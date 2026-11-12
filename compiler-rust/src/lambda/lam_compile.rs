@@ -833,10 +833,9 @@ impl LambdaCompiler {
             let shadow_side_effect = if CHECK { side_effect.clone() } else { None };
             let deps = self.coerce_lowered_output(j, compiled, side_effect);
             let before = if CHECK { Some(deps.clone()) } else { None };
-            let dynamic = if CHECK { self.dynamic_import_modules.clone() } else { Vec::new() };
             let deps = self.finish_lowered_output(deps, &possible_required_modules);
             let checked = candidate.map(|candidate| match candidate {
-                Ok((j, compiled)) => {
+                Ok((j, compiled, dynamic)) => {
                     let saved_stamp = self.id_gen.current_stamp();
                     let new_before = self.coerce_lowered_output(j, compiled, shadow_side_effect);
                     self.id_gen.restore_current_stamp(saved_stamp);

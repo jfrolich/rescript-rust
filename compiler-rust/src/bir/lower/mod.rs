@@ -6,12 +6,16 @@ mod cond;
 mod expr;
 mod konst;
 mod prim;
+mod record;
+mod import;
+mod jsx;
 mod prim_cmp;
 mod prim_block;
 #[cfg(test)]
 mod oracle_tests;
 pub mod out;
 mod unit;
+pub(crate) mod scope;
 
 use super::bridge::Unsupported;
 use super::{Bir, NodeId, VarId, View};
@@ -255,6 +259,7 @@ impl SourceProbe {
 pub(crate) struct Lowered {
     pub program: super::bridge_j::Imported,
     pub finished: Finished,
+    pub dynamic_imports: Vec<crate::js_ir::ModuleId>,
 }
 
 /// N1: C:663 compile_deps_program_in_arena; one fresh J arena for this migration cut.
@@ -293,7 +298,9 @@ struct State {
     statements: StatementStack,
     free: FreePool,
     source_steps: usize,
-    module_paths: Vec<bool>,
+    invalid_module_paths: Vec<bool>,
+    awaited_units: Vec<bool>,
+    dynamic_imports: Vec<crate::js_ir::ModuleId>,
     module_constants: Vec<ModuleConstants>,
     direct: bool,
     located_functions: Vec<bool>,
@@ -323,6 +330,7 @@ impl State {
             assert_eq!(made, var);
             arena.vars.flags[i] = input.arena.vars.flags[i];
         }
+        arena.js_scope = Some(scope::Scope::new(arena.vars.len()));
         arena.pools.j_modules = input
             .globals
             .iter()
@@ -336,7 +344,9 @@ impl State {
             .map(|i| input.arena.vars.order(VarId(i as u32)))
             .max().unwrap_or(0).checked_add(1).expect("identifier order capacity");
         Self {
-            module_paths: vec![false; input.arena.nodes.len()],
+            invalid_module_paths: vec![false; input.arena.nodes.len()],
+            awaited_units: vec![false; input.arena.vars.len()],
+            dynamic_imports: Vec::new(),
             module_constants: (0..arena.pools.j_modules.len()).map(|_| ModuleConstants::Unread).collect(),
             source: input.arena,
             arena,
@@ -416,6 +426,7 @@ impl State {
         Lowered {
             program: super::bridge_j::Imported::from_lowering(self.arena, root, self.idents),
             finished: out.finished,
+            dynamic_imports: self.dynamic_imports,
         }
     }
 }
@@ -449,6 +460,12 @@ impl ProbeRules for State {
                 return Ok(ProbePlan::Children(expr::Resume::Fun { body, header }));
             }
             View::Let { var, value, body } => {
+                if let Some(value) = value { self.record_awaited_unit(var, value); }
+                if !matches!(cx.cont, Cont::Declare(..)) && let Some(value) = value {
+                    if let Some(record) = self.record_copy(var, value, body) {
+                        return Ok(ProbePlan::Children(expr::Resume::Record(record)));
+                    }
+                }
                 let kind = match self.source.node(node).aux() & 3 {
                     0 => LetKind::Strict,
                     1 => LetKind::Alias,
@@ -487,6 +504,12 @@ impl ProbeRules for State {
             }
             View::Prim { primitive, .. } => {
                 use crate::lambda::lam_primitive::Primitive;
+                if matches!(self.arena.primitive(primitive).primitive,
+                    Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { name }) if name.as_str() == "make") {
+                    if let Some(value) = self.flat_make_field(node) {
+                        return Ok(ProbePlan::Ready(self.probe_leaf(cx, value)));
+                    }
+                }
                 let reason = match &self.arena.primitive(primitive).primitive {
                     Primitive::Psequand | Primitive::Psequor => {
                         unreachable!("short circuits are lowered above")
@@ -497,13 +520,8 @@ impl ProbeRules for State {
                     | Primitive::PjsObjectGet(_)
                     | Primitive::PjsObjectSet(_)
                     | Primitive::PjsFnMethod => "external",
-                    Primitive::Pjsx(_) => "jsx",
-                    Primitive::Pimport(_) => "import",
-                    Primitive::Pawait => "await",
-                    Primitive::Pduprecord => "record copy",
-                    Primitive::PrecordRest(_) => "record rest",
                     _ => return Ok(ProbePlan::Children(expr::Resume::Prim(prim::Prim {
-                        source: node, primitive, operands: self.source.node(node).primitive_arguments(),
+                        primitive, operands: self.source.node(node).primitive_arguments(),
                     }))),
                 };
                 return Err(Unsupported(reason));
@@ -594,6 +612,7 @@ impl ProbeRules for State {
     ) -> Result<Probed, Unsupported> {
         match resume {
             expr::Resume::Prim(prim) => self.finish_primitive(cx, prim, children),
+            expr::Resume::Record(record) => Ok(self.finish_record(cx, record, children)),
             resume => Ok(self.finish_expression(cx, resume, children)),
         }
     }

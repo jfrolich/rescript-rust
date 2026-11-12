@@ -230,6 +230,7 @@ impl<'a> Mapper<'a> {
     // We clone the looked-up node to avoid borrow conflicts (`self.arena` is `&mut`).
 
     fn map_expr_idx(&mut self, idx: ExprIdx) -> pt0::Expression {
+        let idx = self.arena.expanded(idx);
         let expr = self.arena.get_expr(idx).clone();
         self.map_expression_with_owner(&expr, Some(idx))
     }

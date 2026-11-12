@@ -1,0 +1,22 @@
+{
+  "name": "derived-code-fixtures",
+  "sources": [
+    {
+      "dir": "src"
+    }
+  ],
+  "dependencies": [
+    "@rescript/belt"
+  ],
+  "package-specs": {
+    "module": "esmodule",
+    "in-source": false
+  },
+  "compiler-flags": [
+    "-w -30",
+    "-warn-error -A"
+  ],
+  "ppx-flags": [
+    "ppx-spice"
+  ]
+}

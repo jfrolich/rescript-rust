@@ -432,7 +432,11 @@ fn generate_ast(
         })
     {
         log::debug!("Parsing {} with source locations", source.file_path.display());
+        let prior = result.as_ref().ok().and_then(|(_, ast, _)| ast.arena().derived_census.as_ref()).map(|c| c.parse_work());
         result = parse_saved_source(&source, true);
+        if let (Some(prior), Ok((_, ast, _))) = (prior, &mut result) {
+            if let Some(census) = census_mut(ast) { census.add_parse_work(prior); }
+        }
     }
     let (stderr, mut stored_ast, deps) = result.map_err(|err| anyhow!("{err}"))?;
     if !stored_ast.arena().stores_locations() {
@@ -476,8 +480,20 @@ pub(crate) fn reparse_with_locations(ast: &StoredAst) -> anyhow::Result<StoredAs
     let source = ast
         .retry_source()
         .ok_or_else(|| anyhow!("missing source for location retry"))?;
-    let (_, ast, _) = parse_saved_source(source, true)?;
-    Ok(ast)
+    let (_, mut located, _) = parse_saved_source(source, true)?;
+    if let (Some(prior), Some(census)) = (ast.arena().derived_census.as_ref(), census_mut(&mut located)) {
+        census.add_parse_work(prior.parse_work());
+    }
+    Ok(located)
+}
+
+/// O(1): borrow the record of a newly parsed, uniquely owned AST. No lock or clone.
+fn census_mut(ast: &mut StoredAst) -> Option<&mut rescript_compiler::derived_census::Census> {
+    let arena = match ast {
+        StoredAst::Structure(ast) => &mut Arc::get_mut(ast)?.arena,
+        StoredAst::Signature(ast) => &mut Arc::get_mut(ast)?.arena,
+    };
+    arena.derived_census.as_deref_mut()
 }
 
 /// The located arena of a fresh parse of `source`, for placing the warnings
@@ -547,7 +563,8 @@ fn parse_source(
     super::build_types::StoredAst,
     Dependencies,
 )> {
-    rescript_compiler::timing::measure(rescript_compiler::timing::Phase::Parse, || {
+    let census_start = rescript_compiler::derived_census::start(options.derived_census.is_some());
+    let mut result = rescript_compiler::timing::measure(rescript_compiler::timing::Phase::Parse, || {
         let source = source_bytes_to_latin1(bytes);
         let mut parser = Parser::with_locations(source_path_for_ast.to_string(), &source, locations);
         // Frontend warning reports, in the order `bsc -bs-ast` prints them.
@@ -635,7 +652,17 @@ fn parse_source(
                 deps,
             ))
         }
-    })
+    });
+    if let (Some(start), Ok((_, stored, _))) = (census_start, &mut result) {
+        let arena = match stored {
+            super::build_types::StoredAst::Structure(ast) => Arc::get_mut(ast).map(|ast| &mut ast.arena),
+            super::build_types::StoredAst::Signature(ast) => Arc::get_mut(ast).map(|ast| &mut ast.arena),
+        };
+        if let Some(arena) = arena && let Some(census) = &mut arena.derived_census {
+            census.account_parse(rescript_compiler::derived_census::nanos(start.elapsed()));
+        }
+    }
+    result
 }
 
 fn filter_ppx_flags(

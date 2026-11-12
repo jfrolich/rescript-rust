@@ -998,7 +998,7 @@ mod tests {
         let before = e.stats.entered;
         assert_eq!(e.run(&round(drop_identity), unit.root), Changed::No);
         assert_eq!(e.stats.entered, before);
-        unit.arena.validate(Some(unit.root), false).unwrap();
+        unit.arena.validate(Some(unit.root)).unwrap();
     }
 
     #[test]
@@ -1036,7 +1036,7 @@ mod tests {
             e.stats.entered
         );
         assert!(e.steps() <= 24 * nodes, "{}", e.steps());
-        unit.arena.validate(Some(unit.root), false).unwrap();
+        unit.arena.validate(Some(unit.root)).unwrap();
     }
 
     #[test]
@@ -1103,7 +1103,7 @@ mod tests {
         );
         assert!(e.steps() <= 128, "{}", e.steps());
         assert_eq!(unit.arena.vars().uses(var), 2 * 5_002);
-        unit.arena.validate(Some(unit.root), false).unwrap();
+        unit.arena.validate(Some(unit.root)).unwrap();
     }
 
     fn function_with_identity(a: &mut LamArena, param: i32) -> crate::lambda::arena::Lam {
@@ -1161,7 +1161,7 @@ mod tests {
         let after: Vec<u32> = (0..4).map(|v| unit.arena.vars().uses(VarId(v))).collect();
         assert_eq!(uses, after);
         assert!(unit.arena.nodes.len() <= nodes + 3);
-        unit.arena.validate(Some(unit.root), false).unwrap();
+        unit.arena.validate(Some(unit.root)).unwrap();
     }
 
     fn check_frozen(e: &mut Engine<'_>, node: NodeId) -> Changed {
@@ -1191,7 +1191,7 @@ mod tests {
             ..round(check_frozen)
         };
         assert_eq!(e.run(&frozen, unit.root), Changed::Yes);
-        unit.arena.validate(Some(unit.root), false).unwrap();
+        unit.arena.validate(Some(unit.root)).unwrap();
     }
 
     #[test]
@@ -1223,6 +1223,6 @@ mod tests {
             e.bir().view(unit.root),
             View::Let { value: None, .. }
         ));
-        unit.arena.validate(Some(unit.root), false).unwrap();
+        unit.arena.validate(Some(unit.root)).unwrap();
     }
 }
