@@ -8,7 +8,7 @@ use crate::js_ir::printer::js_export_name;
 use crate::js_ir::{ModuleFormat, ModulePathResolver, arena::JsDepsProgram, op::Kind};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
-use oxc_codegen::Codegen;
+use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_span::{SPAN, SourceType};
 use oxc_syntax::operator::AssignmentOperator;
 
@@ -22,6 +22,7 @@ pub(super) fn emit(
     debug: bool,
     _jsx_preserve: bool,
     header: bool,
+    source_map: Option<&super::sourcemap::Options<'_>>,
 ) -> Result<(String, Option<String>), Unsupported> {
     let p = &program.program;
     let mut text = String::new();
@@ -39,12 +40,17 @@ pub(super) fn emit(
         && p.name_reservations.is_empty()
     {
         text.push_str(EMPTY);
-        return Ok((text, None));
+        return Ok(match source_map {
+            Some(options) => options.attach(text, options.builder()),
+            None => (text, None),
+        });
     }
     let names = Names::collect(program, resolver)?;
     let allocator = Allocator::default();
     let mut build = Build::new(&allocator, &p.arena, &names);
     build.debug = debug;
+    let spans = source_map.map(|m| super::sourcemap::Spans::new(m.locations.clone(), m.source));
+    build.source_map = spans.as_ref();
     let b = &build.b;
     let mut body = b.vec();
     let commonjs = resolver.module_format() == ModuleFormat::CommonJs;
@@ -176,17 +182,30 @@ pub(super) fn emit(
             b,
         ));
     }
+    let source_text = spans.as_ref().map(|s| s.source_text()).unwrap_or_default();
     let ast = Program::new(
         SPAN,
         SourceType::mjs(),
-        "",
+        &source_text,
         b.vec(),
         None,
         ast_directives,
         body,
         b,
     );
-    let code = Codegen::new().build(&ast).code;
+    let output = Codegen::new().with_options(CodegenOptions {
+        source_map_path: source_map.map(|m| m.source.to_path_buf()),
+        ..CodegenOptions::default()
+    }).build(&ast);
+    let mut map = source_map.map(|m| m.builder());
+    if let (Some(spans), Some(tokens), Some(builder)) = (&spans, &output.map, &mut map) {
+        let preamble_lines = text.bytes().filter(|b| *b == b'\n').count();
+        for token in tokens.get_tokens() {
+            spans.add_token(builder, token.get_src_line(), token.get_src_col(),
+                preamble_lines + token.get_dst_line() as usize, token.get_dst_col() as usize);
+        }
+    }
+    let code = output.code;
     text.push_str(code.trim_end_matches('\n'));
     // S0's split-file comparison preserves this gap, not just the comment.
     // With no exports the legacy printer ensures two newlines before the trailer.
@@ -203,5 +222,8 @@ pub(super) fn emit(
             text.push_str(" Not a pure module */\n");
         }
     }
-    Ok((text, None))
+    Ok(match (source_map, map) {
+        (Some(options), Some(builder)) => options.attach(text, builder),
+        _ => (text, None),
+    })
 }

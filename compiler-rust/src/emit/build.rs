@@ -5,7 +5,7 @@ use crate::js_ir::op::{BinOp, Kind, Number};
 use crate::js_ir::printer::{js_export_name, normalize_float_literal_for_js};
 use oxc_allocator::{Allocator, GetAllocator, Vec as ArenaVec};
 use oxc_ast::{ast::*, builder::AstBuilder};
-use oxc_span::SPAN;
+use oxc_span::{SPAN, GetSpanMut};
 use oxc_syntax::{
     number::{BigintBase, NumberBase},
     operator::{BinaryOperator as B, LogicalOperator as L, UnaryOperator as U},
@@ -16,6 +16,8 @@ pub(super) struct Build<'a, 'r> {
     pub arena: &'r JsArena,
     pub names: &'r Names,
     pub debug: bool,
+    // S1.2: absent on the default, location-free path.
+    pub source_map: Option<&'r super::sourcemap::Spans>,
 }
 impl<'a, 'r> Build<'a, 'r> {
     pub fn new(alloc: &'a Allocator, arena: &'r JsArena, names: &'r Names) -> Self {
@@ -24,6 +26,7 @@ impl<'a, 'r> Build<'a, 'r> {
             arena,
             names,
             debug: false,
+            source_map: None,
         }
     }
     pub fn text(&self, s: &str) -> &'a str {
@@ -451,6 +454,22 @@ impl<'a, 'r> Build<'a, 'r> {
         })
     }
     pub fn expr(&self, e: Expr) -> Result<Expression<'a>, Unsupported> {
+        let mut expression = self.expr_unmapped(e)?;
+        // S1.2: only kinds with a codegen start-token mapping are supported.
+        if let Some(maps) = self.source_map {
+            if maps.is_located(self.arena.expr_loc(e)) {
+                match &expression {
+                    Expression::Identifier(_) | Expression::NumericLiteral(_)
+                    | Expression::StringLiteral(_) | Expression::BooleanLiteral(_)
+                    | Expression::NullLiteral(_) | Expression::BigIntLiteral(_) => {}
+                    _ => return Err(Unsupported("source map: located compound expression")),
+                }
+                *expression.span_mut() = maps.span(self.arena.expr_loc(e))?;
+            }
+        }
+        Ok(expression)
+    }
+    fn expr_unmapped(&self, e: Expr) -> Result<Expression<'a>, Unsupported> {
         let a = self.arena;
         walk::expression_comment(a, e)?;
         Ok(match a.ek(e) {
@@ -714,6 +733,9 @@ impl<'a, 'r> Build<'a, 'r> {
             .alloc(FunctionBody::new(SPAN, directives, statements, &self.b)))
     }
     fn function_expr(&self, f: FunId) -> Result<Expression<'a>, Unsupported> {
+        if self.source_map.is_some() {
+            return Err(Unsupported("source map: transformed function body"));
+        }
         let body = match walk::function_form(self.arena, f, false)? {
             walk::FunctionForm::Eta(e) => return self.expr(e),
             walk::FunctionForm::ArrowExpression(e) => ArrowFunctionBody::from(self.expr(e)?),
@@ -961,6 +983,45 @@ impl<'a, 'r> Build<'a, 'r> {
         tail: Option<bool>,
         out: &mut ArenaVec<'a, Statement<'a>>,
     ) -> Result<(), Unsupported> {
+        // S1.2: switch clauses have independent mapping points, not just the
+        // statement/expression locations covered by the hooks below.
+        if self.source_map.is_some()
+            && matches!(self.arena.sk(s), StmtKind::IntSwitch(..) | StmtKind::StringSwitch(..))
+        {
+            return Err(Unsupported("source map: switch clause markers"));
+        }
+        let start = out.len();
+        self.stmt_unmapped(s, top, tail, out)?;
+        // S1.2: block/expression wrappers do not reliably emit a start token.
+        if let Some(maps) = self.source_map {
+            let loc = self.arena.stmt_loc(s);
+            if maps.is_located(loc) {
+                if out.len() != start + 1 {
+                    return Err(Unsupported("source map: expanded or omitted statement"));
+                }
+                match &mut out[start] {
+                    Statement::VariableDeclaration(_) | Statement::ReturnStatement(_)
+                    | Statement::IfStatement(_) | Statement::DebuggerStatement(_) => {
+                        *out[start].span_mut() = maps.span(loc)?;
+                    }
+                    Statement::FunctionDeclaration(f) => {
+                        // The statement's mark precedes the function expression's
+                        // mark at the same token; the legacy builder keeps the first.
+                        f.span = maps.span(loc)?;
+                    }
+                    _ => return Err(Unsupported("source map: statement without start token")),
+                }
+            }
+        }
+        Ok(())
+    }
+    fn stmt_unmapped(
+        &self,
+        s: Stmt,
+        top: bool,
+        tail: Option<bool>,
+        out: &mut ArenaVec<'a, Statement<'a>>,
+    ) -> Result<(), Unsupported> {
         let a = self.arena;
         if a.stmt_comment(s).is_some() {
             return Err(Unsupported("statement comment"));
@@ -981,7 +1042,8 @@ impl<'a, 'r> Build<'a, 'r> {
                     match walk::function_form(a, f, top)? {
                         walk::FunctionForm::Declaration => {
                             out.push(Statement::new_function_declaration(
-                                SPAN,
+                                // S1.2: initializer maps to the `function` token.
+                                self.source_map.map_or(Ok(SPAN), |m| m.span(a.expr_loc(e)))?,
                                 FunctionType::FunctionDeclaration,
                                 Some(self.binding(name)),
                                 false,
@@ -997,6 +1059,9 @@ impl<'a, 'r> Build<'a, 'r> {
                             return Ok(());
                         }
                         walk::FunctionForm::Eta(e) => {
+                            if self.source_map.is_some() {
+                                return Err(Unsupported("source map: eta-reduced declaration"));
+                            }
                             out.push(self.variable(name, Some(self.expr(e)?)));
                             return Ok(());
                         }

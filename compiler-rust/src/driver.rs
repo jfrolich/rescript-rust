@@ -9794,6 +9794,37 @@ struct JsFileSettings<'a> {
     jsx_preserve: bool,
 }
 
+// Keep opt-in source-map setup out of the default printer's register allocation.
+#[cold]
+#[inline(never)]
+fn render_oxc_source_map(
+    program: &DepsProgram,
+    resolver: &ModulePathResolver,
+    settings: JsFileSettings<'_>,
+    options: &CompilerOptions,
+    output_path: Option<&FsPath>,
+    lam_locs: std::sync::Arc<crate::lambda::LamLocTable>,
+) -> Result<(String, Option<String>), crate::emit::Unsupported> {
+    let source_path = options.source_filename.as_deref().map(FsPath::new);
+    let source_map_target = output_path.map(FsPath::to_path_buf).or_else(|| {
+        (options.source_map == crate::js_ir::source_map::SourceMapMode::Inline).then(|| {
+            let source = source_path.unwrap_or_else(|| FsPath::new("_none_.res"));
+            source.with_extension("js")
+        })
+    });
+    let (Some(target), Some(source)) = (source_map_target.as_deref(), source_path) else {
+        return Err(crate::emit::Unsupported("source map: missing output or source path"));
+    };
+    crate::emit::emit_with_source_map(
+        program, resolver, settings.file_directives, settings.debug, settings.jsx_preserve,
+        !options.no_version_header, &crate::emit::sourcemap::Options {
+            target, source, mode: options.source_map,
+            sources_content: options.source_map_sources_content,
+            source_root: &options.source_map_root, locations: lam_locs,
+        },
+    )
+}
+
 fn render_js_program(
     program: &DepsProgram,
     resolver: &ModulePathResolver,
@@ -9809,7 +9840,9 @@ fn render_js_program(
     } = settings;
     if let crate::emit::PrinterMode::Oxc(stats) = &options.js_printer {
         let result = if options.source_map != crate::js_ir::source_map::SourceMapMode::None {
-            Err(crate::emit::Unsupported("source maps (S1.2)"))
+            render_oxc_source_map(program, resolver, JsFileSettings {
+                file_directives, debug, jsx_preserve,
+            }, options, output_path, lam_locs.clone())
         } else {
             crate::emit::emit(program, resolver, file_directives, debug, jsx_preserve, !options.no_version_header)
         };
