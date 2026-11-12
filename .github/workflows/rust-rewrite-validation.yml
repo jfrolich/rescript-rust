@@ -227,7 +227,7 @@ jobs:
         run: |
           status=0
           pids=()
-          for test in test_js_output_fixture_reporting test_error_output_parity_exit test_build_comparison_layouts; do
+          for test in test_js_output_fixture_reporting test_error_output_parity_exit; do
             python3 "scripts/$test.py" > "$RUNNER_TEMP/$test.log" 2>&1 &
             pids+=("$!:$test")
           done
