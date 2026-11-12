@@ -59,8 +59,7 @@ let schema = (): array<table> =>
     }
   )
 
-let rowType = (name: string, columns: array<column>): decls =>
-  Code.raw(`type ${name} = ${Type.name(Type.record(columns->Array.map(c => c.field)))}`)
+let rowType = (columns: array<column>): typ => Type.record(columns->Array.map(c => c.field))
 
 // module Db = %Sql.tables(): a module per table of the schema, with the
 // type of its rows, all of them, and the one with an id.
@@ -69,16 +68,15 @@ let tables = (): decls =>
   Code.decls(
     schema()->Array.map(table => {
       let select = "select * from " ++ table.sqlName
-      Code.decls([
-        Code.raw(`module ${capitalize(table.sqlName)} = {`),
-        rowType("t", table.columns),
+      Code.module_(
+        capitalize(table.sqlName),
         %code(
+          type t = ${rowType(table.columns)}
           let all = (db: Sql.db): array<t> => exec(db, ${Code.string(select)}, [])
           let byId = (db: Sql.db, id: int): option<t> =>
             exec(db, ${Code.string(select ++ " where id = $1")}, [param(id)])[0]
         ),
-        Code.raw("}"),
-      ])
+      )
     }),
   )
 
@@ -142,5 +140,8 @@ let query = (sql: string): decls => {
     [Code.param("db", %type(Sql.db))]->Array.concat(params->Array.map(((name, typ)) => Code.labelled(name, typ))),
     %code((exec(db, ${Code.string(numbered)}, [${...values}]): array<row>)),
   )
-  Code.decls([rowType("row", columns), %code(let run = ${run})])
+  %code(
+    type row = ${rowType(columns)}
+    let run = ${run}
+  )
 }
