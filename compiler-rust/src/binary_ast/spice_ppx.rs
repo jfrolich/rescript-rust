@@ -5652,6 +5652,7 @@ fn map_structure_item_spice(
                     pstr_desc: StructureItemDesc::Pstr_value((*rec_flag, arena.push_vb_list(&vbs))),
                     pstr_loc: arena.dummy_loc(),
                 };
+                super::derive::mark_generated_item(&value_item, arena);
                 Ok(vec![mapped_item, value_item])
             }
         }

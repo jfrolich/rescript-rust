@@ -31,3 +31,20 @@ pub fn expand_signature_item_with_mapper(
 ) -> Result<Vec<SignatureItem>, String> {
     super::spice_ppx::expand_signature_item_with_mapper(item, arena, active)
 }
+
+/// Record provenance at generation, including derives inside nested modules.
+/// All structure items produced by the builtin derive are value groups.
+pub(super) fn mark_generated_item(item: &StructureItem, arena: &mut ParseArena) {
+    if let crate::parser::ast::StructureItemDesc::Pstr_value((_, bindings)) = item.pstr_desc {
+        arena.mark_derived_value_group(bindings);
+    }
+}
+
+/// Generic provenance query; consumers need not know which derive produced it.
+pub fn is_derived_item(item: &StructureItem, arena: &ParseArena) -> bool {
+    match item.pstr_desc {
+        crate::parser::ast::StructureItemDesc::Pstr_value((_, bindings)) =>
+            arena.is_derived_value_group(bindings),
+        _ => false,
+    }
+}

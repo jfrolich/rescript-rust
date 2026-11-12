@@ -10369,7 +10369,14 @@ fn try_rewrite_structure_item(
             validate_external_attribute_errors(vd, arena, &mut Vec::new())?;
         }
         validate_nested_structure_externals(&expanded, arena)?;
-        result.extend(rewrite_structure_item_no_spice(&expanded, arena));
+        let derived = derive::is_derived_item(&expanded, arena);
+        let rewritten = rewrite_structure_item_no_spice(&expanded, arena);
+        if derived {
+            for item in &rewritten {
+                derive::mark_generated_item(item, arena);
+            }
+        }
+        result.extend(rewritten);
     }
     Ok(result)
 }
@@ -11529,6 +11536,23 @@ let e = () =>
             "{message}"
         );
         assert_eq!((line, start, end), (1, 10, 18));
+    }
+
+    #[test]
+    fn derived_value_groups_survive_frontend_rewriting() {
+        let (mut arena, source) = parse_structure(
+            "let before = 1\n@spice type a = {x: int}\n@spice type b = string\nlet after = 2\n",
+        );
+        assert!(source.iter().all(|item| !derive::is_derived_item(item, &arena)));
+        let expanded: Vec<_> = source.iter().flat_map(|item|
+            derive::expand_structure_item_with_mapper(item, &mut arena, true).unwrap()
+        ).collect();
+        assert_eq!(expanded.iter().map(|item| derive::is_derived_item(item, &arena))
+            .collect::<Vec<_>>(), vec![false, false, true, false, true, false]);
+        // Use the original tree: expanding twice would generate codecs twice.
+        let rewritten = rewrite_structure_with_warnings(&source, &mut arena, false).0.unwrap();
+        assert_eq!(rewritten.iter().map(|item| derive::is_derived_item(item, &arena))
+            .collect::<Vec<_>>(), vec![false, false, true, false, true, false]);
     }
 
     #[test]

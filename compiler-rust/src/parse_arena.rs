@@ -537,6 +537,9 @@ pub struct ParseArena {
     type_lists: ListPool<CoreTypeIdx>,
     /// Pool behind `let` value binding lists (`Pexp_let`, `Pstr_value`).
     vb_lists: ListPool<ValueBinding>,
+    /// Derived structure-value groups, indexed by their binding-list start.
+    /// Only group starts have a bit; no source-location or identifier keys.
+    derived_value_groups: Vec<u64>,
     /// Pools behind record field lists and match/try case lists.
     expr_field_lists: ListPool<ExpressionRecordField>,
     pat_field_lists: ListPool<PatternRecordField>,
@@ -1043,6 +1046,7 @@ impl Default for ParseArena {
             pat_lists: ListPool::default(),
             type_lists: ListPool::default(),
             vb_lists: ListPool::default(),
+            derived_value_groups: Vec::new(),
             expr_field_lists: ListPool::default(),
             pat_field_lists: ListPool::default(),
             case_lists: ListPool::default(),
@@ -2851,6 +2855,23 @@ impl ParseArena {
     /// Borrow the core-type indices stored in a list handle.
     pub fn type_list(&self, list: TypeList) -> &[CoreTypeIdx] {
         self.type_lists.get(list)
+    }
+
+    /// Mark a structure value group produced by a derive.
+    pub(crate) fn mark_derived_value_group(&mut self, list: VbList) {
+        assert!(!list.is_empty());
+        let index = list.start() as usize;
+        self.derived_value_groups.resize(
+            self.derived_value_groups.len().max(index / 64 + 1), 0,
+        );
+        self.derived_value_groups[index / 64] |= 1 << (index % 64);
+    }
+
+    /// Provenance of a structure value group, independent of names and locations.
+    pub fn is_derived_value_group(&self, list: VbList) -> bool {
+        let index = list.start() as usize;
+        !list.is_empty() && self.derived_value_groups.get(index / 64)
+            .is_some_and(|word| word & (1 << (index % 64)) != 0)
     }
 
     /// Store the value bindings of a `let`.
