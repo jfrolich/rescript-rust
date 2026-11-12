@@ -41,6 +41,10 @@ pub struct Out {
 enum Slot {
     Statement(NodeId),
     Held(Span),
+    /// A run consumed below the top: its first slot holds the run's length
+    /// and every other slot 1, so a forward scan crosses the run in one step
+    /// and a backward trim pops it slot by slot.
+    Dead(u32),
 }
 /// One stack per lowering. A hole is distinct from any valid node handle.
 #[derive(Default)]
@@ -51,6 +55,11 @@ pub struct StatementStack {
     pub pushed: usize,
     /// Statements copied into final lists.
     pub copied: usize,
+    /// Holes and dead ranges crossed by `first`, `only`, `last` and `trim`.
+    pub scanned: usize,
+    /// Slots of explicit empty block statements, sorted by slot. An entry is
+    /// stale once its slot was consumed; `drop_empty_blocks` checks the slot.
+    empties: Vec<(u32, NodeId)>,
 }
 impl StatementStack {
     /// K0: C:89 BlockOutput::make, start an empty output at the current top.
@@ -71,11 +80,147 @@ impl StatementStack {
     }
     /// A:191 sequence_arguments: skip reserved holes without copying statements.
     pub(super) fn statements(&self, span: Span) -> impl Iterator<Item = NodeId> + '_ {
-        self.slots[span.start as usize..span.end()].iter().flat_map(|s| match s {
+        let (mut at, end) = (span.start as usize, span.end());
+        std::iter::from_fn(move || {
+            while at < end {
+                let slot = &self.slots[at];
+                at += match slot {
+                    Some(Slot::Dead(len)) => *len as usize,
+                    _ => 1,
+                };
+                match slot {
+                    Some(Slot::Statement(node)) => return Some(std::slice::from_ref(node)),
+                    Some(Slot::Held(span)) => {
+                        return Some(&self.held[span.start as usize..span.end()]);
+                    }
+                    Some(Slot::Dead(_)) | None => {}
+                }
+            }
+            None
+        })
+        .flatten()
+        .copied()
+    }
+    /// C:5241 try_fold_effect_only_return_tail folds a run from its end.
+    /// One step per slot of the run.
+    pub(super) fn statements_rev(&self, span: Span) -> impl Iterator<Item = NodeId> + '_ {
+        (span.start as usize..span.end())
+            .rev()
+            .flat_map(|at| self.slot(at).iter().rev())
+            .copied()
+    }
+    /// The statements of one slot: none for a hole, a dead slot or an empty hold.
+    fn slot(&self, at: usize) -> &[NodeId] {
+        match &self.slots[at] {
             Some(Slot::Statement(node)) => std::slice::from_ref(node),
             Some(Slot::Held(span)) => &self.held[span.start as usize..span.end()],
-            None => &[],
-        }).copied()
+            Some(Slot::Dead(_)) | None => &[],
+        }
+    }
+    /// The first slot of `[at, end)` that holds a statement. One step per
+    /// hole, empty hold or dead range before it, counted in `scanned`.
+    fn live(&mut self, mut at: usize, end: usize) -> Option<usize> {
+        while at < end {
+            if !self.slot(at).is_empty() {
+                return Some(at);
+            }
+            self.scanned += 1;
+            at += match self.slots[at] {
+                Some(Slot::Dead(len)) => len as usize,
+                _ => 1,
+            };
+        }
+        None
+    }
+    /// B:1575 simplify_if reads the head of a branch. Costs the holes and
+    /// dead ranges before the first statement; nothing is copied.
+    pub(super) fn first(&mut self, span: Span) -> Option<NodeId> {
+        let at = self.live(span.start as usize, span.end())?;
+        Some(self.slot(at)[0])
+    }
+    /// B:1575 simplify_if, `[statement]` patterns: the slot and the statement
+    /// when the run holds exactly one. Costs the holes and dead ranges of the
+    /// run, which a trimmed run has only before its first statement.
+    pub(super) fn only(&mut self, span: Span) -> Option<(u32, NodeId)> {
+        let at = self.live(span.start as usize, span.end())?;
+        let &[statement] = self.slot(at) else {
+            return None;
+        };
+        let next = at + 1;
+        self.live(next, span.end())
+            .is_none()
+            .then_some((at as u32, statement))
+    }
+    /// B:1575 simplify_if, `block_last_is_return_throw_or_continue`: the last
+    /// statement. One step on a trimmed run; otherwise one per trailing hole
+    /// or dead slot.
+    pub(super) fn last(&mut self, span: Span) -> Option<NodeId> {
+        let mut at = span.end();
+        while at > span.start as usize {
+            at -= 1;
+            if let Some(&statement) = self.slot(at).last() {
+                return Some(statement);
+            }
+            self.scanned += 1;
+        }
+        None
+    }
+    /// K0: C:119 append. Pop the holes and dead slots at the top, down to
+    /// `floor`, so the run above `floor` ends in a statement or is empty.
+    /// Each popped slot is popped once.
+    pub(super) fn trim(&mut self, floor: Span) -> Span {
+        while self.slots.len() > floor.start as usize
+            && self.slot(self.slots.len() - 1).is_empty()
+        {
+            self.slots.pop();
+            self.scanned += 1;
+        }
+        self.since(Span {
+            start: floor.start,
+            len: 0,
+        })
+    }
+    /// K0: C:119 append. Forget a run whose statements were released or
+    /// moved: the top run is popped, a run below the top becomes one dead
+    /// range. One write per slot of the run.
+    pub(super) fn kill(&mut self, span: Span) {
+        if span.end() == self.slots.len() {
+            self.slots.truncate(span.start as usize);
+            return;
+        }
+        for slot in &mut self.slots[span.start as usize..span.end()] {
+            *slot = Some(Slot::Dead(1));
+        }
+        if span.len > 0 {
+            self.slots[span.start as usize] = Some(Slot::Dead(span.len));
+        }
+    }
+    /// B:1225 block: record that `slot` holds an explicit empty block.
+    /// A binary search and an insertion among the unit's empty blocks.
+    pub(super) fn note_empty_block(&mut self, slot: u32, statement: NodeId) {
+        let at = self.empties.partition_point(|&(other, _)| other < slot);
+        self.empties.insert(at, (slot, statement));
+    }
+    /// B:1575 simplify_if drops the empty blocks of both branches first.
+    /// Two binary searches among the unit's empty blocks, then one step per
+    /// empty block of the run. The run itself is not scanned.
+    pub(super) fn drop_empty_blocks(&mut self, bir: &mut Bir, span: Span) {
+        let from = self.empties.partition_point(|&(slot, _)| slot < span.start);
+        let to = self.empties.partition_point(|&(slot, _)| (slot as usize) < span.end());
+        for (slot, statement) in self.empties.drain(from..to) {
+            let slot = &mut self.slots[slot as usize];
+            if *slot == Some(Slot::Statement(statement))
+                && matches!(bir.view(statement), crate::bir::View::SBlock { statements } if statements.is_empty())
+            {
+                *slot = Some(Slot::Dead(1));
+                bir.release(statement);
+            }
+        }
+    }
+    /// B:1565 unnest_block and C:7612 compiled_from_effect_block replace the
+    /// only statement of an output. One write.
+    pub(super) fn clear(&mut self, slot: u32) {
+        self.slots[slot as usize] = Some(Slot::Dead(1));
     }
     /// A:191 sequence_arguments: a reserved hold is not an argument statement.
     pub(super) fn has_statements(&self, span: Span) -> bool {
@@ -107,11 +252,11 @@ impl StatementStack {
     }
     /// A:191 sequence_arguments: fill an argument's reserved suffix after all
     /// arguments were lowered. Held statements enter the list exactly once.
-    pub(super) fn fill_held(&mut self, slot: u32, statements: Vec<NodeId>) {
+    pub(super) fn fill_held(&mut self, slot: u32, statements: &[NodeId]) {
         assert!(self.slots[slot as usize].is_none());
         let span = Span { start: self.held.len() as u32, len: statements.len() as u32 };
         self.pushed += statements.len();
-        self.held.extend(statements);
+        self.held.extend_from_slice(statements);
         self.slots[slot as usize] = Some(Slot::Held(span));
     }
     /// K0: C:119 append. Both children have already been lowered, even when
@@ -138,25 +283,17 @@ impl StatementStack {
             finished: second.finished,
         }
     }
-    /// K2: C:4752 compiled_to_effect_block. Copy each non-hole directly into
-    /// the child-list pool once, then pop the run. Never flatten SBlock here.
+    /// K2: C:4752 compiled_to_effect_block. Copy each statement of the run
+    /// into the child-list pool once: one step per statement, hole and dead
+    /// range of the run. The top run is popped; a run below the top becomes
+    /// one dead range, so that what follows it is not moved. Never flattens
+    /// SBlock here.
     pub fn take_list(&mut self, bir: &mut Bir, span: Span) -> ListId {
-        assert_eq!(
-            span.end(),
-            self.slots.len(),
-            "only the top run can be consumed"
-        );
+        assert!(span.end() <= self.slots.len());
         let count = self.statements(span).count();
-        let held = &self.held;
-        let id = bir.lists.push_iter(count, self.slots.drain(span.start as usize..).flat_map(|slot| {
-            let (one, span) = match slot {
-                Some(Slot::Statement(node)) => (Some(node), Span::default()),
-                Some(Slot::Held(span)) => (None, span),
-                None => (None, Span::default()),
-            };
-            one.into_iter().chain(held[span.start as usize..span.end()].iter().copied())
-        }));
+        let id = bir.lists.push_iter(count, self.statements(span));
         self.copied += count;
+        self.kill(span);
         id
     }
 }
@@ -245,19 +382,20 @@ impl FreePool {
     /// Explicit postorder stack: each Free is consumed once, even at depth 10k.
     pub fn realize(&mut self, cx: Cx, probed: Probed, emit: &mut impl Realizer) -> Out {
         enum Work {
-            Enter(FreeId),
-            Seq(NodeId),
-            Cond(NodeId),
+            Enter(FreeId, Cx),
+            Seq(NodeId, Cx),
+            After(Span),
+            Cond(NodeId, Cx),
         }
         let root = match probed {
             Probed::Out(out) => return out,
             Probed::Free(root) => root,
         };
-        let mut work = vec![Work::Enter(root)];
+        let mut work = vec![Work::Enter(root, cx)];
         let mut outputs = Vec::new();
         while let Some(task) = work.pop() {
             match task {
-                Work::Enter(id) => {
+                Work::Enter(id, cx) => {
                     self.realized += 1;
                     match self.nodes[id.0 as usize]
                         .take()
@@ -265,21 +403,45 @@ impl FreePool {
                     {
                         Free::Leaf(value) => outputs.push(emit.leaf(cx, value)),
                         Free::Seq { first, second } => {
-                            work.push(Work::Seq(first));
-                            work.push(Work::Enter(second));
+                            // 3.6: a comma where the value is kept; else the
+                            // head as a statement before the converted tail.
+                            if matches!(
+                                cx.cont,
+                                super::Cont::Value(_) | super::Cont::Effect(super::Tail::No)
+                            ) {
+                                work.push(Work::Seq(first, cx));
+                            } else {
+                                work.push(Work::After(emit.effect(first)));
+                            }
+                            work.push(Work::Enter(second, cx));
                         }
                         Free::Cond { test, then_, else_ } => {
-                            work.push(Work::Cond(test));
-                            work.push(Work::Enter(else_));
-                            work.push(Work::Enter(then_));
+                            work.push(Work::Cond(test, cx));
+                            // 3.6: row R3 reads the branches as assignments;
+                            // every other row reads their values.
+                            let branch = match cx.cont {
+                                super::Cont::Assign(_) => cx,
+                                _ => Cx { cont: super::Cont::Value(super::Tail::No), ..cx },
+                            };
+                            work.push(Work::Enter(else_, branch));
+                            work.push(Work::Enter(then_, branch));
                         }
                     }
                 }
-                Work::Seq(first) => {
+                Work::Seq(first, cx) => {
                     let second = outputs.pop().expect("sequence child");
                     outputs.push(emit.seq(cx, first, second));
                 }
-                Work::Cond(test) => {
+                Work::After(head) => {
+                    let mut second = outputs.pop().expect("sequence child");
+                    assert_eq!(head.end(), second.stmts.start as usize);
+                    second.stmts = Span {
+                        start: head.start,
+                        len: head.len + second.stmts.len,
+                    };
+                    outputs.push(second);
+                }
+                Work::Cond(test, cx) => {
                     let else_ = outputs.pop().expect("else child");
                     let then_ = outputs.pop().expect("then child");
                     outputs.push(emit.cond(cx, test, then_, else_));
@@ -314,6 +476,10 @@ mod tests {
             self.visits.push(first.0);
             second
         }
+        fn effect(&mut self, first: NodeId) -> Span {
+            self.visits.push(first.0);
+            Span::default()
+        }
         fn cond(&mut self, _: Cx, test: NodeId, then_: Out, _: Out) -> Out {
             self.visits.push(test.0);
             then_
@@ -328,7 +494,8 @@ mod tests {
         assert_eq!(size_of::<FreeId>(), 4);
         assert_eq!(size_of::<Free>(), 16);
         assert_eq!(size_of::<Probed>(), 20);
-        assert_eq!(size_of::<StatementStack>(), 64);
+        assert_eq!(size_of::<StatementStack>(), 96);
+        assert_eq!(size_of::<Option<Slot>>(), 12);
         assert_eq!(size_of::<FreePool>(), 40);
     }
     #[test]
