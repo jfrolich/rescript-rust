@@ -9,17 +9,24 @@ import os
 from pathlib import Path
 import sqlite3
 import subprocess
-import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 TABLES = ("interfaces", "interface_extras", "runtime_interfaces")
 
 
-def read_interfaces(path):
+def database_path(path):
     path = Path(path)
-    if path.is_dir():
-        path = next((p for p in (path / "rescript.sqlite", path / "lib/bs/rescript.sqlite")
-                     if p.is_file()), path / "rescript.sqlite")
+    candidates = ([path / "rescript.sqlite", path / "lib/rescript/rescript.sqlite",
+                   path / "lib/bs/rescript.sqlite"] if path.is_dir() else [path])
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError("No stored interface database found; tried: " +
+                            ", ".join(str(candidate) for candidate in candidates))
+
+
+def read_interfaces(path):
+    path = database_path(path)
     with sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True) as db:
         result = {(table, module): bytes(data) for table in TABLES
                   for module, data in db.execute(f"SELECT module, data FROM {table}")}
@@ -49,22 +56,17 @@ def clean_builds(binary):
     env = dict(os.environ, RESCRIPT_RUNTIME=str(ROOT / "packages/@rescript/runtime"))
     snapshots = []
     # Reuse the source path: absolute filenames are meaningful interface data.
-    with tempfile.TemporaryDirectory(prefix="stored-interface-determinism-") as tmp:
-        for index, workers in enumerate((1, 8, 8)):
-            env["RAYON_NUM_THREADS"] = str(workers)
-            for command in ("clean", "build"):
-                subprocess.run([str(binary), command], cwd=package, env=env,
-                               check=True, timeout=300)
-            source = package / "lib/bs/rescript.sqlite"
-            target = Path(tmp) / f"{index}.sqlite"
-            with sqlite3.connect(source) as src, sqlite3.connect(target) as dst:
-                src.backup(dst)
-            snapshots.append(read_interfaces(target))
-        print("1 worker versus 8 workers:")
-        different_workers = compare(snapshots[0], snapshots[1])
-        print("Two consecutive 8-worker builds:")
-        same_workers = compare(snapshots[1], snapshots[2])
-        return different_workers and same_workers
+    for workers in (1, 8, 8):
+        env["RAYON_NUM_THREADS"] = str(workers)
+        for command in ("clean", "build"):
+            subprocess.run([str(binary), command], cwd=package, env=env,
+                           check=True, timeout=300)
+        snapshots.append(read_interfaces(package / "lib/rescript/rescript.sqlite"))
+    print("1 worker versus 8 workers:")
+    different_workers = compare(snapshots[0], snapshots[1])
+    print("Two consecutive 8-worker builds:")
+    same_workers = compare(snapshots[1], snapshots[2])
+    return different_workers and same_workers
 
 
 def main():
