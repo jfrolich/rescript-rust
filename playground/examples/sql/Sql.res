@@ -68,14 +68,13 @@ let tables = (): decls =>
   Code.decls(
     schema()->Array.map(table => {
       let select = "select * from " ++ table.sqlName
-      Code.module_(
-        capitalize(table.sqlName),
-        %code(
+      %code(
+        module ${capitalize(table.sqlName)} = {
           type t = ${rowType(table.columns)}
           let all = (db: Sql.db): array<t> => exec(db, ${Code.string(select)}, [])
           let byId = (db: Sql.db, id: int): option<t> =>
             exec(db, ${Code.string(select ++ " where id = $1")}, [param(id)])[0]
-        ),
+        }
       )
     }),
   )
