@@ -702,8 +702,8 @@ runtime sources (and on Belt verification when Belt is present).
 - The registry originally held only one snapshot index: attaching runtime would
   replace Belt. It now retains both package indexes, without per-module entries.
 - Filenames were also hashed into declaration allocation identities. Source
-  scopes now use the filename with extension, and imported scopes use the
-  qualified persistent module name, keeping namespaces separate but allowing
+  scopes now use the package name plus package-relative source path (including
+  extension), and imported scopes use the qualified persistent module name, keeping namespaces separate but allowing
   relocation. Every runtime stored core is compared against source compilation
   in a copied runtime with no configuration file.
 - Rebasing must not eagerly decode unused raw signatures. A stored unit retains
