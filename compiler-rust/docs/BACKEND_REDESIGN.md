@@ -1449,26 +1449,48 @@ line and column in `Program::source_text`, computed from each node's
 `span.start` (and some `span.end`s). It supports one source and takes the
 source text from the program.
 
-Design: the program's `source_text` is a **synthetic text**: the `.res`
-source, followed by other source files that located nodes refer to (rare),
-followed by the pool of comment and raw-JS text (E.4). A node that should be
-mapped gets a span at its original offset; every other node gets an empty
-span, which oxc skips. After printing, `emit/sourcemap.rs` reads the tokens,
-drops those that point into the pool, splits the rest by which file's region
-they fall in, rebases lines, and feeds them to today's `SourceMapBuilder` for
-JSON output (so `sources`, `sourceRoot`, `sourcesContent` and the three modes
-are unchanged). Checked by experiment: tokens come out for exactly the nodes
-with non-empty spans, plus end-of-node tokens for some of them.
+S1.2 implementation correction: the program's `source_text` is a synthetic
+mapping-event table (three bytes per located node, `"  \n"`), not concatenated
+source files. A node's span starts at its event row, with `end = start + 2`.
+Column zero identifies its `LamLoc`; column one identifies oxc's closing-token
+mapping (`end - 1`), and column two identifies its postfix mapping (`end`).
+This distinguishes end tokens from starts even when original source ranges
+overlap. The adapter resolves the retained location handle back to the
+original file, line and UTF-16 column and feeds today's `SourceMapBuilder`.
+The source contents in the final JSON are the original files, never the event
+text. Raw-JS/comment pool integration remains a later construct extension;
+these constructs currently fall back rather than leak snippet positions.
 
-`LamLoc` handles must resolve to byte offsets; `LamLocTable` stores positions
-with `cnum`, so this is a lookup.
+The pinned codegen does not emit a start mapping for every expression kind
+(for example an ordinary call or binary expression), and replaces coincident
+mappings with the **last** one, whereas the legacy builder keeps the **first**.
+The first implementation therefore supports leaf-expression mappings and
+statement/declaration/function starts, and conservatively falls back for
+located compound expressions, transformed function bodies, eta-reduced
+declarations and switch-clause markers. Whole-file fallback is reported under a `source map:` reason;
+unsupported JS constructs still have their existing reasons. A function
+initializer and its declaration at one token retain the declaration's mark.
+New construct support must extend the mapping hooks as well as AST building.
 
-Source maps cannot stay byte-identical to the OCaml compiler's, because
-generated columns change with layout. The gate for maps becomes: the ordered
-list of original positions (source, line, column) of the mappings, with
-consecutive duplicates removed and oxc's end-of-node tokens excluded, equals
-the list from today's printer for the same module. S1 specifies it against
-`tests/build_tests/source_map`.
+Building the span table and adapting tokens is linear in located nodes/tokens,
+with no allocation per token beyond table/map storage. Original UTF-16 columns
+are indexed once per source byte, so out-of-order inlined locations do not
+repeatedly scan a long source line. Total map preparation is O(source bytes +
+located nodes + tokens); the 100,000-node counted test pins one span insertion
+and three start/end token dispatches per node. Allocations for source metadata
+are per source, not per token.
+
+Source maps cannot stay byte-identical to the OCaml compiler's when generated
+layout changes. `tests/support/mapping_sequence.rs` decodes the emitted v3
+maps in generated order, resolves source/name indices, discards unmapped
+segments, and removes consecutive duplicate (source, original line, original
+UTF-16 column, name) tuples. It ignores only generated line/column; it does
+not guess which final mappings are end tokens. End tokens are excluded by the
+emitter's explicit synthetic-column tag before JSON generation. The legacy
+printer currently emits no names (`names: []`); the adapter preserves that.
+`oxc_sourcemap_oracle.rs` checks the source-map fixture, tests/tests and runtime
+outputs, with exact JS/map checks for fallback outputs. The default printer
+and its byte-exact source-map fixture remain unchanged.
 
 Allocator ownership. One `oxc_allocator::Allocator` per worker thread, held
 in the worker's compilation context beside its other scratch state. For each
@@ -1751,7 +1773,8 @@ block, exports, export_set, name_reservations }`, `modules`,
 - Naming and building visit binders and uses in the same order and take the
   same print-time decisions; both call the functions of step 1 and nothing
   else decides.
-- No oxc type appears outside `emit/build.rs` and `emit/program.rs`.
+- oxc AST types stay in `emit/build.rs` and `emit/program.rs`; the source-map
+  adapter also uses `oxc_span::Span` for mapping-event tags.
 - Nothing allocated in the oxc allocator is reachable after `emit` returns.
 - With the legacy printer selected, output is byte-identical to before.
 

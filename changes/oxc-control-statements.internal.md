@@ -1,0 +1,1 @@
+- Extend the opt-in oxc JavaScript emitter with loops, assignments, switches, throw, try/catch/finally, and unit-function tail effects while retaining whole-file fallback and the legacy default.
