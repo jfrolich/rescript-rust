@@ -64,9 +64,56 @@ thread_local! {
     // The list retains one owner. A second owner leases the array exclusively.
     static FIRST_NODE_ARRAYS: RefCell<Vec<Rc<[TypeNode; TypeNodes::FIRST_LEN]>>> = const { RefCell::new(Vec::new()) };
     #[cfg(test)]
-    static FIRST_NODE_LEASE_PROBES: Cell<usize> = const { Cell::new(0) };
+    static FIRST_ARRAY_LEASE_PROBES: Cell<usize> = const { Cell::new(0) };
     #[cfg(test)]
-    static FIRST_NODE_INITIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+    static FIRST_ARRAY_INITIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Lease one array: at most one reference-count probe per retained array,
+/// no initialization on reuse, or exactly N initializations and one amortized
+/// O(1) list append on a new allocation. Called once per pool, not per lookup.
+pub(crate) fn lease_first_array<T, const N: usize>(
+    arrays: &RefCell<Vec<Rc<[T; N]>>>,
+    mut init: impl FnMut() -> T,
+) -> Rc<[T; N]> {
+    let mut arrays = arrays.borrow_mut();
+    #[cfg(test)]
+    let mut probes = 0;
+    let free = arrays.iter().find(|array| {
+        #[cfg(test)]
+        {
+            probes += 1;
+        }
+        Rc::strong_count(array) == 1
+    });
+    #[cfg(test)]
+    {
+        FIRST_ARRAY_LEASE_PROBES.with(|count| count.set(probes));
+        FIRST_ARRAY_INITIALIZATIONS.with(|count| count.set(0));
+    }
+    if let Some(free) = free {
+        return Rc::clone(free);
+    }
+    // Collect on the heap rather than constructing a large stack array.
+    #[cfg(test)]
+    let mut initialized = 0;
+    let array: Rc<[T]> = (0..N)
+        .map(|_| {
+            #[cfg(test)]
+            {
+                initialized += 1;
+            }
+            init()
+        })
+        .collect();
+    #[cfg(test)]
+    FIRST_ARRAY_INITIALIZATIONS.with(|count| count.set(initialized));
+    let array: Rc<[T; N]> = match array.try_into() {
+        Ok(array) => array,
+        Err(_) => unreachable!("first array has N elements"),
+    };
+    arrays.push(Rc::clone(&array));
+    array
 }
 
 impl TypeNodes {
@@ -82,48 +129,11 @@ impl TypeNodes {
     /// FIRST_LEN nodes and appends one Rc to the list (amortized O(1)).
     pub(crate) fn new() -> Self {
         let first = FIRST_NODE_ARRAYS.with(|arrays| {
-            let mut arrays = arrays.borrow_mut();
-            #[cfg(test)]
-            let mut probes = 0;
-            let free = arrays.iter().find(|array| {
-                #[cfg(test)]
-                {
-                    probes += 1;
-                }
-                Rc::strong_count(array) == 1
-            });
-            #[cfg(test)]
-            {
-                FIRST_NODE_LEASE_PROBES.with(|count| count.set(probes));
-                FIRST_NODE_INITIALIZATIONS.with(|count| count.set(0));
-            }
-            if let Some(free) = free {
-                return Rc::clone(free);
-            }
-            // Collect on the heap rather than constructing a large stack array.
-            #[cfg(test)]
-            let mut initialized = 0;
-            let array: Rc<[TypeNode]> = (0..Self::FIRST_LEN)
-                .map(|_| {
-                    #[cfg(test)]
-                    {
-                        initialized += 1;
-                    }
-                    TypeNode {
-                        desc: Cell::new(TypeDesc::Tnil),
-                        level: Cell::new(0),
-                        id: Cell::new(0),
-                    }
-                })
-                .collect();
-            #[cfg(test)]
-            FIRST_NODE_INITIALIZATIONS.with(|count| count.set(initialized));
-            let array: Rc<[TypeNode; Self::FIRST_LEN]> = match array.try_into() {
-                Ok(array) => array,
-                Err(_) => unreachable!("first node array has FIRST_LEN elements"),
-            };
-            arrays.push(Rc::clone(&array));
-            array
+            lease_first_array(arrays, || TypeNode {
+                desc: Cell::new(TypeDesc::Tnil),
+                level: Cell::new(0),
+                id: Cell::new(0),
+            })
         });
         TypeNodes {
             first,
@@ -5544,22 +5554,22 @@ mod tests {
                 arrays.extend((1..10_000).map(|_| Rc::clone(&busy.first)));
             });
             let fresh = TypeNodes::new();
-            FIRST_NODE_LEASE_PROBES.with(|count| assert_eq!(count.get(), 10_000));
-            FIRST_NODE_INITIALIZATIONS.with(|count| {
+            FIRST_ARRAY_LEASE_PROBES.with(|count| assert_eq!(count.get(), 10_000));
+            FIRST_ARRAY_INITIALIZATIONS.with(|count| {
                 assert_eq!(count.get(), TypeNodes::FIRST_LEN);
             });
             assert!(!Rc::ptr_eq(&busy.first, &fresh.first));
             drop(fresh);
             let reused = TypeNodes::new();
-            FIRST_NODE_LEASE_PROBES.with(|count| assert_eq!(count.get(), 10_001));
-            FIRST_NODE_INITIALIZATIONS.with(|count| assert_eq!(count.get(), 0));
+            FIRST_ARRAY_LEASE_PROBES.with(|count| assert_eq!(count.get(), 10_001));
+            FIRST_ARRAY_INITIALIZATIONS.with(|count| assert_eq!(count.get(), 0));
             assert_eq!(reused.len(), 0);
             // Leave only the first entry; the next lease must stop after one probe.
             drop(reused);
             FIRST_NODE_ARRAYS.with(|arrays| arrays.borrow_mut().truncate(1));
             drop(busy);
             let reused = TypeNodes::new();
-            FIRST_NODE_LEASE_PROBES.with(|count| assert_eq!(count.get(), 1));
+            FIRST_ARRAY_LEASE_PROBES.with(|count| assert_eq!(count.get(), 1));
             assert_eq!(reused.len(), 0);
         }).join().unwrap();
     }
