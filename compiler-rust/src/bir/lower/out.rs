@@ -81,6 +81,12 @@ impl StatementStack {
     pub(super) fn has_statements(&self, span: Span) -> bool {
         self.statements(span).next().is_some()
     }
+    /// C:1144 compile_apply_call_inner: empty reserved holds have no output.
+    pub(super) fn remove_empty(&mut self, span: Span) {
+        assert_eq!(span.end(), self.slots.len());
+        assert!(!self.has_statements(span));
+        self.slots.truncate(span.start as usize);
+    }
     /// K0: C:119 append, push a statement once.
     pub fn push(&mut self, statement: NodeId) {
         self.slots.push(Some(Slot::Statement(statement)));

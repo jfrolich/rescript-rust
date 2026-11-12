@@ -399,3 +399,22 @@ fn located_functions_match_mapping_sequences() {
     let map: serde_json::Value = serde_json::from_str(actual.1.as_ref().unwrap()).unwrap();
     assert_ne!(map["mappings"], "");
 }
+
+#[test]
+fn local_applications_in_all_five_contexts() {
+    use crate::lambda::{ApInfo, ApplyStatus, LamLoc};
+    for status in [ApplyStatus::Na, ApplyStatus::InferFull, ApplyStatus::Uncurry] {
+        for nested in [false, true] {
+            let mut a = LamArena::new();
+            let f = Ident::new("f", 10, IdentFlags::NONE);
+            let mut func = a.var(f);
+            if nested {
+                let one = a.const_(C::Int { i: 1, comment: None });
+                func = a.apply_raw(func, &[one], ApInfo { status, loc: LamLoc::NONE });
+            }
+            let arg = a.const_(C::Int { i: 2, comment: None });
+            let root = a.apply_raw(func, &[arg], ApInfo { status, loc: LamLoc::NONE });
+            compare(a, root);
+        }
+    }
+}

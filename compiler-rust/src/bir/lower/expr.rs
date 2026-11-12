@@ -4,6 +4,7 @@ use crate::bir::{FuncId, VarSpan};
 
 /// Decoded structural operands saved across child visits; no source re-read.
 pub(super) enum Resume {
+    Call(super::call::Call),
     Let {
         var: VarId,
         kind: LetKind,
@@ -28,7 +29,12 @@ impl State {
         resume: &Resume,
         into: &mut Vec<(Cx, NodeId)>,
     ) {
+        if let Resume::Call(call) = resume {
+            into.extend(call.operands.iter().map(|&node| (Cx { cont: Cont::Value(Tail::No), ..cx }, node)));
+            return;
+        }
         match *resume {
+            Resume::Call(_) => unreachable!("call handled above"),
             Resume::Let {
                 var,
                 kind,
@@ -73,7 +79,14 @@ impl State {
         index: usize,
         child: Probed,
     ) -> Probed {
+        if let Resume::Call(_) = resume {
+            let mut out = self.realize(cx, child);
+            self.statements.reserve();
+            out.stmts = self.statements.since(Span { start: out.stmts.start, len: 0 });
+            return Probed::Out(out);
+        }
         let force = match resume {
+            Resume::Call(_) => unreachable!("call handled above"),
             Resume::Let { value, .. } => value.is_some() && index == 0,
             Resume::Seq { .. } => index == 0,
             Resume::Fun { .. } => true,
@@ -92,6 +105,7 @@ impl State {
         mut children: impl Iterator<Item = Probed>,
     ) -> Probed {
         match resume {
+            Resume::Call(call) => self.finish_application(cx, call, children),
             Resume::Let { value, .. } => {
                 let first = value.map(|_| match children.next().expect("binding output") {
                     Probed::Out(out) => out,

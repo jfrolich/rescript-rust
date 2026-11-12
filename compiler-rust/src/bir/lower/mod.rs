@@ -1,6 +1,7 @@
 //! Continuations for the level-L to level-J lowering (BACKEND_LOWERING §1).
 //! Context references are indices, never references into growing state pools.
 mod args;
+mod call;
 mod expr;
 mod konst;
 #[cfg(test)]
@@ -370,7 +371,11 @@ impl ProbeRules for State {
                 0,
             ),
             View::Const { value } => self.constant(value),
-            View::Apply { .. } => return Err(Unsupported("apply")),
+            View::Apply { callee, args, info } => {
+                let args = args.to_vec();
+                let call = self.application(callee, &args, info);
+                return Ok(ProbePlan::Children(expr::Resume::Call(call)));
+            }
             View::Fun { body, header } => {
                 return Ok(ProbePlan::Children(expr::Resume::Fun { body, header }));
             }
