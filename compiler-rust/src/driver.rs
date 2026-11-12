@@ -754,6 +754,10 @@ pub struct CompilerOptions {
     /// Run GenType only to register the module's type declarations (for the
     /// modules that import its types), without generating output.
     pub gentype_declarations_only: bool,
+    /// The build's conservative dependency closure can prove this module's
+    /// declarations unreachable from every genType output. Standalone compiles
+    /// default to true because they have no whole-build dependency graph.
+    pub gentype_declarations_needed: bool,
     /// When true, `compile_source_in_process` captures the typed tree,
     /// raw lambda, and lambda sexps for display (used by the playground).
     pub capture_intermediates: bool,
@@ -946,6 +950,7 @@ impl Default for CompilerOptions {
             gentype_config: None,
             gentype_resolver: None,
             gentype_declarations_only: false,
+            gentype_declarations_needed: true,
             capture_intermediates: false,
             dumps: Vec::new(),
             skip_js_render: false,
@@ -9610,6 +9615,7 @@ fn with_gentype_artifact<R>(
                 file_name: crate::gentype::paths::get_module_name_from_source_path(filename),
                 is_interface,
                 declarations_only: options.gentype_declarations_only,
+                declarations_needed: options.gentype_declarations_needed,
                 render_escape: &render_escape,
             },
         )
@@ -9840,14 +9846,26 @@ fn render_js_program(
         jsx_preserve,
     } = settings;
     if let crate::emit::PrinterMode::Oxc(stats) = &options.js_printer {
+        let mut raw_audit = stats.raw_audit_buffer();
         let result = if options.source_map != crate::js_ir::source_map::SourceMapMode::None {
             render_oxc_source_map(program, resolver, JsFileSettings {
                 file_directives, debug, jsx_preserve,
             }, options, output_path, lam_locs.clone())
         } else {
-            crate::emit::emit(program, resolver, file_directives, debug, jsx_preserve, !options.no_version_header)
+            crate::emit::emit_audited(
+                program,
+                resolver,
+                file_directives,
+                debug,
+                jsx_preserve,
+                !options.no_version_header,
+                raw_audit.as_mut(),
+            )
         };
         stats.record(&result);
+        if result.is_ok() {
+            stats.record_raw(raw_audit);
+        }
         match result {
             Ok(output) => return output,
             Err(reason) => log::debug!("oxc printer fallback: {}", reason.0),

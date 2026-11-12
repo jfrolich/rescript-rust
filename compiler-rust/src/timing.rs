@@ -33,10 +33,25 @@ pub enum Phase {
     Gentype,
     /// JavaScript IR generation and JavaScript text rendering.
     Codegen,
+    /// GenType child buckets. They are reported separately, not added again
+    /// to the top-level recorded total. Counts are artifact-phase invocations.
+    GentypePrepare,
+    /// Typed-artifact annotation discovery.
+    GentypeAnnotations,
+    /// Translation of the declaration cache input.
+    GentypeDeclarations,
+    /// Conversion of declaration locations to portable handles.
+    GentypePortable,
+    /// Encoding translated declarations for the cache/store.
+    GentypeEncoding,
+    /// Translation and text generation for an annotated artifact.
+    GentypeEmission,
+    /// Output file writes, no-match removal checks, and deletions.
+    GentypeFiles,
 }
 
 impl Phase {
-    const COUNT: usize = Phase::Codegen as usize + 1;
+    const COUNT: usize = Phase::GentypeFiles as usize + 1;
 }
 
 /// Nanoseconds per phase, indexed by `Phase as usize`.
@@ -105,6 +120,7 @@ impl PhaseTimingSnapshot {
 static ENABLED: OnceLock<bool> = OnceLock::new();
 /// Aggregate nanoseconds per phase, indexed by `Phase as usize`.
 static PHASE_NS: [AtomicU64; Phase::COUNT] = [const { AtomicU64::new(0) }; Phase::COUNT];
+static PHASE_COUNT: [AtomicU64; Phase::COUNT] = [const { AtomicU64::new(0) }; Phase::COUNT];
 
 thread_local! {
     static THREAD_TIMINGS: RefCell<Option<ThreadPhaseCounters>> = const { RefCell::new(None) };
@@ -215,7 +231,7 @@ pub fn reset() {
         return;
     }
 
-    for counter in &PHASE_NS {
+    for counter in PHASE_NS.iter().chain(PHASE_COUNT.iter()) {
         counter.store(0, Ordering::Relaxed);
     }
 
@@ -232,6 +248,9 @@ pub fn record(phase: Phase, duration: Duration) {
 
     let nanos = duration.as_nanos().min(u64::MAX as u128) as u64;
     PHASE_NS[phase as usize].fetch_add(nanos, Ordering::Relaxed);
+    if phase as usize > Phase::Codegen as usize {
+        PHASE_COUNT[phase as usize].fetch_add(1, Ordering::Relaxed);
+    }
     THREAD_TIMINGS.with(|timings| {
         if let Some(thread_timings) = timings.borrow_mut().as_mut() {
             thread_timings.record(phase, nanos);
@@ -305,6 +324,19 @@ pub fn print_report() {
     print_phase("gentype", snapshot.gentype, total);
     print_phase("codegen", snapshot.codegen, total);
     print_phase("overhead", snapshot.overhead(), total);
+    for (name, phase) in [
+        ("gentype_prepare", Phase::GentypePrepare),
+        ("gentype_annotations", Phase::GentypeAnnotations),
+        ("gentype_declarations", Phase::GentypeDeclarations),
+        ("gentype_portable", Phase::GentypePortable),
+        ("gentype_encoding", Phase::GentypeEncoding),
+        ("gentype_emission", Phase::GentypeEmission),
+        ("gentype_files", Phase::GentypeFiles),
+    ] {
+        eprintln!("[phase-timing] phase={} ms={:.3} artifacts={}", name,
+            ms(Duration::from_nanos(PHASE_NS[phase as usize].load(Ordering::Relaxed))),
+            PHASE_COUNT[phase as usize].load(Ordering::Relaxed));
+    }
 }
 
 fn print_phase(name: &str, duration: Duration, total: Duration) {
@@ -325,5 +357,21 @@ fn pct(duration: Duration, total: Duration) -> f64 {
         0.0
     } else {
         duration.as_secs_f64() * 100.0 / total.as_secs_f64()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gentype_children_do_not_inflate_recorded_time() {
+        let mut nanos = [0; Phase::COUNT];
+        nanos[Phase::Gentype as usize] = 100;
+        nanos[Phase::GentypeDeclarations as usize] = 70;
+        nanos[Phase::GentypeEmission as usize] = 30;
+        let snapshot = PhaseTimingSnapshot::from_nanos(Duration::from_nanos(110), nanos);
+        assert_eq!(snapshot.recorded(), Duration::from_nanos(100));
+        assert_eq!(snapshot.overhead(), Duration::from_nanos(10));
     }
 }

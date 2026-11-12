@@ -222,3 +222,105 @@ mod tests {
         assert_eq!(modules["C"].dependents, AHashSet::from(["B".to_string()]));
     }
 }
+
+/// O(V + E) reachability, including dependency packages and namespace modules.
+/// Missing parse flags are conservatively treated as annotated (old/unparsed inputs).
+pub fn plan_gentype(build_state: &mut BuildCommandState) {
+    let roots = build_state.modules.iter().filter_map(|(name, module)| {
+        let SourceType::SourceFile(source) = &module.source_type else {
+            return None;
+        };
+        let enabled = build_state
+            .packages
+            .get(&module.package_name)
+            .is_some_and(|package| package.config.gentype_config.is_some());
+        if !enabled {
+            return None;
+        }
+        let annotated = source.gentype_annotations[0].unwrap_or(true)
+            || (source.interface.is_some() && source.gentype_annotations[1].unwrap_or(true));
+        annotated.then_some(name.as_str())
+    });
+    let needed = gentype_closure(&build_state.modules, roots);
+    if rescript_compiler::perf_counters::enabled() {
+        eprintln!(
+            "[compiler-counter] gentype_closure needed={} total={}",
+            needed.len(),
+            build_state.modules.len()
+        );
+    }
+    // Only names are retained once per plan. Artifact paths are inspected
+    // lazily on a cache miss, never normalized for each skipped module.
+    rescript_compiler::gentype::main::set_skipped_modules(
+        build_state.modules.iter().filter_map(|(name, module)| {
+            (!needed.contains(name)
+                && !module.is_mlmap()
+                && build_state.packages[&module.package_name].config.gentype_config.is_some())
+                .then(|| name.clone())
+        }),
+    );
+    build_state.gentype_needed = Some(needed);
+}
+
+fn gentype_closure<'a>(
+    modules: &'a AHashMap<String, Module>,
+    roots: impl Iterator<Item = &'a str>,
+) -> AHashSet<String> {
+    let mut needed = AHashSet::new();
+    let mut pending = Vec::new();
+    for root in roots {
+        if !needed.contains(root) {
+            needed.insert(root.to_string());
+            pending.push(root);
+        }
+    }
+    while let Some(name) = pending.pop() {
+        if let Some(module) = modules.get(name) {
+            for dependency in &module.deps {
+                if !needed.contains(dependency) {
+                    needed.insert(dependency.clone());
+                    pending.push(dependency.as_str());
+                }
+            }
+        }
+    }
+    needed
+}
+
+#[cfg(test)]
+mod gentype_tests {
+    use super::*;
+
+    #[test]
+    fn closure_includes_transitive_dependencies_and_terminates_on_cycles() {
+        let mut modules = AHashMap::new();
+        for (name, deps) in [
+            ("Output", vec!["Alias"]),
+            ("Alias", vec!["Types"]),
+            ("Types", vec!["Alias"]),
+            ("Unused", vec![]),
+        ] {
+            modules.insert(
+                name.to_string(),
+                Module {
+                    source_type: SourceType::MlMap(MlMap { parse_dirty: false }),
+                    deps: deps.into_iter().map(str::to_string).collect(),
+                    dependents: AHashSet::new(),
+                    package_name: name.to_string(),
+                    compile_dirty: false,
+                    deps_dirty: false,
+                    is_type_dev: false,
+                },
+            );
+        }
+        let needed = gentype_closure(&modules, ["Output"].into_iter());
+        assert_eq!(
+            needed,
+            ["Output", "Alias", "Types"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        );
+        assert!(gentype_closure(&modules, std::iter::empty()).is_empty());
+    }
+}

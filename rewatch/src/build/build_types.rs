@@ -128,6 +128,8 @@ pub struct Implementation {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourceFile {
+    /// Parsed implementation/interface flags. None is conservatively unknown.
+    pub gentype_annotations: [Option<bool>; 2],
     pub implementation: Implementation,
     pub interface: Option<Interface>,
 }
@@ -368,6 +370,9 @@ pub struct BuildCommandState {
     // Keyed by "{module_name}:impl" or "{module_name}:intf" (matching stored_asts convention).
     // Values are the raw module names extracted from the parsed AST.
     pub in_memory_deps: Mutex<AHashMap<String, Dependencies>>,
+    /// Annotated modules and their transitive syntactic dependencies.
+    /// None means no plan is available: standalone callers retain all declarations.
+    pub gentype_needed: Option<AHashSet<String>>,
     // The units each module's last compile in this process read the
     // interface of (type checking its interface and implementation, plus
     // the modules its generated code may require). Interned: every module
@@ -527,6 +532,7 @@ impl BuildCommandState {
             interface_generation: AtomicU64::new(0),
             module_registry: Mutex::new(ModuleRegistry::new()),
             in_memory_deps: Mutex::new(AHashMap::new()),
+            gentype_needed: None,
             loaded_units: Mutex::new(AHashMap::new()),
             unit_reads: Mutex::new(AHashMap::new()),
             verified_imports: Mutex::new(AHashMap::new()),
