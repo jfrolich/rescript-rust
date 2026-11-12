@@ -450,6 +450,9 @@ impl ProbeRules for State {
             View::If { condition, then_, else_ } if matches!(cx.cont, Cont::Assign(_)) => {
                 return self.conditional_assignment(cx, condition, then_, else_).map(ProbePlan::Ready);
             }
+            View::If { condition, then_, else_ } if matches!(cx.cont, Cont::Declare(..)) => {
+                return self.conditional_declaration(cx, condition, then_, else_).map(ProbePlan::Ready);
+            }
             View::If { .. } => return Err(Unsupported("if")),
             View::Switch { .. } => return Err(Unsupported("switch")),
             View::StrSwitch { .. } => return Err(Unsupported("string switch")),
