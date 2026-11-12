@@ -118,9 +118,7 @@ pub fn emit(
         program,
         resolver,
         directives,
-        debug,
-        jsx_preserve,
-        header,
+        program::FileOptions { debug, jsx_preserve, header },
         None,
         None,
     )
@@ -139,9 +137,7 @@ pub(crate) fn emit_audited(
         program,
         resolver,
         directives,
-        debug,
-        jsx_preserve,
-        header,
+        program::FileOptions { debug, jsx_preserve, header },
         None,
         audit,
     )
@@ -157,9 +153,7 @@ pub fn emit_with_source_map(
         program,
         resolver,
         directives,
-        debug,
-        jsx_preserve,
-        header,
+        program::FileOptions { debug, jsx_preserve, header },
         Some(options),
         None,
     )
