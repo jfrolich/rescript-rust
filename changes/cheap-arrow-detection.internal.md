@@ -1,0 +1,1 @@
+- Cache nested arrow-function bracket probes and avoid full parser checkpoints for simple arrow parameters.

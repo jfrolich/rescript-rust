@@ -395,6 +395,7 @@ fn open_direct_persistent_module(
     arena: &ParseArena,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
+    slot: Option<u32>,
 ) -> Option<Path> {
     let Longident::Lident(module_idx) = lid else {
         return None;
@@ -406,7 +407,7 @@ fn open_direct_persistent_module(
     let pers = pers_env.as_mut()?;
     // env.ml:1012: `Pident (Ident.create_persistent s)`.
     let root = Path::pident(ctx.create_ast_persistent_ident(arena, *module_idx));
-    if pers.open_module(module_name, root, env, ctx) {
+    if pers.open_module(module_name, root, env, ctx, slot) {
         Some(root)
     } else {
         None
@@ -11961,6 +11962,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                             arena,
                             &mut tctx.persistent_env,
                             tctx.type_ctx,
+                            None,
                         )
                         .is_none()
                         {
@@ -11972,6 +11974,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 &mut sig_env,
                                 &mut tctx.persistent_env,
                                 tctx.type_ctx,
+                                None,
                             );
                         }
                     }
@@ -12356,6 +12359,7 @@ fn approx_modtype_rec<'a>(
                         &mut sig_env,
                         &mut tctx.persistent_env,
                         tctx.type_ctx,
+                        None,
                     );
                 }
                 PSigDesc::Psig_include(incl) => {
@@ -15926,7 +15930,6 @@ pub fn transl_signature<'a>(
                     Some(od.popen_lid.loc),
                 );
                 let slot = tctx.open_signature_slot(od.popen_override, od.popen_loc);
-                sig_env.set_pending_open_slot(slot);
                 // Resolve the module and extend the environment with opened bindings.
                 // This matches OCaml's transl_signature which calls type_open/Env.open_signature.
                 let path = if let Some(path) = open_direct_persistent_module(
@@ -15935,6 +15938,7 @@ pub fn transl_signature<'a>(
                     arena,
                     &mut tctx.persistent_env,
                     tctx.type_ctx,
+                    slot,
                 ) {
                     path
                 } else if let Some(path) = {
@@ -15946,14 +15950,13 @@ pub fn transl_signature<'a>(
                         &mut sig_env,
                         &mut tctx.persistent_env,
                         tctx.type_ctx,
+                        slot,
                     )
                 } {
                     path
                 } else {
-                    sig_env.set_pending_open_slot(None);
                     open_failure_path(tctx, &sig_env, arena, &longident, od.popen_lid.loc)?
                 };
-                sig_env.set_pending_open_slot(None);
                 tctx.set_open_slot_root(slot, &path);
                 TSigDesc::Tsig_open(crate::types::typedtree::OpenDeclaration {
                     open_path: path,
@@ -19258,13 +19261,13 @@ fn type_structure_item<'a>(
             let open_lid = arena.get_longident(open_desc.popen_lid.txt);
             let mut new_env = env.clone();
             let slot = tctx.open_signature_slot(open_desc.popen_override, open_desc.popen_loc);
-            new_env.set_pending_open_slot(slot);
             let path = if let Some(path) = open_direct_persistent_module(
                 &mut new_env,
                 open_lid,
                 arena,
                 &mut tctx.persistent_env,
                 tctx.type_ctx,
+                slot,
             ) {
                 // OCaml compiler/ml/typemod.ml:88-90 handles structure opens
                 // through `Env.open_signature`; for persistent roots that reaches
@@ -19280,6 +19283,7 @@ fn type_structure_item<'a>(
                     &mut new_env,
                     &mut tctx.persistent_env,
                     tctx.type_ctx,
+                    slot,
                 )
             } {
                 path
@@ -19301,7 +19305,6 @@ fn type_structure_item<'a>(
                 }
                 fallback_path
             };
-            new_env.set_pending_open_slot(None);
             tctx.set_open_slot_root(slot, &path);
 
             let desc = StructureItemDesc::Tstr_open(OpenDeclaration {
