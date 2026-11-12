@@ -241,3 +241,12 @@ export interface NullLit { type: "Lit"; value: null; raw: "null" | null }
 export interface Ident { type: "Ident"; name: string }
 export type Lit = StrLit | NumLit | BoolLit | NullLit | Ident;
 export declare function lit(): Lit;
+
+// A tag that is a union of literals is a case per literal; two members of
+// one tag with the same fields cannot be told apart, so they are one case.
+export interface Fn { type: "FunctionDeclaration" | "FunctionExpression"; name: string | null }
+export interface Arrow { type: "ArrowFunctionExpression"; body: string }
+export interface Named { type: "Named"; name: string }
+export interface AlsoNamed { type: "Named"; name: string; alias?: string }
+export type Callee = Fn | Arrow | Named | AlsoNamed;
+export declare function callee(): Callee;

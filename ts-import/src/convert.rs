@@ -1952,63 +1952,199 @@ impl<'a> Converter<'a> {
         }
     }
 
-    /// Object types that share a property holding a different literal in each
-    /// member: a variant tagged by that property.
+    /// Object types that share a property holding a literal in each member: a
+    /// variant tagged by that property, the one with the most different
+    /// literals. Members with the same literal are cases with the same `@as`,
+    /// told apart by their other fields; members no check separates are
+    /// merged into one case. A member whose tag is a union of literals is a
+    /// case per literal.
     fn tagged_union(&mut self, members: &[P<Type>]) -> Option<DeclKind> {
-        let is_plain_object = |this: &mut Self, member: P<Type>| {
+        // An intersection of plain objects (`{decorators?: ...} & Pattern`)
+        // is one too: a case reads its properties.
+        fn is_plain_object(this: &mut Converter<'_>, member: P<Type>) -> bool {
+            if member.flags().intersects(TypeFlags::Intersection) {
+                return member.types().iter().all(|&part| is_plain_object(this, part));
+            }
             member.flags().intersects(TypeFlags::Object)
                 && !this.c.is_array_type(member)
                 && this.c.get_signatures_of_type(member, SignatureKind::Call).is_empty()
-        };
+        }
         if !members.iter().all(|&member| is_plain_object(self, member)) {
             return None;
         }
-        let candidates = self.visible_properties(members[0]);
-        for candidate in candidates {
+        // For each candidate property, each member with each of its tags,
+        // and whether the member has several.
+        type Entries = Vec<(P<Type>, Tag, bool)>;
+        let mut best: Option<(String, Entries, usize)> = None;
+        for candidate in self.visible_properties(members[0]) {
             let name = candidate.name();
-            let mut tags: Vec<Tag> = Vec::new();
+            let mut entries: Vec<(P<Type>, Tag, bool)> = Vec::new();
+            let mut complete = true;
             for &member in members {
-                let Some(property) = self.c.get_property_of_type(member, name) else { break };
+                let Some(property) = self.c.get_property_of_type(member, name) else {
+                    complete = false;
+                    break;
+                };
                 if property.flags().intersects(SymbolFlags::Optional) {
+                    complete = false;
                     break;
                 }
                 let property_type = self.c.get_type_of_symbol(property);
-                let Some(tag) = literal_tag(property_type) else { break };
-                if tags.contains(&tag) {
+                let tags: Option<Vec<Tag>> = match literal_tag(property_type) {
+                    Some(tag) => Some(vec![tag]),
+                    // `"a" | "b"`, not `boolean`.
+                    None if property_type.flags().intersects(TypeFlags::Union)
+                        && !property_type.flags().intersects(TypeFlags::Boolean) =>
+                    {
+                        property_type.types().iter().map(|&member| literal_tag(member)).collect()
+                    }
+                    None => None,
+                };
+                let Some(tags) = tags else {
+                    complete = false;
                     break;
+                };
+                let split = tags.len() > 1;
+                for tag in tags {
+                    if entries.iter().any(|(other, known, _)| *other == member && *known == tag) {
+                        continue;
+                    }
+                    entries.push((member, tag, split));
                 }
-                tags.push(tag);
             }
-            if tags.len() != members.len() {
+            if !complete {
                 continue;
             }
-            let mut ctors: Vec<Ctor> = Vec::new();
-            for (&member, tag) in members.iter().zip(tags) {
-                let base = match &tag {
-                    Tag::Str(text) => upper_ident(text),
-                    Tag::Num(text) => upper_ident(text),
-                    // `{ok: true, ...} | {ok: false, ...}` reads as `Ok` and `NotOk`.
-                    Tag::Bool(true) => upper_ident(name),
-                    Tag::Bool(false) => format!("Not{}", upper_ident(name)),
-                    Tag::Null => "Null".to_string(),
-                    Tag::Undefined => "Undefined".to_string(),
-                };
-                let ctor_name = unique_ctor(&ctors, &base);
-                let properties = self.visible_properties(member);
-                self.path.push(ctor_name.clone());
-                let fields = self.fields(&properties, Some(name));
-                self.path.pop();
-                ctors.push(Ctor {
-                    name: ctor_name,
-                    tag: Some(tag),
-                    // A member with only the tag is the object `{kind: "point"}`, so an
-                    // empty record: a case without a payload would be the bare string.
-                    payload: Payload::Record(fields),
-                });
+            let mut distinct: Vec<&Tag> = Vec::new();
+            for (_, tag, _) in &entries {
+                if !distinct.contains(&tag) {
+                    distinct.push(tag);
+                }
             }
-            return Some(DeclKind::Variant { tag: Some(name.to_string()), ctors });
+            let count = distinct.len();
+            if count >= 2 && best.as_ref().is_none_or(|(_, _, most)| count > *most) {
+                best = Some((name.to_string(), entries, count));
+            }
         }
-        None
+        let (name, entries, _) = best?;
+        let name = name.as_str();
+        let mark = self.state.mark();
+        let tag_base = |tag: &Tag| match tag {
+            Tag::Str(text) => upper_ident(text),
+            Tag::Num(text) => upper_ident(text),
+            // `{ok: true, ...} | {ok: false, ...}` reads as `Ok` and `NotOk`.
+            Tag::Bool(true) => upper_ident(name),
+            Tag::Bool(false) => format!("Not{}", upper_ident(name)),
+            Tag::Null => "Null".to_string(),
+            Tag::Undefined => "Undefined".to_string(),
+        };
+        // The members of each tag several share, in groups that become one
+        // case each, as for object cases; `None` when they have no order.
+        let without_tag = |shape: ObjectShape| match shape {
+            ObjectShape::Closed(fields) => {
+                ObjectShape::Closed(fields.into_iter().filter(|field| field.name != name).collect())
+            }
+            ObjectShape::Open => ObjectShape::Open,
+        };
+        // For each entry: the entries of its group (itself when alone), and
+        // its shape without the tag.
+        let mut group_of: Vec<Vec<usize>> = (0..entries.len()).map(|index| vec![index]).collect();
+        let mut shapes: Vec<Option<ObjectShape>> = vec![None; entries.len()];
+        let mut done: Vec<&Tag> = Vec::new();
+        for (_, tag, _) in &entries {
+            if done.contains(&tag) {
+                continue;
+            }
+            done.push(tag);
+            let sharing: Vec<usize> = (0..entries.len()).filter(|&at| entries[at].1 == *tag).collect();
+            if sharing.len() < 2 {
+                continue;
+            }
+            let own: Vec<ObjectShape> =
+                sharing.iter().map(|&at| without_tag(self.ts_object_shape(entries[at].0))).collect();
+            for (&at, shape) in sharing.iter().zip(&own) {
+                shapes[at] = Some(shape.clone());
+            }
+            let groups = object_groups(own)?;
+            for group in groups {
+                let indices: Vec<usize> = group.iter().map(|&local| sharing[local]).collect();
+                for &at in &indices {
+                    group_of[at] = indices.clone();
+                }
+            }
+        }
+        let mut ctors: Vec<Ctor> = Vec::new();
+        for (index, (member, tag, split)) in entries.iter().enumerate() {
+            let group = &group_of[index];
+            if group[0] != index {
+                continue;
+            }
+            let shared = entries.iter().filter(|(_, other, _)| other == tag).count() > 1;
+            let base = if !shared || group.len() > 1 {
+                tag_base(tag)
+            } else {
+                // Named after the interface, else after a field only it has
+                // among the cases of its tag, else after the tag.
+                let interface = named_symbol(*member).filter(|_| !*split).map(|symbol| upper_ident(symbol.name()));
+                let own_field = || {
+                    let ObjectShape::Closed(fields) = shapes[index].as_ref()? else { return None };
+                    fields.iter().filter(|field| field.required).find_map(|field| {
+                        let unique = (0..entries.len()).filter(|&other| other != index && entries[other].1 == *tag).all(
+                            |other| match &shapes[other] {
+                                Some(ObjectShape::Closed(others)) => others.iter().all(|f| f.name != field.name),
+                                _ => true,
+                            },
+                        );
+                        unique.then(|| upper_ident(&field.name))
+                    })
+                };
+                interface.or_else(own_field).unwrap_or_else(|| tag_base(tag))
+            };
+            let ctor_name = unique_ctor(&ctors, &base);
+            self.path.push(ctor_name.clone());
+            let records: Vec<Vec<Field>> = group
+                .iter()
+                .map(|&at| {
+                    let properties = self.visible_properties(entries[at].0);
+                    self.fields(&properties, Some(name))
+                })
+                .collect();
+            self.path.pop();
+            let fields = match records.as_slice() {
+                [one] => one.clone(),
+                _ => self.merge_fields(&ctor_name, &records),
+            };
+            ctors.push(Ctor {
+                name: ctor_name,
+                tag: Some(tag.clone()),
+                // A member with only the tag is the object `{kind: "point"}`, so an
+                // empty record: a case without a payload would be the bare string.
+                payload: Payload::Record(fields),
+            });
+        }
+        // The compiler accepts the cases of a shared tag when their converted
+        // fields have an order (`variant_layout::shared_tag_orders`).
+        let mut checked: Vec<&Tag> = Vec::new();
+        for ctor in &ctors {
+            let tag = ctor.tag.as_ref().expect("a tagged case");
+            if checked.contains(&tag) {
+                continue;
+            }
+            checked.push(tag);
+            let sharing: Vec<ObjectShape> = ctors
+                .iter()
+                .filter(|other| other.tag.as_ref() == Some(tag))
+                .map(|other| match &other.payload {
+                    Payload::Record(fields) => self.state.fields_shape(fields),
+                    _ => ObjectShape::Open,
+                })
+                .collect();
+            if sharing.len() > 1 && !objects_ordered(sharing) {
+                self.state.rollback(mark);
+                return None;
+            }
+        }
+        Some(DeclKind::Variant { tag: Some(name.to_string()), ctors })
     }
 
     /// A union ReScript can discriminate with `typeof`, `Array.isArray` and

@@ -100,11 +100,13 @@ module Features = {
     | @as(2) B
   type named = {
     name: string,
+    @as("type") type_: [#Named],
   }
   type rec employee = {
     salary: float,
     manager?: employee,
     name: string,
+    @as("type") type_: [#Named],
   }
   type callable = string => float
   type hybrid = string => float
@@ -225,16 +227,25 @@ module Features = {
     @as("type") type_: [#ArrayPattern],
     elements: array<Null.t<identName>>,
   }
-  type arrayPatternCase = {
-    @as("type") type_: [#ArrayPattern],
-    elements: unknown,
-  }
-  @unboxed type syntaxNode =
-    | ArrayPattern(arrayPatternCase)
-    | IdentBinding(identBinding)
-    | IdentName(identName)
-    | NumericLit(numericLit)
-    | StringLit(stringLit)
+  @tag("type") type syntaxNode =
+    | @as("ArrayPattern") ArrayPattern({
+      elements: unknown,
+    })
+    | @as("Identifier") IdentBinding({
+      name: string,
+      optional: bool,
+    })
+    | @as("Identifier") IdentName({
+      name: string,
+    })
+    | @as("Literal") NumericLit({
+      value: float,
+      raw: Null.t<string>,
+    })
+    | @as("Literal") StringLit({
+      value: string,
+      raw: Null.t<string>,
+    })
   type namedProp = {
     @as("type") type_: [#Prop],
     name: string,
@@ -257,26 +268,26 @@ module Features = {
     @as("type") type_: [#Fourth],
     flag: bool,
   }
-  type propCase = {
-    @as("type") type_: [#Prop],
-    name: string,
-    size: Null.t<float>,
-  }
-  @unboxed type prop =
-    | Fourth(fourth)
-    | Prop(propCase)
-    | Other(other)
-    | Third(third)
-  type heldCase<'t> = {
-    @as("type") type_: [#Held],
-    value: 't,
-    note?: string,
-  }
-  @unboxed type holder<'t> =
-    | Held(heldCase<'t>)
-    | Empty({
-      @as("type") type_: [#Empty],
+  @tag("type") type prop =
+    | @as("Fourth") Fourth({
+      flag: bool,
     })
+    | @as("Prop") Prop({
+      name: string,
+      size: Null.t<float>,
+    })
+    | @as("Other") Other({
+      id: float,
+    })
+    | @as("Third") Third({
+      label: string,
+    })
+  @tag("type") type holder<'t> =
+    | @as("Held") Held({
+      value: 't,
+      note?: string,
+    })
+    | @as("Empty") Empty({})
   type strLit = {
     @as("type") type_: [#Lit],
     value: string,
@@ -303,12 +314,53 @@ module Features = {
     @as("type") type_: [#Ident],
     name: string,
   }
-  @unboxed type lit =
-    | BoolLit(boolLit)
-    | Ident(ident)
-    | NullLit(nullLit)
-    | NumLit(numLit)
-    | StrLit(strLit)
+  @tag("type") type lit =
+    | @as("Lit") BoolLit({
+      value: bool,
+      raw: Null.t<string>,
+    })
+    | @as("Ident") Ident({
+      name: string,
+    })
+    | @as("Lit") NullLit({
+      value: nullValue,
+      raw: Null.t<[#null]>,
+    })
+    | @as("Lit") NumLit({
+      value: float,
+      raw: Null.t<string>,
+    })
+    | @as("Lit") StrLit({
+      value: string,
+      raw: Null.t<string>,
+    })
+  type fn = {
+    @as("type") type_: [#FunctionDeclaration | #FunctionExpression],
+    name: Null.t<string>,
+  }
+  type arrow = {
+    @as("type") type_: [#ArrowFunctionExpression],
+    body: string,
+  }
+  type alsoNamed = {
+    @as("type") type_: [#Named],
+    name: string,
+    alias?: string,
+  }
+  @tag("type") type callee =
+    | @as("Named") Named({
+      name: string,
+      alias?: string,
+    })
+    | @as("ArrowFunctionExpression") ArrowFunctionExpression({
+      body: string,
+    })
+    | @as("FunctionDeclaration") FunctionDeclaration({
+      name: Null.t<string>,
+    })
+    | @as("FunctionExpression") FunctionExpression({
+      name: Null.t<string>,
+    })
   type findResult = {
     id: string,
   }
@@ -744,6 +796,9 @@ module Features = {
   /** TypeScript: `() => Lit` */
   @module("./features.ts")
   external lit: unit => lit = "lit"
+  /** TypeScript: `() => Callee` */
+  @module("./features.ts")
+  external callee: unit => callee = "callee"
 }
 
 // Where ReScript says less than TypeScript:
