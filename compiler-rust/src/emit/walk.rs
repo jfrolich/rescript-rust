@@ -619,18 +619,26 @@ pub(super) fn call_supported(a: &JsArena, callee: Expr) -> Result<(), Unsupporte
 /// Identity options print their payload unchanged. Legacy arrow bodies group a
 /// function under any number of these wrappers (printer::arrow_expr_needs_paren).
 pub(super) fn arrow_function_body(a: &JsArena, mut e: Expr) -> bool {
-    while let ExprKind::OptionalBlock(inner, true) = a.ek(e) { e = inner; }
+    while let ExprKind::OptionalBlock(inner, true) = a.ek(e) {
+        e = inner;
+    }
     matches!(a.ek(e), ExprKind::Fun(_))
 }
 
 /// Logical chains flatten only nodes the legacy printer actually prints as
 /// logical operators. A nullish rewrite is an atomic `x == null` operand.
-pub(super) fn chain_children(a: &JsArena, op: BinOp, e: Expr)
-    -> Result<Option<(Expr, Expr)>, Unsupported>
-{
-    if let ExprKind::Bin(child, l, r) = a.ek(e) && child == op {
+pub(super) fn chain_children(
+    a: &JsArena,
+    op: BinOp,
+    e: Expr,
+) -> Result<Option<(Expr, Expr)>, Unsupported> {
+    if let ExprKind::Bin(child, l, r) = a.ek(e)
+        && child == op
+    {
         expression_comment(a, e)?;
-        if nullish_target(a, op, l, r)?.is_none() { return Ok(Some((l, r))); }
+        if nullish_target(a, op, l, r)?.is_none() {
+            return Ok(Some((l, r)));
+        }
     }
     Ok(None)
 }

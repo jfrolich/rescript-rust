@@ -192,7 +192,7 @@ impl<'a, 'r> Build<'a, 'r> {
             result.push(if let ExprKind::Spread(inner) = self.arena.ek(*e) {
                 Argument::SpreadElement(self.b.alloc(SpreadElement::new(
                     SPAN,
-                    self.expr(inner)?,
+                    self.high_expr(inner)?,
                     &self.b,
                 )))
             } else {
@@ -588,7 +588,12 @@ impl<'a, 'r> Build<'a, 'r> {
                         None => right,
                         Some(left) if op == BinOp::Bor => self.binary(B::BitwiseOR, left, right),
                         Some(left) => Expression::new_logical_expression(
-                            SPAN, left, if op == BinOp::And { L::And } else { L::Or }, right, &self.b),
+                            SPAN,
+                            left,
+                            if op == BinOp::And { L::And } else { L::Or },
+                            right,
+                            &self.b,
+                        ),
                     });
                 }
                 Ok(value.expect("binary chain has operands"))
@@ -938,7 +943,7 @@ impl<'a, 'r> Build<'a, 'r> {
             ExprKind::In(l, r) => self.binary(B::In, self.expr(l)?, self.expr(r)?),
             ExprKind::IsNullOrUndefined(e) => self.binary(
                 B::Equality,
-                self.expr(e)?,
+                self.high_expr(e)?,
                 Expression::new_null_literal(SPAN, &self.b),
             ),
             ExprKind::JsNot(e) => self.unary(U::LogicalNot, self.high_expr(e)?),
@@ -960,7 +965,7 @@ impl<'a, 'r> Build<'a, 'r> {
                 walk::call_supported(a, f)?;
                 let mut call = CallExpression::new(
                     SPAN,
-                    self.expr(f)?,
+                    self.expr_at(f, 15)?,
                     None,
                     self.args(walk::arguments(a, a.exprs(args)), level)?,
                     false,
@@ -976,9 +981,7 @@ impl<'a, 'r> Build<'a, 'r> {
                 self.args(args.map_or(&[], |args| a.exprs(args)), level)?,
                 &self.b,
             ),
-            ExprKind::StaticIndex(e, s, _) => {
-                self.member(self.dot_target(e)?, a.text(s))
-            }
+            ExprKind::StaticIndex(e, s, _) => self.member(self.dot_target(e)?, a.text(s)),
             ExprKind::CamlBlockTag(e, s) => {
                 self.member(self.with_indent(1, || self.expr_at(e, 15))?, a.text(s))
             }
@@ -996,7 +999,7 @@ impl<'a, 'r> Build<'a, 'r> {
                     elements.push(if let ExprKind::Spread(e) = a.ek(*e) {
                         ArrayExpressionElement::SpreadElement(self.b.alloc(SpreadElement::new(
                             SPAN,
-                            self.expr(e)?,
+                            self.high_expr(e)?,
                             &self.b,
                         )))
                     } else {
@@ -1078,12 +1081,14 @@ impl<'a, 'r> Build<'a, 'r> {
                 Expression::new_tagged_template_expression(SPAN, tag, None, quasi, &self.b)
             }
             ExprKind::JsonLiteral(source) => self.json(a.text(source))?,
-            ExprKind::FlatCall(func, args) => self.call(self.member(self.expr(func)?, "apply"), {
-                let mut values = self.b.vec();
-                values.push(Argument::from(Expression::new_null_literal(SPAN, &self.b)));
-                values.push(Argument::from(self.expr(args)?));
-                values
-            }),
+            ExprKind::FlatCall(func, args) => {
+                self.call(self.member(self.expr_at(func, 15)?, "apply"), {
+                    let mut values = self.b.vec();
+                    values.push(Argument::from(Expression::new_null_literal(SPAN, &self.b)));
+                    values.push(Argument::from(self.expr(args)?));
+                    values
+                })
+            }
             ExprKind::Spread(_) => return Err(Unsupported("standalone spread")),
             ExprKind::RecordRest(fields, source) => self.record_rest(fields, source)?,
         })

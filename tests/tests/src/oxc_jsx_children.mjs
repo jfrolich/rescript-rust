@@ -97,6 +97,20 @@ function list(text) {
   </div>, tl: /* [] */0};
 }
 
+function invoked(first, text) {
+  let result = (
+    first ? () => <div>
+        {text}
+      </div> : () => <span>
+        {text}
+      </span>
+  )();
+  return [
+    result,
+    text
+  ];
+}
+
 export {
   nested,
   groups,
@@ -105,5 +119,6 @@ export {
   nestedValue,
   dynamic,
   list,
+  invoked,
 }
 /* react/jsx-runtime Not a pure module */

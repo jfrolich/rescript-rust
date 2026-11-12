@@ -40,3 +40,8 @@ let dynamic = (component: React.component<childrenProps>, text) => {
 }
 
 let list = text => list{<div> {React.string(text)} </div>}
+
+let invoked = (first, text) => {
+  let result = (first ? (_ => <div> {React.string(text)} </div>) : (_ => <span> {React.string(text)} </span>))(())
+  (result, text)
+}
