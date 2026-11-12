@@ -1,6 +1,7 @@
 //! Continuations for the level-L to level-J lowering (BACKEND_LOWERING §1).
 //! Context references are indices, never references into growing state pools.
 mod args;
+mod ffi_args;
 mod call;
 mod cond;
 mod expr;
