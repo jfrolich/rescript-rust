@@ -10,7 +10,15 @@ pub(super) fn compare(arena: LamArena, root: Lam) {
     compare_with_resolver(arena, root, None);
 }
 
-fn compare_with_resolver(mut arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>) {
+fn compare_with_resolver(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>) {
+    compare_with_options(arena, root, resolver, true);
+}
+
+pub(super) fn compare_with_checks(arena: LamArena, root: Lam, checks: bool) {
+    compare_with_options(arena, root, None, checks);
+}
+
+fn compare_with_options(mut arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, checks: bool) {
     let target = Ident::new("result", arena.ident_stamp_bound() + 1, IdentFlags::NONE);
     for direct in [false, true] {
         for context in 0..5 {
@@ -30,6 +38,7 @@ fn compare_with_resolver(mut arena: LamArena, root: Lam, resolver: Option<&crate
             let source_root = input.root;
             let mut state = State::new(input);
             state.direct = direct;
+            state.check_div_by_zero = checks;
             state.resolver = resolver.cloned();
             let probed = state.probe(cx, source_root).unwrap();
             let lowered = state.complete(cx, probed);
@@ -41,6 +50,7 @@ fn compare_with_resolver(mut arena: LamArena, root: Lam, resolver: Option<&crate
             let actual = bridge_j::export_js(&lowered.program).unwrap();
             let mut compiler = LambdaCompiler::new();
             compiler.module_path_resolver = resolver.cloned();
+            compiler.check_div_by_zero = checks;
             let compiled = compiler.bir_lower_oracle(&mut arena, root, cx.cont, target);
             use crate::lambda::lam_compile::OutputFinished;
             let expected_finished = match compiled.finished {

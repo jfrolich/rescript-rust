@@ -922,6 +922,7 @@ pub(crate) fn prepare_lower(
     locations: Option<&crate::lambda::LamLocTable>,
     resolver: Option<&crate::js_ir::ModulePathResolver>,
     cross_module_inline: bool,
+    check_div_by_zero: bool,
 ) -> Result<
     (
         crate::js_ir::arena::JsArena,
@@ -934,7 +935,7 @@ pub(crate) fn prepare_lower(
         "shared Lambda subtree with binder" | "shared Lambda expansion" => LowerFailure::Unsupported(reason, catch_only),
         _ => LowerFailure::Error(anyhow::anyhow!("lower input import: {reason}")),
     })?;
-    let lowered = super::lower::lower_with_resolver(input, locations, false, resolver, cross_module_inline).map_err(|reason| LowerFailure::Unsupported(reason, false))?;
+    let lowered = super::lower::lower_with_resolver(input, locations, false, resolver, cross_module_inline, check_div_by_zero).map_err(|reason| LowerFailure::Unsupported(reason, false))?;
     lowered
         .program
         .arena
@@ -950,7 +951,7 @@ pub(crate) fn prepare_lower(
     if arena.node_count() <= 128 {
         let (direct, _) = super::bridge::import_for_lowering(arena, root);
         let direct = direct.map_err(|e| LowerFailure::Error(anyhow::anyhow!("direct import: {e}")))?;
-        let direct = super::lower::lower_with_resolver(direct, locations, true, resolver, cross_module_inline)
+        let direct = super::lower::lower_with_resolver(direct, locations, true, resolver, cross_module_inline, check_div_by_zero)
             .map_err(|e| LowerFailure::Error(anyhow::anyhow!("direct lower: {e}")))?;
         let direct = super::bridge_j::export_js(&direct.program)
             .map_err(|e| LowerFailure::Error(anyhow::anyhow!("direct export: {e}")))?;
@@ -1085,7 +1086,7 @@ mod lower_tests {
         let body = arena.var(id);
         let binding = arena.let_(crate::lambda::lam_compat::LetKind::Strict, id, constant, body);
         let root = arena.seq_raw(binding, binding);
-        let result = prepare_lower(&arena, root, None, None, false);
+        let result = prepare_lower(&arena, root, None, None, false, true);
         assert!(matches!(result, Err(LowerFailure::Unsupported(
             super::super::bridge::Unsupported("shared Lambda subtree with binder"), false
         ))));

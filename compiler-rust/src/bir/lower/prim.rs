@@ -3,6 +3,7 @@ use super::*;
 use crate::bir::PrimId;
 use crate::bir::j::{norm, plain};
 use crate::js_ir::op::LengthObject;
+use crate::js_ir::BinOp;
 use crate::lambda::lam_primitive::Primitive;
 
 pub(super) struct Prim {
@@ -16,7 +17,18 @@ impl State {
             | Primitive::Pstringadd | Primitive::Pnot | Primitive::Pidentity | Primitive::Pfloatofint
             | Primitive::Pignore | Primitive::Ptypeof | Primitive::PrawJsCode(_)
             | Primitive::PcreateExtension(_) | Primitive::PinitMod | Primitive::PupdateMod
-            | Primitive::Praise | Primitive::Pdebugger)
+            | Primitive::Praise | Primitive::Pdebugger
+            | Primitive::Paddint | Primitive::Psubint | Primitive::Pmulint | Primitive::Pdivint | Primitive::Pmodint | Primitive::Ppowint | Primitive::Pandint | Primitive::Porint | Primitive::Pxorint | Primitive::Plslint | Primitive::Paddfloat | Primitive::Psubfloat | Primitive::Pmulfloat | Primitive::Pdivfloat | Primitive::Pmodfloat | Primitive::Ppowfloat | Primitive::Paddbigint | Primitive::Psubbigint | Primitive::Pmulbigint | Primitive::Ppowbigint | Primitive::Pandbigint | Primitive::Porbigint | Primitive::Pxorbigint | Primitive::Plslbigint | Primitive::Pasrbigint | Primitive::Pasrint | Primitive::Pnotint | Primitive::Pnotbigint | Primitive::Pintoffloat | Primitive::Pnegint | Primitive::Pnegfloat | Primitive::Pnegbigint | Primitive::Plsrint | Primitive::Pdivbigint | Primitive::Pmodbigint)
+    }
+
+    fn primitive_int(&self, node: NodeId) -> Option<i32> {
+        if let View::JNumber { value } = self.arena.view(node) {
+            match self.arena.constant(value) {
+                crate::bir::Constant::Int(n) => Some(*n as i32),
+                crate::bir::Constant::Char(n) => Some(*n as i32),
+                _ => None,
+            }
+        } else { None }
     }
 
     /// C: runtime_call_expr / X: pure_runtime_call_expr. Runtime imports retain
@@ -70,6 +82,49 @@ impl State {
         let payload = self.arena.primitive(prim.primitive).clone();
         let primitive = payload.primitive;
         let value = match primitive {
+            // P: compile_primitive_js, arithmetic arms; J-M3–M13 own the folds.
+            Primitive::Paddint => norm::jm4_int32_add_sub(&mut self.arena, false, values[0], values[1]),
+            Primitive::Psubint => norm::jm4_int32_add_sub(&mut self.arena, true, values[0], values[1]),
+            Primitive::Pmulint => norm::jm5_int32_mul(&mut self.arena, values[0], values[1]),
+            Primitive::Pdivint => norm::jm13_int32_div(&mut self.arena, self.check_div_by_zero, values[0], values[1]),
+            Primitive::Pmodint => norm::jm13_int32_mod(&mut self.arena, self.check_div_by_zero, values[0], values[1]),
+            Primitive::Ppowint => norm::jm6_int32_pow(&mut self.arena, values[0], values[1]),
+            Primitive::Pandint => norm::jm8_int32_band(&mut self.arena, values[0], values[1]),
+            Primitive::Porint => norm::jm3_int32_bor(&mut self.arena, values[0], values[1]),
+            Primitive::Pxorint => norm::jm8_int32_bxor(&mut self.arena, values[0], values[1]),
+            Primitive::Plslint => norm::jm7_int32_lsl(&mut self.arena, values[0], values[1]),
+            Primitive::Paddfloat => norm::je4_bin(&mut self.arena, BinOp::Plus, values[0], values[1]),
+            Primitive::Psubfloat => norm::je4_bin(&mut self.arena, BinOp::Minus, values[0], values[1]),
+            Primitive::Pmulfloat => norm::je4_bin(&mut self.arena, BinOp::Mul, values[0], values[1]),
+            Primitive::Pdivfloat => norm::je4_bin(&mut self.arena, BinOp::Div, values[0], values[1]),
+            Primitive::Pmodfloat => norm::je4_bin(&mut self.arena, BinOp::Mod, values[0], values[1]),
+            Primitive::Ppowfloat => norm::je4_bin(&mut self.arena, BinOp::Pow, values[0], values[1]),
+            Primitive::Paddbigint => norm::je4_bin(&mut self.arena, BinOp::Plus, values[0], values[1]),
+            Primitive::Psubbigint => norm::je4_bin(&mut self.arena, BinOp::Minus, values[0], values[1]),
+            Primitive::Pmulbigint => norm::je4_bin(&mut self.arena, BinOp::Mul, values[0], values[1]),
+            Primitive::Ppowbigint => norm::je4_bin(&mut self.arena, BinOp::Pow, values[0], values[1]),
+            Primitive::Pandbigint => norm::je4_bin(&mut self.arena, BinOp::Band, values[0], values[1]),
+            Primitive::Porbigint => norm::je4_bin(&mut self.arena, BinOp::Bor, values[0], values[1]),
+            Primitive::Pxorbigint => norm::je4_bin(&mut self.arena, BinOp::Bxor, values[0], values[1]),
+            Primitive::Plslbigint => norm::je4_bin(&mut self.arena, BinOp::Lsl, values[0], values[1]),
+            Primitive::Pasrbigint => norm::je4_bin(&mut self.arena, BinOp::Asr, values[0], values[1]),
+            Primitive::Pasrint => norm::je4_bin(&mut self.arena, BinOp::Asr, values[0], values[1]),
+            Primitive::Pnotint => norm::jm10_int_bnot(&mut self.arena, values[0]),
+            Primitive::Pnotbigint => norm::jm10_int_bnot(&mut self.arena, values[0]),
+            Primitive::Pintoffloat => norm::jm3_to_int32(&mut self.arena, values[0]),
+            Primitive::Pnegint => { let zero = plain::int(&mut self.arena, 0); norm::jm4_int32_add_sub(&mut self.arena, true, zero, values[0]) },
+            Primitive::Pnegfloat => { let value = self.arena.intern_float("0.").unwrap(); let zero = plain::node(&mut self.arena, View::JNumber { value }, 0); norm::je4_bin(&mut self.arena, BinOp::Minus, zero, values[0]) },
+            Primitive::Pnegbigint => { let text = self.arena.intern_text("+0"); let value = self.arena.intern_const(crate::bir::Constant::BigInt(text)); let zero = plain::node(&mut self.arena, View::JNumber { value }, 0); norm::je4_bin(&mut self.arena, BinOp::Minus, zero, values[0]) },
+            Primitive::Plsrint => {
+                if self.primitive_int(values[1]) == Some(0) {
+                    self.arena.release(values[1]); values[0]
+                } else {
+                    let value = norm::jm8_int32_lsr(&mut self.arena, values[0], values[1]);
+                    norm::jm3_to_int32(&mut self.arena, value)
+                }
+            },
+            Primitive::Pdivbigint => if self.check_div_by_zero { self.primitive_runtime("Primitive_bigint", "div", &values) } else { norm::je4_bin(&mut self.arena, BinOp::Div, values[0], values[1]) },
+            Primitive::Pmodbigint => if self.check_div_by_zero { self.primitive_runtime("Primitive_bigint", "mod_", &values) } else { norm::je4_bin(&mut self.arena, BinOp::Mod, values[0], values[1]) },
             // P: compile_primitive_js, PfnArity.
             Primitive::PfnArity => match values.first() {
                 Some(&value) => norm::je2_length(&mut self.arena, value, LengthObject::Function),
@@ -144,6 +199,63 @@ impl State {
 mod tests {
     use super::*;
     use crate::lambda::{arena::LamArena, lam_constant::Constant, LamLoc};
+
+    #[test]
+    fn arithmetic_arms_match_legacy_with_and_without_checks() {
+        use Primitive::*;
+        for (primitive, arity) in [
+            (Paddint, 2),
+            (Psubint, 2),
+            (Pmulint, 2),
+            (Pdivint, 2),
+            (Pmodint, 2),
+            (Ppowint, 2),
+            (Pandint, 2),
+            (Porint, 2),
+            (Pxorint, 2),
+            (Plslint, 2),
+            (Paddfloat, 2),
+            (Psubfloat, 2),
+            (Pmulfloat, 2),
+            (Pdivfloat, 2),
+            (Pmodfloat, 2),
+            (Ppowfloat, 2),
+            (Paddbigint, 2),
+            (Psubbigint, 2),
+            (Pmulbigint, 2),
+            (Ppowbigint, 2),
+            (Pandbigint, 2),
+            (Porbigint, 2),
+            (Pxorbigint, 2),
+            (Plslbigint, 2),
+            (Pasrbigint, 2),
+            (Pasrint, 2),
+            (Pnotint, 1),
+            (Pnotbigint, 1),
+            (Pintoffloat, 1),
+            (Pnegint, 1),
+            (Pnegfloat, 1),
+            (Pnegbigint, 1),
+            (Plsrint, 2),
+            (Pdivbigint, 2),
+            (Pmodbigint, 2),
+] {
+            for literal in [false, true] {
+                // The legacy literal LSR helper requires a count in 0..32.
+                let divisors = if matches!(primitive, Plsrint) { [0, 2, 31] } else { [0, 2, -1] };
+                for divisor in divisors {
+                    for checks in [false, true] {
+                        let mut a = LamArena::new();
+                        let args: Vec<_> = (0..arity).map(|i| if literal {
+                            a.const_(Constant::Int { i: if i == 0 { i32::MIN } else { divisor }, comment: None })
+                        } else { a.var(Ident::new(&format!("arg{i}"), 10 + i, crate::ident::IdentFlags::NONE)) }).collect();
+                        let root = a.prim_raw(primitive.clone(), &args, LamLoc::NONE);
+                        super::super::oracle_tests::compare_with_checks(a, root, checks);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn simple_primitive_arms_match_legacy() {

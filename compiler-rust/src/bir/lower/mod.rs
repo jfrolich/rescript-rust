@@ -255,7 +255,7 @@ pub(crate) fn lower(
     locations: Option<&crate::lambda::LamLocTable>,
     direct: bool,
 ) -> Result<Lowered, Unsupported> {
-    unit::lower(input, locations, direct, None, false)
+    unit::lower(input, locations, direct, None, false, true)
 }
 
 /// H2: C:1266 compile_external_field_apply; summaries are read-only inputs.
@@ -265,8 +265,9 @@ pub(crate) fn lower_with_resolver(
     direct: bool,
     resolver: Option<&crate::js_ir::ModulePathResolver>,
     cross_module_inline: bool,
+    check_div_by_zero: bool,
 ) -> Result<Lowered, Unsupported> {
-    unit::lower(input, locations, direct, resolver, cross_module_inline)
+    unit::lower(input, locations, direct, resolver, cross_module_inline, check_div_by_zero)
 }
 
 struct State {
@@ -281,6 +282,7 @@ struct State {
     next_order: u32,
     resolver: Option<crate::js_ir::ModulePathResolver>,
     cross_module_inline: bool,
+    check_div_by_zero: bool,
     locations: Option<crate::lambda::LamLocTable>,
     sequence_steps: usize,
 }
@@ -322,6 +324,7 @@ impl State {
             next_order,
             resolver: None,
             cross_module_inline: false,
+            check_div_by_zero: true,
             locations: None,
             sequence_steps: 0,
         }

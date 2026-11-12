@@ -10,12 +10,14 @@ pub(super) fn lower(
     direct: bool,
     resolver: Option<&crate::js_ir::ModulePathResolver>,
     cross_module_inline: bool,
+    check_div_by_zero: bool,
 ) -> Result<Lowered, Unsupported> {
     let mut node = input.root;
     let mut state = State::new(input);
     state.direct = direct;
     state.resolver = resolver.cloned();
     state.cross_module_inline = cross_module_inline;
+    state.check_div_by_zero = check_div_by_zero;
     state.locations = locations.cloned();
     if let Some(locations) = locations {
         state.located_functions = state
@@ -132,7 +134,7 @@ mod tests {
         let body = source.seq_raw(head, tail);
         let root = source.let_(LetKind::Strict, id, value, body);
         let input = crate::bir::bridge::import_lambda(&source, root).unwrap();
-        let from_unit = lower(input, None, false, None, false).unwrap();
+        let from_unit = lower(input, None, false, None, false, true).unwrap();
         let input = crate::bir::bridge::import_lambda(&source, root).unwrap();
         let root = input.root;
         let mut state = State::new(input);
