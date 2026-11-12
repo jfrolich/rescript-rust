@@ -1161,6 +1161,7 @@ fn parse_packages_inner(build_state: &mut BuildState, packages: &AHashMap<String
                             entry.insert(Module {
                                 deps_dirty: true,
                                 source_type: SourceType::SourceFile(SourceFile {
+                                    gentype_annotations: [None; 2],
                                     implementation: Implementation {
                                         path: file.to_owned(),
                                         parse_state: ParseState::Pending,
@@ -1243,6 +1244,7 @@ fn parse_packages_inner(build_state: &mut BuildState, packages: &AHashMap<String
                                 .or_insert(Module {
                                     deps_dirty: true,
                                     source_type: SourceType::SourceFile(SourceFile {
+                                        gentype_annotations: [None; 2],
                                         // this will be overwritten later
                                         implementation: Implementation {
                                             path: implementation_filename,

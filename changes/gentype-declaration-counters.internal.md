@@ -1,0 +1,2 @@
+- Count genType declaration-cache translations and their output declarations separately for annotated and unannotated artifacts when compiler performance counters are enabled.
+- Skip genType declaration translation outside the conservative dependency closure of annotated modules, preserving declarations across incremental and watch-mode closure growth.

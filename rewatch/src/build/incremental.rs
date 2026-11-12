@@ -479,6 +479,9 @@ pub fn current_record(
             .unwrap()
             .keys()
             .filter_map(|key| Some(key.rsplit_once(':')?.0.to_string()))
+            // Successful compiles consume their ASTs. Their parse flags and
+            // declaration availability must still replace the stored row.
+            .chain(build_state.compiled_modules.iter().cloned())
             .collect()
     });
     let modules: Box<dyn Iterator<Item = (&String, &Module)>> = match &parsed {
@@ -506,6 +509,7 @@ pub fn current_record(
             // A partial record keeps the rows of sources not parsed since
             // they were recorded (same modification time).
             if record.partial
+                && !build_state.compiled_modules.contains(module_name)
                 && let Some(previous) = previous.and_then(|previous| previous.state.deps.get(&key))
                 && build_state.source_mtimes.get(&key) == Some(&previous.mtime)
             {
@@ -515,6 +519,19 @@ pub fn current_record(
                 (Some(deps), Some(mtime)) => Some(SourceDeps {
                     mtime: *mtime,
                     deps: deps.iter().cloned().collect(),
+                    gentype_annotations: source_file.gentype_annotations[usize::from(*kind == "intf")]
+                        .unwrap_or(true),
+                    gentype_declarations: if build_state.packages[package_name].config.gentype_config.is_none() {
+                        false
+                    } else if build_state.compiled_modules.contains(module_name) {
+                        build_state.gentype_needed.as_ref()
+                            .is_none_or(|needed| needed.contains(module_name))
+                            && rescript_compiler::gentype::main::has_type_declarations_for_module(module_name)
+                    } else {
+                        previous
+                            .and_then(|p| p.state.deps.get(&key))
+                            .is_some_and(|row| row.gentype_declarations)
+                    },
                 }),
                 // Not parsed in this build: the recorded row still holds.
                 _ => previous.and_then(|previous| previous.state.deps.get(&key).cloned()),
@@ -725,6 +742,12 @@ pub fn seed_recorded_deps(build_state: &mut BuildCommandState) {
     {
         let mut in_memory_deps = build_state.in_memory_deps.lock().unwrap();
         for (key, row) in seeded {
+            if let Some((name, kind)) = key.rsplit_once(':')
+                && let Some(module) = build_state.build_state.modules.get_mut(name)
+                && let SourceType::SourceFile(source) = &mut module.source_type
+            {
+                source.gentype_annotations[usize::from(kind == "intf")] = Some(row.gentype_annotations);
+            }
             in_memory_deps.insert(key, row.deps.iter().cloned().collect());
         }
     }
@@ -901,6 +924,58 @@ pub fn decode_recorded_imports(
         .for_each(|module_name| registry.decode_stored(module_name, None));
 }
 
+/// Closure growth is a compile input even when source and signature digests
+/// are unchanged. Run after the incremental plan (which sets compile_dirty)
+/// and before choosing the second parse round. Watch builds use it too.
+/// Returns whether any newly required source still needs parsing.
+pub fn mark_missing_gentype_declarations(build_state: &mut BuildCommandState) -> bool {
+    let Some(needed) = &build_state.gentype_needed else {
+        return false;
+    };
+    let mut reparse = false;
+    let asts = build_state.stored_asts.lock().unwrap();
+    for name in needed {
+        let Some(module) = build_state.build_state.modules.get_mut(name) else {
+            continue;
+        };
+        let SourceType::SourceFile(source) = &mut module.source_type else {
+            continue;
+        };
+        if build_state.build_state.packages[&module.package_name]
+            .config
+            .gentype_config
+            .is_none()
+        {
+            continue;
+        }
+        let available = if build_state.compiled_modules.contains(name) {
+            rescript_compiler::gentype::main::has_type_declarations_for_module(name)
+        } else {
+            build_state
+                .previous_in_process
+                .as_ref()
+                .and_then(|previous| previous.packages.get(&module.package_name))
+                .and_then(|package| package.state.deps.get(&format!("{name}:impl")))
+                .is_some_and(|row| row.gentype_declarations)
+        };
+        if available {
+            continue;
+        }
+        module.compile_dirty = true;
+        if !asts.contains_key(&format!("{name}:impl")) {
+            source.implementation.parse_dirty = true;
+            reparse = true;
+        }
+        if let Some(interface) = &mut source.interface
+            && !asts.contains_key(&format!("{name}:intf"))
+        {
+            interface.parse_dirty = true;
+            reparse = true;
+        }
+    }
+    reparse
+}
+
 /// Parse an incremental build in two rounds: first the source files that
 /// changed (the rest of the dependency graph is recorded), then, once the
 /// plan is known, the unchanged modules it compiles. Every other module is
@@ -909,7 +984,9 @@ pub fn parse_and_plan(build_state: &mut BuildCommandState, inc: impl Fn() + Sync
     let mut warnings = super::parse::generate_asts(build_state, &inc, super::parse::ParseWarningLog::Append)?;
     let deleted_modules = build_state.deleted_modules.clone();
     super::deps::get_deps(build_state, &deleted_modules);
+    super::deps::plan_gentype(build_state);
     plan(build_state);
+    mark_missing_gentype_declarations(build_state);
     super::compile::mark_modules_with_deleted_deps_dirty(&mut build_state.build_state);
     let stale: AHashSet<String> = build_state
         .modules

@@ -26,6 +26,8 @@ pub(super) struct ReadInput {
 struct Source {
     package: String,
     paths: Vec<(String, PathBuf)>,
+    gentype_annotations: [bool; 2],
+    gentype_declarations_needed: bool,
 }
 
 enum ReadStage {
@@ -91,6 +93,15 @@ impl FreshRows {
                     Source {
                         package: module.package_name.clone(),
                         paths,
+                        gentype_annotations: source.gentype_annotations.map(|flag| flag.unwrap_or(true)),
+                        gentype_declarations_needed: state.packages[&module.package_name]
+                            .config
+                            .gentype_config
+                            .is_some()
+                            && state
+                                .gentype_needed
+                                .as_ref()
+                                .is_none_or(|needed| needed.contains(name)),
                     },
                 ))
             })
@@ -148,11 +159,15 @@ impl FreshRows {
                 }
             });
             timing::measure(Phase::RecordDependencyRows, || {
-                for (key, _) in &source.paths {
+                let gentype_declarations = source.gentype_declarations_needed
+                    && rescript_compiler::gentype::main::has_type_declarations_for_module(&input.name);
+                for (kind, (key, _)) in source.paths.iter().enumerate() {
                     if let (Some(deps), Some(mtime)) = (self.deps.get(key), self.mtimes.get(key)) {
                         let row = SourceDeps {
                             mtime: *mtime,
                             deps: deps.iter().cloned().collect(),
+                            gentype_annotations: source.gentype_annotations[kind],
+                            gentype_declarations,
                         };
                         let text = timing::measure(Phase::RecordDepsEncode, || row.deps.join("\n"));
                         record.encoded_deps.insert(key.clone(), text);

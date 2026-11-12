@@ -16,6 +16,7 @@ with tempfile.TemporaryDirectory(prefix="prepared-record-") as tmp:
     (project / "src").mkdir()
     (project / "rescript.json").write_text(json.dumps({
         "name": "prepared-record", "namespace": True, "sources": ["src"],
+        "gentypeconfig": {"module": "esmodule"},
         "package-specs": [{"module": "esmodule", "in-source": True, "suffix": ".mjs"}],
     }))
     for name, text in {
@@ -23,7 +24,8 @@ with tempfile.TemporaryDirectory(prefix="prepared-record-") as tmp:
         "B.res": "let f = x => A.f(x)\n",
         "C.resi": "let value: int\n",
         "C.res": "let value = B.f(2)\n",
-        "D.res": "let value = C.value + B.f(3)\n",
+        "D.res": "@genType let value = C.value + B.f(3)\n",
+        "E.res": "let unrelated = 0\n",
     }.items():
         (project / "src" / name).write_text(text)
 

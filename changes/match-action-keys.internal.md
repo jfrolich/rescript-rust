@@ -1,0 +1,1 @@
+- Compare the actions of a match by a hash of a compact key instead of by key text.
