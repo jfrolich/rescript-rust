@@ -36,7 +36,8 @@ env:
 #   build ──────────────┬─> parity (4 suites)
 #   ocaml ──────────────┘
 #   compiler-tests: compiles its tests, then waits for build and ocaml
-#   build-system-tests, script-tests, compiler-warnings: on their own
+#   build-system-tests, script-tests, compiler-warnings, playground-wasm: on
+#   their own
 #
 # Rust target directories are cached by trunk runs and restored by pull
 # requests (build-system-tests saves the release one, compiler-tests the dev
@@ -82,6 +83,45 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             compiler-rust/target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+  # The playground calls the compiler as a library and builds only for wasm,
+  # so nothing else here notices when a compiler API change breaks it.
+  playground-wasm:
+    name: Playground wasm check
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install the pinned Rust toolchain with the wasm target
+        run: rustup toolchain install --target wasm32-unknown-unknown
+
+      - uses: actions/cache/restore@v5
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            playground/crate/target
+          key: validation-playground-wasm-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'playground/crate/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            validation-playground-wasm-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'playground/crate/Cargo.lock') }}
+            validation-playground-wasm-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Check the playground crate against the compiler API
+        env:
+          RUSTFLAGS: --cfg getrandom_backend="wasm_js"
+        run: cargo check --locked --manifest-path playground/crate/Cargo.toml --target wasm32-unknown-unknown
+
+      - uses: actions/cache/save@v5
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            playground/crate/target
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
   build:
