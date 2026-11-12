@@ -2,6 +2,7 @@
 //! Context references are indices, never references into growing state pools.
 mod args;
 mod call;
+mod cond;
 mod expr;
 mod konst;
 mod prim;
@@ -74,6 +75,9 @@ pub struct Cx {
     pub loops: LoopTop,
     /// Enclosing function returns unit.
     pub return_unit: bool,
+    /// A conditional reads whether this output is free (1.5): a leaf stays
+    /// deferred, also in the direct mode of invariant P1.
+    pub probing: bool,
 }
 impl Cx {
     /// K10: C:1997 with_function_scope; no control state crosses a function.
@@ -84,6 +88,7 @@ impl Cx {
             switch_depth: 0,
             loops: LoopTop(0),
             return_unit: false,
+            probing: false,
         }
     }
     /// K1: C:1529 compile_expr (V).
@@ -139,8 +144,10 @@ pub enum ProbeInput {
 pub trait Realizer {
     /// K1/K6: C:6658 return_compiled; convert one lowered value.
     fn leaf(&mut self, cx: Cx, value: NodeId) -> Out;
-    /// K2: C:4715 append_effect_output; combine an effect and a tail.
+    /// K2: C:4715 append_effect_output; join an effect and a tail's value.
     fn seq(&mut self, cx: Cx, first: NodeId, second: Out) -> Out;
+    /// O:339 push_effect_expression; an effect as statements before its tail.
+    fn effect(&mut self, first: NodeId) -> Span;
     /// K6: C:5144 compile_if_return_output; combine lowered branches.
     fn cond(&mut self, cx: Cx, test: NodeId, then_: Out, else_: Out) -> Out;
 }
@@ -297,6 +304,10 @@ struct State {
     locations: Option<crate::lambda::LamLocTable>,
     sequence_steps: usize,
     primitive_steps: usize,
+    /// Let/Seq nodes read by row R5 step 0 of section 3.6.
+    spine_steps: usize,
+    /// Reused by the J rules that push onto a vector.
+    scratch: Vec<NodeId>,
 }
 impl State {
     /// N1: C:481 new. Transfer cold pools, while source hot nodes/list operands
@@ -342,12 +353,14 @@ impl State {
             locations: None,
             sequence_steps: 0,
             primitive_steps: 0,
+            spine_steps: 0,
+            scratch: Vec::new(),
         }
     }
     /// K1: C:1529 compile_expr. Direct mode is the bounded P1 oracle: convert
     /// leaves immediately instead of allocating deferred expression records.
     fn probe_leaf(&mut self, cx: Cx, value: NodeId) -> Probed {
-        if self.direct {
+        if self.direct && !cx.probing {
             Probed::Out(self.leaf(cx, value))
         } else {
             Probed::Free(self.free.push(Free::Leaf(value)))
@@ -451,13 +464,33 @@ impl ProbeRules for State {
                 }));
             }
             View::Seq { first, second } => {
-                return Ok(ProbePlan::Children(expr::Resume::Seq { first, second, continuation: cx.cont }));
+                return Ok(ProbePlan::Children(expr::Resume::Seq { first, second }));
             }
             View::LetRec { .. } => return Err(Unsupported("let rec")),
+            View::Prim { primitive, args }
+                if matches!(
+                    self.arena.primitive(primitive).primitive,
+                    crate::lambda::lam_primitive::Primitive::Psequand
+                        | crate::lambda::lam_primitive::Primitive::Psequor
+                ) =>
+            {
+                use crate::lambda::lam_primitive::Primitive;
+                let kind = match self.arena.primitive(primitive).primitive {
+                    Primitive::Psequand => cond::Kind::And,
+                    _ => cond::Kind::Or,
+                };
+                let &[left, right] = args else {
+                    unreachable!("a short circuit has two operands")
+                };
+                let conditional = self.conditional(cx, kind, left, right, right)?;
+                return Ok(ProbePlan::Children(expr::Resume::If(conditional)));
+            }
             View::Prim { primitive, .. } => {
                 use crate::lambda::lam_primitive::Primitive;
                 let reason = match &self.arena.primitive(primitive).primitive {
-                    Primitive::Psequand | Primitive::Psequor => "if",
+                    Primitive::Psequand | Primitive::Psequor => {
+                        unreachable!("short circuits are lowered above")
+                    }
                     Primitive::PjsCall(_)
                     | Primitive::PjsApply
                     | Primitive::PjsObjectCreate(_)
@@ -475,7 +508,10 @@ impl ProbeRules for State {
                 };
                 return Err(Unsupported(reason));
             }
-            View::If { .. } => return Err(Unsupported("if")),
+            View::If { condition, then_, else_ } => {
+                let conditional = self.conditional(cx, cond::Kind::If, condition, then_, else_)?;
+                return Ok(ProbePlan::Children(expr::Resume::If(conditional)));
+            }
             View::Switch { .. } => return Err(Unsupported("switch")),
             View::StrSwitch { .. } => return Err(Unsupported("string switch")),
             View::Catch { .. } | View::Exit { .. } => return Err(Unsupported("static catch")),
@@ -595,15 +631,27 @@ impl Realizer for State {
             finished,
         }
     }
-    /// K2: C:4715 append_effect_output. The retained head has no effects in
-    /// this slice; its already-lowered J subtree is released, never recompiled.
-    fn seq(&mut self, _: Cx, first: NodeId, second: Out) -> Out {
-        self.drop_pure_effect(first);
+    /// K2: C:4715 append_effect_output, where the value is kept: a comma,
+    /// or the tail alone when the head has no effect. Constant.
+    fn seq(&mut self, _: Cx, first: NodeId, mut second: Out) -> Out {
+        if self.arena.node(first).flags().contains(super::NodeFlags::STRICT) {
+            self.arena.release(first);
+        } else {
+            let value = second.value.expect("the tail of a kept sequence has a value");
+            second.value = Some(super::j::norm::jm1_js_seq(&mut self.arena, first, value));
+        }
         second
     }
-    /// K6: C:5144 compile_if_return_output; If remains explicitly unsupported.
-    fn cond(&mut self, _: Cx, _: NodeId, _: Out, _: Out) -> Out {
-        unreachable!("conditional is unsupported")
+    /// O:339 push_effect_expression: the head of a deferred sequence as
+    /// statements. One step per comma operand of the head.
+    fn effect(&mut self, first: NodeId) -> Span {
+        let mark = self.statements.mark();
+        self.drop_pure_effect(first);
+        self.statements.since(mark)
+    }
+    /// R1–R5: realize a deferred conditional from its value operands.
+    fn cond(&mut self, cx: Cx, test: NodeId, yes: Out, no: Out) -> Out {
+        self.realize_conditional(cx, test, yes, no)
     }
 }
 
@@ -638,6 +686,7 @@ mod tests {
             assert_eq!(cx.loops, LoopTop(0));
             assert_eq!(cx.switch_depth, 0);
             assert!(!cx.return_unit);
+            assert!(!cx.probing);
         }
     }
     #[test]
