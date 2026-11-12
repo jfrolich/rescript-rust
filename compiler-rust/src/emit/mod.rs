@@ -248,8 +248,10 @@ mod tests {
     fn bir_wiring_emits_with_oxc() {
         use crate::driver::{CompilerOptions, compile_source_to_js_with_options};
         let source = "let identity = x => x; let value = identity(42)";
-        let mut options = CompilerOptions::default();
-        options.js_printer = PrinterMode::Oxc(Arc::default());
+        let mut options = CompilerOptions {
+            js_printer: PrinterMode::Oxc(Arc::default()),
+            ..CompilerOptions::default()
+        };
         let expected = compile_source_to_js_with_options(source, "Bir.res", &options).unwrap();
         let stats = Arc::new(PrinterStats::default());
         options.js_printer = PrinterMode::OxcBir(stats.clone());
