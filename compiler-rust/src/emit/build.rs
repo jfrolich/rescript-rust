@@ -159,8 +159,6 @@ impl<'a, 'r> Build<'a, 'r> {
         }
         Ok(result)
     }
-    /// Runtime JSX prints callee(tag, props[, key]). Names are encountered in
-    /// that order, with spread before properties and children. oxc supplies
     /// Record-rest expressions are an immediately called destructuring arrow;
     /// declarations instead bind the real fields and rest name. Synthetic names
     /// __unusedN and __rest never enter naming. Only source is an expression.
@@ -251,6 +249,8 @@ impl<'a, 'r> Build<'a, 'r> {
         Ok(self.call(callee, self.b.vec1(Argument::from(self.expr(source)?))))
     }
 
+    /// Runtime JSX prints callee(tag, props[, key]). Names are encountered in
+    /// that order, with spread before properties and children. oxc supplies
     /// call/object/array parentheses, matching printer::print_jsx_call.
     fn jsx_call(&self, id: crate::js_ir::arena::JsxId) -> Result<Expression<'a>, Unsupported> {
         let jsx = walk::jsx_runtime(self.arena, id, self.jsx_preserve)?;
