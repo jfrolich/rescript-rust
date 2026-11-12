@@ -1,0 +1,20 @@
+unspecified.res	Can't generate codecs for unspecified type
+any.res	Can't generate codecs for `any` type
+function.res	Can't generate codecs for function type
+duplicate.res	Too many occurrences
+partial-as.res	Partial @spice.as usage
+serde-unboxed.res	@spice.serde can't be combined with @unboxed
+serde-config.res	@spice.serde takes no payload
+flag-without-serde.res	need @spice.serde
+alias-not-string.res	@spice.alias needs a string
+other-payload.res	@spice.other needs a constructor without payload
+other-duplicate.res	Only one constructor can be @spice.other
+untagged-no-payload.res	@spice.untagged needs a constructor with one value
+untagged-alias.res	An @spice.untagged constructor has no name to alias
+other-flag-payload.res	@spice.other takes no payload
+other-flag-duplicate.res	Too many occurrences of @spice.other
+tag-collision.res	A payload field is keyed like the tag
+json-name-collision.res	Two constructors are both named
+runtime-tag-number.res	@spice.serde needs @as to be a string
+runtime-tag-disagrees.res	@as and @spice.as name the constructor differently
+poly-tag.res	@tag doesn't apply to polymorphic variants

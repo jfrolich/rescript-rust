@@ -16096,7 +16096,11 @@ fn type_structure_unscoped<'a>(
         let ctx = tctx.type_ctx;
         ctx.init_def(ctx.current_stamp());
         tctx.set_unify_env(&current_env);
-        let (typed_item, item_sig, new_env) = type_structure_item(tctx, &current_env, arena, item)?;
+        let (typed_item, item_sig, new_env) = if tctx.derived_census.is_some() {
+            type_structure_item_with_census(tctx, &current_env, arena, item)
+        } else {
+            type_structure_item(tctx, &current_env, arena, item)
+        }?;
         if let StructureItemDesc::Tstr_include(incl) = &typed_item.str_desc {
             // OCaml compiler/ml/typemod.ml:1579.
             check_included_signature_names(&mut names, item.pstr_loc, &incl.incl_type)?;
@@ -16118,6 +16122,44 @@ fn type_structure_unscoped<'a>(
     };
 
     Ok((structure, current_env))
+}
+
+/// O(1) census bookkeeping around the existing item checker. Keep timer/counter
+/// snapshots and attribution outside the ordinary structure loop's code and stack.
+#[cold]
+#[inline(never)]
+fn type_structure_item_with_census<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    item: &ParsedStructureItem,
+) -> TypeModResult<(StructureItem, Vec<crate::types::decl::SignatureItem>, Env)> {
+    let census_start = crate::derived_census::start(true);
+    let census_before = tctx
+        .derived_census
+        .as_ref()
+        .map_or(0, |c| c.typecheck.total());
+    let counter_before = tctx
+        .derived_census
+        .as_ref()
+        .and_then(|c| c.counter_snapshot());
+    let (typed_item, item_sig, new_env) = type_structure_item(tctx, env, arena, item)?;
+    if let (Some(census), Some(start)) = (&mut tctx.derived_census, census_start) {
+        let derived = match item.pstr_desc {
+            ParsedStructureItemDesc::Pstr_value((_, group)) => arena.is_derived_value_group(group),
+            _ => false,
+        };
+        census.account_counters(derived, counter_before);
+        let children = census.typecheck.total() - census_before;
+        census.typecheck.add(
+            derived,
+            crate::derived_census::nanos(start.elapsed()).saturating_sub(children),
+        );
+        if derived && let StructureItemDesc::Tstr_value(_, group) = typed_item.str_desc {
+            census.mark_typed_group(group.start());
+        }
+    }
+    Ok((typed_item, item_sig, new_env))
 }
 
 fn closed_modtype(

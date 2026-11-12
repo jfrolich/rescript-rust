@@ -1,0 +1,5 @@
+{
+  "name": "derived-code-fixtures",
+  "private": true,
+  "dependencies": {"@rescript/belt": "file:../../packages/@rescript/belt"}
+}
