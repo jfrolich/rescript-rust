@@ -11585,6 +11585,26 @@ let e = () =>
     }
 
     #[test]
+    fn ten_thousand_cases_and_bindings_are_visited_once_and_append_nothing() {
+        let mut source = String::from("let x = switch a {\n");
+        for i in 0..10_000 {
+            source.push_str(&format!("| {i} => b\n"));
+        }
+        source.push_str("}\n");
+        // The match and one pattern per case; the right-hand sides have
+        // certificates.
+        assert_eq!(mapper_cost(&source), (1 + 10_000, 0));
+
+        let mut source = String::from("let x = {\n  let a0 = 1\n");
+        for i in 1..10_000 {
+            source.push_str(&format!("  and a{i} = 1\n"));
+        }
+        source.push_str("  a0\n}\n");
+        // The braces, the `let`, and one pattern per binding.
+        assert_eq!(mapper_cost(&source), (2 + 10_000, 0));
+    }
+
+    #[test]
     fn a_pipe_under_ten_thousand_ancestors_appends_one_node() {
         // Deep recursion in the parser and the mapper of a debug build.
         let run = || {
