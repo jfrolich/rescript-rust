@@ -88,3 +88,7 @@ equal operand's spelling. The existing numeric rendering rule (not arithmetic
 folding) is `compiler/core/js_number.ml:42-57`: Infinity/-Infinity/NaN, an exact
 integer if possible, otherwise the first round-tripping precision of 12, 15,
 or 18 significant digits (`ocaml_float::js_number_to_string` in Rust).
+
+Bulk import accumulates weighted uses once in the arena, indexed by variable
+ID. `try_finish_bulk` reports weight/count overflow as `Unsupported`; a failed
+partially finalized arena is discarded. No importer use-count maps are needed.

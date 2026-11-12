@@ -29,6 +29,8 @@ pub struct Imported {
     pub root: NodeId,
     idents: Vec<Ident>,
     globals: Vec<Ident>,
+    #[cfg(test)]
+    identifier_lookups: usize,
 }
 
 #[derive(Default)]
@@ -37,9 +39,15 @@ struct Importer {
     vars: AHashMap<Ident, VarId>,
     idents: Vec<Ident>,
     globals: Vec<Ident>,
+    #[cfg(test)]
+    identifier_lookups: usize,
 }
 impl Importer {
     fn var(&mut self, ident: Ident) -> VarId {
+        #[cfg(test)]
+        {
+            self.identifier_lookups += 1;
+        }
         *self.vars.entry(ident).or_insert_with(|| {
             let v = self.bir.new_var_id(ident.name_atom(), ident.stamp() as u32);
             self.idents.push(ident);
@@ -391,54 +399,26 @@ fn children(a: &LamArena, node: L) -> SmallVec<[Lam; 4]> {
 /// is looked up at most once, even on that fallback path.
 pub fn import_lambda(arena: &LamArena, root: Lam) -> Result<Imported, Unsupported> {
     enum Work {
-        Enter(Lam, u32),
+        Enter(Lam),
         Finish(L, usize),
     }
     let mut importer = Importer::default();
     importer.bir.begin_bulk();
-    let mut work = vec![Work::Enter(root, 1)];
+    let mut work = vec![Work::Enter(root)];
     let mut values = Vec::new();
     let mut seen = vec![false; arena.node_count()];
-    let mut var_uses: AHashMap<Ident, u32> = AHashMap::default();
-    let mut exit_uses: AHashMap<i32, u32> = AHashMap::default();
     while let Some(task) = work.pop() {
         match task {
-            Work::Enter(id, weight) => {
+            Work::Enter(id) => {
                 if std::mem::replace(&mut seen[id.index()], true) {
                     return Err(Unsupported("shared Lambda node"));
                 }
                 let node = arena.node(id);
                 importer.binders(arena, node)?;
-                let uses = match node {
-                    L::Var(id) => Some(var_uses.entry(arena.ident(id)).or_default()),
-                    L::StaticRaise { label, .. } => Some(exit_uses.entry(label).or_default()),
-                    _ => None,
-                };
-                if let Some(uses) = uses {
-                    *uses = uses
-                        .checked_add(weight)
-                        .ok_or(Unsupported("use count outside u32"))?;
-                }
                 let children = children(arena, node);
-                let doubled_default = match node {
-                    L::Switch { info, .. } => {
-                        let h = arena.switch_payload(info);
-                        h.has_fail && !h.consts_full && !h.blocks_full
-                    }
-                    _ => false,
-                };
                 let count = children.len();
                 work.push(Work::Finish(node, count));
-                for (i, child) in children.into_iter().enumerate().rev() {
-                    let child_weight = if doubled_default && i + 1 == count {
-                        weight
-                            .checked_mul(2)
-                            .ok_or(Unsupported("use weight outside u32"))?
-                    } else {
-                        weight
-                    };
-                    work.push(Work::Enter(child, child_weight));
-                }
+                work.extend(children.into_iter().rev().map(Work::Enter));
             }
             Work::Finish(node, count) => {
                 let start = values.len() - count;
@@ -449,12 +429,14 @@ pub fn import_lambda(arena: &LamArena, root: Lam) -> Result<Imported, Unsupporte
         }
     }
     let root = values[0];
-    importer.bir.finish_bulk(root);
+    importer.bir.try_finish_bulk(root)?;
     Ok(Imported {
         arena: importer.bir,
         root,
         idents: importer.idents,
         globals: importer.globals,
+        #[cfg(test)]
+        identifier_lookups: importer.identifier_lookups,
     })
 }
 
@@ -481,6 +463,23 @@ mod tests {
         println!("import 100000 nodes: {steps} steps");
         assert!(steps < 40 * 100_000, "{steps}");
         imported.arena.validate(Some(imported.root), false).unwrap();
+    }
+
+    #[test]
+    fn hundred_thousand_variable_uses_need_only_identifier_lookups() {
+        let mut a = LamArena::new();
+        let x = Ident::create_local("x");
+        let mut root = a.var(x);
+        for _ in 1..100_000 {
+            let value = a.var(x);
+            root = a.seq_raw(value, root);
+        }
+        let imported = import_lambda(&a, root).unwrap();
+        assert_eq!(imported.identifier_lookups, 100_000);
+        assert_eq!(imported.arena.vars.uses(VarId(0)), 100_000);
+        assert!(imported.arena.steps.get() < 40 * a.node_count() as u64);
+        // Count accumulation is indexed by VarId in try_adjust_direct; the
+        // only importer hash table touched per use is Importer::vars.
     }
 
     #[test]
@@ -929,6 +928,46 @@ mod fallback_tests {
         assert!(matches!(
             import_lambda(&a, root),
             Err(Unsupported("use weight outside u32"))
+        ));
+    }
+
+    #[test]
+    fn excessive_weighted_variable_count_is_unsupported_not_a_panic() {
+        let mut a = LamArena::new();
+        let x = Ident::create_local("x");
+        let left = a.var(x);
+        let right = a.var(x);
+        let mut root = a.seq_raw(left, right);
+        // Each use fits u32 (2^31), but their sum does not.
+        for _ in 0..31 {
+            let scrut = a.const_(C::int(0));
+            let info = a.add_switch(false, [], false, [], true, SwitchDispatch::Direct);
+            let actions = a.add_list(&[root]);
+            root = a.switch_raw(scrut, actions, info);
+        }
+        assert!(matches!(
+            import_lambda(&a, root),
+            Err(Unsupported("use count outside u32"))
+        ));
+    }
+
+    #[test]
+    fn excessive_weighted_exit_count_is_unsupported_not_a_panic() {
+        let mut a = LamArena::new();
+        let left = a.static_raise(7, &[]);
+        let right = a.static_raise(7, &[]);
+        let mut body = a.seq_raw(left, right);
+        for _ in 0..31 {
+            let scrut = a.const_(C::int(0));
+            let info = a.add_switch(false, [], false, [], true, SwitchDispatch::Direct);
+            let actions = a.add_list(&[body]);
+            body = a.switch_raw(scrut, actions, info);
+        }
+        let handler = a.const_(C::JsNull);
+        let root = a.static_catch(body, 7, &[], handler);
+        assert!(matches!(
+            import_lambda(&a, root),
+            Err(Unsupported("use count outside u32"))
         ));
     }
 
