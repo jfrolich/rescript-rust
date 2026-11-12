@@ -677,6 +677,35 @@ pub(crate) mod frozen {
     }
 }
 
+/// What a build's world holds besides its units.
+pub(crate) mod world {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static PREDEF_BUILDS: AtomicU64 = AtomicU64::new(0);
+    static PREDEF_NODES: AtomicU64 = AtomicU64::new(0);
+
+    /// The predefined declarations were built and frozen into `nodes` nodes.
+    pub(crate) fn record_predef_build(nodes: usize) {
+        if super::enabled() {
+            PREDEF_BUILDS.fetch_add(1, Ordering::Relaxed);
+            PREDEF_NODES.fetch_add(nodes as u64, Ordering::Relaxed);
+        }
+    }
+
+    pub(super) fn reset() {
+        PREDEF_BUILDS.store(0, Ordering::Relaxed);
+        PREDEF_NODES.store(0, Ordering::Relaxed);
+    }
+
+    pub(super) fn print_report() {
+        eprintln!(
+            "[compiler-counter] world predef_builds={} predef_nodes={}",
+            PREDEF_BUILDS.load(Ordering::Relaxed),
+            PREDEF_NODES.load(Ordering::Relaxed),
+        );
+    }
+}
+
 /// Returns whether compiler counters are enabled.
 #[inline]
 pub fn enabled() -> bool {
@@ -698,6 +727,7 @@ pub fn reset() {
 
     store_views::reset();
     frozen::reset();
+    world::reset();
     for counts in &GENTYPE_COUNTS {
         counts.modules.store(0, Ordering::Relaxed);
         counts.declarations.store(0, Ordering::Relaxed);
@@ -1043,6 +1073,7 @@ pub fn print_report() {
     );
     store_views::print_report();
     frozen::print_report();
+    world::print_report();
     eprintln!(
         "[compiler-counter] stored_components cached={} build_find_module={}",
         STORED_COMPONENT_CACHED.load(Ordering::Relaxed),

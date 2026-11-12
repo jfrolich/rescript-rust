@@ -1,0 +1,1 @@
+- A single-constructor `@unboxed` variant whose inline record has more than one field, or one mutable field, such as `@unboxed type t = Many({a: string, b: int})`, compiles to the record object again: construction builds the object and field reads read the field, instead of treating the value as the field itself.
