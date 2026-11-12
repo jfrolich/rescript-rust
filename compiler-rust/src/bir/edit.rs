@@ -12,6 +12,21 @@ impl Bir {
         self.new_node_in(view, aux, 1)
     }
 
+    /// Attach a finalized lowering statement list without copying its elements
+    /// a second time. Bulk construction owns each detached statement once.
+    pub(crate) fn block_from_list(&mut self, list: ListId) -> NodeId {
+        assert!(self.bulk, "statement-stack blocks require bulk construction");
+        let id = self.allocate(Node::block_list(list));
+        for i in 0..self.lists.get(list).len() {
+            let child = self.lists.get(list)[i];
+            self.node(child);
+            assert!(self.parents[child.index()].is_none(), "statement already attached");
+            self.parents[child.index()] = Some(id);
+        }
+        self.repair(id);
+        id
+    }
+
     /// [`Self::new_node`] for a root that will fill a slot of use weight
     /// `weight` ([`Self::weight_of`] of the slot). Children that already carry
     /// the weight the new node gives them (see [`Self::detach`]) are attached
@@ -526,6 +541,7 @@ impl Bir {
         match self.view(id) {
             View::Var { .. }
             | View::Global { .. }
+            | View::JQualified { .. }
             | View::JNumber { .. }
             | View::JStr { .. }
             | View::JBool
@@ -1016,6 +1032,19 @@ impl Bir {
     /// Copy a subtree, freshening every internal binder and static label. Explicit
     /// renaming applies only to free variables; internal binders always win.
     pub fn copy_subtree(&mut self, root: NodeId, renaming: &[(VarId, VarId)]) -> NodeId {
+        self.copy_subtree_recording(root, renaming, &mut Vec::new(), &mut Vec::new())
+    }
+
+    /// [`Self::copy_subtree`], appending `(fresh, source)` for every binder
+    /// it freshens, in allocation order (the bridge names fresh variables in
+    /// that order), and `(fresh, source)` for every static label.
+    pub fn copy_subtree_recording(
+        &mut self,
+        root: NodeId,
+        renaming: &[(VarId, VarId)],
+        fresh_vars: &mut Vec<(VarId, VarId)>,
+        fresh_labels: &mut Vec<(u32, u32)>,
+    ) -> NodeId {
         let mut order = Vec::new();
         let mut stack = vec![root];
         while let Some(id) = stack.pop() {
@@ -1028,6 +1057,7 @@ impl Bir {
                 let fresh = self.new_var_id(self.vars.name(var), index(self.vars.len()));
                 self.vars.flags[fresh.index()].0 =
                     self.vars.flags[var.index()].0 & !VarFlags::EXPORTED;
+                fresh_vars.push((fresh, var));
                 vars.insert(var, fresh);
             }
         }
@@ -1061,6 +1091,7 @@ impl Bir {
                     };
                     let new = self.catch_header(label, params);
                     catches.insert(header, new);
+                    fresh_labels.push((label, old.label));
                     labels.insert(old.label, label);
                 }
                 _ => {}

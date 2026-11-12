@@ -1,0 +1,1 @@
+- Count a record pattern's labels as a use of the `open` that brings them into scope, so unused-open and shadowing warnings match the reference compiler.
