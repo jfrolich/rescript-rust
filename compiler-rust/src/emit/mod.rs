@@ -163,6 +163,27 @@ mod oracle_tests {
         }
     }
     #[test]
+    fn scoped_names_source_oracle() {
+        for source in [
+            "let x = 1; let x = 2; let y = x",
+            "let f = x => { let x = add(x, 1); x }",
+            "let f = x => y => add(x, y)",
+            "let f = x => { let g = x => add(x, 1); add(g(x), x) }",
+            "let f = f => add(f, 1)",
+            "let f = (c, x) => if c { let x = add(x, 1); x } else { let x = add(x, -1); x }",
+            "let default = 1; let default = add(default, 1)",
+            "let f = x => add(x, 1); let g = x => add(x, 2)",
+            "@val external x: int = \"x\"; let f = x => add(x, 1); let g = y => add(x, y)",
+        ] {
+            for commonjs in [false, true] {
+                oracle(
+                    &format!("external add: (int, int) => int = \"%addint\"; {source}"),
+                    commonjs,
+                );
+            }
+        }
+    }
+    #[test]
     fn comment_bearing_raw_snippets_fall_back_without_loss() {
         for source in [
             "%%raw(`// leading comment`)\nlet value = 1",

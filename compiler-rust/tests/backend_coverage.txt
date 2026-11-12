@@ -10,8 +10,8 @@
     "unsupported": {}
   },
   "tests/tests": {
-    "identical": 708,
-    "units": 708,
+    "identical": 711,
+    "units": 711,
     "unsupported": {}
   }
 }
