@@ -2,10 +2,10 @@
 //! Context references are indices, never references into growing state pools.
 mod expr;
 mod konst;
-mod unit;
 #[cfg(test)]
 mod oracle_tests;
 pub mod out;
+mod unit;
 
 use super::bridge::Unsupported;
 use super::{Bir, NodeId, VarId, View};
@@ -294,28 +294,7 @@ impl State {
     /// variable, module and function expressions are strictly pure by construction.
     /// Delay safety reads child flags or the variable's final ASSIGNED/JS_GLOBAL facts.
     fn pure_expression(&mut self, view: View<'_>, aux: u16) -> NodeId {
-        let delay_safe = if let View::Var { var } = view {
-            let flags = self.arena.vars.flags(var);
-            !flags.contains(super::VarFlags::ASSIGNED)
-                && !flags.contains(super::VarFlags::JS_GLOBAL)
-        } else if let View::JFun { .. } = view {
-            true
-        } else {
-            view.children().iter().all(|&child| {
-                self.arena
-                    .node(child)
-                    .flags()
-                    .contains(super::NodeFlags::DELAY_SAFE)
-            })
-        };
-        let node = self.arena.new_node(view, aux);
-        let mut flags = self.arena.node(node).flags();
-        flags.0 |= super::NodeFlags::STRICT;
-        if delay_safe {
-            flags.0 |= super::NodeFlags::DELAY_SAFE;
-        }
-        self.arena.nodes[node.index()].set_flags(flags);
-        node
+        super::j::pure_expression(&mut self.arena, view, aux)
     }
     /// K1: C:1529 compile_expr. SourceProbe owns the depth-independent traversal.
     fn probe(&mut self, cx: Cx, node: NodeId) -> Result<Probed, Unsupported> {
@@ -507,28 +486,17 @@ impl Realizer for State {
                 Some(value)
             }
             Cont::Declare(kind, var) => {
-                let stmt = self.arena.new_node(
-                    View::SDecl {
-                        var,
-                        value: Some(value),
-                    },
-                    kind as u16 | ((crate::js_ir::op::UsedStats::Used as u16) << 2),
-                );
+                let stmt = super::j::declare(&mut self.arena, kind, var, value);
                 self.statements.push(stmt);
                 None
             }
             Cont::Assign(var) => {
-                let left = self.pure_expression(View::Var { var }, 0);
-                let value = self.arena.new_node(
-                    View::JBin { left, right: value },
-                    crate::js_ir::BinOp::Eq as u16,
-                );
-                let stmt = self.arena.new_node(View::SExp { value }, 0);
+                let stmt = super::j::assign(&mut self.arena, var, value);
                 self.statements.push(stmt);
                 None
             }
             Cont::Effect(Tail::Return(_)) => {
-                let stmt = self.arena.new_node(View::SReturn { value }, 0);
+                let stmt = super::j::return_value(&mut self.arena, value);
                 self.statements.push(stmt);
                 finished = Finished::True;
                 None

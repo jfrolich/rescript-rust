@@ -1,6 +1,6 @@
 //! K1–K6: C:1529 compile_expr and its Let/Sequence/Function context arms.
 use super::*;
-use crate::bir::{FuncId, NodeFlags, VarSpan};
+use crate::bir::{FuncId, VarSpan};
 
 /// Decoded structural operands saved across child visits; no source re-read.
 pub(super) enum Resume {
@@ -147,7 +147,6 @@ impl State {
     /// K2: O:339 push_effect_expression. This slice's expression producers are
     /// strictly pure; unsupported producers never reach this operation.
     pub(super) fn drop_pure_effect(&mut self, value: NodeId) {
-        assert!(self.arena.node(value).flags().contains(NodeFlags::STRICT));
-        self.arena.release(value);
+        crate::bir::j::norm::discard_pure_effect(&mut self.arena, value);
     }
 }

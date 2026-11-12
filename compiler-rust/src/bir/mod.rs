@@ -16,6 +16,7 @@ pub mod bridge;
 pub mod bridge_j;
 pub mod engine;
 pub mod l;
+pub mod j;
 pub mod lower;
 pub mod replay;
 pub mod shadow;
