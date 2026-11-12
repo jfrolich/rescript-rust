@@ -3686,9 +3686,8 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
     }
     let (env, piece) = ctx.build_in_store(|| build_initial_env(ctx));
     if let Some(log) = &env.data.shadow {
-            shadow::cold(|| { log.freeze(); 
-            });
-        }
+        shadow::cold(|| log.freeze());
+    }
     if let Some(piece) = piece {
         ctx.thread_store().publish_initial_env(env.clone(), piece);
     }
