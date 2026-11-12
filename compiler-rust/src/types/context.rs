@@ -2744,6 +2744,31 @@ impl TypeContext {
         self.write_level_raw(r, level);
     }
 
+    /// Set the level of compilation-local node `r` the way [`Self::set_level`]
+    /// would right after [`Self::snapshot_type_state`]: journaled whenever a
+    /// full snapshot lives, whatever the node's age. (A new snapshot records
+    /// every existing node; without one, a node younger than the innermost
+    /// snapshot is not recorded.) For a walk that replaces one that took a
+    /// snapshot of its own, so that an enclosing snapshot restores the same
+    /// levels as before.
+    #[inline]
+    pub(crate) fn set_level_as_under_new_snapshot(&self, r: TypeExprRef, level: i32) {
+        debug_assert!(!r.is_store());
+        if self.mutation_logging.full() {
+            self.mutation_journal
+                .borrow_mut()
+                .entries
+                .push(TypeMutation::TypeLevel(r, self.types.level(r.index())));
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_type_mutation(
+                    crate::perf_counters::TypeMutationKind::Level,
+                );
+            }
+        }
+        self.poison_store_build();
+        self.types.set_level(r.index(), level);
+    }
+
     /// Level write without journaling (also used to undo).
     #[inline]
     fn write_level_raw(&self, r: TypeExprRef, level: i32) {
