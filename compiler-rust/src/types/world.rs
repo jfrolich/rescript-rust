@@ -299,10 +299,8 @@ pub(crate) enum Unfreezable {
 /// A value whose every type node is frozen.
 pub(crate) struct Frozen<T> {
     pub(crate) value: T,
-    /// Base index of the graph holding the nodes the freeze created; `None`
-    /// when the value reached only nodes that were frozen already.
-    pub(crate) graph: Option<u32>,
-    /// Number of nodes the freeze created.
+    /// Number of nodes the freeze created: 0 when the value reached only
+    /// nodes that were frozen already, and then nothing was published.
     pub(crate) nodes: usize,
 }
 
@@ -706,11 +704,7 @@ pub(crate) fn freeze<T: FrozenExport>(
     }
     let sizes = graph.sizes();
     if sizes.nodes == 0 && sizes.layouts == 0 {
-        return Ok(Frozen {
-            value,
-            graph: None,
-            nodes: 0,
-        });
+        return Ok(Frozen { value, nodes: 0 });
     }
     let base = world
         .pool
@@ -733,7 +727,6 @@ pub(crate) fn freeze<T: FrozenExport>(
     value.rewrite_handles(&Relocation { base });
     Ok(Frozen {
         value,
-        graph: Some(base),
         nodes: sizes.nodes,
     })
 }
@@ -904,11 +897,10 @@ mod tests {
         }
     }
 
+    type Units = Vec<(Arc<PortablePersStruct>, Arc<Signature>)>;
+
     /// `count` units registered in a fresh world, with their signatures.
-    fn world_with_units(
-        ctx: &TypeContext,
-        count: usize,
-    ) -> (World, Vec<(Arc<PortablePersStruct>, Arc<Signature>)>) {
+    fn world_with_units(ctx: &TypeContext, count: usize) -> (World, Units) {
         let world = World::new(u64::MAX);
         let units = (0..count)
             .map(|i| {
@@ -1275,7 +1267,7 @@ mod tests {
         let first = freeze(&world, &scratch, Handles(vec![int(ctx)])).unwrap();
         let frozen_int = first.value.0[0];
         let again = freeze(&world, &scratch, Handles(vec![frozen_int])).unwrap();
-        assert_eq!((again.graph, again.nodes), (None, 0));
+        assert_eq!(again.nodes, 0);
         assert_eq!(again.value.0[0], frozen_int);
         let tuple =
             ctx.new_generic_type(TypeDesc::Ttuple(ctx.new_type_list(&[frozen_int, frozen_int])));
