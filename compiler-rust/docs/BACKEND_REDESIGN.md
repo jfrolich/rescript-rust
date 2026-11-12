@@ -973,6 +973,16 @@ before child; an entry is therefore live when it is popped.
 
 **A round** is one sweep with one rule (C.1), pre- or post-order, with an
 explicit stack. A round whose mask misses the root's summary does nothing.
+`Order::Stateful` additionally lets a pass carry continuations and groups through
+its own explicit stack, using the same edit API. Its driver must call
+`enter_candidate` before aux descent and `finish_candidate` on return; the
+latter refreshes the summary in O(children). Snapshot guards are not yet
+supported for stateful drivers (the engine rejects them). The flatten driver
+precomputes beta-residue suffixes in one linear scan, then visits its input
+nodes once. Candidate scans (`hit`, `safe_alias`, and legacy purity) cost the
+candidate subtree, explicitly in addition to the sweep; these are not bounded
+pattern attempts. `rename_var` allocates and records provenance in amortized
+O(1); bridge registration is also amortized O(1).
 
 **Edits.** Rules edit through the engine: `promote(target, descendant)`,
 `put(target, new node)`, `fill`, `detach`, `node`, and `replace` for a
