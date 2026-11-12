@@ -23,6 +23,7 @@ use crate::parser::ast::{
 };
 use crate::parser::longident::Longident;
 
+pub(super) mod plan;
 mod serde;
 
 const ANNOTATION_NAME: &str = "spice";
@@ -1291,238 +1292,115 @@ fn tuple_generate_decoder(
     expr_fun(ArgLabel::Nolabel, fun_pat, match_expr, Some(1), arena)
 }
 
-fn codecs_generate_constr_codecs(
+/// Which of the two codecs of a type is meant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Side {
+    Encode,
+    Decode,
+}
+
+/// The library function that is the codec of a built-in type constructor,
+/// or `None` for `JSON.t` and for a type with its own derived codecs.
+/// Cost: O(path depth) borrowed comparisons per candidate name; no allocation.
+fn library_codec(
     context: EncodeContext,
-    settings: GeneratorSettings,
+    side: Side,
+    lid_idx: LidentIdx,
+    arena: &ParseArena,
+) -> Option<&'static str> {
+    let is = |parts: &[&str]| longident_matches(arena, lid_idx, parts);
+    let pick = |encode: &'static str, decode: &'static str| match side {
+        Side::Encode => encode,
+        Side::Decode => decode,
+    };
+    Some(if is(&["string"]) {
+        pick("stringToJson", "stringFromJson")
+    } else if is(&["int"]) {
+        pick("intToJson", "intFromJson")
+    } else if is(&["bigint"]) {
+        pick("bigintToJson", "bigintFromJson")
+    } else if is(&["float"]) {
+        pick("floatToJson", "floatFromJson")
+    } else if is(&["bool"]) {
+        pick("boolToJson", "boolFromJson")
+    } else if is(&["unit"]) {
+        pick("unitToJson", "unitFromJson")
+    } else if is(&["array"]) {
+        pick("arrayToJson", "arrayFromJson")
+    } else if is(&["list"]) {
+        pick("listToJson", "listFromJson")
+    } else if is(&["option"]) {
+        let encode = match context {
+            EncodeContext::Optional => "optionToJson",
+            EncodeContext::Value => "optionToNullableJson",
+        };
+        pick(encode, "optionFromJson")
+    } else if is(&["Js", "null"]) || is(&["Js", "Null", "t"]) || is(&["Null", "t"]) {
+        pick("nullToJson", "nullFromJson")
+    } else if is(&["result"]) || is(&["Result", "t"]) || is(&["Belt", "Result", "t"]) {
+        pick("resultToJson", "resultFromJson")
+    } else if is_dict_identifier(lid_idx, arena) {
+        pick("dictToJson", "dictFromJson")
+    } else {
+        return None;
+    })
+}
+
+/// Whether the constructor is the JSON type itself, whose codec is the
+/// identity. Cost: O(path depth) borrowed comparisons; no allocation.
+fn is_json_identifier(lid_idx: LidentIdx, arena: &ParseArena) -> bool {
+    longident_matches(arena, lid_idx, &["Js", "Json", "t"])
+        || longident_matches(arena, lid_idx, &["JSON", "t"])
+}
+
+/// The name of the derived codec of a user type: `t` gives `t_encode`,
+/// `t_encodeJson` or `t_decode`, `M.t` the same in `M`. A functor
+/// application has none.
+/// Cost: one string of the name's length and one longident.
+fn user_codec_lid(
+    context: EncodeContext,
+    side: Side,
+    lid_idx: LidentIdx,
+    arena: &mut ParseArena,
+) -> Option<LidentIdx> {
+    let suffix = match (side, context) {
+        (Side::Encode, EncodeContext::Optional) => ENCODER_FUNC_SUFFIX,
+        (Side::Encode, EncodeContext::Value) => VALUE_ENCODER_FUNC_SUFFIX,
+        (Side::Decode, _) => DECODER_FUNC_SUFFIX,
+    };
+    match arena.get_longident(lid_idx).clone() {
+        Longident::Lident(name) => {
+            let new_name = format!("{}{}", arena.get_string(name), suffix);
+            let idx = arena.push_string(new_name);
+            Some(arena.push_lident_from_idx(idx))
+        }
+        Longident::Ldot(prefix, right) => {
+            let new_name = format!("{}{}", arena.get_string(right), suffix);
+            let new_idx = arena.push_string(new_name);
+            Some(arena.push_longident(Longident::Ldot(prefix, new_idx)))
+        }
+        Longident::Lapply(_, _) => None,
+    }
+}
+
+/// codecs.ml `generate_constr_codecs`, one side.
+fn codecs_generate_constr_codec(
+    context: EncodeContext,
+    side: Side,
     lid: &Located<LidentIdx>,
     arena: &mut ParseArena,
-) -> (Option<Expression>, Option<Expression>) {
-    let do_encode = settings.do_encode;
-    let do_decode = settings.do_decode;
+) -> Option<Expression> {
     let lid_loc = lid.loc;
-
-    let lid_idx = lid.txt;
-    let encode = if do_encode {
-        if longident_matches(arena, lid_idx, &["string"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "stringToJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["int"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "intToJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["bigint"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "bigintToJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["float"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "floatToJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["bool"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "boolToJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["unit"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "unitToJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["array"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "arrayToJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["list"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "listToJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["option"]) {
-            let codec = match context {
-                EncodeContext::Optional => "optionToJson",
-                EncodeContext::Value => "optionToNullableJson",
-            };
-            Some(expr_ident_spice_codecs_with_loc(arena, codec, lid_loc))
-        } else if longident_matches(arena, lid_idx, &["Js", "null"])
-            || longident_matches(arena, lid_idx, &["Js", "Null", "t"])
-            || longident_matches(arena, lid_idx, &["Null", "t"])
-        {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "nullToJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["result"])
-            || longident_matches(arena, lid_idx, &["Result", "t"])
-            || longident_matches(arena, lid_idx, &["Belt", "Result", "t"])
-        {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "resultToJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["dict"])
-            || longident_matches(arena, lid_idx, &["Js", "Dict", "t"])
-            || longident_matches(arena, lid_idx, &["Dict", "t"])
-        {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "dictToJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["Js", "Json", "t"])
-            || longident_matches(arena, lid_idx, &["JSON", "t"])
-        {
-            let v_loc = lid_loc;
-            let v_pat = pat_var_with_loc(arena, "v", v_loc);
-            let v_expr = expr_ident_path_with_lid_loc(arena, &["v"], v_loc);
-            Some(expr_fun_with_loc(
-                ArgLabel::Nolabel,
-                v_pat,
-                v_expr,
-                Some(1),
-                v_loc,
-                arena,
-            ))
-        } else {
-            let lid = arena.get_longident(lid_idx).clone();
-            match lid {
-                Longident::Lident(s) => {
-                    let name = arena.get_string(s);
-                    let suffix = match context {
-                        EncodeContext::Optional => ENCODER_FUNC_SUFFIX,
-                        EncodeContext::Value => VALUE_ENCODER_FUNC_SUFFIX,
-                    };
-                    let new_name = format!("{}{}", name, suffix);
-                    let idx = arena.push_string(new_name);
-                    Some(expr_ident_from_str_idx(arena, idx, arena.none_loc()))
-                }
-                Longident::Ldot(prefix, right) => {
-                    let right_name = arena.get_string(right);
-                    let suffix = match context {
-                        EncodeContext::Optional => ENCODER_FUNC_SUFFIX,
-                        EncodeContext::Value => VALUE_ENCODER_FUNC_SUFFIX,
-                    };
-                    let new_name = format!("{}{}", right_name, suffix);
-                    let new_idx = arena.push_string(new_name);
-                    let new_lid = Longident::Ldot(prefix.clone(), new_idx);
-                    let lid_idx = arena.push_longident(new_lid);
-                    Some(expr_ident_with_loc(
-                        lid_idx,
-                        arena.none_loc(),
-                        arena.dummy_loc(),
-                    ))
-                }
-                Longident::Lapply(_, _) => None,
-            }
-        }
-    } else {
-        None
-    };
-
-    let decode = if do_decode {
-        if longident_matches(arena, lid_idx, &["string"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "stringFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["int"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "intFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["bigint"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "bigintFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["float"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "floatFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["bool"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "boolFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["unit"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "unitFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["array"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "arrayFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["list"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "listFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["option"]) {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "optionFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["Js", "null"])
-            || longident_matches(arena, lid_idx, &["Js", "Null", "t"])
-            || longident_matches(arena, lid_idx, &["Null", "t"])
-        {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "nullFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["result"])
-            || longident_matches(arena, lid_idx, &["Result", "t"])
-            || longident_matches(arena, lid_idx, &["Belt", "Result", "t"])
-        {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "resultFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["dict"])
-            || longident_matches(arena, lid_idx, &["Js", "Dict", "t"])
-            || longident_matches(arena, lid_idx, &["Dict", "t"])
-        {
-            Some(expr_ident_spice_codecs_with_loc(
-                arena,
-                "dictFromJson",
-                lid_loc,
-            ))
-        } else if longident_matches(arena, lid_idx, &["Js", "Json", "t"])
-            || longident_matches(arena, lid_idx, &["JSON", "t"])
-        {
-            let v_loc = lid_loc;
-            let v_pat = pat_var_with_loc(arena, "v", v_loc);
-            let v_expr = expr_ident_path_with_lid_loc(arena, &["v"], v_loc);
-            let ok_expr = expr_construct_with_locs(
+    if let Some(name) = library_codec(context, side, lid.txt, arena) {
+        return Some(expr_ident_spice_codecs_with_loc(arena, name, lid_loc));
+    }
+    if is_json_identifier(lid.txt, arena) {
+        let v_loc = lid_loc;
+        let v_pat = pat_var_with_loc(arena, "v", v_loc);
+        let v_expr = expr_ident_path_with_lid_loc(arena, &["v"], v_loc);
+        let body = match side {
+            Side::Encode => v_expr,
+            Side::Decode => expr_construct_with_locs(
                 {
                     let lident_name = arena.intern_string("Ok");
                     arena.push_lident_from_idx(lident_name)
@@ -1531,43 +1409,41 @@ fn codecs_generate_constr_codecs(
                 v_loc,
                 v_loc,
                 arena,
-            );
-            Some(expr_fun_with_loc(
-                ArgLabel::Nolabel,
-                v_pat,
-                ok_expr,
-                Some(1),
-                v_loc,
-                arena,
-            ))
-        } else {
-            let lid = arena.get_longident(lid_idx).clone();
-            match lid {
-                Longident::Lident(s) => {
-                    let name = arena.get_string(s);
-                    let new_name = format!("{}{}", name, DECODER_FUNC_SUFFIX);
-                    let idx = arena.push_string(new_name);
-                    Some(expr_ident_from_str_idx(arena, idx, arena.none_loc()))
-                }
-                Longident::Ldot(prefix, right) => {
-                    let right_name = arena.get_string(right);
-                    let new_name = format!("{}{}", right_name, DECODER_FUNC_SUFFIX);
-                    let new_idx = arena.push_string(new_name);
-                    let new_lid = Longident::Ldot(prefix.clone(), new_idx);
-                    let lid_idx = arena.push_longident(new_lid);
-                    Some(expr_ident_with_loc(
-                        lid_idx,
-                        arena.none_loc(),
-                        arena.dummy_loc(),
-                    ))
-                }
-                Longident::Lapply(_, _) => None,
-            }
-        }
+            ),
+        };
+        return Some(expr_fun_with_loc(
+            ArgLabel::Nolabel,
+            v_pat,
+            body,
+            Some(1),
+            v_loc,
+            arena,
+        ));
+    }
+    let lid_idx = user_codec_lid(context, side, lid.txt, arena)?;
+    Some(expr_ident_with_loc(
+        lid_idx,
+        arena.none_loc(),
+        arena.dummy_loc(),
+    ))
+}
+
+fn codecs_generate_constr_codecs(
+    context: EncodeContext,
+    settings: GeneratorSettings,
+    lid: &Located<LidentIdx>,
+    arena: &mut ParseArena,
+) -> (Option<Expression>, Option<Expression>) {
+    let encode = if settings.do_encode {
+        codecs_generate_constr_codec(context, Side::Encode, lid, arena)
     } else {
         None
     };
-
+    let decode = if settings.do_decode {
+        codecs_generate_constr_codec(context, Side::Decode, lid, arena)
+    } else {
+        None
+    };
     (encode, decode)
 }
 
@@ -5645,20 +5521,65 @@ fn clone_mapped_signature_item(
     Ok(mapped_item)
 }
 
+/// The path of a group of type declarations: a plan when every declaration
+/// that derives classifies `Plan`, otherwise the first reason met. With the
+/// census on, the bindings of each declaration are counted under its own
+/// classification, or under the group's reason when the declaration alone
+/// could take a plan.
+/// Cost: O(type nodes and attributes of the group); no allocation unless two
+/// declarations of the group derive.
+fn classify_group(
+    arena: &mut ParseArena,
+    rec_flag: RecFlag,
+    decls: &[TypeDeclaration],
+    generated: &[usize],
+    scope: super::derive::Scope,
+) -> super::derive::Classification {
+    use super::derive::Classification;
+    let deriving = generated.iter().filter(|count| **count > 0).count();
+    let shares_names = deriving > 1 && plan::group_shares_names(decls, arena);
+    let mut group = Classification::Plan;
+    let mut counts = super::derive::PathCounts::default();
+    let mut plannable = 0;
+    for (decl, count) in decls.iter().zip(generated) {
+        if *count == 0 {
+            continue;
+        }
+        match plan::classify(arena, decl, rec_flag, shares_names, scope) {
+            Classification::Plan => plannable += *count as u64,
+            general @ Classification::General(_) => {
+                counts.add(general, *count as u64);
+                if group == Classification::Plan {
+                    group = general;
+                }
+            }
+        }
+    }
+    if let Some(census) = arena.derived_census.as_mut() {
+        counts.add(group, plannable);
+        census.paths.merge(counts);
+    }
+    group
+}
+
 fn map_structure_item_spice(
     item: &StructureItem,
     arena: &mut ParseArena,
     mapper_active: bool,
+    scope: super::derive::Scope,
 ) -> SpiceResult<Vec<StructureItem>> {
     match &item.pstr_desc {
         StructureItemDesc::Pstr_type(inner) => {
             let (ref rec_flag, ref decls) = **inner;
             let mut vbs = Vec::new();
+            // Bindings generated per declaration, for the classification.
+            let mut generated_counts: smallvec::SmallVec<[usize; 4]> = smallvec::SmallVec::new();
             for decl in decls {
                 let generated = map_type_decl_structure(decl, arena)?;
                 if arena.derived_census.is_some() {
                     super::derive::record_shapes(decl, decls, *rec_flag == RecFlag::Recursive, &generated, arena);
                 }
+                generated_counts.push(generated.len());
                 vbs.extend(generated);
             }
 
@@ -5671,8 +5592,18 @@ fn map_structure_item_spice(
             } else {
                 let mapped_item = clone_mapped_structure_item(item, arena)?;
 
+                let general = arena.push_vb_list(&vbs);
+                let pstr_desc =
+                    match classify_group(arena, *rec_flag, decls, &generated_counts, scope) {
+                        super::derive::Classification::Plan => {
+                            StructureItemDesc::Pstr_derived(plan::build(arena, decls, general)?)
+                        }
+                        super::derive::Classification::General(_) => {
+                            StructureItemDesc::Pstr_value((*rec_flag, general))
+                        }
+                    };
                 let value_item = StructureItem {
-                    pstr_desc: StructureItemDesc::Pstr_value((*rec_flag, arena.push_vb_list(&vbs))),
+                    pstr_desc,
                     pstr_loc: arena.dummy_loc(),
                 };
                 super::derive::mark_generated_item(&value_item, arena);
@@ -5903,11 +5834,12 @@ pub fn expand_structure_item_with_mapper(
     item: &StructureItem,
     arena: &mut ParseArena,
     mapper_active: bool,
+    scope: super::derive::Scope,
 ) -> SpiceResult<Vec<StructureItem>> {
     if !arena.builtin_spice_enabled() {
         return Ok(vec![item.clone()]);
     }
-    map_structure_item_spice(item, arena, mapper_active)
+    map_structure_item_spice(item, arena, mapper_active, scope)
 }
 
 fn map_structure_items_with_mapper(
@@ -5917,7 +5849,13 @@ fn map_structure_items_with_mapper(
 ) -> SpiceResult<Vec<StructureItem>> {
     let mut expanded = Vec::new();
     for item in structure {
-        expanded.extend(map_structure_item_spice(item, arena, mapper_active)?);
+        // Only the items of a module expression are mapped here.
+        expanded.extend(map_structure_item_spice(
+            item,
+            arena,
+            mapper_active,
+            super::derive::Scope::Nested,
+        )?);
     }
     Ok(expanded)
 }
