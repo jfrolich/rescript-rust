@@ -364,7 +364,8 @@ struct State {
     spine_steps: usize,
     /// Reused by the J rules that push onto a vector.
     scratch: Vec<NodeId>,
-    /// 4.1: the jump table, indexed by catch header; sized at the first catch.
+    /// 4.1: the jump table, indexed by catch header; grown where a catch is
+    /// entered and the unit has more headers than entries.
     jumps: Vec<exit::Jump>,
     /// The handlers of the catches being lowered, a stack of flattened tables.
     catch_table: Vec<(NodeId, crate::bir::CatchId)>,
@@ -382,11 +383,6 @@ impl State {
         let mut arena = Bir::default();
         arena.begin_bulk();
         arena.pools = std::mem::take(&mut input.arena.pools);
-        // The headers keep their labels and parameters; the exits they count
-        // stay in the source. One write per catch of the unit.
-        for header in &mut arena.pools.catches {
-            header.uses = 0;
-        }
         arena.func_owners.resize(arena.pools.funcs.len(), None);
         for i in 0..input.arena.vars.len() {
             let var = VarId(i as u32);
@@ -502,6 +498,12 @@ impl State {
         });
         let list = self.statements.take_list(&mut self.arena, run);
         let root = self.arena.block_from_list(list);
+        // The headers keep their labels and parameters; the exits they count
+        // stay in the source, which reads the counts while a function of
+        // another module is inlined. One write per catch of the unit.
+        for header in &mut self.arena.pools.catches {
+            header.uses = 0;
+        }
         self.arena.finish_bulk(root);
         Lowered {
             program: super::bridge_j::Imported::from_lowering(self.arena, root, self.idents),

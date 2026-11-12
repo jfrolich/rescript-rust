@@ -730,3 +730,40 @@ fn a_result_the_lowering_assigns_is_not_held_before_a_statement_argument() {
     let root = a.apply_raw(f, &[first, second], info);
     compare(a, root);
 }
+
+#[test]
+fn an_inlined_function_that_holds_a_catch_is_lowered_after_a_catch_of_the_unit() {
+    // The inlined body brings a catch header the unit did not have when its
+    // first catch sized the jump table.
+    use crate::cmi::persistent_env::CmjExportArity;
+    use crate::js_ir::ModulePathResolver;
+    use crate::lambda::lam_primitive::Primitive as P;
+    use crate::lambda::{ApInfo, ApplyStatus, FieldDbgInfo, LamLoc, Lambda, lam_arity::Arity};
+    let effect = |a: &mut LamArena, i: i32| {
+        let value = a.const_(C::Int { i, comment: None });
+        a.prim_raw(P::PinitMod, &[value], LamLoc::NONE)
+    };
+    let catch = |a: &mut LamArena, test: Ident, label: i32| {
+        let test = a.var(test);
+        let (exit, other) = (a.static_raise(label, &[]), effect(a, label));
+        let body = a.if_(test, exit, other);
+        let first = effect(a, label + 1);
+        let second = effect(a, label + 2);
+        let handler = a.seq_raw(first, second);
+        a.static_catch(body, label, &[], handler)
+    };
+    let resolver = ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+    let param = Ident::new("arg", 100, IdentFlags::NONE);
+    let mut body = LamArena::new();
+    let root = catch(&mut body, param, 50);
+    resolver.set_bir_test_export("Other", "run", CmjExportArity::Single(Arity::info(vec![1], false)),
+        Some(Lambda::function_(1, vec![param], body.export(root), Default::default(), LamLoc::NONE)));
+    let mut a = LamArena::new();
+    let own = catch(&mut a, Ident::new("x", 10, IdentFlags::NONE), 1);
+    let global = a.global_module(Ident::create_persistent("Other"));
+    let callee = a.prim_raw(P::Pfield(0, FieldDbgInfo::Module { name: crate::name::Name::new("run") }), &[global], LamLoc::NONE);
+    let arg = a.var(Ident::new("y", 11, IdentFlags::NONE));
+    let call = a.apply_raw(callee, &[arg], ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE });
+    let root = a.seq_raw(own, call);
+    compare_oracle(a, root, Some(&resolver), true, &[0, 1, 2, 3, 4], None, true);
+}

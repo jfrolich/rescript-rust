@@ -204,7 +204,9 @@ impl State {
     /// 3.9 step 2 over the handlers. The form is chosen from `cx.cont`, the
     /// length of the table and one flag: no body or handler is walked for it.
     pub(super) fn catch(&mut self, cx: Cx, node: NodeId) -> Catch {
-        if self.jumps.is_empty() {
+        // Inlining a function of another module adds catch headers while
+        // the unit is lowered: one length comparison per catch.
+        if self.jumps.len() < self.arena.pools.catches.len() {
             self.jumps.resize(self.arena.pools.catches.len(), Jump::NONE);
         }
         // Step 1: flatten. The table is collected outermost first.
