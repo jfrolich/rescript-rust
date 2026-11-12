@@ -1,0 +1,1 @@
+- Design the smallest set of intermediate representations for a batch build (`compiler-rust/docs/THREE_TREES.md`): the syntax tree, one core IR and the oxc JavaScript tree, with the checker's results as tables; measure what typed-tree construction costs and re-cut the backend and frontend slices.
