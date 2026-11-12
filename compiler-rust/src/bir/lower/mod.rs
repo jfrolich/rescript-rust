@@ -620,7 +620,7 @@ impl ProbeRules for State {
                 return Ok(ProbePlan::Children(expr::Resume::Switch(self.string_switch(cx, scrutinee, operands, header)?)));
             }
             View::Catch { .. } => {
-                return Ok(ProbePlan::Children(expr::Resume::Catch(self.catch(cx, node)?)));
+                return Ok(ProbePlan::Children(expr::Resume::Catch(self.catch(cx, node))));
             }
             View::Exit { label, .. } => {
                 let args = self.source.node(node).exit_arguments();
