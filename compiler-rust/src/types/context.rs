@@ -2843,6 +2843,7 @@ impl TypeContext {
         name: &str,
         shadowed: bool,
     ) {
+        self.assert_no_store_build("an open's use");
         self.open_slot_events
             .borrow_mut()
             .push(LookupEvent::OpenSlot(OpenSlotEvent {
@@ -2853,8 +2854,23 @@ impl TypeContext {
             }));
     }
 
+    /// Building shared store data never reports anything: the data is used
+    /// by compilations that did not build it, so what a build recorded would
+    /// be reported by one of them only, and which one would depend on
+    /// scheduling. Every sink of this context that feeds a diagnostic calls
+    /// this; lookups report from the consuming compilation instead.
+    #[inline]
+    #[track_caller]
+    fn assert_no_store_build(&self, what: &str) {
+        debug_assert!(
+            !self.in_store_build(),
+            "{what} was recorded while building shared store data"
+        );
+    }
+
     /// Record a `report_deprecated` call of a module lookup.
     pub(crate) fn record_module_deprecation(&self, deprecation: ModuleDeprecation) {
+        self.assert_no_store_build("a module deprecation");
         self.open_slot_events
             .borrow_mut()
             .push(LookupEvent::ModuleDeprecated(deprecation));
@@ -2862,6 +2878,7 @@ impl TypeContext {
 
     /// Queue parser warnings produced while re-parsing source.
     pub(crate) fn push_reparse_warnings(&self, warnings: &[crate::parser::ParserWarning]) {
+        self.assert_no_store_build("a parser warning");
         self.reparse_warnings
             .borrow_mut()
             .extend_from_slice(warnings);
@@ -2927,6 +2944,7 @@ impl TypeContext {
 
     /// `Cmt_format.record_deprecated_used`.
     pub(crate) fn record_deprecated_used(&self, used: DeprecatedUse) {
+        self.assert_no_store_build("a deprecated use");
         self.deprecated_used.borrow_mut().push(used);
     }
 
