@@ -63,6 +63,12 @@ export function Page({ markdown, title, lede, pages, current }) {
   const active = useActiveHeading(ids);
   const activeSection = toc.find((entry) => entry.id === active)?.section;
 
+  // A link to a heading from another page: the heading is there only now.
+  useEffect(() => {
+    const id = decodeURIComponent(window.location.hash.slice(1));
+    if (id) document.getElementById(id)?.scrollIntoView();
+  }, []);
+
   // Load the compiler once the page has settled, so the first edit is quick.
   useEffect(() => {
     if (!parts.some((part) => part.type === "example")) return undefined;
@@ -90,11 +96,12 @@ export function Page({ markdown, title, lede, pages, current }) {
           <a className={current === "rfc" ? "on" : ""} href="./">
             RFC
           </a>
+          <a href="./#try-it">REPL</a>
           <a className={current === "implementation" ? "on" : ""} href="implementation.html">
             Implementation
           </a>
           <a href="playground.html">Playground</a>
-          <a href={`${REPOSITORY}/pull/90`} target="_blank" rel="noreferrer">
+          <a className="away" href={`${REPOSITORY}/pull/90`} target="_blank" rel="noreferrer">
             GitHub ↗
           </a>
           <button type="button" className="theme" onClick={toggleTheme} aria-label="Switch between light and dark">
@@ -115,6 +122,9 @@ export function Page({ markdown, title, lede, pages, current }) {
           <span className="chip">Implemented on a branch</span>
           <a className="chip" href={`${REPOSITORY}/pull/90`} target="_blank" rel="noreferrer">
             Pull request #90 ↗
+          </a>
+          <a className="chip lime" href="./#try-it">
+            Try it in the REPL ↓
           </a>
           <a className="chip" href="playground.html">
             Open the playground →

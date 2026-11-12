@@ -154,6 +154,7 @@ select {
 
 .topbar nav a {
   text-decoration: none;
+  white-space: nowrap;
   padding: 4px 0;
   border-bottom: 1px solid transparent;
 }
@@ -239,6 +240,12 @@ select {
   font-weight: 600;
   text-decoration: none;
   white-space: nowrap;
+}
+
+.chip.lime {
+  background: var(--lime);
+  color: #18201d;
+  border-color: transparent;
 }
 
 .chip.solid {
@@ -1462,6 +1469,11 @@ td:first-child {
   .topbar nav {
     gap: 14px;
     font-size: 12px;
+  }
+
+  /* The pull request is linked below the title too. */
+  .topbar nav a.away {
+    display: none;
   }
 
   .brand span {
