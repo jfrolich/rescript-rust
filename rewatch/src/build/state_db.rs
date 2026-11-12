@@ -997,6 +997,7 @@ impl TemporaryRecord {
             // No other SQLite connection may own this private database. Busy
             // is a protocol failure, not contention worth retrying per package.
             conn.busy_timeout(Duration::ZERO)?;
+            private_lock_test_hook(&package.name, "open", temp.path())?;
             conn.set_prepared_statement_cache_capacity(32);
             conn.pragma_update(None, "journal_mode", "OFF")?;
             conn.pragma_update(None, "synchronous", "OFF")?;
@@ -1049,6 +1050,7 @@ impl TemporaryRecord {
         // empty record or prepare deletion statements for each completed module.
         debug_assert!(rows.partial && rows.meta.is_empty() && rows.reads_updates.is_empty()
             && rows.items_updates.is_empty() && rows.parse_warnings.is_empty());
+        private_lock_test_hook(&self.package_name, "insert", self.temp.path())?;
         let conn = &self.conn;
         if !rows.sources.is_empty() {
             let _timer = RecordTimer::start(Phase::RecordSqlSources);
@@ -1137,8 +1139,8 @@ impl TemporaryRecord {
         timing::measure(Phase::RecordSqlCommit, || self.conn.execute_batch("COMMIT"))?;
         checkpoint("commit");
         publication_test_hook(&package.name, "after-commit");
+        let bytes = self.temp.as_file().metadata()?.len();
         let Self { conn, temp, lifetime, commits, pending_bytes, .. } = self;
-        let bytes = temp.as_file().metadata()?.len();
         conn.close().map_err(|(_, err)| err)?;
         checkpoint("close");
         publication_test_hook(&package.name, "after-close");
@@ -1168,6 +1170,31 @@ impl TemporaryRecord {
         }
         Ok(())
     }
+}
+
+// Debug-only rendezvous for a subprocess that deliberately takes a conflicting
+// fcntl lock on the private database, emulating the BSD same-inode failure on
+// Linux. One rendezvous per build lets the final-state fallback use a new file.
+fn private_lock_test_hook(_package: &str, _phase: &str, _db: &Path) -> anyhow::Result<()> {
+    #[cfg(debug_assertions)]
+    if let Ok(spec) = std::env::var("RESCRIPT_TEST_PRIVATE_LOCK") {
+        use std::io::Write;
+        let mut fields = spec.splitn(3, ':');
+        if fields.next() != Some(_package) || fields.next() != Some(_phase) { return Ok(()); }
+        let ready = Path::new(fields.next().ok_or_else(|| anyhow::anyhow!("missing lock rendezvous path"))?);
+        let mut signal = match std::fs::OpenOptions::new().write(true).create_new(true).open(ready) {
+            Ok(signal) => signal,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+            Err(err) => return Err(err.into()),
+        };
+        signal.write_all(_db.as_os_str().as_encoded_bytes())?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !ready.with_extension("locked").try_exists()? {
+            anyhow::ensure!(std::time::Instant::now() < deadline, "private lock test rendezvous timed out");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    Ok(())
 }
 
 fn publication_test_hook(_package: &str, _phase: &str) {

@@ -194,7 +194,10 @@ impl FreshRows {
             match state_db::TemporaryRecord::new(&writer.package, &seed, &runtime) {
                 Ok(record) => writer.record = Some(record),
                 Err(err) => {
-                    log::warn!("Could not prepare {}: {err}", writer.package.name);
+                    log::warn!("Could not prepare {}: {err}; falling back to final-state recording", writer.package.name);
+                    // Keep processing module events/digests, but exclude this
+                    // package from FinishedRows::packages so the final-state
+                    // path reconstructs its complete record exactly once.
                     writer.valid = false;
                 }
             }
@@ -209,7 +212,7 @@ impl FreshRows {
         let writer = self.writers.get_mut(package).expect("known writer");
         if let Some(record) = &mut writer.record {
             if let Err(err) = record.insert(rows) {
-                log::warn!("Could not prepare {package}: {err}");
+                log::warn!("Could not prepare {package}: {err}; falling back to final-state recording");
                 writer.valid = false;
                 writer.record = None;
             }

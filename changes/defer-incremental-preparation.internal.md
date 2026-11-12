@@ -1,1 +1,2 @@
 - Stream whole-build incremental-store rows into private SQLite files with bounded progressive commits, then publish each completed package atomically while preserving sparse updates and interrupted-writer recovery.
+- Keep application locks on separate sidecars so private SQLite preparation works on macOS/BSD; fail fast on private-database contention and recover through final-state recording.

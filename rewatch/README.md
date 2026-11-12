@@ -129,3 +129,42 @@ validation with the package name and flag; source-marker filtering cannot hide
 an unsupported PPX. Spice needs no installed executable and runs on the current
 AST, without a frozen-v0 conversion.
 
+
+## SQLite publication locks
+
+All paths below are in the owning package's `lib/rescript` directory. On
+Linux/macOS/BSD, the application uses `fs2` (`flock`); on Windows it uses
+`LockFileEx`. **Never take an application lock on a file SQLite opens.** BSD
+systems can make a `flock` conflict with SQLite's `fcntl` locks on the same inode.
+
+| Owner / purpose | File | Acquisition on Unix |
+| --- | --- | --- |
+| Root build / watch exclusion | `.build.lock.guard` / `.watch.lock.guard` | `flock(LOCK_EX | LOCK_NB)`, bounded retry in `lock.rs` |
+| Package writers, private-file creation/cleanup, atomic publication | `rescript.sqlite.guard` | `flock(LOCK_EX)` |
+| Multi-connection package reader | `rescript.sqlite.guard` | `flock(LOCK_SH)` across all table reads |
+| Private preparation lifetime | `.rescript-record-<unique>.sqlite.lock` | `flock(LOCK_EX)` on a newly created sidecar |
+| Abandoned-private-file cleanup | Same private `.sqlite.lock` sidecar | `flock(LOCK_EX | LOCK_NB)`; skip a locked sidecar |
+| SQLite itself | Live/private `.sqlite` and SQLite-managed side files | SQLite's own locking protocol (`fcntl` byte-range locks for Unix databases) |
+
+The package guard covers creation and acquisition of the private sidecar lock,
+then is released before schema creation. The lifetime lock stays held until
+SQLite is closed and the private file is removed or renamed; the sidecar is then
+removed while still locked. Cleanup holds the package guard and probes private
+sidecars, including sidecars orphaned by a kill after rename. A private database
+without a sidecar is abandoned under this protocol. Files left by the older
+same-inode-lock implementation must only be cleaned once those old builds have
+stopped.
+
+Private SQLite connections have a zero busy timeout: contention on an unpublished
+file is a protocol error, not a reason to wait. A preparation error is reported
+once; that package is excluded from the successfully prepared set. After the
+preparation worker joins, the existing final-state recording path reconstructs
+its rows and writes its record. Other packages continue streaming normally.
+
+Run `python3 scripts/test_busy_private_record.py rewatch/target/debug/rescript`
+with a debug executable. It holds a conflicting `fcntl` lock from a second
+process across the entire fallback, testing both schema creation and insertion,
+clean and existing-record builds, root and dependency packages, and 1/2/8 workers.
+The fallback must finish within five seconds, preserve rows/output and incremental
+reuse, report once, and remove private files/sidecars. This emulates SQLite busy
+on Linux; it does not replace native macOS validation.

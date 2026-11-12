@@ -44,6 +44,8 @@ for stage in ("progressive", "before-commit", "after-commit", "after-close",
                "RESCRIPT_TEST_ABORT_PUBLICATION": f"atomic-store:{stage}"}, True)
         leftovers = list(db.parent.glob(".rescript-record-*.sqlite"))
         assert len(leftovers) == (0 if stage == "after-rename" else 1), leftovers
+        sidecars = list(db.parent.glob(".rescript-record-*.sqlite.lock"))
+        assert len(sidecars) == len(leftovers), sidecars
         assert (db.read_bytes() == old) == (stage != "after-rename"), stage
         with sqlite3.connect(db) as conn:
             assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
@@ -51,7 +53,7 @@ for stage in ("progressive", "before-commit", "after-commit", "after-close",
         for suffix in ("-journal", "-wal"):
             assert not Path(str(db) + suffix).exists()
         build()
-        assert not list(db.parent.glob(".rescript-record-*.sqlite")), "next build must remove abandoned private files"
+        assert not list(db.parent.glob(".rescript-record-*")), "next build must remove abandoned private files"
         expected = (project / "src/A.mjs").read_bytes()
         assert b"3" in expected
         assert "Compiled 0 modules" in build()
@@ -67,5 +69,5 @@ for stage in ("progressive", "before-commit", "after-commit", "after-close",
             assert db.read_bytes() == old
             assert list(db.parent.glob(".rescript-record-*.sqlite"))
             assert "Compiled 0 modules" in build()
-            assert not list(db.parent.glob(".rescript-record-*.sqlite"))
+            assert not list(db.parent.glob(".rescript-record-*"))
             print("killed unchanged rebuild: old record intact; zero-module startup removes leftover")
