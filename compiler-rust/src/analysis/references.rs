@@ -52,7 +52,7 @@ pub fn get_loc_item(
 ) -> Option<LocItem> {
     let log = |out: &mut super::Output, n: i32, msg: &str| {
         if debug {
-            out.print(&format!("getLocItem #{n}: {msg}\n"));
+            out.print(&format!("get_loc_item #{n}: {msg}\n"));
         }
     };
     let pos = (pos.0 + 1, pos.1);

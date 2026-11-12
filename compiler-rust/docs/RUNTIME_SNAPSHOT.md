@@ -1,8 +1,9 @@
 # A prebuilt snapshot of the runtime and Belt: design and staged plan
 
-Status: design. Section A describes trunk; everything from section B on is
-proposed and not implemented. This document is the spec for the stages in
-section F.
+Status: S1 implemented. Section A records the baseline before S1. Sections B
+through E describe the full staged design; runtime changes beyond the shared
+container, verification memoisation, snapshot commands and watch integration
+remain future stages. Section F.1 records S1's implementation and evidence.
 
 ## 0. Summary
 
@@ -18,7 +19,7 @@ version, so the work can be done once, when the packages are built.
 ### What the code already does
 
 Half of this exists. Since the runtime was compiled into the executable
-(`rewatch/src/build/embedded_runtime.rs`), a build whose runtime sources equal
+(`rewatch/src/build/snapshot.rs`), a build whose runtime sources equal
 the ones the executable was built from registers the runtime's interfaces from
 the executable's memory and compiles none of it. What remains:
 
@@ -80,7 +81,7 @@ S1 starts by measuring.
   interface from the executable instead of the package's build database, and
   the JavaScript from the snapshot instead of an earlier build.
 
-## A. Today
+## A. Baseline before S1
 
 ### A.1 Where the packages are and how they are found
 
@@ -102,9 +103,9 @@ tries, in order:
 
 1. **Already registered** in this process (later builds of a watch session):
    nothing to do.
-2. **Embedded** (`embedded_runtime::register`). The executable's build script
+2. **Embedded** (`snapshot::register`). The executable's build script
    (`rewatch/cli/build.rs`) compiles `packages/@rescript/runtime` with
-   `embedded_runtime::compile` and the result is included with
+   `snapshot::compile` and the result is included with
    `include_bytes!` and installed at start-up (`rewatch/cli/src/main.rs`).
    The data is: a magic number, a BLAKE3 digest, then each module's name and
    stored-module bytes. The digest covers the runtime's `rescript.json` and
@@ -164,7 +165,7 @@ and leaves the core as bytes until the first lookup
 
 ### A.5 What the incremental store records
 
-Each package has `lib/bs/rescript.sqlite` (`state_db.rs`).
+Each package has `lib/rescript/rescript.sqlite` (`state_db.rs`).
 
 - **Runtime.** Only the `runtime_interfaces` table of the root package's
   database, written after a from-source compile. Nothing is written when the
@@ -202,7 +203,7 @@ reads `lib/ocaml`).
 |---|---|---|
 | D1 | A runtime directory without `rescript.json` fails the build with "failed to read runtime config", before the embedded check. The published package ships only `lib`; `npm pack --dry-run` in the package lists no `rescript.json` | reproduced by removing the file from a copy |
 | D2 | The embedded data records the absolute source paths of the machine that built the executable (309 occurrences), in `ps_filename`, `source_path` and the file-name tables. They enter the interface digest and can reach whatever prints a dependency's file name. One source-map sample did not show them; this was not searched exhaustively | `strings` on the build script's output |
-| D3 | Every build reads and hashes all runtime sources, and decodes the extras of and inserts a registry entry for all 113 modules | `embedded_runtime::register` |
+| D3 | Every build reads and hashes all runtime sources, and decodes the extras of and inserts a registry entry for all 113 modules | `snapshot::register` |
 | D4 | A fallback to compiling from source is logged only at debug level; no test fails when the embedded runtime stops matching | `log::debug!` in `register` |
 | D5 | The build script watches the sources that existed when it last ran. A runtime that gains a source file is compiled from source at run time until the executable is rebuilt | the comment on `watch_sources` |
 | D6 | On fallback, code generation runs for 113 modules and its output is discarded | `compile_runtime_module_from_source` |
@@ -258,7 +259,7 @@ All integers are little endian and all offsets are from the start of the
 file. Looking a module up is a binary search over fixed-width records that
 compares names in place; nothing is decoded or allocated for the modules that
 are not looked up. The container is written and read by one module,
-`rewatch/src/build/snapshot.rs`, which replaces `embedded_runtime.rs`.
+`rewatch/src/build/snapshot.rs`, replacing the former runtime-only container.
 
 ### B.3 Belt's JavaScript as a template
 
@@ -476,7 +477,119 @@ edit `snapshot.rs`.
 
 ### F.1 S1: Belt from the snapshot
 
-- **Changes.** Rename `embedded_runtime.rs` to `snapshot.rs` and give it the
+#### S1 baseline measurement
+
+Measured at `6f17907981` on x86-64 Linux, with a fat-LTO release build
+(`cargo build --release --manifest-path rewatch/Cargo.toml`), Valgrind 3.22.0
+Cachegrind (`--tool=cachegrind --cache-sim=no`) and `RAYON_NUM_THREADS=1`.
+The project was a disposable source-only copy of `tests/belt_tests`, with
+source-only copies of Belt and the runtime. Runtime preparation was outside
+the measurement; both measured builds used the same executable and paths.
+
+| Build | Modules compiled | Instructions |
+|---|---:|---:|
+| Clean project and Belt | 80 | 1,814,122,576 |
+| Clean project, Belt output retained | 37 | 668,482,159 |
+
+For the second build, only the root project's `lib` directory and generated
+`src/*.mjs` files were removed from the build location; Belt's database and
+JavaScript were retained. The measured difference is 1,145,640,417
+instructions (63.15% of this test project's clean build). The S1 snapshot
+budget for this fixture is at most 701,906,266 instructions (the retained-Belt
+build plus 5%). The baseline executable is 35,292,816 bytes. These counts are
+for the test fixture, not the 3,735-module application.
+
+Hardware instruction counting was unavailable in the measurement environment;
+the figures above are Cachegrind counts. Section A.5 has been corrected from
+`lib/bs` to the code's `lib/rescript` layout.
+
+#### S1 after measurement
+
+Repeated with the same release profile, Cachegrind settings and one worker,
+using a fresh disposable copy of `tests/belt_tests`. The candidate includes
+trunk through `5b63dc78b`; the baseline above predates those checker changes,
+so the paired candidate measurements isolate the snapshot's contribution.
+
+| Candidate build | Modules compiled | Instructions |
+|---|---:|---:|
+| Clean, `RESCRIPT_SNAPSHOT=off` | 80 | 1,667,769,849 |
+| Clean root, Belt output retained, `RESCRIPT_SNAPSHOT=off` | 37 | 623,554,268 |
+| Clean, `RESCRIPT_SNAPSHOT=require` | 37 | 635,348,951 |
+
+The snapshot costs 1.89% more than retaining Belt's build output, within the
+5% budget, and saves 61.90% against this candidate's clean from-source build.
+It is also 4.96% below the original retained-Belt count of 668,482,159.
+The release executable grew from 35,292,816 to 36,467,752 bytes: 1,174,936
+bytes (3.33%).
+
+On a 3,735-module application, `scripts/bench_project.sh` counted
+73,856,891,438 instructions for the original baseline and 68,352,078,635 for
+the candidate (7.45% fewer); generated outputs were identical. This comparison
+also includes the intervening trunk checker changes and is not a claim that
+S1 alone saved 7.45%. `scripts/compare_checker_builds.py` also found no
+signature, diagnostic or generated-output differences on that application.
+
+A ten-run, single-worker Hyperfine clean-build comparison on `tests/belt_tests`
+measured the original baseline at 394.4 ± 146.9 ms (293.8–685.2 ms) and the
+candidate at 191.9 ± 44.2 ms (143.2–272.6 ms). The noisy wall times are
+secondary to the instruction counts; the same trunk-change caveat applies.
+
+Local builds, targeted compiler snapshot tests, all rewatch Rust tests, and
+the equivalence script's three projects and twelve configuration cases pass.
+The full `make test-rewatch` shell suite reaches an unrelated failure in
+`watch/04-watch-config-change.sh`: its whole-tree search treats four shipped
+`sury/src/*.res.mjs` files in `node_modules` as stale compiler output. The
+unchanged baseline executable reproduces the same failure on the same four
+files. No files or assertions in that test were removed or weakened.
+
+#### S1 implementation notes
+
+- The container has a runtime entry and a Belt entry. Runtime verification,
+  paths and registration retain their earlier behavior. Belt is attached as
+  one immutable package index; only referenced cores are decoded, through the
+  same lazy stored-module maps used by incremental loading.
+- Belt paths use the logical recorded root `@rescript/belt`, not a producer
+  machine path. The producer proves that rebasing each core back to the
+  compile directory and restoring package fields reproduces the entire
+  original stored core byte for byte. This proves all of its digest inputs,
+  not only one sampled interface digest. The path-free invariant covers the
+  Belt entry; the runtime's known producer paths remain S2 work.
+- Contrary to the single filename-table description in B.4, exported Lambda
+  locations have both original and imported filename tables and an imported
+  filename index. All three are rebased. Signatures also have separate normal
+  and raw filename tables.
+- The configuration parser rejects duplicate suffixes across package specs,
+  even out of source. Proof builds therefore use `.js`/`.cjs` and
+  `.res.mjs`/`.res.cjs`, each in both layouts. The latter layout also enables
+  JSX version/module/preserve and `LetUnwrap`; byte equality is required.
+- CLI logging defaults to `InfoLevel`, so B.7's info message is visible even
+  without `-v` (and is suppressed by quiet mode), rather than verbose-only.
+- The code also exposes alternate JavaScript printers and backends, absent
+  from D. These fall back with an explicit reason. Snapshot production
+  requires the default printer/backend so an environment-selected producer
+  cannot silently embed a different output contract.
+- S1 does not select Belt in watch or check-only mode; those builds retain
+  their earlier behavior. The code's location-bearing diagnostic retry also
+  requires source compilation: it explicitly discards location-free stored
+  interfaces so errors can quote dependency declarations. This internal mode
+  was absent from D and is now an explicit mismatch reason. The switch controls Belt only; changing runtime
+  fallback semantics is reserved for S2.
+- Unreferenced Belt cores are not decoded merely to duplicate them in its
+  build database. The equivalence script compares every dependent stored
+  core, extras entry, item digest and read record; all Belt cores are checked
+  by the producer's byte-for-byte roundtrip. It builds at the same logical
+  path, moving the two completed result trees apart, since different absolute
+  source paths intentionally produce different interface hashes.
+- `make test-rewatch` and `make test-rewatch-rust` run the equivalence script.
+  Its default projects are `tests/belt_tests`, `tests/tests`, and the prepared
+  `rewatch/testrepo`, followed by twelve root-option configurations. Preparing
+  the testrepo uses `yarn --cwd rewatch/testrepo install` and
+  `node rewatch/tests/add-belt-dependencies.mjs`, as the integration suite does.
+  CI maintainers should add those commands and
+  `scripts/test_snapshot_equivalence.sh` alongside the parity gates; this
+  change does not edit workflows.
+
+- **Changes.** Replace the runtime-only container with `snapshot.rs` and the
   container of B.2 with two packages. The build script produces Belt's part:
   it compiles Belt against the runtime it just compiled, under the proof
   configurations of B.3 and B.5, and stores cores and JavaScript templates.
@@ -488,8 +601,7 @@ edit `snapshot.rs`.
   written from the templates for each root package spec when the file is
   missing or different. `RESCRIPT_SNAPSHOT=off|require` and the info-level
   message of B.7. The equivalence script of C.3.
-- **Files.** `rewatch/src/build/snapshot.rs` (new, from
-  `embedded_runtime.rs`), `rewatch/cli/build.rs`, `rewatch/cli/src/main.rs`,
+- **Files.** `rewatch/src/build/snapshot.rs`, `rewatch/cli/build.rs`, `rewatch/cli/src/main.rs`,
   `rewatch/src/build.rs`, `rewatch/src/build/compile.rs`,
   `rewatch/src/build/incremental.rs` (reuse `load_stored`'s registration),
   `rewatch/src/build/clean.rs` (cleaning still removes the written files),

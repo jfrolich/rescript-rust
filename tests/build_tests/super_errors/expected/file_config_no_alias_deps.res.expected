@@ -1,0 +1,5 @@
+
+  [1;33mWarning number 49[0m
+  [36m/.../fixtures/file_config_no_alias_deps.res[0m
+
+  no cmi file was found in path for module NoSuchModuleForAliasDeps

@@ -1,0 +1,6 @@
+- Read a file's `@@config` flags only from its first leading `@@config`, like `bsc`: `-bs-g`, `-bs-jsx`, `-bs-jsx-preserve` and `-bs-noassertfalse` in a later or nested `@@config`, or as a string in another attribute, no longer take effect.
+- Honour `-noassert`, `-bs-no-check-div-by-zero` and `-bs-no-version-header` in a file's `@@config`.
+- Apply `-bs-jsx` and `-bs-jsx-module` from an interface's `@@config` to the JSX rewrite of that interface.
+- Honour `-bs-no-builtin-ppx` in a file's `@@config`: the builtin PPX no longer rewrites that file.
+- Honour `-open`, `-nopervasives`, `-no-alias-deps`, `-keep-locs` and `-no-keep-locs` in a file's `@@config`, in implementations and interfaces.
+- Report `-v`, `-version` and `-warn-help` in `@@config` as invalid flags for bsc, like `bsc`.
