@@ -10,12 +10,14 @@ pub(super) fn lower(
     direct: bool,
     resolver: Option<&crate::js_ir::ModulePathResolver>,
     cross_module_inline: bool,
+    check_div_by_zero: bool,
 ) -> Result<Lowered, Unsupported> {
     let mut node = input.root;
     let mut state = State::new(input);
     state.direct = direct;
     state.resolver = resolver.cloned();
     state.cross_module_inline = cross_module_inline;
+    state.check_div_by_zero = check_div_by_zero;
     state.locations = locations.cloned();
     if let Some(locations) = locations {
         state.located_functions = state
@@ -61,9 +63,25 @@ pub(super) fn lower(
                 out.stmts = state.statements.since(Span { start: out.stmts.start, len: 0 });
             }
         }
+        if out.finished == Finished::True {
+            if let Some(next) = next {
+                // C: compile_expr Let keeps the body's value after a finished
+                // declaration. The shared export coercion still needs that block.
+                let tail = state.probe(Cx::value(), next)?;
+                let mut tail = state.realize(Cx::value(), tail);
+                let value = if matches!(cx.cont, Cont::Declare(_, _)) { tail.value.take() } else { None };
+                out = state.append_outputs(out, tail, None);
+                out.value = value;
+                if let Some(first) = accumulated.take() {
+                    let value = out.value;
+                    out = state.append_outputs(first, out, value);
+                }
+                return Ok(state.complete(Cx::value(), Probed::Out(out)));
+            }
+        }
         let value = out.value;
         let out = match accumulated.take() {
-            Some(first) => state.statements.append(first, out, value),
+            Some(first) => state.append_outputs(first, out, value),
             None => out,
         };
         if let Some(next) = next {
@@ -132,7 +150,7 @@ mod tests {
         let body = source.seq_raw(head, tail);
         let root = source.let_(LetKind::Strict, id, value, body);
         let input = crate::bir::bridge::import_lambda(&source, root).unwrap();
-        let from_unit = lower(input, None, false, None, false).unwrap();
+        let from_unit = lower(input, None, false, None, false, true).unwrap();
         let input = crate::bir::bridge::import_lambda(&source, root).unwrap();
         let root = input.root;
         let mut state = State::new(input);

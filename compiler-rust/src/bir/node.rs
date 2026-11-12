@@ -350,6 +350,12 @@ impl Node {
     pub fn aux(self) -> u16 {
         self.aux
     }
+    /// O(1): retain the existing primitive operand-list handle without copying
+    /// its elements into a traversal resume record.
+    pub(crate) fn primitive_arguments(self) -> ListId {
+        assert_eq!(self.op, Op::Prim);
+        ListId(self.words[0])
+    }
     /// Original integer character decoration; not necessarily the integer value.
     pub fn js_char(self) -> Option<i32> {
         (self.op == Op::JNumber && self.flags.contains(NodeFlags::JS_CHAR_PRESENT))
@@ -362,6 +368,9 @@ impl Node {
     }
     pub(super) fn block_list(list: ListId) -> Self {
         Self { op: Op::SBlock, flags: NodeFlags::default(), aux: 0, words: [list.0, 0, 0] }
+    }
+    pub(super) fn explicit_block_list(list: ListId) -> Self {
+        Self { aux: 1, ..Self::block_list(list) }
     }
     pub(super) fn set_flags(&mut self, flags: NodeFlags) {
         self.flags = flags;
