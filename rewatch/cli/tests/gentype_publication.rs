@@ -14,7 +14,7 @@ fn gentype_declarations_are_available_to_dependents() {
     std::fs::write(root.join("src/Provider.res"), "@genType\ntype t = {value: int}\n").unwrap();
     std::fs::write(
         root.join("src/Consumer.res"),
-        "@genType\nlet read = (x: Provider.t) => x.value\n",
+        "@genType\nmodule Alias = Provider\n@genType\nlet read = (x: Alias.t) => x.value\n",
     )
     .unwrap();
 

@@ -1,1 +1,1 @@
-- Cover genType builds with dependent modules in debug-profile tests, and preserve the signature publication guards.
+- Avoid encoding a dependency's signatures when genType reads its retained raw signature during publication; cover debug builds and publication guards with regression tests.
