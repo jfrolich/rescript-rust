@@ -17,7 +17,7 @@
 //!   the result is a function of the tree alone. A rule pushes only the node
 //!   it was given or nodes it created below it, parent before child; an entry
 //!   is therefore never released before it is popped.
-//! - A **rule attempt** reads the node and a bounded number of levels below
+//! - A **normalising rule attempt** reads the node and a bounded number of levels below
 //!   it (`norm.rs` states the pattern of each row); it never walks a subtree,
 //!   with one documented exception (row N11).
 //! - An **edit** ([`Engine::promote`], [`Engine::put`]) costs the nodes it
@@ -26,6 +26,9 @@
 //! - A **round** is one sweep of the tree in a fixed order. A subtree whose
 //!   summary does not intersect the round's mask is not entered. The sweep
 //!   uses an explicit stack. Total cost: the nodes entered plus the rewrites.
+//!   Stateful drivers additionally state and count their candidate scans;
+//!   flatten caches beta suffixes once and scans candidates for legacy purity
+//!   and variable occurrences (see `bir/l/flatten.rs`).
 //! - A **summary** is a 16-bit set of opcode classes per node, a superset of
 //!   the classes in its subtree. It is set when the engine creates a node and
 //!   widened on the way back up a sweep; it is recomputed in one walk only

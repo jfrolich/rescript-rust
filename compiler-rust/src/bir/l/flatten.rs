@@ -50,6 +50,11 @@ fn beta_table(e: &Engine<'_>, root: NodeId) -> Vec<bool> {
     let mut out = Vec::new();
     let mut work = vec![(root, false)];
     while let Some((n, done)) = work.pop() {
+        if !done && !e.summary(n).intersects(OpMask::LET) {
+            out.resize(out.len().max(n.index() + 1), false);
+            out[n.index()] = e.bir().node(n).op() == Op::Apply;
+            continue;
+        }
         if !done {
             work.push((n, true));
             work.extend(e.bir().view(n).children().into_iter().map(|c| (c, false)));
@@ -332,7 +337,7 @@ enum Work {
 
 /// Null conversion arm, legacy lines 142-162; OCaml:126-141. Allocate the
 /// rename before entering its argument, and keep the shared counter order.
-fn null_binding(e: &mut Engine<'_>, n: NodeId) -> bool {
+fn null_binding(e: &mut Engine<'_>, n: NodeId, beta: &mut Vec<bool>) -> bool {
     let View::Let {
         var,
         value: Some(value),
@@ -380,6 +385,12 @@ fn null_binding(e: &mut Engine<'_>, n: NodeId) -> bool {
         1,
         weight,
     );
+    // Allocation reuses freed slots. Never interpret a new primitive's slot
+    // as the beta-residue decision of its previous occupant.
+    for created in [v, wrapped, inner] {
+        beta.resize(beta.len().max(created.index() + 1), false);
+        beta[created.index()] = false;
+    }
     e.put(
         n,
         View::Let {
@@ -470,13 +481,69 @@ fn fold(e: &mut Engine<'_>, root: NodeId, groups: Vec<Group>, mut result: NodeId
     e.fill(root, result);
 }
 
+/// aux's non-regrouping let arm, legacy:222-234; OCaml:96-266.
+fn aux_binding(work: &mut Vec<Work>, n: NodeId, value: NodeId, body: NodeId, revision: u64) {
+    work.push(Work::Finish(n, revision, true));
+    work.push(Work::Aux(value));
+    work.push(Work::Aux(body));
+}
+
+/// aux's regrouping let arm, legacy:235-239; OCaml:96-266.
+fn aux_regroup(work: &mut Vec<Work>, groups: &mut Vec<Vec<Group>>, n: NodeId) {
+    let index = groups.len();
+    groups.push(Vec::new());
+    work.push(Work::Fold(n, index));
+    work.push(Work::Flat(n, index));
+}
+
+/// aux's let-rec arm, legacy:240-249; OCaml:96-266.
+fn aux_recursive(e: &Engine<'_>, work: &mut Vec<Work>, n: NodeId, revision: u64) {
+    aux_shallow(e, work, n, revision);
+}
+
+/// aux's shallow_map arm, legacy:250; OCaml:96-266.
+fn aux_shallow(e: &Engine<'_>, work: &mut Vec<Work>, n: NodeId, revision: u64) {
+    work.push(Work::Finish(n, revision, false));
+    work.extend(e.bir().view(n).children().into_iter().rev().map(Work::Aux));
+}
+
+/// flatten's beta-residue arm, legacy:127-138; OCaml beta residue guard.
+fn flatten_residue(e: &mut Engine<'_>, work: &mut Vec<Work>, value: NodeId) {
+    fired(e, "beta-residue");
+    work.push(Work::Return(value));
+    work.push(Work::Aux(value));
+}
+
+/// flatten's ordinary let arm, legacy:139-190; OCaml:126-213.
+fn flatten_binding(work: &mut Vec<Work>, value: NodeId, index: usize) {
+    work.push(Work::Flat(value, index));
+}
+
+/// flatten's recursive arm, legacy:192-197; OCaml:96-266.
+fn flatten_recursive(work: &mut Vec<Work>, n: NodeId, values: &[NodeId], index: usize) {
+    work.push(Work::Rec(n, index));
+    work.extend(values.iter().rev().copied().map(Work::Aux));
+}
+
+/// flatten's sequence arm, legacy:198-210; lam_group.ml:36-39.
+fn flatten_sequence(work: &mut Vec<Work>, first: NodeId, second: NodeId, index: usize) {
+    work.push(Work::Sequence(second, index));
+    work.push(Work::Flat(first, index));
+}
+
+/// flatten's terminal arm, legacy:211; OCaml:96-266.
+fn flatten_terminal(work: &mut Vec<Work>, n: NodeId) {
+    work.push(Work::Return(n));
+    work.push(Work::Aux(n));
+}
+
 /// Stateful, nonrecursive translation of aux (legacy lines 219-255;
 /// OCaml:96-266). Ordinary lets visit body then value; flatten visits value
 /// then body while carrying groups; recursive values and shallow-map children
 /// retain their source order. No two whole-tree Pre/Post sweeps can reproduce
 /// both orders and the time at which a null conversion allocates its rename.
 fn run(e: &mut Engine<'_>, root: NodeId) -> Changed {
-    let beta = beta_table(e, root);
+    let mut beta = beta_table(e, root);
     let mut work = vec![Work::Aux(root)];
     let mut groups: Vec<Vec<Group>> = Vec::new();
     let mut result = root;
@@ -493,20 +560,13 @@ fn run(e: &mut Engine<'_>, root: NodeId) -> Changed {
                         body,
                         ..
                     } if !regroups(e, n, &beta) => {
-                        work.push(Work::Finish(n, revision, true));
-                        work.push(Work::Aux(value));
-                        work.push(Work::Aux(body));
+                        aux_binding(&mut work, n, value, body, revision);
                     }
                     View::Let { .. } => {
-                        let index = groups.len();
-                        groups.push(Vec::new());
-                        work.push(Work::Fold(n, index));
-                        work.push(Work::Flat(n, index));
+                        aux_regroup(&mut work, &mut groups, n);
                     }
-                    _ => {
-                        work.push(Work::Finish(n, revision, false));
-                        work.extend(e.bir().view(n).children().into_iter().rev().map(Work::Aux));
-                    }
+                    View::LetRec { .. } => aux_recursive(e, &mut work, n, revision),
+                    _ => aux_shallow(e, &mut work, n, revision),
                 }
             }
             Work::Finish(n, before, is_let) => {
@@ -532,32 +592,25 @@ fn run(e: &mut Engine<'_>, root: NodeId) -> Changed {
                         ..
                     } => {
                         let residue = beta.get(value.index()).copied().unwrap_or(false);
-                        if !residue && null_binding(e, n) {
+                        if !residue && null_binding(e, n, &mut beta) {
                             revision += 1;
                             work.push(Work::Flat(n, index));
                             continue;
                         }
                         work.push(Work::Binding(n, body, index, residue));
                         if residue {
-                            fired(e, "beta-residue");
-                            work.push(Work::Return(value));
-                            work.push(Work::Aux(value));
+                            flatten_residue(e, &mut work, value);
                         } else {
-                            work.push(Work::Flat(value, index));
+                            flatten_binding(&mut work, value, index);
                         }
                     }
                     View::LetRec { values, .. } => {
-                        work.push(Work::Rec(n, index));
-                        work.extend(values.iter().rev().copied().map(Work::Aux));
+                        flatten_recursive(&mut work, n, values, index);
                     }
                     View::Seq { first, second } => {
-                        work.push(Work::Sequence(second, index));
-                        work.push(Work::Flat(first, index));
+                        flatten_sequence(&mut work, first, second, index);
                     }
-                    _ => {
-                        work.push(Work::Return(n));
-                        work.push(Work::Aux(n));
-                    }
+                    _ => flatten_terminal(&mut work, n),
                 }
             }
             Work::Return(n) => {
@@ -618,6 +671,61 @@ fn run(e: &mut Engine<'_>, root: NodeId) -> Changed {
     }
 }
 
+/// The s-expression printer intentionally omits stamps. The round's
+/// diagnostic comparison additionally checks every identity, including
+/// imported binders, by name, stamp and flags in deterministic tree order.
+pub(crate) fn identities(
+    a: &crate::lambda::arena::LamArena,
+    root: crate::lambda::arena::Lam,
+) -> Vec<(crate::name::Name, i32, crate::ident::IdentFlags)> {
+    use crate::lambda::arena::Node as L;
+    let mut result = Vec::new();
+    let mut work = vec![root];
+    while let Some(n) = work.pop() {
+        let mut add =
+            |id: crate::ident::Ident| result.push((id.name_atom(), id.stamp(), id.flags()));
+        match a.node(n) {
+            L::Var(id)
+            | L::GlobalModule(id)
+            | L::Let { id, .. }
+            | L::TryWith { id, .. }
+            | L::For { id, .. }
+            | L::ForOf { id, .. }
+            | L::ForAwaitOf { id, .. }
+            | L::Assign { id, .. } => add(a.ident(id)),
+            L::Function { info, .. } => {
+                for &id in a.params(info) {
+                    add(id);
+                }
+            }
+            L::LetRec { ids, values, .. } => {
+                for &id in a.ident_run(ids, a.list_len(values)) {
+                    add(id);
+                }
+            }
+            L::StaticCatch { info, .. } => {
+                for &id in a.idents(a.catch_payload(info).params) {
+                    add(id);
+                }
+            }
+            L::Const(_)
+            | L::Apply { .. }
+            | L::Prim { .. }
+            | L::Switch { .. }
+            | L::StringSwitch { .. }
+            | L::StaticRaise { .. }
+            | L::TryFinally { .. }
+            | L::If { .. }
+            | L::Sequence(..)
+            | L::While(..)
+            | L::Break
+            | L::Continue => {}
+        }
+        work.extend(crate::bir::bridge::children(a, a.node(n)).into_iter().rev());
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,6 +752,10 @@ mod tests {
         }
         imported.arena.validate(Some(imported.root), false).unwrap();
         let actual = export_lambda(&imported).unwrap();
+        assert_eq!(
+            identities(&actual.arena, actual.root),
+            identities(&a, expected)
+        );
         let mut before = Vec::new();
         let mut after = Vec::new();
         crate::lambda::sexp_lambda::print_lambda(&a.export(expected), &mut before).unwrap();
