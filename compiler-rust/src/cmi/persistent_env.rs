@@ -1918,11 +1918,11 @@ impl PersistentEnv {
             ctx.record_store_effect(crate::types::context::StoreEffect::PreparePers(name.into()));
             let ps = ctx.suspend_store_build(|| self.find_pers_struct(name, ctx));
             // A unit type checked from source belongs to this compilation,
-            // not to the worker store: what is being built from it must not
+            // not to the build's world: what is being built from it must not
             // be shared with the next compilation on this thread.
             if ps
                 .as_ref()
-                .is_some_and(|ps| !ctx.thread_store().owns_signature(&ps.ps_sig))
+                .is_some_and(|ps| !ctx.world().is_unit_signature(&ps.ps_sig))
             {
                 ctx.poison_store_build_for("find_pers_struct:local-unit");
             }
@@ -3283,6 +3283,14 @@ mod cmj_export_tests {
             .read_raw_sig("Foo", &type_ctx)
             .expect("expected raw signature from in-memory source load");
         assert!(!raw_sig.is_empty());
+
+        // Even a cache hit on a source-loaded unit must keep a component
+        // build private: the signature is not owned by the build's world.
+        assert!(!type_ctx.world().is_unit_signature(&loaded.ps_sig));
+        let (cached, piece) =
+            type_ctx.build_in_store(|| env.find_pers_struct("Foo", &type_ctx));
+        assert!(Arc::ptr_eq(&loaded, &cached.expect("cached source unit")));
+        assert!(piece.is_none(), "source-loaded units must not be shared");
     }
 }
 
