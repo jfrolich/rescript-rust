@@ -195,10 +195,19 @@ pub struct PortablePersStruct {
     summary: std::sync::OnceLock<Arc<super::item_deps::SignatureSummary>>,
     /// Publication hashes from the shared graph; absent on stored/fallback units.
     shared_item_hashes: Option<Vec<(super::item_deps::Kind, crate::name::Name, u64)>>,
-    decoded: std::sync::Mutex<Option<(PublishedSignature, Option<PortableRawSignature>)>>,
+    decoded: std::sync::Mutex<Option<(PublishedSignature, RawSignature)>>,
     encoded: std::sync::OnceLock<EncodedSignatures>,
     published_generation: Option<u64>,
     publication_counter_id: usize,
+}
+
+/// Absence of a raw signature is different from storage having moved it to
+/// `encoded`. Readers can observe the latter after waiting for `decoded`, even
+/// if their earlier `encoded.get()` saw an empty slot.
+#[derive(Debug)]
+enum RawSignature {
+    Decoded(Option<PortableRawSignature>),
+    Encoded,
 }
 
 #[derive(Debug)]
@@ -405,7 +414,7 @@ impl PortablePersStruct {
             summary: Default::default(),
             shared_item_hashes: None,
             encoded: Default::default(),
-            decoded: std::sync::Mutex::new(Some((PublishedSignature::Portable(Box::new(sig)), raw))),
+            decoded: std::sync::Mutex::new(Some((PublishedSignature::Portable(Box::new(sig)), RawSignature::Decoded(raw)))),
         }
     }
 
@@ -434,14 +443,17 @@ impl PortablePersStruct {
                     PublishedSignature::Portable(sig) => crate::binser::Encoded::encode(sig.as_ref()),
                     PublishedSignature::Shared(graph) => graph.encode(),
                 },
-                raw: raw.as_ref().map(crate::binser::Encoded::encode),
+                raw: match raw {
+                    RawSignature::Decoded(raw) => raw.as_ref().map(crate::binser::Encoded::encode),
+                    RawSignature::Encoded => unreachable!("raw signature encoded before its publication"),
+                },
             };
             if matches!(sig, PublishedSignature::Portable(_)) {
                 *decoded = None;
             } else if let Some((_, raw)) = decoded.as_mut() {
                 // Keep the frozen graph for a later importer, not a duplicate
                 // raw signature after its bytes have been produced.
-                *raw = None;
+                *raw = RawSignature::Encoded;
             }
             encoded
         })
@@ -489,7 +501,7 @@ impl PortablePersStruct {
             #[cfg(test)]
             self.run_raw_read_storage(false);
             let decoded = self.decoded.lock().unwrap();
-            if let Some((_, raw)) = decoded.as_ref() {
+            if let Some((_, RawSignature::Decoded(raw))) = decoded.as_ref() {
                 // GenType may read a dependency's raw signature while publishing
                 // the current unit. Do not encode either signature just to read
                 // this graph; byte production belongs to the storage reader.
@@ -510,8 +522,8 @@ impl PortablePersStruct {
         self.run_raw_read_storage(true);
         let decoded = self.decoded.lock().unwrap();
         match decoded.as_ref() {
-            Some((_, raw)) => raw.is_some(),
-            None => {
+            Some((_, RawSignature::Decoded(raw))) => raw.is_some(),
+            Some((_, RawSignature::Encoded)) | None => {
                 drop(decoded);
                 self.encoded().raw.is_some()
             }
@@ -1890,7 +1902,7 @@ pub(crate) fn publish_signature(
         ps_name: ps.ps_name.clone(), ps_filename: ps.ps_filename.clone(),
         ps_deprecated: ps.ps_deprecated.clone(), ps_crcs: ps.ps_crcs.clone(),
         shareable: true, fingerprint, summary: Default::default(), shared_item_hashes: Some(hashes),
-        decoded: std::sync::Mutex::new(Some((PublishedSignature::Shared(graph), raw))),
+        decoded: std::sync::Mutex::new(Some((PublishedSignature::Shared(graph), RawSignature::Decoded(raw)))),
         encoded: Default::default(), published_generation: Some(crate::types::thread_store::build_generation()),
         publication_counter_id: crate::perf_counters::signature_publication_id(),
     });
@@ -2956,12 +2968,12 @@ mod identity_tests {
             let mut decoded = portable.decoded.lock().unwrap();
             let (source, raw) = decoded.as_mut().unwrap();
             let sig = source.portable();
-            *raw = Some(PortableRawSignature {
+            *raw = RawSignature::Decoded(Some(PortableRawSignature {
                 raw_ps_sig: sig.ps_sig.clone(),
                 cmi_longident_names: sig.cmi_longident_names.clone(),
                 raw_type_graph: sig.type_graph.clone(),
                 raw_locations: sig.locations.clone(),
-            });
+            }));
         }
         assert!(portable.has_raw_signature());
         assert!(portable.encoded.get().is_none());
