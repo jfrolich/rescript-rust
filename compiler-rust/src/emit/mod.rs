@@ -119,6 +119,10 @@ mod oracle_tests {
     fn oracle(source: &str, commonjs: bool) {
         let stats = Arc::new(PrinterStats::default());
         let mut options = CompilerOptions {
+            include_paths: vec![
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../packages/@rescript/runtime/lib/rescript"),
+            ],
             js_printer: PrinterMode::Legacy,
             output_module_format: Some(if commonjs {
                 crate::js_ir::ModuleFormat::CommonJs
@@ -142,6 +146,23 @@ mod oracle_tests {
             actual,
             "fixed point: {source}"
         );
+    }
+
+    #[test]
+    fn remaining_expressions_source_oracle() {
+        for source in [
+            "let f = @this self => self + 1",
+            "let f = @this (self: int) => 1",
+            "let f = x => y => z => x + y + z",
+            "let f = x => async y => x + y",
+            "type rest = {b: int}; type t = {a: int, b: int}; let f = (r: t) => {let {a, ...rest as other} = r; (a, other)}",
+            "let f = x => Some(x)",
+            "let f = x => x ++ (x ++ x)",
+        ] {
+            for commonjs in [false, true] {
+                oracle(source, commonjs);
+            }
+        }
     }
 
     #[test]

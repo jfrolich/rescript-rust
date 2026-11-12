@@ -20,7 +20,7 @@ pub(super) fn emit(
     resolver: &ModulePathResolver,
     directives: &[String],
     debug: bool,
-    _jsx_preserve: bool,
+    jsx_preserve: bool,
     header: bool,
 ) -> Result<(String, Option<String>), Unsupported> {
     let p = &program.program;
@@ -45,6 +45,7 @@ pub(super) fn emit(
     let allocator = Allocator::default();
     let mut build = Build::new(&allocator, &p.arena, &names);
     build.debug = debug;
+    build.jsx_preserve = jsx_preserve;
     let b = &build.b;
     let mut body = b.vec();
     let commonjs = resolver.module_format() == ModuleFormat::CommonJs;

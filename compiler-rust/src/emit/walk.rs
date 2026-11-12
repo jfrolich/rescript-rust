@@ -62,6 +62,7 @@ pub(super) enum FunctionForm {
     Declaration,
     ArrowExpression(Expr),
     ArrowBlock,
+    Method,
     ArrowEmpty,
 }
 pub(super) fn function_form(a: &JsArena, f: FunId, top: bool) -> Result<FunctionForm, Unsupported> {
@@ -69,8 +70,8 @@ pub(super) fn function_form(a: &JsArena, f: FunId, top: bool) -> Result<Function
         return Ok(FunctionForm::Eta(target));
     }
     let f = a.fun(f);
-    if f.is_method {
-        return Err(Unsupported("method function"));
+    if f.is_method && a.ident_slice(f.params).is_empty() {
+        return Err(Unsupported("method without this parameter"));
     }
     if f.directive.is_some() {
         return Err(Unsupported("function directive"));
@@ -78,16 +79,13 @@ pub(super) fn function_form(a: &JsArena, f: FunId, top: bool) -> Result<Function
     if top {
         return Ok(FunctionForm::Declaration);
     }
+    if f.is_method {
+        return Ok(FunctionForm::Method);
+    }
     if let [stmt] = a.stmts(f.body) {
         match a.sk(*stmt) {
             StmtKind::Return(e) if undefined(a, e) => return Ok(FunctionForm::ArrowEmpty),
             StmtKind::Return(e) | StmtKind::Exp(e) => {
-                // Newly reachable with scoped naming: the reference reformat
-                // retains parentheses around an arrow returned by an arrow.
-                // Leave that separate token-shape slice to its own change.
-                if matches!(a.ek(e), ExprKind::Fun(_)) {
-                    return Err(Unsupported("nested arrow expression body"));
-                }
                 return Ok(FunctionForm::ArrowExpression(e));
             }
             _ => {}
@@ -157,13 +155,41 @@ pub(super) fn negation_form(a: &JsArena, op: BinOp, left: Expr) -> bool {
         })
 }
 
-// Nullish rewriting relies on structural equality. Until that comparison is
-// available, don't emit a potentially different `||` tree for this shape.
-pub(super) fn possible_nullish(a: &JsArena, op: BinOp, l: Expr, r: Expr) -> bool {
-    op == BinOp::Or
-        && [l, r]
-            .iter()
-            .all(|e| matches!(a.ek(*e), ExprKind::Bin(BinOp::EqEqEq, _, _)))
+/// Legacy rewrites x === null || x === undefined to x == null when the
+/// rendered targets match. For identical variables/qualified paths this can
+/// be proven without rendering or allocating; other target comparisons remain
+/// a specific fallback. Only the retained left target is met by naming.
+pub(super) fn nullish_target(
+    a: &JsArena,
+    op: BinOp,
+    l: Expr,
+    r: Expr,
+) -> Result<Option<Expr>, Unsupported> {
+    if op != BinOp::Or {
+        return Ok(None);
+    }
+    let (ExprKind::Bin(BinOp::EqEqEq, x, lx), ExprKind::Bin(BinOp::EqEqEq, y, ly)) =
+        (a.ek(l), a.ek(r))
+    else {
+        return Ok(None);
+    };
+    if !matches!(
+        (a.ek(lx), a.ek(ly)),
+        (ExprKind::Null, ExprKind::Undefined { .. }) | (ExprKind::Undefined { .. }, ExprKind::Null)
+    ) {
+        return Ok(None);
+    }
+    let same = x == y
+        || match (a.ek(x), a.ek(y)) {
+            (ExprKind::Var(x), ExprKind::Var(y)) => a.ident(x).same(&a.ident(y)),
+            (ExprKind::Qualified(x), ExprKind::Qualified(y)) => a.qual(x) == a.qual(y),
+            _ => false,
+        };
+    if same {
+        Ok(Some(x))
+    } else {
+        Err(Unsupported("nullish comparison target equality"))
+    }
 }
 pub(super) fn member_form(name: &str) -> (&str, bool) {
     let name = name
@@ -397,9 +423,10 @@ pub(super) fn string_children(a: &JsArena, e: Expr) -> Option<(Expr, Expr)> {
 pub(super) fn string_leaves(
     a: &JsArena,
     root: Expr,
+    pending: &mut Vec<Expr>,
     mut visit: impl FnMut(Expr) -> Result<(), Unsupported>,
 ) -> Result<(), Unsupported> {
-    let mut pending = vec![root];
+    pending.push(root);
     while let Some(e) = pending.pop() {
         if let Some((l, r)) = string_children(a, e) {
             pending.push(r);
@@ -409,4 +436,47 @@ pub(super) fn string_leaves(
         }
     }
     Ok(())
+}
+
+/// Preserve-mode JSX needs a separate AST shape; runtime-mode JSX prints a
+/// normal call and never drops its tag, props or key, even when they are unit.
+pub(super) fn jsx_runtime(
+    a: &JsArena,
+    id: crate::js_ir::arena::JsxId,
+    preserve: bool,
+) -> Result<crate::js_ir::arena::JsxInfo, Unsupported> {
+    if preserve {
+        return Err(Unsupported("JSX preserve mode"));
+    }
+    let jsx = a.jsx(id);
+    if a.props(jsx.props)
+        .iter()
+        .any(|(key, _)| !matches!(key, crate::js_ir::arena::PropName::Lit(_)))
+    {
+        return Err(Unsupported("symbol JSX key"));
+    }
+    Ok(jsx)
+}
+
+/// Destructuring declarations meet excluded-field binders before the rest
+/// binder and source. Expression-position rest uses only synthetic binders.
+pub(super) fn rest_declaration(
+    a: &JsArena,
+    d: &VarDecl,
+) -> Option<(crate::js_ir::arena::RestId, Expr)> {
+    match a.ek(d.value?) {
+        ExprKind::RecordRest(fields, source) => Some((fields, source)),
+        _ => None,
+    }
+}
+
+/// Canonical integer property text is emitted as a numeric index by legacy.
+/// Keep the newly exposed member shape separate from record-rest support.
+pub(super) fn static_member_supported(name: &str) -> Result<(), Unsupported> {
+    let (name, _) = member_form(name);
+    if name.parse::<i64>().is_ok_and(|n| n.to_string() == name) {
+        Err(Unsupported("numeric static member"))
+    } else {
+        Ok(())
+    }
 }
