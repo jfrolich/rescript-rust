@@ -1145,6 +1145,40 @@ instructions each, plus 48,655 keys compared while written), `as_matrix`
 took the keys to 0.5% of the build (measured, by function); the row pool
 and the lazy contexts remain. Estimated result of all three: 1.2%.
 
+The profile after S5.3 (measured; application 75.7 G instructions, one
+worker): match compilation is 3.97% of the build inclusive, 60,186 matches,
+279,754 calls of `compile_match`, 164,457 splits of 233,252 rows and 539,201
+pattern slots (1.4 rows of 2.3 columns on average; 75% of the splits have
+one row, 80% one column). The largest items:
+
+| Item | Share of build | What it is |
+| --- | ---: | --- |
+| `as_matrix` | 0.65% | 171,972 matrices, 1.64 million row comparisons, 90% of them in 242 matrices of more than 16 rows; 7,603 matrices (4.4%) were ever read |
+| action keys | 0.47% | S5.3's remainder |
+| `constructors_of_type_path` under `mk_failaction_pos` | 0.45% | 9,287 calls that rebuild every constructor description of the type to list the missing ones (43,802 patterns); the cost is in `types/env_lazy.rs` (`reroot_constructor_descriptions` 0.31%), outside the match compiler |
+| row and case-list copies | about 0.4% | 1.04 million case lists dropped, 424,136 grown one push at a time, a vector per row |
+| contexts | about 0.3% | 223,011 context lists of 1.16 million pattern slots; 86.7% of the matches (72% of the lists) never read one: `filter_ctx` is called 107,326 times, 106,642 of them on a single all-wildcard context, and never returned an empty list |
+| pattern overlay (`normalize_pat`, `store_overlay`) | about 0.3% | 368,713 synthesized patterns, each entered into an address map |
+
+S5.5, first part (done): **the matrix of a split group is computed where it
+is read.** OCaml's `pm_half_compiled_info` carries `matrix`, built by every
+split function with `as_matrix`. It is a function of the half-compiled
+matching (`rebuild_matrix`) and is read in three places: when the matching
+is consed onto a default environment (it is then not the first group of its
+split), by `rebuild_default`, and when a matching with or-patterns is
+flattened. `as_matrix` only reads patterns, so `PmHalfCompiledInfo` has no
+`matrix` and those readers call `rebuild_matrix`; a matching with
+or-patterns keeps the rows of its matrix instead of the matrix. A split
+into one group, 95.6% of them, compares no rows. Measured: -0.75% of the
+application build, -1.00% of `tests/tests`.
+
+With that, what is left of the pairwise `le_pats` is in matrices that are
+read, almost all of one row (7,843 rows in 7,603 matrices), where
+`get_mins` makes no comparison. Deciding the minima of a larger matrix
+without comparing every pair (rows whose first columns are different
+constructors or constants cannot be below one another) has a ceiling under
+0.03% of the build and is not done.
+
 ### D.2 Sharing the decision tree with exhaustiveness checking
 
 `types/parmatch.rs` decides exhaustiveness and unused clauses on the same
@@ -1769,7 +1803,7 @@ model with this document as its specification.
 | S4.9 | Default `New` for level L; delete `lam_pass_*.rs`, `lam_beta_reduce.rs`, `lam_compile_main.rs` and the analyses only they use | | fallback zero; instruction count falls by about 5.4% | −8,000 | S4.8, S3.10 | yes |
 | S5.1 | Profile of conversion and match compilation on the application; a builder trait implemented by `RawArena`, with the converter and match compiler generic over it | `raw_lambda/*` | no output change, no instruction increase | 1,500 | none | yes |
 | S5.2 | `Bir` builder implementing the trait; `lower.rs`'s rewriting inside the constructors | `bir/build.rs` | `Check` from the typed tree | 2,500 | S5.1, S4.9 | yes |
-| S5.3 to S5.5 | Match compiler: structural-hash action sharing (done, D.1); row pool; lazy contexts and the single-column fast path | `raw_lambda/matching.rs` | generated JavaScript byte-identical on the suites and the application (these run on today's pipeline, before `Check` covers conversion); each shows its saving | 800 to 1,500 each | S5.1 | no: each needs the profile and an argument that the tree is unchanged |
+| S5.3 to S5.5 | Match compiler: structural-hash action sharing (done, D.1); the matrix of a split group computed where it is read (done, D.1: -0.75% of the application build); row pool; lazy contexts and the single-column fast path | `raw_lambda/matching.rs` | generated JavaScript byte-identical on the suites and the application (these run on today's pipeline, before `Check` covers conversion); each shows its saving | 800 to 1,500 each | S5.1 | no: each needs the profile and an argument that the tree is unchanged |
 | S5.6 | Default `New` from the typed tree; delete `RawArena`, `lower.rs`, `LamArena`, the bridges. `key_encode.rs` stays: the match compiler's action keys use it for `Bir` as well (D.1) | | fallback zero; instruction count falls by about 5.1% | −15,000 | S5.5 | yes |
 | S6 | Summaries from facts; fragments for closed lambdas; stored format | `bir/summary.rs`, `cmi/persistent_env.rs`, `lambda/lam_loc.rs` | `Check` on summaries; a build with cross-module inlining on | 1,200 | S4.9 | yes, section F is the spec |
 | S7 | For modules whose typed tree nobody reads, the type checker calls the `Bir` builder directly | type checker | own design | | S5.6 and the type checker rewrite | no |
