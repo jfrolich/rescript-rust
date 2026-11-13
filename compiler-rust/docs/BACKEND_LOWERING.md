@@ -2675,7 +2675,7 @@ The statement stack and node-list pool must be used end to end.
 | `exit.rs:438` `exit_dispatch` | `let mut actions = Vec::with_capacity(plan.len as usize);` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
 | `exit.rs:509` `exit_children` | `pub(super) fn exit_children(&self, cx: Cx, exit: &Exit, into: &mut Vec<(Cx, NodeId)>) {` | per construct | borrows the retained source traversal queue; owns no buffer | retained |
 | `expr.rs:42` `expression_children` | `into: &mut Vec<(Cx, NodeId)>,` | per visited node | reusable scratch buffer; clear, do not free | pending |
-| `expr.rs:278` `finish_expression` | `let attr = attr.clone();` | per visited node | borrow payload or retain typed pool handle | pending |
+| `expr.rs:278` `finish_expression` | `let attr = attr.clone();` | per visited node | Replacement headers share the source immutable attribute handle; directive strings are not cloned. | removed |
 | `expr.rs:308` `drop_pure_effect` | `let mut effects = Vec::new();` | per construct/walk | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `external.rs:8` `module` | `use smallvec::SmallVec;` | declaration | removed SmallVec import | removed |
 | `external.rs:64` `compile_js_object_create` | `args: SmallVec<[NodeId; 4]>,` | per construct | list-pool handle; no transient argument collection | removed |
@@ -3072,6 +3072,14 @@ recorded capacities, 10,002 source visits and 40,002 primitive steps. The separa
 10,000-rejected-candidate test also allocates zero times and then successfully
 recognizes a valid candidate using the same cleared storage. The record resume
 remains 12 bytes; no output or traversal ownership moves into the resume.
+
+Unit-argument function lowering now creates a fresh zero-parameter header while
+sharing the immutable source attributes. The whole-Lambda fixture containing
+10,000 directive-bearing functions performs 10,000 actual header replacements
+without adding an attribute entry; its warmed probe/realize/release pass allocates
+zero times with unchanged recorded capacities and 20,001 source visits. Function
+headers remain 20 bytes. A small directive fixture compares all continuations
+against legacy output.
 
 ### 7.5.1 Concurrent loop, label and recursive-value additions
 

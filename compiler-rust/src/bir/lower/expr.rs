@@ -280,9 +280,7 @@ impl State {
                     .then_some(self.arena.function(header).loc);
                 let attr = self.arena.function_attributes(header);
                 let header = if attr.one_unit_arg {
-                    let attr = attr.clone();
-                    let loc = self.arena.function(header).loc;
-                    self.arena.function_header(VarSpan::default(), attr, loc)
+                    self.arena.function_header_from(header, VarSpan::default())
                 } else {
                     header
                 };
@@ -316,5 +314,72 @@ impl State {
             self.statements.push(statement);
         }
         self.scratch = effects;
+    }
+}
+
+#[cfg(test)]
+mod allocation_tests {
+    use super::*;
+    use crate::lambda::{FunctionAttribute, LamLoc, arena::LamArena, lam_constant::Constant, lam_primitive::Primitive};
+
+    #[test]
+    fn unit_argument_directive_matches_legacy() {
+        let mut a = LamArena::new();
+        let param = Ident::new("unit", 1, crate::ident::IdentFlags::NONE);
+        let body = a.const_(Constant::Int { i: 42, comment: None });
+        let root = a.function_(1, &[param], body, FunctionAttribute {
+            one_unit_arg: true, directive: Some("use server".into()), ..Default::default()
+        }, LamLoc::NONE);
+        oracle_tests::compare(a, root);
+    }
+
+    #[test]
+    fn ten_thousand_unit_argument_functions_share_directives_without_allocations() {
+        let mut a = LamArena::new();
+        let functions: Vec<_> = (0..10_000).map(|i| {
+            let param = Ident::new("unit", i + 1, crate::ident::IdentFlags::NONE);
+            let body = a.const_(Constant::Int { i, comment: None });
+            a.function_(1, &[param], body, FunctionAttribute {
+                one_unit_arg: true, directive: Some("use server".into()), ..Default::default()
+            }, LamLoc::NONE)
+        }).collect();
+        let root = a.prim_raw(Primitive::Pmakearray, &functions, LamLoc::NONE);
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let run = |s: &mut State| {
+            let out = s.probe(Cx::returning(), root).unwrap();
+            let out = s.realize(Cx::returning(), out);
+            for node in s.statements.statements(out.stmts) { s.arena.release(node); }
+            if let Some(value) = out.value { s.arena.release(value); }
+            s.statements.kill(out.stmts);
+        };
+        let lists = state.arena.lists.storage_shape().0;
+        let functions = state.arena.pools.funcs.len();
+        let attributes = state.arena.pools.attrs.len();
+        run(&mut state);
+        assert_eq!(state.arena.pools.attrs.len(), attributes);
+        assert_eq!(state.arena.pools.funcs.len() - functions, 10_000);
+        state.arena.lists.reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
+        state.arena.pools.funcs.reserve(10_000);
+        state.arena.func_owners.reserve(10_000);
+        state.free.reserve_repeat();
+        let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
+            s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1, s.arena.pools.funcs.capacity(),
+            s.arena.func_owners.capacity(), s.arena.pools.attrs.capacity(), s.traversal.work.capacity(),
+            s.traversal.values.capacity(), s.traversal.children.capacity()];
+        let before = capacities(&state);
+        let free_before = state.free.capacities();
+        let statements_before = state.statements.capacities();
+        let visits = state.source_steps;
+        let allocations = allocation_counter::measure(|| run(&mut state));
+        println!("unit-function headers: {allocations:?}, visits={}", state.source_steps - visits);
+        assert_eq!(allocations.count_total, 0);
+        assert_eq!(state.arena.pools.attrs.len(), attributes);
+        assert_eq!(capacities(&state), before);
+        assert_eq!(state.free.capacities(), free_before);
+        assert_eq!(state.statements.capacities(), statements_before);
+        assert_eq!(state.source_steps - visits, 20_001);
+        assert_eq!(std::mem::size_of::<crate::bir::FuncHeader>(), 20);
     }
 }

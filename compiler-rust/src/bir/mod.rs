@@ -361,6 +361,14 @@ impl Bir {
         });
         id
     }
+    /// Allocate a fresh ordinary header while sharing immutable attributes.
+    pub(crate) fn function_header_from(&mut self, source: FuncId, params: VarSpan) -> FuncId {
+        let old = *self.function(source);
+        let id = FuncId(index(self.pools.funcs.len()));
+        self.func_owners.push(None);
+        self.pools.funcs.push(FuncHeader { params, attr: old.attr, loc: old.loc, flags: 0 });
+        id
+    }
     /// Allocate a JavaScript method header, which preserves the `this` binding.
     pub fn method_header(
         &mut self,
