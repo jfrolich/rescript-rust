@@ -2,6 +2,9 @@
 pub mod norm;
 pub mod plain;
 mod logic;
+pub(crate) mod flatten;
+#[cfg(test)]
+mod flatten_tests;
 pub mod facts;
 pub mod equal;
 
