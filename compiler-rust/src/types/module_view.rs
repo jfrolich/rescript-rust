@@ -686,6 +686,7 @@ fn expand_modtype_name(
 /// proportion to the item it visits (one copy of a value's type, one
 /// description per constructor and label); the component substitution is
 /// built at most three times, each one pass.
+#[allow(clippy::too_many_arguments)]
 fn describe_tables(
     access_path: Path,
     item_root: Path,
