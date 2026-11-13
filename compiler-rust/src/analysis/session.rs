@@ -41,6 +41,16 @@ pub struct SourcePaths {
     pub interface: Option<PathBuf>,
 }
 
+/// A package whose modules `reanalyze` reads.
+#[derive(Debug, Clone)]
+pub struct LocalPackage {
+    /// The package's build directory, where the OCaml compiler writes its
+    /// `.cmt` files.
+    pub build_root: String,
+    /// The package's modules.
+    pub modules: Vec<String>,
+}
+
 /// The project a command runs in: its modules, including those of
 /// dependencies and the runtime, and on-demand type-checking.
 pub trait Project {
@@ -62,6 +72,16 @@ pub trait Project {
     /// Type-check a module's interface or implementation from its current
     /// source.
     fn typecheck(&self, module_name: &str, interface: bool) -> Option<TypedSource>;
+    /// The packages `reanalyze` reads: the project's own and the local
+    /// packages it depends on, in the order of their build directories.
+    fn local_packages(&self) -> Vec<LocalPackage> {
+        Vec::new()
+    }
+    /// Parse a module's interface or implementation with locations, as
+    /// [`Project::typecheck`] parses it.
+    fn parse_located(&self, module_name: &str, interface: bool) -> Option<Arc<dyn ParsedSource>> {
+        self.typecheck(module_name, interface).map(|source| source.parsed)
+    }
 }
 
 /// A loaded module: OCaml's `full` (a `File.t` and its `extra`).

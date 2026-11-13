@@ -10,7 +10,7 @@ use super::build_types::{BuildCommandState, SourceType, StoredAst, StoredSignatu
 use super::{compile, packages, parse};
 use crate::{config, helpers};
 use anyhow::{Result, anyhow};
-use rescript_compiler::analysis::session::{Project, SourcePaths, TypedSource};
+use rescript_compiler::analysis::session::{LocalPackage, Project, SourcePaths, TypedSource};
 use rescript_compiler::cmi::persistent_env::ModuleRegistry;
 use rescript_compiler::parse_arena::ParseArena;
 use std::collections::BTreeMap;
@@ -366,6 +366,78 @@ impl Project for WatchProject<'_> {
         compile::namespace_aliases(package).map(|(_, aliases)| aliases)
     }
 
+    fn local_packages(&self) -> Vec<LocalPackage> {
+        let root = self.build_state.packages.values().find(|package| package.is_root);
+        let mut packages: Vec<LocalPackage> = self
+            .build_state
+            .packages
+            .values()
+            .filter(|package| package.is_local_dep)
+            .map(|package| {
+                let mut modules: Vec<String> = self
+                    .build_state
+                    .modules
+                    .iter()
+                    .filter(|(_, module)| {
+                        module.package_name == package.name
+                            && matches!(module.source_type, SourceType::SourceFile(_))
+                    })
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                modules.sort();
+                LocalPackage {
+                    build_root: package.get_build_path().to_string_lossy().into_owned(),
+                    modules,
+                }
+            })
+            .collect();
+        // The order of the build directories relative to the project root.
+        let relative = |package: &LocalPackage| {
+            let path = Path::new(&package.build_root);
+            root.and_then(|root| path.strip_prefix(&root.path).ok())
+                .unwrap_or(path)
+                .to_string_lossy()
+                .into_owned()
+        };
+        packages.sort_by_key(relative);
+        packages
+    }
+
+    fn parse_located(
+        &self,
+        module_name: &str,
+        interface: bool,
+    ) -> Option<Arc<dyn rescript_compiler::analysis::session::ParsedSource>> {
+        if let Some(source) = self.project_source(module_name) {
+            let relative = if interface { source.interface? } else { source.implementation };
+            return match parse::parse_for_tooling(source.package, relative, self.build_state).ok()? {
+                StoredAst::Structure(ast) => Some(ast),
+                StoredAst::Signature(ast) => Some(ast),
+            };
+        }
+        let runtime = self.runtime.as_ref()?;
+        let implementation = runtime.modules.get(module_name)?;
+        let options = compile::runtime_compiler_options(
+            &runtime.root,
+            &runtime.path,
+            module_name,
+            implementation,
+            &runtime.config,
+        );
+        let path = if interface {
+            Runtime::interface(implementation)?
+        } else {
+            implementation.clone()
+        };
+        let source = compile::read_source_latin1(&path).ok()?;
+        let arena = if interface {
+            compile::parse_runtime_signature(&path, &source, options.experimental_let_unwrap).ok()?.0
+        } else {
+            compile::parse_runtime_structure(&path, &source, options.experimental_let_unwrap).ok()?.0
+        };
+        Some(Arc::new(RuntimeParsed(arena)))
+    }
+
     fn typecheck(&self, module_name: &str, interface: bool) -> Option<TypedSource> {
         let result = match self.project_source(module_name) {
             Some(source) => self.typecheck_project_module(&source, interface),
@@ -403,9 +475,23 @@ fn on_tooling_thread(command: impl FnOnce() -> Result<Vec<u8>, String> + Send) -
 /// Run an editor tooling command (the arguments of `rescript-editor-analysis`,
 /// relative paths resolved against `cwd`) and return what it prints.
 pub fn run_command(build_state: &BuildCommandState, cwd: PathBuf, args: Vec<String>) -> Result<Vec<u8>> {
+    run_command_for_terminal(build_state, cwd, args, false)
+}
+
+/// [`run_command`], saying whether what the command prints goes to a
+/// terminal.
+fn run_command_for_terminal(
+    build_state: &BuildCommandState,
+    cwd: PathBuf,
+    args: Vec<String>,
+    color: bool,
+) -> Result<Vec<u8>> {
     on_tooling_thread(|| {
         let project = WatchProject::new(build_state, &cwd, &args);
-        rescript_compiler::analysis::run(&rescript_compiler::analysis::Request { cwd, args }, &project)
+        rescript_compiler::analysis::run(
+            &rescript_compiler::analysis::Request { cwd, args, color },
+            &project,
+        )
     })
 }
 

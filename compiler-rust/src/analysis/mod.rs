@@ -15,6 +15,7 @@ pub mod json;
 pub mod process_attributes;
 pub mod process_cmt;
 pub mod process_extra;
+pub mod reanalyze;
 pub mod references;
 pub mod resolve_path;
 pub mod session;
@@ -118,6 +119,8 @@ pub struct Request {
     /// The command line after the program name, as `rescript-editor-analysis`
     /// receives it: the command name, then its arguments.
     pub args: Vec<String>,
+    /// Whether what the command prints goes to a terminal.
+    pub color: bool,
 }
 
 /// Collects what a command prints (`print_string`/`print_endline`).
@@ -311,6 +314,11 @@ pub fn run(request: &Request, project: &dyn session::Project) -> Result<Vec<u8>,
             cli.references(&mut out, path, parse_pos(line, col)?, false)
         }
         ["test", path] => test(&mut out, &mut cli, path)?,
+        // `rescript-tools reanalyze` (tools/bin/main.ml).
+        ["reanalyze", ..] => {
+            let report = reanalyze::run(project, &request.cwd, &request.args[1..], request.color)?;
+            out.print(&report);
+        }
         [command, ..] => {
             return Err(format!(
                 "`{command}` is not available inside the watcher yet"
