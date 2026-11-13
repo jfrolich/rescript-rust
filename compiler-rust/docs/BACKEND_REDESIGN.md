@@ -1,7 +1,8 @@
 # Backend redesign: one arena IR, printed by oxc
 
-Status: design, not implemented. This document is the specification the staged
-pull requests in section H are built from.
+Status: design, implemented in part and not on the default path. This
+document is the specification the staged pull requests in section H are
+built from; [STATUS.md](STATUS.md) has the state of each stage.
 
 Scope: everything between the typed tree and the JavaScript file in
 `compiler-rust/`: raw Lambda conversion and match compilation

@@ -1,7 +1,8 @@
 # Three trees plus the type graph
 
-Status: design, not implemented. No production code changes with this
-document. It answers six questions from the code and one profile, states how
+Status: design. No production code changes with this
+document. T1, T2 and T7 have been implemented since ([STATUS.md](STATUS.md)).
+It answers six questions from the code and one profile, states how
 many intermediate representations a batch build needs, and re-cuts the work
 that is in flight.
 
@@ -20,8 +21,8 @@ Conventions.
 - Related documents: [FRONTEND_REWRITES.md](FRONTEND_REWRITES.md),
   [CHECKER_REDESIGN.md](CHECKER_REDESIGN.md) (section K),
   [BACKEND_REDESIGN.md](BACKEND_REDESIGN.md),
-  [BACKEND_LOWERING.md](BACKEND_LOWERING.md). `PRINTER_INSTRUCTIONS.md` is on
-  the branch of pull request #175 and is quoted from there.
+  [BACKEND_LOWERING.md](BACKEND_LOWERING.md). [PRINTER_INSTRUCTIONS.md](PRINTER_INSTRUCTIONS.md) arrived with pull request
+  #175 and is quoted from there.
 
 ## 0. Summary
 
@@ -340,7 +341,8 @@ What oxc's tree supports (read from `oxc_ast` and `oxc_allocator` 0.158):
   `ocaml_eq_expression` is deliberately partial (false for kinds outside a
   fixed set), so the builder needs its own.
 - What oxc nodes do not carry: the flags `PURE`, `STRICT`, `DELAY_SAFE`,
-  `RUNS_NO_CODE` (BACKEND_LOWERING 7.1), and the J-level meaning the printer
+  `J_SUBEXPR` (BACKEND_LOWERING 7.1, where `runs_no_code` is a predicate, not
+  a flag), and the J-level meaning the printer
   turns into a shape: a block's tag and mutability, a record's field names, a
   call's arity information, `undefined` that is a unit, comments. The rules
   and the rounds read these (J3 needs "immutable block with these fields",
@@ -427,7 +429,9 @@ That is 12 to 16 bytes a node against 72.
 
 ## 5. Q6: the built-in rewrites
 
-Read first: where the "rewritten copy" is. The mapper
+Read first: where the "rewritten copy" is. (This paragraph describes the
+mapper before T2; since #193 the expression mapper rebuilds no ancestor and
+`rewrite_child` and `rewrite_expression_generic` are gone.) The mapper
 (`ppx::rewrite_structure_with_warnings`, `rewrite_signature_with_warnings`)
 takes `arena: &mut ParseArena` and appends to the same arena. The nodes as
 parsed stay; what is new is every rewritten construct **and every ancestor of
@@ -638,21 +642,21 @@ was measured on it.
 | Level L rounds S4.1 to S4.4 (`bir/engine.rs`, `bir/l/{norm,flatten,exits,alias,beta,arity}.rs`) | merged | **stay as they are.** Level L is the core IR |
 | S4.5 to S4.9 | planned | **stay as they are** |
 | Lowering S3.3 (`bir/lower/*`, pull requests #170 and #182) | merged | **stays.** It writes J-level `Bir` nodes through `bir::j` and `View`; the two-text gate of BACKEND_LOWERING 8.1 does not depend on the storage |
-| Lowering S3.4 to S3.9 (BACKEND_LOWERING 8.3) | in flight | **stay as they are**, written against the same `bir::j` interface. The storage is swapped under them once, in T6 |
+| Lowering S3.4 to S3.9 (BACKEND_LOWERING 8.3) | merged, except loops and `LetRec` with value members (S3.7) | **stay as they are**, written against the same `bir::j` interface. The storage is swapped under them once, in T6 |
 | J normalising rules (pull request #183, `bir/j/norm.rs`) | merged | **stays**: the rules are the specification of the builder's constructors. In T6 their pattern matches move from `View::J*` to oxc nodes plus the facts table; the rule tests carry over |
 | Rounds J1 to J4 as passes over J-level `Bir` (S3.2: `bir/j/{inline_return,rest,subst,shake}.rs`) | not built | **change target**: decisions of the lowering at scope close (T1, T4), not passes |
 | Export extraction and coercion on J-level `Bir` (S3.9b) | not built | **changes target**: on the lowering's top-level rows (T4) |
 | Emitter under `emit/`: `literal.rs`, `raw.rs`, `sourcemap.rs`, `program.rs`, the node construction of `build.rs` | merged | **stay.** They are how oxc nodes are built; the builder of T6 calls them |
 | `emit/naming.rs` | merged | **changes target**: its group and suffix tables stay, its walk (`walk.rs`, the `Visitor` over the JS IR) is replaced by the replay of T5 |
-| Emit from J-level `Bir` (pull request #175: the view adapter, `bridge_j::import_js`) | open | **dropped as a product path.** Its measurement is the evidence for this document, and its parity suites stay as the check of the oxc printer on the JS IR until T6 |
+| Emit from J-level `Bir` (pull request #175: the view adapter, `bridge_j::import_js`) | not merged; #175 merged its measurement only | **dropped as a product path.** Its measurement is the evidence for this document, and its parity suites stay as the check of the oxc printer on the JS IR until T6 |
 | `bir/bridge_j.rs` (`export_js`) | merged | **stays until T6** as the gate's bridge, then deleted |
 | S5.1 builder trait, S5.2 `Bir` builder | planned | **change target**: the builder reads the syntax tree and the tables (T9) instead of the typed tree; the trait of S5.1 gets an input side |
 | S5.3 to S5.5 match compiler work | done or planned | **stay** |
 | Checker slices W1 to W11, K.6 (CHECKER_REDESIGN) | in flight | **stay**; independent |
 | Subtree skipping of FRONTEND_REWRITES | merged | **stays**: the certificate bits become the expansion bit's neighbours (T2) |
 
-Nothing that is merged is discarded. The only open pull request whose product
-goal is dropped is #175.
+Nothing that is merged is discarded. The only pull request whose product
+goal is dropped is #175, which merged as the record of its measurement.
 
 ## 11. The new slices
 
@@ -669,7 +673,7 @@ model" says whether the slice can be handed to one with this document.
 | T4 | Tail-call inlining at scope close (1.1); top-level rows, the shake filter and export coercion on them (1.4, S3.9b). Also owns original T1 items 3–6: block facts/substitution, dead declarations, record rest and the gate split. New side runs without legacy passes 3–6 | `bir/lower/{scope,tail,export}.rs`, `bir/shadow.rs` | the planned `bir/j/{inline_return,shake}.rs` are never created | `rg 'apply_js_tailcall_inline_pass\|apply_js_shake_pass' bir/shadow.rs` shows the legacy side only | the two-text gate; a counter of inlines where the level L count is not one | 1,500 | no: strong reviewer |
 | T5 | Naming events logged by the lowering; names assigned at scope close by the tables of `emit/naming.rs`; compared with the names the pass computes | `bir/lower/scope.rs`, `emit/naming.rs`, `bir/shadow.rs` | nothing yet (the pass is the oracle) | `rg 'fn replay' emit/naming.rs` has one hit | name tables equal on every supported unit of the corpora | 900 | no |
 | T6 | The builder over oxc nodes (section 3): `bir::j` reimplemented on oxc storage and the facts table; `RESCRIPT_BACKEND=new` prints from it | new `emit/builder.rs`, `bir/j/*`, `bir/lower/*` (types only), `driver.rs` | `bir/bridge_j.rs`, the J opcodes of `bir/node.rs`, the `Bir` view of `emit/walk.rs` | `rg 'JSeq\|JBlockLit' bir/node.rs` is empty; `rg bridge_j .` is empty | reformat-and-compare suites; instruction count of `new` below legacy | 3,000 | no |
-| T7 | Direct typing for the node-local rows of section 5 (`l` integers, boolean match, single record `let`, `async`/`await`) | `types/typecore.rs`, `binary_ast/ppx.rs`, the core IR builder | their arms in the mapper | `rg 'fn transform_await' binary_ast/ppx.rs` is empty | diagnostics parity | 800 | yes, one row per commit |
+| T7 | Direct typing for the node-local rows of section 5 (`l` integers, boolean match, single record `let`, `async`/`await`) | `types/typecore.rs`, `binary_ast/ppx.rs`, the core IR builder | their arms in the mapper | `rg 'fn transform_await' binary_ast/ppx.rs` is empty (as built: one hit, kept for the awaited-module rewrite; section 13) | diagnostics parity | 800 | yes, one row per commit |
 | T8 | Checker result tables written beside the typed tree; a debug check that table and tree agree | `types/typecore.rs`, `types/typemod.rs`, new `types/tables.rs` | nothing | `rg 'struct ExprRow' types/tables.rs` has one hit | the agreement check on all corpora | 1,200 | yes |
 | T9 | The core IR builder reads the syntax tree and the tables (replaces the input of S5.2) | `raw_lambda/convert.rs`, `convert/jsx.rs`, `typeopt.rs`, the `Bir` builder | reads of `Expression` in `raw_lambda/convert.rs` | `rg 'typedtree::Expression' raw_lambda` is empty | JavaScript parity; `Check` from the tables | 3,500 | no |
 | T10 | Patterns: `parmatch.rs` and `matching.rs` read a view over syntax pattern, table row and overlay | `types/parmatch.rs`, `raw_lambda/matching.rs`, `types/dict_pattern.rs` | `TypedArena`'s pattern pools | `rg 'push_pattern' types` is empty | diagnostics and JavaScript parity; the exhaustiveness fixtures | 4,000 | no |
