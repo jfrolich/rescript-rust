@@ -790,11 +790,13 @@ mod tests {
         let (typed, _) = crate::types::typemod::type_structure(&mut tctx, &env, arena, &structure)
             .expect("typecheck");
         let raised = crate::analysis::process_attributes::Raised::default();
+        let files = crate::analysis::process_cmt::FileNames::default();
         let ctx = Ctx {
             ta: &tctx.typed,
             arena,
             types: &type_ctx,
             raised: &raised,
+            files: &files,
         };
         let annots = crate::analysis::process_cmt::Annots::Implementation(tctx.typed.structure_items(typed.str_items));
         let mut file = crate::analysis::process_cmt::file_for_annots(

@@ -6,10 +6,12 @@
 
 use super::process_attributes::{self as attrs, Attrs};
 use super::shared_types::*;
+use crate::intern::StrIdx;
 use crate::parse_arena::{LocIdx, ParseArena};
 use crate::types::decl::{self, RecStatus, SignatureItem};
 use crate::types::typedtree as tt;
 use crate::types::{TypeContext, TypeDesc, TypeExprRef};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// What processing a typed tree reads: the module's parse arena (typed-tree
@@ -24,6 +26,37 @@ pub struct Ctx<'a> {
     pub raised: &'a attrs::Raised,
     /// Node storage of the typed tree.
     pub ta: &'a tt::TypedArena,
+    /// The file names of the module's locations.
+    pub files: &'a FileNames,
+}
+
+/// `Location.none`'s file name.
+pub const NONE_FILE: &str = "_none_";
+
+/// The names of the files a module's locations are in, each allocated once:
+/// nearly every declaration of a module is in the module's own file.
+#[derive(Default)]
+pub struct FileNames(std::cell::RefCell<HashMap<(FileTable, StrIdx), Arc<str>>>);
+
+/// Which table a file-name index is of.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum FileTable {
+    /// The strings of the module's parse arena.
+    Parsed,
+    /// The files of declaration locations (see [`Ctx::decl_extent`]).
+    Declarations,
+}
+
+impl FileNames {
+    /// The name of file `idx` of `table`, which `name` computes the first
+    /// time it is asked for.
+    fn get(&self, table: FileTable, idx: StrIdx, name: impl FnOnce() -> Arc<str>) -> Arc<str> {
+        self.0
+            .borrow_mut()
+            .entry((table, idx))
+            .or_insert_with(name)
+            .clone()
+    }
 }
 
 impl Ctx<'_> {
@@ -34,34 +67,37 @@ impl Ctx<'_> {
     /// The location at `idx` of the parsed tree, with its file name.
     pub(crate) fn extent(&self, idx: LocIdx) -> Extent {
         let location = self.arena.to_location(idx);
+        let file_name = location.loc_start.file_name;
         Extent {
             loc: Loc::of_location(&location),
-            file: LocFile::located(self.arena.get_string(location.loc_start.file_name)),
+            file: self.files.get(FileTable::Parsed, file_name, || {
+                self.arena.get_string(file_name).into()
+            }),
         }
     }
 
     /// A type declaration's location, with its file name. An imported
     /// declaration's file is in the context's file table, any other one is
-    /// a file of this unit's parse (`Annotation.decl_file` in gentype).
+    /// a file of this unit's parse (as `Annotation::decl_file` in gentype).
     fn decl_extent(&self, loc: crate::types::DeclLoc) -> Extent {
         let location = self.types.resolve_loc(loc);
+        let file_name = location.loc_start.file_name;
         if location.is_none() {
             return Extent {
                 loc: Loc::none(),
-                file: LocFile::located("_none_"),
+                file: self
+                    .files
+                    .get(FileTable::Declarations, file_name, || NONE_FILE.into()),
             };
         }
-        let file_name = location.loc_start.file_name;
-        let name: Arc<str> = match self.types.resolve_cmi_longident_component(file_name) {
-            Some(imported) => imported.into(),
-            None => self.arena.own_file_name(file_name).unwrap_or_default().into(),
-        };
-        let origin = loc
-            .source_location()
-            .map(|_| crate::parse_arena::LocIdx(location.origin.raw()));
         Extent {
             loc: Loc::of_location(&location),
-            file: LocFile { name, origin },
+            file: self.files.get(FileTable::Declarations, file_name, || {
+                match self.types.resolve_cmi_longident_component(file_name) {
+                    Some(imported) => imported.into(),
+                    None => self.arena.own_file_name(file_name).unwrap_or_default().into(),
+                }
+            }),
         }
     }
 
@@ -138,7 +174,7 @@ fn module_item(
     docstring: &[String],
     deprecated: &Option<String>,
     loc: Loc,
-    file: &LocFile,
+    file: &Arc<str>,
 ) -> ModuleItem {
     ModuleItem {
         kind,

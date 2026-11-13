@@ -311,12 +311,6 @@ pub fn run(request: &Request, project: &dyn session::Project) -> Result<Vec<u8>,
             cli.references(&mut out, path, parse_pos(line, col)?, false)
         }
         ["test", path] => test(&mut out, &mut cli, path)?,
-        // `rescript-tools doc` (tools/bin/main.ml), which prints the JSON
-        // and a newline, or fails with the reason.
-        ["doc", path] => {
-            let docs = docgen::extract_docs(&cli.session, &request.cwd, path)?;
-            out.print_endline(&docs);
-        }
         [command, ..] => {
             return Err(format!(
                 "`{command}` is not available inside the watcher yet"
@@ -327,6 +321,21 @@ pub fn run(request: &Request, project: &dyn session::Project) -> Result<Vec<u8>,
     if let Some(failure) = cli.session.failure() {
         return Err(failure);
     }
+    Ok(out.into_bytes())
+}
+
+/// `rescript-tools doc <path>` (tools/bin/main.ml): what it prints, the
+/// documentation of the module at `path` as JSON and a newline, or why there
+/// is none. `project` must be built with source locations (see [`docgen`]),
+/// which a watcher's builds leave out, so this is no watcher command.
+pub fn doc(cwd: &Path, path: &str, project: &dyn session::Project) -> Result<Vec<u8>, String> {
+    let session = session::ProjectSession::new(project);
+    let docs = docgen::extract_docs(&session, cwd, path)?;
+    if let Some(failure) = session.failure() {
+        return Err(failure);
+    }
+    let mut out = Output::default();
+    out.print_endline(&docs);
     Ok(out.into_bytes())
 }
 

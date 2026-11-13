@@ -5,7 +5,7 @@ use super::process_cmt::{self, Annots, Ctx};
 use super::process_extra;
 use super::resolve_path::Session;
 use super::shared_types::{
-    Declared, ExportedKind, Extra, File, Loc, LocFile, Located, Module, ModuleId, ModuleItem,
+    Declared, ExportedKind, Extra, File, Loc, Located, Module, ModuleId, ModuleItem,
     ModuleItemKind, ModulePath,
 };
 use crate::driver::{ToolingTyped, ToolingTypedModule};
@@ -74,6 +74,8 @@ pub struct Loaded {
     pub extra: Extra,
     /// An attribute reader's error raised by a command reading this module.
     pub raised: super::process_attributes::Raised,
+    /// The file names of the module's locations.
+    files: process_cmt::FileNames,
 }
 
 impl Loaded {
@@ -90,6 +92,7 @@ impl Loaded {
             types: &self.source.typed.type_ctx,
             raised: &self.raised,
             ta: &self.source.typed.typed_arena,
+            files: &self.files,
         }
     }
 }
@@ -250,11 +253,13 @@ fn invalid_escape_message(
 fn load_source(source: TypedSource, module_name: &str, id: ModuleId) -> Result<Loaded, String> {
     let uri = source.path.to_string_lossy().into_owned();
     let raised = super::process_attributes::Raised::default();
+    let files = process_cmt::FileNames::default();
     let ctx = Ctx {
         arena: source.parsed.arena(),
         types: &source.typed.type_ctx,
         raised: &raised,
         ta: &source.typed.typed_arena,
+        files: &files,
     };
     let annots = match &source.typed.typed {
         ToolingTyped::Implementation(structure) => Some(Annots::Implementation(
@@ -281,6 +286,7 @@ fn load_source(source: TypedSource, module_name: &str, id: ModuleId) -> Result<L
         file,
         extra,
         raised,
+        files,
     })
 }
 
@@ -291,7 +297,7 @@ fn namespace_file(module_name: &str, id: ModuleId, aliases: &[(String, String)])
     let mut structure = (*file.structure).clone();
     let mut exported = (*structure.exported).clone();
     // `Location.none`'s file name.
-    let none_file = LocFile::located("_none_");
+    let none_file: Arc<str> = Arc::from(process_cmt::NONE_FILE);
     for (stamp, (alias, target)) in (1..).zip(aliases) {
         let item = Module::Ident(crate::types::Path::pident(
             crate::ident::Ident::create_persistent(target.as_str()),

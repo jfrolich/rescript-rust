@@ -361,9 +361,10 @@ pub struct ModuleItem {
     pub name: String,
     /// The item's location.
     pub loc: Loc,
-    /// The file the item's location is in: the file of an included module
-    /// for its items, `_none_` for generated ones.
-    pub file: LocFile,
+    /// The name of the file the item's location is in (`pos_fname`): the
+    /// declaring file for an item of an `include`, `_none_` for a generated
+    /// one.
+    pub file: Arc<str>,
     /// The item's doc comments.
     pub docstring: Vec<String>,
     /// The `@deprecated` reason, if the item is deprecated.
@@ -396,34 +397,13 @@ pub enum Module {
     Constraint(Box<Module>, Box<Module>),
 }
 
-/// The file a location is in.
-#[derive(Debug, Clone)]
-pub struct LocFile {
-    /// The file name of the location's start (`pos_fname`).
-    pub name: Arc<str>,
-    /// For a declaration imported from a location-free compilation, whose
-    /// location keeps no coordinates: its location's identity, which names
-    /// the slot a located parse of `name` allocates for it.
-    pub origin: Option<crate::parse_arena::LocIdx>,
-}
-
-impl LocFile {
-    /// A file whose locations have their coordinates.
-    pub fn located(name: impl Into<Arc<str>>) -> LocFile {
-        LocFile {
-            name: name.into(),
-            origin: None,
-        }
-    }
-}
-
-/// A declaration's location and its file.
+/// A declaration's location and the name of the file it is in.
 #[derive(Debug, Clone)]
 pub struct Extent {
     /// The location.
     pub loc: Loc,
-    /// The file it is in.
-    pub file: LocFile,
+    /// The file name of its start (`pos_fname`).
+    pub file: Arc<str>,
 }
 
 /// `Declared.t`.
@@ -433,8 +413,8 @@ pub struct Declared<T> {
     pub name: Located<String>,
     /// The location of the whole declaration.
     pub extent_loc: Loc,
-    /// The file `extent_loc` is in.
-    pub extent_file: LocFile,
+    /// The name of the file `extent_loc` is in.
+    pub extent_file: Arc<str>,
     /// The identifier stamp.
     pub stamp: i32,
     /// Where the declaration is.

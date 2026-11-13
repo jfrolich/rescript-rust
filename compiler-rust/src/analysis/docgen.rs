@@ -4,13 +4,19 @@
 //! The JSON is what `RescriptTools.Docgen` (packages/@rescript/runtime)
 //! decodes. OCaml reads the module from its `.cmt`; here the session
 //! type-checks it from source against the published interfaces.
+//!
+//! An item that another module declares (an item of an `include`, of a
+//! module alias) is documented at the position its declaration has in the
+//! published interface, as OCaml reads it from the `.cmi`. The project must
+//! therefore be built with source locations, which a build leaves out by
+//! default; without them such an item is at line 0.
 
 use super::json::Json;
 use super::session::ProjectSession;
 use super::shared::{decl_to_string, path_ident_to_string, type_to_string, unwrap_if_option};
 use super::shared_types::{
-    Constructor, ConstructorArgs, Field, File, Loc, Module, ModuleItem, ModuleItemKind, QueryEnv,
-    Structure, Type, TypeKind,
+    Constructor, ConstructorArgs, Field, File, Loc, Module, ModuleItemKind, QueryEnv, Structure,
+    Type, TypeKind,
 };
 use crate::types::printtyp::{OutArgLabel, OutIdent, OutType, Printtyp, print_out_type_doc};
 use crate::types::{TypeContext, TypeDesc, TypeExprRef};
@@ -488,24 +494,6 @@ fn get_source(root_path: &str, file_path: &str, loc: &Loc) -> Source {
     }
 }
 
-/// The location of an item. An item imported from another module's
-/// published interface (an `include`, a module alias) has no coordinates
-/// there: builds compile without them. Its location's identity names the
-/// slot of the declaring module's own parse, which the session loads with
-/// locations.
-fn item_loc(session: &ProjectSession<'_>, item: &ModuleItem) -> Loc {
-    let Some(origin) = item.file.origin else {
-        return item.loc;
-    };
-    let path = Path::new(&*item.file.name);
-    let located = session.project().module_for_path(path).and_then(|module_name| {
-        let loaded = session.load(&module_name, item.file.name.ends_with('i'))?;
-        let arena = loaded.source.parsed.arena();
-        (origin.0 < arena.parse_location_slot_count()?).then(|| Loc::of_idx(arena, origin))
-    });
-    located.unwrap_or(item.loc)
-}
-
 /// `string_of_out_ident`.
 fn string_of_out_ident(ident: &OutIdent) -> String {
     match ident {
@@ -747,7 +735,7 @@ impl Extraction<'_, '_, '_> {
             .iter()
             .filter_map(|item| {
                 let name = unwrap_uppercase_exotic(&item.name);
-                let source = get_source(&self.root_path, &item.file.name, &item_loc(session, item));
+                let source = get_source(&self.root_path, &item.file, &item.loc);
                 match &item.kind {
                     ModuleItemKind::Value(typ) => Some(DocItem::Value {
                         id: make_id(module_path, name),
