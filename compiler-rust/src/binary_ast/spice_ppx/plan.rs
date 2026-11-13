@@ -164,9 +164,6 @@ pub(in crate::binary_ast) fn classify(
 ) -> Classification {
     use GeneralReason::*;
     let general = Classification::General;
-    if let Some(reason) = arena.derived_plans_off() {
-        return general(reason);
-    }
     if scope == Scope::Nested {
         return general(Nested);
     }
@@ -237,6 +234,10 @@ pub(in crate::binary_ast) fn classify(
         || facts.unplanned
     {
         return general(NotYetPlanned);
+    }
+    // A declaration that could take a plan, in a tree that is not planned.
+    if let Some(reason) = arena.derived_plans_off() {
+        return general(reason);
     }
     Classification::Plan
 }
@@ -502,12 +503,12 @@ fn binding(
 pub(in crate::binary_ast) fn build(
     arena: &mut ParseArena,
     group: &[TypeDeclaration],
-) -> SpiceResult<DerivedIdx> {
+    settings: &[Option<GeneratorSettings>],
+) -> DerivedIdx {
     let first = arena.plans().next_binding();
     let mut slots = Vec::new();
-    for decl in group {
-        let Some(settings) = get_generator_settings_from_attributes(&decl.ptype_attributes, arena)?
-        else {
+    for (decl, settings) in group.iter().zip(settings) {
+        let Some(settings) = *settings else {
             continue;
         };
         let manifest = decl.ptype_manifest.expect("a planned declaration has a manifest");
@@ -529,7 +530,7 @@ pub(in crate::binary_ast) fn build(
             binding(arena, &type_name, DECODER_FUNC_SUFFIX, Side::Decode, decoder, Attributes::new(), &mut slots);
         }
     }
-    Ok(arena.plans_mut().push_item(first))
+    arena.plans_mut().push_item(first)
 }
 
 #[cfg(test)]

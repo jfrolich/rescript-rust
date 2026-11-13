@@ -159,16 +159,6 @@ pub fn group_shares_names(
     super::spice_ppx::plan::group_shares_names(group, arena)
 }
 
-/// Build the plan of a group of declarations that all classify
-/// [`Classification::Plan`]. No syntax is generated for the group.
-/// Cost: O(codecs of the declarations' types), into the arena's plan pools.
-pub fn plan(
-    arena: &mut ParseArena,
-    group: &[crate::parser::ast::TypeDeclaration],
-) -> Result<DerivedIdx, String> {
-    super::spice_ppx::plan::build(arena, group)
-}
-
 /// The names a planned item resolves in the environment of its declaration:
 /// one per obligation, in typing order. The modules they are qualified with
 /// are the modules the item depends on.

@@ -391,7 +391,7 @@ fn generate_ast(
     let contents = std::str::from_utf8(&source_bytes).unwrap_or_default();
     let spice_ppx = filter_ppx_flags(&package.config, contents)
         .is_some_and(|flags| !flags.is_empty());
-    let frontend_options = {
+    let mut frontend_options = {
         let root_config = build_state.project_context.get_root_config();
         let flags = [
             root_config.get_jsx_args(),
@@ -418,13 +418,9 @@ fn generate_ast(
             ..Default::default()
         }
     };
-    let frontend_options = match parse_for {
-        ParseFor::Build { .. } => frontend_options,
-        ParseFor::Tooling => rescript_compiler::driver::CompilerOptions {
-            derived_path: rescript_compiler::driver::DerivedPath::General,
-            ..frontend_options
-        },
-    };
+    if matches!(parse_for, ParseFor::Tooling) {
+        frontend_options.derived_path = rescript_compiler::driver::DerivedPath::General;
+    }
 
     let _parse_span = if tracing::enabled!(tracing::Level::INFO) {
         make_parse_file_span(filename, package, build_state, parent_span).entered()

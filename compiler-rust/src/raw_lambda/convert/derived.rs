@@ -224,7 +224,7 @@ impl<B: RawLambdaBuilder, S: Steps> ArgLowering<B, BodyIdx> for Lowering<'_, S> 
 mod tests {
     use super::*;
     use crate::binary_ast::derive::plan::{SkeletonNode, Span};
-        use crate::parser::ast::Attributes;
+    use crate::parser::ast::Attributes;
     use crate::parser::{Parser, module};
     use crate::raw_lambda::RawArena;
     use crate::raw_lambda::print::RawLambdaPrinter;
