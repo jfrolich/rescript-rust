@@ -418,6 +418,7 @@ struct State {
     location_work: Vec<(NodeId,bool)>,
     location_steps: usize,
     sequence_steps: usize,
+    evaluation: args::Evaluation,
     primitive_steps: usize,
     /// Let/Seq nodes read by row R5 step 0 of section 3.6.
     spine_steps: usize,
@@ -469,6 +470,7 @@ impl State {
             .max().unwrap_or(0).checked_add(1).expect("identifier order capacity");
         let (untagged_storage, untagged_dispatch) = untagged::prepare(&mut arena);
         Self {
+            evaluation: args::Evaluation::default(),
             tail_arguments: 0, tail_parameters: 0, tail_sort_comparisons: 0, tail_body_statements: 0,
             tail_frames: Vec::new(), tail_functions: Vec::new(), tail_copies: Vec::new(),
             tail_assignments: Vec::new(), tail_name: String::new(), call_reversed: Vec::new(), calls: Vec::new(), tail_order: Vec::new(),

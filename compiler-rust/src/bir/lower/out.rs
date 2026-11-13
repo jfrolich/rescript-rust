@@ -63,6 +63,9 @@ pub struct StatementStack {
 }
 impl StatementStack {
     #[cfg(test)]
+    pub(super) fn reserve_repeat(&mut self) { self.held.reserve(self.held.len()); }
+
+    #[cfg(test)]
     pub(super) fn capacities(&self) -> [usize; 3] {
         [self.slots.capacity(), self.held.capacity(), self.empties.capacity()]
     }

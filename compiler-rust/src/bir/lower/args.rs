@@ -2,6 +2,17 @@
 use super::*;
 use crate::bir::{NodeFlags, Op};
 
+enum Work {
+    Enter(NodeId),
+    Rebuild(NodeId, usize),
+}
+#[derive(Default)]
+pub(super) struct Evaluation {
+    work: Vec<Work>,
+    values: Vec<NodeId>,
+    statements: Vec<NodeId>,
+}
+
 impl State {
     /// A:28 delay_safe: a cached fact, never a subtree walk.
     fn delay_safe(&self, value: NodeId) -> bool {
@@ -43,14 +54,11 @@ impl State {
 
     /// A:116 evaluate_now and A:178 evaluate_all_now. An explicit work stack
     /// preserves literal shape and visits held literal elements left to right.
-    fn evaluate_now(&mut self, root: NodeId) -> (Vec<NodeId>, NodeId) {
-        enum Work {
-            Enter(NodeId),
-            Rebuild(NodeId, usize),
-        }
-        let mut work = vec![Work::Enter(root)];
-        let mut values = Vec::new();
-        let mut statements = Vec::new();
+    fn evaluate_now(&mut self, root: NodeId) -> (Span, NodeId) {
+        let mut evaluation = std::mem::take(&mut self.evaluation);
+        let Evaluation { work, values, statements } = &mut evaluation;
+        debug_assert!(work.is_empty() && values.is_empty() && statements.is_empty());
+        work.push(Work::Enter(root));
         while let Some(task) = work.pop() {
             self.sequence_steps += 1;
             match task {
@@ -90,9 +98,10 @@ impl State {
                             false
                         };
                     if literal {
-                        let children = self.arena.view(value).children();
-                        work.push(Work::Rebuild(value, children.len()));
-                        for child in children.into_iter().rev() {
+                        let count = self.arena.view(value).child_count();
+                        work.push(Work::Rebuild(value, count));
+                        for i in (0..count).rev() {
+                            let child = self.arena.view(value).child_at(i);
                             self.arena.detach(child);
                             work.push(Work::Enter(child));
                         }
@@ -108,7 +117,8 @@ impl State {
                     }
                 }
                 Work::Rebuild(old, count) => {
-                    let children: Vec<_> = values.drain(values.len() - count..).collect();
+                    let begin = values.len() - count;
+                    let children = &values[begin..];
                     let aux = self.arena.node(old).aux();
                     let cold = self.arena.cold(old);
                     let located = self.arena.node(old).flags().contains(NodeFlags::JS_LOC_PRESENT);
@@ -116,11 +126,11 @@ impl State {
                     let value = if let View::JOptional { .. } = view {
                         self.pure_expression(View::JOptional { value: children[0] }, aux)
                     } else if let View::JArray { .. } = view {
-                        self.pure_expression(View::JArray { values: &children }, aux)
+                        self.pure_expression(View::JArray { values: children }, aux)
                     } else if let View::JBlockLit { info, .. } = view {
                         self.pure_expression(
                             View::JBlockLit {
-                                values: &children,
+                                values: children,
                                 info,
                             },
                             aux,
@@ -128,7 +138,7 @@ impl State {
                     } else if let View::JObject { info, .. } = view {
                         self.pure_expression(
                             View::JObject {
-                                values: &children,
+                                values: children,
                                 info,
                             },
                             aux,
@@ -145,12 +155,16 @@ impl State {
                         }
                     }
                     self.arena.release(old);
+                    values.truncate(begin);
                     values.push(value);
                 }
             }
         }
         assert_eq!(values.len(), 1);
-        (statements, values.pop().expect("held value"))
+        let span = Span { start: 0, len: statements.len() as u32 };
+        let value = values.pop().expect("held value");
+        self.evaluation = evaluation;
+        (span, value)
     }
 
     /// A:191 sequence_arguments: allocate holds right to left after all operands
@@ -182,7 +196,7 @@ impl State {
             let value = arg.value.expect("argument value");
             let (held, value) =
                 if !needs_holds || !has_code || (later_defines_pure && self.runs_no_code(value)) {
-                    (Vec::new(), value)
+                    (Span::default(), value)
                 } else if method_callee && i == 0 && self.arena.node(value).op() == Op::JDot {
                     let View::JDot {
                         object,
@@ -212,8 +226,8 @@ impl State {
                 } else {
                     self.evaluate_now(value)
                 };
-            has_code |= self.statements.has_statements(arg.stmts) || !held.is_empty();
-            later_defines_pure &= self.defines_pure_values(&held)
+            has_code |= self.statements.has_statements(arg.stmts) || held.len != 0;
+            later_defines_pure &= self.defines_pure_values(&self.evaluation.statements[..held.len as usize])
                 && self.statements.statements(arg.stmts).all(|statement| {
                     if let View::SDecl { value, .. } = self.arena.view(statement) {
                         value.is_none_or(|value| self.runs_no_code(value))
@@ -221,10 +235,11 @@ impl State {
                         false
                     }
                 });
-            if !held.is_empty() {
+            if held.len != 0 {
                 self.statements
-                    .fill_held(arg.stmts.start + arg.stmts.len - 1, &held);
+                    .fill_held(arg.stmts.start + arg.stmts.len - 1, &self.evaluation.statements[..held.len as usize]);
             }
+            self.evaluation.statements.clear();
             values.push(value);
         }
         values.reverse();
@@ -244,6 +259,77 @@ mod tests {
     use crate::lambda::{
         arena::LamArena, lam_compile::LambdaCompiler, lam_compile_arguments::HeldArgs,
     };
+
+    #[test]
+    fn ten_thousand_held_literal_elements_lower_without_allocations() {
+        use crate::lambda::{LamLoc, lam_primitive::Primitive as P};
+        let mut a = LamArena::new();
+        let elements: Vec<_> = (0..10_000).map(|_| {
+            let x = a.var(Ident::new("x", 10, crate::ident::IdentFlags::NONE));
+            a.apply_raw(x, &[], crate::lambda::ApInfo { loc: LamLoc::NONE, status: crate::lambda::ApplyStatus::Na })
+        }).collect();
+        let array = a.prim_raw(P::Pmakearray, &elements, LamLoc::NONE);
+        let effect = a.prim_raw(P::PinitMod, &[], LamLoc::NONE);
+        let local = Ident::new("later", 100, crate::ident::IdentFlags::NONE);
+        let value = a.var(local);
+        let later = a.let_(LetKind::Strict, local, effect, value);
+        let root = a.prim_raw(P::Pmakearray, &[array, later], LamLoc::NONE);
+        let input = bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let run = |s: &mut State| {
+            let out = s.probe(Cx::returning(), root).unwrap();
+            let out = s.realize(Cx::returning(), out);
+            for node in s.statements.statements(out.stmts) { s.arena.release(node); }
+            if let Some(value) = out.value { s.arena.release(value); }
+            s.statements.kill(out.stmts);
+        };
+        let lists = state.arena.lists.storage_shape().0;
+        let vars = state.arena.vars.len();
+        let js = state.arena.pools.js.len();
+        run(&mut state);
+        let extra = state.arena.vars.len() - vars;
+        assert_eq!(extra, 10_000);
+        state.arena.lists.reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
+        state.arena.pools.js.reserve(state.arena.pools.js.len() - js);
+        state.idents.reserve(extra);
+        state.arena.capture_binders.reserve(extra);
+        state.arena.bulk_binders.reserve(extra);
+        state.arena.js_scope.as_mut().unwrap().uses.reserve(extra);
+        let vars = &mut state.arena.vars;
+        vars.j_origin.reserve(extra); vars.name.reserve(extra); vars.order.reserve(extra);
+        vars.flags.reserve(extra); vars.uses.reserve(extra); vars.binder.reserve(extra);
+        vars.fact.reserve(extra); vars.printed.reserve(extra);
+        state.free.reserve_repeat();
+        state.statements.reserve_repeat();
+        let capacities = |s: &State| {
+            let e = &s.evaluation; let v = &s.arena.vars;
+            [e.work.capacity(), e.values.capacity(), e.statements.capacity(),
+                s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
+                s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1, s.arena.pools.js.capacity(),
+                s.traversal.work.capacity(), s.traversal.values.capacity(), s.traversal.children.capacity(),
+                s.idents.capacity(), s.arena.capture_binders.capacity(), s.arena.bulk_binders.capacity(),
+                s.arena.js_scope.as_ref().unwrap().uses.capacity(),
+                v.j_origin.capacity(), v.name.capacity(), v.order.capacity(), v.flags.capacity(), v.uses.capacity(),
+                v.binder.capacity(), v.fact.capacity(), v.printed.capacity()]
+        };
+        let before = capacities(&state);
+        let statements_before = state.statements.capacities();
+        let free_before = state.free.capacities();
+        let visits = state.source_steps;
+        let sequencing = state.sequence_steps;
+        let allocations = allocation_counter::measure(|| run(&mut state));
+        println!("held literal: {allocations:?}, visits={}, sequencing={}", state.source_steps-visits, state.sequence_steps-sequencing);
+        assert_eq!(allocations.count_total, 0);
+        assert_eq!(state.source_steps - visits, 20_005);
+        assert_eq!(state.sequence_steps - sequencing, 30_004);
+        assert_eq!(capacities(&state), before);
+        assert_eq!(state.statements.capacities(), statements_before);
+        assert_eq!(state.free.capacities(), free_before);
+        assert!(state.evaluation.work.is_empty() && state.evaluation.values.is_empty() && state.evaluation.statements.is_empty());
+        assert_eq!(std::mem::size_of::<Span>(), 8);
+        assert_eq!(std::mem::size_of::<Work>(), 16);
+    }
 
     #[test]
     fn normalized_arithmetic_stays_after_later_argument_statements() {

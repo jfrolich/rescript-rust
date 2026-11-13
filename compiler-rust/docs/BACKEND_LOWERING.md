@@ -2639,15 +2639,15 @@ The statement stack and node-list pool must be used end to end.
 
 | Baseline file:line and function/type | Site | Frequency | Replacement / reason retained | State |
 | --- | --- | --- | --- | --- |
-| `args.rs:46` `evaluate_now` | `fn evaluate_now(&mut self, root: NodeId) -> (Vec<NodeId>, NodeId) {` | per construct/walk | reusable scratch buffer; clear, do not free | pending |
-| `args.rs:51` `Work` | `let mut work = vec![Work::Enter(root)];` | per visited node | reusable scratch buffer; clear, do not free | pending |
-| `args.rs:52` `Work` | `let mut values = Vec::new();` | per visited node | reusable scratch buffer; clear, do not free | pending |
-| `args.rs:53` `Work` | `let mut statements = Vec::new();` | per visited node | reusable scratch buffer; clear, do not free | pending |
-| `args.rs:111` `Work` | `let children: Vec<_> = values.drain(values.len() - count..).collect();` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `args.rs:46` `evaluate_now` | `fn evaluate_now(&mut self, root: NodeId) -> (Vec<NodeId>, NodeId) {` | per construct/walk | Returns an 8-byte span into retained evaluation statement storage rather than an owning vector. | removed |
+| `args.rs:51` `Work` | `let mut work = vec![Work::Enter(root)];` | per visited node | The evaluation work stack belongs to State and is empty when restored after each walk. | removed |
+| `args.rs:52` `Work` | `let mut values = Vec::new();` | per visited node | The evaluation value stack belongs to State and is empty when restored after each walk. | removed |
+| `args.rs:53` `Work` | `let mut statements = Vec::new();` | per visited node | Held statements use retained evaluation storage and are cleared after transfer to StatementStack. | removed |
+| `args.rs:111` `Work` | `let children: Vec<_> = values.drain(values.len() - count..).collect();` | per visited node | Rebuilt literal operands borrow a suffix of the retained value stack; no child vector is collected. | removed |
 | `args.rs:163` `sequence_arguments` | `args: smallvec::SmallVec<[Out; 4]>,` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `args.rs:164` `sequence_arguments` | `) -> (Span, smallvec::SmallVec<[NodeId; 4]>) {` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `args.rs:178` `sequence_arguments` | `let mut values = smallvec::SmallVec::with_capacity(args.len());` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
-| `args.rs:184` `sequence_arguments` | `(Vec::new(), value)` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `args.rs:184` `sequence_arguments` | `(Vec::new(), value)` | per visited node | The no-hold path now returns an empty scalar span and creates no vector. | removed |
 | `call.rs:9` `Call` | `pub operands: Vec<NodeId>,` | per construct | pooled source operand lists and retained spine scratch; four-byte call frame | removed |
 | `call.rs:32` `application` | `let mut reversed: Vec<_> = args.iter().rev().copied().collect();` | per construct | pooled source operand lists and retained spine scratch; four-byte call frame | removed |
 | `call.rs:48` `application` | `let mut operands = Vec::with_capacity(1 + reversed.len());` | per construct | pooled source operand lists and retained spine scratch; four-byte call frame | removed |
@@ -3047,6 +3047,22 @@ and 10,001 primitive steps; failed paths take 10,001 visits and 40,000 primitive
 steps. The debug child-validation table is reserved to the warm run's node
 high-water mark before measurement (a one-node success otherwise first grows
 that table on its second construction).
+
+Argument holding now walks literal child slots directly rather than materializing
+`View::children` SmallVecs. The whole-Lambda held-array fixture contains 10,000
+call-valued elements followed by a statement-producing argument, so it actually
+holds and rebuilds the earlier literal rather than taking the no-hold path.
+After warming and reserving append-only variable/list/held-statement growth,
+probe, realize and release allocate zero times with unchanged recorded capacities:
+20,005 source visits, 30,004 sequencing steps and 10,000 fresh holds per pass.
+The returned held-statement span is 8 bytes and the work entry 16 bytes. The
+original sequencing oracle still checks right-to-left temporary allocation and
+left-to-right execution, including method objects and all supported literal shapes.
+
+| Additional owning API/site | Frequency | Disposition |
+| --- | --- | --- |
+| `args.rs` evaluate-now `View::children()` | per held literal | converted: child slots are indexed directly in reverse scheduling order, with no SmallVec spill |
+| `args.rs` Evaluation buffers | once per lowering State | retained: work/values/statements reuse their high-water capacity and are cleared before restoration/next use |
 
 ### 7.5.1 Concurrent loop, label and recursive-value additions
 
