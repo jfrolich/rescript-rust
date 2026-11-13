@@ -6464,7 +6464,8 @@ fn compile_source_to_js_with_options_inner(
     let (type_ctx, result) = type_structure_two_modes(
         CheckUnit { arena: parser.arena(), filename, options, registry: None,
             module_name: current_unit_name.as_deref(), file_config: &file_config,
-            frontend_warning_specs: &frontend_warning_specs, derived_plans: true },
+            frontend_warning_specs: &frontend_warning_specs, derived_plans: true,
+            mode: crate::types::context::CheckMode::from_env() },
         |tctx, env, arena| {
             tctx.experimental_let_unwrap = experimental_let_unwrap;
             type_structure(tctx, env, arena, &structure)
@@ -7692,7 +7693,8 @@ pub fn typecheck_interface_source(
     type_structure_two_modes(
         CheckUnit { arena: parser.arena(), filename, options, registry: None,
             module_name: current_unit_name.as_deref(), file_config: &file_config,
-            frontend_warning_specs: &frontend_warning_specs, derived_plans: true },
+            frontend_warning_specs: &frontend_warning_specs, derived_plans: true,
+            mode: crate::types::context::CheckMode::from_env() },
         |tctx, env, arena| {
             tctx.experimental_let_unwrap = experimental_let_unwrap;
             transl_signature(tctx, env, arena, &signature)
@@ -10234,6 +10236,7 @@ struct CheckUnit<'a> {
     file_config: &'a FileConfigOverrides,
     frontend_warning_specs: &'a [ppx::WarningAttributeSpec],
     derived_plans: bool,
+    mode: crate::types::context::CheckMode,
 }
 
 /// Settings for one whole-unit attempt. Cost: two bytes copied per attempt,
@@ -10260,7 +10263,7 @@ fn type_structure_two_modes<T, R>(
     use crate::types::context::CheckMode;
     let CheckUnit { arena, filename, options, derived_plans, .. } = unit;
     offer_unit_to_checker(options.checker, filename);
-    let mut attempt = CheckAttempt { mode: CheckMode::from_env(), derived_plans };
+    let mut attempt = CheckAttempt { mode: unit.mode, derived_plans };
     loop {
         let type_ctx = fresh_type_context();
         type_ctx.set_location_namespace(&options.location_identity(filename));
@@ -10334,7 +10337,8 @@ pub fn typecheck_structure_for_tooling(
     let (type_ctx, (typed, typed_arena)) = type_structure_two_modes(
         CheckUnit { arena, filename, options, registry: Some(registry),
             module_name: Some(module_name), file_config: &file_config,
-            frontend_warning_specs: &frontend_warning_specs, derived_plans: true },
+            frontend_warning_specs: &frontend_warning_specs, derived_plans: true,
+            mode: crate::types::context::CheckMode::from_env() },
         |tctx, env, arena| type_structure(tctx, env, arena, structure),
         |type_ctx, mut tctx, result| {
         let typed = match result {
@@ -10381,7 +10385,8 @@ pub fn typecheck_signature_for_tooling(
     let (type_ctx, (typed, typed_arena)) = type_structure_two_modes(
         CheckUnit { arena, filename, options, registry: Some(registry),
             module_name: Some(module_name), file_config: &file_config,
-            frontend_warning_specs: &frontend_warning_specs, derived_plans: true },
+            frontend_warning_specs: &frontend_warning_specs, derived_plans: true,
+            mode: crate::types::context::CheckMode::from_env() },
         |tctx, env, arena| transl_signature(tctx, env, arena, signature),
         |type_ctx, mut tctx, result| {
         let typed = match result {
@@ -10519,7 +10524,8 @@ fn compile_until_js(
     type_structure_two_modes(
         CheckUnit { arena, filename, options, registry: Some(registry),
             module_name: Some(module_name), file_config: &checking_config,
-            frontend_warning_specs: &frontend_warning_specs, derived_plans },
+            frontend_warning_specs: &frontend_warning_specs, derived_plans,
+            mode: crate::types::context::CheckMode::from_env() },
         |tctx, env, arena| type_structure(tctx, env, arena, structure),
         |type_ctx, mut tctx, typed| {
     let ((typed_structure, final_env), env) = match typed {
@@ -11607,7 +11613,8 @@ pub fn typecheck_preprocessed_signature_in_process(
     type_structure_two_modes(
         CheckUnit { arena, filename, options, registry: Some(registry),
             module_name: Some(module_name), file_config: &file_config,
-            frontend_warning_specs: &frontend_warning_specs, derived_plans: true },
+            frontend_warning_specs: &frontend_warning_specs, derived_plans: true,
+            mode: crate::types::context::CheckMode::from_env() },
         |tctx, env, arena| transl_signature(tctx, env, arena, signature),
         |type_ctx, mut tctx, typed| {
     let (typed_signature, env) = match typed {
@@ -11887,7 +11894,8 @@ mod tests {
             super::type_structure_two_modes(
                 super::CheckUnit { arena: parser.arena(), filename: "Attempt.res", options: &options,
                     registry: Some(&super::ModuleRegistry::new()), module_name: Some("Attempt"),
-                    file_config: &Default::default(), frontend_warning_specs: &[], derived_plans: true },
+                    file_config: &Default::default(), frontend_warning_specs: &[], derived_plans: true,
+                    mode: crate::types::context::CheckMode::Success },
                 |tctx, env, arena| {
                     calls.set(calls.get() + 1);
                     super::type_structure(tctx, env, arena, &structure)
@@ -11901,6 +11909,57 @@ mod tests {
             assert_eq!(finishes.get(), 1);
         }
     }
+    #[test]
+    fn discarded_attempt_warnings_match_explain() {
+        use crate::types::context::CheckMode;
+        for recovered in [false, true] {
+            let source = if recovered {
+                "let f = x => switch x { | true => 1 }"
+            } else {
+                "let f = x => switch x { | true => 1 }\nlet bad: bool = 1"
+            };
+            let mut reports = Vec::new();
+            for mode in [CheckMode::Success, CheckMode::Explain] {
+                let mut parser = super::Parser::new("Warnings.res", source);
+                let structure = super::module::parse_structure(&mut parser);
+                crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
+                let options = super::CompilerOptions { nopervasives: true, ..Default::default() };
+                let (_, report) = super::type_structure_two_modes(
+                    super::CheckUnit {
+                        arena: parser.arena(), filename: "Warnings.res", options: &options,
+                        registry: None, module_name: Some("Warnings"), file_config: &Default::default(),
+                        frontend_warning_specs: &[], derived_plans: true, mode,
+                    },
+                    |tctx, env, arena| {
+                        if recovered {
+                            // Model a caller that catches a failed unification, then
+                            // continues checking an expression that emits a warning.
+                            let ctx = tctx.type_ctx;
+                            let left = ctx.new_constr(crate::types::predef::path_bool(), vec![]);
+                            let right = ctx.new_constr(crate::types::predef::path_string(), vec![]);
+                            assert!(crate::types::ctype::unify(ctx, &mut tctx.unify_state, left, right).is_err());
+                        }
+                        let result = super::type_structure(tctx, env, arena, &structure);
+                        tctx.flush_value_usage_checks();
+                        result
+                    },
+                    |ctx, tctx, typed| {
+                        assert!(!tctx.warnings.is_empty(), "fixture must exercise a warning");
+                        let mut report = super::format_type_warnings(parser.arena(), source, "Warnings.res", &tctx.warnings);
+                        if let Err(error) = typed {
+                            report.push_str(&format!("{:#}", super::type_mod_error_to_anyhow(
+                                error, ctx, parser.arena(), source, "Warnings.res", false,
+                            )));
+                        }
+                        report
+                    },
+                );
+                reports.push(report);
+            }
+            assert_eq!(reports[0], reports[1]);
+        }
+    }
+
     /// `-bs-cross-module-opt` and `-bs-no-cross-module-opt` in `@@config`
     /// set `Js_config.cross_module_inline` for the file, the last one given
     /// winning, over the command line's.
