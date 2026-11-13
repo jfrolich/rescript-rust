@@ -10,7 +10,7 @@ pub mod plan;
 mod shape;
 pub(super) use shape::record as record_shapes;
 
-use crate::parse_arena::{LocIdx, ParseArena};
+use crate::parse_arena::ParseArena;
 use crate::parser::ast::{RecFlag, SignatureItem, StructureItem, StructureItemDesc};
 use plan::DerivedIdx;
 
@@ -51,9 +51,12 @@ pub enum GeneralReason {
     /// and constructor applications that need more than names and
     /// applications.
     NotYetPlanned,
-    /// The switch `RESCRIPT_DERIVED_PATH=general` keeps every declaration on
-    /// the general path.
+    /// Plans are off for the tree: the switch `RESCRIPT_DERIVED_PATH=general`,
+    /// or a tree that is stored or printed instead of compiled.
     Switch,
+    /// An obligation of a plan of the unit failed in the checker, and the
+    /// unit is compiled again with every declaration on the general path.
+    FailedObligation,
 }
 
 /// The path a derived declaration takes.
@@ -90,9 +93,8 @@ pub struct PathCounts {
     pub not_yet_planned: u64,
     /// See [`GeneralReason::Switch`].
     pub switch: u64,
-    /// Bindings of plans whose obligations failed in the checker, which then
-    /// typed the general form. They are counted under `plan` as well.
-    pub fallback: u64,
+    /// See [`GeneralReason::FailedObligation`].
+    pub failed_obligation: u64,
 }
 
 impl PathCounts {
@@ -109,7 +111,7 @@ impl PathCounts {
         self.nested += other.nested;
         self.not_yet_planned += other.not_yet_planned;
         self.switch += other.switch;
-        self.fallback += other.fallback;
+        self.failed_obligation += other.failed_obligation;
     }
 
     /// Count `bindings` bindings of one classification. Cost: O(1).
@@ -127,6 +129,7 @@ impl PathCounts {
                 GeneralReason::Nested => &mut self.nested,
                 GeneralReason::NotYetPlanned => &mut self.not_yet_planned,
                 GeneralReason::Switch => &mut self.switch,
+                GeneralReason::FailedObligation => &mut self.failed_obligation,
             },
         };
         *counter += bindings;
@@ -157,42 +160,36 @@ pub fn group_shares_names(
 }
 
 /// Build the plan of a group of declarations that all classify
-/// [`Classification::Plan`]; `general` is the value group the derive
-/// generated for the same declarations.
+/// [`Classification::Plan`]. No syntax is generated for the group.
 /// Cost: O(codecs of the declarations' types), into the arena's plan pools.
 pub fn plan(
     arena: &mut ParseArena,
     group: &[crate::parser::ast::TypeDeclaration],
-    general: crate::parse_arena::VbList,
 ) -> Result<DerivedIdx, String> {
-    super::spice_ppx::plan::build(arena, group, general)
+    super::spice_ppx::plan::build(arena, group)
 }
 
-/// The general form of a derived item: the value group the derive generates
-/// for it, which the item stands for wherever a plan is not understood (the
-/// stored `.ast`, the parse tree dumps) or cannot be used (an obligation of
-/// the plan failed).
-/// Cost: O(1), one read of the item's slot; no allocation.
-pub fn general_form(arena: &ParseArena, idx: DerivedIdx) -> StructureItemDesc {
-    StructureItemDesc::Pstr_value((RecFlag::Nonrecursive, arena.plans().item(idx).general))
+/// The names a planned item resolves in the environment of its declaration:
+/// one per obligation, in typing order. The modules they are qualified with
+/// are the modules the item depends on.
+/// Cost: O(1) to obtain; one slot read per obligation yielded.
+pub fn free_names(
+    arena: &ParseArena,
+    idx: DerivedIdx,
+) -> impl Iterator<Item = crate::parse_arena::LidentIdx> + '_ {
+    let plans = arena.plans();
+    plans
+        .bindings(plans.item(idx))
+        .iter()
+        .flat_map(|binding| binding.obligations.range())
+        .map(move |slot| plans.obligation(plan::ObligationIdx(slot as u32)).name())
 }
 
-/// [`general_form`] as a structure item at `loc`. Cost: O(1).
-pub fn general_item(arena: &ParseArena, loc: LocIdx, idx: DerivedIdx) -> StructureItem {
-    StructureItem {
-        pstr_desc: general_form(arena, idx),
-        pstr_loc: loc,
-    }
-}
-
-/// Replace the general form of a derived item by `desc`, the value group a
-/// mapper made of [`general_form`]. Cost: O(1).
-pub fn set_general_form(arena: &mut ParseArena, idx: DerivedIdx, desc: &StructureItemDesc) {
-    let StructureItemDesc::Pstr_value((RecFlag::Nonrecursive, general)) = desc else {
-        unreachable!("a mapper keeps the general form of a derived item a `let` group")
-    };
-    arena.plans_mut().set_general(idx, *general);
-}
+/// What a planned item stands for is not in its tree: the walks that store
+/// or print syntax run on trees the seam was told not to plan
+/// (`ParseArena::set_derived_plans`).
+pub(crate) const NO_SYNTAX: &str =
+    "a tree that is stored or printed is derived without plans";
 
 /// Detect derives in a structure. O(items and visited attributes), delegating to
 /// the existing mapper scan; no additional traversal.

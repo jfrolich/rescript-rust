@@ -326,7 +326,6 @@ pub fn signature_reads(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::binary_ast::derive::Scope;
     use crate::binary_ast::derive::fixtures::{DECLARATIONS, derive_source};
     use crate::types::derived::tests::type_context;
     use crate::types::typecore::TypeCheckContext;
@@ -335,8 +334,8 @@ mod tests {
 
     /// The paths a program's typed tree reads, with their kinds, and whether
     /// a derived item of it was discharged from a plan.
-    fn paths_read(source: &str, scope: Scope) -> (BTreeSet<(String, String)>, bool) {
-        let (parser, structure) = derive_source(source, scope);
+    fn paths_read(source: &str, plans: bool) -> (BTreeSet<(String, String)>, bool) {
+        let (parser, structure) = derive_source(source, plans);
         let arena = parser.arena();
         let type_ctx = type_context();
         let mut tctx = TypeCheckContext::new(&type_ctx, arena);
@@ -369,8 +368,8 @@ mod tests {
     #[test]
     fn a_discharged_item_reads_what_its_general_form_reads() {
         for source in DECLARATIONS {
-            let (planned, discharged) = paths_read(source, Scope::TopLevel);
-            let (mut general, none) = paths_read(source, Scope::Nested);
+            let (planned, discharged) = paths_read(source, true);
+            let (mut general, none) = paths_read(source, false);
             assert!(discharged && !none);
             // The general form names its own parameter, a local: no read of
             // a unit, and a plan has no identifier for it.

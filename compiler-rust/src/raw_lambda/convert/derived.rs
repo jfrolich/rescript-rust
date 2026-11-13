@@ -223,10 +223,8 @@ impl<B: RawLambdaBuilder, S: Steps> ArgLowering<B, BodyIdx> for Lowering<'_, S> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::binary_ast::derive::Scope;
     use crate::binary_ast::derive::plan::{SkeletonNode, Span};
-    use crate::parse_arena::VbList;
-    use crate::parser::ast::Attributes;
+        use crate::parser::ast::Attributes;
     use crate::parser::{Parser, module};
     use crate::raw_lambda::RawArena;
     use crate::raw_lambda::print::RawLambdaPrinter;
@@ -237,10 +235,10 @@ mod tests {
     use crate::types::{initial_env, typemod};
 
     /// The printed raw Lambda of a program whose derived items are planned
-    /// (`TopLevel`) or general (`Nested`), with its stamps renumbered in
-    /// order of first appearance, and the number of items lowered from plans.
-    fn raw_lambda(source: &str, scope: Scope) -> (String, usize) {
-        let (parser, structure) = derive_source(source, scope);
+    /// or syntax, with its stamps renumbered in order of first appearance,
+    /// and the number of items lowered from plans.
+    fn raw_lambda(source: &str, plans: bool) -> (String, usize) {
+        let (parser, structure) = derive_source(source, plans);
         let arena = parser.arena();
         let type_ctx = type_context();
         let mut tctx = TypeCheckContext::new(&type_ctx, arena);
@@ -286,8 +284,8 @@ mod tests {
     #[test]
     fn a_plan_lowers_to_the_lambda_of_the_general_form() {
         for source in DECLARATIONS {
-            let (planned, items) = raw_lambda(source, Scope::TopLevel);
-            let (general, none) = raw_lambda(source, Scope::Nested);
+            let (planned, items) = raw_lambda(source, true);
+            let (general, none) = raw_lambda(source, false);
             assert_eq!(items, source.matches("type ").count());
             assert_eq!(none, 0);
             assert!(planned.contains("_decode") || planned.contains("_encode"), "{planned}");
@@ -350,7 +348,7 @@ mod tests {
             result_of: obligation,
             applied: 0,
         });
-        let item = plans.push_item(first, VbList::EMPTY);
+        let item = plans.push_item(first);
         crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
         let arena = parser.arena();
         let type_ctx = type_context();

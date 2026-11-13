@@ -95,13 +95,8 @@ fn structure_item(item: StructureItem, c: &mut JsxConfig, a: &mut ParseArena) ->
                 .collect::<R<Vec<_>>>()?;
             StructureItemDesc::Pstr_value((rec_flag, a.push_vb_list(&vbs)))
         }
-        // The item keeps its plan; its general form is mapped as a value group.
-        StructureItemDesc::Pstr_derived(idx) => {
-            let general = crate::binary_ast::derive::general_item(a, item.pstr_loc, idx);
-            let mapped = structure_item(general, c, a)?;
-            crate::binary_ast::derive::set_general_form(a, idx, &mapped.pstr_desc);
-            StructureItemDesc::Pstr_derived(idx)
-        }
+        // A plan holds no syntax to map.
+        StructureItemDesc::Pstr_derived(idx) => StructureItemDesc::Pstr_derived(idx),
         StructureItemDesc::Pstr_primitive(vd) => {
             StructureItemDesc::Pstr_primitive(Box::new(value_description(*vd, c, a)?))
         }

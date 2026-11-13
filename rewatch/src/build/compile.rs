@@ -3871,20 +3871,53 @@ fn compile_with_location_retry<T>(
     options: &rescript_compiler::driver::CompilerOptions,
     mut compile: impl FnMut(&StoredAst, &rescript_compiler::driver::CompilerOptions) -> Result<T>,
 ) -> Result<T> {
-    use rescript_compiler::driver::LocationRetry;
-    let result = match ast.retry_source() {
-        // A location-free compile places its warnings in a located parse of
-        // the same source; it returns `LocationRetry::Warning` when it cannot.
-        Some(source) if !ast.arena().stores_locations() => {
-            let source = source.clone();
-            let mut options = options.clone();
-            options.warning_locations = Some(Arc::new(move || {
-                super::parse::reparse_arena_with_locations(&source)
-            }));
-            compile(ast, &options)
+    use rescript_compiler::driver::{DerivedPath, DerivedRetry, LocationRetry};
+    let mut attempt = |ast: &StoredAst| {
+        let check = options.derived_path == DerivedPath::Check && ast.arena().plans().item_count() > 0;
+        match ast.retry_source() {
+            Some(source) if !ast.arena().stores_locations() || check => {
+                let mut options = options.clone();
+                // A location-free compile places its warnings in a located
+                // parse of the same source; it returns
+                // `LocationRetry::Warning` when it cannot.
+                if !ast.arena().stores_locations() {
+                    let source = source.clone();
+                    options.warning_locations = Some(Arc::new(move || {
+                        super::parse::reparse_arena_with_locations(&source)
+                    }));
+                }
+                // A check compiles the unit's general form as well.
+                if check {
+                    let ast = ast.clone();
+                    options.derived_reference = Some(Arc::new(move || {
+                        match super::parse::reparse_without_plans(&ast, DerivedPath::General).ok()? {
+                            StoredAst::Structure(general) => {
+                                let general = Arc::try_unwrap(general).ok()?;
+                                Some((general.arena, general.structure))
+                            }
+                            StoredAst::Signature(_) => None,
+                        }
+                    }));
+                }
+                compile(ast, &options)
+            }
+            _ => compile(ast, options),
         }
-        _ => compile(ast, options),
     };
+    let result = attempt(ast);
+    // A unit with a plan the checker could not use is compiled again from
+    // the syntax of its derived code. Nothing of the first attempt was
+    // published.
+    let general;
+    let (ast, result) = match result {
+        Err(error) if error.is::<DerivedRetry>() => {
+            general = super::parse::reparse_without_plans(ast, DerivedPath::Fallback)?;
+            let result = attempt(&general);
+            (&general, result)
+        }
+        result => (ast, result),
+    };
+    drop(attempt);
     let local_retry = !ast.arena().stores_locations()
         && matches!(
             &result,

@@ -71,6 +71,15 @@ pub enum LocationRetry {
     Output,
 }
 
+/// Internal control flow: an obligation of a derived item's plan failed in
+/// the checker, which abandoned the unit before publishing anything. Whoever
+/// holds the unit's source runs the frontend again with
+/// [`DerivedPath::Fallback`], which generates the unit's derived code as
+/// syntax, and compiles that.
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+#[error("a derived item's plan could not be used")]
+pub struct DerivedRetry;
+
 /// A compile failure whose report is already formatted for the user: print
 /// `output` as is and exit with `exit_code`.
 #[derive(Debug)]
@@ -310,6 +319,9 @@ pub enum DerivedPath {
     /// `check`: a unit with a planned item is compiled both ways in the
     /// same process, and a difference between the two fails its compile.
     Check,
+    /// Not a value of the switch: the path of one unit after
+    /// [`DerivedRetry`]. Every item of the unit is on the general path.
+    Fallback,
 }
 
 impl DerivedPath {
@@ -331,6 +343,23 @@ impl DerivedPath {
     }
 }
 
+impl DerivedPath {
+    /// Why the derive seam plans no item of a unit on this path, or `None`
+    /// when it plans. Cost: O(1).
+    pub fn plans_off(self) -> Option<crate::binary_ast::derive::GeneralReason> {
+        use crate::binary_ast::derive::GeneralReason;
+        match self {
+            DerivedPath::Plans | DerivedPath::Check => None,
+            DerivedPath::General => Some(GeneralReason::Switch),
+            DerivedPath::Fallback => Some(GeneralReason::FailedObligation),
+        }
+    }
+}
+
+/// See [`CompilerOptions::derived_reference`].
+pub type DerivedReference =
+    std::sync::Arc<dyn Fn() -> Option<(crate::parse_arena::ParseArena, Structure)> + Send + Sync>;
+
 /// Compiler options that can be passed to the driver.
 #[derive(Clone)]
 pub struct CompilerOptions {
@@ -338,6 +367,10 @@ pub struct CompilerOptions {
     pub derived_census: Option<PathBuf>,
     /// The path derived items take, read once when options are created.
     pub derived_path: DerivedPath,
+    /// For `RESCRIPT_DERIVED_PATH=check`: the frontend's result for the
+    /// unit's source with [`DerivedPath::General`], ready for type checking.
+    /// The reference compile of a check runs on it.
+    pub derived_reference: Option<DerivedReference>,
     /// Dormant backend migration mode, selected before compiling modules.
     pub backend: crate::bir::shadow::BackendMode,
     /// Dormant publication equality oracle; configured once, not per unit.
@@ -630,6 +663,7 @@ impl Default for CompilerOptions {
         Self {
             derived_census: Self::derived_census_from_env(),
             derived_path: DerivedPath::from_env(),
+            derived_reference: None,
             backend: crate::bir::shadow::BackendMode::from_env(),
             signature_check: crate::cmi::signature_check::SignatureCheck::from_env(),
             js_printer: crate::emit::PrinterMode::from_env(),
@@ -6089,13 +6123,35 @@ pub fn compile_source_to_js_with_options(
     filename: &str,
     options: &CompilerOptions,
 ) -> Result<String> {
-    compile_source_to_js_with_options_inner(
-        source,
-        filename,
-        options,
-        #[cfg(test)]
-        None,
-    )
+    with_derived_retry(options, |options, frontend_reported| {
+        compile_source_to_js_with_options_inner(
+            source,
+            filename,
+            options,
+            frontend_reported,
+            #[cfg(test)]
+            None,
+        )
+    })
+}
+
+/// Run `compile` on a unit's source, and once more when a plan of the unit
+/// could not be used ([`DerivedRetry`]): with the unit's derived code as
+/// syntax, and `true` to say the frontend's reports were already printed.
+/// Cost: O(1) beyond the compiles; the options are copied only for the
+/// second.
+fn with_derived_retry<T>(
+    options: &CompilerOptions,
+    mut compile: impl FnMut(&CompilerOptions, bool) -> Result<T>,
+) -> Result<T> {
+    match compile(options, false) {
+        Err(error) if error.is::<DerivedRetry>() => {
+            let mut options = options.clone();
+            options.derived_path = DerivedPath::Fallback;
+            compile(&options, true)
+        }
+        result => result,
+    }
 }
 
 #[cfg(test)]
@@ -6108,6 +6164,7 @@ fn compile_source_to_js_with_trace(
         source,
         filename,
         &CompilerOptions::default(),
+        false,
         Some(trace),
     )
 }
@@ -6157,7 +6214,7 @@ pub fn run_implementation_frontend(
     parser.arena_mut().set_builtin_spice(options.builtin_spice());
     parser
         .arena_mut()
-        .set_derived_plans(options.derived_path != DerivedPath::General);
+        .set_derived_plans(options.derived_path.plans_off());
     let frontend_warnings =
         ppx::collect_leading_builtin_warning_attributes(&structure, parser.arena())
             .map_err(|err| ppx_error_to_anyhow(err, parser.arena(), source, filename))?;
@@ -6307,6 +6364,7 @@ fn compile_source_to_js_with_options_inner(
     source: &str,
     filename: &str,
     options: &CompilerOptions,
+    frontend_reported: bool,
     #[cfg(test)] mut discriminator_trace: Option<&mut PreJsDiscriminatorTrace>,
 ) -> Result<String> {
     // Parse
@@ -6321,7 +6379,7 @@ fn compile_source_to_js_with_options_inner(
         options,
         &mut frontend_output,
     );
-    if !options.frontend_already_reported {
+    if !options.frontend_already_reported && !frontend_reported {
         write_stderr(&frontend_output);
     }
     let ImplementationFrontend {
@@ -6389,8 +6447,12 @@ fn compile_source_to_js_with_options_inner(
     // Store persistent env in the type check context for module resolution
     tctx.set_persistent_env(pers_env);
 
+    let typed = type_structure(&mut tctx, &env, parser.arena(), &structure);
+    if tctx.derived_fallback {
+        return Err(DerivedRetry.into());
+    }
     let (typed_structure, final_env) =
-        match type_structure(&mut tctx, &env, parser.arena(), &structure) {
+        match typed {
             Ok(result) => result,
             Err(e) => {
                 // OCaml compiler/ext/misc.ml:337-392: `Color.color_enabled`
@@ -9659,6 +9721,32 @@ pub fn compile_source_in_process(
     has_interface: bool,
     gentype_interface: Option<crate::gentype::main::InterfaceRead>,
 ) -> Result<InProcessCompileResult> {
+    with_derived_retry(options, |options, frontend_reported| {
+        compile_source_in_process_once(
+            source,
+            filename,
+            module_name,
+            options,
+            registry,
+            has_interface,
+            gentype_interface.clone(),
+            frontend_reported,
+        )
+    })
+}
+
+/// [`compile_source_in_process`] for one path of the unit's derived items.
+#[allow(clippy::too_many_arguments)]
+fn compile_source_in_process_once(
+    source: &str,
+    filename: &str,
+    module_name: &str,
+    options: &CompilerOptions,
+    registry: &ModuleRegistry,
+    has_interface: bool,
+    gentype_interface: Option<crate::gentype::main::InterfaceRead>,
+    frontend_reported: bool,
+) -> Result<InProcessCompileResult> {
     let mut parser = Parser::new(filename, source);
     let structure = module::parse_structure(&mut parser);
     let mut frontend_output = String::new();
@@ -9670,7 +9758,9 @@ pub fn compile_source_in_process(
         options,
         &mut frontend_output,
     );
-    write_stderr(&frontend_output);
+    if !frontend_reported {
+        write_stderr(&frontend_output);
+    }
     let frontend = frontend?;
     let warnings_fatal = frontend.warnings_fatal;
     let experimental_let_unwrap = frontend.experimental_let_unwrap;
@@ -9678,13 +9768,35 @@ pub fn compile_source_in_process(
     let structure = frontend.structure;
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
-    let effective_options = if options.experimental_let_unwrap == experimental_let_unwrap {
+    let mut effective_options = if options.experimental_let_unwrap == experimental_let_unwrap {
         std::borrow::Cow::Borrowed(options)
     } else {
         let mut options = options.clone();
         options.experimental_let_unwrap = experimental_let_unwrap;
         std::borrow::Cow::Owned(options)
     };
+    if options.derived_path == DerivedPath::Check && parser.arena().plans().item_count() > 0 {
+        let source = source.to_owned();
+        let filename = filename.to_owned();
+        let mut general_options = options.clone();
+        general_options.derived_path = DerivedPath::General;
+        general_options.derived_census = None;
+        general_options.derived_reference = None;
+        effective_options.to_mut().derived_reference = Some(std::sync::Arc::new(move || {
+            let mut parser = Parser::new(&filename, &source);
+            let structure = module::parse_structure(&mut parser);
+            let frontend = run_implementation_frontend(
+                &mut parser,
+                structure,
+                &source,
+                &filename,
+                &general_options,
+                &mut String::new(),
+            ).ok()?;
+            crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
+            Some((parser.into_arena(), frontend.structure))
+        }));
+    }
 
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let result = compile_preprocessed_structure_in_process_with_signature_hook(
@@ -10364,10 +10476,11 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     if options.derived_path == DerivedPath::Check && arena.plans().item_count() > 0 {
         return derived_check::until_js(&unit, options, gentype_interface, signature_ready);
     }
-    compile_until_js(&unit, options, gentype_interface, signature_ready, true)
+    compile_until_js(&unit, options, gentype_interface, signature_ready)
 }
 
 /// The unit an in-process compile works on.
+#[derive(Clone, Copy)]
 struct UntilJs<'a> {
     arena: &'a crate::parse_arena::ParseArena,
     structure: &'a Structure,
@@ -10378,16 +10491,13 @@ struct UntilJs<'a> {
     publication: SignaturePublicationMode,
 }
 
-/// [`compile_preprocessed_structure_in_process_until_js`] for one path of
-/// the unit's derived items: from their plans (`derived_plans`), or, for the
-/// reference compile of `RESCRIPT_DERIVED_PATH=check`, from their general
-/// forms.
+/// [`compile_preprocessed_structure_in_process_until_js`] for one tree of
+/// the unit.
 fn compile_until_js(
     unit: &UntilJs<'_>,
     options: &CompilerOptions,
     gentype_interface: Option<crate::gentype::main::InterfaceRead>,
     mut signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
-    derived_plans: bool,
 ) -> Result<InProcessPreJsCompileResult> {
     let UntilJs {
         arena,
@@ -10446,11 +10556,7 @@ fn compile_until_js(
         &file_config,
         &frontend_warning_specs,
     );
-    tctx.derived_plans = derived_plans;
-    // The reference compile of a check is not part of the census.
-    if derived_plans {
-        tctx.derived_census = arena.derived_census.clone();
-    }
+    tctx.derived_census = arena.derived_census.clone();
     drop(env_setup_span);
     if let Some(start) = env_setup_start {
         crate::timing::record(crate::timing::Phase::EnvSetup, start.elapsed());
@@ -10465,6 +10571,11 @@ fn compile_until_js(
         let _phase = info_span!("compiler.type_structure").entered();
         type_structure(&mut tctx, &env, arena, structure)
     });
+    // O(1) per unit. Nothing of the abandoned attempt is reported or
+    // published.
+    if tctx.derived_fallback {
+        return Err(DerivedRetry.into());
+    }
     let (typed_structure, final_env) = match typed {
         Ok(result) => result,
         Err(e) => {

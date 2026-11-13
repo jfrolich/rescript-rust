@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::parse_arena::{LidentIdx, LocIdx, StrIdx, VbList};
+use crate::parse_arena::{LidentIdx, LocIdx, StrIdx};
 use crate::parser::ast::Attributes;
 
 macro_rules! handle {
@@ -70,15 +70,12 @@ impl Span {
     }
 }
 
-/// A derived item: its bindings, and the syntax it stands for.
+/// A derived item: its bindings. The syntax it stands for is not generated:
+/// a unit whose plan cannot be used is compiled again with plans off.
 #[derive(Debug, Clone, Copy)]
 pub struct Item {
     /// The bindings, in declaration order.
     pub bindings: Span,
-    /// The general form: the value group the derive generates for this item.
-    /// The checker types it when an obligation fails, and the stored `.ast`
-    /// holds it, so nothing downstream of a stored tree sees a plan.
-    pub general: VbList,
 }
 
 /// Where an obligation's expression is located, relative to its name. The
@@ -123,6 +120,16 @@ pub enum Obligation {
         /// The number of type arguments skeletons apply it to.
         arity: u16,
     },
+}
+
+impl Obligation {
+    /// The name the obligation resolves. Cost: O(1).
+    #[inline]
+    pub fn name(self) -> LidentIdx {
+        match self {
+            Obligation::Value { name, .. } | Obligation::Type { name, .. } => name,
+        }
+    }
 }
 
 /// One node of a type skeleton. A skeleton is stored in prefix order: a node
@@ -238,14 +245,13 @@ impl Plans {
 
     /// Append an item whose bindings are the `len` most recently pushed.
     /// Cost: O(1) amortised; one slot, no other allocation.
-    pub fn push_item(&mut self, first: BindingIdx, general: VbList) -> DerivedIdx {
+    pub fn push_item(&mut self, first: BindingIdx) -> DerivedIdx {
         let idx = DerivedIdx(self.items.len() as u32);
         self.items.push(Item {
             bindings: Span {
                 start: first.0,
                 len: self.bindings.len() as u32 - first.0,
             },
-            general,
         });
         idx
     }
@@ -329,12 +335,6 @@ impl Plans {
     pub fn apply_args(&self, start: u32, len: u16) -> &[BodyIdx] {
         &self.body_args[start as usize..start as usize + len as usize]
     }
-
-    /// Replace the general form of an item, after the front end rewrote it.
-    /// Cost: O(1).
-    pub fn set_general(&mut self, idx: DerivedIdx, general: VbList) {
-        self.items[idx.index()].general = general;
-    }
 }
 
 #[cfg(test)]
@@ -352,7 +352,7 @@ mod tests {
         assert_eq!(size_of::<Obligation>(), 16);
         assert_eq!(size_of::<BodyNode>(), 12);
         assert_eq!(size_of::<SkeletonNode>(), 8);
-        assert_eq!(size_of::<Item>(), 16);
+        assert_eq!(size_of::<Item>(), 8);
         assert_eq!(size_of::<Binding>(), 40);
     }
 
@@ -391,7 +391,7 @@ mod tests {
             result_of: ObligationIdx(0),
             applied: 0,
         });
-        let item = plans.push_item(first, VbList::EMPTY);
+        let item = plans.push_item(first);
         assert_eq!(plans.obligation_count(), 10_000);
         assert_eq!(plans.skeletons.len(), 10_000);
         assert_eq!(plans.body.len(), 10_002);

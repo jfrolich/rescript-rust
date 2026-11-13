@@ -10521,16 +10521,8 @@ fn rewrite_structure_item_body(
                 }]
             }
         }
-        // A derived item keeps its plan; its general form is rewritten as the
-        // value group it is, which rewrites to one value group.
-        StructureItemDesc::Pstr_derived(idx) => {
-            let general = derive::general_item(arena, item.pstr_loc, *idx);
-            let [rewritten] = rewrite_structure_item_body(&general, arena).try_into().unwrap_or_else(
-                |_| unreachable!("a `let` group of generated bindings rewrites to one item"),
-            );
-            derive::set_general_form(arena, *idx, &rewritten.pstr_desc);
-            vec![item.clone()]
-        }
+        // A plan holds no syntax to rewrite.
+        StructureItemDesc::Pstr_derived(_) => vec![item.clone()],
         // Handle value bindings - need to rewrite expressions and patterns
         // Also handle @inline transformation
         StructureItemDesc::Pstr_value(inner) => {

@@ -56,15 +56,20 @@ pub(crate) const DECLARATIONS: [&str; 10] = [
     "@spice type a = string\n@spice and b = array<int>\n@spice type c = result<a, b>",
 ];
 
-/// Parse `source` after the library and run the derive over its items.
+/// Parse `source` after the library and run the derive over its items,
+/// with plans (`true`) or with every item as syntax.
 pub(crate) fn derive_source(
     source: &str,
-    scope: Scope,
+    plans: bool,
 ) -> (Parser<'static>, Vec<StructureItem>) {
     let source: &'static str = Box::leak(format!("{LIBRARY}{source}").into_boxed_str());
     let mut parser = Parser::new("Test.res", source);
     let items = module::parse_structure(&mut parser);
     assert!(!parser.has_errors(), "{source}");
+    parser
+        .arena_mut()
+        .set_derived_plans((!plans).then_some(super::GeneralReason::Switch));
+    let scope = Scope::TopLevel;
     let expanded: Vec<StructureItem> = items
         .iter()
         .flat_map(|item| {

@@ -3269,6 +3269,10 @@ pub enum UnboundTypeVarDetail {
 pub enum TypeModError {
     /// Core type checking error.
     CoreError(TypeCoreError),
+    /// An obligation of a derived item's plan failed
+    /// (`TypeCheckContext::derived_fallback`): no diagnostic, the unit is
+    /// compiled again with plans off.
+    DerivedFallback,
     /// Module type not found.
     UnboundModtype {
         /// Source location to report.
@@ -16747,12 +16751,8 @@ fn type_structure_item<'a>(
             ))
         }
 
-        // A derived item: discharge the obligations of its plan, or, when one
-        // fails, type the value group it stands for.
-        ParsedStructureItemDesc::Pstr_derived(idx) if !tctx.derived_plans => {
-            let general = crate::binary_ast::derive::general_item(arena, loc, *idx);
-            type_structure_item(tctx, env, arena, &general)
-        }
+        // A derived item: discharge the obligations of its plan. When one
+        // fails the unit is compiled again with plans off.
         ParsedStructureItemDesc::Pstr_derived(idx) => {
             match crate::types::derived::discharge(tctx, env, *idx) {
                 Ok(discharged) => {
@@ -16782,11 +16782,8 @@ fn type_structure_item<'a>(
                     ))
                 }
                 Err(crate::types::derived::Fallback) => {
-                    if let Some(census) = &mut tctx.derived_census {
-                        census.paths.fallback += arena.plans().item(*idx).bindings.len as u64;
-                    }
-                    let general = crate::binary_ast::derive::general_item(arena, loc, *idx);
-                    type_structure_item(tctx, env, arena, &general)
+                    tctx.derived_fallback = true;
+                    Err(TypeModError::DerivedFallback)
                 }
             }
         }

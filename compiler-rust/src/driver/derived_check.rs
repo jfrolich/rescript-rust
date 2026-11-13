@@ -17,7 +17,7 @@
 use anyhow::Result;
 
 use super::{
-    CompilerOptions, DumpKind, InProcessCompileResult, InProcessPreJsCompileResult,
+    CompilerOptions, DerivedRetry, DumpKind, InProcessCompileResult, InProcessPreJsCompileResult,
     InProcessSignatureReadyHook, LocationRetry, UntilJs, UserDiagnostic, compile_until_js,
 };
 
@@ -138,22 +138,35 @@ pub(super) fn until_js(
     let mut reference_options = both.clone();
     reference_options.derived_census = None;
 
+    // The general form of the unit is what the frontend makes of its source
+    // with plans off.
+    let Some((general_arena, general_structure)) =
+        options.derived_reference.as_ref().and_then(|frontend| frontend())
+    else {
+        return Err(differs(
+            name,
+            "the compiles",
+            "  the unit's source is not at hand to compile its general form".to_string(),
+        ));
+    };
+    let general = UntilJs {
+        arena: &general_arena,
+        structure: &general_structure,
+        ..*unit
+    };
     // The reference first: it publishes nothing, and what the plans publish
     // is compared with it.
-    let reference = compile_until_js(
-        unit,
-        &reference_options,
-        gentype_interface.clone(),
-        None,
-        false,
-    );
-    let result = compile_until_js(unit, &both, gentype_interface, signature_ready, true);
+    let reference = compile_until_js(&general, &reference_options, gentype_interface.clone(), None);
+    let result = compile_until_js(unit, &both, gentype_interface, signature_ready);
 
     let (mut result, reference) = match (result, reference) {
         (Ok(result), Ok(reference)) => (result, reference),
         // A compile that needs locations is retried with them, and checked
-        // then.
-        (Err(error), _) if error.is::<LocationRetry>() => return Err(error),
+        // then; a unit whose plans cannot be used is compiled without them,
+        // and has nothing to check.
+        (Err(error), _) if error.is::<LocationRetry>() || error.is::<DerivedRetry>() => {
+            return Err(error);
+        }
         (_, Err(error)) if error.is::<LocationRetry>() => return Err(error),
         (Err(error), Err(reference)) => {
             same_text(name, "the diagnostics", &error.to_string(), &reference.to_string())?;

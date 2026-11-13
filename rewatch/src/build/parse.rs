@@ -104,7 +104,9 @@ pub fn generate_asts(
                                 state,
                                 state.get_warn_error_override(),
                                 &parse_span,
-                                !state.parses_with_locations(),
+                                ParseFor::Build {
+                                    omit_locations: !state.parses_with_locations(),
+                                },
                             )
                             .map_err(|e| e.to_string());
 
@@ -116,7 +118,9 @@ pub fn generate_asts(
                                         state,
                                         state.get_warn_error_override(),
                                         &parse_span,
-                                        !state.parses_with_locations(),
+                                        ParseFor::Build {
+                                            omit_locations: !state.parses_with_locations(),
+                                        },
                                     ) {
                                         Ok(v) => Ok(Some(v)),
                                         Err(e) => Err(e.to_string()),
@@ -343,11 +347,21 @@ pub(crate) fn parse_for_tooling(
         build_state,
         build_state.get_warn_error_override(),
         &tracing::Span::none(),
-        false,
+        ParseFor::Tooling,
     )?;
     generated
         .stored_ast
         .ok_or_else(|| anyhow!("no AST for {}", filename.display()))
+}
+
+/// What a parse is for.
+#[derive(Clone, Copy)]
+enum ParseFor {
+    /// A build compiles the tree in this process.
+    Build { omit_locations: bool },
+    /// Editor tooling reads the tree and its typed bodies: locations are
+    /// kept and derived code is syntax.
+    Tooling,
 }
 
 fn generate_ast(
@@ -356,8 +370,12 @@ fn generate_ast(
     build_state: &BuildState,
     warn_error_override: Option<String>,
     parent_span: &tracing::Span,
-    omit_locations: bool,
+    parse_for: ParseFor,
 ) -> anyhow::Result<GeneratedAst> {
+    let omit_locations = match parse_for {
+        ParseFor::Build { omit_locations } => omit_locations,
+        ParseFor::Tooling => false,
+    };
     let file_path = PathBuf::from(&package.path).join(filename);
 
     // `bsc -absname` names the source by its normalized absolute path.
@@ -400,6 +418,13 @@ fn generate_ast(
             ..Default::default()
         }
     };
+    let frontend_options = match parse_for {
+        ParseFor::Build { .. } => frontend_options,
+        ParseFor::Tooling => rescript_compiler::driver::CompilerOptions {
+            derived_path: rescript_compiler::driver::DerivedPath::General,
+            ..frontend_options
+        },
+    };
 
     let _parse_span = if tracing::enabled!(tracing::Level::INFO) {
         make_parse_file_span(filename, package, build_state, parent_span).entered()
@@ -439,7 +464,9 @@ fn generate_ast(
         }
     }
     let (stderr, mut stored_ast, deps) = result.map_err(|err| anyhow!("{err}"))?;
-    if !stored_ast.arena().stores_locations() {
+    // The source is kept for a compile that may have to parse it again: for
+    // its locations, or because a plan of the unit cannot be used.
+    if !stored_ast.arena().stores_locations() || stored_ast.arena().plans().item_count() > 0 {
         match &mut stored_ast {
             StoredAst::Structure(ast) => Arc::get_mut(ast).unwrap().retry_source = Some(source),
             StoredAst::Signature(ast) => Arc::get_mut(ast).unwrap().retry_source = Some(source),
@@ -485,6 +512,45 @@ pub(crate) fn reparse_with_locations(ast: &StoredAst) -> anyhow::Result<StoredAs
         census.add_parse_work(prior.parse_work());
     }
     Ok(located)
+}
+
+/// Parse the source of `ast` again with its derived code as syntax, for
+/// `path`: the general path of the switch, or the fallback of a unit whose
+/// plan could not be used. The result keeps a source that parses the same
+/// way, for a later location retry.
+/// Cost: one frontend run of the unit, and one copy of its source.
+pub(crate) fn reparse_without_plans(
+    ast: &StoredAst,
+    path: rescript_compiler::driver::DerivedPath,
+) -> anyhow::Result<StoredAst> {
+    let source = ast
+        .retry_source()
+        .ok_or_else(|| anyhow!("missing source for a parse without plans"))?;
+    let source = Arc::new(ParseSource {
+        file_path: source.file_path.clone(),
+        source: source.source.clone(),
+        source_path_for_ast: source.source_path_for_ast.clone(),
+        open_deps: source.open_deps.clone(),
+        options: rescript_compiler::driver::CompilerOptions {
+            derived_path: path,
+            // The reference compile is not part of the measured build.
+            derived_census: if path == rescript_compiler::driver::DerivedPath::General {
+                None
+            } else {
+                source.options.derived_census.clone()
+            },
+            ..source.options.clone()
+        },
+    });
+    let (_, mut general, _) = parse_saved_source(&source, ast.arena().stores_locations())?;
+    if let (Some(prior), Some(census)) = (ast.arena().derived_census.as_ref(), census_mut(&mut general)) {
+        census.add_parse_work(prior.parse_work());
+    }
+    match &mut general {
+        StoredAst::Structure(ast) => Arc::get_mut(ast).unwrap().retry_source = Some(source),
+        StoredAst::Signature(ast) => Arc::get_mut(ast).unwrap().retry_source = Some(source),
+    }
+    Ok(general)
 }
 
 /// O(1): borrow the record of a newly parsed, uniquely owned AST. No lock or clone.

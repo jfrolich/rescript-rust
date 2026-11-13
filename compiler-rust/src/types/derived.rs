@@ -3,9 +3,10 @@
 //! [`discharge`] establishes the obligations of the item's plan in order and
 //! enters its bindings in the environment without typing a body: per value
 //! obligation one lookup, one instance and one unification with the
-//! obligation's skeleton. When an obligation fails it undoes what it did and
-//! reports [`Fallback`]; the caller then types the item's general form, so
-//! every diagnostic comes from the code that types syntax.
+//! obligation's skeleton. When an obligation fails it reports [`Fallback`]:
+//! the checking of the unit is abandoned, and the unit is compiled again
+//! with its derived items as syntax, so every diagnostic comes from the code
+//! that types syntax. Nothing is generated for an item whose plan holds.
 //!
 //! What a discharge records is in two dense tables of the typed arena,
 //! indexed by the plan's binding and obligation handles: the identifier,
@@ -180,10 +181,10 @@ impl DerivedTable {
     }
 }
 
-/// The item cannot be established from its plan: the checker types its
-/// general form instead. Nothing the failed discharge did remains: the type
-/// state is restored, and the warnings and deprecated uses it recorded are
-/// dropped.
+/// The item cannot be established from its plan. The type state, the
+/// warnings and the deprecated uses of the failed discharge are left as they
+/// are: the caller abandons the checking of the unit, which is compiled
+/// again with plans off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fallback;
 
@@ -217,9 +218,9 @@ impl Steps for () {
 /// Discharge the obligations of a derived item and enter its bindings.
 /// Cost: O(obligations + skeleton nodes of the item): per value obligation
 /// one environment lookup, one instance of the value's type and one
-/// unification; per binding one function type and one environment entry. One
-/// snapshot of the type state per item; no allocation per obligation beyond
-/// the type nodes of the instances and skeletons.
+/// unification; per binding one function type and one environment entry. No
+/// allocation per obligation beyond the type nodes of the instances and
+/// skeletons.
 pub fn discharge(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -241,13 +242,10 @@ pub fn discharge_counting(
     let bindings = plans.bindings(item);
     tctx.typed.derived.reserve(plans);
 
-    let warnings = tctx.warnings.len();
-    let deprecated_uses = tctx.type_ctx.deprecated_use_count();
     // `Typecore.type_binding` starts with `Typetexp.reset_type_variables`.
     tctx.reset_type_variables();
     tctx.set_unify_env(env);
     let ctx = tctx.type_ctx;
-    let snapshot = ctx.snapshot_type_state();
     ctx.begin_def();
     let mut vars = std::mem::take(&mut tctx.typed.derived.vars);
     let mut established = Ok(());
@@ -278,13 +276,7 @@ pub fn discharge_counting(
     }
     tctx.typed.derived.vars = vars;
     ctx.end_def();
-    if established.is_err() {
-        ctx.restore_type_state(snapshot);
-        tctx.warnings.truncate(warnings);
-        ctx.truncate_deprecated_uses(deprecated_uses);
-        return Err(Fallback);
-    }
-    drop(snapshot);
+    established?;
 
     // typecore.ml `type_let`: every binding is a function, so its type is
     // generalised in full, and the bound variables enter the environment in
@@ -494,7 +486,6 @@ fn instantiate(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::binary_ast::derive::Scope;
     use crate::binary_ast::derive::fixtures::{
         CURRIED_LIBRARY, DECLARATIONS, FAILING, derive_source,
     };
@@ -519,16 +510,21 @@ pub(crate) mod tests {
     }
 
     /// The values a program declares, with their printed types, and how many
-    /// items were discharged; `Err` is the type error.
-    fn check(source: &str, scope: Scope) -> Result<(Vec<(String, String)>, usize), String> {
-        let (parser, structure) = derive_source(source, scope);
+    /// items were discharged; `Err` is the type error. With `plans`, a
+    /// program one of whose plans cannot be used is checked again without,
+    /// as the driver does, and reports no discharged item.
+    fn check(source: &str, plans: bool) -> Result<(Vec<(String, String)>, usize), String> {
+        let (parser, structure) = derive_source(source, plans);
         let arena = parser.arena();
         let type_ctx = type_context();
         let mut tctx = TypeCheckContext::new(&type_ctx, arena);
         let env = initial_env(&type_ctx);
-        let (typed, _) =
-            crate::types::typemod::type_structure(&mut tctx, &env, arena, &structure)
-                .map_err(|error| without_type_handles(&format!("{error:?}")))?;
+        let typed = crate::types::typemod::type_structure(&mut tctx, &env, arena, &structure);
+        if tctx.derived_fallback {
+            assert!(plans && typed.is_err());
+            return check(source, false);
+        }
+        let (typed, _) = typed.map_err(|error| format!("{error:?}"))?;
         let values = typed
             .str_type
             .iter()
@@ -549,45 +545,33 @@ pub(crate) mod tests {
         Ok((values, discharged))
     }
 
-    /// A printed error without the numbers of its type handles: a failed
-    /// discharge leaves type nodes behind, so the general form's are later.
-    fn without_type_handles(error: &str) -> String {
-        let mut out = String::new();
-        let mut rest = error;
-        while let Some(at) = rest.find("TypeExprRef(") {
-            let end = at + "TypeExprRef(".len();
-            out.push_str(&rest[..end]);
-            rest = rest[end..].trim_start_matches(|c: char| c.is_ascii_digit());
-        }
-        out + rest
-    }
-
     /// A discharged binding has the type inference gives its general form.
     #[test]
     fn a_discharge_records_the_types_of_the_general_form() {
         for source in DECLARATIONS {
-            let (planned, discharged) = check(source, Scope::TopLevel).unwrap();
-            let (general, none) = check(source, Scope::Nested).unwrap();
+            let (planned, discharged) = check(source, true).unwrap();
+            let (general, none) = check(source, false).unwrap();
             assert_eq!(discharged, source.matches("type ").count());
             assert_eq!(none, 0);
             assert_eq!(planned, general, "{source}");
         }
     }
 
-    /// A failed obligation gives the diagnostic of the general form.
+    /// A failed obligation abandons the unit, which is then checked from
+    /// the syntax of its derived code.
     #[test]
-    fn a_failed_obligation_reports_as_the_general_form() {
+    fn a_failed_obligation_abandons_the_unit() {
         for source in FAILING {
-            let planned = check(source, Scope::TopLevel).unwrap_err();
-            let general = check(source, Scope::Nested).unwrap_err();
+            let planned = check(source, true).unwrap_err();
+            let general = check(source, false).unwrap_err();
             assert_eq!(planned, general, "{source}");
         }
-        // A library of another shape: the obligation fails, the general form
-        // types, and the result is the same.
+        // A library of another shape: the obligation fails and the syntax
+        // types.
         let curried = CURRIED_LIBRARY;
-        let (planned, discharged) = check(curried, Scope::TopLevel).unwrap();
+        let (planned, discharged) = check(curried, true).unwrap();
         assert_eq!(discharged, 0);
-        assert_eq!(planned, check(curried, Scope::Nested).unwrap().0);
+        assert_eq!(planned, check(curried, false).unwrap().0);
     }
 
     #[derive(Default, Debug, PartialEq)]
@@ -618,7 +602,6 @@ pub(crate) mod tests {
         names: impl Fn(u32) -> &'static str,
     ) -> DerivedIdx {
         use crate::binary_ast::derive::plan::BodyIdx;
-        use crate::parse_arena::VbList;
         let first = arena.plans().next_binding();
         let start = arena.plans().next_obligation();
         for i in 0..count {
@@ -649,7 +632,7 @@ pub(crate) mod tests {
             result_of: start,
             applied: 0,
         });
-        plans.push_item(first, VbList::EMPTY)
+        plans.push_item(first)
     }
 
     /// Type `source`, then run `test` on a context whose arena holds the
@@ -700,17 +683,14 @@ pub(crate) mod tests {
         });
     }
 
-    /// A failed discharge leaves no warning, no deprecated use and no change
-    /// of the type state behind.
+    /// A discharge stops at the first obligation that fails, and records
+    /// the deprecated uses of the ones that hold.
     #[test]
-    fn a_failed_discharge_restores_what_it_did() {
+    fn a_discharge_stops_at_the_first_failed_obligation() {
         use crate::binary_ast::derive::plan::BodyIdx;
-        use crate::parse_arena::VbList;
-        let source = "type cell<'a> = {mutable contents: option<'a>}\n\
-            let weak = {contents: None}\n\
-            module M = {\n  @deprecated(\"old\") let take = (x: cell<int>) => x\n}";
-        // `weak` at 'a, then `take` at 'a => 'b, which makes the weak
-        // variable `int`, then, unless `complete`, a name that is not bound.
+        let source = "module M = {\n  @deprecated(\"old\") let take = (x: int) => x\n}\nlet one = 1";
+        // `M.take` at 'a => 'b, `one` at 'a, then, unless `complete`, a name
+        // that is not bound.
         let run = |complete: bool| {
             let mut parser = Parser::new("Test.res", source);
             let structure = module::parse_structure(&mut parser);
@@ -744,7 +724,7 @@ pub(crate) mod tests {
                 SkeletonNode::Var(1),
             ];
             obligation(arena, &["M", "take"], &take);
-            obligation(arena, &["weak"], &[SkeletonNode::Var(0)]);
+            obligation(arena, &["one"], &[SkeletonNode::Var(0)]);
             if !complete {
                 obligation(arena, &["missing"], &[SkeletonNode::Var(2)]);
             }
@@ -760,7 +740,7 @@ pub(crate) mod tests {
                 result_of: start,
                 applied: 0,
             });
-            let item = plans.push_item(first, VbList::EMPTY);
+            let item = plans.push_item(first);
             crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
             let arena = parser.arena();
             let type_ctx = type_context();
@@ -768,22 +748,13 @@ pub(crate) mod tests {
             let env = initial_env(&type_ctx);
             let (_, env) =
                 crate::types::typemod::type_structure(&mut tctx, &env, arena, &structure).unwrap();
-            let state = |tctx: &TypeCheckContext<'_>| {
-                let (_, weak) = env.find_value_arc_with_path(crate::name::Name::new("weak")).unwrap();
-                (
-                    tctx.warnings.len(),
-                    type_ctx.deprecated_use_count(),
-                    crate::types::printtyp::Printtyp::new(&type_ctx).type_expr(weak.val_type),
-                    type_ctx.current_level(),
-                )
-            };
-            let before = state(&tctx);
+            let warnings = tctx.warnings.len();
             let mut steps = Counted::default();
             let result = discharge_counting(&mut tctx, &env, item, &mut steps);
-            (before, state(&tctx), result.map(|_| ()), steps)
+            (result.map(|_| ()), steps, tctx.warnings.len() - warnings)
         };
 
-        let (before, after, result, steps) = run(false);
+        let (result, steps, _) = run(false);
         assert_eq!(result, Err(Fallback));
         assert_eq!(
             steps,
@@ -793,23 +764,15 @@ pub(crate) mod tests {
                 unifications: 2
             }
         );
-        assert_eq!(after, before);
-        assert!(before.2.contains("cell<'"), "{}", before.2);
-
-        // Without the unbound name the same obligations hold: the deprecated
-        // use is recorded and warned about, and the weak variable is `int`.
-        let (before, after, result, _) = run(true);
+        let (result, _, warnings) = run(true);
         assert_eq!(result, Ok(()));
-        assert_eq!((after.0, after.1), (before.0 + 1, before.1 + 1));
-        assert_eq!(after.2, "cell<int>");
-        assert_eq!(after.3, before.3);
+        assert_eq!(warnings, 1);
     }
 
     /// A type obligation resolves a constructor that skeletons then name.
     #[test]
     fn a_type_obligation_names_a_constructor() {
         use crate::binary_ast::derive::plan::BodyIdx;
-        use crate::parse_arena::VbList;
         let source = "type box<'a> = {v: 'a}\nlet make = (x: int): box<int> => {v: x}";
         for (arity, discharges) in [(1u16, true), (2, false)] {
             let mut parser = Parser::new("Test.res", source);
@@ -849,7 +812,7 @@ pub(crate) mod tests {
                 result_of: value,
                 applied: 0,
             });
-            let item = plans.push_item(first, VbList::EMPTY);
+            let item = plans.push_item(first);
             crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
             let arena = parser.arena();
             let type_ctx = type_context();

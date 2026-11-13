@@ -5426,12 +5426,8 @@ impl<'a> LocCloner<'a> {
                 }
                 *bindings = self.arena.push_vb_list(&new_bindings);
             }
-            // The item keeps its plan; its general form is cloned as a value group.
-            StructureItemDesc::Pstr_derived(idx) => {
-                let mut general = super::derive::general_form(self.arena, *idx);
-                self.structure_item_desc(&mut general);
-                super::derive::set_general_form(self.arena, *idx, &general);
-            }
+            // A plan holds no syntax to clone.
+            StructureItemDesc::Pstr_derived(_) => {}
             StructureItemDesc::Pstr_primitive(vd) => self.value_description(vd),
             StructureItemDesc::Pstr_type(inner) => {
                 let (_, ref mut decls) = **inner;
@@ -5521,6 +5517,28 @@ fn clone_mapped_signature_item(
     Ok(mapped_item)
 }
 
+/// The number of bindings the derive makes for each declaration of a group,
+/// read from the declarations' attributes: two for an encoder, one for a
+/// decoder. `None` when an attribute cannot be read; generating the group
+/// then reports the error.
+/// Cost: O(attributes of the group); the counts are inline up to four
+/// declarations.
+fn binding_counts(
+    decls: &[TypeDeclaration],
+    arena: &mut ParseArena,
+) -> Option<smallvec::SmallVec<[usize; 4]>> {
+    decls
+        .iter()
+        .map(|decl| {
+            let settings =
+                get_generator_settings_from_attributes(&decl.ptype_attributes, arena).ok()?;
+            Some(settings.map_or(0, |settings| {
+                2 * usize::from(settings.do_encode) + usize::from(settings.do_decode)
+            }))
+        })
+        .collect()
+}
+
 /// The path of a group of type declarations: a plan when every declaration
 /// that derives classifies `Plan`, otherwise the first reason met. With the
 /// census on, the bindings of each declaration are counted under its own
@@ -5571,15 +5589,27 @@ fn map_structure_item_spice(
     match &item.pstr_desc {
         StructureItemDesc::Pstr_type(inner) => {
             let (ref rec_flag, ref decls) = **inner;
+            // A group that takes a plan generates no syntax: it is classified
+            // from its declarations alone, before anything is generated.
+            let counts = binding_counts(decls, arena);
+            if let Some(counts) = &counts
+                && counts.iter().any(|count| *count > 0)
+                && classify_group(arena, *rec_flag, decls, counts, scope)
+                    == super::derive::Classification::Plan
+            {
+                let mapped_item = clone_mapped_structure_item(item, arena)?;
+                let value_item = StructureItem {
+                    pstr_desc: StructureItemDesc::Pstr_derived(plan::build(arena, decls)?),
+                    pstr_loc: arena.dummy_loc(),
+                };
+                return Ok(vec![mapped_item, value_item]);
+            }
             let mut vbs = Vec::new();
-            // Bindings generated per declaration, for the classification.
-            let mut generated_counts: smallvec::SmallVec<[usize; 4]> = smallvec::SmallVec::new();
             for decl in decls {
                 let generated = map_type_decl_structure(decl, arena)?;
                 if arena.derived_census.is_some() {
                     super::derive::record_shapes(decl, decls, *rec_flag == RecFlag::Recursive, &generated, arena);
                 }
-                generated_counts.push(generated.len());
                 vbs.extend(generated);
             }
 
@@ -5593,17 +5623,8 @@ fn map_structure_item_spice(
                 let mapped_item = clone_mapped_structure_item(item, arena)?;
 
                 let general = arena.push_vb_list(&vbs);
-                let pstr_desc =
-                    match classify_group(arena, *rec_flag, decls, &generated_counts, scope) {
-                        super::derive::Classification::Plan => {
-                            StructureItemDesc::Pstr_derived(plan::build(arena, decls, general)?)
-                        }
-                        super::derive::Classification::General(_) => {
-                            StructureItemDesc::Pstr_value((*rec_flag, general))
-                        }
-                    };
                 let value_item = StructureItem {
-                    pstr_desc,
+                    pstr_desc: StructureItemDesc::Pstr_value((*rec_flag, general)),
                     pstr_loc: arena.dummy_loc(),
                 };
                 super::derive::mark_generated_item(&value_item, arena);

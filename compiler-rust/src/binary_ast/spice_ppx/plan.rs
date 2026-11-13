@@ -19,7 +19,7 @@ use crate::binary_ast::derive::plan::{
     Binding, BodyIdx, BodyNode, DerivedIdx, ExprLoc, Obligation, SkeletonNode, Span,
 };
 use crate::binary_ast::derive::{Classification, GeneralReason, Scope};
-use crate::parse_arena::{TypeList, VbList};
+use crate::parse_arena::TypeList;
 
 /// Whether an attribute payload is a constant: a literal, or a template
 /// without interpolation. Anything else is a user expression typed among the
@@ -164,8 +164,8 @@ pub(in crate::binary_ast) fn classify(
 ) -> Classification {
     use GeneralReason::*;
     let general = Classification::General;
-    if !arena.derived_plans_enabled() {
-        return general(Switch);
+    if let Some(reason) = arena.derived_plans_off() {
+        return general(reason);
     }
     if scope == Scope::Nested {
         return general(Nested);
@@ -502,7 +502,6 @@ fn binding(
 pub(in crate::binary_ast) fn build(
     arena: &mut ParseArena,
     group: &[TypeDeclaration],
-    general: VbList,
 ) -> SpiceResult<DerivedIdx> {
     let first = arena.plans().next_binding();
     let mut slots = Vec::new();
@@ -530,7 +529,7 @@ pub(in crate::binary_ast) fn build(
             binding(arena, &type_name, DECODER_FUNC_SUFFIX, Side::Decode, decoder, Attributes::new(), &mut slots);
         }
     }
-    Ok(arena.plans_mut().push_item(first, general))
+    Ok(arena.plans_mut().push_item(first))
 }
 
 #[cfg(test)]
@@ -538,12 +537,23 @@ mod tests {
     use super::*;
     use crate::binary_ast::derive;
 
-    /// Parse `source` and run the derive over its top-level items.
+    /// Parse `source` and run the derive over its top-level items, with
+    /// plans.
     fn expand(source: &str, scope: Scope) -> (Vec<StructureItem>, ParseArena) {
+        expand_on(source, scope, None)
+    }
+
+    /// [`expand`], with plans or with every item as syntax.
+    fn expand_on(
+        source: &str,
+        scope: Scope,
+        plans_off: Option<GeneralReason>,
+    ) -> (Vec<StructureItem>, ParseArena) {
         let mut parser = crate::parser::Parser::new("Test.res", source);
         let items = crate::parser::module::parse_structure(&mut parser);
         assert!(!parser.has_errors(), "{source}");
         let mut arena = parser.into_arena();
+        arena.set_derived_plans(plans_off);
         let expanded = items
             .iter()
             .flat_map(|item| {
@@ -558,7 +568,8 @@ mod tests {
         let mut parser = crate::parser::Parser::new("Test.res", source);
         let items = crate::parser::module::parse_structure(&mut parser);
         assert!(!parser.has_errors(), "{source}");
-        let arena = parser.into_arena();
+        let mut arena = parser.into_arena();
+        arena.set_derived_plans(None);
         let (rec_flag, decls) = items
             .iter()
             .rev()
@@ -628,16 +639,16 @@ mod tests {
         assert!(!derived("@spice type a = string", Scope::Nested));
     }
 
-    /// With plans switched off (`RESCRIPT_DERIVED_PATH=general`) the
-    /// classifier keeps every declaration on the general path, and the
-    /// seam emits the value group it emitted before plans.
+    /// With plans off, which a tree is unless the driver says it is compiled
+    /// in this process, the classifier keeps every declaration on the
+    /// general path, and the seam emits the value group it emitted before
+    /// plans.
     #[test]
     fn the_switch_keeps_every_declaration_general() {
         let source = "@spice type a = string @spice and b = array<a>";
         let mut parser = crate::parser::Parser::new("Test.res", source);
         let items = crate::parser::module::parse_structure(&mut parser);
         let mut arena = parser.into_arena();
-        arena.set_derived_plans(false);
         let StructureItemDesc::Pstr_type(inner) = &items[0].pstr_desc else {
             panic!("a type declaration")
         };
@@ -652,6 +663,26 @@ mod tests {
                 .unwrap();
         assert!(matches!(expanded.last().unwrap().pstr_desc, StructureItemDesc::Pstr_value(..)));
         assert_eq!(arena.plans().item_count(), 0);
+    }
+
+    #[test]
+    fn a_planned_item_allocates_no_general_body() {
+        let mut parser = crate::parser::Parser::new("Test.res", "@spice type t = array<string>");
+        let items = crate::parser::module::parse_structure(&mut parser);
+        let mut arena = parser.into_arena();
+        arena.set_derived_plans(None);
+        let before = arena.reserve_pat();
+        let expanded = derive::expand_structure_item_with_mapper(
+            &items[0], &mut arena, true, Scope::TopLevel,
+        ).unwrap();
+        assert!(matches!(expanded[1].pstr_desc, StructureItemDesc::Pstr_derived(_)));
+        // Even a single general binding would allocate its parameter and
+        // binding patterns. The extra slot is only this test's reservation.
+        assert_eq!(arena.reserve_pat().0, before.0 + 1);
+        let mut counts = crate::binary_ast::derive::census::SyntaxCounts::default();
+        counts.item(&arena, &expanded[1]);
+        assert_eq!(counts.bindings, [3, 0]);
+        assert_eq!(counts.nodes, [1, 0]);
     }
 
     fn longident_text(arena: &ParseArena, lid: &Longident) -> String {
@@ -711,30 +742,44 @@ mod tests {
             "@spice.decode type d = dict<option<list<id>>>\n@spice.encode type e = Null.t<float>",
         ] {
             let (items, arena) = expand(source, Scope::TopLevel);
+            // The same parse with every item as syntax: the two trees have
+            // the same items, and the locations of the source are the same
+            // handles in both arenas.
+            let (syntax, syntax_arena) =
+                expand_on(source, Scope::TopLevel, Some(GeneralReason::Switch));
+            assert_eq!(items.len(), syntax.len());
             let mut plans = 0;
-            for item in &items {
+            for (item, syntax) in items.iter().zip(&syntax) {
                 let StructureItemDesc::Pstr_derived(idx) = item.pstr_desc else {
                     continue;
+                };
+                let StructureItemDesc::Pstr_value((_, general)) = syntax.pstr_desc else {
+                    panic!("the general form of a derived item is a value group")
                 };
                 plans += 1;
                 let plan = arena.plans();
                 let item = plan.item(idx);
-                let general = arena.vb_list(item.general);
+                let general = syntax_arena.vb_list(general);
                 assert_eq!(general.len(), plan.bindings(item).len(), "{source}");
                 for (binding, vb) in plan.bindings(item).iter().zip(general) {
-                    let PatternDesc::Ppat_var(name) = &arena.get_pat(vb.pvb_pat).ppat_desc else {
+                    let PatternDesc::Ppat_var(name) = &syntax_arena.get_pat(vb.pvb_pat).ppat_desc
+                    else {
                         panic!("a generated binding binds a variable")
                     };
-                    assert_eq!(arena.get_string(binding.name), arena.get_string(name.txt));
-                    let attribute_names = |attrs: &Attributes| {
-                        attrs.iter().map(|attr| arena.get_string(attr.0.txt)).collect::<Vec<_>>()
-                    };
+                    assert_eq!(arena.get_string(binding.name), syntax_arena.get_string(name.txt));
                     assert_eq!(
-                        attribute_names(&binding.attributes),
-                        attribute_names(&vb.pvb_attributes)
+                        binding
+                            .attributes
+                            .iter()
+                            .map(|attr| arena.get_string(attr.0.txt))
+                            .collect::<Vec<_>>(),
+                        vb.pvb_attributes
+                            .iter()
+                            .map(|attr| syntax_arena.get_string(attr.0.txt))
+                            .collect::<Vec<_>>()
                     );
                     let mut expected = Vec::new();
-                    identifiers(&arena, vb.pvb_expr, &mut Vec::new(), &mut expected);
+                    identifiers(&syntax_arena, vb.pvb_expr, &mut Vec::new(), &mut expected);
                     let actual: Vec<_> = binding
                         .obligations
                         .range()

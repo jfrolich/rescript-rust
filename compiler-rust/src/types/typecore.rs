@@ -1442,10 +1442,10 @@ struct DelayedOpenCheck {
 pub struct TypeCheckContext<'a> {
     /// Optional item accounting; absent in ordinary compilation.
     pub derived_census: Option<Box<crate::derived_census::Census>>,
-    /// Whether a derived item is checked from its plan. The reference
-    /// compile of `RESCRIPT_DERIVED_PATH=check` types every item's general
-    /// form instead.
-    pub derived_plans: bool,
+    /// An obligation of a derived item's plan failed: the checking of the
+    /// unit was abandoned, and the unit is to be compiled again with plans
+    /// off, whatever the checker returned.
+    pub derived_fallback: bool,
     /// Type context for allocation.
     pub type_ctx: &'a TypeContext,
     /// Parse arena for location conversion and longident allocation.
@@ -1663,7 +1663,7 @@ impl<'a> TypeCheckContext<'a> {
         type_ctx.register_arena_longident_names(arena);
         TypeCheckContext {
             derived_census: None,
-            derived_plans: true,
+            derived_fallback: false,
             type_ctx,
             arena,
             typed: TypedArena::new(),
@@ -12319,14 +12319,8 @@ fn collect_lident_idents_in_module_expr(
                             );
                         }
                     }
-                    SID::Pstr_derived(idx) => {
-                        for binding in arena.vb_list(arena.plans().item(*idx).general).iter() {
-                            collect_lident_idents_in_expression(
-                                arena,
-                                arena.get_expanded_expr(binding.pvb_expr),
-                                out,
-                            );
-                        }
+                    SID::Pstr_derived(_) => {
+                        unreachable!("{}", crate::types::derived::TOP_LEVEL_ONLY)
                     }
                     SID::Pstr_module(binding) => {
                         collect_lident_idents_in_module_expr(
