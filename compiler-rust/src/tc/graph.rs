@@ -57,12 +57,13 @@ pub struct Graph {
     pub mode: Mode,
     pub trail: Vec<Change>,
     speculation_depth: usize,
+    pub(crate) work: Vec<Ty>,
 }
 
 impl Default for Graph {
     /// O(1), empty pools allocate nothing.
     fn default() -> Self {
-        Self { nodes: Vec::new(), lists: Vec::new(), params: Vec::new(), level: 1, mode: Mode::Success, trail: Vec::new(), speculation_depth: 0 }
+        Self { nodes: Vec::new(), lists: Vec::new(), params: Vec::new(), level: 1, mode: Mode::Success, trail: Vec::new(), speculation_depth: 0, work: Vec::new() }
     }
 }
 
