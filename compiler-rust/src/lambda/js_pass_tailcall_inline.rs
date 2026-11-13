@@ -33,6 +33,27 @@ pub(crate) fn apply_js_tailcall_inline_pass(mut deps: DepsProgram) -> DepsProgra
     deps
 }
 
+/// What the pass decides about `program` before it rewrites it, per
+/// declared identifier: its status, its count of `Var` occurrences, and
+/// whether its declaration is one the pass keeps for inlining (used once,
+/// pure, a tail callee, an inlinable function literal). For the check-mode
+/// comparison with the decisions of the backend lowering
+/// (`bir::shadow::compare_decisions`); the default build never calls it.
+/// Three walks of the program.
+pub(crate) fn decisions(program: &Program) -> HashMap<Ident, (UsedStats, usize, bool)> {
+    let mut counter = UseCounts::default();
+    walk_block(&mut counter, &program.arena, &program.block);
+    let state = TailcallInlineState::new(program);
+    state
+        .statuses
+        .iter()
+        .map(|(ident, status)| {
+            let count = counter.counts.get(ident).copied().unwrap_or(0);
+            (*ident, (*status, count, state.inline_decls.contains_key(ident)))
+        })
+        .collect()
+}
+
 fn tailcall_inline_program(program: &mut Program) {
     let mut inliner = TailcallInlineState::new(program);
     let block = std::mem::take(&mut program.block);
