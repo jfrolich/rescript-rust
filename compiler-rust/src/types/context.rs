@@ -309,6 +309,36 @@ impl Drop for OwnTypeNodes {
     }
 }
 
+/// The compiler counters of a context's probes (see
+/// [`crate::perf_counters::AttemptCounters`]): allocated on the first probe
+/// with the counters enabled, never otherwise. A context that is not a
+/// deferred unit attempt publishes them when flushed or dropped; a deferred
+/// one publishes them only when kept, so a discarded attempt publishes
+/// nothing.
+#[derive(Default)]
+struct ContextCounters {
+    local: RefCell<Option<Box<crate::perf_counters::AttemptCounters>>>,
+    deferred: Cell<bool>,
+}
+
+impl ContextCounters {
+    /// Add the held counts to the process totals and start again from
+    /// zero. O(size of the counts' maps); nothing when no probe ran.
+    fn publish(&self) {
+        if let Some(counts) = self.local.borrow_mut().take() {
+            counts.publish();
+        }
+    }
+}
+
+impl Drop for ContextCounters {
+    fn drop(&mut self) {
+        if !self.deferred.get() {
+            self.publish();
+        }
+    }
+}
+
 /// A type descriptor read by value. `TypeDesc` is `Copy`, so a reader never
 /// holds a borrow of the node store; the lifetime only ties the copy to the
 /// context it was read from.
@@ -871,7 +901,7 @@ pub struct TypeContext {
 
     /// Cached value of `RESCRIPT_COMPILER_COUNTERS` for hot-path probes.
     compiler_counters_enabled: bool,
-    attempt_counters: RefCell<Option<crate::perf_counters::AttemptCounters>>,
+    attempt_counters: ContextCounters,
 
     /// Abbreviation memo storage
     abbrevs: RefCell<Vec<RefCell<AbbrevMemo>>>,
@@ -1380,8 +1410,8 @@ impl TypeContext {
             mutation_logging: TrailLogging::default(),
             explain_mode: Cell::new(CheckMode::Explain),
             unexplained_unify_failure: Cell::new(false),
-            compiler_counters_enabled: crate::perf_counters::enabled(),
-            attempt_counters: RefCell::new(None),
+            compiler_counters_enabled: crate::perf_counters::context_enabled(),
+            attempt_counters: ContextCounters::default(),
             // Index 0 is reserved as canonical Mnil; index 1 is the dedicated
             // simple_abbrevs memo ref.
             abbrevs: RefCell::new(vec![
@@ -1599,35 +1629,61 @@ impl TypeContext {
     }
 
     /// O(1) per unit: retain counters locally until the attempt is accepted.
+    /// Counts made before this call are published first; from here on the
+    /// context publishes nothing unless [`Self::keep_attempt_counters`] runs.
     pub(crate) fn defer_attempt_counters(&self) {
         self.types.1.set(false);
-        if self.compiler_counters_enabled {
-            *self.attempt_counters.borrow_mut() = Some(Default::default());
-        }
+        self.attempt_counters.publish();
+        self.attempt_counters.deferred.set(true);
     }
 
-    /// O(1) per retained unit: publish its counters exactly once.
+    /// O(1) per retained unit: publish its counters exactly once. Probes
+    /// after this call count locally again and are published once, when the
+    /// context is flushed or dropped.
     pub(crate) fn keep_attempt_counters(&self) {
         self.types.1.set(true);
-        if let Some(counters) = self.attempt_counters.borrow_mut().take() {
-            counters.publish();
+        self.attempt_counters.deferred.set(false);
+        self.attempt_counters.publish();
+    }
+
+    /// Publish the counts of a context that is not a deferred attempt now,
+    /// rather than when it is dropped: for a long-lived context, such as a
+    /// worker's view scratch, whose drop may come after the report.
+    pub(crate) fn flush_counters(&self) {
+        if !self.attempt_counters.deferred.get() {
+            self.attempt_counters.publish();
         }
     }
 
-    /// O(1), called only with instrumentation enabled; no TLS acquisition.
-    /// Non-attempt clients publish immediately, retaining the existing API.
+    /// O(1) plain writes into this context's counts, allocated on the first
+    /// probe; no atomic or TLS operation. Callers test the counters flag.
     pub(crate) fn record_attempt_counter(
         &self,
         record: impl FnOnce(&mut crate::perf_counters::AttemptCounters),
     ) {
-        let mut pending = self.attempt_counters.borrow_mut();
-        if let Some(counters) = pending.as_mut() {
-            record(counters);
-        } else {
-            let mut counters = crate::perf_counters::AttemptCounters::default();
-            record(&mut counters);
-            counters.publish();
+        if !self.compiler_counters_enabled {
+            return;
         }
+        let mut local = self.attempt_counters.local.borrow_mut();
+        record(local.get_or_insert_with(Default::default));
+    }
+
+    /// Read the counts this context holds and has not published (all zero
+    /// when it holds none).
+    pub(crate) fn attempt_counter<R>(
+        &self,
+        read: impl FnOnce(&crate::perf_counters::AttemptCounters) -> R,
+    ) -> R {
+        match self.attempt_counters.local.borrow().as_deref() {
+            Some(counts) => read(counts),
+            None => read(&Default::default()),
+        }
+    }
+
+    /// Turn this context's counters on without `RESCRIPT_COMPILER_COUNTERS`.
+    #[cfg(test)]
+    pub(crate) fn enable_compiler_counters_for_test(&mut self) {
+        self.compiler_counters_enabled = true;
     }
 
     #[inline]
@@ -1813,7 +1869,7 @@ impl TypeContext {
         components: Rc<super::env_lazy::QualifiedModuleComponents>,
     ) {
         if self.compiler_counters_enabled {
-            crate::perf_counters::record_qualified_component_registered();
+            crate::perf_counters::record_qualified_component_registered(self);
         }
         self.qualified_module_components_cache
             .borrow_mut()
@@ -1844,7 +1900,7 @@ impl TypeContext {
             return;
         }
         if self.compiler_counters_enabled {
-            crate::perf_counters::world::record_view_adoption();
+            crate::perf_counters::world::record_view_adoption(self);
         }
         #[cfg(test)]
         self.view_adoptions.set(self.view_adoptions.get() + 1);
@@ -1934,7 +1990,7 @@ impl TypeContext {
     ) {
         self.poison_store_build_for("register_qualified_module_components");
         if self.compiler_counters_enabled {
-            crate::perf_counters::record_qualified_component_registered();
+            crate::perf_counters::record_qualified_component_registered(self);
         }
         self.qualified_module_components_cache
             .borrow_mut()
@@ -1955,12 +2011,12 @@ impl TypeContext {
         let cache = self.qualified_module_components_cache.borrow();
         let Some(components) = cache.get(key) else {
             if self.compiler_counters_enabled {
-                crate::perf_counters::record_qualified_component_miss();
+                crate::perf_counters::record_qualified_component_miss(self);
             }
             return None;
         };
         if self.compiler_counters_enabled {
-            crate::perf_counters::record_qualified_component_hit();
+            crate::perf_counters::record_qualified_component_hit(self);
         }
         Some(f(components.components()))
     }
@@ -2728,7 +2784,7 @@ impl TypeContext {
     #[inline(never)]
     fn count_fresh_var(&self, location: &'static std::panic::Location<'static>) {
         if self.copy_sessions.borrow().is_empty() {
-            crate::perf_counters::record_fresh_var(location);
+            crate::perf_counters::record_fresh_var(self, location);
         }
     }
 
@@ -2952,11 +3008,14 @@ impl TypeContext {
     #[inline(never)]
     fn store_desc(&self, r: TypeExprRef) -> TypeDesc {
         if self.compiler_counters_enabled && !self.store_build_owns(r) {
-            crate::perf_counters::frozen::record(if r.is_shared() {
-                crate::perf_counters::frozen::Kind::DescReadShared
-            } else {
-                crate::perf_counters::frozen::Kind::DescReadWorker
-            });
+            crate::perf_counters::frozen::record(
+                self,
+                if r.is_shared() {
+                    crate::perf_counters::frozen::Kind::DescReadShared
+                } else {
+                    crate::perf_counters::frozen::Kind::DescReadWorker
+                },
+            );
         }
         if self.frozen_writes.any.get() {
             self.frozen_writes.probe();
@@ -3037,11 +3096,14 @@ impl TypeContext {
     #[inline(never)]
     fn store_level(&self, r: TypeExprRef) -> i32 {
         if self.compiler_counters_enabled && !self.store_build_owns(r) {
-            crate::perf_counters::frozen::record(if r.is_shared() {
-                crate::perf_counters::frozen::Kind::LevelReadShared
-            } else {
-                crate::perf_counters::frozen::Kind::LevelReadWorker
-            });
+            crate::perf_counters::frozen::record(
+                self,
+                if r.is_shared() {
+                    crate::perf_counters::frozen::Kind::LevelReadShared
+                } else {
+                    crate::perf_counters::frozen::Kind::LevelReadWorker
+                },
+            );
         }
         if self.frozen_writes.any.get() {
             self.frozen_writes.probe();
@@ -3185,6 +3247,7 @@ impl TypeContext {
             if r.is_shared() {
                 if self.compiler_counters_enabled {
                     crate::perf_counters::frozen::record(
+                        self,
                         crate::perf_counters::frozen::Kind::LevelWriteShared,
                     );
                 }
@@ -3198,6 +3261,7 @@ impl TypeContext {
             }
             if self.compiler_counters_enabled {
                 crate::perf_counters::frozen::record(
+                    self,
                     crate::perf_counters::frozen::Kind::LevelWriteWorker,
                 );
             }
@@ -3239,11 +3303,14 @@ impl TypeContext {
         if r.is_store() {
             if r.is_shared() {
                 if self.compiler_counters_enabled {
-                    crate::perf_counters::frozen::record(if matches!(desc, TypeDesc::Tlink(_)) {
-                        crate::perf_counters::frozen::Kind::LinkShared
-                    } else {
-                        crate::perf_counters::frozen::Kind::DescWriteShared
-                    });
+                    crate::perf_counters::frozen::record(
+                        self,
+                        if matches!(desc, TypeDesc::Tlink(_)) {
+                            crate::perf_counters::frozen::Kind::LinkShared
+                        } else {
+                            crate::perf_counters::frozen::Kind::DescWriteShared
+                        },
+                    );
                 }
                 self.frozen_writes.descs.borrow_mut().insert(r, desc);
                 self.frozen_writes.any.set(true);
@@ -3256,7 +3323,10 @@ impl TypeContext {
                 return;
             }
             if self.compiler_counters_enabled && matches!(desc, TypeDesc::Tlink(_)) {
-                crate::perf_counters::frozen::record(crate::perf_counters::frozen::Kind::LinkWorker);
+                crate::perf_counters::frozen::record(
+                    self,
+                    crate::perf_counters::frozen::Kind::LinkWorker,
+                );
             }
             self.frozen_writes.descs.borrow_mut().insert(r, desc);
             self.frozen_writes.any.set(true);
@@ -3779,7 +3849,10 @@ impl TypeContext {
                 || !self.in_store_build()
                 || memo.store_index() < self.store_build_abbrev_start.get())
         {
-            crate::perf_counters::frozen::record(crate::perf_counters::frozen::Kind::MemoWrite);
+            crate::perf_counters::frozen::record(
+                self,
+                crate::perf_counters::frozen::Kind::MemoWrite,
+            );
         }
         if memo.is_store() {
             if !memo.is_shared() && self.in_store_build()
@@ -4072,6 +4145,7 @@ impl TypeContext {
             }
             if self.compiler_counters_enabled {
                 crate::perf_counters::frozen::record(
+                    self,
                     crate::perf_counters::frozen::Kind::RowFieldWrite,
                 );
             }
@@ -4161,6 +4235,7 @@ impl TypeContext {
         if r.is_persistent() {
             if self.compiler_counters_enabled {
                 crate::perf_counters::frozen::record(
+                    self,
                     crate::perf_counters::frozen::Kind::MutabilityWrite,
                 );
             }
@@ -4227,7 +4302,7 @@ impl TypeContext {
         let nested = self.counted_copy_nodes.get() - counted;
         let own = self.allocated_type_nodes() - allocated - nested;
         self.counted_copy_nodes.set(counted + nested + own);
-        crate::perf_counters::record_copy(cause, own);
+        crate::perf_counters::record_copy(self, cause, own);
         result
     }
 
@@ -4566,6 +4641,7 @@ impl TypeContext {
                 .or_insert_with(|| sig.clone());
             if self.compiler_counters_enabled() {
                 crate::perf_counters::record_signature_freshen_name(
+                    self,
                     "type_context_lazy_rename",
                     module_name,
                     sig.len(),
@@ -4688,7 +4764,7 @@ impl TypeContext {
     /// store data it built and which it found built. One atomic increment.
     fn store_binder(&self, id: &Ident) -> Ident {
         if self.compiler_counters_enabled {
-            crate::perf_counters::store_views::record_binder();
+            crate::perf_counters::store_views::record_binder(self);
         }
         let stamp = super::thread_store::next_store_stamp();
         let mut fresh = id.with_stamp(stamp);
@@ -5168,6 +5244,7 @@ impl TypeContext {
         super::thread_store::set_store_build_depth(depth);
         if depth == 0 && self.compiler_counters_enabled {
             crate::perf_counters::record_store_build_nodes(
+                self,
                 self.store.type_count() - self.store_build_type_start.get(),
             );
         }
@@ -5182,6 +5259,7 @@ impl TypeContext {
         }
         if self.compiler_counters_enabled {
             crate::perf_counters::store_views::record_piece(
+                self,
                 poisoned,
                 effects.is_empty() && guards.is_empty(),
             );
@@ -5248,11 +5326,11 @@ impl TypeContext {
         }
         if self.compiler_counters_enabled {
             use crate::perf_counters::store_views as counters;
-            counters::record_piece_replay();
+            counters::record_piece_replay(self);
             for effect in &piece.effects {
                 match effect {
                     StoreEffect::Piece(_) => {}
-                    StoreEffect::PreparePers(_) => counters::record_effect_replayed(0),
+                    StoreEffect::PreparePers(_) => counters::record_effect_replayed(self, 0),
                 }
             }
         }
@@ -6311,19 +6389,19 @@ mod tests {
         let mut ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let stored = ctx.store.alloc_type(TypeDesc::Tnil, GENERIC_LEVEL);
         let memo = ctx.store.alloc_abbrev(AbbrevMemo::Mnil);
-        let read_before = count(Kind::DescReadWorker);
-        let level_before = count(Kind::LevelReadWorker);
-        let write_before = count(Kind::LinkWorker);
-        let memo_before = count(Kind::MemoWrite);
+        let read_before = count(&ctx, Kind::DescReadWorker);
+        let level_before = count(&ctx, Kind::LevelReadWorker);
+        let write_before = count(&ctx, Kind::LinkWorker);
+        let memo_before = count(&ctx, Kind::MemoWrite);
         ctx.compiler_counters_enabled = false;
         ctx.get_desc(stored);
         ctx.get_level(stored);
         ctx.write_desc_raw(stored, TypeDesc::Tlink(stored));
         ctx.write_abbrev(memo, AbbrevMemo::Mnil);
-        assert_eq!(count(Kind::DescReadWorker), read_before);
-        assert_eq!(count(Kind::LevelReadWorker), level_before);
-        assert_eq!(count(Kind::LinkWorker), write_before);
-        assert_eq!(count(Kind::MemoWrite), memo_before);
+        assert_eq!(count(&ctx, Kind::DescReadWorker), read_before);
+        assert_eq!(count(&ctx, Kind::LevelReadWorker), level_before);
+        assert_eq!(count(&ctx, Kind::LinkWorker), write_before);
+        assert_eq!(count(&ctx, Kind::MemoWrite), memo_before);
         ctx.compiler_counters_enabled = true;
         let local = ctx.new_var(None);
         ctx.get_desc(local);
@@ -6337,18 +6415,18 @@ mod tests {
             let owned_memo = ctx.alloc_abbrev_nil();
             ctx.write_abbrev(owned_memo, AbbrevMemo::Mnil);
         });
-        assert_eq!(count(Kind::DescReadWorker), read_before);
-        assert_eq!(count(Kind::LevelReadWorker), level_before);
-        assert_eq!(count(Kind::LinkWorker), write_before);
-        assert_eq!(count(Kind::MemoWrite), memo_before);
+        assert_eq!(count(&ctx, Kind::DescReadWorker), read_before);
+        assert_eq!(count(&ctx, Kind::LevelReadWorker), level_before);
+        assert_eq!(count(&ctx, Kind::LinkWorker), write_before);
+        assert_eq!(count(&ctx, Kind::MemoWrite), memo_before);
         ctx.get_desc(stored);
         ctx.get_level(stored);
         ctx.write_desc_raw(stored, TypeDesc::Tlink(local));
         ctx.write_abbrev(memo, AbbrevMemo::Mnil);
-        assert_eq!(count(Kind::DescReadWorker), read_before + 1);
-        assert_eq!(count(Kind::LevelReadWorker), level_before + 1);
-        assert_eq!(count(Kind::LinkWorker), write_before + 1);
-        assert_eq!(count(Kind::MemoWrite), memo_before + 1);
+        assert_eq!(count(&ctx, Kind::DescReadWorker), read_before + 1);
+        assert_eq!(count(&ctx, Kind::LevelReadWorker), level_before + 1);
+        assert_eq!(count(&ctx, Kind::LinkWorker), write_before + 1);
+        assert_eq!(count(&ctx, Kind::MemoWrite), memo_before + 1);
 
         let base = ctx
             .store
@@ -6368,17 +6446,17 @@ mod tests {
             )
             .unwrap();
         let shared = super::super::shared_store::shared_ref(base, 0);
-        let links = count(Kind::LinkShared);
-        let descriptors = count(Kind::DescWriteShared);
-        let levels = count(Kind::LevelWriteShared);
+        let links = count(&ctx, Kind::LinkShared);
+        let descriptors = count(&ctx, Kind::DescWriteShared);
+        let levels = count(&ctx, Kind::LevelWriteShared);
         let snapshot = ctx.snapshot_type_state();
         ctx.set_desc(shared, TypeDesc::Tlink(local));
         ctx.set_level(shared, 1);
         ctx.restore_type_state(snapshot);
-        assert_eq!(count(Kind::LinkShared), links + 1);
+        assert_eq!(count(&ctx, Kind::LinkShared), links + 1);
         // Restoring absence removes the exception without writing a value.
-        assert_eq!(count(Kind::DescWriteShared), descriptors);
-        assert_eq!(count(Kind::LevelWriteShared), levels + 1);
+        assert_eq!(count(&ctx, Kind::DescWriteShared), descriptors);
+        assert_eq!(count(&ctx, Kind::LevelWriteShared), levels + 1);
     }
 
     #[test]

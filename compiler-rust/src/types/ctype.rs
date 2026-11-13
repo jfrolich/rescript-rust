@@ -3240,6 +3240,7 @@ pub(crate) fn resolve_type_item_through_modules(
     }
     if counters_enabled {
         crate::perf_counters::record_type_item_resolve_scan(
+            ctx,
             scanned_items,
             type_items,
             result.is_some(),
@@ -3772,7 +3773,7 @@ fn lookup_component_module_sig_type(
             crate::types::typecore::ComponentLookupApi::FindType,
             |components| {
                 components
-                    .lookup_type(type_name)
+                    .lookup_type(type_name, ctx)
                     .map(|(id, decl)| (*id, decl.clone()))
             },
         )
