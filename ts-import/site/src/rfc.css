@@ -749,6 +749,17 @@ td:first-child {
   color: var(--error);
 }
 
+/* Above the error of an example that is meant not to compile. */
+.expected {
+  margin: 0 0 14px;
+  padding: 9px 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--sunken);
+  border-left: 3px solid var(--error);
+}
+
 .output {
   border-top: 1px solid var(--line);
   padding: 10px 18px 12px;

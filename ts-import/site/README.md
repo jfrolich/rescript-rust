@@ -28,6 +28,7 @@ right. To publish it on its own, serve `dist/classes.html` as the index of a
 directory beside `dist/assets`, `compiler.wasm` and `stdlib.json`.
 
 An example is listed in `examples/index.json`: its files (the last one is the
-ReScript file), `"fails": true` when it is meant not to compile, `"compare":
+ReScript file), `"fails": true` when it is meant not to compile (with
+`"expected"`, a sentence shown above the error that says why), `"compare":
 true` to also run a full TypeScript check for comparison, and `"view"` for the
 tab that is open at first.

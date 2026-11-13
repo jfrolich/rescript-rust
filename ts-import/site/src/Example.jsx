@@ -83,7 +83,9 @@ export function Example({ example, prebuilt }) {
   const failed = Boolean(failure) || (result && result.type !== "success");
   const notes = useMemo(() => (result?.imports ?? []).flatMap((entry) => entry.notes), [result]);
 
-  let note = "Built with the page. Edit the code to compile it here.";
+  let note = example.fails
+    ? "Built with the page. It does not compile, which is what the example shows. Edit the code to compile it here."
+    : "Built with the page. Edit the code to compile it here.";
   if (busy && status !== "ready") note = "Loading the compiler…";
   else if (busy) note = "Compiling…";
   else if (failure) note = "The compiler stopped.";
@@ -143,7 +145,7 @@ export function Example({ example, prebuilt }) {
               </Tab>
             )}
             <Tab view="js" current={view} choose={setView}>
-              {example.plain && failed ? "Error" : "JavaScript"}
+              {example.plain && failed ? (example.fails ? "Rejected today" : "Error") : "JavaScript"}
             </Tab>
             {!example.plain && (
               <Tab view="typescript" current={view} choose={setView}>
@@ -153,7 +155,15 @@ export function Example({ example, prebuilt }) {
             )}
           </div>
           <div className={busy ? "pane-scroll stale" : "pane-scroll"}>
-            <ResultView view={view} source={source} result={result} failure={failure} busy={busy} notes={notes} />
+            <ResultView
+              view={view}
+              source={source}
+              result={result}
+              failure={failure}
+              busy={busy}
+              notes={notes}
+              expected={example.expected}
+            />
           </div>
           {result?.warnings && view !== "typescript" && (
             <div className="output">
@@ -180,7 +190,8 @@ function Tab({ view, current, choose, children }) {
   );
 }
 
-function ResultView({ view, source, result, failure, busy, notes }) {
+/** `expected` says why an example that is meant not to compile does not. */
+function ResultView({ view, source, result, failure, busy, notes, expected }) {
   if (failure) {
     return (
       <div className="problems">
@@ -192,6 +203,7 @@ function ResultView({ view, source, result, failure, busy, notes }) {
   if (view === "typescript") return <TypeScriptView result={result} notes={notes} />;
   const problem = result.type !== "success" && (
     <div className="problems">
+      {expected && <p className="expected">{expected}</p>}
       <pre className="problem">{result.message}</pre>
     </div>
   );

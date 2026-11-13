@@ -35,7 +35,7 @@ The types are used outside the DOM bindings. The JSX runtime names seven of them
 
 ### A type has one owner
 
-Two declarations are two types, also when they describe the same values:
+Two declarations are two types, also when they describe the same values. Today's compiler refuses the last line of this program, with the error shown beside it:
 
 <!-- example: class-today -->
 ```rescript
@@ -54,9 +54,16 @@ module WebAPI = {
 // Both types say "an instance of Element". They are still two types.
 let focus = (el: ReactDOM.element) => WebAPI.focus(el)
 ```
+
+```
+This has type: ReactDOM.element
+But this function argument is expecting: WebAPI.element
+```
 <!-- /example -->
 
-The examples on this page are compiled by the Rust compiler of the branch `ts-import`, which has class records. They show what the compiler does today. The proposal itself is not implemented, so its code is not live.
+With the proposal the program is accepted, and `focus` compiles to `el.focus()`.
+
+The examples on this page are compiled by the Rust compiler of the branch `ts-import`, which has class records. They show what the compiler does today, so this one shows an error. The proposal itself is not implemented, and its code is not live.
 
 So that packages agree on `element`, one package has to declare it and all others have to depend on that package. That has four costs.
 
