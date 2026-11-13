@@ -442,4 +442,32 @@ mod tests {
         assert_eq!(steps, log.events.len() + 10_000);
         assert_eq!(table[0].map(|name| name.to_string()).as_deref(), Some("x"));
     }
+
+    #[test]
+    #[ignore = "T5 redesign: free variables of a function nested in a function"]
+    fn a_function_nested_in_a_function_captures_a_local_of_the_outer_one() {
+        // `let f = p => { let v = ext(p); let g = () => { let v' = ext(v); ext(v') }; g }`:
+        // `v` is free in `g` (naming.rs `analyze_fun`), so `g`'s scope
+        // inherits its group and the inner declaration is `v$1`. With one
+        // membership bit per variable the bit `f` set hides the reference
+        // (THREE_TREES 11.4, "T5 as built: part B", finding 1).
+        let (mut b, idents) = unit(&["f", "p", "v", "g", "v"]);
+        let f = function(&mut b, 1, 1);
+        let g = function(&mut b, 0, 0);
+        let mut log = Log::new(5);
+        log.enter(f, S, b.vars());
+        log.declare(VarId(0), S);
+        log.declare(VarId(2), NodeId(1));
+        log.reference(VarId(1));
+        log.enter(g, NodeId(2), b.vars());
+        log.declare(VarId(3), NodeId(2));
+        log.reference(VarId(2));
+        log.declare(VarId(4), NodeId(3));
+        log.reference(VarId(4));
+        log.leave(b.vars());
+        log.leave(b.vars());
+        assert_eq!(log.free_variables(1), &[VarId(2)]);
+        let names = printed(&log, &b, &idents, |_| true);
+        assert_eq!((names[2].as_deref(), names[4].as_deref()), (Some("v"), Some("v$1")));
+    }
 }

@@ -1239,6 +1239,7 @@ texts stay equal.
 | T4a (done) | Export extraction and coercion on top-level rows (`bir/lower/export.rs`, S3.9b), with the position facts of finding 2 as sites ("T4a as built") | `extract_toplevel_exports`, `coerce_lowered_output` | - |
 | T4b (done, RESULT B) | Counterexample: R5 changes the `simplify_if_head` reader of a copied branch; read sites through P1 instead | Nothing; P1 stays until T6 | - |
 | T4c (done, counterexamples) | The statuses and the site of step A, computed and compared in check mode; no splice ("T4c design") | Nothing; P3 stays until P1 (T6) and P2 (T5) have left | T4a, T4b |
+| T5b (built to the replay, not wired: redesign needed (two findings)) | The naming log, replayed through the tables of `emit/naming.rs` ("T5 as built: part B") | Nothing yet; the naming pass stays the oracle | T1 |
 | T4g | The splice of step A, late marks, late zero, graves, the counter (11.6) | `apply_js_tailcall_inline_pass` | T5, T6 |
 | T4d | Step B | `apply_js_record_rest_pass` | T4g |
 | T4e | Steps C and D | `apply_js_flatten_and_mark_dead_pass` | T4d |
@@ -1639,35 +1640,52 @@ parameter) there is no way to tell "in the innermost run" from "in an
 enclosing run"; telling them apart in constant time needs, per variable,
 the scope that last recorded it and the scope that binds it (two dense
 `u32` rows by `VarId`, scopes numbered in stack order), which is not "one
-membership bit per variable".
+membership bit per variable". The example is the ignored test
+`a_function_nested_in_a_function_captures_a_local_of_the_outer_one`
+(`bir/lower/names.rs`), which asserts the correct result (`[v]`, and
+`v$1` for the inner declaration).
 
 **Gap 2: the lowering has no statement when a function's scope opens.**
 `Log::enter(function, statement, vars)` has to be called before the
-body's references are built, so that `reference` puts them in its run.
-The lowering builds bottom-up: `Resume::Fun` lowers the body as a child,
-`finish_expression` (`bir/lower/expr.rs`) takes the body's list and builds
-the `JFun`, and only then does the continuation write the `SDecl` or the
-expression statement that holds it. No node of that statement exists at
-`enter`. For the same reason the binder's `Declare` cannot be "the event
-two after `Enter`" (the replay's rule and the tests) when it is logged
-where the `SDecl` is written: that is after the body's events. Two more
-facts the log would get wrong where it is filled: `one_unit_arg` replaces
-the function's header after the body (`expr.rs`, `finish_expression`), so
-the `FuncId` logged at `Enter` is not the printed function's and its
-`Params` include the unit argument; and the tail-call rewrite
-(`tail.rs`, `loop_function_body`) declares the aliases `let x = _x` after
-the body was lowered, while they print before it. Closing this needs a
-mechanism the design does not have, for example events logged with a
-provisional statement that the write of the statement fills in, and
-`Params` logged at the close.
+body's references are built, so that `reference` puts them in its run, and
+the binder's `Declare` has to be the event two after `Enter` (the replay's
+rule and the tests). Three construction sites contradict that:
 
-Smaller findings, read from the code and not tested: a warm replay of a
-log with functions still allocates (`Names::enter` builds a new `Scope`
-table and an assignment in an inherited group copies its node);
-`ProgramNames` carries no raw JavaScript names, which the pass skips when
-it chooses a suffix (`Names::raw`); the `this` of a method is named by the
-pass only when the body uses it (`method_this_used`), and the log keeps no
-record of that after the close.
+1. The body before the `JFun` before its statement: `State::enter`
+   (`bir/lower/mod.rs`, `View::Fun`) returns `Resume::Fun`, the body is
+   lowered as its child (`expression_children`, `bir/lower/expr.rs`),
+   `finish_expression` (`bir/lower/expr.rs`, `Resume::Fun`) then takes the
+   body's list and builds the `JFun`, and only after that does
+   `State::leaf` (`bir/lower/mod.rs`, `Cont::Declare`) write the `SDecl`
+   (or an expression statement holds it). No node of the statement exists
+   at `enter`, and a `Declare` logged where the `SDecl` is written follows
+   the body's events.
+2. The `one_unit_arg` header replacement: `finish_expression`
+   (`bir/lower/expr.rs`, `Resume::Fun`) allocates a new header without
+   the unit parameter after the body, so the `FuncId` logged at `Enter` is
+   not the printed function's and its `Params` include the unit argument.
+3. The tail-call aliases: `loop_function_body` (`bir/lower/tail.rs`)
+   declares `let x = _x` after the body was lowered, while the aliases
+   print before it.
+
+Closing this needs a mechanism the design does not have, for example
+events logged with a provisional statement that the write of the statement
+fills in, and `Params` logged at the close. Finding 2 has no test: an
+assertion about the log of a lowered Lambda needs step 4 to exist.
+
+Open, read from the code and not tested:
+
+- A warm replay of a log with functions still allocates (`replay` in
+  `emit/naming.rs`, through `Names::enter`: a new `Scope` table per
+  function, and an assignment in an inherited group copies its persistent
+  node).
+- Raw JavaScript names are not passed to the replay (`ProgramNames`,
+  `replay`): the pass skips them when it picks a suffix (`Names::raw`, read
+  in `Names::assign`).
+- The `this` of a method is named by the pass only when the body uses it
+  (`Names::method_this_used`, read in `Names::function`); the replay's
+  `Params` arm names every parameter, and the log keeps no record of that
+  use after the close.
 
 Part A leftovers, done: the hazard of (a) is pinned
 (`a_module_whose_only_reference_the_flatten_pass_drops_still_shadows_the_global_of_its_name`
@@ -2024,6 +2042,8 @@ for the builder:
 > not measure.
 
 ### 11.8 Worker prompt for T6
+
+Written by the builder of T5 part B; not yet reviewed against the design. T6 starts from a design turn.
 
 To be issued when T5 is complete, not before: the builder prints names from
 the table T5's replay fills, and part B stopped at its step 4 ("T5 as
