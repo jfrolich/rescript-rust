@@ -27,7 +27,7 @@ See [`NaN`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Gl
   Float.Constants.nan
   ```
   */
-  @val
+  @val @pure
   external nan: float = "NaN"
 
   /**
@@ -40,7 +40,7 @@ See [`Number.EPSILON`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/R
   Float.Constants.epsilon
   ```
   */
-  @val
+  @val @pure
   external epsilon: float = "Number.EPSILON"
 
   /**
@@ -53,7 +53,7 @@ See [`Number.POSITIVE_INFINITY`](https://developer.mozilla.org/en-US/docs/Web/Ja
   Float.Constants.positiveInfinity
   ```
   */
-  @val
+  @val @pure
   external positiveInfinity: float = "Number.POSITIVE_INFINITY"
 
   /**
@@ -66,7 +66,7 @@ See [`Number.NEGATIVE_INFINITY`](https://developer.mozilla.org/en-US/docs/Web/Ja
   Float.Constants.negativeInfinity
   ```
   */
-  @val
+  @val @pure
   external negativeInfinity: float = "Number.NEGATIVE_INFINITY"
 
   /**
@@ -79,7 +79,7 @@ See [`Number.MIN_VALUE`](https://developer.mozilla.org/en-US/docs/Web/JavaScript
   Float.Constants.minValue
   ```
   */
-  @val
+  @val @pure
   external minValue: float = "Number.MIN_VALUE"
 
   /**
@@ -92,7 +92,7 @@ See [`Number.MAX_VALUE`](https://developer.mozilla.org/en-US/docs/Web/JavaScript
   Float.Constants.minValue
   ```
   */
-  @val
+  @val @pure
   external maxValue: float = "Number.MAX_VALUE"
 }
 
@@ -105,6 +105,7 @@ Float.equal(1.0, 1.0) == true
 Float.equal(1.0, 2.0) == false
 ```
 */
+@pure
 external equal: (float, float) => bool = "%equal"
 
 /**
@@ -117,6 +118,7 @@ Float.compare(1.0, 2.0) == Ordering.less
 Float.compare(2.0, 1.0) == Ordering.greater
 ```
 */
+@pure
 external compare: (float, float) => Stdlib_Ordering.t = "%compare"
 
 /**
@@ -130,7 +132,7 @@ Float.isNaN(3.0) // false
 Float.isNaN(Float.Constants.nan) // true
 ```
 */
-@val @scope("Number")
+@val @scope("Number") @pure
 external isNaN: float => bool = "isNaN"
 
 /**
@@ -145,7 +147,7 @@ Float.isFinite(Float.Constants.nan) == false
 Float.isFinite(Float.Constants.positiveInfinity) == false
 ```
 */
-@val
+@val @pure
 external isFinite: float => bool = "isFinite"
 
 /**
@@ -164,7 +166,7 @@ Float.parseFloat("3.14some non-digit characters") == 3.14
 Float.parseFloat("error")->Float.isNaN == true
 ```
 */
-@val
+@val @pure
 external parseFloat: string => float = "parseFloat"
 
 /**
@@ -189,7 +191,7 @@ Float.parseInt("12", ~radix=13) == 15.0
 Float.parseInt("17", ~radix=40)->Float.isNaN == true
 ```
 */
-@val
+@val @pure
 external parseInt: ('a, ~radix: int=?) => float = "parseInt"
 
 /**
@@ -211,7 +213,7 @@ Float.toExponential(5678.0, ~digits=2) == "5.68e+3"
 
 - `RangeError`: If `digits` less than 0 or greater than 10.
 */
-@send
+@send @pure
 external toExponential: (float, ~digits: int=?) => string = "toExponential"
 
 /**
@@ -233,7 +235,7 @@ Float.toFixed(300.0, ~digits=1) == "300.0"
 
 - `RangeError`: If `digits` is less than 0 or larger than 100.
 */
-@send
+@send @pure
 external toFixed: (float, ~digits: int=?) => string = "toFixed"
 
 /**
@@ -256,7 +258,7 @@ Float.toPrecision(1.0, ~digits=1) == "1"
   Implementations are allowed to support larger and smaller values as well.
   ECMA-262 only requires a precision of up to 21 significant digits.
 */
-@send
+@send @pure
 external toPrecision: (float, ~digits: int=?) => string = "toPrecision"
 
 /**
@@ -270,7 +272,7 @@ Float.toString(1000.0) == "1000"
 Float.toString(-1000.0) == "-1000"
 ```
 */
-@send
+@send @pure
 external toString: (float, ~radix: int=?) => string = "toString"
 
 /**
@@ -288,7 +290,7 @@ Float.toLocaleString(1000.0) // "1,000"
 Float.toLocaleString(1000.0) // "1.000"
 ```
 */
-@send
+@send @pure
 external toLocaleString: float => string = "toLocaleString"
 
 /**
@@ -302,6 +304,7 @@ Float.fromString("NaN") == None
 Float.fromString("6") == Some(6.0)
 ```
 */
+@pure
 let fromString: string => option<float>
 
 /**
@@ -316,6 +319,7 @@ Float.toInt(1.1) == 1
 Float.toInt(1.6) == 1
 ```
 */
+@pure
 external toInt: float => int = "%intoffloat"
 
 /**
@@ -328,6 +332,7 @@ Float.fromInt(2) == 2.0
 Float.fromInt(1) == 1.0
 ```
 */
+@pure
 external fromInt: int => float = "%identity"
 
 /**
@@ -339,6 +344,7 @@ external fromInt: int => float = "%identity"
 Float.mod(7.0, 4.0) == 3.0
 ```
 */
+@pure
 external mod: (float, float) => float = "%modfloat"
 
 /**
@@ -355,6 +361,7 @@ Float.clamp(4.2, ~max=4.1) == 4.1
 Float.clamp(4.2, ~min=4.3, ~max=4.1) == 4.3
 ```
 */
+@pure
 let clamp: (~min: float=?, ~max: float=?, float) => float
 
 /**
@@ -363,4 +370,5 @@ let clamp: (~min: float=?, ~max: float=?, float) => float
   This helper is useful when you want to discard a value (for example, the result of an operation with side effects)
   without having to store or process it further.
 */
+@pure
 external ignore: float => unit = "%ignore"

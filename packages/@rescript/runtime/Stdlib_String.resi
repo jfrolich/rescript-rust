@@ -24,7 +24,7 @@ String.make(3.5) == "3.5"
 String.make([1, 2, 3]) == "1,2,3"
 ```
 */
-@val
+@val @pure
 external make: 'a => string = "String"
 
 /**
@@ -43,7 +43,7 @@ String.fromCharCode(0xd55c) == `한`
 String.fromCharCode(-64568) == `ψ`
 ```
 */
-@val
+@val @pure
 external fromCharCode: int => string = "String.fromCharCode"
 
 /**
@@ -58,7 +58,7 @@ String.fromCharCodeMany([189, 43, 190, 61]) == "½+¾="
 String.fromCharCodeMany([65, 66, 67]) == "ABC"
 ```
 */
-@variadic @val
+@variadic @val @pure
 external fromCharCodeMany: array<int> => string = "String.fromCharCode"
 
 /**
@@ -79,7 +79,7 @@ String.fromCodePoint(0x1f63a) == `😺`
 
 - `RangeError`: If the number is not a valid code point, like `fromCharCode(-5)`.
 */
-@val
+@val @pure
 external fromCodePoint: int => string = "String.fromCodePoint"
 
 /**
@@ -100,7 +100,7 @@ String.fromCodePointMany([0xd55c, 0xae00, 0x1f63a]) == `한글😺`
   `fromCharCode([1, -5])`.
   
 */
-@variadic @val
+@variadic @val @pure
 external fromCodePointMany: array<int> => string = "String.fromCodePoint"
 
 /**
@@ -114,6 +114,7 @@ String.equal("hello", "world") == false
 String.equal("", "") == true
 ```
 */
+@pure
 external equal: (string, string) => bool = "%equal"
 
 /**
@@ -127,6 +128,7 @@ String.compare("apple", "banana") == Ordering.less
 String.compare("zebra", "apple") == Ordering.greater
 ```
 */
+@pure
 external compare: (string, string) => Stdlib_Ordering.t = "%compare"
 
 /**
@@ -139,7 +141,7 @@ See [`String.length`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Re
 String.length("abcd") == 4
 ```
 */
-@get
+@get @pure
 external length: string => int = "length"
 
 /**
@@ -154,7 +156,7 @@ String.get("Hello", 4) == Some("o")
 String.get(`JS`, 4) == None
 ```
 */
-@get_index
+@get_index @pure
 external get: (string, int) => option<string> = ""
 
 /**
@@ -170,7 +172,7 @@ String.getUnsafe("ReScript", 0) == "R"
 String.getUnsafe("Hello", 4) == "o"
 ```
 */
-@get_index
+@get_index @pure
 external getUnsafe: (string, int) => string = ""
 
 /**
@@ -188,7 +190,7 @@ String.charAt("Hello", 12) == ""
 String.charAt(`JS`, 5) == ""
 ```
 */
-@send
+@send @pure
 external charAt: (string, int) => string = "charAt"
 
 /**
@@ -206,6 +208,7 @@ String.charCodeAt("", 0) == None
 String.codePointAt(`😺`, 0) == Some(0x1f63a)
 ```
 */
+@pure
 let charCodeAt: (string, int) => option<int>
 
 /**
@@ -223,7 +226,7 @@ String.charCodeAtUnsafe(`😺`, 0) == 0xd83d
 String.codePointAt(`😺`, 0) == Some(0x1f63a)
 ```
 */
-@send
+@send @pure
 external charCodeAtUnsafe: (string, int) => int = "charCodeAt"
 
 /**
@@ -240,7 +243,7 @@ String.codePointAt(`¿😺?`, 1) == Some(0x1f63a)
 String.codePointAt("abc", 5) == None
 ```
 */
-@send
+@send @pure
 external codePointAt: (string, int) => option<int> = "codePointAt"
 
 /**
@@ -255,7 +258,7 @@ String.concat("cow", "bell") == "cowbell"
 String.concat("Re", "Script") == "ReScript"
 ```
 */
-@send
+@send @pure
 external concat: (string, string) => string = "concat"
 
 /**
@@ -269,7 +272,7 @@ See [`String.concat`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Re
 String.concatMany("1st", ["2nd", "3rd", "4th"]) == "1st2nd3rd4th"
 ```
 */
-@variadic @send
+@variadic @send @pure
 external concatMany: (string, array<string>) => string = "concat"
 
 /**
@@ -284,7 +287,7 @@ String.endsWith("BuckleScript", "Script") == true
 String.endsWith("BuckleShoes", "Script") == false
 ```
 */
-@send
+@send @pure
 external endsWith: (string, string) => bool = "endsWith"
 
 // NOTE: Honestly, this should have been named endsWithAt, but oh well
@@ -303,7 +306,7 @@ String.endsWithFrom("abcde", "cde", 99) == true
 String.endsWithFrom("example.dat", "ple", 7) == true
 ```
 */
-@send
+@send @pure
 external endsWithFrom: (string, string, int) => bool = "endsWith"
 
 /**
@@ -320,7 +323,7 @@ String.includes("programmer", "pro") == true
 String.includes("programmer.dat", "xyz") == false
 ```
 */
-@send
+@send @pure
 external includes: (string, string) => bool = "includes"
 
 /**
@@ -337,7 +340,7 @@ String.includesFrom("programmer", "gram", 4) == false
 String.includesFrom(`대한민국`, `한`, 1) == true
 ```
 */
-@send
+@send @pure
 external includesFrom: (string, string, int) => bool = "includes"
 
 /**
@@ -354,7 +357,7 @@ String.indexOf("beekeeper", "ee") == 1
 String.indexOf("bookseller", "xyz") == -1
 ```
 */
-@send
+@send @pure
 external indexOf: (string, string) => int = "indexOf"
 
 /**
@@ -367,6 +370,7 @@ String.indexOfOpt("bookseller", "ok") == Some(2)
 String.indexOfOpt("bookseller", "xyz") == None
 ```
 */
+@pure
 let indexOfOpt: (string, string) => option<int>
 
 /**
@@ -385,7 +389,7 @@ String.indexOfFrom("bookseller", "sell", 2) == 4
 String.indexOfFrom("bookseller", "sell", 5) == -1
 ```
 */
-@send
+@send @pure
 external indexOfFrom: (string, string, int) => int = "indexOf"
 
 /**
@@ -403,7 +407,7 @@ String.lastIndexOf("beekeeper", "ee") == 4
 String.lastIndexOf("abcdefg", "xyz") == -1
 ```
 */
-@send
+@send @pure
 external lastIndexOf: (string, string) => int = "lastIndexOf"
 
 /**
@@ -418,6 +422,7 @@ String.lastIndexOfOpt("beekeeper", "ee") == Some(4)
 String.lastIndexOfOpt("abcdefg", "xyz") == None
 ```
 */
+@pure
 let lastIndexOfOpt: (string, string) => option<int>
 
 /**
@@ -436,7 +441,7 @@ String.lastIndexOfFrom("beekeeper", "ee", 3) == 1
 String.lastIndexOfFrom("abcdefg", "xyz", 4) == -1
 ```
 */
-@send
+@send @pure
 external lastIndexOfFrom: (string, string, int) => int = "lastIndexOf"
 
 /**
@@ -461,7 +466,7 @@ String.match("The optional example", /(foo)?(example)/) ==
 String.match("The large container.", /b[aeiou]g/) == None
 ```
 */
-@return(nullable) @send
+@return(nullable) @send @pure
 external match: (string, Stdlib_RegExp.t) => option<Stdlib_RegExp.Result.t> = "match"
 
 /**
@@ -483,7 +488,7 @@ assert(string1 != string2) // true
 String.normalize(string1) == String.normalize(string2)
 ```
 */
-@send
+@send @pure
 external normalize: string => string = "normalize"
 
 /**
@@ -511,7 +516,7 @@ Console.log(normalizeString1 == normalizeString2) // true
 */
 type normalizeForm = [#NFC | #NFD | #NFKC | #NFKD]
 
-@send
+@send @pure
 external normalizeByForm: (string, normalizeForm) => string = "normalize"
 
 /**
@@ -529,7 +534,7 @@ String.repeat("empty", 0) == ""
 
 - `RangeError`: if `n` is negative.
 */
-@send
+@send @pure
 external repeat: (string, int) => string = "repeat"
 
 /**
@@ -546,7 +551,7 @@ String.replace("old string", "old", "new") == "new string"
 String.replace("the cat and the dog", "the", "this") == "this cat and the dog"
 ```
 */
-@send
+@send @pure
 external replace: (string, string, string) => string = "replace"
 
 /**
@@ -561,7 +566,7 @@ String.replaceRegExp("vowels be gone", /[aeiou]/g, "x") == "vxwxls bx gxnx"
 String.replaceRegExp("Juan Fulano", /(\w+) (\w+)/, "$2, $1") == "Fulano, Juan"
 ```
 */
-@send
+@send @pure
 external replaceRegExp: (string, Stdlib_RegExp.t, string) => string = "replace"
 
 /**
@@ -578,7 +583,7 @@ String.replaceAll("old old string", "old", "new") == "new new string"
 String.replaceAll("the cat and the dog", "the", "this") == "this cat and this dog"
 ```
 */
-@send
+@send @pure
 external replaceAll: (string, string, string) => string = "replaceAll"
 
 /**
@@ -594,7 +599,7 @@ String.replaceAllRegExp("vowels be gone", /[aeiou]/g, "x") == "vxwxls bx gxnx"
 String.replaceAllRegExp("aabbcc", /b/g, ".") == "aa..cc"
 ```
 */
-@send
+@send @pure
 external replaceAllRegExp: (string, Stdlib_RegExp.t, string) => string = "replaceAll"
 
 /**
@@ -614,7 +619,7 @@ let matchFn = (~match, ~offset as _, ~input as _) => String.toUpperCase(match)
 String.replaceRegExpBy0Unsafe(str, re, matchFn) == "bEAUtIfUl vOwEls"
 ```
 */
-@send
+@send @pure
 external replaceRegExpBy0Unsafe: (
   string,
   Stdlib_RegExp.t,
@@ -637,7 +642,7 @@ let matchFn = (~match as _, ~group1, ~offset as _, ~input as _) => {
 String.replaceRegExpBy1Unsafe(str, re, matchFn) == "Jony is 41"
 ```
 */
-@send
+@send @pure
 external replaceRegExpBy1Unsafe: (
   string,
   Stdlib_RegExp.t,
@@ -663,7 +668,7 @@ let matchFn = (~match as _, ~group1, ~group2, ~offset as _, ~input as _) => {
 String.replaceRegExpBy2Unsafe(str, re, matchFn) == "42"
 ```
 */
-@send
+@send @pure
 external replaceRegExpBy2Unsafe: (
   string,
   Stdlib_RegExp.t,
@@ -675,7 +680,7 @@ external replaceRegExpBy2Unsafe: (
 has three group parameters.
 See [`String.replace`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/replace) on MDN.
 */
-@send
+@send @pure
 external replaceRegExpBy3Unsafe: (
   string,
   Stdlib_RegExp.t,
@@ -701,7 +706,7 @@ String.search("testing 1 2 3", /\d+/) == 8
 String.search("no numbers", /\d+/) == -1
 ```
 */
-@send
+@send @pure
 external search: (string, Stdlib_RegExp.t) => int = "search"
 
 /**
@@ -714,6 +719,7 @@ String.searchOpt("testing 1 2 3", /\d+/) == Some(8)
 String.searchOpt("no numbers", /\d+/) == None
 ```
 */
+@pure
 let searchOpt: (string, Stdlib_RegExp.t) => option<int>
 
 /**
@@ -728,6 +734,7 @@ String.isEmpty("hello") == false
 String.isEmpty("  ") == false
 ```
 */
+@pure
 let isEmpty: string => bool
 
 /**
@@ -744,6 +751,7 @@ String.capitalize("hello world") == "Hello world"
 String.capitalize("") == ""
 ```
 */
+@pure
 let capitalize: string => string
 
 /**
@@ -767,7 +775,7 @@ String.slice("abcdefg", ~start=2) == "cdefg"
 String.slice("Hello World", ~start=6) == "World"
 ```
 */
-@send
+@send @pure
 external slice: (string, ~start: int, ~end: int=?) => string = "slice"
 
 /**
@@ -784,7 +792,7 @@ String.split("good::bad as great::awful", "::") == ["good", "bad as great", "awf
 String.split("has-no-delimiter", ";") == ["has-no-delimiter"]
 ```
 */
-@send
+@send @pure
 external split: (string, string) => array<string> = "split"
 
 /**
@@ -801,7 +809,7 @@ String.splitAtMost("ant/bee/cat/dog/elk", "/", ~limit=0) == []
 String.splitAtMost("ant/bee/cat/dog/elk", "/", ~limit=9) == ["ant", "bee", "cat", "dog", "elk"]
 ```
 */
-@send
+@send @pure
 external splitAtMost: (string, string, ~limit: int) => array<string> = "split"
 
 /**
@@ -815,7 +823,7 @@ See [`String.split`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Ref
 String.splitByRegExp("Jan,Feb,Mar", /,/) == [Some("Jan"), Some("Feb"), Some("Mar")]
 ```
 */
-@send
+@send @pure
 external splitByRegExp: (string, Stdlib_RegExp.t) => array<option<string>> = "split"
 
 /**
@@ -835,7 +843,7 @@ String.splitByRegExpAtMost("Hello World. How are you doing?", / /, ~limit=3) == 
   ]
 ```
 */
-@send
+@send @pure
 external splitByRegExpAtMost: (string, Stdlib_RegExp.t, ~limit: int) => array<option<string>> =
   "split"
 
@@ -852,7 +860,7 @@ String.startsWith("BuckleScript", "") == true
 String.startsWith("JavaScript", "Buckle") == false
 ```
 */
-@send
+@send @pure
 external startsWith: (string, string) => bool = "startsWith"
 
 /**
@@ -869,7 +877,7 @@ String.startsWithFrom("BuckleScript", "", 3) == true
 String.startsWithFrom("JavaScript", "Buckle", 2) == false
 ```
 */
-@send
+@send @pure
 external startsWithFrom: (string, string, int) => bool = "startsWith"
 
 /**
@@ -890,7 +898,7 @@ String.substring("playground", ~start=4) == "ground"
 String.substring("Hello World", ~start=6) == "World"
 ```
 */
-@send
+@send @pure
 external substring: (string, ~start: int, ~end: int=?) => string = "substring"
 
 /**
@@ -909,14 +917,14 @@ String.toLowerCase(`ΣΠ`) == `σπ`
 String.toLowerCase(`ΠΣ`) == `πς`
 ```
 */
-@send
+@send @pure
 external toLowerCase: string => string = "toLowerCase"
 
 /**
 `toLocaleLowerCase(str)` converts `str` to lower case using the current locale.
 See [`String.toLocaleLowerCase`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/toLocaleLowerCase) on MDN.
 */
-@send
+@send @pure
 external toLocaleLowerCase: string => string = "toLocaleLowerCase"
 
 /**
@@ -934,14 +942,14 @@ String.toUpperCase(`Straße`) == `STRASSE`
 String.toUpperCase(`πς`) == `ΠΣ`
 ```
 */
-@send
+@send @pure
 external toUpperCase: string => string = "toUpperCase"
 
 /**
 `toLocaleUpperCase(str)` converts `str` to upper case using the current locale.
 See [`String.toLocaleUpperCase`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/toLocaleUpperCase) on MDN.
 */
-@send
+@send @pure
 external toLocaleUpperCase: string => string = "toLocaleUpperCase"
 
 /**
@@ -956,7 +964,7 @@ String.trim("   abc def   ") == "abc def"
 String.trim("\n\r\t abc def \n\n\t\r ") == "abc def"
 ```
 */
-@send
+@send @pure
 external trim: string => string = "trim"
 
 /**
@@ -971,7 +979,7 @@ String.trimStart("   Hello world!   ") == "Hello world!   "
 String.trimStart("   Hello   world!   ") == "Hello   world!   "
 ```
 */
-@send
+@send @pure
 external trimStart: string => string = "trimStart"
 
 /**
@@ -986,7 +994,7 @@ String.trimEnd("   Hello world!   ") == "   Hello world!"
 String.trimEnd("   Hello   world!   ") == "   Hello   world!"
 ```
 */
-@send
+@send @pure
 external trimEnd: string => string = "trimEnd"
 
 /**
@@ -1002,7 +1010,7 @@ String.padStart("abc", 5, " ") == "  abc"
 String.padStart("abc", 6, "123465") == "123abc"
 ```
 */
-@send
+@send @pure
 external padStart: (string, int, string) => string = "padStart"
 
 /**
@@ -1018,7 +1026,7 @@ String.padEnd("Hello", 10, ".") == "Hello....."
 String.padEnd("abc", 1, "") == "abc"
 ```
 */
-@send
+@send @pure
 external padEnd: (string, int, string) => string = "padEnd"
 
 /**
@@ -1041,7 +1049,7 @@ String.localeCompare("a", "b", ~locales=["en-US"]) < 0.0 == true
 String.localeCompare("a", "A", ~locales=["en-US"], ~options={sensitivity: #base}) == 0.0
 ```
 */
-@send
+@send @pure
 external localeCompare: (
   string,
   string,
@@ -1055,12 +1063,14 @@ external localeCompare: (
   This helper is useful when you want to discard a value (for example, the result of an operation with side effects)
   without having to store or process it further.
 */
+@pure
 external ignore: string => unit = "%ignore"
 
 /**
 `asIterable(str)` views `str` as an `Iterable.t<string>` where each yielded
 value is one string element.
 */
+@pure
 external asIterable: string => Stdlib_Iterable.t<string> = "%identity"
 
 /**
@@ -1074,5 +1084,5 @@ Nullable.make(it)->Nullable.isNullable == false
 ```
 
  */
-@get_index
+@get_index @pure
 external getSymbolUnsafe: (string, Stdlib_Symbol.t) => 'a = ""

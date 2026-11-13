@@ -26,6 +26,7 @@ switch someVariable->Type.typeof {
 }
 ```
 */
+@pure
 external typeof: 'a => t = "#typeof"
 
 module Classify: {
@@ -73,6 +74,7 @@ switch %raw(`null`)->Type.Classify.classify {
 }
 ```
 */
+  @pure
   let classify: 'a => t
 }
 
@@ -82,4 +84,5 @@ switch %raw(`null`)->Type.Classify.classify {
   This helper is useful when you want to discard a value (for example, the result of an operation with side effects)
   without having to store or process it further.
 */
+@pure
 external ignore: t => unit = "%ignore"

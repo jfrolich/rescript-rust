@@ -12,7 +12,7 @@ type t = float
 (1)->Int.compare(2) == Ordering.less
 ```
 */
-@inline let less = -1.
+@pure @inline let less = -1.
 
 /**
 `equal` is the ordering value returned when two values compare the same.
@@ -23,7 +23,7 @@ type t = float
 (2)->Int.compare(2) == Ordering.equal
 ```
 */
-@inline let equal = 0.
+@pure @inline let equal = 0.
 
 /**
 `greater` is the ordering value returned when the left operand is larger than the right operand.
@@ -34,7 +34,7 @@ type t = float
 (3)->Int.compare(2) == Ordering.greater
 ```
 */
-@inline let greater = 1.
+@pure @inline let greater = 1.
 
 /**
 `isLess(ordering)` returns `true` when `ordering` equals `Ordering.less`.
@@ -46,6 +46,7 @@ Ordering.isLess(Ordering.less) == true
 Ordering.isLess(Ordering.equal) == false
 ```
 */
+@pure
 let isLess = ord => ord < equal
 
 /**
@@ -58,6 +59,7 @@ Ordering.isEqual(Ordering.equal) == true
 Ordering.isEqual(Ordering.greater) == false
 ```
 */
+@pure
 let isEqual = ord => ord == equal
 
 /**
@@ -70,6 +72,7 @@ Ordering.isGreater(Ordering.greater) == true
 Ordering.isGreater(Ordering.less) == false
 ```
 */
+@pure
 let isGreater = ord => ord > equal
 
 /**
@@ -82,6 +85,7 @@ Ordering.invert(Ordering.less) == Ordering.greater
 Ordering.invert(Ordering.equal) == Ordering.equal
 ```
 */
+@pure
 let invert = ord => -.ord
 
 /**
@@ -95,6 +99,7 @@ Ordering.fromInt(0) == Ordering.equal
 Ordering.fromInt(3) == Ordering.greater
 ```
 */
+@pure
 let fromInt = n => n < 0 ? less : n > 0 ? greater : equal
 
 /**
@@ -103,4 +108,5 @@ let fromInt = n => n < 0 ? less : n > 0 ? greater : equal
   This helper is useful when you want to discard a value (for example, the result of an operation with side effects)
   without having to store or process it further.
 */
+@pure
 external ignore: t => unit = "%ignore"
