@@ -9386,14 +9386,22 @@ pub fn simple_for_let<'p, B: RawLambdaBuilder>(
 
 /// Compile a let binding match (with optimization for simple cases).
 /// Equivalent to OCaml's `for_let`.
-pub fn for_let<'p, B: RawLambdaBuilder>(
-    env: MatchEnv<'p, '_, B>,
+///
+/// Takes the typed arena, not a pattern arena: a wildcard or a variable,
+/// which most bindings are, needs none, so one is made only for a pattern
+/// the match compiler has to take apart.
+#[allow(clippy::too_many_arguments)]
+pub fn for_let<B: RawLambdaBuilder>(
+    ctx_ref: &TypeContext,
+    ta: &TypedArena,
+    arena: &LocArena<'_, B>,
+    next_raise_count: &mut i32,
     loc: Location,
     param: RawLambda,
-    pat: &'p Pattern,
+    pat: &Pattern,
     body: RawLambda,
 ) -> RawLambda {
-    let b = env.arena.b;
+    let b = arena.b;
     match &pat.pat_desc {
         PatternDesc::Tpat_any => {
             // Eliminates a useless variable
@@ -9403,7 +9411,17 @@ pub fn for_let<'p, B: RawLambdaBuilder>(
             // Fast path
             b.let_(LetKind::Strict, *id, param, body)
         }
-        _ => simple_for_let(env, loc, param, pat, body),
+        _ => {
+            let store = PatStore::default();
+            let pa = PatArena::new(ta, &store);
+            let env = MatchEnv {
+                ctx_ref,
+                pa: &pa,
+                arena,
+                next_raise_count,
+            };
+            simple_for_let(env, loc, param, pat, body)
+        }
     }
 }
 

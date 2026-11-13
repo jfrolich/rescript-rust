@@ -241,8 +241,6 @@ struct PrimitiveArgs {
     first: (TypeExprRef, EnvRef),
     /// The number of arguments the primitive is applied to.
     count: u16,
-    /// Whether an argument is a constant constructor.
-    constant_constructor: bool,
 }
 
 /// How the written fields of a record are lowered
@@ -799,15 +797,16 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         self.sync_matching_stamps();
         let loc = self.loc(loc);
         let arena = crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b);
-        let store = full_matching::PatStore::default();
-        let pa = full_matching::PatArena::new(self.ta, &store);
-        let env = full_matching::MatchEnv {
-            ctx_ref: self.type_ctx,
-            pa: &pa,
-            arena: &arena,
-            next_raise_count: &mut self.next_static_raise,
-        };
-        let lambda = full_matching::for_let(env, loc, param, pat, body);
+        let lambda = full_matching::for_let(
+            self.type_ctx,
+            self.ta,
+            &arena,
+            &mut self.next_static_raise,
+            loc,
+            param,
+            pat,
+            body,
+        );
         self.sync_matching_stamps();
         lambda
     }
@@ -1978,10 +1977,9 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
     /// is an external whose application must be expanded from its FFI spec.
     /// What the choice of a primitive reads of the arguments it is applied
     /// to, for a typed application.
-    fn primitive_args(&self, args: &[&Expression]) -> PrimitiveArgs {
+    fn primitive_args(args: &[&Expression]) -> PrimitiveArgs {
         PrimitiveArgs {
             count: args.len() as u16,
-            constant_constructor: args.iter().any(|arg| Self::has_constant_constructor_arg(arg)),
             first: args
                 .first()
                 .map_or((TypeExprRef::null(), EnvRef(0)), |arg| (arg.exp_type, arg.exp_env)),
@@ -1990,13 +1988,16 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
 
     /// The primitive an application of the builtin `prim` is, or `None` for
     /// an external (translcore.ml `transl_primitive_application`). `ty` is
-    /// the type of the applied value.
+    /// the type of the applied value; `constant_constructor` says whether
+    /// an argument is a constant constructor, and is asked only for a
+    /// comparison.
     /// Cost: O(1) type inspections; one copy of the primitive's name.
     fn translate_primitive_application_raw(
         &mut self,
         prim: &crate::types::PrimitiveDescription,
         ty: TypeExprRef,
         args: PrimitiveArgs,
+        constant_constructor: impl FnOnce() -> bool,
         loc: SrcLoc,
     ) -> Option<Primitive> {
         let prim_name = Self::raw_primitive_name(&prim.prim_name).to_string();
@@ -2013,7 +2014,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                 if self.is_base_type(first_type, "bool") {
                     return Some(table.boolcomp);
                 }
-                if args.constant_constructor && table.simplify_constant_constructor {
+                if table.simplify_constant_constructor && constant_constructor() {
                     return Some(table.intcomp);
                 }
                 // Use arg's type directly for specialization, matching OCaml's
@@ -2479,6 +2480,17 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         elems: Vec<RawLambda>,
         loc: impl Into<SrcLoc>,
     ) -> RawLambda {
+        self.raw_block_or_prim_of(tag_info, &elems, loc)
+    }
+
+    /// A block of lowered elements: a constant when every element is one.
+    /// Cost: O(elements).
+    fn raw_block_or_prim_of(
+        &self,
+        tag_info: TagInfo,
+        elems: &[RawLambda],
+        loc: impl Into<SrcLoc>,
+    ) -> RawLambda {
         let rb = self.b;
         let loc: SrcLoc = loc.into();
         if let Some(constants) = elems
@@ -2493,7 +2505,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         } else {
             rb.prim(
                 Primitive::Pmakeblock(tag_info, Mutable::Immutable),
-                &elems,
+                elems,
                 self.lam_loc(loc),
             )
         }
@@ -2586,13 +2598,20 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
 
         match cstr.cstr_kind {
             crate::types::ConstructorKind::Ordinary(reference) => {
-                let payload = match args {
-                    [arg] => Some((arg.exp_type, arg.exp_env)),
-                    _ => None,
-                };
-                let elems: SmallVec<[RawLambda; 4]> =
-                    args.iter().map(|arg| self.convert_expr_raw(arg)).collect();
-                self.construct_of(loc, cstr, reference, &elems, payload)
+                // No buffer for the common arities.
+                match args {
+                    [] => self.construct_of(loc, cstr, reference, &[], None),
+                    [arg] => {
+                        let elem = self.convert_expr_raw(arg);
+                        let payload = Some((arg.exp_type, arg.exp_env));
+                        self.construct_of(loc, cstr, reference, &[elem], payload)
+                    }
+                    _ => {
+                        let elems: Vec<RawLambda> =
+                            args.iter().map(|arg| self.convert_expr_raw(arg)).collect();
+                        self.construct_of(loc, cstr, reference, &elems, None)
+                    }
+                }
             }
             crate::types::ConstructorKind::Extension(ref path) => {
                 let mut args_lam = Vec::with_capacity(args.len() + 1);
@@ -2612,7 +2631,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
     /// `elems`. `payload` is the type of the argument, and the environment
     /// that was typed in, when there is exactly one.
     /// Cost: O(arguments): one constant, the argument itself for an untagged
-    /// constructor, or one block and one copy of the arguments.
+    /// constructor, or one block.
     fn construct_of(
         &mut self,
         loc: SrcLoc,
@@ -2658,12 +2677,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
             }
             crate::types::VariantConstructorCase::Block(_) => {
                 let tag_info = self.raw_constructor_tag_info(cstr, payload);
-                self.raw_block_or_prim(
-                    reference.block_index(self.type_ctx) as i32,
-                    tag_info,
-                    elems.to_vec(),
-                    loc,
-                )
+                self.raw_block_or_prim_of(tag_info, elems, loc)
             }
         }
     }
@@ -6702,15 +6716,14 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                             .iter()
                             .map(|expr| self.convert_expr_raw(expr))
                             .collect::<Vec<_>>();
-                        let primitive_args = self.primitive_args(&applied_exprs);
-                        let env = self.env_for_expr(funct);
                         self.primitive_application_of(
                             loc_idx,
                             SrcLoc::from(loc),
                             prim,
                             (funct.exp_type, desc.val_type),
-                            env.as_deref(),
-                            primitive_args,
+                            funct.exp_env,
+                            Self::primitive_args(&applied_exprs),
+                            || applied_exprs.iter().any(|arg| Self::has_constant_constructor_arg(arg)),
                             arg_lams,
                         )
                     };
@@ -6743,7 +6756,9 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
     /// takes, already lowered as `arg_lams`: a builtin becomes its
     /// primitive, an external the expansion of its FFI specification.
     /// `types` are the type the value is applied at and the type it is
-    /// declared with; `env` is the environment the value was typed in. Not
+    /// declared with; `env` is the environment the value was typed in, read
+    /// for an external only; `constant_constructor` as for
+    /// [`Self::translate_primitive_application_raw`]. Not
     /// for the primitives that read the syntax of their arguments (a
     /// location primitive, a dynamic import), which the caller handles.
     /// Cost: O(arguments) besides the expansion of an external.
@@ -6754,13 +6769,20 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         loc: SrcLoc,
         prim: &crate::types::PrimitiveDescription,
         (applied_type, declared_type): (TypeExprRef, TypeExprRef),
-        env: Option<&crate::types::env::Env>,
+        env: EnvRef,
         args: PrimitiveArgs,
+        constant_constructor: impl FnOnce() -> bool,
         arg_lams: Vec<RawLambda>,
     ) -> RawLambda {
         let rb = self.b;
         let raw_name = Self::raw_primitive_name(&prim.prim_name);
-        match self.translate_primitive_application_raw(prim, applied_type, args, loc) {
+        match self.translate_primitive_application_raw(
+            prim,
+            applied_type,
+            args,
+            constant_constructor,
+            loc,
+        ) {
             // an external: expand its FFI spec here; %raw
             // parses and classifies its snippet
             None => match (raw_name, arg_lams.as_slice()) {
@@ -6779,7 +6801,8 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                     )
                 }
                 _ => {
-                    let env = env.unwrap_or(self.env);
+                    let env = self.type_ctx.get_typed_env(env);
+                    let env = env.as_deref().unwrap_or(self.env);
                     self.transl_external_application(loc, env, prim, declared_type, arg_lams)
                 }
             },
@@ -7155,6 +7178,12 @@ mod tests {
         items: Vec<crate::types::SignatureItem>,
     ) -> crate::types::decl::ModuleType {
         crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(items))
+    }
+
+    /// What is handed to the choice of a primitive per application.
+    #[test]
+    fn primitive_args_are_twelve_bytes() {
+        assert_eq!(std::mem::size_of::<PrimitiveArgs>(), 12);
     }
 
     use super::*;
