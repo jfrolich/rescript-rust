@@ -914,11 +914,7 @@ impl Extraction<'_, '_, '_> {
             // OCaml places every module it documents this way at the start
             // of the entry point.
             source: Source {
-                filepath: if self.root_path == "." {
-                    self.entry.uri.clone()
-                } else {
-                    source_filepath(&self.root_path, &self.entry.uri)
-                },
+                filepath: source_filepath(&self.root_path, &self.entry.uri),
                 line: 1,
                 col: 1,
             },
@@ -931,18 +927,6 @@ fn prepend(name: &str, module_path: &[String]) -> Vec<String> {
     std::iter::once(name.to_string())
         .chain(module_path.iter().cloned())
         .collect()
-}
-
-/// `Find_files.is_implementation`.
-fn is_implementation(path: &str) -> bool {
-    [".re", ".res", ".ml"].iter().any(|ext| path.ends_with(ext))
-}
-
-/// `Find_files.is_interface`.
-fn is_interface(path: &str) -> bool {
-    [".rei", ".resi", ".mli"]
-        .iter()
-        .any(|ext| path.ends_with(ext))
 }
 
 /// The root of the package `path` is in: the nearest directory holding a
@@ -971,32 +955,30 @@ pub fn extract_docs(
     } else {
         entry_point_file.to_string()
     };
-    if !is_implementation(&path) && !is_interface(&path) {
-        return Err(format!(
-            "error: failed to read {path}, expected an .res or .resi file"
-        ));
-    }
-    let path = if is_implementation(&path) {
-        let as_path = Path::new(&path);
-        let stem = as_path.file_stem().unwrap_or_default().to_string_lossy();
-        let dir = as_path
-            .parent()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let path_as_resi = format!("{dir}/{stem}.resi");
-        if Path::new(&path_as_resi).exists() {
-            path_as_resi
-        } else {
-            path
+    // An implementation with an interface is documented by its interface.
+    let path = match path.strip_suffix(".res") {
+        Some(stem) => {
+            let interface = format!("{stem}.resi");
+            if Path::new(&interface).exists() {
+                interface
+            } else {
+                path
+            }
         }
-    } else {
-        path
+        None if path.ends_with(".resi") => path,
+        None => {
+            return Err(format!(
+                "error: failed to read {path}, expected an .res or .resi file"
+            ));
+        }
     };
     let failed = || format!("error: failed to generate doc for {path}, try to build the project");
     let full = session
         .full_from_path(Path::new(&path))
         .ok_or_else(failed)?;
-    let root_path = package_root(Path::new(&path)).ok_or_else(failed)?;
+    // The root as the build spells it, which the file names of locations
+    // are relative to: `path` may reach the file through a symbolic link.
+    let root_path = package_root(Path::new(&full.file.uri)).ok_or_else(failed)?;
     let extraction = Extraction {
         session,
         entry: &full.file,
