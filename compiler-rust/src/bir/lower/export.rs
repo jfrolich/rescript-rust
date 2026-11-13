@@ -137,8 +137,13 @@ pub(super) struct Tables {
     last_plain: u32,
     /// The last row plus one with a top-level effect; `u32::MAX` unread.
     last_effect: u32,
+    /// The references to the variable of the last collecting `mentions`
+    /// pass that stand in a later row: what `substitute_after` replaces.
+    later: Vec<NodeId>,
     /// Rows, exports, alias-chain links, sites and ancestors visited.
     pub(super) steps: usize,
+    /// Sites read from a variable's chain, released ones included.
+    pub(super) site_visits: usize,
     #[cfg(test)]
     arms: Vec<Arm>,
     #[cfg(test)]
@@ -155,9 +160,11 @@ pub(crate) struct Coerced {
     /// The arm of the fold and the arm of the resolution each export took.
     #[cfg(test)]
     pub arms: Vec<(Arm, Resolved)>,
-    /// `Tables::steps` when the unit was complete.
+    /// `Tables::steps` and `Tables::site_visits` when the unit was complete.
     #[cfg(test)]
     pub steps: usize,
+    #[cfg(test)]
+    pub site_visits: usize,
 }
 
 /// The arm of C:1099 an export took, recorded for the rule tests.
@@ -803,16 +810,23 @@ impl State {
     /// later_toplevel_initializer_mentions_ident, S:626
     /// later_toplevel_function_mentions_ident, S:394
     /// tail_move_uses_are_safe_to_inline, S:469
-    /// replacement_resolves_to_recursive_function). Cost: one step per site
-    /// of the variable, released ones included, plus `row_of`.
-    fn mentions(&mut self, var: VarId, index: u32) -> Mentions {
+    /// replacement_resolves_to_recursive_function). With `collect`, the
+    /// references in later rows are kept for `substitute_after`, so that a
+    /// reference is read from its chain once. Cost: one step per site of
+    /// the variable (one per `Var` node ever built for it, released ones
+    /// included), plus `row_of`. No allocation once `later` has its capacity.
+    fn mentions(&mut self, var: VarId, index: u32, collect: bool) -> Mentions {
         let mut found = Mentions::default();
+        if collect {
+            self.coercion.later.clear();
+        }
         let Some(scope) = &self.arena.js_scope else {
             unreachable!("the lowering arena records sites")
         };
         let mut at = scope.site_heads[var.index()];
         while at != 0 {
             self.coercion.steps += 1;
+            self.coercion.site_visits += 1;
             let site = self.arena.js_scope.as_ref().expect("sites").sites[at as usize - 1];
             at = site.next;
             if site.node == NodeId(u32::MAX) {
@@ -826,6 +840,9 @@ impl State {
                 continue;
             }
             let (row, function) = ((place >> 1) - 1, place & 1 != 0);
+            if collect && row > index {
+                self.coercion.later.push(site.node);
+            }
             let bits = self.coercion.rows[row as usize].bits;
             if row < index {
                 found.0 |= Mentions::PRIOR;
@@ -865,7 +882,7 @@ impl State {
             return false;
         };
         self.coercion.rows[row as usize].has(Row::FUNCTION)
-            && self.mentions(var, row).has(Mentions::OWN)
+            && self.mentions(var, row, false).has(Mentions::OWN)
     }
 
     /// S:435 later_toplevel_effect_allows_tail_move, from the facts one
@@ -945,28 +962,18 @@ impl State {
     }
 
     /// S:160 substitute_after: remove the declaration row `index` and
-    /// replace every reference to `target` in a later row by a copy of the
-    /// replacement. Cost: one step and one copy per site of `target`. The
-    /// block is flattened from here on.
-    fn substitute_after(&mut self, index: u32, target: VarId, replacement: Replacement) {
-        let mut at = self.arena.js_scope.as_ref().expect("sites").site_heads[target.index()];
-        while at != 0 {
+    /// replace every reference the collecting `mentions` pass of the moved
+    /// variable found in a later row by a copy of the replacement. Cost:
+    /// one write and one copy per such reference; no chain is read again.
+    /// The block is flattened from here on.
+    fn substitute_after(&mut self, index: u32, replacement: Replacement) {
+        let mut later = std::mem::take(&mut self.coercion.later);
+        for node in later.drain(..) {
             self.coercion.steps += 1;
-            let site = self.arena.js_scope.as_ref().expect("sites").sites[at as usize - 1];
-            at = site.next;
-            if site.node == NodeId(u32::MAX) {
-                continue;
-            }
-            let Some(parent) = self.arena.parents[site.node.index()] else {
-                continue;
-            };
-            let place = self.row_of(parent);
-            if place == 1 || (place >> 1) - 1 <= index {
-                continue;
-            }
             let copy = self.copy_replacement(replacement);
-            self.arena.replace(site.node, copy);
+            self.arena.replace(node, copy);
         }
+        self.coercion.later = later;
         self.coercion.flattened = true;
         let row = &mut self.coercion.rows[index as usize];
         row.bits |= Row::REMOVED;
@@ -1048,6 +1055,18 @@ impl State {
         node
     }
 
+    /// coercion.ml:140-156 `Ident.rename`: a fresh variable with the name of
+    /// `var`. Constant; the interned name is copied, not looked up.
+    fn renamed(&mut self, var: VarId) -> VarId {
+        let order = self.next_order;
+        self.next_order = order.checked_add(1).expect("identifier order capacity");
+        let name = self.arena.vars.name(var);
+        let fresh = self.arena.new_var_id(name, order);
+        self.idents
+            .push(Ident::new(name, order as i32, crate::ident::IdentFlags::NONE));
+        fresh
+    }
+
     /// The identifier a variable prints as. One read.
     fn ident(&self, var: VarId) -> Ident {
         self.idents[self.origin(var).index()]
@@ -1079,11 +1098,11 @@ impl State {
         if kind == Kind::Literal {
             return None;
         }
-        let uses = self.mentions(target, index);
+        let uses = self.mentions(target, index, true);
         let later_initialiser = uses.has(Mentions::LATER_INITIALISER);
         let prefer_materialized_root = match self.materialized_root(init, true) {
             Some(root) if root != target => {
-                later_initialiser || self.mentions(root, index).has(Mentions::LATER)
+                later_initialiser || self.mentions(root, index, false).has(Mentions::LATER)
             }
             _ => false,
         };
@@ -1104,7 +1123,7 @@ impl State {
         if blocked {
             return None;
         }
-        self.substitute_after(index, target, replacement);
+        self.substitute_after(index, replacement);
         Some((replacement, property))
     }
 
@@ -1181,7 +1200,7 @@ impl State {
         let (reused, _, property) = self.declared_by(index);
         let replacement = self.replacement(Ok(value), reused, false, true);
         let kind = self.replacement_kind(replacement, true);
-        let uses = self.mentions(reused, index);
+        let uses = self.mentions(reused, index, true);
         let qualified_safe = self.is_ml_member(replacement, Some(self.arena.vars.name(reused)))
             || !uses.has(Mentions::LATER_UNSAFE);
         let recursive = self.is_recursive_function(replacement);
@@ -1196,7 +1215,7 @@ impl State {
         if blocked {
             return None;
         }
-        self.substitute_after(index, reused, replacement);
+        self.substitute_after(index, replacement);
         Some((replacement, property))
     }
 
@@ -1326,7 +1345,11 @@ impl State {
     /// ancestor `row_of` enters; every variable is asked about by at most
     /// one export, because the arms read variables carrying the export's
     /// name. Linear in rows plus references plus the nodes between a
-    /// visited reference and its statement.
+    /// visited reference and its statement: at most 3 steps per row, 8 per
+    /// export without an alias chain, and 3 per reference of a moved alias
+    /// directly under its statement's expression (the tests at 10,000
+    /// assert these), plus one per further link of an alias chain and per
+    /// further ancestor.
     pub(super) fn coerce_exports(&mut self, run: Span, idents: Vec<Ident>, finished: Finished) -> Coerced {
         let mut exports = Vec::with_capacity(idents.len());
         self.export_variables(&idents, &mut exports);
@@ -1443,7 +1466,7 @@ impl State {
                 continue;
             }
             // coercion.ml:140-156: `Ident.rename` of the export.
-            let rebound = self.fresh_variable(self.arena.vars.name(export).as_str());
+            let rebound = self.renamed(export);
             self.sync_tables();
             reservations.push(ident);
             let property = if value_var.is_some() {
@@ -1471,6 +1494,8 @@ impl State {
                 .collect(),
             #[cfg(test)]
             steps: 0,
+            #[cfg(test)]
+            site_visits: 0,
         }
     }
 
@@ -2213,5 +2238,132 @@ mod tests {
         let text = gate(a, root);
         assert!(text.contains("throw null;"), "{text}");
         assert!(text.contains("let x;"), "{text}");
+    }
+
+    #[test]
+    fn row_and_fact_sizes() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<super::Row>(), 8);
+        assert_eq!(size_of::<crate::bir::lower::scope::Site>(), 8);
+        // Passed down the fold.
+        assert_eq!(size_of::<super::Init>(), 12);
+        assert_eq!(size_of::<super::Replacement>(), 8);
+        assert_eq!(size_of::<super::Kind>(), 1);
+        assert_eq!(size_of::<super::Mentions>(), 1);
+    }
+
+    /// `let x0 = ext(); ... let x9999 = ext(); export x0, ..., x9999`.
+    #[test]
+    fn ten_thousand_rows_with_ten_thousand_exports_are_coerced_in_linear_steps() {
+        const N: usize = 10_000;
+        let mut a = LamArena::new();
+        let ids: Vec<Ident> = (0..N).map(|i| id(&format!("x{i}"), 100 + i as i32)).collect();
+        let values: Vec<Lam> = ids.iter().map(|&x| a.var(x)).collect();
+        let mut root = exports(&mut a, &ids, &values);
+        for &x in ids.iter().rev() {
+            let value = call(&mut a, "ext", 1);
+            root = a.let_(LetKind::Strict, x, value, root);
+        }
+        let input = crate::bir::bridge::import_for_lowering(&a, root).0.unwrap();
+        let lowered = super::super::lower(input, None, false).unwrap();
+        assert_eq!(lowered.coerced.exports, ids);
+        assert!(lowered.coerced.arms.iter().all(|arm| arm.0 == Arm::DeclaredExport));
+        // The bound of `coerce_exports` and `coerced_list` for this shape:
+        // two steps per row (written, copied) and eight per export (its
+        // table entry, its turn in the fold and in the resolution, one link
+        // of each of the four alias chains it reads and one declaration of
+        // its name). No site is read: an export of its own variable asks
+        // about no reference.
+        println!("10,000 rows, 10,000 exports: {} steps", lowered.coerced.steps);
+        assert!(lowered.coerced.steps <= 2 * N + 8 * N, "{}", lowered.coerced.steps);
+        assert_eq!(lowered.coerced.site_visits, 0);
+    }
+
+    /// `let f = function; let x = f; x(); ... x(); export x` (10,000 calls).
+    fn alias_with_references(a: &mut LamArena, n: usize, argument: bool) -> Lam {
+        let (f, local, export) = (id("f", 5), id("x", 10), id("x", 20));
+        let read = a.var(local);
+        let mut tail = exports(a, &[export], &[read]);
+        for _ in 0..n {
+            let read = a.var(local);
+            let effect = if argument {
+                call_with(a, "use", 2, read)
+            } else {
+                let unit = a.const_(C::JsUndefined { is_unit: true });
+                a.apply_raw(
+                    read,
+                    &[unit],
+                    ApInfo {
+                        status: ApplyStatus::InferFull,
+                        loc: LamLoc::NONE,
+                    },
+                )
+            };
+            tail = a.seq_raw(effect, tail);
+        }
+        let alias = a.var(f);
+        let inner = a.let_(LetKind::Alias, local, alias, tail);
+        let function = function(a, 6);
+        a.let_(LetKind::Strict, f, function, inner)
+    }
+
+    #[test]
+    fn ten_thousand_references_to_a_moved_alias_are_each_visited_once() {
+        const N: usize = 10_000;
+        let mut a = LamArena::new();
+        let root = alias_with_references(&mut a, N, false);
+        let input = crate::bir::bridge::import_for_lowering(&a, root).0.unwrap();
+        let lowered = super::super::lower(input, None, false).unwrap();
+        lowered
+            .program
+            .arena
+            .validate(Some(lowered.program.root))
+            .unwrap();
+        assert_eq!(lowered.coerced.arms, [(Arm::MovedAlias, Resolved::Chain(false))]);
+        // The N calls and the export value are the sites of the alias, read
+        // once by the one pass that decides and collects; the function's
+        // one reference (the alias's initialiser) is read by the two
+        // questions asked about the function.
+        assert_eq!(lowered.coerced.site_visits, N + 1 + 2);
+        // Per reference: the site, the call above it (entered once), and
+        // the replacement. Per row: written, entered in the table dense by
+        // node, and copied.
+        println!("10,000 references to one alias: {} steps", lowered.coerced.steps);
+        assert!(lowered.coerced.steps <= 3 * (N + 1) + 3 * (N + 2) + 32, "{}", lowered.coerced.steps);
+    }
+
+    #[test]
+    fn rows_and_references_are_read_without_allocation_once_the_tables_are_warm() {
+        use super::*;
+        const N: usize = 10_000;
+        let mut a = LamArena::new();
+        // Used as an argument before an effect: the alias stays, so the
+        // pass can be repeated on the same tree.
+        let root = alias_with_references(&mut a, N, true);
+        let input = crate::bir::bridge::import_for_lowering(&a, root).0.unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let probed = state.probe(Cx::value(), root).unwrap();
+        let out = state.realize(Cx::value(), probed);
+        let exports = state.extract_exports(out.value, out.finished).unwrap();
+        let run = state.statements.since(Span { start: out.stmts.start, len: 0 });
+        let mut vars = Vec::new();
+        state.export_variables(&exports, &mut vars);
+        let value = state.coercion.values[0];
+        // Warm: the tables get their capacity.
+        state.build_rows(run, &vars);
+        assert_eq!(state.coercion.rows.len(), N + 2);
+        assert!(state.move_alias_to_tail(vars[0], value).is_none());
+        let visits = state.coercion.site_visits;
+        let allocations = allocation_counter::measure(|| {
+            state.build_rows(run, &vars);
+            assert!(state.move_alias_to_tail(vars[0], value).is_none());
+        });
+        assert!(state.coercion.site_visits - visits >= N);
+        assert_eq!(allocations.count_total, 0, "{allocations:?}");
+        println!(
+            "10,002 rows and 10,001 references read again: {} heap allocations",
+            allocations.count_total
+        );
     }
 }

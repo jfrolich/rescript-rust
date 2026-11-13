@@ -577,6 +577,7 @@ impl State {
         #[cfg(test)]
         let coerced = export::Coerced {
             steps: self.coercion.steps,
+            site_visits: self.coercion.site_visits,
             ..coerced
         };
         let root = self.arena.block_from_list(list);
