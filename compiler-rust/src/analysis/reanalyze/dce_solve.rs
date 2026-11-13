@@ -672,12 +672,22 @@ pub fn solve(config: &Config, files: &Files, data: Vec<FileData>) -> Vec<Issue> 
             dead_by_file.entry(decl.pos.file).or_default().push(decl);
         }
     }
+    // `Dead_common.make_hasRefBelow`, which only the reporting that is not
+    // transitive asks. OCaml searches every reference for each dead
+    // declaration; the references are indexed by their target here, once.
+    let mut value_refs_to: HashMap<Pos, Vec<Pos>> = HashMap::new();
+    if !transitive {
+        for (pos_from, targets) in &merged.value_refs_from {
+            for target in targets {
+                value_refs_to.entry(*target).or_default().push(*pos_from);
+            }
+        }
+    }
     let has_ref_below = |decl: &Decl| {
         // Every reference counts: one from another file is below as well.
-        merged
-            .value_refs_from
-            .iter()
-            .any(|(pos_from, targets)| targets.contains(&decl.pos) && ref_is_below(decl, pos_from))
+        value_refs_to
+            .get(&decl.pos)
+            .is_some_and(|sources| sources.iter().any(|pos_from| ref_is_below(decl, pos_from)))
     };
     let mut modules_with_reported: IndexSet<Name> = IndexSet::new();
     let mut dead_issues: Vec<Issue> = Vec::new();
@@ -814,5 +824,56 @@ mod tests {
         let issues = solve(&Config::default(), &files, vec![data]);
         let reported: Vec<i32> = issues.iter().map(|i| i.loc.start.cnum).collect();
         assert_eq!(reported, [10]);
+    }
+
+    #[test]
+    fn only_uses_from_below_or_another_file_hide_a_dead_value() {
+        let files = Files::new();
+        files.intern("/p/M.res");
+        let other = files.intern("/p/N.res");
+        let mut data = FileData::default();
+        // `a` uses `b`, which is below it; `c` is used by another file's dead
+        // `d`; `e` uses itself.
+        let d = Decl {
+            pos: Pos {
+                file: other,
+                ..pos(0)
+            },
+            pos_start: Pos {
+                file: other,
+                ..pos(0)
+            },
+            pos_end: Pos {
+                file: other,
+                ..pos(5)
+            },
+            ..value("d", 0, 5)
+        };
+        for decl in [
+            value("a", 0, 5),
+            value("b", 10, 20),
+            value("c", 30, 35),
+            value("e", 40, 50),
+            d,
+        ] {
+            data.decls.insert(decl.pos, decl);
+        }
+        add_ref(&mut data.value_refs_from, pos(0), pos(10));
+        add_ref(
+            &mut data.value_refs_from,
+            Pos {
+                file: other,
+                ..pos(0)
+            },
+            pos(30),
+        );
+        add_ref(&mut data.value_refs_from, pos(40), pos(40));
+        let issues = solve(&Config::default(), &files, vec![data]);
+        let reported: Vec<(u32, i32)> = issues
+            .iter()
+            .map(|i| (i.loc.start.file.0, i.loc.start.cnum))
+            .collect();
+        // Sorted by file name: `M.res` is file 2, `N.res` file 3.
+        assert_eq!(reported, [(2, 0), (2, 10), (2, 40), (3, 0)]);
     }
 }
