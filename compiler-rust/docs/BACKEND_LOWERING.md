@@ -1208,7 +1208,7 @@ frames and `switch_depth = 0` (row K10).
 
 ### 3.12 `Try`, `TryFinally`, `LetRec`; source locations
 
-`Try` and `TryFinally` are 5.3; `LetRec` is 5.2.
+`Try` and `TryFinally` are 5.5; `LetRec` is 5.3.
 
 Source locations (only with source maps on; `source_map_enabled`):
 
@@ -2097,6 +2097,19 @@ function g(x) {
 ```
 
 ### 5.5 `Try`, `TryFinally`, `Praise`
+
+S3.7a implementation: exception-region selection reads no subtree flags and
+walks no body. `TryFinally` inspects only the immediate body tag to fuse a
+catch. Saved operands and completed blocks live in a dense frame pool; the
+source traversal carries a four-byte frame index. The 10,000-deep test visits
+20,001 source occurrences and copies at most 20,000 statements in every
+continuation. A 40,001-node body still takes one form-selection operation.
+
+Integration correction: when cross-module inlining borrows the cold pools
+from J, the source function-owner table must first be extended to cover J-only
+headers (for example a lowered one-unit-argument closure). Otherwise the next
+imported function header indexes beyond that table. This does not change the
+lowering rules or the default backend path.
 
 Design (`compile_try`, `lam_compile.ml:1514-1565`).
 
