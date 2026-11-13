@@ -2,7 +2,7 @@
 //!
 //! Two type checkers (or two versions of one) export the same interface when
 //! this text is the same. It does not depend on node identity (which handle
-//! a type has, what is shared), on identifier stamps, on levels other than
+//! a type has), on identifier stamps, on levels other than
 //! "generic or not", or on whether the unit's own items are named by local
 //! identifier (`t`) or through the unit (`Unit.t`): printing a signature,
 //! storing it, reading it back into another [`TypeContext`] and printing it
@@ -14,7 +14,7 @@
 //!    through the outcome tree, which names variables by traversal).
 //! 2. Per item, what the printer leaves out and a dependent can read: every
 //!    type by structure (paths with the `Pdot` positions of other units'
-//!    items, row and object details, which variables are shared), runtime
+//!    items, row and object details, which nodes are shared), runtime
 //!    representations (record
 //!    and variant layouts, `@unboxed`, runtime names and tags), variance,
 //!    primitive descriptions, attributes, and the unit's deprecation.
@@ -74,8 +74,7 @@ pub fn canonical_signature(
         module_prefix: String::new(),
         out,
         indent: 0,
-        vars: Vec::new(),
-        stack: Vec::new(),
+        numbers: NodeNumbers::default(),
     };
     printer.signature(sig, true);
     printer.out
@@ -149,6 +148,61 @@ fn layout_text(layout: &Layout) -> String {
     text
 }
 
+/// Eight bytes per populated dense-table slot; epochs avoid a clearing walk.
+#[derive(Clone, Copy, Default)]
+struct NodeNumber {
+    epoch: u32,
+    number: u32,
+}
+
+#[derive(Default)]
+struct NodeNumbers {
+    tiers: [Vec<NodeNumber>; 3],
+    epoch: u32,
+    variables: u32,
+    structures: u32,
+}
+
+impl NodeNumbers {
+    /// O(1). An item count exceeding u32 is rejected instead of wrapping epochs.
+    fn clear(&mut self) {
+        self.epoch = self.epoch.checked_add(1).expect("too many signature items");
+        self.variables = 0;
+        self.structures = 0;
+    }
+
+    /// Amortized O(1); table growth costs O(new slots), never hashes a node.
+    fn number(&mut self, ty: TypeExprRef, variable: bool) -> (u32, bool) {
+        let (tier, index) = if ty.is_shared() {
+            (2, ty.shared_index() as usize)
+        } else if ty.is_store() {
+            (1, ty.store_index())
+        } else {
+            (0, ty.index())
+        };
+        let table = &mut self.tiers[tier];
+        if index >= table.len() {
+            table.resize((index + 1).next_power_of_two(), NodeNumber::default());
+        }
+        let slot = &mut table[index];
+        // Epoch zero is the empty sentinel, including before the first clear.
+        if slot.epoch != 0 && slot.epoch == self.epoch {
+            return (slot.number, false);
+        }
+        let next = if variable { &mut self.variables } else { &mut self.structures };
+        *slot = NodeNumber { epoch: self.epoch, number: *next };
+        *next = next.checked_add(1).expect("too many canonical nodes");
+        (slot.number, true)
+    }
+}
+
+/// Twelve-byte work item; text is in one shared byte pool, never owned per node.
+#[derive(Clone, Copy)]
+enum PrintTask {
+    Type(TypeExprRef),
+    Text { start: u32, end: u32 },
+}
+
 struct Canonical<'a> {
     ctx: &'a TypeContext,
     arena: Option<&'a ParseArena>,
@@ -164,12 +218,8 @@ struct Canonical<'a> {
     module_prefix: String,
     out: String,
     indent: usize,
-    /// The variables of the item being printed, in order of first
-    /// occurrence; a variable prints as its index here.
-    vars: Vec<TypeExprRef>,
-    /// The nodes being printed, outermost first; a node that contains itself
-    /// prints as its depth here.
-    stack: Vec<TypeExprRef>,
+    numbers: NodeNumbers,
+
 }
 
 impl Canonical<'_> {
@@ -204,8 +254,8 @@ impl Canonical<'_> {
             }
         }
         for item in sig {
-            // Variables are shared within an item, never across items.
-            self.vars.clear();
+            // Sharing is recorded within an item, never across items.
+            self.numbers.clear();
             match item {
                 SignatureItem::SigValue(id, decl) => self.value(id.name(), decl),
                 SignatureItem::SigType(id, decl, rec) => {
@@ -265,9 +315,9 @@ impl Canonical<'_> {
                 self.line("sig");
                 self.indent += 1;
                 // The enclosing item's variables are not visible inside.
-                let vars = std::mem::take(&mut self.vars);
+                let numbers = std::mem::take(&mut self.numbers);
                 self.signature(sig, components);
-                self.vars = vars;
+                self.numbers = numbers;
                 self.indent -= 1;
             }
             ModuleType::MtyFunctor {
@@ -569,70 +619,79 @@ impl Canonical<'_> {
         }
     }
 
-    fn variable_index(&mut self, ty: TypeExprRef) -> usize {
-        match self.vars.iter().position(|var| *var == ty) {
-            Some(index) => index,
-            None => {
-                self.vars.push(ty);
-                self.vars.len() - 1
-            }
+    /// Amortized O(1), plus output bytes: define a structure on its first visit,
+    /// then reference its traversal number. Dense tables are keyed by storage tier.
+    /// OCaml ctype.ml's instance copies each generic node once; observing sharing
+    /// here distinguishes fixture 07b's repeated node from two equal nodes.
+    fn write_shared(&mut self, out: &mut String, ty: TypeExprRef) -> bool {
+        let (number, fresh) = self.numbers.number(ty, false);
+        if fresh {
+            let _ = write!(out, "&{number}(");
+        } else {
+            let _ = write!(out, "@{number}");
         }
+        fresh
     }
 
-    /// The type by structure. Sharing is not visible (a node reached twice
-    /// is printed twice) except for variables, which are numbered, and for
-    /// a node that contains itself, which prints as `^depth`.
-    fn write_type(&mut self, out: &mut String, ty: TypeExprRef) {
-        let ctx = self.ctx;
-        let ty = ctx.repr(ty);
-        if let Some(depth) = self.stack.iter().position(|seen| *seen == ty) {
-            let _ = write!(out, "^{depth}");
-            return;
-        }
-        let desc = ctx.get_desc(ty).into_desc();
-        match desc {
-            TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) => {
-                let index = self.variable_index(ty);
-                out.push(if matches!(desc, TypeDesc::Tvar(_)) {
-                    '\''
-                } else {
-                    '!'
-                });
-                if ctx.get_level(ty) != GENERIC_LEVEL {
-                    out.push('_');
+    /// O(nodes + edges + output bytes), excluding existing path/row normalization.
+    /// One explicit task pool and text pool replace recursion; shared nodes are
+    /// expanded once per item. Returns the number of dispatched tasks for tests.
+    fn write_type(&mut self, output: &mut String, root: TypeExprRef) -> u64 {
+        let mut work = vec![PrintTask::Type(root)];
+        let mut text = String::new();
+        let mut steps = 0;
+        while let Some(task) = work.pop() {
+            steps += 1;
+            let ty = match task {
+                PrintTask::Text { start, end } => {
+                    output.push_str(&text[start as usize..end as usize]);
+                    continue;
                 }
-                let _ = write!(out, "{index}");
-                if let Some(name) = name {
-                    let _ = write!(out, ":{}", name.as_str());
-                }
-                return;
+                PrintTask::Type(ty) => self.ctx.repr(ty),
+            };
+            let ctx = self.ctx;
+            let desc = ctx.get_desc(ty).into_desc();
+            if let TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) = desc {
+                let (index, _) = self.numbers.number(ty, true);
+                output.push(if matches!(desc, TypeDesc::Tvar(_)) { '\'' } else { '!' });
+                if ctx.get_level(ty) != GENERIC_LEVEL { output.push('_'); }
+                let _ = write!(output, "{index}");
+                if let Some(name) = name { let _ = write!(output, ":{}", name.as_str()); }
+                continue;
             }
-            TypeDesc::Tnil => {
-                out.push_str("nil");
-                return;
+            if !self.write_shared(output, ty) { continue; }
+            let first = work.len();
+            let out = &mut text;
+            let mut start = out.len();
+            macro_rules! flush {
+                () => {{
+                    let end = out.len();
+                    if end != start {
+                        work.push(PrintTask::Text {
+                            start: u32::try_from(start).expect("canonical text exceeds u32"),
+                            end: u32::try_from(end).expect("canonical text exceeds u32"),
+                        });
+                    }
+                    start = end;
+                }};
             }
-            TypeDesc::Tlink(_) | TypeDesc::Tsubst(_) => {
-                // `repr` leaves no link; a substitution marker never outlives
-                // the copy that wrote it.
-                out.push_str("<link>");
-                return;
+            macro_rules! child {
+                ($ty:expr) => {{ flush!(); work.push(PrintTask::Type($ty)); }};
             }
-            TypeDesc::Tarrow { .. }
-            | TypeDesc::Ttuple(_)
-            | TypeDesc::Tconstr { .. }
-            | TypeDesc::Tobject { .. }
-            | TypeDesc::Tfield { .. }
-            | TypeDesc::Tvariant(_)
-            | TypeDesc::Tpoly { .. }
-            | TypeDesc::Tpackage { .. } => {}
-        }
-        self.stack.push(ty);
+            macro_rules! children {
+                ($types:expr) => {{
+                    for (index, ty) in $types.into_iter().enumerate() {
+                        if index > 0 { out.push_str(", "); }
+                        child!(ty);
+                    }
+                }};
+            }
         match desc {
             TypeDesc::Tvar(_)
             | TypeDesc::Tunivar(_)
-            | TypeDesc::Tnil
             | TypeDesc::Tlink(_)
-            | TypeDesc::Tsubst(_) => {}
+            | TypeDesc::Tsubst(_) => out.push_str("<link>"),
+            TypeDesc::Tnil => out.push_str("nil"),
             TypeDesc::Tarrow { args, ret } => {
                 out.push('(');
                 for (index, arg) in ctx.type_args(args).iter().enumerate() {
@@ -645,27 +704,27 @@ impl Canonical<'_> {
                         out.push_str(name);
                         out.push(':');
                     }
-                    self.write_type(out, arg.typ);
+                    child!(arg.typ);
                 }
                 out.push_str(") => ");
-                self.write_type(out, ret);
+                child!(ret);
             }
             TypeDesc::Ttuple(types) => {
                 out.push_str("tuple(");
-                self.write_types(out, ctx.type_list(types).iter());
+                children!(ctx.type_list(types).iter());
                 out.push(')');
             }
             TypeDesc::Tconstr { path, args, .. } => {
                 self.write_path(out, &path);
                 if !args.is_empty() {
                     out.push('<');
-                    self.write_types(out, ctx.type_list(args).iter());
+                    children!(ctx.type_list(args).iter());
                     out.push('>');
                 }
             }
             TypeDesc::Tobject { fields } => {
                 out.push_str("object{");
-                self.write_type(out, fields);
+                child!(fields);
                 out.push('}');
             }
             TypeDesc::Tfield {
@@ -680,9 +739,9 @@ impl Canonical<'_> {
                     name.as_str(),
                     ctx.mutability_repr(mutability)
                 );
-                self.write_type(out, typ);
+                child!(typ);
                 out.push_str("; ");
-                self.write_type(out, rest);
+                child!(rest);
             }
             TypeDesc::Tvariant(row) => {
                 let row = ctx.row_desc(row);
@@ -697,7 +756,7 @@ impl Canonical<'_> {
                         RowField::Rpresent(None) => {}
                         RowField::Rpresent(Some(ty)) => {
                             out.push('(');
-                            self.write_type(out, ty);
+                            child!(ty);
                             out.push(')');
                         }
                         RowField::Reither {
@@ -707,28 +766,28 @@ impl Canonical<'_> {
                             ..
                         } => {
                             let _ = write!(out, " either constant={constant} matched={matched} (");
-                            self.write_types(out, types);
+                            children!(types);
                             out.push(')');
                         }
                         RowField::Rabsent => out.push_str(" absent"),
                     }
                 }
                 out.push_str("] more=");
-                self.write_type(out, row.row_more);
+                child!(row.row_more);
                 let _ = write!(out, " closed={} fixed={}", row.row_closed, row.row_fixed);
                 if let Some((path, args)) = &row.row_name {
                     out.push_str(" name=");
                     self.write_path(out, path);
                     out.push('<');
-                    self.write_types(out, args.iter().copied());
+                    children!(args.iter().copied());
                     out.push('>');
                 }
             }
             TypeDesc::Tpoly { body, vars } => {
                 out.push_str("poly[");
-                self.write_types(out, ctx.type_list(vars).iter());
+                children!(ctx.type_list(vars).iter());
                 out.push_str("] ");
-                self.write_type(out, body);
+                child!(body);
             }
             TypeDesc::Tpackage { path, lids, args } => {
                 out.push_str("package(");
@@ -738,12 +797,18 @@ impl Canonical<'_> {
                     out.push_str(" with ");
                     self.write_longident(out, lid);
                     out.push_str(" = ");
-                    self.write_type(out, arg);
+                    child!(arg);
                 }
                 out.push(')');
             }
         }
-        self.stack.pop();
+
+            out.push(')');
+            flush!();
+            debug_assert_eq!(start, out.len());
+            work[first..].reverse();
+        }
+        steps
     }
 
     fn write_longident(&self, out: &mut String, lid: &Longident) {
@@ -846,6 +911,55 @@ let deep: Inner.Deep.v = (1, inner)
         .expect("compiles")
     }
 
+    fn type_text(ctx: &TypeContext, ty: crate::types::TypeExprRef) -> (String, u64) {
+        let mut printer = super::Canonical {
+            ctx, arena: None,
+            unit_path: crate::types::Path::pident(crate::ident::Ident::create_persistent("Test")),
+            own_items: Vec::new(), module_prefix: String::new(), out: String::new(),
+            indent: 0, numbers: super::NodeNumbers::default(),
+        };
+        printer.numbers.clear();
+        let mut text = String::new();
+        let steps = printer.write_type(&mut text, ty);
+        (text, steps)
+    }
+
+    #[test]
+    fn fixture_07b_shared_int_differs_from_two_occurrences() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let path = crate::types::Path::pident(crate::ident::Ident::create_persistent("int"));
+        let one = ctx.new_constr(path, vec![]);
+        let other = ctx.new_constr(path, vec![]);
+        let dup = ctx.new_tuple(vec![one, one]);
+        let two = ctx.new_tuple(vec![one, other]);
+        assert_ne!(type_text(&ctx, dup).0, type_text(&ctx, two).0);
+        // A shift in allocation identities changes neither the numbering nor sharing.
+        let shifted = ctx.new_constr(path, vec![]);
+        let shifted_dup = ctx.new_tuple(vec![shifted, shifted]);
+        assert_eq!(type_text(&ctx, dup).0, type_text(&ctx, shifted_dup).0);
+    }
+
+    #[test]
+    fn ten_thousand_deep_types_use_a_bounded_explicit_stack() {
+        std::thread::Builder::new().stack_size(2 * 1024 * 1024).spawn(|| {
+            let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+            let mut ty = ctx.new_var(None);
+            for _ in 0..10000 { ty = ctx.new_tuple(vec![ty]); }
+            let (text, steps) = type_text(&ctx, ty);
+            assert_eq!(text.matches("tuple(").count(), 10000);
+            assert!(steps <= 3 * 10000 + 1, "{steps}");
+            let wide = ctx.new_tuple(vec![ty; 10000]);
+            let (_, steps) = type_text(&ctx, wide);
+            assert!(steps <= 5 * 10000 + 3, "{steps}");
+        }).unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn canonical_work_and_slot_sizes() {
+        assert_eq!(std::mem::size_of::<super::NodeNumber>(), 8);
+        assert_eq!(std::mem::size_of::<super::PrintTask>(), 12);
+    }
+
     const PRELUDE: &str = "type option<'a> = None | Some('a)\n\
         external \\\"++\": (string, string) => string = \"%string_concat\"\n";
 
@@ -913,7 +1027,6 @@ let deep: Inner.Deep.v = (1, inner)
             "unit Sample\n",
             "== printed\n",
             "== items\n",
-            "label z runtime=Some(\"zed\") Immutable optional=true: option<float>",
             "constructor Red tag=Some(String(\"r\"))",
             "constructor Green tag=Some(Int(2))",
             "Unboxed",
@@ -922,15 +1035,17 @@ let deep: Inner.Deep.v = (1, inner)
             "prim \"%string_length\" arity=1",
             "@deprecated Str(\"use other\")",
             // One variable twice, another once.
-            "value pair: ('0, '1) => tuple('0, '1, '0)",
             // A type that contains itself refers to itself by depth.
-            "value loop: (variant[#more(^1)] more=nil closed=true fixed=false) => int",
             "alias MtaAbsent Inner",
             // One of the unit's own nested items, from the unit's top.
-            "value get: (Inner.Deep.v) => Inner.t",
         ] {
             assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
         }
+        let shapes = text.lines().map(str::trim).filter(|line| {
+            line.starts_with("label z ") || line.starts_with("value pair:")
+                || line.starts_with("value loop:") || line.starts_with("value get:")
+        }).collect::<Vec<_>>().join("\n");
+        crate::expect_dump!(shapes, "label z runtime=Some(\"zed\") Immutable optional=true: &2(option<&3(float)>)\nvalue pair: &0(('0, '1) => &1(tuple('0, '1, '0)))\nvalue loop: &0((&1(variant[#more(@1)] more=&2(nil) closed=true fixed=false)) => &3(int))\nvalue get: &0((&1(Inner.Deep.v)) => &2(Inner.t))");
         // No handle, stamp or location leaks through a `Debug` rendering.
         for forbidden in [
             "TypeExprRef",
