@@ -1,10 +1,10 @@
 # A prebuilt snapshot of the runtime and Belt: design and staged plan
 
-Status: S1–S4 implemented; S4 CI and local freshness/equivalence checks pass.
+Status: S1–S5 implemented; S5 validation and measurements are recorded in F.5.
 Cargo watches existing runtime files and Belt's source directory; new runtime
 files are caught by freshness checking and run-time fallback, not by the build
 script (see D5 and the S4 notes). Section A is historical, not
-a statement of the current layout. Watch integration remains a future stage.
+a statement of the current layout. Watch integration is implemented in S5.
 Sections F.1–F.3 and the S4 notes record implementation and evidence.
 
 ## 0. Summary
@@ -798,7 +798,69 @@ produced is stale.
 - **Gate.** `rescript snapshot --check` passes in CI; editing a runtime
   source without rebuilding the executable makes it fail.
 
-### F.5 S5: watch mode and tooling
+### F.5 S5: watch mode and tooling — implemented
+
+The initial watch build now admits Belt snapshots. Installed Belt source
+folders and the runtime root join the watch set. A source event does one
+borrowed lookup in a directory table built once per session: O(path bytes)
+hashing, no allocation, metadata read, lock or atomic operation for unrelated
+paths. The 10,000-event unit test counts exactly 10,000 lookups. There is no
+dense compiler handle for filesystem directories. Runtime overrides are
+canonicalized during watch initialization so symlinks and macOS path spellings
+agree with notifications, not canonicalized per event.
+
+For an affected package, verification uses the existing source/options digest
+functions from B.5. Byte-identical touches retain the snapshot and log that
+choice. A mismatch revokes the package for the session and requests the existing
+full-rebuild path. The fresh registry drops the old snapshot entries and decoded
+units; the package and its dependents compile through the normal from-source
+path. The other package remains eligible for its verified snapshot. Revocation
+survives full reinitialization, including source restoration. This intentionally
+recompiles all project dependents rather than adding a second invalidation
+planner. It adds no per-source verification to unrelated incremental events.
+
+The audit below found one reader defect: runtime tooling required a configuration
+file even for the supported config-less published layout. It now uses
+`snapshot::runtime_config`; its regression test failed before the fix. Tooling
+already read root-level sources rather than `lib/ocaml`. genType contexts and
+item-digest caches use registered data and need no reader fix or S7 deferral.
+
+`rewatch/tests/watch/30-snapshot-package-edits.sh` covers Belt and runtime body
+edits against from-source sessions, comparing every JavaScript file and requiring
+no diagnostics. A third case touches Belt and requires the retention log. The
+runtime is selected through a symlink. The cases use bounded polling and wait
+for watcher termination. They run from the canonical suite and a Cargo integration
+test, including the Linux and macOS build-system jobs, without workflow changes.
+
+Local checks: rewatch build and tests pass (206 unit tests, one genType integration
+test, eight snapshot integration tests). Snapshot equivalence passes for
+`tests/belt_tests` (80 generated files), `tests/tests` (738), the lazy-runtime
+fixture and all twelve configuration cases, including both incremental switch
+directions. The canonical coverage checker separately rejects the base's three
+invocations of `gentype/04-file-inventory.sh`; that unrelated checker is unchanged.
+
+#### S5 measurements
+
+Paired x86-64 Linux fat-LTO release builds, one codegen unit, base `8f6bd7884e`
+and candidate `1cec9b782` (before the watch-only canonical-path correction).
+Cachegrind measurements use one worker and sequential runs:
+
+| Project | Base instructions | Candidate instructions | Change |
+| --- | ---: | ---: | ---: |
+| `tests/tests` | 4,040,130,428 | 4,038,136,691 | -0.0493% |
+| A 3,735-module application | 68,415,833,161 | 68,396,681,729 | -0.0280% |
+
+Both generated-output comparisons are identical. The application's checker
+comparison found no differences in 3,735 signatures, 32 diagnostics across
+18 files, or 3,980 generated files. CI's five-run minimum count for that candidate
+was 4,039,093,450 versus 4,038,104,905 (-0.024%). This meets the +0.02% ceiling;
+these small fluctuations are not a claimed one-shot optimization. The intended
+one-shot saving is zero.
+
+Hyperfine, two warmups and eight single-worker clean `tests/tests` builds:
+base 831.8 ± 45.9 ms (776.8–894.9 ms), candidate 904.1 ± 99.0 ms
+(729.2–1049.4 ms). This noisy wall-time sample does not establish a speedup.
+
 
 - **Changes.** When a source of a snapshot package changes during a session,
   drop that package's snapshot entries and compile it from source. Check
