@@ -241,3 +241,18 @@ fn snapshot_command_is_hidden() {
     assert!(help.status.success());
     assert!(!String::from_utf8_lossy(&help.stdout).contains("snapshot"));
 }
+
+#[cfg(unix)]
+#[test]
+fn watched_package_edits_and_byte_identical_touch() {
+    // The shell cases use bounded polling and wait for each recorded watcher
+    // PID to exit. Run them from cargo test as well as the canonical suite so
+    // the Linux and macOS build-system jobs exercise the same scenarios.
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
+    let status = Command::new("bash")
+        .arg(checkout.join("rewatch/tests/watch/30-snapshot-package-edits.sh"))
+        .env("REWATCH_EXECUTABLE", env!("CARGO_BIN_EXE_rescript"))
+        .env_remove("RESCRIPT_FULL_BUILD")
+        .status().unwrap();
+    assert!(status.success(), "snapshot watch cases failed: {status}");
+}

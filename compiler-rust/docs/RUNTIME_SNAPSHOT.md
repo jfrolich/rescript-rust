@@ -1,10 +1,10 @@
 # A prebuilt snapshot of the runtime and Belt: design and staged plan
 
-Status: S1–S4 implemented; S4 CI and local freshness/equivalence checks pass.
+Status: S1–S5 implemented; S5 validation and measurements are recorded in F.5.
 Cargo watches existing runtime files and Belt's source directory; new runtime
 files are caught by freshness checking and run-time fallback, not by the build
 script (see D5 and the S4 notes). Section A is historical, not
-a statement of the current layout. Watch integration remains a future stage.
+a statement of the current layout. Watch integration is implemented in S5.
 Sections F.1–F.3 and the S4 notes record implementation and evidence.
 
 ## 0. Summary
@@ -798,7 +798,69 @@ produced is stale.
 - **Gate.** `rescript snapshot --check` passes in CI; editing a runtime
   source without rebuilding the executable makes it fail.
 
-### F.5 S5: watch mode and tooling
+### F.5 S5: watch mode and tooling — implemented
+
+The initial watch build now admits Belt snapshots. Installed Belt source
+folders and the runtime root join the watch set. A source event does one
+borrowed lookup in a directory table built once per session: O(path bytes)
+hashing, no allocation, metadata read, lock or atomic operation for unrelated
+paths. The 10,000-event unit test counts exactly 10,000 lookups. There is no
+dense compiler handle for filesystem directories. Runtime overrides are
+canonicalized during watch initialization so symlinks and macOS path spellings
+agree with notifications, not canonicalized per event.
+
+For an affected package, verification uses the existing source/options digest
+functions from B.5. Byte-identical touches retain the snapshot and log that
+choice. A mismatch revokes the package for the session and requests the existing
+full-rebuild path. The fresh registry drops the old snapshot entries and decoded
+units; the package and its dependents compile through the normal from-source
+path. The other package remains eligible for its verified snapshot. Revocation
+survives full reinitialization, including source restoration. This intentionally
+recompiles all project dependents rather than adding a second invalidation
+planner. It adds no per-source verification to unrelated incremental events.
+
+The audit below found one reader defect: runtime tooling required a configuration
+file even for the supported config-less published layout. It now uses
+`snapshot::runtime_config`; its regression test failed before the fix. Tooling
+already read root-level sources rather than `lib/ocaml`. genType contexts and
+item-digest caches use registered data and need no reader fix or S7 deferral.
+
+`rewatch/tests/watch/30-snapshot-package-edits.sh` covers Belt and runtime body
+edits against from-source sessions, comparing every JavaScript file and requiring
+no diagnostics. A third case touches Belt and requires the retention log. The
+runtime is selected through a symlink. The cases use bounded polling and wait
+for watcher termination. They run from the canonical suite and a Cargo integration
+test, including the Linux and macOS build-system jobs, without workflow changes.
+
+Local checks: rewatch build and tests pass (206 unit tests, one genType integration
+test, eight snapshot integration tests). Snapshot equivalence passes for
+`tests/belt_tests` (80 generated files), `tests/tests` (738), the lazy-runtime
+fixture and all twelve configuration cases, including both incremental switch
+directions. The canonical coverage checker separately rejects the base's three
+invocations of `gentype/04-file-inventory.sh`; that unrelated checker is unchanged.
+
+#### S5 measurements
+
+Paired x86-64 Linux fat-LTO release builds, one codegen unit, base `8f6bd7884e`
+and candidate `1cec9b782` (before the watch-only canonical-path correction).
+Cachegrind measurements use one worker and sequential runs:
+
+| Project | Base instructions | Candidate instructions | Change |
+| --- | ---: | ---: | ---: |
+| `tests/tests` | 4,040,130,428 | 4,038,136,691 | -0.0493% |
+| A 3,735-module application | 68,415,833,161 | 68,396,681,729 | -0.0280% |
+
+Both generated-output comparisons are identical. The application's checker
+comparison found no differences in 3,735 signatures, 32 diagnostics across
+18 files, or 3,980 generated files. CI's five-run minimum count for that candidate
+was 4,039,093,450 versus 4,038,104,905 (-0.024%). This meets the +0.02% ceiling;
+these small fluctuations are not a claimed one-shot optimization. The intended
+one-shot saving is zero.
+
+Hyperfine, two warmups and eight single-worker clean `tests/tests` builds:
+base 831.8 ± 45.9 ms (776.8–894.9 ms), candidate 904.1 ± 99.0 ms
+(729.2–1049.4 ms). This noisy wall-time sample does not establish a speedup.
+
 
 - **Changes.** When a source of a snapshot package changes during a session,
   drop that package's snapshot entries and compile it from source. Check
@@ -893,6 +955,28 @@ expected default-path saving is zero, not an optimization claim.
 `make lib` checks after both package build stamps. CI should run the same check
 after building runtime and Belt; the exact workflow insertion is supplied in
 the pull request, not a workflow edit here.
+
+### S5 as found
+
+Inventory against `8f6bd7884e` (line numbers refer to that revision).
+
+| Reader or event | Result and evidence |
+| --- | --- |
+| Installed Belt source edit in watch | The premise that Belt starts from the snapshot is false: `rewatch/src/build/snapshot.rs:1057–1059` rejects watch mode. `watcher.rs:134–137` watches only local dependencies; `packages.rs:503–512` excludes installed dependencies outside a monorepo. In a disposable project resolving copied Belt/runtime packages, the initial `-vv watch` log says `Not using the prebuilt @rescript/belt: watch mode is not supported by this snapshot stage`. A comment appended to `Belt_Array.res`, followed by an application edit, produced `Parsed 1 source file` and `Compiled 1 module`, not a dependency rebuild. Installed dependency changes are not watched. |
+| Runtime source edit in watch | Initial log: `Registered 113 embedded runtime interfaces`. Appending invalid syntax (`let = invalid`) to the copied `Stdlib_List.res`, then editing the application, still produced `Finished incremental compilation`, with only the application compiled. Runtime is not among the watched package roots (`watcher.rs:118–174`); `compile.rs:3096–3104` returns immediately when the registry already has its snapshot. Thus runtime state remains stale even when another event triggers a build. |
+| Editor tooling, project/Belt units | Correct by code path: `tooling.rs:159–205` obtains the registry and reparses project source with `parse_for_tooling`, then typechecks against that registry. It does not require a typed tree from the original compilation. `tooling.rs:364–375` dispatches project and runtime sources separately. Snapshot-backed Belt still has project module/source metadata. |
+| Editor tooling, runtime source discovery | Partly incorrect: `tooling.rs:112–124` reads source paths from the runtime root, **not** `lib/ocaml`. However, `packages::read_config(root).ok()?` removes the entire runtime from tooling when the published layout lacks configuration. Snapshot loading accepts this layout through `snapshot::runtime_config` (`snapshot.rs:552`); tooling should use the same configuration semantics. |
+| Editor tooling, runtime typechecking | Correct when discovery succeeds: `tooling.rs:209–264` reads and parses the requested source/interface on demand with `runtime_compiler_options`, then typechecks using the registry. It does not require runtime ASTs from startup. |
+| genType contexts | Correct by code path: `compile.rs:2163–2204` constructs configuration and a resolver from package paths and options, not a previous compile result; `build_types.rs:557–580` caches these per package and clears them between builds. Snapshot production rejects genType declarations in its packages; dependent packages still compile normally. |
+| Build item-digest cache | Correct by code path: `compile.rs:687–688` clears published item digests and prepared interfaces before compilation. `incremental.rs:202–215` recomputes missing digests from `ModuleRegistry::item_digests`; `compiler-rust/src/cmi/persistent_env.rs:835–844` obtains the registered signature and metadata, including lazy snapshot units. No compile-local AST is assumed. Clearing the cache does not revoke stale registered units. |
+
+The manual reproduction used `let value = Belt.Array.length([1, 2])` and
+`let length = List.length(list{1, 2})`, ES-module in-source `.mjs` output,
+`dependencies: ["@rescript/belt"]`, and a copied runtime selected through
+`RESCRIPT_RUNTIME`. It polled compilation completion before editing and stopped
+the recorded watcher PID afterwards. These are baseline observations, not the
+S5 acceptance tests or a claim of completion. No instruction count has yet
+been measured for S5.
 
 ## D14: duplicate runtime compilation investigation
 

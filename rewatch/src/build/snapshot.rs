@@ -1040,6 +1040,11 @@ impl rescript_compiler::cmi::persistent_env::SnapshotModules for BeltPackage {
 /// Select Belt once per build: O(source bytes) verification, one package clone
 /// and one registry attachment. No core is read or copied by this operation.
 pub(crate) fn prepare_belt(state: &mut super::build_types::BuildCommandState) -> Result<()> {
+    if state.revoked_snapshots[1] { return Ok(()); }
+    if state.source_map_command == crate::config::SourceMapCommand::Watch
+        && !state.diagnostic_locations
+        && state.packages.get("@rescript/belt").is_some_and(|package| package.prebuilt)
+    { return Ok(()); }
     if let Some(package) = state.build_state.packages.get_mut("@rescript/belt") { package.prebuilt = false; }
     let Some(package) = state.packages.get("@rescript/belt") else { return Ok(()); };
     if package.is_root { return Ok(()); }
@@ -1054,9 +1059,6 @@ pub(crate) fn prepare_belt(state: &mut super::build_types::BuildCommandState) ->
     if state.diagnostic_locations { return mismatch("the diagnostic retry requires source declaration locations"); }
     if state.dump.is_some() { return mismatch("dump flags are not supported"); }
     if let Some(option) = alternate_backend_option() { return mismatch(option); }
-    if state.source_map_command == crate::config::SourceMapCommand::Watch {
-        return mismatch("watch mode is not supported by this snapshot stage");
-    }
     if std::env::var_os("RESCRIPT_FULL_BUILD").is_some() {
         return mismatch("RESCRIPT_FULL_BUILD is enabled");
     }
@@ -1138,4 +1140,82 @@ fn alternate_backend_option() -> Option<&'static str> {
     } else if matches!(std::env::var("RESCRIPT_BACKEND").as_deref(), Ok("new" | "check")) {
         Some("RESCRIPT_BACKEND is not supported")
     } else { None }
+}
+
+/// Watch-only directory index. The two snapshot layouts are flat: runtime's
+/// root and Belt's `src`. Paths have no dense compiler handle, hence this map.
+/// It is constructed once per session; ordinary events do one borrowed lookup,
+/// O(path bytes) hashing, with no allocation, filesystem access, locks or atomics.
+pub(crate) struct WatchSources {
+    directories: std::collections::HashMap<PathBuf, usize>,
+    roots: [Option<PathBuf>; 2],
+    #[cfg(test)]
+    lookups: std::cell::Cell<usize>,
+}
+
+impl WatchSources {
+    /// O(1) package lookups and two path clones/joins; no module walk.
+    pub(crate) fn new(state: &super::build_types::BuildCommandState) -> Self {
+        let runtime = state.compiler_info.runtime_path.clone();
+        let belt = state.packages.get("@rescript/belt").filter(|p| !p.is_root).map(|p| p.path.clone());
+        let mut directories = std::collections::HashMap::new();
+        directories.insert(runtime.clone(), 0);
+        if let Some(root) = &belt { directories.insert(root.join("src"), 1); }
+        Self { directories, roots: [Some(runtime), belt], #[cfg(test)] lookups: std::cell::Cell::new(0) }
+    }
+
+    /// Exactly one directory-table lookup, O(path bytes), no allocation or I/O.
+    fn package(&self, path: &Path) -> Option<usize> {
+        let parent = path.parent()?;
+        #[cfg(test)]
+        self.lookups.set(self.lookups.get() + 1);
+        self.directories.get(parent).copied()
+    }
+
+    /// O(path bytes) for an unrelated path. For a snapshot source event only,
+    /// reuse B.5's source/options digest (O(package source bytes)); byte-identical
+    /// touches retain the snapshot. A mismatch requests the existing full-build
+    /// path, which drops the old registry and recompiles all dependents. Already
+    /// revoked packages also rebuild on edits, including runtime-only edits.
+    pub(crate) fn changed(&self, path: &Path, state: &mut super::build_types::BuildCommandState) -> bool {
+        let Some(package) = self.package(path) else { return false; };
+        if state.revoked_snapshots[package] { return true; }
+        let root = self.roots[package].as_deref().expect("indexed package root");
+        let name = ["@rescript/runtime", "@rescript/belt"][package];
+        let expected = EMBEDDED.get().and_then(Option::as_ref)
+            .and_then(|indexes| indexes.iter().find(|index| index.name == name));
+        let actual = if package == 0 {
+            compile::runtime_source_paths(root).and_then(|paths| sources_digest(root, &paths))
+        } else {
+            belt_sources_digest(root)
+        };
+        if expected.zip(actual.ok()).is_some_and(|(index, digest)| index.sources_digest == digest) {
+            log::info!("Keeping the prebuilt {name}: its sources are unchanged.");
+            return false;
+        }
+        state.revoked_snapshots[package] = true;
+        log::info!("Not using the prebuilt {name}: its sources differ from the ones this compiler was built with. Compiling it from source for the rest of this watch session.");
+        true
+    }
+}
+
+#[cfg(test)]
+mod watch_source_tests {
+    use super::*;
+
+    #[test]
+    fn unrelated_events_do_exactly_one_lookup_each() {
+        let sources = WatchSources {
+            directories: [(PathBuf::from("/runtime"), 0), (PathBuf::from("/belt/src"), 1)].into(),
+            roots: [Some(PathBuf::from("/runtime")), Some(PathBuf::from("/belt"))],
+            lookups: std::cell::Cell::new(0),
+        };
+        for index in 0..10_000 {
+            assert_eq!(sources.package(Path::new(&format!("/project/src/Module{index}.res"))), None);
+        }
+        assert_eq!(sources.lookups.get(), 10_000);
+        assert_eq!(sources.package(Path::new("/belt/src/Belt_Array.res")), Some(1));
+        assert_eq!(sources.package(Path::new("/runtime/Stdlib_List.res")), Some(0));
+        assert_eq!(sources.lookups.get(), 10_002);
+    }
 }

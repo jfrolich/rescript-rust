@@ -711,6 +711,7 @@ pub fn compile(
                     RuntimeStore::of_build(build_state).as_ref(),
                     build_state.check_only,
                     build_state.dump.is_some(),
+                    build_state.revoked_snapshots[0],
                 )
             })
             .and_then(join_runtime_precompile)
@@ -3065,7 +3066,7 @@ pub(crate) fn pre_compile_runtime_modules(
     runtime_root: &Path,
     store: Option<&RuntimeStore>,
 ) -> Result<()> {
-    pre_compile_runtime_modules_with_mode(registry, runtime_root, store, false, false)
+    pre_compile_runtime_modules_with_mode(registry, runtime_root, store, false, false, false)
 }
 
 pub(crate) fn pre_compile_runtime_modules_with_mode(
@@ -3074,6 +3075,7 @@ pub(crate) fn pre_compile_runtime_modules_with_mode(
     store: Option<&RuntimeStore>,
     check_only: bool,
     dump: bool,
+    snapshot_revoked: bool,
 ) -> Result<()> {
     let _span = info_span!("build.runtime_precompile").entered();
     let runtime_timing_enabled =
@@ -3106,7 +3108,7 @@ pub(crate) fn pre_compile_runtime_modules_with_mode(
     // The interfaces the last build compiled stand in for compiling the
     // runtime again while its sources and the compiler are the same.
     // The runtime compiled into this executable, when these are its sources.
-    if super::snapshot::register(registry, runtime_root, &runtime_paths, store, dump)? {
+    if !snapshot_revoked && super::snapshot::register(registry, runtime_root, &runtime_paths, store, dump)? {
         debug!("Registered {} embedded runtime interfaces", runtime_paths.len());
         return Ok(());
     }
