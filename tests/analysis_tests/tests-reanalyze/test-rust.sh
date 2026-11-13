@@ -32,6 +32,23 @@ check deadcode expected/exception.txt -exception -ci \
   -suppress src -unsuppress src/exception
 check termination expected/termination.txt -config -ci -debug
 
+# The rescript-tools executable itself, where a build has put it next to
+# rescript.exe, analyzes with the build system too.
+tools_exe=$(node -e 'import(process.argv[1]).then(bins => console.log(bins.rescript_tools_exe))' "$PWD/../../../cli/common/bins.js")
+if [ -x "$tools_exe" ]; then
+  if ! (cd termination && "$tools_exe" reanalyze -config -ci -debug) > "$actual" \
+    || ! diff -u termination/expected/termination.txt "$actual"; then
+    printf "\033[0;31m❌ %s reanalyze differs from termination/expected/termination.txt\033[0m\n" "$tools_exe"
+    status=1
+  fi
+fi
+
+# The version needs no project.
+if [ "$(cd / && node "$tools" reanalyze -version)" != "reanalyze version 2.22.0" ]; then
+  printf "\033[0;31m❌ rescript-tools reanalyze -version outside a project failed\033[0m\n"
+  status=1
+fi
+
 if [ "$status" = 0 ]; then
   printf "\033[0;32m✅ rescript-tools reanalyze matches the reanalyze snapshots.\033[0m\n"
 fi

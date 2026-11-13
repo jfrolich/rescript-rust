@@ -56,10 +56,11 @@ let log_and_exit = function
 let version = Version.version
 
 (* The build system's executable, which ships next to this one. Builds write
-   no [.cmt] files for [doc] to read, so [rescript doc] documents modules
-   instead, from its own type check of their project. A build of this tool
-   from source has no such sibling (dune's install directory); its [doc]
-   reads the [.cmt] files of a build by the OCaml compiler. *)
+   no [.cmt] files for [doc] and [reanalyze] to read, so [rescript doc]
+   documents modules and [rescript reanalyze] analyzes projects instead, from
+   their own type check of the project. A build of this tool from source has
+   no such sibling (dune's install directory); its [doc] and [reanalyze] read
+   the [.cmt] files of a build by the OCaml compiler. *)
 let build_system_exe =
   Filename.concat (Filename.dirname Sys.executable_name) "rescript.exe"
 
@@ -72,6 +73,15 @@ let run_build_system args =
   match snd (Unix.waitpid [] pid) with
   | Unix.WEXITED status -> exit status
   | Unix.WSIGNALED _ | Unix.WSTOPPED _ -> exit 1
+
+(* The options of [reanalyze] that read the [.cmt] files under a directory:
+   the build system has none to offer for a directory that is no project. *)
+let reanalyze_reads_cmt_directory args =
+  List.exists
+    (fun arg ->
+      List.mem arg
+        ["-all-cmt"; "-dce-cmt"; "-exception-cmt"; "-termination-cmt"])
+    args
 
 let main () =
   match Sys.argv |> Array.to_list |> List.tl with
@@ -184,6 +194,10 @@ let main () =
         ~transform_assert_equal ~entry_point_file:path
       |> log_and_exit
     | _ -> log_and_exit (Error extract_codeblocks_help))
+  | "reanalyze" :: rest
+    when Sys.file_exists build_system_exe
+         && not (reanalyze_reads_cmt_directory rest) ->
+    run_build_system ("reanalyze" :: rest)
   | "reanalyze" :: _ ->
     if Sys.getenv_opt "RESCRIPT_REANALYZE_NO_SERVER" = Some "1" then (
       let len = Array.length Sys.argv in
