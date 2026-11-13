@@ -4961,6 +4961,38 @@ aliases; (2) structure children of alias views; (3) module type names;
 shared without a copy. If a kind cannot be moved, the slice stops there
 and deletes nothing that kind needs.
 
+##### W5b implementation checkpoint (not the completed slice)
+
+The first implementation extends `AliasKey` to an `AliasTarget`: either a
+world-owned unit or another world view. Keeping a unit as a target avoids
+building its own view merely to read its signature. A structure child of
+an alias view resolves the matching child of the source; an explicitly
+declared alias resolves its substituted target. `adopt_view` adopts the
+target view transitively as well as the parent.
+
+An alias view's signature retains the source paths of its values. Re-rooting
+only the immediate target is insufficient for an alias through a namespace:
+values can still name the backing view's types. Value description builds
+now walk the target's source chain. The `world_alias_*` fixtures cover this
+case and the direct structure child of the namespace alias.
+
+**The comparison gate is not yet satisfied.** In `world_alias_use.res`, the
+printed signature and JavaScript agree with the base, but the canonical
+item dump for `direct` differs:
+
+```
+base: World_alias_namespace.Nested@0.Sub.t
+head: World_alias_namespace.Nested@0.Sub@0.t
+```
+
+These are runtime-position annotations in the dumped path, not different
+printed type names. They still make `compare_checker_builds.py` fail; the
+checkpoint does not count that gate as passed. No registration tables or
+store-build mechanisms have been deleted. Module-type-name children,
+store-build elimination, linear deep chains, no-copy view items, and the
+required performance and memory measurements remain unfinished. The
+existing depth test remains at 500, not 10,000.
+
 #### W6. Delete store builds
 
 - **Files.** `types/context.rs`, `types/env_lazy.rs`, `types/thread_store.rs`,

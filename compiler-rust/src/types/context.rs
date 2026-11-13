@@ -1795,6 +1795,12 @@ impl TypeContext {
                 parent,
             );
         }
+        if let Some(target) = view.target_view() {
+            self.adopt_view(
+                QualifiedModuleComponentsCacheKey::new(*target.access_path(), None),
+                target.clone(),
+            );
+        }
         let pairs = view.alias_sources();
         if !pairs.is_empty() {
             self.component_alias_sources

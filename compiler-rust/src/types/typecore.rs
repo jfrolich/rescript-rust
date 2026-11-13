@@ -27187,15 +27187,17 @@ fn adopt_persistent_root_view(
 
 /// The world's view of child `ordinal` of `parent`, a child whose path is a
 /// view key (`ModuleView::world_child_kind`), adopted by this compilation;
-/// `None` when the pool had no room for it, and for an alias of a unit
-/// this compilation cannot load or the world does not own.
+/// `None` when the pool had no room for it, and for an alias of a module
+/// this compilation cannot load, the world has no view of, or resolves
+/// differently than the compilation the view was built for.
 ///
-/// Adopting the view of an alias of a unit loads the unit and takes its
-/// signature's rename, as building the alias's tables did
+/// Adopting the view of an alias adopts the views its target's path goes
+/// through, loading their units, as building the alias's tables did
 /// (env.ml:1440-1442 `scrape_alias` reaches `find_module`, env.ml:872-875).
 ///
 /// Cost, when the view is built and adopted already: one load of the
-/// child's cell and one probe of the compilation's component cache.
+/// child's cell and one probe of the compilation's component cache. Else
+/// [`resolve_alias_target`] for an alias, and one adoption.
 pub(crate) fn adopt_child_view(
     parent: &std::sync::Arc<crate::types::module_view::ModuleView>,
     ordinal: u32,
@@ -27221,19 +27223,22 @@ pub(crate) fn adopt_child_view(
     };
     let view = match parent.world_child_kind(ordinal)? {
         WorldChild::Structure => adopt(ViewKey::Child(parent, ordinal))?,
-        WorldChild::UnitAlias(name) => {
-            let unit = pers_env.as_mut()?.find_pers_struct(name, ctx)?;
-            unit.ps_view.get()?;
-            ctx.trigger_module_sig_rename(name);
+        WorldChild::Alias(target) => {
+            let target = resolve_alias_target(&target, pers_env, ctx)?;
+            if let crate::types::module_view::AliasTarget::Unit(unit) = &target {
+                // env.ml:872-875: `find_module` of a unit forces its
+                // signature.
+                ctx.trigger_module_sig_rename(&unit.ps_name);
+            }
             let view = adopt(ViewKey::Alias(&AliasKey {
                 parent,
                 ordinal,
-                unit: &unit,
+                target: &target,
             }))?;
-            // The cell holds the view of the unit the first compilation
-            // loaded under this name; one that loads another builds its own
-            // tables.
-            if !view.is_alias_of(&unit) {
+            // The cell holds the view of the target the first compilation
+            // resolved the path to; one that resolves it to another (a
+            // different unit under the same name) builds its own tables.
+            if !view.is_alias_of(&target) {
                 return None;
             }
             view
@@ -27241,6 +27246,47 @@ pub(crate) fn adopt_child_view(
     };
     ctx.adopt_view(key_of(&view), view.clone());
     Some(view)
+}
+
+/// What the alias target `path`, a path rooted in a persistent unit, is in
+/// the world: the unit, for a unit's own path, else the view of the path,
+/// adopted by this compilation with every view on the way (docs
+/// /CHECKER_REDESIGN.md, "W5b design", point 1). The units are loaded by
+/// this compilation, which is the one read of it; the rest is world data.
+/// `None` for a unit this compilation cannot load or the world does not
+/// own, and for a path with a step that has no view.
+///
+/// Cost: one step per component of the path and per alias on the way; a
+/// step whose view is adopted already is one probe.
+fn resolve_alias_target(
+    path: &Path,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &crate::types::context::TypeContext,
+) -> Option<crate::types::module_view::AliasTarget> {
+    use crate::types::module_view::AliasTarget;
+    match path.view() {
+        PathView::Pident(id) if id.is_persistent() => {
+            let unit = pers_env.as_mut()?.find_pers_struct(id.name(), ctx)?;
+            unit.ps_view.get()?;
+            Some(AliasTarget::Unit(unit))
+        }
+        PathView::Pdot(parent, name, _) => {
+            let parent = match resolve_alias_target(parent, pers_env, ctx)? {
+                AliasTarget::View(view) => view,
+                AliasTarget::Unit(unit) => adopt_unit_view(
+                    &unit,
+                    crate::types::context::QualifiedModuleComponentsCacheKey::new(
+                        Path::pident(Ident::create_persistent(&unit.ps_name)),
+                        None,
+                    ),
+                    ctx,
+                )?,
+            };
+            let (ordinal, _) = parent.world_child(name.as_str())?;
+            adopt_child_view(&parent, ordinal, pers_env, ctx).map(AliasTarget::View)
+        }
+        _ => None,
+    }
 }
 
 /// The world's view of `module_path` when it is a child path whose parent
