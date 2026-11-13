@@ -40,8 +40,12 @@ impl Graph {
     /// queue space; exactly one node step per copied generic node. Shared
     /// positions remain one node, but different calls allocate different nodes
     /// (compiler/ml/ctype.ml:copy). The generation counter avoids a clearing
-    /// pass over the forwarding array. Exhaustion is an explicit error.
+    /// pass over the forwarding array. Also initializes rows for nodes made
+    /// since the last copy/capture: each row is initialized at most once per
+    /// unit, so the sum of that work is linear in nodes made. Exhaustion of
+    /// the generation counter is an explicit error.
     pub fn copy(&mut self, root: Ty) -> Ty {
+        self.forward.resize(self.nodes.len(), Forward::default());
         self.copy_generation = self
             .copy_generation
             .checked_add(1)
@@ -129,9 +133,12 @@ mod tests {
                     });
                 }
                 let before = g.nodes.len();
+                assert_eq!(before, 10000);
+                assert!(g.forward.is_empty());
                 let mut copied = root;
                 assert_eq!(steps::scope(|| copied = g.copy(root)), 10000);
                 assert_eq!(g.nodes.len() - before, 10000);
+                assert_eq!(g.forward.len(), before);
                 for node in &g.nodes[before..] {
                     if node.arity() == 2 {
                         assert_eq!(g.lists[node.b as usize], g.lists[node.b as usize + 1]);
@@ -260,8 +267,12 @@ impl Graph {
     /// O(generic nodes + edges + representative links), one node step per
     /// captured node and one per list/parameter slot. One queue, no recursion.
     /// Captures the scheme's generic structure by value; callers must capture
-    /// again after changing it or generalizing an external reference.
+    /// again after changing it or generalizing an external reference. Also
+    /// initializes rows for nodes made since the last copy/capture; each row
+    /// is initialized at most once per unit, so their total cost is linear
+    /// in nodes made, not the number of template instances.
     pub fn capture(&mut self, root: Ty) -> Template {
+        self.forward.resize(self.nodes.len(), Forward::default());
         let root = self.repr(root);
         if self.nodes[root.0 as usize].level != GENERIC {
             return Template {
@@ -356,7 +367,6 @@ impl Graph {
             nodes,
             lists,
             params,
-            forward,
             template_nodes,
             template_lists,
             template_params,
@@ -393,9 +403,6 @@ impl Graph {
                 instance_externals[(ty.0 - pools.externals) as usize]
             }
         };
-        // Dense forwarding storage is initialized once, in bulk, not pushed
-        // with a separate growth check for every node.
-        forward.resize(nodes.len() + template.node_len as usize, Forward::default());
         let slots =
             &template_lists[pools.lists as usize..(pools.lists + template.list_len) as usize];
         lists.extend(slots.iter().map(|&ty| {
@@ -448,6 +455,35 @@ mod template_tests {
         assert_eq!(std::mem::size_of::<Template>(), 16);
         assert_eq!(std::mem::size_of::<TemplatePools>(), 20);
     }
+    #[test]
+    fn ten_thousand_instances_do_not_grow_forwarding() {
+        let mut g = Graph::default();
+        let root = g.push(Node {
+            head: VAR,
+            level: GENERIC,
+            a: NONE,
+            b: 0,
+        });
+        let template = g.capture(root);
+        let rows = g.forward.len();
+        assert_eq!(rows, 1);
+        assert_eq!(
+            steps::scope(|| {
+                for _ in 0..10000 {
+                    g.instance(template);
+                }
+            }),
+            10000
+        );
+        assert_eq!(g.forward.len(), rows);
+        // Only a new copy/capture initializes the source rows, never rows
+        // for the fresh targets made during that operation.
+        let source_len = g.nodes.len();
+        g.copy(root);
+        assert_eq!(g.forward.len(), source_len);
+        assert_eq!(g.nodes.len(), source_len + 1);
+    }
+
     #[test]
     fn capture_and_instance_ten_thousand_deep() {
         std::thread::Builder::new()

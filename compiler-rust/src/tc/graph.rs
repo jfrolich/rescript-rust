@@ -124,7 +124,6 @@ impl Graph {
         assert!(self.nodes.len() < (1 << 30));
         let ty = Ty(self.nodes.len() as u32);
         self.nodes.push(node);
-        self.forward.push(super::template::Forward::default());
         ty
     }
 
