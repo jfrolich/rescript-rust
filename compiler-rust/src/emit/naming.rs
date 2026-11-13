@@ -733,7 +733,9 @@ impl Names {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct NameStats {
-    /// Identifiers the pass names.
+    /// Identifiers the pass names, other than the imported modules (named
+    /// from the module list, not from the log) and stamp-zero identifiers
+    /// (printed as they are spelled).
     pub(crate) names_pass: usize,
     /// Variables the replay names.
     pub(crate) names_replayed: usize,
@@ -864,8 +866,26 @@ pub(crate) fn compare_with_pass(
     resolver: &ModulePathResolver,
     jsx_preserve: bool,
 ) -> Result<NameStats, Unsupported> {
-    let _ = (printed, idents, program, resolver, jsx_preserve);
-    todo!("T5 build")
+    let pass = Names::collect(program, resolver, jsx_preserve)?;
+    let modules: HashSet<Ident> = program.modules.iter().map(|module| module.id).collect();
+    let counted = |id: &Ident| id.stamp() != 0 && !modules.contains(id);
+    let mut stats = NameStats {
+        names_pass: pass.printed.keys().filter(|id| counted(id)).count(),
+        ..NameStats::default()
+    };
+    let mut replayed = HashSet::with_capacity(printed.len());
+    for (name, id) in printed.iter().zip(idents) {
+        let Some(name) = name else { continue };
+        stats.names_replayed += 1;
+        let named = pass.printed.get(id);
+        stats.name_differences += usize::from(named != Some(name));
+        if named.is_some() && counted(id) {
+            replayed.insert(*id);
+        }
+    }
+    // Named by the pass only.
+    stats.name_differences += stats.names_pass - replayed.len();
+    Ok(stats)
 }
 
 // Child order is the legacy printer's order. Shape decisions remain in walk;
@@ -1212,7 +1232,6 @@ mod replay_tests {
     }
 
     #[test]
-    #[ignore = "T5 build"]
     fn the_comparison_counts_a_name_the_replay_gets_wrong() {
         // `let x = 1`, exported: the pass names it `x`.
         let mut a = JsArena::new();
