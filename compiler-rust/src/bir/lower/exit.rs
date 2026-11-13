@@ -1322,6 +1322,7 @@ mod tests {
         state.arena.lists.reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
         state.source.lists.reserve_test_growth(state.source.lists.storage_shape().0 - source_lists);
         state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
         state.group_indices.reserve(state.group_indices.len());
         state.group_nodes.reserve(state.group_nodes.len());
         state.switch_output_nodes.reserve(state.switch_output_nodes.len());
@@ -1339,7 +1340,9 @@ mod tests {
         let visits = state.source_steps;
         let flags = state.catch_flag_reads;
         let groups = state.switch_group_steps;
+        let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
         let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
         println!("whole flattened catches: {allocations:?}");
         assert_eq!(allocations.count_total, 0);
         assert_eq!(capacities(&state), before);

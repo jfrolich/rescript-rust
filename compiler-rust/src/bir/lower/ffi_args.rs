@@ -692,6 +692,7 @@ mod tests {
         let growth = state.arena.lists.storage_shape().0 - lists_before;
         state.arena.lists.reserve_test_growth(growth);
         state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
         state
             .arena
             .pools
@@ -722,7 +723,9 @@ mod tests {
         let before = capacities(&state);
         let steps = state.primitive_steps;
         let visits = state.source_steps;
+        let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
         let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
         println!("whole FFI dispatch: {allocations:?}");
         assert_eq!(allocations.count_total, 0);
         assert_eq!(capacities(&state), before);

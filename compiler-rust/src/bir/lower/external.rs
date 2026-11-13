@@ -546,6 +546,7 @@ mod tests {
             .property_keys
             .reserve(state.arena.pools.property_keys.len());
         state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
         let capacities = |s: &State| {
             vec![
                 s.arena.nodes.capacity(),
@@ -572,7 +573,9 @@ mod tests {
         let free_before = state.free.capacities();
         let visits = state.source_steps;
         let steps = state.primitive_steps;
+        let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
         let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
         println!("whole external object={object}: {allocations:?}");
         assert_eq!(allocations.count_total, 0);
         assert_eq!(capacities(&state), before);

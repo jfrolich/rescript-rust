@@ -455,6 +455,7 @@ mod tests {
             run(&mut state);
             state.arena.lists.reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
             state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
             state.labels.reserve_repeat();
             #[cfg(debug_assertions)]
             state.arena.checked_children.reserve(state.arena.nodes.len() - state.arena.checked_children.len());
@@ -470,7 +471,9 @@ mod tests {
             let before = (capacities(&state), state.labels.capacities(), state.free.capacities());
             let visits = state.source_steps;
             let steps = state.primitive_steps;
-            let allocations = allocation_counter::measure(|| run(&mut state));
+            let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
+        let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
             assert_eq!((capacities(&state), state.labels.capacities(), state.free.capacities()), before, "valid={valid}: {allocations:?}");
             assert_eq!(allocations.count_total, 0, "valid={valid}: {allocations:?}");
             assert_eq!(state.source_steps - visits, if valid { 1 } else { 10_001 });

@@ -515,6 +515,7 @@ mod allocation_tests {
         state.arena.js_scope.as_mut().unwrap().uses.reserve(10_000);
         state.arena.capture_binders.reserve(10_000); state.arena.bulk_binders.reserve(10_000); state.idents.reserve(10_000);
         state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
         let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
             s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1, s.source.lists.storage_shape().1,
             s.arena.pools.funcs.capacity(), s.arena.func_owners.capacity(), s.arena.pools.attrs.capacity(), s.arena.pools.js.capacity(),
@@ -525,7 +526,9 @@ mod allocation_tests {
             s.argument_outputs.capacity(), s.argument_values.capacity(), s.traversal.work.capacity(), s.traversal.values.capacity(), s.traversal.children.capacity()];
         let before = capacities(&state); let free_before = state.free.capacities(); let stmts = state.statements.capacities();
         let visits = state.source_steps; let sequences = state.sequence_steps;
+        let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
         let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
         println!("partial calls: {allocations:?}, source={}, sequencing={}", state.source_steps-visits, state.sequence_steps-sequences);
         assert_eq!(capacities(&state), before); assert_eq!(state.free.capacities(), free_before); assert_eq!(state.statements.capacities(), stmts);
         assert_eq!(allocations.count_total, 0);

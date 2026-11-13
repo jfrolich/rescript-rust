@@ -3203,6 +3203,50 @@ preserve flag/attribute distinctions and first-binding naming.
 | import flat-make and export-name callbacks | temporary joined/mangled strings and singleton owned arrays | removed: retained spellings and borrowed iterator |
 | final dependency compatibility records | one owned ModuleId per output occurrence | final export boundary, outside lowering allocation claim; order and duplicates preserved |
 
+Trunk export-fold integration preserves `export.rs` unchanged. Its new occurrence
+site pool and variable site-head pool are append-only; warmed allocation proofs now
+reserve their repeat growth and assert all three scope capacities are unchanged.
+At final unit completion, only the consumed root export shape is given an owned
+identifier payload. Source/shared shapes stay immutable; the export fold can move
+that output vector without emptying another block's metadata. The wide constant
+block proof also covers a 10,000-field module-export shape (1 source / 10,001
+constant visits, zero warmed allocations); export coercion itself is not measured.
+
+The following trunk export sites are inventoried only, not converted:
+
+| Site | Storage/allocation | Ownership | Disposition |
+| --- | --- | --- | --- |
+| `export.rs:104` | `values: Vec<NodeId>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:105` | `rows: Vec<Row>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:107` | `decl: Vec<u32>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:109` | `position: Vec<u32>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:111` | `seen: Vec<bool>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:112` | `trail: Vec<VarId>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:116` | `row_of: Vec<u32>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:117` | `path: Vec<NodeId>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:120` | `name_head: Vec<u32>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:121` | `name_tail: Vec<u32>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:122` | `name_next: Vec<u32>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:126` | `inserted: Vec<(u32, NodeId)>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:128` | `selected: Vec<VarId>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:142` | `later: Vec<NodeId>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:148` | `arms: Vec<Arm>,` | retained unit/result storage; no conversion in this audit | test-only |
+| `export.rs:150` | `resolved: Vec<Resolved>,` | retained unit/result storage; no conversion in this audit | test-only |
+| `export.rs:157` | `pub exports: Vec<Ident>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:159` | `pub reservations: Vec<Ident>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:162` | `pub arms: Vec<(Arm, Resolved)>,` | retained unit/result storage; no conversion in this audit | test-only |
+| `export.rs:254` export identifier transfer | `std::mem::take(exports)` | moves existing output-boundary ownership; no clone | export scope (unchanged) |
+| `export.rs:285` export_variables | borrowed `into: &mut Vec<VarId>` | appends into caller storage | export scope (unchanged) |
+| `export.rs:1354` coerce_exports | `Vec::with_capacity(idents.len())` | fresh export-variable vector | deferred: export scope |
+| `export.rs:1359` coerce_exports | `Vec::new()` reservations | grows output name reservations | deferred: export scope |
+| `export.rs:1494` test arm collection | `.collect()` | cfg(test) reporting vector | test-only |
+| `export.rs:1530` resolve_exports | `Vec::with_capacity(selected.len())` | owned final export identifiers | deferred: export scope |
+
+| Newly found non-export site | Ownership | Disposition |
+| --- | --- | --- |
+| `call::inline_external_function` fresh LamArena/body import/bridge fragment | per inline candidate graph and traversal storage | pending |
+| `complete_unit` consumed root export identifier payload | one final compatibility payload, protecting shared immutable shapes | final export boundary, outside lowering proof |
+
 ### 7.5.1 Concurrent loop, label and recursive-value additions
 
 The baseline exclusions for `loops.rs`, `label.rs` and `rec.rs` no longer apply

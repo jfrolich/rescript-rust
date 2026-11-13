@@ -641,6 +641,7 @@ mod tests {
         run(&mut state);
         state.arena.lists.reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
         state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
         state.loops.reserve(state.loops.len());
         state.labels.reserve_repeat();
         state.group_indices.reserve(state.group_indices.len());
@@ -663,7 +664,9 @@ mod tests {
         let labels = state.labels.capacities();
         let visits = state.source_steps;
         let scheduled = state.labels.visits;
+        let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
         let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
         println!("whole labelled loops: {allocations:?}");
         assert_eq!(allocations.count_total, 0);
         assert_eq!(capacities(&state), before);

@@ -1404,6 +1404,7 @@ mod tests {
             .lists
             .reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
         state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
         state.untagged_dispatch.reserve_repeat();
         state.group_indices.reserve(state.group_indices.len());
         state.group_nodes.reserve(state.group_nodes.len());
@@ -1448,7 +1449,9 @@ mod tests {
         let visits = state.source_steps;
         let programs = state.untagged_storage.program_steps;
         let grouping = state.switch_group_steps;
+        let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
         let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
         println!("whole nested untagged payloads: {allocations:?}");
         assert_eq!(allocations.count_total, 0);
         assert_eq!(capacities(&state), before);
@@ -1604,6 +1607,7 @@ mod tests {
             .switches
             .reserve(state.arena.pools.switches.len());
         state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
         state.untagged_dispatch.reserve_repeat();
         state.group_indices.reserve(state.group_indices.len());
         state.group_nodes.reserve(state.group_nodes.len());
@@ -1666,7 +1670,9 @@ mod tests {
             state.untagged_dispatch.grouping_steps(),
             state.untagged_storage.copied_outputs,
         );
+        let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
         let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
         println!(
             "mixed whole Lambda: {allocations:?}; source={}, grouping={}, program={}, planner grouping={}, copies={}",
             state.source_steps - counts.0,

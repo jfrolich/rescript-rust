@@ -435,6 +435,13 @@ impl Node {
         }
     }
     /// O(1): encode JSX over its finalized operand list and cold shape.
+    /// Replace only immutable block metadata with an equivalent owned payload
+    /// at the export boundary; child links and cached expression facts stay valid.
+    pub(super) fn set_block_info(&mut self, info: JsId) {
+        assert_eq!(self.op(), Op::JBlockLit);
+        self.words[1] = info.0;
+    }
+
     pub(super) fn jsx_list(list: ListId, info: JsId, aux: u16) -> Self {
         Self { op: Op::JJsx, aux, ..Self::object_list(list, info) }
     }
@@ -446,6 +453,17 @@ impl Node {
     }
     pub(super) fn set_flags(&mut self, flags: NodeFlags) {
         self.flags = flags;
+    }
+    /// The site of a `Var` in the lowering arena (`lower::scope::Site`), kept
+    /// in the leaf's unused second word so that it moves with the node's
+    /// content. O(1).
+    pub(super) fn var_site(self) -> u32 {
+        assert_eq!(self.op, Op::Var);
+        self.words[1]
+    }
+    pub(super) fn set_var_site(&mut self, site: u32) {
+        assert_eq!(self.op, Op::Var);
+        self.words[1] = site;
     }
     pub(super) fn kill_value(&mut self) {
         assert_eq!(self.op, Op::Let);

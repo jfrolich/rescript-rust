@@ -301,6 +301,7 @@ mod tests {
         vars.flags.reserve(extra); vars.uses.reserve(extra); vars.binder.reserve(extra);
         vars.fact.reserve(extra); vars.printed.reserve(extra);
         state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
         state.statements.reserve_repeat();
         let capacities = |s: &State| {
             let e = &s.evaluation; let v = &s.arena.vars;
@@ -318,7 +319,9 @@ mod tests {
         let free_before = state.free.capacities();
         let visits = state.source_steps;
         let sequencing = state.sequence_steps;
+        let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
         let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
         println!("held literal: {allocations:?}, visits={}, sequencing={}", state.source_steps-visits, state.sequence_steps-sequencing);
         assert_eq!(allocations.count_total, 0);
         assert_eq!(state.source_steps - visits, 20_005);

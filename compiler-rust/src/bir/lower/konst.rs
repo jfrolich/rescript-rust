@@ -404,6 +404,7 @@ mod allocation_tests {
             .cold
             .reserve(state.arena.pools.cold.len() - cold);
         state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
         let capacities = |s: &State| {
             [
                 s.arena.nodes.capacity(),
@@ -437,7 +438,9 @@ mod allocation_tests {
         let visits = state.source_steps;
         let constants = state.constant_steps;
         let primitives = state.primitive_steps;
+        let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
         let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
         assert_eq!(allocations.count_total, 0, "{allocations:?}");
         assert_eq!(capacities(&state), before);
         assert_eq!(state.free.capacities(), free_before);
@@ -457,10 +460,14 @@ mod allocation_tests {
 
     #[test]
     fn ten_thousand_owned_block_tags_lower_without_allocations() {
-        for kind in 0..3 {
+        for kind in 0..4 {
             let mut a = LamArena::new();
             let tag = TagInfo::constructor("ConstructorWithOwnedShape", 1);
-            let root = if kind == 0 {
+            let root = if kind == 3 {
+                let exports = (0..10_000).map(|i| crate::ident::Ident::new("field", i + 1, crate::ident::IdentFlags::NONE)).collect();
+                let elements = (0..10_000).map(|i| C::Int { i, comment: None }).collect();
+                a.const_(C::Block { tag_info: Box::new(TagInfo::ModuleExport(exports)), elements })
+            } else if kind == 0 {
                 let elements = (0..10_000)
                     .map(|i| C::Block {
                         tag_info: Box::new(tag.clone()),
@@ -526,6 +533,7 @@ mod allocation_tests {
                 .js
                 .reserve(state.arena.pools.js.len() - infos);
             state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
             let capacities = |s: &State| {
                 [
                     s.arena.nodes.capacity(),
@@ -553,7 +561,9 @@ mod allocation_tests {
             let visits = state.source_steps;
             let steps = state.constant_steps;
             let primitives = state.primitive_steps;
-            let allocations = allocation_counter::measure(|| run(&mut state));
+            let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
+        let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
             println!(
                 "owned block kind={kind}: {allocations:?}, visits={}, constants={}, primitives={}",
                 state.source_steps - visits,
@@ -573,6 +583,7 @@ mod allocation_tests {
                 (1, 20_001, 0),
                 (20_001, 10_000, 30_001),
                 (30_001, 20_000, 40_001),
+                (1, 10_001, 0),
             ][kind];
             assert_eq!(state.source_steps - visits, expected_source);
             assert_eq!(state.constant_steps - steps, expected_constants);

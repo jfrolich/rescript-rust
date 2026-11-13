@@ -1361,6 +1361,7 @@ mod tests {
             .switch_output_clauses
             .reserve(state.switch_output_clauses.len());
         state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
         let capacities = |s: &State| {
             [
                 s.arena.nodes.capacity(),
@@ -1383,7 +1384,9 @@ mod tests {
         let before = capacities(&state);
         let visits = state.source_steps;
         let grouping = state.switch_group_steps;
+        let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
         let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
         println!("whole switch: {allocations:?}");
         assert_eq!(allocations.count_total, 0);
         assert_eq!(capacities(&state), before);

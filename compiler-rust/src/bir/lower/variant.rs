@@ -754,6 +754,7 @@ mod tests {
         state.switch_output_nodes.reserve(state.switch_output_nodes.len());
         state.switch_output_clauses.reserve(state.switch_output_clauses.len());
         state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
         let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
             s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1, s.source.lists.storage_shape().1,
             s.arena.pools.switch_keys.capacity(), s.arena.pools.switch_clauses.capacity(), s.arena.pools.switches.capacity(),
@@ -764,7 +765,9 @@ mod tests {
         let before = capacities(&state);
         let free_before = state.free.capacities(); let statements_before = state.statements.capacities();
         let visits = state.source_steps; let groups = state.switch_group_steps;
+        let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
         let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
         println!("named whole Lambda: {allocations:?}; visits={}, grouping={}", state.source_steps-visits, state.switch_group_steps-groups);
         assert_eq!(allocations.count_total, 0);
         assert_eq!(capacities(&state), before); assert_eq!(state.free.capacities(), free_before);

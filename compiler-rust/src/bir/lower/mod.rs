@@ -10,6 +10,7 @@ mod external;
 mod call;
 mod cond;
 mod exit;
+mod export;
 mod expr;
 mod konst;
 mod prim;
@@ -298,8 +299,6 @@ impl<R> SourceProbe<R> {
     }
 }
 
-/// N1: C:663 compile_deps_program_in_arena. The final statement is a plain
-/// SExp carrying Out::value for the migration exporter, not an emitted effect.
 #[derive(Clone, Copy, Default, serde::Serialize)]
 pub(crate) struct SwitchStats {
     pub source_visits: usize,
@@ -311,7 +310,11 @@ pub(crate) struct SwitchStats {
 
 pub(crate) struct Lowered {
     pub program: super::bridge_j::Imported,
+    /// Read by the rule tests against the legacy output's flag.
+    #[cfg(test)]
     pub finished: Finished,
+    /// The exports after coercion and the names they reserve (`export.rs`).
+    pub coerced: export::Coerced,
     pub dynamic_imports: Vec<crate::js_ir::ModuleId>,
     pub switch_stats: SwitchStats,
 }
@@ -452,6 +455,10 @@ struct State {
     catch_flag_reads: usize,
     /// Handler nodes read to find the label of an exit (4.1 step 1).
     catch_walk_steps: usize,
+    /// The variables of the export blocks, as the importer recorded them.
+    export_vars: Vec<u32>,
+    /// The tables of the export fold (`export.rs`).
+    coercion: export::Tables,
 }
 impl State {
     /// N1: C:481 new. Transfer cold pools, while source hot nodes/list operands
@@ -541,6 +548,8 @@ impl State {
             catch_work: Vec::new(),
             catch_flag_reads: 0,
             catch_walk_steps: 0,
+            export_vars: input.export_vars,
+            coercion: Default::default(),
         }
     }
     /// K1: C:1529 compile_expr. Direct mode is the bounded P1 oracle: convert
@@ -586,8 +595,45 @@ impl State {
         self.statements.append(first, second, value)
     }
 
-    /// N1: C:663 compile_deps_program_in_arena. Export transports the last value
-    /// in a plain sentinel SExp removed before export extraction and coercion.
+    /// N1: C:663 compile_deps_program_in_arena, the unit: the last value is
+    /// read for the exports (`export.rs`). Cost: that of `extract_exports`
+    /// and of `finish`.
+    fn complete_unit(mut self, probed: Probed) -> Lowered {
+        let out = self.realize(Cx::value(), probed);
+        // Export coercion takes ownership of the root's identifier vector.
+        // Isolate that output-boundary payload so shared source/block shapes
+        // remain immutable for any other surviving block occurrence.
+        if let Some(mut end) = out.value {
+            while let View::JSeq { second, .. } = self.arena.view(end) { end = second; }
+            if let View::JBlockLit { info, .. } = self.arena.view(end) {
+                if let crate::lambda::TagInfo::ModuleExport(exports) = self.arena.block_tag(info) {
+                    let tag = crate::lambda::TagInfo::ModuleExport(exports.clone());
+                    let owned = self.arena.js_info(crate::bir::JsPayload::Block(tag));
+                    self.arena.nodes[end.index()].set_block_info(owned);
+                }
+            }
+        }
+        let exports = self.extract_exports(out.value, out.finished);
+        let run = self.statements.since(Span {
+            start: out.stmts.start,
+            len: 0,
+        });
+        let (list, coerced) = match exports {
+            Some(exports) if !exports.is_empty() => {
+                let coerced = self.coerce_exports(run, exports, out.finished);
+                (self.coerced_list(run), coerced)
+            }
+            _ => (
+                self.statements.take_list(&mut self.arena, run),
+                export::Coerced::default(),
+            ),
+        };
+        self.finish(list, out.finished, coerced)
+    }
+
+    /// The output of one construct in `cx`, for the rule tests: the value is
+    /// carried by a plain sentinel SExp after the statements.
+    #[cfg(test)]
     fn complete(mut self, cx: Cx, probed: Probed) -> Lowered {
         let out = self.realize(cx, probed);
         let value = out
@@ -600,6 +646,18 @@ impl State {
             len: 0,
         });
         let list = self.statements.take_list(&mut self.arena, run);
+        self.finish(list, out.finished, export::Coerced::default())
+    }
+
+    /// The root block over the top-level list. One step per statement of
+    /// the list and one write per catch of the unit.
+    fn finish(mut self, list: crate::bir::ListId, _finished: Finished, coerced: export::Coerced) -> Lowered {
+        #[cfg(test)]
+        let coerced = export::Coerced {
+            steps: self.coercion.steps,
+            site_visits: self.coercion.site_visits,
+            ..coerced
+        };
         let root = self.arena.block_from_list(list);
         // The headers keep their labels and parameters; the exits they count
         // stay in the source, which reads the counts while a function of
@@ -612,7 +670,9 @@ impl State {
         let dynamic_imports = self.dynamic_imports.iter().map(|id| self.arena.pools.j_modules[id.index()].clone()).collect();
         Lowered {
             program: super::bridge_j::Imported::from_lowering(self.arena, root, self.idents),
-            finished: out.finished,
+            #[cfg(test)]
+            finished: _finished,
+            coerced,
             dynamic_imports,
             switch_stats: SwitchStats {
                 source_visits: self.source_steps,

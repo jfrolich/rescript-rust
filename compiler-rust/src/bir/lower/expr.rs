@@ -364,6 +364,7 @@ mod allocation_tests {
         state.arena.pools.funcs.reserve(10_000);
         state.arena.func_owners.reserve(10_000);
         state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
         let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
             s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1, s.arena.pools.funcs.capacity(),
             s.arena.func_owners.capacity(), s.arena.pools.attrs.capacity(), s.traversal.work.capacity(),
@@ -372,7 +373,9 @@ mod allocation_tests {
         let free_before = state.free.capacities();
         let statements_before = state.statements.capacities();
         let visits = state.source_steps;
+        let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
         let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
         println!("unit-function headers: {allocations:?}, visits={}", state.source_steps - visits);
         assert_eq!(allocations.count_total, 0);
         assert_eq!(state.arena.pools.attrs.len(), attributes);

@@ -468,6 +468,7 @@ mod tests {
             state.idents.reserve(added);
             if let Some(scope) = &mut state.arena.js_scope { scope.uses.reserve(added); }
             state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
             state.labels.reserve_repeat();
             #[cfg(debug_assertions)]
             state.arena.checked_children.reserve(state.arena.nodes.len() - state.arena.checked_children.len());
@@ -483,7 +484,9 @@ mod tests {
             let before = (capacities(&state), state.free.capacities(), state.labels.capacities(), state.statements.capacities());
             let visits = state.source_steps;
             let steps = state.primitive_steps;
-            let allocations = allocation_counter::measure(|| run(&mut state));
+            let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
+        let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
             println!("JSX shape={shape}: {allocations:?}, source={}, primitive={}", state.source_steps - visits, state.primitive_steps - steps);
             assert_eq!(allocations.count_total, 0);
             assert_eq!((capacities(&state), state.free.capacities(), state.labels.capacities(), state.statements.capacities()), before);

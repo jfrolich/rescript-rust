@@ -362,6 +362,7 @@ mod tests {
             state.arena.capture_binders.reserve(20_000); state.arena.bulk_binders.reserve(20_000);
             state.arena.js_scope.as_mut().unwrap().uses.reserve(20_000); state.idents.reserve(20_000);
             state.dynamic_imports.reserve(10_000); state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
             let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
                 s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1, s.arena.pools.funcs.capacity(),
                 s.arena.func_owners.capacity(), s.arena.pools.attrs.capacity(), s.arena.pools.js.capacity(),
@@ -375,7 +376,9 @@ mod tests {
                 s.traversal.work.capacity(), s.traversal.values.capacity(), s.traversal.children.capacity()];
             let before = capacities(&state); let free = state.free.capacities(); let stmts = state.statements.capacities();
             let visits = state.source_steps; let primitives = state.primitive_steps;
-            let allocations = allocation_counter::measure(|| run(&mut state));
+            let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
+        let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
             assert_eq!(allocations.count_total, 0, "external={external} {allocations:?}");
             assert_eq!(capacities(&state), before); assert_eq!(state.free.capacities(), free); assert_eq!(state.statements.capacities(), stmts);
             assert_eq!(state.source_steps - visits, 10_001);

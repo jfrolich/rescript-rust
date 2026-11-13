@@ -83,7 +83,7 @@ pub(super) fn lower(
                     let value = out.value;
                     out = state.append_outputs(first, out, value);
                 }
-                return Ok(state.complete(Cx::value(), Probed::Out(out)));
+                return Ok(state.complete_unit(Probed::Out(out)));
             }
         }
         let value = out.value;
@@ -95,7 +95,7 @@ pub(super) fn lower(
             accumulated = Some(out);
             node = next;
         } else {
-            return Ok(state.complete(Cx::value(), Probed::Out(out)));
+            return Ok(state.complete_unit(Probed::Out(out)));
         }
     }
 }
@@ -107,6 +107,22 @@ mod tests {
     use crate::lambda::lam_compile::LambdaCompiler;
     use crate::lambda::lam_constant::Constant;
     use crate::lambda::lam_tag_info::TagInfo;
+
+    #[test]
+    fn export_consumption_does_not_empty_shared_block_metadata() {
+        let mut source = LamArena::new();
+        let name = Ident::new("answer", 700, crate::ident::IdentFlags::NONE);
+        let tag = TagInfo::ModuleExport(vec![name]);
+        let value = source.const_(Constant::Int { i: 42, comment: None });
+        let root = source.prim_raw(crate::lambda::lam_primitive::Primitive::Pmakeblock(tag.clone(), crate::lambda::lam_primitive::Mutable::Immutable), &[value], crate::lambda::LamLoc::NONE);
+        let input = crate::bir::bridge::import_for_lowering(&source, root).0.unwrap(); let root = input.root;
+        let mut state = State::new(input);
+        let probed = state.probe(Cx::value(), root).unwrap();
+        let shared = state.arena.block_info(&tag);
+        let lowered = state.complete_unit(probed);
+        assert_eq!(lowered.program.arena.block_tag(shared), &tag);
+        assert_eq!(lowered.coerced.exports.len(), 1);
+    }
 
     #[test]
     fn supported_unit_exercises_both_texts_and_shared_export_coercion() {
@@ -162,7 +178,7 @@ mod tests {
         let root = input.root;
         let mut state = State::new(input);
         let probed = state.probe(Cx::value(), root).unwrap();
-        let whole = state.complete(Cx::value(), probed);
+        let whole = state.complete_unit(probed);
         let print = |lowered: Lowered| {
             let p = crate::bir::bridge_j::export_js(&lowered.program).unwrap();
             crate::js_ir::print_deps_program_with_directives_and_options(

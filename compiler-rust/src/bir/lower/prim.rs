@@ -1331,6 +1331,7 @@ mod dictionary_allocations {
             state.arena.pools.property_keys.reserve(state.arena.pools.property_keys.len() - properties);
             state.arena.pools.js.reserve(state.arena.pools.js.len() - infos);
             state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
             let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
                 s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1, s.arena.pools.property_keys.capacity(),
                 s.arena.pools.js.capacity(), s.object_scratch.keys.capacity(), s.object_scratch.values.capacity(),
@@ -1339,7 +1340,9 @@ mod dictionary_allocations {
             let before = capacities(&state); let free_before = state.free.capacities();
             let statements_before = state.statements.capacities(); let visits = state.source_steps;
             let steps = state.primitive_steps;
-            let allocations = allocation_counter::measure(|| run(&mut state));
+            let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
+        let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
             println!("dictionary spread={spread}: {allocations:?}, visits={}, primitives={}", state.source_steps-visits, state.primitive_steps-steps);
             assert_eq!(allocations.count_total, 0);
             assert_eq!(capacities(&state), before); assert_eq!(state.free.capacities(), free_before);
@@ -1387,6 +1390,7 @@ mod template_allocations {
             state.arena.pools.template_parts.reserve(state.arena.pools.template_parts.len() - parts);
             state.arena.pools.js.reserve(state.arena.pools.js.len() - infos);
             state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
             let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
                 s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1, s.arena.pools.template_parts.capacity(),
                 s.arena.pools.js.capacity(), s.arena.pools.text.capacity(), s.arena.pools.strings.capacity(),
@@ -1396,7 +1400,9 @@ mod template_allocations {
             let before = capacities(&state); let text_before = state.arena.j_template_scratch.text.capacities();
             let free_before = state.free.capacities(); let stmts = state.statements.capacities();
             let visits = state.source_steps; let primitives = state.primitive_steps; let steps = state.arena.j_template_scratch.steps;
-            let allocations = allocation_counter::measure(|| run(&mut state));
+            let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
+        let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
             println!("template mode={mode}: {allocations:?}; source={}, primitive={}, normalization={}", state.source_steps-visits, state.primitive_steps-primitives, state.arena.j_template_scratch.steps-steps);
             assert_eq!(allocations.count_total, 0);
             assert_eq!(capacities(&state), before); assert_eq!(state.arena.j_template_scratch.text.capacities(), text_before);

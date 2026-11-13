@@ -331,6 +331,7 @@ mod tests {
         state.arena.pools.property_keys.reserve(state.arena.pools.property_keys.len() - keys);
         state.arena.pools.js.reserve(1);
         state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
         let capacities = |s: &State| {
             [s.object_scratch.operands.capacity(), s.object_scratch.keys.capacity(), s.object_scratch.values.capacity(),
                 s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(), s.arena.release_stack.capacity(),
@@ -342,7 +343,9 @@ mod tests {
         let statements_before = state.statements.capacities();
         let source = state.source_steps;
         let primitive = state.primitive_steps;
+        let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
         let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
         assert_eq!(allocations.count_total, 0, "{allocations:?}");
         assert_eq!(capacities(&state), before);
         assert_eq!(state.free.capacities(), free_before);
