@@ -349,4 +349,36 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn self_calls_in_try_bodies_stay_calls_but_handlers_may_jump() {
+        use crate::lambda::arena::LamArena;
+        use crate::lambda::lam_constant::Constant;
+        for handler_recurses in [false, true] {
+            let mut a = LamArena::new();
+            let (f, x) = (ident("f", 1), ident("x", 2));
+            let argument = a.var(x);
+            let protected = call(&mut a, f, &[argument]);
+            let handler = if handler_recurses {
+                let argument = a.const_(Constant::int(0));
+                call(&mut a, f, &[argument])
+            } else { a.var(x) };
+            let body = a.try_(protected, ident("exn", 3), handler);
+            let root = wrap(&mut a, f, &[x], body);
+            super::super::oracle_tests::compare(a.clone(), root);
+            let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+            let root = input.root;
+            let mut state = State::new(input);
+            let output = state.probe(Cx::value(), root).unwrap();
+            assert_eq!(state.tail_frames.len(), usize::from(handler_recurses));
+            let lowered = state.complete(Cx::value(), output);
+            let b = &lowered.program.arena;
+            let calls = b.nodes.iter().filter(|n| matches!(n.op(), crate::bir::Op::JCall)).count();
+            let jumps = b.nodes.iter().filter(|n| matches!(n.op(), crate::bir::Op::SContinue)).count();
+            assert_eq!(calls, 1, "the protected self call must remain inside try");
+            assert_eq!(jumps, usize::from(handler_recurses));
+            b.validate(Some(lowered.program.root)).unwrap();
+        }
+    }
+
 }

@@ -11,8 +11,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 732,
-      "units": 732,
+      "identical": 730,
+      "units": 730,
       "unsupported": {}
     }
   },
@@ -28,8 +28,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 732,
-      "units": 732,
+      "identical": 730,
+      "units": 730,
       "unsupported": {}
     }
   },
@@ -45,8 +45,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 732,
-      "units": 732,
+      "identical": 730,
+      "units": 730,
       "unsupported": {}
     }
   },
@@ -62,8 +62,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 732,
-      "units": 732,
+      "identical": 730,
+      "units": 730,
       "unsupported": {}
     }
   },
@@ -79,8 +79,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 732,
-      "units": 732,
+      "identical": 730,
+      "units": 730,
       "unsupported": {}
     }
   },
@@ -96,42 +96,38 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 732,
-      "units": 732,
+      "identical": 730,
+      "units": 730,
       "unsupported": {}
     }
   },
   "lower": {
     "fixtures": {
-      "identical": 468,
+      "identical": 502,
       "shared_catch_only": 0,
       "units": 593,
       "unsupported": {
-        "assign": 18,
-        "loop": 57,
-        "try": 50
+        "let rec": 19,
+        "loop": 72
       }
     },
     "runtime": {
-      "identical": 184,
+      "identical": 204,
       "shared_catch_only": 0,
       "units": 226,
       "unsupported": {
-        "assign": 4,
-        "loop": 18,
-        "try": 20
+        "let rec": 6,
+        "loop": 16
       }
     },
     "tests/tests": {
-      "identical": 621,
+      "identical": 619,
       "shared_catch_only": 1,
-      "units": 732,
+      "units": 730,
       "unsupported": {
-        "assign": 24,
-        "let rec": 13,
-        "loop": 44,
-        "shared Lambda subtree with binder": 1,
-        "try": 29
+        "let rec": 73,
+        "loop": 37,
+        "shared Lambda subtree with binder": 1
       }
     }
   }

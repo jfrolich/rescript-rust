@@ -5,6 +5,8 @@ use crate::bir::{FuncId, VarSpan};
 /// Decoded structural operands saved across child visits; no source re-read.
 pub(super) enum Resume {
     Rec(super::rec::Group),
+    Try(super::try_::Try),
+    Assign { var: VarId, value: NodeId },
     Switch(super::switch::Switch),
     Variant(super::variant::Variant),
     Untagged(super::untagged::Untagged),
@@ -40,6 +42,7 @@ impl State {
         into: &mut Vec<(Cx, NodeId)>,
     ) {
         if let Resume::Rec(group) = resume { self.recursive_children(cx, *group, into); return; }
+        if let Resume::Try(frame) = resume { self.try_children(cx, *frame, into); return; }
         if let Resume::Untagged(frame) = resume { self.untagged_children(cx, *frame, into); return; }
         if let Resume::Variant(frame) = resume { self.variant_children(cx, *frame, into); return; }
         if let Resume::Catch(frame) = resume { self.catch_children(cx, *frame, into); return; }
@@ -69,7 +72,8 @@ impl State {
         }
         match *resume {
             Resume::Rec(_) => unreachable!("group handled above"),
-            Resume::If(_) | Resume::Switch(_) | Resume::Variant(_) | Resume::Untagged(_)
+            Resume::Assign { value, .. } => into.push((Cx { cont: Cont::Value(Tail::No), ..cx }, value)),
+            Resume::Try(_) | Resume::If(_) | Resume::Switch(_) | Resume::Variant(_) | Resume::Untagged(_)
             | Resume::Catch(_) | Resume::Exit(_) => unreachable!("control handled above"),
             Resume::Call(_) | Resume::Prim(_) | Resume::Record(_) => unreachable!("arguments handled above"),
             Resume::Let {
@@ -118,6 +122,7 @@ impl State {
         child: Probed,
     ) -> Probed {
         if let Resume::Rec(group) = resume { return self.recursive_child(*group, index, child); }
+        if let Resume::Try(frame) = resume { return self.try_child(cx, *frame, index, child); }
         if let Resume::If(conditional) = resume {
             return self.conditional_child(cx, conditional, index, child);
         }
@@ -150,9 +155,10 @@ impl State {
         }
         let force = match resume {
             Resume::Rec(_) => unreachable!("group handled above"),
-            Resume::If(_) | Resume::Switch(_) | Resume::Variant(_) | Resume::Untagged(_)
+            Resume::Try(_) | Resume::If(_) | Resume::Switch(_) | Resume::Variant(_) | Resume::Untagged(_)
             | Resume::Catch(_) | Resume::Exit(_) => unreachable!("control handled above"),
             Resume::Call(_) | Resume::Prim(_) | Resume::Record(_) => unreachable!("arguments handled above"),
+            Resume::Assign { .. } => false,
             Resume::Let { value, .. } => value.is_some() && index == 0,
             Resume::Seq { .. } => index == 0,
             Resume::Fun { .. } => true,
@@ -172,6 +178,8 @@ impl State {
     ) -> Probed {
         match resume {
             Resume::Rec(group) => self.finish_recursive(cx, group, children),
+            Resume::Try(frame) => self.finish_try(cx, frame),
+            Resume::Assign { var, .. } => self.finish_assignment(cx, var, children.next().expect("assignment operand")),
             Resume::Switch(frame) => self.finish_switch(cx, frame),
             Resume::Variant(frame) => self.finish_variant(cx, frame),
             Resume::Untagged(frame) => self.finish_untagged(cx, frame),

@@ -1,6 +1,8 @@
 //! Continuations for the level-L to level-J lowering (BACKEND_LOWERING §1).
 //! Context references are indices, never references into growing state pools.
 mod args;
+mod assign;
+mod try_;
 mod ffi_args;
 mod external;
 mod call;
@@ -382,6 +384,8 @@ struct State {
     /// The handlers of the catches being lowered, a stack of flattened tables.
     catch_table: Vec<(NodeId, crate::bir::CatchId)>,
     catches: Vec<Option<exit::Plan>>,
+    tries: Vec<try_::Plan>,
+    try_form_reads: usize,
     catch_work: Vec<NodeId>,
     /// `HAS_EXIT` reads that decided a flattening or a form.
     catch_flag_reads: usize,
@@ -454,6 +458,8 @@ impl State {
             jumps: Vec::new(),
             catch_table: Vec::new(),
             catches: Vec::new(),
+            tries: Vec::new(),
+            try_form_reads: 0,
             catch_work: Vec::new(),
             catch_flag_reads: 0,
             catch_walk_steps: 0,
@@ -640,14 +646,15 @@ impl ProbeRules for State {
                 let args = self.source.node(node).exit_arguments();
                 return Ok(ProbePlan::Children(expr::Resume::Exit(self.exit(label, args))));
             }
-            View::Try { .. } | View::TryFinally { .. } => return Err(Unsupported("try")),
+            View::Try { body, exception, handler } => return Ok(ProbePlan::Children(expr::Resume::Try(self.try_statement(cx, body, Some(exception), Some(handler), None)))),
+            View::TryFinally { body, finaliser } => return Ok(ProbePlan::Children(expr::Resume::Try(self.compile_try_finally(cx, body, finaliser)))),
             View::While { .. }
             | View::For { .. }
             | View::ForOf { .. }
             | View::ForAwaitOf { .. }
             | View::Break
             | View::Continue => return Err(Unsupported("loop")),
-            View::Assign { .. } => return Err(Unsupported("assign")),
+            View::Assign { var, value } => return Ok(ProbePlan::Children(expr::Resume::Assign { var, value })),
             View::JBin { .. }
             | View::JNot { .. }
             | View::JBnot { .. }
