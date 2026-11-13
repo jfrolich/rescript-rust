@@ -4,9 +4,12 @@ set -euo pipefail
 
 shopt -s nullglob
 
+# `doc` goes through the launcher, as users run it: it documents modules
+# with the build system, since builds write no `.cmt` files for the OCaml
+# tool to read.
 for file in src/*.{res,resi}; do
   output="$(dirname $file)/expected/$(basename $file).json"
-  ../../_build/install/default/bin/rescript-tools doc $file > $output
+  node ../../cli/rescript-tools.js doc $file > $output
   # # CI. We use LF, and the CI OCaml fork prints CRLF. Convert.
   if [ "${RUNNER_OS:-}" == "Windows" ]; then
     perl -pi -e 's/\r\n/\n/g' -- $output

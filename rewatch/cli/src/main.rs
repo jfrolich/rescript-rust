@@ -250,6 +250,39 @@ fn run_main(telemetry: &telemetry::TelemetryGuard) -> Result<i32> {
             result.map(|()| 0)
         }
         cli::Command::Format { stdin, check, files } => format::format(stdin, check, files).map(|()| 0),
+        cli::Command::Doc { path } => {
+            // Standard output is the command's result.
+            log::set_max_level(log_level_filter.min(LevelFilter::Warn));
+            let cwd = std::env::current_dir()?;
+            configure_rayon_for_in_process();
+            match run_with_in_process_stack(|| build::tooling::doc(&cwd, &path, plain_output)) {
+                Ok(docs) => {
+                    std::io::stdout().write_all(&docs)?;
+                    Ok(0)
+                }
+                Err(err) => {
+                    eprintln!("{err:#}");
+                    Ok(1)
+                }
+            }
+        }
+        cli::Command::Reanalyze { args } => {
+            // Standard output is the command's result.
+            log::set_max_level(log_level_filter.min(LevelFilter::Warn));
+            configure_rayon_for_in_process();
+            let cwd = std::env::current_dir()?;
+            let color = Term::stdout().is_term();
+            match run_with_in_process_stack(|| build::tooling::reanalyze(&cwd, &args, plain_output, color)) {
+                Ok(report) => {
+                    std::io::stdout().write_all(&report)?;
+                    Ok(0)
+                }
+                Err(err) => {
+                    eprintln!("{err:#}");
+                    Ok(1)
+                }
+            }
+        }
         cli::Command::Analysis { args } => {
             let cwd = std::env::current_dir()?;
             std::process::exit(rescript::tooling_server::run_client(&cwd, &args))

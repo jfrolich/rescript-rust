@@ -872,6 +872,43 @@ pub fn load_stored(build_state: &BuildCommandState, modules: &AHashSet<String>) 
     loaded
 }
 
+/// The JS metadata recorded with `module_name`'s stored interface, `None`
+/// when the previous build stored none.
+///
+/// A check-only build generates no code, so a module it checks has no JS
+/// metadata of its own, while a unit's digests cover that metadata (see
+/// `item_deps::item_digests`). Publishing the checked signature with the
+/// recorded metadata makes an item's digest differ from the recorded one
+/// exactly when its declaration changed, so only the modules that read a
+/// changed declaration are checked again. Nothing reads the metadata itself:
+/// only code generation does.
+pub fn recorded_js_metadata(
+    build_state: &BuildCommandState,
+    module_name: &str,
+) -> Option<rescript_compiler::cmi::persistent_env::InMemoryModuleInfo> {
+    let module = build_state.get_module(module_name)?;
+    build_state
+        .previous_in_process
+        .as_ref()?
+        .packages
+        .get(&module.package_name)?
+        .state
+        .stored_interfaces
+        .get(module_name)?;
+    let cores = build_state
+        .recorded_cores
+        .lock()
+        .unwrap()
+        .entry(module.package_name.clone())
+        .or_insert_with(|| {
+            let package = build_state.get_package(&module.package_name).expect("package");
+            std::sync::Arc::new(state_db::InterfaceCores::new(package))
+        })
+        .clone();
+    let core = cores.read(module_name)?;
+    Some(rescript_compiler::cmi::stored_module::decode_core(&core)?.info)
+}
+
 /// Decode, in parallel, the stored interfaces of `loaded` that the last
 /// compile of a module of `round` read (its recorded imports): the compiles
 /// of the round would otherwise decode them one by one as they look them up.
@@ -1275,7 +1312,7 @@ pub fn everything_up_to_date(build_state: &mut BuildCommandState) -> bool {
             times,
             ModuleTimes::Recorded(RecordedTimes { newest_input: Some(newest), output: Some(_), .. })
                 if *newest < started
-        )
+        ) && !has_unreplayable_warnings(build_state, module_name)
     });
     if up_to_date {
         restore_warnings(build_state, &|_| true);
@@ -1284,6 +1321,39 @@ pub fn everything_up_to_date(build_state: &mut BuildCommandState) -> bool {
         build_state.module_times = Some(times);
     }
     up_to_date
+}
+
+/// Whether a check has to take `module_name`'s inputs as changed since the
+/// recorded build, whatever its JavaScript says. A check takes no build
+/// lock, so a watcher may be building beside it. The watcher's JavaScript is
+/// then newer than the sources it compiled, while the record, which the
+/// watcher writes when it exits, still holds their earlier interfaces. The
+/// record covers only inputs older than the start of the build it records,
+/// and only when that build finished without errors.
+fn changed_beside_record(build_state: &BuildCommandState, module_name: &str, times: &ModuleTimes) -> bool {
+    if !build_state.check_only {
+        return false;
+    }
+    let started = build_state
+        .get_module(module_name)
+        .zip(build_state.previous_in_process.as_ref())
+        .and_then(|(module, previous)| previous.packages.get(&module.package_name))
+        .and_then(|record| record.clean_build_started_at);
+    !matches!(
+        (times, started),
+        (ModuleTimes::Recorded(RecordedTimes { newest_input: Some(newest), .. }), Some(started))
+            if *newest < started
+    )
+}
+
+/// Whether this build cannot report `module_name`'s recorded warnings as
+/// they are. A build that generated code recorded them, and some may be
+/// warnings only code generation reports. A check generates no code and
+/// reports none of those, so it checks such a module again instead.
+fn has_unreplayable_warnings(build_state: &BuildCommandState, module_name: &str) -> bool {
+    build_state.check_only
+        && recorded_row(build_state, module_name)
+            .is_some_and(|row| row.implementation_warnings.is_some() || row.interface_warnings.is_some())
 }
 
 /// Keep the recorded confirmation times of modules this build does not
@@ -1376,7 +1446,7 @@ pub fn plan(build_state: &mut BuildCommandState) {
                 own,
                 ModuleTimes::Recorded(RecordedTimes { newest_input: Some(newest), output: Some(output), .. })
                     if newest <= output
-            );
+            ) || changed_beside_record(build_state, module_name, own);
             let row = recorded_row(build_state, module_name);
             let unknown_imports =
                 row.is_none_or(|row| row.interface_digest.is_none() || row.imports.is_none());
@@ -1393,9 +1463,15 @@ pub fn plan(build_state: &mut BuildCommandState) {
                         .iter()
                         .any(|(import, _)| !build_state.modules.contains_key(import))
                 });
+            let unreplayable_warnings = has_unreplayable_warnings(build_state, module_name);
             if build_state.get_module(module_name).is_some_and(|module|
                 build_state.packages[&module.package_name].prebuilt) { continue; }
-            if own_stale || unknown_imports || references_new_module || import_removed {
+            if own_stale
+                || unknown_imports
+                || references_new_module
+                || import_removed
+                || unreplayable_warnings
+            {
                 stale.insert(module_name.clone());
                 continue;
             }

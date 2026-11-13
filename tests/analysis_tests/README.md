@@ -74,5 +74,15 @@ It exits 1 when a block differs or a file fails. With
 `RUST_ANALYSIS_DUMP=<dir>` it also writes each file's Rust output to
 `<dir>/<project>/<file>.txt`.
 
-`tests-reanalyze` runs `rescript-editor-analysis reanalyze`, which the Rust
-analysis does not provide, so `test-rust.sh` does not cover it.
+## Reanalyze
+
+The snapshots of `tests-reanalyze` are the reports of the OCaml
+`rescript-tools reanalyze`, regenerated like the analysis snapshots above
+(build the project with `build-reference`, then run its `test.sh`).
+
+The Rust port (`compiler-rust/src/analysis/reanalyze`) reads the typed trees
+of a check-only build that keeps source locations: `rescript-tools reanalyze
+<options>` runs `rescript reanalyze <options>`. A watcher's builds leave
+locations out, so it is no watcher command. `tests-reanalyze/test-rust.sh`
+runs the three reports (dead code, exceptions, termination) and compares each
+with its snapshot, byte for byte.

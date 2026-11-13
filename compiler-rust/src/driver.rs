@@ -8492,6 +8492,10 @@ pub struct FileConfigOverrides {
     pub jsx_preserve: bool,
     /// `-bs-noassertfalse` (`Clflags.no_assert_false`, translcore.ml:1555).
     pub no_assert_false: bool,
+    /// `-bs-no-bin-annot` (`Clflags.binary_annotations`): OCaml writes no
+    /// `.cmt` or `.cmti` for the file, so tools that read those do not see
+    /// it. A build writes neither; `reanalyze` reads this to skip the file.
+    pub no_bin_annot: bool,
     /// `-noassert` (`Clflags.noassert`, translcore.ml:1558).
     pub noassert: bool,
     /// `-bs-no-check-div-by-zero` (`Js_config.check_div_by_zero`,
@@ -8738,6 +8742,7 @@ fn run_file_level_flags(
                 "-bs-g" => overrides.debug = true,
                 "-bs-jsx-preserve" => overrides.jsx_preserve = true,
                 "-bs-noassertfalse" => overrides.no_assert_false = true,
+                "-bs-no-bin-annot" => overrides.no_bin_annot = true,
                 "-noassert" => overrides.noassert = true,
                 "-bs-no-check-div-by-zero" => overrides.no_check_div_by_zero = true,
                 "-bs-no-version-header" => overrides.no_version_header = true,
@@ -10392,6 +10397,9 @@ pub struct ToolingTypedModule {
     pub typed: ToolingTyped,
     /// Node storage of `typed`.
     pub typed_arena: crate::types::typedtree::TypedArena,
+    /// Whether the file's `@@config` leaves binary annotations on: with
+    /// `-bs-no-bin-annot` OCaml writes no `.cmt` or `.cmti` for it.
+    pub binary_annotations: bool,
 }
 
 /// What type-checking a module for editor tooling produced.
@@ -10414,6 +10422,7 @@ pub fn typecheck_structure_for_tooling(
     module_name: &str,
     options: &CompilerOptions,
     registry: &ModuleRegistry,
+    has_interface: bool,
 ) -> ToolingTypedModule {
     let file_config = extract_file_config_from_structure(structure, arena);
     // The frontend raised on any payload these cannot read.
@@ -10433,8 +10442,28 @@ pub fn typecheck_structure_for_tooling(
             &frontend_warning_specs,
         );
         offer_unit_to_checker(options.checker, filename);
-        let typed = match env.and_then(|env| type_structure(&mut tctx, &env, arena, structure)) {
-            Ok((typed_structure, _final_env)) => ToolingTyped::Implementation(typed_structure),
+        let typed = env.and_then(|env| {
+            type_structure(&mut tctx, &env, arena, structure).map(|(typed, _final_env)| (typed, env))
+        });
+        let typed = match typed {
+            Ok((typed_structure, env)) => {
+                // typemod.ml:1742-1758: an implementation is checked against
+                // its interface, which records the values the interface
+                // exports (`Cmt_format.record_value_dependency`). The build
+                // reported a mismatch already.
+                if has_interface {
+                    let _ = check_compunit_inclusion_for_errors(
+                        &mut tctx,
+                        &env,
+                        &typed_structure,
+                        filename,
+                        &|| read_in_process_source(filename),
+                        filename,
+                        options.current_unit_name().as_deref(),
+                    );
+                }
+                ToolingTyped::Implementation(typed_structure)
+            }
             Err(e) => {
                 let source = read_in_process_source(filename);
                 let report = match tctx
@@ -10454,6 +10483,7 @@ pub fn typecheck_structure_for_tooling(
         type_ctx,
         typed,
         typed_arena,
+        binary_annotations: !file_config.no_bin_annot,
     }
 }
 
@@ -10506,6 +10536,7 @@ pub fn typecheck_signature_for_tooling(
         type_ctx,
         typed,
         typed_arena,
+        binary_annotations: !file_config.no_bin_annot,
     }
 }
 

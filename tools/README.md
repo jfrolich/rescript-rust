@@ -28,11 +28,20 @@ Write JSON:
 rescript-tools doc src/EntryPointLibFile.res > doc.json
 ```
 
+`doc <file>` runs `rescript doc <file>`: builds write no `.cmt` files to read
+the module from, so it type-checks the file's project first, without writing
+files, and fails when the project has an error.
+
 ### Reanalyze
 
 ```sh
 rescript-tools reanalyze --help
 ```
+
+`reanalyze` type-checks the project it runs in, without writing files, and
+reports dead code (`-dce`), exceptions that are thrown but not annotated
+(`-exception`) and possible infinite loops (`-termination`); `-config` reads
+which of them to run from the `reanalyze` section of `rescript.json`.
 
 ## Contributor documentation
 
