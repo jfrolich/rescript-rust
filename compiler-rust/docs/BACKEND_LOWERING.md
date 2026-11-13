@@ -3247,6 +3247,13 @@ The following trunk export sites are inventoried only, not converted:
 | `call::inline_external_function` fresh LamArena/body import/bridge fragment | per inline candidate graph and traversal storage | pending |
 | `complete_unit` consumed root export identifier payload | one final compatibility payload, protecting shared immutable shapes | final export boundary, outside lowering proof |
 
+The later trunk close-decision integration also adds append-only variable facts
+and copied-run decisions to Scope. Repeat reservations now include those pools;
+capacity checks cover sites, site heads, occurrence counts, variable facts,
+decisions and the retained return spine. The lowering-import wrapper is preserved
+in the export-ownership regression. Close decisions and export functionality are
+unchanged; all existing allocation proofs still pass after the integration.
+
 ### 7.5.1 Concurrent loop, label and recursive-value additions
 
 The baseline exclusions for `loops.rs`, `label.rs` and `rec.rs` no longer apply
