@@ -556,6 +556,18 @@ fn application_width_and_na_spines_have_linear_step_counts() {
 }
 
 #[test]
+fn method_receiver_is_held_without_detaching_method() {
+    use crate::lambda::{ApInfo, ApplyStatus, LamLoc, lam_primitive::Primitive};
+    let mut a = LamArena::new();
+    let object = a.var(Ident::new("object", 1, IdentFlags::NONE));
+    let callee = a.prim_raw(Primitive::PjsObjectGet("m".into()), &[object], LamLoc::NONE);
+    let one = a.const_(C::int(1));
+    let arg = a.assign(Ident::new("state", 2, IdentFlags::NONE), one);
+    let root = a.apply_raw(callee, &[arg], ApInfo { status: ApplyStatus::Uncurry, loc: LamLoc::NONE });
+    compare(a, root);
+}
+
+#[test]
 fn loop_arguments_match_legacy() {
     use crate::lambda::{ApInfo, ApplyStatus, LamLoc};
     let mut source = LamArena::new();
