@@ -517,8 +517,10 @@ fn import_with_facts(arena: &LamArena, root: Lam, has_binder: &[u8], reachable: 
         Enter(Lam),
         Finish(L, usize),
     }
-    let mut importer = Importer::default();
-    importer.export_vars = lowering.then(Vec::new);
+    let mut importer = Importer {
+        export_vars: lowering.then(Vec::new),
+        ..Importer::default()
+    };
     importer.bir.begin_bulk();
     let mut work = vec![Work::Enter(root)];
     let mut values = Vec::new();
