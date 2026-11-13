@@ -12,8 +12,9 @@ cat > rescript.json <<'JSON'
 JSON
 pid=''
 trap 'if [[ -n $pid ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi' EXIT
-for package in belt runtime; do
+for package in belt runtime touch; do
   for mode in snapshot off; do
+    if [[ $package == touch && $mode == off ]]; then continue; fi
     for name in belt runtime; do
       target="node_modules/@rescript/$name"
       mkdir -p "$target"
@@ -39,13 +40,18 @@ for package in belt runtime; do
         cat "$work/$package-$mode.log"; exit 1
       fi
     fi
-    if [[ $package == belt ]]; then
+    if [[ $package == touch ]]; then
+      touch node_modules/@rescript/belt/src/Belt_Array.res
+    elif [[ $package == belt ]]; then
       python3 -c 'from pathlib import Path; p=Path("node_modules/@rescript/belt/src/Belt_Float.res"); p.write_text(p.read_text().replace("| i => Some(i)", "| i => Some(i +. 1.0)"))'
     else
       python3 -c 'from pathlib import Path; p=Path("node_modules/@rescript/runtime/Stdlib_List.res"); p.write_text(p.read_text().replace("let length = xs => lengthAux(xs, 0)", "let length = xs => lengthAux(xs, 1)"))'
     fi
     wait_for_pattern_count "$work/$package-$mode.log" 'Finished .*compilation' 2 60
-    if [[ $mode == snapshot ]]; then
+    if [[ $package == touch ]]; then
+      wait_for_pattern_count "$work/$package-$mode.log" 'Keeping the prebuilt @rescript/belt: its sources are unchanged' 1 60
+      if grep -q 'Not using the prebuilt' "$work/$package-$mode.log"; then exit 1; fi
+    elif [[ $mode == snapshot ]]; then
       grep -q "Not using the prebuilt @rescript/$package:.*rest of this watch session" "$work/$package-$mode.log"
     fi
     exit_watcher
@@ -61,6 +67,10 @@ for package in belt runtime; do
     # Successful fixture must have no diagnostics in either mode.
     if grep -E 'Warning number|Syntax error|We.ve found a bug' "$work/$package-$mode.log"; then exit 1; fi
   done
-  diff -r "$work/$package-snapshot" "$work/$package-off"
-  success "$package watch output and diagnostics match from-source"
+  if [[ $package == touch ]]; then
+    success 'Belt touch keeps the snapshot'
+  else
+    diff -r "$work/$package-snapshot" "$work/$package-off"
+    success "$package watch output and diagnostics match from-source"
+  fi
 done
