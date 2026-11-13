@@ -9,6 +9,8 @@ pub mod annotation;
 pub mod common;
 pub mod dce;
 pub mod dce_solve;
+pub mod exception;
+pub mod exn_lib;
 pub mod log;
 pub mod traverse;
 
@@ -345,6 +347,7 @@ fn module_name_of_source(source: &str) -> String {
 #[derive(Default)]
 struct Collected {
     dce: Vec<dce::FileData>,
+    exception: Vec<exception::FileResult>,
 }
 
 /// One analysis run: its configuration, output and the project it reads.
@@ -461,6 +464,13 @@ impl Run<'_> {
                 dce::process_file(&tree, &mut self.log, config, &file, annots, has_interface);
             self.collected.dce.push(data);
         }
+        if config.run.exception
+            && let ToolingTyped::Implementation(structure) = &source.typed.typed
+        {
+            let result =
+                exception::process_structure(&tree, &mut self.log, config, &file, structure);
+            self.collected.exception.push(result);
+        }
     }
 
     /// `Reanalyze.run_analysis`.
@@ -502,6 +512,10 @@ impl Run<'_> {
             for issue in dce_solve::solve(self.config, self.files, data) {
                 self.log.warning(issue.loc, issue.description);
             }
+        }
+        if self.config.run.exception {
+            let results = std::mem::take(&mut self.collected.exception);
+            exception::run_checks(self.config, self.files, &mut self.log, results);
         }
     }
 }
