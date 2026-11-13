@@ -534,21 +534,28 @@ impl PortablePersStruct {
         self.summary.get_or_init(|| {
             Arc::new(super::item_deps::SignatureSummary::of(
                 &self.ps_name,
-                &self.decode_signature(encoded),
+                &self.decode_signature(encoded, None),
             ))
         })
     }
 
     /// The main signature, decoded after ensuring bytes exist.
     pub fn signature(&self) -> PortableSignature {
-        self.decode_signature(self.encoded())
+        self.decode_signature(self.encoded(), None)
     }
 
-    fn decode_signature(&self, encoded: &EncodedSignatures) -> PortableSignature {
+    fn signature_for_attempt(&self, ctx: &TypeContext) -> PortableSignature {
+        self.decode_signature(self.encoded(), Some(ctx))
+    }
+
+    fn decode_signature(&self, encoded: &EncodedSignatures, ctx: Option<&TypeContext>) -> PortableSignature {
         if crate::perf_counters::enabled()
             && self.published_generation == Some(crate::types::thread_store::build_generation())
         {
-            crate::perf_counters::record_published_signature_decode();
+            match ctx {
+                Some(ctx) => crate::perf_counters::record_attempt_signature_decode(ctx),
+                None => crate::perf_counters::record_published_signature_decode(),
+            }
         }
         let mut sig = encoded.sig.decode();
         self.rebase_names(&mut sig.cmi_longident_names);
@@ -2197,7 +2204,7 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         }
     }
     let sig = if shareable {
-        let portable = pps.signature();
+        let portable = pps.signature_for_attempt(ctx);
         let intern = |name: &str| store.intern_longident_name(name);
         let files = FileRemap::new(&portable.cmi_longident_names, &intern);
         let map = |file| files.map(file);
@@ -2208,7 +2215,7 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         );
         internalize_signature_into_store(&portable.ps_sig, &portable.type_graph, &locs, store)
     } else {
-        let portable = pps.signature();
+        let portable = pps.signature_for_attempt(ctx);
         let intern = |name: &str| ctx.intern_cmi_longident_name(name);
         let files = FileRemap::new(&portable.cmi_longident_names, &intern);
         let map = |file| files.map(file);

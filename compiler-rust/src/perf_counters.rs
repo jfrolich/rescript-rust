@@ -294,6 +294,11 @@ fn gentype_counts_include_empty_translations_and_separate_annotation_classes() {
     assert_eq!(counts[1].snapshot(), (1, 5));
 }
 
+/// A per-attempt fallback decode, as opposed to the world's once-per-build import.
+pub(crate) fn record_attempt_signature_decode(ctx: &crate::types::TypeContext) {
+    ctx.record_attempt_counter(|counts| counts.signature_decodes += 1);
+}
+
 /// A main-signature decode on loading a unit published in this build.
 pub fn record_published_signature_decode() {
     if enabled() {
@@ -489,6 +494,7 @@ pub(crate) struct AttemptCounters {
     checker: checker::Counts,
     publication: PublicationCounts,
     gentype: [GentypeCounts; 2],
+    signature_decodes: u64,
 }
 
 impl AttemptCounters {
@@ -515,6 +521,7 @@ impl AttemptCounters {
         for (total, count) in self.mutations.iter_mut().zip(other.mutations) {
             *total += count;
         }
+        self.signature_decodes += other.signature_decodes;
         self.snapshots += other.snapshots;
         self.backtracks += other.backtracks;
         self.restores += other.restores;
@@ -1269,6 +1276,7 @@ pub fn print_report() {
     eprintln!(
         "[compiler-counter] published_signature_decodes={}",
         PUBLISHED_SIGNATURE_DECODES.load(Ordering::Relaxed)
+            + with_totals(|counts| counts.signature_decodes)
     );
     let (publication, gentype) = with_totals(|totals| (totals.publication.clone(), totals.gentype));
     let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
@@ -2448,14 +2456,11 @@ mod publication_guard_tests {
     }
 }
 
-/// The process totals plus the counts `ctx` holds and has not published,
-/// without mutation. O(1): one lock acquisition and a fixed number of
-/// field reads. Item deltas require a single compiler worker; callers must
-/// not interpret concurrent process deltas as item attribution.
+/// The current attempt's four census counts. O(1), without a global lock.
+/// Item attribution happens before retention, so another unit's publication
+/// (including one on the same thread) must not contribute to these deltas.
 pub fn derived_snapshot(ctx: &crate::types::TypeContext) -> [u64; 4] {
-    let totals = with_totals(AttemptCounters::derived);
-    let local = ctx.attempt_counter(AttemptCounters::derived);
-    std::array::from_fn(|i| totals[i] + local[i])
+    ctx.attempt_counter(AttemptCounters::derived)
 }
 
 #[cfg(test)]
@@ -2602,7 +2607,7 @@ mod attempt_tests {
             std::mem::size_of::<usize>()
         );
         // One heap block per counting context, never per probe or node.
-        assert_eq!(std::mem::size_of::<AttemptCounters>(), 1424);
+        assert_eq!(std::mem::size_of::<AttemptCounters>(), 1432);
     }
 
     #[test]
@@ -2632,14 +2637,43 @@ mod attempt_tests {
         // The census reader sees the attempt's unpublished counts.
         let snapshot = super::derived_snapshot(&ctx);
         let expected = [OPERATIONS, OPERATIONS, 3 * OPERATIONS, 4 * OPERATIONS];
-        assert_eq!(
-            std::array::from_fn::<u64, 4, _>(|i| snapshot[i] - totals_before[i]),
-            expected
-        );
+        assert_eq!(snapshot, expected);
         drop(ctx);
         let (after, totals_after) = published(AttemptCounters::derived);
         assert_eq!(after, before);
         assert_eq!(totals_after, totals_before);
+    }
+
+    #[test]
+    fn census_reads_ignore_other_retained_attempts() {
+        let current = context();
+        current.defer_attempt_counters();
+        let sibling = context();
+        sibling.defer_attempt_counters();
+        let (left, right) = (int(&sibling), int(&sibling));
+        let before = super::derived_snapshot(&current);
+        for _ in 0..OPERATIONS {
+            probe_every_family(&sibling, left, right);
+        }
+        sibling.keep_attempt_counters();
+        assert_eq!(super::derived_snapshot(&current), before);
+    }
+
+    #[test]
+    fn fallback_signature_decodes_follow_the_attempt() {
+        super::reset_for_test();
+        for retained in [false, true] {
+            let ctx = context();
+            ctx.defer_attempt_counters();
+            for _ in 0..OPERATIONS {
+                super::record_attempt_signature_decode(&ctx);
+            }
+            assert_eq!(ctx.attempt_counter(|c| c.signature_decodes), OPERATIONS);
+            if retained { ctx.keep_attempt_counters(); }
+            drop(ctx);
+            assert_eq!(super::with_totals(|c| c.signature_decodes),
+                if retained { OPERATIONS } else { 0 });
+        }
     }
 
     #[test]

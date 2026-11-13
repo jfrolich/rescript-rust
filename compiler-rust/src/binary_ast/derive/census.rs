@@ -74,7 +74,7 @@ pub struct Census {
     pub js_lines: Pair,
     /// Derived/other deltas: fresh variables, top-level unifications, instance
     /// copied nodes, lazy environment hits+misses. Null unless counters are
-    /// enabled and RAYON_NUM_THREADS=1; counters are process-global.
+    /// enabled; counts belong to this attempt, independently of worker count.
     pub checker_counters: Option<[[u64; 4]; 2]>,
     /// Base shape class per generated binding, in generation order.
     pub shape_classes: Vec<&'static str>,
@@ -107,8 +107,7 @@ impl Census {
             typecheck: Pair::default(), conversion: Pair::default(), lambda_lowering: Pair::default(),
             lambda_passes: Pair::default(), lowering: Pair::default(), printing: Pair::default(),
             environment: Pair::default(), signature: Pair::default(), gentype: Pair::default(),
-            js_bytes: Pair::default(), js_lines: Pair::default(), checker_counters: (crate::perf_counters::enabled()
-                && std::env::var("RAYON_NUM_THREADS").as_deref() == Ok("1"))
+            js_bytes: Pair::default(), js_lines: Pair::default(), checker_counters: crate::perf_counters::enabled()
                 .then_some([[0; 4]; 2]),
             typed_groups: Vec::new(), shape_classes: Vec::new(), shape_nodes: Vec::new(),
             shape_parameterised: Vec::new(), shape_recursive: Vec::new(), templates: Vec::new(),
@@ -125,8 +124,7 @@ impl Census {
         let i = start as usize;
         self.typed_groups.get(i / 64).is_some_and(|w| w & (1 << (i % 64)) != 0)
     }
-    /// O(1): snapshot only the already enabled, single-worker counters,
-    /// including the counts `ctx` holds and has not published yet.
+    /// O(1): snapshot the enabled attempt-local counters before retention.
     pub fn counter_snapshot(&self, ctx: &crate::types::TypeContext)
         -> Option<([u64; 4], [u64; 4])> {
         self.checker_counters.map(|counts| (crate::perf_counters::derived_snapshot(ctx),

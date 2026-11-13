@@ -1150,14 +1150,23 @@ resets these two observation counters after dependency preparation, before
 checking its selected source; a frontend failure then has zero attempts. These are diagnostic controls,
 not changes to generated JavaScript.
 
-The journal's mutation/snapshot/backtrack counters are plain attempt-local
-integers published only for a retained attempt. Dropped local type-node
-counts are suppressed. Other contextual instrumentation still needs migration:
-`record_fresh_var`, `record_copy`, `record_store_build_nodes`, `census_unify`,
-`census_instance`, `census_generalize`, `census_update_level`, the qualified
-component probes, and `frozen::record`, `store_views::*` and `world::*` probes
-still publish directly. The implementation therefore does **not yet satisfy**
-the complete discarded-counter isolation requirement.
+Context-reachable probes now count in a lazily allocated per-attempt block:
+journal operations, type creation/copying, unification and traversal census,
+lazy/qualified lookup, frozen-store access, store views, signature copying,
+qualification and freshening, exported signatures, publication/freezing and
+GenType translation. Discarded contexts publish none of these counts. Retained
+contexts publish on keep and flush later work on drop; reusable world scratch
+contexts flush after each build. The CLI flushes retained work before reporting.
+
+Derived-item counter snapshots read only the current context, not global totals,
+so other workers' retained attempts cannot contaminate item attribution. The
+census no longer needs a single-worker restriction. Per-compilation fallback
+signature decodes are local too; shared world imports remain once-per-build.
+Global observations are `check_attempts`, `explain_reruns`, registry snapshots,
+shared world construction and import/decode work. Publication IDs allocate
+identity, rather than measuring work; discarded IDs may leave gaps. Tests cover
+10,000 operations per counter family, discarded/retained attempts, post-keep
+flushes and sibling-publication isolation.
 
 Measured evidence, not a replacement for the remaining gates:
 
@@ -1195,7 +1204,7 @@ Attempt order (each row starts with fresh context and initial environment):
 The batch path must freeze its private inferred signature before raw translation
 mutates type nodes; moving that freeze after translation fails the Belt snapshot
 proof. The frozen value is now kept private until validation completes, but its
-freeze/publication instrumentation still needs an isolation audit. Derived-plan
+freeze/publication instrumentation is attributed to the owning attempt. Derived-plan
 fallback abandons the context before the Explain decision, without publishing
 its counters. The source owner still reparses general syntax outside this loop;
 composing that frontend transition into shared attempt settings remains open.
