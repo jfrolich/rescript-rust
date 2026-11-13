@@ -1025,8 +1025,11 @@ boundary using the legacy rule oracle; no alternate production path remains.
 
 The count trial initially included export-tuple references. These belong to
 finding 2/T4a, not to a flattening failure: the test
-`export_tuple_occurrences_are_not_the_tailcall_pass_input_counts` pins
-built=1 versus post-coercion C0=0 with identical final text. Repeating the
+`export_tuple_occurrences_are_not_the_tailcall_pass_input_counts` pinned
+built=1 versus post-coercion C0=0 with identical final text. (T4a closed
+that drift: the lowering's own export coercion releases the reference, and
+the test, now `export_coercion_consumes_the_export_tuple_occurrence`,
+asserts built=0, equal to C0.) Repeating the
 experiment subtracted exactly the references in that sentinel tuple from
 the comparison (not from `built`); the printed-text difference remained.
 The trial observed 331 excluded occurrences in 331 variable rows across 73

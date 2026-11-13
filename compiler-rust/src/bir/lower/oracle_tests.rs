@@ -953,10 +953,13 @@ fn a_declaration_the_tail_call_pass_finds_dead_is_not_materialised() {
 }
 
 #[test]
-fn export_tuple_occurrences_are_not_the_tailcall_pass_input_counts() {
-    // T4b count experiment, reduced from Dom_storage.getItem: the output
-    // tuple carries one reference which export coercion consumes before P1/P2.
-    // No statement-list reader or flattening rule is involved in this drift.
+fn export_coercion_consumes_the_export_tuple_occurrence() {
+    // Reduced from Dom_storage.getItem. The output tuple carries one
+    // reference, which export coercion consumes before P1/P2. While the
+    // lowering left coercion to the legacy code, `built` kept that reference
+    // (1 against the tail-call pass's 0: the drift the T4b count experiment
+    // met). With coercion on rows (T4a) the lowering releases the reference
+    // itself, so `built` is the count the tail-call pass reads.
     use crate::lambda::{LamLoc, TagInfo};
     use crate::lambda::lam_primitive::{Mutable, Primitive};
     use crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_pass;
@@ -976,7 +979,7 @@ fn export_tuple_occurrences_are_not_the_tailcall_pass_input_counts() {
     let lowered = lower(input, None, false).unwrap();
     let var = lowered.program.idents.iter().position(|&id| id == f).unwrap();
     let built = lowered.program.arena.js_scope.as_ref().unwrap().uses[var].built;
-    assert_eq!(built, 1);
+    assert_eq!(built, 0);
 
     let mut compiler = LambdaCompiler::new();
     let (_, check) = compiler.compile_deps_program_with_lower_check::<true>(a, root, Default::default());
