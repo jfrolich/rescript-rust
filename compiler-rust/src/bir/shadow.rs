@@ -930,7 +930,6 @@ pub(crate) struct LowerCandidate {
     /// original identifiers whose names they reserve.
     pub exports: Vec<crate::ident::Ident>,
     pub reservations: Vec<crate::ident::Ident>,
-    pub finished: crate::lambda::lam_compile::OutputFinished,
     pub dynamic_imports: Vec<crate::js_ir::ModuleId>,
     pub stats: super::lower::SwitchStats,
 }
@@ -973,18 +972,11 @@ pub(crate) fn prepare_lower(
         compare_lower_text("P1", "probe vs direct", &print(&direct), &print(&exported))
             .map_err(LowerFailure::Error)?;
     }
-    use crate::lambda::lam_compile::OutputFinished;
-    let finished = match lowered.finished {
-        super::lower::Finished::True => OutputFinished::True,
-        super::lower::Finished::False => OutputFinished::False,
-        super::lower::Finished::Dummy => OutputFinished::Dummy,
-    };
     Ok(LowerCandidate {
         arena: exported.program.arena,
         block: exported.program.block,
         exports: lowered.coerced.exports,
         reservations: lowered.coerced.reservations,
-        finished,
         dynamic_imports: lowered.dynamic_imports,
         stats: lowered.switch_stats,
     })

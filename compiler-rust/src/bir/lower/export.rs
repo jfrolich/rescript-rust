@@ -3,7 +3,8 @@
 //! completes it, and the exports are coerced on top-level rows:
 //! O:209 extract_toplevel_exports and C:1099
 //! coerce_toplevel_exports_with_name_reservations with the tail-move helpers
-//! of js_shake.rs (S).
+//! of the legacy shake module (S). OCaml references name the file under
+//! `compiler/core` without its prefix: `coercion.ml` and `compile_main.ml`.
 use super::*;
 use crate::bir::{JsPayload, NodeFlags, Op};
 use crate::lambda::TagInfo;
@@ -31,6 +32,11 @@ impl Row {
     const REMOVED: u32 = 32;
     /// A rebound export was inserted before this row.
     const ANCHOR: u32 = 64;
+    /// A rebound export inserted before an `ANCHOR` row; it is written there.
+    const INSERTED: u32 = 128;
+    /// A declaration after the top level: a rebound export, or an export a
+    /// finished top level left undeclared. No statement while the fold runs.
+    const TAIL: u32 = 256;
     fn has(self, bits: u32) -> bool {
         self.bits & bits == bits
     }
@@ -118,8 +124,11 @@ pub(super) struct Tables {
     names: ahash::AHashMap<Name, u32>,
     /// Rebound exports inserted before a row, by ascending row.
     inserted: Vec<(u32, NodeId)>,
-    /// Rebound exports after the top level, in fold order.
-    rebound: Vec<NodeId>,
+    /// The variable each export selects, in export order.
+    selected: Vec<VarId>,
+    /// The fold is running: the declarations after the top level are not
+    /// in the block yet (C:1238).
+    folding: bool,
     /// The block was flattened: a moved alias did it (S:160 substitute_after).
     flattened: bool,
     /// The last row plus one with the bit, among the statements of the
@@ -142,7 +151,7 @@ pub(crate) struct Coerced {
 
 impl State {
     /// O:209 extract_toplevel_exports and the finished case of
-    /// lam_compile_main.ml:390-395. Reads the unit's last value: an export
+    /// compile_main.ml:390-395. Reads the unit's last value: an export
     /// block gives the export identifiers and leaves its values, detached, in
     /// `Tables::values` in export order; the heads of a comma that ends in
     /// an export block become effect statements; any other value is one
@@ -272,7 +281,8 @@ impl State {
         t.seen.resize(variables, false);
         t.row_of.clear();
         t.inserted.clear();
-        t.rebound.clear();
+        t.selected.clear();
+        t.folding = true;
         t.flattened = false;
         t.last_function = 0;
         t.last_plain = 0;
@@ -364,7 +374,7 @@ impl State {
     /// the flattened list (`flat`), or the block as it is. One read.
     fn visible(&self, row: u32, flat: bool) -> bool {
         let bits = self.coercion.rows[row as usize].bits;
-        if bits & Row::REMOVED != 0 {
+        if bits & Row::REMOVED != 0 || (bits & Row::TAIL != 0 && self.coercion.folding) {
             return false;
         }
         if flat || self.coercion.flattened {
@@ -691,7 +701,9 @@ impl State {
                 row -= 1;
                 self.coercion.steps += 1;
                 let bits = self.coercion.rows[row as usize].bits;
-                if bits & (Row::BLOCK | Row::REMOVED) == 0 && self.has_toplevel_effect(row) {
+                if bits & (Row::BLOCK | Row::REMOVED | Row::INSERTED | Row::TAIL) == 0
+                    && self.has_toplevel_effect(row)
+                {
                     self.coercion.last_effect = row + 1;
                     break;
                 }
@@ -710,7 +722,7 @@ impl State {
             t.row_of.resize(self.arena.nodes.len(), 0);
             for (index, row) in t.rows.iter().enumerate() {
                 t.steps += 1;
-                if row.bits & Row::REMOVED == 0 {
+                if row.bits & (Row::REMOVED | Row::INSERTED | Row::TAIL) == 0 {
                     t.row_of[row.stmt.index()] = (index as u32 + 1) << 1;
                 }
             }
@@ -930,10 +942,11 @@ impl State {
         self.arena.release(stmt);
     }
 
-    /// B:1420 define, for an export: `let export = value`. When the export
-    /// variable is declared already, the declaration binds a copy that
-    /// prints as the export. Constant.
-    fn define(&mut self, var: VarId, value: NodeId, kind: LetKind) -> NodeId {
+    /// B:1420 define, for the export `export`: `let var = value`, as a row
+    /// of kind `place` (`INSERTED` or `TAIL`) that carries the export's
+    /// name. When the variable is declared already, the declaration binds a
+    /// copy that prints as the variable. Constant.
+    fn define(&mut self, export: u32, place: u32, var: VarId, value: Option<NodeId>, kind: LetKind) -> NodeId {
         let var = if self.arena.vars.binder(var).is_some() {
             let copy = self.arena.new_var_id(self.arena.vars.name(var), self.arena.vars.order(var));
             let origin = self.origin(var);
@@ -945,13 +958,35 @@ impl State {
             var
         };
         let stmt = self.arena.new_node(
-            View::SDecl {
-                var,
-                value: Some(value),
-            },
+            View::SDecl { var, value },
             kind as u16 | ((crate::js_ir::op::UsedStats::default() as u16) << 2),
         );
-        self.built(stmt)
+        self.built(stmt);
+        // The declaration is a row of the final block: C:801 and O:30 read it.
+        let row = self.coercion.rows.len() as u32;
+        let mut bits = Row::DECL | place;
+        if let Some(value) = value {
+            bits |= Row::VALUE;
+            if self.arena.node(value).op() == Op::JFun {
+                bits |= Row::FUNCTION;
+            }
+        }
+        self.coercion.rows.push(Row { stmt, bits });
+        self.coercion.name_next.push(0);
+        let origin = self.origin(var);
+        if self.coercion.decl[origin.index()] == 0 {
+            self.coercion.decl[origin.index()] = row + 1;
+        }
+        if value.is_some() {
+            let tail = &mut self.coercion.name_tail[export as usize];
+            if *tail == 0 {
+                self.coercion.name_head[export as usize] = row + 1;
+            } else {
+                self.coercion.name_next[*tail as usize - 1] = row + 1;
+            }
+            *tail = row + 1;
+        }
+        stmt
     }
 
     /// Give a variable the fold created its entries in the dense tables.
@@ -1191,6 +1226,9 @@ impl State {
         while row > 0 {
             row -= 1;
             self.coercion.steps += 1;
+            if self.coercion.rows[row as usize].bits & (Row::INSERTED | Row::TAIL) != 0 {
+                continue;
+            }
             if !self.visible(row, false) {
                 if self.coercion.rows[row as usize].bits & Row::REMOVED != 0 {
                     continue;
@@ -1218,7 +1256,7 @@ impl State {
                 }
             }
         }
-        let stmt = self.define(var, value, LetKind::Strict);
+        let stmt = self.define(export, Row::INSERTED, var, Some(value), LetKind::Strict);
         self.coercion.rows[start as usize].bits |= Row::ANCHOR;
         self.coercion.inserted.push((start, stmt));
         true
@@ -1252,19 +1290,20 @@ impl State {
         self.export_variables(&idents, &mut exports);
         self.build_rows(run, &exports);
         let block_ended = finished == Finished::True;
-        let mut selected = Vec::with_capacity(idents.len());
+        let mut selected = std::mem::take(&mut self.coercion.selected);
         let mut reservations = Vec::new();
         for index in 0..exports.len() as u32 {
             self.coercion.steps += 1;
             let export = exports[index as usize];
             let ident = idents[index as usize];
             let value = self.coercion.values[index as usize];
+            // Read before the arms add rows: the rows are the block's.
             let value_var = match self.arena.view(value) {
                 View::Var { var } => Some(self.origin(var)),
                 _ => None,
             };
             let exact_self_export = value_var == Some(export);
-            // lam_coercion.ml:99-111: an export of its own identifier
+            // coercion.ml:99-111: an export of its own identifier
             // changes the export list only.
             if !exact_self_export {
                 if let Some((replacement, property)) = self.move_alias_to_tail(export, value) {
@@ -1273,9 +1312,8 @@ impl State {
                     let row = self.declaration_row_removed(target);
                     self.release_row(row);
                     self.arena.release(value);
-                    let stmt = self.define(export, late, property);
-                    self.coercion.rebound.push(stmt);
-                    selected.push(ident);
+                    self.define(index, Row::TAIL, export, Some(late), property);
+                    selected.push(export);
                     continue;
                 }
             }
@@ -1290,7 +1328,7 @@ impl State {
                         if chosen != export {
                             reservations.push(ident);
                         }
-                        selected.push(self.ident(chosen));
+                        selected.push(chosen);
                         self.arena.release(value);
                         continue;
                     }
@@ -1303,7 +1341,7 @@ impl State {
                         if chosen != export {
                             reservations.push(ident);
                         }
-                        selected.push(self.ident(chosen));
+                        selected.push(chosen);
                         self.arena.release(value);
                         continue;
                     }
@@ -1312,7 +1350,7 @@ impl State {
             if matches!(self.arena.view(value), View::JUndefined)
                 && ((self.declared(export) && self.can_reuse_undefined(export)) || block_ended)
             {
-                selected.push(ident);
+                selected.push(export);
                 self.arena.release(value);
                 continue;
             }
@@ -1322,32 +1360,31 @@ impl State {
                     let row = self.reused_row_removed(index);
                     self.release_row(row);
                     self.arena.release(value);
-                    let stmt = self.define(export, late, property);
-                    self.coercion.rebound.push(stmt);
-                    selected.push(ident);
+                    self.define(index, Row::TAIL, export, Some(late), property);
+                    selected.push(export);
                     continue;
                 }
                 if let Some(row) = self.reused_binding(index, value) {
                     let (reused, _, property) = self.declared_by(row);
                     // S:599 keeps_declared_same_name_reusable_export_binding.
                     if reused == export && property != LetKind::Variable {
-                        selected.push(ident);
+                        selected.push(export);
                         self.arena.release(value);
                         continue;
                     }
                 }
                 // O:295 reusable_same_name_export_binding.
                 if let Some(reused) = self.reusable_binding(index, export, value) {
-                    selected.push(self.ident(reused));
+                    selected.push(reused);
                     self.arena.release(value);
                     continue;
                 }
             }
             if self.insert_before_equivalent(index, export, value, &exports) {
-                selected.push(ident);
+                selected.push(export);
                 continue;
             }
-            // lam_coercion.ml:140-156: `Ident.rename` of the export.
+            // coercion.ml:140-156: `Ident.rename` of the export.
             let rebound = self.fresh_variable(self.arena.vars.name(export).as_str());
             self.sync_tables();
             reservations.push(ident);
@@ -1356,14 +1393,126 @@ impl State {
             } else {
                 LetKind::Strict
             };
-            selected.push(self.ident(rebound));
-            let stmt = self.define(rebound, value, property);
-            self.coercion.rebound.push(stmt);
+            selected.push(rebound);
+            self.define(index, Row::TAIL, rebound, Some(value), property);
         }
+        self.coercion.selected = selected;
+        let exports = self.resolve_exports(finished);
         Coerced {
-            exports: selected,
+            exports,
             reservations,
         }
+    }
+
+    /// compile_main.ml `declare_undeclared_exports` (C:801) and O:30
+    /// resolve_export_aliases, on the rows of the final block: the
+    /// declarations after the top level are statements now. A finished top
+    /// level gets `let export;` for every export no top-level statement
+    /// declares. Each export then resolves in the order of O:42-47: a kept
+    /// function alias, the self-alias target, a reusable same-name binding,
+    /// the alias chain. Cost: one step per export, per declaration carrying
+    /// its name and per declaration on its alias chains.
+    fn resolve_exports(&mut self, finished: Finished) -> Vec<Ident> {
+        self.coercion.folding = false;
+        let selected = std::mem::take(&mut self.coercion.selected);
+        if finished == Finished::True {
+            // The set of declared identifiers is read before any is added:
+            // an export selected twice is declared twice (C:806-818).
+            let mut undeclared = std::mem::take(&mut self.coercion.trail);
+            debug_assert!(undeclared.is_empty());
+            for (index, &var) in selected.iter().enumerate() {
+                self.coercion.steps += 1;
+                if self.declaration(var, false).is_none() {
+                    undeclared.push(VarId(index as u32));
+                }
+            }
+            for index in undeclared.drain(..) {
+                let var = selected[index.0 as usize];
+                self.define(index.0, Row::TAIL, var, None, LetKind::Strict);
+            }
+            self.coercion.trail = undeclared;
+        }
+        let mut exports = Vec::with_capacity(selected.len());
+        for (index, &var) in selected.iter().enumerate() {
+            self.coercion.steps += 1;
+            let index = index as u32;
+            let resolved = if self.keeps_function_alias(index, var) {
+                var
+            } else if let Some(target) = self.self_alias_target(var) {
+                target
+            } else if let Some(reused) = self.reusable_declared(index, var) {
+                reused
+            } else {
+                self.alias_chain(var)
+            };
+            exports.push(self.ident(resolved));
+        }
+        self.coercion.selected = selected;
+        exports
+    }
+
+    /// O:101 reusable_declared_same_name_export_alias: another declaration
+    /// of the export's name with the export's own initialiser. One step per
+    /// declaration of that name.
+    fn reusable_declared(&mut self, export: u32, var: VarId) -> Option<VarId> {
+        let row = self.declaration(var, true)?;
+        let (_, initialiser, _) = self.declared_by(row);
+        let initialiser = initialiser?;
+        if initialiser == self.coercion.rows[row as usize].stmt {
+            return None;
+        }
+        self.reusable_binding(export, var, initialiser)
+    }
+
+    /// O:150 collect_export_aliases, for one variable: the variable its
+    /// declaration aliases, when the declaration is in the final block.
+    /// Cost: that of `declared_now`.
+    fn alias_of(&mut self, var: VarId) -> Option<VarId> {
+        if !self.declared_now(var) {
+            return None;
+        }
+        let stmt = match self.declaration(var, true) {
+            Some(row) => self.coercion.rows[row as usize].stmt,
+            None => self.arena.vars.binder(var)?,
+        };
+        match self.arena.view(stmt) {
+            View::SDecl { value: Some(value), .. } => match self.arena.view(value) {
+                View::Var { var } => Some(self.origin(var)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// O:112 collect_declared_idents on the final block, for one variable.
+    /// Cost: one step per statement between the declaration and the top
+    /// level; none for a top-level declaration.
+    fn declared_now(&mut self, var: VarId) -> bool {
+        if self.declaration(var, true).is_some() {
+            return true;
+        }
+        if self.coercion.decl[var.index()] != 0 {
+            // Its top-level declaration moved to the export tail.
+            return false;
+        }
+        self.declared(var)
+    }
+
+    /// O:172 resolve_export_alias: follow same-name aliases through declared
+    /// variables. One step per declaration on the chain.
+    fn alias_chain(&mut self, export: VarId) -> VarId {
+        let mut current = export;
+        while let Some(target) = self.alias_of(current) {
+            if self.arena.vars.name(target) != self.arena.vars.name(export)
+                || !self.declared_now(target)
+                || !self.enter_chain(current)
+            {
+                break;
+            }
+            current = target;
+        }
+        self.leave_chain();
+        current
     }
 
     /// The row `substitute_after` just removed for `target`.
@@ -1432,7 +1581,11 @@ impl State {
                 out.push(self.coercion.inserted[inserted].1);
                 inserted += 1;
             }
-            if bits & Row::REMOVED != 0 {
+            if bits & (Row::REMOVED | Row::INSERTED) != 0 {
+                continue;
+            }
+            if bits & Row::TAIL != 0 {
+                out.push(stmt);
                 continue;
             }
             if flattened {
@@ -1453,7 +1606,6 @@ impl State {
             self.arena.release(block);
         }
         self.coercion.path = blocks;
-        out.extend_from_slice(&self.coercion.rebound);
         let list = self.arena.lists.push_iter(out.len(), out.iter().copied());
         self.statements.copied += out.len();
         self.statements.kill(run);

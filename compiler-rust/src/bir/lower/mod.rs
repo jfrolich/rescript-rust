@@ -298,6 +298,8 @@ pub(crate) struct SwitchStats {
 
 pub(crate) struct Lowered {
     pub program: super::bridge_j::Imported,
+    /// Read by the rule tests against the legacy output's flag.
+    #[cfg(test)]
     pub finished: Finished,
     /// The exports after coercion and the names they reserve (`export.rs`).
     pub coerced: export::Coerced,
@@ -578,7 +580,7 @@ impl State {
 
     /// The root block over the top-level list. One step per statement of
     /// the list and one write per catch of the unit.
-    fn finish(mut self, list: crate::bir::ListId, finished: Finished, coerced: export::Coerced) -> Lowered {
+    fn finish(mut self, list: crate::bir::ListId, _finished: Finished, coerced: export::Coerced) -> Lowered {
         let root = self.arena.block_from_list(list);
         // The headers keep their labels and parameters; the exits they count
         // stay in the source, which reads the counts while a function of
@@ -589,7 +591,8 @@ impl State {
         self.arena.finish_bulk(root);
         Lowered {
             program: super::bridge_j::Imported::from_lowering(self.arena, root, self.idents),
-            finished,
+            #[cfg(test)]
+            finished: _finished,
             coerced,
             dynamic_imports: self.dynamic_imports,
             switch_stats: SwitchStats {

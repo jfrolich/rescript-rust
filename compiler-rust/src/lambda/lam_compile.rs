@@ -169,6 +169,28 @@ struct FlatHandler {
 
 // OCaml's export coercion only reuses direct variables and module-field
 // projections while folding `pairs` (`compiler/core/lam_coercion.ml:99-121`).
+/// The program of a coerced top level, before the JS passes.
+fn coerced_program(
+    j: JsArena,
+    block: Block,
+    exports: Vec<Ident>,
+    name_reservations: Vec<Ident>,
+    side_effect: Option<String>,
+) -> DepsProgram {
+    let export_set = exports.iter().copied().collect();
+    DepsProgram {
+        program: Program {
+            arena: j,
+            block,
+            exports,
+            export_set,
+            name_reservations,
+        },
+        modules: vec![],
+        side_effect,
+    }
+}
+
 fn reusable_export_value_candidate(j: &JsArena, value: Expr) -> bool {
     match j.ek(value) {
         ExprKind::Var(_) | ExprKind::Qualified(_) => true,
@@ -836,9 +858,10 @@ impl LambdaCompiler {
             let deps = self.finish_lowered_output(deps, &possible_required_modules);
             let checked = candidate.map(|candidate| match candidate {
                 Ok(candidate) => {
-                    let crate::bir::shadow::LowerCandidate { arena: j, block, exports, reservations, finished, dynamic_imports: dynamic, stats } = candidate;
-                    // The lowering extracted and coerced the exports.
-                    let new_before = self.finish_coerced_output(j, block, exports, reservations, finished, shadow_side_effect);
+                    let crate::bir::shadow::LowerCandidate { arena: j, block, exports, reservations, dynamic_imports: dynamic, stats } = candidate;
+                    // The lowering extracted, coerced and resolved the
+                    // exports (bir/lower/export.rs): no legacy export code.
+                    let new_before = coerced_program(j, block, exports, reservations, shadow_side_effect);
                     self.dynamic_import_modules = dynamic;
                     let new_after = self.finish_lowered_output(new_before.clone(), &possible_required_modules);
                     crate::bir::shadow::LowerCheck::Supported(Box::new(crate::bir::shadow::LowerPair {
@@ -900,7 +923,6 @@ impl LambdaCompiler {
     }
 
     /// C:801–827: undeclared exports and alias resolution after the fold.
-    /// The new lowering folds on rows (`bir/lower/export.rs`) and enters here.
     fn finish_coerced_output(
         &mut self,
         mut j: JsArena,
@@ -930,19 +952,7 @@ impl LambdaCompiler {
             }
         }
         let exports = resolve_export_aliases(&mut j, &block, exports);
-
-        let export_set = exports.iter().copied().collect();
-        DepsProgram {
-            program: Program {
-                arena: j,
-                block,
-                exports,
-                export_set,
-                name_reservations,
-            },
-            modules: vec![],
-            side_effect,
-        }
+        coerced_program(j, block, exports, name_reservations, side_effect)
     }
 
     /// C:828–881: the six JS passes and dependency tail, shared by both lowerings.
