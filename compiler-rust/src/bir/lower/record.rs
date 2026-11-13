@@ -151,7 +151,7 @@ impl State {
     pub(super) fn duplicate_record(&mut self, source: NodeId) -> NodeId {
         let info = self
             .arena
-            .object_info(&vec![PropertyKey::RecordSpread]);
+            .object_info(&[PropertyKey::RecordSpread]);
         plain::node(
             &mut self.arena,
             View::JObject {

@@ -2234,7 +2234,7 @@ mod constructor_tests {
         |b| {
             let values = [leaf(&mut b), leaf(&mut b)];
             let key = b.intern_text("key");
-            let info = b.object_info(&vec![PropertyKey::Literal(key); 2]);
+            let info = b.object_info(&[PropertyKey::Literal(key); 2]);
             b.new_node(
                 View::JObject {
                     values: &values,

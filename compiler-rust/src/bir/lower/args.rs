@@ -324,7 +324,7 @@ mod tests {
                     }
                     4 => {
                         let key = state.arena.intern_text("field");
-                        let info = state.arena.object_info(&vec![
+                        let info = state.arena.object_info(&[
                             crate::bir::PropertyKey::Literal(key),
                         ]);
                         let key = legacy.j.str("field");
