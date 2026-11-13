@@ -1,0 +1,6 @@
+{
+  "name": "verify_specs",
+  "sources": ["src"],
+  "package-specs": { "module": "esmodule", "in-source": false },
+  "suffix": ".mjs"
+}

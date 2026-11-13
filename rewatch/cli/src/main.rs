@@ -218,7 +218,12 @@ fn run_main(telemetry: &telemetry::TelemetryGuard) -> Result<i32> {
                 }
             }
         }
-        cli::Command::Verify { folder, seed, cases } => {
+        cli::Command::Verify {
+            folder,
+            seed,
+            cases,
+            states,
+        } => {
             configure_rayon_for_in_process();
             let built = run_with_in_process_stack(|| {
                 build::build(
@@ -249,6 +254,7 @@ fn run_main(telemetry: &telemetry::TelemetryGuard) -> Result<i32> {
                     &build::verify::Options {
                         seed,
                         cases,
+                        states,
                         color: !plain_output,
                     },
                 )
