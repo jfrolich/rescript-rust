@@ -14,6 +14,6 @@ createRoot(window.document.getElementById("root")).render(
       </>
     }
     lede="A test checks the cases someone thought of. A law says what holds for every value: write it as a function that returns bool, mark it @law, and rescript verify runs it on values made from the types of its parameters, all of them when there are few. Every example on this page is live: the laws run in your browser."
-    about={{ ...about, jump: { href: "#reference", text: "The rules →" } }}
+    about={{ ...about, pullRequest: 254, jump: { href: "#reference", text: "The rules →" } }}
   />,
 );
