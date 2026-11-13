@@ -3014,6 +3014,13 @@ storage allocates zero times after warming and explicit append-only reservation.
 It includes output release, checks unchanged loop/scheduler capacities, and records
 20,001 source visits. No production loop buffer needed replacement.
 
+The labelled-loop fixture also lowers and releases 10,000 nested loops twice,
+including an actual switch-nested break and symbol resolution. Its warmed pass
+allocates zero times, preserves recorded capacities, visits 20,005 source nodes
+and performs 30,007 scheduling steps. The second pass assigns a fresh label
+number rather than reusing the first result. Scheduler vectors remain justified
+unit-owned pools, not per-construct collections.
+
 The integration keeps method-callee evaluation order and default-first string
 switch traversal from trunk. Group outputs still write their stable pooled slots,
 so no vector rotation is needed. Label finalization runs after each successful

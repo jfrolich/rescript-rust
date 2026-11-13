@@ -622,6 +622,58 @@ mod tests {
     }
 
     #[test]
+    fn ten_thousand_nested_labelled_loops_lower_without_allocations() {
+        let mut a = LamArena::new();
+        let mut root = labelled(&mut a);
+        let condition = a.const_(Constant::JsTrue);
+        for _ in 1..10_000 { root = a.while_(condition, root); }
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let run = |s: &mut State| {
+            let output = s.probe(Cx::effect(), root).unwrap();
+            let output = s.realize(Cx::effect(), output);
+            for node in s.statements.statements(output.stmts) { s.arena.release(node); }
+            if let Some(value) = output.value { s.arena.release(value); }
+            s.statements.kill(output.stmts);
+        };
+        let lists = state.arena.lists.storage_shape().0;
+        run(&mut state);
+        state.arena.lists.reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
+        state.free.reserve_repeat();
+        state.loops.reserve(state.loops.len());
+        state.labels.reserve_repeat();
+        state.group_indices.reserve(state.group_indices.len());
+        state.group_nodes.reserve(state.group_nodes.len());
+        state.switch_output_nodes.reserve(state.switch_output_nodes.len());
+        state.switch_output_clauses.reserve(state.switch_output_clauses.len());
+        state.arena.pools.switch_keys.reserve(state.arena.pools.switch_keys.len());
+        state.arena.pools.switch_clauses.reserve(state.arena.pools.switch_clauses.len());
+        state.arena.pools.switches.reserve(1);
+        state.arena.pools.strings.reserve(2);
+        state.arena.pools.text.reserve(24);
+        state.arena.pools.text_index.reserve(1, |&(hash, _)| hash);
+        let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(),
+            s.arena.free_nodes.capacity(), s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1,
+            s.loops.capacity(), s.arena.pools.strings.capacity(), s.arena.pools.text.capacity(),
+            s.arena.pools.text_index.capacity(), s.group_indices.capacity(), s.group_nodes.capacity(),
+            s.switch_output_nodes.capacity(), s.switch_output_clauses.capacity(), s.arena.pools.switch_keys.capacity(),
+            s.arena.pools.switch_clauses.capacity(), s.arena.pools.switches.capacity()];
+        let before = capacities(&state);
+        let labels = state.labels.capacities();
+        let visits = state.source_steps;
+        let scheduled = state.labels.visits;
+        let allocations = allocation_counter::measure(|| run(&mut state));
+        println!("whole labelled loops: {allocations:?}");
+        assert_eq!(allocations.count_total, 0);
+        assert_eq!(capacities(&state), before);
+        assert_eq!(state.labels.capacities(), labels);
+        assert_eq!(state.source_steps - visits, 20_005);
+        assert_eq!(state.labels.visits - scheduled, 30_007);
+        assert_eq!(state.next_loop_label, 2);
+    }
+
+    #[test]
     fn ten_thousand_nested_loops_with_labelled_break_are_linear() {
         let mut a = LamArena::new();
         let mut root = labelled(&mut a);
