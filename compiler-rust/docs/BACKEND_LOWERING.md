@@ -2818,12 +2818,12 @@ The statement stack and node-list pool must be used end to end.
 | `prim.rs:381` `finish_primitive_payload` | `.collect();` | per visited node | reusable scratch buffer; clear, do not free | pending |
 | `prim_block.rs:13` `flat_make_field` | `let mut segments = smallvec::SmallVec::<[&str; 4]>::new();` | per visited node | Converted: spell segments from retained node scratch into retained string storage without a segment vector. | converted |
 | `prim_block.rs:14` `flat_make_field` | `let mut visited = smallvec::SmallVec::<[NodeId; 4]>::new();` | per visited node | Converted: borrow and clear the unit node scratch on both successful and failed module-path probes. | converted |
-| `record.rs:38` `record_copy` | `let mut operands = vec![*init];` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `record.rs:39` `record_copy` | `let mut keys = vec![PropertyKey::RecordSpread];` | per construct | property-key pool handle (requires J payload API change) | pending |
-| `record.rs:83` `record_children` | `pub(super) fn record_children(&self, cx: Cx, record: &Record, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `record.rs:105` `finish_record` | `let mut values = Vec::with_capacity(self.source.lists.get(record.operands).len());` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `record.rs:154` `duplicate_record` | `.js_info(JsPayload::Object(vec![PropertyKey::RecordSpread]));` | per construct | property-key pool handle (requires J payload API change) | pending |
-| `record.rs:177` `record_rest` | `.collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `record.rs:38` `record_copy` | `let mut operands = vec![*init];` | per construct | Candidate operands use State-owned scratch, cleared on both successful recognition and early rejection. | removed |
+| `record.rs:39` `record_copy` | `let mut keys = vec![PropertyKey::RecordSpread];` | per construct | Candidate property keys use State-owned scratch, cleared on both successful recognition and early rejection. | removed |
+| `record.rs:83` `record_children` | `pub(super) fn record_children(&self, cx: Cx, record: &Record, into: &mut Vec<(Cx, NodeId)>) {` | per construct | This borrowed child-buffer parameter appends to retained SourceProbe.children and owns no construct allocation. | justified |
+| `record.rs:105` `finish_record` | `let mut values = Vec::with_capacity(self.source.lists.get(record.operands).len());` | per construct | Final record operands use a retained value buffer, cleared after constructing the pooled object list. | removed |
+| `record.rs:154` `duplicate_record` | `.js_info(JsPayload::Object(vec![PropertyKey::RecordSpread]));` | per construct | The singleton spread key is a stack slice copied directly into the unit property pool. | removed |
+| `record.rs:177` `record_rest` | `.collect();` | per construct | Rest fields append directly to the unit pool and the descriptor holds a RestSpan. | removed |
 | `scope.rs:16` `Scope` | `pub(crate) uses: Vec<Uses>,` | once per unit | stays: dense variable-indexed table | retained |
 | `scope.rs:24` `new` | `uses: vec![Uses::default(); variables],` | once per unit | stays: once per unit | retained |
 | `switch.rs:33` `Plan` | `groups: Vec<usize>,` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
@@ -3063,6 +3063,15 @@ left-to-right execution, including method objects and all supported literal shap
 | --- | --- | --- |
 | `args.rs` evaluate-now `View::children()` | per held literal | converted: child slots are indexed directly in reverse scheduling order, with no SmallVec spill |
 | `args.rs` Evaluation buffers | once per lowering State | retained: work/values/statements reuse their high-water capacity and are cleared before restoration/next use |
+
+Record-copy recognition and finalization now retain candidate operand, property-key
+and result-value buffers in State. Both success and every rejection clear the
+candidate buffers. The whole-Lambda 10,000-override record-copy fixture measures
+zero allocations after warming and append-only pool reservation, with unchanged
+recorded capacities, 10,002 source visits and 40,002 primitive steps. The separate
+10,000-rejected-candidate test also allocates zero times and then successfully
+recognizes a valid candidate using the same cleared storage. The record resume
+remains 12 bytes; no output or traversal ownership moves into the resume.
 
 ### 7.5.1 Concurrent loop, label and recursive-value additions
 
