@@ -180,11 +180,16 @@ fn read_folders_and_dirs(
     is_type_dev: bool,
     record_entries: bool,
 ) -> Result<SourceWalk> {
+    // Normalize once per source directory, before forming any unit path:
+    // O(directory components), one buffer, no filesystem canonicalization.
+    let path_buf: PathBuf = path.components()
+        .filter(|component| *component != std::path::Component::CurDir)
+        .collect();
+    let path = path_buf.as_path();
     let mut map: AHashMap<PathBuf, SourceFileMeta> = AHashMap::new();
     let mut dirs = vec![path.to_path_buf()];
     let mut outputs = AHashMap::new();
     let mut entries = AHashSet::new();
-    let path_buf = PathBuf::from(path);
     fs::metadata(package_dir.join(path))?;
     // Each subfolder, and whether it is reached through a symlink.
     let mut subdirs: Vec<(PathBuf, bool)> = Vec::new();
@@ -1999,6 +2004,20 @@ mod test {
             dep_active.is_empty(),
             "an explicit empty features list should activate no feature-tagged dirs, got {dep_active:?}"
         );
+    }
+
+    #[test]
+    fn runtime_unit_paths_match_source_discovery() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Example.res"), "let x = 1\n").unwrap();
+        let runtime = super::super::compile::runtime_source_paths(root.path()).unwrap();
+        for directory in [".", "./.", ""] {
+            let sources = super::read_folders(&None, root.path(), std::path::Path::new(directory), false, false).unwrap();
+            assert_eq!(sources.len(), 1);
+            let project_path = root.path().join(sources.keys().next().unwrap());
+            assert_eq!(project_path.to_str(), runtime[0].1.to_str());
+            assert!(!project_path.to_str().unwrap().contains("/./"));
+        }
     }
 
     #[cfg(unix)]
