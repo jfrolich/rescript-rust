@@ -230,7 +230,8 @@ pub fn value_names(
             plan::Obligation::Type { .. }
             | plan::Obligation::Label { .. }
             | plan::Obligation::Constructor { .. }
-            | plan::Obligation::Literal { .. } => None,
+            | plan::Obligation::Literal { .. }
+            | plan::Obligation::Equal { .. } => None,
         })
 }
 

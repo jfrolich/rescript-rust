@@ -90,9 +90,7 @@ fn type_facts(typ_idx: CoreTypeIdx, arena: &ParseArena, facts: &mut TypeFacts) {
             // The codec of a user's type that takes arguments takes their
             // codecs one at a time (`t_encode(a)(b)(v)`); a plan describes
             // the library's, which take them at once.
-            let unplanned = if is_json_identifier(lid.txt, arena) {
-                Some(UnplannedForm::JsonIdentity)
-            } else if matches!(arena.get_longident(lid.txt), Longident::Lapply(_, _)) {
+            let unplanned = if matches!(arena.get_longident(lid.txt), Longident::Lapply(_, _)) {
                 Some(UnplannedForm::AppliedModulePath)
             } else if !args.is_empty()
                 && library_codec(EncodeContext::Value, Side::Encode, lid.txt, arena).is_none()
@@ -243,8 +241,8 @@ pub(in crate::binary_ast) fn classify(
     {
         return general(UnmeasuredShape);
     }
-    // A constant fallback and the identity codec of `JSON.t` need body
-    // nodes no slice lowers yet. A record takes a plan when it has a field
+    // A constant fallback still needs a planned codec-composition form.
+    // A record takes a plan when it has a field
     // and its keys and defaults are literal constants; a variant when
     // `variant::planned` admits its constructors.
     let planned_shape = match &decl.ptype_kind {
@@ -498,6 +496,57 @@ impl Builder<'_> {
         }
     }
 
+    /// Cost: O(type path depth), one type node read; no allocation.
+    fn identity_location(&self, spec: Spec) -> Option<LocIdx> {
+        let Spec::Type(typ, _) = spec else { return None; };
+        let CoreTypeDesc::Ptyp_constr((lid, args)) = &self.arena.get_core_type(typ).ptyp_desc
+            else { return None; };
+        (args.is_empty() && is_json_identifier(lid.txt, self.arena)).then_some(lid.loc)
+    }
+
+    /// A closed identity encoder or result constructor decoder, with the
+    /// equation imposed by its surrounding expected type. Cost: O(1) pool
+    /// appends and one equation, plus one constructor obligation for decoding;
+    /// no allocation outside pool growth. The local is relative to this function
+    /// rather than to its embedding record or variant's binders.
+    fn identity_codec(&mut self, slot: Slot, loc: LocIdx) -> (BodyIdx, SkeletonIdx) {
+        let (param, result) = match slot {
+            Slot::Applied(param, result) => (param, result),
+            Slot::Root | Slot::Plain(_) => (self.fresh(), self.fresh()),
+        };
+        let actual = self.sk(SkeletonNode::Arrow { params: 1 });
+        self.var(param);
+        self.var(match self.side { Side::Encode => param, Side::Decode => result });
+        let expected = match slot {
+            Slot::Plain(var) => self.var(var),
+            Slot::Root | Slot::Applied(..) => {
+                let arrow = self.sk(SkeletonNode::Arrow { params: 1 });
+                self.var(param);
+                self.var(result);
+                arrow
+            }
+        };
+        // The expected function shape is established before typing its body.
+        self.arena.plans_mut().push_obligation(Obligation::Equal { expected, actual });
+        let local = self.node(BodyNode::LocalFromEnd(0));
+        let body = match self.side {
+            Side::Encode => local,
+            Side::Decode => {
+                let name = lident_path_static(self.arena, &["Ok"]);
+                let skeleton = self.var(param);
+                self.var(result);
+                let ctor = self.constructor(name, Owner::Result, Site::ConstructAt, 1, skeleton);
+                self.arena.plans_mut().set_constructor_loc(ctor, loc);
+                let body = self.node(BodyNode::Construct { constructor: ctor, arg: local });
+                self.node(BodyNode::At { loc, body })
+            }
+        };
+        let name = self.arena.intern_string("v");
+        let body = self.node(BodyNode::Function { param: name, body });
+        let body = self.node(BodyNode::At { loc, body });
+        (body, expected)
+    }
+
     /// Emit the codec of `spec`: its obligation and skeleton, then those of
     /// its arguments, and the body node that applies the head to each
     /// argument's codec in turn.
@@ -505,6 +554,9 @@ impl Builder<'_> {
     /// and one application per argument, and two or three skeleton nodes per
     /// argument; no allocation beyond the pools' growth.
     fn codec(&mut self, spec: Spec, slot: Slot) -> BodyIdx {
+        if let Some(loc) = self.identity_location(spec) {
+            return self.identity_codec(slot, loc).0;
+        }
         let parts = self.parts(spec);
         let arity = parts.args.len();
         let first_slot = self.scratch.slots.len();
@@ -570,7 +622,12 @@ fn binding(
         scratch,
     };
     let applied = builder.arity(spec) as u32;
-    let codec = builder.codec(spec, Slot::Root);
+    let (codec, stated) = if let Some(loc) = builder.identity_location(spec) {
+        let (codec, ty) = builder.identity_codec(Slot::Root, loc);
+        (codec, Some(ty))
+    } else {
+        (builder.codec(spec, Slot::Root), None)
+    };
     let vars = builder.vars;
     let name = arena.push_string(format!("{type_name}{suffix}"));
     let param = arena.spice_runtime_v();
@@ -591,10 +648,7 @@ fn binding(
         obligations,
         body,
         vars,
-        ty: TypeSource::ResultOf {
-            obligation: first,
-            applied,
-        },
+        ty: stated.map_or(TypeSource::ResultOf { obligation: first, applied }, TypeSource::Stated),
     });
 }
 
@@ -737,7 +791,7 @@ mod tests {
         assert_eq!(general("@spice @unboxed type t = A(int)"), Unboxed);
         assert_eq!(general("@spice type t = {}"), NotYetPlanned(UnplannedForm::EmptyRecord));
         assert_eq!(general("@spice type t = {@spice.key(`k`) x: int}"), NotYetPlanned(UnplannedForm::TemplateLiteral));
-        assert_eq!(general("@spice type t = {x: JSON.t}"), NotYetPlanned(UnplannedForm::JsonIdentity));
+        assert_eq!(classification("@spice type t = {x: JSON.t}"), Classification::Plan);
         assert_eq!(general("@spice type t = {x: pair<string, int>}"), NotYetPlanned(UnplannedForm::AppliedUserCodec));
         assert_eq!(general("@spice type t = array<A.box<int>>"), NotYetPlanned(UnplannedForm::AppliedUserCodec));
         assert_eq!(general("@spice type t = {x: (int, string)}"), UnmeasuredShape);
@@ -746,9 +800,9 @@ mod tests {
         assert_eq!(classification("@spice type t = A | B(int)"), Classification::Plan);
         assert_eq!(general("@spice type t = @spice.as(\"A\") A(int)"), UnsupportedVariant);
         assert_eq!(general("@spice type t = A(pair<string, int>)"), UnsupportedVariant);
-        assert_eq!(general("@spice type t = A(JSON.t)"), UnsupportedVariant);
-        assert_eq!(general("@spice type t = JSON.t"), NotYetPlanned(UnplannedForm::JsonIdentity));
-        assert_eq!(general("@spice type t = array<Js.Json.t>"), NotYetPlanned(UnplannedForm::JsonIdentity));
+        assert_eq!(classification("@spice type t = A(JSON.t)"), Classification::Plan);
+        assert_eq!(classification("@spice type t = JSON.t"), Classification::Plan);
+        assert_eq!(classification("@spice type t = array<Js.Json.t>"), Classification::Plan);
         assert_eq!(general("@spice @spice.fallback(\"x\") type t = string"), NotYetPlanned(UnplannedForm::ConstantFallback));
         for planned in [
             "@spice type t = string",
@@ -1179,6 +1233,7 @@ mod tests {
         for i in binding.obligations.range() {
             let obligation = plans.obligation(ObligationIdx(i as u32));
             out.push(match obligation {
+                Obligation::Equal { .. } => continue,
                 Obligation::Value { name, name_loc, expr_loc, .. } => {
                     let expr_loc = match expr_loc {
                         ExprLoc::OfName => name_loc,
@@ -1201,6 +1256,7 @@ mod tests {
                 Obligation::Constructor { name, site, .. } => match site {
                     Site::Construct => format!("construct {} {dummy:?}", text(name)),
                     Site::ConstructNone => format!("construct {} {none:?}", text(name)),
+                    Site::ConstructAt => format!("construct {} {:?}", text(name), plans.constructor_loc(ObligationIdx(i as u32))),
                     Site::Pattern => format!("pattern {} {none:?}", text(name)),
                     Site::PatternDummy => format!("pattern {} {dummy:?}", text(name)),
                 },
@@ -1212,6 +1268,12 @@ mod tests {
             previous = Some(obligation);
         }
         out
+    }
+
+    #[test]
+    fn json_obligation_names_follow_general_typing_order() {
+        assert_obligations_follow_the_general_form("@spice type t = {value: JSON.t}");
+        assert_obligations_follow_the_general_form("@spice type t = {value: array<JSON.t>}");
     }
 
     /// The obligations of the plan of the last declaration of `source` are

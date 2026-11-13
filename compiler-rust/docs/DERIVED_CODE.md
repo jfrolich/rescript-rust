@@ -632,3 +632,36 @@ trunk.
 The `script-tests` job in `.github/workflows/rust-rewrite-validation.yml` does not
 run the summary unit tests. The pull request supplies the exact additional step;
 no workflow file is changed here.
+
+
+### JSON identity plans
+
+The plan now expresses the identity encoder and `v => Ok(v)` decoder with a
+body-shape equality obligation, a relative local for the closed nested function,
+and explicit constructor/function source locations. The equality uses ordinary
+unification: it does not skip checks for supposedly ground types. Constructor
+lookup and usage marking stay in general typing order.
+
+The application census moves from 6,392 planned bindings before this slice to
+6,534: all 136 `not_yet_planned` bindings and six variant bindings now use plans.
+Two result-constructor retries still remain. The application check-mode build
+finishes compilation. Raw Lambda equality tests cover aliases, arrays, required
+and optional record fields and variant payloads; the inline-source-map oracle
+also passes. The source-map test initially exposed missing function and
+constructor expression locations; those locations now use the existing `At`
+node and a dense explicit-constructor-location side table.
+
+| JSON record work | 1 field | 2 fields | 10,000 fields |
+|---|---:|---:|---:|
+| Discharge lookups | 32 | 52 | 200,012 |
+| Instances | 23 | 37 | 140,009 |
+| Counted unifications | 32 | 55 | 230,009 |
+| Body nodes / lowering visits | 86 | 140 | 540,032 |
+| Raw Lambda terms | 101 | 161 | 600,041 |
+
+An isolated one-worker application comparison against constructor sharing:
+65,145,326,775 → 65,029,449,437 instructions (**−0.1778751%**).
+Both produce 3,980 files with digest
+`0a3d301322cf7febdbf8793ae8c3dcbc1ecbadf44670c3b52cecbc5437a02408`.
+Counts from separate comparison runs vary; this delta uses the two sides of the
+same run, not a baseline borrowed from the previous experiment.

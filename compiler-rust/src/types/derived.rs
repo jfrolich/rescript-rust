@@ -36,6 +36,8 @@ use crate::types::typedtree::EnvRef;
 /// What a discharged obligation resolved to.
 #[derive(Debug, Clone, Copy)]
 pub enum Resolved {
+    /// A body-shape equation discharged by unification; no runtime payload.
+    Equation,
     /// A value: the path its name resolved to, and the instance of its type
     /// that its skeleton was unified with.
     Value {
@@ -71,7 +73,7 @@ impl Resolved {
     pub fn path(self) -> Path {
         match self {
             Resolved::Value { path, .. } | Resolved::Type(path) => path,
-            Resolved::Label(_) | Resolved::Constructor { .. } | Resolved::Literal(_) => {
+            Resolved::Equation | Resolved::Label(_) | Resolved::Constructor { .. } | Resolved::Literal(_) => {
                 unreachable!("a skeleton names a type obligation, a body's free node a value")
             }
         }
@@ -82,7 +84,8 @@ impl Resolved {
     pub fn instance(self) -> TypeExprRef {
         match self {
             Resolved::Value { instance, .. } => instance,
-            Resolved::Type(_)
+            Resolved::Equation
+            | Resolved::Type(_)
             | Resolved::Label(_)
             | Resolved::Constructor { .. }
             | Resolved::Literal(_) => {
@@ -281,7 +284,8 @@ impl DerivedTable {
             .filter_map(|resolved| match resolved {
                 Some(Resolved::Value { path, .. }) => Some(*path),
                 Some(
-                    Resolved::Type(_)
+                    Resolved::Equation
+                    | Resolved::Type(_)
                     | Resolved::Label(_)
                     | Resolved::Constructor { .. }
                     | Resolved::Literal(_),
@@ -384,6 +388,7 @@ pub fn discharge(
     let result = discharge_counting(tctx, env, item, &mut steps);
     if result.is_err() {
         let (kind, shape) = match steps.last {
+            Some(Obligation::Equal { .. }) => ("equation", "body_shape"),
             Some(Obligation::Value { .. }) => ("value", "codec_function"),
             Some(Obligation::Type { .. }) => ("type", "named_type"),
             Some(Obligation::Label { .. }) => ("label", "record"),
@@ -530,6 +535,16 @@ fn discharge_binding(
             }
         );
         let resolved = match plans.obligation(obligation) {
+            Obligation::Equal { expected, actual } => {
+                let (expected, _) = instantiate(ctx, arena, &tctx.typed.derived,
+                    plans.skeleton_from(expected), vars);
+                let (actual, _) = instantiate(ctx, arena, &tctx.typed.derived,
+                    plans.skeleton_from(actual), vars);
+                steps.unification();
+                crate::types::ctype::unify(ctx, &mut tctx.unify_state, expected, actual)
+                    .map_err(|_| Fallback)?;
+                Resolved::Equation
+            }
             Obligation::Value {
                 name,
                 name_loc,
@@ -748,6 +763,10 @@ fn discharge_binding(
                         arena.dummy_loc(),
                         crate::types::usage::ConstructorUsage::Positive,
                     ),
+                    Site::ConstructAt => (
+                        plans.constructor_loc(obligation),
+                        crate::types::usage::ConstructorUsage::Positive,
+                    ),
                     Site::ConstructNone => (
                         arena.none_loc(),
                         crate::types::usage::ConstructorUsage::Positive,
@@ -832,7 +851,7 @@ fn discharge_binding(
                     || desc.cstr_arity != i32::from(arity)
                     || desc.cstr_args.len() != usize::from(arity)
                     || !matches!(desc.cstr_kind, crate::types::ConstructorKind::Ordinary(_))
-                    || (matches!(site, Site::Construct | Site::ConstructNone)
+                    || (matches!(site, Site::Construct | Site::ConstructNone | Site::ConstructAt)
                         && desc.cstr_private == crate::types::PrivateFlag::Private)
                 {
                     return Err(Fallback);
@@ -1348,7 +1367,16 @@ pub(crate) mod tests {
         fields: usize,
         test: impl FnOnce(&mut TypeCheckContext<'_>, &Env, DerivedIdx, &TypeContext),
     ) {
-        let labels: Vec<String> = (0..fields).map(|i| format!("f{i}: int")).collect();
+        with_record_type(fields, "int", test);
+    }
+
+    /// Test-only setup: O(fields) generated source and normal frontend work.
+    pub(crate) fn with_record_type(
+        fields: usize,
+        typ: &str,
+        test: impl FnOnce(&mut TypeCheckContext<'_>, &Env, DerivedIdx, &TypeContext),
+    ) {
+        let labels: Vec<String> = (0..fields).map(|i| format!("f{i}: {typ}")).collect();
         let source = format!("@spice type t = {{{}}}", labels.join(", "));
         let (parser, structure) =
             crate::binary_ast::derive::fixtures::frontend_source(&source, true);
@@ -1409,6 +1437,24 @@ pub(crate) mod tests {
     /// instance each (a field access instantiates inside the checker's
     /// lookup, a type has none), and one counted unification each (a label
     /// or a constructor unifies its argument and its result).
+    #[test]
+    fn ten_thousand_json_fields_discharge_in_linear_steps() {
+        let count = |fields| {
+            let mut steps = Counted::default();
+            with_record_type(fields, "JSON.t", |tctx, env, item, _| {
+                discharge_counting(tctx, env, item, &mut steps).unwrap();
+            });
+            steps
+        };
+        let (one, two, many) = (count(1), count(2), count(10_000));
+        assert_eq!(one, Counted { lookups: 32, instances: 23, unifications: 32 });
+        assert_eq!(two, Counted { lookups: 52, instances: 37, unifications: 55 });
+        assert_eq!(many, Counted { lookups: 200_012, instances: 140_009, unifications: 230_009 });
+        assert_eq!(many.lookups, one.lookups + 9_999 * (two.lookups - one.lookups));
+        assert_eq!(many.instances, one.instances + 9_999 * (two.instances - one.instances));
+        assert_eq!(many.unifications, one.unifications + 9_999 * (two.unifications - one.unifications));
+    }
+
     #[test]
     fn constructor_descriptions_are_shared_within_each_binding() {
         assert_eq!(std::mem::size_of::<(u32, u32)>(), 8);
