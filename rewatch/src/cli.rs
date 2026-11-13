@@ -668,7 +668,8 @@ pub enum Command {
         ppx: Vec<String>,
     },
     /// Build, then run the project's checks: every law (a `let` marked
-    /// `@law`) on values made from the types of its parameters.
+    /// `@law`) on values made from the types of its parameters, and every
+    /// spec (`@spec`) over the states its machine can get into.
     Verify {
         #[command(flatten)]
         folder: FolderArg,
@@ -680,6 +681,10 @@ pub enum Command {
         /// The number of random cases a law is run on.
         #[arg(long, default_value_t = 1000)]
         cases: u32,
+
+        /// The most states of a spec's machine to go through.
+        #[arg(long, default_value_t = 100000)]
+        states: u32,
     },
     /// Print the compiler arguments for a ReScript source file.
     CompilerArgs {
