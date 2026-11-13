@@ -1,0 +1,25 @@
+[package]
+name = "rescript-verify-wasm"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The ReScript compiler as a WebAssembly module, for the live examples of docs/verify"
+
+# wasm32-wasip1: the standard library works there as it is, and the page
+# supplies the few WASI calls the module imports.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rescript-compiler = { path = "../../../../compiler-rust", default-features = false }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[workspace]
