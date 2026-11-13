@@ -417,6 +417,11 @@ pub fn run_command(build_state: &BuildCommandState, cwd: PathBuf, args: Vec<Stri
 /// build keeps source locations, as the diagnostic rebuild does.
 pub fn doc(cwd: &Path, path: &str, plain_output: bool) -> Result<Vec<u8>> {
     let file = cwd.join(path);
+    if !file.is_file() {
+        return Err(anyhow!(
+            "error: failed to generate doc for {path}, there is no such file"
+        ));
+    }
     let project_root = helpers::get_nearest_config(&file)
         .ok_or_else(|| anyhow!("error: failed to generate doc for {path}, it is in no ReScript project"))?;
     let failed = |err: &dyn std::fmt::Display| {

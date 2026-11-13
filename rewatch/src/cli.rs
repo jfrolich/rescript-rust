@@ -324,6 +324,7 @@ mod tests {
         let cli = parse(&["rescript", "doc", "src/A.res"]).unwrap();
         assert!(matches!(cli.command, Command::Doc { path } if path == "src/A.res"));
         assert!(parse(&["rescript", "doc"]).is_err());
+        assert!(parse(&["rescript", "doc", "rescript.json"]).is_err());
     }
 
     // Default command behaviour.
@@ -676,6 +677,7 @@ pub enum Command {
     #[command(hide = true)]
     Doc {
         /// Path to a ReScript source file (.res or .resi)
+        #[arg(value_parser = parse_source_path)]
         path: String,
     },
     /// Run an editor tooling command in the project's running `rescript watch`.
