@@ -820,6 +820,10 @@ pub enum StructureItemDesc {
     Tstr_include(IncludeDeclaration),
     /// Attribute: `@@attr`.
     Tstr_attribute(crate::parser::ast::Attribute),
+    /// A derived value group whose obligations were discharged: the plan,
+    /// with the bound identifiers and the obligation results in the typed
+    /// arena's tables (`TypedArena::derived`).
+    Tstr_derived(crate::binary_ast::derive::plan::DerivedIdx),
 }
 
 // Re-export TypeDeclaration from decl for convenience (internal representation)

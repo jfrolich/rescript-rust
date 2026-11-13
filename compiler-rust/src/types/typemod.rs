@@ -13563,6 +13563,9 @@ fn extract_module_type_from_mod_expr_inner(
                 let current_env_snapshot = local_env.clone();
                 let current_env = current_env_snapshot.as_ref().or(env);
                 match &item.str_desc {
+                    StructureItemDesc::Tstr_derived(_) => {
+                        unreachable!("{}", crate::types::derived::TOP_LEVEL_ONLY)
+                    }
                     StructureItemDesc::Tstr_value(_, bindings) => {
                         for vb in ta.value_bindings(*bindings) {
                             extract_sig_values_from_pattern(
@@ -16145,10 +16148,7 @@ fn type_structure_item_with_census<'a>(
         .and_then(|c| c.counter_snapshot());
     let (typed_item, item_sig, new_env) = type_structure_item(tctx, env, arena, item)?;
     if let (Some(census), Some(start)) = (&mut tctx.derived_census, census_start) {
-        let derived = match item.pstr_desc {
-            ParsedStructureItemDesc::Pstr_value((_, group)) => arena.is_derived_value_group(group),
-            _ => false,
-        };
+        let derived = crate::binary_ast::derive::is_derived_item(item, arena);
         census.account_counters(derived, counter_before);
         let children = census.typecheck.total() - census_before;
         census.typecheck.add(
@@ -16745,6 +16745,50 @@ fn type_structure_item<'a>(
                 vec![],
                 env.clone(),
             ))
+        }
+
+        // A derived item: discharge the obligations of its plan, or, when one
+        // fails, type the value group it stands for.
+        ParsedStructureItemDesc::Pstr_derived(idx) if !tctx.derived_plans => {
+            let general = crate::binary_ast::derive::general_item(arena, loc, *idx);
+            type_structure_item(tctx, env, arena, &general)
+        }
+        ParsedStructureItemDesc::Pstr_derived(idx) => {
+            match crate::types::derived::discharge(tctx, env, *idx) {
+                Ok(discharged) => {
+                    // typemod.ml type_structure: the signature holds the
+                    // value descriptions the bindings have in the environment.
+                    let sig_items = tctx
+                        .typed
+                        .derived
+                        .bound(*idx)
+                        .map(|bound| {
+                            let value_desc = discharged
+                                .env
+                                .lookup_value(&Path::pident(bound.ident))
+                                .expect("derived binding missing from structure environment")
+                                .clone();
+                            crate::types::decl::SignatureItem::SigValue(bound.ident, value_desc)
+                        })
+                        .collect();
+                    Ok((
+                        StructureItem {
+                            str_desc: StructureItemDesc::Tstr_derived(*idx),
+                            str_loc: loc,
+                            str_env: EnvRef(0),
+                        },
+                        sig_items,
+                        discharged.env,
+                    ))
+                }
+                Err(crate::types::derived::Fallback) => {
+                    if let Some(census) = &mut tctx.derived_census {
+                        census.paths.fallback += arena.plans().item(*idx).bindings.len as u64;
+                    }
+                    let general = crate::binary_ast::derive::general_item(arena, loc, *idx);
+                    type_structure_item(tctx, env, arena, &general)
+                }
+            }
         }
 
         ParsedStructureItemDesc::Pstr_value(inner) => {
