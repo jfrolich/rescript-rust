@@ -1521,6 +1521,8 @@ pub struct TypeCheckContext<'a> {
     pub active_recursive_value_ids: Vec<Ident>,
     /// Mirrors OCaml's Experimental_features.LetUnwrap during type checking.
     pub experimental_let_unwrap: bool,
+    /// `crate::verify::Checks::Kept`: laws are exported, not left out.
+    pub keep_checks: bool,
     /// OCaml's `?deprecated_context:FunctionCall` argument (typecore.ml:2594,
     /// 2632): set right before typing the function of an application or the
     /// tag of a tagged template, and taken by the next expression typed.
@@ -1693,6 +1695,7 @@ impl<'a> TypeCheckContext<'a> {
             active_recursive_value_ids: Vec::new(),
             persistent_env: None,
             experimental_let_unwrap: false,
+            keep_checks: false,
             deprecated_function_call: false,
             transparent_modules: false,
             module_expr_semantic_types: HashMap::new(),

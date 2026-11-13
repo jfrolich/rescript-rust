@@ -4,7 +4,9 @@
 //! The page talks to it with one call: it writes a JSON request into the
 //! input buffer, calls `rv_run`, and reads a JSON reply from the output
 //! buffer. Requests are `{"op": "stdlib", ...}` (the runtime sources, once)
-//! and `{"op": "build", ...}` (one ReScript file).
+//! and `{"op": "build", ...}` (one ReScript file). With `"verify": true` a
+//! build also compiles the file with its checks kept, as `rescript verify`
+//! does, for the page to run.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -14,6 +16,7 @@ use rescript_compiler::driver::{self, CompilerOptions};
 use rescript_compiler::js_ir::ModuleFormat;
 use rescript_compiler::parser::code_frame;
 use rescript_compiler::source_text::decode_internal_utf8_runs;
+use rescript_compiler::verify::Checks;
 use rescript_compiler::wasm_vfs;
 use serde::{Deserialize, Serialize};
 
@@ -64,7 +67,13 @@ enum Request {
     /// from source when a program uses them.
     Stdlib { files: BTreeMap<String, String> },
     /// One ReScript file.
-    Build { name: String, source: String },
+    Build {
+        name: String,
+        source: String,
+        /// Also compile the file with its checks kept.
+        #[serde(default)]
+        verify: bool,
+    },
 }
 
 #[derive(Serialize, Default)]
@@ -74,6 +83,16 @@ struct BuildOut {
     js: Option<String>,
     message: Option<String>,
     warnings: Option<String>,
+    /// The file compiled with its checks kept.
+    verify: Option<VerifyOut>,
+}
+
+#[derive(Serialize)]
+struct VerifyOut {
+    /// CommonJS, which the page can load without a module loader.
+    js: String,
+    /// What the compiler says about each check (`laws::Item::to_json`).
+    items: Vec<serde_json::Value>,
 }
 
 /// The compiler reads a source file as one character per byte, so that every
@@ -121,11 +140,13 @@ fn handle(request: Request) -> serde_json::Value {
             });
             serde_json::json!({ "ok": true })
         }
-        Request::Build { name, source } => serde_json::to_value(build(&name, &source)).unwrap_or_default(),
+        Request::Build { name, source, verify } => {
+            serde_json::to_value(build(&name, &source, verify)).unwrap_or_default()
+        }
     }
 }
 
-fn build(name: &str, source: &str) -> BuildOut {
+fn build(name: &str, source: &str, verify: bool) -> BuildOut {
     code_frame::set_color_mode(code_frame::ColorMode::Never);
     let filename = format!("/app/src/{name}");
     let source = to_compiler_text(source);
@@ -146,6 +167,23 @@ fn build(name: &str, source: &str) -> BuildOut {
             out.js = Some(decode_internal_utf8_runs(&compiled.js_output).into_owned());
             if !compiled.warnings.is_empty() {
                 out.warnings = Some(plain(&decode_internal_utf8_runs(&compiled.warnings)).trim().to_string());
+            }
+            if verify {
+                let checks = Checks::kept();
+                let options = CompilerOptions {
+                    output_module_format: Some(ModuleFormat::CommonJs),
+                    checks: checks.clone(),
+                    ..options
+                };
+                if let Ok(kept) =
+                    driver::compile_source_in_process(&source, &filename, &module_name, &options, &registry, false, None)
+                    && let Checks::Kept(items) = checks
+                {
+                    out.verify = Some(VerifyOut {
+                        js: decode_internal_utf8_runs(&kept.js_output).into_owned(),
+                        items: items.lock().unwrap().iter().map(|item| item.to_json()).collect(),
+                    });
+                }
             }
         }
         Err(error) => {

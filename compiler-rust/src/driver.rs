@@ -456,6 +456,8 @@ fn offer_unit_to_checker(choice: CheckerChoice, filename: &str) {
 /// Compiler options that can be passed to the driver.
 #[derive(Clone)]
 pub struct CompilerOptions {
+    /// What to do with the file's checks (`@law`).
+    pub checks: crate::verify::Checks,
     /// Selected once at setup; all modes currently use the old checker.
     pub checker: CheckerChoice,
     /// Optional derived-code census output, read once when options are created.
@@ -763,6 +765,7 @@ impl CompilerOptions {
 impl Default for CompilerOptions {
     fn default() -> Self {
         Self {
+            checks: crate::verify::Checks::LeftOut,
             checker: CheckerChoice::from_env(),
             derived_census: Self::derived_census_from_env(),
             derived_path: DerivedPath::from_env(),
@@ -846,6 +849,7 @@ impl CompilerOptions {
 }
 
 fn apply_warning_options(tctx: &mut TypeCheckContext<'_>, options: &CompilerOptions) {
+    tctx.keep_checks = options.checks.are_kept();
     for spec in &options.warning_specs {
         tctx.apply_warning_spec(spec);
     }
@@ -6639,6 +6643,7 @@ fn compile_source_to_js_with_options_inner(
         &type_ctx,
         parser.arena(),
         &typed_structure,
+        &options.checks,
         &|| source,
         filename,
     )?;
@@ -10337,7 +10342,8 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
 }
 
 /// Run the checks of `crate::verify` on a type checked implementation and
-/// report what they find.
+/// report what they find. With [`crate::verify::Checks::Kept`], the file's
+/// laws are described to the caller.
 /// Cost: O(1) for a unit that has no verify attribute and whose signatures
 /// required no effect of a value.
 fn verify_typed_structure<'s>(
@@ -10345,28 +10351,39 @@ fn verify_typed_structure<'s>(
     type_ctx: &TypeContext,
     arena: &ParseArena,
     typed_structure: &crate::types::typedtree::Structure,
+    checks: &crate::verify::Checks,
     source: &dyn Fn() -> &'s str,
     filename: &str,
 ) -> Result<()> {
-    use crate::verify::purity;
+    use crate::verify::{laws, purity};
     if !arena.has_verify_annotations() && !type_ctx.has_effect_obligations() {
         return Ok(());
     }
     let obligations = type_ctx.take_effect_obligations();
-    let diagnostics = purity::check(
+    // A check is pure by what it is.
+    let mut diagnostics = purity::check(
         type_ctx,
         &tctx.typed,
         arena,
         typed_structure,
-        &|_| false,
+        &|attributes| laws::is_check(arena, attributes),
         &obligations,
     );
+    let (items, mut misuses) = laws::collect(type_ctx, &tctx.typed, arena, typed_structure);
+    diagnostics.append(&mut misuses);
     if diagnostics.is_empty() {
+        if let crate::verify::Checks::Kept(sink) = checks {
+            sink.lock().unwrap().extend(items);
+        }
         return Ok(());
     }
     if !arena.stores_locations() {
         return Err(LocationRetry::Diagnostic.into());
     }
+    diagnostics.sort_by_key(|diagnostic| {
+        let start = &diagnostic.loc.loc_start;
+        (start.line, start.cnum)
+    });
     let source = source();
     let mut output = String::new();
     for diagnostic in &diagnostics {
@@ -10879,6 +10896,7 @@ fn compile_until_js(
         &type_ctx,
         arena,
         &typed_structure,
+        &options.checks,
         &source,
         filename,
     ) {

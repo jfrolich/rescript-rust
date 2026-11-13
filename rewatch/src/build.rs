@@ -14,6 +14,7 @@ pub mod pools;
 pub mod qos;
 pub mod state_db;
 pub mod tooling;
+pub mod verify;
 
 use self::parse::parser_args;
 use crate::build::compile::mark_modules_with_deleted_deps_dirty;

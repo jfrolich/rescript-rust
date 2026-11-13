@@ -6,6 +6,7 @@ tools check it. They build on each other, and each is useful alone.
 | RFC | Adds | Checked |
 | --- | --- | --- |
 | [Purity](pure.md) | `@pure`, `@mutates` | by the compiler, in every build |
+| [Laws](law.md) | `@law`, `rescript verify` | by running each law on generated values: all of them, or a thousand |
 
 The idea they share: the program says what must hold in ReScript itself, next
 to the code, and the build reports how strongly each statement was checked.

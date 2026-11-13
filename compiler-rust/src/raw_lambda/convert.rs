@@ -4895,6 +4895,14 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                 let expr = self.convert_expr_raw(self.ta.expr(*expr));
                 rb.seq(expr, body)
             }
+            // A check the build leaves out (`TypedArena::left_out_values`):
+            // it defines nothing the program can use.
+            StructureItemDesc::Tstr_value(_, bindings)
+                if !self.ta.left_out_values.is_empty()
+                    && self.ta.left_out_values.contains(&bindings.start()) =>
+            {
+                self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc)
+            }
             StructureItemDesc::Tstr_value(rec_flag, bindings) => {
                 let old_len = fields.len();
                 fields.extend(let_bound_idents(self.ta, self.ta.value_bindings(*bindings)));
