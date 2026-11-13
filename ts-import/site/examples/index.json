@@ -128,5 +128,42 @@
       "loose.ts",
       "Demo.res"
     ]
+  },
+  {
+    "id": "class-today",
+    "title": "Two declarations of one class",
+    "summary": "Each package declares Element. A value of one is refused where the other is expected.",
+    "files": [
+      "Demo.res"
+    ],
+    "plain": true,
+    "fails": true
+  },
+  {
+    "id": "class-crossing",
+    "title": "Records and enums already cross",
+    "summary": "An options object and an enum go from one declaration to another with :>.",
+    "files": [
+      "Demo.res"
+    ],
+    "plain": true
+  },
+  {
+    "id": "class-order",
+    "title": "Cases from two packages",
+    "summary": "The subclass is tested first, although the two cases are declared in different packages.",
+    "files": [
+      "Demo.res"
+    ],
+    "plain": true
+  },
+  {
+    "id": "class-bridge",
+    "title": "Converting through a variant",
+    "summary": "Today's way from one declaration of Element to another: a test that cannot fail.",
+    "files": [
+      "Demo.res"
+    ],
+    "plain": true
   }
 ]

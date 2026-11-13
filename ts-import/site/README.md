@@ -21,6 +21,12 @@ npm run dev
 compiler has loaded, and fails if an example does not compile. Set
 `VITE_PULL_REQUEST` to link the page to a pull request.
 
+`classes.html` is a second page from the same parts: it renders
+`docs/class-identity/README.md`. Its examples have no TypeScript files and are
+marked `"plain": true`, which leaves only the JavaScript (or the error) on the
+right. To publish it on its own, serve `dist/classes.html` as the index of a
+directory beside `dist/assets`, `compiler.wasm` and `stdlib.json`.
+
 An example is listed in `examples/index.json`: its files (the last one is the
 ReScript file), `"fails": true` when it is meant not to compile, `"compare":
 true` to also run a full TypeScript check for comparison, and `"view"` for the
