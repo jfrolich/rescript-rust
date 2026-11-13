@@ -25,16 +25,37 @@ fn constr(g: &mut Graph, id: u32, args: &[Ty]) -> Ty {
     let b = g.lists.len() as u32;
     g.lists.push(Ty(NONE));
     g.lists.extend_from_slice(args);
-    g.push(Node {head: CONSTR | (args.len() as u32) << 8, level: GENERIC, a: id, b})
+    g.push(Node {
+        head: CONSTR | (args.len() as u32) << 8,
+        level: GENERIC,
+        a: id,
+        b,
+    })
 }
 /// O(arguments); parameter metadata is included in R1's storage cost.
 fn arrow(g: &mut Graph, args: &[Ty], result: Ty) -> Ty {
     let b = g.params.len() as u32;
-    g.params.extend(args.iter().map(|&ty| Param {ty, label: 0, loc: 0}));
-    g.push(Node {head: ARROW | (args.len() as u32) << 8, level: GENERIC, a: result.0, b})
+    g.params.extend(args.iter().map(|&ty| Param {
+        ty,
+        label: 0,
+        loc: 0,
+    }));
+    g.push(Node {
+        head: ARROW | (args.len() as u32) << 8,
+        level: GENERIC,
+        a: result.0,
+        b,
+    })
 }
 /// O(1), construct one distinct variable.
-fn var(g: &mut Graph) -> Ty { g.push(Node {head: VAR, level: GENERIC, a: NONE, b: 0}) }
+fn var(g: &mut Graph) -> Ty {
+    g.push(Node {
+        head: VAR,
+        level: GENERIC,
+        a: NONE,
+        b: 0,
+    })
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -61,16 +82,34 @@ fn main() {
     let f = arrow(&mut g, &[array_a, f], array_b);
     let scheme7 = g.capture(f);
     // The reference's "7" operation actually contains six distinct nodes.
-    let ops = ["instance1", "instance3", "instance5", "instance7", "generalize7", "empty", "lower7", "copy7", "repr", "restore", "keep"];
+    let ops = [
+        "instance1",
+        "instance3",
+        "instance5",
+        "instance7",
+        "generalize7",
+        "empty",
+        "lower7",
+        "copy7",
+        "repr",
+        "restore",
+        "keep",
+    ];
     let Some(index) = ops.iter().position(|&s| s == op) else {
-        eprintln!("operation {op} is not implemented by R1; supported: {}", ops.join(", "));
+        eprintln!(
+            "operation {op} is not implemented by R1; supported: {}",
+            ops.join(", ")
+        );
         std::process::exit(2);
     };
     let index = black_box(index);
     let mut sink = 0u64;
     for i in 0..n {
         if i & 0xfff == 0 {
-            g.nodes.clear(); g.lists.clear(); g.params.clear(); g.forward.clear();
+            g.nodes.clear();
+            g.lists.clear();
+            g.params.clear();
+            g.forward.clear();
         }
         match index {
             0 => sink += g.instance(black_box(ground1)).0 as u64,
@@ -106,8 +145,18 @@ fn main() {
             9 | 10 => {
                 let root = g.instance(black_box(ground1));
                 let token = g.speculate();
-                g.write(root, Node {level: 2, ..g.nodes[root.0 as usize]});
-                if index == 9 { g.restore(token); } else { g.keep(token); }
+                g.write(
+                    root,
+                    Node {
+                        level: 2,
+                        ..g.nodes[root.0 as usize]
+                    },
+                );
+                if index == 9 {
+                    g.restore(token);
+                } else {
+                    g.keep(token);
+                }
                 sink += root.0 as u64;
             }
             _ => unreachable!(),
