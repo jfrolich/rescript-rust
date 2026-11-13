@@ -760,6 +760,10 @@ of persistent maps behind `Rc`.
 
 ### 3.3 What every operation costs
 
+The table specifies path halving for `repr`; slice R1 instead builds full
+compression in two iterative loops so a second lookup follows just one link.
+Compression writes are logged only while a speculation is open.
+
 `n` is the number of nodes an operation is defined to visit. "Kernel" gives
 the measurement of 2.2 where one exists.
 

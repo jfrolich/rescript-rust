@@ -182,24 +182,29 @@ impl Graph {
         self.speculation_depth -= 1;
     }
 
-    /// O(links), O(1) stack; one tick per traversed link. Path splitting
-    /// matches the measured kernel (advance to the old successor).
-    /// It preserves the representative, as compiler/ml/btype.ml's repr does.
+    /// O(links), O(1) stack. Find the representative, then fully compress
+    /// the walked path. Count one step per followed link and rewritten node:
+    /// at most two per link, one for an already direct link. Writes use the
+    /// speculative trail. This preserves compiler/ml/btype.ml's representative.
     pub fn repr(&mut self, mut ty: Ty) -> Ty {
-        loop {
+        let mut root = ty;
+        while self.nodes[root.0 as usize].tag() == LINK {
+            #[cfg(test)]
+            super::steps::tick();
+            root = Ty(self.nodes[root.0 as usize].a);
+        }
+        while ty != root {
             let node = self.nodes[ty.0 as usize];
-            if node.tag() != LINK {
-                return ty;
+            let next = Ty(node.a);
+            if next == root {
+                break;
             }
             #[cfg(test)]
             super::steps::tick();
-            let next = Ty(node.a);
-            let after = self.nodes[next.0 as usize];
-            if after.tag() == LINK {
-                self.write(ty, Node { a: after.a, ..node });
-            }
+            self.write(ty, Node { a: root.0, ..node });
             ty = next;
         }
+        root
     }
 }
 
@@ -234,13 +239,11 @@ mod tests {
         });
         assert_eq!(
             super::super::steps::scope(|| assert_eq!(g.repr(Ty(0)), root)),
-            10000
+            19999
         );
-        // The kernel's splitting cannot satisfy the requested second-call
-        // bound of one. Record its actual cost rather than undercounting it.
         assert_eq!(
             super::super::steps::scope(|| assert_eq!(g.repr(Ty(0)), root)),
-            5000
+            1
         );
     }
 }
@@ -248,6 +251,33 @@ mod tests {
 #[cfg(test)]
 mod trail_tests {
     use super::*;
+    #[test]
+    fn compression_of_ten_thousand_links_is_undoable() {
+        let mut g = Graph::default();
+        for i in 0..10000 {
+            g.push(Node {
+                head: LINK,
+                level: 1,
+                a: i + 1,
+                b: 0,
+            });
+        }
+        let root = g.push(Node {
+            head: VAR,
+            level: 1,
+            a: NONE,
+            b: 0,
+        });
+        let token = g.speculate();
+        assert_eq!(
+            super::super::steps::scope(|| assert_eq!(g.repr(Ty(0)), root)),
+            19999
+        );
+        assert_eq!(super::super::steps::scope(|| g.restore(token)), 9999);
+        for i in 0..10000 {
+            assert_eq!(g.nodes[i].a, i as u32 + 1);
+        }
+    }
     #[test]
     fn modes_do_not_log_without_explicit_speculation() {
         for mode in [Mode::Success, Mode::Explain] {
