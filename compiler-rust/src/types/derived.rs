@@ -16,6 +16,7 @@
 //! (`compiler-rust/docs/DERIVED_CODECS.md`, "The cheapest sound path".)
 
 use smallvec::SmallVec;
+use std::borrow::Cow;
 
 use crate::binary_ast::derive::plan::{
     Binding, BindingIdx, DerivedIdx, ExprLoc, LabelUse, NO_VAR, Obligation, ObligationIdx, Owner,
@@ -132,6 +133,9 @@ pub struct DerivedTable {
     labels: Vec<Arc<LabelDescription>>,
     /// The descriptions `Resolved::Constructor` names.
     constructors: Vec<Arc<ConstructorDescription>>,
+    /// Unqualified names: (binding obligation start, description slot + 1).
+    /// A binding has one immutable environment; epochs prevent cross-binding reuse.
+    constructor_names: Vec<(u32, u32)>,
     /// The constants `Resolved::Literal` names.
     constants: Vec<crate::types::typedtree::Constant>,
     /// The instances of the argument types of the constructors
@@ -364,7 +368,10 @@ impl Steps for CensusSteps {
 /// and two unifications; per literal one unification; per binding one function type, one environment entry and one
 /// signature item made of the same value description, without a lookup. No
 /// allocation per obligation beyond the type nodes of the instances and
-/// skeletons; one buffer of signature items per item.
+/// skeletons; one buffer of signature items per item. The first item sizes a
+/// dense constructor-name table in O(interned names); later items reuse it.
+/// Unqualified constructor descriptions are copied once per name per binding,
+/// while all lookup, usage, instance and unification work remains ordered.
 pub fn discharge(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -406,6 +413,8 @@ pub fn discharge_counting(
     let item = plans.item(idx);
     let bindings = plans.bindings(item);
     tctx.typed.derived.reserve(plans);
+    // One dense name table per unit, not per binding or constructor visit.
+    tctx.typed.derived.constructor_names.resize(arena.string_count(), (0, 0));
 
     // `Typecore.type_binding` starts with `Typetexp.reset_type_variables`.
     tctx.reset_type_variables();
@@ -769,7 +778,7 @@ fn discharge_binding(
                         if !is_predefined {
                             return Err(Fallback);
                         }
-                        desc.clone()
+                        Cow::Borrowed(desc)
                     }
                     // A constructor of the declaration being derived, which
                     // the item follows: an unqualified name whose first
@@ -786,7 +795,7 @@ fn discharge_binding(
                         {
                             return Err(Fallback);
                         }
-                        env.find_constructor(last).map_err(|_| Fallback)?.clone()
+                        Cow::Borrowed(env.find_constructor(last).map_err(|_| Fallback)?)
                     }
                     // A qualified name: the lookup of typecore.ml
                     // `type_construct`, in the module that qualifies it. That
@@ -801,7 +810,7 @@ fn discharge_binding(
                             crate::types::env::OpenLookupKind::Component,
                             Some(loc),
                         );
-                        crate::types::typecore::lookup_constructor_in_module(
+                        Cow::Owned(crate::types::typecore::lookup_constructor_in_module(
                             longident,
                             arena,
                             env,
@@ -810,7 +819,7 @@ fn discharge_binding(
                             Some(result),
                         )
                         .ok_or(Fallback)?
-                        .1
+                        .1)
                     }
                 };
                 // A plan describes an ordinary constructor of a regular
@@ -841,11 +850,29 @@ fn discharge_binding(
                         .map_err(|_| Fallback)?;
                 }
                 let table = &mut tctx.typed.derived;
-                table.constructors.push(Arc::new(desc));
+                // Names are interned by the plan builder. Reuse only the stored
+                // description, never a lookup, usage mark, instance or unification.
+                let name_slot = match longident {
+                    crate::parser::Longident::Lident(name) => Some(name.raw() as usize),
+                    crate::parser::Longident::Ldot(..) | crate::parser::Longident::Lapply(..) => None,
+                };
+                let cached = name_slot.map(|slot| table.constructor_names[slot]);
+                let desc_slot = if let Some((epoch, slot)) = cached
+                    && epoch == binding.obligations.start && slot != 0
+                {
+                    slot - 1
+                } else {
+                    let slot = table.constructors.len() as u32;
+                    table.constructors.push(Arc::new(desc.into_owned()));
+                    if let Some(name_slot) = name_slot {
+                        table.constructor_names[name_slot] = (binding.obligations.start, slot + 1);
+                    }
+                    slot
+                };
                 let first_arg = table.constructor_args.len() as u32;
                 table.constructor_args.extend_from_slice(&args);
                 Resolved::Constructor {
-                    desc: table.constructors.len() as u32 - 1,
+                    desc: desc_slot,
                     args: first_arg,
                     res,
                 }
@@ -1382,6 +1409,20 @@ pub(crate) mod tests {
     /// instance each (a field access instantiates inside the checker's
     /// lookup, a type has none), and one counted unification each (a label
     /// or a constructor unifies its argument and its result).
+    #[test]
+    fn constructor_descriptions_are_shared_within_each_binding() {
+        assert_eq!(std::mem::size_of::<(u32, u32)>(), 8);
+        let mut sizes = Vec::new();
+        for fields in [1, 2, 10_000] {
+            with_record(fields, |tctx, env, item, _| {
+                discharge_counting(tctx, env, item, &mut ()).unwrap();
+                sizes.push(tctx.typed.derived.constructors.len());
+                assert_eq!(tctx.typed.derived.constructor_names.len(), tctx.arena.string_count());
+            });
+        }
+        assert_eq!(sizes, [7, 7, 7]);
+    }
+
     #[test]
     fn a_record_of_ten_thousand_fields_is_discharged_in_linear_steps() {
         let steps = |fields: usize| {

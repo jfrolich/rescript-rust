@@ -579,3 +579,30 @@ Singleton templates: 65; highest frequencies: [6, 4, 4, 4, 4, 4].
 Planned discharge is the largest actionable typechecking bucket. All 136 application bindings classified `not_yet_planned` stop at the JSON identity codec. Both abandoned application attempts last visited a result-constructor obligation. This orders investigation as planned discharge, JSON identity plans, then upfront classification of constructor conflicts. User expressions remain general under Q5.
 
 An initial census-disabled Cachegrind run at `a4c557d1c` retired 65,265,265,045 instructions. Its exclusive symbol counts include 53,962,454 in the discharge closure, 44,185,701 in skeleton instantiation and 39,410,903 in plan lowering node visits. Shared callees such as unification include ordinary code too: these numbers **do not** establish inclusive costs by obligation kind or per field. The required attributed profile and before/after validation remain outstanding.
+
+
+### Constructor-description sharing experiment
+
+An unqualified constructor description is now stored once per name per binding,
+indexed by its interned string handle. The binding's obligation-start handle is
+the epoch, so no description crosses an environment boundary. Every obligation
+still performs its original lookup, usage marking, instantiation and unification.
+No cache is keyed by a template or by type equality. Qualified descriptions retain
+their existing lookup ownership. The 10,000-field record test keeps exactly seven
+description slots, the same as one or two fields; its existing discharge step
+counts are unchanged.
+
+`bench_project.sh`, one worker, isolated experiment against the census compiler:
+
+| Measurement | Before | After |
+|---|---:|---:|
+| Application instructions | 65,146,787,362 | 65,127,051,438 |
+| Generated files | 3,980 | 3,980 |
+
+Difference: **−0.0302945%**. Both output digests:
+`0a3d301322cf7febdbf8793ae8c3dcbc1ecbadf44670c3b52cecbc5437a02408`.
+`compare_checker_builds.py` reports no difference in 3,735 signatures, diagnostics
+in 18 files, or 3,980 generated files. This is a small measured saving, not evidence
+that constructor cloning is the largest avoidable obligation cost. No default-path
+saving is claimed; the census-disabled +0.02% gate remains to be measured against
+trunk.
