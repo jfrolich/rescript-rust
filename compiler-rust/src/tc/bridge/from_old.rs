@@ -152,6 +152,26 @@ fn published_digest(unit: &crate::cmi::portable_types::PortablePersStruct) -> [u
     digest
 }
 
+/// Request this unit's segment in the current world. Only the first request
+/// converts; ordinary old-checker registration and loading do not call it.
+pub(crate) fn published_segment(
+    unit: &std::sync::Arc<crate::cmi::portable_types::PortablePersStruct>,
+    ctx: &crate::types::context::TypeContext,
+) -> Result<std::sync::Arc<Segment>, String> {
+    ctx.world().converted_segment(unit, || {
+        unit.with_published_graph(ctx, |published| {
+            from_old(Input::new(
+                &published.graph,
+                &published.signature,
+                &unit.ps_name,
+                unit.ps_deprecated.as_deref(),
+                &published.names,
+                published_digest(unit),
+            ))
+        })
+    })
+}
+
 /// O(conversion + both canonical printers). Check mode explicitly requests
 /// this unit's new representation, even when it has no dependent. The normal
 /// old-checker path never calls this function.
@@ -171,21 +191,12 @@ pub(crate) fn check_published(
         unit.ps_deprecated.as_deref(),
         None,
     );
-    unit.with_published_graph(&ctx, |published| {
-        let segment = from_old(Input::new(
-            &published.graph,
-            &published.signature,
-            &unit.ps_name,
-            unit.ps_deprecated.as_deref(),
-            &published.names,
-            published_digest(unit),
-        ));
-        let actual = crate::tc::canonical::canonical_signature(&segment);
-        compare_text(&unit.ps_name, "segment", &expected, &actual)?;
-        let rebuilt = super::to_old::to_old(&segment);
-        let restored = rebuilt.canonical_text()?;
-        compare_text(&unit.ps_name, "round-trip", &expected, &restored)
-    })??;
+    let segment = published_segment(unit, &ctx)?;
+    let actual = crate::tc::canonical::canonical_signature(&segment);
+    compare_text(&unit.ps_name, "segment", &expected, &actual)?;
+    let rebuilt = ctx.world().converted_old(unit, || super::to_old::to_old(&segment));
+    let restored = rebuilt.canonical_text()?;
+    compare_text(&unit.ps_name, "round-trip", &expected, &restored)?;
     log::debug!(target: "rescript_checker", "tc-segment-canonical {}", unit.ps_name);
     Ok(())
 }
@@ -1948,6 +1959,95 @@ mod tests {
             names,
             digest: [7; 32],
         }
+    }
+
+    #[test]
+    fn unused_units_run_neither_converter_and_requests_are_shared_across_workers() {
+        use crate::context::IdGenerator;
+        use crate::driver::{CheckerChoice, CompilerOptions, compile_source_in_process};
+        use std::sync::{Arc, Barrier};
+        let options = CompilerOptions {
+            nopervasives: true,
+            checker: CheckerChoice::Old,
+            ..Default::default()
+        };
+        let registry = crate::cmi::persistent_env::ModuleRegistry::new();
+        let compile = |name: &str| {
+            compile_source_in_process(
+                "let value = 1",
+                &format!("{name}.res"),
+                name,
+                &options,
+                &registry,
+                false,
+                None,
+            )
+            .expect("unit compiles")
+            .pers_struct
+            .expect("published unit")
+        };
+        let used = compile("R2Used");
+        let unused = compile("R2Unused");
+        let ctx = crate::types::context::TypeContext::new(Arc::new(IdGenerator::new()));
+        let world = ctx.world().clone();
+        assert_eq!(world.conversion_counts(&used), [0, 0]);
+        assert_eq!(world.conversion_counts(&unused), [0, 0]);
+        crate::cmi::portable_types::internalize_pers_struct(unused.clone(), &ctx);
+        assert_eq!(
+            world.conversion_counts(&unused),
+            [0, 0],
+            "old loading runs no converter"
+        );
+        let barrier = Arc::new(Barrier::new(8));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let (world, unit, barrier) = (world.clone(), used.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let segment = world
+                        .converted_segment(&unit, || {
+                            Ok(unit
+                                .with_shared_graph(|published| {
+                                    from_old(Input {
+                                        graph: &published.graph,
+                                        signature: &published.signature,
+                                        unit: &unit.ps_name,
+                                        deprecated: unit.ps_deprecated.as_deref(),
+                                        names: &published.names,
+                                        digest: published_digest(&unit),
+                                    })
+                                })
+                                .expect("a source-built graph"))
+                        })
+                        .expect("converted segment");
+                    let restored =
+                        world.converted_old(&unit, || super::super::to_old::to_old(&segment));
+                    assert!(Arc::ptr_eq(
+                        &segment,
+                        &world
+                            .converted_segment(&unit, || panic!("from_old is run once"))
+                            .unwrap()
+                    ));
+                    assert!(Arc::ptr_eq(
+                        &restored,
+                        &world.converted_old(&unit, || panic!("to_old is run once"))
+                    ));
+                    (segment, restored)
+                })
+            })
+            .collect();
+        let results: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        for (segment, restored) in &results {
+            assert!(Arc::ptr_eq(segment, &results[0].0));
+            assert!(Arc::ptr_eq(restored, &results[0].1));
+        }
+        check_published(&used).expect("cached conversions match the old text");
+        check_published(&used).expect("repeated requests reuse both conversions");
+        assert_eq!(world.conversion_counts(&used), [1, 1]);
+        assert_eq!(world.conversion_counts(&unused), [0, 0]);
     }
 
     #[test]

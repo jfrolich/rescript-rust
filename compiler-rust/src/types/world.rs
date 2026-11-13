@@ -59,6 +59,11 @@ pub(crate) struct UnitSlot {
     ps: OnceLock<Option<Arc<PersStruct>>>,
     /// Name index of `ps.ps_sig`, built by the first worker that asks.
     index: OnceLock<Arc<SignatureIndex>>,
+    /// Compatibility representations, each built only on an explicit request.
+    segment: OnceLock<Result<Arc<crate::tc::segment::Segment>, String>>,
+    converted_old: OnceLock<Arc<crate::tc::bridge::to_old::Output>>,
+    #[cfg(test)]
+    conversions: [AtomicU32; 2],
 }
 
 /// One per build generation; workers and contexts hold `Arc<World>`.
@@ -211,6 +216,67 @@ impl World {
         &self.pool
     }
 
+    /// O(1): one unit-table probe; registration runs neither converter.
+    fn unit_slot(&self, pps: &Arc<PortablePersStruct>) -> Arc<UnitSlot> {
+        count_unit_probe();
+        self.units
+            .lock()
+            .unwrap()
+            .entry(Arc::as_ptr(pps) as usize)
+            .or_insert_with(|| {
+                Arc::new(UnitSlot {
+                    _owner: pps.clone(),
+                    ps: OnceLock::new(),
+                    index: OnceLock::new(),
+                    segment: OnceLock::new(),
+                    converted_old: OnceLock::new(),
+                    #[cfg(test)]
+                    conversions: [AtomicU32::new(0), AtomicU32::new(0)],
+                })
+            })
+            .clone()
+    }
+
+    /// One table probe and one OnceLock read after the first request. Only
+    /// that first request converts; concurrent readers share its result.
+    pub(crate) fn converted_segment(
+        &self,
+        pps: &Arc<PortablePersStruct>,
+        build: impl FnOnce() -> Result<crate::tc::segment::Segment, String>,
+    ) -> Result<Arc<crate::tc::segment::Segment>, String> {
+        let slot = self.unit_slot(pps);
+        slot.segment
+            .get_or_init(|| {
+                #[cfg(test)]
+                slot.conversions[0].fetch_add(1, Ordering::Relaxed);
+                build().map(Arc::new)
+            })
+            .clone()
+    }
+
+    /// As above, for the inverse bridge. Holding the original old signature
+    /// does not run an inverse conversion; callers must explicitly ask.
+    pub(crate) fn converted_old(
+        &self,
+        pps: &Arc<PortablePersStruct>,
+        build: impl FnOnce() -> crate::tc::bridge::to_old::Output,
+    ) -> Arc<crate::tc::bridge::to_old::Output> {
+        let slot = self.unit_slot(pps);
+        slot.converted_old
+            .get_or_init(|| {
+                #[cfg(test)]
+                slot.conversions[1].fetch_add(1, Ordering::Relaxed);
+                Arc::new(build())
+            })
+            .clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn conversion_counts(&self, pps: &Arc<PortablePersStruct>) -> [u32; 2] {
+        let slot = self.unit_slot(pps);
+        std::array::from_fn(|index| slot.conversions[index].load(Ordering::Relaxed))
+    }
+
     /// The internalization of unit `pps`, built with `build` the first time
     /// any worker asks. Concurrent requests for one unit wait for the first
     /// builder. `None` when `build` could not place the graph in the pool.
@@ -221,20 +287,7 @@ impl World {
         pps: &Arc<PortablePersStruct>,
         build: impl FnOnce() -> Option<Arc<PersStruct>>,
     ) -> Option<Arc<PersStruct>> {
-        count_unit_probe();
-        let slot = self
-            .units
-            .lock()
-            .unwrap()
-            .entry(Arc::as_ptr(pps) as usize)
-            .or_insert_with(|| {
-                Arc::new(UnitSlot {
-                    _owner: pps.clone(),
-                    ps: OnceLock::new(),
-                    index: OnceLock::new(),
-                })
-            })
-            .clone();
+        let slot = self.unit_slot(pps);
         slot.ps
             .get_or_init(|| {
                 let ps = build()?;
@@ -1116,6 +1169,31 @@ mod tests {
             })
             .collect();
         (world, units)
+    }
+
+    #[test]
+    fn conversion_failures_are_cached_only_in_their_world() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let pps = Arc::new(crate::cmi::portable_types::serialize_pers_struct(
+            &pers_struct("Conversion"),
+            &ctx,
+            None,
+        ));
+        let first = World::new(u64::MAX);
+        let second = World::new(u64::MAX - 1);
+        let result = first.converted_segment(&pps, || Err("conversion failed".into()));
+        assert_eq!(result.err().as_deref(), Some("conversion failed"));
+        let repeated = first.converted_segment(&pps, || panic!("failure is cached"));
+        assert_eq!(repeated.err().as_deref(), Some("conversion failed"));
+        let value = second
+            .converted_segment(&pps, || Ok(crate::tc::segment::Segment::default()))
+            .unwrap();
+        let repeated = second
+            .converted_segment(&pps, || panic!("success is cached"))
+            .unwrap();
+        assert!(Arc::ptr_eq(&value, &repeated));
+        assert_eq!(first.conversion_counts(&pps), [1, 0]);
+        assert_eq!(second.conversion_counts(&pps), [1, 0]);
     }
 
     #[test]
