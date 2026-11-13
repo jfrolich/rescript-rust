@@ -11,6 +11,10 @@ pub(super) struct Call(pub u32);
 #[derive(Clone, Copy)]
 pub(super) struct AritySpan { start: u32, len: u32 }
 
+/// One imported immutable body and its closed-parameter statistics.
+#[derive(Clone, Copy)]
+pub(super) struct InlineTemplate { function: NodeId, stats_start: u32, stats_len: u32 }
+
 /// Cold call metadata; the source walk carries only its four-byte handle.
 pub(super) struct Plan {
     pub tail: Option<LoopRef>,
@@ -83,7 +87,7 @@ impl State {
                         {
                             let mut args = std::mem::take(&mut self.call_reversed);
                             args.extend_from_slice(&self.source.lists.get(operands)[1..]);
-                            let reduced = self.inline_external_function(cx, function, &args);
+                            let reduced = self.inline_external_function(cx, (module, member), function, &args);
                             args.clear();
                             self.call_reversed = args;
                             let reduced = reduced?;
@@ -112,11 +116,8 @@ impl State {
 
     /// C:1377 compile_external_field_apply. O(imported function + beta work
     /// + newly allocated variables), using the existing L beta reducer.
-    fn inline_external_function(&mut self, _cx: Cx, function: &crate::lambda::LFunction, args: &[NodeId]) -> Result<NodeId, Unsupported> {
+    fn inline_external_function(&mut self, _cx: Cx, key: (crate::bir::ImportId, crate::bir::StrId), function: &crate::lambda::LFunction, args: &[NodeId]) -> Result<NodeId, Unsupported> {
         use crate::bir::{bridge, engine::Engine, l::beta};
-        let mut lambda = crate::lambda::arena::LamArena::new();
-        let body = lambda.import(&function.body);
-        let root = lambda.function_(function.arity, &function.params, body, function.attr.clone(), function.loc);
         // Align source identities with temporaries already allocated by J.
         while self.source.vars.len() < self.arena.vars.len() {
             let var = VarId(self.source.vars.len() as u32);
@@ -126,42 +127,67 @@ impl State {
         let first_var = self.source.vars.len();
         self.inline_globals.extend(self.arena.pools.j_modules[self.inline_globals.len()..].iter().map(|module| module.id));
         let mut globals = std::mem::take(&mut self.inline_globals);
-        let mut foreign = Vec::new();
+        let mut foreign = std::mem::take(&mut self.inline_foreign);
+        debug_assert!(foreign.is_empty());
         std::mem::swap(&mut self.source.pools, &mut self.arena.pools);
         // J lowering can append function headers before another L fragment is
         // imported. Its dense owner table must cover those header identities.
         self.source.func_owners.resize(self.source.pools.funcs.len(), None);
         let result = (|| {
-            let function = bridge::import_fragment(&mut self.source, &mut globals, &mut foreign, &lambda, root)?;
+            let template = if let Some(&template) = self.inline_templates.get(&key) { template } else {
+                // Import only once per immutable export. Beta reduction copies
+                // the body; it does not consume this detached source template.
+                let mut lambda = crate::lambda::arena::LamArena::new();
+                let body = lambda.import(&function.body);
+                let root = lambda.function_(function.arity, &function.params, body, function.attr.clone(), function.loc);
+                let function = bridge::import_fragment(&mut self.source, &mut globals, &mut foreign, &lambda, root)?;
+                let View::Fun { body, header } = self.source.view(function) else { unreachable!("imported external function") };
+                let params = self.source.function(header).params;
+                let engine = Engine::new(&mut self.source);
+                let (_, stats) = beta::closed_with_stats(&engine, &mut self.inline_scratch, params, body);
+                let stats_start = self.inline_param_stats.len() as u32;
+                self.inline_param_stats.extend_from_slice(&stats);
+                let template = InlineTemplate { function, stats_start, stats_len: stats.len() as u32 };
+                self.inline_templates.insert(key, template);
+                self.inline_imports += 1;
+                template
+            };
+            let function = template.function;
             let View::Fun { body, header } = self.source.view(function) else { unreachable!("imported external function") };
             let params = self.source.function(header).params;
             for &arg in args { self.source.detach(arg); }
             let mut engine = Engine::new(&mut self.source);
+            engine.exchange_reuse(&mut self.inline_engine);
+            engine.stats.unsupported = None;
             engine.set_current_stamp(self.next_order - 1);
-            let (_, stats) = beta::closed_with_stats(&engine, &mut self.inline_scratch, params, body);
-            let reduced = beta::reduce(&mut engine, &mut self.inline_scratch, params, body, args, Some(&stats), 1, &mut |_, _, _| {})?;
+            let stats = &self.inline_param_stats[template.stats_start as usize..(template.stats_start + template.stats_len) as usize];
+            let reduced = beta::reduce(&mut engine, &mut self.inline_scratch, params, body, args, Some(stats), 1, &mut |_, _, _| {});
             self.next_order = engine.current_stamp() + 1;
-            Ok((reduced, std::mem::take(&mut engine.stats.renames)))
+            engine.exchange_reuse(&mut self.inline_engine);
+            self.inline_reductions += 1;
+            reduced
         })();
         std::mem::swap(&mut self.source.pools, &mut self.arena.pools);
-        let (reduced, renames) = result?;
-        self.idents.extend(foreign);
-        for (var, origin) in renames {
+        self.idents.append(&mut foreign);
+        self.inline_foreign = foreign;
+        self.inline_globals = globals;
+        let reduced = result?;
+        for (var, origin) in self.inline_engine.stats.renames.drain(..) {
             assert_eq!(var.index(), self.idents.len());
             let old = self.idents[origin.index()];
             self.idents.push(Ident::new(old.name_atom(), self.source.vars.order(var) as i32, old.flags()));
         }
+        self.inline_engine.stats.labels.clear();
         for i in first_var..self.source.vars.len() {
             let var = VarId(i as u32);
             let made = self.arena.new_var_id(self.source.vars.name(var), self.source.vars.order(var));
             assert_eq!(made, var);
             self.arena.vars.flags[i] = self.source.vars.flags[i];
         }
-        for &id in &globals[self.arena.pools.j_modules.len()..] {
+        for &id in &self.inline_globals[self.arena.pools.j_modules.len()..] {
             self.arena.pools.j_modules.push(crate::js_ir::ModuleId { id, kind: crate::js_ir::Kind::Ml, dynamic_import: false });
             self.module_constants.push(ModuleConstants::Unread);
         }
-        self.inline_globals = globals;
         self.arena.func_owners.resize(self.arena.pools.funcs.len(), None);
         self.awaited_units.resize(self.arena.vars.len(), false);
         self.invalid_module_paths.resize(self.source.nodes.len(), false);

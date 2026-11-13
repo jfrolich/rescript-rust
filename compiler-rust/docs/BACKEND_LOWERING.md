@@ -2652,8 +2652,8 @@ The statement stack and node-list pool must be used end to end.
 | `call.rs:32` `application` | `let mut reversed: Vec<_> = args.iter().rev().copied().collect();` | per construct | pooled source operand lists and retained spine scratch; four-byte call frame | removed |
 | `call.rs:48` `application` | `let mut operands = Vec::with_capacity(1 + reversed.len());` | per construct | pooled source operand lists and retained spine scratch; four-byte call frame | removed |
 | `call.rs:66` `application` | `return Ok(Call { tail: None, operands: vec![reduced], inline: true, status, loc, external: None });` | per construct | pooled source operand lists and retained spine scratch; four-byte call frame | removed |
-| `call.rs:94` `inline_external_function` | `let root = lambda.function_(function.arity, &function.params, body, function.attr.clone(), function.loc);` | per construct | borrow payload or retain typed pool handle | pending |
-| `call.rs:104` `inline_external_function` | `let mut foreign = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `call.rs:94` `inline_external_function` | `let root = lambda.function_(function.arity, &function.params, body, function.attr.clone(), function.loc);` | per construct | Each immutable external export is imported once into a cached source template; its attribute payload is unit metadata, not cloned per inline call. | justified |
+| `call.rs:104` `inline_external_function` | `let mut foreign = Vec::new();` | per construct | Foreign identifier storage is retained, appended into the unit identity table, and restored empty. | removed |
 | `call.rs:175` `finish_application` | `.collect();` | per construct | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `call.rs:197` `finish_application` | `self.apply_with_arity(callee, arity, values.into_vec())` | per construct | Call arguments borrow the retained sequencing value buffer; no into_vec conversion remains. | removed |
 | `call.rs:267` `resolve_cmj_module_field_arity` | `crate::cmi::persistent_env::CmjExportArity::Single(arity) => Some(arity.clone()),` | per construct | Each module/member summary is resolved once and represented by an 8-byte span over unit arity groups, including groups wider than SmallVec inline capacity. | removed |
@@ -3244,7 +3244,7 @@ The following trunk export sites are inventoried only, not converted:
 
 | Newly found non-export site | Ownership | Disposition |
 | --- | --- | --- |
-| `call::inline_external_function` fresh LamArena/body import/bridge fragment | per inline candidate graph and traversal storage | pending |
+| `call::inline_external_function` fresh LamArena/body import/bridge fragment | once per immutable external export template; cache hits reuse the source body and flat parameter statistics | justified unit import |
 | `complete_unit` consumed root export identifier payload | one final compatibility payload, protecting shared immutable shapes | final export boundary, outside lowering proof |
 
 The later trunk close-decision integration also adds append-only variable facts
@@ -3253,6 +3253,24 @@ capacity checks cover sites, site heads, occurrence counts, variable facts,
 decisions and the retained return spine. The lowering-import wrapper is preserved
 in the export-ownership regression. Close decisions and export functionality are
 unchanged; all existing allocation proofs still pass after the integration.
+
+External body inlining now imports each immutable module/member function once.
+Subsequent candidates reuse the detached source template and flat parameter
+statistics; the existing beta reducer still copies/normalizes each result and
+renames its binders. Engine worklist/summary storage and rule/provenance statistics
+are retained across invocations. A whole-Lambda 10,000-call test exercises both
+simple substitution and a copied let-binding body, asserting exactly one source
+import and 10,000 reductions; repeated-call all-continuation oracles preserve
+fresh binder behavior. This slice is **not** a zero-allocation inlining proof:
+the beta helper allocations below remain active work.
+
+| Newly exposed inlining site | Ownership | Disposition |
+| --- | --- | --- |
+| `beta::delay_safe` traversal | fresh work vector per argument classification | pending |
+| `beta::simple` motion/usage/order/operand buffers | owning SmallVecs spill on wide applications | pending |
+| `beta::can_move` analysis | fresh saved/work vectors | pending |
+| `beta::copy` traversal, operands, binder enumeration and static labels | fresh traversal collections and map entries | pending |
+| `beta::reduce` effects/rest/spare/moved runs | owning SmallVecs spill on wide applications | pending |
 
 ### 7.5.1 Concurrent loop, label and recursive-value additions
 

@@ -261,6 +261,14 @@ pub struct Engine<'a> {
     pub stats: Stats,
 }
 
+/// Retained storage for repeated normalization-only engine invocations.
+#[derive(Default)]
+pub(crate) struct Reuse {
+    worklist: Vec<NodeId>,
+    summary: Vec<OpMask>,
+    pub(crate) stats: Stats,
+}
+
 impl<'a> Engine<'a> {
     /// An engine over `bir`. Constant time.
     pub fn new(bir: &'a mut Bir) -> Self {
@@ -286,6 +294,15 @@ impl<'a> Engine<'a> {
     /// Start a round's private identifier counter. Constant time.
     pub fn set_current_stamp(&mut self, stamp: u32) {
         self.stamp = stamp;
+    }
+
+    /// Exchange normalization storage without retaining an arena borrow.
+    /// Each invocation still starts with invalid summaries and fresh modes.
+    pub(crate) fn exchange_reuse(&mut self, reuse: &mut Reuse) {
+        debug_assert!(self.worklist.is_empty() && reuse.worklist.is_empty());
+        std::mem::swap(&mut self.worklist, &mut reuse.worklist);
+        std::mem::swap(&mut self.summary, &mut reuse.summary);
+        std::mem::swap(&mut self.stats, &mut reuse.stats);
     }
 
     /// The round counter, to carry it into the engine of the next round.
