@@ -346,12 +346,13 @@ pub fn check_exits(arena: &LamArena, root: Lam, unit: &str) -> anyhow::Result<()
     let mut legacy = arena.clone();
     let expected =
         crate::lambda::lam_pass_deep_flatten::deep_flatten(&mut legacy, root, &generator);
-    let legacy_counts: std::collections::BTreeMap<_, _> =
-        crate::lambda::lam_pass_exits::count_helper(&legacy, expected)
-            .into_iter()
-            .map(|(label, count)| (label as u32, count))
-            .collect();
-    if counts != legacy_counts {
+    let legacy_counts = crate::lambda::lam_pass_exits::count_helper(&legacy, expected);
+    if counts.iter().filter(|&&count| count != 0).count() != legacy_counts.len()
+        || legacy_counts.iter().any(|(&label, &count)| {
+            imported.arena.pools.catch_labels.get(&(label as u32))
+                .and_then(|header| counts.get(header.index())) != Some(&count)
+        })
+    {
         anyhow::bail!("{unit}: lambda-exits ordered count mismatch");
     }
     let expected = crate::lambda::lam_pass_exits::simplify_exits(&mut legacy, expected, &generator);
