@@ -1185,10 +1185,16 @@ Measured evidence, not a replacement for the remaining gates:
   diagnostic. A unit test exercises that post-structure validation boundary.
 - Tests compare a warning before a type error, and a warning after a caught
   failed unification, with forced Explain; both reports match byte-for-byte.
-- A comparison against an older downloaded base had identical JavaScript
-  and diagnostics on both projects, but different canonical signature
-  formatting after trunk changed that formatter. That run is **not** a
-  passing current-trunk signature comparison.
+- A matched-source comparison of candidate `5cda5eb4b` against trunk
+  `474bbcf02` passed both projects: 743 and 3,735 canonical signatures,
+  respectively, with zero diagnostic or generated-file differences.
+- That candidate's five-run application measurement reduced minimum
+  instructions by **0.669%**. Single-worker hyperfine means were
+  9.431 ± 0.263 s (base) and 9.219 ± 0.112 s (candidate); ranges overlap.
+  A synthetic late-type-error unit cost 1.597× forced Explain on the same
+  failure. See [the measurement record](CHECKER_SNAPSHOT_ELISION_MEASUREMENTS.md)
+  for revisions, raw counts, methodology and limitations. These measurements
+  precede later trunk merges and are not final-head acceptance evidence.
 
 Attempt order (each row starts with fresh context and initial environment):
 
@@ -1198,7 +1204,7 @@ Attempt order (each row starts with fresh context and initial environment):
 | `compile_until_js` (batch/playground) | `type_structure`; inferred/interface inclusion; `check_js_names`; `check_nongen_schemes`; normalization; delayed checks; deprecation payload; raw conversion; late warnings and fatal-warning check | `signature_ready` callback and returned pre-JS result; check-only validates inclusion warnings before its callback |
 | `typecheck_interface_source` | `transl_signature`; persistent-environment error; `check_js_names`; self-inclusion through `includemod::escaped`; delayed checks; fatal warnings | Buffered warnings/dumps and returned result |
 | `typecheck_preprocessed_signature_in_process` | `transl_signature`; persistent-environment error; JS-name and self-inclusion checks; delayed/fatal warnings; gentype read; saved-signature and deprecation payload processing | Signature extraction and returned interface result |
-| `typecheck_structure_for_tooling` | `type_structure` and error conversion | Returned typed arena, context and result |
+| `typecheck_structure_for_tooling` | `type_structure`; interface inclusion for dependency recording; error conversion | Returned typed arena, context and result |
 | `typecheck_signature_for_tooling` | `transl_signature` and error conversion | Returned typed arena, context and result |
 
 The batch path must freeze its private inferred signature before raw translation
@@ -1209,11 +1215,10 @@ fallback abandons the context before the Explain decision, without publishing
 its counters. The source owner still reparses general syntax outside this loop;
 composing that frontend transition into shared attempt settings remains open.
 
-Still unmeasured: the final candidate's application instruction count, the
-failing-unit/passing-unit instruction ratio, and wall-time distributions.
-The prototype's speedup is supported by the enabled batch measurement, but
-its implication that rerunning only a failed `type_structure` covers every
-unit error is too narrow: later signature validation also reports errors.
+Final-head measurements must be repeated after retry composition and trunk
+integration. The strict fixture comparison now includes post-structure
+validation; the remaining retry-ownership requirement is the frontend's
+whole-unit derived fallback.
 
 ### 4.3 What the two prototypes do not prove
 
