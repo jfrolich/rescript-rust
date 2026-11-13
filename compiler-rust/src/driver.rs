@@ -71,11 +71,11 @@ pub enum LocationRetry {
     Output,
 }
 
-/// Internal control flow: an obligation of a derived item's plan failed in
-/// the checker, which abandoned the unit before publishing anything. Whoever
-/// holds the unit's source runs the frontend again with
-/// [`DerivedPath::Fallback`], which generates the unit's derived code as
-/// syntax, and compiles that.
+/// An obligation of a derived item's plan failed in the checker, which
+/// abandoned the unit before publishing anything, and the compile had no
+/// [`CompilerOptions::derived_fallback`] to continue the unit's attempt loop
+/// on. Whoever holds the unit's source makes that general syntax with
+/// [`DerivedPath::Fallback`].
 #[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
 #[error("a derived item's plan could not be used")]
 pub struct DerivedRetry;
@@ -244,13 +244,14 @@ pub type WarningLocations =
     std::sync::Arc<dyn Fn() -> Option<crate::parse_arena::ParseArena> + Send + Sync>;
 
 /// Place the warnings of a location-free compile in a located parse of the
-/// same source, replacing each warning's location identity with the matching
-/// location of `located` (parsed on first use). Returns false when any
+/// same source (`warning_locations` of the syntax that was checked),
+/// replacing each warning's location identity with the matching location
+/// of `located` (parsed on first use). Returns false when any
 /// warning cannot be placed with certainty; the caller then retries the
 /// whole compile with locations. A located compile needs no placement.
 fn place_location_free_warnings(
     arena: &crate::parse_arena::ParseArena,
-    options: &CompilerOptions,
+    warning_locations: Option<&WarningLocations>,
     located: &mut Option<crate::parse_arena::ParseArena>,
     warnings: &mut [TypeCoreWarning],
 ) -> bool {
@@ -265,7 +266,7 @@ fn place_location_free_warnings(
         return false;
     };
     if located.is_none() {
-        let Some(parse) = options.warning_locations.as_ref().and_then(|parse| parse()) else {
+        let Some(parse) = warning_locations.and_then(|parse| parse()) else {
             return false;
         };
         // Both parses must have issued the same locations, or identities and
@@ -376,6 +377,23 @@ impl DerivedPath {
 pub type DerivedReference =
     std::sync::Arc<dyn Fn() -> Result<(crate::parse_arena::ParseArena, Structure)> + Send + Sync>;
 
+/// The syntax of a unit with every derived item as code
+/// ([`DerivedPath::Fallback`]): what a unit is checked from once a plan of
+/// it could not be used. Made by whoever holds the unit's source.
+pub struct GeneralSyntax<S> {
+    /// Node storage of `tree`, ready for type checking.
+    pub arena: crate::parse_arena::ParseArena,
+    /// The unit's tree after the frontend.
+    pub tree: S,
+    /// For a location-free `arena`: its located parse, in which warnings
+    /// are placed ([`CompilerOptions::warning_locations`] of this syntax).
+    pub warning_locations: Option<WarningLocations>,
+}
+
+/// See [`CompilerOptions::derived_fallback`].
+pub type DerivedFallback =
+    std::sync::Arc<dyn Fn() -> Result<GeneralSyntax<Structure>> + Send + Sync>;
+
 /// See [`CompilerOptions::derived_differences`].
 pub type DerivedDifferences = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
 
@@ -483,6 +501,12 @@ pub struct CompilerOptions {
     /// or why the frontend could not give it (the error names the source it
     /// read). The reference compile of a check runs on it.
     pub derived_reference: Option<DerivedReference>,
+    /// For an implementation with planned derived items: the unit's syntax
+    /// with its derived code as syntax. When the checker cannot use a plan,
+    /// the unit's attempt loop continues on it, keeping the attempt's check
+    /// mode; nothing of the abandoned attempt is published. Without it the
+    /// compile fails with [`DerivedRetry`].
+    pub derived_fallback: Option<DerivedFallback>,
     /// For `RESCRIPT_DERIVED_PATH=check`: where a build collects what the
     /// check found, to report every unit before it fails. With it a unit
     /// that differs goes on with the result of its plans; without it the
@@ -783,6 +807,7 @@ impl Default for CompilerOptions {
             derived_census: Self::derived_census_from_env(),
             derived_path: DerivedPath::from_env(),
             derived_reference: None,
+            derived_fallback: None,
             derived_differences: None,
             backend: crate::bir::shadow::BackendMode::from_env(),
             signature_check: crate::cmi::signature_check::SignatureCheck::from_env(),
@@ -6230,35 +6255,35 @@ pub fn compile_source_to_js_with_options(
     filename: &str,
     options: &CompilerOptions,
 ) -> Result<String> {
-    with_derived_retry(options, |options, frontend_reported| {
-        compile_source_to_js_with_options_inner(
-            source,
-            filename,
-            options,
-            frontend_reported,
-            #[cfg(test)]
-            None,
-        )
-    })
+    compile_source_to_js_with_options_inner(
+        source,
+        filename,
+        options,
+        #[cfg(test)]
+        None,
+    )
 }
 
-/// Run `compile` on a unit's source, and once more when a plan of the unit
-/// could not be used ([`DerivedRetry`]): with the unit's derived code as
-/// syntax, and `true` to say the frontend's reports were already printed.
-/// Cost: O(1) beyond the compiles; the options are copied only for the
-/// second.
-fn with_derived_retry<T>(
+/// The general syntax of an implementation whose plan could not be used
+/// ([`CompilerOptions::derived_fallback`]): the frontend run again on its
+/// source with [`DerivedPath::Fallback`]. Its reports were printed with the
+/// first tree and are not printed again. Cost: one parse and frontend run
+/// of the unit and one copy of the options, only for a unit that falls back.
+fn general_implementation_syntax(
+    source: &str,
+    filename: &str,
     options: &CompilerOptions,
-    mut compile: impl FnMut(&CompilerOptions, bool) -> Result<T>,
-) -> Result<T> {
-    match compile(options, false) {
-        Err(error) if error.is::<DerivedRetry>() => {
-            let mut options = options.clone();
-            options.derived_path = DerivedPath::Fallback;
-            compile(&options, true)
-        }
-        result => result,
-    }
+) -> Result<GeneralSyntax<Structure>> {
+    let mut options = options.clone();
+    options.derived_path = DerivedPath::Fallback;
+    options.derived_fallback = None;
+    let mut parser = Parser::new(filename, source);
+    let structure = module::parse_structure(&mut parser);
+    let frontend =
+        run_implementation_frontend(&mut parser, structure, source, filename, &options, &mut String::new())?;
+    parser.arena_mut().reserve_typecheck_synthetic_capacity();
+    crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
+    Ok(GeneralSyntax { arena: parser.into_arena(), tree: frontend.structure, warning_locations: None })
 }
 
 #[cfg(test)]
@@ -6271,7 +6296,6 @@ fn compile_source_to_js_with_trace(
         source,
         filename,
         &CompilerOptions::default(),
-        false,
         Some(trace),
     )
 }
@@ -6471,7 +6495,6 @@ fn compile_source_to_js_with_options_inner(
     source: &str,
     filename: &str,
     options: &CompilerOptions,
-    frontend_reported: bool,
     #[cfg(test)] mut discriminator_trace: Option<&mut PreJsDiscriminatorTrace>,
 ) -> Result<String> {
     // Parse
@@ -6486,9 +6509,10 @@ fn compile_source_to_js_with_options_inner(
         options,
         &mut frontend_output,
     );
-    if !options.frontend_already_reported && !frontend_reported {
+    if !options.frontend_already_reported {
         write_stderr(&frontend_output);
     }
+    let unit_options = options;
     let ImplementationFrontend {
         structure,
         warnings_fatal: ppx_warnings_have_errors,
@@ -6517,16 +6541,20 @@ fn compile_source_to_js_with_options_inner(
 
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let current_unit_name = options.current_unit_name();
+    let fallback = || general_implementation_syntax(source, filename, unit_options);
     let (type_ctx, result) = type_structure_two_modes(
-        CheckUnit { arena: parser.arena(), filename, options, registry: None,
+        CheckUnit { filename, options, registry: None,
             module_name: current_unit_name.as_deref(), file_config: &file_config,
             frontend_warning_specs: &frontend_warning_specs, derived_plans: true,
             mode: crate::types::context::CheckMode::from_env() },
-        |tctx, env, arena| {
+        UnitSyntax::new(parser.arena(), &structure, options),
+        (parser.arena().plans().item_count() > 0).then_some(&fallback as &dyn Fn() -> Result<GeneralSyntax<Structure>>),
+        |tctx, env, syntax| {
             tctx.experimental_let_unwrap = experimental_let_unwrap;
-            type_structure(tctx, env, arena, &structure)
+            type_structure(tctx, env, syntax.arena, syntax.tree)
         },
-        |type_ctx, mut tctx, typed, attempt_output| {
+        |type_ctx, mut tctx, typed, syntax, attempt_output| {
+    let UnitSyntax { arena, .. } = syntax;
     let ((typed_structure, final_env), env) = match typed {
         Ok(result) => result,
         Err(e) => {
@@ -6538,7 +6566,7 @@ fn compile_source_to_js_with_options_inner(
             tctx.drain_open_slot_uses();
             let suppress_info_style =
                 !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
-            attempt_output.warnings(parser.arena(), source, filename, &tctx.warnings);
+            attempt_output.warnings(arena, source, filename, &tctx.warnings);
             if let Some(error) = tctx
                 .persistent_env
                 .as_ref()
@@ -6549,7 +6577,7 @@ fn compile_source_to_js_with_options_inner(
             return Err(type_mod_error_to_anyhow(
                 e,
                 type_ctx,
-                parser.arena(),
+                arena,
                 source,
                 filename,
                 suppress_info_style,
@@ -6564,7 +6592,7 @@ fn compile_source_to_js_with_options_inner(
         return Err(persistent_env_error_to_anyhow(error, filename));
     }
     tctx.drain_open_slot_uses();
-    attempt_output.warnings(parser.arena(), source, filename, &tctx.warnings);
+    attempt_output.warnings(arena, source, filename, &tctx.warnings);
     // js_implementation.ml:158-163: `Warnings.check_fatal` runs only after
     // `Typemod.type_implementation_more`, whose delayed checks
     // (typemod.ml:1769-1776) still report their warnings.
@@ -6630,7 +6658,7 @@ fn compile_source_to_js_with_options_inner(
             return Err(type_mod_error_to_anyhow(
                 e,
                 type_ctx,
-                parser.arena(),
+                arena,
                 source,
                 filename,
                 suppress_info_style,
@@ -6648,11 +6676,11 @@ fn compile_source_to_js_with_options_inner(
             match crate::types::includemod::escaped(type_ctx, implementation_coercion) {
                 Ok(coercion) => coercion,
                 Err(e) => {
-                    attempt_output.warnings(parser.arena(), source, filename, &tctx.warnings);
+                    attempt_output.warnings(arena, source, filename, &tctx.warnings);
                     return Err(type_mod_error_to_anyhow(
                         e.into(),
                         type_ctx,
-                        parser.arena(),
+                        arena,
                         source,
                         filename,
                         !tctx.warnings.is_empty()
@@ -6670,7 +6698,7 @@ fn compile_source_to_js_with_options_inner(
             return Err(type_mod_error_to_anyhow(
                 e,
                 type_ctx,
-                parser.arena(),
+                arena,
                 source,
                 filename,
                 suppress_info_style,
@@ -6687,7 +6715,7 @@ fn compile_source_to_js_with_options_inner(
     // typedtree-only runs must therefore flush value-usage checks before the dump.
     tctx.flush_value_usage_checks();
     let delayed_warnings = &tctx.warnings[delayed_type_warning_start..];
-    attempt_output.warnings(parser.arena(), source, filename, delayed_warnings);
+    attempt_output.warnings(arena, source, filename, delayed_warnings);
     // `Warnings.check_fatal` only runs at lam_compile_main.ml:420 (or right
     // after typing for typedtree/cmi-only runs, js_implementation.ml:158-159),
     // so a fatal typing warning still lets Translmod report its warnings.
@@ -6699,7 +6727,7 @@ fn compile_source_to_js_with_options_inner(
     if options.dump_typed_sexp {
         let stderr = &mut attempt_output.stderr;
         let _ = print_typed_structure(
-            parser.arena(),
+            arena,
             type_ctx,
             &tctx.typed,
             &typed_structure,
@@ -6709,7 +6737,7 @@ fn compile_source_to_js_with_options_inner(
     if options.dump_typed_sexp_locs {
         let stderr = &mut attempt_output.stderr;
         let _ = print_typed_structure_with_locs(
-            parser.arena(),
+            arena,
             type_ctx,
             &tctx.typed,
             &typed_structure,
@@ -6750,7 +6778,7 @@ fn compile_source_to_js_with_options_inner(
             has_resi.then(|| interface_source_gentype_read(source_file_for_interface)),
             GentypeUnit {
                 annots: crate::gentype::main::TypedArtifactAnnots::Implementation(&typed_structure),
-                arena: parser.arena(),
+                arena,
                 ta: &tctx.typed,
                 type_ctx,
                 source: &|| source.to_string(),
@@ -6776,7 +6804,7 @@ fn compile_source_to_js_with_options_inner(
     let raw_arena = crate::raw_lambda::RawArena::for_typed_exprs(tctx.typed.expr_count());
     let mut raw_converter =
         crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
-            parser.arena(),
+            arena,
             &tctx.typed,
             type_ctx,
             &env,
@@ -6821,7 +6849,7 @@ fn compile_source_to_js_with_options_inner(
     let lam_locs = raw_converter.take_lam_locs();
     if let Some(diagnostic) = raw_converter.take_diagnostic() {
         // A Translmod error escapes before `Warnings.check_fatal`.
-        attempt_output.warnings(parser.arena(), source, filename, &raw_warnings);
+        attempt_output.warnings(arena, source, filename, &raw_warnings);
         return Err(UserDiagnostic::new(
             format_compiler_error_report_from_location(
                 source,
@@ -6834,8 +6862,8 @@ fn compile_source_to_js_with_options_inner(
         .into());
     }
     let late_type_warnings = &tctx.warnings[post_type_warning_start..];
-    attempt_output.warnings(parser.arena(), source, filename, late_type_warnings);
-    attempt_output.warnings(parser.arena(), source, filename, &raw_warnings);
+    attempt_output.warnings(arena, source, filename, late_type_warnings);
+    attempt_output.warnings(arena, source, filename, &raw_warnings);
     // lam_compile_main.ml:420 `Warnings.check_fatal ()` runs after the
     // lambda and JS passes (checked below, after `lam_compile`).
     let warnings_fatal = typing_warnings_fatal
@@ -7745,15 +7773,18 @@ pub fn typecheck_interface_source(
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let current_unit_name = options.current_unit_name();
     type_structure_two_modes(
-        CheckUnit { arena: parser.arena(), filename, options, registry: None,
+        CheckUnit { filename, options, registry: None,
             module_name: current_unit_name.as_deref(), file_config: &file_config,
             frontend_warning_specs: &frontend_warning_specs, derived_plans: true,
             mode: crate::types::context::CheckMode::from_env() },
-        |tctx, env, arena| {
+        // An interface has no derived item that can fall back.
+        UnitSyntax::new(parser.arena(), &signature, options),
+        None,
+        |tctx, env, syntax| {
             tctx.experimental_let_unwrap = experimental_let_unwrap;
-            transl_signature(tctx, env, arena, &signature)
+            transl_signature(tctx, env, syntax.arena, syntax.tree)
         },
-        |type_ctx, mut tctx, typed, attempt_output| {
+        |type_ctx, mut tctx, typed, _, attempt_output| {
     let (typed_signature, env) = match typed {
         Ok(typed) => typed,
         Err(e) => {
@@ -9742,32 +9773,6 @@ pub fn compile_source_in_process(
     has_interface: bool,
     gentype_interface: Option<crate::gentype::main::InterfaceRead>,
 ) -> Result<InProcessCompileResult> {
-    with_derived_retry(options, |options, frontend_reported| {
-        compile_source_in_process_once(
-            source,
-            filename,
-            module_name,
-            options,
-            registry,
-            has_interface,
-            gentype_interface.clone(),
-            frontend_reported,
-        )
-    })
-}
-
-/// [`compile_source_in_process`] for one path of the unit's derived items.
-#[allow(clippy::too_many_arguments)]
-fn compile_source_in_process_once(
-    source: &str,
-    filename: &str,
-    module_name: &str,
-    options: &CompilerOptions,
-    registry: &ModuleRegistry,
-    has_interface: bool,
-    gentype_interface: Option<crate::gentype::main::InterfaceRead>,
-    frontend_reported: bool,
-) -> Result<InProcessCompileResult> {
     let mut parser = Parser::new(filename, source);
     let structure = module::parse_structure(&mut parser);
     let mut frontend_output = String::new();
@@ -9779,9 +9784,7 @@ fn compile_source_in_process_once(
         options,
         &mut frontend_output,
     );
-    if !frontend_reported {
-        write_stderr(&frontend_output);
-    }
+    write_stderr(&frontend_output);
     let frontend = frontend?;
     let warnings_fatal = frontend.warnings_fatal;
     let experimental_let_unwrap = frontend.experimental_let_unwrap;
@@ -9803,6 +9806,7 @@ fn compile_source_in_process_once(
         general_options.derived_path = DerivedPath::General;
         general_options.derived_census = None;
         general_options.derived_reference = None;
+        general_options.derived_fallback = None;
         effective_options.to_mut().derived_reference = Some(std::sync::Arc::new(move || {
             let mut parser = Parser::new(&filename, &source);
             let structure = module::parse_structure(&mut parser);
@@ -9817,6 +9821,16 @@ fn compile_source_in_process_once(
             .map_err(|error| anyhow::anyhow!("the frontend failed on {filename}: {error}"))?;
             crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
             Ok((parser.into_arena(), frontend.structure))
+        }));
+    }
+
+    // The unit's attempt loop continues on the general syntax when a plan
+    // cannot be used. Cost: one copy of the source and options for a unit
+    // with plans.
+    if parser.arena().plans().item_count() > 0 {
+        let (source, filename, options) = (source.to_owned(), filename.to_owned(), options.clone());
+        effective_options.to_mut().derived_fallback = Some(std::sync::Arc::new(move || {
+            general_implementation_syntax(&source, &filename, &options)
         }));
     }
 
@@ -10300,9 +10314,10 @@ fn fresh_type_context() -> TypeContext {
 fn in_process_type_check_context<'a>(
     type_ctx: &'a TypeContext,
     unit: &CheckUnit<'a>,
+    arena: &'a ParseArena,
     mode: crate::types::context::CheckMode,
 ) -> (TypeCheckContext<'a>, crate::types::typemod::TypeModResult<Env>) {
-    let CheckUnit { arena, options, registry, module_name, file_config,
+    let CheckUnit { options, registry, module_name, file_config,
         frontend_warning_specs, .. } = *unit;
     type_ctx.set_explain_mode(mode);
     let effective_options = file_config.apply(options);
@@ -10339,9 +10354,9 @@ fn in_process_type_check_context<'a>(
 }
 
 /// Borrowed inputs prepared once per unit, not passed down a node walk.
-/// Cost: copying 88 bytes on 64-bit targets; no allocation.
+/// Cost: copying 80 bytes on 64-bit targets; no allocation.
+#[derive(Clone, Copy)]
 struct CheckUnit<'a> {
-    arena: &'a crate::parse_arena::ParseArena,
     filename: &'a str,
     options: &'a CompilerOptions,
     registry: Option<&'a ModuleRegistry>,
@@ -10352,12 +10367,65 @@ struct CheckUnit<'a> {
     mode: crate::types::context::CheckMode,
 }
 
-/// Settings for one whole-unit attempt. Cost: two bytes copied per attempt,
-/// never per node. Another retry reason can change these settings in this loop.
-#[derive(Clone, Copy)]
+/// The syntax one attempt of a unit is checked from: the unit's first tree,
+/// or its general form once a plan could not be used. Cost: three words
+/// copied per attempt, never per node.
+struct UnitSyntax<'a, S> {
+    arena: &'a ParseArena,
+    tree: &'a S,
+    /// See [`CompilerOptions::warning_locations`]: the located parse of
+    /// this syntax.
+    warning_locations: Option<&'a WarningLocations>,
+}
+
+impl<S> Clone for UnitSyntax<'_, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<S> Copy for UnitSyntax<'_, S> {}
+
+impl<'a, S> UnitSyntax<'a, S> {
+    /// A first tree with the options' located parse. O(1).
+    fn new(arena: &'a ParseArena, tree: &'a S, options: &'a CompilerOptions) -> Self {
+        Self { arena, tree, warning_locations: options.warning_locations.as_ref() }
+    }
+}
+
+/// Settings of one whole-unit attempt, owned by the unit's single attempt
+/// loop ([`type_structure_two_modes`]): every retry reason changes these and
+/// nothing else. Cost: two bytes copied per attempt, never per node.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct CheckAttempt {
     mode: crate::types::context::CheckMode,
+    /// The checker may discharge the plans of derived items. Cleared, once,
+    /// when a plan could not be used: the attempt after it runs on the
+    /// unit's general syntax.
     derived_plans: bool,
+}
+
+/// Why an attempt is discarded and the unit checked again.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AttemptRetry {
+    /// A plan of a derived item could not be used.
+    DerivedFallback,
+    /// A Success attempt failed: explain the failure.
+    Explain,
+}
+
+impl CheckAttempt {
+    /// The settings of the attempt after one discarded for `reason`, or
+    /// `None` when that reason cannot apply again. Each reason applies at
+    /// most once per unit, so a unit has at most three attempts. O(1).
+    fn after(self, reason: AttemptRetry) -> Option<Self> {
+        use crate::types::context::CheckMode;
+        match reason {
+            AttemptRetry::DerivedFallback if self.derived_plans => Some(Self { derived_plans: false, ..self }),
+            AttemptRetry::Explain if self.mode == CheckMode::Success => Some(Self { mode: CheckMode::Explain, ..self }),
+            AttemptRetry::DerivedFallback | AttemptRetry::Explain => None,
+        }
+    }
 }
 
 /// Output is private until the attempt crosses its publication boundary.
@@ -10406,44 +10474,75 @@ impl AttemptOutput {
     }
 }
 
-/// Check a unit with diagnostic-only snapshots elided, then explain it if needed.
-/// Cost: one check on success, at most two checks on failure; O(1) dispatch.
-/// The continuation validates the checked unit while its output stays private.
-/// Its publication boundary commits the attempt before external artifacts or
-/// callbacks become observable; all errors before that boundary get Explain.
-/// Returning the owned context separately keeps tooling's typed handles valid
-/// without a self-referential context or retaining the discarded type graph.
-fn type_structure_two_modes<T, R>(
+/// The one attempt loop of a unit: check it with diagnostic-only snapshots
+/// elided, continue on its general syntax when a plan of a derived item
+/// cannot be used, and explain it if the check fails. Every retry reason
+/// changes the loop's [`CheckAttempt`] settings, so the reasons compose: a
+/// unit that falls back keeps its check mode, and one that then fails is
+/// explained once, on its general syntax. Cost: one check on success, one
+/// more for a fallback (plus the frontend run `fallback` makes) and one
+/// more to explain a failure; O(1) dispatch.
+///
+/// `fallback` makes the unit's general syntax; without it a fallback fails
+/// the compile with [`DerivedRetry`]. The continuation validates the checked
+/// unit while its output stays private. Its publication boundary commits the
+/// attempt before external artifacts or callbacks become observable; all
+/// errors before that boundary get Explain. Returning the owned context
+/// separately keeps tooling's typed handles valid without a self-referential
+/// context or retaining the discarded type graph.
+fn type_structure_two_modes<S, T, R>(
     unit: CheckUnit<'_>,
-    check: impl for<'a> Fn(&mut TypeCheckContext<'a>, &Env, &'a crate::parse_arena::ParseArena)
+    first: UnitSyntax<'_, S>,
+    fallback: Option<&dyn Fn() -> Result<GeneralSyntax<S>>>,
+    check: impl for<'a> Fn(&mut TypeCheckContext<'a>, &Env, UnitSyntax<'a, S>)
         -> crate::types::typemod::TypeModResult<T>,
     mut finish: impl for<'a> FnMut(&'a TypeContext, TypeCheckContext<'a>,
-        crate::types::typemod::TypeModResult<(T, Env)>, &mut AttemptOutput) -> Result<R>,
+        crate::types::typemod::TypeModResult<(T, Env)>, UnitSyntax<'a, S>, &mut AttemptOutput) -> Result<R>,
 ) -> (TypeContext, Result<R>) {
     use crate::types::context::CheckMode;
-    let CheckUnit { arena, filename, options, derived_plans, .. } = unit;
+    let CheckUnit { filename, options, .. } = unit;
     offer_unit_to_checker(options.checker, filename);
-    let mut attempt = CheckAttempt { mode: unit.mode, derived_plans };
+    let mut attempt = CheckAttempt { mode: unit.mode, derived_plans: unit.derived_plans };
+    // Owned here once made, so every later attempt borrows it.
+    let mut general: Option<GeneralSyntax<S>> = None;
     loop {
+        let syntax = match &general {
+            Some(general) => UnitSyntax {
+                arena: &general.arena,
+                tree: &general.tree,
+                warning_locations: general.warning_locations.as_ref(),
+            },
+            None => first,
+        };
         crate::perf_counters::record_check_attempt();
         let type_ctx = fresh_type_context();
         type_ctx.set_location_namespace(&options.location_identity(filename));
         type_ctx.defer_attempt_counters();
         let (mut tctx, env) = crate::timing::measure(crate::timing::Phase::EnvSetup, || {
-            in_process_type_check_context(
-                &type_ctx, &unit, attempt.mode,
-            )
+            in_process_type_check_context(&type_ctx, &unit, syntax.arena, attempt.mode)
         });
         if attempt.derived_plans {
-            tctx.derived_census = arena.derived_census.clone();
+            tctx.derived_census = syntax.arena.derived_census.clone();
         }
         let typed = crate::timing::measure(crate::timing::Phase::Typecheck, || {
-            env.and_then(|env| check(&mut tctx, &env, arena).map(|typed| (typed, env)))
+            env.and_then(|env| check(&mut tctx, &env, syntax).map(|typed| (typed, env)))
         });
         if tctx.derived_fallback {
+            // Dropped in dependency order: nothing of this attempt survives.
             drop(typed);
             drop(tctx);
-            return (type_ctx, Err(DerivedRetry.into()));
+            let (Some(next), Some(fallback)) = (attempt.after(AttemptRetry::DerivedFallback), fallback) else {
+                return (type_ctx, Err(DerivedRetry.into()));
+            };
+            // The frontend's own errors were reported with the first tree;
+            // one here is the compile's error, not a check to explain.
+            match fallback() {
+                Ok(syntax) => general = Some(syntax),
+                Err(error) => return (type_ctx, Err(error)),
+            }
+            drop(type_ctx);
+            attempt = next;
+            continue;
         }
         if attempt.mode == CheckMode::Success
             && (typed.is_err() || type_ctx.unexplained_unify_failure())
@@ -10453,18 +10552,18 @@ fn type_structure_two_modes<T, R>(
             drop(tctx);
             drop(type_ctx);
             crate::perf_counters::record_explain_rerun();
-            attempt.mode = CheckMode::Explain;
+            attempt = attempt.after(AttemptRetry::Explain).expect("a Success attempt can be explained");
             continue;
         }
         let mut reports = AttemptOutput::new(attempt.mode);
-        let output = finish(&type_ctx, tctx, typed, &mut reports);
+        let output = finish(&type_ctx, tctx, typed, syntax, &mut reports);
         if reports.publication == AttemptPublication::Pending && attempt.mode == CheckMode::Success
             && (output.is_err() || type_ctx.unexplained_unify_failure())
         {
             drop(output);
             drop(type_ctx);
             crate::perf_counters::record_explain_rerun();
-            attempt.mode = CheckMode::Explain;
+            attempt = attempt.after(AttemptRetry::Explain).expect("a Success attempt can be explained");
             continue;
         }
         let output = reports.publish(&type_ctx).and(output);
@@ -10514,12 +10613,15 @@ pub fn typecheck_structure_for_tooling(
         ppx::collect_leading_builtin_warning_attribute_specs(structure, arena)
             .expect("the frontend read these attributes");
     let (type_ctx, output) = type_structure_two_modes(
-        CheckUnit { arena, filename, options, registry: Some(registry),
+        CheckUnit { filename, options, registry: Some(registry),
             module_name: Some(module_name), file_config: &file_config,
             frontend_warning_specs: &frontend_warning_specs, derived_plans: true,
             mode: crate::types::context::CheckMode::from_env() },
-        |tctx, env, arena| type_structure(tctx, env, arena, structure),
-        |type_ctx, mut tctx, result, _attempt_output| {
+        // Tooling parses derived code as syntax: nothing to fall back from.
+        UnitSyntax::new(arena, structure, options),
+        None,
+        |tctx, env, syntax| type_structure(tctx, env, syntax.arena, syntax.tree),
+        |type_ctx, mut tctx, result, UnitSyntax { arena, .. }, _attempt_output| {
         let typed = match result {
 
             Ok(((typed_structure, _final_env), env)) => {
@@ -10581,12 +10683,14 @@ pub fn typecheck_signature_for_tooling(
         ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena)
             .expect("the frontend read these attributes");
     let (type_ctx, output) = type_structure_two_modes(
-        CheckUnit { arena, filename, options, registry: Some(registry),
+        CheckUnit { filename, options, registry: Some(registry),
             module_name: Some(module_name), file_config: &file_config,
             frontend_warning_specs: &frontend_warning_specs, derived_plans: true,
             mode: crate::types::context::CheckMode::from_env() },
-        |tctx, env, arena| transl_signature(tctx, env, arena, signature),
-        |type_ctx, mut tctx, result, _attempt_output| {
+        UnitSyntax::new(arena, signature, options),
+        None,
+        |tctx, env, syntax| transl_signature(tctx, env, syntax.arena, syntax.tree),
+        |type_ctx, mut tctx, result, UnitSyntax { arena, .. }, _attempt_output| {
         let typed = match result {
 
             Ok((typed_signature, _env)) => ToolingTyped::Interface(typed_signature),
@@ -10720,13 +10824,20 @@ fn compile_until_js(
     let source = || -> &str { source_cell.get_or_init(|| read_in_process_source(filename)) };
     let checking_config = file_config.clone();
     type_structure_two_modes(
-        CheckUnit { arena, filename, options, registry: Some(registry),
+        CheckUnit { filename, options, registry: Some(registry),
             module_name: Some(module_name), file_config: &checking_config,
             frontend_warning_specs: &frontend_warning_specs,
             derived_plans: options.derived_path.plans_off().is_none(),
             mode: crate::types::context::CheckMode::from_env() },
-        |tctx, env, arena| type_structure(tctx, env, arena, structure),
-        |type_ctx, mut tctx, typed, attempt_output| {
+        UnitSyntax::new(arena, structure, options),
+        options
+            .derived_fallback
+            .as_deref()
+            .map(|fallback| fallback as &dyn Fn() -> Result<GeneralSyntax<Structure>>),
+        |tctx, env, syntax| type_structure(tctx, env, syntax.arena, syntax.tree),
+        |type_ctx, mut tctx, typed, syntax, attempt_output| {
+    // A unit that fell back is finished from its general syntax.
+    let UnitSyntax { arena, tree: structure, warning_locations } = syntax;
     let ((typed_structure, final_env), env) = match typed {
         Ok(result) => result,
         Err(e) => {
@@ -10903,7 +11014,7 @@ fn compile_until_js(
     // translation, as the file compile does.
     tctx.flush_value_usage_checks();
     let mut located_warnings = None;
-    if !place_location_free_warnings(arena, options, &mut located_warnings, &mut tctx.warnings) {
+    if !place_location_free_warnings(arena, warning_locations, &mut located_warnings, &mut tctx.warnings) {
         return Err(LocationRetry::Warning.into());
     }
     let post_type_warning_start = tctx.warnings.len();
@@ -11067,7 +11178,7 @@ fn compile_until_js(
         // The earlier typing warnings already carry located parse slots.
         // Only inclusion warnings appended since then still need placement.
         if !place_location_free_warnings(
-            arena, options, &mut located_warnings,
+            arena, warning_locations, &mut located_warnings,
             &mut tctx.warnings[post_type_warning_start..],
         ) {
             return Err(LocationRetry::Warning.into());
@@ -11265,12 +11376,12 @@ fn compile_until_js(
         }
         if !place_location_free_warnings(
             arena,
-            options,
+            warning_locations,
             &mut located_warnings,
             &mut tctx.warnings[post_type_warning_start..],
         ) || !place_location_free_warnings(
             arena,
-            options,
+            warning_locations,
             &mut located_warnings,
             &mut raw_warnings,
         ) {
@@ -11786,12 +11897,15 @@ pub fn typecheck_preprocessed_signature_in_process(
     let source_cell = std::cell::OnceCell::new();
     let source = || -> &str { source_cell.get_or_init(|| read_in_process_source(filename)) };
     type_structure_two_modes(
-        CheckUnit { arena, filename, options, registry: Some(registry),
+        CheckUnit { filename, options, registry: Some(registry),
             module_name: Some(module_name), file_config: &file_config,
             frontend_warning_specs: &frontend_warning_specs, derived_plans: true,
             mode: crate::types::context::CheckMode::from_env() },
-        |tctx, env, arena| transl_signature(tctx, env, arena, signature),
-        |type_ctx, mut tctx, typed, attempt_output| {
+        // An interface has no derived item that can fall back.
+        UnitSyntax::new(arena, signature, options),
+        None,
+        |tctx, env, syntax| transl_signature(tctx, env, syntax.arena, syntax.tree),
+        |type_ctx, mut tctx, typed, UnitSyntax { arena, warning_locations, .. }, attempt_output| {
     let (typed_signature, env) = match typed {
         Ok(typed_signature) => typed_signature,
         Err(e) => {
@@ -11877,7 +11991,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     // js_implementation.ml:64 `Delayed_checks.force_delayed_checks ()`.
     tctx.flush_value_usage_checks();
     let mut located_warnings = None;
-    if !place_location_free_warnings(arena, options, &mut located_warnings, &mut tctx.warnings) {
+    if !place_location_free_warnings(arena, warning_locations, &mut located_warnings, &mut tctx.warnings) {
         return Err(LocationRetry::Warning.into());
     }
     let warnings = format_type_warnings_lazy(
@@ -12060,7 +12174,8 @@ mod tests {
     fn two_mode_attempts_keep_only_the_final_check() {
         assert_eq!(std::mem::size_of::<super::CheckAttempt>(), 2);
         assert_eq!(std::mem::size_of::<super::AttemptOutput>(), 4 * std::mem::size_of::<usize>());
-        assert_eq!(std::mem::size_of::<super::CheckUnit<'_>>(), 11 * std::mem::size_of::<usize>());
+        assert_eq!(std::mem::size_of::<super::CheckUnit<'_>>(), 10 * std::mem::size_of::<usize>());
+        assert_eq!(std::mem::size_of::<super::UnitSyntax<'_, super::Structure>>(), 3 * std::mem::size_of::<usize>());
         for (source, attempts) in [("let x = 1", 1), ("let x: bool = 1", 2)] {
             let mut parser = super::Parser::new("Attempt.res", source);
             let structure = super::module::parse_structure(&mut parser);
@@ -12069,15 +12184,17 @@ mod tests {
             let calls = std::cell::Cell::new(0);
             let finishes = std::cell::Cell::new(0);
             let (_, result) = super::type_structure_two_modes(
-                super::CheckUnit { arena: parser.arena(), filename: "Attempt.res", options: &options,
+                super::CheckUnit { filename: "Attempt.res", options: &options,
                     registry: Some(&super::ModuleRegistry::new()), module_name: Some("Attempt"),
                     file_config: &Default::default(), frontend_warning_specs: &[], derived_plans: true,
                     mode: crate::types::context::CheckMode::Success },
-                |tctx, env, arena| {
+                super::UnitSyntax::new(parser.arena(), &structure, &options),
+                None,
+                |tctx, env, syntax| {
                     calls.set(calls.get() + 1);
-                    super::type_structure(tctx, env, arena, &structure)
+                    super::type_structure(tctx, env, syntax.arena, syntax.tree)
                 },
-                |_, _, result, _reports| {
+                |_, _, result, _, _reports| {
                     finishes.set(finishes.get() + 1);
                     assert_eq!(result.is_ok(), attempts == 1);
                     Ok(())
@@ -12088,6 +12205,198 @@ mod tests {
             assert_eq!(finishes.get(), 1);
         }
     }
+    /// The settings of the one attempt loop: each retry reason applies once,
+    /// a fallback keeps the check mode and an explanation keeps the path.
+    #[test]
+    fn attempt_settings_compose_each_reason_once() {
+        use super::{AttemptRetry, CheckAttempt};
+        use crate::types::context::CheckMode;
+        let first = CheckAttempt { mode: CheckMode::Success, derived_plans: true };
+        let general = first.after(AttemptRetry::DerivedFallback).unwrap();
+        assert_eq!(general, CheckAttempt { mode: CheckMode::Success, derived_plans: false });
+        let explained = general.after(AttemptRetry::Explain).unwrap();
+        assert_eq!(explained, CheckAttempt { mode: CheckMode::Explain, derived_plans: false });
+        assert_eq!(explained.after(AttemptRetry::Explain), None);
+        assert_eq!(explained.after(AttemptRetry::DerivedFallback), None);
+        assert_eq!(
+            first.after(AttemptRetry::Explain).unwrap().after(AttemptRetry::DerivedFallback),
+            Some(explained),
+        );
+    }
+
+    /// A unit whose plan cannot be used continues, in the same attempt loop
+    /// and check mode, on its general syntax, made once. A Success unit
+    /// that then type-checks has no explanation; one with a type error is
+    /// explained once, on the general syntax, and reports what a forced
+    /// Explain check reports.
+    #[test]
+    fn a_derived_fallback_and_an_explanation_share_one_attempt_loop() {
+        use crate::binary_ast::derive::fixtures::{CURRIED_LIBRARY, derive_source};
+        use crate::types::context::CheckMode;
+        for (error, success_checks) in [(false, 2), (true, 3)] {
+            let source = if error {
+                format!("{CURRIED_LIBRARY}\nlet bad: bool = 1")
+            } else {
+                CURRIED_LIBRARY.to_owned()
+            };
+            let mut reports = Vec::new();
+            for mode in [CheckMode::Success, CheckMode::Explain] {
+                let (parser, structure) = derive_source(&source, true);
+                assert!(parser.arena().plans().item_count() > 0);
+                let options = super::CompilerOptions { nopervasives: true, ..Default::default() };
+                let regenerated = std::cell::Cell::new(0);
+                let fallback = || {
+                    regenerated.set(regenerated.get() + 1);
+                    let (parser, tree) = derive_source(&source, false);
+                    Ok(super::GeneralSyntax { arena: parser.into_arena(), tree, warning_locations: None })
+                };
+                // The syntax and mode of each check, in order.
+                let checks = std::cell::RefCell::new(Vec::new());
+                let finishes = std::cell::Cell::new(0);
+                let first_arena: *const super::ParseArena = parser.arena();
+                let (_, result) = super::type_structure_two_modes(
+                    super::CheckUnit {
+                        filename: "Fallback.res", options: &options, registry: None,
+                        module_name: Some("Fallback"), file_config: &Default::default(),
+                        frontend_warning_specs: &[], derived_plans: true, mode,
+                    },
+                    super::UnitSyntax::new(parser.arena(), &structure, &options),
+                    Some(&fallback),
+                    |tctx, env, syntax| {
+                        // Outside any speculation only an Explain check snapshots.
+                        let mode = if tctx.type_ctx.unify_takes_snapshot() { CheckMode::Explain } else { CheckMode::Success };
+                        checks.borrow_mut().push((std::ptr::eq(syntax.arena, first_arena), mode));
+                        super::type_structure(tctx, env, syntax.arena, syntax.tree)
+                    },
+                    |ctx, _, typed, syntax, _| -> super::Result<()> {
+                        finishes.set(finishes.get() + 1);
+                        assert!(!std::ptr::eq(syntax.arena, first_arena), "finished from the general syntax");
+                        match typed {
+                            Ok(_) => Ok(()),
+                            Err(error) => Err(super::type_mod_error_to_anyhow(
+                                error, ctx, syntax.arena, "", "Fallback.res", false,
+                            )),
+                        }
+                    },
+                );
+                assert_eq!(regenerated.get(), 1, "the general syntax is made once");
+                assert_eq!(finishes.get(), 1, "only the final attempt is finished");
+                let checks = checks.into_inner();
+                let expected: Vec<(bool, CheckMode)> = match (mode, error) {
+                    (CheckMode::Success, false) => vec![(true, CheckMode::Success), (false, CheckMode::Success)],
+                    (CheckMode::Success, true) => vec![
+                        (true, CheckMode::Success), (false, CheckMode::Success), (false, CheckMode::Explain),
+                    ],
+                    (CheckMode::Explain, _) => vec![(true, CheckMode::Explain), (false, CheckMode::Explain)],
+                };
+                assert_eq!(checks, expected);
+                if mode == CheckMode::Success {
+                    assert_eq!(checks.len(), success_checks);
+                }
+                assert_eq!(result.is_err(), error);
+                reports.push(result.err().map(|error| format!("{error:#}")));
+            }
+            assert_eq!(reports[0], reports[1], "Success and forced Explain report the same");
+        }
+    }
+
+    /// Without a way to make the general syntax, a fallback fails the
+    /// compile with `DerivedRetry` and nothing is finished.
+    #[test]
+    fn a_derived_fallback_without_general_syntax_is_a_derived_retry() {
+        let (parser, structure) =
+            crate::binary_ast::derive::fixtures::derive_source(crate::binary_ast::derive::fixtures::CURRIED_LIBRARY, true);
+        let options = super::CompilerOptions { nopervasives: true, ..Default::default() };
+        let (_, result) = super::type_structure_two_modes(
+            super::CheckUnit {
+                filename: "Fallback.res", options: &options, registry: None, module_name: None,
+                file_config: &Default::default(), frontend_warning_specs: &[], derived_plans: true,
+                mode: crate::types::context::CheckMode::Success,
+            },
+            super::UnitSyntax::new(parser.arena(), &structure, &options),
+            None,
+            |tctx, env, syntax| super::type_structure(tctx, env, syntax.arena, syntax.tree),
+            |_, _, _, _, _| -> super::Result<()> { panic!("an abandoned attempt is not finished") },
+        );
+        assert!(result.unwrap_err().is::<super::DerivedRetry>());
+    }
+
+    /// A codec with an optional parameter fails its plan's arity
+    /// obligation; the general form, which applies it to one argument,
+    /// types.
+    const FALLING_BACK: &str = "type plain = int\nlet plain_encode = Spice.intToJson\nlet plain_encodeJson = (x: plain, ~extra=1) => {\n  let _ = extra\n  plain_encode(x)\n}\nlet plain_decode = Spice.intFromJson\n@spice type t = {a: plain}\n";
+
+    /// The in-process compile of a unit whose plan cannot be used gives its
+    /// attempt loop the general syntax: it compiles as the general path
+    /// does, and a type error after the fallback is the general path's.
+    #[test]
+    fn an_in_process_compile_falls_back_within_its_attempt_loop() {
+        use super::{CompilerOptions, DerivedPath, compile_source_in_process};
+        let compile = |extra: &str, derived_path| {
+            let source = format!("{}{FALLING_BACK}{extra}", crate::binary_ast::derive::fixtures::RECORD_LIBRARY);
+            let options = CompilerOptions { spice_ppx: true, derived_path, ..Default::default() };
+            compile_source_in_process(
+                &source, "Fallback.res", "Fallback", &options,
+                &crate::cmi::persistent_env::ModuleRegistry::new(), false, None,
+            )
+        };
+        let planned = compile("", DerivedPath::Plans).expect("the unit falls back and compiles");
+        let general = compile("", DerivedPath::General).unwrap();
+        assert_eq!(planned.js_outputs.len(), general.js_outputs.len());
+        for (planned, general) in planned.js_outputs.iter().zip(&general.js_outputs) {
+            assert_eq!(planned.code, general.code);
+        }
+        assert_eq!(planned.warnings, general.warnings);
+        let planned = compile("let bad: bool = 1\n", DerivedPath::Plans).err().expect("a type error");
+        assert!(!planned.is::<super::DerivedRetry>());
+        let general = compile("let bad: bool = 1\n", DerivedPath::General).err().expect("a type error");
+        assert_eq!(format!("{planned:#}"), format!("{general:#}"));
+        assert!(format!("{planned:#}").contains("bool"));
+    }
+
+    /// The fixture falls back: its plan is abandoned once, and with a type
+    /// error after it the Success check explains once, on the general
+    /// syntax, reporting what a forced Explain check reports.
+    #[test]
+    fn a_frontend_fallback_then_a_type_error_is_explained_once() {
+        use crate::binary_ast::derive::fixtures::frontend_source;
+        use crate::types::context::CheckMode;
+        let source = format!("{FALLING_BACK}let bad: bool = 1\n");
+        let mut reports = Vec::new();
+        for mode in [CheckMode::Success, CheckMode::Explain] {
+            let (parser, structure) = frontend_source(&source, true);
+            let options = super::CompilerOptions { nopervasives: true, ..Default::default() };
+            let regenerated = std::cell::Cell::new(0);
+            let checks = std::cell::Cell::new(0);
+            let fallback = || {
+                regenerated.set(regenerated.get() + 1);
+                let (parser, tree) = frontend_source(&source, false);
+                Ok(super::GeneralSyntax { arena: parser.into_arena(), tree, warning_locations: None })
+            };
+            let (_, result) = super::type_structure_two_modes(
+                super::CheckUnit {
+                    filename: "Fallback.res", options: &options, registry: None, module_name: None,
+                    file_config: &Default::default(), frontend_warning_specs: &[], derived_plans: true, mode,
+                },
+                super::UnitSyntax::new(parser.arena(), &structure, &options),
+                Some(&fallback),
+                |tctx, env, syntax| {
+                    checks.set(checks.get() + 1);
+                    super::type_structure(tctx, env, syntax.arena, syntax.tree)
+                },
+                |ctx, _, typed, syntax, _| -> super::Result<()> {
+                    typed.map(|_| ()).map_err(|error| {
+                        super::type_mod_error_to_anyhow(error, ctx, syntax.arena, &source, "Fallback.res", false)
+                    })
+                },
+            );
+            assert_eq!(regenerated.get(), 1);
+            assert_eq!(checks.get(), if mode == CheckMode::Success { 3 } else { 2 });
+            reports.push(format!("{:#}", result.unwrap_err()));
+        }
+        assert_eq!(reports[0], reports[1]);
+    }
+
     #[test]
     fn post_structure_validation_is_rechecked_before_publication() {
         use crate::types::context::CheckMode;
@@ -12101,12 +12410,14 @@ mod tests {
             let attempts = std::cell::Cell::new(0);
             let (_, result) = super::type_structure_two_modes(
                 super::CheckUnit {
-                    arena: parser.arena(), filename: "NonGeneralizable.res", options: &options,
+                    filename: "NonGeneralizable.res", options: &options,
                     registry: None, module_name: None, file_config: &Default::default(),
                     frontend_warning_specs: &[], derived_plans: true, mode,
                 },
-                |tctx, env, arena| super::type_structure(tctx, env, arena, &structure),
-                |ctx, _, typed, output| -> super::Result<()> {
+                super::UnitSyntax::new(parser.arena(), &structure, &options),
+                None,
+                |tctx, env, syntax| super::type_structure(tctx, env, syntax.arena, syntax.tree),
+                |ctx, _, typed, _, output| -> super::Result<()> {
                     attempts.set(attempts.get() + 1);
                     assert!(output.stderr.is_empty(), "discarded reports must not enter the retry");
                     let ((structure, env), _) = typed.expect("structure typing succeeds");
@@ -12142,11 +12453,13 @@ mod tests {
                 let options = super::CompilerOptions { nopervasives: true, ..Default::default() };
                 let (_, report) = super::type_structure_two_modes(
                     super::CheckUnit {
-                        arena: parser.arena(), filename: "Warnings.res", options: &options,
+                        filename: "Warnings.res", options: &options,
                         registry: None, module_name: Some("Warnings"), file_config: &Default::default(),
                         frontend_warning_specs: &[], derived_plans: true, mode,
                     },
-                    |tctx, env, arena| {
+                    super::UnitSyntax::new(parser.arena(), &structure, &options),
+                    None,
+                    |tctx, env, syntax| {
                         if recovered {
                             // Model a caller that catches a failed unification, then
                             // continues checking an expression that emits a warning.
@@ -12155,11 +12468,11 @@ mod tests {
                             let right = ctx.new_constr(crate::types::predef::path_string(), vec![]);
                             assert!(crate::types::ctype::unify(ctx, &mut tctx.unify_state, left, right).is_err());
                         }
-                        let result = super::type_structure(tctx, env, arena, &structure);
+                        let result = super::type_structure(tctx, env, syntax.arena, syntax.tree);
                         tctx.flush_value_usage_checks();
                         result
                     },
-                    |ctx, tctx, typed, _reports| {
+                    |ctx, tctx, typed, _, _reports| {
                         assert!(!tctx.warnings.is_empty(), "fixture must exercise a warning");
                         let mut report = super::format_type_warnings(parser.arena(), source, "Warnings.res", &tctx.warnings);
                         if let Err(error) = typed {
