@@ -684,6 +684,10 @@ fn watch_loop(
                             SourceMapCommand::Watch,
                         )
                         .context("Could not initialize build")?;
+                        // Match notify's canonical event paths (notably /var versus
+                        // /private/var on macOS), without filesystem work per event.
+                        next_build_state.build_state.compiler_info.runtime_path =
+                            next_build_state.compiler_info.runtime_path.canonicalize()?;
                         next_build_state.revoked_snapshots = build_state.revoked_snapshots;
                         initialization_failed = false;
 
@@ -852,6 +856,11 @@ pub fn start(
                 SourceMapCommand::Watch,
             )
             .with_context(|| "Could not initialize build")?;
+
+            // Runtime overrides can name a symlink; normalize once before both
+            // watch registration and constructing the source-directory index.
+            build_state.build_state.compiler_info.runtime_path =
+                build_state.compiler_info.runtime_path.canonicalize()?;
 
             // Compute and register targeted watches based on source folders.
             let current_watches = register_watches(&mut watcher, &compute_watch_paths(&build_state, path));

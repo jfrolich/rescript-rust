@@ -16,8 +16,9 @@ cd "$work/project"
 cat > rescript.json <<'JSON'
 {"name":"snapshot-watch-test","sources":["src"],"dependencies":["@rescript/belt"],"package-specs":{"module":"esmodule","in-source":true},"suffix":".mjs"}
 JSON
+ln -s node_modules/@rescript/runtime runtime-link
 pid=''
-trap 'if [[ -n $pid ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi' EXIT
+trap 'status=$?; if [[ $status != 0 ]]; then tail -n 100 "$work/"*.log; fi; if [[ -n $pid ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi' EXIT
 for package in belt runtime touch; do
   for mode in snapshot off; do
     if [[ $package == touch && $mode == off ]]; then continue; fi
@@ -32,7 +33,7 @@ for package in belt runtime touch; do
         cp "$repo/packages/@rescript/runtime/"*.res* "$target/"
       fi
     done
-    export RESCRIPT_RUNTIME="$PWD/node_modules/@rescript/runtime"
+    export RESCRIPT_RUNTIME="$PWD/runtime-link"
     export RESCRIPT_SNAPSHOT=require
     [[ $mode != off ]] || export RESCRIPT_SNAPSHOT=off
     rewatch clean > "$work/clean.log" 2>&1
@@ -54,7 +55,15 @@ for package in belt runtime touch; do
       python3 -c 'from pathlib import Path; p=Path("node_modules/@rescript/runtime/Stdlib_List.res"); p.write_text(p.read_text().replace("let length = xs => lengthAux(xs, 0)", "let length = xs => lengthAux(xs, 1)"))'
     fi
     if [[ $package != touch ]]; then
-      wait_for_pattern_count "$work/$package-$mode.log" 'Finished .*compilation' 2 60
+      # macOS can deliver delayed metadata events from fixture setup. A second
+      # completion alone need not belong to the source edit. Require completion
+      # after this package's revocation, in log order.
+      remaining=60
+      until awk '/rest of this watch session/ {revoked=1} revoked && /Finished .*compilation/ {done=1} END {exit !done}' "$work/$package-$mode.log"; do
+        if [[ $remaining == 0 ]]; then exit 1; fi
+        sleep 1
+        remaining=$((remaining - 1))
+      done
     fi
     if [[ $package == touch ]]; then
       wait_for_pattern_count "$work/$package-$mode.log" 'Keeping the prebuilt @rescript/belt: its sources are unchanged' 1 60
