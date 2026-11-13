@@ -12,7 +12,7 @@ use smallvec::SmallVec;
 use super::{ArgLowering, FieldLowering, PrimitiveArgs, RawLambdaConverter, SrcLoc};
 use crate::binary_ast::derive::plan::{
     Binding, BodyIdx, BodyNode, CasePattern, DerivedIdx, ExprLoc, Obligation, ObligationIdx,
-    OptionalArg, Plans,
+    OptionalArg, PatNode, Plans,
 };
 use crate::lambda::{Constant, Primitive, TagInfo};
 use crate::parse_arena::{Located, LocIdx};
@@ -33,6 +33,8 @@ use crate::types::type_expr::{TypeDesc, TypeExprRef};
 pub(super) trait Steps {
     /// A body node is lowered.
     fn node(&mut self);
+    /// A nested pattern node is materialized. Cost: O(1).
+    fn pattern(&mut self) {}
 }
 
 impl Steps for () {
@@ -79,16 +81,17 @@ enum Arg {
 /// Lower the bindings of a discharged item around `body`, the term of the
 /// items that follow it: `let b_1 = e_1 in ... let b_n = e_n in body`
 /// (translcore.ml `transl_let`, a non-recursive group of variables).
-/// Cost: O(body nodes of the item) besides its matches: each node is
-/// visited once and makes a fixed number of terms (a local one, a free
+/// Cost: O(body and pattern nodes of the item) besides match compilation:
+/// each body occurrence is visited once and makes a fixed number of terms (a local one, a free
 /// value its path, a function one, an application one, or, when it is
 /// partial, one per parameter it leaves and per term it protects; a field,
 /// a construction, a tuple, an array and a constant one; a record one and
 /// the buffers of `record_of`). A match costs what `compile_matching` costs
-/// on its cases, each a constructor of one variable or a wildcard: a fixed
-/// amount per case. No heap allocation per node: arguments, components and
+/// on its pattern matrix; the plan lowering does not build a decision tree. No heap allocation per node: arguments, components and
 /// the values of the item are gathered inline, up to eight; a match
-/// allocates its patterns in the item's one pattern store.
+/// allocates its patterns in the item's one pattern store. Nested patterns
+/// are expanded directly from their prefix pool into that store; the match
+/// compiler owns all decisions about constructor, string and array tests.
 pub(super) fn lower<B: RawLambdaBuilder>(
     conv: &mut RawLambdaConverter<'_, B>,
     idx: DerivedIdx,
@@ -208,6 +211,81 @@ impl<S: Steps> Lowering<'_, S> {
             }
             _ => TypeExprRef::null(),
         }
+    }
+
+    /// Materialize one prefix-encoded pattern in the caller-owned match arena.
+    /// Cost: O(pattern nodes), one visit and one pattern allocation per node;
+    /// constructor arguments and tuple children use inline temporary handles.
+    /// Returns the pattern handle and the number of prefix nodes consumed.
+    fn pattern<B: RawLambdaBuilder>(
+        &mut self,
+        conv: &mut RawLambdaConverter<'_, B>,
+        nodes: &[PatNode],
+        expected: TypeExprRef,
+    ) -> (crate::types::tast_arena::TPatIdx, usize) {
+        self.steps.pattern();
+        let none = LocIdx::none();
+        let mut used = 1;
+        let mut ty = expected;
+        let desc = match nodes[0] {
+            PatNode::Any => PatternDesc::Tpat_any,
+            PatNode::Var(name) => {
+                let id = conv.fresh_ident(conv.arena.get_string(name));
+                self.locals.push(id);
+                PatternDesc::Tpat_var(id, Located::new(String::new(), none))
+            }
+            PatNode::Construct(constructor) => {
+                let Obligation::Constructor { name, .. } = self.plans.obligation(constructor) else {
+                    unreachable!("a constructor pattern names its obligation")
+                };
+                let (description, _, result) = self.table.constructor(constructor);
+                ty = result;
+                let mut args = SmallVec::<[_; 4]>::new();
+                for arg in self.table.constructor_args(constructor) {
+                    let (pattern, count) = self.pattern(conv, &nodes[used..], *arg);
+                    used += count;
+                    args.push(pattern);
+                }
+                PatternDesc::Tpat_construct(
+                    Located::new(name, none),
+                    description.clone(),
+                    self.pa.push_list(args),
+                )
+            }
+            PatNode::Tuple { len } => {
+                let mut args = SmallVec::<[_; 4]>::new();
+                for _ in 0..len {
+                    let (pattern, count) = self.pattern(conv, &nodes[used..], TypeExprRef::null());
+                    used += count;
+                    args.push(pattern);
+                }
+                let types = conv.type_ctx.new_type_list_from(
+                    args.iter().map(|idx| self.pa.pat(*idx).pat_type),
+                );
+                ty = conv.type_ctx.new_type(TypeDesc::Ttuple(types));
+                PatternDesc::Tpat_tuple(self.pa.push_list(args))
+            }
+            PatNode::Record { labels, len } => {
+                let mut fields = Vec::with_capacity(len as usize);
+                for i in 0..u32::from(len) {
+                    let obligation = ObligationIdx(labels.0 + i);
+                    let Obligation::Label { name, .. } = self.plans.obligation(obligation) else {
+                        unreachable!("a record pattern names its label obligations")
+                    };
+                    let label = self.table.label(obligation);
+                    ty = label.lbl_res;
+                    let (pattern, count) = self.pattern(conv, &nodes[used..], label.lbl_arg);
+                    used += count;
+                    fields.push((Located::new(name, none), label.clone(), pattern, label.lbl_optional));
+                }
+                PatternDesc::Tpat_record(fields, crate::parser::ast::ClosedFlag::Closed, None)
+            }
+            PatNode::EmptyArray => PatternDesc::Tpat_array(crate::types::tast_arena::TPatList::EMPTY),
+            PatNode::Str(name) => PatternDesc::Tpat_constant(
+                crate::types::typedtree::Constant::String(conv.arena.get_string(name).to_owned()),
+            ),
+        };
+        (self.pa.push(Pattern::new(desc, none, ty, self.env_ref)), used)
     }
 
     /// The lowered nodes `args`, in order. Cost: O(nodes under them).
@@ -386,7 +464,7 @@ impl<S: Steps> Lowering<'_, S> {
                 (conv.record_of(SrcLoc::from(dummy), &fields, None, None, self), None)
             }
             BodyNode::Construct { constructor, arg } => {
-                let Obligation::Constructor { has_arg, .. } = self.plans.obligation(constructor)
+                let Obligation::Constructor { args, .. } = self.plans.obligation(constructor)
                 else {
                     unreachable!("a construction names a constructor obligation")
                 };
@@ -395,7 +473,7 @@ impl<S: Steps> Lowering<'_, S> {
                     unreachable!("a discharged constructor is an ordinary one")
                 };
                 let loc = SrcLoc::from(dummy);
-                let lam = if has_arg {
+                let lam = if args > 0 {
                     let (elem, _) = self.node(conv, arg);
                     let payload = Some((payload, self.env_ref));
                     conv.construct_of(loc, cstr, reference, &[elem], payload)
@@ -403,6 +481,35 @@ impl<S: Steps> Lowering<'_, S> {
                     conv.construct_of(loc, cstr, reference, &[], None)
                 };
                 (lam, None)
+            }
+            BodyNode::ConstructArgs { constructor, args } => {
+                let (cstr, _, _) = self.table.constructor(constructor);
+                let ConstructorKind::Ordinary(reference) = cstr.cstr_kind else {
+                    unreachable!("a discharged constructor is ordinary")
+                };
+                let count = self.table.constructor_args(constructor).len() as u32;
+                let elems = self.nodes(conv, self.plans.args(args, count));
+                (conv.construct_of(SrcLoc::from(dummy), cstr, reference, &elems, None), None)
+            }
+            BodyNode::Int(value) => (conv.b.const_(Constant::int(value)), None),
+            BodyNode::If { cond, then, else_ } => {
+                // Keep the general converter's order: else, condition, then.
+                let otherwise = self.node(conv, else_).0;
+                let cond = self.node(conv, cond).0;
+                let then = self.node(conv, then).0;
+                (conv.b.if_(cond, then, otherwise), None)
+            }
+            BodyNode::Let { param, value, body } => {
+                let id = conv.fresh_ident(conv.arena.get_string(param));
+                self.locals.push(id);
+                let body = self.node(conv, body).0;
+                self.locals.pop();
+                let value = self.node(conv, value).0;
+                (conv.b.let_(LetKind::Strict, id, value, body), None)
+            }
+            BodyNode::Update { base, label, value } => {
+                let base = self.node(conv, base).0;
+                (conv.record_of(SrcLoc::from(dummy), &[(label, value)], Some(base), None, self), None)
             }
             // translcore.ml `Texp_tuple`.
             BodyNode::Tuple { args, len } => {
@@ -440,6 +547,19 @@ impl<S: Steps> Lowering<'_, S> {
                             let ty = scrutinee_type.expect("a wildcard follows a constructor");
                             let any = Pattern::new(PatternDesc::Tpat_any, none, ty, self.env_ref);
                             (pa.alloc(any), self.node(conv, case.body).0)
+                        }
+                        CasePattern::Nested(root) => {
+                            let before = self.locals.len();
+                            let (pattern, _) = self.pattern(
+                                conv,
+                                self.plans.pattern_from(root),
+                                scrutinee_type.unwrap_or_else(TypeExprRef::null),
+                            );
+                            let pattern = pa.pat(pattern);
+                            scrutinee_type = Some(pattern.pat_type);
+                            let body = self.node(conv, case.body).0;
+                            self.locals.truncate(before);
+                            (pattern, body)
                         }
                         CasePattern::Construct {
                             constructor,
@@ -479,8 +599,15 @@ impl<S: Steps> Lowering<'_, S> {
                     };
                     pat_act_list.push((pattern, CaseAction::unguarded(body)));
                 }
-                let (scrutinee, _) = self.node(conv, scrutinee);
-                (conv.matching_of(pa, dummy, scrutinee, pat_act_list, Partial::Total), None)
+                let matched = if let BodyNode::Tuple { args, len } = self.plans.body(scrutinee) {
+                    self.steps.node();
+                    let values = self.nodes(conv, self.plans.args(args, len)).into_vec();
+                    conv.multiple_matching_of(pa, dummy, values, pat_act_list, Partial::Total)
+                } else {
+                    let (value, _) = self.node(conv, scrutinee);
+                    conv.matching_of(pa, dummy, value, pat_act_list, Partial::Total)
+                };
+                (matched, None)
             }
         }
     }

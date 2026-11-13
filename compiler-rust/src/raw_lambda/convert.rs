@@ -872,14 +872,27 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         pat_act_list: Vec<(&Pattern, full_matching::CaseAction)>,
         partial: Partial,
     ) -> RawLambda {
+        let store = full_matching::PatStore::default();
+        let pa = full_matching::PatArena::new(self.ta, &store);
+        self.multiple_matching_of(&pa, loc, paraml, pat_act_list, partial)
+    }
+
+    /// Match already lowered tuple components using the caller's pattern arena.
+    /// Cost: that of `Matching.for_multiple_match`; no synthetic tuple term.
+    fn multiple_matching_of<'p>(
+        &mut self,
+        pa: &'p full_matching::PatArena<'p>,
+        loc: LocIdx,
+        paraml: Vec<RawLambda>,
+        pat_act_list: Vec<(&'p Pattern, full_matching::CaseAction)>,
+        partial: Partial,
+    ) -> RawLambda {
         self.sync_matching_stamps();
         let loc = self.loc(loc);
         let arena = crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b);
-        let store = full_matching::PatStore::default();
-        let pa = full_matching::PatArena::new(self.ta, &store);
         let env = full_matching::MatchEnv {
             ctx_ref: self.type_ctx,
-            pa: &pa,
+            pa,
             arena: &arena,
             next_raise_count: &mut self.next_static_raise,
         };
@@ -2588,23 +2601,25 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
     ) -> RawLambda {
         let rb = self.b;
         if cstr.cstr_inlined.is_some() {
-            return match args {
+            let crate::types::ConstructorKind::Ordinary(reference) = cstr.cstr_kind else {
+                unreachable!("inline records belong to ordinary constructors")
+            };
+            let elem = match args {
                 [arg] => match &arg.exp_desc {
-                    ExpressionDesc::Texp_record {
-                        fields,
-                        extended_expression,
-                        ..
-                    } => self.convert_record_raw(
-                        SrcLoc::from(arg.exp_loc),
-                        self.ta.record_fields(*fields),
-                        extended_expression.map(|e| self.ta.expr(e)),
-                        inlined_record_representation(cstr),
-                    ),
+                    ExpressionDesc::Texp_record { fields, extended_expression, .. } => {
+                        self.convert_record_raw(
+                            SrcLoc::from(arg.exp_loc),
+                            self.ta.record_fields(*fields),
+                            extended_expression.map(|e| self.ta.expr(e)),
+                            inlined_record_representation(cstr),
+                        )
+                    }
                     _ => self.convert_expr_raw(arg),
                 },
-                [] => rb.const_(raw_constructor_constant(self.type_ctx, cstr, 0)),
-                _ => rb.unit(),
+                [] => return self.construct_of(loc, cstr, reference, &[], None),
+                _ => unreachable!("inline record constructors have one argument"),
             };
+            return self.construct_of(loc, cstr, reference, &[elem], None);
         }
 
         match cstr.cstr_kind {
@@ -2637,8 +2652,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         }
     }
 
-    /// translcore.ml `Texp_construct` of an ordinary constructor without an
-    /// inlined record: the value `cstr` makes of its lowered arguments
+    /// translcore.ml `Texp_construct` of an ordinary constructor: the value `cstr` makes of its lowered arguments
     /// `elems`. `payload` is the type of the argument, and the environment
     /// that was typed in, when there is exactly one.
     /// Cost: O(arguments): one constant, the argument itself for an untagged
@@ -2652,6 +2666,14 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         payload: Option<(TypeExprRef, EnvRef)>,
     ) -> RawLambda {
         let rb = self.b;
+        // An inline record already carries the constructor's representation.
+        if cstr.cstr_inlined.is_some() {
+            return match elems {
+                [arg] => *arg,
+                [] => rb.const_(raw_constructor_constant(self.type_ctx, cstr, 0)),
+                _ => unreachable!("inline record constructors have one argument"),
+            };
+        }
         match reference.representation(self.type_ctx) {
             crate::types::VariantConstructorCase::Constant(_) => match cstr.cstr_name.as_str() {
                 "true" => rb.const_(Constant::JsTrue),
