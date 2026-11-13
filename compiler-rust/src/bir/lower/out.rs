@@ -60,10 +60,6 @@ pub struct StatementStack {
     /// Slots of explicit empty block statements, sorted by slot. An entry is
     /// stale once its slot was consumed; `drop_empty_blocks` checks the slot.
     empties: Vec<(u32, NodeId)>,
-    /// Pending operands of the returned expression `close::decide` reads.
-    spine: Vec<super::close::Pending>,
-    /// Steps of `close::decide` over every copied run.
-    pub closed: usize,
 }
 impl StatementStack {
     /// K0: C:89 BlockOutput::make, start an empty output at the current top.
@@ -347,7 +343,7 @@ impl StatementStack {
     /// Cost: that of `close::decide`; nothing on an arena without counts.
     pub(super) fn close(&mut self, bir: &mut Bir, list: ListId) {
         if bir.js_scope.is_some() {
-            self.closed += super::close::decide(bir, list, &mut self.spine);
+            super::close::decide(bir, list);
         }
     }
 }
@@ -548,7 +544,7 @@ mod tests {
         assert_eq!(size_of::<FreeId>(), 4);
         assert_eq!(size_of::<Free>(), 16);
         assert_eq!(size_of::<Probed>(), 20);
-        assert_eq!(size_of::<StatementStack>(), 128);
+        assert_eq!(size_of::<StatementStack>(), 96);
         assert_eq!(size_of::<Option<Slot>>(), 12);
         assert_eq!(size_of::<FreePool>(), 40);
     }

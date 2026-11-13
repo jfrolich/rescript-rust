@@ -1,7 +1,7 @@
 //! JavaScript occurrence counts, maintained by the arena's existing mutation
 //! paths, including normalisation, argument sequencing and statement removal.
 //! These are unweighted JS occurrences, not level-L switch-default use weights.
-use crate::bir::{NodeId, VarId};
+use crate::bir::{Bir, NodeId, VarId, View};
 
 /// Two counts per variable; indexed by VarId, never by identifier or node.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -90,6 +90,11 @@ pub(crate) struct Scope {
     pub(crate) facts: Vec<VarFacts>,
     /// One per declaration of every copied run, last slot first within a run.
     pub(crate) decisions: Vec<Decision>,
+    /// Pending operands of the returned expression `return_sites` reads: the
+    /// node, and whether a call found there is a site.
+    spine: Vec<(NodeId, bool)>,
+    /// Steps of `close::decide` and `return_sites`.
+    pub(crate) close_steps: usize,
     #[cfg(test)]
     pub(crate) updates: usize,
 }
@@ -102,6 +107,8 @@ impl Scope {
             site_heads: vec![0; variables],
             facts: vec![VarFacts::default(); variables],
             decisions: Vec::new(),
+            spine: Vec::new(),
+            close_steps: 0,
             #[cfg(test)]
             updates: 0,
         }
@@ -139,6 +146,44 @@ impl Scope {
             row.remaining = row.remaining.checked_sub(1).expect("released uncounted JS use");
         }
     }
+}
+
+/// The sites of `return value`, read through the flatten pass ("T4c design"
+/// (a)): both branches of a conditional, the last operand of a sequence, a
+/// call of a variable. `last` says whether the `return` is the last
+/// statement of its list; below a conditional every call is a site, because
+/// the flatten pass gives each branch a list of its own.
+///
+/// Cost: one step per conditional and sequence between `value` and its
+/// calls, and one per call; a predicate, the head of a sequence and the
+/// arguments of a call are not read. Nothing is allocated once the spine
+/// has its capacity; nothing is done on an arena without counts.
+pub(crate) fn return_sites(bir: &mut Bir, value: NodeId, last: bool) {
+    let Some(scope) = &mut bir.js_scope else { return };
+    let mut spine = std::mem::take(&mut scope.spine);
+    debug_assert!(spine.is_empty());
+    spine.push((value, last));
+    let mut steps = 0;
+    while let Some((node, site)) = spine.pop() {
+        steps += 1;
+        match bir.view(node) {
+            View::JCond { then_, else_, .. } => {
+                spine.push((else_, true));
+                spine.push((then_, true));
+            }
+            View::JSeq { second, .. } => spine.push((second, site)),
+            View::JCall { callee, .. } if site => {
+                if let View::Var { var } = bir.view(callee) {
+                    let scope = bir.js_scope.as_mut().expect("lowering scope");
+                    scope.facts[var.index()].site = node;
+                }
+            }
+            _ => {}
+        }
+    }
+    let scope = bir.js_scope.as_mut().expect("lowering scope");
+    scope.close_steps += steps;
+    scope.spine = spine;
 }
 
 #[cfg(test)]

@@ -1019,14 +1019,24 @@ pub(crate) fn prepare_lower(
             .map_err(LowerFailure::Error)?;
     }
     let scope = lowered.program.arena.js_scope.as_ref().expect("lowering scope");
-    let decisions = scope
+    // A statement the lowering moves out of a copied list is copied, and
+    // decided, again: the last decision of a variable is the one that stands.
+    let mut last = vec![u32::MAX; lowered.program.arena.vars.len()];
+    for (index, decision) in scope.decisions.iter().enumerate() {
+        last[decision.var.index()] = index as u32;
+    }
+    let decisions: Vec<_> = scope
         .decisions
         .iter()
-        .map(|decision| {
+        .enumerate()
+        .filter(|(index, decision)| last[decision.var.index()] == *index as u32)
+        .map(|(_, decision)| {
             let origin = lowered.program.arena.vars.j_origin[decision.var.index()];
             (lowered.program.idents[origin.index()], *decision)
         })
         .collect();
+    let mut stats = lowered.switch_stats;
+    stats.decisions.decision_reclosed = scope.decisions.len() - decisions.len();
     Ok(LowerCandidate {
         decisions,
         arena: exported.program.arena,
@@ -1034,7 +1044,7 @@ pub(crate) fn prepare_lower(
         exports: lowered.coerced.exports,
         reservations: lowered.coerced.reservations,
         dynamic_imports: lowered.dynamic_imports,
-        stats: lowered.switch_stats,
+        stats,
     })
 }
 

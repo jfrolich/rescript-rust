@@ -895,7 +895,9 @@ impl LambdaCompiler {
                     // against the tail-call pass on the program that pass
                     // receives. Counted in the report; the pass decides.
                     let decided = apply_external_shadow_pass(apply_js_flatten_pass(new_before.clone()));
+                    let reclosed = stats.decisions.decision_reclosed;
                     stats.decisions = crate::bir::shadow::compare_decisions(&decisions, &decided.program);
+                    stats.decisions.decision_reclosed = reclosed;
                     let new_after = self.finish_lowered_output(new_before.clone(), &possible_required_modules);
                     crate::bir::shadow::LowerCheck::Supported(Box::new(crate::bir::shadow::LowerPair {
                         stats,

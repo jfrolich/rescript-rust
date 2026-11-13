@@ -309,8 +309,11 @@ pub(crate) struct SwitchStats {
 /// design" (a) and (b)).
 #[derive(Clone, Copy, Default, serde::Serialize)]
 pub(crate) struct DecisionStats {
-    /// Declarations the lowering decided.
+    /// Declarations the lowering decided, each counted once.
     pub decision_rows: usize,
+    /// Decisions replaced by a later one of the same variable: its
+    /// statement was moved out of a copied list and copied again.
+    pub decision_reclosed: usize,
     /// Identifiers the legacy pass gives a status.
     pub decision_legacy: usize,
     /// Rows whose identifier the legacy pass does not see declared.
@@ -627,6 +630,7 @@ impl State {
             header.uses = 0;
         }
         self.arena.finish_bulk(root);
+        let close_steps = self.arena.js_scope.as_ref().map_or(0, |scope| scope.close_steps);
         Lowered {
             program: super::bridge_j::Imported::from_lowering(self.arena, root, self.idents),
             #[cfg(test)]
@@ -639,7 +643,7 @@ impl State {
                 comparisons: self.switch_comparisons,
                 compared_pairs: self.switch_compared,
                 location_visits: self.location_steps,
-                close_steps: self.statements.closed,
+                close_steps,
                 decisions: DecisionStats::default(),
             },
         }
