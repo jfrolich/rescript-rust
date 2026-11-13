@@ -869,6 +869,114 @@ compiler-rust/src/types/unit_reads.rs` empty; the CI instruction count, which
 must fall by about 1% of tests/tests (structure_reads is 1.16% today).
 ```
 
+### 11.4 T4 design
+
+How the lowering reproduces legacy passes 3 to 6 without running them. "P3"
+to "P6" below are the legacy passes (`apply_js_tailcall_inline_pass`,
+`apply_js_record_rest_pass`, `apply_js_flatten_and_mark_dead_pass`,
+`apply_js_shake_pass`); "C0" is the count of `Var` occurrences in the program
+the legacy lowering hands to P3.
+
+**What makes the order matter.** The legacy passes are whole-program and
+strictly ordered: P3 computes every status from C0 before it changes
+anything, P4 reads the result of P3, the substitution of P5 reads the result
+of P4, the dead marks of P5 count what is left, P6 reads the marks. The
+lowering closes scopes innermost first, so an inner scope is finished before
+the P3 of an outer one has run. Two facts keep the legacy order observable
+from inside that schedule:
+
+1. **Two counts** (`bir/lower/scope.rs`, `Uses`). `built` is C0: it changes
+   only where the lowering itself builds or releases a `Var` (normalising
+   rules, argument sequencing, a discarded output). `remaining` is what the
+   dead marks of P5 count: every scope-close decision changes `remaining`
+   only. A decision never writes `built`.
+2. **A late mark on nodes a scope-close decision creates** (a substituted
+   field value, a renamed parameter, a hoisted field variable's occurrence).
+   P3 treats a late node as "not there in C0": a late `Var` is not a callee
+   candidate, and a late argument is neither a variable nor a constant for
+   parameter substitution, because in the legacy order P3 saw the field read
+   the node replaced. A variable created by a decision (`x_0`, the binders of
+   a record rest) has no status in P3 and is never inlined.
+
+**Where a scope closes.** `StatementStack::take_list`: the run that holds a
+declaration is copied to its list after every use of the variable has been
+lowered (a use is in the body of the `let`, which is lowered into the same
+run or into lists nested in it; a deferred value travels with the run). The
+close visits the slots of the run, never the statements' bodies.
+
+**Order of the decisions at the close of a run**, with the count each reads:
+
+| Step | Decision | Reads | Writes |
+| --- | --- | --- | --- |
+| A | P3 status of each declaration of the run, in slot order: `built == 0` is dead (dropped when the value is strictly pure, an expression statement otherwise); `built == 1`, strictly pure, lexical kind, a function literal that is not a method, not `async`, without directive: inline candidate | `built` (C0) | `remaining` of the variables inside a dropped value |
+| A | Tail-call inlining: the candidate site recorded for the variable (below) is spliced when the declaration is an inline candidate and the arity matches | `built` of the callee; the late marks of the arguments | the site becomes the callee's statements; parameters are renamed or declared; `remaining` only |
+| B | Record rest, only in a run that has one, last declaration first | the slots after the declaration, as step A left them | the pattern; the reads of the source in the tail |
+| C | Block substitution, in slot order: a surviving lexical declaration of an immutable block literal with two or more fields is materialised (`should_materialize_block_binding_items`, hoists named by `block_substitution_name`), then each recorded read of the variable is replaced by the field when the field is simple | the field facts; the read sites recorded for the variable | late nodes; `remaining` |
+| D | Dead marks, while the slots are copied: `remaining == 0` after A to C | `remaining` | the declaration is dropped or becomes an expression statement |
+
+Step A is P3, B is P4, C and D are P5. A runs before C for the same run, as
+in the legacy order. For an inner run, C and D have run before the A of an
+outer run; the late mark is what makes that A see the C0 shape.
+
+**Facts recorded while lowering** (all dense, indexed by `VarId`):
+
+- `Uses { built, remaining }`: 8 bytes (T1).
+- `VarFacts`, 16 bytes: the declaration's statement node; the head of the
+  variable's list of read sites (`x[i]`, `x.f` with a constant index, pushed
+  where the lowering builds the read while the variable has a block fact);
+  the single tail-call site (`return x(args)` as the last statement of a
+  block, recorded only while `built` is one and the site is not inside the
+  variable's own initialiser; a second occurrence clears it); state bits
+  (initialiser being lowered, closed, substituted).
+- Read sites: a pool of `(node, next)` pairs, 8 bytes each.
+- Graves: where a decision removes occurrences that C0 counted (a dropped
+  value, a pruned branch of an inlined body, the argument of a renamed
+  parameter), the removed occurrences are logged against the variable whose
+  declaration anchors them (the dead variable, the inlined function). The
+  anchor stays in its list as a declaration without value marked dead (the
+  printer writes nothing for it). When the lowering later releases a subtree
+  that contains the anchor, the logged occurrences leave `built`. Without
+  this, `built` of an outer variable would stay above C0 after such a
+  release.
+
+**Late zero.** A decision of an outer run can take the last use of a
+variable whose run is already closed: inlining `f(y)` into a closed function
+renames a parameter that the body never reads, or prunes the branch that
+read `z`. The legacy P5 runs after all of P3 and marks `y` and `z` dead. So
+a decrement that brings `remaining` of a closed variable to zero marks its
+declaration in place (dead mark, or expression statement), through
+`VarFacts.decl`. The dead marks are one level, as in P5: the occurrences
+inside a declaration that step D drops stay counted.
+
+**A site in a list that is already closed.** The site of an inlined call is
+often in a nested list. The splice rewrites the `return` node in place into
+a block of the callee's statements; the printer writes a nested block
+statement without braces, and steps B to D treat it as part of the list that
+holds it.
+
+**The boundary shape** (`const pair = [x => x, 1]; const run = () =>
+pair[0](2)`). Lowering `run`: the body's `return pair[0](2)` is not a
+candidate site (the callee is a field read), and the read is recorded as a
+read site of `pair`. `run`'s list closes; nothing to decide. The top-level
+run closes: A finds no candidate; C materialises `pair` (`pair_0` hoisted)
+and replaces the read by a late `Var pair_0`; the call is now `pair_0(2)`,
+but `pair_0` has no P3 status, so nothing is inlined: the legacy output. D
+drops `pair` (`remaining` zero).
+
+**The counter.** `Scope::inline_stats`: sites spliced, and of those the
+number whose callee has a level L use count other than one (the count the
+source arena holds for the variable when the site is lowered). It is written
+to the check report next to the switch statistics. If it is zero on every
+corpus, 1.1's simpler form applies.
+
+**Top-level rows** (`bir/lower/export.rs`). The unit's run is not closed by
+`take_list` alone: each top-level statement gets a row (variable or none,
+strictly pure, the range of its references in a shared pool of `VarId`s,
+appended where a `Var` of a top-level variable is built while the statement
+is being lowered). Export extraction and coercion read and extend the rows;
+the shake is the worklist of `live_idents` over the rows, then one filter
+that does not push the statements that are not live.
+
 ## 12. Risks and what was not measured
 
 Not measured:
