@@ -3009,6 +3009,11 @@ vectors are not compile-path allocations.
 | `label.rs:120` `Schedule.numbers` | `Vec<Option<u32>>` | once-per-unit pool | retained dense numbers indexed by loop |
 | `label.rs:121` `Schedule.work` | `Vec<Work>` | once-per-unit stack | retained scheduling scratch; high-water capacity reused |
 
+The 10,000-node whole-Lambda while-loop fixture confirms that this retained
+storage allocates zero times after warming and explicit append-only reservation.
+It includes output release, checks unchanged loop/scheduler capacities, and records
+20,001 source visits. No production loop buffer needed replacement.
+
 The integration keeps method-callee evaluation order and default-first string
 switch traversal from trunk. Group outputs still write their stable pooled slots,
 so no vector rotation is needed. Label finalization runs after each successful

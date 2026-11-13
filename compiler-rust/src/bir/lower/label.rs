@@ -445,6 +445,21 @@ impl State {
 }
 
 #[cfg(test)]
+impl Schedule {
+    /// Reserve another warmed pass's append-only event and loop-number storage.
+    pub(super) fn reserve_repeat(&mut self) {
+        self.edges.reserve(self.edges.len());
+        self.steps.reserve(self.steps.len());
+        self.costs.reserve(self.costs.len());
+        self.numbers.reserve(self.numbers.len());
+    }
+    pub(super) fn capacities(&self) -> [usize; 7] {
+        [self.frames.capacity(), self.values.capacity(), self.edges.capacity(), self.steps.capacity(),
+         self.costs.capacity(), self.numbers.capacity(), self.work.capacity()]
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::ident::IdentFlags;

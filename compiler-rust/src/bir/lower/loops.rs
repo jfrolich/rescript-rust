@@ -322,6 +322,43 @@ mod tests {
     }
 
     #[test]
+    fn ten_thousand_while_nodes_lower_without_allocations() {
+        let mut a = LamArena::new();
+        let mut root = a.const_(Constant::JsUndefined { is_unit: true });
+        let condition = a.const_(Constant::JsTrue);
+        for _ in 0..10_000 { root = a.while_(condition, root); }
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let run = |s: &mut State| {
+            let output = s.probe(Cx::effect(), root).unwrap();
+            let output = s.realize(Cx::effect(), output);
+            for node in s.statements.statements(output.stmts) { s.arena.release(node); }
+            if let Some(value) = output.value { s.arena.release(value); }
+            s.statements.kill(output.stmts);
+        };
+        let lists = state.arena.lists.storage_shape().0;
+        run(&mut state);
+        state.arena.lists.reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
+        state.free.reserve_repeat();
+        state.loops.reserve(state.loops.len());
+        state.labels.reserve_repeat();
+        let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(),
+            s.arena.free_nodes.capacity(), s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1,
+            s.traversal.work.capacity(), s.traversal.values.capacity(), s.traversal.children.capacity(), s.loops.capacity()];
+        let before = capacities(&state);
+        let labels = state.labels.capacities();
+        let visits = state.source_steps;
+        let allocations = allocation_counter::measure(|| run(&mut state));
+        println!("whole while loops: {allocations:?}");
+        assert_eq!(allocations.count_total, 0);
+        assert_eq!(capacities(&state), before);
+        assert_eq!(state.labels.capacities(), labels);
+        assert_eq!(state.source_steps - visits, 20_001);
+        assert_eq!(state.loops.len(), 20_000);
+    }
+
+    #[test]
     fn range_exclusive_end() {
         let mut a = LamArena::new();
         let start = a.const_(Constant::int(0));
