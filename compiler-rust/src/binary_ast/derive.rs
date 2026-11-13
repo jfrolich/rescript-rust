@@ -35,10 +35,11 @@ pub enum GeneralReason {
     UnmeasuredShape,
     /// An `@unboxed` declaration.
     Unboxed,
-    /// A measured shape whose plan a later slice builds: records, variants,
-    /// and constructor applications that need more than names and
-    /// applications.
+    /// A record or constructor application needing forms not yet planned.
     NotYetPlanned,
+    /// A variant with a representation, attribute or payload codec outside
+    /// the plan language; classify it before checking rather than retrying.
+    UnsupportedVariant,
     /// Plans are off for the tree: the switch `RESCRIPT_DERIVED_PATH=general`,
     /// or a tree that is stored or printed instead of compiled.
     Switch,
@@ -77,6 +78,8 @@ pub struct PathCounts {
     pub unboxed: u64,
     /// See [`GeneralReason::NotYetPlanned`].
     pub not_yet_planned: u64,
+    /// See [`GeneralReason::UnsupportedVariant`].
+    pub unsupported_variant: u64,
     /// See [`GeneralReason::Switch`].
     pub switch: u64,
     /// See [`GeneralReason::FailedObligation`].
@@ -95,6 +98,7 @@ impl PathCounts {
         self.unmeasured_shape += other.unmeasured_shape;
         self.unboxed += other.unboxed;
         self.not_yet_planned += other.not_yet_planned;
+        self.unsupported_variant += other.unsupported_variant;
         self.switch += other.switch;
         self.failed_obligation += other.failed_obligation;
     }
@@ -112,6 +116,7 @@ impl PathCounts {
                 GeneralReason::UnmeasuredShape => &mut self.unmeasured_shape,
                 GeneralReason::Unboxed => &mut self.unboxed,
                 GeneralReason::NotYetPlanned => &mut self.not_yet_planned,
+                GeneralReason::UnsupportedVariant => &mut self.unsupported_variant,
                 GeneralReason::Switch => &mut self.switch,
                 GeneralReason::FailedObligation => &mut self.failed_obligation,
             },

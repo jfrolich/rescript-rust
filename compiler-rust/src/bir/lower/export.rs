@@ -1562,6 +1562,10 @@ impl State {
             #[cfg(test)]
             self.coercion.resolved.push(arm);
             exports.push(self.ident(resolved));
+            // The top-level statuses read the export set through the origin.
+            let origin = self.origin(resolved);
+            let scope = self.arena.js_scope.as_mut().expect("lowering scope");
+            scope.facts[origin.index()].state |= super::scope::VarFacts::EXPORTED;
         }
         self.coercion.selected = selected;
         exports
@@ -2340,7 +2344,7 @@ mod tests {
         // Used as an argument before an effect: the alias stays, so the
         // pass can be repeated on the same tree.
         let root = alias_with_references(&mut a, N, true);
-        let input = crate::bir::bridge::import_for_lowering(&a, root).0.unwrap();
+        let input = crate::bir::bridge::import_for_lowering(&a, root).0.unwrap().into_imported();
         let root = input.root;
         let mut state = State::new(input);
         let probed = state.probe(Cx::value(), root).unwrap();
