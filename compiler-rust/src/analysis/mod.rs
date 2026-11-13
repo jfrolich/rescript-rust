@@ -7,6 +7,7 @@
 //! analysis/bin/main.ml) and returns what that binary prints.
 
 pub mod commands;
+pub mod docgen;
 pub mod document_symbol;
 pub mod hashtbl;
 pub mod hover;
@@ -140,20 +141,25 @@ impl Output {
         self.0.push('\n');
     }
 
-    /// The printed bytes. Source text is held as Latin-1 characters standing
-    /// for bytes; other characters are encoded as UTF-8.
+    /// The printed bytes.
     pub fn into_bytes(self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(self.0.len());
-        for c in self.0.chars() {
-            if (c as u32) <= 0xFF {
-                bytes.push(c as u8);
-            } else {
-                let mut buf = [0u8; 4];
-                bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
-            }
-        }
-        bytes
+        text_bytes(&self.0)
     }
+}
+
+/// The bytes of analysis text. Source text is held as Latin-1 characters
+/// standing for bytes; other characters are encoded as UTF-8.
+fn text_bytes(text: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(text.len());
+    for c in text.chars() {
+        if (c as u32) <= 0xFF {
+            bytes.push(c as u8);
+        } else {
+            let mut buf = [0u8; 4];
+            bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+        }
+    }
+    bytes
 }
 
 fn resolve(cwd: &Path, path: &str) -> PathBuf {
@@ -315,6 +321,21 @@ pub fn run(request: &Request, project: &dyn session::Project) -> Result<Vec<u8>,
     if let Some(failure) = cli.session.failure() {
         return Err(failure);
     }
+    Ok(out.into_bytes())
+}
+
+/// `rescript-tools doc <path>` (tools/bin/main.ml): what it prints, the
+/// documentation of the module at `path` as JSON and a newline, or why there
+/// is none. `project` must be built with source locations (see [`docgen`]),
+/// which a watcher's builds leave out, so this is no watcher command.
+pub fn doc(cwd: &Path, path: &str, project: &dyn session::Project) -> Result<Vec<u8>, String> {
+    let session = session::ProjectSession::new(project);
+    let docs = docgen::extract_docs(&session, cwd, path)?;
+    if let Some(failure) = session.failure() {
+        return Err(failure);
+    }
+    let mut out = Output::default();
+    out.print_endline(&docs);
     Ok(out.into_bytes())
 }
 

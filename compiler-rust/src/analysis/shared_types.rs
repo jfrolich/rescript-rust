@@ -361,6 +361,10 @@ pub struct ModuleItem {
     pub name: String,
     /// The item's location.
     pub loc: Loc,
+    /// The name of the file the item's location is in (`pos_fname`): the
+    /// declaring file for an item of an `include`, `_none_` for a generated
+    /// one.
+    pub file: Arc<str>,
     /// The item's doc comments.
     pub docstring: Vec<String>,
     /// The `@deprecated` reason, if the item is deprecated.
@@ -393,6 +397,15 @@ pub enum Module {
     Constraint(Box<Module>, Box<Module>),
 }
 
+/// A declaration's location and the name of the file it is in.
+#[derive(Debug, Clone)]
+pub struct Extent {
+    /// The location.
+    pub loc: Loc,
+    /// The file name of its start (`pos_fname`).
+    pub file: Arc<str>,
+}
+
 /// `Declared.t`.
 #[derive(Debug, Clone)]
 pub struct Declared<T> {
@@ -400,6 +413,8 @@ pub struct Declared<T> {
     pub name: Located<String>,
     /// The location of the whole declaration.
     pub extent_loc: Loc,
+    /// The name of the file `extent_loc` is in.
+    pub extent_file: Arc<str>,
     /// The identifier stamp.
     pub stamp: i32,
     /// Where the declaration is.
