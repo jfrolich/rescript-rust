@@ -1,0 +1,9 @@
+We've found a bug for you!
+  /.../fixtures/Cross_child_of_alias_type/User.res:1:14-33
+
+  1 │ let _: int = Dep.Alias.Sub.make()
+  2 │ let _: string = Dep.Alias.Sub.Deep.leaf()
+  3 │ 
+
+  This has type: Dep.Alias.Sub.t
+  But it's expected to have type: int

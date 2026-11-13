@@ -1126,31 +1126,9 @@ pub struct TypeContext {
 pub(crate) enum StoreEffect {
     /// A shared piece forced while building this one.
     Piece(Rc<StorePiece>),
-    /// A component view registered in this compilation's component cache.
-    RegisterComponents(
-        QualifiedModuleComponentsCacheKey,
-        Rc<super::env_lazy::QualifiedModuleComponents>,
-    ),
-    /// A world view adopted by the build (`TypeContext::adopt_view`): a
-    /// compilation that reuses the piece adopts it too.
-    AdoptView(
-        QualifiedModuleComponentsCacheKey,
-        Arc<super::module_view::ModuleView>,
-    ),
     /// `PersistentEnv::find_pers_struct` for this unit, which prepares the
     /// module for the compilation on first use.
     PreparePers(smol_str::SmolStr),
-    /// `trigger_module_sig_rename`: registers the lazy rename of a persistent
-    /// signature in this compilation.
-    TriggerRename(smol_str::SmolStr),
-    /// Registrations in this compilation's declaration and alias tables.
-    RegisterAliasSource(Path, Path),
-    RegisterQualifiedModuleDecl(
-        Path,
-        smol_str::SmolStr,
-        Ident,
-        Arc<super::decl::ModuleDeclaration>,
-    ),
 }
 
 /// Replay record of one piece of shared store data (see
@@ -1747,12 +1725,6 @@ impl TypeContext {
         if self.compiler_counters_enabled {
             crate::perf_counters::record_qualified_component_registered();
         }
-        if self.in_store_build() {
-            self.record_store_effect(StoreEffect::RegisterComponents(
-                key.clone(),
-                components.clone(),
-            ));
-        }
         self.qualified_module_components_cache
             .borrow_mut()
             .insert(key, super::env_lazy::HeldComponents::Local(components));
@@ -1778,9 +1750,6 @@ impl TypeContext {
         key: QualifiedModuleComponentsCacheKey,
         view: Arc<super::module_view::ModuleView>,
     ) {
-        if self.in_store_build() {
-            self.record_store_effect(StoreEffect::AdoptView(key.clone(), view.clone()));
-        }
         if self.holds_view(&key, &view) {
             return;
         }
@@ -1793,6 +1762,12 @@ impl TypeContext {
             self.adopt_view(
                 QualifiedModuleComponentsCacheKey::new(*parent.access_path(), None),
                 parent,
+            );
+        }
+        if let Some(target) = view.target_view() {
+            self.adopt_view(
+                QualifiedModuleComponentsCacheKey::new(*target.access_path(), None),
+                target.clone(),
             );
         }
         let pairs = view.alias_sources();
@@ -1859,13 +1834,6 @@ impl TypeContext {
         };
         if first {
             self.register_qualified_module_decl(view.access_path(), name, id, md.clone());
-        } else if self.in_store_build() {
-            self.record_store_effect(StoreEffect::RegisterQualifiedModuleDecl(
-                *view.access_path(),
-                name.into(),
-                id,
-                md.clone(),
-            ));
         }
     }
 
@@ -1930,12 +1898,6 @@ impl TypeContext {
     }
 
     pub(crate) fn register_component_alias_source(&self, component_path: Path, alias_source: Path) {
-        if self.in_store_build() {
-            self.record_store_effect(StoreEffect::RegisterAliasSource(
-                component_path,
-                alias_source,
-            ));
-        }
         // OCaml compiler/ml/env.ml:1440-1446 scrapes aliases by resolving the
         // target path through `find_module`; env.ml:1530 then prefixes the
         // selected component path. Record exactly that pair so later helpers
@@ -2076,7 +2038,10 @@ impl TypeContext {
         self.poison_store_build_for("read:find_module_alias_in_components");
         let key = QualifiedModuleComponentsCacheKey::new(*parent_path, None);
         self.with_qualified_module_components(&key, |components| {
-            components.lookup_module_alias_target(module_name, true, self)
+            // env.ml:865-882 `find_module ~alias:true` follows `Mty_alias`
+            // only: a module declared with a module type name (`N: S`) is
+            // not an alias of `S`.
+            components.lookup_module_alias_target(module_name, false, self)
         })
         .flatten()
     }
@@ -2276,14 +2241,6 @@ impl TypeContext {
         id: Ident,
         md: Arc<super::decl::ModuleDeclaration>,
     ) {
-        if self.in_store_build() {
-            self.record_store_effect(StoreEffect::RegisterQualifiedModuleDecl(
-                *parent_path,
-                child_name.into(),
-                id,
-                md.clone(),
-            ));
-        }
         let Some(head) = parent_path.head_opt() else {
             return;
         };
@@ -4491,11 +4448,6 @@ impl TypeContext {
     /// Matches OCaml's find_module → Lazy.force ps.ps_sig which renames
     /// bound idents the first time a module is accessed during normalize_path.
     pub fn trigger_module_sig_rename(&self, module_name: &str) {
-        if self.in_store_build() {
-            self.record_store_effect(StoreEffect::TriggerRename(module_name.into()));
-            self.suspend_store_build(|| self.trigger_module_sig_rename(module_name));
-            return;
-        }
         if self.renamed_module_sigs.borrow().contains_key(module_name) {
             return; // Already renamed
         }
@@ -5208,28 +5160,13 @@ impl TypeContext {
             for effect in &piece.effects {
                 match effect {
                     StoreEffect::Piece(_) => {}
-                    StoreEffect::RegisterComponents(..) | StoreEffect::AdoptView(..) => {
-                        counters::record_effect_replayed(0)
-                    }
-                    StoreEffect::PreparePers(_) => counters::record_effect_replayed(1),
-                    StoreEffect::TriggerRename(_) => counters::record_effect_replayed(2),
-                    StoreEffect::RegisterAliasSource(..) => counters::record_effect_replayed(3),
-                    StoreEffect::RegisterQualifiedModuleDecl(..) => {
-                        counters::record_effect_replayed(4)
-                    }
+                    StoreEffect::PreparePers(_) => counters::record_effect_replayed(0),
                 }
             }
         }
         for effect in &piece.effects {
             match effect {
                 StoreEffect::Piece(inner) => self.replay_store_piece(inner),
-                StoreEffect::RegisterComponents(key, components) => {
-                    self.qualified_module_components_cache.borrow_mut().insert(
-                        key.clone(),
-                        super::env_lazy::HeldComponents::Local(components.clone()),
-                    );
-                }
-                StoreEffect::AdoptView(key, view) => self.adopt_view(key.clone(), view.clone()),
                 StoreEffect::PreparePers(name) => {
                     let replayed = self
                         .persistent_env
@@ -5242,13 +5179,6 @@ impl TypeContext {
                     if let Some(mut pers) = self.persistent_env_clone() {
                         let _ = pers.find_pers_struct(name, self);
                     }
-                }
-                StoreEffect::TriggerRename(name) => self.trigger_module_sig_rename(name),
-                StoreEffect::RegisterAliasSource(component, source) => {
-                    self.register_component_alias_source(*component, *source)
-                }
-                StoreEffect::RegisterQualifiedModuleDecl(parent, name, id, md) => {
-                    self.register_qualified_module_decl(parent, name, *id, md.clone())
                 }
             }
         }
@@ -5271,9 +5201,6 @@ impl TypeContext {
             StoreEffect::PreparePers(name) => effects
                 .iter()
                 .any(|e| matches!(e, StoreEffect::PreparePers(other) if other == name)),
-            StoreEffect::TriggerRename(name) => effects
-                .iter()
-                .any(|e| matches!(e, StoreEffect::TriggerRename(other) if other == name)),
             _ => false,
         };
         if !duplicate {
