@@ -1,23 +1,9 @@
-//! R1 operations from docs/prototypes/checker-kernel. The same source modules
-//! are compiled here because tc is deliberately not a public compiler API.
+//! R1 operations from docs/prototypes/checker-kernel, using the production
+//! crate API (no cfg(test) counters or duplicate source modules).
 //! Run: cargo bench --manifest-path compiler-rust/Cargo.toml --bench tc_kernel -- instance7 1000000
 //! For instructions use cachegrind at N and zero, subtract empty; subtract
 //! instance7 from generalize7. Unification and names belong to R3 and R4.
-#[path = "../src/tc/graph.rs"]
-mod graph;
-#[path = "../src/tc/level.rs"]
-mod level;
-#[path = "../src/tc/template.rs"]
-mod template;
-#[cfg(test)]
-mod steps {
-    /// O(1), compiled away: cargo bench sets cfg(test), but measurements
-    /// must not include the unit-test thread-local counter.
-    #[inline(always)]
-    pub fn tick() {}
-}
-
-use graph::{ARROW, CONSTR, GENERIC, Graph, NONE, Node, Param, Ty, VAR};
+use rescript_compiler::tc::graph::{ARROW, CONSTR, GENERIC, Graph, NONE, Node, Param, Ty, VAR};
 use std::hint::black_box;
 
 /// O(arguments); build a setup-only constructor with its reserved memo slot.
@@ -106,10 +92,7 @@ fn main() {
     let mut sink = 0u64;
     for i in 0..n {
         if i & 0xfff == 0 {
-            g.nodes.clear();
-            g.lists.clear();
-            g.params.clear();
-            g.forward.clear();
+            g.clear_instances();
         }
         match index {
             0 => sink += g.instance(black_box(ground1)).0 as u64,

@@ -100,6 +100,18 @@ impl Default for Graph {
 }
 
 impl Graph {
+    /// O(1): clear plain-data instance pools while retaining their capacity.
+    /// Invalidates all local handles and templates with external references;
+    /// closed templates remain usable. No speculation may be open.
+    pub fn clear_instances(&mut self) {
+        assert_eq!(self.speculation_depth, 0, "open speculation at reset");
+        self.nodes.clear();
+        self.lists.clear();
+        self.params.clear();
+        self.forward.clear();
+        self.work.clear();
+    }
+
     /// Amortized O(1); each call allocates a distinct occurrence.
     pub fn push(&mut self, node: Node) -> Ty {
         assert!(self.nodes.len() < (1 << 30));
@@ -274,8 +286,8 @@ mod trail_tests {
             19999
         );
         assert_eq!(super::super::steps::scope(|| g.restore(token)), 9999);
-        for i in 0..10000 {
-            assert_eq!(g.nodes[i].a, i as u32 + 1);
+        for (i, node) in g.nodes[..10000].iter().enumerate() {
+            assert_eq!(node.a, i as u32 + 1);
         }
     }
     #[test]
