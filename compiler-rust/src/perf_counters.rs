@@ -66,10 +66,92 @@ static SIGNATURE_NONSHAREABLE: AtomicU64 = AtomicU64::new(0);
 static SIGNATURE_POOL_FULL: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn record_signature_fallback(pool_full: bool) {
-    if enabled() {
+    if context_enabled()
+        && !into_publication(|p| {
+            *if pool_full {
+                &mut p.pool_full
+            } else {
+                &mut p.nonshareable
+            } += 1
+        })
+    {
         let counter = if pool_full { &SIGNATURE_POOL_FULL } else { &SIGNATURE_NONSHAREABLE };
         counter.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// The signature probes of one unit's publication, counted while
+/// [`attribute_publication`] runs: the publication runs before the driver
+/// keeps or discards the unit's checking attempt, so its counts belong to
+/// that attempt.
+#[derive(Clone, Default)]
+struct PublicationCounts {
+    nonshareable: u64,
+    pool_full: u64,
+    nodes_frozen: u64,
+    nodes_hashed: u64,
+    hash_walks: u64,
+    /// The `(generation, publication id)` of each signature published.
+    published: Vec<(u64, usize)>,
+}
+
+impl PublicationCounts {
+    fn merge(&mut self, other: PublicationCounts) {
+        self.nonshareable += other.nonshareable;
+        self.pool_full += other.pool_full;
+        self.nodes_frozen += other.nodes_frozen;
+        self.nodes_hashed += other.nodes_hashed;
+        self.hash_walks += other.hash_walks;
+        self.published.extend(other.published);
+    }
+}
+
+thread_local! {
+    /// The publication [`attribute_publication`] is running on this thread.
+    static PUBLICATION: RefCell<Option<PublicationCounts>> = const { RefCell::new(None) };
+}
+
+/// Count a signature probe in the publication running on this thread, if
+/// any; `false` when none runs. One TLS access per probe call (per graph,
+/// walk or fallback), not per node, and only with the counters enabled.
+fn into_publication(record: impl FnOnce(&mut PublicationCounts)) -> bool {
+    PUBLICATION.with(|current| match current.borrow_mut().as_mut() {
+        Some(counts) => {
+            record(counts);
+            true
+        }
+        None => false,
+    })
+}
+
+/// Run `publish`, a publication of the unit `ctx` checks, counting its
+/// signature probes (fallbacks, frozen and hashed nodes, the published
+/// signature) in `ctx`: a discarded attempt's publication publishes none of
+/// them. Probes outside any publication, such as an importer's promotion,
+/// stay process-global. With the counters off, one flag test.
+pub(crate) fn attribute_publication<R>(
+    ctx: &crate::types::TypeContext,
+    publish: impl FnOnce() -> R,
+) -> R {
+    if !ctx.compiler_counters_enabled() {
+        return publish();
+    }
+    struct Scope<'a> {
+        ctx: &'a crate::types::TypeContext,
+        previous: Option<PublicationCounts>,
+    }
+    impl Drop for Scope<'_> {
+        fn drop(&mut self) {
+            let counts = PUBLICATION.with(|current| current.replace(self.previous.take()));
+            if let Some(counts) = counts {
+                self.ctx
+                    .record_attempt_counter(|c| c.publication.merge(counts));
+            }
+        }
+    }
+    let previous = PUBLICATION.with(|current| current.replace(Some(Default::default())));
+    let _scope = Scope { ctx, previous };
+    publish()
 }
 
 #[derive(Default)]
@@ -121,53 +203,53 @@ static SIGNATURE_HASH_WALKS: AtomicU64 = AtomicU64::new(0);
 /// Import counts exclude stored/embedded interfaces and count a signature
 /// acquisition, not each individual node read or repeated worker lookup.
 pub(crate) fn record_signature_access(id: usize, generation: u64, imported: bool) {
-    if enabled() {
+    if context_enabled() && (imported || !into_publication(|p| p.published.push((generation, id))))
+    {
         let mut counts = SIGNATURE_COUNTS.get_or_init(Default::default).lock().unwrap();
         counts.record((generation, id), imported);
     }
 }
 
 pub(crate) fn record_signature_nodes_frozen(nodes: usize) {
-    if enabled() {
+    if context_enabled() && !into_publication(|p| p.nodes_frozen += nodes as u64) {
         SIGNATURE_NODES_FROZEN.fetch_add(nodes as u64, Ordering::Relaxed);
     }
 }
 
 pub(crate) fn record_signature_nodes_hashed(nodes: u64) {
-    if enabled() {
+    if context_enabled()
+        && !into_publication(|p| {
+            p.hash_walks += 1;
+            p.nodes_hashed += nodes;
+        })
+    {
         SIGNATURE_HASH_WALKS.fetch_add(1, Ordering::Relaxed);
         SIGNATURE_NODES_HASHED.fetch_add(nodes, Ordering::Relaxed);
     }
 }
 
+/// Translated modules and their declarations, of one annotation class.
+#[derive(Clone, Copy, Default)]
 struct GentypeCounts {
-    modules: AtomicU64,
-    declarations: AtomicU64,
+    modules: u64,
+    declarations: u64,
 }
 
 impl GentypeCounts {
-    const fn new() -> Self {
-        Self {
-            modules: AtomicU64::new(0),
-            declarations: AtomicU64::new(0),
-        }
+    fn record(&mut self, declarations: usize) {
+        self.modules += 1;
+        self.declarations += declarations as u64;
     }
 
-    fn record(&self, declarations: usize) {
-        self.modules.fetch_add(1, Ordering::Relaxed);
-        self.declarations
-            .fetch_add(declarations as u64, Ordering::Relaxed);
+    fn merge(&mut self, other: GentypeCounts) {
+        self.modules += other.modules;
+        self.declarations += other.declarations;
     }
 
     fn snapshot(&self) -> (u64, u64) {
-        (
-            self.modules.load(Ordering::Relaxed),
-            self.declarations.load(Ordering::Relaxed),
-        )
+        (self.modules, self.declarations)
     }
 }
-
-static GENTYPE_COUNTS: [GentypeCounts; 2] = [GentypeCounts::new(), GentypeCounts::new()];
 
 #[cfg(test)]
 thread_local! {
@@ -181,7 +263,13 @@ pub(crate) fn gentype_counts_for_test() -> [u64; 4] {
 
 /// Successful declaration-cache translations and the declarations they produce.
 /// This excludes the separate translation for an annotated module's own output.
-pub(crate) fn record_gentype_translation(annotated: bool, declarations: usize) {
+/// It runs before the driver keeps the unit's checking attempt, so it counts
+/// in the unit's context `ctx`.
+pub(crate) fn record_gentype_translation(
+    ctx: &crate::types::TypeContext,
+    annotated: bool,
+    declarations: usize,
+) {
     #[cfg(test)]
     GENTYPE_TEST_COUNTS.with(|counts| {
         let mut values = counts.get();
@@ -190,15 +278,13 @@ pub(crate) fn record_gentype_translation(annotated: bool, declarations: usize) {
         values[offset + 1] += declarations as u64;
         counts.set(values);
     });
-    if enabled() {
-        GENTYPE_COUNTS[usize::from(annotated)].record(declarations);
-    }
+    ctx.record_attempt_counter(|c| c.gentype[usize::from(annotated)].record(declarations));
 }
 
 #[cfg(test)]
 #[test]
 fn gentype_counts_include_empty_translations_and_separate_annotation_classes() {
-    let counts = [GentypeCounts::new(), GentypeCounts::new()];
+    let mut counts = [GentypeCounts::default(); 2];
     assert_eq!(counts[0].snapshot(), (0, 0));
     counts[0].record(0);
     counts[0].record(3);
@@ -400,6 +486,8 @@ pub(crate) struct AttemptCounters {
     papply_views: u64,
     store_views: store_views::Counts,
     checker: checker::Counts,
+    publication: PublicationCounts,
+    gentype: [GentypeCounts; 2],
 }
 
 impl AttemptCounters {
@@ -463,6 +551,10 @@ impl AttemptCounters {
         self.papply_views += other.papply_views;
         self.store_views.merge(other.store_views);
         self.checker.merge(other.checker);
+        self.publication.merge(other.publication);
+        for (total, count) in self.gentype.iter_mut().zip(other.gentype) {
+            total.merge(count);
+        }
     }
 
     /// The four totals the derived census charges to items: fresh
@@ -482,7 +574,18 @@ impl AttemptCounters {
 
     /// Add these counts to the process totals. O(size of the maps), one
     /// lock acquisition; called once per publication, never per probe.
-    pub(crate) fn publish(self) {
+    pub(crate) fn publish(mut self) {
+        // Published keys join the process-wide set, which importers' later
+        // acquisitions are matched against.
+        if !self.publication.published.is_empty() {
+            let mut counts = SIGNATURE_COUNTS
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap();
+            for key in self.publication.published.drain(..) {
+                counts.record(key, false);
+            }
+        }
         with_totals_mut(|totals| {
             totals.publications += 1;
             totals.counts.get_or_insert_with(Default::default).merge(self);
@@ -907,9 +1010,14 @@ pub fn reset() {
     }
 
     world::reset();
-    for counts in &GENTYPE_COUNTS {
-        counts.modules.store(0, Ordering::Relaxed);
-        counts.declarations.store(0, Ordering::Relaxed);
+    for counter in [
+        &SIGNATURE_NONSHAREABLE,
+        &SIGNATURE_POOL_FULL,
+        &SIGNATURE_NODES_FROZEN,
+        &SIGNATURE_NODES_HASHED,
+        &SIGNATURE_HASH_WALKS,
+    ] {
+        counter.store(0, Ordering::Relaxed);
     }
 
     for counter in [
@@ -1161,22 +1269,27 @@ pub fn print_report() {
         "[compiler-counter] published_signature_decodes={}",
         PUBLISHED_SIGNATURE_DECODES.load(Ordering::Relaxed)
     );
-    eprintln!("signature_nonshareable={} signature_pool_full={}",
-        SIGNATURE_NONSHAREABLE.load(Ordering::Relaxed), SIGNATURE_POOL_FULL.load(Ordering::Relaxed));
+    let (publication, gentype) = with_totals(|totals| (totals.publication.clone(), totals.gentype));
+    let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+    eprintln!(
+        "signature_nonshareable={} signature_pool_full={}",
+        load(&SIGNATURE_NONSHAREABLE) + publication.nonshareable,
+        load(&SIGNATURE_POOL_FULL) + publication.pool_full,
+    );
 
     if let Some(counts) = SIGNATURE_COUNTS.get() {
         let counts = counts.lock().unwrap();
         eprintln!(
             "[compiler-counter] signature_units_published={} signature_units_imported={} signature_nodes_frozen={} signature_nodes_hashed={} signature_hash_walks={}",
             counts.published.len(), counts.imported.len(),
-            SIGNATURE_NODES_FROZEN.load(Ordering::Relaxed),
-            SIGNATURE_NODES_HASHED.load(Ordering::Relaxed),
-            SIGNATURE_HASH_WALKS.load(Ordering::Relaxed),
+            load(&SIGNATURE_NODES_FROZEN) + publication.nodes_frozen,
+            load(&SIGNATURE_NODES_HASHED) + publication.nodes_hashed,
+            load(&SIGNATURE_HASH_WALKS) + publication.hash_walks,
         );
     }
 
     for (index, annotated) in [false, true].into_iter().enumerate() {
-        let (modules, declarations) = GENTYPE_COUNTS[index].snapshot();
+        let (modules, declarations) = gentype[index].snapshot();
         eprintln!(
             "[compiler-counter] gentype annotated={annotated} modules={modules} declarations={declarations}",
         );
@@ -2488,7 +2601,7 @@ mod attempt_tests {
             std::mem::size_of::<usize>()
         );
         // One heap block per counting context, never per probe or node.
-        assert_eq!(std::mem::size_of::<AttemptCounters>(), 1328);
+        assert_eq!(std::mem::size_of::<AttemptCounters>(), 1424);
     }
 
     #[test]
@@ -2593,6 +2706,159 @@ mod attempt_tests {
         }
         drop(ctx);
         assert_eq!(published(|c| c.views_adopted), (1, OPERATIONS));
+    }
+
+    /// The signature probes of a publication, `n` times each, as the unit
+    /// `ctx` checks publishes with generation `generation`.
+    fn publish_n(ctx: &TypeContext, generation: u64, n: u64) {
+        super::attribute_publication(ctx, || {
+            for id in 0..n as usize {
+                super::record_signature_fallback(id % 2 == 0);
+                super::record_signature_nodes_frozen(3);
+                super::record_signature_nodes_hashed(5);
+                super::record_signature_access(id, generation, false);
+            }
+            // A nested publication counts in the same attempt.
+            super::attribute_publication(ctx, || super::record_signature_nodes_frozen(1));
+        });
+    }
+
+    fn global_signature_counts(generation: u64) -> ([u64; 5], usize, usize) {
+        let load = |c: &super::AtomicU64| c.load(super::Ordering::Relaxed);
+        let (published, imported) = super::SIGNATURE_COUNTS
+            .get()
+            .map(|counts| {
+                let counts = counts.lock().unwrap();
+                let mine = |set: &std::collections::HashSet<(u64, usize)>| {
+                    set.iter().filter(|(g, _)| *g == generation).count()
+                };
+                (mine(&counts.published), mine(&counts.imported))
+            })
+            .unwrap_or_default();
+        (
+            [
+                load(&super::SIGNATURE_NONSHAREABLE),
+                load(&super::SIGNATURE_POOL_FULL),
+                load(&super::SIGNATURE_NODES_FROZEN),
+                load(&super::SIGNATURE_NODES_HASHED),
+                load(&super::SIGNATURE_HASH_WALKS),
+            ],
+            published,
+            imported,
+        )
+    }
+
+    /// A publication made before the attempt is kept or discarded counts in
+    /// the attempt: a discarded one adds no published unit, frozen or hashed
+    /// node; a kept one adds each exactly once. Probes outside a
+    /// publication stay process-global.
+    #[test]
+    fn signature_publication_counts_follow_the_attempt() {
+        super::reset_for_test();
+        super::force_context_counters_for_test();
+        // Generations no build uses, so other tests' keys never match.
+        let (discarded_generation, kept_generation) = (u64::MAX - 1, u64::MAX - 2);
+        let (globals_before, _, _) = global_signature_counts(discarded_generation);
+
+        let discarded = context();
+        discarded.defer_attempt_counters();
+        publish_n(&discarded, discarded_generation, OPERATIONS);
+        discarded.attempt_counter(|c| {
+            let p = &c.publication;
+            assert_eq!(
+                [
+                    p.nonshareable,
+                    p.pool_full,
+                    p.nodes_frozen,
+                    p.nodes_hashed,
+                    p.hash_walks
+                ],
+                [
+                    OPERATIONS / 2,
+                    OPERATIONS / 2,
+                    3 * OPERATIONS + 1,
+                    5 * OPERATIONS,
+                    OPERATIONS
+                ]
+            );
+            assert_eq!(p.published.len() as u64, OPERATIONS);
+        });
+        drop(discarded);
+        assert_eq!(
+            global_signature_counts(discarded_generation),
+            (globals_before, 0, 0)
+        );
+        assert_eq!(published(|_| ()).0, 0);
+
+        let kept = context();
+        kept.defer_attempt_counters();
+        publish_n(&kept, kept_generation, OPERATIONS);
+        assert_eq!(
+            global_signature_counts(kept_generation),
+            (globals_before, 0, 0)
+        );
+        kept.keep_attempt_counters();
+        let (publications, totals) = published(|c| {
+            let p = &c.publication;
+            [
+                p.nonshareable,
+                p.pool_full,
+                p.nodes_frozen,
+                p.nodes_hashed,
+                p.hash_walks,
+            ]
+        });
+        assert_eq!(publications, 1);
+        assert_eq!(
+            totals,
+            [
+                OPERATIONS / 2,
+                OPERATIONS / 2,
+                3 * OPERATIONS + 1,
+                5 * OPERATIONS,
+                OPERATIONS
+            ]
+        );
+        assert_eq!(published(|c| c.publication.published.len()).1, 0);
+        assert_eq!(
+            global_signature_counts(kept_generation),
+            (globals_before, OPERATIONS as usize, 0)
+        );
+        // An importer's acquisition, outside any publication, is global.
+        super::record_signature_access(0, kept_generation, true);
+        assert_eq!(
+            global_signature_counts(kept_generation),
+            (globals_before, OPERATIONS as usize, 1)
+        );
+        super::record_signature_nodes_frozen(7);
+        let (globals_after, _, _) = global_signature_counts(kept_generation);
+        assert_eq!(globals_after[2], globals_before[2] + 7);
+    }
+
+    /// GenType translations run before the attempt is kept: a discarded
+    /// attempt's translations are not counted.
+    #[test]
+    fn gentype_translations_follow_the_attempt() {
+        super::reset_for_test();
+        for keep in [false, true] {
+            let ctx = context();
+            ctx.defer_attempt_counters();
+            for i in 0..OPERATIONS {
+                super::record_gentype_translation(&ctx, i % 4 == 0, 2);
+            }
+            if keep {
+                ctx.keep_attempt_counters();
+            }
+        }
+        let (publications, counts) = published(|c| c.gentype.map(|g| g.snapshot()));
+        assert_eq!(publications, 1);
+        assert_eq!(
+            counts,
+            [
+                (OPERATIONS * 3 / 4, OPERATIONS * 3 / 2),
+                (OPERATIONS / 4, OPERATIONS / 2)
+            ]
+        );
     }
 
     /// The world's scratch outlives its builds: each build's counts are

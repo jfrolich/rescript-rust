@@ -1931,7 +1931,17 @@ pub enum SignaturePublicationMode {
 
 /// Publish directly from the checker. The portable oracle is check-only;
 /// ordinary storage reconstructs it from the frozen graph after release.
+/// The publication's counters count in `ctx`, the unit's checking attempt.
 pub(crate) fn publish_signature(
+    ps: &PersStruct, ctx: &TypeContext, arena: Option<&ParseArena>,
+    mode: SignaturePublicationMode, checked: bool,
+) -> (Arc<PortablePersStruct>, Option<super::signature_check::Comparison>) {
+    crate::perf_counters::attribute_publication(ctx, || {
+        publish_signature_attributed(ps, ctx, arena, mode, checked)
+    })
+}
+
+fn publish_signature_attributed(
     ps: &PersStruct, ctx: &TypeContext, arena: Option<&ParseArena>,
     mode: SignaturePublicationMode, checked: bool,
 ) -> (Arc<PortablePersStruct>, Option<super::signature_check::Comparison>) {
