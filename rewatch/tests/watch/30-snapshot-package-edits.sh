@@ -37,7 +37,7 @@ for package in belt runtime touch; do
     [[ $mode != off ]] || export RESCRIPT_SNAPSHOT=off
     rewatch clean > "$work/clean.log" 2>&1
     printf 'let value = Belt.Float.fromString("2.0")\nlet length = List.length(list{1, 2})\n' > src/Main.res
-    rewatch watch -v > "$work/$package-$mode.log" 2>&1 &
+    "$REWATCH_EXECUTABLE" watch -v > "$work/$package-$mode.log" 2>&1 &
     pid=$!
     wait_for_file src/Main.mjs 60
     wait_for_pattern_count "$work/$package-$mode.log" 'Finished .*compilation' 1 60
