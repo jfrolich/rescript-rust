@@ -33,3 +33,4 @@ pub mod level;
 pub mod template;
 
 pub mod segment;
+pub mod publish;

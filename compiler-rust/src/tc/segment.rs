@@ -66,6 +66,11 @@ pub struct Segment {
     pub lists: Box<[Ty]>,
     pub params: Box<[Param]>,
     pub templates: Box<[Template]>,
+    pub(crate) template_nodes: Box<[Node]>,
+    pub(crate) template_lists: Box<[Ty]>,
+    pub(crate) template_params: Box<[Param]>,
+    pub(crate) template_pools: Box<[super::template::TemplatePools]>,
+    pub(crate) template_externals: Box<[Ty]>,
     pub type_declarations: Box<[TypeDecl]>,
     pub members: Box<[MemberDecl]>,
     pub items: Box<[ExportItem]>,
@@ -77,7 +82,9 @@ impl Segment {
     /// O(log n) probes, O(1) stack and no allocation, for n root exports.
     /// Returns None for an empty segment. Names use the publisher's interner.
     pub fn lookup(&self, name: u32) -> Option<&ExportItem> {
-        self.children.first().and_then(|&table| self.lookup_in(table, name))
+        self.children
+            .first()
+            .and_then(|&table| self.lookup_in(table, name))
     }
 
     /// O(log n) probes, at most floor(log2(n)) + 1 for a nonempty table.
@@ -117,25 +124,32 @@ mod tests {
         assert_eq!(std::mem::size_of::<ChildTable>(), 8);
         assert_eq!(std::mem::size_of::<TypeDecl>(), 32);
         assert_eq!(std::mem::size_of::<MemberDecl>(), 16);
-        assert_eq!(std::mem::size_of::<Segment>(), 160);
+        assert_eq!(std::mem::size_of::<Segment>(), 240);
     }
 
     #[test]
     fn ten_thousand_names_need_at_most_fifteen_probes() {
         let segment = Segment {
-            items: (0..10000).map(|i| ExportItem {
-                name: i * 2,
-                payload: i,
-                kind: ExportKind::Value,
-            }).collect(),
-            children: Box::new([ChildTable { start: 0, len: 10000 }]),
+            items: (0..10000)
+                .map(|i| ExportItem {
+                    name: i * 2,
+                    payload: i,
+                    kind: ExportKind::Value,
+                })
+                .collect(),
+            children: Box::new([ChildTable {
+                start: 0,
+                len: 10000,
+            }]),
             ..Segment::default()
         };
         for name in 0..=20000 {
             let probes = steps::scope(|| {
                 let found = segment.lookup(name);
-                assert_eq!(found.map(|item| item.payload),
-                    (name < 20000 && name % 2 == 0).then_some(name / 2));
+                assert_eq!(
+                    found.map(|item| item.payload),
+                    (name < 20000 && name % 2 == 0).then_some(name / 2)
+                );
             });
             assert!(probes <= 15, "{name}: {probes} probes");
         }
@@ -146,8 +160,16 @@ mod tests {
     fn child_tables_are_independent_and_empty_tables_are_valid() {
         let segment = Segment {
             items: Box::new([
-                ExportItem { name: 7, payload: 0, kind: ExportKind::Module },
-                ExportItem { name: 7, payload: 1, kind: ExportKind::Value },
+                ExportItem {
+                    name: 7,
+                    payload: 0,
+                    kind: ExportKind::Module,
+                },
+                ExportItem {
+                    name: 7,
+                    payload: 1,
+                    kind: ExportKind::Value,
+                },
             ]),
             children: Box::new([
                 ChildTable { start: 0, len: 1 },
@@ -157,7 +179,10 @@ mod tests {
             ..Segment::default()
         };
         assert_eq!(segment.lookup(7).unwrap().kind, ExportKind::Module);
-        assert_eq!(segment.lookup_in(segment.children[1], 7).unwrap().payload, 1);
+        assert_eq!(
+            segment.lookup_in(segment.children[1], 7).unwrap().payload,
+            1
+        );
         assert!(segment.lookup_in(segment.children[2], 7).is_none());
         assert!(Segment::default().lookup(7).is_none());
     }
