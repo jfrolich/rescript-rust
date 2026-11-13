@@ -421,7 +421,7 @@ struct State {
     location_steps: usize,
     sequence_steps: usize,
     evaluation: args::Evaluation,
-    record_scratch: record::Scratch,
+    object_scratch: record::Scratch,
     primitive_steps: usize,
     /// Let/Seq nodes read by row R5 step 0 of section 3.6.
     spine_steps: usize,
@@ -475,7 +475,7 @@ impl State {
         let named_metadata = variant::prepare(&mut arena);
         Self {
             evaluation: args::Evaluation::default(),
-            record_scratch: record::Scratch::default(),
+            object_scratch: record::Scratch::default(),
             tail_arguments: 0, tail_parameters: 0, tail_sort_comparisons: 0, tail_body_statements: 0,
             tail_frames: Vec::new(), tail_functions: Vec::new(), tail_copies: Vec::new(),
             tail_assignments: Vec::new(), tail_name: String::new(), call_reversed: Vec::new(), calls: Vec::new(), tail_order: Vec::new(),

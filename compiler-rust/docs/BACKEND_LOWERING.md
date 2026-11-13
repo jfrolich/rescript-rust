@@ -2809,10 +2809,10 @@ The statement stack and node-list pool must be used end to end.
 | `out.rs:436` `Work` | `let mut outputs = Vec::new();` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `prim.rs:122` `finish_primitive_payload` | `.collect();` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `prim.rs:127` `finish_primitive_payload` | `let mut outputs: smallvec::SmallVec<[Out; 4]> = outputs;` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
-| `prim.rs:164` `finish_primitive_payload` | `.collect::<Vec<_>>(),` | per visited node | reusable scratch buffer; clear, do not free | pending |
-| `prim.rs:173` `finish_primitive_payload` | `let (keys, kept): (Vec<_>, Vec<_>) = entries.into_iter().unzip();` | per visited node | property-key pool handle (requires J payload API change) | pending |
-| `prim.rs:195` `finish_primitive_payload` | `let mut keys = Vec::new();` | per visited node | property-key pool handle (requires J payload API change) | pending |
-| `prim.rs:196` `finish_primitive_payload` | `let mut kept = Vec::new();` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `prim.rs:164` `finish_primitive_payload` | `.collect::<Vec<_>>(),` | per visited node | Dictionary extraction and spread share retained cleared object key/value buffers with record lowering; final keys append to the unit property pool. | removed |
+| `prim.rs:173` `finish_primitive_payload` | `let (keys, kept): (Vec<_>, Vec<_>) = entries.into_iter().unzip();` | per visited node | Dictionary extraction and spread share retained cleared object key/value buffers with record lowering; final keys append to the unit property pool. | removed |
+| `prim.rs:195` `finish_primitive_payload` | `let mut keys = Vec::new();` | per visited node | Dictionary extraction and spread share retained cleared object key/value buffers with record lowering; final keys append to the unit property pool. | removed |
+| `prim.rs:196` `finish_primitive_payload` | `let mut kept = Vec::new();` | per visited node | Dictionary extraction and spread share retained cleared object key/value buffers with record lowering; final keys append to the unit property pool. | removed |
 | `prim.rs:272` `finish_primitive_payload` | `let info = self.arena.js_info(crate::bir::JsPayload::Block(tag.clone()));` | per visited node | borrow payload or retain typed pool handle | pending |
 | `prim.rs:372` `finish_primitive_payload` | `norm::jm12_interpolated_template(&mut self.arena, segments.clone(), values.into_vec())` | per visited node | borrow payload or retain typed pool handle | pending |
 | `prim.rs:381` `finish_primitive_payload` | `.collect();` | per visited node | reusable scratch buffer; clear, do not free | pending |
@@ -3097,6 +3097,16 @@ import is outside these measurements; preparation does no body grouping.
 | `variant::named_variant` key `split_off` | per-side vector allocation | removed: unit-key subspans |
 | `variant::switch_key_expression` large integer `to_string` | temporary string | removed: retained cleared encoding buffer |
 | `variant::switch_key_expression` bigint parser and `format!` | temporary strings | removed: caller-owned bigint encoding buffer; named numeric descriptors bypass reconstruction |
+
+Dictionary extraction no longer collects and unzips entry tuples: it appends
+keys and kept values directly to the retained object buffers shared with record
+lowering. Dictionary spread reuses those same buffers while preserving flattening,
+detachment, duplicate-key order and release behavior. Whole-Lambda proofs for
+10,000 dictionary entries and 10,000 flattened object spreads each measure zero
+warmed allocations and unchanged recorded capacities. Their exact source/primitive
+counts are 30,002/50,003 and 50,001/100,001 respectively. The buffers are empty after
+both complete probe/realize/release passes. These fixtures use tuple block metadata;
+owned constructor/record block tags remain a separate pending inventory item.
 
 ### 7.5.1 Concurrent loop, label and recursive-value additions
 

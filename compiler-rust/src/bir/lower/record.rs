@@ -14,8 +14,8 @@ pub(super) struct Record {
 #[derive(Default)]
 pub(super) struct Scratch {
     operands: Vec<NodeId>,
-    keys: Vec<PropertyKey>,
-    values: Vec<NodeId>,
+    pub(super) keys: Vec<PropertyKey>,
+    pub(super) values: Vec<NodeId>,
 }
 
 impl State {
@@ -43,7 +43,7 @@ impl State {
         }
         let loc = self.arena.primitive(primitive).loc;
         let init = *init;
-        let mut scratch = std::mem::take(&mut self.record_scratch);
+        let mut scratch = std::mem::take(&mut self.object_scratch);
         let operands = &mut scratch.operands;
         let keys = &mut scratch.keys;
         debug_assert!(operands.is_empty() && keys.is_empty());
@@ -88,7 +88,7 @@ impl State {
         Some(Record { operands, info, loc })
         })();
         scratch.operands.clear(); scratch.keys.clear();
-        self.record_scratch = scratch;
+        self.object_scratch = scratch;
         result
     }
 
@@ -115,7 +115,7 @@ impl State {
         children: impl Iterator<Item = Probed>,
     ) -> Probed {
         let mut start = None;
-        let mut values = std::mem::take(&mut self.record_scratch.values);
+        let mut values = std::mem::take(&mut self.object_scratch.values);
         debug_assert!(values.is_empty());
         for child in children {
             self.primitive_steps += 1;
@@ -135,7 +135,7 @@ impl State {
             0,
         );
         values.clear();
-        self.record_scratch.values = values;
+        self.object_scratch.values = values;
         if self
             .locations
             .as_ref()
@@ -298,15 +298,15 @@ mod tests {
         let View::Let { var, value: Some(value), body } = state.source.view(root) else { panic!() };
         // The initializer is valid, but its own Prim is not an override spine.
         assert!(state.record_copy(var, value, value).is_none());
-        let before = (state.record_scratch.operands.capacity(), state.record_scratch.keys.capacity());
+        let before = (state.object_scratch.operands.capacity(), state.object_scratch.keys.capacity());
         let allocations = allocation_counter::measure(|| {
             for _ in 0..10_000 { assert!(state.record_copy(var, value, value).is_none()); }
         });
         assert_eq!(allocations.count_total, 0, "{allocations:?}");
-        assert_eq!((state.record_scratch.operands.capacity(), state.record_scratch.keys.capacity()), before);
-        assert!(state.record_scratch.operands.is_empty() && state.record_scratch.keys.is_empty());
+        assert_eq!((state.object_scratch.operands.capacity(), state.object_scratch.keys.capacity()), before);
+        assert!(state.object_scratch.operands.is_empty() && state.object_scratch.keys.is_empty());
         assert!(state.record_copy(var, value, body).is_some());
-        assert!(state.record_scratch.operands.is_empty() && state.record_scratch.keys.is_empty());
+        assert!(state.object_scratch.operands.is_empty() && state.object_scratch.keys.is_empty());
     }
 
     #[test]
@@ -332,7 +332,7 @@ mod tests {
         state.arena.pools.js.reserve(1);
         state.free.reserve_repeat();
         let capacities = |s: &State| {
-            [s.record_scratch.operands.capacity(), s.record_scratch.keys.capacity(), s.record_scratch.values.capacity(),
+            [s.object_scratch.operands.capacity(), s.object_scratch.keys.capacity(), s.object_scratch.values.capacity(),
                 s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(), s.arena.release_stack.capacity(),
                 s.arena.lists.storage_shape().1, s.source.lists.storage_shape().1, s.arena.pools.property_keys.capacity(),
                 s.arena.pools.js.capacity(), s.traversal.work.capacity(), s.traversal.values.capacity(), s.traversal.children.capacity()]
@@ -349,7 +349,7 @@ mod tests {
         assert_eq!(state.statements.capacities(), statements_before);
         assert_eq!(state.source_steps - source, 10_002);
         assert_eq!(state.primitive_steps - primitive, 40_002);
-        assert!(state.record_scratch.operands.is_empty() && state.record_scratch.keys.is_empty() && state.record_scratch.values.is_empty());
+        assert!(state.object_scratch.operands.is_empty() && state.object_scratch.keys.is_empty() && state.object_scratch.values.is_empty());
     }
 
     #[test]

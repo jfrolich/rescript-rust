@@ -150,37 +150,24 @@ impl State {
             // P: compile_primitive_js, dictionaries: extract only literal-key
             // tuple entries, exactly as the legacy filter_map does.
             Primitive::Pmakedict => {
-                let entries = if let [array] = values.as_slice() {
+                let mut keys = std::mem::take(&mut self.object_scratch.keys);
+                let mut kept = std::mem::take(&mut self.object_scratch.values);
+                debug_assert!(keys.is_empty() && kept.is_empty());
+                let extracted = if let [array] = values.as_slice() {
                     if let View::JArray { values: items } = self.arena.view(*array) {
-                        Some(
-                            items
-                                .iter()
-                                .filter_map(|&item| {
-                                    self.primitive_steps += 1;
-                                    if let View::JBlockLit {
-                                        values: [key, value],
-                                        ..
-                                    } = self.arena.view(item)
-                                    {
-                                        if let View::JStr { text } = self.arena.view(*key) {
-                                            return Some((
-                                                crate::bir::PropertyKey::Literal(text),
-                                                *value,
-                                            ));
-                                        }
-                                    }
-                                    None
-                                })
-                                .collect::<Vec<_>>(),
-                        )
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                let result = if let Some(entries) = entries {
-                    let (keys, kept): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+                        for &item in items {
+                            self.primitive_steps += 1;
+                            if let View::JBlockLit { values: [key, value], .. } = self.arena.view(item) {
+                                if let View::JStr { text } = self.arena.view(*key) {
+                                    keys.push(crate::bir::PropertyKey::Literal(text));
+                                    kept.push(*value);
+                                }
+                            }
+                        }
+                        true
+                    } else { false }
+                } else { false };
+                let result = if extracted {
                     for &value in &kept {
                         self.arena.detach(value);
                     }
@@ -199,11 +186,15 @@ impl State {
                 for value in values.drain(..) {
                     self.arena.release(value);
                 }
+                keys.clear(); kept.clear();
+                self.object_scratch.keys = keys;
+                self.object_scratch.values = kept;
                 result
             }
             Primitive::PdictSpread => {
-                let mut keys = Vec::new();
-                let mut kept = Vec::new();
+                let mut keys = std::mem::take(&mut self.object_scratch.keys);
+                let mut kept = std::mem::take(&mut self.object_scratch.values);
+                debug_assert!(keys.is_empty() && kept.is_empty());
                 for arg in values.drain(..) {
                     self.primitive_steps += 1;
                     let start = kept.len();
@@ -239,14 +230,18 @@ impl State {
                     }
                 }
                 let info = self.arena.object_info(&keys);
-                plain::node(
+                let result = plain::node(
                     &mut self.arena,
                     View::JObject {
                         values: &kept,
                         info,
                     },
                     0,
-                )
+                );
+                keys.clear(); kept.clear();
+                self.object_scratch.keys = keys;
+                self.object_scratch.values = kept;
+                result
             }
             Primitive::PdictHas => {
                 if let [object, property] = values.as_slice() {
@@ -1295,5 +1290,65 @@ mod inventory_tests {
     }
         // Extension-slot equality is lowered before Bir import.
         unsupported { PextensionSlotEq }
+    }
+}
+
+#[cfg(test)]
+mod dictionary_allocations {
+    use super::*;
+    use crate::lambda::{LamLoc, arena::LamArena, lam_constant::Constant as C, lam_primitive::Mutable};
+
+    #[test]
+    fn ten_thousand_dictionary_entries_and_spreads_lower_without_allocations() {
+        for spread in [false, true] {
+            let mut a = LamArena::new();
+            let entries: Vec<_> = (0..10_000).map(|i| {
+                let key = a.const_(C::String(format!("key{i}")));
+                let value = a.const_(C::String(format!("value{i}")));
+                let pair = a.prim_raw(Primitive::Pmakeblock(crate::lambda::TagInfo::Tuple, Mutable::Immutable), &[key, value], LamLoc::NONE);
+                if spread {
+                    let array = a.prim_raw(Primitive::Pmakearray, &[pair], LamLoc::NONE);
+                    a.prim_raw(Primitive::Pmakedict, &[array], LamLoc::NONE)
+                } else { pair }
+            }).collect();
+            let root = if spread { a.prim_raw(Primitive::PdictSpread, &entries, LamLoc::NONE) } else {
+                let array = a.prim_raw(Primitive::Pmakearray, &entries, LamLoc::NONE);
+                a.prim_raw(Primitive::Pmakedict, &[array], LamLoc::NONE)
+            };
+            let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+            let root = input.root;
+            let mut state = State::new(input);
+            let run = |s: &mut State| {
+                let out = s.probe(Cx::returning(), root).unwrap();
+                let out = s.realize(Cx::returning(), out);
+                for node in s.statements.statements(out.stmts) { s.arena.release(node); }
+                if let Some(value) = out.value { s.arena.release(value); }
+                s.statements.kill(out.stmts);
+            };
+            let lists = state.arena.lists.storage_shape().0;
+            let properties = state.arena.pools.property_keys.len();
+            let infos = state.arena.pools.js.len();
+            run(&mut state);
+            state.arena.lists.reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
+            state.arena.pools.property_keys.reserve(state.arena.pools.property_keys.len() - properties);
+            state.arena.pools.js.reserve(state.arena.pools.js.len() - infos);
+            state.free.reserve_repeat();
+            let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
+                s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1, s.arena.pools.property_keys.capacity(),
+                s.arena.pools.js.capacity(), s.object_scratch.keys.capacity(), s.object_scratch.values.capacity(),
+                s.argument_outputs.capacity(), s.argument_values.capacity(), s.traversal.work.capacity(),
+                s.traversal.values.capacity(), s.traversal.children.capacity()];
+            let before = capacities(&state); let free_before = state.free.capacities();
+            let statements_before = state.statements.capacities(); let visits = state.source_steps;
+            let steps = state.primitive_steps;
+            let allocations = allocation_counter::measure(|| run(&mut state));
+            println!("dictionary spread={spread}: {allocations:?}, visits={}, primitives={}", state.source_steps-visits, state.primitive_steps-steps);
+            assert_eq!(allocations.count_total, 0);
+            assert_eq!(capacities(&state), before); assert_eq!(state.free.capacities(), free_before);
+            assert_eq!(state.statements.capacities(), statements_before);
+            assert!(state.object_scratch.keys.is_empty() && state.object_scratch.values.is_empty());
+            assert_eq!(state.source_steps - visits, if spread { 50_001 } else { 30_002 });
+            assert_eq!(state.primitive_steps - steps, if spread { 100_001 } else { 50_003 });
+        }
     }
 }
