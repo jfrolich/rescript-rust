@@ -1457,6 +1457,8 @@ impl Exporter<'_> {
                         let tag = match key {
                             CaseKey::JavaScript(tag) => tag.clone(),
                             CaseKey::String(text) => crate::lambda::SwitchCaseTag::String(b.text(*text).to_owned()),
+                            CaseKey::Float(text) => crate::lambda::SwitchCaseTag::Float(b.text(*text).to_owned()),
+                            CaseKey::BigInt(text) => crate::lambda::SwitchCaseTag::BigInt(b.text(*text).to_owned()),
                             CaseKey::Lambda(_) => return Err(Unsupported("non-JS string switch key")),
                         };
                         clauses.push(j::StringClauseInfo {

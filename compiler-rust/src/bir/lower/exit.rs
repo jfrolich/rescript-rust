@@ -72,9 +72,7 @@ pub(super) struct Plan {
     handler_empty: bool,
     /// More than one handler: the groups of equal handlers (3.9 step 2), as
     /// `State::group_switch_cases` returns them, and their lowered clauses.
-    groups: Vec<usize>,
-    next: Vec<usize>,
-    bodies: Vec<NodeId>,
+    groups: super::switch::Groups,
     output: Vec<NodeId>,
     clauses: Vec<ClauseMeta>,
 }
@@ -269,7 +267,7 @@ impl State {
                 self.declare_empty(LetKind::Variable, var);
             }
         }
-        let (groups, next, bodies) = if len > 1 {
+        let groups = if len > 1 {
             // C: compile_grouped_staticcatch_handlers.
             let mut handlers = std::mem::take(&mut self.scratch);
             handlers.extend(self.catch_table[table..].iter().map(|&(handler, _)| handler));
@@ -279,7 +277,7 @@ impl State {
             self.prepare_switch_hashes();
             self.group_switch_cases(list, len, None)
         } else {
-            (Vec::new(), Vec::new(), Vec::new())
+            super::switch::Groups::default()
         };
         let frame = Catch(self.catches.len() as u32);
         self.catches.push(Some(Plan {
@@ -295,8 +293,6 @@ impl State {
             handler_finished: Finished::False,
             handler_empty: true,
             groups,
-            next,
-            bodies,
             output: Vec::new(),
             clauses: Vec::new(),
         }));
@@ -324,7 +320,7 @@ impl State {
         } else if plan.len == 1 {
             into.push((inner, self.catch_table[plan.table as usize].0));
         } else {
-            into.extend(plan.bodies.iter().map(|&handler| (inner, handler)));
+            into.extend(self.grouped_bodies(&plan.groups).iter().map(|&handler| (inner, handler)));
         }
     }
 
@@ -349,7 +345,7 @@ impl State {
             plan.handler_finished = finished;
             plan.handler_empty = run.len == 0;
         } else {
-            let handler = plan.bodies[index - 1];
+            let handler = self.group_nodes[plan.groups.bodies.start as usize + index - 1];
             // C: compile_exit_dispatch: a return continuation keeps the
             // break only when the handler holds an exit (4.2 invariant 5).
             let should_break = finished != Finished::True
@@ -436,11 +432,12 @@ impl State {
         let mut keys = Vec::with_capacity(plan.len as usize);
         let mut clauses = Vec::with_capacity(plan.len as usize);
         let mut actions = Vec::with_capacity(plan.len as usize);
-        for (group, &head) in plan.groups.iter().enumerate() {
+        for group in 0..plan.groups.heads.len as usize {
+            let head = self.group_indices[plan.groups.heads.start as usize + group];
             let mut case = head;
             loop {
                 keys.push(CaseKey::Lambda(crate::lambda::SwitchKey::Int(plan.first + case as i32)));
-                if plan.next[case] == super::switch::NONE {
+                if self.group_indices[plan.groups.next.start as usize + case] == super::switch::NONE {
                     actions.push(plan.output[group]);
                     clauses.push(plan.clauses[group]);
                     break;
@@ -448,7 +445,7 @@ impl State {
                 let empty = self.arena.lists.push(&[]);
                 actions.push(self.arena.block_from_list(empty));
                 clauses.push(ClauseMeta { should_break: false, comment: None, loc: None });
-                case = plan.next[case];
+                case = self.group_indices[plan.groups.next.start as usize + case];
             }
         }
         let header = self.arena.switch_header(crate::bir::SwitchInput {
@@ -1363,6 +1360,6 @@ mod tests {
         assert_eq!(size_of::<Jump>(), 8);
         assert_eq!(size_of::<Catch>(), 4);
         assert_eq!(size_of::<Exit>(), 16);
-        assert_eq!(size_of::<Plan>(), 168);
+        assert_eq!(size_of::<Plan>(), 120);
     }
 }

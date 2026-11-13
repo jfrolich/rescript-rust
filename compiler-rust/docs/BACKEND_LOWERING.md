@@ -2821,35 +2821,35 @@ The statement stack and node-list pool must be used end to end.
 | `record.rs:177` `record_rest` | `.collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
 | `scope.rs:16` `Scope` | `pub(crate) uses: Vec<Uses>,` | once per unit | stays: dense variable-indexed table | retained |
 | `scope.rs:24` `new` | `uses: vec![Uses::default(); variables],` | once per unit | stays: once per unit | retained |
-| `switch.rs:33` `Plan` | `groups: Vec<usize>,` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:34` `Plan` | `next: Vec<usize>,` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:35` `Plan` | `pub(super) bodies: Vec<NodeId>,` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:37` `Plan` | `output: Vec<NodeId>,` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:38` `Plan` | `clauses: Vec<ClauseMeta>,` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:71` `integer_switch` | `let keys = h.keys[..n].to_vec();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:75` `integer_switch` | `let mut actions = all[..n].to_vec();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:82` `integer_switch` | `clauses: Vec::new(),` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:140` `plan_switch` | `(0..count).collect(),` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:141` `plan_switch` | `vec![NONE; count],` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:142` `plan_switch` | `self.source.lists.get(operands)[..count].to_vec(),` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:169` `plan_switch` | `output: Vec::new(),` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:170` `plan_switch` | `clauses: Vec::new(),` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:205` `group_switch_cases` | `) -> (Vec<usize>, Vec<usize>, Vec<NodeId>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:212` `group_switch_cases` | `let cases = self.source.lists.get(operands)[..count].to_vec();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:213` `group_switch_cases` | `let fingerprints: Vec<_> = cases.iter().map(&#124;n&#124; self.switch_facts[n.index()]).collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:217` `group_switch_cases` | `let mut groups = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:218` `group_switch_cases` | `let mut next = vec![NONE; cases.len()];` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:219` `group_switch_cases` | `let mut heads: Vec<usize> = (0..cases.len()).collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:253` `group_switch_cases` | `let bodies = groups.iter().map(&#124;&i&#124; cases[i]).collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:547` `switch_children` | `pub(super) fn switch_children(&self, cx: Cx, frame: Switch, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:684` `finish_switch` | `let mut keys = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:685` `finish_switch` | `let mut clauses = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:686` `finish_switch` | `let mut actions = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:693` `finish_switch` | `crate::lambda::SwitchCaseTag::String(self.arena.text(*text).to_owned()),` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `switch.rs:695` `finish_switch` | `key => key.clone(),` | per construct | borrow payload or retain typed pool handle | pending |
-| `switch.rs:831` `prepare_switch_hashes` | `let mut bytes = Vec::new();` | once per unit | stays: once per unit | retained |
-| `switch.rs:892` `switch_constants_equal` | `let mut work = smallvec::SmallVec::<[(crate::bir::ConstId, crate::bir::ConstId); 8]>::new();` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `switch.rs:962` `finish_small_switch` | `let key = self.arena.switch(plan.header).keys[0].clone();` | per construct | borrow payload or retain typed pool handle | pending |
+| `switch.rs:33` `Plan` | `groups: Vec<usize>,` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:34` `Plan` | `next: Vec<usize>,` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:35` `Plan` | `pub(super) bodies: Vec<NodeId>,` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:37` `Plan` | `output: Vec<NodeId>,` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:38` `Plan` | `clauses: Vec<ClauseMeta>,` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:71` `integer_switch` | `let keys = h.keys[..n].to_vec();` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:75` `integer_switch` | `let mut actions = all[..n].to_vec();` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:82` `integer_switch` | `clauses: Vec::new(),` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:140` `plan_switch` | `(0..count).collect(),` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:141` `plan_switch` | `vec![NONE; count],` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:142` `plan_switch` | `self.source.lists.get(operands)[..count].to_vec(),` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:169` `plan_switch` | `output: Vec::new(),` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:170` `plan_switch` | `clauses: Vec::new(),` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:205` `group_switch_cases` | `) -> (Vec<usize>, Vec<usize>, Vec<NodeId>) {` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:212` `group_switch_cases` | `let cases = self.source.lists.get(operands)[..count].to_vec();` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:213` `group_switch_cases` | `let fingerprints: Vec<_> = cases.iter().map(&#124;n&#124; self.switch_facts[n.index()]).collect();` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:217` `group_switch_cases` | `let mut groups = Vec::new();` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:218` `group_switch_cases` | `let mut next = vec![NONE; cases.len()];` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:219` `group_switch_cases` | `let mut heads: Vec<usize> = (0..cases.len()).collect();` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:253` `group_switch_cases` | `let bodies = groups.iter().map(&#124;&i&#124; cases[i]).collect();` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:547` `switch_children` | `pub(super) fn switch_children(&self, cx: Cx, frame: Switch, into: &mut Vec<(Cx, NodeId)>) {` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:684` `finish_switch` | `let mut keys = Vec::new();` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:685` `finish_switch` | `let mut clauses = Vec::new();` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:686` `finish_switch` | `let mut actions = Vec::new();` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:693` `finish_switch` | `crate::lambda::SwitchCaseTag::String(self.arena.text(*text).to_owned()),` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:695` `finish_switch` | `key => key.clone(),` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:831` `prepare_switch_hashes` | `let mut bytes = Vec::new();` | once per unit | retained serialization scratch buffer | removed |
+| `switch.rs:892` `switch_constants_equal` | `let mut work = smallvec::SmallVec::<[(crate::bir::ConstId, crate::bir::ConstId); 8]>::new();` | per construct | retained constant-pair scratch buffer | removed |
+| `switch.rs:962` `finish_small_switch` | `let key = self.arena.switch(plan.header).keys[0].clone();` | per construct | borrowed key from its temporarily acquired pool; no clone | removed |
 | `tail.rs:40` `finish_self_call` | `pub(super) fn finish_self_call(&mut self, frame: LoopRef, statements: Span, values: smallvec::SmallVec<[NodeId; 4]>) -> Probed {` | per construct | borrowed node slice supplied by reusable sequencing buffer | removed |
 | `try_.rs:65` `try_children` | `pub(super) fn try_children(&self, cx: Cx, frame: Try, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
 | `unit.rs:33` `lower` | `.collect();` | once per unit | stays: once per unit | retained |
@@ -2927,6 +2927,18 @@ validation uses a reusable dense epoch table rather than a per-node hash set;
 the sharing check still happens before mutation. Module metadata still owns
 spelling/attributes at the J bridge boundary; borrowing the module-itself
 spelling removes its temporary descriptor, not those outstanding allocations.
+
+The direct-switch slice stores grouped case heads/links, representative source
+bodies, lowered actions and clause metadata in flat unit-owned pools. A source
+frame remains a 4-byte switch handle; its cold plan is 108 bytes (formerly 200).
+The 24-byte group descriptor is cold data; helpers borrow it. Fingerprints are
+values without arena identities, so their retained hash table maps fingerprints
+to case positions while all per-case state remains in dense indexed arrays.
+A 10,000-case whole-Lambda switch with distinct string-valued bodies allocates
+zero times after warming and pool reservation, at 10,002 source visits and
+20,000 grouping steps; recorded capacities remain unchanged. Pooled J keys
+retain interned spelling handles, including floats and big integers, rather
+than cloning strings into each output header.
 
 ## 8. The gate and the slices
 

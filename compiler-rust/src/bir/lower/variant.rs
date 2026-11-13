@@ -155,7 +155,7 @@ impl State {
             let side = self.switch_plan(frame);
             sides.push(Side {
                 frame,
-                count: side.bodies.len() + usize::from(side.default.is_some()),
+                count: side.groups.bodies.len as usize + usize::from(side.default.is_some()),
                 run: Span::default(),
                 block,
             });
@@ -269,7 +269,7 @@ impl State {
                 ..cx
             };
             into.extend(
-                p.bodies
+                self.grouped_bodies(&p.groups)
                     .iter()
                     .chain(p.default.iter())
                     .map(|&n| (body_cx, n)),

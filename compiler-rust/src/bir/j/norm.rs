@@ -571,7 +571,11 @@ pub fn js4_normalize(b: &mut Bir, statement: NodeId) -> NodeId {
         h.keys.iter().position(|key| matches!(key, crate::bir::CaseKey::Lambda(crate::lambda::SwitchKey::Int(n)) if *n == value))
     } else {
         let View::JStr { text } = b.view(scrutinee) else { return statement; };
-        h.keys.iter().position(|key| matches!(key, crate::bir::CaseKey::JavaScript(crate::lambda::SwitchCaseTag::String(s)) if s == b.text(text)))
+        h.keys.iter().position(|key| match key {
+            crate::bir::CaseKey::String(key) => *key == text,
+            crate::bir::CaseKey::JavaScript(crate::lambda::SwitchCaseTag::String(s)) => s == b.text(text),
+            _ => false,
+        })
     }.or_else(|| h.has_default.then_some(h.keys.len())).expect("literal switch must match a clause or default");
     let action = actions[selected];
     let View::SBlock { statements } = b.view(action) else {

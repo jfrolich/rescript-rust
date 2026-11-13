@@ -268,6 +268,10 @@ pub enum CaseKey {
     Lambda(crate::lambda::SwitchKey),
     /// String switch case.
     String(StrId),
+    /// Lowered floating-point case spelling, owned by the unit text pool.
+    Float(StrId),
+    /// Lowered big-integer case spelling, owned by the unit text pool.
+    BigInt(StrId),
     /// Lowered JavaScript literal case.
     JavaScript(crate::lambda::SwitchCaseTag),
 }

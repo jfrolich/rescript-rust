@@ -25,17 +25,22 @@ pub(super) enum Kind {
     Named,
 }
 
+/// Runs in the lowering state's case-index and body pools. Not a traversal frame.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Groups {
+    pub heads: Span,
+    pub next: Span,
+    pub bodies: Span,
+}
+
 /// Cold per-switch data, not copied down the source walk.
 pub(super) struct Plan {
     pub(super) scrutinee: NodeId,
     operands: crate::bir::ListId,
     pub(super) header: SwitchId,
-    groups: Vec<usize>,
-    next: Vec<usize>,
-    pub(super) bodies: Vec<NodeId>,
+    pub(super) groups: Groups,
     pub(super) default: Option<NodeId>,
-    output: Vec<NodeId>,
-    clauses: Vec<ClauseMeta>,
+    output: Span,
     pub(super) start: Span,
     pub(super) value: Option<NodeId>,
     target: Option<VarId>,
@@ -68,18 +73,23 @@ impl State {
         // C: direct dispatch consumes constant arms only, even when a raw
         // synthetic switch carries an unused block partition.
         let (operands, header) = if n != h.keys.len() {
-            let keys = h.keys[..n].to_vec();
             let has_default = h.has_default;
             let consts_full = h.consts_full;
-            let all = self.source.lists.get(operands);
-            let mut actions = all[..n].to_vec();
-            if has_default {
-                actions.push(all[h.keys.len()]);
+            let default = has_default.then(|| self.source.lists.get(operands)[h.keys.len()]);
+            let keys = self.arena.pools.switches[header.index()].keys;
+            let operands = self
+                .source
+                .lists
+                .slice(operands, 0, n + usize::from(has_default));
+            if let Some(default) = default {
+                self.source.lists.set(operands, n, default);
             }
-            let operands = self.source.lists.push(&actions);
-            let header = self.arena.switch_header(crate::bir::SwitchInput {
-                keys,
-                clauses: Vec::new(),
+            let header = self.arena.switch_record(crate::bir::SwitchRecord {
+                keys: crate::bir::KeySpan {
+                    start: keys.start,
+                    len: n as u32,
+                },
+                clauses: crate::bir::ClauseSpan { start: 0, len: 0 },
                 constants: n as u32,
                 consts_full,
                 blocks_full: false,
@@ -132,16 +142,13 @@ impl State {
         } else {
             Form::General
         };
-        let (groups, next, bodies) = if form == Form::General {
+        let groups = if form == Form::General {
             self.prepare_switch_hashes();
             self.group_switch_cases(operands, count, default)
         } else {
-            (
-                (0..count).collect(),
-                vec![NONE; count],
-                self.source.lists.get(operands)[..count].to_vec(),
-            )
+            self.ungrouped_cases(operands, count)
         };
+        let output = self.reserve_switch_outputs(groups.bodies.len as usize + usize::from(default.is_some()));
         let start = self.statements.mark();
         let binding = match cx.cont {
             Cont::Value(_) if !string => Some((LetKind::Strict, self.fresh_variable("tmp"))),
@@ -163,11 +170,8 @@ impl State {
             operands,
             header,
             groups,
-            next,
-            bodies,
             default,
-            output: Vec::new(),
-            clauses: Vec::new(),
+            output,
             start,
             value: None,
             target: binding.map(|(_, var)| var),
@@ -202,29 +206,33 @@ impl State {
         operands: crate::bir::ListId,
         count: usize,
         default: Option<NodeId>,
-    ) -> (Vec<usize>, Vec<usize>, Vec<NodeId>) {
+    ) -> Groups {
         for i in 0..count {
             self.switch_facts(self.source.lists.get(operands)[i]);
         }
         if let Some(default) = default {
             self.switch_facts(default);
         }
-        let cases = self.source.lists.get(operands)[..count].to_vec();
-        let fingerprints: Vec<_> = cases.iter().map(|n| self.switch_facts[n.index()]).collect();
-        // Fingerprints have no arena handle. The table contains case indices;
-        // all actual state is in the dense arrays indexed by those indices.
-        let mut table = hashbrown::HashTable::<usize>::with_capacity(cases.len());
-        let mut groups = Vec::new();
-        let mut next = vec![NONE; cases.len()];
-        let mut heads: Vec<usize> = (0..cases.len()).collect();
-        for i in (0..cases.len()).rev() {
-            let facts = fingerprints[i];
+        let next = Span {
+            start: self.group_indices.len() as u32,
+            len: count as u32,
+        };
+        self.group_indices
+            .resize(self.group_indices.len() + count, NONE);
+        let mut table = std::mem::take(&mut self.group_table);
+        let mut order = std::mem::take(&mut self.group_order);
+        let mut heads = std::mem::take(&mut self.group_heads);
+        heads.extend(0..count);
+        for i in (0..count).rev() {
+            self.switch_group_steps += 1;
+            let node = self.source.lists.get(operands)[i];
+            let facts = self.switch_facts[node.index()];
             if let Some(default) = default {
                 let d = self.switch_facts[default.index()];
                 if facts.comparable
                     && d.comparable
                     && facts.hash == d.hash
-                    && self.switch_equal(cases[i], default)
+                    && self.switch_equal(node, default)
                 {
                     continue;
                 }
@@ -232,29 +240,102 @@ impl State {
             let matching = if facts.comparable {
                 table
                     .find(facts.hash, |&j| {
-                        fingerprints[j].hash == facts.hash
-                            && self.switch_equal(cases[i], cases[heads[j]])
+                        let candidate = self.source.lists.get(operands)[j];
+                        self.switch_facts[candidate.index()].hash == facts.hash
+                            && self.switch_equal(node, self.source.lists.get(operands)[heads[j]])
                     })
                     .copied()
             } else {
                 None
             };
             if let Some(j) = matching {
-                next[i] = heads[j];
+                self.group_indices[next.start as usize + i] = heads[j];
                 heads[j] = i;
             } else {
-                groups.push(i);
+                order.push(i);
                 if facts.comparable {
-                    table.insert_unique(facts.hash, i, |&j| fingerprints[j].hash);
+                    table.insert_unique(facts.hash, i, |&j| {
+                        self.switch_facts[self.source.lists.get(operands)[j].index()].hash
+                    });
                 }
             }
         }
-        groups.reverse();
-        let bodies = groups.iter().map(|&i| cases[i]).collect();
-        for group in &mut groups {
-            *group = heads[*group];
+        order.reverse();
+        let groups = Groups {
+            heads: Span {
+                start: self.group_indices.len() as u32,
+                len: order.len() as u32,
+            },
+            next,
+            bodies: Span {
+                start: self.group_nodes.len() as u32,
+                len: order.len() as u32,
+            },
+        };
+        for &i in &order {
+            self.switch_group_steps += 1;
+            self.group_nodes.push(self.source.lists.get(operands)[i]);
+            self.group_indices.push(heads[i]);
         }
-        (groups, next, bodies)
+        table.clear();
+        order.clear();
+        heads.clear();
+        self.group_table = table;
+        self.group_order = order;
+        self.group_heads = heads;
+        groups
+    }
+
+    /// O(count): record the original case order for small-switch lowering.
+    fn ungrouped_cases(&mut self, operands: crate::bir::ListId, count: usize) -> Groups {
+        let heads = Span {
+            start: self.group_indices.len() as u32,
+            len: count as u32,
+        };
+        self.group_indices.extend(0..count);
+        let next = Span {
+            start: self.group_indices.len() as u32,
+            len: count as u32,
+        };
+        self.group_indices
+            .resize(self.group_indices.len() + count, NONE);
+        let bodies = Span {
+            start: self.group_nodes.len() as u32,
+            len: count as u32,
+        };
+        self.group_nodes
+            .extend_from_slice(&self.source.lists.get(operands)[..count]);
+        self.switch_group_steps += count;
+        Groups {
+            heads,
+            next,
+            bodies,
+        }
+    }
+
+    /// O(1): borrow a group's representative bodies from their typed pool.
+    pub(super) fn grouped_bodies(&self, groups: &Groups) -> &[NodeId] {
+        &self.group_nodes
+            [groups.bodies.start as usize..(groups.bodies.start + groups.bodies.len) as usize]
+    }
+
+    /// O(count): reserve one output slot per group, plus an optional default.
+    fn reserve_switch_outputs(&mut self, count: usize) -> Span {
+        let run = Span {
+            start: self.switch_output_nodes.len() as u32,
+            len: count as u32,
+        };
+        self.switch_output_nodes
+            .resize(self.switch_output_nodes.len() + count, NodeId(u32::MAX));
+        self.switch_output_clauses.resize(
+            self.switch_output_clauses.len() + count,
+            ClauseMeta {
+                should_break: false,
+                comment: None,
+                loc: None,
+            },
+        );
+        run
     }
 
     /// One iterative bottom-up visit per source node, memoized across switches.
@@ -408,7 +489,7 @@ impl State {
                 (View::Var { var: a }, View::Var { var: b }) => a == b,
                 (View::Global { module: a }, View::Global { module: b }) => a == b,
                 (View::Const { value: a }, View::Const { value: b }) => {
-                    self.switch_constants_equal(a, b)
+                    Self::switch_constants_equal(&self.arena, &mut self.switch_constant_work, a, b)
                 }
                 (
                     View::Apply {
@@ -561,7 +642,7 @@ impl State {
             ..cx
         };
         into.extend(
-            plan.bodies
+            self.grouped_bodies(&plan.groups)
                 .iter()
                 .chain(plan.default.iter())
                 .map(|&n| (body_cx, n)),
@@ -597,11 +678,11 @@ impl State {
                 self.drop_pure_effect(value);
             }
             let p = self.switch_plan(frame);
-            let is_default = index > p.bodies.len();
+            let is_default = index > p.groups.bodies.len as usize;
             let source = if is_default {
                 p.default.unwrap()
             } else {
-                p.bodies[index - 1]
+                self.grouped_bodies(&p.groups)[index - 1]
             };
             let located = if is_default {
                 !matches!(cx.cont, Cont::Effect(Tail::Return(_)))
@@ -621,11 +702,13 @@ impl State {
                 });
             }
             let plan = self.switch_plan(frame);
-            let is_default = index > plan.bodies.len();
+            let is_default = index > plan.groups.bodies.len as usize;
             let should_break = !is_default
                 && out.finished != Finished::True
                 && match cx.cont {
-                    Cont::Effect(Tail::Return(_)) => self.switch_has_exit(plan.bodies[index - 1]),
+                    Cont::Effect(Tail::Return(_)) => {
+                        self.switch_has_exit(self.grouped_bodies(&plan.groups)[index - 1])
+                    }
                     _ => true,
                 };
             // A emits an explicit break inside the body; E and R carry clause
@@ -643,12 +726,13 @@ impl State {
             let block = self.arena.block_from_list(list);
             let loc = self.switch_location(source);
             let plan = self.switches[frame.0 as usize].as_mut().unwrap();
-            plan.output.push(block);
-            plan.clauses.push(ClauseMeta {
+            let slot = plan.output.start as usize + index - 1;
+            self.switch_output_nodes[slot] = block;
+            self.switch_output_clauses[slot] = ClauseMeta {
                 should_break: should_break && !explicit,
                 comment: None,
                 loc,
-            });
+            };
         }
         // All child statements now belong to their group, except the scrutinee
         // prelude, which stays on the outer statement run.
@@ -669,63 +753,88 @@ impl State {
             self.switches.pop();
         }
         if plan.form != Form::General {
-            return self.finish_small_switch(cx, plan);
+            return self.finish_small_switch(cx, &plan);
         }
         let scrutinee = plan.value.expect("lowered scrutinee");
         let body_cont = plan.target.map_or(cx.cont, Cont::Assign);
-        let empty = plan.output.iter().all(|&body| matches!(self.arena.view(body), View::SBlock { statements } if statements.is_empty()));
+        let empty = self.switch_output_nodes[plan.output.start as usize..(plan.output.start + plan.output.len) as usize].iter().all(|&body| matches!(self.arena.view(body), View::SBlock { statements } if statements.is_empty()));
         if empty && plan.kind != Kind::Named && matches!(cx.cont, Cont::Effect(Tail::No)) {
-            for &body in &plan.output {
-                self.arena.release(body);
+            for i in 0..plan.output.len {
+                self.arena
+                    .release(self.switch_output_nodes[(plan.output.start + i) as usize]);
             }
             self.statements
                 .push(norm::js1_exp(&mut self.arena, scrutinee));
         } else {
-            let mut keys = Vec::new();
-            let mut clauses = Vec::new();
-            let mut actions = Vec::new();
-            for (group, &head) in plan.groups.iter().enumerate() {
-                let mut case = head;
+            let source_keys = self.arena.pools.switches[plan.header.index()].keys;
+            let mut keys = crate::bir::KeySpan {
+                start: self.arena.pools.switch_keys.len() as u32,
+                len: 0,
+            };
+            let mut clauses = crate::bir::ClauseSpan {
+                start: self.arena.pools.switch_clauses.len() as u32,
+                len: 0,
+            };
+            let capacity = source_keys.len as usize + usize::from(plan.default.is_some());
+            let actions = self
+                .arena
+                .lists
+                .push_iter(capacity, std::iter::repeat_n(NodeId(u32::MAX), capacity));
+            for group in 0..plan.groups.heads.len as usize {
+                let mut case = self.group_indices[plan.groups.heads.start as usize + group];
                 loop {
-                    let key = &self.arena.switch(plan.header).keys[case];
-                    keys.push(match key {
-                        CaseKey::String(text) => CaseKey::JavaScript(
-                            crate::lambda::SwitchCaseTag::String(self.arena.text(*text).to_owned()),
-                        ),
-                        key => key.clone(),
-                    });
-                    if plan.next[case] == NONE {
-                        actions.push(plan.output[group]);
-                        clauses.push(plan.clauses[group]);
+                    self.append_switch_key(source_keys.start as usize + case);
+                    keys.len += 1;
+                    let next = self.group_indices[plan.groups.next.start as usize + case];
+                    let (action, clause) = if next == NONE {
+                        (
+                            self.switch_output_nodes[plan.output.start as usize + group],
+                            self.switch_output_clauses[plan.output.start as usize + group],
+                        )
+                    } else {
+                        let empty = self.arena.lists.push(&[]);
+                        let action = self.arena.block_from_list(empty);
+                        let source = self.source.lists.get(plan.operands)[case];
+                        let loc = self.switch_location(source);
+                        (
+                            action,
+                            ClauseMeta {
+                                should_break: false,
+                                comment: None,
+                                loc,
+                            },
+                        )
+                    };
+                    self.arena.lists.set(actions, clauses.len as usize, action);
+                    self.arena.pools.switch_clauses.push(clause);
+                    clauses.len += 1;
+                    if next == NONE {
                         break;
                     }
-                    let empty = self.arena.lists.push(&[]);
-                    actions.push(self.arena.block_from_list(empty));
-                    let source = self.source.lists.get(plan.operands)[case];
-                    let loc = self.switch_location(source);
-                    clauses.push(ClauseMeta {
-                        should_break: false,
-                        comment: None,
-                        loc,
-                    });
-                    case = plan.next[case];
+                    case = next;
                 }
             }
             let mut has_default = plan.default.is_some();
             if has_default {
-                let body = *plan.output.last().unwrap();
+                let body =
+                    self.switch_output_nodes[(plan.output.start + plan.output.len - 1) as usize];
                 if !matches!(body_cont, Cont::Assign(_))
                     && matches!(self.arena.view(body), View::SBlock { statements } if statements.is_empty())
                 {
                     self.arena.release(body);
                     has_default = false;
                 } else {
-                    actions.push(body);
-                    clauses.push(*plan.clauses.last().unwrap());
+                    self.arena.lists.set(actions, clauses.len as usize, body);
+                    self.arena.pools.switch_clauses.push(
+                        self.switch_output_clauses
+                            [(plan.output.start + plan.output.len - 1) as usize],
+                    );
+                    clauses.len += 1;
                 }
             }
-            let header = self.arena.switch_header(crate::bir::SwitchInput {
-                constants: keys.len() as u32,
+            self.arena.lists.truncate(actions, clauses.len as usize);
+            let header = self.arena.switch_record(crate::bir::SwitchRecord {
+                constants: keys.len,
                 keys,
                 clauses,
                 has_default,
@@ -733,13 +842,10 @@ impl State {
                 blocks_full: false,
                 dispatch: crate::lambda::SwitchDispatch::Direct,
             });
-            let statement = plain::node(
-                &mut self.arena,
-                View::SSwitch {
-                    scrutinee,
-                    actions: &actions,
-                    header,
-                },
+            let statement = self.arena.switch_from_list(
+                scrutinee,
+                actions,
+                header,
                 u16::from(plan.kind != Kind::Integer),
             );
             self.statements.push(statement);
@@ -821,6 +927,33 @@ impl State {
 }
 
 impl State {
+    /// O(spelling bytes): append one J case key, interning borrowed spellings.
+    /// Scalar tags are copied; source constructor metadata is never cloned.
+    fn append_switch_key(&mut self, index: usize) {
+        use crate::lambda::{SwitchCaseTag as Tag, SwitchKey};
+        let mut keys = std::mem::take(&mut self.arena.pools.switch_keys);
+        let key = match &keys[index] {
+            CaseKey::String(s) => CaseKey::String(*s),
+            CaseKey::Float(s) => CaseKey::Float(*s),
+            CaseKey::BigInt(s) => CaseKey::BigInt(*s),
+            CaseKey::Lambda(SwitchKey::Int(i)) => CaseKey::Lambda(SwitchKey::Int(*i)),
+            CaseKey::Lambda(SwitchKey::Constructor(_)) => {
+                unreachable!("named source keys are decoded before J emission")
+            }
+            CaseKey::JavaScript(tag) => match tag {
+                Tag::String(s) => CaseKey::String(self.arena.intern_text(s)),
+                Tag::Float(s) => CaseKey::Float(self.arena.intern_text(s)),
+                Tag::BigInt(s) => CaseKey::BigInt(self.arena.intern_text(s)),
+                Tag::Int(i) => CaseKey::JavaScript(Tag::Int(*i)),
+                Tag::Bool(b) => CaseKey::JavaScript(Tag::Bool(*b)),
+                Tag::Null => CaseKey::JavaScript(Tag::Null),
+                Tag::Undefined => CaseKey::JavaScript(Tag::Undefined),
+            },
+        };
+        keys.push(key);
+        self.arena.pools.switch_keys = keys;
+    }
+
     /// Prepare dense payload-indexed hashes once, at the first switch.
     /// O(payload bytes + constant edges); a single serialization buffer is
     /// reused, not allocated per payload or per source occurrence.
@@ -828,7 +961,7 @@ impl State {
         use crate::bir::Constant as C;
         use crate::lambda::lam_primitive::Primitive;
         use std::hash::{Hash, Hasher};
-        let mut bytes = Vec::new();
+        let mut bytes = std::mem::take(&mut self.switch_hash_bytes);
         for p in &self.arena.pools.prims[self.switch_primitive_hashes.len()..] {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             match &p.primitive {
@@ -883,19 +1016,27 @@ impl State {
             }
             self.switch_constant_hashes.push(h.finish());
         }
+        bytes.clear();
+        self.switch_hash_bytes = bytes;
     }
 
     /// Lam constant eq_approx. O(compared constant nodes), with an iterative
     /// small work stack, never materializing legacy constant trees.
-    fn switch_constants_equal(&self, a: crate::bir::ConstId, b: crate::bir::ConstId) -> bool {
+    fn switch_constants_equal(
+        arena: &Bir,
+        work: &mut Vec<(crate::bir::ConstId, crate::bir::ConstId)>,
+        a: crate::bir::ConstId,
+        b: crate::bir::ConstId,
+    ) -> bool {
         use crate::bir::Constant as C;
-        let mut work = smallvec::SmallVec::<[(crate::bir::ConstId, crate::bir::ConstId); 8]>::new();
+        debug_assert!(work.is_empty());
         work.push((a, b));
+        let mut equal = true;
         while let Some((a, b)) = work.pop() {
             if a == b {
                 continue;
             }
-            let same = match (self.arena.constant(a), self.arena.constant(b)) {
+            let same = match (arena.constant(a), arena.constant(b)) {
                 (
                     C::Int(a)
                     | C::DecoratedInt {
@@ -925,10 +1066,7 @@ impl State {
                     },
                 ) => a == b,
                 (C::Block { tag: a, fields: af }, C::Block { tag: b, fields: bf }) => {
-                    let (af, bf) = (
-                        self.arena.constant_fields(*af),
-                        self.arena.constant_fields(*bf),
-                    );
+                    let (af, bf) = (arena.constant_fields(*af), arena.constant_fields(*bf));
                     if a != b || af.len() != bf.len() {
                         false
                     } else {
@@ -944,26 +1082,31 @@ impl State {
                 _ => false,
             };
             if !same {
-                return false;
+                equal = false;
+                break;
             }
         }
-        true
+
+        work.clear();
+        equal
     }
 }
 
 impl State {
     /// V: compile_small_string_switch_assignment/return/effect, one Cx path.
     /// O(statements consumed by J-S3); the direct-body form copies no run.
-    fn finish_small_switch(&mut self, cx: Cx, plan: Plan) -> Probed {
+    fn finish_small_switch(&mut self, cx: Cx, plan: &Plan) -> Probed {
         let scrutinee = plan.value.unwrap();
         if plan.form == Form::Body {
             self.arena.release(scrutinee);
         } else {
-            let key = self.arena.switch(plan.header).keys[0].clone();
-            let key = self.switch_key_expression(&key);
+            let index = self.arena.pools.switches[plan.header.index()].keys.start as usize;
+            let keys = std::mem::take(&mut self.arena.pools.switch_keys);
+            let key = self.switch_key_expression(&keys[index]);
+            self.arena.pools.switch_keys = keys;
             let test = norm::je4_bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, scrutinee, key);
             let yes = plan.runs[0];
-            let no = if plan.bodies.len() + usize::from(plan.default.is_some()) == 2 {
+            let no = if plan.groups.bodies.len as usize + usize::from(plan.default.is_some()) == 2 {
                 plan.runs[1]
             } else {
                 self.statements.mark()
@@ -984,7 +1127,7 @@ impl State {
                 self.place(plan.head, statement);
             }
         }
-        self.switch_result(cx, &plan)
+        self.switch_result(cx, plan)
     }
 }
 
@@ -1164,8 +1307,96 @@ mod tests {
     fn frames_and_facts_are_small() {
         assert_eq!(std::mem::size_of::<Switch>(), 4);
         assert_eq!(std::mem::size_of::<Facts>(), 16);
-        assert_eq!(std::mem::size_of::<Plan>(), 200);
+        assert_eq!(std::mem::size_of::<Plan>(), 108);
     }
+    #[test]
+    fn ten_thousand_switch_cases_lower_without_allocations() {
+        let mut source = LamArena::new();
+        let scrutinee = source.var(Ident::new("tag", 1, crate::ident::IdentFlags::NONE));
+        let actions: Vec<_> = (0..10_000)
+            .map(|i| source.const_(C::String(format!("value{i}"))))
+            .collect();
+        let actions = source.add_list(&actions);
+        let header = source.add_switch(
+            true,
+            (0..10_000).map(SwitchKey::Int),
+            false,
+            std::iter::empty(),
+            false,
+            SwitchDispatch::Direct,
+        );
+        let root = source.switch_raw(scrutinee, actions, header);
+        let input = crate::bir::bridge::import_lambda(&source, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let run = |state: &mut State| {
+            let out = state.probe(Cx::returning(), root).unwrap();
+            let out = state.realize(Cx::returning(), out);
+            for node in state.statements.statements(out.stmts) {
+                state.arena.release(node);
+            }
+            if let Some(value) = out.value {
+                state.arena.release(value);
+            }
+            state.statements.kill(out.stmts);
+        };
+        let lists = state.arena.lists.storage_shape().0;
+        let keys = state.arena.pools.switch_keys.len();
+        run(&mut state);
+        state
+            .arena
+            .lists
+            .reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
+        state
+            .arena
+            .pools
+            .switch_keys
+            .reserve(state.arena.pools.switch_keys.len() - keys);
+        state
+            .arena
+            .pools
+            .switch_clauses
+            .reserve(state.arena.pools.switch_clauses.len());
+        state.group_indices.reserve(state.group_indices.len());
+        state.group_nodes.reserve(state.group_nodes.len());
+        state
+            .switch_output_nodes
+            .reserve(state.switch_output_nodes.len());
+        state
+            .switch_output_clauses
+            .reserve(state.switch_output_clauses.len());
+        state.free.reserve_repeat();
+        let capacities = |s: &State| {
+            [
+                s.arena.nodes.capacity(),
+                s.arena.lists.storage_shape().1,
+                s.arena.pools.switch_keys.capacity(),
+                s.arena.pools.switch_clauses.capacity(),
+                s.group_indices.capacity(),
+                s.group_nodes.capacity(),
+                s.group_heads.capacity(),
+                s.group_order.capacity(),
+                s.group_table.capacity(),
+                s.switch_output_nodes.capacity(),
+                s.switch_output_clauses.capacity(),
+                s.switches.capacity(),
+                s.switch_hash_bytes.capacity(),
+                s.arena.free_nodes.capacity(),
+                s.arena.release_stack.capacity(),
+            ]
+        };
+        let before = capacities(&state);
+        let visits = state.source_steps;
+        let grouping = state.switch_group_steps;
+        let allocations = allocation_counter::measure(|| run(&mut state));
+        println!("whole switch: {allocations:?}");
+        assert_eq!(allocations.count_total, 0);
+        assert_eq!(capacities(&state), before);
+        assert_eq!(state.source_steps - visits, 10_002);
+        assert_eq!(state.switch_group_steps - grouping, 20_000);
+        assert_eq!(std::mem::size_of::<Groups>(), 24);
+    }
+
     #[test]
     fn ten_thousand_cases_have_linear_comparison_counts() {
         for mode in 0..3 {
