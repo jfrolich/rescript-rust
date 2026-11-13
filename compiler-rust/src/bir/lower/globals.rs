@@ -107,8 +107,8 @@ pub(crate) fn decide(bir: &mut Bir, idents: &[Ident]) {
     let ident = |bir: &Bir, var: usize| idents.get(bir.vars.j_origin[var].index()).copied();
     let variables = bir.vars.len();
     globals.steps += variables;
-    for var in 0..variables {
-        if scope.site_heads[var] == 0 {
+    for (var, head) in scope.site_heads.iter().enumerate().take(variables) {
+        if *head == 0 {
             continue;
         }
         let Some(ident) = ident(bir, var) else { continue };
