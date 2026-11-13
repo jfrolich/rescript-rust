@@ -606,3 +606,29 @@ in 18 files, or 3,980 generated files. This is a small measured saving, not evid
 that constructor cloning is the largest avoidable obligation cost. No default-path
 saving is claimed; the census-disabled +0.02% gate remains to be measured against
 trunk.
+
+
+### Additional validation of constructor sharing
+
+- Compiler build and focused derive/plan/discharge/lowering tests pass; the full
+  compiler suite was not run locally.
+- Rewatch build and tests pass: 210 unit, one integration and eight snapshot tests.
+- Clippy with warnings denied passes for all targets with all features and with
+  no default features.
+- Check-mode builds of both Spice projects and the application finish compilation.
+- All 15 existing derived diagnostic fixtures pass in default/general/check modes.
+  They were invoked through their `input.js`, the same entry used by
+  `scripts/test.js`; the latter has no per-fixture selector and runs all build tests.
+- Application outputs at one worker, ten workers and ten-worker general mode:
+  3,980 files in each, digest
+  `0a3d301322cf7febdbf8793ae8c3dcbc1ecbadf44670c3b52cecbc5437a02408`.
+- `test_worker_determinism.py tests/ppx_spice` passes for 1/8 workers and two shuffle
+  seeds: 74 signatures and 144 stored entries agree. That script excludes the
+  fixture's `lib` outputs, so its generated-file comparison contains zero files;
+  it is not evidence of JavaScript equality (the check-mode build supplies that).
+- Census integration passes, including phase reconciliation within 2% and both
+  negative codec cases. Eleven summary unit tests pass.
+
+The `script-tests` job in `.github/workflows/rust-rewrite-validation.yml` does not
+run the summary unit tests. The pull request supplies the exact additional step;
+no workflow file is changed here.

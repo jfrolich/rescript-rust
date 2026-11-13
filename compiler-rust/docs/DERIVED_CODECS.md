@@ -866,6 +866,34 @@ Checks to paste: the same list as slice 2, plus a fixture (with and without
 codecs, asserting no unused-constructor warning in either mode.
 ```
 
+### Slice 3b as built (in progress)
+
+The census now separates successful planned binding typechecking and conversion
+from general bindings, counts the first unsupported form with a closed enum, and
+reports general body-node counts and exclusive checker time by effective group
+reason. Reasons are stored only with the census, in a dense table indexed by the
+parse value-list handle and transferred through frontend rewrites. Retry events
+record the last obligation kind and expected owner shape without double-counting
+completed bindings. They do not yet identify the resolved conflicting type.
+
+The dated application and Spice summaries are in `DERIVED_CODE.md`. All 136
+application `not_yet_planned` bindings stop at JSON identity codecs. Both retried
+application units last visit a result-constructor obligation. User expressions
+remain general by Q5.
+
+Constructor descriptions for unqualified names are stored once per name per
+binding, with a dense string-handle table and binding epochs. All ordered lookups,
+usage marking, instantiation and unification remain. The isolated application
+instruction change is −0.0302945%; generated output, signatures and diagnostics
+match. A 10,000-field record retains seven descriptions rather than one clone per
+constructor obligation.
+
+Still required before this slice is complete: inclusive instruction attribution
+by obligation kind and per field/constructor; the census-disabled +0.02% gate
+against trunk; planning JSON identity codecs; upfront classification eliminating
+the two application retries with fixtures; final census and instruction comparison.
+The oracle switch is retained.
+
 ### Slice 4. Remove the switch
 
 **Status: held until the new checker handles derived items.**
