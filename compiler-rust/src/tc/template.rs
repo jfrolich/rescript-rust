@@ -363,6 +363,21 @@ impl Graph {
             return root;
         }
         let pools = self.template_pools[template.pools as usize];
+        if pools.external_len == 0 {
+            self.instance_inner::<false>(template, &pools)
+        } else {
+            self.instance_inner::<true>(template, &pools)
+        }
+    }
+
+    /// O(nodes + slots + external references + links). Both specializations
+    /// share this traversal; closed templates compile without an external
+    /// reference case in the per-reference mapping.
+    fn instance_inner<const EXTERNALS: bool>(
+        &mut self,
+        template: Template,
+        pools: &TemplatePools,
+    ) -> Ty {
         let Self {
             nodes,
             lists,
@@ -381,7 +396,7 @@ impl Graph {
         let list_base = lists.len() as u32;
         let param_base = params.len() as u32;
         assert!(nodes.len() + (template.node_len as usize) < (1 << 30));
-        if pools.external_len != 0 {
+        if EXTERNALS {
             instance_externals.clear();
             let external_source = &template_externals
                 [pools.externals as usize..(pools.externals + pools.external_len) as usize];
@@ -397,10 +412,10 @@ impl Graph {
         let at = |ty: Ty| {
             if ty.0 == NONE {
                 ty
-            } else if ty.0 & RELATIVE != 0 {
-                Ty(base + (ty.0 & !RELATIVE))
-            } else {
+            } else if EXTERNALS && ty.0 & RELATIVE == 0 {
                 instance_externals[(ty.0 - pools.externals) as usize]
+            } else {
+                Ty(base + (ty.0 & !RELATIVE))
             }
         };
         let slots =
@@ -527,6 +542,41 @@ mod template_tests {
             .join()
             .unwrap();
     }
+    #[test]
+    fn closed_arrow_copies_ten_thousand_parameter_slots() {
+        let mut g = Graph::default();
+        let shared = g.push(Node {
+            head: VAR,
+            level: GENERIC,
+            a: 7,
+            b: 0,
+        });
+        for i in 0..10000 {
+            g.params.push(Param {
+                ty: shared,
+                label: i,
+                loc: i + 1,
+            });
+        }
+        let root = g.push(Node {
+            head: ARROW | 10000 << 8,
+            level: GENERIC,
+            a: shared.0,
+            b: 0,
+        });
+        let template = g.capture(root);
+        assert_eq!(g.template_pools[template.pools as usize].external_len, 0);
+        let mut copied = root;
+        assert_eq!(steps::scope(|| copied = g.instance(template)), 10002);
+        let node = g.nodes[copied.0 as usize];
+        for (i, param) in g.params[node.b as usize..].iter().enumerate() {
+            assert_eq!(param.ty, Ty(node.a));
+            assert_eq!(param.label, i as u32);
+            assert_eq!(param.loc, i as u32 + 1);
+        }
+        assert_ne!(Ty(node.a), shared);
+    }
+
     #[test]
     fn parameter_slots_sharing_and_external_links() {
         let mut g = Graph::default();
