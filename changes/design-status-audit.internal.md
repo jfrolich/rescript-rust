@@ -1,0 +1,1 @@
+- Add `compiler-rust/docs/STATUS.md`, an audit of the design documents against the code, and correct statements in those documents that no longer hold.

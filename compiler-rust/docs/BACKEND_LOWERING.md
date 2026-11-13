@@ -1,6 +1,7 @@
 # Backend lowering: level L to level J (S3.3 to S3.9)
 
-Status: specification, not implemented. It is the table
+Status: specification. S3.3 to S3.6, S3.8, S3.9 and part of S3.7 are
+implemented, in check mode only ([STATUS.md](STATUS.md)). It is the table
 [BACKEND_REDESIGN.md](BACKEND_REDESIGN.md) H.1 asks for before stage S3.3
 ("a table mapping each context function of `lam_compile.rs` (A.5) to a
 continuation case"), and the slicing of S3.3 to S3.9. Sections A to I of that
@@ -2795,7 +2796,8 @@ there, in the section named.
    with the legacy rule: they do not follow the right operand of `&&`/`||` or a `Try`
    handler (the legacy code and OCaml do; tested, 5.2), and they treat a
    function bound by `Let` as able to call itself. The flags should be
-   removed or left unused; they must not be read by S3.6.
+   removed or left unused; they must not be read by S3.6. (Removed since,
+   with `mark_tail_positions` and `tail_child`: #198.)
 10. "A J statement list is a `ListId`": lowering needs block statements as
     real nodes until a unit is done (1.3), and builds lists through a stack.
 11. The J opcode list omits kinds the legacy IR has. `bir/node.rs` already
@@ -2830,9 +2832,11 @@ there, in the section named.
     spread, `await`, dynamic import": `let rec` of functions belongs with
     tail loops (every function member goes through 5.1), and `Assign` with
     loops. The table of 8.3 replaces the row.
-18. S3.2 "fed by importing the JS IR before the JS passes": `import_js` is
+18. S3.2 "fed by importing the JS IR before the JS passes": `import_js` was
     not built (`bir/bridge.rs` returns `Unsupported("JS arena import not
-    implemented")`); S3.3 adds the opposite direction, `export_js`.
+    implemented")`); S3.3 adds the opposite direction, `export_js`. Both
+    directions now exist in `bir/bridge_j.rs` (#167); the stub in
+    `bir/bridge.rs` is still there.
 
 ## 10. Open questions
 

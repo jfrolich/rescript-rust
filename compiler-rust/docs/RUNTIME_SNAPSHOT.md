@@ -492,7 +492,7 @@ reported 7.7%.
 | S4 | `rescript snapshot --write/--check`, `make lib` and CI freshness | S1 | 300 | 0 | yes |
 | S5 | Watch mode and tooling audit | S2 | 300 plus tests | 0 for one-shot builds | yes |
 | S6 | Cache for third-party packages | S3, S4 | 1,200 | unknown (E) | no |
-| S7 | Follow the checker redesign (B.8) | P5 and P10 there | with those stages | removes the decode and internalise of referenced snapshot units; not measured | no |
+| S7 | Follow the checker redesign (B.8) | P5 and P10 there (now slices W8 to W10 of its section J) | with those stages | removes the decode and internalise of referenced snapshot units; not measured | no |
 
 S1 comes first because Belt is the part that is compiled in every clean build
 today. S2 to S5 can proceed in parallel after S1 except that S2 and S3 both
@@ -592,7 +592,7 @@ files. No files or assertions in that test were removed or weakened.
   requires the default printer/backend so an environment-selected producer
   cannot silently embed a different output contract.
 - S1 does not select Belt in watch or check-only mode; those builds retain
-  their earlier behavior. The code's location-bearing diagnostic retry also
+  their earlier behavior (watch mode admits Belt since S5, F.5). The code's location-bearing diagnostic retry also
   requires source compilation: it explicitly discards location-free stored
   interfaces so errors can quote dependency declarations. This internal mode
   was absent from D and is now an explicit mismatch reason. The switch controls Belt only; changing runtime
