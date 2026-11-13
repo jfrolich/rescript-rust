@@ -141,20 +141,25 @@ impl Output {
         self.0.push('\n');
     }
 
-    /// The printed bytes. Source text is held as Latin-1 characters standing
-    /// for bytes; other characters are encoded as UTF-8.
+    /// The printed bytes.
     pub fn into_bytes(self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(self.0.len());
-        for c in self.0.chars() {
-            if (c as u32) <= 0xFF {
-                bytes.push(c as u8);
-            } else {
-                let mut buf = [0u8; 4];
-                bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
-            }
-        }
-        bytes
+        text_bytes(&self.0)
     }
+}
+
+/// The bytes of analysis text. Source text is held as Latin-1 characters
+/// standing for bytes; other characters are encoded as UTF-8.
+fn text_bytes(text: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(text.len());
+    for c in text.chars() {
+        if (c as u32) <= 0xFF {
+            bytes.push(c as u8);
+        } else {
+            let mut buf = [0u8; 4];
+            bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+        }
+    }
+    bytes
 }
 
 fn resolve(cwd: &Path, path: &str) -> PathBuf {
