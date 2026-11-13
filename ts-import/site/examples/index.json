@@ -132,13 +132,11 @@
   {
     "id": "class-today",
     "title": "Two declarations of one class",
-    "summary": "Each package declares Element. Today a value of one is refused where the other is expected.",
+    "summary": "Each package declares Element. A value of one is accepted where the other is expected.",
     "files": [
       "Demo.res"
     ],
-    "plain": true,
-    "fails": true,
-    "expected": "This error is what the example shows: today's compiler refuses the program. With the proposal it is accepted, and focus compiles to el.focus()."
+    "plain": true
   },
   {
     "id": "class-crossing",

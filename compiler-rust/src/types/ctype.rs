@@ -5864,6 +5864,60 @@ pub fn subtype_now(
     force_subtype(ctx, env, cstrs)
 }
 
+/// Whether an expression of type `ty` is accepted, without a written `:>`,
+/// where `expected` is and the two do not unify (docs/class-identity,
+/// rule 3): `ty` is a class type that is the same class as `expected` or a
+/// subclass of it, or the two types are equal up to class types that are
+/// two declarations of one class. A subclass is not accepted inside another
+/// type, where a written coercion says what is meant.
+///
+/// The types are left as they were when the answer is no.
+pub(crate) fn coerces_between_class_declarations(
+    ctx: &TypeContext,
+    env: &Env,
+    ty: TypeExprRef,
+    expected: TypeExprRef,
+) -> bool {
+    let head = |ty: TypeExprRef| {
+        let ty = ctx.repr(ty);
+        match &*ctx.get_desc(ty) {
+            TypeDesc::Tconstr { path, .. } if generic_abbrev(ctx, env, path) => {
+                try_expand_head(ctx, env, ty).unwrap_or(ty)
+            }
+            _ => ty,
+        }
+    };
+    let nullary = |ty: TypeExprRef| {
+        matches!(&*ctx.get_desc(ctx.repr(ty)), TypeDesc::Tconstr { args, .. } if args.is_empty())
+    };
+    let (source, target) = (head(ty), head(expected));
+    if nullary(source) && nullary(target) && class_step(ctx, env, source, target).is_some() {
+        return true;
+    }
+    let snapshot = ctx.snapshot_type_state();
+    let mut subtypes = HashSet::new();
+    let mut cstrs = SubtypeAcc {
+        steps: SubtypeSteps::SameClass,
+        ..SubtypeAcc::default()
+    };
+    let coerces = subtype_rec(ctx, env, &mut subtypes, &[(ty, expected)], ty, expected, &mut cstrs)
+        .and_then(|()| {
+            force_subtype(
+                ctx,
+                env,
+                SubtypeConstraints {
+                    cstrs: cstrs.cstrs,
+                    univar_slots: cstrs.univar_slots,
+                },
+            )
+        })
+        .is_ok();
+    if !coerces {
+        ctx.restore_type_state(snapshot);
+    }
+    coerces
+}
+
 /// Whether the record or variant declaration behind `ty1` coerces to the one
 /// behind `ty2` by its fields or constructors. `subtype` takes a declared
 /// subclass at its word; the check of `@extends` is where that word is

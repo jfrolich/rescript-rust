@@ -998,8 +998,10 @@ pub(crate) enum ClashSite {
         operator: &'static str,
         is_constant: Option<StrIdx>,
     },
-    /// In a braced identifier.
-    BracedIdent,
+    /// In a braced identifier. `argument` says that the braces are at a site
+    /// that [`ClashSite::takes_class_coercion`], such as the value of a JSX
+    /// prop (`container={el}`).
+    BracedIdent { argument: bool },
     /// In a record spread.
     RecordSpread,
     /// In a record field value.
@@ -1036,12 +1038,34 @@ pub(crate) enum ClashSite {
     TryReturn,
     /// In a let? rewritten match return.
     LetUnwrapReturn,
+    /// In the payload of a constructor. A clash there is reported without a
+    /// context.
+    ConstructorArgument,
 }
 
 impl ClashSite {
-    /// The owned context an error carries.
-    pub(crate) fn resolve(self, arena: &ParseArena) -> TypeClashContext {
-        match self {
+    /// Whether an expression at this site is checked against a type that the
+    /// site declares: the parameter of a function, the field of a record
+    /// (a JSX prop is one), the payload of a constructor. Only there is a
+    /// class type accepted for another declaration of its class without a
+    /// written coercion (docs/class-identity, rule 3). Elsewhere the
+    /// expected type may come from a neighbouring expression, such as the
+    /// other branch of an `if`, and which of the two types the result has
+    /// would depend on their order.
+    fn takes_class_coercion(self) -> bool {
+        matches!(
+            self,
+            ClashSite::FunctionArgument { .. }
+                | ClashSite::RecordField { .. }
+                | ClashSite::ConstructorArgument
+                | ClashSite::BracedIdent { argument: true }
+        )
+    }
+
+    /// The owned context an error carries, if the site has one.
+    pub(crate) fn resolve(self, arena: &ParseArena) -> Option<TypeClashContext> {
+        Some(match self {
+            ClashSite::ConstructorArgument => return None,
             ClashSite::FunctionCall => TypeClashContext::FunctionCall,
             ClashSite::FunctionArgument { optional, name } => TypeClashContext::FunctionArgument {
                 optional,
@@ -1060,7 +1084,7 @@ impl ClashSite {
                 operator: operator.to_string(),
                 is_constant: is_constant.map(|text| arena.get_string(text).to_string()),
             },
-            ClashSite::BracedIdent => TypeClashContext::BracedIdent,
+            ClashSite::BracedIdent { .. } => TypeClashContext::BracedIdent,
             ClashSite::RecordSpread => TypeClashContext::RecordSpread,
             ClashSite::RecordField {
                 field_name,
@@ -1087,7 +1111,7 @@ impl ClashSite {
             ClashSite::SwitchExpression => TypeClashContext::SwitchExpression,
             ClashSite::TryReturn => TypeClashContext::TryReturn,
             ClashSite::LetUnwrapReturn => TypeClashContext::LetUnwrapReturn,
-        }
+        })
     }
 }
 
@@ -8123,7 +8147,9 @@ fn type_expect_with_recarg_unscoped<'a>(
                 ED::Pexp_ident(_)
             ) =>
         {
-            Some(ClashSite::BracedIdent)
+            Some(ClashSite::BracedIdent {
+                argument: context.is_some_and(ClashSite::takes_class_coercion),
+            })
         }
         _ => context,
     };
@@ -9292,10 +9318,42 @@ fn unify_expression_types(
             Err(TypeCoreError::ExprTypeClash {
                 loc,
                 trace,
-                context: context.map(|site| site.resolve(tctx.arena)),
+                context: context.and_then(|site| site.resolve(tctx.arena)),
                 env,
             })
         }
+    }
+}
+
+/// The `unify_exp env texp ty_expected` that ends typecore.ml
+/// `type_argument`, for an argument typed at a site that
+/// [`ClashSite::takes_class_coercion`]. When the argument's type is a class
+/// type and `expected` another declaration of its class, or of an ancestor,
+/// the argument is typed as if `(arg :> expected)` were written: it gets the
+/// expected type. `rue_unify` let it through for the same reason.
+fn unify_argument(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    typed_arg: &mut Expression,
+    expected: TypeExprRef,
+    context: ClashSite,
+) -> TypeCoreResult<()> {
+    match unify_expression_types(tctx, loc, typed_arg.exp_type, expected, Some(context)) {
+        Ok(()) => Ok(()),
+        Err(_)
+            if context.takes_class_coercion()
+                && crate::types::ctype::coerces_between_class_declarations(
+                    tctx.type_ctx,
+                    env,
+                    typed_arg.exp_type,
+                    expected,
+                ) =>
+        {
+            typed_arg.exp_type = expected;
+            Ok(())
+        }
+        Err(clash) => Err(clash),
     }
 }
 
@@ -9333,7 +9391,25 @@ fn rue_unify(
     context: Option<ClashSite>,
 ) -> TypeCoreResult<()> {
     let inst = crate::types::instance(tctx.type_ctx, expected_ty);
-    unify_expression_types(tctx, loc, exp_ty, inst, context)
+    match unify_expression_types(tctx, loc, exp_ty, inst, context) {
+        Ok(()) => Ok(()),
+        // The site that asked for `expected_ty` gives the expression that
+        // type: see `unify_argument`.
+        Err(_)
+            if context.is_some_and(ClashSite::takes_class_coercion)
+                && tctx.unify_state.env().is_some_and(|env| {
+                    crate::types::ctype::coerces_between_class_declarations(
+                        tctx.type_ctx,
+                        env,
+                        exp_ty,
+                        inst,
+                    )
+                }) =>
+        {
+            Ok(())
+        }
+        Err(clash) => Err(clash),
+    }
 }
 
 // ============================================================================
@@ -10388,7 +10464,7 @@ fn type_application(
                 let typed_arg_result =
                     type_expect(tctx, env, expr, arg_expected_ty, Some(context));
 
-                let typed_arg = typed_arg_result?;
+                let mut typed_arg = typed_arg_result?;
                 if let Some(saved_env) = saved_unify_env {
                     tctx.unify_state.set_env(&saved_env);
                 } else {
@@ -10402,13 +10478,8 @@ fn type_application(
                     // runs this second unification for selected arguments too;
                     // alias handling belongs in Ctype/Env, not a typecore-side
                     // selected-value guard.
-                    unify_expression_types(
-                        tctx,
-                        typed_arg.exp_loc,
-                        typed_arg.exp_type,
-                        unify_ty,
-                        Some(context),
-                    )?;
+                    let loc = typed_arg.exp_loc;
+                    unify_argument(tctx, env, loc, &mut typed_arg, unify_ty, context)?;
                 }
                 let typed_arg = if enforce_optional {
                     let wrapped_loc = typed_arg.exp_loc;
@@ -14344,8 +14415,10 @@ fn type_construct(
         .zip(arg_types_for_unify.iter())
     {
         let arg_expr = tctx.arena.get_expanded_expr(*arg_idx);
-        let typed_arg = type_expect_with_recarg(tctx, env, arg_expr, *arg_ty, None, recarg)?;
-        unify_expression_types(tctx, loc, typed_arg.exp_type, *arg_ty0, None)?;
+        let context = ClashSite::ConstructorArgument;
+        let mut typed_arg =
+            type_expect_with_recarg(tctx, env, arg_expr, *arg_ty, Some(context), recarg)?;
+        unify_argument(tctx, env, loc, &mut typed_arg, *arg_ty0, context)?;
         typed_args.push(typed_arg);
     }
 
@@ -15620,30 +15693,24 @@ fn type_record(
                     });
                 };
 
-            let field_context = Some(ClashSite::RecordField {
+            let field_context = ClashSite::RecordField {
                 field_name: crate::name::Name::new(field_name),
                 optional: label_desc.lbl_optional && !field.opt,
                 jsx: jsx_component_error_info
                     .as_ref()
                     .map(|info| info.jsx_type),
-            });
-            let typed_expr = type_expect(
+            };
+            let mut typed_expr = type_expect(
                 tctx,
                 env,
                 tctx.arena.get_expanded_expr(field.expr),
                 field_input_ty,
-                field_context,
+                Some(field_context),
             )?;
             // OCaml `type_argument`: after typing against `ty_expected'`, unify with
             // a fresh `instance` of that type to preserve sharing behavior.
             let field_input_ty_inst = crate::types::ctype::instance(ctx, field_input_ty);
-            unify_expression_types(
-                tctx,
-                loc,
-                typed_expr.exp_type,
-                field_input_ty_inst,
-                field_context,
-            )?;
+            unify_argument(tctx, env, loc, &mut typed_expr, field_input_ty_inst, field_context)?;
             Ok((label_desc, field_input_ty, less_general_expected_ty, poly_vars, typed_expr))
         })();
         ctx.end_def();
@@ -29823,7 +29890,7 @@ mod tests {
             let TypeClashContext::FunctionArgument {
                 optional: actual,
                 name,
-            } = site.resolve(&arena)
+            } = site.resolve(&arena).unwrap()
             else {
                 panic!("wrong argument context");
             };
@@ -29839,7 +29906,7 @@ mod tests {
             for_float,
             operator,
             is_constant,
-        } = site.resolve(&arena)
+        } = site.resolve(&arena).unwrap()
         else {
             panic!("wrong operator context");
         };
@@ -29860,7 +29927,7 @@ mod tests {
                 field_name,
                 optional,
                 jsx: actual,
-            } = site.resolve(&arena)
+            } = site.resolve(&arena).unwrap()
             else {
                 panic!("wrong field context");
             };
@@ -29871,7 +29938,7 @@ mod tests {
         let site = ClashSite::SetRecordField {
             field_name: crate::name::Name::new("value"),
         };
-        let TypeClashContext::SetRecordField { field_name } = site.resolve(&arena) else {
+        let TypeClashContext::SetRecordField { field_name } = site.resolve(&arena).unwrap() else {
             panic!("wrong assignment context");
         };
         assert_eq!(field_name, "value");
