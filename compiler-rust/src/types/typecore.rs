@@ -27248,6 +27248,12 @@ pub(crate) fn adopt_child_view(
     Some(view)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Calls of [`resolve_alias_target`] on this thread.
+    pub(crate) static RESOLVE_ALIAS_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// What the alias target `path`, a path rooted in a persistent unit, is in
 /// the world: the unit, for a unit's own path, else the view of the path,
 /// adopted by this compilation with every view on the way (docs
@@ -27264,6 +27270,8 @@ fn resolve_alias_target(
     ctx: &crate::types::context::TypeContext,
 ) -> Option<crate::types::module_view::AliasTarget> {
     use crate::types::module_view::AliasTarget;
+    #[cfg(test)]
+    RESOLVE_ALIAS_STEPS.with(|steps| steps.set(steps.get() + 1));
     match path.view() {
         PathView::Pident(id) if id.is_persistent() => {
             let unit = pers_env.as_mut()?.find_pers_struct(id.name(), ctx)?;

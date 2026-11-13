@@ -4968,12 +4968,17 @@ and deletes nothing that kind needs.
 
 ##### W5b as built: what is done, what the design got wrong, and what is left
 
-**W5b is not complete.** Every persistent-rooted path with components is a
-world view on `tests/tests` and on the application, no store build starts,
-and the deletions that follow from that are made. The registration tables
-are still there, a link's build is still proportional to what is declared
-below it, view items are still copied, and the `super_errors_multi`
-fixtures and the 10,000-element tests of the row were not written.
+**W5b ends here, on purpose short of the row.** Built: every
+persistent-rooted path with components is a world view on `tests/tests`
+and on the application, and no store build starts. Deleted: what follows
+from that (step 5 below). Three things of the row stay as they are: the
+registration tables, a link's build that copies what is declared below it
+(the chain test stays at depth 500), and the copy of every view item. They
+were dropped from the slice when a design for a rewritten checker arrived
+(`compiler-rust/docs/CHECKER_REWRITE.md`, section 3.6, on the branch
+`checker-rewrite-design` when this was written) that replaces
+`TypeContext`, `types/env_lazy.rs` and `types/module_view.rs` whole: more
+edits to those files are work the rewrite deletes.
 
 | Step of the design's order | State |
 | --- | --- |
@@ -4982,8 +4987,8 @@ fixtures and the 10,000-element tests of the row were not written.
 | (3) Module type names | Done for a name the view's own unit binds (`ModuleView::expansions`, `expand_modtype_name`). Not done: a module type declared in another unit (its prefix is another view); such a child, like a functor, has its tables built for the compilation |
 | (4) `ViewTables` without store builds | Done. The scan and the opened layers run outside a store build and create no type node (a debug assertion). A child without a view is marked `StoredModuleComponents::of_view`: its tables and a functor result are built for the compilation that asks and kept in the compilation, never in the worker's shell |
 | (5) The deletions of the W5 row | Part. Deleted: `ThreadTypeStore::{shared_components, publish_shared_components}`, the worker-shared branch of `with_resolved_module_components_for_path_with_cache_mode`, `shared_components_enabled`, `RESCRIPT_NO_SHARED_COMPONENTS`, `StoreEffect::{RegisterComponents, RegisterAliasSource, RegisterQualifiedModuleDecl, TriggerRename, AdoptView}`, `make_private`, the `store_views` view counters. **Not deleted:** `component_alias_sources`, `component_paths_by_alias_source`, `qualified_module_decl_cache` and their `register_*` functions |
-| (6) A link's build proportional to its own declarations | Not done. The depth test is still 500 |
-| (7) View items shared without a copy | Not done. `world_view_nodes` still reports `shared=0` |
+| (6) A link's build proportional to its own declarations | Dropped (the rewrite replaces the file). The depth test is still 500 |
+| (7) View items shared without a copy | Dropped (the rewrite replaces the file). `world_view_nodes` still reports `shared=0`, and the one-worker cost on `tests/tests` (+0.089% for the code) is not repaid |
 
 Why the registration tables stay: the tables of local module paths
 register into them and read them too (`new_with_child_components_arc_and_value_source_prefix_inner`,
@@ -5080,6 +5085,9 @@ Fixed in `TypeContext::find_module_alias_in_components`. And
 `expand_modtype_name` scanned every module type item per child; the
 signature index now maps a module type name to its item
 (`expanding_module_type_names_costs_two_probes_per_child`, 10,000 children).
+`resolve_alias_target` has a step count too
+(`resolving_a_chain_of_aliases_costs_two_steps_per_link`, a chain of
+10,000 aliases: two steps per link, each view built once).
 
 Who reads the registration tables, measured (a probe at each reader, the
 application, 8 workers; not committed):
@@ -5110,7 +5118,7 @@ for) read what views registered, and no fixture reaches those paths.
 What the next slices start from:
 
 1. The registration tables (above) are the one deletion of the W5 row that
-   is open. W6's list names `local_stored_components` and
+   is open, and stay until the rewrite removes `TypeContext`. W6's list names `local_stored_components` and
    `StoredModuleComponents::in_store` for deletion; `local_stored_components`
    now holds the per-compilation tables of a view's child that has no view
    (`of_view`) and must stay, keyed by `local_id` (a process-wide counter,
@@ -5119,9 +5127,10 @@ What the next slices start from:
    them. Every caller of `build_in_store` that is left sits behind an
    `in_store` flag that is never set (`store_build_active()` is never
    true), which is W6's deletion.
-3. Steps (6) and (7) and the row's tests (`super_errors_multi` fixtures for
-   a type printed through a namespace alias and through a local alias of
-   another unit; forcing 10,000 children; a chain 10,000 deep) are owed.
+3. Steps (6) and (7) are not owed by a later slice of this plan: the
+   rewrite replaces the files. Until then a chain of child views is
+   quadratic in its depth, a value of an alias view is rewritten once per
+   alias view in its target's chain, and every view item is copied.
 
 #### W6. Delete store builds
 

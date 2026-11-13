@@ -685,7 +685,8 @@ fn expand_modtype_name(
 /// Cost: a fixed number of passes over the signature, each doing work in
 /// proportion to the item it visits (one copy of a value's type, one
 /// description per constructor and label); the component substitution is
-/// built at most three times, each one pass.
+/// built at most three times, each one pass. A value of an alias view is
+/// rewritten once per alias view in its target's chain.
 #[allow(clippy::too_many_arguments)]
 fn describe_tables(
     access_path: Path,
@@ -1339,6 +1340,8 @@ mod tests {
         /// (named through the unit's path), and children `Named: Same` and
         /// `Opaque: S` (`S` is abstract).
         named: bool,
+        /// Aliases `A0 = Unit.Inner` and `A<n> = Unit.A<n-1>`, this many.
+        alias_chain: usize,
         /// With `named`: further children `Named<n>: Same`.
         named_children: usize,
         /// Leave out the module type `S` and the modules `Alias` and
@@ -1578,6 +1581,18 @@ mod tests {
                     })),
                 ),
             ));
+            for n in 0..shape.alias_chain {
+                let unit_path = Path::pident(Ident::create_persistent(&name));
+                let target = if n == 0 {
+                    Path::pdot(unit_path, "Inner")
+                } else {
+                    Path::pdot(unit_path, format!("A{}", n - 1))
+                };
+                signature.push(module(
+                    &format!("A{n}"),
+                    ModuleType::MtyAlias(AliasPresence::MtaAbsent, Arc::new(target)),
+                ));
+            }
             signature.push(module(
                 "Inner",
                 ModuleType::MtySignature(Arc::new(vec![SignatureItem::SigType(
@@ -1970,6 +1985,7 @@ mod tests {
             alias_path: None,
             named: false,
             named_children: 0,
+            alias_chain: 0,
         };
         let unit = unit_of("Opened", shape);
         let view = view_of(&unit);
@@ -2408,6 +2424,76 @@ mod tests {
             crate::types::typecore::adopt_child_view(&parent, ordinal, &mut None, &compilation())
                 .expect("the expansion has a view");
         assert!(view.lookup_value_for_access("own").is_some());
+    }
+
+    #[test]
+    fn resolving_a_chain_of_aliases_costs_two_steps_per_link() {
+        // `A0 = Unit.Inner`, `A<n> = Unit.A<n-1>`, 10,000 long. Resolving
+        // the last alias resolves each target once: one step for the unit
+        // and one for the child, per link. The resolution and the adoption
+        // recurse over the chain, so the test runs on a thread with room
+        // for it.
+        const LINKS: usize = 10_000;
+        std::thread::Builder::new()
+            .stack_size(1 << 30)
+            .spawn(|| {
+                let unit = unit_of(
+                    "Alias_chain",
+                    Shape {
+                        alias_chain: LINKS,
+                        ..Shape::default()
+                    },
+                );
+                let parent = view_of(&unit);
+                let adopt_last = |ctx: &TypeContext| {
+                    let mut pers = crate::cmi::persistent_env::PersistentEnv::new();
+                    pers.set_in_process_mode(true);
+                    pers.insert_loaded_unit(unit.clone());
+                    ctx.set_persistent_env(pers.clone());
+                    let (ordinal, _) = parent
+                        .world_child(&format!("A{}", LINKS - 1))
+                        .expect("an alias of a path");
+                    let steps = crate::types::typecore::RESOLVE_ALIAS_STEPS.with(|s| s.get());
+                    let view = crate::types::typecore::adopt_child_view(
+                        &parent,
+                        ordinal,
+                        &mut Some(pers),
+                        ctx,
+                    )
+                    .expect("the last alias has a view");
+                    let steps =
+                        crate::types::typecore::RESOLVE_ALIAS_STEPS.with(|s| s.get()) - steps;
+                    (view, steps)
+                };
+                let first = compilation();
+                let (view, steps) = adopt_last(&first);
+                assert_eq!(steps, 2 * LINKS as u64);
+                assert!(view.lookup_type("u").is_some());
+                // Every alias view was built once.
+                let builds: u32 = parent
+                    .children
+                    .iter()
+                    .map(|cell| cell.builds.load(Ordering::Relaxed))
+                    .sum();
+                assert_eq!(builds as usize, LINKS + 1);
+                // A second compilation resolves the chain again (it loads
+                // the units itself) and builds nothing.
+                let (again, steps) = adopt_last(&compilation());
+                assert!(Arc::ptr_eq(&view, &again));
+                assert_eq!(steps, 2 * LINKS as u64);
+                let builds_after: u32 = parent
+                    .children
+                    .iter()
+                    .map(|cell| cell.builds.load(Ordering::Relaxed))
+                    .sum();
+                assert_eq!(builds_after, builds);
+                // Asking the same compilation again is one probe.
+                let (_, steps) = adopt_last(&first);
+                assert_eq!(steps, 0);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
