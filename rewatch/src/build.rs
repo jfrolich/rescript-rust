@@ -390,21 +390,23 @@ fn initialize_build_with_mode(
         .get_root_config()
         .get_source_map_args(source_map_command);
     // Read before `verify_compiler_info` may clean a package's build state.
-    let metas = if check_only {
+    let metas = compiler_info::read_metas(&packages);
+    let recorded_outputs = if check_only {
         Default::default()
     } else {
-        compiler_info::read_metas(&packages)
+        clean::recorded_outputs(&metas)
     };
-    let recorded_outputs = clean::recorded_outputs(&metas);
-    let compiler_check = if check_only {
-        None
+    // A build cleans the packages another compiler or configuration built.
+    // A check writes nothing, so it leaves them and reads no record of theirs.
+    let (compiler_check, unreadable_records) = if check_only {
+        let mismatched = compiler_info::mismatched_packages(&packages, &compiler, &source_map_args, &metas)
+            .into_iter()
+            .map(|package| package.name.clone())
+            .collect();
+        (None, mismatched)
     } else {
-        Some(compiler_info::verify_compiler_info_with(
-            &packages,
-            &compiler,
-            &source_map_args,
-            &metas,
-        ))
+        let check = compiler_info::verify_compiler_info_with(&packages, &compiler, &source_map_args, &metas);
+        (Some(check), ahash::AHashSet::new())
     };
 
     if !packages::validate_packages_dependencies(&packages) {
@@ -427,6 +429,13 @@ fn initialize_build_with_mode(
     phase_mark("init:parse-packages");
 
     let cleaned = if check_only {
+        // The previous build's record tells which modules are unchanged;
+        // their stored interfaces stand in for checking them again.
+        clean::read_previous_in_process_build(
+            &mut build_state,
+            clean::PreviousOutputs::Keep,
+            &unreadable_records,
+        );
         0
     } else {
         clean::cleanup_previous_in_process_build(&mut build_state)
@@ -604,10 +613,8 @@ pub fn incremental_build_without_lock(
     // A fresh in-process build compiles only what changed since the JavaScript
     // was written (see `incremental`). It still parses every module: the
     // dependency graph comes from the parse.
-    let incremental = fresh_in_process
-        && !build_state.check_only
-        && !build_state.diagnostic_locations
-        && incremental::applies(build_state);
+    let incremental =
+        fresh_in_process && !build_state.diagnostic_locations && incremental::applies(build_state);
     if incremental
         && build_state.build_state.source_map_command == SourceMapCommand::Build
         && incremental::everything_up_to_date(build_state)

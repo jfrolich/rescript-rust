@@ -102,6 +102,7 @@ fi
 # After 14, which builds the testrepo again: 17 ends with a clean, and
 # check-only requires an unchanged, built testrepo.
 ./compile/26-check-only.sh &&
+./compile/31-check-only-incremental.sh &&
 ./compile/15-no-new-files.sh &&
 ./compile/16-snapshots-unchanged.sh &&
 

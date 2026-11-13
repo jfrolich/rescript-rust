@@ -416,6 +416,9 @@ pub struct BuildCommandState {
     // What the previous in-process build recorded (see `incremental`). Read
     // during initialization, in-process builds only.
     pub previous_in_process: Option<super::incremental::PreviousInProcessBuild>,
+    /// Readers of the packages' stored interfaces, for a check-only build
+    /// (see `incremental::recorded_js_metadata`).
+    pub recorded_cores: Mutex<AHashMap<String, Arc<super::state_db::InterfaceCores>>>,
     // Compile into the module registry only, writing nothing to disk (no
     // JavaScript, source copies or compiler log): `rescript bsc` builds an
     // `-I` package this way without touching its files.
@@ -551,6 +554,7 @@ impl BuildCommandState {
             package_compiler_options: Mutex::new(AHashMap::new()),
             features,
             previous_in_process: None,
+            recorded_cores: Mutex::new(AHashMap::new()),
             in_memory_only: false,
             incremental_plan: None,
             build_run: BuildRun::NotStarted,
