@@ -485,6 +485,18 @@ fn sharing_facts(arena: &LamArena, root: Lam) -> (Vec<u8>, usize, u8) {
     (binder, reachable, shared)
 }
 
+/// An import that recorded the variables of every export block: what the
+/// unit lowering (`lower::lower_with_resolver`) reads its exports from. Only
+/// `import_for_lowering` makes one, so a unit imported without the records
+/// cannot reach the export coercion.
+pub(crate) struct ForLowering(Imported);
+impl ForLowering {
+    /// The import, for the lowering's state. Constant.
+    pub(crate) fn into_imported(self) -> Imported {
+        self.0
+    }
+}
+
 /// Import occurrences, as the legacy lowering does. Binder-free shared
 /// subtrees are copied per edge, with a hard budget of four times the reachable
 /// source nodes. Repeated binder subtrees cannot retain unique Bir binders.
@@ -494,8 +506,9 @@ pub fn import_lambda(arena: &LamArena, root: Lam) -> Result<Imported, Unsupporte
 
 /// Same import, with the subset of binder fallbacks due solely to catch labels.
 /// The binder analysis runs once, also when the import is unsupported.
-pub(crate) fn import_for_lowering(arena: &LamArena, root: Lam) -> (Result<Imported, Unsupported>, bool) {
-    import_with_sharing(arena, root, true)
+pub(crate) fn import_for_lowering(arena: &LamArena, root: Lam) -> (Result<ForLowering, Unsupported>, bool) {
+    let (imported, catch_only) = import_with_sharing(arena, root, true);
+    (imported.map(ForLowering), catch_only)
 }
 
 fn import_with_sharing(arena: &LamArena, root: Lam, lowering: bool) -> (Result<Imported, Unsupported>, bool) {

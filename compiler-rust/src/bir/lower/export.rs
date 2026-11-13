@@ -2344,7 +2344,7 @@ mod tests {
         // Used as an argument before an effect: the alias stays, so the
         // pass can be repeated on the same tree.
         let root = alias_with_references(&mut a, N, true);
-        let input = crate::bir::bridge::import_for_lowering(&a, root).0.unwrap();
+        let input = crate::bir::bridge::import_for_lowering(&a, root).0.unwrap().into_imported();
         let root = input.root;
         let mut state = State::new(input);
         let probed = state.probe(Cx::value(), root).unwrap();

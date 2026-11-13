@@ -5,13 +5,14 @@ use super::*;
 /// Consume top-level groups iteratively. No group in this slice creates loop
 /// labels; loop-bearing groups remain Unsupported before label allocation.
 pub(super) fn lower(
-    input: super::super::bridge::Imported,
+    input: super::super::bridge::ForLowering,
     locations: Option<&crate::lambda::LamLocTable>,
     direct: bool,
     resolver: Option<&crate::js_ir::ModulePathResolver>,
     cross_module_inline: bool,
     check_div_by_zero: bool,
 ) -> Result<Lowered, Unsupported> {
+    let input = input.into_imported();
     let mut node = input.root;
     let mut state = State::new(input);
     state.direct = direct;
@@ -156,9 +157,9 @@ mod tests {
         let tail = source.var(id);
         let body = source.seq_raw(head, tail);
         let root = source.let_(LetKind::Strict, id, value, body);
-        let input = crate::bir::bridge::import_lambda(&source, root).unwrap();
+        let input = crate::bir::bridge::import_for_lowering(&source, root).0.unwrap();
         let from_unit = lower(input, None, false, None, false, true).unwrap();
-        let input = crate::bir::bridge::import_lambda(&source, root).unwrap();
+        let input = crate::bir::bridge::import_for_lowering(&source, root).0.unwrap().into_imported();
         let root = input.root;
         let mut state = State::new(input);
         let probed = state.probe(Cx::value(), root).unwrap();
