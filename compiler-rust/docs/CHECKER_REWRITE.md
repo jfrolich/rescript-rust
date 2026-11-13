@@ -32,8 +32,8 @@ Short version:
   2.4% of the checker, measured 2.2% and 2.1%. Instantiation from
   templates: predicted 4% to 5%, measured 0.6% and 0.9%; the cost is
   creating nodes in today's storage, not the copy (section 4).
-- The design reaches about 14,100 instructions per line on its own
-  figures and about 22,400 when every unconfirmed figure is doubled; the
+- The design reaches about 14,200 instructions per line on its own
+  figures and about 22,500 when every unconfirmed figure is doubled; the
   budget is 18,000 to 22,000. 4% of that reduction is measured in a
   checker, the rest on a stand-alone kernel or estimated (section 7).
 - It is built beside the old checker, a unit at a time behind one switch,
@@ -146,7 +146,7 @@ Three remarks on what the rows hide.
   opened on the application and 36,012 are ever restored (0.9%).
   In OCaml a snapshot is a counter; here it is 219 instructions and every
   write under it is logged.
-- Row 1 contains 3.9% of the checker in four functions that answer one
+- Row 1 contains 3.7% of the checker in four functions that answer one
   question, "does this variable occur in that type" (`binding_facts::walk`,
   `surely_occur_free`, `surely_univar_free`, `reaches_quick`), and 1.0% in
   a hash set of pairs (`mark_unified`, `already_unified`) that OCaml does
@@ -372,8 +372,8 @@ variable-free at 260 (two pairs of nodes assumed); 967,464 variable against
 variable-free at 300; 240,836 variable against variable at 120; 152,334
 variable against a type with variables at 400; 390,023 structure against
 structure at 500; 45,903 different variable-free types, which is the
-expansion road, at 900. Sum 833 M, **1,270 a line**; with 45% for what the
-kernel lacks, **1,850**. *Extrapolated from the kernel; the sizes (pairs
+expansion road, at 900. Sum 876 M, **1,330 a line**; with 45% for what the
+kernel lacks, **1,930**. *Extrapolated from the kernel; the sizes (pairs
 per unification) are assumed, not counted.* The journal part, 1,331 today,
 is *measured* by the prototype (4.2).
 
@@ -1747,7 +1747,7 @@ rests on.
 
 | Item | Today | Design | Cautious | The design figure is |
 |---|---:|---:|---:|---|
-| Unification and the journal | 8,297 | 1,850 | 3,700 | extrapolated from the kernel and counted shapes; sizes assumed. 865 of the reduction is **measured** in situ (4.2) |
+| Unification and the journal | 8,297 | 1,930 | 3,860 | extrapolated from the kernel and counted shapes; sizes assumed. 865 of the reduction is **measured** in situ (4.2) |
 | The walk | 5,411 | 4,200 | 4,900 | extrapolated from CHECKER_REDESIGN K.4 (a measured 54% of one family's allocation and copying) to 4,960, then estimated |
 | Environment lookups | 5,279 | 570 | 1,150 | extrapolated from the kernel and H.2.11's operation counts; layers per lookup assumed |
 | Loading dependencies | 2,996 | 600 | 1,200 | estimated |
@@ -1760,28 +1760,29 @@ rests on.
 | Warnings and usage | 1,382 | 400 | 700 | estimated |
 | Declarations | 1,017 | 700 | 850 | estimated |
 | Modules, disambiguation, annotations, error preparation | 943 | 750 | 850 | estimated at 80% |
-| **`type_structure`** | **40,656** | **12,770** | **20,350** | |
+| **`type_structure`** | **40,656** | **12,850** | **20,510** | |
 | Interfaces, and the implementation against its interface | 1,367 | 600 | 900 | estimated: the same mechanisms |
 | Publication | 1,380 | 500 | 700 | estimated: one export walk (CHECKER_REDESIGN J.6) |
 | Per-unit setup | 396 | 60 | 100 | estimated: a reset of a dozen vectors |
 | Per-unit teardown | 1,200 | 150 | 300 | estimated: no destructors in the pools |
-| **The checker with its surroundings** | **45,022** | **14,080** | **22,350** | |
+| **The checker with its surroundings** | **45,022** | **14,160** | **22,510** | |
 | Unit reads | 2,607 | 300 | 600 | estimated (THREE_TREES T3) |
 
 The budget is 18,000 to 22,000. (The rows of today add up to 44,999; 1.4's
 45,022 uses the inclusive count of `type_structure`, 0.06% above the
 toggled one.)
 
-- **The design reaches about 14,100 instructions per line**, 31% of
+- **The design reaches about 14,200 instructions per line**, 31% of
   today, if every figure holds.
-- **The cautious reading is about 22,400**, at the budget's upper edge.
-- What is **measured in situ** of that reduction of 23,000 to 31,000 is
+- **The cautious reading is about 22,500**, just above the budget's upper
+  edge.
+- What is **measured in situ** of that reduction of 22,500 to 30,900 is
   865 (the journal) plus 345 a line that a template saves on today's
   storage (4.1): 4%. Everything else is a kernel measurement multiplied by
   a count, a quoted measurement extended, or an estimate.
 
 So the plain answer: the design is under the budget on paper and at its
-edge when the paper is distrusted, and this document has not proved either
+upper edge when the paper is distrusted, and this document has not proved either
 in a checker. The proof is slice R5c (covered units at 60% or less, bridge
 included) and slice R7 (24,000 with the bridge still there). R9 removes
 the bridge: about 3% of a build, 3,000 a line, which is why R7's gate is
@@ -1816,7 +1817,7 @@ Nothing in the contract. Three things in the engineering:
 | Lookups in the order of the walk | a use is resolved when the walk reaches it, not in a pass before | O15 | `fun_return_poly1.res` |
 | A second check of a failing unit | once per failing unit | O16: the message prints the types as they stood | any type clash fixture |
 
-Together these floors are about 900 a line of the design's 14,100.
+Together these floors are about 900 a line of the design's 14,200.
 
 ### 7.4 What could not be measured
 
