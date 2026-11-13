@@ -2737,7 +2737,7 @@ The statement stack and node-list pool must be used end to end.
 | `jsx.rs:159` `duplicate_jsx_key` | `let mut spine = smallvec::SmallVec::<[NodeId; 4]>::new();` | per visited node | Converted: duplicate member spines using retained unit node scratch, cleared on success and rejection. | converted |
 | `konst.rs:55` `Work` | `let mut work = vec![Work::Enter(root)];` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `konst.rs:56` `Work` | `let mut values: Vec<(NodeId, bool)> = Vec::new();` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
-| `konst.rs:60` `Work` | `let constant = self.arena.constant(id).clone();` | per visited node | Compound constants are borrowed and block work stores ConstId, never TagInfo; constructor/decorated leaf cloning remains pending. | pending |
+| `konst.rs:60` `Work` | `let constant = self.arena.constant(id).clone();` | per visited node | Compound metadata stays behind source handles; leaf decoding snapshots only scalars and spans in retained spelling storage, never clones Constant. | removed |
 | `konst.rs:177` `Work` | `let children: Vec<_> = values.drain(start..).map(&#124;(node, _)&#124; node).collect();` | per visited node | Block operands use retained cleared constant_children storage. | removed |
 | `mod.rs:190` `children` | `fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>);` | per construct | reusable scratch buffer; clear, do not free | pending |
 | `mod.rs:230` `Work` | `let mut work = vec![Work::Enter(cx, node)];` | per construct | reusable traversal/output/argument buffer retained in lowering state | removed |
@@ -3122,12 +3122,29 @@ tags (1 source / 20,001 constant / 0 primitive visits); primitive constructor bl
 use 20,001 / 10,000 / 30,001, and lists use 30,001 / 20,000 / 40,001. Primitive and
 list fixtures also assert that all 10,000 occurrences create exactly one unit shape
 on the first pass, ruling out a relocated metadata allocation per occurrence.
-Constructor/decorated constant *leaves* still have a separate pending clone path.
+Constructor/decorated constant leaves are covered by the separate proof below.
 
 | Newly found site | Previous ownership | Disposition |
 | --- | --- | --- |
 | `prim::Pmakelist` builtin constructor shape | boxed/name metadata per node | removed: one immutable shape cached in State |
 | `konst::Work::Block` | owning cloned TagInfo in each work entry | removed: source ConstId and scalar field count |
+
+Constant leaves now decode borrowed source payloads into a 16-byte scalar value
+descriptor plus optional comment span. Source spelling and numeric encoding use
+two retained, cleared strings; neither constant nor pointer/constructor metadata
+is cloned. The whole-Lambda 10,000-leaf proof mixes nominal strings/floats/bigints,
+wide runtime constructor integers, runtime bigints, native integer comments,
+polyvariant comments and runtime strings. Warmed probe/realize/release allocates
+zero with unchanged recorded capacities and 10,001 source / 10,000 constant /
+10,001 primitive visits. Nested option tests preserve the distinction between
+nominal undefined (an option-none marker) and decorated constructor undefined.
+
+| Newly found site | Previous ownership | Disposition |
+| --- | --- | --- |
+| `konst` native/runtime integer formatting | fresh `to_string` | removed: retained encoding string |
+| `konst` nominal bigint normalization | parser result and formatted string | removed: caller-owned normalization buffer |
+| `konst` runtime bigint prefix | formatted string | removed: retained encoding string |
+| `konst` constructor/pointer comments | deep constant payload clone | removed: borrowed decoding and retained spelling spans |
 
 ### 7.5.1 Concurrent loop, label and recursive-value additions
 
