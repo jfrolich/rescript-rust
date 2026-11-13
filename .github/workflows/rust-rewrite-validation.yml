@@ -592,11 +592,13 @@ jobs:
                 ./scripts/test_gentype_output_parity.sh
           - suite: analysis
             # The Rust editor analysis against the OCaml analysis snapshots,
-            # and `rescript-tools doc` against the OCaml doc snapshots.
+            # and `rescript-tools doc` and `rescript-tools reanalyze` against
+            # the OCaml doc and reanalyze snapshots.
             run: |
               ./tests/analysis_tests/no-watcher.sh
               ./tests/analysis_tests/test-rust.sh
               ./tests/tools_tests/test-doc-rust.sh
+              ./tests/analysis_tests/tests-reanalyze/test-rust.sh
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-node

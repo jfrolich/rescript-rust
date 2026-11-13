@@ -38,6 +38,11 @@ files, and fails when the project has an error.
 rescript-tools reanalyze --help
 ```
 
+`reanalyze` type-checks the project it runs in, without writing files, and
+reports dead code (`-dce`), exceptions that are thrown but not annotated
+(`-exception`) and possible infinite loops (`-termination`); `-config` reads
+which of them to run from the `reanalyze` section of `rescript.json`.
+
 ## Contributor documentation
 
 - [Migration framework capabilities](src/migrate.md)
