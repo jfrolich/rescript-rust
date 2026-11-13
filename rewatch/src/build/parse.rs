@@ -510,15 +510,11 @@ pub(crate) fn reparse_with_locations(ast: &StoredAst) -> anyhow::Result<StoredAs
     Ok(located)
 }
 
-/// Parse the source of `ast` again with its derived code as syntax, for
-/// `path`: the general path of the switch, or the fallback of a unit whose
-/// plan could not be used. The result keeps a source that parses the same
-/// way, for a later location retry.
+/// Parse the source of `ast` again with its derived code as syntax, for a
+/// unit whose plan could not be used. The result keeps a source that parses
+/// the same way, for a later location retry.
 /// Cost: one frontend run of the unit, and one copy of its source.
-pub(crate) fn reparse_without_plans(
-    ast: &StoredAst,
-    path: rescript_compiler::driver::DerivedPath,
-) -> anyhow::Result<StoredAst> {
+pub(crate) fn reparse_without_plans(ast: &StoredAst) -> anyhow::Result<StoredAst> {
     let source = ast
         .retry_source()
         .ok_or_else(|| anyhow!("missing source for a parse without plans"))?;
@@ -528,13 +524,7 @@ pub(crate) fn reparse_without_plans(
         source_path_for_ast: source.source_path_for_ast.clone(),
         open_deps: source.open_deps.clone(),
         options: rescript_compiler::driver::CompilerOptions {
-            derived_path: path,
-            // The reference compile is not part of the measured build.
-            derived_census: if path == rescript_compiler::driver::DerivedPath::General {
-                None
-            } else {
-                source.options.derived_census.clone()
-            },
+            derived_path: rescript_compiler::driver::DerivedPath::Fallback,
             ..source.options.clone()
         },
     });
@@ -556,6 +546,42 @@ fn census_mut(ast: &mut StoredAst) -> Option<&mut rescript_compiler::derived_cen
         StoredAst::Signature(ast) => &mut Arc::get_mut(ast)?.arena,
     };
     arena.derived_census.as_deref_mut()
+}
+
+/// The general form of the unit `source` holds, for the reference compile of
+/// `RESCRIPT_DERIVED_PATH=check`: its tree with every derived item as
+/// syntax, with location tables when the checked compile has them. Errors
+/// name the file.
+/// Cost: one frontend run of the unit, and one copy of its source.
+pub(crate) fn general_form(
+    source: &ParseSource,
+    locations: bool,
+) -> anyhow::Result<(
+    rescript_compiler::parse_arena::ParseArena,
+    rescript_compiler::parser::ast::Structure,
+)> {
+    let path = source.file_path.display();
+    let general = ParseSource {
+        file_path: source.file_path.clone(),
+        source: source.source.clone(),
+        source_path_for_ast: source.source_path_for_ast.clone(),
+        open_deps: source.open_deps.clone(),
+        options: rescript_compiler::driver::CompilerOptions {
+            derived_path: rescript_compiler::driver::DerivedPath::General,
+            // The reference compile is not part of the measured build.
+            derived_census: None,
+            ..source.options.clone()
+        },
+    };
+    let (_, ast, _) = parse_saved_source(&general, locations)
+        .map_err(|error| anyhow!("parsing {path} again failed: {error}"))?;
+    match ast {
+        StoredAst::Structure(ast) => {
+            let ast = Arc::try_unwrap(ast).map_err(|_| anyhow!("the parse of {path} is shared"))?;
+            Ok((ast.arena, ast.structure))
+        }
+        StoredAst::Signature(_) => Err(anyhow!("{path} is an interface")),
+    }
 }
 
 /// The located arena of a fresh parse of `source`, for placing the warnings

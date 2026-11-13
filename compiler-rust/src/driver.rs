@@ -358,7 +358,7 @@ impl DerivedPath {
 
 /// See [`CompilerOptions::derived_reference`].
 pub type DerivedReference =
-    std::sync::Arc<dyn Fn() -> Option<(crate::parse_arena::ParseArena, Structure)> + Send + Sync>;
+    std::sync::Arc<dyn Fn() -> Result<(crate::parse_arena::ParseArena, Structure)> + Send + Sync>;
 
 /// Compiler options that can be passed to the driver.
 #[derive(Clone)]
@@ -368,8 +368,9 @@ pub struct CompilerOptions {
     /// The path derived items take, read once when options are created.
     pub derived_path: DerivedPath,
     /// For `RESCRIPT_DERIVED_PATH=check`: the frontend's result for the
-    /// unit's source with [`DerivedPath::General`], ready for type checking.
-    /// The reference compile of a check runs on it.
+    /// unit's source with [`DerivedPath::General`], ready for type checking,
+    /// or why the frontend could not give it (the error names the source it
+    /// read). The reference compile of a check runs on it.
     pub derived_reference: Option<DerivedReference>,
     /// Dormant backend migration mode, selected before compiling modules.
     pub backend: crate::bir::shadow::BackendMode,
@@ -9746,9 +9747,10 @@ fn compile_source_in_process_once(
                 &filename,
                 &general_options,
                 &mut String::new(),
-            ).ok()?;
+            )
+            .map_err(|error| anyhow::anyhow!("the frontend failed on {filename}: {error}"))?;
             crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
-            Some((parser.into_arena(), frontend.structure))
+            Ok((parser.into_arena(), frontend.structure))
         }));
     }
 

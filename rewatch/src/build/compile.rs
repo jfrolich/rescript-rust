@@ -3872,6 +3872,17 @@ fn compile_with_location_retry<T>(
     mut compile: impl FnMut(&StoredAst, &rescript_compiler::driver::CompilerOptions) -> Result<T>,
 ) -> Result<T> {
     use rescript_compiler::driver::{DerivedPath, DerivedRetry, LocationRetry};
+    // A check compiles the general form of a unit that has plans as well:
+    // `tree` is the parse being compiled, `source` what it was parsed from.
+    let checked = |tree: &StoredAst,
+                   source: &Arc<super::build_types::ParseSource>,
+                   options: &mut rescript_compiler::driver::CompilerOptions| {
+        if options.derived_path == DerivedPath::Check && tree.arena().plans().item_count() > 0 {
+            let (source, locations) = (source.clone(), tree.arena().stores_locations());
+            options.derived_reference =
+                Some(Arc::new(move || super::parse::general_form(&source, locations)));
+        }
+    };
     let mut attempt = |ast: &StoredAst| {
         let check = options.derived_path == DerivedPath::Check && ast.arena().plans().item_count() > 0;
         match ast.retry_source() {
@@ -3886,19 +3897,7 @@ fn compile_with_location_retry<T>(
                         super::parse::reparse_arena_with_locations(&source)
                     }));
                 }
-                // A check compiles the unit's general form as well.
-                if check {
-                    let ast = ast.clone();
-                    options.derived_reference = Some(Arc::new(move || {
-                        match super::parse::reparse_without_plans(&ast, DerivedPath::General).ok()? {
-                            StoredAst::Structure(general) => {
-                                let general = Arc::try_unwrap(general).ok()?;
-                                Some((general.arena, general.structure))
-                            }
-                            StoredAst::Signature(_) => None,
-                        }
-                    }));
-                }
+                checked(ast, source, &mut options);
                 compile(ast, &options)
             }
             _ => compile(ast, options),
@@ -3911,7 +3910,7 @@ fn compile_with_location_retry<T>(
     let general;
     let (ast, result) = match result {
         Err(error) if error.is::<DerivedRetry>() => {
-            general = super::parse::reparse_without_plans(ast, DerivedPath::Fallback)?;
+            general = super::parse::reparse_without_plans(ast)?;
             let result = attempt(&general);
             (&general, result)
         }
@@ -3935,7 +3934,14 @@ fn compile_with_location_retry<T>(
                 .map(|source| source.file_path.display().to_string())
                 .unwrap_or_default()
         );
-        return super::parse::reparse_with_locations(ast).and_then(|located| compile(&located, options));
+        // The located parse keeps no source of its own: its reference is
+        // made from the source it was parsed from.
+        let located = super::parse::reparse_with_locations(ast)?;
+        let mut options = options.clone();
+        if let Some(source) = ast.retry_source() {
+            checked(&located, source, &mut options);
+        }
+        return compile(&located, &options);
     }
     if !build.parses_with_locations() && result.is_err() {
         // Type errors can quote declarations from dependency interfaces.

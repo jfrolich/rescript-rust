@@ -32,6 +32,17 @@ fn differs(unit: &str, what: &str, detail: String) -> anyhow::Error {
     .into()
 }
 
+/// The check could not run on `unit`: its general form is missing.
+fn no_general_form(unit: &str, error: &anyhow::Error) -> anyhow::Error {
+    UserDiagnostic::new(
+        format!(
+            "RESCRIPT_DERIVED_PATH=check: internal error: {unit} was not checked, its general form could not be made: {error}\n"
+        ),
+        2,
+    )
+    .into()
+}
+
 /// The first line at which two texts differ: its number from 1, and the
 /// line of each (empty past the end of a text). Cost: O(bytes).
 fn first_difference<'a>(plans: &'a str, general: &'a str) -> Option<(usize, &'a str, &'a str)> {
@@ -140,14 +151,14 @@ pub(super) fn until_js(
 
     // The general form of the unit is what the frontend makes of its source
     // with plans off.
-    let Some((general_arena, general_structure)) =
-        options.derived_reference.as_ref().and_then(|frontend| frontend())
-    else {
-        return Err(differs(
-            name,
-            "the compiles",
-            "  the unit's source is not at hand to compile its general form".to_string(),
-        ));
+    // Not having it is a failure of the check itself, never a difference.
+    let general_form = match &options.derived_reference {
+        Some(frontend) => frontend(),
+        None => Err(anyhow::anyhow!("the build gave no source to make it from")),
+    };
+    let (general_arena, general_structure) = match general_form {
+        Ok(general_form) => general_form,
+        Err(error) => return Err(no_general_form(name, &error)),
     };
     let general = UntilJs {
         arena: &general_arena,
