@@ -319,6 +319,13 @@ mod tests {
         assert!(parse(&["rescript", "watch", "--check-only"]).is_err());
     }
 
+    #[test]
+    fn doc_takes_one_source_file() {
+        let cli = parse(&["rescript", "doc", "src/A.res"]).unwrap();
+        assert!(matches!(cli.command, Command::Doc { path } if path == "src/A.res"));
+        assert!(parse(&["rescript", "doc"]).is_err());
+    }
+
     // Default command behaviour.
     #[test]
     fn no_subcommand_defaults_to_build() {
