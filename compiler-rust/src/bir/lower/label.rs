@@ -567,6 +567,72 @@ mod tests {
     }
 
     #[test]
+    fn labelled_loops_with_captured_iteration_variables() {
+        use crate::lambda::{ApInfo, ApplyStatus, DirectionFlag, FunctionAttribute, LamLoc};
+        for form in 0..3 {
+            let mut a = LamArena::new();
+            let id = Ident::new("index", 20, IdentFlags::NONE);
+            let value = a.var(id);
+            let inner = labelled(&mut a);
+            let function_body = a.seq_raw(inner, value);
+            let closure = a.function_(
+                0,
+                &[],
+                function_body,
+                FunctionAttribute::default(),
+                LamLoc::NONE,
+            );
+            let sink = a.var(Ident::new("sink", 21, IdentFlags::NONE));
+            let call = a.apply_raw(
+                sink,
+                &[closure],
+                ApInfo {
+                    status: ApplyStatus::InferFull,
+                    loc: LamLoc::NONE,
+                },
+            );
+            let zero = a.const_(Constant::int(0));
+            let jump = a.break_();
+            let switch =
+                a.string_switch(value, &[("a", jump), ("b", value), ("c", zero)], Some(zero));
+            let body = a.seq_raw(call, switch);
+            let limit = a.var(Ident::new("limit", 22, IdentFlags::NONE));
+            let root = match form {
+                0 => a.for_(id, zero, limit, DirectionFlag::Upto, body),
+                1 => a.for_of(id, limit, body),
+                _ => a.for_await_of(id, limit, body),
+            };
+            super::super::oracle_tests::compare(a, root);
+        }
+    }
+
+    #[test]
+    fn ten_thousand_nested_loops_with_labelled_break_are_linear() {
+        let mut a = LamArena::new();
+        let mut root = labelled(&mut a);
+        let condition = a.const_(Constant::JsTrue);
+        for _ in 1..10_000 {
+            root = a.while_(condition, root);
+        }
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let output = state.probe(Cx::effect(), root).unwrap();
+        assert_eq!(state.loops.len(), 10_000);
+        assert_eq!(state.next_loop_label, 1);
+        assert_eq!(state.loops.iter().filter(|p| p.label.is_some()).count(), 1);
+        assert!(state.loops.last().unwrap().label.is_some());
+        assert_eq!(state.source_steps, 20_005);
+        assert_eq!(state.labels.visits, 30_007);
+        let lowered = state.complete(Cx::effect(), output);
+        lowered
+            .program
+            .arena
+            .validate(Some(lowered.program.root))
+            .unwrap();
+    }
+
+    #[test]
     fn layout() {
         assert_eq!(std::mem::size_of::<Work>(), 16);
         assert_eq!(std::mem::size_of::<Cost>(), 8);

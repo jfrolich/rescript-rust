@@ -1,7 +1,6 @@
 # Backend lowering: level L to level J (S3.3 to S3.9)
 
-Status: specification. S3.3 to S3.6, S3.8, S3.9 and part of S3.7 are
-implemented, in check mode only ([STATUS.md](STATUS.md)). It is the table
+Status: specification. S3.3 to S3.9 are implemented, in check mode only ([STATUS.md](STATUS.md)). It is the table
 [BACKEND_REDESIGN.md](BACKEND_REDESIGN.md) H.1 asks for before stage S3.3
 ("a table mapping each context function of `lam_compile.rs` (A.5) to a
 continuation case"), and the slicing of S3.3 to S3.9. Sections A to I of that
@@ -1245,6 +1244,8 @@ the depth of the case body. Smart constructors drop or keep locations as the
 legacy ones do (for example J-E8 keeps the comment and drops the location of
 a negated literal); the J rules of section 6 are ported with their location
 handling, and the gate with source maps on (8.1) is the judge.
+
+S3.7b validation and measurements: [LOWERING_LOOPS_RECURSIVE_RESULTS.md](LOWERING_LOOPS_RECURSIVE_RESULTS.md).
 
 ## 4. Exits: `Catch` and `Exit`, and loop labels
 

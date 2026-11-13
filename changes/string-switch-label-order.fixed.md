@@ -1,1 +1,0 @@
-Match the reference compiler's label allocation order by lowering a general string switch's default before its grouped cases, while preserving JavaScript case order.
