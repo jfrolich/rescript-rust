@@ -921,6 +921,19 @@ pub(crate) struct LowerPair {
     pub locations: Option<std::sync::Arc<crate::lambda::LamLocTable>>,
 }
 
+/// What the new lowering hands to the shared tail of the gate.
+pub(crate) struct LowerCandidate {
+    pub arena: crate::js_ir::arena::JsArena,
+    /// The top-level statements, effects of the last value included.
+    pub block: Vec<crate::js_ir::arena::Stmt>,
+    /// The exported identifiers after the lowering's coercion, and the
+    /// original identifiers whose names they reserve.
+    pub exports: Vec<crate::ident::Ident>,
+    pub reservations: Vec<crate::ident::Ident>,
+    pub dynamic_imports: Vec<crate::js_ir::ModuleId>,
+    pub stats: super::lower::SwitchStats,
+}
+
 /// Import exactly the simplified root about to enter legacy compile_expr.
 pub(crate) fn prepare_lower(
     arena: &LamArena,
@@ -929,15 +942,7 @@ pub(crate) fn prepare_lower(
     resolver: Option<&crate::js_ir::ModulePathResolver>,
     cross_module_inline: bool,
     check_div_by_zero: bool,
-) -> Result<
-    (
-        crate::js_ir::arena::JsArena,
-        crate::lambda::lam_compile::Compiled,
-        Vec<crate::js_ir::ModuleId>,
-        super::lower::SwitchStats,
-    ),
-    LowerFailure,
-> {
+) -> Result<LowerCandidate, LowerFailure> {
     let (input, catch_only) = super::bridge::import_for_lowering(arena, root);
     let input = input.map_err(|reason| match reason.0 {
         "shared Lambda subtree with binder" | "shared Lambda expansion" => LowerFailure::Unsupported(reason, catch_only),
@@ -950,8 +955,8 @@ pub(crate) fn prepare_lower(
         .validate(Some(lowered.program.root))
         .map_err(|error| LowerFailure::Error(anyhow::anyhow!("lower validation: {error}")))?;
     // bridge_j's exporter uses expr_with/stmt_with and alloc_* only: no
-    // smart constructor and no normalize. The last SExp transports Out::value.
-    let mut exported = super::bridge_j::export_js(&lowered.program)
+    // smart constructor and no normalize.
+    let exported = super::bridge_j::export_js(&lowered.program)
         .map_err(|error| LowerFailure::Error(anyhow::anyhow!("lower export: {error}")))?;
     super::j::write_stats(lowered.program.arena.j_stats)
         .map_err(|error| LowerFailure::Error(anyhow::anyhow!("J normalisation stats: {error}")))?;
@@ -967,31 +972,14 @@ pub(crate) fn prepare_lower(
         compare_lower_text("P1", "probe vs direct", &print(&direct), &print(&exported))
             .map_err(LowerFailure::Error)?;
     }
-    let value =
-        exported.program.block.pop().ok_or_else(|| {
-            LowerFailure::Error(anyhow::anyhow!("lower export lacks output value"))
-        })?;
-    let crate::js_ir::arena::StmtKind::Exp(expr) = exported.program.arena.sk(value) else {
-        return Err(LowerFailure::Error(anyhow::anyhow!(
-            "lower export value is not SExp"
-        )));
-    };
-    use crate::lambda::lam_compile::OutputFinished;
-    let finished = match lowered.finished {
-        super::lower::Finished::True => OutputFinished::True,
-        super::lower::Finished::False => OutputFinished::False,
-        super::lower::Finished::Dummy => OutputFinished::Dummy,
-    };
-    Ok((
-        exported.program.arena,
-        crate::lambda::lam_compile::Compiled {
-            prelude: exported.program.block,
-            expr,
-            finished,
-        },
-        lowered.dynamic_imports,
-        lowered.switch_stats,
-    ))
+    Ok(LowerCandidate {
+        arena: exported.program.arena,
+        block: exported.program.block,
+        exports: lowered.coerced.exports,
+        reservations: lowered.coerced.reservations,
+        dynamic_imports: lowered.dynamic_imports,
+        stats: lowered.switch_stats,
+    })
 }
 
 /// Two independent texts through the legacy ES module printer; when requested,
