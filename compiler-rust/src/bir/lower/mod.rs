@@ -10,6 +10,7 @@ mod expr;
 mod konst;
 mod prim;
 mod record;
+mod rec;
 mod import;
 mod jsx;
 mod prim_cmp;
@@ -322,6 +323,7 @@ enum ModuleConstants {
 }
 
 struct State {
+    rec_values: Vec<Option<NodeId>>,
     switches: Vec<Option<switch::Plan>>,
     variants: Vec<Option<variant::Plan>>,
     untagged: Vec<Option<untagged::Plan>>,
@@ -404,6 +406,7 @@ impl State {
             .map(|i| input.arena.vars.order(VarId(i as u32)))
             .max().unwrap_or(0).checked_add(1).expect("identifier order capacity");
         Self {
+            rec_values: Vec::new(),
             switch_facts: vec![switch::Facts::default(); input.arena.nodes.len()],
             switches: Vec::new(), variants: Vec::new(), untagged: Vec::new(), switch_work: Vec::new(), switch_pairs: Vec::new(),
             switch_primitive_hashes: Vec::new(), switch_constant_hashes: Vec::new(),
@@ -572,7 +575,7 @@ impl ProbeRules for State {
             View::Seq { first, second } => {
                 return Ok(ProbePlan::Children(expr::Resume::Seq { first, second }));
             }
-            View::LetRec { .. } => return Err(Unsupported("let rec")),
+            View::LetRec { .. } => return Ok(ProbePlan::Children(expr::Resume::Rec(self.recursive_group(node)?))),
             View::Prim { primitive, args }
                 if matches!(
                     self.arena.primitive(primitive).primitive,
