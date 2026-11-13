@@ -69,13 +69,16 @@ pub struct Graph {
     pub level: u32,
     pub mode: Mode,
     pub trail: Vec<Change>,
-    speculation_depth: usize,
+    pub(crate) speculation_depth: usize,
     pub(crate) work: Vec<Ty>,
     pub(crate) forward: Vec<super::template::Forward>,
     pub(crate) copy_generation: u32,
     pub(crate) template_nodes: Vec<Node>,
     pub(crate) template_lists: Vec<Ty>,
     pub(crate) template_params: Vec<Param>,
+    pub(crate) template_pools: Vec<super::template::TemplatePools>,
+    pub(crate) template_externals: Vec<Ty>,
+    pub(crate) instance_externals: Vec<Ty>,
 }
 
 impl Default for Graph {
@@ -95,6 +98,9 @@ impl Default for Graph {
             template_nodes: Vec::new(),
             template_lists: Vec::new(),
             template_params: Vec::new(),
+            template_pools: Vec::new(),
+            template_externals: Vec::new(),
+            instance_externals: Vec::new(),
         }
     }
 }
@@ -110,6 +116,7 @@ impl Graph {
         self.params.clear();
         self.forward.clear();
         self.work.clear();
+        self.instance_externals.clear();
     }
 
     /// Amortized O(1); each call allocates a distinct occurrence.
@@ -198,22 +205,38 @@ impl Graph {
     /// the walked path. Count one step per followed link and rewritten node:
     /// at most two per link, one for an already direct link. Writes use the
     /// speculative trail. This preserves compiler/ml/btype.ml's representative.
-    pub fn repr(&mut self, mut ty: Ty) -> Ty {
+    #[inline]
+    pub fn repr(&mut self, ty: Ty) -> Ty {
+        Self::repr_parts(&mut self.nodes, &mut self.trail, self.speculation_depth, ty)
+    }
+
+    /// O(links), at most two steps per link. Split borrows let pool iterators
+    /// resolve external references without borrowing the entire graph.
+    #[inline]
+    pub(crate) fn repr_parts(
+        nodes: &mut [Node],
+        trail: &mut Vec<Change>,
+        depth: usize,
+        mut ty: Ty,
+    ) -> Ty {
         let mut root = ty;
-        while self.nodes[root.0 as usize].tag() == LINK {
+        while nodes[root.0 as usize].tag() == LINK {
             #[cfg(test)]
             super::steps::tick();
-            root = Ty(self.nodes[root.0 as usize].a);
+            root = Ty(nodes[root.0 as usize].a);
         }
         while ty != root {
-            let node = self.nodes[ty.0 as usize];
+            let node = nodes[ty.0 as usize];
             let next = Ty(node.a);
             if next == root {
                 break;
             }
             #[cfg(test)]
             super::steps::tick();
-            self.write(ty, Node { a: root.0, ..node });
+            if depth != 0 {
+                trail.push(Change { ty, before: node });
+            }
+            nodes[ty.0 as usize] = Node { a: root.0, ..node };
             ty = next;
         }
         root

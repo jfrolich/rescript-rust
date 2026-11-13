@@ -17,6 +17,7 @@ impl Graph {
 
     /// O(arity), one push per edge, no allocation per node. With `memo`,
     /// also visit the constructor abbreviation memo, as generalize does.
+    #[inline(always)]
     pub(crate) fn children(&mut self, node: Node, memo: bool) {
         match node.tag() {
             VAR => {}

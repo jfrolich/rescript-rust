@@ -203,7 +203,7 @@ mod tests {
     }
 }
 
-/// The kernel's four-word range shape avoids a 65,535-node scheme limit.
+/// Four words, with a pool-range index, avoiding a 65,535-node scheme limit.
 /// References use bit 30 for instance-relative indices; bit 31 stays reserved
 /// for frozen handles. A zero-node template holds an external root in nodes.
 #[derive(Clone, Copy, Debug)]
@@ -211,8 +211,20 @@ mod tests {
 pub struct Template {
     pub nodes: u32,
     pub node_len: u32,
-    pub lists: u32,
+    pub pools: u32,
     pub list_len: u32,
+}
+
+/// Cold ranges read once per instance, not per node. Parameter metadata and
+/// external references are pools separate from the four-byte list slots.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub(crate) struct TemplatePools {
+    lists: u32,
+    params: u32,
+    param_len: u32,
+    externals: u32,
+    external_len: u32,
 }
 
 const RELATIVE: u32 = 1 << 30;
@@ -224,7 +236,10 @@ impl Graph {
         let ty = self.repr(ty);
         let node = self.nodes[ty.0 as usize];
         if node.level != GENERIC {
-            return ty;
+            let external = self.template_externals.len() as u32;
+            assert!(external < RELATIVE);
+            self.template_externals.push(ty);
+            return Ty(external);
         }
         let row = self.forward[ty.0 as usize];
         if row.generation == self.copy_generation {
@@ -247,6 +262,15 @@ impl Graph {
     /// Captures the scheme's generic structure by value; callers must capture
     /// again after changing it or generalizing an external reference.
     pub fn capture(&mut self, root: Ty) -> Template {
+        let root = self.repr(root);
+        if self.nodes[root.0 as usize].level != GENERIC {
+            return Template {
+                nodes: root.0,
+                node_len: 0,
+                pools: 0,
+                list_len: 0,
+            };
+        }
         self.copy_generation = self
             .copy_generation
             .checked_add(1)
@@ -254,15 +278,9 @@ impl Graph {
         self.work.clear();
         let base = self.template_nodes.len() as u32;
         let lists = self.template_lists.len() as u32;
-        let root = self.capture_ref(root, base);
-        if root.0 & RELATIVE == 0 {
-            return Template {
-                nodes: root.0,
-                node_len: 0,
-                lists,
-                list_len: 0,
-            };
-        }
+        let params = self.template_params.len() as u32;
+        let externals = self.template_externals.len() as u32;
+        self.capture_ref(root, base);
         let mut cursor = 0;
         while cursor < self.work.len() {
             let source = self.work[cursor];
@@ -281,7 +299,7 @@ impl Graph {
                         let ty = self.capture_ref(param.ty, base);
                         self.template_params.push(Param { ty, ..param });
                     }
-                    node.b = start;
+                    node.b = start - params;
                 }
                 CONSTR | TUPLE => {
                     let old = node.b + u32::from(node.tag() == CONSTR);
@@ -303,74 +321,120 @@ impl Graph {
             }
             self.template_nodes[target as usize] = node;
         }
+        let pools = self.template_pools.len() as u32;
+        self.template_pools.push(TemplatePools {
+            lists,
+            params,
+            param_len: self.template_params.len() as u32 - params,
+            externals,
+            external_len: self.template_externals.len() as u32 - externals,
+        });
         Template {
             nodes: base,
             node_len: self.template_nodes.len() as u32 - base,
-            lists,
+            pools,
             list_len: self.template_lists.len() as u32 - lists,
         }
     }
 
-    /// O(1) for relative references, O(link depth) for external references.
-    fn instance_ref(&mut self, ty: Ty, base: u32) -> Ty {
-        if ty.0 == NONE {
-            return ty;
-        }
-        if ty.0 & RELATIVE != 0 {
-            return Ty(base + (ty.0 & !RELATIVE));
-        }
-        let ty = self.repr(ty);
-        assert_ne!(
-            self.nodes[ty.0 as usize].level, GENERIC,
-            "recapture after external generalization"
-        );
-        ty
-    }
-
-    /// O(template nodes + list slots + parameter slots + external links).
-    /// One pass: exactly one step per node and per list/parameter slot, no
-    /// forwarding lookup, placeholder write or recursive call. Each use gets
+    /// O(template nodes + list/parameter slots + external references + links).
+    /// Validate external references once, then copy each node and slot once.
+    /// Exact-size iterators reserve each pool once: no per-node growth check,
+    /// placeholder write, forwarding lookup or recursive call. Each use gets
     /// distinct generic nodes (compiler/ml/ctype.ml:747-780).
     pub fn instance(&mut self, template: Template) -> Ty {
         if template.node_len == 0 {
-            return self.instance_ref(Ty(template.nodes), 0);
+            let root = self.repr(Ty(template.nodes));
+            assert_ne!(
+                self.nodes[root.0 as usize].level, GENERIC,
+                "recapture after external generalization"
+            );
+            return root;
         }
-        let base = self.nodes.len() as u32;
-        let lists = self.lists.len() as u32;
-        self.nodes.reserve(template.node_len as usize);
-        self.forward.reserve(template.node_len as usize);
-        self.lists.reserve(template.list_len as usize);
-        for i in 0..template.list_len {
+        let pools = self.template_pools[template.pools as usize];
+        let Self {
+            nodes,
+            lists,
+            params,
+            forward,
+            template_nodes,
+            template_lists,
+            template_params,
+            template_externals,
+            instance_externals,
+            trail,
+            speculation_depth,
+            level,
+            ..
+        } = self;
+        let base = nodes.len() as u32;
+        let list_base = lists.len() as u32;
+        let param_base = params.len() as u32;
+        assert!(nodes.len() + (template.node_len as usize) < (1 << 30));
+        if pools.external_len != 0 {
+            instance_externals.clear();
+            let external_source = &template_externals
+                [pools.externals as usize..(pools.externals + pools.external_len) as usize];
+            instance_externals.extend(external_source.iter().map(|&ty| {
+                let ty = Self::repr_parts(nodes, trail, *speculation_depth, ty);
+                assert_ne!(
+                    nodes[ty.0 as usize].level, GENERIC,
+                    "recapture after external generalization"
+                );
+                ty
+            }));
+        }
+        let at = |ty: Ty| {
+            if ty.0 == NONE {
+                ty
+            } else if ty.0 & RELATIVE != 0 {
+                Ty(base + (ty.0 & !RELATIVE))
+            } else {
+                instance_externals[(ty.0 - pools.externals) as usize]
+            }
+        };
+        // Dense forwarding storage is initialized once, in bulk, not pushed
+        // with a separate growth check for every node.
+        forward.resize(nodes.len() + template.node_len as usize, Forward::default());
+        let slots =
+            &template_lists[pools.lists as usize..(pools.lists + template.list_len) as usize];
+        lists.extend(slots.iter().map(|&ty| {
             #[cfg(test)]
             super::steps::tick();
-            let ty = self.template_lists[(template.lists + i) as usize];
-            let ty = self.instance_ref(ty, base);
-            self.lists.push(ty);
+            at(ty)
+        }));
+        if pools.param_len != 0 {
+            let arguments =
+                &template_params[pools.params as usize..(pools.params + pools.param_len) as usize];
+            params.extend(arguments.iter().map(|&param| {
+                #[cfg(test)]
+                super::steps::tick();
+                Param {
+                    ty: at(param.ty),
+                    ..param
+                }
+            }));
         }
-        for i in 0..template.node_len {
+        let source =
+            &template_nodes[template.nodes as usize..(template.nodes + template.node_len) as usize];
+        nodes.extend(source.iter().map(|&original| {
             #[cfg(test)]
             super::steps::tick();
-            let mut node = self.template_nodes[(template.nodes + i) as usize];
-            node.level = self.level;
+            let mut node = Node {
+                level: *level,
+                ..original
+            };
             match node.tag() {
                 VAR => {}
                 ARROW => {
-                    node.a = self.instance_ref(Ty(node.a), base).0;
-                    let start = self.params.len() as u32;
-                    for j in 0..node.arity() {
-                        #[cfg(test)]
-                        super::steps::tick();
-                        let param = self.template_params[(node.b + j) as usize];
-                        let ty = self.instance_ref(param.ty, base);
-                        self.params.push(Param { ty, ..param });
-                    }
-                    node.b = start;
+                    node.a = at(Ty(node.a)).0;
+                    node.b += param_base;
                 }
-                CONSTR | TUPLE => node.b += lists,
+                CONSTR | TUPLE => node.b += list_base,
                 _ => panic!("invalid template descriptor"),
             }
-            self.push(node);
-        }
+            node
+        }));
         Ty(base)
     }
 }
@@ -382,6 +446,7 @@ mod template_tests {
     #[test]
     fn template_size() {
         assert_eq!(std::mem::size_of::<Template>(), 16);
+        assert_eq!(std::mem::size_of::<TemplatePools>(), 20);
     }
     #[test]
     fn capture_and_instance_ten_thousand_deep() {
@@ -408,7 +473,7 @@ mod template_tests {
                 let mut template = Template {
                     nodes: 0,
                     node_len: 0,
-                    lists: 0,
+                    pools: 0,
                     list_len: 0,
                 };
                 assert_eq!(steps::scope(|| template = g.capture(root)), 10000 + 9999);
