@@ -291,6 +291,11 @@ pub struct TypedArena {
     /// What the checker recorded for `Tstr_derived` items, indexed by the
     /// plan's handles.
     pub derived: crate::types::derived::DerivedTable,
+    /// The `let` items the checker left out of their structure's signature
+    /// and environment (`@law`, when checks are left out), by the start of
+    /// their binding list: Lambda translation skips them. Empty for a file
+    /// without checks.
+    pub left_out_values: Vec<u32>,
 }
 
 /// Accessors for the cold data of expressions and patterns. Records are

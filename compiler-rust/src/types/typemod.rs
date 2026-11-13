@@ -16866,6 +16866,48 @@ fn type_structure_item<'a>(
             let (typed_bindings, new_env) =
                 type_binding(tctx, env, *rec_flag, arena.vb_list(*bindings))?;
 
+            // A check (`@law`) is a statement about the program and no part
+            // of it: its name is not added to the environment, so nothing
+            // can refer to it. A build leaves it out of the signature too,
+            // and Lambda translation then skips it; `rescript verify`
+            // exports it. O(1) for a file without checks.
+            if arena.has_verify_annotations()
+                && typed_bindings
+                    .iter()
+                    .any(|vb| crate::verify::laws::is_check(arena, &vb.vb_attributes))
+            {
+                let mut sig_items = Vec::new();
+                for vb in &typed_bindings {
+                    push_sig_values_from_env_pattern(
+                        &tctx.typed,
+                        &new_env,
+                        tctx.typed.pattern(vb.vb_pat),
+                        &mut sig_items,
+                    );
+                }
+                // Nothing uses a check by name.
+                for item in &sig_items {
+                    if let crate::types::decl::SignatureItem::SigValue(id, vd) = item {
+                        let loc = tctx.type_ctx.resolve_loc(vd.val_loc);
+                        tctx.mark_value_used(&new_env, id.name_atom(), loc);
+                    }
+                }
+                let bindings = tctx.typed.push_value_bindings(typed_bindings);
+                if !tctx.keep_checks {
+                    sig_items.clear();
+                    tctx.typed.left_out_values.push(bindings.start());
+                }
+                return Ok((
+                    StructureItem {
+                        str_desc: StructureItemDesc::Tstr_value(*rec_flag, bindings),
+                        str_loc: loc,
+                        str_env: EnvRef(0),
+                    },
+                    sig_items,
+                    env.clone(),
+                ));
+            }
+
             // typemod.ml type_structure: the environment keeps let-bound
             // values without attributes, so uses in this module do not warn.
             // The signature carries their `deprecated` attributes, so uses
