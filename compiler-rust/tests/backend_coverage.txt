@@ -23,8 +23,8 @@
       "unsupported": {}
     },
     "runtime": {
-      "identical": 226,
-      "units": 226,
+      "identical": 113,
+      "units": 113,
       "unsupported": {}
     },
     "tests/tests": {
@@ -111,11 +111,11 @@
       }
     },
     "runtime": {
-      "identical": 206,
+      "identical": 103,
       "shared_catch_only": 0,
-      "units": 226,
+      "units": 113,
       "unsupported": {
-        "loop": 20
+        "loop": 10
       }
     },
     "tests/tests": {
