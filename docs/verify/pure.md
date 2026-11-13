@@ -41,6 +41,7 @@ program rely on exactly that:
 Compute. Call other pure functions, build and take apart data, raise and
 catch exceptions, loop, recurse.
 
+<!-- example: pure-compute -->
 ```rescript
 type shape = Circle(float) | Rect(float, float)
 
@@ -51,10 +52,12 @@ let area = shape =>
   | Rect(w, h) => w *. h
   }
 ```
+<!-- /example -->
 
 It may also change values it creates itself. Nobody else can see them until
 the function returns them:
 
+<!-- example: pure-local -->
 ```rescript
 @pure
 let evens = xs => {
@@ -67,11 +70,13 @@ let evens = xs => {
   out
 }
 ```
+<!-- /example -->
 
 ### What it may not do
 
 Change something it was given:
 
+<!-- example: pure-argument -->
 ```rescript
 @pure
 let addItem = (items, item) => {
@@ -96,9 +101,11 @@ let addItem = (items, item) => {
   bound to a literal (`[]`, `{...}`, `dict{}`), to `ref(...)`, or to a call of
   a @pure external that returns a new value.
 ```
+<!-- /example -->
 
 Read or change state outside itself, or call something that does:
 
+<!-- example: pure-state -->
 ```rescript
 let counter = ref(0)
 
@@ -108,9 +115,11 @@ let next = () => counter.contents + 1 // `counter` ... its type lets it change
 @pure
 let stamp = text => `${text} at ${Date.now()->Float.toString}` // `Date.now` is not marked @pure
 ```
+<!-- /example -->
 
 Return a function that keeps state:
 
+<!-- example: pure-closure -->
 ```rescript
 @pure
 let counter = () => {
@@ -121,12 +130,14 @@ let counter = () => {
   }
 }
 ```
+<!-- /example -->
 
 ### Functions of the same file
 
 A function of the same file needs no annotation. The compiler looks into it
 the first time a pure binding uses it, and reports where it stops being pure:
 
+<!-- example: pure-helpers -->
 ```rescript
 let trace = x => {
   Console.log(x)
@@ -142,6 +153,7 @@ let f = x => trace(x)
 
   Line 2: The external `Console.log` is not marked @pure.
 ```
+<!-- /example -->
 
 Only what crosses a file needs an annotation: a pure binding can use a value
 of another file when its declaration there (in the interface, when the file
@@ -152,10 +164,16 @@ has one) says `@pure`.
 A pure function may call a function it is given. It is then as pure as that
 function:
 
+<!-- example: pure-arguments -->
 ```rescript
 @pure
 let twice = (f, x) => f(f(x))
+
+// The argument is checked here, where it is written.
+@pure
+let fourth = x => twice(n => n * n, x)
 ```
+<!-- /example -->
 
 Called from a pure binding, the argument is checked there, so the whole call
 is pure. Called from ordinary code with a function that logs, `twice` logs.
@@ -163,6 +181,10 @@ is pure. Called from ordinary code with a function that logs, `twice` logs.
 
 ### `@mutates`
 
+A `@mutates` function is checked like a pure one, except that it may change
+its first argument. A pure function may call it on a value it created:
+
+<!-- example: pure-mutates -->
 ```rescript
 type buffer = {mutable items: array<string>, mutable size: int}
 
@@ -171,12 +193,7 @@ let add = (buffer, item) => {
   buffer.items = buffer.items->Array.concat([item])
   buffer.size = buffer.size + 1
 }
-```
 
-A `@mutates` function is checked like a pure one, except that it may change
-its first argument. A pure function may call it on a value it created:
-
-```rescript
 @pure
 let fromArray = items => {
   let buffer = {items: [], size: 0}
@@ -184,6 +201,7 @@ let fromArray = items => {
   buffer
 }
 ```
+<!-- /example -->
 
 The standard library's mutating functions are marked this way
 (`Array.push`, `Array.sort`, `Dict.set`, `Map.set`, `Set.add`, ...), which is
@@ -194,7 +212,9 @@ how the compiler knows that `xs->Array.push(x)` changes `xs`.
 The compiler cannot see JavaScript. An external is taken to have an effect
 unless its declaration says otherwise, and then it is taken on trust:
 
-```rescript
+<!-- example: pure-externals -->
+```
+<!-- /example -->rescript
 @pure @val external parseFloat: string => float = "parseFloat"
 @mutates @send external reverse: array<'a> => unit = "reverse"
 ```
@@ -209,21 +229,25 @@ An annotation in a signature is a requirement on whatever is matched against
 it. The implementation needs no annotation of its own; it is checked as if it
 had one:
 
+<!-- example: pure-interface -->
 ```rescript
-// Counter.resi
-@pure
-let next: int => int
-
-// Counter.res
-let calls = ref(0)
-let next = n => {
-  calls := calls.contents + 1 // This changes `calls`, and it is defined outside this function
-  n + 1
+module Counter: {
+  @pure
+  let next: int => int
+} = {
+  let calls = ref(0)
+  let next = n => {
+    calls := calls.contents + 1 // This changes `calls`, and it is defined outside this function
+    n + 1
+  }
 }
 ```
+<!-- /example -->
 
-This is one rule for interface files, module types and functor arguments:
+It is one rule for interface files (`.resi`), signatures written on a module,
+module types and functor arguments:
 
+<!-- example: pure-functor -->
 ```rescript
 module type Ord = {
   type t
@@ -238,6 +262,7 @@ module Max = (O: Ord) => {
 
 module StringMax = Max(String) // String.compare is @pure
 ```
+<!-- /example -->
 
 ## Reference
 
