@@ -1,0 +1,1 @@
+- Restore tracked support for derived diagnostic fixtures and exercise all derive modes in the build-test runner.

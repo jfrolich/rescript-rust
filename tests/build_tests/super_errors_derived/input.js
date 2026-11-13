@@ -2,7 +2,7 @@
 
 // Diagnostics and warnings of code the built-in derive generates. Each
 // fixture directory is built as a project that enables the derive
-// (`ppx-flags`) together with lib/Spice.res, the library the generated code
+// (`ppx-flags`) together with support/Spice.res, the library the generated code
 // calls, and the diagnostics the build writes to
 // `lib/rescript/.compiler.log` are compared with the snapshot. A fixture that
 // compiles has an empty snapshot unless it warns.
@@ -22,7 +22,7 @@ import { normalizeNewlines } from "#dev/utils";
 
 const fixturesDir = path.join(import.meta.dirname, "fixtures");
 const expectedDir = path.join(import.meta.dirname, "expected");
-const libDir = path.join(import.meta.dirname, "lib");
+const supportDir = path.join(import.meta.dirname, "support");
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
 
 const fixtures = readdirSync(fixturesDir)
@@ -79,7 +79,7 @@ async function runFixture(fixtureName) {
   );
   try {
     await fs.mkdir(path.join(projectDir, "src"));
-    for (const dir of [libDir, fixtureDir]) {
+    for (const dir of [supportDir, fixtureDir]) {
       for (const name of await fs.readdir(dir)) {
         if (name.endsWith(".res") || name.endsWith(".resi")) {
           await fs.copyFile(
