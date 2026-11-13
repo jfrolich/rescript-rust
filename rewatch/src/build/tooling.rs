@@ -110,7 +110,7 @@ struct Runtime {
 
 impl Runtime {
     fn load(root: &Path) -> Option<Runtime> {
-        let config = packages::read_config(root).ok()?;
+        let config = super::snapshot::runtime_config(root).ok()?;
         // The runtime ships its sources at its root; `path` is its artifact
         // directory, the runtime compile's `-I`.
         let path = packages::get_build_path(root);
@@ -403,4 +403,22 @@ pub fn run_command(build_state: &BuildCommandState, cwd: PathBuf, args: Vec<Stri
             .map_err(|_| anyhow!("the tooling command panicked"))?
             .map_err(|err| anyhow!(err))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn published_runtime_without_config_is_visible_to_tooling() {
+        let root = tempfile::tempdir().unwrap();
+        let implementation = root.path().join("Stdlib_List.res");
+        let interface = root.path().join("Stdlib_List.resi");
+        std::fs::write(&implementation, "let value = 1\n").unwrap();
+        std::fs::write(&interface, "let value: int\n").unwrap();
+        let runtime = Runtime::load(root.path()).expect("published runtime is discoverable");
+        assert_eq!(runtime.modules.get("Stdlib_List"), Some(&implementation));
+        assert_eq!(Runtime::interface(&implementation), Some(interface));
+        assert_eq!(runtime.config.name, "@rescript/runtime");
+    }
 }
