@@ -718,9 +718,11 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         // The callers inline `Matching.for_function`, which lowers the dict
         // patterns of the cases.
         let arena = crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b);
+        let store = full_matching::PatStore::default();
+        let pa = full_matching::PatArena::new(self.ta, &store);
         let env = full_matching::MatchEnv {
             ctx_ref: self.type_ctx,
-            ta: self.ta,
+            pa: &pa,
             arena: &arena,
             next_raise_count: &mut self.next_static_raise,
         };
@@ -744,9 +746,11 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         self.sync_matching_stamps();
         let loc = self.loc(loc);
         let arena = crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b);
+        let store = full_matching::PatStore::default();
+        let pa = full_matching::PatArena::new(self.ta, &store);
         let env = full_matching::MatchEnv {
             ctx_ref: self.type_ctx,
-            ta: self.ta,
+            pa: &pa,
             arena: &arena,
             next_raise_count: &mut self.next_static_raise,
         };
@@ -765,9 +769,11 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         self.sync_matching_stamps();
         let loc = self.loc(loc);
         let arena = crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b);
+        let store = full_matching::PatStore::default();
+        let pa = full_matching::PatArena::new(self.ta, &store);
         let env = full_matching::MatchEnv {
             ctx_ref: self.type_ctx,
-            ta: self.ta,
+            pa: &pa,
             arena: &arena,
             next_raise_count: &mut self.next_static_raise,
         };
@@ -783,9 +789,11 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
     ) -> RawLambda {
         self.sync_matching_stamps();
         let arena = crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b);
+        let store = full_matching::PatStore::default();
+        let pa = full_matching::PatArena::new(self.ta, &store);
         let env = full_matching::MatchEnv {
             ctx_ref: self.type_ctx,
-            ta: self.ta,
+            pa: &pa,
             arena: &arena,
             next_raise_count: &mut self.next_static_raise,
         };
@@ -804,9 +812,11 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         self.sync_matching_stamps();
         let loc = self.loc(loc);
         let arena = crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b);
+        let store = full_matching::PatStore::default();
+        let pa = full_matching::PatArena::new(self.ta, &store);
         let env = full_matching::MatchEnv {
             ctx_ref: self.type_ctx,
-            ta: self.ta,
+            pa: &pa,
             arena: &arena,
             next_raise_count: &mut self.next_static_raise,
         };

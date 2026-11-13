@@ -9202,11 +9202,14 @@ impl<'p, 'a, B: RawLambdaBuilder> Clone for MatchCx<'p, 'a, B> {
 }
 
 /// The translation state a match is compiled in.
-pub struct MatchEnv<'a, B: RawLambdaBuilder> {
+pub struct MatchEnv<'p, 'a, B: RawLambdaBuilder> {
     /// The type context the patterns' types live in.
     pub ctx_ref: &'a TypeContext,
-    /// The typed tree the patterns live in.
-    pub ta: &'a TypedArena,
+    /// The patterns of the match: the typed tree's, and the ones its caller
+    /// or the match compiler allocate in the overlay. A caller without typed
+    /// patterns (a derived item) builds its cases there from constructor
+    /// descriptions.
+    pub pa: &'p PatArena<'p>,
     /// The arenas the compiled Lambda and its locations are built in.
     pub arena: &'a LocArena<'a, B>,
     /// The static-raise counter, shared with the rest of the translation.
@@ -9215,46 +9218,28 @@ pub struct MatchEnv<'a, B: RawLambdaBuilder> {
 
 /// `Matching.compile_matching` on the cases of `Matching.for_function`,
 /// `for_trywith` or `for_let`, which all lower their dict patterns first
-/// (`lower_dict_patterns`).
-pub fn compile_matching<B: RawLambdaBuilder>(
-    env: MatchEnv<'_, B>,
-    handler_fun: impl FnOnce() -> RawLambda,
-    arg: RawLambda,
-    pat_act_list: Vec<(&Pattern, CaseAction)>,
-    partial: Partial,
-) -> RawLambda {
-    let MatchEnv {
-        ctx_ref,
-        ta,
-        arena,
-        next_raise_count,
-    } = env;
-    let store = PatStore::default();
-    let pa = PatArena::new(ta, &store);
-    let pat_act_list = lower_dict_patterns(ctx_ref, &pa, pat_act_list);
-    compile_matching_unresolved(
-        MatchCx {
-            ctx_ref,
-            pa: &pa,
-            arena,
-            cp: &CtxPool::default(),
-        },
-        handler_fun,
-        arg,
-        pat_act_list,
-        partial,
-        next_raise_count,
-    )
-}
-
-fn compile_matching_unresolved<'p, B: RawLambdaBuilder>(
-    cx: MatchCx<'p, '_, B>,
+/// (`lower_dict_patterns`). The patterns live in `env.pa`: in the typed tree
+/// or in the overlay.
+pub fn compile_matching<'p, B: RawLambdaBuilder>(
+    env: MatchEnv<'p, '_, B>,
     handler_fun: impl FnOnce() -> RawLambda,
     arg: RawLambda,
     pat_act_list: Vec<(&'p Pattern, CaseAction)>,
     partial: Partial,
-    next_raise_count: &mut i32,
 ) -> RawLambda {
+    let MatchEnv {
+        ctx_ref,
+        pa,
+        arena,
+        next_raise_count,
+    } = env;
+    let pat_act_list = lower_dict_patterns(ctx_ref, pa, pat_act_list);
+    let cx = MatchCx {
+        ctx_ref,
+        pa,
+        arena,
+        cp: &CtxPool::default(),
+    };
     let MatchCx { pa, arena, cp, .. } = cx;
     let b = arena.b;
     let partial = check_partial_single(pa, &pat_act_list, partial);
@@ -9343,11 +9328,11 @@ pub fn partial_function<B: RawLambdaBuilder>(arena: &LocArena<'_, B>, loc: Locat
 
 /// Compile a match for a function body.
 /// Equivalent to OCaml's `for_function`.
-pub fn for_function<B: RawLambdaBuilder>(
-    env: MatchEnv<'_, B>,
+pub fn for_function<'p, B: RawLambdaBuilder>(
+    env: MatchEnv<'p, '_, B>,
     loc: Location,
     param: RawLambda,
-    pat_act_list: Vec<(&Pattern, CaseAction)>,
+    pat_act_list: Vec<(&'p Pattern, CaseAction)>,
     partial: Partial,
 ) -> RawLambda {
     let arena = env.arena;
@@ -9363,10 +9348,10 @@ pub fn for_function<B: RawLambdaBuilder>(
 
 /// Compile a match for a try-with handler.
 /// Equivalent to OCaml's `for_trywith`.
-pub fn for_trywith<B: RawLambdaBuilder>(
-    env: MatchEnv<'_, B>,
+pub fn for_trywith<'p, B: RawLambdaBuilder>(
+    env: MatchEnv<'p, '_, B>,
     param: RawLambda,
-    pat_act_list: Vec<(&Pattern, CaseAction)>,
+    pat_act_list: Vec<(&'p Pattern, CaseAction)>,
 ) -> RawLambda {
     let b = env.arena.b;
     let param_clone = param;
@@ -9381,11 +9366,11 @@ pub fn for_trywith<B: RawLambdaBuilder>(
 
 /// Simple let matching.
 /// Equivalent to OCaml's `simple_for_let`.
-pub fn simple_for_let<B: RawLambdaBuilder>(
-    env: MatchEnv<'_, B>,
+pub fn simple_for_let<'p, B: RawLambdaBuilder>(
+    env: MatchEnv<'p, '_, B>,
     loc: Location,
     param: RawLambda,
-    pat: &Pattern,
+    pat: &'p Pattern,
     body: RawLambda,
 ) -> RawLambda {
     let arena = env.arena;
@@ -9401,11 +9386,11 @@ pub fn simple_for_let<B: RawLambdaBuilder>(
 
 /// Compile a let binding match (with optimization for simple cases).
 /// Equivalent to OCaml's `for_let`.
-pub fn for_let<B: RawLambdaBuilder>(
-    env: MatchEnv<'_, B>,
+pub fn for_let<'p, B: RawLambdaBuilder>(
+    env: MatchEnv<'p, '_, B>,
     loc: Location,
     param: RawLambda,
-    pat: &Pattern,
+    pat: &'p Pattern,
     body: RawLambda,
 ) -> RawLambda {
     let b = env.arena.b;
@@ -9424,25 +9409,23 @@ pub fn for_let<B: RawLambdaBuilder>(
 
 /// Compile a tupled function match.
 /// Equivalent to OCaml's `for_tupled_function`.
-pub fn for_tupled_function<B: RawLambdaBuilder>(
-    env: MatchEnv<'_, B>,
+pub fn for_tupled_function<'p, B: RawLambdaBuilder>(
+    env: MatchEnv<'p, '_, B>,
     loc: Location,
     paraml: &[Ident],
-    pats_act_list: Vec<(Vec<&Pattern>, CaseAction)>,
+    pats_act_list: Vec<(Vec<&'p Pattern>, CaseAction)>,
     partial: Partial,
 ) -> RawLambda {
     let MatchEnv {
         ctx_ref,
-        ta,
+        pa,
         arena,
         next_raise_count,
     } = env;
-    let store = PatStore::default();
-    let pa = PatArena::new(ta, &store);
     for_tupled_function_unresolved(
         MatchCx {
             ctx_ref,
-            pa: &pa,
+            pa,
             arena,
             cp: &CtxPool::default(),
         },
@@ -9826,16 +9809,16 @@ fn bind_opt<B: RawLambdaBuilder>(
 
 /// Compile a multiple match expression.
 /// Equivalent to OCaml's `for_multiple_match`.
-pub fn for_multiple_match<B: RawLambdaBuilder>(
-    env: MatchEnv<'_, B>,
+pub fn for_multiple_match<'p, B: RawLambdaBuilder>(
+    env: MatchEnv<'p, '_, B>,
     loc: Location,
     paraml: Vec<RawLambda>,
-    pat_act_list: Vec<(&Pattern, CaseAction)>,
+    pat_act_list: Vec<(&'p Pattern, CaseAction)>,
     partial: Partial,
 ) -> RawLambda {
     let MatchEnv {
         ctx_ref,
-        ta,
+        pa,
         arena,
         next_raise_count,
     } = env;
@@ -9845,13 +9828,11 @@ pub fn for_multiple_match<B: RawLambdaBuilder>(
         .map(|param| param_to_var(b, ctx_ref, param))
         .collect();
     let new_paraml: Vec<RawLambda> = v_paraml.iter().map(|(v, _)| b.var(*v)).collect();
-    let store = PatStore::default();
-    let pa = PatArena::new(ta, &store);
-    let pat_act_list = lower_dict_patterns(ctx_ref, &pa, pat_act_list);
+    let pat_act_list = lower_dict_patterns(ctx_ref, pa, pat_act_list);
     let inner = do_for_multiple_match(
         MatchCx {
             ctx_ref,
-            pa: &pa,
+            pa,
             arena,
             cp: &CtxPool::default(),
         },

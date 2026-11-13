@@ -287,6 +287,251 @@ mod tests {
         }
     }
 
+    /// The printed raw Lambda of the value `probe` of `source`, compiled
+    /// after the record library by the converter of typed trees, with its
+    /// stamps renumbered in order of first appearance.
+    fn probe(source: &str) -> String {
+        let (parser, structure) =
+            crate::binary_ast::derive::fixtures::frontend_source(source, false);
+        let arena = parser.arena();
+        let type_ctx = type_context();
+        let mut tctx = TypeCheckContext::new(&type_ctx, arena);
+        let env = initial_env(&type_ctx);
+        let (typed, _) = typemod::type_structure(&mut tctx, &env, arena, &structure)
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        let rb = RawArena::new();
+        let mut converter = RawLambdaConverter::new(arena, &tctx.typed, &type_ctx, &env, &rb);
+        let lam = converter.convert_structure(&typed);
+        let printed = RawLambdaPrinter::new(&rb.get(), lam).to_string();
+        let at = printed.find(" probe/").expect("a value named probe") + 1;
+        let end = printed.rfind("\n  (makeblock module/exports").expect("the unit's exports");
+        // The term is printed as the last binding of a `let`: its closing
+        // parenthesis belongs to the list of bindings.
+        let term = printed[at..end].strip_suffix(')').expect("the end of the bindings");
+        renumber(term)
+    }
+
+    /// The raw Lambda the converter of typed trees makes today for each form
+    /// the body of a record codec is made of (`records_generate_encoder`,
+    /// `records_generate_flat_decoder_expr`). Lowering a plan must give
+    /// these terms.
+    #[test]
+    fn the_forms_of_a_record_body() {
+        let record = "type r = {x: int, y?: string}\n";
+        for (source, lambda) in [
+            // Field access.
+            ("let probe = (v: r) => v.x", "probe/0 = (function v/1 (field:x/2 v/1))"),
+            // Record construction with an optional field.
+            (
+                "let probe = (a, b): r => {x: a, y: ?b}",
+                "probe/0 = (function a/1 b/2 (makeblock [x;y] a/1 b/2))",
+            ),
+            // `Some(e)` where `e : JSON.t`: the payload cannot be `undefined`.
+            (
+                "let probe = (e: JSON.t) => Some(e)",
+                "probe/0 = (function e/1 (makeblock some_not_nested e/1))",
+            ),
+            // `Ok(None)` is a constant block.
+            (
+                "let probe = (): result<option<int>, string> => Ok(None)",
+                "probe/0 = (function param/1 [Ok: shape_none])",
+            ),
+            // `JSON.Object(d)` is the identity: `JSON.t` is untagged.
+            ("let probe = (d): JSON.t => JSON.Object(d)", "probe/0 = (function d/1 d/1)"),
+            // `Dict.fromArray` and `Dict.get` are externals.
+            (
+                "let probe = e => Dict.fromArray(e)",
+                "probe/0 = (function e/1 (Object.fromEntries e/1))",
+            ),
+            ("let probe = (d, k) => Dict.get(d, k)", "probe/0 = (function d/1 k/2 ( d/1 k/2))"),
+            // `Spice.error` with and without its optional `~path`.
+            (
+                "let probe = (p, m, v) => Spice.error(~path=p, m, v)",
+                "probe/0 =
+     (function p/1 m/2 v/3
+       (apply (field:error/4 Spice/5) (makeblock some_not_nested p/1)
+         m/2 v/3))",
+            ),
+            (
+                "let probe = (m, v) => Spice.error(m, v)",
+                "probe/0 =
+     (function m/1 v/2
+       (apply (field:error/3 Spice/4) shape_none m/1 v/2))",
+            ),
+            // String concatenation is a primitive.
+            (
+                "let probe = (a, b) => a ++ b",
+                "probe/0 = (function a/1 b/2 (string.concat a/1 b/2))",
+            ),
+            // The match on `JSON.t` of a decoder.
+            (JSON_MATCH, JSON_MATCH_LAMBDA),
+            // The match on the result of a field's decoder.
+            (RESULT_MATCH, RESULT_MATCH_LAMBDA),
+        ] {
+            let source = format!("{record}{source}");
+            assert_eq!(probe(&source), lambda, "{source}");
+        }
+    }
+
+    const JSON_MATCH: &str = "let probe = (v, e1, e2) =>
+  switch (v: JSON.t) {
+  | JSON.Object(dict) => e1(dict)
+  | _ => e2
+  }";
+    const JSON_MATCH_LAMBDA: &str = "probe/0 =
+     (function v/1 e1/2 e2/3
+       (catch
+         (switch v/1
+          case constructor \"Object\":
+           (let (dict/4 =a v/1) (apply e1/2 dict/4))
+          default: (exit 1))
+        with (1) e2/3))";
+    const RESULT_MATCH: &str = "let probe = (r, e1, e2) =>
+  switch r {
+  | Ok(x) => e1(x)
+  | Error(e: Spice.decodeError) => e2(e)
+  }";
+    const RESULT_MATCH_LAMBDA: &str = "probe/0 =
+     (function r/1 e1/2 e2/3
+       (switch* r/1
+        case constructor \"Ok\":
+         (let (x/4 =a (field:var/5 r/1)) (apply e1/2 x/4))
+        case constructor \"Error\":
+         (let (e/6 =a (field:var/5 r/1)) (apply e2/3 e/6))))";
+
+    /// A printed term without its stamps and its layout.
+    fn shape(printed: &str) -> String {
+        let mut out = String::new();
+        let mut rest = printed;
+        while let Some(at) = rest.find('/') {
+            out.push_str(&rest[..at]);
+            rest = rest[at + 1..].trim_start_matches(|c: char| c.is_ascii_digit());
+        }
+        out.push_str(rest);
+        out.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// The match of `scrutinee` against `cases`, each a constructor of
+    /// `open_module` with the variable its argument binds, or a wildcard,
+    /// compiled by `compile_matching` from patterns that are built in its
+    /// overlay from the constructors' descriptions: no typed pattern and no
+    /// typed expression. A case with a binder applies `e<n>` to it; one
+    /// without is `e<n>`.
+    fn match_from_descriptions(
+        open_module: &str,
+        scrutinee: &str,
+        cases: &[Option<(&str, &str)>],
+    ) -> String {
+        use crate::parse_arena::Located;
+        use crate::raw_lambda::matching::{CaseAction, MatchEnv, PatArena, PatStore, compile_matching};
+        use crate::types::typedtree::{Partial, Pattern, PatternDesc};
+        let (mut parser, structure) = crate::binary_ast::derive::fixtures::frontend_source(
+            &format!("{open_module}\nlet used = 0"),
+            false,
+        );
+        let lids: Vec<_> = cases
+            .iter()
+            .map(|case| case.map(|(constructor, _)| parser.arena_mut().push_lident(constructor)))
+            .collect();
+        crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
+        let arena = parser.arena();
+        let type_ctx = type_context();
+        let mut tctx = TypeCheckContext::new(&type_ctx, arena);
+        let env = initial_env(&type_ctx);
+        let (_, final_env) = typemod::type_structure(&mut tctx, &env, arena, &structure).unwrap();
+        let env_ref = type_ctx.store_typed_env(&final_env);
+        let rb = RawArena::new();
+        let mut conv = RawLambdaConverter::new(arena, &tctx.typed, &type_ctx, &env, &rb);
+        let scrutinee = conv.fresh_ident(scrutinee);
+
+        let store = PatStore::default();
+        let pa = PatArena::new(conv.ta, &store);
+        let none = crate::parse_arena::LocIdx::none();
+        let mut pat_act_list = Vec::new();
+        let mut scrutinee_type = None;
+        for (i, (case, lid)) in cases.iter().zip(&lids).enumerate() {
+            let action = conv.fresh_ident(&format!("e{}", i + 1));
+            let Some((constructor, binder)) = case else {
+                let any = pa.alloc(Pattern::new(
+                    PatternDesc::Tpat_any,
+                    none,
+                    scrutinee_type.expect("a wildcard follows a constructor"),
+                    env_ref,
+                ));
+                pat_act_list.push((any, CaseAction::unguarded(rb.var(action))));
+                continue;
+            };
+            let description = std::sync::Arc::new(
+                final_env.find_constructor(*constructor).expect("the constructor").clone(),
+            );
+            scrutinee_type = Some(description.cstr_res);
+            let binder = conv.fresh_ident(binder);
+            // The matcher reads a variable's identifier, never its name.
+            let variable = pa.push(Pattern::new(
+                PatternDesc::Tpat_var(binder, Located::new(String::new(), none)),
+                none,
+                description.cstr_args[0],
+                env_ref,
+            ));
+            let pattern = pa.alloc(Pattern::new(
+                PatternDesc::Tpat_construct(
+                    Located::new(lid.expect("a constructor has a name"), none),
+                    description.clone(),
+                    pa.push_list([variable]),
+                ),
+                none,
+                description.cstr_res,
+                env_ref,
+            ));
+            let body = rb.apply(
+                rb.var(action),
+                &[rb.var(binder)],
+                crate::lambda::ApInfo {
+                    loc: LamLoc::NONE,
+                    status: crate::lambda::ApplyStatus::Na,
+                },
+            );
+            pat_act_list.push((pattern, CaseAction::unguarded(body)));
+        }
+        let loc_arena = crate::raw_lambda::loc::LocArena::new(conv.arena, &conv.lam_locs, conv.b);
+        let lam = compile_matching(
+            MatchEnv {
+                ctx_ref: conv.type_ctx,
+                pa: &pa,
+                arena: &loc_arena,
+                next_raise_count: &mut conv.next_static_raise,
+            },
+            || unreachable!("both matches are total"),
+            rb.var(scrutinee),
+            pat_act_list,
+            Partial::Total,
+        );
+        shape(&RawLambdaPrinter::new(&rb.get(), lam).to_string())
+    }
+
+    /// The decision of the design (`DERIVED_CODECS.md`, Q2): both matches of
+    /// a record decoder are produced by `compile_matching` from patterns
+    /// allocated in its `PatArena` from the constructor descriptions, and
+    /// they are the terms the converter of typed trees makes.
+    #[test]
+    fn the_matches_compile_from_constructor_descriptions() {
+        let json = match_from_descriptions("open JSON", "v", &[Some(("Object", "dict")), None]);
+        assert_eq!(
+            json,
+            "(catch (switch v case constructor \"Object\": (let (dict =a v) (apply e1 dict)) \
+             default: (exit 1)) with (1) e2)"
+        );
+        assert!(shape(JSON_MATCH_LAMBDA).contains(&json));
+
+        let result = match_from_descriptions("", "r", &[Some(("Ok", "x")), Some(("Error", "e"))]);
+        assert_eq!(
+            result,
+            "(switch* r case constructor \"Ok\": (let (x =a (field:var r)) (apply e1 x)) \
+             case constructor \"Error\": (let (e =a (field:var r)) (apply e2 e)))"
+        );
+        assert!(shape(RESULT_MATCH_LAMBDA).contains(&result));
+    }
+
     /// A planned item inside a module expression lowers to the raw Lambda
     /// of its general form.
     #[test]

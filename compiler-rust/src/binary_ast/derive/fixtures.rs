@@ -118,3 +118,159 @@ pub(crate) const FAILING: [&str; 2] = [
 /// A program whose library has another shape than plans assume (a curried
 /// codec): the obligation fails and the general form types.
 pub(crate) const CURRIED_LIBRARY: &str = "module Curried = {\n  module Spice = {\n    let arrayToJson = (e: 'a => json) => (_: array<'a>) => { let _ = e; Null }\n  }\n}\nopen Curried\n@spice.encode type t = array<A.t>";
+
+/// The library the bodies of record codecs call, with the shapes the real
+/// one has (`tests/ppx_spice/src/Spice.res` and the standard library's
+/// `JSON`, `Dict` and `Option`): an untagged `JSON.t`, `Dict` as externals,
+/// `Spice.error` with an optional `~path`. Self-contained, so the tests need
+/// no compiled standard library.
+pub(crate) const RECORD_LIBRARY: &str = r#"
+external \"++": (string, string) => string = "%string_concat"
+module JSON = {
+  @unboxed
+  type rec t =
+    | Boolean(bool)
+    | @as(null) Null
+    | String(string)
+    | Number(float)
+    | Object(dict<t>)
+    | Array(array<t>)
+}
+module Dict = {
+  @val external fromArray: array<(string, 'a)> => dict<'a> = "Object.fromEntries"
+  @get_index external get: (dict<'a>, string) => option<'a> = ""
+}
+module Option = {
+  let map = (opt, f) =>
+    switch opt {
+    | Some(x) => Some(f(x))
+    | None => None
+    }
+  let getOr = (opt, default) =>
+    switch opt {
+    | Some(x) => x
+    | None => default
+    }
+}
+module Null = {
+  @unboxed type t<'a> = Value('a) | @as(null) Null
+}
+module Spice = {
+  type decodeError = {
+    path: string,
+    message: string,
+    value: JSON.t,
+  }
+  type result<'a> = result<'a, decodeError>
+  let error = (~path=?, message, value) => {
+    let path = switch path {
+    | None => ""
+    | Some(s) => s
+    }
+    Error({path, message, value})
+  }
+  let stringToJson = (s): JSON.t => JSON.String(s)
+  let stringFromJson = j =>
+    switch (j: JSON.t) {
+    | JSON.String(s) => Ok(s)
+    | _ => Error({path: "", message: "Not a string", value: j})
+    }
+  let intToJson = (_: int): JSON.t => JSON.Number(0.)
+  let intFromJson = (j: JSON.t): result<int> => Error({path: "", message: "Not a number", value: j})
+  let floatToJson = (f): JSON.t => JSON.Number(f)
+  let floatFromJson = (j: JSON.t): result<float> =>
+    Error({path: "", message: "Not a number", value: j})
+  let boolToJson = (b): JSON.t => JSON.Boolean(b)
+  let boolFromJson = (j: JSON.t): result<bool> =>
+    Error({path: "", message: "Not a boolean", value: j})
+  let bigintToJson = (_: bigint): JSON.t => JSON.Number(0.)
+  let bigintFromJson = (j: JSON.t): result<bigint> =>
+    Error({path: "", message: "Not a number", value: j})
+  let arrayToJson = (_: 'a => JSON.t, _: array<'a>): JSON.t => JSON.Array([])
+  let arrayFromJson = (_: JSON.t => result<'a>, j: JSON.t): result<array<'a>> =>
+    Error({path: "", message: "Not an array", value: j})
+  let filterOptional = (arr: array<(string, option<JSON.t>)>): array<(string, JSON.t)> => {
+    let _ = arr
+    []
+  }
+  let optionToJson = (encoder, opt): option<JSON.t> =>
+    switch opt {
+    | Some(x) => Some(encoder(x))
+    | None => None
+    }
+  let optionToNullableJson = (encoder, opt): JSON.t =>
+    switch opt {
+    | Some(x) => encoder(x)
+    | None => JSON.Null
+    }
+  let optionFromJson = (decoder, json) =>
+    switch (json: JSON.t) {
+    | JSON.Null => Ok(None)
+    | _ =>
+      switch decoder(json) {
+      | Ok(v) => Ok(Some(v))
+      | Error(e) => Error(e)
+      }
+    }
+  let optionalFieldFromJson = (decoder, json) =>
+    switch (json: JSON.t) {
+    | JSON.Null =>
+      switch decoder(json) {
+      | Ok(v) => Ok(Some(v))
+      | Error(_) => Ok(None)
+      }
+    | _ =>
+      switch decoder(json) {
+      | Ok(v) => Ok(Some(v))
+      | Error(e) => Error(e)
+      }
+    }
+  let nullToJson = (encoder, opt): JSON.t =>
+    switch opt {
+    | Null.Value(x) => encoder(x)
+    | Null.Null => JSON.Null
+    }
+  let nullFromJson = (decoder, json) =>
+    switch (json: JSON.t) {
+    | JSON.Null => Ok(Null.Null)
+    | _ =>
+      switch decoder(json) {
+      | Ok(v) => Ok(Null.Value(v))
+      | Error(e) => Error(e)
+      }
+    }
+}
+"#;
+
+/// Parse `source` after [`RECORD_LIBRARY`] and run the whole front end over
+/// it (the built-in rewrites give the library's externals their meaning),
+/// with plans (`true`) or with every derived item as syntax.
+pub(crate) fn frontend_source(source: &str, plans: bool) -> (Parser<'static>, Vec<StructureItem>) {
+    let source: &'static str = Box::leak(format!("{RECORD_LIBRARY}{source}").into_boxed_str());
+    let mut parser = Parser::new("Test.res", source);
+    let structure = module::parse_structure(&mut parser);
+    assert!(!parser.has_errors(), "{source}");
+    let options = crate::driver::CompilerOptions {
+        spice_ppx: true,
+        derived_path: if plans {
+            crate::driver::DerivedPath::Plans
+        } else {
+            crate::driver::DerivedPath::General
+        },
+        derived_census: None,
+        ..Default::default()
+    };
+    let mut out = String::new();
+    let frontend = crate::driver::run_implementation_frontend(
+        &mut parser,
+        structure,
+        source,
+        "Test.res",
+        &options,
+        &mut out,
+    )
+    .unwrap_or_else(|error| panic!("{error}\n{source}"));
+    assert!(out.is_empty(), "{out}");
+    crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
+    (parser, frontend.structure)
+}
