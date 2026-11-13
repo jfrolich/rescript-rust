@@ -2853,39 +2853,39 @@ The statement stack and node-list pool must be used end to end.
 | `tail.rs:40` `finish_self_call` | `pub(super) fn finish_self_call(&mut self, frame: LoopRef, statements: Span, values: smallvec::SmallVec<[NodeId; 4]>) -> Probed {` | per construct | borrowed node slice supplied by reusable sequencing buffer | removed |
 | `try_.rs:65` `try_children` | `pub(super) fn try_children(&self, cx: Cx, frame: Try, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
 | `unit.rs:33` `lower` | `.collect();` | once per unit | stays: once per unit | retained |
-| `untagged.rs:53` `Plan` | `program: Vec<Op>,` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:55` `Plan` | `actions: Vec<Action>,` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:56` `Plan` | `cached: Vec<Option<NodeId>>,` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:57` `Plan` | `finished: Vec<Finished>,` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:58` `Plan` | `remaining: Vec<u32>,` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:59` `Plan` | `marks: Vec<Span>,` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:60` `Plan` | `outputs: Vec<Output>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:53` `Plan` | `program: Vec<Op>,` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:55` `Plan` | `actions: Vec<Action>,` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:56` `Plan` | `cached: Vec<Option<NodeId>>,` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:57` `Plan` | `finished: Vec<Finished>,` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:58` `Plan` | `remaining: Vec<u32>,` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:59` `Plan` | `marks: Vec<Span>,` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:60` `Plan` | `outputs: Vec<Output>,` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
 | `untagged.rs:82` `untagged_switch` | `let facts = facts.clone();` | per construct | borrow payload or retain typed pool handle | pending |
 | `untagged.rs:83` `untagged_switch` | `let mut literal_arms = Vec::with_capacity(n);` | per construct | reusable scratch buffer; clear, do not free | pending |
 | `untagged.rs:84` `untagged_switch` | `let mut payload_arms = Vec::with_capacity(h.keys.len() - n);` | per construct | reusable scratch buffer; clear, do not free | pending |
 | `untagged.rs:88` `untagged_switch` | `literal_arms.push((tag.literal.clone(), i as u32))` | per construct | borrow payload or retain typed pool handle | pending |
 | `untagged.rs:91` `untagged_switch` | `block.block_type().expect("untagged payload").clone(),` | per construct | borrow payload or retain typed pool handle | pending |
-| `untagged.rs:97` `untagged_switch` | `let sources = self.source.lists.get(operands).to_vec();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:135` `untagged_switch` | `let remaining = actions.iter().map(&#124;a&#124; a.uses).collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:136` `untagged_switch` | `let cached = vec![None; actions.len()];` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:137` `untagged_switch` | `let finished = vec![Finished::False; actions.len()];` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:153` `untagged_switch` | `marks: Vec::new(),` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:154` `untagged_switch` | `outputs: Vec::new(),` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:167` `untagged_program` | `) -> (Vec<Op>, Vec<Action>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:168` `untagged_program` | `let mut program = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:169` `untagged_program` | `let mut actions: Vec<Action> = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:170` `untagged_program` | `let mut cache = vec![[NONE; 2]; sources.len()];` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:171` `untagged_program` | `let mut work = vec![Work::Visit(plan.root(), depth)];` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:248` `untagged_children` | `pub(super) fn untagged_children(&self, cx: Cx, frame: Untagged, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:332` `copy_dispatch_output` | `let mut vars = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:333` `copy_dispatch_output` | `let mut labels = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:414` `advance_untagged` | `let body: Vec<_> = self.statements.statements(out.run).collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:489` `untagged_switch_statement` | `.collect::<Vec<_>>(),` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:511` `untagged_switch_statement` | `.collect(),` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:522` `untagged_switch_statement` | `let mut actions = Vec::with_capacity(keys.len() + usize::from(has_default));` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:523` `untagged_switch_statement` | `let mut clauses = Vec::with_capacity(actions.capacity());` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:589` `untagged_test` | `let mut work = vec![(test, false)];` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:590` `untagged_test` | `let mut values = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:97` `untagged_switch` | `let sources = self.source.lists.get(operands).to_vec();` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:135` `untagged_switch` | `let remaining = actions.iter().map(&#124;a&#124; a.uses).collect();` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:136` `untagged_switch` | `let cached = vec![None; actions.len()];` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:137` `untagged_switch` | `let finished = vec![Finished::False; actions.len()];` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:153` `untagged_switch` | `marks: Vec::new(),` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:154` `untagged_switch` | `outputs: Vec::new(),` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:167` `untagged_program` | `) -> (Vec<Op>, Vec<Action>) {` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:168` `untagged_program` | `let mut program = Vec::new();` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:169` `untagged_program` | `let mut actions: Vec<Action> = Vec::new();` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:170` `untagged_program` | `let mut cache = vec![[NONE; 2]; sources.len()];` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:171` `untagged_program` | `let mut work = vec![Work::Visit(plan.root(), depth)];` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:248` `untagged_children` | `pub(super) fn untagged_children(&self, cx: Cx, frame: Untagged, into: &mut Vec<(Cx, NodeId)>) {` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:332` `copy_dispatch_output` | `let mut vars = Vec::new();` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:333` `copy_dispatch_output` | `let mut labels = Vec::new();` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:414` `advance_untagged` | `let body: Vec<_> = self.statements.statements(out.run).collect();` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:489` `untagged_switch_statement` | `.collect::<Vec<_>>(),` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:511` `untagged_switch_statement` | `.collect(),` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:522` `untagged_switch_statement` | `let mut actions = Vec::with_capacity(keys.len() + usize::from(has_default));` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:523` `untagged_switch_statement` | `let mut clauses = Vec::with_capacity(actions.capacity());` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:589` `untagged_test` | `let mut work = vec![(test, false)];` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:590` `untagged_test` | `let mut values = Vec::new();` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
 | `variant.rs:29` `Plan` | `sides: Vec<Side>,` | per construct | reusable scratch buffer; clear, do not free | pending |
 | `variant.rs:89` `named_variant` | `let tag_name = facts.tag_name.as_deref().unwrap_or("TAG").to_owned();` | per construct | reusable scratch buffer; clear, do not free | pending |
 | `variant.rs:90` `named_variant` | `let keys: Vec<_> = h` | per construct | reusable scratch buffer; clear, do not free | pending |
@@ -2939,6 +2939,16 @@ zero times after warming and pool reservation, at 10,002 source visits and
 20,000 grouping steps; recorded capacities remain unchanged. Pooled J keys
 retain interned spelling handles, including floats and big integers, rather
 than cloning strings into each output header.
+
+The untagged **emission-storage** conversion replaces its seven per-plan vectors
+with typed pool runs and retained scratch, reducing the cold plan from 336 to
+224 bytes. Local runs are 12 bytes, action state is 16 bytes, and nested plans
+have disjoint reserved stack regions. The 10,000-level payload fixture records
+10,000 emission-program steps. A separate 10,000-slot parent/child storage test
+measures zero warmed allocations and unchanged capacity; this is a storage test,
+**not** the required whole-Lambda untagged allocation proof. Shared dispatch
+planning still owns metadata and scratch vectors, test literal conversion still
+clones tags, and subtree copying still allocates. Those paths remain outstanding.
 
 ## 8. The gate and the slices
 

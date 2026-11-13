@@ -27,6 +27,7 @@ enum Work {
     Clause(TreeId, u32),
     Emit(Op),
 }
+#[derive(Clone, Copy)]
 struct Action {
     source: NodeId,
     depth: u32,
@@ -41,6 +42,91 @@ struct Output {
 }
 const NONE: u32 = u32::MAX;
 
+/// A typed run of a pool, including a bound for its local stack operations.
+#[derive(Clone, Copy)]
+struct Run<T> {
+    start: u32,
+    len: u32,
+    limit: u32,
+    marker: std::marker::PhantomData<T>,
+}
+impl<T> Run<T> {
+    /// O(1): form a checked pool run.
+    fn new(start: usize, len: usize, limit: usize) -> Self {
+        u32::try_from(start.checked_add(limit).unwrap()).expect("untagged pool capacity");
+        assert!(len <= limit);
+        Self {
+            start: u32::try_from(start).unwrap(),
+            len: u32::try_from(len).unwrap(),
+            limit: u32::try_from(limit).unwrap(),
+            marker: std::marker::PhantomData,
+        }
+    }
+    /// O(1): current initialized range.
+    fn range(&self) -> std::ops::Range<usize> {
+        self.start as usize..(self.start + self.len) as usize
+    }
+}
+struct Pool<T> {
+    values: Vec<T>,
+}
+impl<T> Default for Pool<T> {
+    fn default() -> Self {
+        Self { values: Vec::new() }
+    }
+}
+impl<T: Copy> Pool<T> {
+    /// O(count): reserve a disjoint stack region; never shared with a child plan.
+    fn stack(&mut self, count: usize, empty: T) -> Run<T> {
+        let run = Run::new(self.values.len(), 0, count);
+        self.values.resize(self.values.len() + count, empty);
+        run
+    }
+    /// O(1), with no pool growth: write a slot reserved when the plan was made.
+    fn push(&mut self, run: &mut Run<T>, value: T) {
+        assert!(run.len < run.limit);
+        self.values[(run.start + run.len) as usize] = value;
+        run.len += 1;
+    }
+    /// O(1): consume the most recent local stack slot.
+    fn pop(&self, run: &mut Run<T>) -> T {
+        assert!(run.len > 0);
+        run.len -= 1;
+        self.values[(run.start + run.len) as usize]
+    }
+    /// O(1): read a live slot.
+    fn get(&self, run: &Run<T>, index: usize) -> T {
+        assert!(index < run.len as usize);
+        self.values[run.start as usize + index]
+    }
+    /// O(1): update a live slot.
+    fn get_mut(&mut self, run: &Run<T>, index: usize) -> &mut T {
+        assert!(index < run.len as usize);
+        &mut self.values[run.start as usize + index]
+    }
+}
+#[derive(Clone, Copy)]
+struct ActionState {
+    cached: Option<NodeId>,
+    remaining: u32,
+    finished: Finished,
+}
+#[derive(Default)]
+pub(super) struct Storage {
+    program: Pool<Op>,
+    actions: Pool<Action>,
+    states: Pool<ActionState>,
+    marks: Pool<Span>,
+    outputs: Pool<Output>,
+    work: Vec<Work>,
+    cache: Vec<[u32; 2]>,
+    test_work: Vec<(TestId, bool)>,
+    test_values: Vec<NodeId>,
+    copied_vars: Vec<(VarId, VarId)>,
+    copied_labels: Vec<(u32, u32)>,
+    program_steps: usize,
+}
+
 pub(super) struct Plan {
     source: NodeId,
     operands: crate::bir::ListId,
@@ -50,14 +136,12 @@ pub(super) struct Plan {
     scrutinee: Option<NodeId>,
     payload_only: bool,
     dispatch: dispatch::Plan<u32>,
-    program: Vec<Op>,
+    program: Run<Op>,
     pc: usize,
-    actions: Vec<Action>,
-    cached: Vec<Option<NodeId>>,
-    finished: Vec<Finished>,
-    remaining: Vec<u32>,
-    marks: Vec<Span>,
-    outputs: Vec<Output>,
+    actions: Run<Action>,
+    states: Run<ActionState>,
+    marks: Run<Span>,
+    outputs: Run<Output>,
 }
 
 impl State {
@@ -94,17 +178,18 @@ impl State {
                 _ => unreachable!("untagged constructor key"),
             }
         }
-        let sources = self.source.lists.get(operands).to_vec();
+        let source_count = self.source.lists.get(operands).len();
         self.prepare_switch_hashes();
-        for &source in &sources {
-            self.switch_facts(source);
+        for i in 0..source_count {
+            self.switch_facts(self.source.lists.get(operands)[i]);
         }
         let state = std::cell::RefCell::new(&mut *self);
         let dispatch = dispatch::plan(
             |a: &u32, b: &u32| {
-                state
-                    .borrow_mut()
-                    .same_switch_body(sources[*a as usize], sources[*b as usize])
+                let mut state = state.borrow_mut();
+                let a = state.source.lists.get(operands)[*a as usize];
+                let b = state.source.lists.get(operands)[*b as usize];
+                state.same_switch_body(a, b)
             },
             dispatch::Input {
                 facts: &facts,
@@ -115,8 +200,7 @@ impl State {
                 fallback,
             },
         );
-        let (program, actions) =
-            Self::untagged_program(&dispatch, &sources, fallback, cx.switch_depth);
+        let (program, actions) = self.untagged_program(&dispatch, operands, fallback, cx.switch_depth);
         let start = self.statements.mark();
         let binding = match cx.cont {
             Cont::Value(_) => Some((LetKind::Strict, self.fresh_variable("tmp"))),
@@ -132,9 +216,30 @@ impl State {
             self.statements.push(declaration);
         }
         let frame = Untagged(self.untagged.len() as u32);
-        let remaining = actions.iter().map(|a| a.uses).collect();
-        let cached = vec![None; actions.len()];
-        let finished = vec![Finished::False; actions.len()];
+        let states = Run::new(
+            self.untagged_storage.states.values.len(),
+            actions.len as usize,
+            actions.len as usize,
+        );
+        for action in &self.untagged_storage.actions.values[actions.range()] {
+            self.untagged_storage.states.values.push(ActionState {
+                cached: None,
+                remaining: action.uses,
+                finished: Finished::False,
+            });
+        }
+        let marks = self
+            .untagged_storage
+            .marks
+            .stack(program.len as usize, Span { start: 0, len: 0 });
+        let outputs = self.untagged_storage.outputs.stack(
+            program.len as usize,
+            Output {
+                run: Span { start: 0, len: 0 },
+                action: NONE,
+                finished: Finished::False,
+            },
+        );
         self.untagged.push(Some(Plan {
             source,
             operands,
@@ -147,11 +252,9 @@ impl State {
             program,
             pc: 0,
             actions,
-            cached,
-            finished,
-            remaining,
-            marks: Vec::new(),
-            outputs: Vec::new(),
+            states,
+            marks,
+            outputs,
         }));
         Ok(frame)
     }
@@ -160,16 +263,25 @@ impl State {
     /// O(plan occurrences + clauses), using an explicit stack. Source actions
     /// are cached by dense arm index and the two in-switch states.
     fn untagged_program(
+        &mut self,
         plan: &dispatch::Plan<u32>,
-        sources: &[NodeId],
+        sources: crate::bir::ListId,
         fallback: Option<u32>,
         depth: u32,
-    ) -> (Vec<Op>, Vec<Action>) {
-        let mut program = Vec::new();
-        let mut actions: Vec<Action> = Vec::new();
-        let mut cache = vec![[NONE; 2]; sources.len()];
-        let mut work = vec![Work::Visit(plan.root(), depth)];
+    ) -> (Run<Op>, Run<Action>) {
+        let sources = self.source.lists.get(sources);
+        let storage = &mut self.untagged_storage;
+        let program_start = storage.program.values.len();
+        let action_start = storage.actions.values.len();
+        let program = &mut storage.program.values;
+        let actions = &mut storage.actions.values;
+        let cache = &mut storage.cache;
+        cache.resize(sources.len(), [NONE; 2]);
+        cache.fill([NONE; 2]);
+        let work = &mut storage.work;
+        work.push(Work::Visit(plan.root(), depth));
         while let Some(task) = work.pop() {
+            storage.program_steps += 1;
             match task {
                 Work::Emit(op) => program.push(op),
                 Work::Clause(tree, depth) => work.push(Work::Visit(tree, depth)),
@@ -181,7 +293,7 @@ impl State {
                         };
                         let slot = &mut cache[arm as usize][usize::from(depth > 0)];
                         if *slot == NONE {
-                            *slot = actions.len() as u32;
+                            *slot = (actions.len() - action_start) as u32;
                             actions.push(Action {
                                 source: sources[arm as usize],
                                 depth,
@@ -190,7 +302,7 @@ impl State {
                             });
                             program.push(Op::Run(*slot));
                         } else {
-                            actions[*slot as usize].uses += 1;
+                            actions[action_start + *slot as usize].uses += 1;
                             program.push(Op::Cached(*slot));
                         }
                     }
@@ -241,7 +353,18 @@ impl State {
                 },
             }
         }
-        (program, actions)
+        (
+            Run::new(
+                program_start,
+                program.len() - program_start,
+                program.len() - program_start,
+            ),
+            Run::new(
+                action_start,
+                actions.len() - action_start,
+                actions.len() - action_start,
+            ),
+        )
     }
 
     /// Schedule the scrutinee, then each first body occurrence. O(actions).
@@ -255,16 +378,20 @@ impl State {
             p.source,
         ));
         let cont = p.target.map_or(cx.cont, Cont::Assign);
-        into.extend(p.actions.iter().map(|a| {
-            (
-                Cx {
-                    cont,
-                    switch_depth: a.depth,
-                    ..cx
-                },
-                a.source,
-            )
-        }));
+        into.extend(
+            self.untagged_storage.actions.values[p.actions.range()]
+                .iter()
+                .map(|a| {
+                    (
+                        Cx {
+                            cont,
+                            switch_depth: a.depth,
+                            ..cx
+                        },
+                        a.source,
+                    )
+                }),
+        );
     }
 
     /// V: untagged_output_block. O(statements), copied into cache storage only
@@ -282,14 +409,13 @@ impl State {
             let mut value = out.value.unwrap();
             if !p.payload_only && !matches!(self.arena.view(value), View::Var { .. }) {
                 let var = self.fresh_variable("tmp");
-                let declaration =
-                    crate::bir::j::declare(&mut self.arena, LetKind::Strict, var, value);
+                let declaration = crate::bir::j::declare(&mut self.arena, LetKind::Strict, var, value);
                 self.statements.push(declaration);
                 value = self.pure_expression(View::Var { var }, 0);
             }
             p.scrutinee = Some(value);
         } else {
-            let Op::Run(action) = p.program[p.pc] else {
+            let Op::Run(action) = self.untagged_storage.program.get(&p.program, p.pc) else {
                 unreachable!("paused for source action")
             };
             assert_eq!(action as usize, index - 1);
@@ -302,19 +428,43 @@ impl State {
                 start: out.stmts.start,
                 len: 0,
             });
-            self.locate_switch_run(p.actions[action as usize].source, out.stmts);
-            p.finished[action as usize] = out.finished;
-            if p.actions[action as usize].uses > 1 {
+            self.locate_switch_run(
+                self.untagged_storage
+                    .actions
+                    .get(&p.actions, action as usize)
+                    .source,
+                out.stmts,
+            );
+            self.untagged_storage
+                .states
+                .get_mut(&p.states, action as usize)
+                .finished = out.finished;
+            if self
+                .untagged_storage
+                .actions
+                .get(&p.actions, action as usize)
+                .uses
+                > 1
+            {
                 let list = self.statements.take_list(&mut self.arena, out.stmts);
-                p.cached[action as usize] = Some(self.arena.block_from_list(list));
+                self.untagged_storage
+                    .states
+                    .get_mut(&p.states, action as usize)
+                    .cached = Some(self.arena.block_from_list(list));
                 self.emit_cached_action(&mut p, action);
             } else {
-                p.remaining[action as usize] -= 1;
-                p.outputs.push(Output {
-                    run: out.stmts,
-                    action,
-                    finished: out.finished,
-                });
+                self.untagged_storage
+                    .states
+                    .get_mut(&p.states, action as usize)
+                    .remaining -= 1;
+                self.untagged_storage.outputs.push(
+                    &mut p.outputs,
+                    Output {
+                        run: out.stmts,
+                        action,
+                        finished: out.finished,
+                    },
+                );
             }
         }
         self.advance_untagged(&mut p);
@@ -329,16 +479,19 @@ impl State {
     /// Copy a multiply-emitted J output, never relower its source. O(emitted
     /// nodes), including binder remapping by the arena's existing copier.
     fn copy_dispatch_output(&mut self, root: NodeId) -> NodeId {
-        let mut vars = Vec::new();
-        let mut labels = Vec::new();
+        let mut vars = std::mem::take(&mut self.untagged_storage.copied_vars);
+        let mut labels = std::mem::take(&mut self.untagged_storage.copied_labels);
         let copied = self
             .arena
             .copy_subtree_recording(root, &[], &mut vars, &mut labels);
-        for (new, old) in vars {
+        for (new, old) in vars.drain(..) {
             assert_eq!(new.index(), self.idents.len());
             self.idents.push(self.idents[old.index()]);
             self.arena.vars.order[new.index()] = self.arena.vars.order(old);
         }
+        labels.clear();
+        self.untagged_storage.copied_vars = vars;
+        self.untagged_storage.copied_labels = labels;
         copied
     }
 
@@ -346,11 +499,22 @@ impl State {
     /// O(output size) for repeated occurrences; the last takes the original.
     fn emit_cached_action(&mut self, p: &mut Plan, action: u32) {
         let i = action as usize;
-        p.remaining[i] -= 1;
-        let root = if p.remaining[i] == 0 {
-            p.cached[i].take().unwrap()
+        self.untagged_storage.states.get_mut(&p.states, i).remaining -= 1;
+        let root = if self.untagged_storage.states.get(&p.states, i).remaining == 0 {
+            self.untagged_storage
+                .states
+                .get_mut(&p.states, i)
+                .cached
+                .take()
+                .unwrap()
         } else {
-            self.copy_dispatch_output(p.cached[i].unwrap())
+            self.copy_dispatch_output(
+                self.untagged_storage
+                    .states
+                    .get(&p.states, i)
+                    .cached
+                    .unwrap(),
+            )
         };
         let start = self.statements.mark();
         let View::SBlock { statements } = self.arena.view(root) else {
@@ -363,11 +527,14 @@ impl State {
             self.arena.detach(statement);
         }
         self.arena.release(root);
-        p.outputs.push(Output {
-            run: self.statements.since(start),
-            action,
-            finished: p.finished[i],
-        });
+        self.untagged_storage.outputs.push(
+            &mut p.outputs,
+            Output {
+                run: self.statements.since(start),
+                action,
+                finished: self.untagged_storage.states.get(&p.states, i).finished,
+            },
+        );
     }
 
     /// A scrutinee occurrence. O(1) for variables (the normal bound case),
@@ -384,7 +551,8 @@ impl State {
     /// V: emit_untagged_tree. O(emitted program steps + J-rule costs), with
     /// all control stacks explicit and all kept statement runs left in place.
     fn advance_untagged(&mut self, p: &mut Plan) {
-        while let Some(&op) = p.program.get(p.pc) {
+        while p.pc < p.program.len as usize {
+            let op = self.untagged_storage.program.get(&p.program, p.pc);
             if matches!(op, Op::Run(_)) {
                 break;
             }
@@ -394,33 +562,47 @@ impl State {
                 Op::Begin => {
                     let start = self.statements.mark();
                     self.statements.reserve();
-                    p.marks.push(start);
+                    self.untagged_storage.marks.push(&mut p.marks, start);
                 }
-                Op::Empty => p.outputs.push(Output {
-                    run: self.statements.mark(),
-                    action: NONE,
-                    finished: Finished::False,
-                }),
+                Op::Empty => self.untagged_storage.outputs.push(
+                    &mut p.outputs,
+                    Output {
+                        run: self.statements.mark(),
+                        action: NONE,
+                        finished: Finished::False,
+                    },
+                ),
                 Op::Cached(action) => self.emit_cached_action(p, action),
                 Op::If(test) => {
-                    let no = p.outputs.pop().unwrap();
-                    let yes = p.outputs.pop().unwrap();
+                    let no = self.untagged_storage.outputs.pop(&mut p.outputs);
+                    let yes = self.untagged_storage.outputs.pop(&mut p.outputs);
                     let test = self.untagged_test(p, test);
                     self.untagged_if(p, test, yes.run, no.run);
                 }
                 Op::Block => {
-                    let out = p.outputs.pop().unwrap();
-                    let start = p.marks.pop().unwrap();
-                    let body: Vec<_> = self.statements.statements(out.run).collect();
-                    self.statements.copied += body.len();
-                    self.statements.kill(out.run);
-                    let block = norm::js2_block(&mut self.arena, body);
-                    self.place(start.start, block);
-                    p.outputs.push(Output {
-                        run: self.statements.since(start),
-                        action: NONE,
-                        finished: Finished::False,
+                    let out = self.untagged_storage.outputs.pop(&mut p.outputs);
+                    let start = self.untagged_storage.marks.pop(&mut p.marks);
+                    let only = self.unnest(out.run.start);
+                    let run = self.statements.since(Span {
+                        start: out.run.start,
+                        len: 0,
                     });
+                    let block = if let Some((_, statement)) = only {
+                        self.statements.kill(run);
+                        statement
+                    } else {
+                        let list = self.statements.take_list(&mut self.arena, run);
+                        self.arena.explicit_block_from_list(list)
+                    };
+                    self.place(start.start, block);
+                    self.untagged_storage.outputs.push(
+                        &mut p.outputs,
+                        Output {
+                            run: self.statements.since(start),
+                            action: NONE,
+                            finished: Finished::False,
+                        },
+                    );
                 }
                 Op::Switch(tree) => self.untagged_switch_statement(p, tree),
             }
@@ -429,24 +611,32 @@ impl State {
 
     /// V: untagged_if / normalized_if_block. O(statements consumed by J-S3).
     fn untagged_if(&mut self, p: &mut Plan, test: NodeId, yes: Span, no: Span) {
-        let start = p.marks.pop().unwrap();
+        let start = self.untagged_storage.marks.pop(&mut p.marks);
         let statement = self.if_statement(test, yes, no);
         self.place(start.start, statement);
         if matches!(p.cont, Cont::Effect(Tail::Return(_))) {
             self.unnest(start.start);
         }
-        p.outputs.push(Output {
-            run: self.statements.since(start),
-            action: NONE,
-            finished: Finished::False,
-        });
+        self.untagged_storage.outputs.push(
+            &mut p.outputs,
+            Output {
+                run: self.statements.since(start),
+                action: NONE,
+                finished: Finished::False,
+            },
+        );
     }
 
     /// V: emit_untagged_clause. O(1) control/exit facts, plus one list transfer.
     fn untagged_clause(&mut self, p: &Plan, out: Output) -> (NodeId, ClauseMeta) {
         let should_break = if out.action == NONE {
             false
-        } else if p.actions[out.action as usize].fallback {
+        } else if self
+            .untagged_storage
+            .actions
+            .get(&p.actions, out.action as usize)
+            .fallback
+        {
             !self.statements.last(out.run).is_some_and(|s| {
                 matches!(
                     self.arena.view(s),
@@ -459,10 +649,26 @@ impl State {
         } else {
             out.finished != Finished::True
                 && (!matches!(p.cont, Cont::Effect(Tail::Return(_)))
-                    || self.switch_has_exit(p.actions[out.action as usize].source))
+                    || self.switch_has_exit(
+                        self.untagged_storage
+                            .actions
+                            .get(&p.actions, out.action as usize)
+                            .source,
+                    ))
         };
-        let loc = if out.action != NONE && !p.actions[out.action as usize].fallback {
-            self.switch_location(p.actions[out.action as usize].source)
+        let loc = if out.action != NONE
+            && !self
+                .untagged_storage
+                .actions
+                .get(&p.actions, out.action as usize)
+                .fallback
+        {
+            self.switch_location(
+                self.untagged_storage
+                    .actions
+                    .get(&p.actions, out.action as usize)
+                    .source,
+            )
         } else {
             None
         };
@@ -477,52 +683,71 @@ impl State {
         )
     }
 
+    /// O(spelling bytes): intern a literal key without cloning an owned tag.
+    fn untagged_literal_key(&mut self, literal: &crate::types::VariantLiteralTag) -> CaseKey {
+        use crate::types::VariantLiteralTag as L;
+        match literal {
+            L::String(s) => CaseKey::String(self.arena.intern_text(s)),
+            L::Float(s) => CaseKey::Float(self.arena.intern_text(s)),
+            L::BigInt(s) => CaseKey::BigInt(self.arena.intern_text(s)),
+            L::Int(i) => CaseKey::JavaScript(SwitchCaseTag::Int(i64::from(*i as i32))),
+            L::Bool(b) => CaseKey::JavaScript(SwitchCaseTag::Bool(*b)),
+            L::Null => CaseKey::JavaScript(SwitchCaseTag::Null),
+            L::Undefined => CaseKey::JavaScript(SwitchCaseTag::Undefined),
+        }
+    }
+
     /// V: emit_untagged_tree's value/typeof switch arms. O(clauses + statements
     /// transferred), with default-first source order and case-first output.
     fn untagged_switch_statement(&mut self, p: &mut Plan, tree: TreeId) {
-        let (keys, typeof_, value_switch) = match p.dispatch.tree(tree) {
-            Tree::SwitchValue(clauses, _) => (
-                p.dispatch
-                    .value_clauses(*clauses)
-                    .iter()
-                    .map(|(l, _)| CaseKey::JavaScript(Self::literal_tag(l)))
-                    .collect::<Vec<_>>(),
-                false,
-                true,
-            ),
+        let (cases, typeof_, value_switch) = match p.dispatch.tree(tree) {
+            Tree::SwitchValue(clauses, _) => (*clauses, false, true),
             Tree::SwitchTypeof(clauses, _) => {
                 let cases = p.dispatch.typeof_clauses(*clauses);
                 if cases.len() == 1 && matches!(cases[0].1, Clause::Body(_)) {
-                    let no = p.outputs.pop().unwrap();
-                    let yes = p.outputs.pop().unwrap();
+                    let no = self.untagged_storage.outputs.pop(&mut p.outputs);
+                    let yes = self.untagged_storage.outputs.pop(&mut p.outputs);
                     let value = self.untagged_scrutinee(p);
                     let test = self.untagged_typeof(value, &cases[0].0);
                     self.untagged_if(p, test, yes.run, no.run);
                     return;
                 }
-                (
-                    cases
-                        .iter()
-                        .map(|(k, _)| {
-                            CaseKey::JavaScript(SwitchCaseTag::String(
-                                k.typeof_name().unwrap().into(),
-                            ))
-                        })
-                        .collect(),
-                    true,
-                    false,
-                )
+                (*clauses, true, false)
             }
             _ => unreachable!("switch operation"),
         };
-        let start = p.marks.pop().unwrap();
-        let base = p.outputs.len() - keys.len() - 1;
-        let default = p.outputs[base];
+        let count = cases.len();
+        let keys = crate::bir::KeySpan {
+            start: self.arena.pools.switch_keys.len() as u32,
+            len: count as u32,
+        };
+        let start = self.untagged_storage.marks.pop(&mut p.marks);
+        let base = p.outputs.len as usize - count - 1;
+        let default = self.untagged_storage.outputs.get(&p.outputs, base);
         let has_default = !value_switch || self.statements.has_statements(default.run);
-        let mut actions = Vec::with_capacity(keys.len() + usize::from(has_default));
-        let mut clauses = Vec::with_capacity(actions.capacity());
-        for i in 0..keys.len() {
-            let (body, mut meta) = self.untagged_clause(p, p.outputs[base + 1 + i]);
+        let action_count = count + usize::from(has_default);
+        let actions = self.arena.lists.push_iter(
+            action_count,
+            std::iter::repeat_n(NodeId(u32::MAX), action_count),
+        );
+        let clauses = crate::bir::ClauseSpan {
+            start: self.arena.pools.switch_clauses.len() as u32,
+            len: action_count as u32,
+        };
+        for i in 0..count {
+            let key = if value_switch {
+                self.untagged_literal_key(&p.dispatch.value_clauses(cases)[i].0)
+            } else {
+                CaseKey::String(
+                    self.arena
+                        .intern_text(p.dispatch.typeof_clauses(cases)[i].0.typeof_name().unwrap()),
+                )
+            };
+            self.arena.pools.switch_keys.push(key);
+            let (body, mut meta) = self.untagged_clause(
+                p,
+                self.untagged_storage.outputs.get(&p.outputs, base + 1 + i),
+            );
             let clause = match p.dispatch.tree(tree) {
                 Tree::SwitchValue(c, _) => &p.dispatch.value_clauses(*c)[i].1,
                 Tree::SwitchTypeof(c, _) => &p.dispatch.typeof_clauses(*c)[i].1,
@@ -531,13 +756,14 @@ impl State {
             if let Clause::FallsThrough(Some(arm)) = clause {
                 meta.loc = self.switch_location(self.source.lists.get(p.operands)[*arm as usize]);
             }
-            actions.push(body);
-            clauses.push(meta);
+            self.arena.lists.set(actions, i, body);
+            self.arena.pools.switch_clauses.push(meta);
         }
         if has_default {
             let list = self.statements.take_list(&mut self.arena, default.run);
-            actions.push(self.arena.block_from_list(list));
-            clauses.push(ClauseMeta {
+            let body = self.arena.block_from_list(list);
+            self.arena.lists.set(actions, count, body);
+            self.arena.pools.switch_clauses.push(ClauseMeta {
                 should_break: false,
                 comment: None,
                 loc: None,
@@ -545,13 +771,13 @@ impl State {
         } else {
             self.statements.kill(default.run);
         }
-        p.outputs.truncate(base);
+        p.outputs.len = base as u32;
         let mut scrutinee = self.untagged_scrutinee(p);
         if typeof_ {
             scrutinee = plain::node(&mut self.arena, View::JTypeof { value: scrutinee }, 0);
         }
-        let header = self.arena.switch_header(crate::bir::SwitchInput {
-            constants: keys.len() as u32,
+        let header = self.arena.switch_record(crate::bir::SwitchRecord {
+            constants: count as u32,
             keys,
             clauses,
             consts_full: false,
@@ -559,21 +785,16 @@ impl State {
             has_default,
             dispatch: SwitchDispatch::Direct,
         });
-        let statement = plain::node(
-            &mut self.arena,
-            View::SSwitch {
-                scrutinee,
-                actions: &actions,
-                header,
-            },
-            1,
-        );
+        let statement = self.arena.switch_from_list(scrutinee, actions, header, 1);
         self.statements.fill(start.start, statement);
-        p.outputs.push(Output {
-            run: self.statements.since(start),
-            action: NONE,
-            finished: Finished::False,
-        });
+        self.untagged_storage.outputs.push(
+            &mut p.outputs,
+            Output {
+                run: self.statements.since(start),
+                action: NONE,
+                finished: Finished::False,
+            },
+        );
     }
 
     /// V: untagged_typeof_expr. O(1), retaining raw typeof rather than folding.
@@ -586,8 +807,9 @@ impl State {
     /// V: untagged_test_expr. O(test occurrences + emitted scrutinee copies),
     /// using explicit stacks instead of recursion on the planner's tests.
     fn untagged_test(&mut self, p: &Plan, test: TestId) -> NodeId {
-        let mut work = vec![(test, false)];
-        let mut values = Vec::new();
+        let mut work = std::mem::take(&mut self.untagged_storage.test_work);
+        let mut values = std::mem::take(&mut self.untagged_storage.test_values);
+        work.push((test, false));
         while let Some((id, done)) = work.pop() {
             let test = p.dispatch.test(id);
             if !done {
@@ -620,8 +842,7 @@ impl State {
                 Test::NotNull => {
                     let value = self.untagged_scrutinee(p);
                     let null = plain::node(&mut self.arena, View::JNull, 0);
-                    let eq =
-                        norm::je4_bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, value, null);
+                    let eq = norm::je4_bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, value, null);
                     norm::je8_not(&mut self.arena, eq)
                 }
                 Test::Not(_) => norm::je8_not(&mut self.arena, values.pop().unwrap()),
@@ -642,7 +863,10 @@ impl State {
             };
             values.push(value);
         }
-        values.pop().unwrap()
+        let value = values.pop().unwrap();
+        self.untagged_storage.test_work = work;
+        self.untagged_storage.test_values = values;
+        value
     }
 
     /// V: class_constructor / is_instance_of. O(class path bytes); array tests
@@ -711,8 +935,8 @@ impl State {
         while self.untagged.last().is_some_and(Option::is_none) {
             self.untagged.pop();
         }
-        assert_eq!(p.pc, p.program.len());
-        assert_eq!(p.outputs.len(), 1);
+        assert_eq!(p.pc, p.program.len as usize);
+        assert_eq!(p.outputs.len as usize, 1);
         self.arena.release(p.scrutinee.unwrap());
         if matches!(cx.cont, Cont::Effect(Tail::Return(_))) {
             self.unnest(p.start.start);
@@ -963,12 +1187,51 @@ mod tests {
         assert_eq!(state.source_steps, 20_001);
         assert_eq!(state.switch_visits, 10_000);
         assert_eq!(state.switch_comparisons, 0);
+        assert_eq!(state.untagged_storage.program_steps, 10_000);
         state.complete(Cx::returning(), out);
     }
 
     #[test]
+    fn ten_thousand_reserved_plan_slots_do_not_allocate() {
+        let mut outputs = Pool::default();
+        let empty = Output {
+            run: Span::default(),
+            action: NONE,
+            finished: Finished::False,
+        };
+        let mut parent = outputs.stack(10_000, empty);
+        let mut child = outputs.stack(10_000, empty);
+        let exercise =
+            |outputs: &mut Pool<Output>, parent: &mut Run<Output>, child: &mut Run<Output>| {
+                for i in 0..10_000 {
+                    outputs.push(parent, Output { action: i, ..empty });
+                    outputs.push(
+                        child,
+                        Output {
+                            action: i + 10_000,
+                            ..empty
+                        },
+                    );
+                }
+                for i in (0..10_000).rev() {
+                    assert_eq!(outputs.pop(child).action, i + 10_000);
+                    assert_eq!(outputs.pop(parent).action, i);
+                }
+            };
+        exercise(&mut outputs, &mut parent, &mut child);
+        let capacity = outputs.values.capacity();
+        let allocations =
+            allocation_counter::measure(|| exercise(&mut outputs, &mut parent, &mut child));
+        assert_eq!(allocations.count_total, 0);
+        assert_eq!(outputs.values.capacity(), capacity);
+    }
+
+    #[test]
     fn program_element_sizes() {
-        assert_eq!(std::mem::size_of::<Plan>(), 336);
+        assert_eq!(std::mem::size_of::<Plan>(), 224);
+        assert_eq!(std::mem::size_of::<Run<Op>>(), 12);
+        assert_eq!(std::mem::size_of::<Run<Action>>(), 12);
+        assert_eq!(std::mem::size_of::<ActionState>(), 16);
         assert_eq!(std::mem::size_of::<Untagged>(), 4);
         assert_eq!(std::mem::size_of::<Op>(), 8);
         assert_eq!(std::mem::size_of::<Work>(), 12);
