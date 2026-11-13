@@ -2173,6 +2173,20 @@ fn shared_pers_struct_at(
     Some((Arc::new(ps), base))
 }
 
+/// Read a detached checker-bridge publication through the ordinary shared
+/// graph relocation, without serializing a portable intermediate.
+pub(crate) fn import_checker_publication(
+    graph: &mut super::shared_reader::PublishedGraph,
+    unit: &str,
+    ctx: &TypeContext,
+) -> Result<Arc<Signature>, String> {
+    let pool = ctx.thread_store().shared_pool();
+    assert!(std::ptr::eq(graph.names.as_ref(), pool.names_ref()));
+    signature_builder::promote(graph, unit, pool)
+        .map(|published| published.signature)
+        .ok_or_else(|| format!("checker bridge cannot publish rebuilt unit {unit}"))
+}
+
 /// Load a PortablePersStruct for the current compilation.
 ///
 /// The dependency graph is internalized once per build into the world's

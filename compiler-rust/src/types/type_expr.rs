@@ -1453,6 +1453,16 @@ impl TypeArgLabel {
         }
     }
 
+    /// Build a compact label from an already interned name, with no string
+    /// allocation or interner lookup at the arrow-parameter boundary.
+    pub(crate) const fn from_name(name: crate::name::Name, optional: bool, loc: DeclLoc) -> Self {
+        Self {
+            name: Some(name),
+            optional,
+            loc,
+        }
+    }
+
     /// The owned label (same text and location).
     pub fn to_arg_label(self) -> ArgLabel {
         match self.name {
@@ -1728,6 +1738,44 @@ impl MutabilityRef {
             super::asttypes::MutableFlag::Mutable => 1,
         };
         Self(STORE_REF_TAG | (id << 1) | bit)
+    }
+
+    /// Reserve a publication's cell identities in one atomic reservation.
+    /// Each input flag gets a distinct identity; repeated references reuse
+    /// the returned handle rather than allocating another cell. Exhaustion
+    /// leaves the counter unchanged, including when a caller catches a panic.
+    pub(crate) fn new_persistent_batch(
+        flags: impl ExactSizeIterator<Item = super::asttypes::MutableFlag>,
+    ) -> Vec<Self> {
+        let count = u32::try_from(flags.len()).expect("persistent mutability cell count");
+        if count == 0 {
+            return Vec::new();
+        }
+        // A checked CAS reservation works on the crate's MSRV too;
+        // fetch_update is deprecated and try_update requires a newer Rust.
+        let mut base = NEXT_PERSISTENT_MUTABILITY.load(std::sync::atomic::Ordering::Relaxed);
+        loop {
+            let end = base
+                .checked_add(count)
+                .filter(|&end| end <= (1 << 30))
+                .expect("persistent mutability cells exhausted");
+            match NEXT_PERSISTENT_MUTABILITY.compare_exchange_weak(
+                base,
+                end,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(current) => base = current,
+            }
+        }
+        flags
+            .enumerate()
+            .map(|(i, flag)| {
+                let bit = u32::from(flag == super::asttypes::MutableFlag::Mutable);
+                Self(STORE_REF_TAG | ((base + i as u32) << 1) | bit)
+            })
+            .collect()
     }
 
     /// Whether the cell is a persistent one, shared process-wide, rather than

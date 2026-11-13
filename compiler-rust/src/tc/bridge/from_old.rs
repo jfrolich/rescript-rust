@@ -181,7 +181,10 @@ pub(crate) fn check_published(
             published_digest(unit),
         ));
         let actual = crate::tc::canonical::canonical_signature(&segment);
-        compare_text(&unit.ps_name, "segment", &expected, &actual)
+        compare_text(&unit.ps_name, "segment", &expected, &actual)?;
+        let rebuilt = super::to_old::to_old(&segment);
+        let restored = rebuilt.canonical_text()?;
+        compare_text(&unit.ps_name, "round-trip", &expected, &restored)
     })??;
     log::debug!(target: "rescript_checker", "tc-segment-canonical {}", unit.ps_name);
     Ok(())
