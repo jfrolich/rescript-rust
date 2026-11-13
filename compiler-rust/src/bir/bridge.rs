@@ -1212,6 +1212,21 @@ mod roundtrip_tests {
     }
 
     #[test]
+    fn import_records_loop_label_fact() {
+        let mut a = LamArena::new();
+        let jump = a.break_();
+        let scrutinee = a.const_(C::int(0));
+        let info = a.add_switch(false, [], false, [], true, SwitchDispatch::Direct);
+        let actions = a.add_list(&[jump]);
+        let body = a.switch_raw(scrutinee, actions, info);
+        let condition = a.const_(C::JsTrue);
+        let root = a.while_(condition, body);
+        let imported = import_lambda(&a, root).unwrap();
+        assert!(imported.arena.loop_needs_label(imported.root));
+        imported.arena.validate(Some(imported.root)).unwrap();
+    }
+
+    #[test]
     fn identity_retains_static_catches_loops_and_switches() {
         let mut a = LamArena::new();
         let p = Ident::create_local("caught");

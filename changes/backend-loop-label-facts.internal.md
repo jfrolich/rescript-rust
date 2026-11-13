@@ -1,0 +1,1 @@
+- Record loop-label requirements with backend IR control facts, including construction, import, edit repair, and independent validation.
