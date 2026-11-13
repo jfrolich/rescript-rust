@@ -552,20 +552,11 @@ fn lookup_rebind_constructor<'a>(
     lid: &Located<LidentIdx>,
 ) -> TypeModResult<(Path, crate::types::decl::ConstructorDescription)> {
     let longident = tctx.resolve_lid(lid.txt).clone();
-    let result = match &longident {
-        Longident::Lident(name_idx) => {
-            let name = tctx.arena.get_string(*name_idx);
-            env.find_constructor(name).ok().map(|desc| {
-                let desc = desc.clone();
-                let path = match &desc.cstr_kind {
-                    crate::types::ConstructorKind::Extension(path) => *path,
-                    crate::types::ConstructorKind::Ordinary(_) => {
-                        Path::pident(Ident::create_persistent(name))
-                    }
-                };
-                (path, desc)
-            })
-        }
+    let desc = match &longident {
+        Longident::Lident(name_idx) => env
+            .find_constructor(tctx.arena.get_string(*name_idx))
+            .ok()
+            .cloned(),
         Longident::Ldot(_, _) => crate::types::typecore::lookup_constructor_in_module(
             &longident,
             tctx.arena,
@@ -573,14 +564,26 @@ fn lookup_rebind_constructor<'a>(
             &mut tctx.persistent_env,
             tctx.type_ctx,
             None,
-        ),
+        )
+        .map(|(_, desc)| desc),
         Longident::Lapply(_, _) => None,
     };
-    result.ok_or_else(|| {
+    let desc = desc.ok_or_else(|| {
         TypeModError::CoreError(crate::types::typecore::unbound_constructor_lookup_error(
             tctx, env, lid.loc, &longident,
         ))
-    })
+    })?;
+    // The path the rebound constructor is read at is the one its description
+    // carries (compiler/ml/typedecl.ml:1745-1749): for `M.E` the field `E`
+    // of `M`, not a name of its own. A constructor that is no extension is
+    // rejected by the caller, which unifies its type with the extended one.
+    let path = match &desc.cstr_kind {
+        crate::types::ConstructorKind::Extension(path) => *path,
+        crate::types::ConstructorKind::Ordinary(_) => Path::pident(Ident::create_persistent(
+            tctx.arena.get_string(longident.last_idx()),
+        )),
+    };
+    Ok((path, desc))
 }
 
 /// The arguments of a rebound extension constructor (compiler/ml/
