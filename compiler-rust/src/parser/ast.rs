@@ -1258,6 +1258,10 @@ pub enum StructureItemDesc {
     Pstr_extension(Box<(Extension, Attributes)>),
     /// `%%raw("...")`: JavaScript statements.
     Pstr_raw(Box<PstrRaw>),
+    /// A derived value group that is a plan in the arena's plan pools
+    /// instead of syntax. Only the built-in derive makes it, after parsing;
+    /// `derive::general_form` gives the value group it stands for.
+    Pstr_derived(crate::binary_ast::derive::plan::DerivedIdx),
 }
 
 /// A signature item.

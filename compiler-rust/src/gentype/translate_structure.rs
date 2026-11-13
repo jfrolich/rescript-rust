@@ -313,6 +313,16 @@ pub fn translate_structure_item(
                 })
                 .collect::<crate::gentype::annotation::Read<Vec<_>>>()?,
         ),
+        // A derived binding carries no genType annotation: like an
+        // unannotated `let`, it only becomes the current module item.
+        StructureItemDesc::Tstr_derived(idx) => {
+            for bound in ta.derived.bound(*idx) {
+                let name = unwrap_uppercase_exotic(bound.ident.name());
+                let module_item = crate::gentype::runtime::new_module_item(name);
+                crate::gentype::type_env::update_module_item(module_item, type_env);
+            }
+            crate::gentype::translation::empty()
+        }
         StructureItemDesc::Tstr_primitive(value_description) => {
             crate::gentype::translation::translate_primitive(
                 input,
@@ -410,7 +420,24 @@ pub fn translate_structure(
                     .collect();
                 items.push(Item::Values(value_bindings));
             }
-            _ => items.push(Item::Borrowed(item)),
+            // Its names shadow earlier bindings of the same name.
+            StructureItemDesc::Tstr_derived(idx) => {
+                for bound in ta.derived.bound(*idx) {
+                    seen.insert(bound.ident.name().to_string());
+                }
+                items.push(Item::Borrowed(item));
+            }
+            StructureItemDesc::Tstr_eval(..)
+            | StructureItemDesc::Tstr_primitive(_)
+            | StructureItemDesc::Tstr_type(..)
+            | StructureItemDesc::Tstr_typext(_)
+            | StructureItemDesc::Tstr_exception(_)
+            | StructureItemDesc::Tstr_module(_)
+            | StructureItemDesc::Tstr_recmodule(_)
+            | StructureItemDesc::Tstr_modtype(_)
+            | StructureItemDesc::Tstr_open(_)
+            | StructureItemDesc::Tstr_include(_)
+            | StructureItemDesc::Tstr_attribute(_) => items.push(Item::Borrowed(item)),
         }
     }
     items

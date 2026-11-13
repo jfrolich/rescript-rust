@@ -24,6 +24,9 @@ impl NodeFlags {
     pub const JS_LOC_PRESENT: u8 = 64;
     /// A JNumber carries an optional character decoration in its spare word.
     pub const JS_CHAR_PRESENT: u8 = 128;
+    /// L-only: a pure Let/Seq spine ending in the unit constant.
+    /// Shares the J strict-purity bit; L and J operations are disjoint.
+    pub const TRIVIAL_UNIT: u8 = 8;
     /// J-only: strict purity.
     pub const STRICT: u8 = 8;
     /// J-only: removable by E:146 is_pure_subexpression (not general purity).
@@ -39,6 +42,8 @@ impl NodeFlags {
     /// lambda_contains_statement_value_form). Reuses the bit level J reads as
     /// `JS_LOC_PRESENT`.
     pub const HAS_STATEMENT: u8 = Self::JS_LOC_PRESENT;
+    /// L-only facts maintained together from immediate child flags.
+    pub(super) const CONTROL: u8 = Self::HAS_EXIT | Self::HAS_STATEMENT | Self::TRIVIAL_UNIT;
     /// Test a flag.
     pub fn contains(self, flag: u8) -> bool {
         self.0 & flag != 0
@@ -383,6 +388,10 @@ impl Node {
         assert_eq!(self.op, Op::JNumber);
         self.flags.0 |= NodeFlags::JS_CHAR_PRESENT;
         self.words[1] = code as u32;
+    }
+    /// O(1): borrow an SBlock's list identity without copying its elements.
+    pub(super) fn block_list_id(self) -> Option<ListId> {
+        (self.op == Op::SBlock).then_some(ListId(self.words[0]))
     }
     pub(super) fn block_list(list: ListId) -> Self {
         Self { op: Op::SBlock, flags: NodeFlags::default(), aux: 0, words: [list.0, 0, 0] }

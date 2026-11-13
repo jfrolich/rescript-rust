@@ -1594,6 +1594,10 @@ pub fn structure(items: &[StructureItem], arena: &ParseArena) -> Sexp {
 
 fn structure_item(si: &StructureItem, arena: &ParseArena) -> Sexp {
     let desc = match &si.pstr_desc {
+        StructureItemDesc::Pstr_derived(idx) => {
+            let general = crate::binary_ast::derive::general_item(arena, si.pstr_loc, *idx);
+            return structure_item(&general, arena);
+        }
         StructureItemDesc::Pstr_eval(inner) => {
             let (ref e, ref attrs) = **inner;
             Sexp::list(vec![

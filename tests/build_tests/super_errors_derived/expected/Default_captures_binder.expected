@@ -1,0 +1,10 @@
+We've found a bug for you!
+  /.../fixtures/Default_captures_binder/Main.res:6:26
+
+  4 │ 
+  5 │ @spice
+  6 │ type t = {@spice.default(v) b: int}
+  7 │ 
+
+  This has type: JSON.t
+  But it's expected to have type: int

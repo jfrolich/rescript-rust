@@ -86,6 +86,9 @@ pub struct Census {
     pub shape_recursive: Vec<bool>,
     /// Canonical structural bytes per binding; null means unsupported syntax.
     pub templates: Vec<Option<Vec<u8>>>,
+    /// Derived bindings per path: plans, each reason of the general path,
+    /// and plans the checker fell back from.
+    pub paths: super::PathCounts,
     #[serde(skip)]
     pub(crate) observer_ns: u64,
     #[serde(skip)]
@@ -108,7 +111,8 @@ impl Census {
                 && std::env::var("RAYON_NUM_THREADS").as_deref() == Ok("1"))
                 .then_some([[0; 4]; 2]),
             typed_groups: Vec::new(), shape_classes: Vec::new(), shape_nodes: Vec::new(),
-            shape_parameterised: Vec::new(), shape_recursive: Vec::new(), templates: Vec::new(), observer_ns: 0 }
+            shape_parameterised: Vec::new(), shape_recursive: Vec::new(), templates: Vec::new(),
+            paths: super::PathCounts::default(), observer_ns: 0 }
     }
     /// O(new words) on growth, O(1) otherwise; one bit per typed binding-pool slot.
     pub fn mark_typed_group(&mut self, start: u32) {
@@ -208,8 +212,26 @@ impl SyntaxCounts {
     pub fn item(&mut self, arena: &ParseArena, item: &StructureItem) {
         self.side = usize::from(!super::is_derived_item(item, arena));
         self.node();
-        if let StructureItemDesc::Pstr_value((_, group)) = item.pstr_desc {
-            self.bindings[self.side] += group.len() as u64;
+        match item.pstr_desc {
+            StructureItemDesc::Pstr_value((_, group)) => {
+                self.bindings[self.side] += group.len() as u64;
+            }
+            StructureItemDesc::Pstr_derived(idx) => {
+                self.bindings[self.side] += arena.plans().item(idx).bindings.len as u64;
+            }
+            StructureItemDesc::Pstr_eval(_)
+            | StructureItemDesc::Pstr_primitive(_)
+            | StructureItemDesc::Pstr_type(_)
+            | StructureItemDesc::Pstr_typext(_)
+            | StructureItemDesc::Pstr_exception(_)
+            | StructureItemDesc::Pstr_module(_)
+            | StructureItemDesc::Pstr_recmodule(_)
+            | StructureItemDesc::Pstr_modtype(_)
+            | StructureItemDesc::Pstr_open(_)
+            | StructureItemDesc::Pstr_include(_)
+            | StructureItemDesc::Pstr_attribute(_)
+            | StructureItemDesc::Pstr_extension(_)
+            | StructureItemDesc::Pstr_raw(_) => {}
         }
     }
 }

@@ -1,0 +1,12 @@
+We've found a bug for you!
+  /.../fixtures/Default_of_another_type/Main.res:3:26-28
+
+  1 │ // The default of an `int` field is a string.
+  2 │ @spice
+  3 │ type t = {@spice.default("x") count: int}
+  4 │ 
+
+  This has type: string
+  But it's expected to have type: int
+  
+  You can convert string to int with Int.fromString.

@@ -224,7 +224,10 @@ pub fn walk_structure_item<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, item: 
         StructureItemDesc::Tstr_include(incl) => {
             sub.module_expr(sub.arena().module_expr(incl.incl_mod))
         }
-        StructureItemDesc::Tstr_open(_) | StructureItemDesc::Tstr_attribute(_) => {}
+        // A derived item has no typed children: its bindings have no body.
+        StructureItemDesc::Tstr_open(_)
+        | StructureItemDesc::Tstr_attribute(_)
+        | StructureItemDesc::Tstr_derived(_) => {}
     }
 }
 

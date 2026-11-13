@@ -1,0 +1,10 @@
+Warning number 33
+  /.../fixtures/Codec_through_open/Main.res:13:1-14
+
+  11 │ 
+  12 │ open Codecs
+  13 │ open Unrelated
+  14 │ 
+  15 │ @spice
+
+  unused open Unrelated.
