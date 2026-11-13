@@ -3341,6 +3341,17 @@ impl TypeContext {
         self.deprecated_used.borrow_mut().push(used);
     }
 
+    /// How many deprecated uses are recorded. Cost: O(1).
+    pub(crate) fn deprecated_use_count(&self) -> usize {
+        self.deprecated_used.borrow().len()
+    }
+
+    /// Forget the deprecated uses recorded since `count` of them were.
+    /// Cost: O(uses dropped).
+    pub(crate) fn truncate_deprecated_uses(&self, count: usize) {
+        self.deprecated_used.borrow_mut().truncate(count);
+    }
+
     /// Recorded deprecated uses, most recent first (as OCaml's list).
     pub fn deprecated_uses(&self) -> Vec<DeprecatedUse> {
         self.deprecated_used

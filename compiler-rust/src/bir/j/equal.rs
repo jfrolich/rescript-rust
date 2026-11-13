@@ -17,7 +17,7 @@ pub fn equal(b: &Bir, left: NodeId, right: NodeId, steps: &mut usize) -> bool {
                 (la != 0) == (ra != 0)
             }
             (View::Var { var: x }, View::Var { var: y }) => {
-                b.vars.j_origin.get(&x).copied().unwrap_or(x) == b.vars.j_origin.get(&y).copied().unwrap_or(y)
+                b.vars.j_origin[x.index()] == b.vars.j_origin[y.index()]
             },
             (
                 View::JQualified {
@@ -168,4 +168,29 @@ pub fn equal(b: &Bir, left: NodeId, right: NodeId, steps: &mut usize) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::name::Name;
+
+    #[test]
+    fn ten_thousand_variable_origins_take_one_pair_step_each() {
+        let mut b = Bir::default();
+        let mut steps = 0;
+        for i in 0..10_000 {
+            let original = b.new_var_id(Name::new("x"), 2 * i);
+            let copy = b.new_var_id(Name::new("x"), 2 * i + 1);
+            b.vars.j_origin[copy.index()] = original;
+            let left = b.new_node(View::Var { var: original }, 0);
+            let right = b.new_node(View::Var { var: copy }, 0);
+            assert!(equal(&b, left, right, &mut steps));
+            b.release(left);
+            b.release(right);
+        }
+        assert_eq!(steps, 10_000); // two direct origin-table reads per pair
+        assert_eq!(b.vars.j_origin.len(), 20_000);
+        b.validate(None).unwrap();
+    }
 }

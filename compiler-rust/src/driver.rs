@@ -3,6 +3,7 @@
 //! This module wires together parsing, type-checking, Lambda conversion, and
 //! JS IR codegen to produce JavaScript output.
 
+mod derived_check;
 mod type_clash;
 
 use crate::types::path::PathView;
@@ -297,11 +298,46 @@ fn publish_signature(
     Ok(Some(pers_struct))
 }
 
+/// The path derived items take: the switch `RESCRIPT_DERIVED_PATH`
+/// (`compiler-rust/docs/DERIVED_CODECS.md`, "The oracle"). It exists until
+/// every supported item is planned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DerivedPath {
+    /// Unset: the items the classifier supports are planned.
+    Plans,
+    /// `general`: the classifier keeps every item on the general path.
+    General,
+    /// `check`: a unit with a planned item is compiled both ways in the
+    /// same process, and a difference between the two fails its compile.
+    Check,
+}
+
+impl DerivedPath {
+    /// Read the switch once per process; later calls are O(1). A value that
+    /// is not one of the three ends the process with a message.
+    pub fn from_env() -> DerivedPath {
+        static PATH: std::sync::OnceLock<DerivedPath> = std::sync::OnceLock::new();
+        *PATH.get_or_init(|| match std::env::var("RESCRIPT_DERIVED_PATH").as_deref() {
+            Err(_) | Ok("") => DerivedPath::Plans,
+            Ok("general") => DerivedPath::General,
+            Ok("check") => DerivedPath::Check,
+            Ok(other) => {
+                eprintln!(
+                    "RESCRIPT_DERIVED_PATH is `{other}`; it is unset, `general` or `check`"
+                );
+                std::process::exit(2)
+            }
+        })
+    }
+}
+
 /// Compiler options that can be passed to the driver.
 #[derive(Clone)]
 pub struct CompilerOptions {
     /// Optional derived-code census output, read once when options are created.
     pub derived_census: Option<PathBuf>,
+    /// The path derived items take, read once when options are created.
+    pub derived_path: DerivedPath,
     /// Dormant backend migration mode, selected before compiling modules.
     pub backend: crate::bir::shadow::BackendMode,
     /// Dormant publication equality oracle; configured once, not per unit.
@@ -593,6 +629,7 @@ impl Default for CompilerOptions {
     fn default() -> Self {
         Self {
             derived_census: Self::derived_census_from_env(),
+            derived_path: DerivedPath::from_env(),
             backend: crate::bir::shadow::BackendMode::from_env(),
             signature_check: crate::cmi::signature_check::SignatureCheck::from_env(),
             js_printer: crate::emit::PrinterMode::from_env(),
@@ -6118,6 +6155,9 @@ pub fn run_implementation_frontend(
         return Err(parser_error_to_anyhow(parser, source, filename));
     }
     parser.arena_mut().set_builtin_spice(options.builtin_spice());
+    parser
+        .arena_mut()
+        .set_derived_plans(options.derived_path != DerivedPath::General);
     let frontend_warnings =
         ppx::collect_leading_builtin_warning_attributes(&structure, parser.arena())
             .map_err(|err| ppx_error_to_anyhow(err, parser.arena(), source, filename))?;
@@ -8166,7 +8206,26 @@ fn moregen_link_structure(
             crate::types::typedtree::StructureItemDesc::Tstr_module(mb) => {
                 moregen_link_mod_expr(type_ctx, ta, ta.module_expr(mb.mb_expr), iface_val_types);
             }
-            _ => {}
+            // A derived binding is a `let` of a variable bound to a function.
+            crate::types::typedtree::StructureItemDesc::Tstr_derived(idx) => {
+                for bound in ta.derived.bound(*idx) {
+                    let Some(&iface_ty) = iface_val_types.get(bound.ident.name()) else {
+                        continue;
+                    };
+                    let iface_inst = crate::types::ctype::instance(type_ctx, iface_ty);
+                    moregen_link(type_ctx, bound.ty, iface_inst, &mut ahash::AHashSet::new());
+                }
+            }
+            crate::types::typedtree::StructureItemDesc::Tstr_eval(..)
+            | crate::types::typedtree::StructureItemDesc::Tstr_primitive(_)
+            | crate::types::typedtree::StructureItemDesc::Tstr_type(..)
+            | crate::types::typedtree::StructureItemDesc::Tstr_typext(_)
+            | crate::types::typedtree::StructureItemDesc::Tstr_exception(_)
+            | crate::types::typedtree::StructureItemDesc::Tstr_recmodule(_)
+            | crate::types::typedtree::StructureItemDesc::Tstr_modtype(_)
+            | crate::types::typedtree::StructureItemDesc::Tstr_open(_)
+            | crate::types::typedtree::StructureItemDesc::Tstr_include(_)
+            | crate::types::typedtree::StructureItemDesc::Tstr_attribute(_) => {}
         }
     }
 }
@@ -9321,6 +9380,10 @@ pub struct InProcessPreJsCompileResult {
     /// What the typed tree read of other units (with
     /// `CompilerOptions::collect_unit_reads`).
     pub unit_reads: Vec<crate::cmi::item_deps::UnitRead>,
+    /// With `RESCRIPT_DERIVED_PATH=check`, the same unit compiled from the
+    /// general forms of its derived items; the JS backend runs on both and
+    /// compares what they produce.
+    pub derived_reference: Option<Box<InProcessPreJsCompileResult>>,
 }
 
 /// The `.cmj` metadata of an in-process compile, available after the JS
@@ -10285,9 +10348,56 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     registry: &ModuleRegistry,
     has_interface: bool,
     gentype_interface: Option<crate::gentype::main::InterfaceRead>,
-    mut signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
+    signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
     publication: SignaturePublicationMode,
 ) -> Result<InProcessPreJsCompileResult> {
+    let unit = UntilJs {
+        arena,
+        structure,
+        filename,
+        module_name,
+        registry,
+        has_interface,
+        publication,
+    };
+    // O(1): one comparison per unit; only `check` compiles a unit twice.
+    if options.derived_path == DerivedPath::Check && arena.plans().item_count() > 0 {
+        return derived_check::until_js(&unit, options, gentype_interface, signature_ready);
+    }
+    compile_until_js(&unit, options, gentype_interface, signature_ready, true)
+}
+
+/// The unit an in-process compile works on.
+struct UntilJs<'a> {
+    arena: &'a crate::parse_arena::ParseArena,
+    structure: &'a Structure,
+    filename: &'a str,
+    module_name: &'a str,
+    registry: &'a ModuleRegistry,
+    has_interface: bool,
+    publication: SignaturePublicationMode,
+}
+
+/// [`compile_preprocessed_structure_in_process_until_js`] for one path of
+/// the unit's derived items: from their plans (`derived_plans`), or, for the
+/// reference compile of `RESCRIPT_DERIVED_PATH=check`, from their general
+/// forms.
+fn compile_until_js(
+    unit: &UntilJs<'_>,
+    options: &CompilerOptions,
+    gentype_interface: Option<crate::gentype::main::InterfaceRead>,
+    mut signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
+    derived_plans: bool,
+) -> Result<InProcessPreJsCompileResult> {
+    let UntilJs {
+        arena,
+        structure,
+        filename,
+        module_name,
+        registry,
+        has_interface,
+        publication,
+    } = *unit;
     if !arena.stores_locations()
         && (options.source_map != crate::js_ir::source_map::SourceMapMode::None
             || options.capture_intermediates
@@ -10336,7 +10446,11 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         &file_config,
         &frontend_warning_specs,
     );
-    tctx.derived_census = arena.derived_census.clone();
+    tctx.derived_plans = derived_plans;
+    // The reference compile of a check is not part of the census.
+    if derived_plans {
+        tctx.derived_census = arena.derived_census.clone();
+    }
     drop(env_setup_span);
     if let Some(start) = env_setup_start {
         crate::timing::record(crate::timing::Phase::EnvSetup, start.elapsed());
@@ -11089,6 +11203,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             .as_ref()
             .map(PersistentEnv::loaded_units)
             .unwrap_or_default(),
+        derived_reference: None,
     })
 }
 
@@ -11108,6 +11223,53 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary(
 /// [`finish_preprocessed_structure_in_process_from_js_boundary`], handing
 /// the `.cmj` metadata to `metadata_ready` before the JavaScript is printed.
 pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_hook(
+    mut pre_js: InProcessPreJsCompileResult,
+    options: &CompilerOptions,
+    registry: &ModuleRegistry,
+    metadata_ready: Option<&mut InProcessJsMetadataReadyHook<'_>>,
+) -> Result<InProcessCompileResult> {
+    // O(1): absent unless `RESCRIPT_DERIVED_PATH=check` compiled a unit
+    // with a planned item.
+    let Some(reference) = pre_js.derived_reference.take() else {
+        return finish_from_js_boundary(pre_js, options, registry, metadata_ready);
+    };
+    let unit = options.module_name.as_deref().unwrap_or("");
+    let reference = finish_from_js_boundary(*reference, options, registry, None)?;
+    let result = match metadata_ready {
+        // The hook takes the export summary: compare what it is handed.
+        Some(forward) => {
+            let mut hook = |metadata: InProcessJsMetadataReady| {
+                derived_check::compare_exports(
+                    unit,
+                    metadata.is_pure,
+                    &metadata.cmj_export_constants,
+                    &metadata.cmj_export_arities,
+                    &metadata.cmj_export_lambdas,
+                    &reference,
+                )?;
+                forward(metadata)
+            };
+            finish_from_js_boundary(pre_js, options, registry, Some(&mut hook))?
+        }
+        None => {
+            let result = finish_from_js_boundary(pre_js, options, registry, None)?;
+            derived_check::compare_exports(
+                unit,
+                result.is_pure,
+                &result.cmj_export_constants,
+                &result.cmj_export_arities,
+                &result.cmj_export_lambdas,
+                &reference,
+            )?;
+            result
+        }
+    };
+    derived_check::compare_js(unit, &result, &reference)?;
+    Ok(result)
+}
+
+/// The JS backend and printer of one pre-JS result.
+fn finish_from_js_boundary(
     mut pre_js: InProcessPreJsCompileResult,
     options: &CompilerOptions,
     registry: &ModuleRegistry,

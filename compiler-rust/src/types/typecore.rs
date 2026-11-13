@@ -1442,6 +1442,10 @@ struct DelayedOpenCheck {
 pub struct TypeCheckContext<'a> {
     /// Optional item accounting; absent in ordinary compilation.
     pub derived_census: Option<Box<crate::derived_census::Census>>,
+    /// Whether a derived item is checked from its plan. The reference
+    /// compile of `RESCRIPT_DERIVED_PATH=check` types every item's general
+    /// form instead.
+    pub derived_plans: bool,
     /// Type context for allocation.
     pub type_ctx: &'a TypeContext,
     /// Parse arena for location conversion and longident allocation.
@@ -1659,6 +1663,7 @@ impl<'a> TypeCheckContext<'a> {
         type_ctx.register_arena_longident_names(arena);
         TypeCheckContext {
             derived_census: None,
+            derived_plans: true,
             type_ctx,
             arena,
             typed: TypedArena::new(),
@@ -3174,18 +3179,7 @@ fn transl_type_inner(
             let longident = tctx.arena.get_longident(lid.txt);
 
             let (path, decl) = find_type_for_lid(tctx, env, lid.loc, longident)?;
-            // typetexp.ml:104-106: `check_deprecated ~deprecated_context:Reference`.
-            record_deprecated_used(
-                tctx,
-                lid.loc,
-                &decl.type_attributes,
-                Some(crate::types::context::DeprecatedContext::Reference),
-            )?;
-            if let Some(warning) = deprecated_warning_for_type(&path, &decl)
-                .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
-            {
-                tctx.report_warning(lid.loc, warning);
-            }
+            note_type_use(tctx, lid.loc, &path, &decl)?;
 
             let mut parsed_args: Vec<_> = tctx
                 .arena
@@ -8039,6 +8033,110 @@ fn deprecated_warning_for_type(
     deprecated_warning_for_path(path, &decl.type_attributes)
 }
 
+/// Why the lookup of an identifier expression found no value.
+pub(crate) enum ValueLookupFailure {
+    /// The name is not a legal value name (`Env.check_value_name`).
+    IllegalName,
+    /// The name is not bound.
+    Unbound,
+}
+
+/// The lookup of an identifier expression (typetexp.ml `find_value`):
+/// `Env.check_value_name (Longident.last lid) loc`, the use of the opens the
+/// name goes through, then the lookup itself. Shared by the typing of an
+/// identifier and the discharge of a derived item's value obligation.
+/// Cost: one environment lookup; one shared-pointer copy of the description.
+#[inline(always)]
+pub(crate) fn lookup_value_ident(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    longident: &Longident,
+    loc: LocIdx,
+) -> Result<(Path, Arc<ValueDescription>), ValueLookupFailure> {
+    let last = tctx.arena.get_string(longident.last_idx());
+    if crate::types::env::check_value_name(last, tctx.arena.to_location(loc)).is_err() {
+        return Err(ValueLookupFailure::IllegalName);
+    }
+    mark_open_lid_use(
+        tctx.type_ctx,
+        env,
+        tctx.arena,
+        longident,
+        crate::types::env::OpenLookupKind::Value,
+        Some(loc),
+    );
+    env.lookup_value_by_lid(
+        longident,
+        tctx.arena,
+        &mut tctx.persistent_env,
+        tctx.type_ctx,
+    )
+    .ok_or(ValueLookupFailure::Unbound)
+}
+
+/// What the use of a looked-up value records: `Env.lookup_value` marks the
+/// declaration used (env.ml:1169-1172), and a deprecated value is recorded
+/// and warned about (typetexp.ml:117-123 via typecore.ml:2381-2388).
+/// `function_call` says whether the identifier is the callee of an
+/// application.
+/// Cost: O(1) plus a scan of the value's attributes.
+#[inline(always)]
+pub(crate) fn note_value_ident_use(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    longident: &Longident,
+    loc: LocIdx,
+    path: &Path,
+    desc: &ValueDescription,
+    function_call: bool,
+) -> TypeCoreResult<()> {
+    let used_name = tctx.arena.name(longident.last_idx());
+    tctx.mark_value_used(env, used_name, tctx.resolve_loc(desc.val_loc));
+    let deprecated_context = if function_call {
+        crate::types::context::DeprecatedContext::FunctionCall
+    } else {
+        crate::types::context::DeprecatedContext::Reference
+    };
+    record_deprecated_used(
+        tctx,
+        loc,
+        &desc.val_attributes,
+        Some(deprecated_context),
+    )?;
+    if let Some(warning) = deprecated_warning_for_value(path, desc)
+        .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
+    {
+        tctx.report_warning(loc, warning);
+    }
+    Ok(())
+}
+
+/// What the use of a looked-up type constructor in a type expression records
+/// (typetexp.ml:104-106, `check_deprecated ~deprecated_context:Reference`).
+/// Shared by the translation of a type and the discharge of a derived item's
+/// type obligation.
+/// Cost: O(1) plus a scan of the declaration's attributes.
+#[inline(always)]
+pub(crate) fn note_type_use(
+    tctx: &mut TypeCheckContext<'_>,
+    loc: LocIdx,
+    path: &Path,
+    decl: &crate::types::decl::TypeDeclaration,
+) -> TypeCoreResult<()> {
+    record_deprecated_used(
+        tctx,
+        loc,
+        &decl.type_attributes,
+        Some(crate::types::context::DeprecatedContext::Reference),
+    )?;
+    if let Some(warning) = deprecated_warning_for_type(path, decl)
+        .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
+    {
+        tctx.report_warning(loc, warning);
+    }
+    Ok(())
+}
+
 /// Type check an expression against an expected type.
 pub(crate) fn type_expect<'a>(
     tctx: &mut TypeCheckContext<'a>,
@@ -9098,35 +9196,16 @@ fn type_identifier(
     let ctx = tctx.type_ctx;
     let longident = tctx.arena.get_longident(lid.txt);
 
-    // Normal identifier expression. typetexp.ml `find_value`:
-    // `Env.check_value_name (Longident.last lid) loc` before lookup.
-    {
-        let last = tctx.arena.get_string(longident.last_idx());
-        if crate::types::env::check_value_name(last, tctx.arena.to_location(lid.loc))
-            .is_err()
-        {
+    // Normal identifier expression.
+    let (path, desc) = match lookup_value_ident(tctx, env, longident, lid.loc) {
+        Ok(result) => result,
+        Err(ValueLookupFailure::IllegalName) => {
             return Err(TypeCoreError::IllegalValueName {
                 loc: lid.loc,
-                name: last.to_string(),
+                name: tctx.arena.get_string(longident.last_idx()).to_string(),
             });
         }
-    }
-    mark_open_lid_use(
-        ctx,
-        env,
-        tctx.arena,
-        longident,
-        crate::types::env::OpenLookupKind::Value,
-        Some(lid.loc),
-    );
-    let (path, desc) = match env.lookup_value_by_lid(
-        longident,
-        tctx.arena,
-        &mut tctx.persistent_env,
-        tctx.type_ctx,
-    ) {
-        Some(result) => result,
-        None => {
+        Err(ValueLookupFailure::Unbound) => {
             if let Some(err) = unbound_module_prefix_error(tctx, env, lid.loc, longident) {
                 return Err(err);
             }
@@ -9148,26 +9227,7 @@ fn type_identifier(
             return Err(unbound_value_error(tctx, env, lid.loc, longident));
         }
     };
-    // `Env.lookup_value` marks the declaration used (env.ml:1169-1172).
-    let used_name = tctx.arena.name(longident.last_idx());
-    tctx.mark_value_used(env, used_name, tctx.resolve_loc(desc.val_loc));
-    // typetexp.ml:117-123 via typecore.ml:2381-2388.
-    let deprecated_context = if deprecated_function_call {
-        crate::types::context::DeprecatedContext::FunctionCall
-    } else {
-        crate::types::context::DeprecatedContext::Reference
-    };
-    record_deprecated_used(
-        tctx,
-        lid.loc,
-        &desc.val_attributes,
-        Some(deprecated_context),
-    )?;
-    if let Some(warning) = deprecated_warning_for_value(&path, &desc)
-        .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
-    {
-        tctx.report_warning(lid.loc, warning);
-    }
+    note_value_ident_use(tctx, env, longident, lid.loc, &path, &desc, deprecated_function_call)?;
     check_inlined_record_escape(ctx, loc, desc.val_type, recarg)?;
 
     let ty = crate::types::instance(ctx, desc.val_type);
@@ -11065,6 +11125,9 @@ fn collect_module_expr_ident_heads(
                     | StructureItemDesc::Tstr_modtype(_)
                     | StructureItemDesc::Tstr_open(_)
                     | StructureItemDesc::Tstr_attribute(_) => {}
+                    StructureItemDesc::Tstr_derived(_) => {
+                        unreachable!("{}", crate::types::derived::TOP_LEVEL_ONLY)
+                    }
                 }
             }
         }
@@ -12249,6 +12312,15 @@ fn collect_lident_idents_in_module_expr(
                     }
                     SID::Pstr_value(inner) => {
                         for binding in arena.vb_list(inner.1).iter() {
+                            collect_lident_idents_in_expression(
+                                arena,
+                                arena.get_expanded_expr(binding.pvb_expr),
+                                out,
+                            );
+                        }
+                    }
+                    SID::Pstr_derived(idx) => {
+                        for binding in arena.vb_list(arena.plans().item(*idx).general).iter() {
                             collect_lident_idents_in_expression(
                                 arena,
                                 arena.get_expanded_expr(binding.pvb_expr),
@@ -18324,7 +18396,7 @@ fn unbound_value_alternatives(
     )
 }
 
-fn check_inlined_record_escape(
+pub(crate) fn check_inlined_record_escape(
     ctx: &TypeContext,
     loc: LocIdx,
     ty: TypeExprRef,
@@ -19417,6 +19489,8 @@ fn is_nonexpansive_module_expr(
                 crate::types::typedtree::StructureItemDesc::Tstr_modtype(_) => true,
                 crate::types::typedtree::StructureItemDesc::Tstr_open(_) => true,
                 crate::types::typedtree::StructureItemDesc::Tstr_attribute(_) => true,
+                // Every binding of a derived item is a function.
+                crate::types::typedtree::StructureItemDesc::Tstr_derived(_) => true,
                 crate::types::typedtree::StructureItemDesc::Tstr_value(_, bindings) => ta
                     .value_bindings(*bindings)
                     .iter()
@@ -20033,6 +20107,9 @@ fn typed_structure_item_uses_ident(ta: &TypedArena, item: &StructureItem, target
         | StructureItemDesc::Tstr_exception(_)
         | StructureItemDesc::Tstr_open(_)
         | StructureItemDesc::Tstr_attribute(_) => false,
+        StructureItemDesc::Tstr_derived(_) => {
+            unreachable!("{}", crate::types::derived::TOP_LEVEL_ONLY)
+        }
     }
 }
 
@@ -20443,6 +20520,9 @@ fn rec_structure_item(
         | crate::types::typedtree::StructureItemDesc::Tstr_open(_)
         | crate::types::typedtree::StructureItemDesc::Tstr_attribute(_) => {
             (RecEnv::default(), RecUse::default())
+        }
+        crate::types::typedtree::StructureItemDesc::Tstr_derived(_) => {
+            unreachable!("{}", crate::types::derived::TOP_LEVEL_ONLY)
         }
     }
 }
@@ -22507,6 +22587,10 @@ impl Env {
 
     /// Look up a value by longident. `None` means the value is unbound; the
     /// caller builds the user-facing error.
+    // Inlined into its two callers: the typing of an identifier expression,
+    // which is hot and had this body inline when it was the only caller, and
+    // the discharge of a derived item.
+    #[inline(always)]
     pub fn lookup_value_by_lid(
         &self,
         lid: &Longident,

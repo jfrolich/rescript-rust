@@ -13,7 +13,8 @@ impl Bir {
     }
 
     /// Attach a finalized lowering statement list without copying its elements
-    /// a second time. Bulk construction owns each detached statement once.
+    /// a second time. O(statements), plus any changed use-weight recounts
+    /// outside bulk construction. Each detached statement is adopted once.
     pub(crate) fn block_from_list(&mut self, list: ListId) -> NodeId {
         self.attach_list(Node::block_list(list), list)
     }
@@ -24,12 +25,17 @@ impl Bir {
     }
 
     fn attach_list(&mut self, node: Node, list: ListId) -> NodeId {
-        assert!(self.bulk, "statement-stack blocks require bulk construction");
         let id = self.allocate(node);
         for i in 0..self.lists.get(list).len() {
             let child = self.lists.get(list)[i];
             self.node(child);
             assert!(self.parents[child.index()].is_none(), "statement already attached");
+            if !self.bulk {
+                let weight = self.weight(child);
+                if weight != 1 {
+                    self.adjust_counts(child, 1 - i64::from(weight));
+                }
+            }
             self.parents[child.index()] = Some(id);
         }
         self.repair(id);
@@ -633,35 +639,45 @@ impl Bir {
         };
         (j_pure.unwrap_or(effects.0), effects.1)
     }
-    /// `HAS_EXIT` and `HAS_STATEMENT` of a node that was already read,
-    /// from its children's. An `Exit` has both; a loop, switch, catch, try,
-    /// assignment, `Break` or `Continue` is a statement form; a `Fun` has
-    /// neither (an exit cannot leave a function, lam_exit_code.ml:28); any
-    /// other level-L node has what a child has. One read per child, until
-    /// both are known; constant for a `Fun`, an `Exit`, a `Var` and every
-    /// level-J node.
+    /// L control facts, including R5's TRIVIAL_UNIT, in one immediate-child
+    /// fold. O(arity), stopping when both control bits are set and unit is
+    /// impossible; constant for Fun, Exit, Var, Const and every J operation.
+    /// Child flags include independently known PURE for unit-spine prefixes.
+    /// Fun is a control boundary (compiler/core/lam_exit_code.ml:28).
     pub(super) fn control_facts(
         &self,
         node: Node,
-        child_facts: impl Fn(NodeId) -> (bool, bool),
-    ) -> (bool, bool) {
+        child_facts: impl Fn(NodeId) -> NodeFlags,
+    ) -> NodeFlags {
         let own = match node.op() {
-            Op::Exit => return (true, true),
-            Op::Fun | Op::Var => return (false, false),
+            Op::Exit => return NodeFlags(NodeFlags::HAS_EXIT | NodeFlags::HAS_STATEMENT),
+            Op::Fun | Op::Var => return NodeFlags::default(),
             Op::Switch | Op::StrSwitch | Op::Catch | Op::Try | Op::TryFinally | Op::While
             | Op::For | Op::ForOf | Op::ForAwaitOf | Op::Assign | Op::Break | Op::Continue => true,
             op if op as u8 <= Op::Continue as u8 => false,
-            _ => return (false, false),
+            _ => return NodeFlags::default(),
         };
-        let mut facts = (false, own);
-        for &child in &node.view(&self.lists).children() {
-            let (exit, statement) = child_facts(child);
-            facts.0 |= exit;
-            facts.1 |= statement;
-            if facts == (true, true) {
+        let view = node.view(&self.lists);
+        let tail = match view {
+            View::Const { value } => return NodeFlags(if matches!(self.constant(value), Constant::Undefined(true)) {
+                NodeFlags::TRIVIAL_UNIT
+            } else { 0 }),
+            View::Seq { second, .. } => Some(second),
+            View::Let { value: Some(_), body, .. } => Some(body),
+            _ => None,
+        };
+        let mut unit = tail.is_some();
+        let both = NodeFlags::HAS_EXIT | NodeFlags::HAS_STATEMENT;
+        let mut facts = NodeFlags(if own { NodeFlags::HAS_STATEMENT } else { 0 });
+        for child in view.children() {
+            let flags = child_facts(child);
+            facts.0 |= flags.0 & both;
+            unit &= flags.contains(if tail == Some(child) { NodeFlags::TRIVIAL_UNIT } else { NodeFlags::PURE });
+            if facts.0 == both && !unit {
                 break;
             }
         }
+        if unit { facts.0 |= NodeFlags::TRIVIAL_UNIT; }
         facts
     }
     fn repair(&mut self, mut id: NodeId) {
@@ -671,21 +687,20 @@ impl Bir {
                 (f.contains(NodeFlags::PURE), f.contains(NodeFlags::NO_ALLOC))
             });
             let old_node = self.node(id);
-            let (has_exit, has_statement) = self.control_facts(old_node, |c| {
-                let f = self.node(c).flags();
-                (f.contains(NodeFlags::HAS_EXIT), f.contains(NodeFlags::HAS_STATEMENT))
+            let control = self.control_facts(old_node, |c| {
+                let child = self.node(c);
+                let mut flags = child.flags();
+                // J reuses these bits for unrelated facts and metadata.
+                if child.op() == Op::Var || child.op() as u8 > Op::Continue as u8 {
+                    flags.0 &= !NodeFlags::CONTROL;
+                }
+                flags
             });
             let old_flags = old_node.flags();
             let mut flags = old_flags;
             flags.0 &= !(NodeFlags::PURE | NodeFlags::NO_ALLOC);
             if old_node.op() != Op::Var && old_node.op() as u8 <= Op::Continue as u8 {
-                flags.0 &= !(NodeFlags::HAS_EXIT | NodeFlags::HAS_STATEMENT);
-                if has_exit {
-                    flags.0 |= NodeFlags::HAS_EXIT;
-                }
-                if has_statement {
-                    flags.0 |= NodeFlags::HAS_STATEMENT;
-                }
+                flags.0 = (flags.0 & !NodeFlags::CONTROL) | control.0;
             }
             if pure {
                 flags.0 |= NodeFlags::PURE;
@@ -734,18 +749,6 @@ impl Bir {
                 None => return false,
             }
         }
-    }
-    pub(super) fn is_captured(&self, id: NodeId, var: VarId) -> bool {
-        let mut child = id;
-        while let Some(parent) = self.parents[child.index()] {
-            if self.capture_boundary(parent, child)
-                && !self.vars.binder[var.index()].is_some_and(|b| self.is_descendant(b, parent))
-            {
-                return true;
-            }
-            child = parent;
-        }
-        false
     }
     fn next_capture_epoch(&mut self) -> u64 {
         self.capture_epoch = self
