@@ -856,3 +856,200 @@ being inspected; the last slice ports it and deletes that use.
 - Rows, objects, polymorphic variants, universal variables, GADT
   equations: ported. They are the `false` branches of the kernel.
 - The exhaustiveness algorithm: ported onto pattern handles.
+
+## 4. Proof by prototype
+
+The two items with the largest predicted saving that a patch on trunk can
+test are unification with its journal (8,297 instructions a line, 2.3 items
+1 and 12) and instantiation (4,341, item 4). Names are larger (9,812) but
+no patch on today's `Env` tests the design for them: that design removes
+`Env`, and CHECKER_REDESIGN H.2.11 is what a replacement behind `Env`'s API
+measures.
+
+Both patches apply to trunk 7e1dbc2bd4 (`git apply`), build, and compile
+both projects with no difference in signatures, diagnostics or generated
+files. They are measurement prototypes, not reviewed code.
+
+### 4.1 Instantiation from templates
+
+[instantiation-prototype.patch](prototypes/instantiation-prototype.patch):
+429 lines added, of which `types/templates.rs` is 330.
+
+**What it does.** `ctype::instance` of a generic root asks for the root's
+template. The second time a root is instantiated its generic part is
+captured: the nodes in the order `copy_type_cached` allocates their
+copies, child references relative or to a node that is not generic. From
+then on an instance is one loop over the template that allocates each node
+with its final descriptor: no `CopyCache`, no map from node to copy, no
+recursion, no placeholder written twice. It allocates the same nodes in
+the same order with the same identifiers as the general copy, so the two
+paths leave the same graph. Local roots are looked up in a dense table by
+node index, frozen roots in a hash map.
+
+What keeps it exact:
+
+- A template is stale when one of its generic nodes is written. A write
+  to a local node tests one watermark (nodes that existed when a template
+  was last captured) and, below it, whether the node is generic; then an
+  epoch is bumped. 374 templates went stale on the application.
+- A reference to a node that was not generic is checked at each instance:
+  its representative is taken as it stands, and if it has become generic
+  the template is rebuilt.
+- O11: when the simple-abbreviation memo holds an expansion of a nullary
+  constructor the template contains, the general copy runs (42,882 times
+  on the application).
+- Frozen roots are skipped as soon as the compilation has written to any
+  frozen node.
+- Rows, objects, polymorphic types, the multi-root copies
+  (`instance_constructor`, `instance_label`, `instance_list`) and copies
+  under a non-empty abbreviation context take the general copy.
+
+**Prediction, made before the measurement.** Plain `instance` was taken to
+cover about 60% of the copied nodes, and a templated node to cost about
+120 instructions against 592: 4% to 5% of the checker.
+
+**Measured.**
+
+| Workload | Measure | Trunk | Prototype | Change |
+|---|---|---:|---:|---:|
+| Test project | instructions of type checking, mean of 3 | 1,310.10 M | 1,301.78 M | **-0.64%** |
+| Test project | the same binary with `RESCRIPT_NO_TEMPLATES=1` (the write guard alone) | | 1,313.76 M | +0.28% |
+| Application | instructions of type checking, one run (trunk: 26,698 M and 26,729 M in two runs) | 26,714 M | 26,487 M | **-0.85%** |
+| Application | instructions of the build (cachegrind) | 67,829 M | 67,615 M | -0.32% |
+| Both | `scripts/compare_checker_builds.py` | | | no difference: 738 and 3,735 signatures, 1 and 18 diagnostics files, 732 and 3,980 generated files |
+
+| Counter | Test project | Application |
+|---|---:|---:|
+| Nodes copied by `instance` and its variants (1.5) | 255,735 | 4,817,581 |
+| Instances made from a template | 40,239 | 658,001 |
+| of which from a frozen root | 8,961 | 193,565 |
+| Nodes they made | 74,513 (29%) | 1,667,361 (35%) |
+| Templates captured | 6,943 | 149,859 |
+| Instances per template | 5.8 | 4.4 |
+
+**The prediction was wrong by a factor of six, for three reasons that the
+numbers separate.**
+
+1. *Coverage is 29% to 35% of the copied nodes, not 60%.* The first use of
+   a root, the multi-root copies of constructors and labels and the roots
+   with rows take the general copy.
+2. *A templated node costs about 230 instructions in today's checker, not
+   120.* On the test project the template path saves 12.0 M against the
+   same binary without it, and capturing costs about 10 M (callgrind,
+   inclusive cost of the capture); so 74,513 nodes save 22 M before
+   capture, 295 a node, of the general copy's 523. What is left is not
+   the copy: it is creating a node today. `alloc_type` (a store-build
+   test, an atomic increment for the identifier, the push), a list
+   allocated in a pool behind a `SmallVec`, and a memo cell pushed on a
+   `RefCell<Vec<RefCell<_>>>` for every constructor are 32.6 M, 60 M and
+   26.2 M inclusive on the test project, and a template pays all three.
+3. *Capture eats half of the gain.* At 4.4 to 5.8 instances per template
+   and about 1,400 instructions a capture, a scheme has to be
+   instantiated three times before its template has paid for itself.
+
+**What the design changes because of it.**
+
+- The saving of instantiation is not in the copy algorithm. Section 1
+  charges `alloc_type`, the list pools and the memo cells to the item that
+  calls them, so "instantiation, 10.7%" is mostly the price of making a
+  node, and so is a part of every other item that makes nodes. The design
+  already replaces those (a 16-byte push, a list slot, a memo slot that
+  costs nothing until an expansion is memoised); the prototype shows that
+  *this* is the part that carries the number, and that a template on
+  today's storage is worth 0.3% of a build. It is not worth landing on
+  trunk.
+- A dependency's templates are written once, at publication, into the
+  segment (3.4 step 5): 29% of the templated instances come from frozen
+  roots and their capture is paid once per build, not once per
+  compilation as in the prototype.
+- A local scheme is captured at its *third* instance, not its second, and
+  its first two copies use the forwarding array (3.3).
+- The estimate of item 4 is corrected in section 7: the kernel's figure
+  (600 a line) is kept as the design's, and the figure the prototype
+  supports is stated beside it: 4,341 x 230 / 592 = 1,690 a line if only
+  the copy changed and every node were covered.
+
+No program was found for which the prototype's output differs; the
+smallest program that would show a difference if the guard were missing is
+`checker_identity_02_annotated.res`, where an annotation's generic
+structure is instantiated twice and one copy is then linked.
+
+### 4.2 Unification without a journal on the success path
+
+[unify-prototype.patch](prototypes/unify-prototype.patch): 90 lines added,
+14 deleted, in `ctype.rs`, `context.rs` and `driver.rs`.
+
+**What it does.** A checker context has a mode. In the success mode a
+top-level `unify` opens no snapshot unless a speculation is already open;
+a failure there is recorded in the context. The driver checks a unit in
+the success mode; if the unit has an error, or any unification failed
+without its snapshot, that attempt is thrown away and the unit is checked
+again by the checker as it is today. So the output of the success mode is
+used only when the snapshot would never have been read. This is the
+mechanism of 2.4 idea 8 with today's checker as the explaining mode.
+
+**Prediction, made before the measurement.** The bookkeeping of the
+snapshot is `snapshot_type_state_with`, `TypeMutationJournal::finish` and
+`TypeMutationSnapshot::drop`: 2.12% of the checker on both projects (1.2,
+row 12), plus a part of the per-write mode test. 2.1% to 2.4% of the
+checker; no unit of either project checked twice.
+
+**Measured.**
+
+| Workload | Measure | Trunk | Prototype | Change |
+|---|---|---:|---:|---:|
+| Test project | instructions of type checking, mean of 3 | 1,310.10 M | 1,280.96 M | **-2.22%** |
+| Test project | instructions of the build (cachegrind, one run; two runs of trunk differ by 0.09%) | 4,078.9 M | 4,049.7 M | -0.72% |
+| Application | instructions of type checking, one run | 26,714 M | 26,146 M | **-2.13%** |
+| Application | instructions of the build (cachegrind) | 67,829 M | 67,234 M | **-0.88%** |
+| Both | units checked twice | | | 0 of 738, 0 of 3,735 |
+| Both | `scripts/compare_checker_builds.py` | | | no difference |
+
+The prediction holds. 865 instructions a line of the journal's 1,331 are
+gone; what is left of row 12 is the per-write test of whether a
+speculation is open and the 131,000 snapshots that are real speculations.
+
+**What it shows beyond its own number.** A unit can be checked on a path
+that keeps nothing for error messages, and a failing unit checked again,
+with identical output on 4,473 units and without one unit taking the slow
+road on code that compiles. That is the assumption every other item of the
+design leans on when it drops a trace, a clash context or an owned
+string.
+
+**What it does not show.** The error fixtures. The patch changes only the
+build path (`compile_until_js`); the single-file path the `super_errors`
+runner uses is untouched, so the 746 fixtures were not run through the
+re-check. Their output is today's by construction (the second attempt *is*
+today's checker), but that the success mode fails for each of them was not
+tested here. Slice R8 tests it.
+
+### 4.3 What the two prototypes do not prove
+
+- Nothing about names (2.3, items 3, 6 and 9), the largest group and the
+  least certain number.
+- Nothing about the walk, the allocator or expansion.
+- The kernel's per-operation costs inside a full checker. Prototype 4.1
+  is the caution: a mechanism measured alone at a fifth of today's cost
+  delivered a sixth of the predicted saving when everything around it
+  stayed. The design's numbers hold only if the storage, the names and
+  the walk change together, which is why it is a rewrite, and why slice
+  R5c and slice R7 carry hard measurement gates (5.3).
+
+### 4.4 How the numbers were measured
+
+- Trunk 7e1dbc2bd4; each prototype built in its own complete checkout with
+  the same profile as the trunk binary of section 1 (fat LTO, line
+  tables).
+- Type checking: `valgrind --tool=callgrind --collect-atstart=no
+  --toggle-collect=rescript_compiler::types::typemod::type_structure`,
+  one worker, clean build. The test project three times a side,
+  interleaved; the spread of one side is 0.16% (trunk: 1,309.04 to
+  1,311.11 M). The application once a side, trunk twice (0.12% apart).
+- Whole build: `valgrind --tool=cachegrind --cache-sim=no`, one worker,
+  clean build, once a side on the application.
+- Counters: `RESCRIPT_TEMPLATE_STATS=1` and `RESCRIPT_EXPLAIN_RERUNS=1`,
+  switches of the prototypes.
+- Output: `scripts/compare_checker_builds.py PROJECT trunk prototype` on
+  both projects.
+- Not measured: wall time, cycles, cache misses, memory, the profile-guided
+  build, more than one worker.

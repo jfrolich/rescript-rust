@@ -1,0 +1,503 @@
+diff --git a/compiler-rust/src/types/context.rs b/compiler-rust/src/types/context.rs
+index 3b2be833e..550b26fbd 100644
+--- a/compiler-rust/src/types/context.rs
++++ b/compiler-rust/src/types/context.rs
+@@ -290,6 +290,12 @@ impl TypeNodes {
+     }
+ }
+ 
++/// Prototype switch: `RESCRIPT_NO_TEMPLATES=1` runs the general copy only.
++fn templates_switch() -> bool {
++    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ON.get_or_init(|| std::env::var_os("RESCRIPT_NO_TEMPLATES").is_none())
++}
++
+ /// A compilation's own type nodes. With the compiler counters on, their
+ /// number is reported when the compilation is dropped.
+ struct OwnTypeNodes(TypeNodes);
+@@ -841,6 +847,14 @@ pub struct TypeContext {
+     /// OCaml-shaped mutation trail. Logging is dormant unless a snapshot lives.
+     mutation_journal: RefCell<TypeMutationJournal>,
+     mutation_logging: TrailLogging,
++    /// Prototype (CHECKER_REWRITE 4.1): templates of generic schemes.
++    pub(crate) templates: RefCell<super::templates::TemplateStore>,
++    /// Local nodes below this index may belong to a template.
++    template_watermark: Cell<u32>,
++    /// Bumped when a generic local node below the watermark is written.
++    template_local_epoch: Cell<u32>,
++    /// `RESCRIPT_NO_TEMPLATES` unset.
++    templates_enabled: bool,
+ 
+     /// Cached value of `RESCRIPT_COMPILER_COUNTERS` for hot-path probes.
+     compiler_counters_enabled: bool,
+@@ -1372,6 +1386,10 @@ impl TypeContext {
+             local_stored_components: RefCell::new(crate::fast_hash::AHashMap::new()),
+             mutation_journal: RefCell::new(TypeMutationJournal::default()),
+             mutation_logging: TrailLogging::default(),
++            templates: RefCell::new(Default::default()),
++            template_watermark: Cell::new(0),
++            template_local_epoch: Cell::new(0),
++            templates_enabled: templates_switch(),
+             compiler_counters_enabled: crate::perf_counters::enabled(),
+             // Index 0 is reserved as canonical Mnil; index 1 is the dedicated
+             // simple_abbrevs memo ref.
+@@ -1562,6 +1580,58 @@ impl TypeContext {
+         self.typed_envs.borrow().get(env_ref.index()).cloned()
+     }
+ 
++    /// Cost: one field read.
++    #[inline]
++    pub(crate) fn templates_enabled(&self) -> bool {
++        self.templates_enabled
++    }
++
++    /// Whether `ty` is a local node a template may hold: in the first
++    /// array, where one compare guards its writes. Cost: one compare.
++    #[inline]
++    pub(crate) fn template_local_node(&self, ty: TypeExprRef) -> bool {
++        (ty.0 as usize) < TypeNodes::FIRST_LEN && !self.in_store_build()
++    }
++
++    /// Cost: one `Cell` read.
++    #[inline]
++    pub(crate) fn template_epoch(&self, far: bool) -> u32 {
++        if far { 0 } else { self.template_local_epoch.get() }
++    }
++
++    /// Every local node that exists now may belong to a template.
++    /// Cost: one `Cell` write.
++    pub(crate) fn raise_template_watermark(&self) {
++        self.template_watermark
++            .set(self.types.len().min(TypeNodes::FIRST_LEN) as u32);
++    }
++
++    /// Cost: one `Cell` read.
++    #[inline]
++    pub(crate) fn any_frozen_write(&self) -> bool {
++        self.frozen_writes.any.get()
++    }
++
++    /// Index the next local node gets. Cost: one `Cell` read.
++    #[inline]
++    pub(crate) fn next_local_type_index(&self) -> usize {
++        self.types.len()
++    }
++
++    /// A write to a local node: a template that holds it is stale when the
++    /// node is generic and stops being so, or its descriptor changes (path
++    /// compression aside). Cost: one compare when no template can hold it.
++    #[inline(always)]
++    fn template_guard(&self, raw: u32, node: &TypeNode, keeps_generic: bool) {
++        if raw < self.template_watermark.get()
++            && node.level.get() == GENERIC_LEVEL
++            && !keeps_generic
++            && !matches!(node.desc.get(), TypeDesc::Tlink(_))
++        {
++            self.template_local_epoch.set(self.template_local_epoch.get().wrapping_add(1));
++        }
++    }
++
+     #[inline]
+     pub(crate) fn compiler_counters_enabled(&self) -> bool {
+         self.compiler_counters_enabled
+@@ -3121,6 +3191,7 @@ impl TypeContext {
+     #[inline]
+     fn write_level_raw(&self, r: TypeExprRef, level: i32) {
+         if let Some(node) = self.types.direct(r.0) {
++            self.template_guard(r.0, node, level == GENERIC_LEVEL);
+             node.level.set(level);
+             return;
+         }
+@@ -3175,6 +3246,7 @@ impl TypeContext {
+     #[inline]
+     fn write_desc_raw(&self, r: TypeExprRef, desc: TypeDesc) {
+         if let Some(node) = self.types.direct(r.0) {
++            self.template_guard(r.0, node, false);
+             node.desc.set(desc);
+             return;
+         }
+diff --git a/compiler-rust/src/types/ctype.rs b/compiler-rust/src/types/ctype.rs
+index 4038b48a8..1fe1557b2 100644
+--- a/compiler-rust/src/types/ctype.rs
++++ b/compiler-rust/src/types/ctype.rs
+@@ -11731,6 +11731,13 @@ pub fn instance(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
+     if ctx.get_level(ty) != GENERIC_LEVEL {
+         return ty;
+     }
++    // Prototype (CHECKER_REWRITE 4.1): one pass over the scheme's template.
++    if ctx.templates_enabled()
++        && super::templates::plain_abbreviations(ctx)
++        && let Some(made) = super::templates::instance(ctx, ty)
++    {
++        return made;
++    }
+     let mut cache = CopyCache::new(ctx);
+     copy_type_cached(ctx, ty, &mut cache)
+ }
+diff --git a/compiler-rust/src/types/mod.rs b/compiler-rust/src/types/mod.rs
+index ec4b5de8b..63a1077b3 100644
+--- a/compiler-rust/src/types/mod.rs
++++ b/compiler-rust/src/types/mod.rs
+@@ -54,6 +54,7 @@ pub mod record_runtime;
+ pub mod sexp_typedtree;
+ pub mod shared_store;
+ pub mod tast_arena;
++pub(crate) mod templates;
+ pub mod tast_iterator;
+ pub mod thread_store;
+ pub mod type_expr;
+diff --git a/compiler-rust/src/types/templates.rs b/compiler-rust/src/types/templates.rs
+new file mode 100644
+index 000000000..ed30c3351
+--- /dev/null
++++ b/compiler-rust/src/types/templates.rs
+@@ -0,0 +1,349 @@
++//! Prototype (CHECKER_REWRITE 4.1): instantiation from templates.
++//!
++//! The generic part of a type scheme is captured once as a flat list of
++//! nodes in the order `copy_type_cached` allocates their copies. An instance
++//! is then one pass over that list: no copy session, no map from source node
++//! to copy, no recursion, no placeholder that is written twice. The nodes it
++//! allocates, their order and their identifiers are those of the general
++//! copy, so the two paths leave the same type graph.
++//!
++//! Measurement prototype, not reviewed code.
++
++use super::context::TypeContext;
++use super::path::Path;
++use super::type_expr::{AbbrevMemo, AbbrevMemoRef, GENERIC_LEVEL, TypeArg, TypeDesc, TypeExprRef};
++use smallvec::SmallVec;
++
++/// A child of a template node: another node of the template, or a node
++/// outside it (not generic when the template was captured).
++#[derive(Clone, Copy)]
++enum TRef {
++    Node(u32),
++    Ext(u32),
++}
++
++#[derive(Clone, Copy)]
++enum TNode {
++    Var,
++    Univar(Option<crate::name::Name>),
++    Constr { path: Path, start: u32, len: u32 },
++    Tuple { start: u32, len: u32 },
++    Arrow { start: u32, len: u32, ret: TRef },
++}
++
++struct Template {
++    nodes: (u32, u32),
++    externals: (u32, u32),
++    /// Paths of nullary constructors, which the copy links to a memoised
++    /// expansion when the simple-abbreviation memo has one.
++    nullary: (u32, u32),
++    epoch: u32,
++}
++
++const UNSEEN: u32 = 0;
++const SEEN: u32 = 1;
++const NEVER: u32 = u32::MAX;
++const FIRST_ID: u32 = 2;
++
++#[derive(Default)]
++pub(crate) struct TemplateStore {
++    /// State of each local root, by node index.
++    local: Vec<u32>,
++    /// State of each frozen root. A hash map: the frozen pool is shared by
++    /// every compilation and has no per-compilation dense index.
++    far: crate::fast_hash::AHashMap<u32, u32>,
++    templates: Vec<Template>,
++    nodes: Vec<TNode>,
++    refs: Vec<TRef>,
++    args: Vec<(TypeArg, TRef)>,
++    externals: Vec<TypeExprRef>,
++    paths: Vec<Path>,
++    pub(crate) stats: [u64; 8],
++}
++
++struct Capture<'a> {
++    ctx: &'a TypeContext,
++    far: bool,
++    memo: crate::fast_hash::AHashMap<u32, u32>,
++    nodes: Vec<TNode>,
++    refs: Vec<TRef>,
++    args: Vec<(TypeArg, TRef)>,
++    externals: Vec<TypeExprRef>,
++    paths: Vec<Path>,
++}
++
++impl Capture<'_> {
++    /// Cost: one visit per generic node reachable from `ty`, each O(arity).
++    fn cap(&mut self, ty: TypeExprRef) -> Option<TRef> {
++        let ctx = self.ctx;
++        let ty = ctx.repr(ty);
++        if ctx.get_level(ty) != GENERIC_LEVEL {
++            self.externals.push(ty);
++            return Some(TRef::Ext(self.externals.len() as u32 - 1));
++        }
++        if let Some(&j) = self.memo.get(&ty.0) {
++            return Some(TRef::Node(j));
++        }
++        // Every node of a template lies in one tier, so one test says
++        // whether a write can touch it.
++        if self.far != ty.is_shared() || (!self.far && !ctx.template_local_node(ty)) {
++            return None;
++        }
++        let j = self.nodes.len() as u32;
++        self.memo.insert(ty.0, j);
++        let desc = *ctx.borrow_desc(ty);
++        match desc {
++            TypeDesc::Tvar(_) => self.nodes.push(TNode::Var),
++            TypeDesc::Tunivar(name) => self.nodes.push(TNode::Univar(name)),
++            TypeDesc::Ttuple(list) => {
++                self.nodes.push(TNode::Var);
++                let mut children: SmallVec<[TRef; 8]> = SmallVec::new();
++                for child in ctx.type_list(list).iter() {
++                    children.push(self.cap(child)?);
++                }
++                let start = self.refs.len() as u32;
++                self.refs.extend_from_slice(&children);
++                self.nodes[j as usize] = TNode::Tuple { start, len: children.len() as u32 };
++            }
++            TypeDesc::Tconstr { path, args, .. } => {
++                self.nodes.push(TNode::Var);
++                if args.is_empty() && !path.head_name().starts_with('#') {
++                    self.paths.push(path);
++                }
++                let mut children: SmallVec<[TRef; 8]> = SmallVec::new();
++                for child in ctx.type_list(args).iter() {
++                    children.push(self.cap(child)?);
++                }
++                let start = self.refs.len() as u32;
++                self.refs.extend_from_slice(&children);
++                self.nodes[j as usize] =
++                    TNode::Constr { path, start, len: children.len() as u32 };
++            }
++            TypeDesc::Tarrow { args, ret } => {
++                self.nodes.push(TNode::Var);
++                let mut children: SmallVec<[(TypeArg, TRef); 4]> = SmallVec::new();
++                for arg in ctx.type_args(args).iter() {
++                    let typ = self.cap(arg.typ)?;
++                    children.push((arg, typ));
++                }
++                let ret = self.cap(ret)?;
++                let start = self.args.len() as u32;
++                self.args.extend_from_slice(&children);
++                self.nodes[j as usize] =
++                    TNode::Arrow { start, len: children.len() as u32, ret };
++            }
++            _ => return None,
++        }
++        Some(TRef::Node(j))
++    }
++}
++
++impl TemplateStore {
++    fn state(&mut self, root: TypeExprRef) -> &mut u32 {
++        if root.is_shared() {
++            self.far.entry(root.0).or_insert(UNSEEN)
++        } else {
++            let index = root.index();
++            if self.local.len() <= index {
++                self.local.resize(index + 1, UNSEEN);
++            }
++            &mut self.local[index]
++        }
++    }
++
++    fn capture(&mut self, ctx: &TypeContext, root: TypeExprRef) -> Option<u32> {
++        let far = root.is_shared();
++        let mut capture = Capture {
++            ctx,
++            far,
++            memo: Default::default(),
++            nodes: Vec::new(),
++            refs: Vec::new(),
++            args: Vec::new(),
++            externals: Vec::new(),
++            paths: Vec::new(),
++        };
++        capture.cap(root)?;
++        let node_base = self.nodes.len() as u32;
++        let ref_base = self.refs.len() as u32;
++        let arg_base = self.args.len() as u32;
++        self.nodes.extend(capture.nodes.iter().map(|node| match *node {
++            TNode::Constr { path, start, len } => {
++                TNode::Constr { path, start: start + ref_base, len }
++            }
++            TNode::Tuple { start, len } => TNode::Tuple { start: start + ref_base, len },
++            TNode::Arrow { start, len, ret } => {
++                TNode::Arrow { start: start + arg_base, len, ret }
++            }
++            other => other,
++        }));
++        self.refs.extend_from_slice(&capture.refs);
++        self.args.extend_from_slice(&capture.args);
++        let ext_base = self.externals.len() as u32;
++        self.externals.extend_from_slice(&capture.externals);
++        let path_base = self.paths.len() as u32;
++        self.paths.extend_from_slice(&capture.paths);
++        self.templates.push(Template {
++            nodes: (node_base, capture.nodes.len() as u32),
++            externals: (ext_base, capture.externals.len() as u32),
++            nullary: (path_base, capture.paths.len() as u32),
++            epoch: ctx.template_epoch(far),
++        });
++        if !far {
++            ctx.raise_template_watermark();
++        }
++        Some(self.templates.len() as u32 - 1)
++    }
++}
++
++/// `instance(root)` for a generic representative `root`, from its template.
++/// `None` when the general copy has to run (and nothing was allocated).
++///
++/// Cost: O(1) to find the template; then one step per template node, each
++/// O(arity): one list allocation, one memo cell for a constructor, one node.
++/// No hashing for a local root, one probe for a frozen one.
++pub(crate) fn instance(ctx: &TypeContext, root: TypeExprRef) -> Option<TypeExprRef> {
++    let far = root.is_shared();
++    if (root.is_store() && !far) || (!far && !ctx.template_local_node(root)) {
++        return None;
++    }
++    if far && ctx.any_frozen_write() {
++        return None;
++    }
++    let mut store = ctx.templates.borrow_mut();
++    let store = &mut *store;
++    // One probe (frozen root) or one indexed load (local root).
++    let slot: &mut u32 = if far {
++        store.far.entry(root.0).or_insert(UNSEEN)
++    } else {
++        let index = root.index();
++        if store.local.len() <= index {
++            store.local.resize(index + 1, UNSEEN);
++        }
++        &mut store.local[index]
++    };
++    let id = match *slot {
++        UNSEEN => {
++            *slot = SEEN;
++            return None;
++        }
++        NEVER => return None,
++        SEEN => match store.capture(ctx, root) {
++            Some(id) => {
++                *store.state(root) = id + FIRST_ID;
++                store.stats[2] += 1;
++                id
++            }
++            None => {
++                *store.state(root) = NEVER;
++                return None;
++            }
++        },
++        id => id - FIRST_ID,
++    };
++    let template = &store.templates[id as usize];
++    if template.epoch != ctx.template_epoch(far) {
++        *store.state(root) = SEEN;
++        store.stats[3] += 1;
++        return None;
++    }
++    // The copy returns a node outside the template as it stands now: its
++    // representative, which must still not be generic.
++    let mut externals: SmallVec<[TypeExprRef; 8]> = SmallVec::new();
++    let (ext_start, ext_len) = template.externals;
++    for &external in &store.externals[ext_start as usize..(ext_start + ext_len) as usize] {
++        let now = ctx.repr(external);
++        if ctx.get_level(now) == GENERIC_LEVEL {
++            *store.state(root) = SEEN;
++            store.stats[3] += 1;
++            return None;
++        }
++        externals.push(now);
++    }
++    let (path_start, path_len) = template.nullary;
++    if path_len != 0 {
++        let simple = ctx.simple_abbrevs_memo();
++        if !matches!(ctx.get_abbrev_memo(simple), AbbrevMemo::Mnil) {
++            for path in &store.paths[path_start as usize..(path_start + path_len) as usize] {
++                if ctx.find_abbrev_repr(simple, path).is_some() {
++                    store.stats[4] += 1;
++                    return None;
++                }
++            }
++        }
++    }
++    let base = ctx.next_local_type_index();
++    let at = |r: TRef| match r {
++        TRef::Node(j) => TypeExprRef::from_usize(base + j as usize),
++        TRef::Ext(k) => externals[k as usize],
++    };
++    let (node_start, node_len) = template.nodes;
++    for (j, node) in
++        store.nodes[node_start as usize..(node_start + node_len) as usize].iter().enumerate()
++    {
++        let desc = match *node {
++            TNode::Var => TypeDesc::Tvar(None),
++            TNode::Univar(name) => TypeDesc::Tunivar(name),
++            TNode::Tuple { start, len } => {
++                let children: SmallVec<[TypeExprRef; 8]> = store.refs
++                    [start as usize..(start + len) as usize]
++                    .iter()
++                    .map(|&r| at(r))
++                    .collect();
++                TypeDesc::Ttuple(ctx.new_type_list(&children))
++            }
++            TNode::Constr { path, start, len } => {
++                let children: SmallVec<[TypeExprRef; 8]> = store.refs
++                    [start as usize..(start + len) as usize]
++                    .iter()
++                    .map(|&r| at(r))
++                    .collect();
++                TypeDesc::Tconstr {
++                    path,
++                    args: ctx.new_type_list(&children),
++                    abbrev: ctx.alloc_abbrev(AbbrevMemo::Mnil),
++                }
++            }
++            TNode::Arrow { start, len, ret } => {
++                let args = ctx.new_type_args_from(
++                    store.args[start as usize..(start + len) as usize].iter().map(|&(arg, r)| {
++                        let mut arg = arg;
++                        arg.typ = at(r);
++                        arg
++                    }),
++                );
++                TypeDesc::Tarrow { args, ret: at(ret) }
++            }
++        };
++        let made = ctx.new_type(desc);
++        debug_assert_eq!(made.index(), base + j);
++    }
++    store.stats[5] += 1;
++    store.stats[6] += node_len as u64;
++    store.stats[7] += far as u64;
++    Some(TypeExprRef::from_usize(base))
++}
++
++/// The memo reference a plain `instance` copies under.
++pub(crate) fn plain_abbreviations(ctx: &TypeContext) -> bool {
++    ctx.current_abbreviations() == AbbrevMemoRef::nil() && !ctx.trace_gadt_instances()
++}
++
++impl Drop for TemplateStore {
++    fn drop(&mut self) {
++        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++        if *ON.get_or_init(|| std::env::var_os("RESCRIPT_TEMPLATE_STATS").is_some()) {
++            eprintln!(
++                "[template-stats] first={} never={} captured={} stale={} memo_hit={} instances={} nodes={} far={}",
++                self.stats[0],
++                self.stats[1],
++                self.stats[2],
++                self.stats[3],
++                self.stats[4],
++                self.stats[5],
++                self.stats[6],
++                self.stats[7]
++            );
++        }
++    }
++}
