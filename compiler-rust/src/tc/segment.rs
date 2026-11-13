@@ -31,11 +31,22 @@ pub struct ChildTable {
     pub len: u32,
 }
 
+/// The pool selected by a declaration's member range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DeclarationKind {
+    Abstract,
+    Record,
+    Variant,
+    Open,
+}
+
 /// Cold type-declaration metadata; all references index segment pools.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct TypeDecl {
-    pub kind: u8,
+    pub kind: DeclarationKind,
+    /// Bits: private, immediate, unboxed, local constraint, abbreviation.
     pub flags: u8,
     pub arity: u16,
     pub params: u32,
@@ -76,6 +87,7 @@ pub struct Segment {
     pub items: Box<[ExportItem]>,
     pub children: Box<[ChildTable]>,
     pub digest: [u8; 32],
+    pub signature: SignaturePools,
 }
 
 impl Segment {
@@ -124,7 +136,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<ChildTable>(), 8);
         assert_eq!(std::mem::size_of::<TypeDecl>(), 32);
         assert_eq!(std::mem::size_of::<MemberDecl>(), 16);
-        assert_eq!(std::mem::size_of::<Segment>(), 240);
+        assert_eq!(std::mem::size_of::<Segment>(), 1016);
     }
 
     #[test]
@@ -185,5 +197,434 @@ mod tests {
         );
         assert!(segment.lookup_in(segment.children[2], 7).is_none());
         assert!(Segment::default().lookup(7).is_none());
+    }
+}
+
+/// A range in the pool named by its containing field. Empty ranges allocate
+/// nothing. Optional pool indices use graph::NONE, never an empty range.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
+pub struct Range {
+    pub start: u32,
+    pub len: u32,
+}
+
+// All declaration data is cold, owned once by the segment. These rows are not
+// values passed down the type walk. References are indices, including strings.
+macro_rules! row {
+    ($(#[$meta:meta])* $name:ident, $size:expr, {$($(#[$doc:meta])* $field:ident: $ty:ty),* $(,)?}) => {
+        $(#[$meta])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[repr(C)]
+        pub struct $name { $($(#[$doc])* pub $field: $ty),* }
+        const _: () = assert!(std::mem::size_of::<$name>() == $size);
+    };
+}
+
+row!(PositionRow, 16, { filename: u32, line: i32, beginning_of_line: i32, offset: i32 });
+row!(LocationRow, 36, { start: PositionRow, end: PositionRow, ghost: bool });
+
+row!(UnitRow, 16, {
+    name: u32, deprecated: u32, signature: u32, path: u32,
+});
+row!(IdentRow, 16, {
+    name: u32, stamp: i32, flags: u32,
+    /// Absolute enclosing scope; distinct functor binders remain distinct.
+    scope: u32,
+});
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathRow {
+    Ident(u32),
+    Dot {
+        parent: u32,
+        name: u32,
+        position: i32,
+    },
+    Apply {
+        functor: u32,
+        argument: u32,
+    },
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LongidentRow {
+    Ident(u32),
+    Dot { parent: u32, name: u32 },
+    Apply { functor: u32, argument: u32 },
+    Unresolved,
+}
+
+/// Unlike the sorted lookup index, signature rows retain declaration order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignatureKind {
+    Value,
+    Type,
+    Extension,
+    Module,
+    ModuleType,
+    Class,
+    ClassType,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecStatus {
+    Not,
+    First,
+    Next,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtensionStatus {
+    First,
+    Next,
+    Exception,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ItemStatus {
+    Ordinary,
+    Recursive(RecStatus),
+    Extension(ExtensionStatus),
+}
+row!(SignatureItemRow, 12, {
+    ident: u32, declaration: u32, kind: SignatureKind, status: ItemStatus,
+});
+row!(ValueRow, 16, { ty: u32, primitive: u32, attributes: Range });
+row!(ModuleRow, 16, { module_type: u32, attributes: Range, loc: u32 });
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModuleTypeRow {
+    Ident(u32),
+    Alias {
+        path: u32,
+        present: bool,
+    },
+    Signature(u32),
+    Functor {
+        parameter: u32,
+        parameter_type: u32,
+        result: u32,
+    },
+}
+
+row!(TypeDetailsRow, 48, {
+    parameter_roots: Range, variance: Range, attributes: Range,
+    inlined_records: Range, representation: u32, shape: u32,
+    /// Optional local abstract-type level pair, retained for tooling.
+    newtype_level: u32, scope_level: u32,
+});
+row!(InlinedRecordRow, 12, { name: u32, labels: Range });
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordRepresentationRow {
+    Regular,
+    Array,
+    Unboxed(bool),
+    Extension,
+    Inlined {
+        name: u32,
+        position: u32,
+        layout: u32,
+    },
+}
+row!(LabelRow, 28, {
+    ident: u32, runtime_name: u32, ty: u32, attributes: Range,
+    loc: u32, mutable: bool, optional: bool,
+});
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConstructorArgumentsRow {
+    Tuple(Range),
+    Record(Range),
+}
+row!(ConstructorRow, 28, {
+    ident: u32, runtime_tag: u32, arguments: u32, result: u32,
+    attributes: Range, loc: u32,
+});
+row!(ExtensionRow, 36, {
+    path: u32, parameters: Range, result: u32, arguments: u32,
+    attributes: Range, loc: u32, private: bool, exception: bool,
+});
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockTypeRow {
+    Number,
+    String,
+    Bigint,
+    Boolean,
+    Array,
+    Symbol,
+    Function,
+    Object,
+    Unknown,
+    Class { name: u32, ancestors: Range },
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShapeRow {
+    Unstated,
+    NeverUndefined,
+    Recognized(u32),
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiteralRow {
+    String(u32),
+    Int(i64),
+    Float(u32),
+    BigInt(u32),
+    Bool(bool),
+    Null,
+    Undefined,
+}
+row!(LayoutRow, 16, { constructors: Range, tag_name: u32, unboxed: bool });
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeConstructorRow {
+    Constant {
+        name: u32,
+        literal: u32,
+    },
+    Tagged {
+        name: u32,
+        literal: u32,
+        tag_name: u32,
+    },
+    Untagged {
+        name: u32,
+        literal: u32,
+        block_type: u32,
+    },
+}
+
+row!(AttributeRow, 16, { name: u32, payload: u32, name_loc: u32, loc: u32 });
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttributePayloadRow {
+    Empty,
+    Str(u32),
+    Int(i64),
+    IntLiteral(u32),
+    Float(u32),
+    BigInt(u32),
+    Bool(bool),
+    Ident(u32),
+    Deprecated(u32),
+    Structure(Range),
+    SemanticString(u32),
+    StrTuple(Range),
+}
+/// Err holds a location; Missing is distinct from the empty string.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticStringValue {
+    Missing,
+    Valid(u32),
+    Invalid(u32),
+}
+row!(SemanticStringRow, 16, {
+    value: SemanticStringValue, braces: u32, template: bool,
+});
+row!(DeprecatedRow, 20, {
+    reason: SemanticStringValue, migrate: u32, migrate_in_pipe_chain: u32,
+    can_be_automigrated: bool,
+});
+row!(StringPair, 8, { first: u32, second: u32 });
+row!(StringIntPair, 16, { name: u32, value: i64 });
+row!(MarshalFragmentRow, 20, { bytes: Range, objects: u32, size_32: u32, size_64: u32 });
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrimitiveKindRow {
+    Intrinsic,
+    External(u32),
+    Inline(u32),
+}
+row!(PrimitiveRow, 20, {
+    name: u32, arity: i32, kind: PrimitiveKindRow,
+    native_float: bool, from_constructor: bool,
+});
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConstantArgumentRow {
+    Int(i64),
+    String(u32),
+    Json(u32),
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FfiAttributeRow {
+    PolyVarString(Range),
+    /// NONE means absent, otherwise indexes a range in the ranges pool.
+    PolyVar(u32),
+    Int(Range),
+    Constant(u32),
+    Unit,
+    Nothing,
+    Ignore,
+    Unwrap,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FfiLabelRow {
+    Positional,
+    Labelled,
+    Optional,
+    ObjectEmpty,
+    ObjectLabel(u32),
+    ObjectOptional { name: u32, no_nested_option: bool },
+}
+row!(FfiParamRow, 12, { attribute: u32, label: FfiLabelRow });
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReturnWrapperRow {
+    Unset,
+    Identity,
+    NullToOption,
+    NullUndefinedToOption,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FfiRow {
+    Call {
+        params: Range,
+        declaration: u32,
+        return_wrapper: ReturnWrapperRow,
+    },
+    Object(Range),
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternalKindRow {
+    Value(u32),
+    Send(u32),
+    New(u32),
+    Get(u32),
+    Set(u32),
+    GetIndex,
+    SetIndex,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModuleSourceRow {
+    Absent,
+    Itself,
+    Named(u32),
+}
+row!(ExternalDeclRow, 40, {
+    kind: ExternalKindRow, module: ModuleSourceRow, scopes: Range,
+    effective_arity: i64, variadic: bool,
+});
+row!(ExternalModuleRow, 12, {
+    bundle: u32, binding_hint: u32,
+    /// Optional range of ordered import attribute pairs.
+    import_attributes: u32,
+});
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InlineConstantRow {
+    String(u32),
+    Bool(bool),
+    Int(i32),
+    Bigint { positive: bool, digits: u32 },
+    Float(u32),
+}
+
+// Cold payloads for descriptors outside the four R1 kernel descriptor shapes.
+// References here are occurrence handles, never structurally interned types.
+/// Descriptor payload for the non-kernel shapes. Node.a indexes this pool;
+/// Node still owns the occurrence's level and physical identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtraDescriptor {
+    Object(Ty),
+    Field(u32),
+    Nil,
+    Univar(u32),
+    Poly { body: Ty, variables: Range },
+    Variant(u32),
+    Package(u32),
+    Substitution(Ty),
+}
+row!(
+    /// A root within one item's template. Multiple declaration fields use roots
+    /// of the same template, preserving sharing across those fields.
+    SchemeRoot, 8, { template: u32, ty: Ty }
+);
+
+row!(FieldTypeRow, 16, { name: u32, mutability: u32, ty: Ty, rest: Ty });
+row!(VariantRow, 28, {
+    fields: Range, more: Ty, name: u32, name_arguments: Range,
+    closed: bool, fixed: bool,
+});
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowFieldKind {
+    Present,
+    Absent,
+    Either { constant: bool, matched: bool },
+}
+row!(RowFieldRow, 20, { name: u32, types: Range, link: u32, kind: RowFieldKind });
+row!(PackageRow, 20, { path: u32, longidents: Range, arguments: Range });
+
+/// All cold signature metadata. Type nodes and templates remain in Segment's
+/// hot pools. Ranges select boxed slices; no row owns a string, Vec or pointer.
+#[derive(Default)]
+pub struct SignaturePools {
+    pub unit: Option<UnitRow>,
+    pub bytes: Box<[u8]>,
+    pub strings: Box<[Range]>,
+    pub ranges: Box<[Range]>,
+    pub indices: Box<[u32]>,
+    pub identifiers: Box<[IdentRow]>,
+    pub paths: Box<[PathRow]>,
+    pub longidents: Box<[LongidentRow]>,
+    pub ordered_items: Box<[SignatureItemRow]>,
+    pub signatures: Box<[Range]>,
+    pub values: Box<[ValueRow]>,
+    pub modules: Box<[ModuleRow]>,
+    pub module_types: Box<[ModuleTypeRow]>,
+    pub type_details: Box<[TypeDetailsRow]>,
+    pub inlined_records: Box<[InlinedRecordRow]>,
+    pub record_representations: Box<[RecordRepresentationRow]>,
+    pub labels: Box<[LabelRow]>,
+    pub constructor_arguments: Box<[ConstructorArgumentsRow]>,
+    pub constructors: Box<[ConstructorRow]>,
+    pub extensions: Box<[ExtensionRow]>,
+    pub block_types: Box<[BlockTypeRow]>,
+    pub shapes: Box<[ShapeRow]>,
+    pub literals: Box<[LiteralRow]>,
+    pub layouts: Box<[LayoutRow]>,
+    pub runtime_constructors: Box<[RuntimeConstructorRow]>,
+    pub attributes: Box<[AttributeRow]>,
+    pub attribute_payloads: Box<[AttributePayloadRow]>,
+    pub semantic_strings: Box<[SemanticStringRow]>,
+    pub deprecations: Box<[DeprecatedRow]>,
+    pub string_pairs: Box<[StringPair]>,
+    pub string_int_pairs: Box<[StringIntPair]>,
+    pub marshal_fragments: Box<[MarshalFragmentRow]>,
+    pub primitives: Box<[PrimitiveRow]>,
+    pub constant_arguments: Box<[ConstantArgumentRow]>,
+    pub ffi_attributes: Box<[FfiAttributeRow]>,
+    pub ffi_params: Box<[FfiParamRow]>,
+    pub ffi: Box<[FfiRow]>,
+    pub external_declarations: Box<[ExternalDeclRow]>,
+    pub external_modules: Box<[ExternalModuleRow]>,
+    pub inline_constants: Box<[InlineConstantRow]>,
+    pub field_types: Box<[FieldTypeRow]>,
+    pub variants: Box<[VariantRow]>,
+    pub row_fields: Box<[RowFieldRow]>,
+    pub packages: Box<[PackageRow]>,
+    pub variance: Box<[u8]>,
+    pub locations: Box<[LocationRow]>,
+    pub descriptor_extras: Box<[ExtraDescriptor]>,
+    pub roots: Box<[SchemeRoot]>,
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+    #[test]
+    fn schema_rows_are_pinned() {
+        macro_rules! sizes {
+            ($($ty:ty => $n:expr),* $(,)?) => { $(assert_eq!(std::mem::size_of::<$ty>(), $n, stringify!($ty));)* };
+        }
+        sizes!(
+            DeclarationKind => 1, PositionRow => 16, LocationRow => 36,
+            SignaturePools => 776, ExtraDescriptor => 16, SchemeRoot => 8, Range => 8, UnitRow => 16, IdentRow => 16, PathRow => 16,
+            LongidentRow => 12, SignatureKind => 1, RecStatus => 1,
+            ExtensionStatus => 1, ItemStatus => 2, SignatureItemRow => 12,
+            ValueRow => 16, ModuleRow => 16, ModuleTypeRow => 16,
+            TypeDetailsRow => 48, InlinedRecordRow => 12, RecordRepresentationRow => 16,
+            LabelRow => 28, ConstructorArgumentsRow => 12, ConstructorRow => 28,
+            ExtensionRow => 36, BlockTypeRow => 16, ShapeRow => 8, LiteralRow => 16,
+            LayoutRow => 16, RuntimeConstructorRow => 16, AttributeRow => 16,
+            AttributePayloadRow => 16, SemanticStringValue => 8, SemanticStringRow => 16,
+            DeprecatedRow => 20, StringPair => 8, StringIntPair => 16,
+            MarshalFragmentRow => 20, PrimitiveKindRow => 8, PrimitiveRow => 20,
+            ConstantArgumentRow => 16, FfiAttributeRow => 12, FfiLabelRow => 8,
+            FfiParamRow => 12, ReturnWrapperRow => 1, FfiRow => 16,
+            ExternalKindRow => 8, ModuleSourceRow => 8, ExternalDeclRow => 40,
+            ExternalModuleRow => 12, InlineConstantRow => 8, FieldTypeRow => 16,
+            VariantRow => 28, RowFieldKind => 2, RowFieldRow => 20, PackageRow => 20,
+        );
     }
 }
