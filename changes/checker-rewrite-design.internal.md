@@ -1,0 +1,1 @@
+- Add `compiler-rust/docs/CHECKER_REWRITE.md`: a measured cost table of the type checker, a from-scratch design, two measurement prototypes, and the slices and worker prompts of the rewrite.
