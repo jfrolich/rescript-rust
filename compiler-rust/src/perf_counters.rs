@@ -1,8 +1,15 @@
 //! Optional compiler performance counters.
 //!
-//! Counters are disabled unless `RESCRIPT_COMPILER_COUNTERS` is set. They are
-//! process-global so the in-process build can report aggregate behavior across
-//! all worker threads.
+//! Counters are disabled unless `RESCRIPT_COMPILER_COUNTERS` is set. The
+//! report aggregates the behavior of all worker threads.
+//!
+//! A probe a type context reaches counts in that context's
+//! [`AttemptCounters`], with plain writes, and the context adds them to the
+//! process totals once: a unit attempt when the driver retains it
+//! (`TypeContext::keep_attempt_counters`), never when it discards it, and
+//! any other context when it is flushed or dropped. Probes no compilation
+//! owns (once-per-build world, signature and gentype work, the module
+//! registry, explain reruns) stay process-global atomics.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -224,73 +231,6 @@ pub fn assert_signature_released() {
     });
 }
 
-static VALUE_HITS: AtomicU64 = AtomicU64::new(0);
-static VALUE_MISSES: AtomicU64 = AtomicU64::new(0);
-static VALUE_SCANS: AtomicU64 = AtomicU64::new(0);
-static VALUE_SCANNED_ITEMS: AtomicU64 = AtomicU64::new(0);
-static VALUE_RESULTS: AtomicU64 = AtomicU64::new(0);
-
-static TYPE_HITS: AtomicU64 = AtomicU64::new(0);
-static TYPE_MISSES: AtomicU64 = AtomicU64::new(0);
-static TYPE_SCANS: AtomicU64 = AtomicU64::new(0);
-static TYPE_SCANNED_ITEMS: AtomicU64 = AtomicU64::new(0);
-static TYPE_RESULTS: AtomicU64 = AtomicU64::new(0);
-
-static MODULE_HITS: AtomicU64 = AtomicU64::new(0);
-static MODULE_MISSES: AtomicU64 = AtomicU64::new(0);
-static MODULE_SCANS: AtomicU64 = AtomicU64::new(0);
-static MODULE_SCANNED_ITEMS: AtomicU64 = AtomicU64::new(0);
-static MODULE_RESULTS: AtomicU64 = AtomicU64::new(0);
-
-static CONSTRUCTOR_HITS: AtomicU64 = AtomicU64::new(0);
-static CONSTRUCTOR_MISSES: AtomicU64 = AtomicU64::new(0);
-static CONSTRUCTOR_SCANS: AtomicU64 = AtomicU64::new(0);
-static CONSTRUCTOR_SCANNED_ITEMS: AtomicU64 = AtomicU64::new(0);
-static CONSTRUCTOR_RESULTS: AtomicU64 = AtomicU64::new(0);
-
-static LABEL_HITS: AtomicU64 = AtomicU64::new(0);
-static LABEL_MISSES: AtomicU64 = AtomicU64::new(0);
-static LABEL_SCANS: AtomicU64 = AtomicU64::new(0);
-static LABEL_SCANNED_ITEMS: AtomicU64 = AtomicU64::new(0);
-static LABEL_RESULTS: AtomicU64 = AtomicU64::new(0);
-
-static CHILD_COMPONENT_HITS: AtomicU64 = AtomicU64::new(0);
-static CHILD_COMPONENT_MISSES: AtomicU64 = AtomicU64::new(0);
-static CHILD_COMPONENT_SCANS: AtomicU64 = AtomicU64::new(0);
-static CHILD_COMPONENT_SCANNED_ITEMS: AtomicU64 = AtomicU64::new(0);
-static CHILD_COMPONENT_RESULTS: AtomicU64 = AtomicU64::new(0);
-
-static QUALIFIED_COMPONENT_HITS: AtomicU64 = AtomicU64::new(0);
-static QUALIFIED_COMPONENT_MISSES: AtomicU64 = AtomicU64::new(0);
-static QUALIFIED_COMPONENT_REGISTERED: AtomicU64 = AtomicU64::new(0);
-static STORED_COMPONENT_CACHED: AtomicU64 = AtomicU64::new(0);
-static STORED_COMPONENT_BUILD_FIND_MODULE: AtomicU64 = AtomicU64::new(0);
-
-
-
-static TYPE_ITEM_RESOLVE_SCANS: AtomicU64 = AtomicU64::new(0);
-static TYPE_ITEM_RESOLVE_SCANNED_ITEMS: AtomicU64 = AtomicU64::new(0);
-static TYPE_ITEM_RESOLVE_TYPE_ITEMS: AtomicU64 = AtomicU64::new(0);
-static TYPE_ITEM_RESOLVE_FOUND: AtomicU64 = AtomicU64::new(0);
-
-static SIGNATURE_COPY_CALLS: AtomicU64 = AtomicU64::new(0);
-static SIGNATURE_COPY_ITEMS: AtomicU64 = AtomicU64::new(0);
-static SIGNATURE_COPY_MAX_ITEMS: AtomicU64 = AtomicU64::new(0);
-static SIGNATURE_COPY_SITES: OnceLock<Mutex<HashMap<(&'static str, u32), SignatureCopySite>>> =
-    OnceLock::new();
-static SIGNATURE_QUALIFICATION_KINDS: OnceLock<Mutex<HashMap<&'static str, SignatureCopySite>>> =
-    OnceLock::new();
-static SIGNATURE_QUALIFICATION_NAMES: OnceLock<Mutex<HashMap<String, SignatureCopySite>>> =
-    OnceLock::new();
-static SIGNATURE_FRESHEN_KINDS: OnceLock<Mutex<HashMap<&'static str, SignatureCopySite>>> =
-    OnceLock::new();
-static SIGNATURE_FRESHEN_NAMES: OnceLock<Mutex<HashMap<String, SignatureCopySite>>> =
-    OnceLock::new();
-static MODULE_SIGNATURE_COPIES: OnceLock<Mutex<HashMap<String, SignatureCopySite>>> =
-    OnceLock::new();
-static MODULE_SIGNATURE_FRESHENS: OnceLock<Mutex<HashMap<String, SignatureCopySite>>> =
-    OnceLock::new();
-
 thread_local! {
     static CURRENT_MODULE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
@@ -305,16 +245,6 @@ static REGISTRY_LOCAL_INFO_TOTAL: AtomicU64 = AtomicU64::new(0);
 static REGISTRY_LOCAL_ALIASES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static REGISTRY_LOCAL_FALLBACKS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
-static TYPE_MUTATION_DESC: AtomicU64 = AtomicU64::new(0);
-static TYPE_MUTATION_LEVEL: AtomicU64 = AtomicU64::new(0);
-static TYPE_MUTATION_ROW: AtomicU64 = AtomicU64::new(0);
-static TYPE_MUTATION_ABBREV: AtomicU64 = AtomicU64::new(0);
-static TYPE_MUTATION_STATE: AtomicU64 = AtomicU64::new(0);
-static TYPE_MUTATION_SNAPSHOTS: AtomicU64 = AtomicU64::new(0);
-static TYPE_MUTATION_BACKTRACKS: AtomicU64 = AtomicU64::new(0);
-static TYPE_MUTATION_RESTORES: AtomicU64 = AtomicU64::new(0);
-static TYPE_MUTATION_PEAK_DEPTH: AtomicU64 = AtomicU64::new(0);
-
 #[derive(Clone, Copy)]
 pub(crate) enum TypeMutationKind {
     Desc,
@@ -323,8 +253,113 @@ pub(crate) enum TypeMutationKind {
     State,
 }
 
-/// Attempt-local journal counters. Dense fields, no atomic or TLS operations.
-/// One instance per speculative unit, never per node.
+/// Lazy lookup buckets tracked by `RESCRIPT_COMPILER_COUNTERS`.
+#[derive(Clone, Copy)]
+pub(crate) enum LazyLookupKind {
+    /// Qualified value lookup inside a shared signature.
+    Value,
+    /// Qualified type lookup inside a shared signature.
+    Type,
+    /// Qualified child module lookup inside a shared signature.
+    Module,
+    /// Constructor bucket lookup derived from a shared signature.
+    Constructor,
+    /// Record label bucket lookup derived from a shared signature.
+    Label,
+    /// Lazy child component lookup derived from a shared signature.
+    ChildComponent,
+}
+
+impl LazyLookupKind {
+    const ALL: [LazyLookupKind; 6] = [
+        LazyLookupKind::Value,
+        LazyLookupKind::Type,
+        LazyLookupKind::Module,
+        LazyLookupKind::Constructor,
+        LazyLookupKind::Label,
+        LazyLookupKind::ChildComponent,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            LazyLookupKind::Value => "value",
+            LazyLookupKind::Type => "type",
+            LazyLookupKind::Module => "module",
+            LazyLookupKind::Constructor => "constructor",
+            LazyLookupKind::Label => "label",
+            LazyLookupKind::ChildComponent => "child_component",
+        }
+    }
+}
+
+/// One lazy lookup kind: hits, misses, scans, scanned items, result items.
+#[derive(Clone, Copy, Default)]
+struct LazyCounts {
+    hits: u64,
+    misses: u64,
+    scans: u64,
+    scanned_items: u64,
+    results: u64,
+}
+
+/// Qualified and stored component views.
+#[derive(Clone, Copy, Default)]
+struct ComponentCounts {
+    qualified_hits: u64,
+    qualified_misses: u64,
+    qualified_registered: u64,
+    stored_cached: u64,
+    stored_build_find_module: u64,
+}
+
+/// Type-item signature scans.
+#[derive(Clone, Copy, Default)]
+struct TypeItemResolveCounts {
+    scans: u64,
+    scanned_items: u64,
+    type_items: u64,
+    found: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct SignatureCopySite {
+    calls: u64,
+    items: u64,
+    max_items: u64,
+}
+
+impl SignatureCopySite {
+    fn record(&mut self, item_count: usize) {
+        self.calls += 1;
+        self.items += item_count as u64;
+        self.max_items = self.max_items.max(item_count as u64);
+    }
+
+    fn merge(&mut self, other: SignatureCopySite) {
+        self.calls += other.calls;
+        self.items += other.items;
+        self.max_items = self.max_items.max(other.max_items);
+    }
+}
+
+fn merge_sites<K: Eq + std::hash::Hash>(
+    into: &mut HashMap<K, SignatureCopySite>,
+    from: HashMap<K, SignatureCopySite>,
+) {
+    for (key, site) in from {
+        into.entry(key).or_default().merge(site);
+    }
+}
+
+/// The counts of every probe a [`crate::types::TypeContext`] reaches: plain
+/// fields and dense arrays indexed by kind, with maps only for the source
+/// sites, kinds and names no index exists for. No atomic or TLS operation
+/// is made per probe.
+///
+/// A context allocates one on its first probe with the counters enabled,
+/// and adds it to the process totals at most once per publication: a unit
+/// attempt when it is retained, any other context when it is flushed or
+/// dropped. A discarded attempt publishes nothing.
 #[derive(Default)]
 pub(crate) struct AttemptCounters {
     mutations: [u64; 4],
@@ -332,6 +367,22 @@ pub(crate) struct AttemptCounters {
     backtracks: u64,
     restores: u64,
     peak_depth: u64,
+    lazy: [LazyCounts; 6],
+    components: ComponentCounts,
+    type_item_resolve: TypeItemResolveCounts,
+    signature_copies: SignatureCopySite,
+    signature_copy_sites: HashMap<(&'static str, u32), SignatureCopySite>,
+    qualification_kinds: HashMap<&'static str, SignatureCopySite>,
+    qualification_names: HashMap<String, SignatureCopySite>,
+    freshen_kinds: HashMap<&'static str, SignatureCopySite>,
+    freshen_names: HashMap<String, SignatureCopySite>,
+    module_copies: HashMap<String, SignatureCopySite>,
+    module_freshens: HashMap<String, SignatureCopySite>,
+    frozen: [u64; frozen::KINDS],
+    views_adopted: u64,
+    papply_views: u64,
+    store_views: store_views::Counts,
+    checker: checker::Counts,
 }
 
 impl AttemptCounters {
@@ -352,19 +403,114 @@ impl AttemptCounters {
         self.restores += restores as u64;
     }
 
-    /// O(1), eight atomic updates once per retained attempt, not per mutation.
-    pub(crate) fn publish(self) {
-        for (counter, count) in [
-            &TYPE_MUTATION_DESC, &TYPE_MUTATION_LEVEL,
-            &TYPE_MUTATION_ROW, &TYPE_MUTATION_STATE,
-        ].into_iter().zip(self.mutations) {
-            counter.fetch_add(count, Ordering::Relaxed);
+    /// Add `other` to these counts: sums, and maxima for the `max` fields.
+    /// O(size of `other`'s maps).
+    fn merge(&mut self, other: AttemptCounters) {
+        for (total, count) in self.mutations.iter_mut().zip(other.mutations) {
+            *total += count;
         }
-        TYPE_MUTATION_SNAPSHOTS.fetch_add(self.snapshots, Ordering::Relaxed);
-        TYPE_MUTATION_BACKTRACKS.fetch_add(self.backtracks, Ordering::Relaxed);
-        TYPE_MUTATION_RESTORES.fetch_add(self.restores, Ordering::Relaxed);
-        TYPE_MUTATION_PEAK_DEPTH.fetch_max(self.peak_depth, Ordering::Relaxed);
+        self.snapshots += other.snapshots;
+        self.backtracks += other.backtracks;
+        self.restores += other.restores;
+        self.peak_depth = self.peak_depth.max(other.peak_depth);
+        for (total, count) in self.lazy.iter_mut().zip(other.lazy) {
+            total.hits += count.hits;
+            total.misses += count.misses;
+            total.scans += count.scans;
+            total.scanned_items += count.scanned_items;
+            total.results += count.results;
+        }
+        let (c, o) = (&mut self.components, other.components);
+        c.qualified_hits += o.qualified_hits;
+        c.qualified_misses += o.qualified_misses;
+        c.qualified_registered += o.qualified_registered;
+        c.stored_cached += o.stored_cached;
+        c.stored_build_find_module += o.stored_build_find_module;
+        let (t, o) = (&mut self.type_item_resolve, other.type_item_resolve);
+        t.scans += o.scans;
+        t.scanned_items += o.scanned_items;
+        t.type_items += o.type_items;
+        t.found += o.found;
+        self.signature_copies.merge(other.signature_copies);
+        merge_sites(&mut self.signature_copy_sites, other.signature_copy_sites);
+        merge_sites(&mut self.qualification_kinds, other.qualification_kinds);
+        merge_sites(&mut self.qualification_names, other.qualification_names);
+        merge_sites(&mut self.freshen_kinds, other.freshen_kinds);
+        merge_sites(&mut self.freshen_names, other.freshen_names);
+        merge_sites(&mut self.module_copies, other.module_copies);
+        merge_sites(&mut self.module_freshens, other.module_freshens);
+        for (total, count) in self.frozen.iter_mut().zip(other.frozen) {
+            *total += count;
+        }
+        self.views_adopted += other.views_adopted;
+        self.papply_views += other.papply_views;
+        self.store_views.merge(other.store_views);
+        self.checker.merge(other.checker);
     }
+
+    /// The four totals the derived census charges to items: fresh
+    /// variables, top-level unifications, nodes copied by instantiation,
+    /// and lazy and qualified-component lookups (hits plus misses).
+    fn derived(&self) -> [u64; 4] {
+        let [fresh, unify, copies] = self.checker.derived();
+        let lookups = self
+            .lazy
+            .iter()
+            .map(|kind| kind.hits + kind.misses)
+            .sum::<u64>()
+            + self.components.qualified_hits
+            + self.components.qualified_misses;
+        [fresh, unify, copies, lookups]
+    }
+
+    /// Add these counts to the process totals. O(size of the maps), one
+    /// lock acquisition; called once per publication, never per probe.
+    pub(crate) fn publish(self) {
+        with_totals_mut(|totals| {
+            totals.publications += 1;
+            totals.counts.get_or_insert_with(Default::default).merge(self);
+        });
+    }
+}
+
+/// The process totals of the context-owned counts, and how many
+/// publications made them.
+#[derive(Default)]
+struct Totals {
+    publications: u64,
+    counts: Option<Box<AttemptCounters>>,
+}
+
+#[cfg(not(test))]
+static TOTALS: Mutex<Totals> = Mutex::new(Totals {
+    publications: 0,
+    counts: None,
+});
+
+// Unit tests run on parallel threads: each test thread publishes to totals
+// of its own, so a test sees exactly the publications it made.
+#[cfg(test)]
+thread_local! {
+    static TOTALS: RefCell<Totals> = RefCell::default();
+}
+
+fn with_totals_mut<R>(update: impl FnOnce(&mut Totals) -> R) -> R {
+    #[cfg(not(test))]
+    {
+        update(&mut TOTALS.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+    #[cfg(test)]
+    {
+        TOTALS.with(|totals| update(&mut totals.borrow_mut()))
+    }
+}
+
+/// Read the process totals of the context-owned counts.
+fn with_totals<R>(read: impl FnOnce(&AttemptCounters) -> R) -> R {
+    with_totals_mut(|totals| match totals.counts.as_deref() {
+        Some(counts) => read(counts),
+        None => read(&AttemptCounters::default()),
+    })
 }
 
 /// O(1): update the unit's plain fields, or publish for non-attempt callers.
@@ -382,57 +528,12 @@ pub(crate) fn record_type_mutation_backtrack(ctx: &crate::types::TypeContext, re
     ctx.record_attempt_counter(|c| c.backtrack(restores));
 }
 
-/// Lazy lookup buckets tracked by `RESCRIPT_COMPILER_COUNTERS`.
-#[derive(Clone, Copy)]
-pub(crate) enum LazyLookupKind {
-    /// Qualified value lookup inside a shared signature.
-    Value,
-    /// Qualified type lookup inside a shared signature.
-    Type,
-    /// Qualified child module lookup inside a shared signature.
-    Module,
-    /// Constructor bucket lookup derived from a shared signature.
-    Constructor,
-    /// Record label bucket lookup derived from a shared signature.
-    Label,
-    /// Lazy child component lookup derived from a shared signature.
-    ChildComponent,
-}
-
-struct LazyCounters {
-    hits: &'static AtomicU64,
-    misses: &'static AtomicU64,
-    scans: &'static AtomicU64,
-    scanned_items: &'static AtomicU64,
-    results: &'static AtomicU64,
-}
-
-#[derive(Clone, Copy, Default)]
-struct SignatureCopySite {
-    calls: u64,
-    items: u64,
-    max_items: u64,
-}
-
-impl SignatureCopySite {
-    fn record(&mut self, item_count: usize) {
-        self.calls += 1;
-        self.items += item_count as u64;
-        self.max_items = self.max_items.max(item_count as u64);
-    }
-}
-
 /// Print the 20 entries of `map` with the most items (then calls).
 fn print_top_signature_sites<K: Clone>(
-    map: &OnceLock<Mutex<HashMap<K, SignatureCopySite>>>,
+    map: &HashMap<K, SignatureCopySite>,
     mut print: impl FnMut(&K, &SignatureCopySite),
 ) {
-    let Some(map) = map.get() else {
-        return;
-    };
     let mut entries = map
-        .lock()
-        .unwrap()
         .iter()
         .map(|(key, site)| (key.clone(), *site))
         .collect::<Vec<_>>();
@@ -483,142 +584,82 @@ impl Drop for ModuleCounterGuard {
     }
 }
 
-impl LazyLookupKind {
-    fn name(self) -> &'static str {
-        match self {
-            LazyLookupKind::Value => "value",
-            LazyLookupKind::Type => "type",
-            LazyLookupKind::Module => "module",
-            LazyLookupKind::Constructor => "constructor",
-            LazyLookupKind::Label => "label",
-            LazyLookupKind::ChildComponent => "child_component",
-        }
-    }
-
-    fn counters(self) -> LazyCounters {
-        match self {
-            LazyLookupKind::Value => LazyCounters {
-                hits: &VALUE_HITS,
-                misses: &VALUE_MISSES,
-                scans: &VALUE_SCANS,
-                scanned_items: &VALUE_SCANNED_ITEMS,
-                results: &VALUE_RESULTS,
-            },
-            LazyLookupKind::Type => LazyCounters {
-                hits: &TYPE_HITS,
-                misses: &TYPE_MISSES,
-                scans: &TYPE_SCANS,
-                scanned_items: &TYPE_SCANNED_ITEMS,
-                results: &TYPE_RESULTS,
-            },
-            LazyLookupKind::Module => LazyCounters {
-                hits: &MODULE_HITS,
-                misses: &MODULE_MISSES,
-                scans: &MODULE_SCANS,
-                scanned_items: &MODULE_SCANNED_ITEMS,
-                results: &MODULE_RESULTS,
-            },
-            LazyLookupKind::Constructor => LazyCounters {
-                hits: &CONSTRUCTOR_HITS,
-                misses: &CONSTRUCTOR_MISSES,
-                scans: &CONSTRUCTOR_SCANS,
-                scanned_items: &CONSTRUCTOR_SCANNED_ITEMS,
-                results: &CONSTRUCTOR_RESULTS,
-            },
-            LazyLookupKind::Label => LazyCounters {
-                hits: &LABEL_HITS,
-                misses: &LABEL_MISSES,
-                scans: &LABEL_SCANS,
-                scanned_items: &LABEL_SCANNED_ITEMS,
-                results: &LABEL_RESULTS,
-            },
-            LazyLookupKind::ChildComponent => LazyCounters {
-                hits: &CHILD_COMPONENT_HITS,
-                misses: &CHILD_COMPONENT_MISSES,
-                scans: &CHILD_COMPONENT_SCANS,
-                scanned_items: &CHILD_COMPONENT_SCANNED_ITEMS,
-                results: &CHILD_COMPONENT_RESULTS,
-            },
-        }
-    }
-}
-
 /// Counters of shared store data (stage P4 of `docs/CHECKER_REDESIGN.md`):
 /// how often persistent-rooted component views are built against how many
 /// distinct views exist, and what replaying their pieces costs.
 pub(crate) mod store_views {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::types::TypeContext;
 
-    static PIECES_BUILT: AtomicU64 = AtomicU64::new(0);
-    static PIECES_EMPTY: AtomicU64 = AtomicU64::new(0);
-    static PIECES_POISONED: AtomicU64 = AtomicU64::new(0);
-    static BINDERS: AtomicU64 = AtomicU64::new(0);
-    static PIECES_REPLAYED: AtomicU64 = AtomicU64::new(0);
-    /// Replayed effects: unit preparations.
-    static EFFECTS_REPLAYED: [AtomicU64; 1] = [const { AtomicU64::new(0) }; 1];
-
-    /// A store build ended: with effects or guards, with none, or poisoned.
-    pub(crate) fn record_piece(poisoned: bool, empty: bool) {
-        let counter = if poisoned {
-            &PIECES_POISONED
-        } else if empty {
-            &PIECES_EMPTY
-        } else {
-            &PIECES_BUILT
-        };
-        counter.fetch_add(1, Ordering::Relaxed);
+    /// Store builds with effects or guards, with none, and poisoned;
+    /// binders created inside them; first replays of a piece; replayed
+    /// effects (unit preparations).
+    #[derive(Clone, Copy, Default)]
+    pub(crate) struct Counts {
+        pub(super) pieces_built: u64,
+        pub(super) pieces_empty: u64,
+        pub(super) pieces_poisoned: u64,
+        pub(super) binders: u64,
+        pub(super) pieces_replayed: u64,
+        pub(super) effects_replayed: [u64; 1],
     }
 
-    /// A binder was created inside a store build.
-    pub(crate) fn record_binder() {
-        BINDERS.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// A compilation replayed a piece for the first time.
-    pub(crate) fn record_piece_replay() {
-        PIECES_REPLAYED.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// A replayed effect (index as in `EFFECTS_REPLAYED`).
-    pub(crate) fn record_effect_replayed(kind: usize) {
-        EFFECTS_REPLAYED[kind].fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub(super) fn reset() {
-        for counter in [
-            &PIECES_BUILT,
-            &PIECES_EMPTY,
-            &PIECES_POISONED,
-            &BINDERS,
-            &PIECES_REPLAYED,
-        ]
-        .into_iter()
-        .chain(&EFFECTS_REPLAYED)
-        {
-            counter.store(0, Ordering::Relaxed);
+    impl Counts {
+        pub(super) fn merge(&mut self, other: Counts) {
+            self.pieces_built += other.pieces_built;
+            self.pieces_empty += other.pieces_empty;
+            self.pieces_poisoned += other.pieces_poisoned;
+            self.binders += other.binders;
+            self.pieces_replayed += other.pieces_replayed;
+            for (total, count) in self.effects_replayed.iter_mut().zip(other.effects_replayed) {
+                *total += count;
+            }
         }
     }
 
-    pub(super) fn print_report() {
-        let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+    /// A store build ended: with effects or guards, with none, or poisoned.
+    pub(crate) fn record_piece(ctx: &TypeContext, poisoned: bool, empty: bool) {
+        ctx.record_attempt_counter(|c| {
+            let counts = &mut c.store_views;
+            *if poisoned {
+                &mut counts.pieces_poisoned
+            } else if empty {
+                &mut counts.pieces_empty
+            } else {
+                &mut counts.pieces_built
+            } += 1;
+        });
+    }
+
+    /// A binder was created inside a store build.
+    pub(crate) fn record_binder(ctx: &TypeContext) {
+        ctx.record_attempt_counter(|c| c.store_views.binders += 1);
+    }
+
+    /// A compilation replayed a piece for the first time.
+    pub(crate) fn record_piece_replay(ctx: &TypeContext) {
+        ctx.record_attempt_counter(|c| c.store_views.pieces_replayed += 1);
+    }
+
+    /// A replayed effect (index as in `Counts::effects_replayed`).
+    pub(crate) fn record_effect_replayed(ctx: &TypeContext, kind: usize) {
+        ctx.record_attempt_counter(|c| c.store_views.effects_replayed[kind] += 1);
+    }
+
+    pub(super) fn print_report(counts: &Counts) {
         // Printed only when a store build ran or a piece was replayed:
         // neither happens once every persistent-rooted path is a world
         // view.
-        let pieces = load(&PIECES_BUILT) + load(&PIECES_EMPTY) + load(&PIECES_POISONED);
-        if pieces == 0 && load(&PIECES_REPLAYED) == 0 {
+        let pieces = counts.pieces_built + counts.pieces_empty + counts.pieces_poisoned;
+        if pieces == 0 && counts.pieces_replayed == 0 {
             return;
         }
         eprintln!(
             "[compiler-counter] store_pieces with_effects={} empty={} poisoned={} binders={}",
-            load(&PIECES_BUILT),
-            load(&PIECES_EMPTY),
-            load(&PIECES_POISONED),
-            load(&BINDERS),
+            counts.pieces_built, counts.pieces_empty, counts.pieces_poisoned, counts.binders,
         );
         eprintln!(
             "[compiler-counter] store_replay pieces={} prepare_pers={}",
-            load(&PIECES_REPLAYED),
-            load(&EFFECTS_REPLAYED[0]),
+            counts.pieces_replayed, counts.effects_replayed[0],
         );
     }
 }
@@ -626,7 +667,7 @@ pub(crate) mod store_views {
 /// Reads and overlay writes of published type data. Callers gate these on
 /// the context's cached counters flag and exclude nodes still being built.
 pub(crate) mod frozen {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::types::TypeContext;
 
     #[derive(Clone, Copy)]
     pub(crate) enum Kind {
@@ -644,8 +685,8 @@ pub(crate) mod frozen {
         MutabilityWrite,
     }
 
-    static COUNTS: [AtomicU64; 12] = [const { AtomicU64::new(0) }; 12];
-    const NAMES: [&str; 12] = [
+    pub(super) const KINDS: usize = 12;
+    const NAMES: [&str; KINDS] = [
         "desc_read_shared",
         "desc_read_worker",
         "level_read_shared",
@@ -660,34 +701,37 @@ pub(crate) mod frozen {
         "mutability_write",
     ];
 
-    pub(crate) fn record(kind: Kind) {
-        COUNTS[kind as usize].fetch_add(1, Ordering::Relaxed);
+    /// O(1): one plain increment in the context's counts.
+    pub(crate) fn record(ctx: &TypeContext, kind: Kind) {
+        ctx.record_attempt_counter(|c| c.frozen[kind as usize] += 1);
     }
 
+    /// The count of `kind` the context holds and has not published.
     #[cfg(test)]
-    pub(crate) fn count(kind: Kind) -> u64 {
-        COUNTS[kind as usize].load(Ordering::Relaxed)
+    pub(crate) fn count(ctx: &TypeContext, kind: Kind) -> u64 {
+        ctx.attempt_counter(|c| c.frozen[kind as usize])
     }
 
-    pub(super) fn reset() {
-        for counter in &COUNTS {
-            counter.store(0, Ordering::Relaxed);
-        }
-    }
-
-    pub(super) fn print_report() {
+    pub(super) fn print_report(counts: &[u64; KINDS]) {
         let fields: Vec<_> = NAMES
             .iter()
-            .zip(&COUNTS)
-            .map(|(name, counter)| format!("{name}={}", counter.load(Ordering::Relaxed)))
+            .zip(counts)
+            .map(|(name, count)| format!("{name}={count}"))
             .collect();
         eprintln!("[compiler-counter] frozen {}", fields.join(" "));
     }
 }
 
 /// What a build's world holds besides its units.
+///
+/// The view builds, failures and forced children are once-per-build work
+/// of the shared world, made on scratch contexts no compilation owns, so
+/// they stay process-global. The adoptions and functor-application tables
+/// are per compilation and count in its context.
 pub(crate) mod world {
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    use crate::types::TypeContext;
 
     static PREDEF_BUILDS: AtomicU64 = AtomicU64::new(0);
     static PREDEF_NODES: AtomicU64 = AtomicU64::new(0);
@@ -701,7 +745,6 @@ pub(crate) mod world {
     }
 
     static VIEWS_BUILT: AtomicU64 = AtomicU64::new(0);
-    static VIEWS_ADOPTED: AtomicU64 = AtomicU64::new(0);
     static VIEWS_FAILED: AtomicU64 = AtomicU64::new(0);
     static VIEW_NODES_COPIED: AtomicU64 = AtomicU64::new(0);
     static CHILDREN_FORCED: AtomicU64 = AtomicU64::new(0);
@@ -730,17 +773,15 @@ pub(crate) mod world {
     }
 
     /// A compilation adopted a module view. The caller tests the flag.
-    pub(crate) fn record_view_adoption() {
-        VIEWS_ADOPTED.fetch_add(1, Ordering::Relaxed);
+    pub(crate) fn record_view_adoption(ctx: &TypeContext) {
+        ctx.record_attempt_counter(|c| c.views_adopted += 1);
     }
-
-    static PAPPLY_VIEWS: AtomicU64 = AtomicU64::new(0);
 
     /// A compilation built the component tables of a path with a functor
     /// application on it (`F(X).t`): such a path has no world view, so each
     /// compilation that uses it builds them. The caller tests the flag.
-    pub(crate) fn record_papply_view_build() {
-        PAPPLY_VIEWS.fetch_add(1, Ordering::Relaxed);
+    pub(crate) fn record_papply_view_build(ctx: &TypeContext) {
+        ctx.record_attempt_counter(|c| c.papply_views += 1);
     }
 
     /// A child module declaration of a view was forced into `nodes` nodes.
@@ -755,7 +796,6 @@ pub(crate) mod world {
         PREDEF_BUILDS.store(0, Ordering::Relaxed);
         PREDEF_NODES.store(0, Ordering::Relaxed);
         VIEWS_BUILT.store(0, Ordering::Relaxed);
-        VIEWS_ADOPTED.store(0, Ordering::Relaxed);
         VIEWS_FAILED.store(0, Ordering::Relaxed);
         for total in &VIEW_ITEMS {
             total.store(0, Ordering::Relaxed);
@@ -763,10 +803,9 @@ pub(crate) mod world {
         VIEW_NODES_COPIED.store(0, Ordering::Relaxed);
         CHILDREN_FORCED.store(0, Ordering::Relaxed);
         CHILD_NODES.store(0, Ordering::Relaxed);
-        PAPPLY_VIEWS.store(0, Ordering::Relaxed);
     }
 
-    pub(super) fn print_report() {
+    pub(super) fn print_report(views_adopted: u64, papply_views: u64) {
         eprintln!(
             "[compiler-counter] world predef_builds={} predef_nodes={}",
             PREDEF_BUILDS.load(Ordering::Relaxed),
@@ -775,14 +814,11 @@ pub(crate) mod world {
         eprintln!(
             "[compiler-counter] world_views built={} adopted={} failed={} children_forced={}",
             VIEWS_BUILT.load(Ordering::Relaxed),
-            VIEWS_ADOPTED.load(Ordering::Relaxed),
+            views_adopted,
             VIEWS_FAILED.load(Ordering::Relaxed),
             CHILDREN_FORCED.load(Ordering::Relaxed),
         );
-        eprintln!(
-            "[compiler-counter] papply_views built={}",
-            PAPPLY_VIEWS.load(Ordering::Relaxed),
-        );
+        eprintln!("[compiler-counter] papply_views built={papply_views}");
         let items = |index: usize| VIEW_ITEMS[index].load(Ordering::Relaxed);
         eprintln!(
             "[compiler-counter] world_view_items signature_items={} values={} constructors={} labels={} opened_values={} opened_types={} opened_constructors={} opened_labels={}",
@@ -816,7 +852,36 @@ pub fn enabled() -> bool {
     }
 }
 
-/// Reset all compiler performance counters.
+/// Whether a new type context counts its probes: [`enabled`], or in unit
+/// tests, a thread that asked for it with [`force_context_counters_for_test`].
+#[inline]
+pub(crate) fn context_enabled() -> bool {
+    #[cfg(test)]
+    if FORCE_CONTEXT_COUNTERS.with(std::cell::Cell::get) {
+        return true;
+    }
+    enabled()
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_CONTEXT_COUNTERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Make the type contexts this thread creates from now on count probes.
+#[cfg(test)]
+pub(crate) fn force_context_counters_for_test() {
+    FORCE_CONTEXT_COUNTERS.with(|force| force.set(true));
+}
+
+/// Forget this test thread's published totals.
+#[cfg(test)]
+fn reset_for_test() {
+    with_totals_mut(|totals| *totals = Totals::default());
+}
+
+/// Reset all compiler performance counters. Counts a live context holds
+/// and has not published yet are not reset.
 pub fn reset() {
     EXPLAIN_RERUNS.store(0, Ordering::Relaxed);
     SNAPSHOT_MODULE_DECODES.store(0, Ordering::Relaxed);
@@ -824,8 +889,6 @@ pub fn reset() {
         return;
     }
 
-    store_views::reset();
-    frozen::reset();
     world::reset();
     for counts in &GENTYPE_COUNTS {
         counts.modules.store(0, Ordering::Relaxed);
@@ -833,48 +896,6 @@ pub fn reset() {
     }
 
     for counter in [
-        &VALUE_HITS,
-        &VALUE_MISSES,
-        &VALUE_SCANS,
-        &VALUE_SCANNED_ITEMS,
-        &VALUE_RESULTS,
-        &TYPE_HITS,
-        &TYPE_MISSES,
-        &TYPE_SCANS,
-        &TYPE_SCANNED_ITEMS,
-        &TYPE_RESULTS,
-        &MODULE_HITS,
-        &MODULE_MISSES,
-        &MODULE_SCANS,
-        &MODULE_SCANNED_ITEMS,
-        &MODULE_RESULTS,
-        &CONSTRUCTOR_HITS,
-        &CONSTRUCTOR_MISSES,
-        &CONSTRUCTOR_SCANS,
-        &CONSTRUCTOR_SCANNED_ITEMS,
-        &CONSTRUCTOR_RESULTS,
-        &LABEL_HITS,
-        &LABEL_MISSES,
-        &LABEL_SCANS,
-        &LABEL_SCANNED_ITEMS,
-        &LABEL_RESULTS,
-        &CHILD_COMPONENT_HITS,
-        &CHILD_COMPONENT_MISSES,
-        &CHILD_COMPONENT_SCANS,
-        &CHILD_COMPONENT_SCANNED_ITEMS,
-        &CHILD_COMPONENT_RESULTS,
-        &QUALIFIED_COMPONENT_HITS,
-        &QUALIFIED_COMPONENT_MISSES,
-        &QUALIFIED_COMPONENT_REGISTERED,
-        &STORED_COMPONENT_CACHED,
-        &STORED_COMPONENT_BUILD_FIND_MODULE,
-        &TYPE_ITEM_RESOLVE_SCANS,
-        &TYPE_ITEM_RESOLVE_SCANNED_ITEMS,
-        &TYPE_ITEM_RESOLVE_TYPE_ITEMS,
-        &TYPE_ITEM_RESOLVE_FOUND,
-        &SIGNATURE_COPY_CALLS,
-        &SIGNATURE_COPY_ITEMS,
-        &SIGNATURE_COPY_MAX_ITEMS,
         &REGISTRY_SNAPSHOTS,
         &REGISTRY_SHARED_ENTRIES_TOTAL,
         &REGISTRY_LOCAL_ENTRIES_TOTAL,
@@ -884,40 +905,11 @@ pub fn reset() {
         &REGISTRY_LOCAL_INFO_TOTAL,
         &REGISTRY_LOCAL_ALIASES_TOTAL,
         &REGISTRY_LOCAL_FALLBACKS_TOTAL,
-        &TYPE_MUTATION_DESC,
-        &TYPE_MUTATION_LEVEL,
-        &TYPE_MUTATION_ROW,
-        &TYPE_MUTATION_ABBREV,
-        &TYPE_MUTATION_STATE,
-        &TYPE_MUTATION_SNAPSHOTS,
-        &TYPE_MUTATION_BACKTRACKS,
-        &TYPE_MUTATION_RESTORES,
-        &TYPE_MUTATION_PEAK_DEPTH,
     ] {
         counter.store(0, Ordering::Relaxed);
     }
 
-    if let Some(sites) = SIGNATURE_COPY_SITES.get() {
-        sites.lock().unwrap().clear();
-    }
-    if let Some(kinds) = SIGNATURE_QUALIFICATION_KINDS.get() {
-        kinds.lock().unwrap().clear();
-    }
-    if let Some(names) = SIGNATURE_QUALIFICATION_NAMES.get() {
-        names.lock().unwrap().clear();
-    }
-    if let Some(kinds) = SIGNATURE_FRESHEN_KINDS.get() {
-        kinds.lock().unwrap().clear();
-    }
-    if let Some(names) = SIGNATURE_FRESHEN_NAMES.get() {
-        names.lock().unwrap().clear();
-    }
-    if let Some(modules) = MODULE_SIGNATURE_COPIES.get() {
-        modules.lock().unwrap().clear();
-    }
-    if let Some(modules) = MODULE_SIGNATURE_FRESHENS.get() {
-        modules.lock().unwrap().clear();
-    }
+    with_totals_mut(|totals| *totals = Totals::default());
     checker::reset();
 }
 
@@ -925,66 +917,72 @@ pub fn reset() {
 ///
 /// Caller must check [`enabled`] before calling this hot-path helper.
 #[inline]
-pub(crate) fn record_lazy_hit(kind: LazyLookupKind) {
-    kind.counters().hits.fetch_add(1, Ordering::Relaxed);
+pub(crate) fn record_lazy_hit(ctx: &crate::types::TypeContext, kind: LazyLookupKind) {
+    ctx.record_attempt_counter(|c| c.lazy[kind as usize].hits += 1);
 }
 
 /// Record a lazy-signature scan after a cache miss.
 ///
 /// Caller must check [`enabled`] before calling this hot-path helper.
 #[inline]
-pub(crate) fn record_lazy_scan(kind: LazyLookupKind, scanned_items: usize, result_items: usize) {
-    let counters = kind.counters();
-    counters.misses.fetch_add(1, Ordering::Relaxed);
-    counters.scans.fetch_add(1, Ordering::Relaxed);
-    counters
-        .scanned_items
-        .fetch_add(scanned_items as u64, Ordering::Relaxed);
-    counters
-        .results
-        .fetch_add(result_items as u64, Ordering::Relaxed);
+pub(crate) fn record_lazy_scan(
+    ctx: &crate::types::TypeContext,
+    kind: LazyLookupKind,
+    scanned_items: usize,
+    result_items: usize,
+) {
+    ctx.record_attempt_counter(|c| {
+        let counts = &mut c.lazy[kind as usize];
+        counts.misses += 1;
+        counts.scans += 1;
+        counts.scanned_items += scanned_items as u64;
+        counts.results += result_items as u64;
+    });
 }
 
 /// Record a qualified component-view cache hit.
 ///
 /// Caller must check [`enabled`] before calling this hot-path helper.
 #[inline]
-pub(crate) fn record_qualified_component_hit() {
-    QUALIFIED_COMPONENT_HITS.fetch_add(1, Ordering::Relaxed);
+pub(crate) fn record_qualified_component_hit(ctx: &crate::types::TypeContext) {
+    ctx.record_attempt_counter(|c| c.components.qualified_hits += 1);
 }
 
 /// Record a qualified component-view cache miss.
 ///
 /// Caller must check [`enabled`] before calling this hot-path helper.
 #[inline]
-pub(crate) fn record_qualified_component_miss() {
-    QUALIFIED_COMPONENT_MISSES.fetch_add(1, Ordering::Relaxed);
+pub(crate) fn record_qualified_component_miss(ctx: &crate::types::TypeContext) {
+    ctx.record_attempt_counter(|c| c.components.qualified_misses += 1);
 }
 
 /// Record a newly cached qualified component view.
 ///
 /// Caller must check [`enabled`] before calling this hot-path helper.
 #[inline]
-pub(crate) fn record_qualified_component_registered() {
-    QUALIFIED_COMPONENT_REGISTERED.fetch_add(1, Ordering::Relaxed);
+pub(crate) fn record_qualified_component_registered(ctx: &crate::types::TypeContext) {
+    ctx.record_attempt_counter(|c| c.components.qualified_registered += 1);
 }
 
 /// Record use of an already-built stored component view.
 ///
 /// Caller must check [`enabled`] before calling this hot-path helper.
 #[inline]
-pub(crate) fn record_stored_component_cached() {
-    STORED_COMPONENT_CACHED.fetch_add(1, Ordering::Relaxed);
+pub(crate) fn record_stored_component_cached(ctx: &crate::types::TypeContext) {
+    ctx.record_attempt_counter(|c| c.components.stored_cached += 1);
 }
 
 /// Record a stored component view built for a specific lookup mode.
 ///
 /// Caller must check [`enabled`] before calling this hot-path helper.
 #[inline]
-pub(crate) fn record_stored_component_build(mode: ComponentLookupApi) {
+pub(crate) fn record_stored_component_build(
+    ctx: &crate::types::TypeContext,
+    mode: ComponentLookupApi,
+) {
     match mode {
         ComponentLookupApi::FindModule => {
-            STORED_COMPONENT_BUILD_FIND_MODULE.fetch_add(1, Ordering::Relaxed);
+            ctx.record_attempt_counter(|c| c.components.stored_build_find_module += 1);
         }
         ComponentLookupApi::LookupModule
         | ComponentLookupApi::FindModuleDescr
@@ -998,107 +996,116 @@ pub(crate) fn record_stored_component_build(mode: ComponentLookupApi) {
 ///
 /// Caller must check [`enabled`] before calling this hot-path helper.
 #[inline]
-pub(crate) fn record_type_item_resolve_scan(scanned_items: usize, type_items: usize, found: bool) {
-    TYPE_ITEM_RESOLVE_SCANS.fetch_add(1, Ordering::Relaxed);
-    TYPE_ITEM_RESOLVE_SCANNED_ITEMS.fetch_add(scanned_items as u64, Ordering::Relaxed);
-    TYPE_ITEM_RESOLVE_TYPE_ITEMS.fetch_add(type_items as u64, Ordering::Relaxed);
-    if found {
-        TYPE_ITEM_RESOLVE_FOUND.fetch_add(1, Ordering::Relaxed);
-    }
+pub(crate) fn record_type_item_resolve_scan(
+    ctx: &crate::types::TypeContext,
+    scanned_items: usize,
+    type_items: usize,
+    found: bool,
+) {
+    ctx.record_attempt_counter(|c| {
+        let counts = &mut c.type_item_resolve;
+        counts.scans += 1;
+        counts.scanned_items += scanned_items as u64;
+        counts.type_items += type_items as u64;
+        counts.found += u64::from(found);
+    });
+}
+
+/// The module the current worker thread attributes counters to. One TLS
+/// read per signature copy or freshening, not per node.
+fn current_module() -> Option<String> {
+    CURRENT_MODULE.with(|current| current.borrow().clone())
 }
 
 /// Record a full signature copy, grouped by call site.
 ///
 /// Caller must check [`enabled`] before calling this helper.
 pub(crate) fn record_signature_copy(
+    ctx: &crate::types::TypeContext,
     location: &'static std::panic::Location<'static>,
     item_count: usize,
 ) {
-    SIGNATURE_COPY_CALLS.fetch_add(1, Ordering::Relaxed);
-    SIGNATURE_COPY_ITEMS.fetch_add(item_count as u64, Ordering::Relaxed);
-    SIGNATURE_COPY_MAX_ITEMS.fetch_max(item_count as u64, Ordering::Relaxed);
-
-    let sites = SIGNATURE_COPY_SITES.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut sites = sites.lock().unwrap();
-    sites
-        .entry((location.file(), location.line()))
-        .or_default()
-        .record(item_count);
-    record_current_module_signature_copy(item_count);
+    let module = current_module();
+    ctx.record_attempt_counter(|c| {
+        c.signature_copies.record(item_count);
+        c.signature_copy_sites
+            .entry((location.file(), location.line()))
+            .or_default()
+            .record(item_count);
+        if let Some(module) = module {
+            c.module_copies
+                .entry(module)
+                .or_default()
+                .record(item_count);
+        }
+    });
 }
 
 /// Record a signature qualification before the current full-copy path.
 ///
 /// Caller must check [`enabled`] before calling this helper.
-pub(crate) fn record_signature_qualification(kind: &'static str, item_count: usize) {
-    let kinds = SIGNATURE_QUALIFICATION_KINDS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut kinds = kinds.lock().unwrap();
-    kinds.entry(kind).or_default().record(item_count);
+pub(crate) fn record_signature_qualification(
+    ctx: &crate::types::TypeContext,
+    kind: &'static str,
+    item_count: usize,
+) {
+    ctx.record_attempt_counter(|c| {
+        c.qualification_kinds
+            .entry(kind)
+            .or_default()
+            .record(item_count);
+    });
 }
 
 /// Record a named signature qualification entry.
 ///
 /// Caller must check [`enabled`] before calling this helper.
 pub(crate) fn record_signature_qualification_name(
+    ctx: &crate::types::TypeContext,
     kind: &'static str,
     name: &str,
     item_count: usize,
 ) {
-    let names = SIGNATURE_QUALIFICATION_NAMES.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut names = names.lock().unwrap();
-    names
-        .entry(format!("{kind}:{name}"))
-        .or_default()
-        .record(item_count);
-}
-
-/// Record a signature freshening entry point before it performs full-copy work.
-///
-/// Caller must check [`enabled`] before calling this helper.
-pub(crate) fn record_signature_freshen(kind: &'static str, item_count: usize) {
-    let kinds = SIGNATURE_FRESHEN_KINDS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut kinds = kinds.lock().unwrap();
-    kinds.entry(kind).or_default().record(item_count);
-    record_current_module_signature_freshen(item_count);
-}
-
-/// Record a named signature freshening entry.
-///
-/// Caller must check [`enabled`] before calling this helper.
-pub(crate) fn record_signature_freshen_name(kind: &'static str, name: &str, item_count: usize) {
-    let names = SIGNATURE_FRESHEN_NAMES.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut names = names.lock().unwrap();
-    names
-        .entry(format!("{kind}:{name}"))
-        .or_default()
-        .record(item_count);
-}
-
-fn record_current_module_signature_copy(item_count: usize) {
-    CURRENT_MODULE.with(|current| {
-        let current = current.borrow();
-        let Some(module) = current.as_ref() else {
-            return;
-        };
-        let modules = MODULE_SIGNATURE_COPIES.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut modules = modules.lock().unwrap();
-        modules
-            .entry(module.clone())
+    ctx.record_attempt_counter(|c| {
+        c.qualification_names
+            .entry(format!("{kind}:{name}"))
             .or_default()
             .record(item_count);
     });
 }
 
-fn record_current_module_signature_freshen(item_count: usize) {
-    CURRENT_MODULE.with(|current| {
-        let current = current.borrow();
-        let Some(module) = current.as_ref() else {
-            return;
-        };
-        let modules = MODULE_SIGNATURE_FRESHENS.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut modules = modules.lock().unwrap();
-        modules
-            .entry(module.clone())
+/// Record a signature freshening entry point before it performs full-copy work.
+///
+/// Caller must check [`enabled`] before calling this helper.
+pub(crate) fn record_signature_freshen(
+    ctx: &crate::types::TypeContext,
+    kind: &'static str,
+    item_count: usize,
+) {
+    let module = current_module();
+    ctx.record_attempt_counter(|c| {
+        c.freshen_kinds.entry(kind).or_default().record(item_count);
+        if let Some(module) = module {
+            c.module_freshens
+                .entry(module)
+                .or_default()
+                .record(item_count);
+        }
+    });
+}
+
+/// Record a named signature freshening entry.
+///
+/// Caller must check [`enabled`] before calling this helper.
+pub(crate) fn record_signature_freshen_name(
+    ctx: &crate::types::TypeContext,
+    kind: &'static str,
+    name: &str,
+    item_count: usize,
+) {
+    ctx.record_attempt_counter(|c| {
+        c.freshen_names
+            .entry(format!("{kind}:{name}"))
             .or_default()
             .record(item_count);
     });
@@ -1156,62 +1163,48 @@ pub fn print_report() {
             "[compiler-counter] gentype annotated={annotated} modules={modules} declarations={declarations}",
         );
     }
-    for kind in [
-        LazyLookupKind::Value,
-        LazyLookupKind::Type,
-        LazyLookupKind::Module,
-        LazyLookupKind::Constructor,
-        LazyLookupKind::Label,
-        LazyLookupKind::ChildComponent,
-    ] {
-        print_lazy(kind);
-    }
-    eprintln!(
-        "[compiler-counter] qualified_components hits={} misses={} registered={}",
-        QUALIFIED_COMPONENT_HITS.load(Ordering::Relaxed),
-        QUALIFIED_COMPONENT_MISSES.load(Ordering::Relaxed),
-        QUALIFIED_COMPONENT_REGISTERED.load(Ordering::Relaxed),
-    );
-    store_views::print_report();
-    frozen::print_report();
-    world::print_report();
-    eprintln!(
-        "[compiler-counter] stored_components cached={} build_find_module={}",
-        STORED_COMPONENT_CACHED.load(Ordering::Relaxed),
-        STORED_COMPONENT_BUILD_FIND_MODULE.load(Ordering::Relaxed),
-    );
-    eprintln!(
-        "[compiler-counter] type_item_resolve scans={} scanned_items={} type_items={} found={}",
-        TYPE_ITEM_RESOLVE_SCANS.load(Ordering::Relaxed),
-        TYPE_ITEM_RESOLVE_SCANNED_ITEMS.load(Ordering::Relaxed),
-        TYPE_ITEM_RESOLVE_TYPE_ITEMS.load(Ordering::Relaxed),
-        TYPE_ITEM_RESOLVE_FOUND.load(Ordering::Relaxed),
-    );
-    eprintln!(
-        "[compiler-counter] signature_copies calls={} items={} max_items={}",
-        SIGNATURE_COPY_CALLS.load(Ordering::Relaxed),
-        SIGNATURE_COPY_ITEMS.load(Ordering::Relaxed),
-        SIGNATURE_COPY_MAX_ITEMS.load(Ordering::Relaxed),
-    );
-    print_signature_copy_sites();
-    print_signature_qualification_kinds();
-    print_signature_qualification_names();
-    print_signature_freshen_kinds();
-    print_signature_freshen_names();
-    print_module_signature_copies();
-    print_module_signature_freshens();
-    eprintln!(
-        "[compiler-counter] type_mutations desc={} level={} row={} abbrev={} state={} snapshots={} backtracks={} restores={} peak_depth={}",
-        TYPE_MUTATION_DESC.load(Ordering::Relaxed),
-        TYPE_MUTATION_LEVEL.load(Ordering::Relaxed),
-        TYPE_MUTATION_ROW.load(Ordering::Relaxed),
-        TYPE_MUTATION_ABBREV.load(Ordering::Relaxed),
-        TYPE_MUTATION_STATE.load(Ordering::Relaxed),
-        TYPE_MUTATION_SNAPSHOTS.load(Ordering::Relaxed),
-        TYPE_MUTATION_BACKTRACKS.load(Ordering::Relaxed),
-        TYPE_MUTATION_RESTORES.load(Ordering::Relaxed),
-        TYPE_MUTATION_PEAK_DEPTH.load(Ordering::Relaxed),
-    );
+    with_totals(|totals| {
+        for kind in LazyLookupKind::ALL {
+            print_lazy(kind, &totals.lazy[kind as usize]);
+        }
+        let components = &totals.components;
+        eprintln!(
+            "[compiler-counter] qualified_components hits={} misses={} registered={}",
+            components.qualified_hits, components.qualified_misses, components.qualified_registered,
+        );
+        store_views::print_report(&totals.store_views);
+        frozen::print_report(&totals.frozen);
+        world::print_report(totals.views_adopted, totals.papply_views);
+        eprintln!(
+            "[compiler-counter] stored_components cached={} build_find_module={}",
+            components.stored_cached, components.stored_build_find_module,
+        );
+        let resolve = &totals.type_item_resolve;
+        eprintln!(
+            "[compiler-counter] type_item_resolve scans={} scanned_items={} type_items={} found={}",
+            resolve.scans, resolve.scanned_items, resolve.type_items, resolve.found,
+        );
+        let copies = &totals.signature_copies;
+        eprintln!(
+            "[compiler-counter] signature_copies calls={} items={} max_items={}",
+            copies.calls, copies.items, copies.max_items,
+        );
+        print_signature_sites(totals);
+        eprintln!(
+            "[compiler-counter] type_mutations desc={} level={} row={} abbrev={} state={} snapshots={} backtracks={} restores={} peak_depth={}",
+            totals.mutations[TypeMutationKind::Desc as usize],
+            totals.mutations[TypeMutationKind::Level as usize],
+            totals.mutations[TypeMutationKind::Row as usize],
+            // No probe records abbreviation writes; the field stays for
+            // the report's shape.
+            0,
+            totals.mutations[TypeMutationKind::State as usize],
+            totals.snapshots,
+            totals.backtracks,
+            totals.restores,
+            totals.peak_depth,
+        );
+    });
     eprintln!(
         "[compiler-counter] module_registry_snapshots count={} shared_entries_total={} local_entries_total={} max_shared_entries={} max_local_entries={} local_modules_total={} local_info_total={} local_aliases_total={} local_fallbacks_total={}",
         REGISTRY_SNAPSHOTS.load(Ordering::Relaxed),
@@ -1224,20 +1217,49 @@ pub fn print_report() {
         REGISTRY_LOCAL_ALIASES_TOTAL.load(Ordering::Relaxed),
         REGISTRY_LOCAL_FALLBACKS_TOTAL.load(Ordering::Relaxed),
     );
-    checker::print_report();
+    with_totals(|totals| checker::print_report(&totals.checker));
 }
 
-fn print_module_signature_copies() {
-    print_top_signature_sites(&MODULE_SIGNATURE_COPIES, |module, site| {
+/// The signature copy and freshening sites, kinds, names and modules, in
+/// the report's order.
+fn print_signature_sites(totals: &AttemptCounters) {
+    print_top_signature_sites(&totals.signature_copy_sites, |(file, line), counters| {
+        eprintln!(
+            "[compiler-counter] signature_copy_site file={} line={} calls={} items={} max_items={}",
+            file, line, counters.calls, counters.items, counters.max_items,
+        );
+    });
+    print_top_signature_sites(&totals.qualification_kinds, |kind, counters| {
+        eprintln!(
+            "[compiler-counter] signature_qualification kind={} calls={} items={} max_items={}",
+            kind, counters.calls, counters.items, counters.max_items,
+        );
+    });
+    print_top_signature_sites(&totals.qualification_names, |name, counters| {
+        eprintln!(
+            "[compiler-counter] signature_qualification_name name={} calls={} items={} max_items={}",
+            name, counters.calls, counters.items, counters.max_items,
+        );
+    });
+    print_top_signature_sites(&totals.freshen_kinds, |kind, counters| {
+        eprintln!(
+            "[compiler-counter] signature_freshen kind={} calls={} items={} max_items={}",
+            kind, counters.calls, counters.items, counters.max_items,
+        );
+    });
+    print_top_signature_sites(&totals.freshen_names, |name, counters| {
+        eprintln!(
+            "[compiler-counter] signature_freshen_name name={} calls={} items={} max_items={}",
+            name, counters.calls, counters.items, counters.max_items,
+        );
+    });
+    print_top_signature_sites(&totals.module_copies, |module, site| {
         eprintln!(
             "[compiler-counter] module_signature_copies module={} calls={} items={} max_items={}",
             module, site.calls, site.items, site.max_items
         );
     });
-}
-
-fn print_module_signature_freshens() {
-    print_top_signature_sites(&MODULE_SIGNATURE_FRESHENS, |module, site| {
+    print_top_signature_sites(&totals.module_freshens, |module, site| {
         eprintln!(
             "[compiler-counter] module_signature_freshens module={} calls={} items={} max_items={}",
             module, site.calls, site.items, site.max_items
@@ -1245,61 +1267,15 @@ fn print_module_signature_freshens() {
     });
 }
 
-fn print_signature_qualification_names() {
-    print_top_signature_sites(&SIGNATURE_QUALIFICATION_NAMES, |name, counters| {
-        eprintln!(
-            "[compiler-counter] signature_qualification_name name={} calls={} items={} max_items={}",
-            name, counters.calls, counters.items, counters.max_items,
-        );
-    });
-}
-
-fn print_signature_freshen_names() {
-    print_top_signature_sites(&SIGNATURE_FRESHEN_NAMES, |name, counters| {
-        eprintln!(
-            "[compiler-counter] signature_freshen_name name={} calls={} items={} max_items={}",
-            name, counters.calls, counters.items, counters.max_items,
-        );
-    });
-}
-
-fn print_signature_freshen_kinds() {
-    print_top_signature_sites(&SIGNATURE_FRESHEN_KINDS, |kind, counters| {
-        eprintln!(
-            "[compiler-counter] signature_freshen kind={} calls={} items={} max_items={}",
-            kind, counters.calls, counters.items, counters.max_items,
-        );
-    });
-}
-
-fn print_signature_qualification_kinds() {
-    print_top_signature_sites(&SIGNATURE_QUALIFICATION_KINDS, |kind, counters| {
-        eprintln!(
-            "[compiler-counter] signature_qualification kind={} calls={} items={} max_items={}",
-            kind, counters.calls, counters.items, counters.max_items,
-        );
-    });
-}
-
-fn print_signature_copy_sites() {
-    print_top_signature_sites(&SIGNATURE_COPY_SITES, |(file, line), counters| {
-        eprintln!(
-            "[compiler-counter] signature_copy_site file={} line={} calls={} items={} max_items={}",
-            file, line, counters.calls, counters.items, counters.max_items,
-        );
-    });
-}
-
-fn print_lazy(kind: LazyLookupKind) {
-    let counters = kind.counters();
+fn print_lazy(kind: LazyLookupKind, counts: &LazyCounts) {
     eprintln!(
         "[compiler-counter] lazy_lookup kind={} hits={} misses={} scans={} scanned_items={} result_items={}",
         kind.name(),
-        counters.hits.load(Ordering::Relaxed),
-        counters.misses.load(Ordering::Relaxed),
-        counters.scans.load(Ordering::Relaxed),
-        counters.scanned_items.load(Ordering::Relaxed),
-        counters.results.load(Ordering::Relaxed),
+        counts.hits,
+        counts.misses,
+        counts.scans,
+        counts.scanned_items,
+        counts.results,
     );
 }
 
@@ -1321,7 +1297,6 @@ fn print_lazy(kind: LazyLookupKind) {
 /// compressing them.
 mod checker {
     use std::collections::HashMap;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use crate::fast_hash::AHashMap;
@@ -1373,50 +1348,37 @@ mod checker {
         pub case: u8,
     }
 
-    static COPY_SESSIONS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
-    static COPY_NODES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+    /// The type contexts dropped and the nodes their own pools held:
+    /// once per context, from its drop, so process-global (a discarded
+    /// attempt's pool is not counted, see `TypeContext::defer_attempt_counters`).
     static TYPE_CONTEXTS: AtomicU64 = AtomicU64::new(0);
     static LOCAL_NODES: AtomicU64 = AtomicU64::new(0);
-    static STORE_BUILDS: AtomicU64 = AtomicU64::new(0);
-    static STORE_BUILD_NODES: AtomicU64 = AtomicU64::new(0);
-
-    static FRESH_VARS: AtomicU64 = AtomicU64::new(0);
-    static FRESH_VAR_SITES: Mutex<Option<HashMap<(&'static str, u32), u64>>> = Mutex::new(None);
-    static EXPECTED_VARS: Mutex<Option<HashMap<ExpectedVar, u64>>> = Mutex::new(None);
 
     /// Calls, calls whose every root is ground, visited nodes, ground
     /// visited nodes.
-    struct WalkCounters {
-        calls: AtomicU64,
-        ground_calls: AtomicU64,
-        visits: AtomicU64,
-        ground_visits: AtomicU64,
+    #[derive(Clone, Copy, Default)]
+    pub(super) struct WalkCounts {
+        calls: u64,
+        ground_calls: u64,
+        visits: u64,
+        ground_visits: u64,
     }
 
-    impl WalkCounters {
-        const fn new() -> Self {
-            WalkCounters {
-                calls: AtomicU64::new(0),
-                ground_calls: AtomicU64::new(0),
-                visits: AtomicU64::new(0),
-                ground_visits: AtomicU64::new(0),
-            }
-        }
-
-        fn all(&self) -> [&AtomicU64; 4] {
-            [
-                &self.calls,
-                &self.ground_calls,
-                &self.visits,
-                &self.ground_visits,
-            ]
+    impl WalkCounts {
+        fn merge(&mut self, other: WalkCounts) {
+            self.calls += other.calls;
+            self.ground_calls += other.ground_calls;
+            self.visits += other.visits;
+            self.ground_visits += other.ground_visits;
         }
 
         fn print(&self, name: &str, visit: &str) {
-            let calls = self.calls.load(Ordering::Relaxed);
-            let ground_calls = self.ground_calls.load(Ordering::Relaxed);
-            let visits = self.visits.load(Ordering::Relaxed);
-            let ground_visits = self.ground_visits.load(Ordering::Relaxed);
+            let WalkCounts {
+                calls,
+                ground_calls,
+                visits,
+                ground_visits,
+            } = *self;
             eprintln!(
                 "[compiler-counter] {name} calls={calls} ground_calls={ground_calls} ({}) {visit}={visits} ground_{visit}={ground_visits} ({})",
                 percent(ground_calls, calls),
@@ -1425,9 +1387,13 @@ mod checker {
         }
     }
 
-    static INSTANCE: WalkCounters = WalkCounters::new();
-    static GENERALIZE: WalkCounters = WalkCounters::new();
-    static UPDATE_LEVEL: WalkCounters = WalkCounters::new();
+    /// The census walks, indexed by `Walk`.
+    #[derive(Clone, Copy)]
+    enum Walk {
+        Instance,
+        Generalize,
+        UpdateLevel,
+    }
 
     const UNIFY_SHAPES: usize = 8;
     const UNIFY_SHAPE_NAMES: [&str; UNIFY_SHAPES] = [
@@ -1440,18 +1406,124 @@ mod checker {
         "structure_one_ground",
         "structure_nonground",
     ];
-    static UNIFY: [AtomicU64; UNIFY_SHAPES] = [const { AtomicU64::new(0) }; UNIFY_SHAPES];
-    /// Top-level unifications by the two head constructors.
-    static UNIFY_HEADS: Mutex<Option<HashMap<(&'static str, &'static str), u64>>> =
-        Mutex::new(None);
 
-    static EXPORT_UNITS: AtomicU64 = AtomicU64::new(0);
-    static EXPORT_NODES: AtomicU64 = AtomicU64::new(0);
-    static EXPORT_NONGROUND_NODES: AtomicU64 = AtomicU64::new(0);
-    static EXPORT_MAX_NONGROUND_NODES: AtomicU64 = AtomicU64::new(0);
-    static EXPORT_RECURSIVE_GROUND: AtomicU64 = AtomicU64::new(0);
-    /// Non-ground and all exported nodes per unit.
-    static EXPORT_BY_UNIT: Mutex<Vec<(String, u64, u64)>> = Mutex::new(Vec::new());
+    /// The head constructor names a top-level unification is counted by,
+    /// indexed by [`head_index`].
+    const HEADS: usize = 12;
+    const HEAD_NAMES: [&str; HEADS] = [
+        "var", "arrow", "tuple", "constr", "object", "field", "nil", "link", "variant", "univar",
+        "poly", "package",
+    ];
+
+    /// The checker's counts in one context; see [`super::AttemptCounters`].
+    #[derive(Default)]
+    pub(super) struct Counts {
+        copy_sessions: [u64; 4],
+        copy_nodes: [u64; 4],
+        store_builds: u64,
+        store_build_nodes: u64,
+        fresh_vars: u64,
+        fresh_var_sites: HashMap<(&'static str, u32), u64>,
+        expected_vars: HashMap<ExpectedVar, u64>,
+        walks: [WalkCounts; 3],
+        unify: [u64; UNIFY_SHAPES],
+        /// Top-level unifications by the two head constructors, dense:
+        /// `unify_heads[left * HEADS + right]`.
+        unify_heads: Vec<u64>,
+        export_units: u64,
+        export_nodes: u64,
+        export_nonground_nodes: u64,
+        export_max_nonground_nodes: u64,
+        export_recursive_ground: u64,
+        /// Non-ground and all exported nodes per unit.
+        export_by_unit: Vec<(String, u64, u64)>,
+    }
+
+    impl Counts {
+        pub(super) fn merge(&mut self, other: Counts) {
+            for (total, count) in self.copy_sessions.iter_mut().zip(other.copy_sessions) {
+                *total += count;
+            }
+            for (total, count) in self.copy_nodes.iter_mut().zip(other.copy_nodes) {
+                *total += count;
+            }
+            self.store_builds += other.store_builds;
+            self.store_build_nodes += other.store_build_nodes;
+            self.fresh_vars += other.fresh_vars;
+            for (site, count) in other.fresh_var_sites {
+                *self.fresh_var_sites.entry(site).or_default() += count;
+            }
+            for (var, count) in other.expected_vars {
+                *self.expected_vars.entry(var).or_default() += count;
+            }
+            for (total, count) in self.walks.iter_mut().zip(other.walks) {
+                total.merge(count);
+            }
+            for (total, count) in self.unify.iter_mut().zip(other.unify) {
+                *total += count;
+            }
+            if !other.unify_heads.is_empty() {
+                self.unify_heads.resize(HEADS * HEADS, 0);
+                for (total, count) in self.unify_heads.iter_mut().zip(other.unify_heads) {
+                    *total += count;
+                }
+            }
+            self.export_units += other.export_units;
+            self.export_nodes += other.export_nodes;
+            self.export_nonground_nodes += other.export_nonground_nodes;
+            self.export_max_nonground_nodes = self
+                .export_max_nonground_nodes
+                .max(other.export_max_nonground_nodes);
+            self.export_recursive_ground += other.export_recursive_ground;
+            self.export_by_unit.extend(other.export_by_unit);
+        }
+
+        pub(super) fn derived(&self) -> [u64; 3] {
+            [
+                self.fresh_vars,
+                self.unify.iter().sum(),
+                self.copy_nodes[CopyCause::Instance as usize],
+            ]
+        }
+
+        /// The counts `attempt_tests::probe_every_family` makes `n` times
+        /// with two distinct `int` nodes at level 0.
+        #[cfg(test)]
+        pub(super) fn assert_counts(&self, n: u64) {
+            let instance = CopyCause::Instance as usize;
+            assert_eq!((self.copy_sessions[instance], self.copy_nodes[instance]), (n, 3 * n));
+            assert_eq!(self.copy_sessions.iter().sum::<u64>(), n);
+            assert_eq!((self.store_builds, self.store_build_nodes), (n, 2 * n));
+            assert_eq!(self.fresh_vars, n);
+            assert_eq!(self.fresh_var_sites.values().sum::<u64>(), n);
+            let expected = ExpectedVar {
+                construct: "test",
+                case: 2,
+            };
+            assert_eq!(self.expected_vars.get(&expected).copied(), Some(n));
+            // Ground roots below every walk's level: no node is entered.
+            for walk in self.walks {
+                let WalkCounts {
+                    calls,
+                    ground_calls,
+                    visits,
+                    ground_visits,
+                } = walk;
+                assert_eq!([calls, ground_calls, visits, ground_visits], [n, n, 0, 0]);
+            }
+            // Two identical ground constructors, both headed `constr`.
+            assert_eq!(self.unify, [0, n, 0, 0, 0, 0, 0, 0]);
+            let constr = 3;
+            assert_eq!(HEAD_NAMES[constr], "constr");
+            assert_eq!(self.unify_heads.len(), HEADS * HEADS);
+            assert_eq!(self.unify_heads[constr * HEADS + constr], n);
+            assert_eq!(self.unify_heads.iter().sum::<u64>(), n);
+            assert_eq!(
+                (self.export_units, self.export_nodes, self.export_by_unit.len() as u64),
+                (n, 0, n)
+            );
+        }
+    }
 
     fn percent(part: u64, whole: u64) -> String {
         if whole == 0 {
@@ -1461,46 +1533,19 @@ mod checker {
         }
     }
 
-    pub(super) fn derived_snapshot() -> [u64; 3] {
-        [FRESH_VARS.load(Ordering::Relaxed),
-         UNIFY.iter().map(|c| c.load(Ordering::Relaxed)).sum(),
-         COPY_NODES[CopyCause::Instance as usize].load(Ordering::Relaxed)]
-    }
-
     pub(super) fn reset() {
-        let walks = [&INSTANCE, &GENERALIZE, &UPDATE_LEVEL];
-        for counter in COPY_SESSIONS
-            .iter()
-            .chain(&COPY_NODES)
-            .chain(&UNIFY)
-            .chain(walks.iter().flat_map(|walk| walk.all()))
-            .chain([
-                &TYPE_CONTEXTS,
-                &LOCAL_NODES,
-                &STORE_BUILDS,
-                &STORE_BUILD_NODES,
-                &FRESH_VARS,
-                &EXPORT_UNITS,
-                &EXPORT_NODES,
-                &EXPORT_NONGROUND_NODES,
-                &EXPORT_MAX_NONGROUND_NODES,
-                &EXPORT_RECURSIVE_GROUND,
-            ])
-        {
-            counter.store(0, Ordering::Relaxed);
-        }
-        *FRESH_VAR_SITES.lock().unwrap() = None;
-        *EXPECTED_VARS.lock().unwrap() = None;
-        *UNIFY_HEADS.lock().unwrap() = None;
-        EXPORT_BY_UNIT.lock().unwrap().clear();
+        TYPE_CONTEXTS.store(0, Ordering::Relaxed);
+        LOCAL_NODES.store(0, Ordering::Relaxed);
     }
 
     /// A copy for `cause` allocated `nodes` type nodes, not counting the
     /// copies nested in it.
-    pub(crate) fn record_copy(cause: CopyCause, nodes: usize) {
+    pub(crate) fn record_copy(ctx: &TypeContext, cause: CopyCause, nodes: usize) {
         let index = cause as usize;
-        COPY_SESSIONS[index].fetch_add(1, Ordering::Relaxed);
-        COPY_NODES[index].fetch_add(nodes as u64, Ordering::Relaxed);
+        ctx.record_attempt_counter(|c| {
+            c.checker.copy_sessions[index] += 1;
+            c.checker.copy_nodes[index] += nodes as u64;
+        });
     }
 
     /// A compilation's own node pool is dropped holding `nodes` nodes.
@@ -1510,32 +1555,32 @@ mod checker {
     }
 
     /// An outermost store build allocated `nodes` nodes in the worker store.
-    pub(crate) fn record_store_build_nodes(nodes: usize) {
-        STORE_BUILDS.fetch_add(1, Ordering::Relaxed);
-        STORE_BUILD_NODES.fetch_add(nodes as u64, Ordering::Relaxed);
+    pub(crate) fn record_store_build_nodes(ctx: &TypeContext, nodes: usize) {
+        ctx.record_attempt_counter(|c| {
+            c.checker.store_builds += 1;
+            c.checker.store_build_nodes += nodes as u64;
+        });
     }
 
     /// `new_var` and its variants, called from `location` outside a copy
     /// session.
-    pub(crate) fn record_fresh_var(location: &'static std::panic::Location<'static>) {
-        FRESH_VARS.fetch_add(1, Ordering::Relaxed);
-        *FRESH_VAR_SITES
-            .lock()
-            .unwrap()
-            .get_or_insert_with(HashMap::new)
-            .entry((location.file(), location.line()))
-            .or_default() += 1;
+    pub(crate) fn record_fresh_var(
+        ctx: &TypeContext,
+        location: &'static std::panic::Location<'static>,
+    ) {
+        ctx.record_attempt_counter(|c| {
+            c.checker.fresh_vars += 1;
+            *c.checker
+                .fresh_var_sites
+                .entry((location.file(), location.line()))
+                .or_default() += 1;
+        });
     }
 
     /// A fresh variable was made only to be the expected type of an
     /// expression.
-    pub(crate) fn record_expected_var(var: ExpectedVar) {
-        *EXPECTED_VARS
-            .lock()
-            .unwrap()
-            .get_or_insert_with(HashMap::new)
-            .entry(var)
-            .or_default() += 1;
+    pub(crate) fn record_expected_var(ctx: &TypeContext, var: ExpectedVar) {
+        ctx.record_attempt_counter(|c| *c.checker.expected_vars.entry(var).or_default() += 1);
     }
 
     /// The representative of `ty`, without compressing the links.
@@ -1548,20 +1593,21 @@ mod checker {
         }
     }
 
-    fn head_name(desc: &TypeDesc) -> &'static str {
+    /// The index in [`HEAD_NAMES`] of the head constructor of `desc`.
+    fn head_index(desc: &TypeDesc) -> usize {
         match desc {
-            TypeDesc::Tvar(_) => "var",
-            TypeDesc::Tarrow { .. } => "arrow",
-            TypeDesc::Ttuple(_) => "tuple",
-            TypeDesc::Tconstr { .. } => "constr",
-            TypeDesc::Tobject { .. } => "object",
-            TypeDesc::Tfield { .. } => "field",
-            TypeDesc::Tnil => "nil",
-            TypeDesc::Tlink(_) | TypeDesc::Tsubst(_) => "link",
-            TypeDesc::Tvariant(_) => "variant",
-            TypeDesc::Tunivar(_) => "univar",
-            TypeDesc::Tpoly { .. } => "poly",
-            TypeDesc::Tpackage { .. } => "package",
+            TypeDesc::Tvar(_) => 0,
+            TypeDesc::Tarrow { .. } => 1,
+            TypeDesc::Ttuple(_) => 2,
+            TypeDesc::Tconstr { .. } => 3,
+            TypeDesc::Tobject { .. } => 4,
+            TypeDesc::Tfield { .. } => 5,
+            TypeDesc::Tnil => 6,
+            TypeDesc::Tlink(_) | TypeDesc::Tsubst(_) => 7,
+            TypeDesc::Tvariant(_) => 8,
+            TypeDesc::Tunivar(_) => 9,
+            TypeDesc::Tpoly { .. } => 10,
+            TypeDesc::Tpackage { .. } => 11,
         }
     }
 
@@ -1793,26 +1839,26 @@ mod checker {
 
     fn census_walk(
         ctx: &TypeContext,
-        counters: &WalkCounters,
+        walk: Walk,
         roots: impl IntoIterator<Item = TypeExprRef>,
         enters: impl FnMut(TypeExprRef) -> bool,
     ) {
         let (graph, roots) = Graph::of(ctx, roots);
         let (visits, ground_visits) = graph.visit(&roots, enters);
-        counters.calls.fetch_add(1, Ordering::Relaxed);
-        if roots.iter().all(|root| graph.is_ground(*root)) {
-            counters.ground_calls.fetch_add(1, Ordering::Relaxed);
-        }
-        counters.visits.fetch_add(visits, Ordering::Relaxed);
-        counters
-            .ground_visits
-            .fetch_add(ground_visits, Ordering::Relaxed);
+        let ground = roots.iter().all(|root| graph.is_ground(*root));
+        ctx.record_attempt_counter(|c| {
+            let counts = &mut c.checker.walks[walk as usize];
+            counts.calls += 1;
+            counts.ground_calls += u64::from(ground);
+            counts.visits += visits;
+            counts.ground_visits += ground_visits;
+        });
     }
 
     /// An instantiation of `roots` in one copy session is about to run: it
     /// copies the nodes at the generic level it reaches through such nodes.
     pub(crate) fn census_instance(ctx: &TypeContext, roots: impl IntoIterator<Item = TypeExprRef>) {
-        census_walk(ctx, &INSTANCE, roots, |ty| {
+        census_walk(ctx, Walk::Instance, roots, |ty| {
             ctx.get_level(ty) == GENERIC_LEVEL
         });
     }
@@ -1820,7 +1866,7 @@ mod checker {
     /// A generalisation of `ty` is about to run: it visits the nodes above
     /// `level` that are not generic yet.
     pub(crate) fn census_generalize(ctx: &TypeContext, level: i32, ty: TypeExprRef) {
-        census_walk(ctx, &GENERALIZE, [ty], |ty| {
+        census_walk(ctx, Walk::Generalize, [ty], |ty| {
             let node_level = ctx.get_level(ty);
             node_level > level && node_level != GENERIC_LEVEL
         });
@@ -1829,7 +1875,7 @@ mod checker {
     /// `ty` is about to be lowered to `level`: the walk visits the nodes
     /// above it.
     pub(crate) fn census_update_level(ctx: &TypeContext, level: i32, ty: TypeExprRef) {
-        census_walk(ctx, &UPDATE_LEVEL, [ty], |ty| ctx.get_level(ty) > level);
+        census_walk(ctx, Walk::UpdateLevel, [ty], |ty| ctx.get_level(ty) > level);
     }
 
     /// Whether two ground types are the same type without expanding
@@ -1876,12 +1922,7 @@ mod checker {
     pub(crate) fn census_unify(ctx: &TypeContext, t1: TypeExprRef, t2: TypeExprRef) {
         let (t1, t2) = (resolve(ctx, t1), resolve(ctx, t2));
         let (d1, d2) = (ctx.get_desc(t1).into_desc(), ctx.get_desc(t2).into_desc());
-        *UNIFY_HEADS
-            .lock()
-            .unwrap()
-            .get_or_insert_with(HashMap::new)
-            .entry((head_name(&d1), head_name(&d2)))
-            .or_default() += 1;
+        let head = head_index(&d1) * HEADS + head_index(&d2);
         let shape = if t1 == t2 {
             0
         } else {
@@ -1906,7 +1947,14 @@ mod checker {
                 (false, false) => 7,
             }
         };
-        UNIFY[shape].fetch_add(1, Ordering::Relaxed);
+        ctx.record_attempt_counter(|c| {
+            let counts = &mut c.checker;
+            counts.unify[shape] += 1;
+            if counts.unify_heads.is_empty() {
+                counts.unify_heads.resize(HEADS * HEADS, 0);
+            }
+            counts.unify_heads[head] += 1;
+        });
     }
 
     fn signature_types(sig: &[SignatureItem], out: &mut Vec<TypeExprRef>) {
@@ -1990,51 +2038,49 @@ mod checker {
             .filter(|nonground| **nonground)
             .count() as u64;
         let recursive_ground = graph.recursive_ground() as u64;
-        EXPORT_UNITS.fetch_add(1, Ordering::Relaxed);
-        EXPORT_NODES.fetch_add(nodes, Ordering::Relaxed);
-        EXPORT_NONGROUND_NODES.fetch_add(nonground, Ordering::Relaxed);
-        EXPORT_MAX_NONGROUND_NODES.fetch_max(nonground, Ordering::Relaxed);
-        EXPORT_RECURSIVE_GROUND.fetch_add(recursive_ground, Ordering::Relaxed);
-        EXPORT_BY_UNIT
-            .lock()
-            .unwrap()
-            .push((unit.to_string(), nonground, nodes));
+        ctx.record_attempt_counter(|c| {
+            let counts = &mut c.checker;
+            counts.export_units += 1;
+            counts.export_nodes += nodes;
+            counts.export_nonground_nodes += nonground;
+            counts.export_max_nonground_nodes = counts.export_max_nonground_nodes.max(nonground);
+            counts.export_recursive_ground += recursive_ground;
+            counts
+                .export_by_unit
+                .push((unit.to_string(), nonground, nodes));
+        });
     }
 
     /// The `limit` largest entries, ties broken by key so that the report
     /// does not depend on hash order.
-    fn largest<K: Ord + Clone>(map: &Option<HashMap<K, u64>>, limit: usize) -> Vec<(K, u64)> {
-        let mut entries: Vec<(K, u64)> = map
-            .iter()
-            .flatten()
-            .map(|(key, count)| (key.clone(), *count))
-            .collect();
+    fn largest<K: Ord + Clone>(
+        entries: impl IntoIterator<Item = (K, u64)>,
+        limit: usize,
+    ) -> Vec<(K, u64)> {
+        let mut entries: Vec<(K, u64)> = entries.into_iter().collect();
         entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         entries.truncate(limit);
         entries
     }
 
-    pub(super) fn print_report() {
+    pub(super) fn print_report(counts: &Counts) {
         let local = LOCAL_NODES.load(Ordering::Relaxed);
-        let store = STORE_BUILD_NODES.load(Ordering::Relaxed);
-        let fresh = FRESH_VARS.load(Ordering::Relaxed);
-        let copied: u64 = COPY_NODES
-            .iter()
-            .map(|nodes| nodes.load(Ordering::Relaxed))
-            .sum();
+        let store = counts.store_build_nodes;
+        let fresh = counts.fresh_vars;
+        let copied: u64 = counts.copy_nodes.iter().sum();
         let total = local + store;
         eprintln!(
             "[compiler-counter] type_nodes total={total} local={local} store_builds={store} type_contexts={} store_build_count={}",
             TYPE_CONTEXTS.load(Ordering::Relaxed),
-            STORE_BUILDS.load(Ordering::Relaxed),
+            counts.store_builds,
         );
         for cause in CopyCause::ALL {
-            let nodes = COPY_NODES[cause as usize].load(Ordering::Relaxed);
+            let nodes = counts.copy_nodes[cause as usize];
             eprintln!(
                 "[compiler-counter] type_nodes_by_cause cause={} nodes={nodes} ({}) copies={}",
                 cause.name(),
                 percent(nodes, total),
-                COPY_SESSIONS[cause as usize].load(Ordering::Relaxed),
+                counts.copy_sessions[cause as usize],
             );
         }
         eprintln!(
@@ -2047,34 +2093,41 @@ mod checker {
             percent(direct, total),
         );
 
-        INSTANCE.print("instance", "copied_nodes");
-        GENERALIZE.print("generalize", "visits");
-        UPDATE_LEVEL.print("update_level", "visits");
+        counts.walks[Walk::Instance as usize].print("instance", "copied_nodes");
+        counts.walks[Walk::Generalize as usize].print("generalize", "visits");
+        counts.walks[Walk::UpdateLevel as usize].print("update_level", "visits");
 
-        let unify_total: u64 = UNIFY
-            .iter()
-            .map(|count| count.load(Ordering::Relaxed))
-            .sum();
+        let unify_total: u64 = counts.unify.iter().sum();
         let mut line = format!("[compiler-counter] unify_top_level total={unify_total}");
-        for (name, count) in UNIFY_SHAPE_NAMES.iter().zip(&UNIFY) {
-            let count = count.load(Ordering::Relaxed);
+        for (name, count) in UNIFY_SHAPE_NAMES.iter().zip(counts.unify) {
             line.push_str(&format!(
                 " {name}={count} ({})",
                 percent(count, unify_total)
             ));
         }
         eprintln!("{line}");
-        for ((left, right), count) in largest(&UNIFY_HEADS.lock().unwrap(), 20) {
+        let heads = counts
+            .unify_heads
+            .iter()
+            .enumerate()
+            .filter(|(_, count)| **count != 0)
+            .map(|(index, count)| {
+                (
+                    (HEAD_NAMES[index / HEADS], HEAD_NAMES[index % HEADS]),
+                    *count,
+                )
+            });
+        for ((left, right), count) in largest(heads, 20) {
             eprintln!(
                 "[compiler-counter] unify_top_level_heads left={left} right={right} count={count} ({})",
                 percent(count, unify_total),
             );
         }
 
-        let expected = EXPECTED_VARS.lock().unwrap();
-        let expected_total: u64 = expected.iter().flatten().map(|(_, count)| *count).sum();
+        let expected = &counts.expected_vars;
+        let expected_total: u64 = expected.values().sum();
         let mut by_case = [0u64; 6];
-        for (var, count) in expected.iter().flatten() {
+        for (var, count) in expected {
             by_case[usize::from(var.case).min(5)] += count;
         }
         eprintln!(
@@ -2086,11 +2139,8 @@ mod checker {
             by_case[4],
             by_case[5],
         );
-        let mut constructs: Vec<(ExpectedVar, u64)> = expected
-            .iter()
-            .flatten()
-            .map(|(var, count)| (*var, *count))
-            .collect();
+        let mut constructs: Vec<(ExpectedVar, u64)> =
+            expected.iter().map(|(var, count)| (*var, *count)).collect();
         constructs.sort_by(|a, b| {
             b.1.cmp(&a.1)
                 .then_with(|| a.0.construct.cmp(b.0.construct))
@@ -2104,8 +2154,11 @@ mod checker {
                 percent(count, fresh),
             );
         }
-        drop(expected);
-        for ((file, line), count) in largest(&FRESH_VAR_SITES.lock().unwrap(), 40) {
+        let sites = counts
+            .fresh_var_sites
+            .iter()
+            .map(|(site, count)| (*site, *count));
+        for ((file, line), count) in largest(sites, 40) {
             // The path as the compiler was built with; print it from the
             // crate's directory.
             let file = file
@@ -2117,16 +2170,16 @@ mod checker {
             );
         }
 
-        let export_nodes = EXPORT_NODES.load(Ordering::Relaxed);
-        let export_nonground = EXPORT_NONGROUND_NODES.load(Ordering::Relaxed);
+        let export_nodes = counts.export_nodes;
+        let export_nonground = counts.export_nonground_nodes;
         eprintln!(
             "[compiler-counter] exported_signatures units={} nodes={export_nodes} nonground_nodes={export_nonground} ({}) max_nonground_nodes_per_unit={} recursive_ground_types={}",
-            EXPORT_UNITS.load(Ordering::Relaxed),
+            counts.export_units,
             percent(export_nonground, export_nodes),
-            EXPORT_MAX_NONGROUND_NODES.load(Ordering::Relaxed),
-            EXPORT_RECURSIVE_GROUND.load(Ordering::Relaxed),
+            counts.export_max_nonground_nodes,
+            counts.export_recursive_ground,
         );
-        let mut units = EXPORT_BY_UNIT.lock().unwrap().clone();
+        let mut units = counts.export_by_unit.clone();
         units.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         for (unit, nonground, nodes) in units.into_iter().take(10) {
             eprintln!(
@@ -2263,15 +2316,284 @@ mod publication_guard_tests {
     }
 }
 
-/// Read existing process-global counters, without locks or mutation. O(1):
-/// twenty-four atomic reads. Item deltas require a single compiler worker;
-/// callers must not interpret concurrent process deltas as item attribution.
-pub fn derived_snapshot() -> [u64; 4] {
-    let [fresh, unify, copies] = checker::derived_snapshot();
-    let lookups = [&VALUE_HITS, &VALUE_MISSES, &TYPE_HITS, &TYPE_MISSES,
-        &MODULE_HITS, &MODULE_MISSES, &CONSTRUCTOR_HITS, &CONSTRUCTOR_MISSES,
-        &LABEL_HITS, &LABEL_MISSES, &CHILD_COMPONENT_HITS, &CHILD_COMPONENT_MISSES,
-        &QUALIFIED_COMPONENT_HITS, &QUALIFIED_COMPONENT_MISSES]
-        .iter().map(|c| c.load(Ordering::Relaxed)).sum();
-    [fresh, unify, copies, lookups]
+/// The process totals plus the counts `ctx` holds and has not published,
+/// without mutation. O(1): one lock acquisition and a fixed number of
+/// field reads. Item deltas require a single compiler worker; callers must
+/// not interpret concurrent process deltas as item attribution.
+pub fn derived_snapshot(ctx: &crate::types::TypeContext) -> [u64; 4] {
+    let totals = with_totals(AttemptCounters::derived);
+    let local = ctx.attempt_counter(AttemptCounters::derived);
+    std::array::from_fn(|i| totals[i] + local[i])
+}
+
+#[cfg(test)]
+mod attempt_tests {
+    use std::sync::Arc;
+
+    use super::{AttemptCounters, ExpectedVar, LazyLookupKind, TypeMutationKind, frozen};
+    use crate::context::IdGenerator;
+    use crate::ident::Ident;
+    use crate::types::context::TypeContext;
+    use crate::types::path::Path;
+    use crate::types::type_expr::{AbbrevMemoRef, TypeDesc, TypeExprRef};
+    use crate::types::typecore::ComponentLookupApi;
+
+    const OPERATIONS: u64 = 10_000;
+
+    fn context() -> TypeContext {
+        let mut ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        ctx.enable_compiler_counters_for_test();
+        ctx
+    }
+
+    fn int(ctx: &TypeContext) -> TypeExprRef {
+        ctx.new_type(TypeDesc::Tconstr {
+            path: Path::pident(Ident::create_persistent("int")),
+            args: ctx.new_type_list(&[]),
+            abbrev: AbbrevMemoRef::nil(),
+        })
+    }
+
+    /// This thread's publications so far, and the totals they made.
+    fn published<R>(read: impl FnOnce(&AttemptCounters) -> R) -> (u64, R) {
+        (
+            super::with_totals_mut(|totals| totals.publications),
+            super::with_totals(read),
+        )
+    }
+
+    /// One counted operation of every probe family a context reaches.
+    fn probe_every_family(ctx: &TypeContext, left: TypeExprRef, right: TypeExprRef) {
+        super::record_type_mutation(ctx, TypeMutationKind::Desc);
+        super::record_type_mutation_snapshot(ctx, 3);
+        super::record_type_mutation_backtrack(ctx, 2);
+        frozen::record(ctx, frozen::Kind::DescReadShared);
+        super::record_lazy_hit(ctx, LazyLookupKind::Label);
+        super::record_lazy_scan(ctx, LazyLookupKind::Value, 4, 1);
+        super::record_qualified_component_hit(ctx);
+        super::record_qualified_component_miss(ctx);
+        super::record_qualified_component_registered(ctx);
+        super::record_stored_component_cached(ctx);
+        super::record_stored_component_build(ctx, ComponentLookupApi::FindModule);
+        super::record_type_item_resolve_scan(ctx, 5, 2, true);
+        super::record_signature_copy(ctx, std::panic::Location::caller(), 7);
+        super::record_signature_qualification(ctx, "alias", 7);
+        super::record_signature_qualification_name(ctx, "alias", "M", 7);
+        super::record_signature_freshen(ctx, "include", 6);
+        super::record_signature_freshen_name(ctx, "include", "M", 6);
+        super::world::record_view_adoption(ctx);
+        super::world::record_papply_view_build(ctx);
+        super::store_views::record_piece(ctx, false, true);
+        super::store_views::record_binder(ctx);
+        super::store_views::record_piece_replay(ctx);
+        super::store_views::record_effect_replayed(ctx, 0);
+        super::record_copy(ctx, super::CopyCause::Instance, 3);
+        super::record_store_build_nodes(ctx, 2);
+        super::record_fresh_var(ctx, std::panic::Location::caller());
+        super::record_expected_var(
+            ctx,
+            ExpectedVar {
+                construct: "test",
+                case: 2,
+            },
+        );
+        super::census_unify(ctx, left, right);
+        super::census_instance(ctx, [left]);
+        super::census_generalize(ctx, 0, left);
+        super::census_update_level(ctx, 0, left);
+        super::census_exported_signature(ctx, "Unit", &[]);
+    }
+
+    /// The counts `probe_every_family` makes `n` times, as exact values.
+    fn assert_counts(c: &AttemptCounters, n: u64) {
+        assert_eq!(c.mutations, [n, 0, 0, 0]);
+        assert_eq!((c.snapshots, c.backtracks, c.restores, c.peak_depth), (n, n, 2 * n, 3));
+        assert_eq!(c.frozen[frozen::Kind::DescReadShared as usize], n);
+        assert_eq!(c.frozen.iter().sum::<u64>(), n);
+        let label = c.lazy[LazyLookupKind::Label as usize];
+        let value = c.lazy[LazyLookupKind::Value as usize];
+        assert_eq!((label.hits, label.misses), (n, 0));
+        assert_eq!(
+            (value.hits, value.misses, value.scans, value.scanned_items, value.results),
+            (0, n, n, 4 * n, n)
+        );
+        let components = c.components;
+        assert_eq!(
+            [
+                components.qualified_hits,
+                components.qualified_misses,
+                components.qualified_registered,
+                components.stored_cached,
+                components.stored_build_find_module,
+            ],
+            [n; 5]
+        );
+        let resolve = c.type_item_resolve;
+        assert_eq!(
+            [resolve.scans, resolve.scanned_items, resolve.type_items, resolve.found],
+            [n, 5 * n, 2 * n, n]
+        );
+        assert_eq!(
+            (c.signature_copies.calls, c.signature_copies.items, c.signature_copies.max_items),
+            (n, 7 * n, 7)
+        );
+        assert_eq!(c.signature_copy_sites.values().map(|s| s.calls).sum::<u64>(), n);
+        assert_eq!(c.qualification_kinds["alias"].calls, n);
+        assert_eq!(c.qualification_names["alias:M"].items, 7 * n);
+        assert_eq!(c.freshen_kinds["include"].calls, n);
+        assert_eq!(c.freshen_names["include:M"].items, 6 * n);
+        // No `ModuleCounterGuard` is active on a test thread.
+        assert!(c.module_copies.is_empty() && c.module_freshens.is_empty());
+        assert_eq!((c.views_adopted, c.papply_views), (n, n));
+        let store = c.store_views;
+        assert_eq!(
+            [
+                store.pieces_built,
+                store.pieces_empty,
+                store.pieces_poisoned,
+                store.binders,
+                store.pieces_replayed,
+                store.effects_replayed[0],
+            ],
+            [0, n, 0, n, n, n]
+        );
+        c.checker.assert_counts(n);
+        // Fresh variables, unifications, instance copies, lookups.
+        assert_eq!(c.derived(), [n, n, 3 * n, 4 * n]);
+    }
+
+    /// The per-context counts are plain fields allocated on first probe.
+    #[test]
+    fn context_counters_sizes_are_pinned() {
+        assert_eq!(
+            std::mem::size_of::<Option<Box<AttemptCounters>>>(),
+            std::mem::size_of::<usize>()
+        );
+        // One heap block per counting context, never per probe or node.
+        assert_eq!(std::mem::size_of::<AttemptCounters>(), 1328);
+    }
+
+    #[test]
+    fn a_disabled_context_counts_nothing() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let (left, right) = (int(&ctx), int(&ctx));
+        let (before, _) = published(|_| ());
+        for _ in 0..OPERATIONS {
+            ctx.record_attempt_counter(|c| c.views_adopted += 1);
+            super::census_unify(&ctx, left, right);
+        }
+        assert_eq!(ctx.attempt_counter(|c| c.views_adopted), 0);
+        drop(ctx);
+        assert_eq!(published(|_| ()).0, before);
+    }
+
+    #[test]
+    fn a_discarded_attempt_publishes_nothing() {
+        let (before, totals_before) = published(AttemptCounters::derived);
+        let ctx = context();
+        ctx.defer_attempt_counters();
+        let (left, right) = (int(&ctx), int(&ctx));
+        for _ in 0..OPERATIONS {
+            probe_every_family(&ctx, left, right);
+        }
+        ctx.attempt_counter(|c| assert_counts(c, OPERATIONS));
+        // The census reader sees the attempt's unpublished counts.
+        let snapshot = super::derived_snapshot(&ctx);
+        let expected = [OPERATIONS, OPERATIONS, 3 * OPERATIONS, 4 * OPERATIONS];
+        assert_eq!(
+            std::array::from_fn::<u64, 4, _>(|i| snapshot[i] - totals_before[i]),
+            expected
+        );
+        drop(ctx);
+        let (after, totals_after) = published(AttemptCounters::derived);
+        assert_eq!(after, before);
+        assert_eq!(totals_after, totals_before);
+    }
+
+    #[test]
+    fn a_kept_attempt_publishes_once_and_post_keep_probes_once_more() {
+        super::reset_for_test();
+        let ctx = context();
+        ctx.defer_attempt_counters();
+        let (left, right) = (int(&ctx), int(&ctx));
+        // A discarded sibling attempt on the same thread contributes nothing.
+        let discarded = context();
+        discarded.defer_attempt_counters();
+        for _ in 0..OPERATIONS {
+            probe_every_family(&ctx, left, right);
+            probe_every_family(&discarded, int(&discarded), int(&discarded));
+        }
+        drop(discarded);
+        assert_eq!(published(|_| ()).0, 0);
+        ctx.keep_attempt_counters();
+        let (publications, ()) = published(|c| assert_counts(c, OPERATIONS));
+        assert_eq!(publications, 1);
+        assert_eq!(ctx.attempt_counter(AttemptCounters::derived), [0; 4]);
+        // Keeping again publishes nothing more.
+        ctx.keep_attempt_counters();
+        assert_eq!(published(|_| ()).0, 1);
+        for _ in 0..OPERATIONS {
+            probe_every_family(&ctx, left, right);
+        }
+        assert_eq!(published(|_| ()).0, 1);
+        drop(ctx);
+        let (publications, ()) = published(|c| assert_counts(c, 2 * OPERATIONS));
+        assert_eq!(publications, 2);
+    }
+
+    #[test]
+    fn a_flushed_context_publishes_each_count_once() {
+        super::reset_for_test();
+        let ctx = context();
+        let (left, right) = (int(&ctx), int(&ctx));
+        for _ in 0..OPERATIONS {
+            probe_every_family(&ctx, left, right);
+        }
+        assert_eq!(published(|_| ()).0, 0);
+        ctx.flush_counters();
+        let (publications, ()) = published(|c| assert_counts(c, OPERATIONS));
+        assert_eq!(publications, 1);
+        // Nothing new: neither a second flush nor the drop publishes.
+        ctx.flush_counters();
+        drop(ctx);
+        let (publications, ()) = published(|c| assert_counts(c, OPERATIONS));
+        assert_eq!(publications, 1);
+    }
+
+    /// Counts made before an attempt is deferred are not the attempt's: they
+    /// are published by `defer_attempt_counters` and survive a discard.
+    #[test]
+    fn counts_before_deferral_survive_a_discard() {
+        super::reset_for_test();
+        let ctx = context();
+        for _ in 0..OPERATIONS {
+            super::world::record_view_adoption(&ctx);
+        }
+        ctx.defer_attempt_counters();
+        for _ in 0..OPERATIONS {
+            super::world::record_view_adoption(&ctx);
+        }
+        drop(ctx);
+        assert_eq!(published(|c| c.views_adopted), (1, OPERATIONS));
+    }
+
+    /// The world's scratch outlives its builds: each build's counts are
+    /// published when the build ends.
+    #[test]
+    fn view_scratch_builds_publish_their_counts() {
+        super::reset_for_test();
+        super::force_context_counters_for_test();
+        for round in 1..=3u64 {
+            crate::types::world::ViewScratch::with(|scratch| {
+                for _ in 0..OPERATIONS {
+                    super::world::record_view_adoption(scratch.ctx());
+                }
+            });
+            assert_eq!(
+                published(|c| c.views_adopted),
+                (round, round * OPERATIONS),
+                "round {round}"
+            );
+        }
+    }
 }

@@ -2903,18 +2903,20 @@ pub(crate) fn resolve_type_constructor_path(
                     ) {
                         return Some((*lookup_path, decl));
                     }
-                    components.lookup_type(type_name).map(|(id, decl)| {
-                        let decl = decl.clone();
-                        tctx.type_ctx.register_resolved_module_type(
-                            env.scope_id(),
-                            &module_path,
-                            type_name,
-                            module_path,
-                            *id,
-                            decl.clone(),
-                        );
-                        (*lookup_path, decl)
-                    })
+                    components
+                        .lookup_type(type_name, tctx.type_ctx)
+                        .map(|(id, decl)| {
+                            let decl = decl.clone();
+                            tctx.type_ctx.register_resolved_module_type(
+                                env.scope_id(),
+                                &module_path,
+                                type_name,
+                                module_path,
+                                *id,
+                                decl.clone(),
+                            );
+                            (*lookup_path, decl)
+                        })
                 },
             ) {
                 let path = tctx.type_ctx.create_ast_dotted(
@@ -7709,7 +7711,7 @@ pub(crate) fn type_exp<'a>(
         );
     }
     if tctx.type_ctx.compiler_counters_enabled() {
-        crate::perf_counters::record_expected_var(expected_var_use(expr));
+        crate::perf_counters::record_expected_var(tctx.type_ctx, expected_var_use(expr));
     }
     let expected_ty = tctx.type_ctx.new_var(None);
     type_expect(tctx, env, expr, expected_ty, context)
@@ -9290,7 +9292,7 @@ fn materialize_expected(
                         case: 1,
                     },
                 };
-                crate::perf_counters::record_expected_var(site);
+                crate::perf_counters::record_expected_var(tctx.type_ctx, site);
             }
             let ty = tctx.type_ctx.new_var(None);
             tctx.type_ctx.set_level(ty, level);
@@ -10129,10 +10131,13 @@ fn type_application_parts(
     if ctx.compiler_counters_enabled() {
         // Retain the second variable: its check below may lower the function
         // type after end_def, and must preserve escape diagnostics.
-        crate::perf_counters::record_expected_var(crate::perf_counters::ExpectedVar {
-            construct: "application: lowering",
-            case: 1,
-        });
+        crate::perf_counters::record_expected_var(
+            ctx,
+            crate::perf_counters::ExpectedVar {
+                construct: "application: lowering",
+                case: 1,
+            },
+        );
     }
     let inferred = Expected::Infer {
         level: ctx.current_level(), site: InferenceSite::ApplicationFunction,
@@ -22428,6 +22433,7 @@ pub(crate) fn copy_lookup_signature_for_subst(
     }
     if ctx.compiler_counters_enabled() {
         crate::perf_counters::record_signature_copy(
+            ctx,
             std::panic::Location::caller(),
             sig_items.len(),
         );
@@ -22454,6 +22460,7 @@ where
     }
     if ctx.compiler_counters_enabled() {
         crate::perf_counters::record_signature_copy(
+            ctx,
             std::panic::Location::caller(),
             sig_items.len(),
         );
@@ -22489,6 +22496,7 @@ where
     }
     if ctx.compiler_counters_enabled() {
         crate::perf_counters::record_signature_copy(
+            ctx,
             std::panic::Location::caller(),
             sig_items.len(),
         );
@@ -22759,16 +22767,18 @@ impl Env {
                     pers_env,
                     ctx,
                     |components| {
-                        components.lookup_module(submod_name).map(|(pos, _, _md)| {
-                            // OCaml compiler/ml/env.ml:1008-1013
-                            // `lookup_module_descr_aux` and env.ml:1064-1073
-                            // `lookup_module` construct the selected child
-                            // access path as `Pdot(parent, name, pos)`. The
-                            // module declaration's `md_path` is the alias
-                            // target; using it here leaks the backing unit
-                            // into typedtree paths.
-                            Path::pdot_pos(parent_path, submod_name, pos as i32)
-                        })
+                        components
+                            .lookup_module(submod_name, ctx)
+                            .map(|(pos, _, _md)| {
+                                // OCaml compiler/ml/env.ml:1008-1013
+                                // `lookup_module_descr_aux` and env.ml:1064-1073
+                                // `lookup_module` construct the selected child
+                                // access path as `Pdot(parent, name, pos)`. The
+                                // module declaration's `md_path` is the alias
+                                // target; using it here leaks the backing unit
+                                // into typedtree paths.
+                                Path::pdot_pos(parent_path, submod_name, pos as i32)
+                            })
                     },
                 )
                 .flatten()?;
@@ -24960,7 +24970,7 @@ fn force_type_path_for_lookup_from_type(
         // sibling in the owning persistent signature.
         let _ =
             with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
-                components.lookup_type(type_name.as_str()).is_some()
+                components.lookup_type(type_name.as_str(), ctx).is_some()
             });
     }
 }
@@ -25419,7 +25429,7 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                             ComponentLookupApi::FindType,
                             |components| {
                                 components
-                                    .lookup_type(id.name())
+                                    .lookup_type(id.name(), ctx)
                                     .is_some_and(|(binder, _)| binder.same(id))
                             },
                         )
@@ -25656,7 +25666,7 @@ fn lookup_constructor_from_type_descrs(
     // this type; it does not call env.ml:865-882 `find_module` and therefore
     // does not force the persistent `ps_sig` binder-renaming thunk here.
     let desc = with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
-        let (_, _) = components.lookup_type(type_name.as_str())?;
+        let (_, _) = components.lookup_type(type_name.as_str(), ctx)?;
         let component_type_path = Path::pdot(*components.access_path(), type_name.as_str());
         let constructors = components.lookup_constructors(cstr_name, ctx);
         constructors.iter().find_map(|desc| {
@@ -26912,20 +26922,20 @@ fn build_module_components_from_parent_path(
                 ctx,
                 cache_mode,
                 |components| {
-                    components.lookup_module(module_name.as_str()).and_then(
-                        |(runtime_pos, _, md)| match md
-                            .md_type
-                            .ident_or_alias_path()
-                            .map(|p| p.view())
-                        {
-                            Some(PathView::Pident(alias_id)) if alias_id.is_persistent() => Some((
-                                runtime_pos,
-                                alias_id.name().to_string(),
-                                *components.access_path(),
-                            )),
-                            _ => None,
-                        },
-                    )
+                    components
+                        .lookup_module(module_name.as_str(), ctx)
+                        .and_then(|(runtime_pos, _, md)| {
+                            match md.md_type.ident_or_alias_path().map(|p| p.view()) {
+                                Some(PathView::Pident(alias_id)) if alias_id.is_persistent() => {
+                                    Some((
+                                        runtime_pos,
+                                        alias_id.name().to_string(),
+                                        *components.access_path(),
+                                    ))
+                                }
+                                _ => None,
+                            }
+                        })
                 },
             )
     {
@@ -26984,7 +26994,7 @@ fn build_module_components_from_parent_path(
             cache_mode,
             |components| {
                 components
-                    .lookup_module(module_name.as_str())
+                    .lookup_module(module_name.as_str(), ctx)
                     .map(|(runtime_pos, _, md)| {
                         let access_path = qualified_submodule_access_path(
                             components.access_path(),
@@ -27473,7 +27483,7 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
     if ctx.compiler_counters_enabled()
         && (matches!(module_path.view(), PathView::Papply(..)) || module_path.has_apply_prefix())
     {
-        crate::perf_counters::world::record_papply_view_build();
+        crate::perf_counters::world::record_papply_view_build(ctx);
     }
     let result = (f
         .take()
@@ -27702,7 +27712,7 @@ fn lookup_type_in_resolved_path_with_cache_mode(
         ctx,
         cache_mode,
         |components| {
-            components.lookup_type(type_name).map(|(id, decl)| {
+            components.lookup_type(type_name, ctx).map(|(id, decl)| {
                 let result = (*parent_module_path, *id, decl.clone());
                 ctx.register_resolved_module_type(
                     env.scope_id(),
@@ -27814,8 +27824,9 @@ fn qualify_resolved_signature_for_access_path_inner(
         } else {
             "other"
         };
-        crate::perf_counters::record_signature_qualification(kind, resolved_sig.len());
+        crate::perf_counters::record_signature_qualification(ctx, kind, resolved_sig.len());
         crate::perf_counters::record_signature_qualification_name(
+            ctx,
             kind,
             access_path.name().as_str(),
             resolved_sig.len(),
@@ -28635,7 +28646,7 @@ fn lookup_type_decl_for_path_with_cache_mode(
             cache_mode,
             |components| {
                 components
-                    .lookup_type(type_name)
+                    .lookup_type(type_name, ctx)
                     .map(|(_, decl)| decl.clone())
             },
         )
@@ -28739,7 +28750,7 @@ fn lookup_type_decl_for_path_with_cache_mode(
             ctx,
             cache_mode,
             |components| {
-                let (_, decl) = match components.lookup_type(type_name.as_str()) {
+                let (_, decl) = match components.lookup_type(type_name.as_str(), ctx) {
                     Some(found) => found,
                     None => return None,
                 };
@@ -28864,7 +28875,7 @@ fn lookup_type_decl_for_path_with_cache_mode(
                                 cache_mode,
                                 |components| {
                                     components
-                                        .lookup_type(type_name.as_str())
+                                        .lookup_type(type_name.as_str(), ctx)
                                         .map(|(_, decl)| decl.clone())
                                 },
                             )
