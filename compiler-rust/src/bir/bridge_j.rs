@@ -1216,10 +1216,7 @@ impl Exporter<'_> {
             View::JArray { .. } => E::Array(self.exprs(c)?, mutability(aux)?),
             View::JOptional { .. } => E::OptionalBlock(c[0].expr()?, aux != 0),
             View::JBlockLit { info, .. } => {
-                let JsPayload::Block(tag) = b.javascript(info) else {
-                    return Err(Unsupported("missing J block metadata"));
-                };
-                let tag = self.a.tag_id(tag.clone());
+                let tag = self.a.tag_id(b.block_tag(info).clone());
                 E::CamlBlock(self.exprs(c)?, mutability(aux)?, tag)
             }
             View::JNumber { value } => {

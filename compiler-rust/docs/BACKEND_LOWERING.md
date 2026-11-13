@@ -2737,8 +2737,8 @@ The statement stack and node-list pool must be used end to end.
 | `jsx.rs:159` `duplicate_jsx_key` | `let mut spine = smallvec::SmallVec::<[NodeId; 4]>::new();` | per visited node | Converted: duplicate member spines using retained unit node scratch, cleared on success and rejection. | converted |
 | `konst.rs:55` `Work` | `let mut work = vec![Work::Enter(root)];` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `konst.rs:56` `Work` | `let mut values: Vec<(NodeId, bool)> = Vec::new();` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
-| `konst.rs:60` `Work` | `let constant = self.arena.constant(id).clone();` | per visited node | borrow payload or retain typed pool handle | pending |
-| `konst.rs:177` `Work` | `let children: Vec<_> = values.drain(start..).map(&#124;(node, _)&#124; node).collect();` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `konst.rs:60` `Work` | `let constant = self.arena.constant(id).clone();` | per visited node | Compound constants are borrowed and block work stores ConstId, never TagInfo; constructor/decorated leaf cloning remains pending. | pending |
+| `konst.rs:177` `Work` | `let children: Vec<_> = values.drain(start..).map(&#124;(node, _)&#124; node).collect();` | per visited node | Block operands use retained cleared constant_children storage. | removed |
 | `mod.rs:190` `children` | `fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>);` | per construct | reusable scratch buffer; clear, do not free | pending |
 | `mod.rs:230` `Work` | `let mut work = vec![Work::Enter(cx, node)];` | per construct | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `mod.rs:231` `Work` | `let mut values = Vec::new();` | per construct | reusable traversal/output/argument buffer retained in lowering state | removed |
@@ -2813,7 +2813,7 @@ The statement stack and node-list pool must be used end to end.
 | `prim.rs:173` `finish_primitive_payload` | `let (keys, kept): (Vec<_>, Vec<_>) = entries.into_iter().unzip();` | per visited node | Dictionary extraction and spread share retained cleared object key/value buffers with record lowering; final keys append to the unit property pool. | removed |
 | `prim.rs:195` `finish_primitive_payload` | `let mut keys = Vec::new();` | per visited node | Dictionary extraction and spread share retained cleared object key/value buffers with record lowering; final keys append to the unit property pool. | removed |
 | `prim.rs:196` `finish_primitive_payload` | `let mut kept = Vec::new();` | per visited node | Dictionary extraction and spread share retained cleared object key/value buffers with record lowering; final keys append to the unit property pool. | removed |
-| `prim.rs:272` `finish_primitive_payload` | `let info = self.arena.js_info(crate::bir::JsPayload::Block(tag.clone()));` | per visited node | borrow payload or retain typed pool handle | pending |
+| `prim.rs:272` `finish_primitive_payload` | `let info = self.arena.js_info(crate::bir::JsPayload::Block(tag.clone()));` | per visited node | A unit shape interner returns a shared JsId; only the first distinct metadata key owns a tag clone, never each block occurrence. | removed |
 | `prim.rs:372` `finish_primitive_payload` | `norm::jm12_interpolated_template(&mut self.arena, segments.clone(), values.into_vec())` | per visited node | borrow payload or retain typed pool handle | pending |
 | `prim.rs:381` `finish_primitive_payload` | `.collect();` | per visited node | reusable scratch buffer; clear, do not free | pending |
 | `prim_block.rs:13` `flat_make_field` | `let mut segments = smallvec::SmallVec::<[&str; 4]>::new();` | per visited node | Converted: spell segments from retained node scratch into retained string storage without a segment vector. | converted |
@@ -3107,6 +3107,27 @@ warmed allocations and unchanged recorded capacities. Their exact source/primiti
 counts are 30,002/50,003 and 50,001/100,001 respectively. The buffers are empty after
 both complete probe/realize/release passes. These fixtures use tuple block metadata;
 owned constructor/record block tags remain a separate pending inventory item.
+
+Compound-constant block metadata now references its immutable source ConstId;
+block work entries are 12 bytes and final operand lists use cleared retained
+storage. Primitive block shapes are interned by serialized metadata key into a
+unit-owned flat byte pool and shared JsIds. Only first insertion of a distinct
+shape clones its owned payload; source primitives cannot be borrowed by output
+metadata while primitive dispatch temporarily holds their pool outside the arena.
+The builtin list shape is created once per State, not once per list constructor.
+
+Three whole-Lambda 10,000-block fixtures measure zero warmed allocations with
+unchanged recorded capacities. The constant-block fixture uses owned constructor
+tags (1 source / 20,001 constant / 0 primitive visits); primitive constructor blocks
+use 20,001 / 10,000 / 30,001, and lists use 30,001 / 20,000 / 40,001. Primitive and
+list fixtures also assert that all 10,000 occurrences create exactly one unit shape
+on the first pass, ruling out a relocated metadata allocation per occurrence.
+Constructor/decorated constant *leaves* still have a separate pending clone path.
+
+| Newly found site | Previous ownership | Disposition |
+| --- | --- | --- |
+| `prim::Pmakelist` builtin constructor shape | boxed/name metadata per node | removed: one immutable shape cached in State |
+| `konst::Work::Block` | owning cloned TagInfo in each work entry | removed: source ConstId and scalar field count |
 
 ### 7.5.1 Concurrent loop, label and recursive-value additions
 

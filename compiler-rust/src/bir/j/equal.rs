@@ -148,10 +148,7 @@ pub fn equal(b: &Bir, left: NodeId, right: NodeId, steps: &mut usize) -> bool {
                 work.extend(xs.iter().copied().zip(ys.iter().copied()).rev());
                 la == ra
                     && xs.len() == ys.len()
-                    && match (b.javascript(x), b.javascript(y)) {
-                        (JsPayload::Block(x), JsPayload::Block(y)) => x == y,
-                        _ => false,
-                    }
+                    && b.block_tag(x) == b.block_tag(y)
             }
             (View::SExp { value: x }, View::SExp { value: y })
             | (View::SReturn { value: x }, View::SReturn { value: y }) => {

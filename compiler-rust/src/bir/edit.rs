@@ -370,7 +370,7 @@ impl Bir {
                 assert_eq!(values.len(), self.property_keys(*keys).len());
             }
             View::JBlockLit { info, .. } => {
-                assert!(matches!(self.pools.js[info.index()], JsPayload::Block(_)))
+                assert!(matches!(self.pools.js[info.index()], JsPayload::Block(_) | JsPayload::ConstantBlock(_)))
             }
             View::JJsx { values, info } => {
                 let JsPayload::Jsx(h) = &self.pools.js[info.index()] else {

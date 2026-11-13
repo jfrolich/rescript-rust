@@ -1,7 +1,7 @@
 //! X: external argument holding and effect assembly.
 use super::*;
 use crate::bir::j::{norm, plain};
-use crate::bir::{JsPayload, NodeFlags};
+use crate::bir::NodeFlags;
 use crate::lambda::lam_primitive::{Attr, Label, LabelNoname, ObjParam, Param};
 
 /// The two suffix facts required by X:278's object-argument ordering predicate.
@@ -38,7 +38,7 @@ impl State {
     /// X:30 literal_polyvar_block. O(1), borrowing the literal header.
     fn literal_polyvar_block(&self, _cx: Cx, arg: NodeId) -> bool {
         matches!(self.arena.view(arg), View::JBlockLit { values: [key, _], info }
-            if matches!(self.arena.javascript(info), JsPayload::Block(crate::lambda::TagInfo::PolyVar(_)))
+            if matches!(self.arena.block_tag(info), crate::lambda::TagInfo::PolyVar(_))
                 && matches!(self.arena.view(*key), View::JStr { .. }))
     }
 

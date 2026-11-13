@@ -1343,9 +1343,7 @@ pub fn jm11_projection(
     }
     let value = match b.view(target) {
         View::JBlockLit { values, info } => {
-            let crate::bir::JsPayload::Block(tag) = b.javascript(info) else {
-                unreachable!()
-            };
+            let tag = b.block_tag(info);
             if let (Some(field), Some(fields)) = (field, tag.record_fields()) {
                 values
                     .iter()

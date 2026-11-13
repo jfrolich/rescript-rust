@@ -434,6 +434,8 @@ pub enum JsPayload {
     Object(PropertySpan),
     /// Fixed runtime block shape.
     Block(crate::lambda::lam_tag_info::TagInfo),
+    /// Borrow immutable shape metadata from a source constant.
+    ConstantBlock(ConstId),
     /// JSX positional shape.
     Jsx(JsxHeader),
     /// Untagged template quasis; one more than interpolations.
@@ -479,6 +481,9 @@ pub(super) struct Pools {
     pub catches: Vec<CatchHeader>,
     pub apply: Vec<ApInfo>,
     pub js: Vec<JsPayload>,
+    pub block_index: hashbrown::HashTable<(u64, JsId, u32, u32)>,
+    pub block_key_bytes: Vec<u8>,
+    pub block_key_scratch: Vec<u8>,
     pub property_keys: Vec<PropertyKey>,
     pub rest_fields: Vec<RestField>,
     pub cold: Vec<Cold>,

@@ -321,6 +321,17 @@ impl Bir {
     pub fn javascript(&self, id: JsId) -> &JsPayload {
         &self.pools.js[id.index()]
     }
+    /// Borrow a block shape, including metadata shared with the source IR.
+    pub fn block_tag(&self, info: JsId) -> &crate::lambda::TagInfo {
+        match self.javascript(info) {
+            JsPayload::Block(tag) => tag,
+            JsPayload::ConstantBlock(id) => {
+                let Constant::Block { tag, .. } = self.constant(*id) else { panic!("constant block shape") };
+                tag
+            }
+            _ => panic!("block shape metadata"),
+        }
+    }
     /// O(1): borrow a property-key run without copying metadata.
     pub fn property_keys(&self, span: PropertySpan) -> &[PropertyKey] {
         &self.pools.property_keys[span.start as usize..(span.start + span.len) as usize]
@@ -471,6 +482,28 @@ impl Bir {
         let id = JsId(index(self.pools.js.len()));
         self.pools.js.push(info);
         id
+    }
+    /// Intern an immutable block shape once per distinct unit metadata key.
+    /// Source primitives are temporarily borrowed outside the arena during
+    /// lowering, so output shapes cannot borrow that movable primitive vector.
+    pub(crate) fn block_info(&mut self, tag: &crate::lambda::TagInfo) -> JsId {
+        let mut key = std::mem::take(&mut self.pools.block_key_scratch);
+        crate::binser::to_vec_reuse(tag, &mut key).expect("block shape encoding");
+        let hash = self.pools.hash_builder.hash_one(&key);
+        let info = if let Some(&(_, info, _, _)) = self.pools.block_index.find(hash, |&(_, _, start, len)| {
+            self.pools.block_key_bytes[start as usize..(start + len) as usize] == key
+        }) {
+            info
+        } else {
+            let info = self.js_info(JsPayload::Block(tag.clone()));
+            let start = index(self.pools.block_key_bytes.len());
+            self.pools.block_key_bytes.extend_from_slice(&key);
+            self.pools.block_index.insert_unique(hash, (hash, info, start, index(key.len())), |entry| entry.0);
+            info
+        };
+        key.clear();
+        self.pools.block_key_scratch = key;
+        info
     }
     /// Append immutable record-rest metadata without an owning per-node vector.
     pub fn rest_info(&mut self, fields: impl IntoIterator<Item = RestField>) -> JsId {

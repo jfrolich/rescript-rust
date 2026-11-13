@@ -275,7 +275,7 @@ impl State {
             }
             // P: compile_primitive_js, blocks and fields (K: compile_field_access).
             Primitive::Pmakeblock(tag, mutable) => {
-                let info = self.arena.js_info(crate::bir::JsPayload::Block(tag.clone()));
+                let info = self.arena.block_info(tag);
                 plain::node(
                     &mut self.arena,
                     View::JBlockLit {
@@ -290,9 +290,9 @@ impl State {
                 )
             }
             Primitive::Pmakelist => {
-                let info = self.arena.js_info(crate::bir::JsPayload::Block(
+                let info = *self.list_block_info.get_or_insert_with(|| self.arena.js_info(crate::bir::JsPayload::Block(
                     crate::lambda::TagInfo::constructor("::", 1),
-                ));
+                )));
                 plain::node(
                     &mut self.arena,
                     View::JBlockLit {
