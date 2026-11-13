@@ -8,7 +8,24 @@ import { warmUp } from "./compiler.js";
 const REPOSITORY = "https://github.com/jfrolich/rescript-rust";
 // Filled in by the build: see vite.config.js.
 const PULL_REQUEST = import.meta.env.VITE_PULL_REQUEST || null;
-const BRANCH = "ts-import";
+
+/** What the page of docs/ts-import says about itself. */
+const TS_IMPORT = {
+  doc: "docs/ts-import",
+  branch: "ts-import",
+  pullRequest: PULL_REQUEST,
+  status: "Implemented on a branch",
+  jump: { href: "#what-typescript-can-say-that-rescript-cannot", text: "What does not fit yet →" },
+  colophon: (
+    <>
+      The examples are compiled in your browser by that compiler and by{" "}
+      <a href="https://github.com/oxc-project/tsrs" target="_blank" rel="noreferrer">
+        tsrs
+      </a>
+      , a Rust port of the TypeScript checker, built together to WebAssembly.
+    </>
+  ),
+};
 
 function useTheme() {
   const [theme, setTheme] = useState(() => localStorage.getItem("theme") ?? "auto");
@@ -41,8 +58,14 @@ function useActiveHeading(ids) {
   return active;
 }
 
-/** The document, with its examples live. */
-export function Page({ markdown, title, lede }) {
+/**
+ * The document, with its examples live. `about` says where the document is
+ * in the repository and what the page shows around it: `doc` (its
+ * directory), `branch`, `pullRequest`, `status` (the second chip), `source`
+ * (a link that replaces the one to the pull request or branch), `jump` (a
+ * link into the page) and `colophon`.
+ */
+export function Page({ markdown, title, lede, about = TS_IMPORT }) {
   const [dark, toggleTheme] = useTheme();
   const parts = useMemo(() => {
     // The page has its own title and table of contents.
@@ -66,10 +89,16 @@ export function Page({ markdown, title, lede }) {
   // A relative link is a file of the repository, relative to the document.
   const links = (href) => {
     if (href.startsWith("#") || /^[a-z]+:/.test(href)) return href;
-    const path = new URL(href, "https://x/docs/ts-import/").pathname.slice(1);
-    return `${REPOSITORY}/blob/${BRANCH}/${path}`;
+    const path = new URL(href, `https://x/${about.doc}/`).pathname.slice(1);
+    return `${REPOSITORY}/blob/${about.branch}/${path}`;
   };
-  const github = PULL_REQUEST ? `${REPOSITORY}/pull/${PULL_REQUEST}` : `${REPOSITORY}/tree/${BRANCH}`;
+  const github = about.pullRequest
+    ? `${REPOSITORY}/pull/${about.pullRequest}`
+    : `${REPOSITORY}/tree/${about.branch}/${about.doc}`;
+  const source = about.source ?? {
+    href: github,
+    text: about.pullRequest ? `Pull request #${about.pullRequest} ↗` : "Source ↗",
+  };
 
   return (
     <>
@@ -103,12 +132,12 @@ export function Page({ markdown, title, lede }) {
         <p className="lede">{lede}</p>
         <div className="hero-meta">
           <span className="chip solid">Draft</span>
-          <span className="chip">Implemented on a branch</span>
-          <a className="chip" href={github} target="_blank" rel="noreferrer">
-            {PULL_REQUEST ? `Pull request #${PULL_REQUEST} ↗` : "Source ↗"}
+          <span className="chip">{about.status}</span>
+          <a className="chip" href={source.href} target="_blank" rel="noreferrer">
+            {source.text}
           </a>
-          <a className="chip" href="#what-typescript-can-say-that-rescript-cannot">
-            What does not fit yet →
+          <a className="chip" href={about.jump.href}>
+            {about.jump.text}
           </a>
         </div>
       </div>
@@ -140,15 +169,11 @@ export function Page({ markdown, title, lede }) {
           })}
           <footer className="colophon">
             <p>
-              This page is <code>docs/ts-import</code> of{" "}
+              This page is <code>{about.doc}</code> of{" "}
               <a href={REPOSITORY} target="_blank" rel="noreferrer">
                 the Rust port of the ReScript compiler
               </a>
-              . The examples are compiled in your browser by that compiler and by{" "}
-              <a href="https://github.com/oxc-project/tsrs" target="_blank" rel="noreferrer">
-                tsrs
-              </a>
-              , a Rust port of the TypeScript checker, built together to WebAssembly.
+              . {about.colophon}
             </p>
           </footer>
         </main>

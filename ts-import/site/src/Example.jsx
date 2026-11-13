@@ -13,13 +13,16 @@ function label(name) {
  * the right what the compiler makes of the ReScript file. It starts from a
  * result that was built with the page; the compiler is loaded when the code
  * is edited.
+ *
+ * An example marked `plain` imports nothing from TypeScript: its result is
+ * the JavaScript, or the error, alone.
  */
 export function Example({ example, prebuilt }) {
   const entry = example.files[example.files.length - 1].name;
   const [files, setFiles] = useState(example.files);
   const [generation, setGeneration] = useState(0);
   const [active, setActive] = useState(example.open ?? entry);
-  const [view, setView] = useState(example.view ?? "expanded");
+  const [view, setView] = useState(example.plain ? "js" : (example.view ?? "expanded"));
   const [result, setResult] = useState(prebuilt ?? null);
   const [failure, setFailure] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -80,7 +83,9 @@ export function Example({ example, prebuilt }) {
   const failed = Boolean(failure) || (result && result.type !== "success");
   const notes = useMemo(() => (result?.imports ?? []).flatMap((entry) => entry.notes), [result]);
 
-  let note = "Built with the page. Edit the code to compile it here.";
+  let note = example.fails
+    ? "Built with the page. It does not compile, which is what the example shows. Edit the code to compile it here."
+    : "Built with the page. Edit the code to compile it here.";
   if (busy && status !== "ready") note = "Loading the compiler…";
   else if (busy) note = "Compiling…";
   else if (failure) note = "The compiler stopped.";
@@ -134,19 +139,31 @@ export function Example({ example, prebuilt }) {
 
         <section className="pane pane-result" aria-label="Result">
           <div className="tabs" role="tablist">
-            <Tab view="expanded" current={view} choose={setView}>
-              As ReScript
-            </Tab>
+            {!example.plain && (
+              <Tab view="expanded" current={view} choose={setView}>
+                As ReScript
+              </Tab>
+            )}
             <Tab view="js" current={view} choose={setView}>
-              JavaScript
+              {example.plain && failed ? (example.fails ? "Rejected" : "Error") : "JavaScript"}
             </Tab>
-            <Tab view="typescript" current={view} choose={setView}>
-              TypeScript
-              {notes.length > 0 && <span className="tab-count">{notes.length}</span>}
-            </Tab>
+            {!example.plain && (
+              <Tab view="typescript" current={view} choose={setView}>
+                TypeScript
+                {notes.length > 0 && <span className="tab-count">{notes.length}</span>}
+              </Tab>
+            )}
           </div>
           <div className={busy ? "pane-scroll stale" : "pane-scroll"}>
-            <ResultView view={view} source={source} result={result} failure={failure} busy={busy} notes={notes} />
+            <ResultView
+              view={view}
+              source={source}
+              result={result}
+              failure={failure}
+              busy={busy}
+              notes={notes}
+              expected={example.expected}
+            />
           </div>
           {result?.warnings && view !== "typescript" && (
             <div className="output">
@@ -173,7 +190,8 @@ function Tab({ view, current, choose, children }) {
   );
 }
 
-function ResultView({ view, source, result, failure, busy, notes }) {
+/** `expected` says why an example that is meant not to compile does not. */
+function ResultView({ view, source, result, failure, busy, notes, expected }) {
   if (failure) {
     return (
       <div className="problems">
@@ -185,6 +203,7 @@ function ResultView({ view, source, result, failure, busy, notes }) {
   if (view === "typescript") return <TypeScriptView result={result} notes={notes} />;
   const problem = result.type !== "success" && (
     <div className="problems">
+      {expected && <p className="expected">{expected}</p>}
       <pre className="problem">{result.message}</pre>
     </div>
   );

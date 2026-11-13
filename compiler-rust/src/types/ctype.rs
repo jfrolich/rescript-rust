@@ -86,6 +86,21 @@ pub enum TypeError {
     },
 }
 
+/// Two class types whose classes do not let the first coerce to the second.
+#[derive(Debug, Clone)]
+pub struct UnrelatedClasses {
+    /// The type coerced from.
+    pub source: Path,
+    /// Its class.
+    pub source_class: String,
+    /// The ancestors its declarations name, nearest first.
+    pub ancestors: Vec<String>,
+    /// The type coerced to.
+    pub target: Path,
+    /// Its class.
+    pub target_class: String,
+}
+
 /// Context for subtype errors.
 #[derive(Debug, Clone)]
 pub enum SubtypeContext {
@@ -157,6 +172,11 @@ pub enum SubtypeContext {
         /// The private type.
         typename: Path,
     },
+
+    /// Both types are class types (`@instanceOf`), and the target's class is
+    /// neither the source's class nor one of its declared ancestors. Boxed:
+    /// it is rare, and the errors that carry a context stay small.
+    ClassNotAnAncestor(Box<UnrelatedClasses>),
 
     /// One record is represented as a JavaScript array, the other as an
     /// object.
@@ -5367,6 +5387,7 @@ struct SubtypeAcc {
     cstrs: Vec<SubtypeConstraint>,
     univar_pairs: Vec<UnivarPairEntry>,
     univar_slots: Vec<Option<TypeExprRef>>,
+    steps: SubtypeSteps,
 }
 
 impl SubtypeAcc {
@@ -5376,7 +5397,80 @@ impl SubtypeAcc {
             cstrs: Vec::new(),
             univar_pairs: self.univar_pairs.clone(),
             univar_slots: self.univar_slots.clone(),
+            steps: self.steps,
         }
+    }
+}
+
+/// Which steps `subtype_rec` may take from one type to a different one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SubtypeSteps {
+    /// Every coercion `:>` knows.
+    #[default]
+    All,
+    /// Only from a class type to another declaration of the same class.
+    /// Everything else has to unify.
+    SameClass,
+}
+
+/// For two class types without a [`class_step`] from `t1` to `t2`: the class
+/// of `t1`, its declared ancestors, and the class of `t2`.
+fn unrelated_classes(
+    ctx: &TypeContext,
+    env: &Env,
+    t1: TypeExprRef,
+    t2: TypeExprRef,
+) -> Option<(String, Vec<String>, String)> {
+    use crate::types::variant_runtime::{BlockType, Instance};
+    let Some(Instance::Class { name: target, .. }) =
+        crate::types::variant_layout::own_class(ctx, env, t2)
+    else {
+        return None;
+    };
+    match crate::types::variant_layout::recognized_as(ctx, env, t1) {
+        Some(BlockType::Instance(Instance::Class { name, ancestors, .. }))
+            if class_step(ctx, env, t1, t2).is_none() =>
+        {
+            Some((name, ancestors, target))
+        }
+        _ => None,
+    }
+}
+
+/// How a class type gets to another one by the classes the two declare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClassStep {
+    /// Both declarations state the same class.
+    Same,
+    /// The target's class is an ancestor of the source's, or the source only
+    /// abbreviates a type of the target's class.
+    Up,
+}
+
+/// The step from the class type `t1` to the class type `t2`, read from the
+/// two declarations: `t2`'s own declaration states a class with `@instanceOf`,
+/// and `t1` is declared as that class or as one of its subclasses. The
+/// declarations may be in different modules; their fields are not compared,
+/// each is a description of the class its module vouches for.
+fn class_step(ctx: &TypeContext, env: &Env, t1: TypeExprRef, t2: TypeExprRef) -> Option<ClassStep> {
+    use crate::types::variant_runtime::{BlockType, Instance};
+    let Some(Instance::Class { name: target, .. }) =
+        crate::types::variant_layout::own_class(ctx, env, t2)
+    else {
+        return None;
+    };
+    if let Some(Instance::Class { name, .. }) = crate::types::variant_layout::own_class(ctx, env, t1)
+        && name == target
+    {
+        return Some(ClassStep::Same);
+    }
+    match crate::types::variant_layout::recognized_as(ctx, env, t1) {
+        Some(BlockType::Instance(Instance::Class { name, ancestors, .. }))
+            if name == target || ancestors.contains(&target) =>
+        {
+            Some(ClassStep::Up)
+        }
+        _ => None,
     }
 }
 
@@ -5814,6 +5908,83 @@ pub fn subtype_now(
     force_subtype(ctx, env, cstrs)
 }
 
+/// Whether an expression of type `ty` is accepted, without a written `:>`,
+/// where `expected` is and the two do not unify (docs/class-identity,
+/// rule 3): `ty` is a class type that is the same class as `expected` or a
+/// subclass of it, or the two types are equal up to class types that are
+/// two declarations of one class. A subclass is not accepted inside another
+/// type, where a written coercion says what is meant.
+///
+/// The types are left as they were when the answer is no.
+pub(crate) fn coerces_between_class_declarations(
+    ctx: &TypeContext,
+    env: &Env,
+    ty: TypeExprRef,
+    expected: TypeExprRef,
+) -> bool {
+    let head = |ty: TypeExprRef| {
+        let ty = ctx.repr(ty);
+        match &*ctx.get_desc(ty) {
+            TypeDesc::Tconstr { path, .. } if generic_abbrev(ctx, env, path) => {
+                try_expand_head(ctx, env, ty).unwrap_or(ty)
+            }
+            _ => ty,
+        }
+    };
+    let nullary = |ty: TypeExprRef| {
+        matches!(&*ctx.get_desc(ctx.repr(ty)), TypeDesc::Tconstr { args, .. } if args.is_empty())
+    };
+    let (source, target) = (head(ty), head(expected));
+    if nullary(source) && nullary(target) && class_step(ctx, env, source, target).is_some() {
+        return true;
+    }
+    let snapshot = ctx.snapshot_type_state();
+    let mut subtypes = HashSet::new();
+    let mut cstrs = SubtypeAcc {
+        steps: SubtypeSteps::SameClass,
+        ..SubtypeAcc::default()
+    };
+    let coerces = subtype_rec(ctx, env, &mut subtypes, &[(ty, expected)], ty, expected, &mut cstrs)
+        .and_then(|()| {
+            force_subtype(
+                ctx,
+                env,
+                SubtypeConstraints {
+                    cstrs: cstrs.cstrs,
+                    univar_slots: cstrs.univar_slots,
+                },
+            )
+        })
+        .is_ok();
+    if !coerces {
+        ctx.restore_type_state(snapshot);
+    }
+    coerces
+}
+
+/// Whether the record or variant declaration behind `ty1` coerces to the one
+/// behind `ty2` by its fields or constructors. `subtype` takes a declared
+/// subclass at its word; the check of `@extends` is where that word is
+/// tested, so it compares the two declarations.
+pub(crate) fn subtype_declarations_now(
+    ctx: &TypeContext,
+    env: &Env,
+    ty1: TypeExprRef,
+    ty2: TypeExprRef,
+) -> TypeResult<()> {
+    let mut subtypes = HashSet::new();
+    let mut cstrs = SubtypeAcc::default();
+    subtype_concrete_typedecls(ctx, env, &mut subtypes, &[(ty1, ty2)], ty1, ty2, &mut cstrs)?;
+    force_subtype(
+        ctx,
+        env,
+        SubtypeConstraints {
+            cstrs: cstrs.cstrs,
+            univar_slots: cstrs.univar_slots,
+        },
+    )
+}
+
 /// OCaml `subtype_error env trace` (ctype.ml:3427-3428).
 fn subtype_error(ctx: &TypeContext, env: &Env, trace: &[TypePair]) -> TypeError {
     record_trace_expansions(ctx, env, trace);
@@ -6137,6 +6308,53 @@ fn subtype_rec(
                     )?;
                 }
             }
+            Ok(())
+        }
+        (TypeDesc::Tconstr { args: a1, .. }, TypeDesc::Tconstr { args: a2, .. })
+            if a1.is_empty()
+                && a2.is_empty()
+                && match class_step(ctx, env, t1, t2) {
+                    Some(ClassStep::Same) => true,
+                    Some(ClassStep::Up) => cstrs.steps == SubtypeSteps::All,
+                    None => false,
+                } =>
+        {
+            // A class type is what its class says it is, whichever
+            // declaration names the class. Where the two types must be equal
+            // (an invariant parameter, a mutable field) the check runs both
+            // ways, which only two declarations of the same class pass.
+            Ok(())
+        }
+        _ if cstrs.steps == SubtypeSteps::SameClass => {
+            push_subtype_cstr(cstrs, trace, t1, t2, None);
+            Ok(())
+        }
+        (
+            TypeDesc::Tconstr {
+                path: p1, args: a1, ..
+            },
+            TypeDesc::Tconstr {
+                path: p2, args: a2, ..
+            },
+        ) if a1.is_empty() && a2.is_empty() && unrelated_classes(ctx, env, t1, t2).is_some() => {
+            // Nothing else gets from one class type to another: an abstract
+            // class type is reached through its abbreviations, which are its
+            // subclasses, and a class record is private.
+            let (source_class, ancestors, target_class) =
+                unrelated_classes(ctx, env, t1, t2).expect("checked by the guard");
+            push_subtype_cstr(
+                cstrs,
+                trace,
+                t1,
+                t2,
+                Some(SubtypeContext::ClassNotAnAncestor(Box::new(UnrelatedClasses {
+                    source: *p1,
+                    source_class,
+                    ancestors,
+                    target: *p2,
+                    target_class,
+                }))),
+            );
             Ok(())
         }
         (TypeDesc::Tconstr { path: p1, .. }, _) if generic_private_abbrev(ctx, env, p1) => {
