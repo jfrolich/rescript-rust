@@ -1203,6 +1203,14 @@ counts two and keeps the function). No unit of the corpora has either shape.
 The counter 11.4 asked for (sites spliced) is the inline-candidate column:
 nothing is spliced.
 
+Instructions of a clean build of `tests/tests` (cachegrind, one worker
+thread, release binary, one run each; run-to-run noise is about 0.1%),
+before (the head of the export slice) and after: with `RESCRIPT_BACKEND=
+check` 20,616,262,185 and 20,759,677,746 (+0.70%: the close, and P1 and P2
+run once more on a copy of the new side's program for the comparison); the
+default build 4,072,030,942 and 4,074,346,809 (+0.06%, within noise: the
+default build does not run the lowering).
+
 Two places where the code is not what "The design" says:
 
 - *A run is not closed once.* A statement the lowering moves out of a copied
