@@ -359,6 +359,11 @@ pub struct BuildCommandState {
     /// the modules whose declarations it documents.
     pub located_modules: AHashSet<String>,
     pub diagnostic_retry: std::sync::atomic::AtomicBool,
+    /// For a check-only build: what reads each module's typed tree as the
+    /// build type-checks it (`rescript reanalyze`). The modules are then
+    /// parsed as editor tooling parses them, with derived code as syntax,
+    /// so that it is in their typed trees.
+    pub typed_trees: Option<Arc<dyn rescript_compiler::driver::TypedTreeReader>>,
     /// What `RESCRIPT_DERIVED_PATH=check` found in this build: reported
     /// together when the compile phase ends, and then the build fails.
     pub derived_differences: rescript_compiler::driver::DerivedDifferences,
@@ -553,6 +558,7 @@ impl BuildCommandState {
             diagnostic_locations: false,
             located_modules: AHashSet::new(),
             diagnostic_retry: std::sync::atomic::AtomicBool::new(false),
+            typed_trees: None,
             derived_differences: Default::default(),
             in_memory_interfaces: Mutex::new(AHashMap::new()),
             published_item_digests: Mutex::new(AHashMap::new()),
