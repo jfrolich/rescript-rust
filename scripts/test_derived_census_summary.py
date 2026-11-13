@@ -11,6 +11,18 @@ def row():
 
 
 class DerivedCensusSummaryTest(unittest.TestCase):
+    def test_json_identity_argument_reason_and_old_reason_arrays(self):
+        old = row()
+        old.update(general_syntax_nodes=[0] * 11, general_typecheck_ns=[0] * 11)
+        current = row()
+        current.update(paths={"json_identity_argument": 3},
+                       general_syntax_nodes=[0] * 11 + [42],
+                       general_typecheck_ns=[0] * 11 + [7])
+        result = summarize([old, current])
+        self.assertEqual(result["paths"]["json_identity_argument"], 3)
+        self.assertEqual(result["general_costs"]["json_identity_argument"]["general_syntax_nodes"], 42)
+        self.assertIn("json_identity_argument", markdown(result))
+
     def test_sums_ten_thousand_records_without_losing_integer_precision(self):
         item = row()
         item["typecheck"]["derived"] = 2**53 + 1

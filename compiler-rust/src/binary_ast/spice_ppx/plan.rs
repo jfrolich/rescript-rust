@@ -68,6 +68,8 @@ fn find_attributes(attrs: &[Attribute], names: &[&str], arena: &ParseArena) -> (
 struct TypeFacts {
     /// A `@spice.codec` on a type.
     custom_codec: bool,
+    /// A syntactic JSON identity codec, including the legacy spelling.
+    json_identity: bool,
     /// A tuple or a polymorphic variant.
     unmeasured: bool,
     /// A type whose codec is not a plain name applied to codecs: `JSON.t`,
@@ -87,6 +89,7 @@ fn type_facts(typ_idx: CoreTypeIdx, arena: &ParseArena, facts: &mut TypeFacts) {
         .any(|attr| arena.get_string(attr.0.txt) == "spice.codec");
     match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr((lid, args)) => {
+            facts.json_identity |= is_json_identifier(lid.txt, arena);
             // The codec of a user's type that takes arguments takes their
             // codecs one at a time (`t_encode(a)(b)(v)`); a plan describes
             // the library's, which take them at once.
@@ -275,6 +278,30 @@ pub(in crate::binary_ast) fn classify(
                 }
             }))
         });
+    }
+    // Only a manifest exposes the codec argument in the binding's scheme;
+    // records and variants expose their declared type instead. Application
+    // inference expands a generic callee's return while lowering its levels
+    // (compiler/ml/typecore.ml:2503-2514, 2826-2828), so nested codec instances
+    // may share its JSON abbreviation. A direct identity has no callee; a
+    // single option's first encoder returns option<JSON.t>, not JSON.t.
+    // Cost: O(1) beyond the existing type-facts walk, no extra traversal.
+    if facts.json_identity
+        && (has("spice") || has("spice.encode"))
+        && let Some(manifest) = decl.ptype_manifest
+        && let CoreTypeDesc::Ptyp_constr((lid, args)) = &arena.get_core_type(manifest).ptyp_desc
+    {
+        let direct_identity = is_json_identifier(lid.txt, arena);
+        let direct_option_identity = longident_matches(arena, lid.txt, &["option"])
+            && arena.type_list(*args).len() == 1
+            && matches!(
+                &arena.get_core_type(arena.type_list(*args)[0]).ptyp_desc,
+                CoreTypeDesc::Ptyp_constr((inner, inner_args))
+                    if inner_args.is_empty() && is_json_identifier(inner.txt, arena)
+            );
+        if !direct_identity && !direct_option_identity {
+            return general(JsonIdentityArgument);
+        }
     }
     // A declaration that could take a plan, in a tree that is not planned.
     if let Some(reason) = arena.derived_plans_off() {
@@ -750,6 +777,36 @@ mod tests {
     }
 
     #[test]
+    fn exposed_json_identity_arguments_are_classified_before_planning() {
+        for shape in [
+            "array<JSON.t>", "list<JSON.t>", "dict<JSON.t>",
+            "array<option<JSON.t>>", "option<option<JSON.t>>",
+            "option<array<JSON.t>>", "result<JSON.t, string>",
+            "result<string, JSON.t>", "Null.t<JSON.t>",
+            "array<Js.Json.t>", "list<Js.Json.t>", "dict<Js.Json.t>",
+        ] {
+            for annotation in ["spice", "spice.encode"] {
+                assert_eq!(
+                    classification(&format!("@{annotation} type t = {shape}")),
+                    Classification::General(GeneralReason::JsonIdentityArgument),
+                    "{annotation}: {shape}",
+                );
+            }
+            assert_eq!(
+                classification(&format!("@spice.decode type t = {shape}")),
+                Classification::Plan,
+                "decode: {shape}",
+            );
+        }
+        for shape in [
+            "JSON.t", "Js.Json.t", "option<JSON.t>", "option<Js.Json.t>",
+            "{field: array<JSON.t>}", "A(array<JSON.t>)",
+        ] {
+            assert_eq!(classification(&format!("@spice type t = {shape}")), Classification::Plan);
+        }
+    }
+
+    #[test]
     fn a_constructor_can_have_more_than_255_arguments() {
         let args = vec!["int"; 256].join(", ");
         let source = format!("@spice type t = C({args})");
@@ -802,7 +859,7 @@ mod tests {
         assert_eq!(general("@spice type t = A(pair<string, int>)"), UnsupportedVariant);
         assert_eq!(classification("@spice type t = A(JSON.t)"), Classification::Plan);
         assert_eq!(classification("@spice type t = JSON.t"), Classification::Plan);
-        assert_eq!(classification("@spice type t = array<Js.Json.t>"), Classification::Plan);
+        assert_eq!(general("@spice type t = array<Js.Json.t>"), JsonIdentityArgument);
         assert_eq!(general("@spice @spice.fallback(\"x\") type t = string"), NotYetPlanned(UnplannedForm::ConstantFallback));
         for planned in [
             "@spice type t = string",

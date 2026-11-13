@@ -63,6 +63,8 @@ pub enum GeneralReason {
     /// A variant with a representation, attribute or payload codec outside
     /// the plan language; classify it before checking rather than retrying.
     UnsupportedVariant,
+    /// An exposed JSON identity argument needs application abbreviation inference.
+    JsonIdentityArgument,
     /// Plans are off for the tree: the switch `RESCRIPT_DERIVED_PATH=general`,
     /// or a tree that is stored or printed instead of compiled.
     Switch,
@@ -86,6 +88,7 @@ impl GeneralReason {
             Self::UnsupportedVariant => 8,
             Self::Switch => 9,
             Self::FailedObligation => 10,
+            Self::JsonIdentityArgument => 11,
         }
     }
 }
@@ -124,6 +127,8 @@ pub struct PathCounts {
     pub unplanned_forms: [u64; 8],
     /// See [`GeneralReason::UnsupportedVariant`].
     pub unsupported_variant: u64,
+    /// See [`GeneralReason::JsonIdentityArgument`].
+    pub json_identity_argument: u64,
     /// See [`GeneralReason::Switch`].
     pub switch: u64,
     /// See [`GeneralReason::FailedObligation`].
@@ -146,6 +151,7 @@ impl PathCounts {
             *count += increment;
         }
         self.unsupported_variant += other.unsupported_variant;
+        self.json_identity_argument += other.json_identity_argument;
         self.switch += other.switch;
         self.failed_obligation += other.failed_obligation;
     }
@@ -167,6 +173,7 @@ impl PathCounts {
                     &mut self.not_yet_planned
                 },
                 GeneralReason::UnsupportedVariant => &mut self.unsupported_variant,
+                GeneralReason::JsonIdentityArgument => &mut self.json_identity_argument,
                 GeneralReason::Switch => &mut self.switch,
                 GeneralReason::FailedObligation => &mut self.failed_obligation,
             },
@@ -363,8 +370,10 @@ mod census_reason_tests {
             group.add(Classification::General(GeneralReason::NotYetPlanned(
                 UnplannedForm::JsonIdentity,
             )), 1);
+            group.add(Classification::General(GeneralReason::JsonIdentityArgument), 1);
             counts.merge(group);
         }
+        assert_eq!(counts.json_identity_argument, 10_000);
         assert_eq!(counts.not_yet_planned, 10_000);
         assert_eq!(counts.unplanned_forms.iter().sum::<u64>(), 10_000);
         assert_eq!(counts.unplanned_forms[UnplannedForm::JsonIdentity as usize], 10_000);

@@ -692,3 +692,55 @@ application comparison; the container-sharing counterexample is demonstrated
 by the separate `JSONIdentity` fixture, not by those application bindings.
 The oracle, fixture and classification remain unchanged pending the decision
 on that counterexample. See `DERIVED_CODECS.md` for its traced memo mechanism.
+
+#### Upfront JSON identity argument classification
+
+`json_identity_argument` keeps an encoder-bearing manifest application on the
+syntax path when its exposed argument contains a JSON identity codec, except
+for a direct identity or a single `option<JSON.t>`. It is decided from type facts
+before a plan is built, never by retrying a comparison. The oracle experiments
+on individual declarations gave this table; `Js.Json.t` uses a local compatibility
+module alias because this fixture's runtime no longer supplies `Js`.
+
+| Shape (`@spice`, unless noted) | Path | Oracle result without the classification |
+|---|---|---|
+| `JSON.t` | plan | agrees; no library application |
+| `array<JSON.t>` | general: `json_identity_argument` | encoder result and element sharing differ |
+| `option<JSON.t>` | plan | agrees; first encoder returns `option<JSON.t>` |
+| `list<JSON.t>` | general: `json_identity_argument` | encoder result and element sharing differ |
+| `dict<JSON.t>` | general: `json_identity_argument` | encoder result and element sharing differ |
+| `array<option<JSON.t>>` | general: `json_identity_argument` | nested encoder argument sharing differs |
+| `(JSON.t, int)` | general: existing `unmeasured_shape` | tuples were not planned |
+| `result<JSON.t, string>` (either argument position) | general: `json_identity_argument` | encoder result and argument sharing differ |
+| record field `array<JSON.t>` | plan | agrees; exported parameter is the declared record type |
+| variant payload `array<JSON.t>` | plan | agrees; exported parameter is the declared variant type |
+| `array<Js.Json.t>` | general: `json_identity_argument` | same as modern spelling |
+| `option<Js.Json.t>` | plan | same as modern spelling |
+| `list<Js.Json.t>` | general: `json_identity_argument` | same as modern spelling |
+| `dict<Js.Json.t>` | general: `json_identity_argument` | same as modern spelling |
+| `option<option<JSON.t>>` | general: `json_identity_argument` | inner application expands JSON before the later instance |
+| `option<array<JSON.t>>` (also list/dict) | general: `json_identity_argument` | inner application expands JSON before the later instance |
+| `dict<option<JSON.t>>` | general: `json_identity_argument` | nested encoder argument sharing differs |
+| `Null.t<JSON.t>` | general: `json_identity_argument` | encoder result and argument sharing differ |
+| decode-only array, option, nested array/option, result | plan | each agrees without encoder application lowering |
+
+The rule covers the remaining plan-supported shapes because only manifest
+applications expose these generic codec argument types in the binding scheme:
+application level lowering expands the JSON abbreviation, whereas records and
+variants hide the argument behind their declared type and the direct identity,
+single option and decode-only cases above do not cause the differing sharing.
+
+Acceptance after classification:
+
+- The exact CI Spice clean/build command with `RESCRIPT_DERIVED_PATH=check`
+  ends `Parsed 32 source files`, `Compiled 32 modules`, `Finished compilation`.
+- All 16 diagnostic fixtures (the original 15 plus the encoder-use probe) pass
+  unchanged in default, general and check modes.
+- Application census: **6,534 planned**, **0 `json_identity_argument`**, zero
+  `not_yet_planned`; the existing 21 failed-obligation bindings remain for the
+  separate retry-classification work.
+- The application check-mode build ends `Finished compilation`; all 3,980 output
+  files match the identity-plan candidate, with the same digest reported above.
+- Classification tests cover both encoder annotations and decode-only forms;
+  the dense reason counts merge correctly at 10,000 bindings. The summary
+  accepts both old eleven-bucket and new twelve-bucket census records.
