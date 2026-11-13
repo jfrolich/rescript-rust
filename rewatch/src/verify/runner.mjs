@@ -194,7 +194,7 @@ class Shapes {
 // Making values.
 
 const LETTERS =
-  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 _-.,:;!?/\\\"'\n\t";
+  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 _-.,:;!?/\\\"'\n\t@#$%&*+=()[]{}<>|~^`";
 const SYMBOLS = ["é", "ß", "→", "日", "😀", "\u0000", "​"];
 const INT_EDGES = [2147483647, 2147483646, 1073741824, 65536, 255];
 const FLOAT_EDGES = [0.5, 0.1, 1e-9, 1e21, Number.MAX_SAFE_INTEGER, Number.EPSILON, 1.7976931348623157e308];
@@ -635,7 +635,7 @@ function painter(color) {
   return { green: paint(32), red: paint(31), dim: paint(2), bold: paint(1) };
 }
 
-function lookup(module, path) {
+export function lookup(module, path) {
   const from = root => {
     let value = root;
     for (const name of path) {
@@ -703,7 +703,7 @@ export async function run(manifest, host) {
   return failed;
 }
 
-function runItem(item, name, value, options, lines) {
+export function runItem(item, name, value, options, lines) {
   if (item.kind === "law") {
     const result = checkLaw(value, name, item.detail, options);
     if (result.status === "proved") {

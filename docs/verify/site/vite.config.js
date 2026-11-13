@@ -8,11 +8,12 @@ export default defineConfig({
   worker: { format: "es" },
   server: {
     // The pages are rendered from the documents one directory up.
-    fs: { allow: [".."] },
+    // The runner of `rescript verify` is in rewatch/.
+    fs: { allow: ["..", "../../../rewatch/src/verify"] },
   },
   build: {
     target: "esnext",
     // One page per document of docs/verify.
-    rollupOptions: { input: ["index.html", "pure.html"] },
+    rollupOptions: { input: ["index.html", "pure.html", "law.html"] },
   },
 });
