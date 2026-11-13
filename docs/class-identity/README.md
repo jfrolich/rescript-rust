@@ -1,29 +1,42 @@
 # Class types that packages can share
 
-Status: draft, not implemented. It builds on the class records of the branch `ts-import` and on the upstream RFC "Class hierarchies in WebAPI" ([rescript-lang/rescript issue 9058](https://github.com/rescript-lang/rescript/issues/9058)).
+Status: draft, implemented in the Rust port of the compiler on the branch `class-identity-rfc`. It builds on the class records of the branch `ts-import` and on the upstream RFC "Class hierarchies in WebAPI" ([rescript-lang/rescript issue 9058](https://github.com/rescript-lang/rescript/issues/9058)). The OCaml compiler does not have it.
 
 ## In short
 
 The DOM types are moving out of the compiler's standard library and into a package, `@rescript/webapi`. A type belongs to the module that declares it, so from then on every package that mentions an `Element` has to depend on that one package: the React bindings, the JSX runtime, every binding to a library that takes a DOM node.
 
-This RFC removes the need for an owner. A type declared with `@instanceOf` already names a JavaScript class. The proposal is that the class, not the declaration, decides what the type is compatible with:
+This RFC removes the need for an owner. A type declared with `@instanceOf` already names a JavaScript class. With this change the class, not the declaration, decides what the type is compatible with:
 
+<!-- example: class-shared -->
 ```rescript
-// @rescript/react declares the little it needs. It does not depend on WebAPI.
-@instanceOf("Element") type element
-external createRoot: element => Root.t = "createRoot"
+// Two packages, each with its own declaration of the class Element.
+module ReactDOM = {
+  @instanceOf("Element") type element
+  type root
+  external createRoot: element => root = "createRoot"
+  @val external querySelector: string => Null.t<element> = "document.querySelector"
+}
 
-// @rescript/webapi declares the whole interface.
-@instanceOf("Element")
-type element = private {tagName: string, mutable id: string /* ... */}
+module WebAPI = {
+  @instanceOf("Element")
+  type element = private {tagName: string, mutable id: string}
+  @send external focus: element => unit = "focus"
+}
 
-// An application uses both.
+// Both types say "an instance of Element", so a value of one is accepted
+// where the other is expected.
 let mount = (container: WebAPI.element) => ReactDOM.createRoot(container)
+
+let focus = (el: ReactDOM.element) => WebAPI.focus(el)
 ```
+<!-- /example -->
 
-Both declarations say "an instance of `Element`", so a value of one is accepted where the other is expected. Each package declares the slice of a class it uses. Nothing about the DOM has to be in the compiler.
+Each package declares the slice of a class it uses: React the little it needs, WebAPI the whole interface. Nothing about the DOM has to be in the compiler.
 
-An untagged variant already goes by the class: it orders and tests its cases by class, whatever declarations the cases come from. The proposal extends that to coercion.
+An untagged variant already went by the class: it orders and tests its cases by class, whatever declarations the cases come from. This change extends that to coercion.
+
+The examples on this page are live. They are compiled in your browser by the compiler of this branch: edit one and see what the compiler says.
 
 ## The problem
 
@@ -35,35 +48,12 @@ The types are used outside the DOM bindings. The JSX runtime names seven of them
 
 ### A type has one owner
 
-Two declarations are two types, also when they describe the same values. Today's compiler refuses the last line of this program, with the error shown beside it:
-
-<!-- example: class-today -->
-```rescript
-// Two packages, each with its own declaration of the class Element.
-module ReactDOM = {
-  @instanceOf("Element") type element
-  @val external querySelector: string => Null.t<element> = "document.querySelector"
-}
-
-module WebAPI = {
-  @instanceOf("Element")
-  type element = private {tagName: string, mutable id: string}
-  @send external focus: element => unit = "focus"
-}
-
-// Both types say "an instance of Element". They are still two types.
-let focus = (el: ReactDOM.element) => WebAPI.focus(el)
-```
+Two declarations are two types, also when they describe the same values. Before this change the compiler refused the program above, at the argument of `focus`:
 
 ```
 This has type: ReactDOM.element
 But this function argument is expecting: WebAPI.element
 ```
-<!-- /example -->
-
-With the proposal the program is accepted, and `focus` compiles to `el.focus()`.
-
-The examples on this page are compiled by the Rust compiler of the branch `ts-import`, which has class records. They show what the compiler does today, so this one shows an error. The proposal itself is not implemented, and its code is not live.
 
 So that packages agree on `element`, one package has to declare it and all others have to depend on that package. That has four costs.
 
@@ -102,7 +92,7 @@ let listen = (options: A.options, mode: A.mode) =>
 
 A class type is different. It is abstract or a private record, and nothing may be coerced into a private type, because the module that declares it is the only one that may build its values. That is the right rule for a type that guards an invariant. A class type guards one fact, and the compiler knows which: its values are instances of the class.
 
-## What the compiler already knows
+## What the compiler already knew
 
 `@instanceOf` declares the class of a type. A private abbreviation of a class type is a subclass. On the branch `ts-import`, a private record can carry a class as well, with `@extends` for its superclass, and `@module` beside `@instanceOf` imports the class from a module:
 
@@ -119,7 +109,7 @@ type file = private {size: float, name: string}           // a subclass of Blob
 
 From these the compiler keeps, for every class type, the name of its class and the names of its ancestors.
 
-### A variant already goes by the class
+### A variant went by the class
 
 An untagged variant tests a subclass before its superclass. It finds the order in the class names, so it works when the cases come from two packages:
 
@@ -146,7 +136,7 @@ let describe = (target: target) =>
 ```
 <!-- /example -->
 
-### And it already converts between declarations
+### And it converted between declarations
 
 A constructor of an untagged variant does not decide which case a value matches: the value is tested again when it is matched. So a variant with one case for each package's type converts from one to the other:
 
@@ -175,9 +165,9 @@ let focus = (el: ReactDOM.element) =>
 ```
 <!-- /example -->
 
-The JavaScript is `if (!(el instanceof Element)) return; el.focus();`. The compiler takes `instanceof Element` as proof that the value is a `WebAPI.element`. It also knows, from the type of `el`, that the test cannot fail. Today that knowledge costs a variant, a `switch`, a branch that is never taken and a test at run time. The proposal lets the type checker use it directly.
+The JavaScript is `if (!(el instanceof Element)) return; el.focus();`. The compiler takes `instanceof Element` as proof that the value is a `WebAPI.element`. It also knows, from the type of `el`, that the test cannot fail. That knowledge cost a variant, a `switch`, a branch that is never taken and a test at run time. The rules below let the type checker use it directly.
 
-## The proposal
+## The rules
 
 ### Definitions
 
@@ -193,51 +183,113 @@ Whether two types are the same class or subclass and superclass is read from the
 
 `(a :> B.t)` is accepted when the type of `a` is the same class as `B.t`, or a subclass of it. The declarations may be in different modules or packages. No fields are compared.
 
-```rescript
-let a = (el: ReactDOM.element) => (el :> WebAPI.element)          // the same class
-let b = (input: WebAPI.htmlInputElement) => (input :> ReactDOM.element)  // a subclass
-let c = (el: ReactDOM.element) => (el :> WebAPI.htmlInputElement) // an error: not an ancestor
-```
-
-Inside other types the rule follows variance, as `:>` does for every other subtype: `array<WebAPI.htmlInputElement>` coerces to `array<ReactDOM.element>`.
+Inside other types the rule follows variance, as `:>` does for every other subtype: `option<WebAPI.input>` coerces to `option<ReactDOM.element>`, and a listener of type `ReactDOM.node => unit` to `WebAPI.input => unit`.
 
 ### Rule 2: the same class counts as equal where types must be equal
 
-A mutable field and the parameter of a type such as `ref` require equal types on both sides of `:>`. Two types of the same class are equal there. A subclass is not.
+A mutable field, an array and the parameter of a type such as `ref` are read and written, so `:>` requires equal types on both sides. Two types of the same class are equal there. A subclass is not: `array<WebAPI.input>` does not coerce to `array<ReactDOM.element>`, as it does not within one package.
 
+<!-- example: class-coerce -->
 ```rescript
-let d = (ref: React.ref<Nullable.t<ReactDOM.element>>) =>
-  (ref :> React.ref<Nullable.t<WebAPI.element>>)
+module ReactDOM = {
+  @instanceOf("Node") type node
+  @instanceOf("Element") type element = private node
+}
+
+module WebAPI = {
+  @instanceOf("Node")
+  type node = private {nodeName: string}
+
+  @instanceOf("Element") @extends(: node)
+  type element = private {nodeName: string, tagName: string, mutable id: string}
+
+  @instanceOf("HTMLInputElement") @extends(: element)
+  type input = private {nodeName: string, tagName: string, mutable id: string, mutable value: string}
+}
+
+// The same class, in both directions.
+let tag = (el: ReactDOM.element) => (el :> WebAPI.element).tagName
+let back = (el: WebAPI.element) => (el :> ReactDOM.element)
+
+// A subclass, to another package's declaration of an ancestor.
+let node = (input: WebAPI.input) => (input :> ReactDOM.node)
+
+// Inside other types the coercion follows variance.
+let maybe = (input: option<WebAPI.input>) => (input :> option<ReactDOM.element>)
+let listener = (f: ReactDOM.node => unit) => (f :> WebAPI.input => unit)
+
+// A ref is read and written, so its content must be equal on both sides.
+// Two declarations of one class are.
+type ref<'a> = {mutable current: 'a}
+let ref = (ref: ref<Null.t<ReactDOM.element>>) => (ref :> ref<Null.t<WebAPI.element>>)
 ```
+<!-- /example -->
 
-### Rule 3: the coercion is written for you where the expected type is known
+### Rule 3: the coercion is written for you where a site declares the type
 
-Where an expression is checked against a type that is already known (an argument of a function, a JSX prop, a field of a record that is built, the payload of a constructor), and the two types do not unify, the compiler tries rules 1 and 2. If they apply, the expression is typed as if `:>` were written.
+Four sites declare the type of the expression written there: the argument of a function (labelled and optional ones too, and the left side of `->`), a JSX prop, a field of a record that is built, and the payload of a constructor. When the expression has another type than the site expects and the two do not unify, the compiler tries rules 1 and 2. If they apply, the expression is typed as if `:>` were written.
 
+<!-- example: class-arguments -->
 ```rescript
-let mount = (container: WebAPI.element) => ReactDOM.createRoot(container)
+// An argument: the same class, or a subclass.
+let mount = (input: WebAPI.input) => ReactDOM.createRoot(input)
+let focus = (el: ReactDOM.element) => el->WebAPI.focus
 
-let focus = (ref: React.ref<Nullable.t<ReactDOM.element>>) =>
-  switch ref.current {
-  | Value(el) => el->WebAPI.Element.focus
-  | Null | Undefined => ()
-  }
+// A labelled and an optional argument.
+let observe = (input: WebAPI.input, el: WebAPI.element) =>
+  ReactDOM.observe(~target=input, ~root=el)
 
-// A subclass of one package, where another package expects the superclass.
-let attach = (input: WebAPI.htmlInputElement) => Charts.attach(input)
+// The same class inside the type of the argument.
+let width = () => WebAPI.measure(ReactDOM.useRef())
+
+// A field of a record and the payload of a constructor.
+let portal = (input: WebAPI.input) => {container: input, title: "Settings"}
+let target = (el: WebAPI.element) => Element(el)
 ```
+<!-- /example -->
 
-Two limits keep this narrow:
+Three limits keep this narrow:
 
-- **The same class is accepted anywhere in the type.** A listener of type `WebAPI.event => unit` is accepted where `ReactDOM.event => unit` is expected.
-- **A subclass is accepted only as the argument's own type.** `array<htmlInputElement>` where `array<element>` is expected stays an error with a `:>` to write, as it is today within one package.
+- **The same class is accepted anywhere in the type.** A `ref<Null.t<ReactDOM.element>>` is accepted where a `ref<Null.t<WebAPI.element>>` is expected, and a listener of type `WebAPI.event => unit` where `ReactDOM.event => unit` is.
+- **A subclass is accepted only as the argument's own type.** `option<WebAPI.input>` where `option<ReactDOM.element>` is expected stays an error, with a `:>` to write. The error says that the types are compatible at run time and names the operator.
+- **The expression itself has the type.** A variable, a call, a field or an `await` written at the site is coerced. A tuple, a block or a conditional written there passes the expected type on to its parts, and those are not at such a site.
 
-The second limit is what the discussion of the upstream RFC proposed for upcasts within one package. Rule 3 covers that case too.
+Other places have an expected type that no site declares. In `useOwn ? mine : theirs` the type expected of the second branch is the type of the first. Accepting the second there would make the type of the result depend on the order of the branches, and with a subclass whether the program compiles at all. So the coercion is written there:
+
+<!-- example: class-branches -->
+```rescript
+// Neither branch is the expected type of the other, so the compiler does
+// not choose: write the coercion on one of them.
+//   useOwn ? mine : (theirs :> ReactDOM.element)
+let pick = (useOwn, mine: ReactDOM.element, theirs: WebAPI.element) =>
+  useOwn ? mine : theirs
+```
+<!-- /example -->
+
+The upstream discussion proposed implicit upcasts at arguments within one package. Rule 3 covers that case too.
+
+### When a coercion is refused
+
+A class type does not coerce to a class that is not its own or among its declared ancestors. The error names both classes and the superclasses the source declares, because the usual cause is a declaration that leaves its superclass out:
+
+<!-- example: class-chain -->
+```rescript
+module Forms = {
+  // Nothing here says that an HTMLInputElement is an Element. Declare the
+  // chain and the last line compiles:
+  //   @instanceOf("Element") type element
+  //   @instanceOf("HTMLInputElement") type input = private element
+  @instanceOf("HTMLInputElement") type input
+}
+
+let mount = (input: Forms.input) => ReactDOM.createRoot((input :> ReactDOM.element))
+```
+<!-- /example -->
 
 ### What does not change
 
-- **Type inference.** Unification is not touched. Rule 3 runs only after unification has failed, so a program that compiles today gets the same types and the same JavaScript.
-- **Two declarations stay two types.** `el.tagName` is looked up in the declaration of the type of `el`. Which fields a value has never depends on the order in which types were unified.
+- **Type inference.** Unification is not touched. Rule 3 runs only after unification has failed, on the path that reported the error, so a program that compiled before gets the same types and the same JavaScript. When rule 3 does not apply either, the error is the one reported before.
+- **Two declarations stay two types.** `el.tagName` is looked up in the declaration of the type of `el`. An argument is coerced where it is passed; the variable keeps its type. Which fields a value has never depends on the order in which types were unified.
 - **The JavaScript.** A coercion compiles to nothing.
 - **Declarations.** A class record must be private, and `@extends` still checks, within its package, that the record has the fields of its superclass.
 
@@ -280,7 +332,7 @@ It has 30 class types today (`Date`, `Map`, `Blob`, `File`, the typed arrays). T
 
 ## Why this is sound
 
-It relies on what the compiler relies on today. A class type makes two promises:
+It relies on what the compiler already relied on. A class type makes two promises:
 
 1. **Every value of the type is an instance of the class.** A variant tests `instanceof` and expects it to succeed for the values of the case.
 2. **Every instance of the class may be used at the type.** A match gives a value that passes `instanceof` the type of the case, wherever the value came from.
@@ -290,16 +342,16 @@ The bridge above uses both: promise 1 for `ReactDOM.element`, promise 2 for `Web
 What stays trusted, not checked:
 
 - **The fields of a record.** They are a claim about the class, as the type of an `external` is a claim about a function. Two packages can describe one class differently, and each reader gets the description of the type they hold. A wrong description is wrong for the package's own values too.
-- **The ancestry.** A false `@extends` or abbreviation lets a value pass as a class it is not. Today that stays inside the package; with rule 1 it reaches the packages that declare the ancestor.
+- **The ancestry.** A false `@extends` or abbreviation lets a value pass as a class it is not. Before, that stayed inside the package; with rule 1 it reaches the packages that declare the ancestor.
 - **Realms.** `instanceof` fails for a value of another frame. That is unchanged.
 
-One thing follows for authors: a type that is narrower than its class must not have `@instanceOf`. A module that hands out only the elements it created, and relies on that, declares `type root = private element` without the attribute. Rule 1 looks at the declaration that has `@instanceOf`, so nothing coerces into `root`.
+One thing follows for authors: a type that is narrower than its class must not have `@instanceOf`. A module that hands out only the elements it created, and relies on that, declares `type root = private element` without the attribute. Rule 1 requires the target's own declaration to have `@instanceOf`, so nothing coerces into `root`, and `root` itself still coerces to every declaration of `Element`.
 
 ## Limits
 
-- **A slice has to declare the chain it is used with.** Ancestors come from the declaration of the type that is coerced. A package that declares `@instanceOf("HTMLElement") type htmlElement` with no parent cannot pass it where an `Element` is expected.
-- **A missing chain also misorders a variant.** In `Element(A.element) | Input(B.input)`, where `B.input` declares no parent, `instanceof Element` is tested first and takes every input. This happens today, within one package too. It becomes more likely when slices are small. A warning for two unrelated classes in one variant whose order matters is possible, but the compiler cannot know the chain that was left out.
-- **Classes with type parameters** keep today's rules. `element<'native>` of one package and `element` of another are not the same class, because nothing says how the parameters correspond.
+- **A slice has to declare the chain it is used with.** Ancestors come from the declaration of the type that is coerced. A package that declares `@instanceOf("HTMLElement") type htmlElement` with no parent cannot pass it where an `Element` is expected. The error says so (see [When a coercion is refused](#when-a-coercion-is-refused)).
+- **A missing chain also misorders a variant.** In `Element(A.element) | Input(B.input)`, where `B.input` declares no parent, `instanceof Element` is tested first and takes every input. This is not new, and it happens within one package too. It becomes more likely when slices are small. A warning for two unrelated classes in one variant whose order matters is possible, but the compiler cannot know the chain that was left out.
+- **Classes with type parameters** keep the rules they had. `element<'native>` of one package and `element` of another are not the same class, because nothing says how the parameters correspond.
 - **A relative `@module`** (`"./mesh.js"`) names a file relative to the declaring file. Two declarations in different directories are the same class only if the compiler resolves the specifiers; until it does they are different classes, which is the safe answer.
 - **Mixins** (`ParentNode`, `GlobalEventHandlers`) have no class and are not covered. They do not need to be: no value has a mixin as its type.
 
@@ -307,7 +359,7 @@ One thing follows for authors: a type that is narrower than its class must not h
 
 | Alternative | What it gives | Why not |
 |---|---|---|
-| One package owns the types, vendored into the compiler repository (the upstream RFC) | Works with today's compiler | Everything that names a DOM class depends on it; the subset follows React DOM |
+| One package owns the types, vendored into the compiler repository (the upstream RFC) | Needs no compiler change | Everything that names a DOM class depends on it; the subset follows React DOM |
 | Keep `Dom` in the standard library | No dependency | The DOM stays in the compiler; abstract types have no fields; the compiler's releases decide what the web looks like |
 | Phantom types (`Dom.element_like<'a>`, as `Dom` does today) | Equal types across packages, no compiler change | No fields, no `instanceof` dispatch, and errors that print the encoding |
 | Object types (`{"tagName": string}`) | Structural, no owner | Any object literal is an element; no class to dispatch on |
@@ -319,30 +371,34 @@ The fifth row is the closest. It is a later step if rule 3 turns out to leave to
 
 ## Implementation
 
-The parts are small, because a class type already carries its class and its ancestors by name (`Instance::Class` in [`variant_runtime.rs`](../../compiler-rust/src/types/variant_runtime.rs); the name of an imported class includes its module), also for a type of another module.
+The parts are small, because a class type already carried its class and its ancestors by name (`Instance::Class` in [`variant_runtime.rs`](../../compiler-rust/src/types/variant_runtime.rs); the name of an imported class includes its module), also for a type of another module.
 
-1. **Rule 1** in `subtype_rec` of [`ctype.rs`](../../compiler-rust/src/types/ctype.rs): two type constructors with different paths are subtypes when `is_declared_subclass` holds or the classes are equal. `coerces_into_private_type`, which refuses coercion into a private record, already makes an exception for a declared subclass; the exception gets the same-class case and stops comparing fields for class records of different declarations.
-2. **Rule 2** where `subtype_rec` falls back to unification for invariant positions: try the same-class test first.
-3. **Rule 3** in the typing of arguments, record fields and constructor payloads in `typecore.rs`: on a unification error, run the subtype check restricted to class steps, and wrap the expression in the coercion node that `:>` produces.
-4. **Errors.** A failed coercion between two class types says which class each is and which ancestors the source declares.
-5. **The OCaml compiler** has the same structure (`Ctype.subtype`, `Typecore.type_argument`), so the rules can be ported once they are agreed on.
+- **Rules 1 and 2** are one case of `subtype_rec` in [`ctype.rs`](../../compiler-rust/src/types/ctype.rs): two type constructors without parameters are subtypes when `class_step` finds the target's class to be the source's class or one of its ancestors. The case comes before private abbreviations are expanded and before a coercion into a private record is refused. Rule 2 needs nothing of its own: `subtype_rec` checks an invariant parameter and a mutable field in both directions, and only the same class passes both.
+- **`@extends`** compared the fields of a record with its superclass's by coercing one to the other. Since `:>` now takes a declared subclass at its word, the check compares the two declarations directly (`subtype_declarations_now`).
+- **Rule 3** is in [`typecore.rs`](../../compiler-rust/src/types/typecore.rs). The type checker passes down where an expression is (`ClashSite`), to explain a clash. `rue_unify`, where the type of an expression meets the expected type, lets a clash pass when the site is an argument, a record field or a constructor payload and `coerces_between_class_declarations` holds; `unify_argument` at those three sites then gives the expression the expected type. The check restores the types when it fails, so the clash is reported as before.
+- **The error** is a context of the existing subtype error (`ClassNotAnAncestor`).
+- **The typed tree** has no node for the implicit coercion: the argument has the expected type. `Texp_coerce` holds the type as it was written, and nothing was.
 
-Rule 3 costs nothing for code that type checks today: it runs on the path that would report an error.
+Rule 3 costs nothing for code that type checks: it runs on the path that would report an error.
 
-Tests: two packages with different slices of one class (abstract and record), each direction of rule 1, the invariant positions of rule 2, each site of rule 3, the errors, and the variant examples of this page.
+Tests: [`compiler-rust/tests/class_identity.rs`](../../compiler-rust/tests/class_identity.rs) has each direction of rule 1, the invariant positions of rule 2, each site of rule 3 and the places where the coercion stays written, the errors, and the declarations in separate files. A project built with `rescript build`, with the two packages and their user as three files, compiles to the expected JavaScript, also when only the user is rebuilt against the stored interfaces.
+
+Not done:
+
+- **The OCaml compiler.** It has the same structure (`Ctype.subtype`, `Typecore.type_argument`), so the rules can be ported once they are agreed on. It first needs class records, which are also only in the Rust compiler.
+- **The packages.** The React bindings and the JSX runtime still use the standard library's `Dom`.
 
 ## Open questions
 
-1. **Where rule 3 applies.** Arguments, JSX props, record fields and constructor payloads are proposed. Annotated `let` bindings and function results could follow. Branches of an `if` or a `switch` have no expected type and stay explicit.
-2. **Upcasts in rule 3.** The same class is the case that sharing needs. Accepting a subclass as an argument is the convenience the upstream discussion asked for. They can land separately.
-3. **Classes with type parameters.** Is "same number of parameters, compared in order" good enough, or should the correspondence be declared?
-4. **Disagreeing descriptions.** Should a build that contains two records for one class with a field at incompatible types get a warning, reported at the second declaration?
-5. **Refinements.** `type root = private element` without `@instanceOf` is still tested with `instanceof Element` in a variant, so a variant can hand any element to it. Should a refinement be refused as a case?
+1. **More sites for rule 3.** Arguments, JSX props, record fields and constructor payloads are implemented. An assignment to a mutable field (`ref.current = el`), an annotated `let` and the result of a function with an annotated result declare their type as well and could follow.
+2. **Classes with type parameters.** Is "same number of parameters, compared in order" good enough, or should the correspondence be declared?
+3. **Disagreeing descriptions.** Should a build that contains two records for one class with a field at incompatible types get a warning, reported at the second declaration?
+4. **Refinements.** `type root = private element` without `@instanceOf` is still tested with `instanceof Element` in a variant, so a variant can hand any element to it. Should a refinement be refused as a case?
+5. **A record of the coercion in the typed tree.** Editor tooling shows the expected type for an accepted argument. A node of its own would let it show both.
 
 ## Order of work
 
-1. Rules 1 and 2, with the two-package tests. This is enough for React DOM to stop depending on a DOM package, with `:>` written where two packages meet.
-2. Rule 3 for the same class.
-3. Rule 3 for a subclass as an argument.
-4. The React bindings and the JSX runtime declare their classes; `Dom` is deprecated.
-5. Tests for `%ts` across files: a class that two files import is one class.
+1. Rules 1, 2 and 3 and the error: done, in the Rust compiler.
+2. The React bindings and the JSX runtime declare their classes; `Dom` is deprecated.
+3. Tests for `%ts` across files: a class that two files import is one class.
+4. The port to the OCaml compiler, after class records.

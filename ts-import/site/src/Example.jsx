@@ -145,7 +145,7 @@ export function Example({ example, prebuilt }) {
               </Tab>
             )}
             <Tab view="js" current={view} choose={setView}>
-              {example.plain && failed ? (example.fails ? "Rejected today" : "Error") : "JavaScript"}
+              {example.plain && failed ? (example.fails ? "Rejected" : "Error") : "JavaScript"}
             </Tab>
             {!example.plain && (
               <Tab view="typescript" current={view} choose={setView}>

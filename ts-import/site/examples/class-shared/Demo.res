@@ -1,6 +1,8 @@
 // Two packages, each with its own declaration of the class Element.
 module ReactDOM = {
   @instanceOf("Element") type element
+  type root
+  external createRoot: element => root = "createRoot"
   @val external querySelector: string => Null.t<element> = "document.querySelector"
 }
 
@@ -10,5 +12,8 @@ module WebAPI = {
   @send external focus: element => unit = "focus"
 }
 
-// Both types say "an instance of Element". They are still two types.
+// Both types say "an instance of Element", so a value of one is accepted
+// where the other is expected.
+let mount = (container: WebAPI.element) => ReactDOM.createRoot(container)
+
 let focus = (el: ReactDOM.element) => WebAPI.focus(el)

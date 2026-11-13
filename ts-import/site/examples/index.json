@@ -130,7 +130,7 @@
     ]
   },
   {
-    "id": "class-today",
+    "id": "class-shared",
     "title": "Two declarations of one class",
     "summary": "Each package declares Element. A value of one is accepted where the other is expected.",
     "files": [
@@ -159,10 +159,50 @@
   {
     "id": "class-bridge",
     "title": "Converting through a variant",
-    "summary": "Today's way from one declaration of Element to another: a test that cannot fail.",
+    "summary": "The way from one declaration of Element to another before this change: a test that cannot fail.",
     "files": [
       "Demo.res"
     ],
     "plain": true
+  },
+  {
+    "id": "class-coerce",
+    "title": "Coercion between declarations",
+    "summary": "The same class both ways, a subclass to an ancestor, and inside other types.",
+    "files": [
+      "Demo.res"
+    ],
+    "plain": true
+  },
+  {
+    "id": "class-arguments",
+    "title": "Where the coercion is implicit",
+    "summary": "Arguments, record fields and constructor payloads take a class type of another declaration.",
+    "files": [
+      "Demo.res"
+    ],
+    "plain": true
+  },
+  {
+    "id": "class-branches",
+    "title": "Where it stays written",
+    "summary": "The two branches have two types, and neither is the expected one.",
+    "files": [
+      "Demo.res"
+    ],
+    "plain": true,
+    "fails": true,
+    "expected": "This error is what the example shows: the branches of a conditional are not a site that declares a type, so one of them needs a written coercion."
+  },
+  {
+    "id": "class-chain",
+    "title": "A declaration without its superclass",
+    "summary": "The error names both classes and the superclasses the source declares.",
+    "files": [
+      "Demo.res"
+    ],
+    "plain": true,
+    "fails": true,
+    "expected": "This error is what the example shows: Forms.input does not declare that its class extends Element."
   }
 ]
