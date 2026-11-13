@@ -547,47 +547,15 @@ impl LazyLookupKind {
 /// how often persistent-rooted component views are built against how many
 /// distinct views exist, and what replaying their pieces costs.
 pub(crate) mod store_views {
-    use std::collections::HashSet;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    static VIEW_BUILDS: AtomicU64 = AtomicU64::new(0);
-    static VIEW_BUILDS_PRIVATE: AtomicU64 = AtomicU64::new(0);
-    static VIEW_HITS: AtomicU64 = AtomicU64::new(0);
-    static VIEW_GUARD_MISSES: AtomicU64 = AtomicU64::new(0);
-    static DISTINCT_VIEWS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
     static PIECES_BUILT: AtomicU64 = AtomicU64::new(0);
     static PIECES_EMPTY: AtomicU64 = AtomicU64::new(0);
     static PIECES_POISONED: AtomicU64 = AtomicU64::new(0);
     static BINDERS: AtomicU64 = AtomicU64::new(0);
     static PIECES_REPLAYED: AtomicU64 = AtomicU64::new(0);
-    /// Replayed effects: components, prepare, rename,
-    /// alias source, module declaration.
-    static EFFECTS_REPLAYED: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
-
-    /// A view of a worker-shareable key was built; `published` is false when
-    /// the build read compilation state and stays private.
-    pub(crate) fn record_view_build(name: String, published: bool) {
-        VIEW_BUILDS.fetch_add(1, Ordering::Relaxed);
-        if !published {
-            VIEW_BUILDS_PRIVATE.fetch_add(1, Ordering::Relaxed);
-        }
-        DISTINCT_VIEWS
-            .lock()
-            .unwrap()
-            .get_or_insert_with(HashSet::new)
-            .insert(name);
-    }
-
-    /// A compilation adopted a view its worker already built.
-    pub(crate) fn record_view_hit() {
-        VIEW_HITS.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// A worker's view failed the adopting compilation's guards.
-    pub(crate) fn record_view_guard_miss() {
-        VIEW_GUARD_MISSES.fetch_add(1, Ordering::Relaxed);
-    }
+    /// Replayed effects: unit preparations.
+    static EFFECTS_REPLAYED: [AtomicU64; 1] = [const { AtomicU64::new(0) }; 1];
 
     /// A store build ended: with effects or guards, with none, or poisoned.
     pub(crate) fn record_piece(poisoned: bool, empty: bool) {
@@ -618,10 +586,6 @@ pub(crate) mod store_views {
 
     pub(super) fn reset() {
         for counter in [
-            &VIEW_BUILDS,
-            &VIEW_BUILDS_PRIVATE,
-            &VIEW_HITS,
-            &VIEW_GUARD_MISSES,
             &PIECES_BUILT,
             &PIECES_EMPTY,
             &PIECES_POISONED,
@@ -633,24 +597,17 @@ pub(crate) mod store_views {
         {
             counter.store(0, Ordering::Relaxed);
         }
-        *DISTINCT_VIEWS.lock().unwrap() = None;
     }
 
     pub(super) fn print_report() {
         let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
-        let distinct = DISTINCT_VIEWS
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map_or(0, HashSet::len);
-        let builds = load(&VIEW_BUILDS);
-        eprintln!(
-            "[compiler-counter] store_views builds={builds} distinct={distinct} builds_per_view={:.2} private={} hits={} guard_misses={}",
-            if distinct == 0 { 0.0 } else { builds as f64 / distinct as f64 },
-            load(&VIEW_BUILDS_PRIVATE),
-            load(&VIEW_HITS),
-            load(&VIEW_GUARD_MISSES),
-        );
+        // Printed only when a store build ran or a piece was replayed:
+        // neither happens once every persistent-rooted path is a world
+        // view.
+        let pieces = load(&PIECES_BUILT) + load(&PIECES_EMPTY) + load(&PIECES_POISONED);
+        if pieces == 0 && load(&PIECES_REPLAYED) == 0 {
+            return;
+        }
         eprintln!(
             "[compiler-counter] store_pieces with_effects={} empty={} poisoned={} binders={}",
             load(&PIECES_BUILT),
@@ -659,13 +616,9 @@ pub(crate) mod store_views {
             load(&BINDERS),
         );
         eprintln!(
-            "[compiler-counter] store_replay pieces={} components={} prepare_pers={} trigger_rename={} alias_source={} module_decl={}",
+            "[compiler-counter] store_replay pieces={} prepare_pers={}",
             load(&PIECES_REPLAYED),
             load(&EFFECTS_REPLAYED[0]),
-            load(&EFFECTS_REPLAYED[1]),
-            load(&EFFECTS_REPLAYED[2]),
-            load(&EFFECTS_REPLAYED[3]),
-            load(&EFFECTS_REPLAYED[4]),
         );
     }
 }

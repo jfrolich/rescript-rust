@@ -17,9 +17,12 @@
 //! Covered keys: the path of a unit the world owns (`ViewKey::Unit`); the
 //! path of a child that a unit's view, or such a child's, declares with a
 //! signature (`ViewKey::Child`); the path of a child that is an alias of a
-//! unit the world owns (`ViewKey::Alias`). A structure child of an alias
-//! view, an alias of a path that is not a unit, a child that is a module
-//! type name, and any path with a functor application on it are built by
+//! module the world has a view of, or of a unit it owns (`ViewKey::Alias`):
+//! a declared alias, or a child of an alias view, which is an alias of the
+//! source's child (mtype.ml:93-97). A child declared with a module type
+//! name its own unit binds is a `ViewKey::Child` of the name's expansion.
+//! A child whose module type is declared in another unit, a functor, and
+//! any path with a functor application on it are built by
 //! `types/env_lazy.rs` (see `Components::Local`).
 
 use super::context::TypeContext;
@@ -92,25 +95,66 @@ pub(crate) enum ViewKey<'a> {
     /// view and the child's ordinal among the parent's module items
     /// ([`ModuleView::world_child`]).
     Child(&'a Arc<ModuleView>, u32),
-    /// The path of a child that is an alias of a unit the world owns
-    /// (`module JSON = Stdlib_JSON`, the modules of a namespace).
+    /// The path of a child that is an alias of a module the world knows:
+    /// a unit it owns (`module JSON = Stdlib_JSON`, the modules of a
+    /// namespace) or a path it has a view of (`module X = Other.Sub`, a
+    /// sibling alias, a child of an alias view).
     Alias(&'a AliasKey<'a>),
 }
 
 /// A child of `parent` (its `ordinal` among the module items) that is an
-/// alias of `unit`.
+/// alias of `target`.
 pub(crate) struct AliasKey<'a> {
     pub(crate) parent: &'a Arc<ModuleView>,
     pub(crate) ordinal: u32,
-    pub(crate) unit: &'a Arc<PersStruct>,
+    pub(crate) target: &'a AliasTarget,
+}
+
+/// What an alias view is a view of: the module whose signature it
+/// strengthens and puts at its own path (`scrape_alias`, env.ml:1435-1446).
+#[derive(Clone)]
+pub(crate) enum AliasTarget {
+    /// A unit the world owns, read through its signature: an alias of a
+    /// unit needs no view of the unit.
+    Unit(Arc<PersStruct>),
+    /// A module path the world has a view of.
+    View(Arc<ModuleView>),
+}
+
+impl AliasTarget {
+    /// Whether both are the same unit or the same view. One pointer test.
+    #[inline]
+    pub(crate) fn same(&self, other: &AliasTarget) -> bool {
+        match (self, other) {
+            (AliasTarget::Unit(a), AliasTarget::Unit(b)) => Arc::ptr_eq(a, b),
+            (AliasTarget::View(a), AliasTarget::View(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+
+    fn signature(&self) -> &Arc<Signature> {
+        match self {
+            AliasTarget::Unit(unit) => &unit.ps_sig,
+            AliasTarget::View(view) => &view.signature,
+        }
+    }
+
+    fn access_path(&self) -> Path {
+        match self {
+            AliasTarget::Unit(unit) => Path::pident(Ident::create_persistent(&unit.ps_name)),
+            AliasTarget::View(view) => view.access_path,
+        }
+    }
 }
 
 /// What kind of key the path of a child module of a view is.
-pub(crate) enum WorldChild<'a> {
-    /// Declared with a signature: [`ViewKey::Child`].
+pub(crate) enum WorldChild {
+    /// Declared with a signature, or with a module type name that expands
+    /// to one: [`ViewKey::Child`].
     Structure,
-    /// An alias of the unit with this name: [`ViewKey::Alias`].
-    UnitAlias(&'a str),
+    /// An alias of the module at this path, which is rooted in a unit:
+    /// [`ViewKey::Alias`] once the path is resolved to a unit or a view.
+    Alias(Path),
 }
 
 impl ViewKey<'_> {
@@ -247,6 +291,10 @@ impl std::fmt::Debug for ModuleView {
 pub(crate) struct ModuleView {
     id: ViewId,
     access_path: Path,
+    /// The path the signature's own items are named through: the access
+    /// path, except for a child of an alias view that is declared with a
+    /// signature (see [`describe_view`]).
+    item_root: Path,
     /// The signature the tables are built from. A unit's own: its items
     /// name each other by local identifier. A child's: its declared
     /// signature with its own items at the access path and its ancestors'
@@ -259,10 +307,10 @@ pub(crate) struct ModuleView {
     raw: Arc<Signature>,
     /// The view this one is a child of, and its ordinal there.
     parent: Option<(std::sync::Weak<ModuleView>, u32)>,
-    /// For the view of an alias of a unit: the unit's path, which the
-    /// unit's signature names its own items through until they are put at
-    /// this view's path (`scrape_alias`, env.ml:1435-1446), and the unit.
-    source: Option<(Arc<Path>, Arc<PersStruct>)>,
+    /// For an alias view: the target's path, which the target's signature
+    /// names its own items through until they are put at this view's path
+    /// (`scrape_alias`, env.ml:1435-1446), and the target.
+    source: Option<(Arc<Path>, AliasTarget)>,
     index: Arc<SignatureIndex>,
     /// By signature item: `Some` for the value item a name lookup reaches.
     values: Box<[Option<ViewValue>]>,
@@ -275,6 +323,10 @@ pub(crate) struct ModuleView {
     /// The substituted target of each child whose type is a path, and
     /// whether it is an alias (`Mty_alias`) or a module type (`Mty_ident`).
     alias_targets: AHashMap<SmolStr, (bool, Arc<Path>)>,
+    /// By ordinal among the module items: the signature a child declared
+    /// with a module type name expands to (`scrape_alias`,
+    /// env.ml:1437-1439). Empty when the view has no such child.
+    expansions: Box<[Option<Arc<Signature>>]>,
     /// The cell of each child module, by its ordinal among the module
     /// items (`SignatureIndex::module_cell`).
     children: Box<[ViewCell]>,
@@ -290,6 +342,29 @@ pub(crate) struct ModuleView {
     no_labels: Arc<Vec<LabelDescription>>,
     /// Type nodes the build created (the rest are the unit's).
     nodes: usize,
+}
+
+/// An alias view owns its target, so a chain of aliases is a chain of
+/// owners: free it link by link, not by recursion over its length (a chain
+/// of 10,000 overflowed a 2 MB stack). One step per link this view is the
+/// last owner of; one test for a view that is not an alias view.
+impl Drop for ModuleView {
+    fn drop(&mut self) {
+        let mut next = match self.source.take() {
+            Some((_, AliasTarget::View(target))) => Some(target),
+            _ => None,
+        };
+        while let Some(target) = next {
+            next = match Arc::into_inner(target) {
+                Some(mut owned) => match owned.source.take() {
+                    Some((_, AliasTarget::View(target))) => Some(target),
+                    _ => None,
+                },
+                // Another owner (the cell of the target's parent) frees it.
+                None => None,
+            };
+        }
+    }
 }
 
 /// Rewrites every handle the view's tables hold, each once. A unit's
@@ -355,6 +430,18 @@ impl FrozenExport for ModuleView {
 thread_local! {
     /// Signature items visited by view builds on this thread.
     static BUILD_STEPS: std::sync::atomic::AtomicU64 = const { std::sync::atomic::AtomicU64::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Name probes of [`expand_modtype_name`] on this thread.
+    static EXPAND_STEPS: std::sync::atomic::AtomicU64 = const { std::sync::atomic::AtomicU64::new(0) };
+}
+
+#[inline]
+fn count_expand_step() {
+    #[cfg(test)]
+    EXPAND_STEPS.with(|steps| steps.fetch_add(1, Ordering::Relaxed));
 }
 
 #[inline]
@@ -431,6 +518,7 @@ fn describe_view(world: &World, scratch: &ViewScratch, key: &ViewKey<'_>) -> Opt
                 .unwrap_or_else(|| Arc::new(SignatureIndex::build(&signature)));
             Some(describe_tables(
                 access_path,
+                access_path,
                 signature.clone(),
                 index,
                 signature,
@@ -442,25 +530,45 @@ fn describe_view(world: &World, scratch: &ViewScratch, key: &ViewKey<'_>) -> Opt
         ViewKey::Alias(AliasKey {
             parent,
             ordinal,
-            unit,
+            target,
         }) => {
             let (idx, runtime_pos) = parent.index.module_item(*ordinal as usize);
             let SignatureItem::SigModule(id, md, _) = &parent.signature[idx] else {
                 return None;
             };
-            let target = md.md_type.ident_or_alias_path()?;
             let access_path = Path::pdot_pos(parent.access_path, id.name(), runtime_pos as i32);
-            let source = Path::pident(Ident::create_persistent(target.head().name()));
-            // The tables below read the alias sources of this path and of
-            // its ancestors as a compilation holds them once it has adopted
-            // the ancestors (`alias_sources_for_component_path`).
+            // Where the items of the signature are put. OCaml's
+            // `prefix_idents` (env.ml:1454-1481) puts them at the access
+            // path. The alias views of trunk put the items of a child
+            // declared with a signature at the parent's root and the
+            // child's name without a runtime position
+            // (`QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix`
+            // re-roots a child module of the scraped signature that way),
+            // and the canonical signature dump prints positions, so a child
+            // of an alias view keeps that spelling. Nothing compares or
+            // emits the position of a type path (`Path::same`).
+            let item_root = if parent.source.is_some()
+                && matches!(md.md_type, ModuleType::MtySignature(_))
+            {
+                Path::pdot(parent.item_root, id.name())
+            } else {
+                access_path
+            };
+            let source = target.access_path();
+            // The tables below read the alias sources of this path, of its
+            // ancestors and of its target's chain as a compilation holds
+            // them once it has adopted those views
+            // (`alias_sources_for_component_path`).
             parent.register_alias_chain(ctx);
+            if let AliasTarget::View(target) = target {
+                target.register_alias_chain(ctx);
+            }
             ctx.register_component_alias_source(access_path, source);
-            // env.ml:1516-1518, 1435-1446: the unit's signature, its items
-            // put at this path and strengthened against the unit.
+            // env.ml:1516-1518, 1435-1446: the target's signature, its
+            // items put at this path and strengthened against the target.
             let signature = super::env_lazy::QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
-                access_path,
-                unit.ps_sig.clone(),
+                item_root,
+                target.signature().clone(),
                 Default::default(),
                 Some(source),
                 ctx,
@@ -469,11 +577,12 @@ fn describe_view(world: &World, scratch: &ViewScratch, key: &ViewKey<'_>) -> Opt
             let index = Arc::new(SignatureIndex::build(&signature));
             Some(describe_tables(
                 access_path,
+                item_root,
                 signature.clone(),
                 index,
                 signature,
                 Some((Arc::downgrade(parent), *ordinal)),
-                Some((Arc::new(source), (*unit).clone())),
+                Some((Arc::new(source), (*target).clone())),
                 ctx,
             ))
         }
@@ -482,8 +591,11 @@ fn describe_view(world: &World, scratch: &ViewScratch, key: &ViewKey<'_>) -> Opt
             let SignatureItem::SigModule(id, md, _) = &parent.raw[idx] else {
                 return None;
             };
-            let ModuleType::MtySignature(raw) = &md.md_type else {
-                return None;
+            // The declared signature, or the one the declared module type
+            // name expands to (env.ml:1437-1439).
+            let raw = match &md.md_type {
+                ModuleType::MtySignature(raw) => raw,
+                _ => parent.expansions.get(*ordinal as usize)?.as_ref()?,
             };
             // env.ml:1573-1578: the child's component thunk holds its
             // declared signature and the parent's substitution;
@@ -512,6 +624,7 @@ fn describe_view(world: &World, scratch: &ViewScratch, key: &ViewKey<'_>) -> Opt
             let index = Arc::new(SignatureIndex::build(&signature));
             Some(describe_tables(
                 access_path,
+                access_path,
                 signature,
                 index,
                 raw.clone(),
@@ -521,6 +634,67 @@ fn describe_view(world: &World, scratch: &ViewScratch, key: &ViewKey<'_>) -> Opt
             ))
         }
     }
+}
+
+/// The signature the module type named `name` expands to, for a name a
+/// declared signature binds: an item of `raw` (the declared signature of
+/// the view under construction at `access_path`, indexed by `index`) or of
+/// an ancestor's (`parent`). `scrape_alias` expands `Mty_ident` through
+/// `find_modtype` (env.ml:1437-1439). A unit's signature names a module
+/// type of its own by identifier or through the path of the module that
+/// declares it, so the binder is found in the view's own chain and no
+/// compilation is read. `None` for a name declared outside the chain (its
+/// prefix is another module's view, which this build does not resolve), an
+/// abstract module type and a functor type: such a child has no world view.
+///
+/// Cost: one probe of a name index per name in a chain of module types
+/// that are names themselves, and one per enclosing view up to the one
+/// that binds the name. Runs in a view's build only.
+fn expand_modtype_name(
+    raw: &Signature,
+    index: &SignatureIndex,
+    access_path: &Path,
+    parent: Option<&(std::sync::Weak<ModuleView>, u32)>,
+    name: &Path,
+) -> Option<Arc<Signature>> {
+    let mut name = *name;
+    loop {
+        count_expand_step();
+        // The item of this signature that binds `name`: by identity for an
+        // identifier, by name for a path through this module.
+        let bound = match name.view() {
+            super::path::PathView::Pident(id) if !id.is_persistent() => {
+                index.modtype_item(id.name()).filter(|&idx| {
+                    matches!(&raw[idx], SignatureItem::SigModtype(bound, _) if bound.same(id))
+                })
+            }
+            super::path::PathView::Pdot(prefix, last, _) if prefix.same(access_path) => {
+                index.modtype_item(last.as_str())
+            }
+            _ => None,
+        };
+        let Some(idx) = bound else { break };
+        let SignatureItem::SigModtype(_, mtd) = &raw[idx] else {
+            return None;
+        };
+        match mtd.mtd_type.as_ref()? {
+            ModuleType::MtySignature(signature) => return Some(signature.clone()),
+            ModuleType::MtyIdent(next) => name = *next,
+            _ => return None,
+        }
+    }
+    let (enclosing, _) = parent?;
+    let enclosing = enclosing.upgrade()?;
+    if enclosing.source.is_some() {
+        return None;
+    }
+    expand_modtype_name(
+        &enclosing.raw,
+        &enclosing.index,
+        &enclosing.access_path,
+        enclosing.parent.as_ref(),
+        &name,
+    )
 }
 
 /// The tables of the view of the module with `signature` at `access_path`.
@@ -534,17 +708,21 @@ fn describe_view(world: &World, scratch: &ViewScratch, key: &ViewKey<'_>) -> Opt
 /// Cost: a fixed number of passes over the signature, each doing work in
 /// proportion to the item it visits (one copy of a value's type, one
 /// description per constructor and label); the component substitution is
-/// built at most three times, each one pass.
+/// built at most three times, each one pass. A value of an alias view is
+/// rewritten once per alias view in its target's chain.
+#[allow(clippy::too_many_arguments)]
 fn describe_tables(
     access_path: Path,
+    item_root: Path,
     signature: Arc<Signature>,
     index: Arc<SignatureIndex>,
     raw: Arc<Signature>,
     parent: Option<(std::sync::Weak<ModuleView>, u32)>,
-    source: Option<(Arc<Path>, Arc<PersStruct>)>,
+    source: Option<(Arc<Path>, AliasTarget)>,
     ctx: &TypeContext,
 ) -> ModuleView {
     let shared_access_path = Arc::new(access_path);
+    let shared_item_root = Arc::new(item_root);
 
     let mut values: Vec<Option<ViewValue>> = Vec::with_capacity(signature.len());
     let mut labels: AHashMap<SmolStr, Vec<LabelDescription>> = AHashMap::default();
@@ -555,6 +733,9 @@ fn describe_tables(
     let mut value_maps = None;
     let mut subst = None;
     let mut runtime_pos = 0usize;
+    let mut module_ordinal = 0usize;
+    let is_alias_view = source.is_some();
+    let mut expansions: Vec<Option<Arc<Signature>>> = Vec::new();
     for (idx, item) in signature.iter().enumerate() {
         count_build_step();
         let mut value = None;
@@ -566,15 +747,21 @@ fn describe_tables(
                     // env.ml:1537 `Subst.value_description sub decl`.
                     let mut desc =
                         super::typecore::copy_lookup_value_description_for_subst(desc, ctx);
-                    if let Some((source, _)) = &source {
-                        // An alias view's values are the unit's until here:
-                        // put the copy at this path like the other items.
+                    let mut value_source = source.as_ref();
+                    while let Some((prefix, target)) = value_source {
+                        // Alias signatures retain their values' source paths.
+                        // Re-root every backing source, not just the immediate
+                        // target: an alias target may itself be an alias view.
                         crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
                             &[SignatureItem::SigValue(*id, desc.clone())],
-                            source,
-                            &shared_access_path,
+                            prefix,
+                            &shared_item_root,
                             ctx,
                         );
+                        value_source = match target {
+                            AliasTarget::Unit(_) => None,
+                            AliasTarget::View(view) => view.source.as_ref(),
+                        };
                     }
                     let maps = value_maps.get_or_insert_with(|| {
                         crate::cmi::persistent_env::build_value_subst_maps(
@@ -652,8 +839,22 @@ fn describe_tables(
                     {
                         alias_targets.insert(SmolStr::new_static(id.name()), target);
                     }
+                    // A child of an alias view is an alias of the source's
+                    // child whatever its type (mtype.ml:93-97).
+                    if !is_alias_view
+                        && let SignatureItem::SigModule(_, declared, _) = &raw[idx]
+                        && let ModuleType::MtyIdent(name) = &declared.md_type
+                        && let Some(expansion) =
+                            expand_modtype_name(&raw, &index, &access_path, parent.as_ref(), name)
+                    {
+                        if expansions.is_empty() {
+                            expansions.resize(index.module_count(), None);
+                        }
+                        expansions[module_ordinal] = Some(expansion);
+                    }
                 }
                 runtime_pos += 1;
+                module_ordinal += 1;
             }
             SignatureItem::SigModtype(id, mtd) => {
                 // env.ml:1581-1585 `Subst.modtype_declaration sub decl`.
@@ -687,10 +888,12 @@ fn describe_tables(
         // Numbered when it is published.
         id: ViewId(u32::MAX),
         access_path,
+        item_root,
         children: (0..index.module_count())
             .map(|_| ViewCell::default())
             .collect(),
         subst: subst.map(OnceLock::from).unwrap_or_default(),
+        expansions: expansions.into_boxed_slice(),
         signature,
         raw,
         parent,
@@ -769,10 +972,19 @@ impl ModuleView {
         self.source.as_ref().map(|(source, _)| source)
     }
 
-    /// For an alias view: whether it is the view of an alias of `unit`.
+    /// For an alias view: whether it is the view of an alias of `target`.
     #[inline]
-    pub(crate) fn is_alias_of(&self, unit: &Arc<PersStruct>) -> bool {
-        matches!(&self.source, Some((_, target)) if Arc::ptr_eq(target, unit))
+    pub(crate) fn is_alias_of(&self, target: &AliasTarget) -> bool {
+        matches!(&self.source, Some((_, held)) if held.same(target))
+    }
+
+    /// For an alias view whose target is a view: that view.
+    #[inline]
+    pub(crate) fn target_view(&self) -> Option<&Arc<ModuleView>> {
+        match &self.source {
+            Some((_, AliasTarget::View(target))) => Some(target),
+            _ => None,
+        }
     }
 
     /// Register, on the scratch context `ctx`, the alias source of every
@@ -807,31 +1019,51 @@ impl ModuleView {
 
     /// The ordinal of child module `name` and the kind of key its path is,
     /// when it is a view key of its own: a child declared with a signature
-    /// (of a unit's view or of such a child's), or an alias of a unit. A
-    /// functor, a module type name, an alias of anything but a unit, and a
-    /// structure child of an alias view have none. One probe of the name
-    /// index.
-    pub(crate) fn world_child(&self, name: &str) -> Option<(u32, WorldChild<'_>)> {
+    /// (of a unit's view or of such a child's), or an alias: a child
+    /// declared as an alias of a path rooted in a unit, or a child of an
+    /// alias view declared with a signature. A functor and a module type
+    /// name have none. One probe of the name index and at most one of the
+    /// alias targets.
+    pub(crate) fn world_child(&self, name: &str) -> Option<(u32, WorldChild)> {
         let (_, _, ordinal) = self.index.module_cell(name)?;
         Some((ordinal as u32, self.world_child_kind(ordinal as u32)?))
     }
 
     /// [`Self::world_child`] for the child with `ordinal`. One read of the
-    /// module table.
-    pub(crate) fn world_child_kind(&self, ordinal: u32) -> Option<WorldChild<'_>> {
+    /// module table; for a child declared as a path, one probe of the
+    /// alias targets and one of the name index.
+    pub(crate) fn world_child_kind(&self, ordinal: u32) -> Option<WorldChild> {
         let (idx, _) = self.index.module_item(ordinal as usize);
-        let SignatureItem::SigModule(_, md, _) = &self.signature[idx] else {
+        let SignatureItem::SigModule(id, md, _) = &self.signature[idx] else {
             return None;
         };
         match &md.md_type {
-            ModuleType::MtySignature(_) if self.source.is_none() => Some(WorldChild::Structure),
+            ModuleType::MtySignature(_) => match &self.source {
+                None => Some(WorldChild::Structure),
+                // mtype.ml:93-97: strengthening the source's signature
+                // makes this child an alias of the source's child.
+                Some((source, _)) => Some(WorldChild::Alias(Path::pdot(**source, id.name()))),
+            },
             ModuleType::MtyAlias(..) | ModuleType::MtyIdent(_) => {
-                match md.md_type.ident_or_alias_path()?.view() {
-                    super::path::PathView::Pident(id) if id.is_persistent() => {
-                        Some(WorldChild::UnitAlias(id.name()))
-                    }
-                    _ => None,
+                if let super::path::PathView::Pident(target) =
+                    md.md_type.ident_or_alias_path()?.view()
+                    && target.is_persistent()
+                {
+                    return Some(WorldChild::Alias(Path::pident(*target)));
                 }
+                // A module type name that expands to a signature
+                // (env.ml:1437-1439): the child has that signature.
+                if let Some(Some(_)) = self.expansions.get(ordinal as usize) {
+                    return Some(WorldChild::Structure);
+                }
+                // The target under the view's substitution, which the
+                // table holds for the declaration a name lookup reaches.
+                let (alias, target) = self.alias_targets.get(id.name())?;
+                let reached = self.index.module(id.name()).map(|(reached, _)| reached);
+                (*alias
+                    && reached == Some(idx)
+                    && target.head_opt().is_some_and(|head| head.is_persistent()))
+                .then(|| WorldChild::Alias(**target))
             }
             _ => None,
         }
@@ -1125,6 +1357,16 @@ mod tests {
         chain: usize,
         /// The unit `Alias` is an alias of, in place of `Other_unit`.
         alias_of: Option<&'static str>,
+        /// A dotted alias target, in place of `alias_of`.
+        alias_path: Option<Path>,
+        /// Module types `Sig = { type u; let own: u }` and `Same = Sig`
+        /// (named through the unit's path), and children `Named: Same` and
+        /// `Opaque: S` (`S` is abstract).
+        named: bool,
+        /// Aliases `A0 = Unit.Inner` and `A<n> = Unit.A<n-1>`, this many.
+        alias_chain: usize,
+        /// With `named`: further children `Named<n>: Same`.
+        named_children: usize,
         /// Leave out the module type `S` and the modules `Alias` and
         /// `Inner`: no item of the unit then needs the component
         /// substitution when the view is built.
@@ -1308,15 +1550,72 @@ mod tests {
                     mtd_loc: crate::types::DeclLoc::none(),
                 },
             ));
+            if shape.named {
+                let modtype = |name: &str, mtd_type| {
+                    let id = Ident::create_local(name.to_string());
+                    let item = SignatureItem::SigModtype(
+                        id,
+                        ModtypeDeclaration {
+                            mtd_type: Some(mtd_type),
+                            mtd_attributes: vec![],
+                            mtd_loc: crate::types::DeclLoc::none(),
+                        },
+                    );
+                    (id, item)
+                };
+                let u = Ident::create_local("u");
+                let (sig, sig_item) = modtype(
+                    "Sig",
+                    ModuleType::MtySignature(Arc::new(vec![
+                        SignatureItem::SigType(u, Arc::new(abstract_decl()), RecStatus::TrecNot),
+                        value("own", ctx.new_generic_constr(Path::pident(u), vec![])),
+                    ])),
+                );
+                signature.push(sig_item);
+                let (same, same_item) = modtype("Same", ModuleType::MtyIdent(Path::pident(sig)));
+                signature.push(same_item);
+                let _ = same;
+                // A unit's signature names its own module types through
+                // its path.
+                let unit_path = Path::pident(Ident::create_persistent(&name));
+                signature.push(module(
+                    "Named",
+                    ModuleType::MtyIdent(Path::pdot(unit_path, "Same")),
+                ));
+                for n in 0..shape.named_children {
+                    signature.push(module(
+                        &format!("Named{n}"),
+                        ModuleType::MtyIdent(Path::pdot(unit_path, "Same")),
+                    ));
+                }
+                signature.push(module(
+                    "Opaque",
+                    ModuleType::MtyIdent(Path::pdot(unit_path, "S")),
+                ));
+            }
             signature.push(module(
                 "Alias",
                 ModuleType::MtyAlias(
                     AliasPresence::MtaAbsent,
-                    Arc::new(Path::pident(Ident::create_persistent(
-                        shape.alias_of.unwrap_or("Other_unit"),
-                    ))),
+                    Arc::new(shape.alias_path.unwrap_or_else(|| {
+                        Path::pident(Ident::create_persistent(
+                            shape.alias_of.unwrap_or("Other_unit"),
+                        ))
+                    })),
                 ),
             ));
+            for n in 0..shape.alias_chain {
+                let unit_path = Path::pident(Ident::create_persistent(&name));
+                let target = if n == 0 {
+                    Path::pdot(unit_path, "Inner")
+                } else {
+                    Path::pdot(unit_path, format!("A{}", n - 1))
+                };
+                signature.push(module(
+                    &format!("A{n}"),
+                    ModuleType::MtyAlias(AliasPresence::MtaAbsent, Arc::new(target)),
+                ));
+            }
             signature.push(module(
                 "Inner",
                 ModuleType::MtySignature(Arc::new(vec![SignatureItem::SigType(
@@ -1706,6 +2005,10 @@ mod tests {
             bare: false,
             chain: 0,
             alias_of: None,
+            alias_path: None,
+            named: false,
+            named_children: 0,
+            alias_chain: 0,
         };
         let unit = unit_of("Opened", shape);
         let view = view_of(&unit);
@@ -1875,7 +2178,7 @@ mod tests {
     fn structure_child(view: &Arc<ModuleView>, name: &str) -> Option<u32> {
         match view.world_child(name)? {
             (ordinal, WorldChild::Structure) => Some(ordinal),
-            (_, WorldChild::UnitAlias(_)) => None,
+            (_, WorldChild::Alias(_)) => None,
         }
     }
 
@@ -2084,6 +2387,215 @@ mod tests {
     }
 
     #[test]
+    fn a_child_typed_by_a_module_type_name_has_a_view_of_the_expansion() {
+        let unit = unit_of(
+            "Named_unit",
+            Shape {
+                named: true,
+                ..Shape::default()
+            },
+        );
+        let parent = view_of(&unit);
+        // `Named: Same`, `Same = Sig`, `Sig = { type u; let own: u }`.
+        let (ordinal, kind) = parent.world_child("Named").expect("a view key");
+        assert!(matches!(kind, WorldChild::Structure));
+        let ctx = compilation();
+        let view = crate::types::typecore::adopt_child_view(&parent, ordinal, &mut None, &ctx)
+            .expect("the expansion has a view");
+        assert_eq!(view.access_path().name(), format!("{}.Named", unit.ps_name));
+        let (_, _, own) = view.lookup_value_for_access("own").expect("the value");
+        match ctx.get_desc(own.val_type).into_desc() {
+            crate::types::type_expr::TypeDesc::Tconstr { path, .. } => {
+                assert_eq!(path.name(), format!("{}.Named.u", unit.ps_name));
+            }
+            _ => panic!("a constructor type"),
+        }
+        // Built once: the cell is the parent's.
+        let again =
+            crate::types::typecore::adopt_child_view(&parent, ordinal, &mut None, &compilation())
+                .unwrap();
+        assert!(Arc::ptr_eq(&view, &again));
+        assert_eq!(parent.children[ordinal as usize].builds.load(Ordering::Relaxed), 1);
+        // An abstract module type has no components (env.ml:1437-1439
+        // finds no manifest): no view.
+        assert!(parent.world_child("Opaque").is_none());
+    }
+
+    #[test]
+    fn expanding_module_type_names_costs_two_probes_per_child() {
+        // 10,000 children `Named<n>: Same` with `Same = Sig`: each child's
+        // expansion probes the name index for `Same` and for `Sig`,
+        // whatever the number of module types and children.
+        let steps = EXPAND_STEPS.with(|steps| steps.load(Ordering::Relaxed));
+        let unit = unit_of(
+            "Many_named",
+            Shape {
+                named: true,
+                named_children: 10_000,
+                ..Shape::default()
+            },
+        );
+        let parent = view_of(&unit);
+        let steps = EXPAND_STEPS.with(|steps| steps.load(Ordering::Relaxed)) - steps;
+        // `Named` and `Named<n>`: two probes; `Opaque: S`: one, and one of
+        // the unit's missing parent is not made.
+        assert_eq!(steps, 2 * 10_001 + 1);
+        assert_eq!(parent.expansions.iter().flatten().count(), 10_001);
+        let (ordinal, kind) = parent.world_child("Named9999").expect("a view key");
+        assert!(matches!(kind, WorldChild::Structure));
+        let view =
+            crate::types::typecore::adopt_child_view(&parent, ordinal, &mut None, &compilation())
+                .expect("the expansion has a view");
+        assert!(view.lookup_value_for_access("own").is_some());
+    }
+
+    #[test]
+    fn resolving_a_chain_of_aliases_costs_two_steps_per_link() {
+        // `A0 = Unit.Inner`, `A<n> = Unit.A<n-1>`, 10,000 long. Resolving
+        // the last alias resolves each target once: one step for the unit
+        // and one for the child, per link. The resolution and the adoption
+        // recurse over the chain, so the test runs on a thread with room
+        // for it.
+        const LINKS: usize = 10_000;
+        std::thread::Builder::new()
+            .stack_size(1 << 30)
+            .spawn(|| {
+                let unit = unit_of(
+                    "Alias_chain",
+                    Shape {
+                        alias_chain: LINKS,
+                        ..Shape::default()
+                    },
+                );
+                let parent = view_of(&unit);
+                let adopt_last = |ctx: &TypeContext| {
+                    let mut pers = crate::cmi::persistent_env::PersistentEnv::new();
+                    pers.set_in_process_mode(true);
+                    pers.insert_loaded_unit(unit.clone());
+                    ctx.set_persistent_env(pers.clone());
+                    let (ordinal, _) = parent
+                        .world_child(&format!("A{}", LINKS - 1))
+                        .expect("an alias of a path");
+                    let steps = crate::types::typecore::RESOLVE_ALIAS_STEPS.with(|s| s.get());
+                    let view = crate::types::typecore::adopt_child_view(
+                        &parent,
+                        ordinal,
+                        &mut Some(pers),
+                        ctx,
+                    )
+                    .expect("the last alias has a view");
+                    let steps =
+                        crate::types::typecore::RESOLVE_ALIAS_STEPS.with(|s| s.get()) - steps;
+                    (view, steps)
+                };
+                let first = compilation();
+                let (view, steps) = adopt_last(&first);
+                assert_eq!(steps, 2 * LINKS as u64);
+                assert!(view.lookup_type("u").is_some());
+                // Every alias view was built once.
+                let builds: u32 = parent
+                    .children
+                    .iter()
+                    .map(|cell| cell.builds.load(Ordering::Relaxed))
+                    .sum();
+                assert_eq!(builds as usize, LINKS + 1);
+                // A second compilation resolves the chain again (it loads
+                // the units itself) and builds nothing.
+                let (again, steps) = adopt_last(&compilation());
+                assert!(Arc::ptr_eq(&view, &again));
+                assert_eq!(steps, 2 * LINKS as u64);
+                let builds_after: u32 = parent
+                    .children
+                    .iter()
+                    .map(|cell| cell.builds.load(Ordering::Relaxed))
+                    .sum();
+                assert_eq!(builds_after, builds);
+                // Asking the same compilation again is one probe.
+                let (_, steps) = adopt_last(&first);
+                assert_eq!(steps, 0);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn an_alias_of_a_non_unit_adopts_its_target_view() {
+        let target = unit("Other", 0);
+        let target_path = Path::pdot(
+            Path::pident(Ident::create_persistent(&target.ps_name)), "Inner",
+        );
+        let holder = unit_of("Dep", Shape {
+            alias_path: Some(target_path),
+            ..Shape::default()
+        });
+        let parent = view_of(&holder);
+        let (ordinal, kind) = parent.world_child("Alias").unwrap();
+        assert!(matches!(kind, WorldChild::Alias(path) if path.same(&target_path)));
+        let ctx = compilation();
+        let mut pers = crate::cmi::persistent_env::PersistentEnv::new();
+        pers.set_in_process_mode(true);
+        pers.insert_loaded_unit(holder.clone());
+        pers.insert_loaded_unit(target.clone());
+        ctx.set_persistent_env(pers.clone());
+        let mut pers = Some(pers);
+        let view = crate::types::typecore::adopt_child_view(
+            &parent, ordinal, &mut pers, &ctx,
+        ).expect("an alias of a non-unit has a view");
+        let source = view.target_view().unwrap();
+        assert!(source.access_path().same(&target_path));
+        assert!(ctx.holds_view(
+            &QualifiedModuleComponentsCacheKey::new(*source.access_path(), None), source,
+        ));
+        let (_, declaration) = view.lookup_type("u").unwrap();
+        let manifest = declaration.type_manifest.expect("alias strengthens abstract type");
+        match ctx.get_desc(manifest).into_desc() {
+            crate::types::type_expr::TypeDesc::Tconstr { path, .. } => {
+                assert_eq!(path.name(), format!("{}.Inner.u", target.ps_name));
+            }
+            _ => panic!("a constructor type"),
+        }
+    }
+
+    #[test]
+    fn alias_values_are_rerooted_through_all_backing_views() {
+        let target = unit_of("Backing", Shape {
+            children: 1,
+            ..Shape::default()
+        });
+        let namespace = unit_of("Namespace", Shape {
+            alias_path: Some(Path::pident(Ident::create_persistent(&target.ps_name))),
+            ..Shape::default()
+        });
+        let holder = unit_of("Dep", Shape {
+            alias_path: Some(Path::pdot(
+                Path::pdot(Path::pident(Ident::create_persistent(&namespace.ps_name)), "Alias"),
+                "M0",
+            )),
+            ..Shape::default()
+        });
+        let parent = view_of(&holder);
+        let (ordinal, _) = parent.world_child("Alias").unwrap();
+        let ctx = compilation();
+        let mut pers = crate::cmi::persistent_env::PersistentEnv::new();
+        pers.set_in_process_mode(true);
+        for unit in [holder.clone(), namespace, target] {
+            pers.insert_loaded_unit(unit);
+        }
+        ctx.set_persistent_env(pers.clone());
+        let view = crate::types::typecore::adopt_child_view(
+            &parent, ordinal, &mut Some(pers), &ctx,
+        ).unwrap();
+        let (_, _, value) = view.lookup_value_for_access("own").unwrap();
+        match ctx.get_desc(value.val_type).into_desc() {
+            crate::types::type_expr::TypeDesc::Tconstr { path, .. } => {
+                assert_eq!(path.name(), format!("{}.Alias.u", holder.ps_name));
+            }
+            _ => panic!("a constructor type"),
+        }
+    }
+
+    #[test]
     fn an_alias_of_a_unit_has_one_view_named_through_the_alias() {
         let target = unit("Target", 3);
         let target_name: &'static str = Box::leak(target.ps_name.clone().into_boxed_str());
@@ -2096,7 +2608,9 @@ mod tests {
         );
         let parent = view_of(&holder);
         let (ordinal, kind) = parent.world_child("Alias").expect("an alias of a unit");
-        assert!(matches!(kind, WorldChild::UnitAlias(name) if name == target_name));
+        assert!(matches!(kind, WorldChild::Alias(path) if path.name() == target_name));
+        let target_unit = target.clone();
+        let target = AliasTarget::Unit(target);
         // Built once, whichever thread asks first.
         let barrier = Arc::new(std::sync::Barrier::new(16));
         let threads: Vec<_> = (0..16)
@@ -2112,7 +2626,7 @@ mod tests {
                             &ViewKey::Alias(&AliasKey {
                                 parent: &parent,
                                 ordinal,
-                                unit: &target,
+                                target: &target,
                             }),
                         )
                         .expect("the alias view builds")
@@ -2135,7 +2649,7 @@ mod tests {
         let mut pers = crate::cmi::persistent_env::PersistentEnv::new();
         pers.set_in_process_mode(true);
         pers.insert_loaded_unit(holder.clone());
-        pers.insert_loaded_unit(target.clone());
+        pers.insert_loaded_unit(target_unit.clone());
         ctx.set_persistent_env(pers.clone());
         let mut pers = Some(pers);
         let view = crate::types::typecore::adopt_child_view(&parent, ordinal, &mut pers, &ctx)
@@ -2173,13 +2687,28 @@ mod tests {
             &ViewKey::Alias(&AliasKey {
                 parent: &parent,
                 ordinal,
-                unit: &target,
+                target: &target,
             }),
             &view,
         );
-        // A structure child of an alias view is no view key: its items are
-        // strengthened against the unit's child.
-        assert!(view.world_child("Inner").is_none());
+        // A structure child of an alias view targets the source's child.
+        let (inner_ordinal, kind) = view.world_child("Inner").unwrap();
+        assert!(matches!(kind, WorldChild::Alias(path)
+            if path.name() == format!("{target_name}.Inner")));
+        let inner = crate::types::typecore::adopt_child_view(
+            &view, inner_ordinal, &mut pers, &ctx,
+        ).expect("a structure child of an alias has a view");
+        let source = inner.target_view().expect("the target is a child view");
+        assert_eq!(source.access_path().name(), format!("{target_name}.Inner"));
+        let other = compilation();
+        other.adopt_view(
+            QualifiedModuleComponentsCacheKey::new(*inner.access_path(), None),
+            inner.clone(),
+        );
+        assert!(other.holds_view(
+            &QualifiedModuleComponentsCacheKey::new(*source.access_path(), None),
+            source,
+        ));
 
         // A compilation that cannot load the unit has no view of the alias.
         let blind = compilation();
@@ -2232,7 +2761,7 @@ mod tests {
                     &ViewKey::Alias(&AliasKey {
                         parent: &parent,
                         ordinal,
-                        unit: &target,
+                        target: &AliasTarget::Unit(target.clone()),
                     }),
                 )
                 .expect("the alias view builds");

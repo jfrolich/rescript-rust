@@ -347,9 +347,101 @@ impl crate::types::context::CheckMode {
     }
 }
 
+/// Unit checker selection; the old checker remains the default during construction.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CheckerChoice {
+    /// Use the existing checker.
+    #[default]
+    Old,
+    /// Offer units to the new checker first.
+    New,
+    /// Compare both checkers on covered units.
+    Both,
+}
+
+impl CheckerChoice {
+    /// O(1): parse one of three fixed-length mode names.
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "" | "old" => Some(Self::Old),
+            "new" => Some(Self::New),
+            "both" => Some(Self::Both),
+            _ => None,
+        }
+    }
+
+    /// O(1) after the first call; reads the environment once per process.
+    pub fn from_env() -> Self {
+        static CHOICE: std::sync::OnceLock<CheckerChoice> = std::sync::OnceLock::new();
+        *CHOICE.get_or_init(|| {
+            let value = std::env::var("RESCRIPT_CHECKER").unwrap_or_default();
+            Self::parse(&value).unwrap_or_else(|| {
+                eprintln!("checker choice must be old, new or both; got `{value}`");
+                std::process::exit(2)
+            })
+        })
+    }
+}
+
+#[cfg(test)]
+mod checker_choice_tests {
+    use super::CheckerChoice;
+
+    #[test]
+    fn checker_choice_names_and_layout() {
+        assert_eq!(std::mem::size_of::<CheckerChoice>(), 1);
+        assert_eq!(CheckerChoice::parse(""), Some(CheckerChoice::Old));
+        assert_eq!(CheckerChoice::parse("old"), Some(CheckerChoice::Old));
+        assert_eq!(CheckerChoice::parse("new"), Some(CheckerChoice::New));
+        assert_eq!(CheckerChoice::parse("both"), Some(CheckerChoice::Both));
+        assert_eq!(CheckerChoice::parse("other"), None);
+    }
+
+    #[test]
+    fn both_compares_fake_observations_but_does_not_force_declined_ones() {
+        use super::checker_results_agree;
+        use crate::tc::Declined;
+        // Signature, ordered diagnostics, and unit reads are independent observations.
+        let old = ("signature", "warning:1:2", [3, 5]);
+        assert!(checker_results_agree(Ok(old), || old));
+        assert!(!checker_results_agree(Ok(("different", old.1, old.2)), || old));
+        assert!(!checker_results_agree(Ok((old.0, "warning:2:3", old.2)), || old));
+        assert!(!checker_results_agree(Ok((old.0, old.1, [3, 6])), || old));
+        assert!(checker_results_agree::<()>(Err(Declined::NotBuilt), || panic!("declined")));
+    }
+}
+
+/// O(1) on a decline; otherwise the cost of producing and comparing observations.
+/// The old observations are lazy: declined units need no canonicalization.
+fn checker_results_agree<T: PartialEq>(
+    new: Result<T, crate::tc::Declined>,
+    old: impl FnOnce() -> T,
+) -> bool {
+    match new {
+        Err(crate::tc::Declined::NotBuilt) => true,
+        Ok(new) => new == old(),
+    }
+}
+
+/// O(1) per unit, before the old checker can emit warnings or publish anything.
+/// No successful new result exists in R0; Both's comparison is consequently empty.
+fn offer_unit_to_checker(choice: CheckerChoice, filename: &str) {
+    if choice == CheckerChoice::Old {
+        return;
+    }
+    let new = crate::tc::check_unit();
+    let Err(reason) = new;
+    log::debug!(target: "rescript_checker", "tc-declined {reason:?} {filename}");
+    if choice == CheckerChoice::Both {
+        assert!(checker_results_agree(new.map(|never| match never {}), || ()));
+    }
+}
+
 /// Compiler options that can be passed to the driver.
 #[derive(Clone)]
 pub struct CompilerOptions {
+    /// Selected once at setup; all modes currently use the old checker.
+    pub checker: CheckerChoice,
     /// Optional derived-code census output, read once when options are created.
     pub derived_census: Option<PathBuf>,
     /// The path derived items take, read once when options are created.
@@ -644,6 +736,7 @@ impl CompilerOptions {
 impl Default for CompilerOptions {
     fn default() -> Self {
         Self {
+            checker: CheckerChoice::from_env(),
             derived_census: Self::derived_census_from_env(),
             derived_path: DerivedPath::from_env(),
             backend: crate::bir::shadow::BackendMode::from_env(),
@@ -10166,6 +10259,7 @@ fn type_structure_two_modes<T, R>(
 ) -> (TypeContext, R) {
     use crate::types::context::CheckMode;
     let CheckUnit { arena, filename, options, derived_plans, .. } = unit;
+    offer_unit_to_checker(options.checker, filename);
     let mut attempt = CheckAttempt { mode: CheckMode::from_env(), derived_plans };
     loop {
         let type_ctx = fresh_type_context();
