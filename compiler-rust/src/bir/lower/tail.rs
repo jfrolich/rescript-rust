@@ -381,4 +381,77 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn value_return_self_call_matches_legacy_jump() {
+        use crate::lambda::{arena::LamArena, lam_compile::{LambdaCompiler, TailLoopState}};
+        use crate::js_ir::arena::{JsDepsProgram, JsProgram};
+        let mut a = LamArena::new();
+        let (f, x) = (ident("f", 1), ident("x", 2));
+        let argument = a.const_(crate::lambda::lam_constant::Constant::int(3));
+        let body = call(&mut a, f, &[argument]);
+        let root = wrap(&mut a, f, &[x], body);
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let View::LetRec { first, values, .. } = input.arena.view(input.root) else { panic!() };
+        let function = values[0];
+        let View::Fun { body: source_body, .. } = input.arena.view(function) else { panic!() };
+        let mut state = State::new(input);
+        state.register_tail_function(function, first);
+        let cx = Cx::new(Cont::Value(Tail::Return(Ret::Named { loop_: Some(LoopRef(0)), in_catch: false })));
+        let output = state.probe(cx, source_body).unwrap();
+        let lowered = state.complete(cx, output);
+        assert_eq!(lowered.finished, Finished::True);
+        let actual = crate::bir::bridge_j::export_js(&lowered.program).unwrap();
+        let mut compiler = LambdaCompiler::new();
+        let mut frame = TailLoopState { tail_targets: vec![f], params: vec![x], new_params: Default::default(), triggered: false };
+        let mut block = compiler.compile_tail_loop_return_block(&mut a, body, &mut frame);
+        assert!(frame.triggered);
+        // The migration exporter retains the final Out value as a sentinel.
+        let unit = crate::js_ir::build::exp::undefined(false, &mut compiler.j);
+        block.push(compiler.j.stmt(crate::js_ir::arena::StmtKind::Exp(unit)));
+        let expected = JsDepsProgram { program: JsProgram::new_in(block, vec![], compiler.j), modules: vec![], side_effect: None };
+        let print = |p: &JsDepsProgram| crate::js_ir::print_deps_program_with_directives_and_options(p, None, &[], false, false, false);
+        assert_eq!(print(&actual), print(&expected));
+    }
+
+    #[test]
+    fn self_call_sequences_effectful_arguments_before_copy_assignments() {
+        use crate::lambda::arena::LamArena;
+        let mut a = LamArena::new();
+        let (f, x, y) = (ident("f", 1), ident("x", 2), ident("y", 3));
+        let x_arg = a.var(x);
+        let first = call(&mut a, ident("effect", 10), &[x_arg]);
+        let value = call(&mut a, ident("effect", 10), &[]);
+        let result = a.var(x);
+        let second = a.let_(LetKind::Strict, ident("held", 11), value, result);
+        let body = call(&mut a, f, &[first, second]);
+        let root = wrap(&mut a, f, &[x, y], body);
+        super::super::oracle_tests::compare(a, root);
+    }
+
+    #[test]
+    fn ten_thousand_parameter_copies_have_bounded_sort_and_single_emission() {
+        use crate::lambda::arena::LamArena;
+        let mut a = LamArena::new();
+        let f = ident("f", 1);
+        let params: Vec<_> = (0..10_000).map(|i| ident("p", i + 2)).collect();
+        let args: Vec<_> = params.iter().rev().map(|&p| a.var(p)).collect();
+        let body = call(&mut a, f, &args);
+        let root = wrap(&mut a, f, &params, body);
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let nodes = input.arena.nodes.len();
+        let root = input.root;
+        let mut state = State::new(input);
+        let output = state.probe(Cx::value(), root).unwrap();
+        assert_eq!(state.source_steps, nodes);
+        assert_eq!(state.tail_arguments, 10_001);
+        assert_eq!(state.tail_parameters, 10_000);
+        assert_eq!(state.tail_body_statements, 10_001);
+        assert!(state.tail_sort_comparisons <= 200_000);
+        eprintln!("10,000 parameters: visits={}, arguments={}, parameters={}, body statements={}, sort comparisons={}",
+            state.source_steps, state.tail_arguments, state.tail_parameters, state.tail_body_statements, state.tail_sort_comparisons);
+        let lowered = state.complete(Cx::value(), output);
+        lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
+    }
+
 }

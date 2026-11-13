@@ -1800,7 +1800,9 @@ Design (`compile_recursive_let`, `lam_compile.ml:507-575`; `compile_apply`,
   identifiers reaches the output (section 9).
 
 The L arena records whether a recursive function has a self tail call during
-construction/import, not lowering. Tail-position children concatenate bounded
+construction/import, not lowering. Tail candidates are concatenated in the
+same `control_facts` immediate-child fold as `HAS_EXIT`, `HAS_STATEMENT` and
+`TRIVIAL_UNIT`. Tail-position children concatenate bounded
 segments of pooled callee candidates; a `LetRec` matches the candidates of
 each function against its binding. Candidate cells survive node relocation,
 and the independent validator rebuilds the answer. The lowering reads this
@@ -2849,3 +2851,27 @@ Each with the experiment that settles it; resolved rows retain their measured re
 | Q9 | The exact order and holding rules of external arguments (S3.8) | the table S3.8 writes first, from X |
 | Q10 | Termination measures for J-E7 and J-S3 (section 6) | S3.2 |
 | Q11 | Whether invariant P1 (1.5) holds for every construct: `probe` then `realize` equals a direct lowering | the debug assertion, on from S3.3 |
+
+### S3.6 measured lowering work
+
+The S3.6 cost tests count source entries and tail-loop work independently:
+
+| Shape | Source entries | Sequenced tail operands | Parameters | Body statements moved |
+| --- | ---: | ---: | ---: | ---: |
+| 10,000 distinct switch cases, each a self tail call | 30,005 | 20,000 | 1 | 1 |
+| Same switch, each recursive call an argument of another call | 50,005 | 0 | 0 | 0 |
+| 10,000 recursive function members without tail calls | 20,002 | 0 | 0 | 0 |
+| One self call exchanging 10,000 parameters | 10,005 | 10,001 | 10,000 | 10,001 |
+
+Both switch functions are lowered once; the second creates no loop record.
+The 10,000-parameter case takes 9,999 sort comparisons and emits each alias
+and assignment once.
+Construction of 10,001 tail candidates takes 780,060 arena visits, including
+all ordinary node construction facts. The two endpoint and candidate-cell
+representations are each 8 bytes; the recursive group and loop frame are each
+16 bytes. Loop headers use a pooled parameter-reference run because a mix of
+unchanged parameters and lazily created copies is not a contiguous VarId run.
+
+The default compiler still uses the legacy backend; this slice itself saves
+nothing on that path. The separate short-circuit correction changes default
+JavaScript only where the old loop probe differed from the OCaml reference.
