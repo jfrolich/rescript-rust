@@ -28,13 +28,17 @@ def summarize(rows):
     result.update(modules=0, bindings=[0, 0], syntax_nodes=[0, 0],
                   checker_counters=[[0] * 4, [0] * 4], counter_modules=0, paths={}, path_timing_records=0,
                   planned_typecheck_ns=0, planned_conversion_ns=0, unplanned_forms={},
-                  general_typecheck_ns=0, general_conversion_ns=0, general_costs={}, general_cost_records=0)
+                  general_typecheck_ns=0, general_conversion_ns=0, general_costs={}, general_cost_records=0, failed_obligations={})
     shapes = collections.defaultdict(list)
     templates = []
     template_sizes = []
     for row in rows:
         if row.get("version") != 1:
             raise ValueError(f"Unsupported census version: {row.get('version')!r}")
+        if row.get("event") == "failed_obligation":
+            key = f"{row['obligation']} / {row['type_shape']}"
+            result["failed_obligations"][key] = result["failed_obligations"].get(key, 0) + 1
+            continue
         result["modules"] += 1
         for reason, count in row.get("paths", {}).items():
             if reason == "unplanned_forms":
@@ -142,6 +146,10 @@ def markdown(summary):
         lines += ["", "| Path | Bindings |", "|---|---:|"]
         for reason, count in sorted(summary["paths"].items()):
             lines.append(f"| {reason} | {count} |")
+    if summary["failed_obligations"]:
+        lines += ["", "| Failed obligation / expected type shape | Abandoned attempts |", "|---|---:|"]
+        for key, count in sorted(summary["failed_obligations"].items()):
+            lines.append(f"| {key} | {count} |")
     if summary["general_cost_records"]:
         lines += ["", f"General cost availability: {summary['general_cost_records']}/{summary['modules']} records.",
                   "", "| General reason | Bindings | Generated body syntax nodes | Typecheck ms |", "|---|---:|---:|---:|"]

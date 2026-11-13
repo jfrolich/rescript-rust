@@ -321,6 +321,8 @@ pub struct Discharged {
 /// The steps of a discharge, for the tests that prove its cost. The checker
 /// passes `()`, whose methods are empty.
 pub trait Steps {
+    /// O(1): observe the current obligation; the normal path erases this call.
+    fn obligation(&mut self, _obligation: Obligation) {}
     /// An environment lookup.
     fn lookup(&mut self);
     /// An instance of a looked-up value's type.
@@ -338,6 +340,23 @@ impl Steps for () {
     fn unification(&mut self) {}
 }
 
+/// Last obligation visited, only when the census is enabled.
+#[derive(Default)]
+struct CensusSteps {
+    last: Option<Obligation>,
+}
+
+impl Steps for CensusSteps {
+    /// O(1): overwrite the inline observation without allocating.
+    fn obligation(&mut self, obligation: Obligation) { self.last = Some(obligation); }
+    /// O(1): no additional operation counters in this observer.
+    fn lookup(&mut self) {}
+    /// O(1): no additional operation counters in this observer.
+    fn instance(&mut self) {}
+    /// O(1): no additional operation counters in this observer.
+    fn unification(&mut self) {}
+}
+
 /// Discharge the obligations of a derived item and enter its bindings.
 /// Cost: O(obligations + skeleton nodes of the item): per value obligation
 /// one environment lookup, one instance of the value's type and one
@@ -351,7 +370,28 @@ pub fn discharge(
     env: &Env,
     item: DerivedIdx,
 ) -> Result<Discharged, Fallback> {
-    discharge_counting(tctx, env, item, &mut ())
+    if tctx.derived_census.is_none() {
+        return discharge_counting(tctx, env, item, &mut ());
+    }
+    let mut steps = CensusSteps::default();
+    let result = discharge_counting(tctx, env, item, &mut steps);
+    if result.is_err() {
+        let (kind, shape) = match steps.last {
+            Some(Obligation::Value { .. }) => ("value", "codec_function"),
+            Some(Obligation::Type { .. }) => ("type", "named_type"),
+            Some(Obligation::Label { .. }) => ("label", "record"),
+            Some(Obligation::Constructor { of, .. }) => ("constructor", match of {
+                Owner::Option => "option",
+                Owner::Result => "result",
+                Owner::Declared => "declared_variant",
+                Owner::Type => "qualified_variant",
+            }),
+            Some(Obligation::Literal { .. }) => ("literal", "constant"),
+            None => ("binding", "binding_type"),
+        };
+        tctx.derived_census.as_ref().unwrap().failed_obligation(kind, shape);
+    }
+    result
 }
 
 /// [`discharge`], counting its steps.
@@ -470,6 +510,7 @@ fn discharge_binding(
     let mut record_expression: Option<(crate::types::decl::LabelArrayRef, u32, u32)> = None;
     for slot in binding.obligations.range() {
         let obligation = ObligationIdx(slot as u32);
+        steps.obligation(plans.obligation(obligation));
         // Whether the obligation is a label of the record expression or
         // pattern being discharged.
         let grouped = matches!(
@@ -1554,4 +1595,18 @@ pub(crate) mod tests {
             }
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn census_observer_has_one_inline_obligation() {
+    assert_eq!(std::mem::size_of::<CensusSteps>(), 16);
+    let mut observer = CensusSteps::default();
+    for _ in 0..10_000 {
+        observer.obligation(Obligation::Type {
+            name: crate::parse_arena::LidentIdx(0),
+            name_loc: crate::parse_arena::LocIdx(0), arity: 0, var: NO_VAR,
+        });
+    }
+    assert!(matches!(observer.last, Some(Obligation::Type { .. })));
 }

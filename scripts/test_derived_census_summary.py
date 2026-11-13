@@ -100,6 +100,15 @@ class DerivedCensusSummaryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             summarize([item])
 
+    def test_failed_attempt_does_not_double_count_bindings(self):
+        event = dict(version=1, event="failed_obligation", module="example",
+                     obligation="constructor", type_shape="result")
+        result = summarize([event, row()])
+        self.assertEqual(result["modules"], 1)
+        self.assertEqual(result["bindings"], [3, 2])
+        self.assertEqual(result["failed_obligations"], {"constructor / result": 1})
+        self.assertIn("constructor / result", markdown(result))
+
     def test_counter_sides(self):
         item = row()
         item["checker_counters"] = [[1, 2, 3, 4], [10, 20, 30, 40]]

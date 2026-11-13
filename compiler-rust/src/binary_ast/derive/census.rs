@@ -5,6 +5,8 @@ use serde::Serialize;
 use crate::parse_arena::ParseArena;
 use crate::parser::ast::{StructureItem, StructureItemDesc};
 
+static OUTPUT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Exact item attribution or an explicitly labelled whole-module estimate.
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 pub struct Pair {
@@ -181,6 +183,22 @@ impl Census {
         self.printing = Pair::estimate(print_ns, self.syntax_nodes);
         self.lowering = Pair::estimate(nanos(s.codegen).saturating_sub(print_ns), self.syntax_nodes);
     }
+    /// O(module name bytes): append one failure event, not a second module
+    /// census. Called once per abandoned unit, never per successful obligation.
+    pub(crate) fn failed_obligation(&self, kind: &'static str, shape: &'static str) {
+        use std::io::Write;
+        let event = serde_json::json!({"version": 1, "event": "failed_obligation",
+            "module": self.module, "obligation": kind, "type_shape": shape});
+        let mut encoded = serde_json::to_vec(&event).expect("failure census is serializable");
+        encoded.push(b'\n');
+        let _guard = OUTPUT.lock().unwrap_or_else(|e| e.into_inner());
+        match std::fs::OpenOptions::new().create(true).append(true).open(&self.output)
+            .and_then(|mut output| output.write_all(&encoded))
+        {
+            Ok(()) => {},
+            Err(error) => eprintln!("derived census: {error}"),
+        }
+    }
     /// O(output bytes): count bytes/lines without allocating per line, then append
     /// one JSON line under a process-wide output lock (one acquisition per module).
     pub fn finish(&mut self, outputs: impl Iterator<Item = impl AsRef<str>>) -> std::io::Result<()> {
@@ -195,7 +213,6 @@ impl Census {
         self.js_lines = Pair::estimate(lines, self.syntax_nodes);
         let mut encoded = serde_json::to_vec(self)?;
         encoded.push(b'\n');
-        static OUTPUT: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _guard = OUTPUT.lock().unwrap_or_else(|e| e.into_inner());
         std::fs::OpenOptions::new().create(true).append(true).open(&self.output)?.write_all(&encoded)
     }
