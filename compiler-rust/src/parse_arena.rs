@@ -547,6 +547,9 @@ pub struct ParseArena {
     /// Derived structure-value groups, indexed by their binding-list start.
     /// Only group starts have a bit; no source-location or identifier keys.
     derived_value_groups: Vec<u64>,
+    /// Plans of derived items: `StructureItemDesc::Pstr_derived` handles
+    /// index these pools.
+    plans: crate::binary_ast::derive::plan::Plans,
     /// Pools behind record field lists and match/try case lists.
     expr_field_lists: ListPool<ExpressionRecordField>,
     pat_field_lists: ListPool<PatternRecordField>,
@@ -590,6 +593,8 @@ pub struct ParseArena {
     /// Whether the builtin spice mapper stands in for a configured external
     /// spice derive (see `binary_ast::derive`).
     builtin_spice_disabled: bool,
+    /// The derive seam plans no item (`RESCRIPT_DERIVED_PATH=general`).
+    derived_plans_disabled: bool,
     /// `Experimental_features.is_enabled LetUnwrap` for the builtin PPX run on
     /// this arena, which decides the error a `let?` binding raises
     /// (bs_builtin_ppx.ml:273, 366, 565). Set by the rewrite entry points.
@@ -1076,6 +1081,7 @@ impl Default for ParseArena {
             type_lists: ListPool::default(),
             vb_lists: ListPool::default(),
             derived_value_groups: Vec::new(),
+            plans: Default::default(),
             derived_census: None,
             expr_field_lists: ListPool::default(),
             pat_field_lists: ListPool::default(),
@@ -1092,6 +1098,7 @@ impl Default for ParseArena {
             value_constraint_varify_errors: HashMap::new(),
             ppx_deferred_error: None,
             builtin_spice_disabled: false,
+            derived_plans_disabled: false,
             experimental_let_unwrap: false,
             used_attributes: std::sync::Mutex::new(HashSet::new()),
             has_gentype_annotations: false,
@@ -3018,6 +3025,18 @@ impl ParseArena {
         self.derived_value_groups[index / 64] |= 1 << (index % 64);
     }
 
+    /// The plan pools of derived items. Cost: O(1).
+    #[inline]
+    pub fn plans(&self) -> &crate::binary_ast::derive::plan::Plans {
+        &self.plans
+    }
+
+    /// The plan pools, for the seam that builds plans. Cost: O(1).
+    #[inline]
+    pub(crate) fn plans_mut(&mut self) -> &mut crate::binary_ast::derive::plan::Plans {
+        &mut self.plans
+    }
+
     /// Provenance of a structure value group, independent of names and locations.
     /// Cost: O(1), at most one word read, with no allocation or synchronization.
     pub fn is_derived_value_group(&self, list: VbList) -> bool {
@@ -3369,6 +3388,18 @@ impl ParseArena {
     /// Enable or disable the builtin spice mapper for this compilation.
     pub fn set_builtin_spice(&mut self, enabled: bool) {
         self.builtin_spice_disabled = !enabled;
+    }
+
+    /// Let the derive seam plan items, or keep every item on the general
+    /// path.
+    pub fn set_derived_plans(&mut self, enabled: bool) {
+        self.derived_plans_disabled = !enabled;
+    }
+
+    /// Whether the derive seam plans items. Cost: O(1).
+    #[inline]
+    pub fn derived_plans_enabled(&self) -> bool {
+        !self.derived_plans_disabled
     }
 
     /// Whether built-in Spice deriving is enabled for this parse.

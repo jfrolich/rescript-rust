@@ -38,6 +38,7 @@ pub mod context;
 pub mod ctype;
 pub mod decl;
 pub mod decl_loc;
+pub mod derived;
 pub mod dict_pattern;
 pub mod env;
 pub(crate) mod env_lazy;

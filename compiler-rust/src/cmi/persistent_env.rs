@@ -3040,8 +3040,7 @@ impl PersistentEnv {
         // The view of a unit the world owns is the same for every
         // compilation (OCaml builds `ps_comps` once per process): it is
         // built once per build and adopted here.
-        if alias_source.is_none()
-            && self.in_process_mode
+        if self.in_process_mode
             && let Some(view) =
                 crate::types::typecore::adopt_unit_view(&ps, components_key.clone(), ctx)
         {
@@ -4292,6 +4291,11 @@ thread_local! {
     /// Component substitutions built on this thread (one pass over a
     /// signature each).
     pub(crate) static SUBST_MAP_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Walks of one type that rewrite one path prefix
+    /// (`rewrite_type_expr_by_path_prefix`).
+    pub(crate) static TYPE_PREFIX_WALKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Signature items those builds visited.
+    pub(crate) static SUBST_MAP_ITEMS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 fn build_subst_maps(
@@ -4300,7 +4304,10 @@ fn build_subst_maps(
     ctx: &TypeContext,
 ) -> SubstMaps {
     #[cfg(test)]
-    SUBST_MAP_BUILDS.with(|builds| builds.set(builds.get() + 1));
+    {
+        SUBST_MAP_BUILDS.with(|builds| builds.set(builds.get() + 1));
+        SUBST_MAP_ITEMS.with(|items| items.set(items.get() + sig_items.len() as u64));
+    }
     let mut maps = SubstMaps {
         protected_module_head: nonpersistent_path_head(module_path),
         ..SubstMaps::default()
@@ -5307,6 +5314,58 @@ impl ComponentSubst {
             *module_type =
                 crate::types::typecore::copy_lookup_module_type_for_subst(module_type, ctx);
             freshen_module_type_bound_idents_with_maps(module_type, &self.0, ctx);
+        }
+    }
+
+    /// [`freshen_component_module_declaration_bound_idents`] without
+    /// building the substitution again: one copy of the declaration's
+    /// module type (`Subst.modtype sub md.md_type`, env.ml:475-477), none
+    /// for an alias of a persistent unit, which names no item of the
+    /// signature and binds nothing.
+    pub(crate) fn freshen_module_declaration(&self, md: &mut ModuleDeclaration, ctx: &TypeContext) {
+        if let ModuleType::MtyAlias(_, target) = &md.md_type
+            && let PathView::Pident(target) = target.view()
+            && target.is_persistent()
+        {
+            return;
+        }
+        md.md_type = crate::types::typecore::copy_lookup_module_type_for_subst(&md.md_type, ctx);
+        freshen_module_type_bound_idents_with_maps(&mut md.md_type, &self.0, ctx);
+    }
+
+    /// What a child component table's signature gets from its parent's
+    /// substitution (this one, of `parent_sig` at `parent_module_path`):
+    /// [`substitute_type_paths_in_child_sig`] and
+    /// [`substitute_module_alias_paths_in_child_sig`] without building the
+    /// parent's maps again. One walk of the child's type nodes and one of
+    /// its items; a child type whose manifest is its own name also scans
+    /// the parent's items for a type of that name.
+    pub(crate) fn substitute_child_signature(
+        &self,
+        child_sig: &mut [SignatureItem],
+        parent_sig: &[SignatureItem],
+        parent_module_path: &Path,
+        ctx: &TypeContext,
+    ) {
+        substitute_type_paths_in_sig_with_maps(child_sig, &self.0, ctx);
+        restore_child_self_manifests_from_parent_scope(
+            child_sig,
+            parent_sig,
+            parent_module_path,
+            ctx,
+        );
+        for item in child_sig.iter_mut() {
+            if let SignatureItem::SigModule(_, md, _) = item
+                && let ModuleType::MtyAlias(_, path) = &mut md.md_type
+            {
+                *path = substitute_shared_module_path(
+                    ctx,
+                    path,
+                    &self.0.module_stamp_map,
+                    &self.0.module_name_map,
+                    self.0.protected_module_head.as_ref(),
+                );
+            }
         }
     }
 
@@ -6364,6 +6423,34 @@ pub fn substitute_type_paths_in_value_with_maps(
     module_path: &Path,
     ctx: &TypeContext,
 ) {
+    substitute_value_type_paths(desc, value_maps, sig_items, module_path, true, ctx);
+}
+
+/// The component substitution of one value (`Subst.value_description sub
+/// decl`, env.ml:1537) for a builder that has put the value's type at
+/// `module_path` already when the module is reached through an alias (one
+/// rewrite of the whole source prefix): the per-item re-rooting of
+/// [`substitute_type_paths_in_value_with_maps`], one walk of the type for
+/// every type and module of the signature, would find nothing. One walk of
+/// the value's type.
+pub(crate) fn substitute_value_type_paths_at_component(
+    desc: &mut crate::types::decl::ValueDescription,
+    value_maps: &ValueSubstMaps,
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+    ctx: &TypeContext,
+) {
+    substitute_value_type_paths(desc, value_maps, sig_items, module_path, false, ctx);
+}
+
+fn substitute_value_type_paths(
+    desc: &mut crate::types::decl::ValueDescription,
+    value_maps: &ValueSubstMaps,
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+    reroot_alias_sources: bool,
+    ctx: &TypeContext,
+) {
     let maps = &value_maps.maps;
     let direct_type_name_map = &value_maps.direct_type_name_map;
     let type_stamp_map = &maps.type_stamp_map;
@@ -6389,6 +6476,9 @@ pub fn substitute_type_paths_in_value_with_maps(
 
     let mut visited = visit_set();
     substitute_type_expr_path(desc.val_type, paths, ctx, &mut visited);
+    if !reroot_alias_sources {
+        return;
+    }
 
     for alias_source in component_alias_sources(module_path, ctx) {
         for item in sig_items {
@@ -7509,6 +7599,8 @@ pub fn rewrite_type_expr_by_path_prefix(
     new_prefix: &Arc<Path>,
     ctx: &TypeContext,
 ) {
+    #[cfg(test)]
+    TYPE_PREFIX_WALKS.with(|walks| walks.set(walks.get() + 1));
     let mut visited = visit_set();
     rewrite_type_expr_by_path_prefix_in(ty_ref, old_prefix, new_prefix, ctx, &mut visited);
 }

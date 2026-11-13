@@ -998,3 +998,20 @@ before and 67,508,249,057 after (-0.0213%); generated outputs are identical.
 The independent checker comparison reports no differences in 3,735
 signatures, diagnostics from 18 files, or 3,980 generated files. These small
 ordinary-project differences are measurement variation, not intended savings.
+
+### Integration with assignment/exception lowering
+
+After merging trunk `1878df548`, the baseline was regenerated again with
+`python3 scripts/test_backend_coverage.py --record`, not resolved by choosing
+one side of the conflicting JSON. Runtime lower coverage is now 102 identical
+of 113 units, with let rec 3 and loop 8, exactly half of trunk's 204 of 226
+and its unsupported counts. Every runtime stage has 113 units; all fixtures
+and tests/tests entries equal trunk (lower: fixtures 502/593, tests/tests
+619/730). The assignment and exception lowering improvements are retained.
+
+The instruction measurements above describe the pre-merge candidate against
+`37ba9b513`, not an isolated measurement against the newer trunk. After the
+merge, Rewatch debug/release builds, its 205 unit tests plus eight integration
+snapshot tests, the runtime compile-count regression, and JavaScript parity
+(730/730 plus focused fixtures) pass again. The PR's final Instruction count
+CI comparison measures against the updated base.

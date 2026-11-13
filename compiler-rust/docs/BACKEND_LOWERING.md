@@ -1208,7 +1208,7 @@ frames and `switch_depth = 0` (row K10).
 
 ### 3.12 `Try`, `TryFinally`, `LetRec`; source locations
 
-`Try` and `TryFinally` are 5.3; `LetRec` is 5.2.
+`Try` and `TryFinally` are 5.5; `LetRec` is 5.3.
 
 Source locations (only with source maps on; `source_map_enabled`):
 
@@ -2098,6 +2098,19 @@ function g(x) {
 
 ### 5.5 `Try`, `TryFinally`, `Praise`
 
+S3.7a implementation: exception-region selection reads no subtree flags and
+walks no body. `TryFinally` inspects only the immediate body tag to fuse a
+catch. Saved operands and completed blocks live in a dense frame pool; the
+source traversal carries a four-byte frame index. The 10,000-deep test visits
+20,001 source occurrences and copies at most 20,000 statements in every
+continuation. A 40,001-node body still takes one form-selection operation.
+
+Integration correction: when cross-module inlining borrows the cold pools
+from J, the source function-owner table must first be extended to cover J-only
+headers (for example a lowered one-unit-argument closure). Otherwise the next
+imported function header indexes beyond that table. This does not change the
+lowering rules or the default backend path.
+
 Design (`compile_try`, `lam_compile.ml:1514-1565`).
 
 | Continuation | `Try(body, exn, handler)` | Legacy |
@@ -2433,9 +2446,9 @@ reuse. `Var` is an operation of both levels and carries neither L flag.
 | label numbers (4.5) | five integers per output that has labels; one prefix sum per group | linear in the labels and conditionals of a group that has labels |
 | `realize` | each node of a `Free` once | a `Free` is realized once |
 | a conditional (3.6) | constant, plus the statements of a branch that becomes a list (copied once) or is discarded; a branch kept as the statements after a guard is not read | each statement is written once and copied to a list once. Measured at 10,000 nested conditionals whose innermost branch needs a statement: 20,001 copies in **V** and **A**, 10,000 in **R** |
-| row R5 step 0 | the `Let`/`Seq` spine of both branches, in a function that returns unit | a spine node belongs to one conditional |
+| row R5 step 0 | one `TRIVIAL_UNIT` flag read per branch | maintained with `HAS_EXIT` and `HAS_STATEMENT` by `Bir::control_facts` during construction/import and repair; independently checked by `Bir::validate` |
 | row R5 step 1 | the expression statements that lead each branch, stopping at the first other statement | a statement leads the branch of one conditional: an enclosing branch starts with a guard or with other statements, unless a test in between is a boolean literal (rule 0 keeps its branch without a guard) |
-| `S.if_` rules that need a rewrite (7 to 10, and 0 to 6 outside **R**) | `norm::js3_simplify_if` on two vectors: the statements of both branches, and two allocations | linear; taken only when `plain_if` says a rule applies. Open: porting J-S3 to list handles removes the vectors |
+| `S.if_` | `norm::js3_simplify_if` takes two list-pool handles; shared rules 0 to 6 also accept statement-stack run handles so retained tails stay in place | consumed statements and shells, plus structural comparisons and J expression rules; no per-branch vectors |
 
 S3.9 primitive costs: the resume is two `u32` handles (8 bytes), retaining
 an existing source-list handle rather than allocating an operand vector. Up to

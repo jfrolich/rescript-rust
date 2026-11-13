@@ -5660,6 +5660,7 @@ fn private_extension_item_allowed(item: &StructureItem, arena: &ParseArena) -> b
     match &item.pstr_desc {
         StructureItemDesc::Pstr_eval(_)
         | StructureItemDesc::Pstr_value(_)
+        | StructureItemDesc::Pstr_derived(_)
         | StructureItemDesc::Pstr_primitive(_)
         | StructureItemDesc::Pstr_typext(_)
         | StructureItemDesc::Pstr_exception(_) => true,
@@ -9793,10 +9794,12 @@ fn rewrite_structure_impl(
                         if is_structure_mapper_extension(work, arena) {
                             mapped.push(work.clone());
                         } else if apply_spice {
+                            // The run becomes the body of a local module.
                             mapped.extend(try_rewrite_structure_item(
                                 work,
                                 arena,
                                 spice_mapper_active,
+                                derive::Scope::Nested,
                             )?);
                         } else {
                             mapped.extend(rewrite_structure_item_no_spice(work, arena));
@@ -9843,6 +9846,7 @@ fn rewrite_structure_unit(
                     item,
                     arena,
                     spice_mapper_active,
+                    derive::Scope::TopLevel,
                 )?);
             } else {
                 result.extend(rewrite_structure_item_no_spice(item, arena));
@@ -9868,6 +9872,7 @@ fn rewrite_structure_unit(
                     item,
                     arena,
                     spice_mapper_active,
+                    derive::Scope::TopLevel,
                 )?);
             } else {
                 result.extend(rewrite_structure_item_no_spice(item, arena));
@@ -9880,6 +9885,7 @@ fn rewrite_structure_unit(
                     item,
                     arena,
                     spice_mapper_active,
+                    derive::Scope::TopLevel,
                 )?);
             } else {
                 result.extend(rewrite_structure_item_no_spice(item, arena));
@@ -10355,9 +10361,11 @@ fn try_rewrite_structure_item(
     item: &StructureItem,
     arena: &mut ParseArena,
     spice_mapper_active: bool,
+    scope: derive::Scope,
 ) -> PpxResult<Vec<StructureItem>> {
     let mut result = Vec::new();
-    for expanded in derive::expand_structure_item_with_mapper(item, arena, spice_mapper_active)
+    for expanded in
+        derive::expand_structure_item_with_mapper(item, arena, spice_mapper_active, scope)
         .map_err(PpxError::message)?
     {
         if let StructureItemDesc::Pstr_primitive(vd) = &expanded.pstr_desc {
@@ -10373,7 +10381,9 @@ fn try_rewrite_structure_item(
 fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<StructureItem> {
     let spice_mapper_active =
         derive::structure_uses_spice_mapper(std::slice::from_ref(item), arena);
-    try_rewrite_structure_item(item, arena, spice_mapper_active).unwrap_or_else(|error| {
+    // Reached for the items of a module expression only.
+    try_rewrite_structure_item(item, arena, spice_mapper_active, derive::Scope::Nested)
+        .unwrap_or_else(|error| {
         arena.defer_ppx_error(error);
         rewrite_structure_item_no_spice(item, arena)
     })
@@ -10510,6 +10520,16 @@ fn rewrite_structure_item_body(
                     pstr_loc: item.pstr_loc,
                 }]
             }
+        }
+        // A derived item keeps its plan; its general form is rewritten as the
+        // value group it is, which rewrites to one value group.
+        StructureItemDesc::Pstr_derived(idx) => {
+            let general = derive::general_item(arena, item.pstr_loc, *idx);
+            let [rewritten] = rewrite_structure_item_body(&general, arena).try_into().unwrap_or_else(
+                |_| unreachable!("a `let` group of generated bindings rewrites to one item"),
+            );
+            derive::set_general_form(arena, *idx, &rewritten.pstr_desc);
+            vec![item.clone()]
         }
         // Handle value bindings - need to rewrite expressions and patterns
         // Also handle @inline transformation
@@ -11548,7 +11568,7 @@ let e = () =>
         );
         assert!(source.iter().all(|item| !derive::is_derived_item(item, &arena)));
         let expanded: Vec<_> = source.iter().flat_map(|item|
-            derive::expand_structure_item_with_mapper(item, &mut arena, true).unwrap()
+            derive::expand_structure_item_with_mapper(item, &mut arena, true, derive::Scope::TopLevel).unwrap()
         ).collect();
         assert_eq!(expanded.iter().map(|item| derive::is_derived_item(item, &arena))
             .collect::<Vec<_>>(), vec![false, false, true, false, true, false]);
