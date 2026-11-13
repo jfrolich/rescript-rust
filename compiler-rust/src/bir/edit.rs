@@ -18,6 +18,14 @@ pub(crate) struct CopyScratch {
     nodes: HashMap<NodeId, NodeId>,
 }
 
+#[cfg(test)]
+impl CopyScratch {
+    pub(crate) fn capacities(&self) -> [usize; 8] {
+        [self.order.capacity(), self.stack.capacity(), self.vars.capacity(), self.funcs.capacity(),
+            self.catches.capacity(), self.labels.capacity(), self.js.capacity(), self.nodes.capacity()]
+    }
+}
+
 #[derive(Clone, Copy)]
 enum BinderRun {
     Empty,
@@ -1279,7 +1287,8 @@ impl Bir {
         stack.push(root);
         while let Some(id) = stack.pop() {
             order.push(id);
-            stack.extend(self.view(id).children());
+            let view = self.view(id);
+            stack.extend((0..view.child_count()).map(|i| view.child_at(i)));
         }
         vars.extend(renaming.iter().copied());
         for &id in order.iter() {
@@ -1364,7 +1373,8 @@ impl Bir {
             );
             let new = self.allocate(packed);
             self.bind(new);
-            for child in self.view(new).children() {
+            for i in 0..self.view(new).child_count() {
+                let child = self.view(new).child_at(i);
                 self.parents[child.index()] = Some(new);
                 let multiplier = self.edge_weight(new, child);
                 if !self.bulk && multiplier != 1 {

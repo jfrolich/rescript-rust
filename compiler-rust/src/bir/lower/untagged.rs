@@ -126,6 +126,7 @@ pub(super) struct Storage {
     copied_vars: Vec<(VarId, VarId)>,
     copied_labels: Vec<(u32, u32)>,
     program_steps: usize,
+    copied_outputs: usize,
     imported: Vec<Option<ImportedPlan>>,
     literals: Vec<LiteralEmission>,
     aliases: Vec<Option<u32>>,
@@ -137,8 +138,17 @@ struct ImportedPlan {
     payloads: Vec<(dispatch::Kind, u32)>,
 }
 #[derive(Clone, Copy)]
-enum LiteralValue { String(crate::bir::StrId), Number(crate::bir::ConstId), Bool(bool), Null, Undefined }
-struct LiteralEmission { key: CaseKey, value: LiteralValue }
+enum LiteralValue {
+    String(crate::bir::StrId),
+    Number(crate::bir::ConstId),
+    Bool(bool),
+    Null,
+    Undefined,
+}
+struct LiteralEmission {
+    key: CaseKey,
+    value: LiteralValue,
+}
 
 /// Metadata-only import: no grouping, planning or simplification runs here.
 pub(super) fn prepare(arena: &mut Bir) -> (Storage, dispatch::Plan<u32>) {
@@ -146,14 +156,18 @@ pub(super) fn prepare(arena: &mut Bir) -> (Storage, dispatch::Plan<u32>) {
     let mut graph = dispatch::Plan::default();
     for i in 0..arena.pools.switches.len() {
         let h = arena.switch(crate::bir::SwitchId(i as u32));
-        let SwitchDispatch::Variant(facts) = h.dispatch else { storage.imported.push(None); continue };
+        let SwitchDispatch::Variant(facts) = h.dispatch else {
+            storage.imported.push(None);
+            continue;
+        };
         let facts = graph.metadata.import_facts(facts);
         let mut literals = Vec::new();
         let mut payloads = Vec::new();
         for (i, key) in h.keys.iter().enumerate() {
             match key {
-                CaseKey::Lambda(SwitchKey::Constructor(Case::Constant(tag))) =>
-                    literals.push((graph.metadata.import_literal(&tag.literal), i as u32)),
+                CaseKey::Lambda(SwitchKey::Constructor(Case::Constant(tag))) => {
+                    literals.push((graph.metadata.import_literal(&tag.literal), i as u32))
+                }
                 CaseKey::Lambda(SwitchKey::Constructor(Case::Block(block))) => {
                     if let Some(kind) = block.block_type() {
                         payloads.push((graph.metadata.import_kind(kind), i as u32));
@@ -162,28 +176,50 @@ pub(super) fn prepare(arena: &mut Bir) -> (Storage, dispatch::Plan<u32>) {
                 _ => {}
             }
         }
-        storage.imported.push(Some(ImportedPlan { facts, literals, payloads }));
+        storage.imported.push(Some(ImportedPlan {
+            facts,
+            literals,
+            payloads,
+        }));
     }
     for i in 0..graph.metadata.literal_count() {
         use dispatch::Literal as L;
         let (key, value) = match graph.metadata.literal(dispatch::LiteralId(i as u32)) {
-            L::String(s) => { let text = arena.intern_text(graph.metadata.text(s));
-                (CaseKey::String(text), LiteralValue::String(text)) },
-            L::Float(s) => { let spelling = graph.metadata.text(s);
+            L::String(s) => {
+                let text = arena.intern_text(graph.metadata.text(s));
+                (CaseKey::String(text), LiteralValue::String(text))
+            }
+            L::Float(s) => {
+                let spelling = graph.metadata.text(s);
                 let text = arena.intern_text(spelling);
                 let value = arena.intern_float(spelling).expect("valid literal float");
-                (CaseKey::Float(text), LiteralValue::Number(value)) },
-            L::BigInt(s) => { let spelling = graph.metadata.text(s);
+                (CaseKey::Float(text), LiteralValue::Number(value))
+            }
+            L::BigInt(s) => {
+                let spelling = graph.metadata.text(s);
                 let text = arena.intern_text(spelling);
                 let (positive, digits) = crate::types::typecore::parse_bigint_literal(spelling);
-                let canonical = arena.intern_text(&format!("{}{digits}", if positive { '+' } else { '-' }));
+                let canonical =
+                    arena.intern_text(&format!("{}{digits}", if positive { '+' } else { '-' }));
                 let value = arena.intern_const(crate::bir::Constant::BigInt(canonical));
-                (CaseKey::BigInt(text), LiteralValue::Number(value)) },
-            L::Int(i) => { let value = arena.intern_const(crate::bir::Constant::Int(i64::from(i as i32)));
-                (CaseKey::JavaScript(SwitchCaseTag::Int(i64::from(i as i32))), LiteralValue::Number(value)) },
-            L::Bool(b) => (CaseKey::JavaScript(SwitchCaseTag::Bool(b)), LiteralValue::Bool(b)),
+                (CaseKey::BigInt(text), LiteralValue::Number(value))
+            }
+            L::Int(i) => {
+                let value = arena.intern_const(crate::bir::Constant::Int(i64::from(i as i32)));
+                (
+                    CaseKey::JavaScript(SwitchCaseTag::Int(i64::from(i as i32))),
+                    LiteralValue::Number(value),
+                )
+            }
+            L::Bool(b) => (
+                CaseKey::JavaScript(SwitchCaseTag::Bool(b)),
+                LiteralValue::Bool(b),
+            ),
             L::Null => (CaseKey::JavaScript(SwitchCaseTag::Null), LiteralValue::Null),
-            L::Undefined => (CaseKey::JavaScript(SwitchCaseTag::Undefined), LiteralValue::Undefined),
+            L::Undefined => (
+                CaseKey::JavaScript(SwitchCaseTag::Undefined),
+                LiteralValue::Undefined,
+            ),
         };
         storage.literals.push(LiteralEmission { key, value });
     }
@@ -243,11 +279,17 @@ impl State {
         let full = (h.consts_full, h.blocks_full);
         let payload_only = h.consts_full && n == 0;
         let fallback = h.has_default.then_some(h.keys.len() as u32);
-        let imported = self.untagged_storage.imported[header.index()].as_ref().expect("imported dispatch");
-        dispatch::append(
+        let imported = self.untagged_storage.imported[header.index()]
+            .as_ref()
+            .expect("imported dispatch");
+        dispatch::append_bucketed(
             &mut dispatch,
             |a: &u32, b: &u32| {
                 aliases[*a as usize].is_some() && aliases[*a as usize] == aliases[*b as usize]
+            },
+            |body: &u32| {
+                aliases[*body as usize]
+                    .map_or(source_count + *body as usize, |alias| alias as usize)
             },
             dispatch::BorrowedInput {
                 facts: &imported.facts,
@@ -258,7 +300,8 @@ impl State {
                 fallback,
             },
         );
-        let (program, actions) = self.untagged_program(&dispatch, operands, fallback, cx.switch_depth);
+        let (program, actions) =
+            self.untagged_program(&dispatch, operands, fallback, cx.switch_depth);
         aliases.clear();
         self.untagged_storage.aliases = aliases;
         self.untagged_dispatch = dispatch;
@@ -469,7 +512,8 @@ impl State {
             let mut value = out.value.unwrap();
             if !p.payload_only && !matches!(self.arena.view(value), View::Var { .. }) {
                 let var = self.fresh_variable("tmp");
-                let declaration = crate::bir::j::declare(&mut self.arena, LetKind::Strict, var, value);
+                let declaration =
+                    crate::bir::j::declare(&mut self.arena, LetKind::Strict, var, value);
                 self.statements.push(declaration);
                 value = self.pure_expression(View::Var { var }, 0);
             }
@@ -541,12 +585,16 @@ impl State {
     /// Copy a multiply-emitted J output, never relower its source. O(emitted
     /// nodes), including binder remapping by the arena's existing copier.
     fn copy_dispatch_output(&mut self, root: NodeId) -> NodeId {
+        self.untagged_storage.copied_outputs += 1;
         let mut vars = std::mem::take(&mut self.untagged_storage.copied_vars);
         let mut labels = std::mem::take(&mut self.untagged_storage.copied_labels);
-        let copied = self
-            .arena
-            .copy_subtree_with_scratch(root, &[], &mut vars, &mut labels,
-                &mut self.untagged_storage.copy_scratch);
+        let copied = self.arena.copy_subtree_with_scratch(
+            root,
+            &[],
+            &mut vars,
+            &mut labels,
+            &mut self.untagged_storage.copy_scratch,
+        );
         for (new, old) in vars.drain(..) {
             assert_eq!(new.index(), self.idents.len());
             self.idents.push(self.idents[old.index()]);
@@ -790,7 +838,9 @@ impl State {
         };
         for i in 0..count {
             let key = if value_switch {
-                self.untagged_storage.literals[dispatch.value_clauses(cases)[i].0.0 as usize].key.clone()
+                self.untagged_storage.literals[dispatch.value_clauses(cases)[i].0.0 as usize]
+                    .key
+                    .clone()
             } else {
                 CaseKey::String(
                     self.arena
@@ -882,11 +932,17 @@ impl State {
                 Test::Equals(tag) => {
                     let left = self.untagged_scrutinee(p);
                     let right = match self.untagged_storage.literals[tag.0 as usize].value {
-                        LiteralValue::String(text) => plain::node(&mut self.arena, View::JStr { text }, 0),
-                        LiteralValue::Number(value) => plain::node(&mut self.arena, View::JNumber { value }, 0),
+                        LiteralValue::String(text) => {
+                            plain::node(&mut self.arena, View::JStr { text }, 0)
+                        }
+                        LiteralValue::Number(value) => {
+                            plain::node(&mut self.arena, View::JNumber { value }, 0)
+                        }
                         LiteralValue::Bool(b) => plain::boolean(&mut self.arena, b),
                         LiteralValue::Null => plain::node(&mut self.arena, View::JNull, 0),
-                        LiteralValue::Undefined => plain::node(&mut self.arena, View::JUndefined, 0),
+                        LiteralValue::Undefined => {
+                            plain::node(&mut self.arena, View::JUndefined, 0)
+                        }
                     };
                     norm::je4_bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, left, right)
                 }
@@ -901,7 +957,8 @@ impl State {
                 Test::NotNull => {
                     let value = self.untagged_scrutinee(p);
                     let null = plain::node(&mut self.arena, View::JNull, 0);
-                    let eq = norm::je4_bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, value, null);
+                    let eq =
+                        norm::je4_bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, value, null);
                     norm::je8_not(&mut self.arena, eq)
                 }
                 Test::Not(_) => norm::je8_not(&mut self.arena, values.pop().unwrap()),
@@ -930,7 +987,12 @@ impl State {
 
     /// V: class_constructor / is_instance_of. O(class path bytes); array tests
     /// use the same ordinary CallInfo as the legacy constructor.
-    fn untagged_instance(&mut self, value: NodeId, metadata: &dispatch::Metadata, instance: dispatch::InstanceId) -> NodeId {
+    fn untagged_instance(
+        &mut self,
+        value: NodeId,
+        metadata: &dispatch::Metadata,
+        instance: dispatch::InstanceId,
+    ) -> NodeId {
         let name = metadata.instance_name(instance);
         let mut parts = name.split('.');
         let first = parts.next().unwrap();
@@ -1022,8 +1084,8 @@ mod tests {
         arena::LamArena, lam_constant::Constant as C, lam_primitive::Primitive as LambdaPrimitive,
     };
     use crate::types::{
-        ShapeAllocation, VariantBlock, VariantBlockType, VariantInstance, VariantLiteralTag as Literal, VariantMatchingFacts,
-        VariantTag,
+        ShapeAllocation, VariantBlock, VariantBlockType, VariantInstance,
+        VariantLiteralTag as Literal, VariantMatchingFacts, VariantTag,
     };
 
     #[test]
@@ -1177,12 +1239,22 @@ mod tests {
             }));
             let effect = |a: &mut LamArena, i: i32| {
                 let value = a.const_(C::Int { i, comment: None });
-                a.prim_raw(LambdaPrimitive::PinitMod, &[value], crate::lambda::LamLoc::NONE)
+                a.prim_raw(
+                    LambdaPrimitive::PinitMod,
+                    &[value],
+                    crate::lambda::LamLoc::NONE,
+                )
             };
             let actions: Vec<_> = exits
                 .iter()
                 .enumerate()
-                .map(|(i, &exit)| if exit { a.static_raise(1, &[]) } else { effect(&mut a, i as i32) })
+                .map(|(i, &exit)| {
+                    if exit {
+                        a.static_raise(1, &[])
+                    } else {
+                        effect(&mut a, i as i32)
+                    }
+                })
                 .collect();
             let info = a.add_switch(
                 true,
@@ -1353,6 +1425,245 @@ mod tests {
         assert_eq!(state.source_steps - visits, 20_001);
         assert_eq!(state.untagged_storage.program_steps - programs, 10_000);
         assert_eq!(state.switch_group_steps - grouping, 20_000);
+    }
+
+    #[test]
+    fn ten_thousand_mixed_cases_lower_without_allocations() {
+        let mut a = LamArena::new();
+        let x = a.var(Ident::new("x", 100, crate::ident::IdentFlags::NONE));
+        let mut literals: Vec<_> = (0..9_998)
+            .map(|i| Literal::String(format!("tag{i}")))
+            .collect();
+        let keys: Vec<_> = literals
+            .iter()
+            .enumerate()
+            .map(|(i, literal)| {
+                SwitchKey::Constructor(Case::Constant(VariantTag {
+                    name: crate::name::Name::new(&format!("C{i}")),
+                    literal: literal.clone(),
+                }))
+            })
+            .collect();
+        // This unnamed numeric literal must go to fallback, not the Number
+        // payload. The fallback also occurs in the payload dispatch, forcing
+        // cached-output copying rather than merely sharing grouped case labels.
+        literals.push(Literal::Int(42));
+        let kinds = vec![VariantBlockType::Number, VariantBlockType::Object];
+        let blocks: Vec<_> = kinds
+            .iter()
+            .enumerate()
+            .map(|(i, kind)| {
+                SwitchKey::Constructor(Case::Block(VariantBlock::Untagged {
+                    tag: VariantTag {
+                        name: crate::name::Name::new(&format!("B{i}")),
+                        literal: Literal::String(format!("B{i}")),
+                    },
+                    block_type: kind.clone(),
+                }))
+            })
+            .collect();
+        let bodies: Vec<_> = (0..10_001)
+            .map(|i| a.const_(C::String(format!("body{i}"))))
+            .collect();
+        let actions = a.add_list(&bodies);
+        let header = a.add_switch(
+            false,
+            keys,
+            false,
+            blocks,
+            true,
+            SwitchDispatch::Variant(VariantMatchingFacts {
+                tag_name: None,
+                literal_tags: literals,
+                block_types: kinds,
+            }),
+        );
+        let root = a.switch_raw(x, actions, header);
+        assert_mixed_allocation_free(a, root, Some((10_003, 20_002, 20_008, 10_003, 1)));
+    }
+
+    #[test]
+    fn small_equals_literals_lower_without_allocations() {
+        for literal in [
+            Literal::String("value".into()),
+            Literal::Float("1.50".into()),
+            Literal::BigInt("+002".into()),
+        ] {
+            let mut a = LamArena::new();
+            let x = a.var(Ident::new("x", 100, crate::ident::IdentFlags::NONE));
+            let kinds = vec![VariantBlockType::Number, VariantBlockType::Object];
+            let blocks: Vec<_> = kinds
+                .iter()
+                .enumerate()
+                .map(|(i, kind)| {
+                    SwitchKey::Constructor(Case::Block(VariantBlock::Untagged {
+                        tag: VariantTag {
+                            name: crate::name::Name::new(&format!("B{i}")),
+                            literal: Literal::String(format!("B{i}")),
+                        },
+                        block_type: kind.clone(),
+                    }))
+                })
+                .collect();
+            let body: Vec<_> = (0..4)
+                .map(|i| a.const_(C::String(format!("body{i}"))))
+                .collect();
+            let actions = a.add_list(&body);
+            let key = SwitchKey::Constructor(Case::Constant(VariantTag {
+                name: crate::name::Name::new("C"),
+                literal: literal.clone(),
+            }));
+            let header = a.add_switch(
+                false,
+                [key],
+                false,
+                blocks,
+                true,
+                SwitchDispatch::Variant(VariantMatchingFacts {
+                    tag_name: None,
+                    literal_tags: vec![literal, Literal::Int(42)],
+                    block_types: kinds,
+                }),
+            );
+            let root = a.switch_raw(x, actions, header);
+            assert_mixed_allocation_free(a, root, Some((6, 8, 14, 4, 1)));
+        }
+    }
+
+    fn assert_mixed_allocation_free(
+        a: LamArena,
+        root: crate::lambda::arena::Lam,
+        expected: Option<(usize, usize, usize, usize, usize)>,
+    ) {
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let run = |s: &mut State| {
+            let out = s.probe(Cx::returning(), root).unwrap();
+            let out = s.realize(Cx::returning(), out);
+            for node in s.statements.statements(out.stmts) {
+                s.arena.release(node);
+            }
+            if let Some(value) = out.value {
+                s.arena.release(value);
+            }
+            s.statements.kill(out.stmts);
+        };
+        let lists = state.arena.lists.storage_shape().0;
+        let keys = state.arena.pools.switch_keys.len();
+        run(&mut state);
+        state
+            .arena
+            .lists
+            .reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
+        state
+            .arena
+            .pools
+            .switch_keys
+            .reserve(state.arena.pools.switch_keys.len() - keys);
+        state
+            .arena
+            .pools
+            .switch_clauses
+            .reserve(state.arena.pools.switch_clauses.len());
+        state
+            .arena
+            .pools
+            .switches
+            .reserve(state.arena.pools.switches.len());
+        state.free.reserve_repeat();
+        state.untagged_dispatch.reserve_repeat();
+        state.group_indices.reserve(state.group_indices.len());
+        state.group_nodes.reserve(state.group_nodes.len());
+        let d = &mut state.untagged_storage;
+        d.program.values.reserve(d.program.values.len());
+        d.actions.values.reserve(d.actions.values.len());
+        d.states.values.reserve(d.states.values.len());
+        d.marks.values.reserve(d.marks.values.len());
+        d.outputs.values.reserve(d.outputs.values.len());
+        let capacities = |s: &State| {
+            let d = &s.untagged_storage;
+            [
+                s.arena.nodes.capacity(),
+                s.arena.parents.capacity(),
+                s.arena.free_nodes.capacity(),
+                s.arena.release_stack.capacity(),
+                s.arena.lists.storage_shape().1,
+                s.arena.pools.switch_keys.capacity(),
+                s.arena.pools.switch_clauses.capacity(),
+                s.arena.pools.switches.capacity(),
+                s.traversal.work.capacity(),
+                s.traversal.values.capacity(),
+                s.traversal.children.capacity(),
+                s.group_indices.capacity(),
+                s.group_nodes.capacity(),
+                s.group_table.capacity(),
+                s.group_heads.capacity(),
+                s.group_order.capacity(),
+                s.untagged.capacity(),
+                d.program.values.capacity(),
+                d.actions.values.capacity(),
+                d.states.values.capacity(),
+                d.marks.values.capacity(),
+                d.outputs.values.capacity(),
+                d.work.capacity(),
+                d.cache.capacity(),
+                d.aliases.capacity(),
+                d.test_work.capacity(),
+                d.test_values.capacity(),
+                d.copied_vars.capacity(),
+                d.copied_labels.capacity(),
+                s.arena.j_equal_work.borrow().capacity(),
+            ]
+        };
+        let before = capacities(&state);
+        let statements_before = state.statements.capacities();
+        let graph_before = state.untagged_dispatch.capacities();
+        let free_before = state.free.capacities();
+        let metadata_before = state.untagged_dispatch.metadata.capacities();
+        let copy_before = state.untagged_storage.copy_scratch.capacities();
+        let counts = (
+            state.source_steps,
+            state.switch_group_steps,
+            state.untagged_storage.program_steps,
+            state.untagged_dispatch.grouping_steps(),
+            state.untagged_storage.copied_outputs,
+        );
+        let allocations = allocation_counter::measure(|| run(&mut state));
+        println!(
+            "mixed whole Lambda: {allocations:?}; source={}, grouping={}, program={}, planner grouping={}, copies={}",
+            state.source_steps - counts.0,
+            state.switch_group_steps - counts.1,
+            state.untagged_storage.program_steps - counts.2,
+            state.untagged_dispatch.grouping_steps() - counts.3,
+            state.untagged_storage.copied_outputs - counts.4
+        );
+        assert_eq!(allocations.count_total, 0);
+        assert_eq!(capacities(&state), before);
+        assert_eq!(state.statements.capacities(), statements_before);
+        assert_eq!(state.untagged_dispatch.capacities(), graph_before);
+        assert_eq!(state.free.capacities(), free_before);
+        assert_eq!(
+            state.untagged_dispatch.metadata.capacities(),
+            metadata_before
+        );
+        assert_eq!(
+            state.untagged_storage.copy_scratch.capacities(),
+            copy_before
+        );
+        if let Some(expected) = expected {
+            assert_eq!(
+                (
+                    state.source_steps - counts.0,
+                    state.switch_group_steps - counts.1,
+                    state.untagged_storage.program_steps - counts.2,
+                    state.untagged_dispatch.grouping_steps() - counts.3,
+                    state.untagged_storage.copied_outputs - counts.4
+                ),
+                expected
+            );
+        }
+        assert!(state.untagged_storage.copied_outputs > counts.4);
     }
 
     #[test]

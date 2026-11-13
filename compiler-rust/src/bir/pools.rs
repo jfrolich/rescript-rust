@@ -68,6 +68,18 @@ impl Lists {
         self.items.extend_from_slice(items);
         id
     }
+    /// Append a remapped list directly; the source run stays valid during growth.
+    pub(super) fn mapped(&mut self, source: ListId, map: impl Fn(NodeId) -> NodeId) -> ListId {
+        let len = self.get(source).len();
+        #[cfg(test)] { self.pushes += 1; }
+        let id = ListId(index(self.items.len()));
+        self.items.push(NodeId(index(len)));
+        for i in 0..len {
+            let value = map(self.items[source.index() + 1 + i]);
+            self.items.push(value);
+        }
+        id
+    }
     /// Consume a statement-stack run directly, without an intermediate vector.
     pub(super) fn push_iter(&mut self, len: usize, items: impl Iterator<Item = NodeId>) -> ListId {
         #[cfg(test)] { self.pushes += 1; }

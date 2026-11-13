@@ -251,7 +251,7 @@ pub(crate) fn literal_denotes_same(
 /// variant, which the code generator prints and constant folding evaluates.
 /// A switch with literal arms and no payload arm left is a plain switch on
 /// the literals. `arm` names an arm's action as the plan's body.
-pub(crate) fn untagged_plan_with<'s, A: Clone>(
+pub(crate) fn untagged_plan_with<'s, A: Copy>(
     sw_consts_full: bool,
     sw_consts: &'s [(SwitchKey, A)],
     sw_blocks_full: bool,
@@ -272,7 +272,7 @@ pub(crate) fn untagged_plan_with<'s, A: Clone>(
         .iter()
         .map(|(key, action)| match key {
             SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(tag)) => {
-                Some((tag.literal.clone(), action.clone()))
+                Some((tag.literal.clone(), *action))
             }
             SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(_))
             | SwitchKey::Int(_) => None,
@@ -283,7 +283,7 @@ pub(crate) fn untagged_plan_with<'s, A: Clone>(
         .map(|(key, action)| match key {
             SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
                 crate::types::VariantBlock::Untagged { block_type, .. },
-            )) => Some((block_type.clone(), action.clone())),
+            )) => Some((block_type.clone(), *action)),
             _ => None,
         })
         .collect::<Option<Vec<_>>>()?;

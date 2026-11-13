@@ -7,7 +7,9 @@ use crate::bir::{Bir, Constant, JsPayload, NodeId, View};
 /// literal bytes), bounded by the smaller input tree; stack is O(tree width +
 /// depth). `steps` counts inspected pairs, including the mismatching pair.
 pub fn equal(b: &Bir, left: NodeId, right: NodeId, steps: &mut usize) -> bool {
-    let mut work = vec![(left, right)];
+    let mut work = b.j_equal_work.borrow_mut();
+    work.clear();
+    work.push((left, right));
     while let Some((l, r)) = work.pop() {
         *steps += 1;
         let (la, ra) = (b.node(l).aux(), b.node(r).aux());

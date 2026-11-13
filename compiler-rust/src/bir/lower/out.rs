@@ -62,6 +62,11 @@ pub struct StatementStack {
     empties: Vec<(u32, NodeId)>,
 }
 impl StatementStack {
+    #[cfg(test)]
+    pub(super) fn capacities(&self) -> [usize; 3] {
+        [self.slots.capacity(), self.held.capacity(), self.empties.capacity()]
+    }
+
     /// K0: C:89 BlockOutput::make, start an empty output at the current top.
     pub fn mark(&self) -> Span {
         Span {

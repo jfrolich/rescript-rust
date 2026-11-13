@@ -185,12 +185,7 @@ impl<'a> Operand<'a> for &'a [NodeId] {
     fn child_count(self) -> usize { self.len() }
     fn child_at(self, at: usize) -> NodeId { self[at] }
     fn remap(raw: u32, lists: &mut Lists, map: &Renaming<'_>) -> u32 {
-        let values: Vec<_> = lists
-            .get(ListId(raw))
-            .iter()
-            .map(|n| map.nodes[n])
-            .collect();
-        lists.push(&values).0
+        lists.mapped(ListId(raw), |n| map.nodes[&n]).0
     }
 }
 
