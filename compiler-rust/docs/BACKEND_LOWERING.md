@@ -2600,6 +2600,305 @@ fragment, multi-child, optional-prop, spread and key policy. The declaration
 exception for record copies is documented in section 3.4. These are opt-in
 lowering changes; they claim no default-path performance improvement.
 
+### 7.5 Allocation-site inventory (S3.2d baseline)
+
+Baseline: `e5ada1df93`. This is the **pre-conversion inventory**, not a claim
+that lowering is allocation-free. `pending` means the site is still present.
+Line numbers refer to this baseline; function names are the stable references.
+The excluded concurrent slice is `loops.rs`, `label.rs`, and `rec.rs`.
+Test modules (including `oracle_tests.rs`) are excluded.
+
+The required discovery command is:
+
+```sh
+rg -n 'Vec::new|vec!\[|SmallVec|Box::new|\.collect\(|\.to_vec\(|\.clone\(\)|String::' compiler-rust/src/bir/lower
+```
+
+The table also includes `Vec` fields/signatures, `Vec::with_capacity`,
+turbofish `collect`, `to_owned`, and `into_vec`, which that command misses.
+A signature/import row identifies storage/API ownership, not a separate
+allocation instruction. Empty-vector constructors are kept even though they
+allocate only on growth; fixed-capacity small vectors are not exempted.
+"Per construct" includes per call, catch, switch, function or literal,
+not once per compilation. Payload clones must be checked through their
+nested fields (e.g. a function attribute owns an optional directive string).
+
+Replacement descriptions are the intended design, **not implemented state**.
+In particular, switching a local vector to a pool handle requires changing
+consuming APIs too: `JsPayload::Object` owns a property-key vector, switch
+headers own keys/clauses, and the untagged dispatch planner owns its plan.
+Moving those allocations outside this directory would not satisfy the audit.
+The statement stack and node-list pool must be used end to end.
+
+| Baseline file:line and function/type | Site | Frequency | Replacement / reason retained | State |
+| --- | --- | --- | --- | --- |
+| `args.rs:46` `evaluate_now` | `fn evaluate_now(&mut self, root: NodeId) -> (Vec<NodeId>, NodeId) {` | per construct/walk | reusable scratch buffer; clear, do not free | pending |
+| `args.rs:51` `Work` | `let mut work = vec![Work::Enter(root)];` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `args.rs:52` `Work` | `let mut values = Vec::new();` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `args.rs:53` `Work` | `let mut statements = Vec::new();` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `args.rs:111` `Work` | `let children: Vec<_> = values.drain(values.len() - count..).collect();` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `args.rs:163` `sequence_arguments` | `args: smallvec::SmallVec<[Out; 4]>,` | per visited node | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `args.rs:164` `sequence_arguments` | `) -> (Span, smallvec::SmallVec<[NodeId; 4]>) {` | per visited node | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `args.rs:178` `sequence_arguments` | `let mut values = smallvec::SmallVec::with_capacity(args.len());` | per visited node | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `args.rs:184` `sequence_arguments` | `(Vec::new(), value)` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `call.rs:9` `Call` | `pub operands: Vec<NodeId>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `call.rs:32` `application` | `let mut reversed: Vec<_> = args.iter().rev().copied().collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `call.rs:48` `application` | `let mut operands = Vec::with_capacity(1 + reversed.len());` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `call.rs:66` `application` | `return Ok(Call { tail: None, operands: vec![reduced], inline: true, status, loc, external: None });` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `call.rs:94` `inline_external_function` | `let root = lambda.function_(function.arity, &function.params, body, function.attr.clone(), function.loc);` | per construct | borrow payload or retain typed pool handle | pending |
+| `call.rs:104` `inline_external_function` | `let mut foreign = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `call.rs:175` `finish_application` | `.collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `call.rs:197` `finish_application` | `self.apply_with_arity(callee, arity, values.into_vec())` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `call.rs:267` `resolve_cmj_module_field_arity` | `crate::cmi::persistent_env::CmjExportArity::Single(arity) => Some(arity.clone()),` | per construct | borrow payload or retain typed pool handle | pending |
+| `call.rs:289` `apply_with_arity` | `args: Vec<NodeId>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `call.rs:300` `apply_with_arity` | `callee = self.call_node(callee, &remaining[..count], full.clone());` | per construct | stays: call-info scalar clone; no heap value | non-allocating |
+| `call.rs:313` `apply_with_arity` | `let mut full_args = remaining.to_vec();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `cond.rs:154` `conditional_children` | `into: &mut Vec<(Cx, NodeId)>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `exit.rs:75` `Plan` | `groups: Vec<usize>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `exit.rs:76` `Plan` | `next: Vec<usize>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `exit.rs:77` `Plan` | `bodies: Vec<NodeId>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `exit.rs:78` `Plan` | `output: Vec<NodeId>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `exit.rs:79` `Plan` | `clauses: Vec<ClauseMeta>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `exit.rs:282` `catch` | `(Vec::new(), Vec::new(), Vec::new())` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `exit.rs:300` `catch` | `output: Vec::new(),` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `exit.rs:301` `catch` | `clauses: Vec::new(),` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `exit.rs:314` `catch_children` | `pub(super) fn catch_children(&self, cx: Cx, frame: Catch, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `exit.rs:436` `exit_dispatch` | `let mut keys = Vec::with_capacity(plan.len as usize);` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `exit.rs:437` `exit_dispatch` | `let mut clauses = Vec::with_capacity(plan.len as usize);` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `exit.rs:438` `exit_dispatch` | `let mut actions = Vec::with_capacity(plan.len as usize);` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `exit.rs:509` `exit_children` | `pub(super) fn exit_children(&self, cx: Cx, exit: &Exit, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `expr.rs:42` `expression_children` | `into: &mut Vec<(Cx, NodeId)>,` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `expr.rs:278` `finish_expression` | `let attr = attr.clone();` | per visited node | borrow payload or retain typed pool handle | pending |
+| `expr.rs:308` `drop_pure_effect` | `let mut effects = Vec::new();` | per construct/walk | reusable scratch buffer; clear, do not free | pending |
+| `external.rs:8` `module` | `use smallvec::SmallVec;` | declaration | remove after handle conversion | pending |
+| `external.rs:64` `compile_js_object_create` | `args: SmallVec<[NodeId; 4]>,` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `external.rs:68` `compile_js_object_create` | `let mut keys = Vec::new();` | per construct | property-key pool handle (requires J payload API change) | pending |
+| `external.rs:69` `compile_js_object_create` | `let mut values = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `external.rs:70` `compile_js_object_create` | `let mut effects: SmallVec<[NodeId; 4]> = SmallVec::new();` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `external.rs:71` `compile_js_object_create` | `let mut pending: Vec<(u32, NodeId)> = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `external.rs:229` `translate_scoped_global_value` | `let head = scopes.first().map_or(name, String::as_str);` | per construct | stays: borrowed string projection; no allocation | non-allocating |
+| `external.rs:266` `translate_scoped_module_value` | `let head = scopes.first().map_or(name, String::as_str);` | per construct | stays: borrowed string projection; no allocation | non-allocating |
+| `external.rs:287` `external_module_binding` | `bundle: name.to_owned(),` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `external.rs:312` `compile_js_call` | `args: SmallVec<[NodeId; 4]>,` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `external.rs:384` `compile_js_call` | `args.collect(),` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `ffi_args.rs:6` `module` | `use smallvec::SmallVec;` | declaration | remove after handle conversion | pending |
+| `ffi_args.rs:112` `hold_external_args` | `args: SmallVec<[Out; 4]>,` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:113` `hold_external_args` | `) -> SmallVec<[Out; 4]> {` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:115` `hold_external_args` | `let mut held = SmallVec::with_capacity(args.len());` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:136` `hold_external_obj_args` | `args: SmallVec<[Out; 4]>,` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:137` `hold_external_obj_args` | `) -> SmallVec<[Out; 4]> {` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:138` `hold_external_obj_args` | `let params: SmallVec<[&ObjParam; 4]> = specs` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:146` `hold_external_obj_args` | `.collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `ffi_args.rs:147` `hold_external_obj_args` | `let mut suffix: SmallVec<[LaterLiteral; 4]> = SmallVec::with_capacity(args.len());` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:200` `hold_external_obj_args` | `.collect()` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `ffi_args.rs:299` `external_dispatch` | `let mut keys = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `ffi_args.rs:300` `external_dispatch` | `let mut actions = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `ffi_args.rs:301` `external_dispatch` | `let mut clauses = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `ffi_args.rs:363` `external_polyvar_string_expr` | `let cases: Vec<_> = cases` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `ffi_args.rs:365` `external_polyvar_string_expr` | `.map(&#124;(key, value)&#124; (key.clone(), plain::string(&mut self.arena, value)))` | per construct | borrow payload or retain typed pool handle | pending |
+| `ffi_args.rs:366` `external_polyvar_string_expr` | `.collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `ffi_args.rs:389` `external_polyvar_int_expr` | `let cases: Vec<_> = cases` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `ffi_args.rs:391` `external_polyvar_int_expr` | `.map(&#124;(key, value)&#124; (key.clone(), plain::int(&mut self.arena, *value as i32)))` | per construct | borrow payload or retain typed pool handle | pending |
+| `ffi_args.rs:392` `external_polyvar_int_expr` | `.collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `ffi_args.rs:403` `external_polyvar_event_exprs` | `) -> SmallVec<[NodeId; 2]> {` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:427` `external_polyvar_event_exprs` | `smallvec::smallvec![tag, value]` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:438` `lower_external_arg_values_and_effect` | `) -> (SmallVec<[NodeId; 2]>, Option<NodeId>) {` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:441` `lower_external_arg_values_and_effect` | `smallvec::smallvec![self.external_option_unwrap_expr(cx, raw)],` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:454` `lower_external_arg_values_and_effect` | `return (SmallVec::new(), None);` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:456` `lower_external_arg_values_and_effect` | `Attr::Ignore => return (SmallVec::new(), self.external_arg_effect(cx, arg)),` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:460` `lower_external_arg_values_and_effect` | `SmallVec::new()` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:462` `lower_external_arg_values_and_effect` | `smallvec::smallvec![plain::node(&mut self.arena, View::JUndefined, 1)]` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:476` `lower_external_arg_values_and_effect` | `(smallvec::smallvec![value], None)` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:502` `assemble_external_args_no_splice` | `args: SmallVec<[NodeId; 4]>,` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:503` `assemble_external_args_no_splice` | `) -> (SmallVec<[NodeId; 4]>, Option<NodeId>) {` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:505` `assemble_external_args_no_splice` | `let mut values = SmallVec::with_capacity(specs.len());` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:506` `assemble_external_args_no_splice` | `let mut effects: SmallVec<[NodeId; 4]> = SmallVec::new();` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:548` `assemble_external_args_with_splice` | `args: SmallVec<[NodeId; 4]>,` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:549` `assemble_external_args_with_splice` | `) -> (SmallVec<[NodeId; 4]>, Option<NodeId>) {` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:551` `assemble_external_args_with_splice` | `let mut values = SmallVec::with_capacity(specs.len());` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:552` `assemble_external_args_with_splice` | `let mut effects: SmallVec<[NodeId; 4]> = SmallVec::new();` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:595` `assemble_external_args` | `args: SmallVec<[NodeId; 4]>,` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:597` `assemble_external_args` | `) -> (SmallVec<[NodeId; 4]>, Option<NodeId>) {` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `import.rs:110` `external_module` | `name: external.bundle.clone(),` | per construct | borrow payload or retain typed pool handle | pending |
+| `import.rs:114` `external_module` | `.clone()` | per construct | borrow payload or retain typed pool handle | pending |
+| `import.rs:176` `compile_import` | `.push(self.arena.pools.j_modules[module.index()].clone());` | per construct | borrow payload or retain typed pool handle | pending |
+| `import.rs:194` `capitalize` | `let mut result = String::with_capacity(s.len());` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `import.rs:218` `external_binding_name` | `let mut result = String::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `import.rs:234` `external_binding_name` | `name.clone()` | per construct | borrow payload or retain typed pool handle | pending |
+| `jsx.rs:70` `compile_jsx` | `let mut props = Vec::with_capacity(jsx.jsx_props.len());` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `jsx.rs:71` `compile_jsx` | `let mut values = Vec::with_capacity(` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `jsx.rs:159` `duplicate_jsx_key` | `let mut spine = smallvec::SmallVec::<[NodeId; 4]>::new();` | per visited node | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `konst.rs:55` `Work` | `let mut work = vec![Work::Enter(root)];` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `konst.rs:56` `Work` | `let mut values: Vec<(NodeId, bool)> = Vec::new();` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `konst.rs:60` `Work` | `let constant = self.arena.constant(id).clone();` | per visited node | borrow payload or retain typed pool handle | pending |
+| `konst.rs:177` `Work` | `let children: Vec<_> = values.drain(start..).map(&#124;(node, _)&#124; node).collect();` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `mod.rs:190` `children` | `fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>);` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `mod.rs:230` `Work` | `let mut work = vec![Work::Enter(cx, node)];` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `mod.rs:231` `Work` | `let mut values = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `mod.rs:232` `Work` | `let mut children = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `mod.rs:295` `Lowered` | `pub dynamic_imports: Vec<crate::js_ir::ModuleId>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `mod.rs:333` `State` | `tail_frames: Vec<tail::Frame>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:334` `State` | `tail_functions: Vec<Option<LoopRef>>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:335` `State` | `tail_copies: Vec<Option<VarId>>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:336` `State` | `tail_assignments: Vec<NodeId>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:337` `State` | `tail_order: Vec<VarId>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:338` `State` | `rec_values: Vec<Option<NodeId>>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:339` `State` | `switches: Vec<Option<switch::Plan>>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:340` `State` | `variants: Vec<Option<variant::Plan>>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:341` `State` | `untagged: Vec<Option<untagged::Plan>>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:342` `State` | `switch_facts: Vec<switch::Facts>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:343` `State` | `switch_work: Vec<(NodeId, bool)>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:344` `State` | `switch_pairs: Vec<(NodeId, NodeId)>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:345` `State` | `switch_primitive_hashes: Vec<u64>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:346` `State` | `switch_constant_hashes: Vec<u64>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:352` `State` | `idents: Vec<Ident>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:356` `State` | `invalid_module_paths: Vec<bool>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:357` `State` | `awaited_units: Vec<bool>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:358` `State` | `dynamic_imports: Vec<crate::js_ir::ModuleId>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:359` `State` | `external_references: Vec<Option<crate::bir::ImportId>>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:360` `State` | `external_globals: Vec<Option<VarId>>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:361` `State` | `inline_globals: Vec<Ident>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:363` `State` | `external_bindings: Vec<[Option<VarId>; 2]>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:364` `State` | `module_constants: Vec<ModuleConstants>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:366` `State` | `located_functions: Vec<bool>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:372` `State` | `switch_locations: Vec<location::Fact>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:373` `State` | `location_work: Vec<(NodeId,bool)>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:380` `State` | `scratch: Vec<NodeId>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:383` `State` | `jumps: Vec<exit::Jump>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:385` `State` | `catch_table: Vec<(NodeId, crate::bir::CatchId)>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:386` `State` | `catches: Vec<Option<exit::Plan>>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:387` `State` | `tries: Vec<try_::Plan>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:389` `State` | `catch_work: Vec<NodeId>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:418` `new` | `.collect();` | once per unit | stays: once per unit | retained |
+| `mod.rs:424` `new` | `tail_frames: Vec::new(), tail_functions: Vec::new(), tail_copies: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:425` `new` | `tail_assignments: Vec::new(), tail_order: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:426` `new` | `rec_values: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:427` `new` | `switch_facts: vec![switch::Facts::default(); input.arena.nodes.len()],` | once per unit | stays: once per unit | retained |
+| `mod.rs:428` `new` | `switches: Vec::new(), variants: Vec::new(), untagged: Vec::new(), switch_work: Vec::new(), switch_pairs: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:429` `new` | `switch_primitive_hashes: Vec::new(), switch_constant_hashes: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:431` `new` | `invalid_module_paths: vec![false; input.arena.nodes.len()],` | once per unit | stays: once per unit | retained |
+| `mod.rs:432` `new` | `awaited_units: vec![false; input.arena.vars.len()],` | once per unit | stays: once per unit | retained |
+| `mod.rs:433` `new` | `dynamic_imports: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:434` `new` | `external_references: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:435` `new` | `external_globals: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:436` `new` | `inline_globals: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:438` `new` | `external_bindings: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:439` `new` | `module_constants: (0..arena.pools.j_modules.len()).map(&#124;_&#124; ModuleConstants::Unread).collect(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:447` `new` | `located_functions: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:453` `new` | `switch_locations: Vec::new(), location_work: Vec::new(), location_steps: 0,` | once per unit | stays: once per unit | retained |
+| `mod.rs:457` `new` | `scratch: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:458` `new` | `jumps: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:459` `new` | `catch_table: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:460` `new` | `catches: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:461` `new` | `tries: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:463` `new` | `catch_work: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:560` `enter` | `let args = args.to_vec();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `mod.rs:713` `children` | `fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `out.rs:52` `StatementStack` | `slots: Vec<Option<Slot>>,` | once per unit | stays: reusable statement-stack storage | retained |
+| `out.rs:53` `StatementStack` | `held: Vec<NodeId>,` | once per unit | stays: reusable statement-stack storage | retained |
+| `out.rs:62` `StatementStack` | `empties: Vec<(u32, NodeId)>,` | once per unit | stays: reusable statement-stack storage | retained |
+| `out.rs:378` `FreePool` | `nodes: Vec<Option<Free>>,` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `out.rs:435` `Work` | `let mut work = vec![Work::Enter(root, cx)];` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `out.rs:436` `Work` | `let mut outputs = Vec::new();` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `prim.rs:122` `finish_primitive_payload` | `.collect();` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `prim.rs:127` `finish_primitive_payload` | `let mut outputs: smallvec::SmallVec<[Out; 4]> = outputs;` | per visited node | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `prim.rs:164` `finish_primitive_payload` | `.collect::<Vec<_>>(),` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `prim.rs:173` `finish_primitive_payload` | `let (keys, kept): (Vec<_>, Vec<_>) = entries.into_iter().unzip();` | per visited node | property-key pool handle (requires J payload API change) | pending |
+| `prim.rs:195` `finish_primitive_payload` | `let mut keys = Vec::new();` | per visited node | property-key pool handle (requires J payload API change) | pending |
+| `prim.rs:196` `finish_primitive_payload` | `let mut kept = Vec::new();` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `prim.rs:272` `finish_primitive_payload` | `let info = self.arena.js_info(crate::bir::JsPayload::Block(tag.clone()));` | per visited node | borrow payload or retain typed pool handle | pending |
+| `prim.rs:372` `finish_primitive_payload` | `norm::jm12_interpolated_template(&mut self.arena, segments.clone(), values.into_vec())` | per visited node | borrow payload or retain typed pool handle | pending |
+| `prim.rs:381` `finish_primitive_payload` | `.collect();` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `prim_block.rs:13` `flat_make_field` | `let mut segments = smallvec::SmallVec::<[&str; 4]>::new();` | per visited node | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `prim_block.rs:14` `flat_make_field` | `let mut visited = smallvec::SmallVec::<[NodeId; 4]>::new();` | per visited node | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `record.rs:38` `record_copy` | `let mut operands = vec![*init];` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `record.rs:39` `record_copy` | `let mut keys = vec![PropertyKey::RecordSpread];` | per construct | property-key pool handle (requires J payload API change) | pending |
+| `record.rs:83` `record_children` | `pub(super) fn record_children(&self, cx: Cx, record: &Record, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `record.rs:105` `finish_record` | `let mut values = Vec::with_capacity(self.source.lists.get(record.operands).len());` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `record.rs:154` `duplicate_record` | `.js_info(JsPayload::Object(vec![PropertyKey::RecordSpread]));` | per construct | property-key pool handle (requires J payload API change) | pending |
+| `record.rs:177` `record_rest` | `.collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `scope.rs:16` `Scope` | `pub(crate) uses: Vec<Uses>,` | once per unit | stays: dense variable-indexed table | retained |
+| `scope.rs:24` `new` | `uses: vec![Uses::default(); variables],` | once per unit | stays: once per unit | retained |
+| `switch.rs:33` `Plan` | `groups: Vec<usize>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:34` `Plan` | `next: Vec<usize>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:35` `Plan` | `pub(super) bodies: Vec<NodeId>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:37` `Plan` | `output: Vec<NodeId>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:38` `Plan` | `clauses: Vec<ClauseMeta>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:71` `integer_switch` | `let keys = h.keys[..n].to_vec();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:75` `integer_switch` | `let mut actions = all[..n].to_vec();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:82` `integer_switch` | `clauses: Vec::new(),` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:140` `plan_switch` | `(0..count).collect(),` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:141` `plan_switch` | `vec![NONE; count],` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:142` `plan_switch` | `self.source.lists.get(operands)[..count].to_vec(),` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:169` `plan_switch` | `output: Vec::new(),` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:170` `plan_switch` | `clauses: Vec::new(),` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:205` `group_switch_cases` | `) -> (Vec<usize>, Vec<usize>, Vec<NodeId>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:212` `group_switch_cases` | `let cases = self.source.lists.get(operands)[..count].to_vec();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:213` `group_switch_cases` | `let fingerprints: Vec<_> = cases.iter().map(&#124;n&#124; self.switch_facts[n.index()]).collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:217` `group_switch_cases` | `let mut groups = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:218` `group_switch_cases` | `let mut next = vec![NONE; cases.len()];` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:219` `group_switch_cases` | `let mut heads: Vec<usize> = (0..cases.len()).collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:253` `group_switch_cases` | `let bodies = groups.iter().map(&#124;&i&#124; cases[i]).collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:547` `switch_children` | `pub(super) fn switch_children(&self, cx: Cx, frame: Switch, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:684` `finish_switch` | `let mut keys = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:685` `finish_switch` | `let mut clauses = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:686` `finish_switch` | `let mut actions = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:693` `finish_switch` | `crate::lambda::SwitchCaseTag::String(self.arena.text(*text).to_owned()),` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `switch.rs:695` `finish_switch` | `key => key.clone(),` | per construct | borrow payload or retain typed pool handle | pending |
+| `switch.rs:831` `prepare_switch_hashes` | `let mut bytes = Vec::new();` | once per unit | stays: once per unit | retained |
+| `switch.rs:892` `switch_constants_equal` | `let mut work = smallvec::SmallVec::<[(crate::bir::ConstId, crate::bir::ConstId); 8]>::new();` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `switch.rs:962` `finish_small_switch` | `let key = self.arena.switch(plan.header).keys[0].clone();` | per construct | borrow payload or retain typed pool handle | pending |
+| `tail.rs:40` `finish_self_call` | `pub(super) fn finish_self_call(&mut self, frame: LoopRef, statements: Span, values: smallvec::SmallVec<[NodeId; 4]>) -> Probed {` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `try_.rs:65` `try_children` | `pub(super) fn try_children(&self, cx: Cx, frame: Try, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `unit.rs:33` `lower` | `.collect();` | once per unit | stays: once per unit | retained |
+| `untagged.rs:53` `Plan` | `program: Vec<Op>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:55` `Plan` | `actions: Vec<Action>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:56` `Plan` | `cached: Vec<Option<NodeId>>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:57` `Plan` | `finished: Vec<Finished>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:58` `Plan` | `remaining: Vec<u32>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:59` `Plan` | `marks: Vec<Span>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:60` `Plan` | `outputs: Vec<Output>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:82` `untagged_switch` | `let facts = facts.clone();` | per construct | borrow payload or retain typed pool handle | pending |
+| `untagged.rs:83` `untagged_switch` | `let mut literal_arms = Vec::with_capacity(n);` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:84` `untagged_switch` | `let mut payload_arms = Vec::with_capacity(h.keys.len() - n);` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:88` `untagged_switch` | `literal_arms.push((tag.literal.clone(), i as u32))` | per construct | borrow payload or retain typed pool handle | pending |
+| `untagged.rs:91` `untagged_switch` | `block.block_type().expect("untagged payload").clone(),` | per construct | borrow payload or retain typed pool handle | pending |
+| `untagged.rs:97` `untagged_switch` | `let sources = self.source.lists.get(operands).to_vec();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:135` `untagged_switch` | `let remaining = actions.iter().map(&#124;a&#124; a.uses).collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:136` `untagged_switch` | `let cached = vec![None; actions.len()];` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:137` `untagged_switch` | `let finished = vec![Finished::False; actions.len()];` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:153` `untagged_switch` | `marks: Vec::new(),` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:154` `untagged_switch` | `outputs: Vec::new(),` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:167` `untagged_program` | `) -> (Vec<Op>, Vec<Action>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:168` `untagged_program` | `let mut program = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:169` `untagged_program` | `let mut actions: Vec<Action> = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:170` `untagged_program` | `let mut cache = vec![[NONE; 2]; sources.len()];` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:171` `untagged_program` | `let mut work = vec![Work::Visit(plan.root(), depth)];` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:248` `untagged_children` | `pub(super) fn untagged_children(&self, cx: Cx, frame: Untagged, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:332` `copy_dispatch_output` | `let mut vars = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:333` `copy_dispatch_output` | `let mut labels = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:414` `advance_untagged` | `let body: Vec<_> = self.statements.statements(out.run).collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:489` `untagged_switch_statement` | `.collect::<Vec<_>>(),` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:511` `untagged_switch_statement` | `.collect(),` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:522` `untagged_switch_statement` | `let mut actions = Vec::with_capacity(keys.len() + usize::from(has_default));` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:523` `untagged_switch_statement` | `let mut clauses = Vec::with_capacity(actions.capacity());` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:589` `untagged_test` | `let mut work = vec![(test, false)];` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:590` `untagged_test` | `let mut values = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `variant.rs:29` `Plan` | `sides: Vec<Side>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `variant.rs:89` `named_variant` | `let tag_name = facts.tag_name.as_deref().unwrap_or("TAG").to_owned();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `variant.rs:90` `named_variant` | `let keys: Vec<_> = h` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `variant.rs:101` `named_variant` | `.collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `variant.rs:102` `named_variant` | `let mut keys = [keys, Vec::new()];` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `variant.rs:131` `named_variant` | `let mut sides = Vec::with_capacity(2);` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `variant.rs:139` `named_variant` | `let actions: Vec<_> = range` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `variant.rs:140` `named_variant` | `.clone()` | per construct | borrow payload or retain typed pool handle | pending |
+| `variant.rs:143` `named_variant` | `.collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `variant.rs:147` `named_variant` | `clauses: Vec::new(),` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `variant.rs:183` `literal_tag` | `Literal::String(s) => Tag::String(s.clone()),` | per construct | borrow payload or retain typed pool handle | pending |
+| `variant.rs:185` `literal_tag` | `Literal::Float(s) => Tag::Float(s.clone()),` | per construct | borrow payload or retain typed pool handle | pending |
+| `variant.rs:186` `literal_tag` | `Literal::BigInt(s) => Tag::BigInt(s.clone()),` | per construct | borrow payload or retain typed pool handle | pending |
+| `variant.rs:255` `variant_children` | `pub(super) fn variant_children(&self, cx: Cx, frame: Variant, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
+
 ## 8. The gate and the slices
 
 ### 8.1 The gate

@@ -1,0 +1,1 @@
+- Inventory allocation sites in the check-mode backend lowering before conversion to reusable buffers and pool handles.
