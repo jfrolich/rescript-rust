@@ -125,6 +125,9 @@ pub(super) struct Storage {
     copied_vars: Vec<(VarId, VarId)>,
     copied_labels: Vec<(u32, u32)>,
     program_steps: usize,
+    literal_arms: Vec<(crate::types::VariantLiteralTag, u32)>,
+    payload_arms: Vec<(VariantBlockType, u32)>,
+    aliases: Vec<Option<u32>>,
 }
 
 pub(super) struct Plan {
@@ -135,7 +138,6 @@ pub(super) struct Plan {
     target: Option<VarId>,
     scrutinee: Option<NodeId>,
     payload_only: bool,
-    dispatch: dispatch::Plan<u32>,
     program: Run<Op>,
     pc: usize,
     actions: Run<Action>,
@@ -146,8 +148,9 @@ pub(super) struct Plan {
 
 impl State {
     /// V: compile_untagged_switch. O(planner work + its emitted plan + new
-    /// fingerprint nodes). The planner's equality callback rejects differing
-    /// fingerprints before confirming source nodes; no legacy lowering runs.
+    /// fingerprint nodes). Stable source groups provide dense equality aliases;
+    /// planner comparisons read those aliases without borrowing mutable state.
+    /// Dispatch graph pools survive every construct; metadata is borrowed during planning.
     pub(super) fn untagged_switch(
         &mut self,
         cx: Cx,
@@ -155,52 +158,72 @@ impl State {
         operands: crate::bir::ListId,
         header: crate::bir::SwitchId,
     ) -> Result<Untagged, Unsupported> {
+        self.prepare_switch_hashes();
+        let source_count = self.source.lists.get(operands).len();
+        let groups = self.group_switch_cases(operands, source_count, None);
+        let mut aliases = std::mem::take(&mut self.untagged_storage.aliases);
+        aliases.resize(source_count, None);
+        aliases.fill(None);
+        for group in 0..groups.heads.len {
+            let mut case = self.group_indices[(groups.heads.start + group) as usize];
+            loop {
+                let source = self.source.lists.get(operands)[case];
+                if self.switch_facts[source.index()].comparable() {
+                    aliases[case] = Some(group);
+                }
+                case = self.group_indices[groups.next.start as usize + case];
+                if case == super::switch::NONE {
+                    break;
+                }
+            }
+        }
+        let mut dispatch = std::mem::take(&mut self.untagged_dispatch);
+        let mut literal_arms = std::mem::take(&mut self.untagged_storage.literal_arms);
+        let mut payload_arms = std::mem::take(&mut self.untagged_storage.payload_arms);
         let h = self.arena.switch(header);
         let n = h.constants as usize;
         let full = (h.consts_full, h.blocks_full);
         let payload_only = h.consts_full && n == 0;
         let fallback = h.has_default.then_some(h.keys.len() as u32);
-        let SwitchDispatch::Variant(facts) = &h.dispatch else {
+        let SwitchDispatch::Variant(facts) = h.dispatch else {
             unreachable!("untagged dispatch")
         };
-        let facts = facts.clone();
-        let mut literal_arms = Vec::with_capacity(n);
-        let mut payload_arms = Vec::with_capacity(h.keys.len() - n);
         for (i, key) in h.keys.iter().enumerate() {
             match key {
                 CaseKey::Lambda(SwitchKey::Constructor(Case::Constant(tag))) => {
-                    literal_arms.push((tag.literal.clone(), i as u32))
+                    literal_arms.push((tag.literal.clone(), i as u32));
                 }
-                CaseKey::Lambda(SwitchKey::Constructor(Case::Block(block))) => payload_arms.push((
-                    block.block_type().expect("untagged payload").clone(),
-                    i as u32,
-                )),
+                CaseKey::Lambda(SwitchKey::Constructor(Case::Block(block))) => {
+                    payload_arms.push((
+                        block.block_type().expect("untagged payload").clone(),
+                        i as u32,
+                    ));
+                }
                 _ => unreachable!("untagged constructor key"),
             }
         }
-        let source_count = self.source.lists.get(operands).len();
-        self.prepare_switch_hashes();
-        for i in 0..source_count {
-            self.switch_facts(self.source.lists.get(operands)[i]);
-        }
-        let state = std::cell::RefCell::new(&mut *self);
-        let dispatch = dispatch::plan(
+        dispatch::append(
+            &mut dispatch,
             |a: &u32, b: &u32| {
-                let mut state = state.borrow_mut();
-                let a = state.source.lists.get(operands)[*a as usize];
-                let b = state.source.lists.get(operands)[*b as usize];
-                state.same_switch_body(a, b)
+                aliases[*a as usize].is_some() && aliases[*a as usize] == aliases[*b as usize]
             },
-            dispatch::Input {
-                facts: &facts,
-                literal_arms,
-                payload_arms,
+            dispatch::BorrowedInput {
+                facts,
+                literal_arms: &literal_arms,
+                payload_arms: &payload_arms,
                 literals_complete: full.0,
                 payloads_complete: full.1,
                 fallback,
             },
         );
         let (program, actions) = self.untagged_program(&dispatch, operands, fallback, cx.switch_depth);
+        literal_arms.clear();
+        payload_arms.clear();
+        aliases.clear();
+        self.untagged_storage.literal_arms = literal_arms;
+        self.untagged_storage.payload_arms = payload_arms;
+        self.untagged_storage.aliases = aliases;
+        self.untagged_dispatch = dispatch;
         let start = self.statements.mark();
         let binding = match cx.cont {
             Cont::Value(_) => Some((LetKind::Strict, self.fresh_variable("tmp"))),
@@ -248,7 +271,6 @@ impl State {
             target: binding.map(|(_, v)| v),
             scrutinee: None,
             payload_only,
-            dispatch,
             program,
             pc: 0,
             actions,
@@ -467,7 +489,9 @@ impl State {
                 );
             }
         }
-        self.advance_untagged(&mut p);
+        let dispatch = std::mem::take(&mut self.untagged_dispatch);
+        self.advance_untagged(&mut p, &dispatch);
+        self.untagged_dispatch = dispatch;
         self.untagged[frame.0 as usize] = Some(p);
         Probed::Out(Out {
             stmts: self.statements.mark(),
@@ -550,7 +574,7 @@ impl State {
 
     /// V: emit_untagged_tree. O(emitted program steps + J-rule costs), with
     /// all control stacks explicit and all kept statement runs left in place.
-    fn advance_untagged(&mut self, p: &mut Plan) {
+    fn advance_untagged(&mut self, p: &mut Plan, dispatch: &dispatch::Plan<u32>) {
         while p.pc < p.program.len as usize {
             let op = self.untagged_storage.program.get(&p.program, p.pc);
             if matches!(op, Op::Run(_)) {
@@ -576,7 +600,7 @@ impl State {
                 Op::If(test) => {
                     let no = self.untagged_storage.outputs.pop(&mut p.outputs);
                     let yes = self.untagged_storage.outputs.pop(&mut p.outputs);
-                    let test = self.untagged_test(p, test);
+                    let test = self.untagged_test(p, dispatch, test);
                     self.untagged_if(p, test, yes.run, no.run);
                 }
                 Op::Block => {
@@ -604,7 +628,7 @@ impl State {
                         },
                     );
                 }
-                Op::Switch(tree) => self.untagged_switch_statement(p, tree),
+                Op::Switch(tree) => self.untagged_switch_statement(p, dispatch, tree),
             }
         }
     }
@@ -699,11 +723,16 @@ impl State {
 
     /// V: emit_untagged_tree's value/typeof switch arms. O(clauses + statements
     /// transferred), with default-first source order and case-first output.
-    fn untagged_switch_statement(&mut self, p: &mut Plan, tree: TreeId) {
-        let (cases, typeof_, value_switch) = match p.dispatch.tree(tree) {
+    fn untagged_switch_statement(
+        &mut self,
+        p: &mut Plan,
+        dispatch: &dispatch::Plan<u32>,
+        tree: TreeId,
+    ) {
+        let (cases, typeof_, value_switch) = match dispatch.tree(tree) {
             Tree::SwitchValue(clauses, _) => (*clauses, false, true),
             Tree::SwitchTypeof(clauses, _) => {
-                let cases = p.dispatch.typeof_clauses(*clauses);
+                let cases = dispatch.typeof_clauses(*clauses);
                 if cases.len() == 1 && matches!(cases[0].1, Clause::Body(_)) {
                     let no = self.untagged_storage.outputs.pop(&mut p.outputs);
                     let yes = self.untagged_storage.outputs.pop(&mut p.outputs);
@@ -736,11 +765,11 @@ impl State {
         };
         for i in 0..count {
             let key = if value_switch {
-                self.untagged_literal_key(&p.dispatch.value_clauses(cases)[i].0)
+                self.untagged_literal_key(&dispatch.value_clauses(cases)[i].0)
             } else {
                 CaseKey::String(
                     self.arena
-                        .intern_text(p.dispatch.typeof_clauses(cases)[i].0.typeof_name().unwrap()),
+                        .intern_text(dispatch.typeof_clauses(cases)[i].0.typeof_name().unwrap()),
                 )
             };
             self.arena.pools.switch_keys.push(key);
@@ -748,9 +777,9 @@ impl State {
                 p,
                 self.untagged_storage.outputs.get(&p.outputs, base + 1 + i),
             );
-            let clause = match p.dispatch.tree(tree) {
-                Tree::SwitchValue(c, _) => &p.dispatch.value_clauses(*c)[i].1,
-                Tree::SwitchTypeof(c, _) => &p.dispatch.typeof_clauses(*c)[i].1,
+            let clause = match dispatch.tree(tree) {
+                Tree::SwitchValue(c, _) => &dispatch.value_clauses(*c)[i].1,
+                Tree::SwitchTypeof(c, _) => &dispatch.typeof_clauses(*c)[i].1,
                 _ => unreachable!(),
             };
             if let Clause::FallsThrough(Some(arm)) = clause {
@@ -806,12 +835,12 @@ impl State {
 
     /// V: untagged_test_expr. O(test occurrences + emitted scrutinee copies),
     /// using explicit stacks instead of recursion on the planner's tests.
-    fn untagged_test(&mut self, p: &Plan, test: TestId) -> NodeId {
+    fn untagged_test(&mut self, p: &Plan, dispatch: &dispatch::Plan<u32>, test: TestId) -> NodeId {
         let mut work = std::mem::take(&mut self.untagged_storage.test_work);
         let mut values = std::mem::take(&mut self.untagged_storage.test_values);
         work.push((test, false));
         while let Some((id, done)) = work.pop() {
-            let test = p.dispatch.test(id);
+            let test = dispatch.test(id);
             if !done {
                 work.push((id, true));
                 match test {
@@ -1192,6 +1221,111 @@ mod tests {
     }
 
     #[test]
+    fn ten_thousand_nested_payload_dispatches_lower_without_allocations() {
+        let mut a = LamArena::new();
+        let info = a.add_switch(
+            true,
+            [],
+            true,
+            [SwitchKey::Constructor(Case::Block(
+                VariantBlock::Untagged {
+                    tag: VariantTag {
+                        name: crate::name::Name::new("Payload"),
+                        literal: Literal::String("Payload".into()),
+                    },
+                    block_type: VariantBlockType::Unknown,
+                },
+            ))],
+            false,
+            SwitchDispatch::Variant(VariantMatchingFacts {
+                tag_name: None,
+                literal_tags: vec![],
+                block_types: vec![VariantBlockType::Unknown],
+            }),
+        );
+        let mut root = a.var(Ident::new("result", 101, crate::ident::IdentFlags::NONE));
+        for _ in 0..10_000 {
+            let x = a.var(Ident::new("x", 100, crate::ident::IdentFlags::NONE));
+            let actions = a.add_list(&[root]);
+            root = a.switch_raw(x, actions, info);
+        }
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let run = |s: &mut State| {
+            let output = s.probe(Cx::returning(), root).unwrap();
+            let output = s.realize(Cx::returning(), output);
+            for node in s.statements.statements(output.stmts) {
+                s.arena.release(node);
+            }
+            if let Some(value) = output.value {
+                s.arena.release(value);
+            }
+            s.statements.kill(output.stmts);
+        };
+        let lists = state.arena.lists.storage_shape().0;
+        run(&mut state);
+        state
+            .arena
+            .lists
+            .reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
+        state.free.reserve_repeat();
+        state.untagged_dispatch.reserve_repeat();
+        state.group_indices.reserve(state.group_indices.len());
+        state.group_nodes.reserve(state.group_nodes.len());
+        let storage = &mut state.untagged_storage;
+        storage.program.values.reserve(storage.program.values.len());
+        storage.actions.values.reserve(storage.actions.values.len());
+        storage.states.values.reserve(storage.states.values.len());
+        storage.marks.values.reserve(storage.marks.values.len());
+        storage.outputs.values.reserve(storage.outputs.values.len());
+        let capacities = |s: &State| {
+            let d = &s.untagged_storage;
+            [
+                s.arena.nodes.capacity(),
+                s.arena.parents.capacity(),
+                s.arena.free_nodes.capacity(),
+                s.arena.release_stack.capacity(),
+                s.arena.lists.storage_shape().1,
+                s.traversal.work.capacity(),
+                s.traversal.values.capacity(),
+                s.traversal.children.capacity(),
+                s.group_indices.capacity(),
+                s.group_nodes.capacity(),
+                s.group_table.capacity(),
+                s.group_heads.capacity(),
+                s.group_order.capacity(),
+                s.untagged.capacity(),
+                d.program.values.capacity(),
+                d.actions.values.capacity(),
+                d.states.values.capacity(),
+                d.marks.values.capacity(),
+                d.outputs.values.capacity(),
+                d.work.capacity(),
+                d.cache.capacity(),
+                d.literal_arms.capacity(),
+                d.payload_arms.capacity(),
+                d.aliases.capacity(),
+            ]
+        };
+        let before = capacities(&state);
+        let free_before = state.free.capacities();
+        let graph_before = state.untagged_dispatch.capacities();
+        let visits = state.source_steps;
+        let programs = state.untagged_storage.program_steps;
+        let grouping = state.switch_group_steps;
+        let allocations = allocation_counter::measure(|| run(&mut state));
+        println!("whole nested untagged payloads: {allocations:?}");
+        assert_eq!(allocations.count_total, 0);
+        assert_eq!(capacities(&state), before);
+        assert_eq!(state.free.capacities(), free_before);
+        assert_eq!(state.untagged_dispatch.capacities(), graph_before);
+        assert_eq!(state.source_steps - visits, 20_001);
+        assert_eq!(state.untagged_storage.program_steps - programs, 10_000);
+        assert_eq!(state.switch_group_steps - grouping, 20_000);
+    }
+
+    #[test]
     fn ten_thousand_reserved_plan_slots_do_not_allocate() {
         let mut outputs = Pool::default();
         let empty = Output {
@@ -1228,7 +1362,7 @@ mod tests {
 
     #[test]
     fn program_element_sizes() {
-        assert_eq!(std::mem::size_of::<Plan>(), 224);
+        assert_eq!(std::mem::size_of::<Plan>(), 120);
         assert_eq!(std::mem::size_of::<Run<Op>>(), 12);
         assert_eq!(std::mem::size_of::<Run<Action>>(), 12);
         assert_eq!(std::mem::size_of::<ActionState>(), 16);

@@ -2865,9 +2865,9 @@ The statement stack and node-list pool must be used end to end.
 | `untagged.rs:58` `Plan` | `remaining: Vec<u32>,` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
 | `untagged.rs:59` `Plan` | `marks: Vec<Span>,` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
 | `untagged.rs:60` `Plan` | `outputs: Vec<Output>,` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
-| `untagged.rs:82` `untagged_switch` | `let facts = facts.clone();` | per construct | borrow payload or retain typed pool handle | pending |
-| `untagged.rs:83` `untagged_switch` | `let mut literal_arms = Vec::with_capacity(n);` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `untagged.rs:84` `untagged_switch` | `let mut payload_arms = Vec::with_capacity(h.keys.len() - n);` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `untagged.rs:82` `untagged_switch` | `let facts = facts.clone();` | per construct | borrow source matching facts while appending to the unit graph | removed |
+| `untagged.rs:83` `untagged_switch` | `let mut literal_arms = Vec::with_capacity(n);` | per construct | input buffer retained; mixed/literal planner still copies it via Cow::into_owned | pending |
+| `untagged.rs:84` `untagged_switch` | `let mut payload_arms = Vec::with_capacity(h.keys.len() - n);` | per construct | retained payload-arm buffer; owned tag clones tracked separately | removed |
 | `untagged.rs:88` `untagged_switch` | `literal_arms.push((tag.literal.clone(), i as u32))` | per construct | borrow payload or retain typed pool handle | pending |
 | `untagged.rs:91` `untagged_switch` | `block.block_type().expect("untagged payload").clone(),` | per construct | borrow payload or retain typed pool handle | pending |
 | `untagged.rs:97` `untagged_switch` | `let sources = self.source.lists.get(operands).to_vec();` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
@@ -2945,15 +2945,29 @@ zero times after warming and pool reservation, at 10,002 source visits and
 retain interned spelling handles, including floats and big integers, rather
 than cloning strings into each output header.
 
-The untagged **emission-storage** conversion replaces its seven per-plan vectors
-with typed pool runs and retained scratch, reducing the cold plan from 336 to
-224 bytes. Local runs are 12 bytes, action state is 16 bytes, and nested plans
-have disjoint reserved stack regions. The 10,000-level payload fixture records
-10,000 emission-program steps. A separate 10,000-slot parent/child storage test
-measures zero warmed allocations and unchanged capacity; this is a storage test,
-**not** the required whole-Lambda untagged allocation proof. Shared dispatch
-planning still owns metadata and scratch vectors, test literal conversion still
-clones tags, and subtree copying still allocates. Those paths remain outstanding.
+The untagged plan now contains **no owned vectors**. Its 120-byte cold record
+refers to typed unit-wide program/action/stack pools; the shared dispatch graph's
+four pools also live once per lowering state. The owned legacy planner API and
+borrowed append API invoke the same planning function. Source-body equivalence
+is computed through the existing structural grouping pass, then the planner uses
+dense aliases. Incomparable bodies receive no alias, even for self-comparison.
+
+A complete Lambda fixture with 10,000 nested single-payload dispatches now runs
+twice with **zero allocations** in the measured second pass and unchanged
+recorded capacities: 20,001 source visits, 10,000 emission-program steps and
+20,000 grouping steps. It includes planning, traversal, emission, realization
+and release. Import is outside measurement; append-only growth is pre-reserved
+after warming. This does **not** prove the mixed/literal 10,000-case fixture:
+its shared planner still uses temporary vectors and clones owned tag metadata.
+Subtree copying and literal-test conversion also remain outstanding.
+
+| Additional owning API/site | Frequency | Disposition |
+| --- | --- | --- |
+| `untagged.rs` former `Plan.dispatch` | per construct | converted: four graph pools owned by `State::untagged_dispatch` |
+| `untagged_dispatch.rs` `PlanInput.literal_arms.into_owned()` | per mixed/literal plan | pending: borrowed input still copied by the general planner; not counted as an allocation removal |
+| `untagged_dispatch.rs` grouping, payload partitioning and simplification vectors | per general plan | pending: replace with typed runs and retained scratch |
+| `untagged.rs` literal and instance arm metadata clones | per arm | pending: replace owned tag payloads with metadata handles |
+| `edit.rs` `copy_subtree_recording` temporary maps and vectors | per copied action | pending: reusable indexed copy state required |
 
 ### 7.5.1 Concurrent loop, label and recursive-value additions
 

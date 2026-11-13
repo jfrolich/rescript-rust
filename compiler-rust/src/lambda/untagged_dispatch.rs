@@ -99,6 +99,13 @@ pub(crate) struct Plan<A> {
     root: TreeId,
 }
 
+impl<A> Default for Plan<A> {
+    /// O(1): empty unit pools defer allocation until graph construction.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<A> Plan<A> {
     fn new() -> Self {
         Plan {
@@ -194,6 +201,28 @@ pub(crate) struct Input<'f, A> {
     pub payloads_complete: bool,
     /// The default action of the match, for the cases without an arm.
     pub fallback: Option<A>,
+}
+
+/// Borrowed inputs for appending a plan to a unit-owned graph pool.
+/// Metadata and arm storage need only live for the planning call.
+pub(crate) struct BorrowedInput<'f, A> {
+    pub facts: &'f MatchingFacts,
+    pub literal_arms: &'f [(LiteralTag, A)],
+    pub payload_arms: &'f [(BlockType, A)],
+    pub literals_complete: bool,
+    pub payloads_complete: bool,
+    pub fallback: Option<A>,
+}
+
+/// The legacy caller transfers its literal-arm vector; pooled callers borrow it.
+/// Both callers use the same planner, not alternative lowering algorithms.
+struct PlanInput<'f, A: Clone> {
+    facts: &'f MatchingFacts,
+    literal_arms: std::borrow::Cow<'f, [(LiteralTag, A)]>,
+    payload_arms: &'f [(BlockType, A)],
+    literals_complete: bool,
+    payloads_complete: bool,
+    fallback: Option<A>,
 }
 
 /// The kinds `switch (typeof x)` tells apart; functions and objects are
@@ -721,19 +750,69 @@ fn simplify_clauses<K, A: Clone>(
 }
 
 /// untagged_dispatch.ml `plan`; `same` tells two bodies that are one body
-/// apart.
+/// apart. Cost is emitted tests/clauses plus source-body equality work.
 pub(crate) fn plan<A: Clone>(same: impl Fn(&A, &A) -> bool, input: Input<'_, A>) -> Plan<A> {
     let mut p = Plan::new();
-    p.root = plan_tree(&mut p, &same, input);
+    p.root = plan_tree(
+        &mut p,
+        &same,
+        PlanInput {
+            facts: input.facts,
+            literal_arms: std::borrow::Cow::Owned(input.literal_arms),
+            payload_arms: &input.payload_arms,
+            literals_complete: input.literals_complete,
+            payloads_complete: input.payloads_complete,
+            fallback: input.fallback,
+        },
+    );
     p
+}
+
+/// Append one root to retained graph pools. Cost is the planner's tests,
+/// clauses and equality comparisons; existing nodes and handles remain valid.
+pub(crate) fn append<A: Clone>(
+    p: &mut Plan<A>,
+    same: impl Fn(&A, &A) -> bool,
+    input: BorrowedInput<'_, A>,
+) {
+    p.root = plan_tree(
+        p,
+        &same,
+        PlanInput {
+            facts: input.facts,
+            literal_arms: std::borrow::Cow::Borrowed(input.literal_arms),
+            payload_arms: input.payload_arms,
+            literals_complete: input.literals_complete,
+            payloads_complete: input.payloads_complete,
+            fallback: input.fallback,
+        },
+    );
+}
+
+#[cfg(test)]
+impl<A> Plan<A> {
+    pub(crate) fn reserve_repeat(&mut self) {
+        self.tests.reserve(self.tests.len());
+        self.trees.reserve(self.trees.len());
+        self.value_clauses.reserve(self.value_clauses.len());
+        self.typeof_clauses.reserve(self.typeof_clauses.len());
+    }
+    pub(crate) fn capacities(&self) -> [usize; 4] {
+        [
+            self.tests.capacity(),
+            self.trees.capacity(),
+            self.value_clauses.capacity(),
+            self.typeof_clauses.capacity(),
+        ]
+    }
 }
 
 fn plan_tree<A: Clone>(
     p: &mut Plan<A>,
     same: &impl Fn(&A, &A) -> bool,
-    input: Input<'_, A>,
+    input: PlanInput<'_, A>,
 ) -> TreeId {
-    let Input {
+    let PlanInput {
         facts,
         literal_arms,
         payload_arms,
@@ -757,7 +836,7 @@ fn plan_tree<A: Clone>(
             false,
             fallback.as_ref(),
             payload_has_default,
-            &payload_arms,
+            payload_arms,
         );
         return simplify(p, same, payload);
     }
@@ -779,7 +858,7 @@ fn plan_tree<A: Clone>(
             unnamed.iter().any(|l| **l == LiteralTag::Null),
             fallback.as_ref(),
             true,
-            &payload_arms,
+            payload_arms,
         )
     });
     let skips_the_switch = |p: &Plan<A>, literal: &LiteralTag| -> bool {
@@ -816,7 +895,7 @@ fn plan_tree<A: Clone>(
             .collect(),
         None => Vec::new(),
     };
-    let mut literal_arms = literal_arms;
+    let mut literal_arms = literal_arms.into_owned();
     literal_arms.extend(unnamed_arms);
     let payload = payload_part(
         p,
@@ -825,7 +904,7 @@ fn plan_tree<A: Clone>(
         null_guard,
         fallback.as_ref(),
         payload_has_default,
-        &payload_arms,
+        payload_arms,
     );
     let payload = simplify(p, same, payload);
     // A payload dispatch that runs one body unchecked takes the literals with
@@ -871,6 +950,43 @@ fn plan_tree<A: Clone>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appended_plans_keep_earlier_root_handles_valid() {
+        let facts = MatchingFacts {
+            tag_name: None,
+            literal_tags: vec![],
+            block_types: vec![BlockType::Unknown],
+        };
+        let mut pool = Plan::default();
+        append(
+            &mut pool,
+            |a: &u32, b: &u32| a == b,
+            BorrowedInput {
+                facts: &facts,
+                literal_arms: &[],
+                payload_arms: &[(BlockType::Unknown, 7)],
+                literals_complete: true,
+                payloads_complete: true,
+                fallback: None,
+            },
+        );
+        let first = pool.root();
+        append(
+            &mut pool,
+            |a: &u32, b: &u32| a == b,
+            BorrowedInput {
+                facts: &facts,
+                literal_arms: &[],
+                payload_arms: &[(BlockType::Unknown, 8)],
+                literals_complete: true,
+                payloads_complete: true,
+                fallback: None,
+            },
+        );
+        assert!(matches!(pool.tree(first), Tree::Run(7)));
+        assert!(matches!(pool.tree(pool.root()), Tree::Run(8)));
+    }
 
     type P = Plan<&'static str>;
 

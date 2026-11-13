@@ -196,6 +196,11 @@ pub(super) struct Facts {
     comparable: bool,
 }
 
+impl Facts {
+    /// O(1): incomparable source bodies must not acquire an equality alias.
+    pub(super) fn comparable(&self) -> bool { self.comparable }
+}
+
 impl State {
     /// V: stable_group_switch_cases, C: filtered_switch_case_refs. Expected
     /// O(c + reachable nodes + confirmed equal nodes); collision candidates
@@ -456,16 +461,6 @@ impl State {
             }
             _ => {}
         }
-    }
-
-    /// Fingerprint prefilter followed by eq_approx. O(1) on rejection,
-    /// otherwise O(confirmed source pairs), counted separately.
-    pub(super) fn same_switch_body(&mut self, a: NodeId, b: NodeId) -> bool {
-        let (a_facts, b_facts) = (self.switch_facts[a.index()], self.switch_facts[b.index()]);
-        a_facts.comparable
-            && b_facts.comparable
-            && a_facts.hash == b_facts.hash
-            && self.switch_equal(a, b)
     }
 
     /// `return_case_needs_break` (C:6643) asks `lambda_has_exit` of a case
