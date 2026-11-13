@@ -550,6 +550,19 @@ impl Path {
         result
     }
 
+    /// Call `f` with each head of the path, in the order [`Path::heads`]
+    /// lists them. Cost: O(components of the path); no allocation.
+    pub fn for_each_head(&self, f: &mut impl FnMut(&'static Ident)) {
+        match self.view() {
+            PathView::Pident(id) => f(id),
+            PathView::Pdot(p, _, _) => p.for_each_head(f),
+            PathView::Papply(p1, p2) => {
+                p1.for_each_head(f);
+                p2.for_each_head(f);
+            }
+        }
+    }
+
     fn collect_heads(&self, acc: &mut Vec<&'static Ident>) {
         match self.view() {
             PathView::Pident(id) => acc.push(id),

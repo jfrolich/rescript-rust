@@ -437,6 +437,12 @@ jobs:
         run: |
           python3 -m unittest discover -s scripts -p test_backend_coverage_test.py
           python3 scripts/test_backend_coverage.py
+      # Units the rewritten type checker declines, per corpus and reason:
+      # a count may fall, never rise.
+      - name: Check checker coverage ratchet
+        run: |
+          python3 scripts/test_tc_coverage.py
+          python3 scripts/tc_coverage.py --rescript rewatch/target/release/rescript
 
   # Fingerprint, item digests and encoded bytes computed from the frozen
   # shared graph must equal those of the portable form, unit by unit.

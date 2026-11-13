@@ -4186,6 +4186,7 @@ fn with_fallback(
 
 fn map_type_decl_structure(
     decl: &TypeDeclaration,
+    generator_settings: Option<GeneratorSettings>,
     arena: &mut ParseArena,
 ) -> SpiceResult<Vec<ValueBinding>> {
     let type_name = arena.get_string(decl.ptype_name.txt).to_string();
@@ -4194,8 +4195,6 @@ fn map_type_decl_structure(
         get_attribute_by_name(&decl.ptype_attributes, "unboxed", arena),
         Ok(Some(_))
     );
-
-    let generator_settings = get_generator_settings_from_attributes(&decl.ptype_attributes, arena)?;
 
     let settings = match generator_settings {
         None => return Ok(vec![]),
@@ -5426,12 +5425,8 @@ impl<'a> LocCloner<'a> {
                 }
                 *bindings = self.arena.push_vb_list(&new_bindings);
             }
-            // The item keeps its plan; its general form is cloned as a value group.
-            StructureItemDesc::Pstr_derived(idx) => {
-                let mut general = super::derive::general_form(self.arena, *idx);
-                self.structure_item_desc(&mut general);
-                super::derive::set_general_form(self.arena, *idx, &general);
-            }
+            // A plan holds no syntax to clone.
+            StructureItemDesc::Pstr_derived(_) => {}
             StructureItemDesc::Pstr_primitive(vd) => self.value_description(vd),
             StructureItemDesc::Pstr_type(inner) => {
                 let (_, ref mut decls) = **inner;
@@ -5521,6 +5516,19 @@ fn clone_mapped_signature_item(
     Ok(mapped_item)
 }
 
+/// The derive settings of each declaration of a group, read once from its
+/// attributes; an attribute that cannot be read is the error generating the
+/// declaration reports.
+type GroupSettings = smallvec::SmallVec<[SpiceResult<Option<GeneratorSettings>>; 4]>;
+
+/// The number of bindings the derive makes for a declaration: two for an
+/// encoder, one for a decoder. Cost: O(1).
+fn binding_count(settings: Option<GeneratorSettings>) -> usize {
+    settings.map_or(0, |settings| {
+        2 * usize::from(settings.do_encode) + usize::from(settings.do_decode)
+    })
+}
+
 /// The path of a group of type declarations: a plan when every declaration
 /// that derives classifies `Plan`, otherwise the first reason met. With the
 /// census on, the bindings of each declaration are counted under its own
@@ -5532,23 +5540,23 @@ fn classify_group(
     arena: &mut ParseArena,
     rec_flag: RecFlag,
     decls: &[TypeDeclaration],
-    generated: &[usize],
-    scope: super::derive::Scope,
+    settings: &[Option<GeneratorSettings>],
 ) -> super::derive::Classification {
     use super::derive::Classification;
-    let deriving = generated.iter().filter(|count| **count > 0).count();
+    let deriving = settings.iter().filter(|settings| settings.is_some()).count();
     let shares_names = deriving > 1 && plan::group_shares_names(decls, arena);
     let mut group = Classification::Plan;
     let mut counts = super::derive::PathCounts::default();
     let mut plannable = 0;
-    for (decl, count) in decls.iter().zip(generated) {
-        if *count == 0 {
+    for (decl, settings) in decls.iter().zip(settings) {
+        let count = binding_count(*settings) as u64;
+        if count == 0 {
             continue;
         }
-        match plan::classify(arena, decl, rec_flag, shares_names, scope) {
-            Classification::Plan => plannable += *count as u64,
+        match plan::classify(arena, decl, rec_flag, shares_names) {
+            Classification::Plan => plannable += count,
             general @ Classification::General(_) => {
-                counts.add(general, *count as u64);
+                counts.add(general, count);
                 if group == Classification::Plan {
                     group = general;
                 }
@@ -5566,20 +5574,39 @@ fn map_structure_item_spice(
     item: &StructureItem,
     arena: &mut ParseArena,
     mapper_active: bool,
-    scope: super::derive::Scope,
 ) -> SpiceResult<Vec<StructureItem>> {
     match &item.pstr_desc {
         StructureItemDesc::Pstr_type(inner) => {
             let (ref rec_flag, ref decls) = **inner;
+            // The settings are read once, for the classification and for
+            // whichever of the plan and the syntax is then made.
+            let settings: GroupSettings = decls
+                .iter()
+                .map(|decl| get_generator_settings_from_attributes(&decl.ptype_attributes, arena))
+                .collect();
+            // A group that takes a plan generates no syntax: it is classified
+            // from its declarations alone, before anything is generated.
+            if let Ok(settings) = settings
+                .iter()
+                .cloned()
+                .collect::<SpiceResult<smallvec::SmallVec<[Option<GeneratorSettings>; 4]>>>()
+                && settings.iter().any(|settings| settings.is_some())
+                && classify_group(arena, *rec_flag, decls, &settings)
+                    == super::derive::Classification::Plan
+            {
+                let mapped_item = clone_mapped_structure_item(item, arena)?;
+                let value_item = StructureItem {
+                    pstr_desc: StructureItemDesc::Pstr_derived(plan::build(arena, decls, &settings)),
+                    pstr_loc: arena.dummy_loc(),
+                };
+                return Ok(vec![mapped_item, value_item]);
+            }
             let mut vbs = Vec::new();
-            // Bindings generated per declaration, for the classification.
-            let mut generated_counts: smallvec::SmallVec<[usize; 4]> = smallvec::SmallVec::new();
-            for decl in decls {
-                let generated = map_type_decl_structure(decl, arena)?;
+            for (decl, settings) in decls.iter().zip(settings) {
+                let generated = map_type_decl_structure(decl, settings?, arena)?;
                 if arena.derived_census.is_some() {
                     super::derive::record_shapes(decl, decls, *rec_flag == RecFlag::Recursive, &generated, arena);
                 }
-                generated_counts.push(generated.len());
                 vbs.extend(generated);
             }
 
@@ -5593,17 +5620,8 @@ fn map_structure_item_spice(
                 let mapped_item = clone_mapped_structure_item(item, arena)?;
 
                 let general = arena.push_vb_list(&vbs);
-                let pstr_desc =
-                    match classify_group(arena, *rec_flag, decls, &generated_counts, scope) {
-                        super::derive::Classification::Plan => {
-                            StructureItemDesc::Pstr_derived(plan::build(arena, decls, general)?)
-                        }
-                        super::derive::Classification::General(_) => {
-                            StructureItemDesc::Pstr_value((*rec_flag, general))
-                        }
-                    };
                 let value_item = StructureItem {
-                    pstr_desc,
+                    pstr_desc: StructureItemDesc::Pstr_value((*rec_flag, general)),
                     pstr_loc: arena.dummy_loc(),
                 };
                 super::derive::mark_generated_item(&value_item, arena);
@@ -5834,12 +5852,11 @@ pub fn expand_structure_item_with_mapper(
     item: &StructureItem,
     arena: &mut ParseArena,
     mapper_active: bool,
-    scope: super::derive::Scope,
 ) -> SpiceResult<Vec<StructureItem>> {
     if !arena.builtin_spice_enabled() {
         return Ok(vec![item.clone()]);
     }
-    map_structure_item_spice(item, arena, mapper_active, scope)
+    map_structure_item_spice(item, arena, mapper_active)
 }
 
 fn map_structure_items_with_mapper(
@@ -5854,7 +5871,6 @@ fn map_structure_items_with_mapper(
             item,
             arena,
             mapper_active,
-            super::derive::Scope::Nested,
         )?);
     }
     Ok(expanded)

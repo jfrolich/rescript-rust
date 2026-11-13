@@ -3871,20 +3871,53 @@ fn compile_with_location_retry<T>(
     options: &rescript_compiler::driver::CompilerOptions,
     mut compile: impl FnMut(&StoredAst, &rescript_compiler::driver::CompilerOptions) -> Result<T>,
 ) -> Result<T> {
-    use rescript_compiler::driver::LocationRetry;
-    let result = match ast.retry_source() {
-        // A location-free compile places its warnings in a located parse of
-        // the same source; it returns `LocationRetry::Warning` when it cannot.
-        Some(source) if !ast.arena().stores_locations() => {
-            let source = source.clone();
-            let mut options = options.clone();
-            options.warning_locations = Some(Arc::new(move || {
-                super::parse::reparse_arena_with_locations(&source)
-            }));
-            compile(ast, &options)
+    use rescript_compiler::driver::{DerivedPath, DerivedRetry, LocationRetry};
+    // A check compiles the general form of a unit that has plans as well:
+    // `tree` is the parse being compiled, `source` what it was parsed from.
+    let checked = |tree: &StoredAst,
+                   source: &Arc<super::build_types::ParseSource>,
+                   options: &mut rescript_compiler::driver::CompilerOptions| {
+        if options.derived_path == DerivedPath::Check && tree.arena().plans().item_count() > 0 {
+            let (source, locations) = (source.clone(), tree.arena().stores_locations());
+            options.derived_reference =
+                Some(Arc::new(move || super::parse::general_form(&source, locations)));
+            options.derived_differences = Some(build.derived_differences.clone());
         }
-        _ => compile(ast, options),
     };
+    let mut attempt = |ast: &StoredAst| {
+        let check = options.derived_path == DerivedPath::Check && ast.arena().plans().item_count() > 0;
+        match ast.retry_source() {
+            Some(source) if !ast.arena().stores_locations() || check => {
+                let mut options = options.clone();
+                // A location-free compile places its warnings in a located
+                // parse of the same source; it returns
+                // `LocationRetry::Warning` when it cannot.
+                if !ast.arena().stores_locations() {
+                    let source = source.clone();
+                    options.warning_locations = Some(Arc::new(move || {
+                        super::parse::reparse_arena_with_locations(&source)
+                    }));
+                }
+                checked(ast, source, &mut options);
+                compile(ast, &options)
+            }
+            _ => compile(ast, options),
+        }
+    };
+    let result = attempt(ast);
+    // A unit with a plan the checker could not use is compiled again from
+    // the syntax of its derived code. Nothing of the first attempt was
+    // published.
+    let general;
+    let (ast, result) = match result {
+        Err(error) if error.is::<DerivedRetry>() => {
+            general = super::parse::reparse_without_plans(ast)?;
+            let result = attempt(&general);
+            (&general, result)
+        }
+        result => (ast, result),
+    };
+    drop(attempt);
     let local_retry = !ast.arena().stores_locations()
         && matches!(
             &result,
@@ -3902,7 +3935,14 @@ fn compile_with_location_retry<T>(
                 .map(|source| source.file_path.display().to_string())
                 .unwrap_or_default()
         );
-        return super::parse::reparse_with_locations(ast).and_then(|located| compile(&located, options));
+        // The located parse keeps no source of its own: its reference is
+        // made from the source it was parsed from.
+        let located = super::parse::reparse_with_locations(ast)?;
+        let mut options = options.clone();
+        if let Some(source) = ast.retry_source() {
+            checked(&located, source, &mut options);
+        }
+        return compile(&located, &options);
     }
     if !build.parses_with_locations() && result.is_err() {
         // Type errors can quote declarations from dependency interfaces.
