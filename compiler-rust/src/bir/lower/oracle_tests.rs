@@ -1423,3 +1423,66 @@ fn a_copied_function_doubles_the_legacy_count_of_the_variables_declared_inside_i
     let stats = crate::bir::shadow::compare_decisions(&decisions, &program.program);
     assert_eq!((stats.decision_count_differences, stats.decision_status_differences, stats.decision_inline, stats.decision_legacy_inline), (1, 1, 1, 0));
 }
+
+#[test]
+fn ten_thousand_return_sites_are_read_in_two_steps_each() {
+    // One `return` of 10,000 nested conditionals, each with a call of its own
+    // callee in one branch: `scope::return_sites` takes one step per
+    // conditional and one per call, and records every callee's site.
+    use crate::lambda::LamLoc;
+    let mut a = LamArena::new();
+    let callee = a.var(Ident::new("f", 1, IdentFlags::NONE));
+    let mut root = call(&mut a, callee, &[]);
+    for i in 0..10_000 {
+        let test = a.var(Ident::new("c", 20_000, IdentFlags::NONE));
+        let callee = a.var(Ident::new("f", i + 2, IdentFlags::NONE));
+        let applied = call(&mut a, callee, &[]);
+        root = a.if_(test, applied, root);
+    }
+    let root = a.function_(0, &[], root, Default::default(), LamLoc::NONE);
+    let input = bridge::import_lambda(&a, root).unwrap();
+    let source_root = input.root;
+    let mut state = State::new(input);
+    let probed = state.probe(Cx::value(), source_root).unwrap();
+    let lowered = state.complete(Cx::value(), probed);
+    let scope = lowered.program.arena.js_scope.as_ref().unwrap();
+    let sites = scope.facts.iter().filter(|facts| facts.site != super::scope::VarFacts::NO_SITE).count();
+    assert_eq!(sites, 10_001);
+    // 10,000 conditionals and 10,001 calls, the `return`, the sentinel.
+    assert_eq!(lowered.switch_stats.close_steps, 10_000 + 10_001 + 2);
+    assert_eq!(lowered.switch_stats.statements_copied, 2);
+}
+
+#[test]
+fn a_declaration_is_decided_once_per_copy_of_its_statement() {
+    // `close::decide` runs where a list is copied, so a statement the
+    // lowering moves and copies again is decided again: the number of
+    // decisions is bounded by `StatementStack::copied`, not by the number of
+    // declarations. 10,000 nested `if c { let y = ext(); y } else { ... }`:
+    // every declaration is copied, and decided, once here.
+    use crate::lambda::LamLoc;
+    let mut a = LamArena::new();
+    let ext = Ident::new("ext", 6, IdentFlags::NONE);
+    let mut root = a.const_(C::Int { i: 1, comment: None });
+    for i in 0..10_000 {
+        let test = a.var(Ident::new("c", 5, IdentFlags::NONE));
+        let callee = a.var(ext);
+        let effect = call(&mut a, callee, &[]);
+        let y = Ident::new("y", 1000 + i, IdentFlags::NONE);
+        let read = a.var(y);
+        let yes = a.let_(LetKind::Strict, y, effect, read);
+        root = a.if_(test, yes, root);
+    }
+    let root = a.function_(0, &[], root, Default::default(), LamLoc::NONE);
+    let input = bridge::import_lambda(&a, root).unwrap();
+    let source_root = input.root;
+    let mut state = State::new(input);
+    let probed = state.probe(Cx::value(), source_root).unwrap();
+    let lowered = state.complete(Cx::value(), probed);
+    let scope = lowered.program.arena.js_scope.as_ref().unwrap();
+    let stats = lowered.switch_stats;
+    assert_eq!(scope.decisions.len(), 10_000);
+    assert!(scope.decisions.len() <= stats.statements_copied);
+    // One step per copied statement and one per returned value.
+    assert!(stats.close_steps <= 2 * stats.statements_copied, "{} steps, {} copied", stats.close_steps, stats.statements_copied);
+}

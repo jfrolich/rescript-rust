@@ -297,6 +297,9 @@ pub(crate) struct SwitchStats {
     pub location_visits: usize,
     /// Steps of `close::decide` over every copied run.
     pub close_steps: usize,
+    /// Statements copied into lists (`StatementStack::copied`): a moved
+    /// statement is copied, and decided, once per move.
+    pub statements_copied: usize,
     /// Step A against the legacy tail-call pass (`shadow::compare_decisions`),
     /// zero until check mode compares.
     #[serde(flatten)]
@@ -644,6 +647,7 @@ impl State {
                 compared_pairs: self.switch_compared,
                 location_visits: self.location_steps,
                 close_steps,
+                statements_copied: self.statements.copied,
                 decisions: DecisionStats::default(),
             },
         }

@@ -22,6 +22,18 @@ use crate::lambda::lam_compat::LetKind;
 /// steps per declaration of a function whose body is one `return` of a call
 /// (`ten_thousand_declarations_close_in_three_steps_each`): one for the
 /// declaration, two for the body's list.
+///
+/// A list is copied, and decided, each time the lowering moves its
+/// statements (a held run, a branch `simplify_if_head` moves after its
+/// guard), so a declaration is decided once per copy of its statement, not
+/// once: the bound is `StatementStack::copied`, which no constant per
+/// declaration bounds (7 decisions of one variable in the runtime's
+/// `Primitive_object`, one decision in five replaced on a 3,735-module
+/// application). The last decision is the one that stands
+/// (`a_declaration_is_decided_once_per_copy_of_its_statement`). That is
+/// acceptable while nothing is rewritten: a decision is a pure function of
+/// the counts and costs the step the copy already takes. A splice needs a
+/// close that happens once (THREE_TREES 11.4, "T4c design").
 pub(super) fn decide(bir: &mut Bir, list: ListId) {
     let count = bir.lists.get(list).len();
     let mut steps = 0;
@@ -66,4 +78,44 @@ fn inlinable_function(bir: &Bir, value: NodeId) -> bool {
     let View::JFun { header, .. } = bir.view(value) else { return false };
     let attributes = bir.function_attributes(header);
     bir.function(header).flags & FuncHeader::METHOD == 0 && !attributes.async_ && attributes.directive.is_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bir::lower::scope::Scope;
+    use crate::name::Name;
+
+    /// A list of `count` declarations `let v = w` and one `return c ? w : w`.
+    fn run(b: &mut Bir, count: u32) -> ListId {
+        let other = b.new_var_id(Name::new("w"), 0);
+        let mut statements = Vec::with_capacity(count as usize + 1);
+        for order in 0..count {
+            let var = b.new_var_id(Name::new("v"), order + 1);
+            let value = b.new_node(View::Var { var: other }, 0);
+            statements.push(b.new_node(View::SDecl { var, value: Some(value) }, LetKind::Strict as u16));
+        }
+        let operands = [(); 3].map(|()| b.new_node(View::Var { var: other }, 0));
+        let value = b.new_node(View::JCond { condition: operands[0], then_: operands[1], else_: operands[2] }, 0);
+        statements.push(b.new_node(View::SReturn { value }, 0));
+        b.lists.push(&statements)
+    }
+
+    #[test]
+    fn ten_thousand_declarations_are_decided_without_allocating_once_the_tables_are_warm() {
+        let mut b = Bir::default();
+        b.begin_bulk();
+        b.js_scope = Some(Scope::new(0));
+        let list = run(&mut b, 10_000);
+        // Warm: the spine has its capacity, the rows have room.
+        decide(&mut b, list);
+        let scope = b.js_scope.as_mut().unwrap();
+        assert_eq!(scope.decisions.len(), 10_000);
+        // 10,001 statements; the returned conditional and its two branches.
+        assert_eq!(scope.close_steps, 10_001 + 3);
+        scope.decisions.reserve(10_000);
+        let allocations = allocation_counter::measure(|| decide(&mut b, list));
+        assert_eq!(allocations.count_total, 0, "{allocations:?}");
+        assert_eq!(b.js_scope.as_ref().unwrap().decisions.len(), 20_000);
+    }
 }
