@@ -302,6 +302,10 @@ impl<'a> DependencyCollector<'a> {
 
     fn add_structure_item(&mut self, item: &StructureItem) {
         match &item.pstr_desc {
+            StructureItemDesc::Pstr_derived(idx) => {
+                let general = crate::binary_ast::derive::general_item(self.arena, item.pstr_loc, *idx);
+                self.add_structure_item(&general)
+            }
             StructureItemDesc::Pstr_eval(inner) => {
                 let (ref expr, ref _attrs) = **inner;
                 self.add_expr_idx(*expr);
@@ -514,6 +518,9 @@ impl<'a> DependencyCollector<'a> {
                             }
                         }
                     }
+                    if inner.is_async {
+                        self.add_lident_idx(arena.promise_async_lident());
+                    }
                     self.add_expr_idx(inner.rhs);
                     for name in newly_added {
                         self.bound_modules.shift_remove(&name);
@@ -540,6 +547,9 @@ impl<'a> DependencyCollector<'a> {
                     .collect();
                 // rhs is ExprIdx
                 let rhs = *rhs;
+                if inner.is_async {
+                    self.add_lident_idx(arena.promise_async_lident());
+                }
                 self.add_expr_idx(rhs);
                 for name in &newly_added {
                     self.bound_modules.shift_remove(name);
@@ -771,6 +781,7 @@ impl<'a> DependencyCollector<'a> {
             ExpressionDesc::Pexp_raw(_) | ExpressionDesc::Pexp_todo(_) => {}
             ExpressionDesc::Pexp_extension(ext) => self.handle_extension(ext),
             ExpressionDesc::Pexp_await(expr) => {
+                self.add_lident_idx(self.arena.promise_await_lident());
                 // expr is ExprIdx
                 let expr = *expr;
                 self.add_expr_idx(expr);
@@ -1514,6 +1525,21 @@ let y = Type.typeof
 
         let deps = extract_structure_deps(&arena, &structure);
         assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn direct_promises_keep_implicit_dependencies_and_unpack_scope() {
+        for (source, expected) in [
+            ("let f = async p => await p", true),
+            ("module Primitive_promise = {}\nlet f = async p => await p", false),
+            ("module type S = {}\nlet f = async (module(Primitive_promise: S)) => 1", false),
+        ] {
+            let mut parser = crate::parser::state::Parser::new("promise.res", source);
+            let structure = crate::parser::module::parse_structure(&mut parser);
+            let arena = parser.into_arena();
+            let deps = extract_structure_deps(&arena, &structure);
+            assert_eq!(deps.contains("Primitive_promise"), expected, "{source}: {deps:?}");
+        }
     }
 
     #[test]

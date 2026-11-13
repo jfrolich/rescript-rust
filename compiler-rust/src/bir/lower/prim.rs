@@ -90,12 +90,28 @@ impl State {
 
     /// P: compile_primitive_js. O(a + emitted metadata bytes), plus sequencing
     /// holds and the named J-rule costs. Arguments are decoded once; dictionary
-    /// extraction visits each immediate entry once. Payload cloning copies cold
-    /// tag/template data, not expression trees.
+    /// extraction visits each immediate entry once. The payload pool is borrowed
+    /// while the output arena is mutated; moving its Vec header costs O(1).
     pub(super) fn finish_primitive(
         &mut self,
         cx: Cx,
         prim: Prim,
+        children: impl Iterator<Item = Probed>,
+    ) -> Result<Probed, Unsupported> {
+        let payloads = std::mem::take(&mut self.arena.pools.prims);
+        let payload = &payloads[prim.primitive.index()];
+        let result = self.finish_primitive_payload(cx, prim, payload, children);
+        self.arena.pools.prims = payloads;
+        result
+    }
+
+    /// P: compile_primitive_js. O(a + emitted metadata bytes + J-rule costs).
+    /// Borrow source metadata; only metadata owned by the output is copied.
+    fn finish_primitive_payload(
+        &mut self,
+        cx: Cx,
+        prim: Prim,
+        payload: &crate::bir::PrimPayload,
         children: impl Iterator<Item = Probed>,
     ) -> Result<Probed, Unsupported> {
         let outputs = children
@@ -104,10 +120,22 @@ impl State {
                 Probed::Free(_) => unreachable!("argument realized before its next sibling"),
             })
             .collect();
+        let outputs = match &payload.primitive {
+            Primitive::PjsCall(call) => self.hold_external_args(cx, &call.arg_types, outputs),
+            Primitive::PjsObjectCreate(specs) => self.hold_external_obj_args(cx, specs, outputs),
+            Primitive::PjsObjectGet(_) => {
+                let mut outputs: smallvec::SmallVec<[Out; 4]> = outputs;
+                if outputs.len() == 1 {
+                    let arg = outputs.pop().unwrap();
+                    outputs.push(self.hold_external_receiver(cx, arg));
+                }
+                outputs
+            }
+            _ => outputs,
+        };
         let (statements, values) = self.sequence_arguments(false, outputs);
         self.primitive_steps += values.len() + 1;
-        let payload = self.arena.primitive(prim.primitive).clone();
-        let primitive = payload.primitive;
+        let primitive = &payload.primitive;
         let value = match primitive {
             // P: compile_primitive_js, dictionaries: extract only literal-key
             // tuple entries, exactly as the legacy filter_map does.
@@ -168,31 +196,32 @@ impl State {
                 let mut kept = Vec::new();
                 for arg in values {
                     self.primitive_steps += 1;
-                    let entries = if let View::JObject { info, values } = self.arena.view(arg) {
+                    let start = kept.len();
+                    let flatten = if let View::JObject { info, values } = self.arena.view(arg) {
                         let crate::bir::JsPayload::Object(props) = self.arena.javascript(info)
                         else {
                             unreachable!()
                         };
-                        props
-                            .iter()
-                            .all(|p| {
-                                matches!(
-                                    p,
-                                    crate::bir::PropertyKey::Literal(_)
-                                        | crate::bir::PropertyKey::Symbol
-                                )
-                            })
-                            .then(|| (props.clone(), values.to_vec()))
+                        let literal = props.iter().all(|p| {
+                            matches!(
+                                p,
+                                crate::bir::PropertyKey::Literal(_)
+                                    | crate::bir::PropertyKey::Symbol
+                            )
+                        });
+                        if literal {
+                            keys.extend_from_slice(props);
+                            kept.extend_from_slice(values);
+                        }
+                        literal
                     } else {
-                        None
+                        false
                     };
-                    if let Some((props, values)) = entries {
-                        for &value in &values {
+                    if flatten {
+                        for &value in &kept[start..] {
                             self.arena.detach(value);
                         }
                         self.arena.release(arg);
-                        keys.extend(props);
-                        kept.extend(values);
                     } else {
                         keys.push(crate::bir::PropertyKey::Spread);
                         kept.push(arg);
@@ -240,7 +269,7 @@ impl State {
             }
             // P: compile_primitive_js, blocks and fields (K: compile_field_access).
             Primitive::Pmakeblock(tag, mutable) => {
-                let info = self.arena.js_info(crate::bir::JsPayload::Block(tag));
+                let info = self.arena.js_info(crate::bir::JsPayload::Block(tag.clone()));
                 plain::node(
                     &mut self.arena,
                     View::JBlockLit {
@@ -270,9 +299,9 @@ impl State {
             Primitive::Pmakearray => {
                 plain::node(&mut self.arena, View::JArray { values: &values }, 1)
             }
-            Primitive::Pfield(idx, info) => self.primitive_field(idx, info, values[0]),
+            Primitive::Pfield(idx, info) => self.primitive_field(*idx, info, values[0]),
             Primitive::Psetfield(idx, info) => {
-                self.primitive_set_field(idx, info.name(), values[0], values[1])
+                self.primitive_set_field(*idx, info.name(), values[0], values[1])
             }
             Primitive::Pobjtag => {
                 let property = self.arena.intern_text("TAG");
@@ -291,9 +320,10 @@ impl State {
                 norm::jm3_to_int32(&mut self.arena, length)
             }
             Primitive::PisPolyVarBlock => {
-                let typeof_ = plain::node(&mut self.arena, View::JTypeof { value: values[0] }, 0);
+                // P:642 / E:653 folds typeof before comparing the type name.
+                let typeof_ = norm::jm9_typeof(&mut self.arena, values[0]);
                 let object = plain::string(&mut self.arena, "object");
-                plain::bin(&mut self.arena, BinOp::EqEqEq, typeof_, object)
+                norm::je4_bin(&mut self.arena, BinOp::EqEqEq, typeof_, object)
             }
             // P: compile_primitive_js, indexing. Both string forms are checked.
             Primitive::Pstringrefs | Primitive::Pstringrefu => {
@@ -339,13 +369,13 @@ impl State {
             }
             // P: compile_primitive_js, template arms; J-M12 preserves raw spelling.
             Primitive::Ptemplate(segments) => {
-                norm::jm12_interpolated_template(&mut self.arena, segments, values.into_vec())
+                norm::jm12_interpolated_template(&mut self.arena, segments.clone(), values.into_vec())
             }
             Primitive::PtaggedTemplate(segments) => {
                 let parts = segments
-                    .into_iter()
+                    .iter()
                     .map(|s| crate::bir::TemplatePart {
-                        raw: self.arena.intern_text(&s),
+                        raw: self.arena.intern_text(s),
                         cooked: None,
                     })
                     .collect();
@@ -459,22 +489,22 @@ impl State {
                 }
             }
             // P: compile_primitive_js, comparison arms.
-            Primitive::Pintcomp(cmp) => self.primitive_int_comparison(cmp, values[0], values[1]),
-            Primitive::Pboolcomp(cmp) => self.primitive_bool_comparison(cmp, values[0], values[1]),
+            Primitive::Pintcomp(cmp) => self.primitive_int_comparison(*cmp, values[0], values[1]),
+            Primitive::Pboolcomp(cmp) => self.primitive_bool_comparison(*cmp, values[0], values[1]),
             Primitive::Pstringcomp(cmp) => {
-                self.primitive_literal_comparison(cmp, values[0], values[1], false)
+                self.primitive_literal_comparison(*cmp, values[0], values[1], false)
             }
             Primitive::Pbigintcomp(cmp) => {
-                self.primitive_literal_comparison(cmp, values[0], values[1], true)
+                self.primitive_literal_comparison(*cmp, values[0], values[1], true)
             }
-            Primitive::Pobjcomp(cmp) => self.primitive_object_comparison(cmp, values[0], values[1]),
+            Primitive::Pobjcomp(cmp) => self.primitive_object_comparison(*cmp, values[0], values[1]),
             Primitive::Pfloatcomp(
                 cmp @ (crate::lambda::lam_compat::Comparison::Eq
                 | crate::lambda::lam_compat::Comparison::Neq),
-            ) => self.primitive_int_comparison(cmp, values[0], values[1]),
+            ) => self.primitive_int_comparison(*cmp, values[0], values[1]),
             Primitive::Pfloatcomp(cmp) | Primitive::Pjscomp(cmp) => norm::je4_bin(
                 &mut self.arena,
-                super::prim_cmp::comparison_op(cmp, true),
+                super::prim_cmp::comparison_op(*cmp, true),
                 values[0],
                 values[1],
             ),
@@ -654,7 +684,7 @@ impl State {
                 )
             }
             Primitive::PcreateExtension(name) => {
-                let name = plain::string(&mut self.arena, &name);
+                let name = plain::string(&mut self.arena, name);
                 let call = self.primitive_runtime("Primitive_exceptions", "create", &[name]);
                 let comment = Some(self.arena.intern_text("@__PURE__"));
                 self.arena.set_cold(
@@ -700,10 +730,10 @@ impl State {
                     finished: Finished::True,
                 }));
             }
-            Primitive::Pjsx(jsx) => self.compile_jsx(&jsx, values),
-            Primitive::Pimport(source) => self.compile_import(&source),
+            Primitive::Pjsx(jsx) => self.compile_jsx(jsx, values),
+            Primitive::Pimport(source) => self.compile_import(source),
             Primitive::Pduprecord => self.duplicate_record(values[0]),
-            Primitive::PrecordRest(excluded) => self.record_rest(values[0], &excluded),
+            Primitive::PrecordRest(excluded) => self.record_rest(values[0], excluded),
             // P: compile_primitive_js, Pawait. O(1): one owned J node.
             Primitive::Pawait => plain::node(&mut self.arena, View::JAwait { value: values[0] }, 0),
             Primitive::Pstringlength => {
@@ -712,14 +742,38 @@ impl State {
             Primitive::Parraylength => {
                 norm::je2_length(&mut self.arena, values[0], LengthObject::Array)
             }
+            Primitive::PjsCall(call) => self.compile_js_call(cx, prim.primitive, call, values),
+            Primitive::PjsApply => match values.split_first() {
+                Some((&callee, args)) => self.call_node(callee, args, Default::default()),
+                None => plain::node(&mut self.arena, View::JUndefined, 0),
+            },
+            Primitive::PjsObjectCreate(specs) => self.compile_js_object_create(cx, specs, values),
+            Primitive::PjsFnMethod => {
+                let mut values = values.into_iter();
+                let value = values.next().unwrap_or_else(|| plain::node(&mut self.arena, View::JUndefined, 0));
+                for unused in values { self.arena.release(unused); }
+                if let View::JFun { header, .. } = self.arena.view(value) {
+                    self.arena.pools.funcs[header.index()].flags |= crate::bir::FuncHeader::METHOD;
+                }
+                value
+            }
+            Primitive::PjsObjectGet(name) | Primitive::PjsObjectSet(name) => {
+                match (primitive, values.as_slice()) {
+                    (Primitive::PjsObjectGet(_), &[receiver]) => self.static_member(receiver, name),
+                    (Primitive::PjsObjectSet(_), &[receiver, value]) => {
+                        let target = self.static_member(receiver, name);
+                        let assign = plain::bin(&mut self.arena, BinOp::Eq, target, value);
+                        let unit = plain::node(&mut self.arena, View::JUndefined, 1);
+                        plain::seq(&mut self.arena, assign, unit)
+                    }
+                    _ => {
+                        for value in values { self.arena.release(value); }
+                        plain::node(&mut self.arena, View::JUndefined, 0)
+                    }
+                }
+            }
             Primitive::Psequand
             | Primitive::Psequor
-            | Primitive::PjsCall(_)
-            | Primitive::PjsApply
-            | Primitive::PjsObjectCreate(_)
-            | Primitive::PjsObjectGet(_)
-            | Primitive::PjsObjectSet(_)
-            | Primitive::PjsFnMethod
             => {
                 unreachable!("unsupported primitive rejected by dispatch")
             }
@@ -727,6 +781,21 @@ impl State {
                 unreachable!("PextensionSlotEq is lowered in raw_lambda::lower")
             }
         };
+        // C: primitive_uses_default_compilation / with_source_loc. Preserve
+        // a child's existing location when a normalizer returns that child.
+        let located = match primitive {
+            Primitive::Pdebugger => false,
+            Primitive::Pfield(_,crate::lambda::FieldDbgInfo::Module { .. }) =>
+                !matches!(self.source.lists.get(prim.operands),[arg] if matches!(self.source.view(*arg),View::Global { .. })),
+            _ => true,
+        };
+        if located && !self.arena.node(value).flags().contains(crate::bir::NodeFlags::JS_LOC_PRESENT)
+            && self.locations.as_ref().and_then(|t|t.get(payload.loc)).is_some_and(|loc| !loc.loc_ghost && loc.loc_start.cnum >= 0) {
+            let comment = self.arena.cold(value).and_then(|c|c.comment);
+            self.arena.set_cold(value,crate::bir::Cold { loc:payload.loc,comment });
+            let mut flags = self.arena.node(value).flags(); flags.0 |= crate::bir::NodeFlags::JS_LOC_PRESENT;
+            self.arena.nodes[value.index()].set_flags(flags);
+        }
         Ok(self.primitive_result(
             cx,
             self.statements.since(Span {
@@ -762,10 +831,28 @@ mod tests {
     use crate::lambda::{LamLoc, arena::LamArena, lam_constant::Constant};
 
     #[test]
+    fn interned_payload_is_reusable_after_lowering() {
+        let mut a = LamArena::new();
+        let primitive = Primitive::PrawJsCode(crate::lambda::lam_primitive::JsRawInfo {
+            code: "payload()".into(),
+            is_stmt: false,
+        });
+        let first = a.prim_raw(primitive.clone(), &[], LamLoc::NONE);
+        let second = a.prim_raw(primitive, &[], LamLoc::NONE);
+        let root = a.prim_raw(Primitive::Pmakearray, &[first, second], LamLoc::NONE);
+        super::super::oracle_tests::compare(a, root);
+    }
+
+    #[test]
     fn primitive_resume_is_two_handles() {
         assert_eq!(std::mem::size_of::<Prim>(), 8);
         assert_eq!(std::mem::size_of::<ModuleConstants>(), 16);
         assert_eq!(std::mem::size_of::<crate::bir::ListId>(), 4);
+    }
+
+    fn named_case(primitive: &Primitive, check: impl FnOnce()) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(check));
+        assert!(result.is_ok(), "primitive {primitive:?} failed its oracle case");
     }
 
     #[test]
@@ -811,7 +898,7 @@ mod tests {
                     arg
                 };
                 let root = a.prim_raw(primitive.clone(), &[arg], LamLoc::NONE);
-                super::super::oracle_tests::compare(a, root);
+                named_case(&primitive, || super::super::oracle_tests::compare(a, root));
             }
         }
     }
@@ -883,7 +970,7 @@ mod tests {
                             })
                             .collect();
                         let root = a.prim_raw(primitive.clone(), &args, LamLoc::NONE);
-                        super::super::oracle_tests::compare_with_checks(a, root, checks);
+                        named_case(&primitive, || super::super::oracle_tests::compare_with_checks(a, root, checks));
                     }
                 }
             }
@@ -930,7 +1017,7 @@ mod tests {
                     })
                     .collect();
                 let root = a.prim_raw(primitive.clone(), &args, LamLoc::NONE);
-                super::super::oracle_tests::compare(a, root);
+                named_case(&primitive, || super::super::oracle_tests::compare(a, root));
             }
         }
     }
@@ -946,7 +1033,7 @@ mod tests {
                     a.var(Ident::new("value", 10, crate::ident::IdentFlags::NONE))
                 };
                 let root = a.prim_raw(primitive.clone(), &[arg], LamLoc::NONE);
-                super::super::oracle_tests::compare(a, root);
+                named_case(&primitive, || super::super::oracle_tests::compare(a, root));
             }
         }
     }
@@ -986,5 +1073,210 @@ mod await_tests {
             } else { awaited };
             super::super::oracle_tests::compare(a, root);
         }
+    }
+}
+
+#[cfg(test)]
+mod inventory_tests {
+    use super::*;
+    use Primitive::*;
+    use crate::lambda::{LamLoc, arena::LamArena};
+
+    // One table generates both the individually named oracle tests and the
+    // exhaustive inventory. Adding a Primitive variant cannot compile until
+    // it has a test row or an explicit unsupported dispatch classification.
+    macro_rules! primitive_cases {
+        (cases { $($pattern:pat => $name:ident($value:expr, $arity:expr);)* }
+         unsupported { $($unsupported:pat),* $(,)? }) => {
+            fn inventory(primitive: &Primitive) -> Option<&'static str> {
+                match primitive {
+                    $($pattern => Some(stringify!($name)),)*
+                    $($unsupported => None,)*
+                }
+            }
+            $(
+                #[test]
+                fn $name() {
+                    let primitive = $value;
+                    assert_eq!(inventory(&primitive), Some(stringify!($name)));
+                    let mut arena = LamArena::new();
+                    let args: Vec<_> = (0..$arity).map(|i| {
+                        arena.var(Ident::new(format!("arg{i}"), 10 + i, crate::ident::IdentFlags::NONE))
+                    }).collect();
+                    let root = arena.prim_raw(primitive, &args, LamLoc::NONE);
+                    super::super::oracle_tests::compare(arena, root);
+                }
+            )*
+        };
+    }
+
+    fn minimal_jsx() -> crate::lambda::lam_primitive::JsxElement {
+        use crate::lambda::lam_primitive::{JsxElement, ExternalDecl, DeclKind};
+        JsxElement {
+            jsx_name: "jsx".into(),
+            jsx_ffi: ExternalDecl {
+                kind: DeclKind::DeclVal { name: "jsx".into() },
+                module_: None,
+                scopes: vec!["React".into()],
+                variadic: false,
+                effective_arity: 3,
+            },
+            jsx_multi: false,
+            jsx_fragment: false,
+            jsx_spread: false,
+            jsx_props: vec![],
+            jsx_children: None,
+            jsx_key: false,
+        }
+    }
+
+    fn minimal_import() -> crate::lambda::lam_primitive::ImportSource {
+        use crate::lambda::lam_primitive::{ImportSource, ExternalModuleName, ModuleBindName};
+        ImportSource::ImportExternal {
+            module_: ExternalModuleName {
+                bundle: "example".into(),
+                module_bind_name: ModuleBindName::PhintNothing,
+                import_attributes: None,
+            },
+            path: vec![],
+        }
+    }
+
+    primitive_cases! { cases {
+        PjsCall(..) => pjs_call(PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
+            prim_name: "call".into(),
+            arg_types: vec![],
+            ffi: crate::lambda::lam_primitive::ExternalDecl {
+                kind: crate::lambda::lam_primitive::DeclKind::DeclVal { name: "call".into() },
+                module_: None,
+                scopes: vec![],
+                variadic: false,
+                effective_arity: 0,
+            },
+        })), 0);
+        PjsObjectCreate(..) => pjs_object_create(PjsObjectCreate(vec![]), 0);
+        PjsApply => pjs_apply(PjsApply, 2);
+        PjsObjectGet(..) => pjs_object_get(PjsObjectGet("field".into()), 1);
+        PjsObjectSet(..) => pjs_object_set(PjsObjectSet("field".into()), 2);
+        PjsFnMethod => pjs_fn_method(PjsFnMethod, 1);
+        Pmakeblock(..) => pmakeblock(Pmakeblock(crate::lambda::TagInfo::Tuple, crate::lambda::lam_primitive::Mutable::Immutable), 2);
+        Pfield(..) => pfield(Pfield(0, crate::lambda::FieldDbgInfo::Tuple), 1);
+        Psetfield(..) => psetfield(Psetfield(0, crate::lambda::SetFieldDbgInfo::RecordSet(crate::name::Name::new("field"))), 2);
+        Pduprecord => pduprecord(Pduprecord, 1);
+        PrecordRest(..) => precord_rest(PrecordRest(vec!["field".into()]), 1);
+        PtaggedTemplate(..) => ptagged_template(PtaggedTemplate(vec!["segment".into()]), 1);
+        Ptemplate(..) => ptemplate(Ptemplate(vec![crate::string_literal::template_from_semantic("segment")]), 0);
+        Pjsx(..) => pjsx(Pjsx(Box::new(minimal_jsx())), 1);
+        Praise => praise(Praise, 1);
+        Pobjcomp(..) => pobjcomp(Pobjcomp(crate::lambda::Comparison::Eq), 2);
+        Pobjorder => pobjorder(Pobjorder, 2);
+        Pobjmin => pobjmin(Pobjmin, 2);
+        Pobjmax => pobjmax(Pobjmax, 2);
+        Pobjtag => pobjtag(Pobjtag, 1);
+        Pobjsize => pobjsize(Pobjsize, 1);
+        Psequand => psequand(Psequand, 2);
+        Psequor => psequor(Psequor, 2);
+        Pnot => pnot(Pnot, 1);
+        Pboolcomp(..) => pboolcomp(Pboolcomp(crate::lambda::Comparison::Eq), 2);
+        Pboolorder => pboolorder(Pboolorder, 2);
+        Pboolmin => pboolmin(Pboolmin, 2);
+        Pboolmax => pboolmax(Pboolmax, 2);
+        Pnegint => pnegint(Pnegint, 1);
+        Paddint => paddint(Paddint, 2);
+        Psubint => psubint(Psubint, 2);
+        Pmulint => pmulint(Pmulint, 2);
+        Pdivint => pdivint(Pdivint, 2);
+        Pmodint => pmodint(Pmodint, 2);
+        Ppowint => ppowint(Ppowint, 2);
+        Pandint => pandint(Pandint, 2);
+        Porint => porint(Porint, 2);
+        Pxorint => pxorint(Pxorint, 2);
+        Pnotint => pnotint(Pnotint, 1);
+        Plslint => plslint(Plslint, 2);
+        Plsrint => plsrint(Plsrint, 2);
+        Pasrint => pasrint(Pasrint, 2);
+        Pintcomp(..) => pintcomp(Pintcomp(crate::lambda::Comparison::Eq), 2);
+        Pintorder => pintorder(Pintorder, 2);
+        Pintmin => pintmin(Pintmin, 2);
+        Pintmax => pintmax(Pintmax, 2);
+        Pintoffloat => pintoffloat(Pintoffloat, 1);
+        Pfloatofint => pfloatofint(Pfloatofint, 1);
+        Pnegfloat => pnegfloat(Pnegfloat, 1);
+        Paddfloat => paddfloat(Paddfloat, 2);
+        Psubfloat => psubfloat(Psubfloat, 2);
+        Pmulfloat => pmulfloat(Pmulfloat, 2);
+        Pdivfloat => pdivfloat(Pdivfloat, 2);
+        Pmodfloat => pmodfloat(Pmodfloat, 2);
+        Ppowfloat => ppowfloat(Ppowfloat, 2);
+        Pfloatcomp(..) => pfloatcomp(Pfloatcomp(crate::lambda::Comparison::Eq), 2);
+        Pfloatorder => pfloatorder(Pfloatorder, 2);
+        Pfloatmin => pfloatmin(Pfloatmin, 2);
+        Pfloatmax => pfloatmax(Pfloatmax, 2);
+        Pnegbigint => pnegbigint(Pnegbigint, 1);
+        Paddbigint => paddbigint(Paddbigint, 2);
+        Psubbigint => psubbigint(Psubbigint, 2);
+        Pmulbigint => pmulbigint(Pmulbigint, 2);
+        Pdivbigint => pdivbigint(Pdivbigint, 2);
+        Pmodbigint => pmodbigint(Pmodbigint, 2);
+        Ppowbigint => ppowbigint(Ppowbigint, 2);
+        Pandbigint => pandbigint(Pandbigint, 2);
+        Porbigint => porbigint(Porbigint, 2);
+        Pxorbigint => pxorbigint(Pxorbigint, 2);
+        Pnotbigint => pnotbigint(Pnotbigint, 1);
+        Plslbigint => plslbigint(Plslbigint, 2);
+        Pasrbigint => pasrbigint(Pasrbigint, 2);
+        Pbigintcomp(..) => pbigintcomp(Pbigintcomp(crate::lambda::Comparison::Eq), 2);
+        Pbigintorder => pbigintorder(Pbigintorder, 2);
+        Pbigintmin => pbigintmin(Pbigintmin, 2);
+        Pbigintmax => pbigintmax(Pbigintmax, 2);
+        Pstringlength => pstringlength(Pstringlength, 1);
+        Pstringrefu => pstringrefu(Pstringrefu, 2);
+        Pstringrefs => pstringrefs(Pstringrefs, 2);
+        Pstringadd => pstringadd(Pstringadd, 2);
+        Pstringcomp(..) => pstringcomp(Pstringcomp(crate::lambda::Comparison::Eq), 2);
+        Pstringorder => pstringorder(Pstringorder, 2);
+        Pstringmin => pstringmin(Pstringmin, 2);
+        Pstringmax => pstringmax(Pstringmax, 2);
+        Pmakearray => pmakearray(Pmakearray, 2);
+        Parraylength => parraylength(Parraylength, 1);
+        Parrayrefu => parrayrefu(Parrayrefu, 2);
+        Parraysetu => parraysetu(Parraysetu, 3);
+        Parrayrefs => parrayrefs(Parrayrefs, 2);
+        Pmakelist => pmakelist(Pmakelist, 2);
+        Pmakedict => pmakedict(Pmakedict, 1);
+        PdictSpread => pdict_spread(PdictSpread, 1);
+        ParraySpread => parray_spread(ParraySpread, 1);
+        PlistSpread => plist_spread(PlistSpread, 1);
+        PdictHas => pdict_has(PdictHas, 2);
+        Pawait => pawait(Pawait, 1);
+        Pidentity => pidentity(Pidentity, 1);
+        Pignore => pignore(Pignore, 1);
+        PisPolyVarBlock => pis_poly_var_block(PisPolyVarBlock, 1);
+        Pjscomp(..) => pjscomp(Pjscomp(crate::lambda::Comparison::Eq), 2);
+        Pdebugger => pdebugger(Pdebugger, 1);
+        PinitMod => pinit_mod(PinitMod, 2);
+        PupdateMod => pupdate_mod(PupdateMod, 3);
+        PrawJsCode(..) => praw_js_code(PrawJsCode(crate::lambda::lam_primitive::JsRawInfo { code: "value()".into(), is_stmt: false }), 0);
+        PnullToOpt => pnull_to_opt(PnullToOpt, 1);
+        PnullUndefinedToOpt => pnull_undefined_to_opt(PnullUndefinedToOpt, 1);
+        PisNull => pis_null(PisNull, 1);
+        PisUndefined => pis_undefined(PisUndefined, 1);
+        PisNullUndefined => pis_null_undefined(PisNullUndefined, 1);
+        Pimport(..) => pimport(Pimport(Box::new(minimal_import())), 0);
+        Ptypeof => ptypeof(Ptypeof, 1);
+        PfnArity => pfn_arity(PfnArity, 1);
+        PcreateExtension(..) => pcreate_extension(PcreateExtension("Example".into()), 0);
+        PisNotNone => pis_not_none(PisNotNone, 1);
+        PvalFromOption => pval_from_option(PvalFromOption, 1);
+        PvalFromOptionNotNest => pval_from_option_not_nest(PvalFromOptionNotNest, 1);
+        Psome => psome(Psome, 1);
+        PsomeNotNest => psome_not_nest(PsomeNotNest, 1);
+        Phash => phash(Phash, 1);
+        PhashMixstring => phash_mixstring(PhashMixstring, 2);
+        PhashMixint => phash_mixint(PhashMixint, 2);
+        PhashFinalmix => phash_finalmix(PhashFinalmix, 1);
+    }
+        // Extension-slot equality is lowered before Bir import.
+        unsupported { PextensionSlotEq }
     }
 }

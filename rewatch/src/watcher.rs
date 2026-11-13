@@ -134,7 +134,7 @@ fn compute_watch_paths(build_state: &BuildCommandState, root: &Path) -> Vec<(Pat
     };
 
     for (_, package) in build_state.build_state.packages.iter() {
-        if !package.is_local_dep {
+        if !package.is_local_dep && package.name != "@rescript/belt" {
             continue;
         }
 
@@ -163,6 +163,8 @@ fn compute_watch_paths(build_state: &BuildCommandState, root: &Path) -> Vec<(Pat
             insert(dir, mode);
         }
     }
+
+    insert(build_state.compiler_info.runtime_path.clone(), RecursiveMode::NonRecursive);
 
     // Watch the artifact directory for the watcher lockfile (watch.lock lives
     // in lib/rescript/).
@@ -465,6 +467,7 @@ fn watch_loop(
     }: WatchArgs<'_>,
 ) -> Result<i32> {
     let mut build_state = initial_build_state;
+    let snapshot_sources = build::snapshot::WatchSources::new(&build_state);
     let mut needs_compile_type = CompileType::None;
     let mut initialization_failed = false;
     loop {
@@ -526,6 +529,12 @@ fn watch_loop(
                 .filter(|path| !is_in_build_path(path))
                 .filter(|path| matches_filter(path, filter));
             for path in paths {
+                if !matches!(event.kind, notify::EventKind::Access(_))
+                    && snapshot_sources.changed(path, &mut build_state)
+                {
+                    needs_compile_type = CompileType::Full;
+                    continue;
+                }
                 let path_buf = path.to_path_buf();
                 let source_compile_type = compile_type_for_source_event(event.kind, initialization_failed);
                 log::debug!(
@@ -675,6 +684,11 @@ fn watch_loop(
                             SourceMapCommand::Watch,
                         )
                         .context("Could not initialize build")?;
+                        // Match notify's canonical event paths (notably /var versus
+                        // /private/var on macOS), without filesystem work per event.
+                        next_build_state.build_state.compiler_info.runtime_path =
+                            next_build_state.compiler_info.runtime_path.canonicalize()?;
+                        next_build_state.revoked_snapshots = build_state.revoked_snapshots;
                         initialization_failed = false;
 
                         // Full rebuilds can be triggered by editor atomic saves that surface as rename events.
@@ -842,6 +856,11 @@ pub fn start(
                 SourceMapCommand::Watch,
             )
             .with_context(|| "Could not initialize build")?;
+
+            // Runtime overrides can name a symlink; normalize once before both
+            // watch registration and constructing the source-directory index.
+            build_state.build_state.compiler_info.runtime_path =
+                build_state.compiler_info.runtime_path.canonicalize()?;
 
             // Compute and register targeted watches based on source folders.
             let current_watches = register_watches(&mut watcher, &compute_watch_paths(&build_state, path));

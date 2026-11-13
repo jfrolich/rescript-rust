@@ -49,7 +49,10 @@ pub(crate) struct TypeNodes {
     /// FIRST_LEN normally, zero while a store build must observe local reads.
     fast_limit: Cell<u32>,
     chunks: [std::cell::OnceCell<Box<[TypeNode]>>; TypeNodes::CHUNKS],
+    /// One past the last node's index.
     len: Cell<usize>,
+    /// Index of the first node: 0, or `FIRST_LEN` for a ladder-only store.
+    start: usize,
 }
 
 /// One node of [`TypeNodes`]. A node's descriptor and level are usually
@@ -116,6 +119,20 @@ pub(crate) fn lease_first_array<T, const N: usize>(
     array
 }
 
+/// The first retained array of the thread, shared and never read or written
+/// by the caller: a pool that keeps everything in its ladder still has to
+/// hold an array of the type. Only a thread that has none yet creates one
+/// (a later exclusive lease then takes it). One list read.
+pub(crate) fn placeholder_first_array<T, const N: usize>(
+    arrays: &RefCell<Vec<Rc<[T; N]>>>,
+    init: impl FnMut() -> T,
+) -> Rc<[T; N]> {
+    if let Some(array) = arrays.borrow().first() {
+        return Rc::clone(array);
+    }
+    lease_first_array(arrays, init)
+}
+
 impl TypeNodes {
     // Smaller measured arrays exceed the 0.2% instruction budget versus 65536.
     const FIRST_LEN: usize = 1 << 16;
@@ -140,6 +157,30 @@ impl TypeNodes {
             fast_limit: Cell::new(Self::FIRST_LEN as u32),
             chunks: std::array::from_fn(|_| std::cell::OnceCell::new()),
             len: Cell::new(0),
+            start: 0,
+        }
+    }
+
+    /// A store whose nodes are all in the ladder, which grows from 256
+    /// nodes: for a short-lived context that creates few nodes (a view
+    /// build's scratch context), where a first array of its own would be
+    /// 2 MB initialised per thread and kept. Its indices start at
+    /// `FIRST_LEN`, so every read takes the far path and the first array it
+    /// holds is never touched. One list read; initialises no node.
+    pub(crate) fn ladder_only() -> Self {
+        let first = FIRST_NODE_ARRAYS.with(|arrays| {
+            placeholder_first_array(arrays, || TypeNode {
+                desc: Cell::new(TypeDesc::Tnil),
+                level: Cell::new(0),
+                id: Cell::new(0),
+            })
+        });
+        TypeNodes {
+            first,
+            fast_limit: Cell::new(Self::FIRST_LEN as u32),
+            chunks: std::array::from_fn(|_| std::cell::OnceCell::new()),
+            len: Cell::new(Self::FIRST_LEN),
+            start: Self::FIRST_LEN,
         }
     }
 
@@ -238,8 +279,14 @@ impl TypeNodes {
         idx
     }
 
+    /// One past the last node's index.
     pub(crate) fn len(&self) -> usize {
         self.len.get()
+    }
+
+    /// Number of nodes.
+    pub(crate) fn count(&self) -> usize {
+        self.len.get() - self.start
     }
 }
 
@@ -257,7 +304,7 @@ impl Deref for OwnTypeNodes {
 impl Drop for OwnTypeNodes {
     fn drop(&mut self) {
         if crate::perf_counters::enabled() {
-            crate::perf_counters::record_local_type_nodes(self.0.len());
+            crate::perf_counters::record_local_type_nodes(self.0.count());
         }
     }
 }
@@ -870,9 +917,17 @@ pub struct TypeContext {
     qualified_module_components_cache: RefCell<
         crate::fast_hash::AHashMap<
             QualifiedModuleComponentsCacheKey,
-            Rc<super::env_lazy::QualifiedModuleComponents>,
+            super::env_lazy::HeldComponents,
         >,
     >,
+    /// By view id, the child modules (by signature item, one bit each) whose
+    /// forced declaration this compilation has registered
+    /// (`note_forced_view_module`).
+    noted_view_modules: RefCell<Vec<Vec<u64>>>,
+    /// Views this compilation adopted (`adopt_view` calls that were not
+    /// already answered by the component cache).
+    #[cfg(test)]
+    pub(crate) view_adoptions: Cell<u64>,
 
     /// Module alias source paths discovered while building component tables.
     ///
@@ -1041,6 +1096,9 @@ pub struct TypeContext {
     /// dict pattern. Families built in the worker store live in its pool and
     /// are shared with later compilations, hence the `Arc` element.
     label_families: RefCell<Vec<Arc<Vec<super::decl::LabelDescription>>>>,
+    /// Set on the scratch context of a view build: binders take store-range
+    /// stamps (see `new_scratch`).
+    world_scratch: Cell<bool>,
 
     /// Stored typedtree environment snapshots, keyed by EnvRef.
     typed_envs: RefCell<Vec<Rc<Env>>>,
@@ -1068,25 +1126,9 @@ pub struct TypeContext {
 pub(crate) enum StoreEffect {
     /// A shared piece forced while building this one.
     Piece(Rc<StorePiece>),
-    /// A component view registered in this compilation's component cache.
-    RegisterComponents(
-        QualifiedModuleComponentsCacheKey,
-        Rc<super::env_lazy::QualifiedModuleComponents>,
-    ),
     /// `PersistentEnv::find_pers_struct` for this unit, which prepares the
     /// module for the compilation on first use.
     PreparePers(smol_str::SmolStr),
-    /// `trigger_module_sig_rename`: registers the lazy rename of a persistent
-    /// signature in this compilation.
-    TriggerRename(smol_str::SmolStr),
-    /// Registrations in this compilation's declaration and alias tables.
-    RegisterAliasSource(Path, Path),
-    RegisterQualifiedModuleDecl(
-        Path,
-        smol_str::SmolStr,
-        Ident,
-        Arc<super::decl::ModuleDeclaration>,
-    ),
 }
 
 /// Replay record of one piece of shared store data (see
@@ -1247,7 +1289,36 @@ impl super::decl_loc::DeclLocs for TypeContext {
 impl TypeContext {
     /// Create a new type context.
     pub fn new(id_gen: Arc<IdGenerator>) -> Self {
-        let store = super::thread_store::current();
+        Self::with_storage(
+            id_gen,
+            super::thread_store::current(),
+            TypeNodes::new(),
+            Default::default(),
+        )
+    }
+
+    /// The scratch context of a view build (`world::ViewScratch`): its
+    /// nodes, its lists and its private store are all ladder-only, so
+    /// creating one initialises no first array, and its binders take stamps
+    /// of the process-wide store range. The private store is dropped with
+    /// the context.
+    pub(crate) fn new_scratch(id_gen: Arc<IdGenerator>) -> Self {
+        let ctx = Self::with_storage(
+            id_gen,
+            super::thread_store::scratch(),
+            TypeNodes::ladder_only(),
+            super::type_expr::TypePayloadPool::ladder_only(0),
+        );
+        ctx.world_scratch.set(true);
+        ctx
+    }
+
+    fn with_storage(
+        id_gen: Arc<IdGenerator>,
+        store: super::thread_store::StoreLease,
+        types: TypeNodes,
+        type_lists: super::type_expr::TypePayloadPool,
+    ) -> Self {
         let shared_pages = store.shared_pool().pages();
         TypeContext {
             id_gen,
@@ -1263,10 +1334,10 @@ impl TypeContext {
             existential_constructors: RefCell::new(crate::fast_hash::AHashMap::new()),
             previous_env_id: Cell::new(None),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
-            types: OwnTypeNodes(TypeNodes::new()),
+            types: OwnTypeNodes(types),
             frozen_writes: FrozenWrites::default(),
             store,
-            type_lists: Default::default(),
+            type_lists,
             shared_pages,
             store_build_depth: Cell::new(0),
             store_build_type_start: Cell::new(0),
@@ -1305,6 +1376,9 @@ impl TypeContext {
             counted_call_reentered: Cell::new(false),
             resolved_module_sig_cache: RefCell::new(hashbrown::HashMap::default()),
             qualified_module_components_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            noted_view_modules: RefCell::new(Vec::new()),
+            #[cfg(test)]
+            view_adoptions: Cell::new(0),
             component_alias_sources: RefCell::new(crate::fast_hash::AHashMap::new()),
             signature_indexes: RefCell::new(crate::fast_hash::AHashMap::new()),
             component_paths_by_alias_source: RefCell::new(crate::fast_hash::AHashMap::new()),
@@ -1345,6 +1419,7 @@ impl TypeContext {
             arity_aliases: RefCell::new(crate::fast_hash::AHashMap::new()),
             label_family_summaries: RefCell::new(crate::fast_hash::AHashMap::new()),
             label_families: RefCell::new(Vec::new()),
+            world_scratch: Cell::new(false),
             typed_envs: RefCell::new(Vec::new()),
             typed_envs_by_id: RefCell::new(crate::fast_hash::AHashMap::new()),
             last_typed_env: Cell::new(None),
@@ -1650,15 +1725,116 @@ impl TypeContext {
         if self.compiler_counters_enabled {
             crate::perf_counters::record_qualified_component_registered();
         }
-        if self.in_store_build() {
-            self.record_store_effect(StoreEffect::RegisterComponents(
-                key.clone(),
-                components.clone(),
-            ));
+        self.qualified_module_components_cache
+            .borrow_mut()
+            .insert(key, super::env_lazy::HeldComponents::Local(components));
+    }
+
+    /// Use the world view `view` in this compilation, under `key`: the one
+    /// way a compilation comes to read a view. Registers the view in the
+    /// component cache, adopts the view it is a child of (so adoption is
+    /// transitive whatever the caller did first) and registers, for each
+    /// child of the view that is a path, the (component path, alias source)
+    /// pair the tables of other paths read
+    /// (`alias_sources_for_component_path`). A store build that adopts a
+    /// view records it, so a compilation reusing the build's result adopts
+    /// the view as well.
+    ///
+    /// Cost: one probe of the component cache when the view is adopted
+    /// already; else one insert, one probe for its parent, and one
+    /// registration per child that is a path, into tables given room for
+    /// them first (they are empty when a compilation starts, and growing
+    /// them pair by pair rehashed them again and again).
+    pub(crate) fn adopt_view(
+        &self,
+        key: QualifiedModuleComponentsCacheKey,
+        view: Arc<super::module_view::ModuleView>,
+    ) {
+        if self.holds_view(&key, &view) {
+            return;
+        }
+        if self.compiler_counters_enabled {
+            crate::perf_counters::world::record_view_adoption();
+        }
+        #[cfg(test)]
+        self.view_adoptions.set(self.view_adoptions.get() + 1);
+        if let Some(parent) = view.parent_view() {
+            self.adopt_view(
+                QualifiedModuleComponentsCacheKey::new(*parent.access_path(), None),
+                parent,
+            );
+        }
+        if let Some(target) = view.target_view() {
+            self.adopt_view(
+                QualifiedModuleComponentsCacheKey::new(*target.access_path(), None),
+                target.clone(),
+            );
+        }
+        let pairs = view.alias_sources();
+        if !pairs.is_empty() {
+            self.component_alias_sources
+                .borrow_mut()
+                .reserve(pairs.len());
+            self.component_paths_by_alias_source
+                .borrow_mut()
+                .reserve(pairs.len());
+            self.suspend_store_build(|| {
+                for (component, source) in pairs {
+                    self.register_component_alias_source(*component, *source);
+                }
+            });
         }
         self.qualified_module_components_cache
             .borrow_mut()
-            .insert(key, components);
+            .insert(key, super::env_lazy::HeldComponents::World(view));
+    }
+
+    /// Whether this compilation has adopted `view` under `key`. One probe
+    /// of the component cache.
+    pub(crate) fn holds_view(
+        &self,
+        key: &QualifiedModuleComponentsCacheKey,
+        view: &Arc<super::module_view::ModuleView>,
+    ) -> bool {
+        matches!(
+            self.qualified_module_components_cache.borrow().get(key),
+            Some(super::env_lazy::HeldComponents::World(held)) if Arc::ptr_eq(held, view)
+        )
+    }
+
+    /// The forced declaration of child `name` (signature item `item`) of
+    /// `view` was read: register it with this compilation the first time,
+    /// where the tables of an alias path to the same module look for it
+    /// (`find_qualified_module_decl`).
+    ///
+    /// Cost: one bit test in a table indexed by view and item; the first
+    /// time per compilation and child, one registration.
+    pub(crate) fn note_forced_view_module(
+        &self,
+        view: &super::module_view::ModuleView,
+        item: usize,
+        name: &str,
+        id: Ident,
+        md: &Arc<super::decl::ModuleDeclaration>,
+    ) {
+        let first = {
+            let mut noted = self.noted_view_modules.borrow_mut();
+            let view_index = view.id().index();
+            if noted.len() <= view_index {
+                noted.resize_with(view_index + 1, Vec::new);
+            }
+            let bits = &mut noted[view_index];
+            if bits.len() <= item / 64 {
+                bits.resize(item / 64 + 1, 0);
+            }
+            let mask = 1u64 << (item % 64);
+            let first = bits[item / 64] & mask == 0;
+            bits[item / 64] |= mask;
+            first
+        };
+        if first {
+            self.register_qualified_module_decl(view.access_path(), name, id, md.clone());
+        }
     }
 
     pub(crate) fn register_qualified_module_components(
@@ -1672,7 +1848,7 @@ impl TypeContext {
         }
         self.qualified_module_components_cache
             .borrow_mut()
-            .insert(key, Rc::new(components));
+            .insert(key, super::env_lazy::HeldComponents::Local(Rc::new(components)));
     }
 
     /// Borrow a cached qualified module-components view.
@@ -1683,7 +1859,7 @@ impl TypeContext {
     pub(crate) fn with_qualified_module_components<R>(
         &self,
         key: &QualifiedModuleComponentsCacheKey,
-        f: impl FnOnce(&super::env_lazy::QualifiedModuleComponents) -> R,
+        f: impl FnOnce(super::env_lazy::Components<'_>) -> R,
     ) -> Option<R> {
         self.poison_store_build_for("read:with_qualified_module_components");
         let cache = self.qualified_module_components_cache.borrow();
@@ -1696,7 +1872,7 @@ impl TypeContext {
         if self.compiler_counters_enabled {
             crate::perf_counters::record_qualified_component_hit();
         }
-        Some(f(components.as_ref()))
+        Some(f(components.components()))
     }
 
     /// Name index for the component tables of `sig`, shared by every table
@@ -1722,12 +1898,6 @@ impl TypeContext {
     }
 
     pub(crate) fn register_component_alias_source(&self, component_path: Path, alias_source: Path) {
-        if self.in_store_build() {
-            self.record_store_effect(StoreEffect::RegisterAliasSource(
-                component_path,
-                alias_source,
-            ));
-        }
         // OCaml compiler/ml/env.ml:1440-1446 scrapes aliases by resolving the
         // target path through `find_module`; env.ml:1530 then prefixes the
         // selected component path. Record exactly that pair so later helpers
@@ -1868,7 +2038,10 @@ impl TypeContext {
         self.poison_store_build_for("read:find_module_alias_in_components");
         let key = QualifiedModuleComponentsCacheKey::new(*parent_path, None);
         self.with_qualified_module_components(&key, |components| {
-            components.lookup_module_alias_target(module_name, true, self)
+            // env.ml:865-882 `find_module ~alias:true` follows `Mty_alias`
+            // only: a module declared with a module type name (`N: S`) is
+            // not an alias of `S`.
+            components.lookup_module_alias_target(module_name, false, self)
         })
         .flatten()
     }
@@ -2068,14 +2241,6 @@ impl TypeContext {
         id: Ident,
         md: Arc<super::decl::ModuleDeclaration>,
     ) {
-        if self.in_store_build() {
-            self.record_store_effect(StoreEffect::RegisterQualifiedModuleDecl(
-                *parent_path,
-                child_name.into(),
-                id,
-                md.clone(),
-            ));
-        }
         let Some(head) = parent_path.head_opt() else {
             return;
         };
@@ -2802,7 +2967,7 @@ impl TypeContext {
 
     /// Number of allocated type expressions.
     pub fn type_expr_count(&self) -> usize {
-        self.types.len()
+        self.types.count()
     }
 
     /// Preserve absence, not a copy of the published value, on the trail.
@@ -3133,6 +3298,17 @@ impl TypeContext {
         self.deprecated_used.borrow_mut().push(used);
     }
 
+    /// How many deprecated uses are recorded. Cost: O(1).
+    pub(crate) fn deprecated_use_count(&self) -> usize {
+        self.deprecated_used.borrow().len()
+    }
+
+    /// Forget the deprecated uses recorded since `count` of them were.
+    /// Cost: O(uses dropped).
+    pub(crate) fn truncate_deprecated_uses(&self, count: usize) {
+        self.deprecated_used.borrow_mut().truncate(count);
+    }
+
     /// Recorded deprecated uses, most recent first (as OCaml's list).
     pub fn deprecated_uses(&self) -> Vec<DeprecatedUse> {
         self.deprecated_used
@@ -3420,9 +3596,11 @@ impl TypeContext {
         &self,
         lbl_all: super::decl::LabelArrayRef,
     ) -> Option<Arc<Vec<super::decl::LabelDescription>>> {
-        match lbl_all.index()? {
-            Ok(store_idx) => self.store.label_family(store_idx),
-            Err(local_idx) => self.label_families.borrow().get(local_idx).cloned(),
+        use super::decl::LabelArrayTier;
+        match lbl_all.tier()? {
+            LabelArrayTier::Frozen(index) => self.world().label_array(index).cloned(),
+            LabelArrayTier::Store(store_idx) => self.store.label_family(store_idx),
+            LabelArrayTier::Local(local_idx) => self.label_families.borrow().get(local_idx).cloned(),
         }
     }
 
@@ -4281,11 +4459,6 @@ impl TypeContext {
     /// Matches OCaml's find_module → Lazy.force ps.ps_sig which renames
     /// bound idents the first time a module is accessed during normalize_path.
     pub fn trigger_module_sig_rename(&self, module_name: &str) {
-        if self.in_store_build() {
-            self.record_store_effect(StoreEffect::TriggerRename(module_name.into()));
-            self.suspend_store_build(|| self.trigger_module_sig_rename(module_name));
-            return;
-        }
         if self.renamed_module_sigs.borrow().contains_key(module_name) {
             return; // Already renamed
         }
@@ -4385,7 +4558,7 @@ impl TypeContext {
 
     /// Create a new identifier using the typing context's shared stamp source.
     pub fn create_ident(&self, name: impl Into<crate::name::Name>) -> Ident {
-        if self.in_store_build() {
+        if self.in_store_build() || self.world_scratch.get() {
             return self.store_binder(&Ident::create_persistent(name));
         }
         // OCaml compiler/ext/ident.ml:28-40 increments the active
@@ -4494,7 +4667,12 @@ impl TypeContext {
     }
 
     /// Select the stable namespace before allocating this unit's locations,
-    /// shape blocks or private interface imports.
+    /// shape blocks or private interface imports. O(filename bytes), once per
+    /// compilation, not per location. Installation directories are not identity:
+    /// snapshot relocation must preserve scopes as well as displayed filenames.
+    /// The driver supplies package name plus package-relative path, including
+    /// the extension to distinguish implementation and interface arenas. Imports
+    /// separately namespace these source-local identities by persistent unit.
     pub(crate) fn set_location_namespace(&self, unit: &str) {
         use std::hash::{Hash, Hasher};
         assert_eq!(self.next_identity_scope.get(), 1);
@@ -4993,24 +5171,13 @@ impl TypeContext {
             for effect in &piece.effects {
                 match effect {
                     StoreEffect::Piece(_) => {}
-                    StoreEffect::RegisterComponents(..) => counters::record_effect_replayed(0),
-                    StoreEffect::PreparePers(_) => counters::record_effect_replayed(1),
-                    StoreEffect::TriggerRename(_) => counters::record_effect_replayed(2),
-                    StoreEffect::RegisterAliasSource(..) => counters::record_effect_replayed(3),
-                    StoreEffect::RegisterQualifiedModuleDecl(..) => {
-                        counters::record_effect_replayed(4)
-                    }
+                    StoreEffect::PreparePers(_) => counters::record_effect_replayed(0),
                 }
             }
         }
         for effect in &piece.effects {
             match effect {
                 StoreEffect::Piece(inner) => self.replay_store_piece(inner),
-                StoreEffect::RegisterComponents(key, components) => {
-                    self.qualified_module_components_cache
-                        .borrow_mut()
-                        .insert(key.clone(), components.clone());
-                }
                 StoreEffect::PreparePers(name) => {
                     let replayed = self
                         .persistent_env
@@ -5023,13 +5190,6 @@ impl TypeContext {
                     if let Some(mut pers) = self.persistent_env_clone() {
                         let _ = pers.find_pers_struct(name, self);
                     }
-                }
-                StoreEffect::TriggerRename(name) => self.trigger_module_sig_rename(name),
-                StoreEffect::RegisterAliasSource(component, source) => {
-                    self.register_component_alias_source(*component, *source)
-                }
-                StoreEffect::RegisterQualifiedModuleDecl(parent, name, id, md) => {
-                    self.register_qualified_module_decl(parent, name, *id, md.clone())
                 }
             }
         }
@@ -5052,9 +5212,6 @@ impl TypeContext {
             StoreEffect::PreparePers(name) => effects
                 .iter()
                 .any(|e| matches!(e, StoreEffect::PreparePers(other) if other == name)),
-            StoreEffect::TriggerRename(name) => effects
-                .iter()
-                .any(|e| matches!(e, StoreEffect::TriggerRename(other) if other == name)),
             _ => false,
         };
         if !duplicate {
@@ -5082,7 +5239,7 @@ impl TypeContext {
     }
 
     fn rename_ident_stamp(&self, id: &Ident) -> Ident {
-        if self.in_store_build() {
+        if self.in_store_build() || self.world_scratch.get() {
             return self.store_binder(id);
         }
         // See `create_ident`: this mirrors compiler/ext/ident.ml:38-40.
@@ -5594,6 +5751,63 @@ mod tests {
             assert_eq!(reused.types.level(idx), 4);
             assert_eq!(reused.types.id(idx), 5);
         }).join().unwrap();
+    }
+
+    /// A view build's scratch context creates no first array: the arrays of
+    /// the thread are those of the compilation that started the build,
+    /// however many scratch contexts follow and however much they allocate.
+    #[test]
+    fn scratch_contexts_take_no_first_array() {
+        // A fresh thread gives this test a fresh lease list.
+        std::thread::spawn(|| {
+            let arrays = || {
+                (
+                    FIRST_NODE_ARRAYS.with(|arrays| arrays.borrow().len()),
+                    super::super::type_expr::first_list_arrays(),
+                )
+            };
+            let compilation = TypeContext::new(Arc::new(IdGenerator::new()));
+            let marker = compilation.types.push(TypeDesc::Tvar(None), 37, 91);
+            let before = arrays();
+            // The compilation's nodes and its store's nodes.
+            assert_eq!(before, (2, (2, 2)));
+            for _ in 0..3 {
+                let scratch = TypeContext::new_scratch(Arc::new(IdGenerator::new()));
+                assert_eq!(scratch.type_expr_count(), 0);
+                let mut tuples = Vec::new();
+                for n in 0..10_000usize {
+                    let var = scratch.new_var(None);
+                    let items = vec![var; n % 3 + 1];
+                    tuples.push((scratch.new_tuple(items), var, n % 3 + 1));
+                }
+                let (stored, piece) = scratch.build_in_store(|| {
+                    let var = scratch.new_generic_var(None);
+                    scratch.new_generic_type(TypeDesc::Ttuple(scratch.new_type_list(&[var, var])))
+                });
+                assert!(stored.is_store() && piece.is_some());
+                assert_eq!(scratch.type_expr_count(), 20_000);
+                for (tuple, var, len) in tuples {
+                    let TypeDesc::Ttuple(list) = *scratch.get_desc(tuple) else {
+                        panic!("expected a tuple");
+                    };
+                    let items = scratch.type_list(list);
+                    assert_eq!(items.len(), len);
+                    assert!((0..len).all(|i| items.get(i) == Some(var)));
+                }
+                assert_eq!(arrays(), before);
+            }
+            // The array the scratch contexts held was not written.
+            assert_eq!(compilation.types.level(marker), 37);
+            assert_eq!(compilation.types.len(), 1);
+            // The worker's store is still the compilation's: a new
+            // compilation gets a second one, as before.
+            drop(compilation);
+            let next = TypeContext::new(Arc::new(IdGenerator::new()));
+            assert_eq!(next.types.len(), 0);
+            assert_eq!(arrays(), before);
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

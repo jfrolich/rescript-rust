@@ -1442,6 +1442,10 @@ struct DelayedOpenCheck {
 pub struct TypeCheckContext<'a> {
     /// Optional item accounting; absent in ordinary compilation.
     pub derived_census: Option<Box<crate::derived_census::Census>>,
+    /// Whether a derived item is checked from its plan. The reference
+    /// compile of `RESCRIPT_DERIVED_PATH=check` types every item's general
+    /// form instead.
+    pub derived_plans: bool,
     /// Type context for allocation.
     pub type_ctx: &'a TypeContext,
     /// Parse arena for location conversion and longident allocation.
@@ -1659,6 +1663,7 @@ impl<'a> TypeCheckContext<'a> {
         type_ctx.register_arena_longident_names(arena);
         TypeCheckContext {
             derived_census: None,
+            derived_plans: true,
             type_ctx,
             arena,
             typed: TypedArena::new(),
@@ -2539,7 +2544,8 @@ pub fn convert_constant(
     use crate::parser::ast::Constant as ParsedConstant;
 
     match cst {
-        ParsedConstant::Integer(s, None) => {
+        ParsedConstant::Integer(_, None | Some('l')) => {
+            let digits = cst.integer_digits().expect("machine integer");
             // Parse integer literal, handling underscores and 0x/0o/0b prefixes.
             // OCaml's native int is 63-bit on 64-bit systems. We parse as i64
             // and simulate 63-bit wrapping to match OCaml's int_of_string
@@ -2547,7 +2553,7 @@ pub fn convert_constant(
             // intervals must see Lambda's int32 value (`Int32.to_int
             // (Int32.of_int value)`), so -0xFFFF_FFFF and 1 are the same key.
             // This does not change overflow diagnostics.
-            match parse_int_literal(arena.get_string(*s)) {
+            match parse_int_literal(arena.get_string(digits)) {
                 Some(n) => Ok(Constant::Int(i64::from(wrap_to_ocaml_int(n) as i32))),
                 None => Err(TypeCoreError::LiteralOverflow {
                     loc,
@@ -3173,18 +3179,7 @@ fn transl_type_inner(
             let longident = tctx.arena.get_longident(lid.txt);
 
             let (path, decl) = find_type_for_lid(tctx, env, lid.loc, longident)?;
-            // typetexp.ml:104-106: `check_deprecated ~deprecated_context:Reference`.
-            record_deprecated_used(
-                tctx,
-                lid.loc,
-                &decl.type_attributes,
-                Some(crate::types::context::DeprecatedContext::Reference),
-            )?;
-            if let Some(warning) = deprecated_warning_for_type(&path, &decl)
-                .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
-            {
-                tctx.report_warning(lid.loc, warning);
-            }
+            note_type_use(tctx, lid.loc, &path, &decl)?;
 
             let mut parsed_args: Vec<_> = tctx
                 .arena
@@ -7698,6 +7693,7 @@ pub(crate) fn type_exp<'a>(
             | crate::parser::ast::ExpressionDesc::Pexp_ident(_)
             | crate::parser::ast::ExpressionDesc::Pexp_field(..)
             | crate::parser::ast::ExpressionDesc::Pexp_apply(_)
+            | crate::parser::ast::ExpressionDesc::Pexp_await(_)
     ) {
         return type_expect_full(
             tctx,
@@ -8037,6 +8033,110 @@ fn deprecated_warning_for_type(
     deprecated_warning_for_path(path, &decl.type_attributes)
 }
 
+/// Why the lookup of an identifier expression found no value.
+pub(crate) enum ValueLookupFailure {
+    /// The name is not a legal value name (`Env.check_value_name`).
+    IllegalName,
+    /// The name is not bound.
+    Unbound,
+}
+
+/// The lookup of an identifier expression (typetexp.ml `find_value`):
+/// `Env.check_value_name (Longident.last lid) loc`, the use of the opens the
+/// name goes through, then the lookup itself. Shared by the typing of an
+/// identifier and the discharge of a derived item's value obligation.
+/// Cost: one environment lookup; one shared-pointer copy of the description.
+#[inline(always)]
+pub(crate) fn lookup_value_ident(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    longident: &Longident,
+    loc: LocIdx,
+) -> Result<(Path, Arc<ValueDescription>), ValueLookupFailure> {
+    let last = tctx.arena.get_string(longident.last_idx());
+    if crate::types::env::check_value_name(last, tctx.arena.to_location(loc)).is_err() {
+        return Err(ValueLookupFailure::IllegalName);
+    }
+    mark_open_lid_use(
+        tctx.type_ctx,
+        env,
+        tctx.arena,
+        longident,
+        crate::types::env::OpenLookupKind::Value,
+        Some(loc),
+    );
+    env.lookup_value_by_lid(
+        longident,
+        tctx.arena,
+        &mut tctx.persistent_env,
+        tctx.type_ctx,
+    )
+    .ok_or(ValueLookupFailure::Unbound)
+}
+
+/// What the use of a looked-up value records: `Env.lookup_value` marks the
+/// declaration used (env.ml:1169-1172), and a deprecated value is recorded
+/// and warned about (typetexp.ml:117-123 via typecore.ml:2381-2388).
+/// `function_call` says whether the identifier is the callee of an
+/// application.
+/// Cost: O(1) plus a scan of the value's attributes.
+#[inline(always)]
+pub(crate) fn note_value_ident_use(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    longident: &Longident,
+    loc: LocIdx,
+    path: &Path,
+    desc: &ValueDescription,
+    function_call: bool,
+) -> TypeCoreResult<()> {
+    let used_name = tctx.arena.name(longident.last_idx());
+    tctx.mark_value_used(env, used_name, tctx.resolve_loc(desc.val_loc));
+    let deprecated_context = if function_call {
+        crate::types::context::DeprecatedContext::FunctionCall
+    } else {
+        crate::types::context::DeprecatedContext::Reference
+    };
+    record_deprecated_used(
+        tctx,
+        loc,
+        &desc.val_attributes,
+        Some(deprecated_context),
+    )?;
+    if let Some(warning) = deprecated_warning_for_value(path, desc)
+        .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
+    {
+        tctx.report_warning(loc, warning);
+    }
+    Ok(())
+}
+
+/// What the use of a looked-up type constructor in a type expression records
+/// (typetexp.ml:104-106, `check_deprecated ~deprecated_context:Reference`).
+/// Shared by the translation of a type and the discharge of a derived item's
+/// type obligation.
+/// Cost: O(1) plus a scan of the declaration's attributes.
+#[inline(always)]
+pub(crate) fn note_type_use(
+    tctx: &mut TypeCheckContext<'_>,
+    loc: LocIdx,
+    path: &Path,
+    decl: &crate::types::decl::TypeDeclaration,
+) -> TypeCoreResult<()> {
+    record_deprecated_used(
+        tctx,
+        loc,
+        &decl.type_attributes,
+        Some(crate::types::context::DeprecatedContext::Reference),
+    )?;
+    if let Some(warning) = deprecated_warning_for_type(path, decl)
+        .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
+    {
+        tctx.report_warning(loc, warning);
+    }
+    Ok(())
+}
+
 /// Type check an expression against an expected type.
 pub(crate) fn type_expect<'a>(
     tctx: &mut TypeCheckContext<'a>,
@@ -8071,10 +8171,15 @@ fn type_expect_full<'a>(
 ) -> TypeCoreResult<Expression> {
     let expected_ty = expected_ty.into();
     let arena = tctx.arena;
+    let no_attributes = Attributes::new();
     let mut typed = crate::types::typemod::with_warning_scope(
         tctx,
         arena,
-        &expr.pexp_attributes,
+        if matches!(expr.pexp_desc, crate::parser::ast::ExpressionDesc::Pexp_await(_)) {
+            &no_attributes
+        } else {
+            &expr.pexp_attributes
+        },
         true,
         |tctx| {
             type_expect_with_recarg_unscoped(
@@ -8154,93 +8259,8 @@ fn type_expect_with_recarg_unscoped<'a>(
         return Ok(tctx.typed.with_exp_attributes(node, expr.pexp_attributes.clone()));
     }
     if let ED::Pexp_ident(lid) = &expr.pexp_desc {
-        let longident = tctx.arena.get_longident(lid.txt);
-
-        // Normal identifier expression. typetexp.ml `find_value`:
-        // `Env.check_value_name (Longident.last lid) loc` before lookup.
-        {
-            let last = tctx.arena.get_string(longident.last_idx());
-            if crate::types::env::check_value_name(last, tctx.arena.to_location(lid.loc))
-                .is_err()
-            {
-                return Err(TypeCoreError::IllegalValueName {
-                    loc: lid.loc,
-                    name: last.to_string(),
-                });
-            }
-        }
-        mark_open_lid_use(
-            ctx,
-            env,
-            tctx.arena,
-            longident,
-            crate::types::env::OpenLookupKind::Value,
-            Some(lid.loc),
-        );
-        let (path, desc) = match env.lookup_value_by_lid(
-            longident,
-            tctx.arena,
-            &mut tctx.persistent_env,
-            tctx.type_ctx,
-        ) {
-            Some(result) => result,
-            None => {
-                if let Some(err) = unbound_module_prefix_error(tctx, env, lid.loc, longident) {
-                    return Err(err);
-                }
-                // typecore.ml Pexp_ident: `<Button />` refers to
-                // `Button.make`. The module exists (otherwise the lookup
-                // reports it as unbound), but it defines no component.
-                if let Longident::Ldot(module_lid, last) = longident
-                    && matches!(context, Some(ClashSite::JsxComponent))
-                    && tctx.arena.get_string(*last) == "make"
-                {
-                    let module_lid = tctx.longident_to_string(module_lid);
-                    let alternatives = unbound_value_alternatives(tctx, env, longident);
-                    return Err(TypeCoreError::JsxComponentWithoutMake {
-                        loc: lid.loc,
-                        module_lid,
-                        alternatives,
-                    });
-                }
-                return Err(unbound_value_error(tctx, env, lid.loc, longident));
-            }
-        };
-        // `Env.lookup_value` marks the declaration used (env.ml:1169-1172).
-        let used_name = tctx.arena.name(longident.last_idx());
-        tctx.mark_value_used(env, used_name, tctx.resolve_loc(desc.val_loc));
-        // typetexp.ml:117-123 via typecore.ml:2381-2388.
-        let deprecated_context = if deprecated_function_call {
-            crate::types::context::DeprecatedContext::FunctionCall
-        } else {
-            crate::types::context::DeprecatedContext::Reference
-        };
-        record_deprecated_used(
-            tctx,
-            lid.loc,
-            &desc.val_attributes,
-            Some(deprecated_context),
-        )?;
-        if let Some(warning) = deprecated_warning_for_value(&path, &desc)
-            .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
-        {
-            tctx.report_warning(lid.loc, warning);
-        }
-        check_inlined_record_escape(ctx, loc, desc.val_type, recarg)?;
-
-        let ty = crate::types::instance(ctx, desc.val_type);
-        finish_expected(tctx, expr, ty, &mut expected_ty, context)?;
-
-        return Ok({
-            let typed_node = Expression::new(
-                ExpressionDesc::Texp_ident(path, *lid, desc),
-                loc,
-                ty,
-                tctx.type_ctx.store_typed_env(env),
-            );
-            tctx.typed
-                .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
-        });
+        return type_identifier(tctx, env, expr, loc, lid, &expr.pexp_attributes,
+            &mut expected_ty, context, recarg, deprecated_function_call);
     }
     if let ED::Pexp_field(record_expr_idx, field_lid) = &expr.pexp_desc {
         let record_expr = tctx.arena.get_expanded_expr(*record_expr_idx);
@@ -8263,6 +8283,14 @@ fn type_expect_with_recarg_unscoped<'a>(
         // request must be materialised by the first check or a lowered apply.
         finish_expected(tctx, expr, typed_apply.exp_type, &mut expected_ty, context)?;
         return Ok(typed_apply);
+    }
+    if let ED::Pexp_await(operand) = &expr.pexp_desc {
+        let arena = tctx.arena;
+        let primitive = Located {
+            txt: arena.promise_await_lident(),
+            loc: arena.ghost_location(arena.get_expr(*operand).pexp_loc),
+        };
+        return type_promise_application(tctx, env, expr, *operand, primitive, &mut expected_ty, context);
     }
     let expected_ty = materialize_expected(tctx, expr, &mut expected_ty);
 
@@ -8362,6 +8390,22 @@ fn type_expect_with_recarg_unscoped<'a>(
 
         ED::Pexp_let(inner) => {
             let (ref rec_flag, ref bindings, ref body_idx) = *inner;
+            let arena = tctx.arena;
+            if let Some(binding) = crate::parser::parsetree_viewer::single_record_binding(arena, *rec_flag, *bindings) {
+                let case = crate::parser::ast::Case {
+                    pc_bar: None,
+                    pc_lhs: binding.pvb_pat,
+                    pc_guard: None,
+                    pc_rhs: *body_idx,
+                };
+                return crate::types::typemod::with_warning_scope(
+                    tctx, arena, &binding.pvb_attributes, true, |tctx| {
+                        type_match(tctx, env, loc, &expr.pexp_attributes,
+                            &binding.pvb_attributes, arena.get_expanded_expr(binding.pvb_expr),
+                            std::slice::from_ref(&case), expected_ty, match_context)
+                    },
+                );
+            }
             // typecore.ml:2648-2673: a non-recursive let of one binding
             // without a type constraint whose pattern contains a GADT
             // constructor is typed as a one-case match, without the caller's
@@ -8499,80 +8543,8 @@ fn type_expect_with_recarg_unscoped<'a>(
                 ),
                 _ => unreachable!(),
             };
-            let (cond_idx, then_idx, else_idx) = (&cond_idx, &then_idx, &else_idx);
-            // If expression
-            let bool_ty = env.type_bool(ctx);
-
-            // Condition should be bool
-            let cond = tctx.arena.get_expanded_expr(*cond_idx);
-            let typed_cond = type_expect(
-                tctx,
-                env,
-                cond,
-                bool_ty,
-                Some(ClashSite::IfCondition),
-            )?;
-            let then_branch = tctx.arena.get_expanded_expr(*then_idx);
-            let else_branch = else_idx.map(|idx| tctx.arena.get_expanded_expr(idx));
-
-            match else_branch {
-                Some(else_branch) => {
-                    // OCaml keeps sharing by unifying else with then.exp_type.
-                    let typed_then =
-                        type_expect(tctx, env, then_branch, expected_ty, return_context)?;
-                    let typed_else =
-                        type_expect(tctx, env, else_branch, expected_ty, return_context)?;
-                    unify_expression_types(
-                        tctx,
-                        loc,
-                        typed_else.exp_type,
-                        typed_then.exp_type,
-                        return_context,
-                    )?;
-                    let then_exp_type = typed_then.exp_type;
-
-                    Ok({
-                        let typed_node = Expression::new(
-                            ExpressionDesc::Texp_ifthenelse(
-                                tctx.push_expr(typed_cond),
-                                tctx.push_expr(typed_then),
-                                Some(tctx.push_expr(typed_else)),
-                            ),
-                            loc,
-                            then_exp_type,
-                            exp_env_ref,
-                        );
-                        tctx.typed
-                            .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
-                    })
-                }
-                None => {
-                    // Match OCaml Pexp_ifthenelse without else:
-                    // `type_expect ... sifso Predef.type_unit`
-                    // The then-branch must be typed against the generic
-                    // predef unit scheme itself, not a fresh unit instance,
-                    // so inner applications/matches still instance it lazily.
-                    let typed_then =
-                        type_expect(tctx, env, then_branch, ctx.predef_unit(), return_context)?;
-                    let then_exp_type = typed_then.exp_type;
-                    rue_unify(tctx, loc, then_exp_type, expected_ty, context)?;
-
-                    Ok({
-                        let typed_node = Expression::new(
-                            ExpressionDesc::Texp_ifthenelse(
-                                tctx.push_expr(typed_cond),
-                                tctx.push_expr(typed_then),
-                                None,
-                            ),
-                            loc,
-                            then_exp_type,
-                            exp_env_ref,
-                        );
-                        tctx.typed
-                            .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
-                    })
-                }
-            }
+            type_conditional(tctx, env, expr, expected_ty, context, exp_env_ref,
+                cond_idx, then_idx, else_idx, return_context)
         }
 
         ED::Pexp_while(cond_idx, body_idx) => {
@@ -8882,13 +8854,19 @@ fn type_expect_with_recarg_unscoped<'a>(
 
         ED::Pexp_match(inner) => {
             let (ref scrutinee_idx, ref cases) = *inner;
+            if let Some((yes, no)) = crate::parser::parsetree_viewer::boolean_match_arms(tctx.arena, *cases) {
+                return type_conditional(tctx, env, expr, expected_ty, context, exp_env_ref,
+                    *scrutinee_idx, yes, Some(no), Some(ClashSite::IfReturn));
+            }
             let scrutinee = tctx.arena.get_expanded_expr(*scrutinee_idx);
 
             // Normal match expression
             type_match(
                 tctx,
                 env,
-                expr,
+                expr.pexp_loc,
+                &expr.pexp_attributes,
+                &[],
                 scrutinee,
                 tctx.arena.case_list(*cases),
                 expected_ty,
@@ -9088,19 +9066,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             )
         }
 
-        ED::Pexp_await(inner_expr_idx) => {
-            // Await expression: await E
-            let inner_expr = tctx.arena.get_expanded_expr(*inner_expr_idx);
-            type_await(
-                tctx,
-                env,
-                loc,
-                inner_expr,
-                expected_ty,
-                context,
-                &expr.pexp_attributes,
-            )
-        }
+        ED::Pexp_await(_) => unreachable!("await was typed above"),
 
         ED::Pexp_object_get(inner) => {
             let (ref obj_expr_idx, ref method) = **inner;
@@ -9217,6 +9183,68 @@ fn type_expect_with_recarg_unscoped<'a>(
     }
 }
 
+/// Type a value identifier without requiring a parsed expression node.
+/// Cost: the existing value lookup, instantiation and unification, then one
+/// typed identifier; no additional lookup or parsed-node allocation.
+#[allow(clippy::too_many_arguments)]
+fn type_identifier(
+    tctx: &mut TypeCheckContext<'_>, env: &Env, expr: &ParsedExpression,
+    loc: LocIdx, lid: &Located<LidentIdx>, attributes: &Attributes,
+    expected_ty: &mut Expected, context: Option<ClashSite>, recarg: RecArg,
+    deprecated_function_call: bool,
+) -> TypeCoreResult<Expression> {
+    let ctx = tctx.type_ctx;
+    let longident = tctx.arena.get_longident(lid.txt);
+
+    // Normal identifier expression.
+    let (path, desc) = match lookup_value_ident(tctx, env, longident, lid.loc) {
+        Ok(result) => result,
+        Err(ValueLookupFailure::IllegalName) => {
+            return Err(TypeCoreError::IllegalValueName {
+                loc: lid.loc,
+                name: tctx.arena.get_string(longident.last_idx()).to_string(),
+            });
+        }
+        Err(ValueLookupFailure::Unbound) => {
+            if let Some(err) = unbound_module_prefix_error(tctx, env, lid.loc, longident) {
+                return Err(err);
+            }
+            // typecore.ml Pexp_ident: `<Button />` refers to
+            // `Button.make`. The module exists (otherwise the lookup
+            // reports it as unbound), but it defines no component.
+            if let Longident::Ldot(module_lid, last) = longident
+                && matches!(context, Some(ClashSite::JsxComponent))
+                && tctx.arena.get_string(*last) == "make"
+            {
+                let module_lid = tctx.longident_to_string(module_lid);
+                let alternatives = unbound_value_alternatives(tctx, env, longident);
+                return Err(TypeCoreError::JsxComponentWithoutMake {
+                    loc: lid.loc,
+                    module_lid,
+                    alternatives,
+                });
+            }
+            return Err(unbound_value_error(tctx, env, lid.loc, longident));
+        }
+    };
+    note_value_ident_use(tctx, env, longident, lid.loc, &path, &desc, deprecated_function_call)?;
+    check_inlined_record_escape(ctx, loc, desc.val_type, recarg)?;
+
+    let ty = crate::types::instance(ctx, desc.val_type);
+    finish_expected_at(tctx, expr, loc, ty, expected_ty, context)?;
+
+    Ok({
+        let typed_node = Expression::new(
+            ExpressionDesc::Texp_ident(path, *lid, desc),
+            loc,
+            ty,
+            tctx.type_ctx.store_typed_env(env),
+        );
+        tctx.typed
+            .with_exp_attributes(typed_node, attributes.clone())
+    })
+}
+
 /// Finish a case-1 expression. Materialise when unification would do more
 /// than link the unobservable expected variable, retaining the original
 /// representative choice, level updates and error traces in those cases.
@@ -9227,13 +9255,23 @@ fn finish_expected(
     expected: &mut Expected,
     context: Option<ClashSite>,
 ) -> TypeCoreResult<()> {
+    finish_expected_at(tctx, expr, expr.pexp_loc, ty, expected, context)
+}
+
+/// Finish an expected type at the construct's semantic location.
+/// Cost: the existing expected-variable check and, when needed, unification;
+/// no location allocation, traversal or additional type lookup.
+fn finish_expected_at(
+    tctx: &mut TypeCheckContext<'_>, expr: &ParsedExpression, loc: LocIdx,
+    ty: TypeExprRef, expected: &mut Expected, context: Option<ClashSite>,
+) -> TypeCoreResult<()> {
     if let Expected::Infer { level, .. } = *expected
         && crate::types::ctype::fresh_expected_only_links(tctx.type_ctx, ty, level)
     {
         return Ok(());
     }
     let expected = materialize_expected(tctx, expr, expected);
-    rue_unify(tctx, expr.pexp_loc, ty, expected, context)
+    rue_unify(tctx, loc, ty, expected, context)
 }
 
 fn materialize_expected(
@@ -9462,19 +9500,19 @@ fn unified_expected_type(env: &Env, ctx: &TypeContext, type_name: &str) -> TypeE
 /// Crucially, this does NOT unify the operator's polymorphic type with the
 /// concrete arg/result types, so the operator expression keeps its
 /// polymorphic instance type (with shared Tvars and cycles in sexp output).
+#[allow(clippy::too_many_arguments)]
 fn translate_unified_ops(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     sexp: &ParsedExpression,
-    apply: &PexpApply,
+    loc: LocIdx,
+    attributes: &[crate::parser::ast::Attribute],
+    args: &[(ArgLabel, crate::parse_arena::ExprIdx)],
+    transformed_jsx: bool,
     typed_funct: &Expression,
     expected_ty: &mut Expected,
     context: Option<ClashSite>,
 ) -> Option<TypeCoreResult<Expression>> {
-    let loc = sexp.pexp_loc;
-    let attributes: &[crate::parser::ast::Attribute] = &sexp.pexp_attributes;
-    let args = tctx.arena.apply_args(apply.args);
-    let transformed_jsx = apply.transformed_jsx;
     use crate::types::typedtree::ApplyArg;
 
     // Check if the function is a unified op (`Pervasives.<op>`).
@@ -9949,28 +9987,44 @@ fn filter_arrow_for_lowered_apply(
     }
 }
 
+/// The existing application rule, supplied with the parsed operands.
+/// Cost: the existing operand/list reads followed by application typing.
 fn type_application(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &Env,
-    sexp: &ParsedExpression,
-    apply: &PexpApply,
-    expected_ty: &mut Expected,
+    tctx: &mut TypeCheckContext<'_>, env: &Env, sexp: &ParsedExpression,
+    apply: &PexpApply, expected_ty: &mut Expected, context: Option<ClashSite>,
+) -> TypeCoreResult<Expression> {
+    let arena = tctx.arena;
+    type_application_parts(tctx, env, sexp, sexp.pexp_loc, &sexp.pexp_attributes,
+        ApplicationCallee::Source(arena.get_expanded_expr(apply.funct)),
+        arena.apply_args(apply.args), apply.partial, apply.transformed_jsx, expected_ty, context)
+}
+
+/// Borrowed source callee or a compilation-local primitive handle. Never stored.
+#[derive(Clone, Copy)]
+enum ApplicationCallee<'a> {
+    Source(&'a ParsedExpression),
+    Promise(Located<LidentIdx>),
+}
+
+/// Apply the ordinary typing rule to borrowed operands.
+/// Cost: the same callee check, argument checks and typed-node writes as an
+/// explicit application; no parsed node, argument list or per-node state.
+#[allow(clippy::too_many_arguments)]
+fn type_application_parts(
+    tctx: &mut TypeCheckContext<'_>, env: &Env, sexp: &ParsedExpression,
+    loc: LocIdx, attributes: &[crate::parser::ast::Attribute],
+    callee: ApplicationCallee<'_>, args: &[(ArgLabel, crate::parse_arena::ExprIdx)],
+    partial: bool, transformed_jsx: bool, expected_ty: &mut Expected,
     context: Option<ClashSite>,
 ) -> TypeCoreResult<Expression> {
-    let loc = sexp.pexp_loc;
-    let attributes: &[crate::parser::ast::Attribute] = &sexp.pexp_attributes;
-    let arena = tctx.arena;
-    let funct = arena.get_expanded_expr(apply.funct);
-    let args = arena.apply_args(apply.args);
-    let partial = apply.partial;
-    let transformed_jsx = apply.transformed_jsx;
     use crate::types::typedtree::ApplyArg;
 
     // compiler/frontend/ast_exp_apply.ml:47-50 validates all arguments to
     // special infix applications before rewriting them. Keep that boundary
     // ahead of function lookup so a malformed pipe reports the label itself,
     // rather than an unbound synthetic `->` value.
-    if let crate::parser::ast::ExpressionDesc::Pexp_ident(lid) = &funct.pexp_desc
+    if let ApplicationCallee::Source(funct) = callee
+        && let crate::parser::ast::ExpressionDesc::Pexp_ident(lid) = &funct.pexp_desc
         && tctx.arena.is_lident(lid.txt, "->")
         && let Some((_, arg_idx)) = args
             .iter()
@@ -10080,19 +10134,21 @@ fn type_application(
             case: 1,
         });
     }
-    tctx.deprecated_function_call = true;
-    let typed_funct = type_expect_full(
-        tctx,
-        env,
-        funct,
-        Expected::Infer {
-            level: ctx.current_level(),
-            site: InferenceSite::ApplicationFunction,
-        },
-        None,
-        RecArg::Rejected,
-        None,
-    )?;
+    let inferred = Expected::Infer {
+        level: ctx.current_level(), site: InferenceSite::ApplicationFunction,
+    };
+    let typed_funct = match callee {
+        ApplicationCallee::Source(funct) => {
+            tctx.deprecated_function_call = true;
+            type_expect_full(tctx, env, funct, inferred, None, RecArg::Rejected, None)?
+        }
+        ApplicationCallee::Promise(lid) => {
+            tctx.set_unify_env(env);
+            type_identifier(tctx, env, sexp, lid.loc, &lid, &Attributes::new(), &mut { inferred },
+                None, RecArg::Rejected, true)?
+        }
+    };
+    let funct_loc = typed_funct.exp_loc;
     let typed_funct_value_path = match &typed_funct.exp_desc {
         ExpressionDesc::Texp_ident(path, _, _) => Some(*path),
         _ => None,
@@ -10131,7 +10187,10 @@ fn type_application(
         tctx,
         env,
         sexp,
-        apply,
+        loc,
+        attributes,
+        args,
+        transformed_jsx,
         &typed_funct,
         expected_ty,
         context,
@@ -10203,7 +10262,7 @@ fn type_application(
         let arity_suggestion =
             find_arity_suggestion_for_expression(tctx, env, &typed_funct, args.len())?;
         return Err(TypeCoreError::UncurriedArityMismatch {
-            loc: funct.pexp_loc,
+            loc: funct_loc,
             function_type: typed_funct.exp_type,
             expected_arity: function_arity,
             provided_arity: args.len(),
@@ -10473,7 +10532,7 @@ fn type_application(
         let arity_suggestion =
             find_arity_suggestion_for_expression(tctx, env, &typed_funct, args.len())?;
         return Err(TypeCoreError::UncurriedArityMismatch {
-            loc: funct.pexp_loc,
+            loc: funct_loc,
             function_type: typed_funct.exp_type,
             expected_arity: args.len() + function_arity - provided,
             provided_arity: args.len(),
@@ -10507,7 +10566,7 @@ fn type_application(
     unify_expression_types(tctx, loc, ctx.new_var(None), typed_funct.exp_type, None)?;
 
     // OCaml: rue { ... exp_type = ty_res; ... }
-    finish_expected(tctx, sexp, result_ty, expected_ty, context)?;
+    finish_expected_at(tctx, sexp, loc, result_ty, expected_ty, context)?;
 
     Ok({
         let typed_node = Expression::new(
@@ -11066,6 +11125,9 @@ fn collect_module_expr_ident_heads(
                     | StructureItemDesc::Tstr_modtype(_)
                     | StructureItemDesc::Tstr_open(_)
                     | StructureItemDesc::Tstr_attribute(_) => {}
+                    StructureItemDesc::Tstr_derived(_) => {
+                        unreachable!("{}", crate::types::derived::TOP_LEVEL_ONLY)
+                    }
                 }
             }
         }
@@ -11566,18 +11628,113 @@ fn type_match_cases_batch_non_gadt<'a>(
     batch_result
 }
 
+/// Type a conditional, including the two-case boolean match rule.
+/// Cost: one condition and at most two branch checks, then one typed node;
+/// no parsed node, list, lookup table or traversal is allocated here.
+#[allow(clippy::too_many_arguments)]
+fn type_conditional(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    expr: &ParsedExpression,
+    expected_ty: TypeExprRef,
+    context: Option<ClashSite>,
+    exp_env_ref: EnvRef,
+    cond_idx: crate::parse_arena::ExprIdx,
+    then_idx: crate::parse_arena::ExprIdx,
+    else_idx: Option<crate::parse_arena::ExprIdx>,
+    return_context: Option<ClashSite>,
+) -> TypeCoreResult<Expression> {
+    let ctx = tctx.type_ctx;
+    let loc = expr.pexp_loc;
+    let (cond_idx, then_idx, else_idx) = (&cond_idx, &then_idx, &else_idx);
+    // If expression
+    let bool_ty = env.type_bool(ctx);
+
+    // Condition should be bool
+    let cond = tctx.arena.get_expanded_expr(*cond_idx);
+    let typed_cond = type_expect(
+        tctx,
+        env,
+        cond,
+        bool_ty,
+        Some(ClashSite::IfCondition),
+    )?;
+    let then_branch = tctx.arena.get_expanded_expr(*then_idx);
+    let else_branch = else_idx.map(|idx| tctx.arena.get_expanded_expr(idx));
+
+    match else_branch {
+        Some(else_branch) => {
+            // OCaml keeps sharing by unifying else with then.exp_type.
+            let typed_then =
+                type_expect(tctx, env, then_branch, expected_ty, return_context)?;
+            let typed_else =
+                type_expect(tctx, env, else_branch, expected_ty, return_context)?;
+            unify_expression_types(
+                tctx,
+                loc,
+                typed_else.exp_type,
+                typed_then.exp_type,
+                return_context,
+            )?;
+            let then_exp_type = typed_then.exp_type;
+
+            Ok({
+                let typed_node = Expression::new(
+                    ExpressionDesc::Texp_ifthenelse(
+                        tctx.push_expr(typed_cond),
+                        tctx.push_expr(typed_then),
+                        Some(tctx.push_expr(typed_else)),
+                    ),
+                    loc,
+                    then_exp_type,
+                    exp_env_ref,
+                );
+                tctx.typed
+                    .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
+            })
+        }
+        None => {
+            // Match OCaml Pexp_ifthenelse without else:
+            // `type_expect ... sifso Predef.type_unit`
+            // The then-branch must be typed against the generic
+            // predef unit scheme itself, not a fresh unit instance,
+            // so inner applications/matches still instance it lazily.
+            let typed_then =
+                type_expect(tctx, env, then_branch, ctx.predef_unit(), return_context)?;
+            let then_exp_type = typed_then.exp_type;
+            rue_unify(tctx, loc, then_exp_type, expected_ty, context)?;
+
+            Ok({
+                let typed_node = Expression::new(
+                    ExpressionDesc::Texp_ifthenelse(
+                        tctx.push_expr(typed_cond),
+                        tctx.push_expr(typed_then),
+                        None,
+                    ),
+                    loc,
+                    then_exp_type,
+                    exp_env_ref,
+                );
+                tctx.typed
+                    .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
+            })
+        }
+    }
+}
+
 /// Type check match expression.
+#[allow(clippy::too_many_arguments)]
 fn type_match(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    sexp: &ParsedExpression,
+    loc: LocIdx,
+    attributes: &[crate::parser::ast::Attribute],
+    binding_attributes: &[crate::parser::ast::Attribute],
     scrutinee: &ParsedExpression,
     cases: &[crate::parser::ast::Case],
     expected_ty: TypeExprRef,
     match_context: Option<MatchContext>,
 ) -> TypeCoreResult<Expression> {
-    let loc = sexp.pexp_loc;
-    let attributes: &[crate::parser::ast::Attribute] = &sexp.pexp_attributes;
     let ctx = tctx.type_ctx;
     // typecore.ml:2855-2864: a match the type checker synthesized says what it
     // stands for; otherwise only the parsed `let?` is marked, by
@@ -11587,6 +11744,7 @@ fn type_match(
         None => {
             if attributes
                 .iter()
+                .chain(binding_attributes)
                 .any(|attr| tctx.arena.get_string(attr.0.txt) == "let.unwrap")
             {
                 Some(ClashSite::LetUnwrapReturn)
@@ -11894,7 +12052,7 @@ fn type_match(
             tctx.type_ctx.store_typed_env(env),
         );
         tctx.typed
-            .with_exp_attributes(typed_node, attributes.to_vec().into())
+            .with_exp_attributes(typed_node, attributes.iter().chain(binding_attributes).cloned().collect::<Vec<_>>().into())
     })
 }
 
@@ -12154,6 +12312,15 @@ fn collect_lident_idents_in_module_expr(
                     }
                     SID::Pstr_value(inner) => {
                         for binding in arena.vb_list(inner.1).iter() {
+                            collect_lident_idents_in_expression(
+                                arena,
+                                arena.get_expanded_expr(binding.pvb_expr),
+                                out,
+                            );
+                        }
+                    }
+                    SID::Pstr_derived(idx) => {
+                        for binding in arena.vb_list(arena.plans().item(*idx).general).iter() {
                             collect_lident_idents_in_expression(
                                 arena,
                                 arena.get_expanded_expr(binding.pvb_expr),
@@ -13550,13 +13717,19 @@ fn type_function_nary(
     } else {
         result_type
     };
-    let typed_body = type_expect_with_module_unpacks(
-        tctx,
-        &body_env,
-        tctx.arena.get_expanded_expr(body),
-        body_result_type,
-        &unpacks,
-        None,
+    let async_body = if is_async {
+        let pattern = tctx.arena.get_pat(params[0].p_pat);
+        let loc = match &pattern.ppat_desc {
+            crate::parser::ast::PatternDesc::Ppat_var(name) => name.loc,
+            _ => pattern.ppat_loc,
+        };
+        Some((body, loc))
+    } else {
+        None
+    };
+    let typed_body = type_body_with_module_unpacks(
+        tctx, &body_env, tctx.arena.get_expanded_expr(body),
+        body_result_type, &unpacks, None, async_body,
     )?;
     let mut typed_body = Expression {
         exp_type: crate::types::instance(ctx, body_result_type),
@@ -17138,40 +17311,20 @@ fn type_newtype(
 
 /// Type check await expression.
 #[allow(clippy::too_many_arguments)]
-fn type_await(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &Env,
-    loc: LocIdx,
-    inner_expr: &ParsedExpression,
-    expected_ty: TypeExprRef,
-    _context: Option<ClashSite>,
-    attributes: &[crate::parser::ast::Attribute],
+/// Type a promise primitive using the ordinary application rule.
+/// Cost: one existing primitive lookup and one operand check; the one-argument
+/// slice is stack borrowed, with no parsed node, list or location allocation.
+fn type_promise_application(
+    tctx: &mut TypeCheckContext<'_>, env: &Env, source: &ParsedExpression,
+    operand: crate::parse_arena::ExprIdx, primitive: Located<LidentIdx>,
+    expected: &mut Expected, context: Option<ClashSite>,
 ) -> TypeCoreResult<Expression> {
-    // For await, the inner expression should be a Promise<T>
-    // and the result type is T
-    // For simplicity, we just type check the inner expression with expected type
-    // Full implementation would handle Promise type constructor
-
-    // Type check the inner expression
-    let typed_inner = type_expect(tctx, env, inner_expr, expected_ty, None)?;
-
-    // Return the expression - await just unwraps the promise
-    // In JavaScript, this is a runtime operation
-    Ok({
-        let typed_node = Expression::new(
-            ExpressionDesc::Texp_apply {
-                funct: tctx.push_expr(typed_inner),
-                args: crate::types::typedtree::TArgList::EMPTY, // Await is a special form, not a regular application
-                partial: false,
-                transformed_jsx: false,
-            },
-            loc,
-            expected_ty,
-            tctx.type_ctx.store_typed_env(env),
-        );
-        tctx.typed
-            .with_exp_attributes(typed_node, attributes.to_vec().into())
-    })
+    tctx.set_unify_env(env);
+    let result = type_application_parts(tctx, env, source, primitive.loc, &[],
+        ApplicationCallee::Promise(primitive), &[(ArgLabel::Nolabel, operand)],
+        false, false, expected, context)?;
+    finish_expected_at(tctx, source, primitive.loc, result.exp_type, expected, context)?;
+    Ok(result)
 }
 
 /// typecore.ml `object_valid_fields`.
@@ -18243,7 +18396,7 @@ fn unbound_value_alternatives(
     )
 }
 
-fn check_inlined_record_escape(
+pub(crate) fn check_inlined_record_escape(
     ctx: &TypeContext,
     loc: LocIdx,
     ty: TypeExprRef,
@@ -18944,13 +19097,26 @@ fn module_type_from_package_binding(
     .unwrap_or(crate::types::decl::ModuleType::MtyIdent(path)))
 }
 
+/// Type an ordinary body under unpacked parameter modules.
+/// Cost: the existing unpack recursion and body check; no additional walk.
 fn type_expect_with_module_unpacks(
+    tctx: &mut TypeCheckContext<'_>, env: &Env, body: &ParsedExpression,
+    expected_ty: TypeExprRef, unpacks: &[PatternVariable], context: Option<ClashSite>,
+) -> TypeCoreResult<Expression> {
+    type_body_with_module_unpacks(tctx, env, body, expected_ty, unpacks, context, None)
+}
+
+/// Type a function body, optionally adding its promise result, under unpacks.
+/// Cost: one existing module-unpack scope per parameter unpack, then one body
+/// check. The promise wrapper adds no traversal or parsed nodes.
+fn type_body_with_module_unpacks(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     body: &ParsedExpression,
     expected_ty: TypeExprRef,
     unpacks: &[PatternVariable],
     context: Option<ClashSite>,
+    async_body: Option<(crate::parse_arena::ExprIdx, LocIdx)>,
 ) -> TypeCoreResult<Expression> {
     fn ensure_string_idx(arena: &ParseArena, s: &str) -> StrIdx {
         if let Some(idx) = arena.find_string_idx(s) {
@@ -18962,7 +19128,13 @@ fn type_expect_with_module_unpacks(
     // `wrap_unpacks` (typecore.ml:2097-2108) folds left over the unpacks, so
     // the last one is the outermost `let module`.
     let Some((unpack, rest)) = unpacks.split_last() else {
-        return type_expect(tctx, env, body, expected_ty, context);
+        return if let Some((operand, loc)) = async_body {
+            let primitive = Located { txt: tctx.arena.promise_async_lident(), loc };
+            type_promise_application(tctx, env, body, operand, primitive,
+                &mut Expected::Known(expected_ty), context)
+        } else {
+            type_expect(tctx, env, body, expected_ty, context)
+        };
     };
 
     let decl_mty = module_type_from_package_binding(tctx, env, unpack.ty, unpack.loc_idx)?;
@@ -19002,7 +19174,7 @@ fn type_expect_with_module_unpacks(
     );
     ctx.init_def(ctx.current_stamp());
     let typed_body =
-        type_expect_with_module_unpacks(tctx, &body_env, body, expected_ty, rest, context);
+        type_body_with_module_unpacks(tctx, &body_env, body, expected_ty, rest, context, async_body);
     ctx.end_def();
     let typed_body = typed_body?;
     apply_letmodule_local_path_cleanup(
@@ -19086,7 +19258,7 @@ fn type_expect_with_module_unpacks(
                 tctx.typed.push_module_expr(unpack_module),
                 tctx.push_expr(typed_body),
             ),
-            body.pexp_loc,
+            async_body.map_or(body.pexp_loc, |(_, loc)| loc),
             wrapped_ty,
             tctx.type_ctx.store_typed_env(env),
         );
@@ -19317,6 +19489,8 @@ fn is_nonexpansive_module_expr(
                 crate::types::typedtree::StructureItemDesc::Tstr_modtype(_) => true,
                 crate::types::typedtree::StructureItemDesc::Tstr_open(_) => true,
                 crate::types::typedtree::StructureItemDesc::Tstr_attribute(_) => true,
+                // Every binding of a derived item is a function.
+                crate::types::typedtree::StructureItemDesc::Tstr_derived(_) => true,
                 crate::types::typedtree::StructureItemDesc::Tstr_value(_, bindings) => ta
                     .value_bindings(*bindings)
                     .iter()
@@ -19511,11 +19685,23 @@ fn type_approx_for_rec_let(
                     typ,
                 )
             }));
-            let ret = type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(body))?;
+            // The return annotation constrains the operand of unsafe_async,
+            // not the function's promise result. Approximate that application
+            // with a fresh variable, as for every other application below.
+            let ret = if inner.is_async {
+                ctx.new_var(None)
+            } else {
+                type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(body))?
+            };
             Ok(ctx.new_type(TypeDesc::Tarrow { args, ret }))
         }
         ED::Pexp_match(inner) => {
             let (_, cases) = inner;
+            // The direct boolean rule is a conditional: pre-unification must
+            // approximate its true arm even when false appears first in source.
+            if let Some((ifso, _)) = crate::parser::parsetree_viewer::boolean_match_arms(tctx.arena, *cases) {
+                return type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(ifso));
+            }
             match tctx.arena.case_list(*cases).first() {
                 Some(case) => type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(case.pc_rhs)),
                 None => Ok(ctx.new_var(None)),
@@ -19921,6 +20107,9 @@ fn typed_structure_item_uses_ident(ta: &TypedArena, item: &StructureItem, target
         | StructureItemDesc::Tstr_exception(_)
         | StructureItemDesc::Tstr_open(_)
         | StructureItemDesc::Tstr_attribute(_) => false,
+        StructureItemDesc::Tstr_derived(_) => {
+            unreachable!("{}", crate::types::derived::TOP_LEVEL_ONLY)
+        }
     }
 }
 
@@ -20331,6 +20520,9 @@ fn rec_structure_item(
         | crate::types::typedtree::StructureItemDesc::Tstr_open(_)
         | crate::types::typedtree::StructureItemDesc::Tstr_attribute(_) => {
             (RecEnv::default(), RecUse::default())
+        }
+        crate::types::typedtree::StructureItemDesc::Tstr_derived(_) => {
+            unreachable!("{}", crate::types::derived::TOP_LEVEL_ONLY)
         }
     }
 }
@@ -22395,6 +22587,10 @@ impl Env {
 
     /// Look up a value by longident. `None` means the value is unbound; the
     /// caller builds the user-facing error.
+    // Inlined into its two callers: the typing of an identifier expression,
+    // which is hot and had this body inline when it was the only caller, and
+    // the discharge of a derived item.
+    #[inline(always)]
     pub fn lookup_value_by_lid(
         &self,
         lid: &Longident,
@@ -26091,13 +26287,13 @@ fn module_components_cache_key(
 }
 
 fn with_resolved_child_module_components<R>(
-    parent_components: &crate::types::env_lazy::QualifiedModuleComponents,
+    parent_components: crate::types::env_lazy::Components<'_>,
     child_name: &str,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
     cache_mode: ComponentLookupApi,
-    f: impl FnOnce(i32, &crate::types::env_lazy::QualifiedModuleComponents) -> R,
+    f: impl FnOnce(i32, crate::types::env_lazy::Components<'_>) -> R,
 ) -> Option<R> {
     let mut f = Some(f);
     let step_pos = |path: &Path| match path.view() {
@@ -26188,7 +26384,10 @@ fn with_resolved_child_module_components<R>(
     };
     let result = (f
         .take()
-        .expect("qualified child module components callback reused"))(pos, &components);
+        .expect("qualified child module components callback reused"))(
+        pos,
+        crate::types::env_lazy::Components::Local(&components),
+    );
     if let Some(module_key) = module_key {
         ctx.register_qualified_module_components(module_key, components);
     }
@@ -26485,7 +26684,7 @@ fn with_resolved_module_components_for_lid_inner<'a, R>(
     mode: LidComponentLookup,
     f: &mut dyn FnMut(
         Option<&Path>,
-        &crate::types::env_lazy::QualifiedModuleComponents,
+        crate::types::env_lazy::Components<'_>,
     ) -> Option<R>,
 ) -> Option<R> {
     let LidComponentLookup {
@@ -26546,10 +26745,10 @@ fn with_resolved_module_components_for_lid_inner<'a, R>(
                 pers_env,
                 ctx,
                 mode,
-                &mut |path, components| Some((path.cloned(), components.clone())),
+                &mut |path, components| Some((path.cloned(), components.to_held())),
             )?;
             with_resolved_child_module_components(
-                &parent_components,
+                parent_components.components(),
                 child_name.as_str(),
                 env,
                 pers_env,
@@ -26575,11 +26774,11 @@ pub(crate) fn with_module_descr_for_lid<R>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
-    f: impl FnOnce(&Path, &crate::types::env_lazy::QualifiedModuleComponents) -> R,
+    f: impl FnOnce(&Path, crate::types::env_lazy::Components<'_>) -> R,
 ) -> Option<R> {
     let mut f = Some(f);
     let mut wrapper = |path: Option<&Path>,
-                       components: &crate::types::env_lazy::QualifiedModuleComponents| {
+                       components: crate::types::env_lazy::Components<'_>| {
         Some((f.take().expect("module descriptor callback reused"))(
             path.expect("lookup path requested"),
             components,
@@ -26605,11 +26804,11 @@ pub(crate) fn with_resolved_module_components_for_lid<R>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
-    f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
+    f: impl FnOnce(crate::types::env_lazy::Components<'_>) -> R,
 ) -> Option<R> {
     let mut f = Some(f);
     let mut wrapper =
-        |_: Option<&Path>, components: &crate::types::env_lazy::QualifiedModuleComponents| {
+        |_: Option<&Path>, components: crate::types::env_lazy::Components<'_>| {
             Some((f.take().expect(
                 "qualified module components by lid callback reused",
             ))(components))
@@ -26669,7 +26868,7 @@ pub(crate) fn open_module_lid_components_into_env(
     }
     // The open's root is the path `Env.lookup_module` builds for `lid`.
     let mut wrapper =
-        |path: Option<&Path>, components: &crate::types::env_lazy::QualifiedModuleComponents| {
+        |path: Option<&Path>, components: crate::types::env_lazy::Components<'_>| {
             let path = *path.expect("lookup path requested");
             crate::cmi::persistent_env::open_module_components_into_env(
                 components, path, target_env, ctx, slot,
@@ -26760,8 +26959,11 @@ fn build_module_components_from_parent_path(
         cache_mode,
         |components| components.lookup_child_components(module_name.as_str(), ctx),
     ) {
+        // Reached for a key no world view answers (one scoped to an
+        // environment, or a view the pool had no room for): the tables are
+        // built for this compilation.
         if let Some(components) =
-            stored.with_components(pers_env, ctx, cache_mode, |child| child.clone())
+            stored.with_local_components(pers_env, ctx, cache_mode, |child| child.clone())
         {
             return Some(components);
         }
@@ -26807,7 +27009,7 @@ fn build_module_components_from_parent_path(
             Some((parent_access_path, parent_sig)),
         );
         if let Some(components) =
-            stored.with_components(pers_env, ctx, cache_mode, |child| child.clone())
+            stored.with_local_components(pers_env, ctx, cache_mode, |child| child.clone())
         {
             return Some(components);
         }
@@ -26924,7 +27126,216 @@ fn flattened_alias_component_parent(
         || ctx.has_component_paths_for_alias_source(&source_path)
 }
 
-fn build_shared_persistent_root_components(
+/// The world's view of unit `ps`, adopted by this compilation under `key`
+/// (see `TypeContext::adopt_view`); `None` when the world does not own the
+/// unit. One load of the unit's view cell when the view is built already.
+pub(crate) fn adopt_unit_view(
+    ps: &std::sync::Arc<crate::cmi::persistent_env::PersStruct>,
+    key: crate::types::context::QualifiedModuleComponentsCacheKey,
+    ctx: &crate::types::context::TypeContext,
+) -> Option<std::sync::Arc<crate::types::module_view::ModuleView>> {
+    use crate::types::module_view::{ViewKey, verify_view, world_verify_enabled};
+    let world = ctx.world();
+    let view_key = ViewKey::Unit(ps);
+    let view = world.views().get_or_build(world, &view_key)?;
+    if world_verify_enabled() {
+        verify_view(world, &view_key, &view);
+    }
+    ctx.adopt_view(key, view.clone());
+    Some(view)
+}
+
+/// The world's view of `module_path` when it is the path of a unit.
+///
+/// Which kind of key a path is, is a fact of the path and the world: a
+/// persistent identifier names a unit, and a unit's components are its own
+/// (`ps_comps`, compiler/ml/env.ml:669-678, 1000-1007), whether or not the
+/// asking compilation has met a module alias of the unit. Loads the unit as
+/// any lookup of it does; a lookup that carries no persistent environment
+/// (type expansion) reads the unit through the compilation's own, as its
+/// raw signature was read before.
+///
+/// Cost: the unit lookup (one probe of the compilation's unit cache when it
+/// is loaded) and one load of the unit's view cell.
+fn adopt_persistent_root_view(
+    module_path: &Path,
+    key: &crate::types::context::QualifiedModuleComponentsCacheKey,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &crate::types::context::TypeContext,
+) -> Option<std::sync::Arc<crate::types::module_view::ModuleView>> {
+    if !ctx.persistent_env_is_in_process() {
+        return None;
+    }
+    let name = crate::types::module_view::unit_key_name(module_path)?;
+    let ps = match pers_env.as_mut() {
+        Some(pers) => {
+            if !pers.unit_visible(name) {
+                return None;
+            }
+            pers.find_pers_struct(name, ctx)?
+        }
+        None => {
+            let mut pers = ctx.persistent_env_clone()?;
+            if !pers.unit_visible(name) {
+                return None;
+            }
+            pers.find_pers_struct(name, ctx)?
+        }
+    };
+    adopt_unit_view(&ps, key.clone(), ctx)
+}
+
+/// The world's view of child `ordinal` of `parent`, a child whose path is a
+/// view key (`ModuleView::world_child_kind`), adopted by this compilation;
+/// `None` when the pool had no room for it, and for an alias of a module
+/// this compilation cannot load, the world has no view of, or resolves
+/// differently than the compilation the view was built for.
+///
+/// Adopting the view of an alias adopts the views its target's path goes
+/// through, loading their units, as building the alias's tables did
+/// (env.ml:1440-1442 `scrape_alias` reaches `find_module`, env.ml:872-875).
+///
+/// Cost, when the view is built and adopted already: one load of the
+/// child's cell and one probe of the compilation's component cache. Else
+/// [`resolve_alias_target`] for an alias, and one adoption.
+pub(crate) fn adopt_child_view(
+    parent: &std::sync::Arc<crate::types::module_view::ModuleView>,
+    ordinal: u32,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &crate::types::context::TypeContext,
+) -> Option<std::sync::Arc<crate::types::module_view::ModuleView>> {
+    use crate::types::module_view::{AliasKey, ViewKey, WorldChild, verify_view, world_verify_enabled};
+    let key_of = |view: &crate::types::module_view::ModuleView| {
+        crate::types::context::QualifiedModuleComponentsCacheKey::new(*view.access_path(), None)
+    };
+    if let Some(view) = parent.built_child(ordinal)
+        && ctx.holds_view(&key_of(view), view)
+    {
+        return Some(view.clone());
+    }
+    let world = ctx.world();
+    let adopt = |view_key: ViewKey<'_>| {
+        let view = world.views().get_or_build(world, &view_key)?;
+        if world_verify_enabled() {
+            verify_view(world, &view_key, &view);
+        }
+        Some(view)
+    };
+    let view = match parent.world_child_kind(ordinal)? {
+        WorldChild::Structure => adopt(ViewKey::Child(parent, ordinal))?,
+        WorldChild::Alias(target) => {
+            let target = resolve_alias_target(&target, pers_env, ctx)?;
+            if let crate::types::module_view::AliasTarget::Unit(unit) = &target {
+                // env.ml:872-875: `find_module` of a unit forces its
+                // signature.
+                ctx.trigger_module_sig_rename(&unit.ps_name);
+            }
+            let view = adopt(ViewKey::Alias(&AliasKey {
+                parent,
+                ordinal,
+                target: &target,
+            }))?;
+            // The cell holds the view of the target the first compilation
+            // resolved the path to; one that resolves it to another (a
+            // different unit under the same name) builds its own tables.
+            if !view.is_alias_of(&target) {
+                return None;
+            }
+            view
+        }
+    };
+    ctx.adopt_view(key_of(&view), view.clone());
+    Some(view)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Calls of [`resolve_alias_target`] on this thread.
+    pub(crate) static RESOLVE_ALIAS_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// What the alias target `path`, a path rooted in a persistent unit, is in
+/// the world: the unit, for a unit's own path, else the view of the path,
+/// adopted by this compilation with every view on the way (docs
+/// /CHECKER_REDESIGN.md, "W5b design", point 1). The units are loaded by
+/// this compilation, which is the one read of it; the rest is world data.
+/// `None` for a unit this compilation cannot load or the world does not
+/// own, and for a path with a step that has no view.
+///
+/// Cost: one step per component of the path and per alias on the way; a
+/// step whose view is adopted already is one probe.
+fn resolve_alias_target(
+    path: &Path,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &crate::types::context::TypeContext,
+) -> Option<crate::types::module_view::AliasTarget> {
+    use crate::types::module_view::AliasTarget;
+    #[cfg(test)]
+    RESOLVE_ALIAS_STEPS.with(|steps| steps.set(steps.get() + 1));
+    match path.view() {
+        PathView::Pident(id) if id.is_persistent() => {
+            let unit = pers_env.as_mut()?.find_pers_struct(id.name(), ctx)?;
+            unit.ps_view.get()?;
+            Some(AliasTarget::Unit(unit))
+        }
+        PathView::Pdot(parent, name, _) => {
+            let parent = match resolve_alias_target(parent, pers_env, ctx)? {
+                AliasTarget::View(view) => view,
+                AliasTarget::Unit(unit) => adopt_unit_view(
+                    &unit,
+                    crate::types::context::QualifiedModuleComponentsCacheKey::new(
+                        Path::pident(Ident::create_persistent(&unit.ps_name)),
+                        None,
+                    ),
+                    ctx,
+                )?,
+            };
+            let (ordinal, _) = parent.world_child(name.as_str())?;
+            adopt_child_view(&parent, ordinal, pers_env, ctx).map(AliasTarget::View)
+        }
+        _ => None,
+    }
+}
+
+/// The world's view of `module_path` when it is a child path whose parent
+/// has a world view and the child's path is a view key. Resolves the parent
+/// as any lookup of the child does.
+///
+/// Cost: the lookup of the parent's components, one probe of the parent's
+/// name index, and [`adopt_child_view`].
+fn adopt_world_child_view(
+    module_path: &Path,
+    key: &crate::types::context::QualifiedModuleComponentsCacheKey,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &crate::types::context::TypeContext,
+    cache_mode: ComponentLookupApi,
+) -> Option<std::sync::Arc<crate::types::module_view::ModuleView>> {
+    if !ctx.persistent_env_is_in_process() || !key.is_worker_shareable() {
+        return None;
+    }
+    let PathView::Pdot(parent, name, _) = module_path.view() else {
+        return None;
+    };
+    let (parent, ordinal) = with_resolved_module_components_for_path_with_cache_mode(
+        parent,
+        env,
+        pers_env,
+        ctx,
+        cache_mode,
+        |components| match components {
+            crate::types::env_lazy::Components::World(view) => view
+                .world_child(name.as_str())
+                .map(|(ordinal, _)| (view.clone(), ordinal)),
+            crate::types::env_lazy::Components::Local(_) => None,
+        },
+    )??;
+    adopt_child_view(&parent, ordinal, pers_env, ctx)
+}
+
+/// The components of a unit only this compilation holds (the world owns no
+/// copy of it): built for this compilation, like any other local path.
+fn build_private_unit_components(
     module_path: &Path,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
@@ -26941,13 +27352,6 @@ fn build_shared_persistent_root_components(
     }
 
     let pers = pers_env.as_mut()?;
-    if pers
-        .qualified_alias_path_for_flattened_head(id.name())
-        .is_some()
-    {
-        return None;
-    }
-
     let ps = pers.find_pers_struct(id.name(), ctx)?;
     let access_path = Path::pident(Ident::create_persistent(id.name()));
     Some(
@@ -26987,7 +27391,7 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
     cache_mode: ComponentLookupApi,
-    f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
+    f: impl FnOnce(crate::types::env_lazy::Components<'_>) -> R,
 ) -> Option<R> {
     // OCaml compiler/ml/env.ml:781-788 path-based `Pident` lookup is exact
     // (`IdTbl.find_same`). Source `Longident.Lident` name lookup is handled
@@ -27000,9 +27404,7 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
         .with_local_module_components(module_path, |stored| {
             stored.with_components(pers_env, ctx, cache_mode, |components| {
                 (f.take()
-                    .expect("qualified module components callback reused"))(
-                    components
-                )
+                    .expect("qualified module components callback reused"))(components)
             })
         })
         .flatten()
@@ -27022,67 +27424,42 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
         return Some(result);
     }
 
-    // A persistent-rooted view is the same for every compilation (OCaml
-    // builds `ps_comps` from `Env.empty`, compiler/ml/env.ml:669-678), so it
-    // is built once per worker as a store build and shared.
-    let shared_key = module_key
-        .as_ref()
-        .filter(|key| {
-            ctx.persistent_env_is_in_process()
-                && key.is_worker_shareable()
-                && shared_components_enabled()
-                // The worker's shared view was built by a compilation that
-                // could see the root unit; one that cannot (a package that
-                // does not depend on it) must not reach it through the view.
-                && pers_env
-                    .as_ref()
-                    .is_none_or(|pers| pers.unit_visible(module_path.head().name()))
-        })
-        .cloned();
-    if ctx.in_store_build()
-        && shared_key.is_none()
-        && let Some(module_key) = module_key.as_ref()
-        && let Some(result) = ctx.with_qualified_module_components(module_key, |components| {
-            (f.take()
-                .expect("qualified module components callback reused"))(components)
-        })
+    // The view of a unit's own path is the same for every compilation
+    // (OCaml builds `ps_comps` from `Env.empty`, compiler/ml/env.ml:669-678):
+    // the world holds it, built once per build.
+    if let Some(module_key) = module_key.as_ref()
+        && let Some(view) = adopt_persistent_root_view(module_path, module_key, pers_env, ctx)
     {
-        // A store build must not read this compilation's cache when the
-        // shared cache below answers for the same key.
-        return Some(result);
-    }
-    if let Some(shared_key) = shared_key.as_ref()
-        && let Some((components, piece)) = ctx.thread_store().shared_components(shared_key)
-        && (ctx.store_guards_hold(&piece) || {
-            if crate::types::context::store_debug_enabled() {
-                eprintln!("[store-guard-miss] {}", module_path.name());
-            }
-            if ctx.compiler_counters_enabled() {
-                crate::perf_counters::store_views::record_view_guard_miss();
-            }
-            false
-        })
-    {
-        if crate::types::context::store_debug_enabled() {
-            eprintln!("[store-hit] {}", module_path.name());
-        }
-        if ctx.compiler_counters_enabled() {
-            crate::perf_counters::store_views::record_view_hit();
-        }
-        ctx.touch_store_piece(&piece);
-        let result =
-            (f.take()
-                .expect("qualified module components callback reused"))(&components);
-        ctx.register_qualified_module_components_shared(shared_key.clone(), components);
-        return Some(result);
+        return Some((f
+            .take()
+            .expect("qualified module components callback reused"))(
+            crate::types::env_lazy::Components::World(&view),
+        ));
     }
 
-    let build = |pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>| {
+    // So is the view of a child that a world view declares with a
+    // signature (env.ml:1573-1578) or as an alias of a unit
+    // (env.ml:1516-1518): it is the parent's, built once.
+    if let Some(module_key) = module_key.as_ref()
+        && let Some(view) =
+            adopt_world_child_view(module_path, module_key, env, pers_env, ctx, cache_mode)
+    {
+        return Some((f
+            .take()
+            .expect("qualified module components callback reused"))(
+            crate::types::env_lazy::Components::World(&view),
+        ));
+    }
+
+    // Any other path (a local module, a functor application, a child that
+    // is a functor or whose module type another unit declares, a unit the
+    // world does not own) has its tables built for this compilation.
+    let components = Rc::new(
         build_module_components_from_parent_path(module_path, env, pers_env, ctx, cache_mode)
             .or_else(|| {
                 build_functor_application_components(module_path, env, pers_env, ctx, cache_mode)
             })
-            .or_else(|| build_shared_persistent_root_components(module_path, pers_env, ctx))
+            .or_else(|| build_private_unit_components(module_path, pers_env, ctx))
             .or_else(|| {
                 let (access_path, sig) =
                     build_module_signature_for_path(module_path, env, pers_env, ctx, cache_mode)?;
@@ -27091,48 +27468,22 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
                     sig,
                     ctx,
                 ))
-            })
-    };
-    let (components, piece) = if shared_key.is_some() {
-        ctx.build_in_store_guarded(|| build(pers_env))
-    } else {
-        (build(pers_env), None)
-    };
-    let components = Rc::new(components?);
-    if shared_key.is_some() && piece.is_none() {
-        components.make_private();
+            })?,
+    );
+    if ctx.compiler_counters_enabled()
+        && (matches!(module_path.view(), PathView::Papply(..)) || module_path.has_apply_prefix())
+    {
+        crate::perf_counters::world::record_papply_view_build();
     }
     let result = (f
         .take()
-        .expect("qualified module components callback reused"))(&components);
+        .expect("qualified module components callback reused"))(
+        crate::types::env_lazy::Components::Local(&components),
+    );
     if let Some(module_key) = module_key {
-        if crate::types::context::store_debug_enabled() && shared_key.is_some() {
-            eprintln!(
-                "[store-build] {} published={}",
-                module_path.name(),
-                piece.is_some()
-            );
-        }
-        if shared_key.is_some() && ctx.compiler_counters_enabled() {
-            crate::perf_counters::store_views::record_view_build(
-                module_path.name(),
-                piece.is_some(),
-            );
-        }
-        if let (Some(shared_key), Some(piece)) = (shared_key, piece) {
-            ctx.thread_store()
-                .publish_shared_components(shared_key, components.clone(), piece);
-        }
         ctx.register_qualified_module_components_shared(module_key, components);
     }
     Some(result)
-}
-
-/// `RESCRIPT_NO_SHARED_COMPONENTS=1` disables worker-shared component views
-/// (for A/B measurements and bisecting).
-pub(crate) fn shared_components_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("RESCRIPT_NO_SHARED_COMPONENTS").is_none())
 }
 
 pub(crate) fn with_resolved_module_components_for_path<R>(
@@ -27140,7 +27491,7 @@ pub(crate) fn with_resolved_module_components_for_path<R>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
-    f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
+    f: impl FnOnce(crate::types::env_lazy::Components<'_>) -> R,
 ) -> Option<R> {
     with_resolved_module_components_for_path_with_cache_mode(
         module_path,
@@ -29805,6 +30156,12 @@ fn parmatch_check_unused(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn direct_application_view_sizes() {
+        assert_eq!(std::mem::size_of::<ApplicationCallee<'_>>(), 16);
+        assert_eq!(std::mem::size_of::<Option<(crate::parse_arena::ExprIdx, LocIdx)>>(), 12);
+    }
+
     use super::*;
     use crate::context::IdGenerator;
 
@@ -30107,6 +30464,20 @@ mod tests {
         let cst = crate::parser::ast::Constant::Integer(arena.intern_string("42"), None);
         let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
         assert_eq!(result, Constant::Int(42));
+    }
+
+    #[test]
+    fn test_convert_constant_l_suffix() {
+        let mut arena = crate::parse_arena::ParseArena::new();
+        for digits in ["42", "0xffff_ffff", "-0xffff_ffff", "999999999999999999999999999999"] {
+            let digits = arena.intern_string(digits);
+            let plain = crate::parser::ast::Constant::Integer(digits, None);
+            let suffixed = crate::parser::ast::Constant::Integer(digits, Some('l'));
+            assert_eq!(
+                format!("{:?}", convert_constant(&plain, LocIdx(0), &arena)),
+                format!("{:?}", convert_constant(&suffixed, LocIdx(0), &arena)),
+            );
+        }
     }
 
     #[test]

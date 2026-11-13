@@ -988,7 +988,7 @@ struct Exporter<'a> {
 }
 impl Exporter<'_> {
     fn ident(&self, v: VarId) -> Result<Ident, Unsupported> {
-        let v = self.p.arena.vars.j_origin.get(&v).copied().unwrap_or(v);
+        let v = self.p.arena.vars.j_origin[v.index()];
         self.p
             .idents
             .get(v.index())
@@ -1167,8 +1167,8 @@ impl Exporter<'_> {
                 let h = b.function(header);
                 let attr = b.function_attributes(header);
                 self.ids.clear();
-                for v in h.params.iter() {
-                    self.ids.push(self.ident(v)?);
+                for i in 0..h.params.len() {
+                    self.ids.push(self.ident(b.function_parameter(header, i))?);
                 }
                 let params = self.a.ident_list(&self.ids);
                 let directive = attr.directive.as_deref().map(|s| self.a.str(s));

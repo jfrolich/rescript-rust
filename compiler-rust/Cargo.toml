@@ -50,6 +50,7 @@ oxc_ast_visit = "=0.158.0"
 rescript-ts-import = { path = "../ts-import", optional = true }
 
 [dev-dependencies]
+allocation-counter = "0.8.1"
 js-reformat = { path = "../scripts/js-reformat" }
 rayon = "1.10"
 proptest = "1.5"

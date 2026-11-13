@@ -1,0 +1,412 @@
+//! The plan of a derived item: what the seam hands the checker and the
+//! backend instead of syntax (`compiler-rust/docs/DERIVED_CODECS.md`, "Target
+//! design").
+//!
+//! A plan is generic. It names the bindings an item declares and, per
+//! binding, the ordered obligations the checker discharges, the type the
+//! binding gets and a body in a small core language that the backend lowers.
+//! Nothing here names a derive.
+//!
+//! Everything lives in dense pools of the `ParseArena`, addressed by `u32`
+//! handles. A binding owns a contiguous range of obligations, of skeleton
+//! nodes and of body nodes, so reading a plan is a forward scan of each pool.
+
+use serde::{Deserialize, Serialize};
+
+use crate::parse_arena::{LidentIdx, LocIdx, StrIdx, VbList};
+use crate::parser::ast::Attributes;
+
+macro_rules! handle {
+    ($(#[$doc:meta])* $name:ident) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        pub struct $name(pub u32);
+
+        impl $name {
+            /// The pool slot this handle names. Cost: O(1).
+            #[inline]
+            pub fn index(self) -> usize {
+                self.0 as usize
+            }
+        }
+    };
+}
+
+handle!(
+    /// A derived structure item: `StructureItemDesc::Pstr_derived`.
+    DerivedIdx
+);
+handle!(
+    /// One binding a derived item declares.
+    BindingIdx
+);
+handle!(
+    /// One obligation. Obligation results are a dense table indexed by it.
+    ObligationIdx
+);
+handle!(
+    /// The first node of a type skeleton, stored in prefix order.
+    SkeletonIdx
+);
+handle!(
+    /// One node of a binding's body.
+    BodyIdx
+);
+
+/// A half-open range of slots in one pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    /// First slot.
+    pub start: u32,
+    /// Number of slots.
+    pub len: u32,
+}
+
+impl Span {
+    /// The slots as indices. Cost: O(1).
+    #[inline]
+    pub fn range(self) -> std::ops::Range<usize> {
+        self.start as usize..(self.start + self.len) as usize
+    }
+}
+
+/// A derived item: its bindings, and the syntax it stands for.
+#[derive(Debug, Clone, Copy)]
+pub struct Item {
+    /// The bindings, in declaration order.
+    pub bindings: Span,
+    /// The general form: the value group the derive generates for this item.
+    /// The checker types it when an obligation fails, and the stored `.ast`
+    /// holds it, so nothing downstream of a stored tree sees a plan.
+    pub general: VbList,
+}
+
+/// Where an obligation's expression is located, relative to its name. The
+/// derive gives an identifier either the location of the type constructor it
+/// was generated for, or none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExprLoc {
+    /// The expression carries the location of its name.
+    OfName,
+    /// The expression carries the arena's dummy location.
+    Dummy,
+}
+
+/// What the checker must establish for one name the body uses. Obligations
+/// of a binding are stored in the order inference meets the identifiers of
+/// the general form, which fixes the first failure and the order of warnings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Obligation {
+    /// A value: looked up as an identifier expression is (usage marking and
+    /// the deprecation check included), instantiated once, and the instance
+    /// unified with the instantiated `skeleton`.
+    Value {
+        /// The name, resolved in the environment of the item.
+        name: LidentIdx,
+        /// Location of the name: where its warnings are reported.
+        name_loc: LocIdx,
+        /// The type the body uses the value at.
+        skeleton: SkeletonIdx,
+        /// Location of the identifier expression.
+        expr_loc: ExprLoc,
+        /// Whether the body calls the value: a deprecated value is recorded
+        /// as called or as referenced.
+        called: bool,
+    },
+    /// A type constructor: looked up as a type annotation is. Skeletons name
+    /// it through `SkeletonNode::Named`.
+    Type {
+        /// The name, resolved in the environment of the item.
+        name: LidentIdx,
+        /// Location of the name.
+        name_loc: LocIdx,
+        /// The number of type arguments skeletons apply it to.
+        arity: u16,
+    },
+}
+
+/// One node of a type skeleton. A skeleton is stored in prefix order: a node
+/// is followed by its children, so it has no child handles and instantiating
+/// it is one forward scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkeletonNode {
+    /// A type variable of the binding. Slots are shared by the skeletons of
+    /// one binding: the first use makes the variable, later uses denote it.
+    Var(u32),
+    /// A function type: `params` parameter skeletons follow, then the result.
+    Arrow {
+        /// Number of unlabelled parameters.
+        params: u16,
+    },
+    /// The constructor a `Type` obligation resolved, applied to `args`
+    /// skeletons that follow.
+    Named {
+        /// The `Type` obligation; it precedes every skeleton that names it.
+        ty: ObligationIdx,
+        /// Number of type arguments.
+        args: u16,
+    },
+}
+
+/// One node of a binding's body: the core language the backend lowers.
+/// Children precede their parents in the pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyNode {
+    /// The parameter of an enclosing function, counted from the outermost.
+    Local(u32),
+    /// The value a `Value` obligation resolved.
+    Free(ObligationIdx),
+    /// An application to unlabelled arguments.
+    Apply {
+        /// The callee.
+        funct: BodyIdx,
+        /// The arguments: a range of the argument pool.
+        args: u32,
+        /// Number of arguments.
+        len: u16,
+        /// Whether the call is written as a partial application (`f(a, ...)`).
+        partial: bool,
+    },
+    /// A function of one parameter.
+    Function {
+        /// The parameter's name.
+        param: StrIdx,
+        /// The function's body.
+        body: BodyIdx,
+    },
+}
+
+/// One binding of a derived item.
+#[derive(Debug, Clone)]
+pub struct Binding {
+    /// The bound name.
+    pub name: StrIdx,
+    /// Attributes of the binding, scoped around its checks as a `let`
+    /// binding's are.
+    pub attributes: Attributes,
+    /// The obligations, in typing order.
+    pub obligations: Span,
+    /// The root of the body: a `BodyNode::Function`.
+    pub body: BodyIdx,
+    /// Number of skeleton variable slots the binding uses.
+    pub vars: u32,
+    /// The type source `ResultOf(obligation, applied)`: the binding's type is
+    /// the function type that remains of the value `result_of` resolved after
+    /// `applied` leading parameters were supplied.
+    pub result_of: ObligationIdx,
+    /// See `result_of`.
+    pub applied: u32,
+}
+
+/// The plan pools of one `ParseArena`.
+#[derive(Debug, Default)]
+pub struct Plans {
+    items: Vec<Item>,
+    bindings: Vec<Binding>,
+    obligations: Vec<Obligation>,
+    skeletons: Vec<SkeletonNode>,
+    body: Vec<BodyNode>,
+    body_args: Vec<BodyIdx>,
+}
+
+impl Plans {
+    /// Number of derived items. Cost: O(1).
+    pub fn item_count(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Number of bindings of all items. Cost: O(1).
+    pub fn binding_count(&self) -> usize {
+        self.bindings.len()
+    }
+
+    /// Number of obligations of all items: the size of a table indexed by
+    /// `ObligationIdx`. Cost: O(1).
+    pub fn obligation_count(&self) -> usize {
+        self.obligations.len()
+    }
+
+    /// The handle the next pushed binding gets. Cost: O(1).
+    pub fn next_binding(&self) -> BindingIdx {
+        BindingIdx(self.bindings.len() as u32)
+    }
+
+    /// The handle the next pushed obligation gets. Cost: O(1).
+    pub fn next_obligation(&self) -> ObligationIdx {
+        ObligationIdx(self.obligations.len() as u32)
+    }
+
+    /// Append an item whose bindings are the `len` most recently pushed.
+    /// Cost: O(1) amortised; one slot, no other allocation.
+    pub fn push_item(&mut self, first: BindingIdx, general: VbList) -> DerivedIdx {
+        let idx = DerivedIdx(self.items.len() as u32);
+        self.items.push(Item {
+            bindings: Span {
+                start: first.0,
+                len: self.bindings.len() as u32 - first.0,
+            },
+            general,
+        });
+        idx
+    }
+
+    /// Append a binding. Cost: O(1) amortised; one slot.
+    pub fn push_binding(&mut self, binding: Binding) -> BindingIdx {
+        let idx = self.next_binding();
+        self.bindings.push(binding);
+        idx
+    }
+
+    /// Append an obligation. Cost: O(1) amortised; one 16-byte slot.
+    pub fn push_obligation(&mut self, obligation: Obligation) -> ObligationIdx {
+        let idx = self.next_obligation();
+        self.obligations.push(obligation);
+        idx
+    }
+
+    /// Append one skeleton node; a skeleton is the node and the children
+    /// pushed after it. Cost: O(1) amortised; one 8-byte slot.
+    pub fn push_skeleton(&mut self, node: SkeletonNode) -> SkeletonIdx {
+        let idx = SkeletonIdx(self.skeletons.len() as u32);
+        self.skeletons.push(node);
+        idx
+    }
+
+    /// Append a body node whose children were pushed before it.
+    /// Cost: O(1) amortised; one 16-byte slot.
+    pub fn push_body(&mut self, node: BodyNode) -> BodyIdx {
+        let idx = BodyIdx(self.body.len() as u32);
+        self.body.push(node);
+        idx
+    }
+
+    /// Append an application of `funct` to `args`.
+    /// Cost: O(arguments): one argument slot each and one node slot.
+    pub fn push_apply(&mut self, funct: BodyIdx, args: &[BodyIdx], partial: bool) -> BodyIdx {
+        let start = self.body_args.len() as u32;
+        self.body_args.extend_from_slice(args);
+        self.push_body(BodyNode::Apply {
+            funct,
+            args: start,
+            len: args.len() as u16,
+            partial,
+        })
+    }
+
+    /// The item of a handle. Cost: O(1).
+    #[inline]
+    pub fn item(&self, idx: DerivedIdx) -> Item {
+        self.items[idx.index()]
+    }
+
+    /// The bindings of an item, in declaration order. Cost: O(1).
+    #[inline]
+    pub fn bindings(&self, item: Item) -> &[Binding] {
+        &self.bindings[item.bindings.range()]
+    }
+
+    /// The obligation of a handle. Cost: O(1).
+    #[inline]
+    pub fn obligation(&self, idx: ObligationIdx) -> Obligation {
+        self.obligations[idx.index()]
+    }
+
+    /// The skeleton pool from `idx` on: the skeleton's nodes in prefix order,
+    /// then whatever follows it. Cost: O(1).
+    #[inline]
+    pub fn skeleton_from(&self, idx: SkeletonIdx) -> &[SkeletonNode] {
+        &self.skeletons[idx.index()..]
+    }
+
+    /// The body node of a handle. Cost: O(1).
+    #[inline]
+    pub fn body(&self, idx: BodyIdx) -> BodyNode {
+        self.body[idx.index()]
+    }
+
+    /// The arguments of an application node. Cost: O(1).
+    #[inline]
+    pub fn apply_args(&self, start: u32, len: u16) -> &[BodyIdx] {
+        &self.body_args[start as usize..start as usize + len as usize]
+    }
+
+    /// Replace the general form of an item, after the front end rewrote it.
+    /// Cost: O(1).
+    pub fn set_general(&mut self, idx: DerivedIdx, general: VbList) {
+        self.items[idx.index()].general = general;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem::size_of;
+
+    #[test]
+    fn sizes_are_pinned() {
+        assert_eq!(size_of::<DerivedIdx>(), 4);
+        assert_eq!(size_of::<BindingIdx>(), 4);
+        assert_eq!(size_of::<ObligationIdx>(), 4);
+        assert_eq!(size_of::<SkeletonIdx>(), 4);
+        assert_eq!(size_of::<BodyIdx>(), 4);
+        assert_eq!(size_of::<Obligation>(), 16);
+        assert_eq!(size_of::<BodyNode>(), 12);
+        assert_eq!(size_of::<SkeletonNode>(), 8);
+        assert_eq!(size_of::<Item>(), 16);
+        assert_eq!(size_of::<Binding>(), 40);
+    }
+
+    /// Pushing is one slot per element: 10,000 obligations, skeleton nodes
+    /// and body nodes occupy exactly 10,000 slots of each pool, and an
+    /// application's arguments exactly one argument slot each.
+    #[test]
+    fn pools_hold_one_slot_per_element() {
+        let mut plans = Plans::default();
+        let first = plans.next_binding();
+        let name = LidentIdx(0);
+        let mut args = Vec::new();
+        for i in 0..10_000u32 {
+            let skeleton = plans.push_skeleton(SkeletonNode::Var(i));
+            let obligation = plans.push_obligation(Obligation::Value {
+                name,
+                name_loc: LocIdx(0),
+                skeleton,
+                expr_loc: ExprLoc::Dummy,
+                called: false,
+            });
+            args.push(plans.push_body(BodyNode::Free(obligation)));
+        }
+        let funct = args[0];
+        let apply = plans.push_apply(funct, &args[1..], false);
+        let body = plans.push_body(BodyNode::Function {
+            param: StrIdx(0),
+            body: apply,
+        });
+        plans.push_binding(Binding {
+            name: StrIdx(0),
+            attributes: Attributes::new(),
+            obligations: Span { start: 0, len: 10_000 },
+            body,
+            vars: 10_000,
+            result_of: ObligationIdx(0),
+            applied: 0,
+        });
+        let item = plans.push_item(first, VbList::EMPTY);
+        assert_eq!(plans.obligation_count(), 10_000);
+        assert_eq!(plans.skeletons.len(), 10_000);
+        assert_eq!(plans.body.len(), 10_002);
+        assert_eq!(plans.body_args.len(), 9_999);
+        let item = plans.item(item);
+        assert_eq!(plans.bindings(item).len(), 1);
+        assert_eq!(plans.bindings(item)[0].obligations.range(), 0..10_000);
+        let BodyNode::Apply { args, len, .. } = plans.body(apply) else {
+            panic!("an application")
+        };
+        assert_eq!(plans.apply_args(args, len), &args_of(&plans)[..]);
+        fn args_of(plans: &Plans) -> Vec<BodyIdx> {
+            (1..10_000).map(BodyIdx).collect::<Vec<_>>().into_iter().filter(|idx| {
+                matches!(plans.body(*idx), BodyNode::Free(_))
+            }).collect()
+        }
+    }
+}

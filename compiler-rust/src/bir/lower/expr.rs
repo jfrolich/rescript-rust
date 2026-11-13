@@ -4,10 +4,19 @@ use crate::bir::{FuncId, VarSpan};
 
 /// Decoded structural operands saved across child visits; no source re-read.
 pub(super) enum Resume {
+    Loop(super::loops::Loop),
+    Rec(super::rec::Group),
+    Try(super::try_::Try),
+    Assign { var: VarId, value: NodeId },
+    Switch(super::switch::Switch),
+    Variant(super::variant::Variant),
+    Untagged(super::untagged::Untagged),
     If(super::cond::Conditional),
     Call(super::call::Call),
     Prim(super::prim::Prim),
     Record(super::record::Record),
+    Catch(super::exit::Catch),
+    Exit(super::exit::Exit),
     Let {
         var: VarId,
         kind: LetKind,
@@ -21,6 +30,7 @@ pub(super) enum Resume {
     Fun {
         body: NodeId,
         header: FuncId,
+        loop_: Option<LoopRef>,
     },
 }
 impl State {
@@ -32,6 +42,17 @@ impl State {
         resume: &Resume,
         into: &mut Vec<(Cx, NodeId)>,
     ) {
+        if let Resume::Loop(frame) = resume { self.loop_children(cx, *frame, into); return; }
+        if let Resume::Rec(group) = resume { self.recursive_children(cx, *group, into); return; }
+        if let Resume::Try(frame) = resume { self.try_children(cx, *frame, into); return; }
+        if let Resume::Untagged(frame) = resume { self.untagged_children(cx, *frame, into); return; }
+        if let Resume::Variant(frame) = resume { self.variant_children(cx, *frame, into); return; }
+        if let Resume::Catch(frame) = resume { self.catch_children(cx, *frame, into); return; }
+        if let Resume::Exit(exit) = resume { self.exit_children(cx, exit, into); return; }
+        if let Resume::Switch(frame) = resume {
+            self.switch_children(cx, *frame, into);
+            return;
+        }
         if let Resume::Record(record) = resume {
             self.record_children(cx, record, into);
             return;
@@ -52,7 +73,10 @@ impl State {
             return;
         }
         match *resume {
-            Resume::If(_) => unreachable!("conditional handled above"),
+            Resume::Rec(_) | Resume::Loop(_) => unreachable!("group or loop handled above"),
+            Resume::Assign { value, .. } => into.push((Cx { cont: Cont::Value(Tail::No), ..cx }, value)),
+            Resume::Try(_) | Resume::If(_) | Resume::Switch(_) | Resume::Variant(_) | Resume::Untagged(_)
+            | Resume::Catch(_) | Resume::Exit(_) => unreachable!("control handled above"),
             Resume::Call(_) | Resume::Prim(_) | Resume::Record(_) => unreachable!("arguments handled above"),
             Resume::Let {
                 var,
@@ -81,9 +105,10 @@ impl State {
                 ));
                 into.push((cx, second));
             }
-            Resume::Fun { body, header } => {
+            Resume::Fun { body, header, loop_ } => {
                 let mut function = Cx::returning();
                 function.return_unit = self.arena.function_attributes(header).return_unit;
+                function.cont = Cont::Effect(Tail::Return(Ret::Named { loop_, in_catch: false }));
                 into.push((function, body));
             }
         }
@@ -98,9 +123,17 @@ impl State {
         index: usize,
         child: Probed,
     ) -> Probed {
+        if let Resume::Loop(frame) = resume { return self.loop_child(cx, *frame, index, child); }
+        if let Resume::Rec(group) = resume { return self.recursive_child(cx, *group, index, child); }
+        if let Resume::Try(frame) = resume { return self.try_child(cx, *frame, index, child); }
         if let Resume::If(conditional) = resume {
             return self.conditional_child(cx, conditional, index, child);
         }
+        if let Resume::Untagged(frame) = resume { return self.untagged_child(cx, *frame, index, child); }
+        if let Resume::Variant(frame) = resume { return self.variant_child(cx, *frame, index, child); }
+        if let Resume::Switch(frame) = resume { return self.switch_child(cx, *frame, index, child); }
+        if let Resume::Catch(frame) = resume { return self.catch_child(cx, *frame, index, child); }
+        if let Resume::Exit(exit) = resume { return self.exit_child(cx, exit, index, child); }
         if matches!(resume, Resume::Call(_) | Resume::Prim(_) | Resume::Record(_)) {
             let mut out = self.realize(cx, child);
             if let Resume::Prim(prim) = resume {
@@ -124,8 +157,11 @@ impl State {
             }
         }
         let force = match resume {
-            Resume::If(_) => unreachable!("conditional handled above"),
+            Resume::Rec(_) | Resume::Loop(_) => unreachable!("group or loop handled above"),
+            Resume::Try(_) | Resume::If(_) | Resume::Switch(_) | Resume::Variant(_) | Resume::Untagged(_)
+            | Resume::Catch(_) | Resume::Exit(_) => unreachable!("control handled above"),
             Resume::Call(_) | Resume::Prim(_) | Resume::Record(_) => unreachable!("arguments handled above"),
+            Resume::Assign { .. } => false,
             Resume::Let { value, .. } => value.is_some() && index == 0,
             Resume::Seq { .. } => index == 0,
             Resume::Fun { .. } => true,
@@ -144,6 +180,15 @@ impl State {
         mut children: impl Iterator<Item = Probed>,
     ) -> Probed {
         match resume {
+            Resume::Loop(frame) => self.finish_loop(cx, frame),
+            Resume::Rec(group) => self.finish_recursive(cx, group, children),
+            Resume::Try(frame) => self.finish_try(cx, frame),
+            Resume::Assign { var, .. } => self.finish_assignment(cx, var, children.next().expect("assignment operand")),
+            Resume::Switch(frame) => self.finish_switch(cx, frame),
+            Resume::Variant(frame) => self.finish_variant(cx, frame),
+            Resume::Untagged(frame) => self.finish_untagged(cx, frame),
+            Resume::Catch(frame) => self.finish_catch(cx, frame),
+            Resume::Exit(exit) => self.finish_exit(cx, exit, children),
             Resume::If(conditional) => self.finish_conditional(cx, conditional, children),
             Resume::Call(call) => self.finish_application(cx, call, children),
             Resume::Prim(_) | Resume::Record(_) => unreachable!("primitive finished by dispatch"),
@@ -218,13 +263,14 @@ impl State {
                     self.probe_leaf(cx, value)
                 } else { Probed::Out(out) }
             }
-            Resume::Fun { header, .. } => {
+            Resume::Fun { header, loop_, .. } => {
                 let Probed::Out(body) = children.next().expect("function body") else {
                     unreachable!("return was realized")
                 };
                 assert!(body.value.is_none());
                 let list = self.statements.take_list(&mut self.arena, body.stmts);
                 let body = self.arena.block_from_list(list);
+                let body = if let Some(frame) = loop_ { self.loop_function_body(frame, header, body) } else { body };
                 let source_loc = self
                     .located_functions
                     .get(header.index())

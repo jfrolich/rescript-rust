@@ -1,6 +1,7 @@
 # Derived codecs without the whole pipeline
 
-Status: design. No production code accompanies this document. The measurement
+Status: design. Slice 1 is implemented (#215); slices 2 to 4 are not
+([STATUS.md](STATUS.md)). No production code accompanied this document. The measurement
 patch and script it used are in `prototypes/derived-codecs/`.
 
 `@spice` on a type declaration derives `<name>_encode`, `<name>_encodeJson` and
@@ -26,12 +27,13 @@ read and built at `1898b21000`.
   emits `<name>_encode`, `<name>_encodeJson` (carrying `@warning("-32")`) and
   `<name>_decode`. The encoder body is generated once and cloned into both
   encoder bindings, so the checker and the backend process it twice.
-- **There are no error fixtures for derived code.** No file under
+- **There were no error fixtures for derived code** (slice 1 added
+  `tests/build_tests/super_errors_derived`). No file under
   `tests/build_tests/` contains `@spice`; `tests/ppx_spice` holds only programs
   that compile. The diagnostics below were produced by compiling small probes
   with a build of #194. Slice 1 adds the fixtures.
-- **`tests/ppx_spice` is not a buildable project on trunk.** Its `rescript.json`
-  and `package.json` arrive with #194.
+- **`tests/ppx_spice` was not a buildable project on trunk.** Its `rescript.json`
+  and `package.json` arrived with #194.
 - **The Spice library is project source, not part of the compiler.** The
   generated code calls `Spice.*` (`tests/ppx_spice/src/Spice.res`), `Dict.*`,
   `Option.*` and the constructors `Ok`, `Error`, `Some`, `None`, `JSON.Object`
@@ -473,7 +475,10 @@ the compiler options are created (where `RESCRIPT_DERIVED_CENSUS` is read in
   process and the following are compared; a difference fails the build naming
   the unit and the first differing binding:
   - the JavaScript bytes, and the source map when enabled;
-  - the signature (`types/canonical_sig.rs`) and the stored interface bytes;
+  - the signature in canonical form (`types/canonical_sig.rs`). The stored
+    interface bytes and their fingerprint are not compared: they record which
+    type nodes two values share, and a discharge instantiates each binding's
+    codec on its own where typing a group shares the nodes of one annotation;
   - the export summary: arities, constants, inlinable bodies, purity;
   - the unit reads, as sets;
   - the warnings, as text in order.
@@ -507,7 +512,7 @@ success path and no switch selects another.
 
 ## Slices
 
-All slices depend on #194 being merged (the derived bit, the census, the
+All slices depend on #194 (merged: the derived bit, the census, the
 buildable `tests/ppx_spice`). Sizes are of new non-test lines.
 
 ### Slice 1. The plan, the obligations and the oracle, for constructor applications
@@ -516,7 +521,7 @@ buildable `tests/ppx_spice`). Sizes are of new non-test lines.
   `binary_ast/spice_ppx.rs` (classifier and plan builder for one shape),
   `parser/ast.rs` (`Pstr_derived`), `parse_arena.rs` (pools),
   `types/typedtree.rs` (`Tstr_derived`), new `types/derived.rs` (discharge),
-  `types/typemod.rs` (one arm), new `raw_lambda/derived.rs` (lowering of
+  `types/typemod.rs` (one arm), new `raw_lambda/convert/derived.rs` (as built; lowering of
   `Local`, `Free`, `Apply`, `Function`), `raw_lambda/convert.rs` (one arm),
   `types/unit_reads.rs`, `driver.rs` (the switch and `check`),
   every exhaustive match on the two item enums, fixtures.
@@ -589,7 +594,7 @@ Commits, in this order, each building and passing `cargo test
    obligations performs exactly 10,000 lookups, 10,000 instances and 10,000
    unifications (count through the existing perf counters or a test counter
    passed as a parameter; no global).
-6. `raw_lambda/derived.rs`: `lower(plan, results, builder)` for the body nodes
+6. `raw_lambda/convert/derived.rs`: `lower(plan, results, builder)` for the body nodes
    `Local`, `Free`, `Apply`, `Function`, producing for each binding the raw
    Lambda `convert_let_with_body_raw` produces today for the general form.
    Unit test: for ten declarations, the printed raw Lambda of both forms is
@@ -622,14 +627,14 @@ body for the maintainers to add.
 
 - **Files:** `binary_ast/spice_ppx.rs` (plan builder for records),
   `binary_ast/derive/plan.rs` (the remaining body nodes), `types/derived.rs`
-  (`Label`, `Constructor`, `Literal`), `raw_lambda/derived.rs`,
+  (`Label`, `Constructor`, `Literal`), `raw_lambda/convert/derived.rs`,
   `raw_lambda/convert.rs` (node builders split out of the typed-node
   functions), `raw_lambda/matching.rs` (an entry taking patterns built from
   descriptions, if the existing one cannot be called).
 - **Deletes:** the bodies of the `convert.rs` functions that were split move
   into the shared builders; no copy remains. The census's syntax-node count for
   planned items goes (there is no syntax); the census reports plan nodes.
-- **End state:** `rg -n "some_not_nest|Psome_not_nest" compiler-rust/src/raw_lambda/derived.rs`
+- **End state:** `rg -n "some_not_nest|Psome_not_nest" compiler-rust/src/raw_lambda/convert/derived.rs`
   has no match (the decision lives in one place);
   `rg -n "fn compile_matching" compiler-rust/src/raw_lambda` shows one
   definition; a census of `tests/ppx_spice` shows every record without a
@@ -657,7 +662,7 @@ or by supporting records without optional fields.
 Commits in order:
 
 1. Characterisation, no behaviour change. In a test module of
-   raw_lambda/derived.rs, for each of these general-form bodies print the raw
+   raw_lambda/convert/derived.rs, for each of these general-form bodies print the raw
    Lambda today's converter produces and pin it: field access; record
    construction with an optional field; `Some(e)` where `e : JSON.t`;
    `Ok(None)`; `JSON.Object(d)`; `Dict.fromArray(e)` and `Dict.get(d, k)`;
@@ -682,7 +687,7 @@ Commits in order:
    today's body uses (pattern in encoders, construction in decoders), and the
    `Stated` type source. A `type a = {x: int} and b = {x: int}` group must
    classify `General`.
-5. `raw_lambda/derived.rs`: lowering of the remaining body nodes through the
+5. `raw_lambda/convert/derived.rs`: lowering of the remaining body nodes through the
    split builders and `compile_matching`. Unit test: for each record of
    tests/ppx_spice/src/Records.res and OptionalFieldRecords.res, the raw Lambda
    of both forms is equal after renumbering stamps and static exit numbers.
@@ -704,7 +709,7 @@ not round it into a claim about another project).
 
 - **Files:** `binary_ast/spice_ppx.rs` (plan builder for
   `variants_generate_codecs` without `@spice.serde`),
-  `raw_lambda/derived.rs` (`Switch` on a declared constructor and on a string).
+  `raw_lambda/convert/derived.rs` (`Switch` on a declared constructor and on a string).
 - **Deletes:** nothing beyond the per-shape `General(NotYetPlanned)` reason for
   variants.
 - **End state:** `rg -n "NotYetPlanned" compiler-rust/src/binary_ast` lists

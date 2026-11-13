@@ -697,26 +697,27 @@ pub fn compile(
     crate::build::phase_mark("compile-start");
     prepare_registry_for_runtime_precompile(build_state);
 
-    // Pre-compile all @rescript/runtime modules into the registry.
-    // In in-process mode, the registry is the sole source of truth —
-    // no CMI fallback. Every dependency must be in the registry before
-    // project modules start compiling, even when @rescript/runtime is
-    // also present in the package graph (otherwise implicit Stdlib opens
-    // can require modules that the main build graph hasn't reached yet).
-    let parent_span = compile_parent_span.clone();
-    let pre_compile_result: Result<()> = std::thread::scope(|scope| {
-        spawn_runtime_precompile(scope, || {
-            let _parent = parent_span.enter();
-            pre_compile_runtime_modules_with_mode(
-                &build_state.module_registry,
-                &build_state.build_state.compiler_info.runtime_path,
-                RuntimeStore::of_build(build_state).as_ref(),
-                build_state.check_only,
-            )
-        })
-        .and_then(join_runtime_precompile)
-    });
-    pre_compile_result?;
+    // A runtime project supplies its own modules through the normal dependency
+    // scheduler (-make-runtime disables implicit Stdlib dependencies). Other
+    // projects need runtime interfaces before their modules can compile.
+    if build_state.build_state.project_context.current_config.name != "@rescript/runtime" {
+        let parent_span = compile_parent_span.clone();
+        let pre_compile_result: Result<()> = std::thread::scope(|scope| {
+            spawn_runtime_precompile(scope, || {
+                let _parent = parent_span.enter();
+                pre_compile_runtime_modules_with_mode(
+                    &build_state.module_registry,
+                    &build_state.build_state.compiler_info.runtime_path,
+                    RuntimeStore::of_build(build_state).as_ref(),
+                    build_state.check_only,
+                    build_state.dump.is_some(),
+                    build_state.revoked_snapshots[0],
+                )
+            })
+            .and_then(join_runtime_precompile)
+        });
+        pre_compile_result?;
+    }
     crate::build::phase_mark("runtime-precompile-end");
 
     // Clear source-fallback paths after pre-compilation.
@@ -2295,6 +2296,7 @@ fn build_package_compiler_options(
         nopervasives: parsed_flags.nopervasives,
         no_version_header: parsed_flags.no_version_header,
         package_name: Some(package.config.name.clone()),
+        package_root: Some(package.path.clone()),
         make_runtime: parsed_flags.make_runtime,
         gentype_config,
         gentype_resolver,
@@ -3064,7 +3066,7 @@ pub(crate) fn pre_compile_runtime_modules(
     runtime_root: &Path,
     store: Option<&RuntimeStore>,
 ) -> Result<()> {
-    pre_compile_runtime_modules_with_mode(registry, runtime_root, store, false)
+    pre_compile_runtime_modules_with_mode(registry, runtime_root, store, false, false, false)
 }
 
 pub(crate) fn pre_compile_runtime_modules_with_mode(
@@ -3072,13 +3074,15 @@ pub(crate) fn pre_compile_runtime_modules_with_mode(
     runtime_root: &Path,
     store: Option<&RuntimeStore>,
     check_only: bool,
+    dump: bool,
+    snapshot_revoked: bool,
 ) -> Result<()> {
     let _span = info_span!("build.runtime_precompile").entered();
     let runtime_timing_enabled =
         std::env::var_os("RESCRIPT_RUNTIME_TIMINGS").is_some() || module_timings_enabled();
     let runtime_timing_start = runtime_timing_enabled.then(Instant::now);
     let runtime_timing_before = runtime_timing_enabled.then(rescript_compiler::timing::snapshot);
-    let runtime_config = packages::read_config(runtime_root)
+    let runtime_config = super::snapshot::runtime_config(runtime_root)
         .with_context(|| format!("failed to read runtime config from {}", runtime_root.display()))?;
     // The runtime package ships its sources at its root; its compiled
     // modules would be in its artifact directory, the runtime's `-I`.
@@ -3092,7 +3096,7 @@ pub(crate) fn pre_compile_runtime_modules_with_mode(
 
     let already_registered = {
         let registry = registry.lock().unwrap();
-        runtime_paths.iter().all(|(module_name, _)| {
+        registry.has_runtime_snapshot() || runtime_paths.iter().all(|(module_name, _)| {
             registry.is_pending_stored(module_name)
                 || (registry.module_info_is_runtime(module_name) && registry.has_cached_module(module_name))
         })
@@ -3104,7 +3108,7 @@ pub(crate) fn pre_compile_runtime_modules_with_mode(
     // The interfaces the last build compiled stand in for compiling the
     // runtime again while its sources and the compiler are the same.
     // The runtime compiled into this executable, when these are its sources.
-    if super::snapshot::register(registry, runtime_root, &runtime_paths) {
+    if !snapshot_revoked && super::snapshot::register(registry, runtime_root, &runtime_paths, store, dump)? {
         debug!("Registered {} embedded runtime interfaces", runtime_paths.len());
         return Ok(());
     }
@@ -3832,6 +3836,7 @@ pub(crate) fn runtime_compiler_options(
         nopervasives: parsed_flags.nopervasives,
         module_name: Some(module_name.to_string()),
         package_name: Some(runtime_config.name.clone()),
+        package_root: Some(runtime_root.to_path_buf()),
         make_runtime: parsed_flags.make_runtime,
         keep_locs: parsed_flags.keep_locs,
         skip_js_render: true,

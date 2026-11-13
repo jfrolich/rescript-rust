@@ -32,14 +32,78 @@ use super::path::Path;
 pub(crate) struct SignatureIndex {
     values: HashMap<smol_str::SmolStr, (usize, usize)>,
     types: HashMap<smol_str::SmolStr, usize>,
-    modules: HashMap<smol_str::SmolStr, (usize, usize)>,
+    /// By name: item index, runtime position, and ordinal among the module
+    /// items (the index of the module's cell in a view's child table).
+    modules: HashMap<smol_str::SmolStr, (usize, usize, u32)>,
+    /// By ordinal among the module items: item index and runtime position.
+    module_items: Vec<(u32, u32)>,
     /// Alias/ident module items, as (item index, runtime position), in order.
     alias_modules: Vec<(usize, usize)>,
     /// Module type items, in order.
     modtypes: Vec<usize>,
+    /// By name: the module type item a lookup of the name reaches.
+    modtype_names: HashMap<smol_str::SmolStr, usize>,
 }
 
 impl SignatureIndex {
+    /// (item index, runtime position) of the value a lookup of `name`
+    /// reaches. One hash probe.
+    #[inline]
+    pub(crate) fn value(&self, name: &str) -> Option<(usize, usize)> {
+        self.values.get(name).copied()
+    }
+
+    /// Item index of the type a lookup of `name` reaches. One hash probe.
+    #[inline]
+    pub(crate) fn type_item(&self, name: &str) -> Option<usize> {
+        self.types.get(name).copied()
+    }
+
+    /// (item index, runtime position) of the module a lookup of `name`
+    /// reaches. One hash probe.
+    #[inline]
+    pub(crate) fn module(&self, name: &str) -> Option<(usize, usize)> {
+        self.modules
+            .get(name)
+            .map(|&(idx, runtime_pos, _)| (idx, runtime_pos))
+    }
+
+    /// (item index, runtime position, ordinal among the module items) of the
+    /// module a lookup of `name` reaches. One hash probe.
+    #[inline]
+    pub(crate) fn module_cell(&self, name: &str) -> Option<(usize, usize, usize)> {
+        self.modules
+            .get(name)
+            .map(|&(idx, runtime_pos, ordinal)| (idx, runtime_pos, ordinal as usize))
+    }
+
+    /// Number of module items, shadowed ones included.
+    #[inline]
+    pub(crate) fn module_count(&self) -> usize {
+        self.module_items.len()
+    }
+
+    /// (item index, runtime position) of the module item with `ordinal`.
+    /// One read of a table indexed by the ordinal.
+    #[inline]
+    pub(crate) fn module_item(&self, ordinal: usize) -> (usize, usize) {
+        let (idx, runtime_pos) = self.module_items[ordinal];
+        (idx as usize, runtime_pos as usize)
+    }
+
+    /// Item index of the module type a lookup of `name` reaches. One hash
+    /// probe.
+    #[inline]
+    pub(crate) fn modtype_item(&self, name: &str) -> Option<usize> {
+        self.modtype_names.get(name).copied()
+    }
+
+    /// Number of child modules whose type is a path.
+    #[inline]
+    pub(crate) fn alias_module_count(&self) -> usize {
+        self.alias_modules.len()
+    }
+
     pub(crate) fn build(signature: &Signature) -> Self {
         // Size the tables up front: a signature is indexed once, and growing
         // three maps item by item rehashed each of them several times.
@@ -56,6 +120,7 @@ impl SignatureIndex {
             values: HashMap::with_capacity(values),
             types: HashMap::with_capacity(types),
             modules: HashMap::with_capacity(modules),
+            module_items: Vec::with_capacity(modules),
             ..SignatureIndex::default()
         };
         let mut runtime_pos = 0usize;
@@ -84,12 +149,19 @@ impl SignatureIndex {
                     ) {
                         index.alias_modules.push((idx, runtime_pos));
                     }
-                    index
-                        .modules
-                        .insert(smol_str::SmolStr::new_static(id.name()), (idx, runtime_pos));
+                    index.modules.insert(
+                        smol_str::SmolStr::new_static(id.name()),
+                        (idx, runtime_pos, index.module_items.len() as u32),
+                    );
+                    index.module_items.push((idx as u32, runtime_pos as u32));
                     runtime_pos += 1;
                 }
-                SignatureItem::SigModtype(_, _) => index.modtypes.push(idx),
+                SignatureItem::SigModtype(id, _) => {
+                    index.modtypes.push(idx);
+                    index
+                        .modtype_names
+                        .insert(smol_str::SmolStr::new_static(id.name()), idx);
+                }
                 SignatureItem::SigClassType => {}
             }
         }
@@ -215,7 +287,9 @@ fn build_matching_type_constructors(
     ctx: &super::context::TypeContext,
 ) {
     let type_path = Path::pdot(*access_path, type_name);
-    build_type_constructors(out, &type_path, decl, Some(constructor_name), ctx);
+    build_type_constructors(&type_path, decl, Some(constructor_name), ctx, &mut |desc| {
+        out.insert(0, desc)
+    });
 }
 
 /// `fst (Env.find_type_descrs path env)` for a variant declaration whose
@@ -244,8 +318,7 @@ pub(crate) fn constructors_of_type_path(
     ctx: &super::context::TypeContext,
 ) -> Vec<ConstructorDescription> {
     let mut out = Vec::new();
-    build_type_constructors(&mut out, type_path, decl, None, ctx);
-    out.reverse();
+    build_type_constructors(type_path, decl, None, ctx, &mut |desc| out.push(desc));
     if let Some(access_path) = type_path.parent() {
         reroot_constructor_descriptions(&mut out, &[], &access_path, ctx);
     }
@@ -294,7 +367,7 @@ pub(crate) fn label_descrs(
 }
 
 /// [`label_descrs`] returning only the handle of the tied array.
-fn label_descrs_array(
+pub(crate) fn label_descrs_array(
     res_ty: super::type_expr::TypeExprRef,
     decl: &TypeDeclaration,
     ctx: &super::context::TypeContext,
@@ -308,12 +381,24 @@ fn label_descrs_array(
     handle
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Constructors described by `build_type_constructors` on this thread.
+    pub(crate) static CONSTRUCTOR_DESCRIPTIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Signature items scanned for the children of world views on this
+    /// thread.
+    pub(crate) static CHILD_SCAN_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Describe the constructors of `decl` (those named `constructor_name`, or
+/// all), in declaration order, handing each to `emit`. One description per
+/// constructor.
 fn build_type_constructors(
-    out: &mut Vec<ConstructorDescription>,
     type_path: &Path,
     decl: &TypeDeclaration,
     constructor_name: Option<&str>,
     ctx: &super::context::TypeContext,
+    emit: &mut impl FnMut(ConstructorDescription),
 ) {
     let super::decl::TypeKind::TypeVariant(cstrs, layout) = &decl.type_kind else {
         return;
@@ -324,6 +409,8 @@ fn build_type_constructors(
         if constructor_name.is_some_and(|name| cd.cd_id.name() != name) {
             continue;
         }
+        #[cfg(test)]
+        CONSTRUCTOR_DESCRIPTIONS.with(|count| count.set(count.get() + 1));
 
         let (cstr_args, cstr_arity, cstr_inlined) = match &cd.cd_args {
             super::decl::ConstructorArguments::CstrTuple(args) => {
@@ -405,8 +492,7 @@ fn build_type_constructors(
         } else {
             ctx.new_generic_constr(type_path, decl.type_params.clone())
         };
-        out.insert(
-            0,
+        emit(
             ConstructorDescription {
                 cstr_name: cd.cd_id.name().to_string(),
                 cstr_res,
@@ -427,6 +513,133 @@ fn build_type_constructors(
             },
         );
     }
+}
+
+/// The description of extension constructor `id` of a component at
+/// `access_path` (env.ml:1560-1565), whose type is `ext_type_path` after the
+/// component substitution. One description; no loop over the signature.
+fn extension_constructor_description(
+    access_path: &Path,
+    id: Ident,
+    ext: &super::decl::ExtensionConstructor,
+    ext_slot: i32,
+    ext_type_path: Path,
+    ctx: &super::context::TypeContext,
+) -> ConstructorDescription {
+    let ext_path = Path::pdot_pos(*access_path, id.name(), ext_slot);
+    let (cstr_args, cstr_arity, cstr_inlined) = match &ext.ext_args {
+        super::decl::ConstructorArguments::CstrTuple(args) => {
+            (args.clone(), args.len() as i32, None)
+        }
+        super::decl::ConstructorArguments::CstrRecord(labels) => {
+            let inline_params = super::typecore::inline_record_type_params(ctx, labels);
+            let inline_path = ext_path;
+            let inline_constr =
+                ctx.new_generic_constr(inline_path, inline_params.clone());
+            let inline_decl = TypeDeclaration {
+                type_params: inline_params.clone(),
+                type_arity: inline_params.len() as i32,
+                type_kind: super::decl::TypeKind::TypeRecord(
+                    crate::types::decl::SharedVec::from(labels.clone()),
+                    super::decl::RecordRepresentation::RecordExtension,
+                ),
+                type_private: ext.ext_private,
+                type_manifest: None,
+                type_variance: inline_params
+                    .iter()
+                    .map(|_| super::variance::Variance::full())
+                    .collect(),
+                type_newtype_level: None,
+                type_loc: ext.ext_loc,
+                type_attributes: vec![],
+                type_immediate: false,
+                type_representation: crate::types::TypeRepresentation::Boxed,
+                type_shape: crate::types::ValueShape::Unstated,
+                type_inlined_types: vec![],
+                type_path: None,
+            };
+            (vec![inline_constr], 1, Some(Box::new(inline_decl)))
+        }
+    };
+    let cstr_res = ctx.new_generic_constr(ext_type_path, ext.ext_type_params.clone());
+    ConstructorDescription {
+            cstr_name: id.name().to_string(),
+            cstr_res,
+            cstr_existentials: declared_constructor_existentials(
+                ctx,
+                &ext.ext_args,
+                ext.ext_ret_type,
+            ),
+            cstr_args,
+            cstr_arity,
+            cstr_kind: ConstructorKind::Extension(ext_path),
+            cstr_generalized: ext.ext_ret_type.is_some(),
+            cstr_private: ext.ext_private,
+            cstr_loc: ext.ext_loc,
+            cstr_attributes: ext.ext_attributes.clone(),
+            cstr_inlined,
+        }
+}
+
+/// Every constructor of the component at `access_path`, by name, each
+/// bucket in the order [`build_constructors_for_name`] returns it (latest
+/// declaration first). One pass over `signature` and one description per
+/// constructor; the component substitution is built at most once.
+pub(crate) fn build_all_constructors(
+    access_path: &Path,
+    signature: &[SignatureItem],
+    ctx: &super::context::TypeContext,
+) -> crate::fast_hash::AHashMap<smol_str::SmolStr, Vec<ConstructorDescription>> {
+    let mut buckets: crate::fast_hash::AHashMap<smol_str::SmolStr, Vec<ConstructorDescription>> =
+        Default::default();
+    let mut subst = None;
+    let mut runtime_pos = 0i32;
+    for item in signature {
+        match item {
+            SignatureItem::SigValue(_, desc) => {
+                if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
+                    runtime_pos += 1;
+                }
+            }
+            SignatureItem::SigType(id, decl, _) => {
+                let type_path = Path::pdot(*access_path, id.name());
+                build_type_constructors(&type_path, decl, None, ctx, &mut |desc| {
+                    buckets
+                        .entry(smol_str::SmolStr::new(&desc.cstr_name))
+                        .or_default()
+                        .push(desc)
+                });
+            }
+            SignatureItem::SigTypext(id, ext, _) => {
+                let ext_slot = runtime_pos;
+                runtime_pos += 1;
+                let subst = subst.get_or_insert_with(|| {
+                    crate::cmi::persistent_env::ComponentSubst::new(signature, access_path, ctx)
+                });
+                let ext_type_path = subst.path(&ext.ext_type_path, ctx);
+                buckets
+                    .entry(smol_str::SmolStr::new_static(id.name()))
+                    .or_default()
+                    .push(extension_constructor_description(
+                        access_path,
+                        *id,
+                        ext,
+                        ext_slot,
+                        ext_type_path,
+                        ctx,
+                    ));
+            }
+            SignatureItem::SigModule(_, _, _) | SignatureItem::SigClass => {
+                runtime_pos += 1;
+            }
+            SignatureItem::SigModtype(_, _) | SignatureItem::SigClassType => {}
+        }
+    }
+    for bucket in buckets.values_mut() {
+        bucket.reverse();
+        reroot_constructor_descriptions(bucket, signature, access_path, ctx);
+    }
+    buckets
 }
 
 fn build_constructors_for_name(
@@ -461,67 +674,22 @@ fn build_constructors_for_name(
                 if id.name() != constructor_name {
                     continue;
                 }
-                let ext_path = Path::pdot_pos(*access_path, id.name(), ext_slot);
-                let (cstr_args, cstr_arity, cstr_inlined) = match &ext.ext_args {
-                    super::decl::ConstructorArguments::CstrTuple(args) => {
-                        (args.clone(), args.len() as i32, None)
-                    }
-                    super::decl::ConstructorArguments::CstrRecord(labels) => {
-                        let inline_params = super::typecore::inline_record_type_params(ctx, labels);
-                        let inline_path = ext_path;
-                        let inline_constr =
-                            ctx.new_generic_constr(inline_path, inline_params.clone());
-                        let inline_decl = TypeDeclaration {
-                            type_params: inline_params.clone(),
-                            type_arity: inline_params.len() as i32,
-                            type_kind: super::decl::TypeKind::TypeRecord(
-                                crate::types::decl::SharedVec::from(labels.clone()),
-                                super::decl::RecordRepresentation::RecordExtension,
-                            ),
-                            type_private: ext.ext_private,
-                            type_manifest: None,
-                            type_variance: inline_params
-                                .iter()
-                                .map(|_| super::variance::Variance::full())
-                                .collect(),
-                            type_newtype_level: None,
-                            type_loc: ext.ext_loc,
-                            type_attributes: vec![],
-                            type_immediate: false,
-                            type_representation: crate::types::TypeRepresentation::Boxed,
-                            type_shape: crate::types::ValueShape::Unstated,
-                            type_inlined_types: vec![],
-                            type_path: None,
-                        };
-                        (vec![inline_constr], 1, Some(Box::new(inline_decl)))
-                    }
-                };
                 let ext_type_path = crate::cmi::persistent_env::substitute_sig_path(
                     &ext.ext_type_path,
                     signature,
                     access_path,
                     ctx,
                 );
-                let cstr_res = ctx.new_generic_constr(ext_type_path, ext.ext_type_params.clone());
                 constructors.insert(
                     0,
-                    ConstructorDescription {
-                        cstr_name: id.name().to_string(),
-                        cstr_res,
-                        cstr_existentials: declared_constructor_existentials(
-                            ctx,
-                            &ext.ext_args,
-                            ext.ext_ret_type,
-                        ),
-                        cstr_args,
-                        cstr_arity,
-                        cstr_kind: ConstructorKind::Extension(ext_path),
-                        cstr_generalized: ext.ext_ret_type.is_some(),
-                        cstr_private: ext.ext_private,
-                        cstr_loc: ext.ext_loc,
-                        cstr_attributes: ext.ext_attributes.clone(),
-                        cstr_inlined,
-                    },
+                    extension_constructor_description(
+                        access_path,
+                        *id,
+                        ext,
+                        ext_slot,
+                        ext_type_path,
+                        ctx,
+                    ),
                 );
             }
             SignatureItem::SigModule(_, _, _) | SignatureItem::SigClass => {
@@ -548,6 +716,8 @@ struct ChildScanCursor {
     working_env: Option<super::env::Env>,
     next_index: usize,
     runtime_pos: usize,
+    /// Module items scanned so far: the next module's ordinal.
+    modules: u32,
 }
 
 impl ChildScanCursor {
@@ -704,10 +874,21 @@ fn strengthened_child_env_decl(
     }
 }
 
+/// Continue the scan of a component table's children up to `child_name`.
+/// `signature` is the table's; `declared` is the same signature as the
+/// module declares it (the table's own unless it is a world view of a child
+/// module), which the evolving environment and each child's thunk are made
+/// from. A child of the world view `view` that is declared with a signature
+/// is marked as that view's child: its components are a world view too.
+///
+/// Cost: one step per item scanned; all calls together scan each item once.
+#[allow(clippy::too_many_arguments)]
 fn scan_child_component_from_signature(
     access_path: &Arc<Path>,
     source_prefix: Option<&Arc<Path>>,
     signature: &Arc<Signature>,
+    declared: &Arc<Signature>,
+    view: Option<&Arc<super::module_view::ModuleView>>,
     child_components: &mut HashMap<String, Option<(usize, Rc<StoredModuleComponents>)>>,
     state: &mut ChildComponentScanState,
     child_name: &str,
@@ -725,8 +906,8 @@ fn scan_child_component_from_signature(
     // env.ml:1573-1578. Persistent signatures need the same split so
     // qualified value lookup can descend through child components without
     // forcing `Subst.modtype` on the module declaration thunk.
-    while cursor.next_index < signature.len() {
-        let item = &signature[cursor.next_index];
+    while cursor.next_index < declared.len() {
+        let item = &declared[cursor.next_index];
         cursor.next_index += 1;
         match item {
             SignatureItem::SigValue(_, desc) => {
@@ -765,6 +946,13 @@ fn scan_child_component_from_signature(
                         runtime_pos as i32,
                     ));
                 }
+                if let (Some(view), Some((_, stored))) = (view, &stored) {
+                    stored.of_view.set(true);
+                    if view.world_child_kind(cursor.modules).is_some() {
+                        let _ = stored.world_child.set((view.clone(), cursor.modules));
+                    }
+                }
+                cursor.modules += 1;
                 // OCaml `Tbl.add` shadows earlier entries with the same name
                 // (compiler/ml/env.ml:1577-1578), so keep the latest scanned
                 // child component for this name.
@@ -784,7 +972,7 @@ fn scan_child_component_from_signature(
     }
 
     let scanned_items = cursor.next_index - start_index;
-    if cursor.next_index >= signature.len() {
+    if cursor.next_index >= declared.len() {
         *state = ChildComponentScanState::Complete;
         child_components
             .entry(child_name.to_string())
@@ -1089,12 +1277,6 @@ impl QualifiedModuleComponents {
         layers
     }
 
-    /// Keep these tables private to this compilation (their build read
-    /// compilation-local state): later entries are forced locally.
-    pub(crate) fn make_private(&self) {
-        self.tables.in_store.set(false);
-    }
-
     /// Drop an entry forced from compilation-local state so that other
     /// compilations sharing these tables force it themselves.
     fn forget_entry(&self, kind: ForcedKind, name: &str) {
@@ -1149,7 +1331,7 @@ impl QualifiedModuleComponents {
         if self.compiler_counters_enabled {
             crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Module);
         }
-        self.tables.index.modules.get(name).copied()
+        self.tables.index.module(name)
     }
 
     pub(crate) fn lookup_value(&self, name: &str) -> Option<(usize, &Ident, &ValueDescription)> {
@@ -1495,6 +1677,8 @@ impl QualifiedModuleComponents {
             &self.access_path,
             self.value_source_prefix.as_ref(),
             &self.signature,
+            &self.signature,
+            None,
             &mut child_components,
             &mut scan,
             name,
@@ -1678,15 +1862,6 @@ impl QualifiedModuleComponents {
             .borrow_mut()
             .insert(name.to_string(), (id, md.clone()));
         Some((runtime_pos, id, md))
-    }
-
-    pub(crate) fn lookup_qualified_module(
-        &self,
-        name: &str,
-        ctx: &super::context::TypeContext,
-    ) -> Option<(usize, Ident, ModuleDeclaration)> {
-        self.lookup_qualified_module_shared(name, ctx)
-            .map(|(runtime_pos, id, md)| (runtime_pos, id, md.as_ref().clone()))
     }
 
     pub(crate) fn lookup_modtype(
@@ -2242,6 +2417,16 @@ pub(crate) struct StoredModuleComponents {
     /// in-process unit (`Unit.Sub.t`), that unit-rooted path of this child.
     source_prefix: OnceCell<Path>,
     cached: OnceCell<Rc<QualifiedModuleComponents>>,
+    /// The world view this module is a child of, and its ordinal there,
+    /// when the module's own path is a view key
+    /// (`ModuleView::structure_child`): its components are that view.
+    world_child: OnceCell<(Arc<super::module_view::ModuleView>, u32)>,
+    /// A child of a world view, kept by the worker for every compilation
+    /// that adopts the view (`ViewTables`). Nothing a compilation builds is
+    /// cached in it: its tables, when its path has no world view (a functor,
+    /// a module type declared in another unit), are built for the
+    /// compilation that asks and kept by that compilation.
+    of_view: std::cell::Cell<bool>,
     /// Built during a store build (see `StructureComponentTables::in_store`).
     in_store: bool,
     /// Key of this module's compilation-private components (see
@@ -2289,6 +2474,8 @@ impl StoredModuleComponents {
             parent_context,
             source_prefix: OnceCell::new(),
             cached: OnceCell::new(),
+            world_child: OnceCell::new(),
+            of_view: std::cell::Cell::new(false),
             in_store: super::thread_store::store_build_active(),
             local_id: {
                 static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2301,13 +2488,52 @@ impl StoredModuleComponents {
         }
     }
 
+    /// The components of this module: the world's view of its path when it
+    /// has one (one load of the child's cell and one probe of the
+    /// compilation's component cache once the view is built), else the
+    /// tables built for this compilation or worker.
     pub(crate) fn with_components<R>(
+        &self,
+        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+        ctx: &super::context::TypeContext,
+        cache_mode: super::typecore::ComponentLookupApi,
+        f: impl FnOnce(Components<'_>) -> R,
+    ) -> Option<R> {
+        if let Some((parent, ordinal)) = self.world_child.get()
+            && let Some(view) = super::typecore::adopt_child_view(parent, *ordinal, pers_env, ctx)
+        {
+            return Some(f(Components::World(&view)));
+        }
+        self.with_local_components(pers_env, ctx, cache_mode, |components| {
+            f(Components::Local(components))
+        })
+    }
+
+    /// The seed environment of this module's tables: what the scan of its
+    /// parent had installed when it reached the module.
+    pub(crate) fn seed_env(&self) -> &super::env::Env {
+        &self.seed_env
+    }
+
+    /// The tables built for this compilation or worker, whatever view the
+    /// world has of the module's path.
+    pub(crate) fn with_local_components<R>(
         &self,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
         ctx: &super::context::TypeContext,
         cache_mode: super::typecore::ComponentLookupApi,
         f: impl FnOnce(&QualifiedModuleComponents) -> R,
     ) -> Option<R> {
+        if self.of_view.get() {
+            // One probe of the compilation's table; the build is once per
+            // compilation.
+            if let Some(components) = ctx.local_stored_components(self.local_id) {
+                return Some(f(components.as_ref()));
+            }
+            let components = Rc::new(self.build_components(pers_env, ctx, cache_mode)?);
+            ctx.set_local_stored_components(self.local_id, components.clone());
+            return Some(f(components.as_ref()));
+        }
         if let Some(components) = self.cached.get().cloned() {
             // A shared result is valid for this compilation only when it
             // answers the build's guarded reads the same way.
@@ -2411,7 +2637,11 @@ impl StoredModuleComponents {
                 ctx,
             )
         };
-        let component_result = if let Some(cached) = self.functor_component_result.get() {
+        let component_result = if self.of_view.get() {
+            // Instantiated for the compilation: the result's nodes are its
+            // own, and the compilation caches the applied path's components.
+            compute_component_result()
+        } else if let Some(cached) = self.functor_component_result.get() {
             if let Some(piece) = self.functor_component_piece.get() {
                 ctx.touch_store_piece(piece);
             }
@@ -2437,7 +2667,9 @@ impl StoredModuleComponents {
                 ctx,
             )
         };
-        let (substituted, piece, cacheable) = if self.in_store {
+        let (substituted, piece, cacheable) = if self.of_view.get() {
+            (substitute(), None, false)
+        } else if self.in_store {
             if shareable_arg {
                 let (substituted, piece) = ctx.build_in_store(substitute);
                 let cacheable = piece.is_some();
@@ -2455,6 +2687,373 @@ impl StoredModuleComponents {
                 .insert(*arg_path, (substituted.clone(), piece));
         }
         Some(substituted)
+    }
+}
+
+/// What one worker derives from a world view: the layer tables `open`
+/// installs, and one `StoredModuleComponents` per child module, which names
+/// the child's world view when its path has one and otherwise holds what a
+/// compilation needs to build the child's tables for itself. No type node
+/// and no store build.
+pub(crate) struct ViewTables {
+    access_path: Arc<Path>,
+    opened: OnceCell<Rc<super::env::OpenedLayers>>,
+    children: RefCell<HashMap<String, Option<ChildComponents>>>,
+    scan: RefCell<ChildComponentScanState>,
+}
+
+impl ViewTables {
+    pub(crate) fn new(view: &super::module_view::ModuleView) -> Self {
+        ViewTables {
+            access_path: Arc::new(*view.access_path()),
+            opened: OnceCell::new(),
+            children: RefCell::new(HashMap::new()),
+            scan: RefCell::new(ChildComponentScanState::Pending(ChildScanCursor::default())),
+        }
+    }
+
+    /// `comp_components` of child `name` (env.ml:1573-1578). One probe when
+    /// the scan has passed the child; else the scan continues from where it
+    /// stopped, so all lookups together visit each signature item once.
+    pub(crate) fn child_components(
+        &self,
+        view: &Arc<super::module_view::ModuleView>,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Option<(usize, Rc<StoredModuleComponents>)> {
+        if let Some(cached) = self.children.borrow().get(name) {
+            return cached.clone();
+        }
+        if matches!(*self.scan.borrow(), ChildComponentScanState::Complete) {
+            self.children.borrow_mut().insert(name.to_string(), None);
+            return None;
+        }
+        // env.ml:1548-1578: the thunks of a child view's children close over
+        // the environment the scan of its ancestors had built when it
+        // reached the child. This worker's scan of the parent holds it.
+        let unseeded = matches!(
+            &*self.scan.borrow(),
+            ChildComponentScanState::Pending(cursor)
+                if cursor.next_index == 0 && cursor.working_env.is_none()
+        );
+        if unseeded
+            && let Some((parent, own_name)) = view.seed_parent()
+            && let Some((_, stored)) = ctx
+                .thread_store()
+                .view_tables(&parent)
+                .child_components(&parent, own_name, ctx)
+            && let ChildComponentScanState::Pending(cursor) = &mut *self.scan.borrow_mut()
+        {
+            cursor.working_env = Some(stored.seed_env().clone());
+        }
+        // The scan's results are kept by the worker for every compilation
+        // that adopts the view, so it must create nothing a compilation
+        // owns: it installs the view's frozen declarations in the evolving
+        // environment and creates no type node.
+        let nodes_before = ctx.type_expr_count();
+        let (found, _scanned) = scan_child_component_from_signature(
+            &self.access_path,
+            view.value_source(),
+            view.signature_ref(),
+            view.raw_signature(),
+            Some(view),
+            &mut self.children.borrow_mut(),
+            &mut self.scan.borrow_mut(),
+            name,
+            ctx,
+        );
+        debug_assert_eq!(
+            nodes_before,
+            ctx.type_expr_count(),
+            "the child scan of a view created a type node"
+        );
+        #[cfg(test)]
+        CHILD_SCAN_STEPS.with(|steps| steps.set(steps.get() + _scanned as u64));
+        found
+    }
+
+    /// The layer tables `open` adds for the view (env.ml:1841-1877), built
+    /// once per worker: one hash insert per opened item, no type node.
+    pub(crate) fn opened_layers(
+        &self,
+        view: &Arc<super::module_view::ModuleView>,
+        ctx: &super::context::TypeContext,
+    ) -> Rc<super::env::OpenedLayers> {
+        self.opened
+            .get_or_init(|| {
+                let items = view.opened_items();
+                let mut module_components = Vec::with_capacity(items.modules.len());
+                for module in &items.modules {
+                    let stored = if module.direct_persistent_alias {
+                        // env.ml:1516-1518: the components of an alias
+                        // of a persistent unit are that unit's.
+                        let stored = StoredModuleComponents::new(
+                            super::env::Env::empty(),
+                            module.decl.md_path.expect("an opened module has its path"),
+                            module.decl.as_ref().clone(),
+                        );
+                        stored.of_view.set(true);
+                        if let Some((ordinal, _)) = view.world_child(module.id.name()) {
+                            let _ = stored.world_child.set((view.clone(), ordinal));
+                        }
+                        Some(Rc::new(stored))
+                    } else {
+                        self.child_components(view, module.id.name(), ctx)
+                            .map(|(_, stored)| stored)
+                    };
+                    if let Some(stored) = stored {
+                        module_components.push((module.id, stored, module.pos));
+                    }
+                }
+                Rc::new(super::env::OpenedLayers::from_view(items, module_components))
+            })
+            .clone()
+    }
+}
+
+/// What a lookup through a module path receives: the world's view of the
+/// path, or the tables one compilation (or one worker's store) built for a
+/// path the world has no view of.
+#[derive(Clone, Copy)]
+pub(crate) enum Components<'a> {
+    World(&'a Arc<super::module_view::ModuleView>),
+    Local(&'a QualifiedModuleComponents),
+}
+
+// Passed by value down every lookup: a tag and a pointer.
+const _: () = assert!(std::mem::size_of::<Components<'static>>() <= 16);
+
+impl<'a> Components<'a> {
+    /// An owned hold on the same components, for a caller that keeps them
+    /// across another lookup. One reference-count increment.
+    pub(crate) fn to_held(self) -> HeldComponents {
+        match self {
+            Components::World(view) => HeldComponents::World(view.clone()),
+            Components::Local(components) => HeldComponents::Local(Rc::new(components.clone())),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn access_path(self) -> &'a Path {
+        match self {
+            Components::World(view) => view.access_path(),
+            Components::Local(components) => components.access_path(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn signature(self) -> &'a [SignatureItem] {
+        match self {
+            Components::World(view) => view.signature(),
+            Components::Local(components) => components.signature(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn signature_arc(self) -> Arc<Signature> {
+        match self {
+            Components::World(view) => view.signature_arc(),
+            Components::Local(components) => components.signature_arc(),
+        }
+    }
+
+    /// See `QualifiedModuleComponents::rerooted_value_source`; a view's
+    /// values are substituted when it is built.
+    #[inline]
+    pub(crate) fn rerooted_value_source(self) -> Option<&'a Path> {
+        match self {
+            Components::World(view) => view.value_source().map(|source| source.as_ref()),
+            Components::Local(components) => components.rerooted_value_source(),
+        }
+    }
+
+    pub(crate) fn lookup_value_for_access(
+        self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Option<(usize, Ident, ValueDescription)> {
+        match self {
+            Components::World(view) => view.lookup_value_for_access(name),
+            Components::Local(components) => components.lookup_value_for_access(name, ctx),
+        }
+    }
+
+    pub(crate) fn lookup_constructors(
+        self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Arc<Vec<ConstructorDescription>> {
+        match self {
+            Components::World(view) => view.lookup_constructors(name),
+            Components::Local(components) => components.lookup_constructors(name, ctx),
+        }
+    }
+
+    pub(crate) fn lookup_labels(
+        self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Arc<Vec<LabelDescription>> {
+        match self {
+            Components::World(view) => view.lookup_labels(name),
+            Components::Local(components) => components.lookup_labels(name, ctx),
+        }
+    }
+
+    pub(crate) fn type_label_family(
+        self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Option<super::decl::LabelArrayRef> {
+        match self {
+            Components::World(view) => view.type_label_family(name),
+            Components::Local(components) => components.type_label_family(name, ctx),
+        }
+    }
+
+    pub(crate) fn lookup_type(self, name: &str) -> Option<(&'a Ident, &'a Arc<TypeDeclaration>)> {
+        match self {
+            Components::World(view) => view.lookup_type(name),
+            Components::Local(components) => components.lookup_type(name),
+        }
+    }
+
+    pub(crate) fn lookup_module(
+        self,
+        name: &str,
+    ) -> Option<(usize, &'a Ident, &'a ModuleDeclaration)> {
+        match self {
+            Components::World(view) => view.lookup_module(name),
+            Components::Local(components) => components.lookup_module(name),
+        }
+    }
+
+    pub(crate) fn lookup_module_alias_target(
+        self,
+        name: &str,
+        include_ident: bool,
+        ctx: &super::context::TypeContext,
+    ) -> Option<Arc<Path>> {
+        match self {
+            Components::World(view) => view.lookup_module_alias_target(name, include_ident),
+            Components::Local(components) => {
+                components.lookup_module_alias_target(name, include_ident, ctx)
+            }
+        }
+    }
+
+    /// The component tables of child `name`, for a child whose path the
+    /// world has no view of: a worker keeps them per view.
+    pub(crate) fn lookup_child_components(
+        self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Option<(usize, Rc<StoredModuleComponents>)> {
+        match self {
+            Components::World(view) => ctx
+                .thread_store()
+                .view_tables(view)
+                .child_components(view, name, ctx),
+            Components::Local(components) => components.lookup_child_components(name, ctx),
+        }
+    }
+
+    /// `find_module` of child `name`. A view's forced declaration is also
+    /// registered with the compilation, where the tables of an alias path
+    /// to the same module look for it.
+    pub(crate) fn lookup_qualified_module_shared(
+        self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Option<(usize, Ident, Arc<ModuleDeclaration>)> {
+        match self {
+            Components::World(view) => {
+                let (item, runtime_pos, forced) = view.lookup_forced_module(ctx.world(), name)?;
+                if let Some((id, md)) = forced {
+                    ctx.note_forced_view_module(view, item, name, id, &md);
+                    return Some((runtime_pos, id, md));
+                }
+                // The pool had no room for the declaration: this
+                // compilation forces its own, once (the force registers it).
+                if let Some((id, md)) = ctx.find_qualified_module_decl(view.access_path(), name) {
+                    return Some((runtime_pos, id, md));
+                }
+                let SignatureItem::SigModule(id, md, _) = &view.signature()[item] else {
+                    return None;
+                };
+                let (id, md) = force_component_module_declaration_thunk(
+                    view.access_path(),
+                    name,
+                    view.access_path(),
+                    view.signature(),
+                    *id,
+                    md.clone(),
+                    ctx,
+                );
+                Some((runtime_pos, id, md))
+            }
+            Components::Local(components) => components.lookup_qualified_module_shared(name, ctx),
+        }
+    }
+
+    pub(crate) fn lookup_qualified_module(
+        self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Option<(usize, Ident, ModuleDeclaration)> {
+        self.lookup_qualified_module_shared(name, ctx)
+            .map(|(runtime_pos, id, md)| (runtime_pos, id, md.as_ref().clone()))
+    }
+
+    pub(crate) fn lookup_modtype(
+        self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Option<(Ident, ModtypeDeclaration)> {
+        match self {
+            Components::World(view) => view.lookup_modtype(name),
+            Components::Local(components) => components.lookup_modtype(name, ctx),
+        }
+    }
+
+    pub(crate) fn lookup_qualified_modtype(
+        self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Option<(Ident, ModtypeDeclaration)> {
+        match self {
+            Components::World(view) => view.lookup_modtype(name),
+            Components::Local(components) => components.lookup_qualified_modtype(name, ctx),
+        }
+    }
+}
+
+/// A compilation's hold on the components of one path: what its component
+/// cache stores.
+#[derive(Clone)]
+pub(crate) enum HeldComponents {
+    World(Arc<super::module_view::ModuleView>),
+    Local(Rc<QualifiedModuleComponents>),
+}
+
+impl HeldComponents {
+    #[inline]
+    pub(crate) fn components(&self) -> Components<'_> {
+        match self {
+            HeldComponents::World(view) => Components::World(view),
+            HeldComponents::Local(components) => Components::Local(components),
+        }
+    }
+}
+
+impl std::fmt::Debug for HeldComponents {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HeldComponents::World(view) => write!(f, "World({})", view.access_path().name()),
+            HeldComponents::Local(components) => {
+                write!(f, "Local({})", components.access_path().name())
+            }
+        }
     }
 }
 

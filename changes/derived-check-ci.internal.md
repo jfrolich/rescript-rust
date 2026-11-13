@@ -1,0 +1,1 @@
+- Check in CI that derived declarations compile to the same result from their plans and from their general form.

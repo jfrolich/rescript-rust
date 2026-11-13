@@ -1,0 +1,1 @@
+- Publish each commit on the trunk to npm as `@tellahq/rescript` with the dist-tag `nightly`.

@@ -1,3 +1,5 @@
+mod snapshot;
+
 use anyhow::Result;
 use console::Term;
 use log::LevelFilter;
@@ -82,6 +84,14 @@ fn main() {
                 })),
             );
             std::process::exit(0);
+        }
+        Some("snapshot") => {
+            configure_rayon_for_in_process();
+            if let Err(error) = snapshot::run(args.collect()) {
+                eprintln!("{error:#}");
+                std::process::exit(1);
+            }
+            return;
         }
         Some("res-parser") => {
             rescript_compiler::cli::res_parser::main(args.collect());

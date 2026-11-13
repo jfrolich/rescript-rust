@@ -93,6 +93,7 @@ fi
 ./compile/23-root-source-dir-rebuild.sh &&
 ./compile/24-location-free-retry.sh &&
 ./compile/27-warning-build-modes.sh &&
+./compile/28-runtime-compiled-once.sh &&
 ./compile/25-deterministic-records.sh &&
 ./compile/26-external-ppx-rejected.sh &&
 ./compile/14-no-testrepo-changes.sh &&
@@ -111,6 +112,7 @@ fi
 ./gentype/04-file-inventory.sh watch &&
 
 # Watch tests
+./watch/30-snapshot-package-edits.sh &&
 ./watch/11-gentype-declaration-closure.sh &&
 ./watch/01-watch-recompile.sh &&
 ./watch/02-watch-warnings-persist.sh &&

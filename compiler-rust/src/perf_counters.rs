@@ -499,47 +499,15 @@ impl LazyLookupKind {
 /// how often persistent-rooted component views are built against how many
 /// distinct views exist, and what replaying their pieces costs.
 pub(crate) mod store_views {
-    use std::collections::HashSet;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    static VIEW_BUILDS: AtomicU64 = AtomicU64::new(0);
-    static VIEW_BUILDS_PRIVATE: AtomicU64 = AtomicU64::new(0);
-    static VIEW_HITS: AtomicU64 = AtomicU64::new(0);
-    static VIEW_GUARD_MISSES: AtomicU64 = AtomicU64::new(0);
-    static DISTINCT_VIEWS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
     static PIECES_BUILT: AtomicU64 = AtomicU64::new(0);
     static PIECES_EMPTY: AtomicU64 = AtomicU64::new(0);
     static PIECES_POISONED: AtomicU64 = AtomicU64::new(0);
     static BINDERS: AtomicU64 = AtomicU64::new(0);
     static PIECES_REPLAYED: AtomicU64 = AtomicU64::new(0);
-    /// Replayed effects: components, prepare, rename,
-    /// alias source, module declaration.
-    static EFFECTS_REPLAYED: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
-
-    /// A view of a worker-shareable key was built; `published` is false when
-    /// the build read compilation state and stays private.
-    pub(crate) fn record_view_build(name: String, published: bool) {
-        VIEW_BUILDS.fetch_add(1, Ordering::Relaxed);
-        if !published {
-            VIEW_BUILDS_PRIVATE.fetch_add(1, Ordering::Relaxed);
-        }
-        DISTINCT_VIEWS
-            .lock()
-            .unwrap()
-            .get_or_insert_with(HashSet::new)
-            .insert(name);
-    }
-
-    /// A compilation adopted a view its worker already built.
-    pub(crate) fn record_view_hit() {
-        VIEW_HITS.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// A worker's view failed the adopting compilation's guards.
-    pub(crate) fn record_view_guard_miss() {
-        VIEW_GUARD_MISSES.fetch_add(1, Ordering::Relaxed);
-    }
+    /// Replayed effects: unit preparations.
+    static EFFECTS_REPLAYED: [AtomicU64; 1] = [const { AtomicU64::new(0) }; 1];
 
     /// A store build ended: with effects or guards, with none, or poisoned.
     pub(crate) fn record_piece(poisoned: bool, empty: bool) {
@@ -570,10 +538,6 @@ pub(crate) mod store_views {
 
     pub(super) fn reset() {
         for counter in [
-            &VIEW_BUILDS,
-            &VIEW_BUILDS_PRIVATE,
-            &VIEW_HITS,
-            &VIEW_GUARD_MISSES,
             &PIECES_BUILT,
             &PIECES_EMPTY,
             &PIECES_POISONED,
@@ -585,24 +549,17 @@ pub(crate) mod store_views {
         {
             counter.store(0, Ordering::Relaxed);
         }
-        *DISTINCT_VIEWS.lock().unwrap() = None;
     }
 
     pub(super) fn print_report() {
         let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
-        let distinct = DISTINCT_VIEWS
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map_or(0, HashSet::len);
-        let builds = load(&VIEW_BUILDS);
-        eprintln!(
-            "[compiler-counter] store_views builds={builds} distinct={distinct} builds_per_view={:.2} private={} hits={} guard_misses={}",
-            if distinct == 0 { 0.0 } else { builds as f64 / distinct as f64 },
-            load(&VIEW_BUILDS_PRIVATE),
-            load(&VIEW_HITS),
-            load(&VIEW_GUARD_MISSES),
-        );
+        // Printed only when a store build ran or a piece was replayed:
+        // neither happens once every persistent-rooted path is a world
+        // view.
+        let pieces = load(&PIECES_BUILT) + load(&PIECES_EMPTY) + load(&PIECES_POISONED);
+        if pieces == 0 && load(&PIECES_REPLAYED) == 0 {
+            return;
+        }
         eprintln!(
             "[compiler-counter] store_pieces with_effects={} empty={} poisoned={} binders={}",
             load(&PIECES_BUILT),
@@ -611,13 +568,9 @@ pub(crate) mod store_views {
             load(&BINDERS),
         );
         eprintln!(
-            "[compiler-counter] store_replay pieces={} components={} prepare_pers={} trigger_rename={} alias_source={} module_decl={}",
+            "[compiler-counter] store_replay pieces={} prepare_pers={}",
             load(&PIECES_REPLAYED),
             load(&EFFECTS_REPLAYED[0]),
-            load(&EFFECTS_REPLAYED[1]),
-            load(&EFFECTS_REPLAYED[2]),
-            load(&EFFECTS_REPLAYED[3]),
-            load(&EFFECTS_REPLAYED[4]),
         );
     }
 }
@@ -699,9 +652,70 @@ pub(crate) mod world {
         }
     }
 
+    static VIEWS_BUILT: AtomicU64 = AtomicU64::new(0);
+    static VIEWS_ADOPTED: AtomicU64 = AtomicU64::new(0);
+    static VIEWS_FAILED: AtomicU64 = AtomicU64::new(0);
+    static VIEW_NODES_COPIED: AtomicU64 = AtomicU64::new(0);
+    static CHILDREN_FORCED: AtomicU64 = AtomicU64::new(0);
+    static CHILD_NODES: AtomicU64 = AtomicU64::new(0);
+
+    /// What the views of a build hold: signature items, values,
+    /// constructors and labels of the lookup tables, then the opened
+    /// values, types, constructors and labels.
+    static VIEW_ITEMS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+
+    /// A module view was built; freezing it created `nodes` nodes, and it
+    /// holds `items` (see `VIEW_ITEMS`). The caller tests the flag.
+    pub(crate) fn record_view_build(nodes: usize, items: [usize; 8]) {
+        VIEWS_BUILT.fetch_add(1, Ordering::Relaxed);
+        VIEW_NODES_COPIED.fetch_add(nodes as u64, Ordering::Relaxed);
+        for (total, count) in VIEW_ITEMS.iter().zip(items) {
+            total.fetch_add(count as u64, Ordering::Relaxed);
+        }
+    }
+
+    /// The pool had no room for a module view.
+    pub(crate) fn record_view_failure() {
+        if super::enabled() {
+            VIEWS_FAILED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// A compilation adopted a module view. The caller tests the flag.
+    pub(crate) fn record_view_adoption() {
+        VIEWS_ADOPTED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    static PAPPLY_VIEWS: AtomicU64 = AtomicU64::new(0);
+
+    /// A compilation built the component tables of a path with a functor
+    /// application on it (`F(X).t`): such a path has no world view, so each
+    /// compilation that uses it builds them. The caller tests the flag.
+    pub(crate) fn record_papply_view_build() {
+        PAPPLY_VIEWS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A child module declaration of a view was forced into `nodes` nodes.
+    pub(crate) fn record_forced_child(nodes: usize) {
+        if super::enabled() {
+            CHILDREN_FORCED.fetch_add(1, Ordering::Relaxed);
+            CHILD_NODES.fetch_add(nodes as u64, Ordering::Relaxed);
+        }
+    }
+
     pub(super) fn reset() {
         PREDEF_BUILDS.store(0, Ordering::Relaxed);
         PREDEF_NODES.store(0, Ordering::Relaxed);
+        VIEWS_BUILT.store(0, Ordering::Relaxed);
+        VIEWS_ADOPTED.store(0, Ordering::Relaxed);
+        VIEWS_FAILED.store(0, Ordering::Relaxed);
+        for total in &VIEW_ITEMS {
+            total.store(0, Ordering::Relaxed);
+        }
+        VIEW_NODES_COPIED.store(0, Ordering::Relaxed);
+        CHILDREN_FORCED.store(0, Ordering::Relaxed);
+        CHILD_NODES.store(0, Ordering::Relaxed);
+        PAPPLY_VIEWS.store(0, Ordering::Relaxed);
     }
 
     pub(super) fn print_report() {
@@ -709,6 +723,34 @@ pub(crate) mod world {
             "[compiler-counter] world predef_builds={} predef_nodes={}",
             PREDEF_BUILDS.load(Ordering::Relaxed),
             PREDEF_NODES.load(Ordering::Relaxed),
+        );
+        eprintln!(
+            "[compiler-counter] world_views built={} adopted={} failed={} children_forced={}",
+            VIEWS_BUILT.load(Ordering::Relaxed),
+            VIEWS_ADOPTED.load(Ordering::Relaxed),
+            VIEWS_FAILED.load(Ordering::Relaxed),
+            CHILDREN_FORCED.load(Ordering::Relaxed),
+        );
+        eprintln!(
+            "[compiler-counter] papply_views built={}",
+            PAPPLY_VIEWS.load(Ordering::Relaxed),
+        );
+        let items = |index: usize| VIEW_ITEMS[index].load(Ordering::Relaxed);
+        eprintln!(
+            "[compiler-counter] world_view_items signature_items={} values={} constructors={} labels={} opened_values={} opened_types={} opened_constructors={} opened_labels={}",
+            items(0),
+            items(1),
+            items(2),
+            items(3),
+            items(4),
+            items(5),
+            items(6),
+            items(7),
+        );
+        eprintln!(
+            "[compiler-counter] world_view_nodes copied={} shared=0 child_nodes={}",
+            VIEW_NODES_COPIED.load(Ordering::Relaxed),
+            CHILD_NODES.load(Ordering::Relaxed),
         );
     }
 }

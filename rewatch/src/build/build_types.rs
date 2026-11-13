@@ -336,6 +336,8 @@ impl BuildRun {
 /// - `build`/`watch` commands need both core data AND CLI overrides
 /// - This prevents the "code smell" of optional fields that are None for some commands
 pub struct BuildCommandState {
+    /// Runtime/Belt snapshots revoked by source edits for this watch session.
+    pub revoked_snapshots: [bool; 2],
     pub root_folder: PathBuf,
     pub build_state: BuildState,
     // Command-line --warn-error flag override (takes precedence over rescript.json config)
@@ -523,6 +525,7 @@ impl BuildCommandState {
             build_state: BuildState::new(project_context, packages, compiler, source_map_command),
             warn_error_override,
             dump: None,
+            revoked_snapshots: [false; 2],
             stored_asts: Mutex::new(AHashMap::new()),
             diagnostic_locations: false,
             diagnostic_retry: std::sync::atomic::AtomicBool::new(false),

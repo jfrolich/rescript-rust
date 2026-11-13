@@ -547,6 +547,9 @@ pub struct ParseArena {
     /// Derived structure-value groups, indexed by their binding-list start.
     /// Only group starts have a bit; no source-location or identifier keys.
     derived_value_groups: Vec<u64>,
+    /// Plans of derived items: `StructureItemDesc::Pstr_derived` handles
+    /// index these pools.
+    plans: crate::binary_ast::derive::plan::Plans,
     /// Pools behind record field lists and match/try case lists.
     expr_field_lists: ListPool<ExpressionRecordField>,
     pat_field_lists: ListPool<PatternRecordField>,
@@ -590,6 +593,8 @@ pub struct ParseArena {
     /// Whether the builtin spice mapper stands in for a configured external
     /// spice derive (see `binary_ast::derive`).
     builtin_spice_disabled: bool,
+    /// The derive seam plans no item (`RESCRIPT_DERIVED_PATH=general`).
+    derived_plans_disabled: bool,
     /// `Experimental_features.is_enabled LetUnwrap` for the builtin PPX run on
     /// this arena, which decides the error a `let?` binding raises
     /// (bs_builtin_ppx.ml:273, 366, 565). Set by the rewrite entry points.
@@ -668,6 +673,7 @@ pub struct ParseArena {
     /// Pre-allocated `Ldot(Lident "*predef*", "option")` for lifted option types.
     /// OCaml uses `Ast_literal.predef_option` as a module-level constant.
     static_predef_option_lident: LidentIdx,
+    promise_primitives: [LidentIdx; 2],
     /// Pre-allocated no-loc builtin types from `Ast_literal.No_loc`.
     static_ast_literal_types: StaticAstLiteralTypes,
     /// Pre-allocated `Lident "string"` for `Ast_literal.No_loc.type_string`.
@@ -1006,6 +1012,16 @@ impl Default for ParseArena {
         ));
         let static_some_lid = longidents.push(Longident::Lident(some_str));
 
+        // One pair per compilation, shared by direct promise typing. No
+        // identifier or expression is appended when an await is checked.
+        let promise = strings.intern("Primitive_promise");
+        let await_name = strings.intern("unsafe_await");
+        let async_name = strings.intern("unsafe_async");
+        let promise_primitives = [
+            longidents.push(Longident::Ldot(Box::new(Longident::Lident(promise)), await_name)),
+            longidents.push(Longident::Ldot(Box::new(Longident::Lident(promise)), async_name)),
+        ];
+
         // Pre-allocate Ast_literal no-loc core type longidents.
         // OCaml reuses these module-level constants (Ast_literal.No_loc.*), so
         // they must have stable identity distinct from generic parser lidents.
@@ -1065,6 +1081,7 @@ impl Default for ParseArena {
             type_lists: ListPool::default(),
             vb_lists: ListPool::default(),
             derived_value_groups: Vec::new(),
+            plans: Default::default(),
             derived_census: None,
             expr_field_lists: ListPool::default(),
             pat_field_lists: ListPool::default(),
@@ -1081,6 +1098,7 @@ impl Default for ParseArena {
             value_constraint_varify_errors: HashMap::new(),
             ppx_deferred_error: None,
             builtin_spice_disabled: false,
+            derived_plans_disabled: false,
             experimental_let_unwrap: false,
             used_attributes: std::sync::Mutex::new(HashSet::new()),
             has_gentype_annotations: false,
@@ -1106,6 +1124,7 @@ impl Default for ParseArena {
             static_array_lidents,
             static_regexp_t_lident,
             static_predef_option_lident,
+            promise_primitives,
             static_ast_literal_types,
             static_ast_literal_type_string_lident,
             static_ast_literal_type_int_lident,
@@ -1490,6 +1509,7 @@ impl ParseArena {
     /// Push a location into the arena and return its index.
     pub fn push_location(&mut self, loc: InternedLocation) -> LocIdx {
         if self.store_locations {
+            assert!(self.locations.len() < 1 << 30, "location pool overflow");
             self.locations.push(loc)
         } else {
             self.fresh_location_identity(loc.loc_ghost)
@@ -1678,8 +1698,13 @@ impl ParseArena {
         self.longident_shareable_strs.contains(&idx)
     }
 
-    /// Look up a location by index.
-    pub fn get_location(&self, idx: LocIdx) -> &InternedLocation {
+    /// Look up a location, applying its immutable ghost-view bit.
+    /// Cost: one indexed load and one bit test for a source location; no
+    /// allocation or synchronization for a ghost view of a source location.
+    // Keep field-only readers scalar: an out-of-line 12-byte return copies
+    // unused coordinates even when the caller only tests ghostness.
+    #[inline(always)]
+    pub fn get_location(&self, idx: LocIdx) -> InternedLocation {
         if !self.store_locations {
             const SOURCE: InternedLocation = InternedLocation {
                 loc_start: PosIdx(0),
@@ -1692,19 +1717,40 @@ impl ParseArena {
                 loc_ghost: true,
             };
             return if idx.0 < 2 || idx.0 & 0x4000_0000 != 0 {
-                &GENERATED
+                GENERATED
             } else {
-                &SOURCE
+                SOURCE
             };
         }
-        let raw = idx.to_u32();
-        if raw < SYNTHETIC_LOCATION_BASE {
-            self.locations.get(idx)
+        let raw = idx.to_u32() & !0x4000_0000;
+        let mut location = if raw < SYNTHETIC_LOCATION_BASE {
+            self.locations.get(LocIdx(raw)).clone()
         } else {
             self.synthetic_locations
                 .get((raw - SYNTHETIC_LOCATION_BASE) as usize)
-                .expect("typechecker synthetic location read before initialization")
-        }
+                .expect("typechecker synthetic location read before initialization").clone()
+        };
+        location.loc_ghost |= idx.0 & 0x4000_0000 != 0;
+        location
+    }
+
+    /// An immutable ghost view of an existing location.
+    /// Cost: one bitwise OR, no allocation, lookup, lock or stored row.
+    #[inline]
+    pub fn ghost_location(&self, idx: LocIdx) -> LocIdx {
+        LocIdx(idx.0 | 0x4000_0000)
+    }
+
+    /// The await primitive's identifier, allocated once per arena.
+    /// Cost: one field read; no lookup or allocation.
+    pub fn promise_await_lident(&self) -> LidentIdx {
+        self.promise_primitives[0]
+    }
+
+    /// The async primitive's identifier, allocated once per arena.
+    /// Cost: one field read; no lookup or allocation.
+    pub fn promise_async_lident(&self) -> LidentIdx {
+        self.promise_primitives[1]
     }
 
     /// Intern a `Location` that comes from outside this arena (e.g. a label
@@ -1745,6 +1791,7 @@ impl ParseArena {
         let start = push_pos(&loc.loc_start);
         let end = push_pos(&loc.loc_end);
         let slot = self.synthetic_locations.len();
+        assert!(slot < 1 << 30, "synthetic location pool overflow");
         self.synthetic_locations
             .push(Box::new(InternedLocation::new(start, end, loc.loc_ghost)));
         LocIdx::from_u32(SYNTHETIC_LOCATION_BASE + slot as u32)
@@ -1761,7 +1808,31 @@ impl ParseArena {
         let loc = self.get_location(idx);
         let ghost = InternedLocation::new(loc.loc_start, loc.loc_end, true);
         let slot = self.synthetic_locations.len();
+        assert!(slot < 1 << 30, "synthetic location pool overflow");
         self.synthetic_locations.push(Box::new(ghost));
+        LocIdx::from_u32(SYNTHETIC_LOCATION_BASE + slot as u32)
+    }
+
+    /// OCaml `Location.in_file "command line"` (location.ml:24-26), where
+    /// `Res_compmisc.open_implicit_module` locates `-open` modules: a ghost
+    /// location without a printable range, so reports show only the name.
+    pub fn push_typecheck_command_line_loc(&self) -> LocIdx {
+        if !self.store_locations {
+            return self.fresh_location_identity(true);
+        }
+        let pos = Position {
+            file_name: self.push_shared_string("command line".to_string()),
+            line: 1,
+            bol: 0,
+            cnum: -1,
+        };
+        let start_slot = self.synthetic_positions.len();
+        self.synthetic_positions.push(Box::new(pos));
+        let start = PosIdx::from_u32(SYNTHETIC_POSITION_BASE + start_slot as u32);
+        let slot = self.synthetic_locations.len();
+        assert!(slot < 1 << 30, "synthetic location pool overflow");
+        self.synthetic_locations
+            .push(Box::new(InternedLocation::new(start, start, true)));
         LocIdx::from_u32(SYNTHETIC_LOCATION_BASE + slot as u32)
     }
 
@@ -1773,6 +1844,7 @@ impl ParseArena {
             return self.fresh_location_identity(true);
         }
         let slot = self.synthetic_locations.len();
+        assert!(slot < 1 << 30, "synthetic location pool overflow");
         self.synthetic_locations
             .push(Box::new(InternedLocation::new(start, end, true)));
         LocIdx::from_u32(SYNTHETIC_LOCATION_BASE + slot as u32)
@@ -2765,8 +2837,7 @@ impl ParseArena {
             ExpressionDesc::Pexp_ident(_)
             | ExpressionDesc::Pexp_break
             | ExpressionDesc::Pexp_continue => 3,
-            ExpressionDesc::Pexp_constant(Constant::Integer(_, Some('l'))) => 0,
-            ExpressionDesc::Pexp_constant(Constant::Integer(_, None)) => 1,
+            ExpressionDesc::Pexp_constant(c) if c.integer_digits().is_some() => 1,
             ExpressionDesc::Pexp_constant(_) => 3,
             ExpressionDesc::Pexp_apply(apply) => {
                 let is_pipe = matches!(&self.get_expr(apply.funct).pexp_desc,
@@ -2991,6 +3062,18 @@ impl ParseArena {
             self.derived_value_groups.len().max(index / 64 + 1), 0,
         );
         self.derived_value_groups[index / 64] |= 1 << (index % 64);
+    }
+
+    /// The plan pools of derived items. Cost: O(1).
+    #[inline]
+    pub fn plans(&self) -> &crate::binary_ast::derive::plan::Plans {
+        &self.plans
+    }
+
+    /// The plan pools, for the seam that builds plans. Cost: O(1).
+    #[inline]
+    pub(crate) fn plans_mut(&mut self) -> &mut crate::binary_ast::derive::plan::Plans {
+        &mut self.plans
     }
 
     /// Provenance of a structure value group, independent of names and locations.
@@ -3344,6 +3427,18 @@ impl ParseArena {
     /// Enable or disable the builtin spice mapper for this compilation.
     pub fn set_builtin_spice(&mut self, enabled: bool) {
         self.builtin_spice_disabled = !enabled;
+    }
+
+    /// Let the derive seam plan items, or keep every item on the general
+    /// path.
+    pub fn set_derived_plans(&mut self, enabled: bool) {
+        self.derived_plans_disabled = !enabled;
+    }
+
+    /// Whether the derive seam plans items. Cost: O(1).
+    #[inline]
+    pub fn derived_plans_enabled(&self) -> bool {
+        !self.derived_plans_disabled
     }
 
     /// Whether built-in Spice deriving is enabled for this parse.
@@ -4017,6 +4112,29 @@ impl<T> Located<T> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ten_thousand_ghost_views_do_not_allocate_locations() {
+        let mut arena = ParseArena::new();
+        let locations: Vec<_> = (0..10_000)
+            .map(|_| arena.push_loc(PosIdx(0), PosIdx(0), false))
+            .collect();
+        let before = arena.location_count();
+        let mut steps = 0;
+        for source in locations {
+            let ghost = arena.ghost_location(source);
+            steps += 1;
+            assert_eq!(arena.ghost_location(ghost), ghost);
+            assert!(arena.loc_ghost(ghost));
+            assert!(!arena.loc_ghost(source));
+            assert_eq!(arena.loc_start_idx(ghost), arena.loc_start_idx(source));
+            assert_eq!(arena.loc_end_idx(ghost), arena.loc_end_idx(source));
+            assert!(arena.to_location(ghost).loc_ghost);
+        }
+        assert_eq!(steps, 10_000);
+        assert_eq!(arena.location_count(), before);
+        assert_eq!(std::mem::size_of::<InternedLocation>(), 12);
+    }
+
     use super::*;
     use crate::parser::ast::{
         ArgLabel, Attributes, Case, ExpressionDesc, Pattern, PatternDesc, PexpFun,

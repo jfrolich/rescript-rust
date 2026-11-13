@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use rescript_compiler::cmi::persistent_env::ModuleRegistry;
+use rescript_compiler::bir::shadow::BackendMode;
 use rescript_compiler::driver::{self, CompilerOptions};
 
 /// A registry that type checks the runtime from its sources.
@@ -27,12 +28,21 @@ fn registry() -> ModuleRegistry {
 }
 
 fn compile(source: &str) -> Result<String, String> {
+    // `RESCRIPT_BACKEND=check` runs every test with the comparison.
+    compile_in(source, BackendMode::from_env())
+}
+
+/// With `BackendMode::Check`, the shadow backend compares its own lowering
+/// with the one that is printed. The comparison fails the compilation when
+/// the two differ; a form the shadow backend does not lower yet is declined.
+fn compile_in(source: &str, backend: BackendMode) -> Result<String, String> {
     rescript_compiler::parser::code_frame::set_color_mode(
         rescript_compiler::parser::code_frame::ColorMode::Never,
     );
     let options = CompilerOptions {
         source_filename: Some("/app/src/Demo.res".to_string()),
         module_name: Some("Demo".to_string()),
+        backend,
         ..Default::default()
     };
     driver::compile_source_in_process(source, "/app/src/Demo.res", "Demo", &options, &registry(), false, None)
@@ -252,4 +262,22 @@ let name = (p: pet) =>
     )
     .unwrap();
     assert!(js.contains("p instanceof Dog"), "{js}");
+}
+
+#[test]
+fn the_shadow_backend_declines_a_class_imported_from_a_module() {
+    let source = r#"
+@module("node:stream") @instanceOf("Readable") type readable
+@module("node:stream") @instanceOf("Writable") type writable
+@unboxed type stream = Readable(readable) | Writable(writable) | Path(string)
+let what = (s: stream) =>
+  switch s {
+  | Readable(_) => "r"
+  | Writable(_) => "w"
+  | Path(p) => p
+  }
+"#;
+    let compared = compile_in(source, BackendMode::Check).unwrap();
+    assert!(compared.contains("s instanceof Nodestream.Readable"), "{compared}");
+    assert_eq!(compared, compile(source).unwrap());
 }

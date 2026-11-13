@@ -1,9 +1,11 @@
 # A prebuilt snapshot of the runtime and Belt: design and staged plan
 
-Status: S1 implemented. Section A records the baseline before S1. Sections B
-through E describe the full staged design; runtime changes beyond the shared
-container, verification memoisation, snapshot commands and watch integration
-remain future stages. Section F.1 records S1's implementation and evidence.
+Status: S1–S5 implemented; S5 validation and measurements are recorded in F.5.
+Cargo watches existing runtime files and Belt's source directory; new runtime
+files are caught by freshness checking and run-time fallback, not by the build
+script (see D5 and the S4 notes). Section A is historical, not
+a statement of the current layout. Watch integration is implemented in S5.
+Sections F.1–F.3 and the S4 notes record implementation and evidence.
 
 ## 0. Summary
 
@@ -205,7 +207,7 @@ reads `lib/ocaml`).
 | D2 | The embedded data records the absolute source paths of the machine that built the executable (309 occurrences), in `ps_filename`, `source_path` and the file-name tables. They enter the interface digest and can reach whatever prints a dependency's file name. One source-map sample did not show them; this was not searched exhaustively | `strings` on the build script's output |
 | D3 | Every build reads and hashes all runtime sources, and decodes the extras of and inserts a registry entry for all 113 modules | `snapshot::register` |
 | D4 | A fallback to compiling from source is logged only at debug level; no test fails when the embedded runtime stops matching | `log::debug!` in `register` |
-| D5 | The build script watches the sources that existed when it last ran. A runtime that gains a source file is compiled from source at run time until the executable is rebuilt | the comment on `watch_sources` |
+| D5 | The build script watches existing runtime sources, not the runtime directory, to avoid rebuilding the executable after writes to `lib`. A new runtime source is caught by `snapshot --check` in `make lib` and CI, and by the run-time source-digest mismatch/from-source fallback. Belt additions are watched through its `src` directory | `watch_sources`, `snapshot::check`, and `snapshot::register` |
 | D6 | On fallback, code generation runs for 113 modules and its output is discarded | `compile_runtime_module_from_source` |
 
 ## B. The artifact
@@ -253,6 +255,11 @@ per package:
     js offset, js length         u32, u32  per module format (0, 0 for none)
     slot offset, slot count      u32, u32  per module format (B.3)
 blobs        names, cores, JavaScript texts, slot lists
+source manifest (S4, cold; normal builds never read it):
+  per source, sorted within runtime then Belt:
+    package name, source filename   length-prefixed strings
+    source contents digest          32 bytes (BLAKE3)
+  manifest byte length              u32, at end of file
 ```
 
 All integers are little endian and all offsets are from the start of the
@@ -281,8 +288,9 @@ snapshot fails.
 
 ### B.4 Paths
 
-The snapshot stores paths as the producer saw them, plus the recorded root.
-The consumer rewrites the prefix `recorded root` to the package's actual root
+The producer normalizes paths to `@rescript/runtime` or `@rescript/belt` and
+records that logical root, never its checkout path. The consumer rewrites the
+prefix `recorded root` to the package's actual root
 in the three places a path is kept: `PortablePersStruct::ps_filename`,
 `InMemoryModuleInfo::source_path`, and the file-name tables of the signature
 and of `CmjExportLambdas` when they are decoded. `package_name`,
@@ -304,13 +312,28 @@ incremental store, and it is the test that proves the rebasing complete.
 | Package options | the flags the package was compiled with | part of the sources digest, taken from the parsed configuration, not the file's bytes. A runtime directory without `rescript.json` (the published layout, D1) is accepted as having the producer's options |
 | Root options that reach a dependency | Belt's output | module format and suffix: any, through the template. In-source: any, proven at production. Source maps, dump flags: not supported, fall back (section D). JSX settings and `LetUnwrap`: proven irrelevant at production by a second compile with them set |
 
-Verification cost: the digest reads and hashes 857 KB for the runtime, about
-2.8 M instructions measured, and about 600 KB more for Belt. Estimated under
-2 ms warm; the wall time was not measured on its own. To keep incremental
-builds below that, the root package's database memoises
-`(path, size, modification time of each source) -> verified digest`, the key
-`RuntimeStore::key` already computes, so an incremental build only calls
-`stat`.
+Verification cost: a clean one-module fixture with Belt measured 4,165,175
+instructions in runtime BLAKE3 updates and 2,427,067 in Belt BLAKE3 updates
+(Callgrind, x86-64), exceeding the 5 M threshold for retaining the memo.
+Runtime registration added 69,796 inclusive instructions; the whole runtime
+precompile function cost 5,692,270 and Belt verification 3,312,620. These are
+nested measurements, not values to sum indiscriminately.
+
+The root build directory now holds `snapshot-runtime.verified` and
+`snapshot-belt.verified`, beside `rescript.sqlite`. Each key covers the compiler
+identity, expected embedded sources/options digest, ordered full source and
+configuration paths, sizes, and nanosecond modification times. Missing optional
+interfaces/configurations have distinct markers. A hit performs one stat per
+listed path and no source-file reads. Failed metadata reads do not reuse a memo;
+failed verification never writes one. Writes are atomic and best-effort. Clean
+removes the memo with the build directory.
+
+Soundness has the same boundary as the incremental planner: source files are
+stable during the build, and an edit changes size or modification time. This is
+not a cryptographic guarantee against edits that deliberately preserve metadata.
+There is no dense compiler handle for filesystem paths, so a fixed-size hash is
+used for the memo key. Unchanged projects without Belt already return before
+runtime verification; they gain no runtime verification saving.
 
 ### B.6 Loading
 
@@ -364,7 +387,7 @@ error; CI uses it (C.3).
 
 | Where | Command | What happens |
 |---|---|---|
-| Building the executable | `cargo build --manifest-path rewatch/Cargo.toml` (and `make rewatch`, `make rewatch-pgo`) | `rewatch/cli/build.rs` calls `snapshot::produce` for `packages/@rescript/runtime` and `packages/@rescript/belt` and embeds the result, as it embeds the runtime today. The build script lists the package directories, not single files, in `rerun-if-changed` (the `lib` output folders excluded by listing sources and the directory itself), which closes D5 |
+| Building the executable | `cargo build --manifest-path rewatch/Cargo.toml` (and `make rewatch`, `make rewatch-pgo`) | `rewatch/cli/build.rs` calls `snapshot::produce` for `packages/@rescript/runtime` and `packages/@rescript/belt` and embeds the result, as it embeds the runtime today. The build script watches runtime `rescript.json` and existing sources, plus Belt `rescript.json` and its `src` directory. Neither package root is watched, so package `lib` output does not trigger executable rebuilds. D5 is detected for new runtime files by `snapshot --check` and run-time fallback, not closed by the build script |
 | Inspecting or checking | `rescript snapshot --write <file>` and `rescript snapshot --check` (hidden commands, like the existing `bsc` test command) | `--write` produces the snapshot from the packages on disk to a file. `--check` produces it again and compares it with the embedded one, byte for byte |
 | `make lib` | unchanged commands, one added step | after building the two packages, `rescript snapshot --check` |
 | Release pipeline | unchanged | the executable in each platform package was built from the tagged sources; `--check` runs against the packages that are about to be published |
@@ -469,7 +492,7 @@ reported 7.7%.
 | S4 | `rescript snapshot --write/--check`, `make lib` and CI freshness | S1 | 300 | 0 | yes |
 | S5 | Watch mode and tooling audit | S2 | 300 plus tests | 0 for one-shot builds | yes |
 | S6 | Cache for third-party packages | S3, S4 | 1,200 | unknown (E) | no |
-| S7 | Follow the checker redesign (B.8) | P5 and P10 there | with those stages | removes the decode and internalise of referenced snapshot units; not measured | no |
+| S7 | Follow the checker redesign (B.8) | P5 and P10 there (now slices W8 to W10 of its section J) | with those stages | removes the decode and internalise of referenced snapshot units; not measured | no |
 
 S1 comes first because Belt is the part that is compiled in every clean build
 today. S2 to S5 can proceed in parallel after S1 except that S2 and S3 both
@@ -569,7 +592,7 @@ files. No files or assertions in that test were removed or weakened.
   requires the default printer/backend so an environment-selected producer
   cannot silently embed a different output contract.
 - S1 does not select Belt in watch or check-only mode; those builds retain
-  their earlier behavior. The code's location-bearing diagnostic retry also
+  their earlier behavior (watch mode admits Belt since S5, F.5). The code's location-bearing diagnostic retry also
   requires source compilation: it explicitly discards location-free stored
   interfaces so errors can quote dependency declarations. This internal mode
   was absent from D and is now an explicit mismatch reason. The switch controls Belt only; changing runtime
@@ -623,6 +646,37 @@ files. No files or assertions in that test were removed or weakened.
 
 ### F.2 S2: the runtime path made reliable
 
+#### SN2 baseline (x86-64 Linux, Cachegrind 3.22)
+
+At `ca587c441`, a fat-LTO release executable is 36,712,568 bytes.
+The disposable project `snapshot-one-module` has one source, `src/Main.res`:
+`let value = list{1, 2, 3}->List.length`. Its config has `sources: ["src"]`,
+ES modules, in-source output, and suffix `.mjs`; it has no Belt dependency.
+With `RAYON_NUM_THREADS=1` and `RESCRIPT_RUNTIME` pointing to the repository
+runtime, `valgrind --tool=cachegrind --cache-sim=no --branch-sim=no` reports:
+
+| Build | Instructions | Compiled modules |
+| --- | ---: | ---: |
+| Clean (after `rescript clean`) | 17,588,559 | 1 |
+| Immediately repeated, unchanged | 6,164,684 | 0 |
+
+`cg_annotate --auto=no --threshold=0` attributes 20,226 clean-build
+instructions directly to `ModuleRegistry::register_stored_parts` (zero on
+the unchanged build). The clean build's BLAKE3 function self costs include
+120,526 in `ChunkState::update`, 62,524 in `Hasher::update`, and 59,253 in
+`Hasher::merge_cv_stack`. These are **not** an inclusive runtime-verification
+cost: fat LTO inlines the digest caller, and hashing also serves other work.
+Inclusive follow-up attribution is recorded in B.5; these self costs must not
+be reported as the total saving available.
+
+Code/document disagreement: `compile::compile` returns before runtime
+precompilation when there are no dirty modules and no support work. Thus this
+unchanged build already does **zero runtime verification or registration**;
+a runtime memo cannot remove millions of instructions from that path. Its
+benefit must instead be measured on a changed application source with unchanged
+runtime sources (and on Belt verification when Belt is present).
+
+
 - **Changes.** Accept a runtime without `rescript.json` (B.5), and add
   `rescript.json` to the runtime package's `files` so that a fallback can
   read its flags. Rebase paths for runtime units (B.4), and make the digest
@@ -643,6 +697,87 @@ files. No files or assertions in that test were removed or weakened.
 
 ### F.3 S3: index lookup, memoised verification, cheaper fallback
 
+#### SN2 measurements after implementation
+
+The following measurements compare fat-LTO release builds of trunk
+`73a1901ea` and `f2fb16c9a`, on x86-64 Linux. The latter includes S2/S3 and
+package-relative declaration identities. A later prefix-rejection optimization
+avoids walking longident names as paths; its final measurements and CI results
+are reported in the pull request.
+
+| `snapshot-one-module` build | Trunk instructions | S2/S3 instructions |
+| --- | ---: | ---: |
+| Clean | 17,798,956 | 18,472,399 |
+| Immediately repeated, unchanged | 6,172,142 | 6,174,289 |
+| Changed application source, unchanged runtime | 18,177,203 | 14,126,711 |
+
+The changed-source build saves 4,050,492 instructions. The first clean build
+saves nothing: verification now also records metadata for subsequent builds.
+The unchanged no-Belt build already skips runtime loading; its small total
+variation is not a claimed saving. Executable sizes are 36,971,216 bytes and
+37,001,880 bytes respectively.
+
+For a 3,735-module application, `scripts/bench_project.sh` reports 67,454,164,984
+versus 67,391,542,409 instructions (-0.0928%), with identical generated outputs.
+`scripts/compare_checker_builds.py` reports no differences in 3,735 signatures,
+32 diagnostics in 18 files, or 3,980 generated files. Hyperfine (two warmups,
+eight clean-build runs) measures trunk 1.843 ± 0.198 s (1.667–2.213 s), versus
+S2/S3 1.774 ± 0.106 s (1.603–1.922 s). The variance does not establish a large
+wall-time improvement; the measured instruction saving is small.
+
+Local verification on the merged trunk:
+
+- Runtime relocated with `rescript.json` absent: snapshot/source equivalence
+  passes for `tests/belt_tests` (80 generated files), `tests/tests` (743), and
+  all twelve supported configuration cases, including both incremental switch
+  directions. The one-module fixture decodes exactly three reached runtime
+  interfaces. All runtime stored cores match a from-source compile.
+- Twelve snapshot unit tests, four CLI snapshot tests, eighteen portable-type
+  tests, the registry index test and package-relative identity test pass.
+- JavaScript parity: 729/729; diagnostics including `super_errors`: 2,124/2,124;
+  runtime output: 113/113; the two in-repository genType suites: 2/2.
+- `make test-rewatch` reaches `watch/04-watch-config-change.sh`, whose broad
+  `find . -name '*.res.mjs'` also finds four pre-shipped files in installed
+  `sury`, outside the project dependency graph. The unchanged baseline fails
+  identically. Those files and the gate are not removed or weakened.
+- Searching the entire embedded container finds zero checkout-path occurrences.
+  No runtime per-module snapshot-registration loop remains.
+
+
+#### Code/document corrections found by SN2
+
+- Current published runtime sources are flat `*.res`/`*.resi`, already listed in
+  `package.json`; they are not read from `lib/ocaml`. `rescript.json` is now also
+  published, and a missing configuration uses the producer's parsed defaults.
+- The embedded runtime loop used `register_stored_parts`, not
+  `register_stored_static`. That loop is deleted. The latter API remains for
+  non-snapshot stored-interface callers; from-source runtime storage still has
+  its existing per-module registration path.
+- The registry originally held only one snapshot index: attaching runtime would
+  replace Belt. It now retains both package indexes, without per-module entries.
+- Filenames were also hashed into declaration allocation identities. Source
+  scopes now use the package name plus package-relative source path (including
+  extension), and imported scopes use the qualified persistent module name,
+  keeping namespaces separate but allowing relocation. Every runtime stored core is compared against source compilation
+  in a copied runtime with no configuration file.
+- Rebasing must not eagerly decode unused raw signatures. A stored unit retains
+  its prefix mapping and applies it to filename side tables during the existing
+  signature decode. Storage materializes rebased bytes only when requested.
+- Whole-executable `strings` also finds Rust diagnostic/build metadata. The
+  invariant test searches the entire embedded container, where there are zero
+  checkout-path matches; it does not claim to remove unrelated Rust paths.
+
+
+D6 inspection at SN2: `runtime_compiler_options` already sets
+`skip_js_render: true`. In
+`finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_hook`,
+that skips rendering, but JS lowering still computes purity and exported
+constants, arities and inlinable lambdas. These are consumed by dependents, so
+stopping before that lowering would lose required metadata. No additional early
+return is introduced; the document's claim that discarded JavaScript text is
+produced is stale.
+
+
 - **Changes.** B.6 steps 2 to 4 for both packages, replacing the per-module
   `register_stored_static` loop. The verification memo of B.5. On a
   from-source runtime compile, stop before code generation (D6).
@@ -657,12 +792,75 @@ files. No files or assertions in that test were removed or weakened.
 ### F.4 S4: producing and checking
 
 - **Changes.** C.1's two commands, the `make lib` step, the CI step of C.2,
-  the build script's directory watching (D5).
+  the build script's input watching (D5; runtime additions are detected by
+  freshness checking rather than a root-directory watch).
 - **Invariants.** Producing twice gives the same bytes.
 - **Gate.** `rescript snapshot --check` passes in CI; editing a runtime
   source without rebuilding the executable makes it fail.
 
-### F.5 S5: watch mode and tooling
+### F.5 S5: watch mode and tooling — implemented
+
+The initial watch build now admits Belt snapshots. Installed Belt source
+folders and the runtime root join the watch set. A source event does one
+borrowed lookup in a directory table built once per session: O(path bytes)
+hashing, no allocation, metadata read, lock or atomic operation for unrelated
+paths. The 10,000-event unit test counts exactly 10,000 lookups. There is no
+dense compiler handle for filesystem directories. Runtime overrides are
+canonicalized during watch initialization so symlinks and macOS path spellings
+agree with notifications, not canonicalized per event.
+
+For an affected package, verification uses the existing source/options digest
+functions from B.5. Byte-identical touches retain the snapshot and log that
+choice. A mismatch revokes the package for the session and requests the existing
+full-rebuild path. The fresh registry drops the old snapshot entries and decoded
+units; the package and its dependents compile through the normal from-source
+path. The other package remains eligible for its verified snapshot. Revocation
+survives full reinitialization, including source restoration. This intentionally
+recompiles all project dependents rather than adding a second invalidation
+planner. It adds no per-source verification to unrelated incremental events.
+
+The audit below found one reader defect: runtime tooling required a configuration
+file even for the supported config-less published layout. It now uses
+`snapshot::runtime_config`; its regression test failed before the fix. Tooling
+already read root-level sources rather than `lib/ocaml`. genType contexts and
+item-digest caches use registered data and need no reader fix or S7 deferral.
+
+`rewatch/tests/watch/30-snapshot-package-edits.sh` covers Belt and runtime body
+edits against from-source sessions, comparing every JavaScript file and requiring
+no diagnostics. A third case touches Belt and requires the retention log. The
+runtime is selected through a symlink. The cases use bounded polling and wait
+for watcher termination. They run from the canonical suite and a Cargo integration
+test, including the Linux and macOS build-system jobs, without workflow changes.
+
+Local checks: rewatch build and tests pass (206 unit tests, one genType integration
+test, eight snapshot integration tests). Snapshot equivalence passes for
+`tests/belt_tests` (80 generated files), `tests/tests` (738), the lazy-runtime
+fixture and all twelve configuration cases, including both incremental switch
+directions. The canonical coverage checker separately rejects the base's three
+invocations of `gentype/04-file-inventory.sh`; that unrelated checker is unchanged.
+
+#### S5 measurements
+
+Paired x86-64 Linux fat-LTO release builds, one codegen unit, base `8f6bd7884e`
+and candidate `1cec9b782` (before the watch-only canonical-path correction).
+Cachegrind measurements use one worker and sequential runs:
+
+| Project | Base instructions | Candidate instructions | Change |
+| --- | ---: | ---: | ---: |
+| `tests/tests` | 4,040,130,428 | 4,038,136,691 | -0.0493% |
+| A 3,735-module application | 68,415,833,161 | 68,396,681,729 | -0.0280% |
+
+Both generated-output comparisons are identical. The application's checker
+comparison found no differences in 3,735 signatures, 32 diagnostics across
+18 files, or 3,980 generated files. CI's five-run minimum count for that candidate
+was 4,039,093,450 versus 4,038,104,905 (-0.024%). This meets the +0.02% ceiling;
+these small fluctuations are not a claimed one-shot optimization. The intended
+one-shot saving is zero.
+
+Hyperfine, two warmups and eight single-worker clean `tests/tests` builds:
+base 831.8 ± 45.9 ms (776.8–894.9 ms), candidate 904.1 ± 99.0 ms
+(729.2–1049.4 ms). This noisy wall-time sample does not establish a speedup.
+
 
 - **Changes.** When a source of a snapshot package changes during a session,
   drop that package's snapshot entries and compile it from source. Check
@@ -699,3 +897,205 @@ a declaration in a dependency (which would make D2 visible to users), and
 whether watch mode's first build takes the incremental plan or compiles every
 dependency; the two descriptions in `build.rs` and `incremental.rs` read
 differently and no watch session was run for this document.
+
+### S4 input watching without output-triggered rebuilds
+
+The build script explicitly lists `build.rs`, runtime `rescript.json` and each
+existing runtime `.res`/`.resi` file, Belt `rescript.json`, and Belt's `src`
+directory. Neither package root nor either `lib` directory is listed. Cargo
+recursively watches a listed directory, so watching the runtime root would also
+watch its `lib` outputs and unnecessarily rerun production and relink the
+executable after building the runtime. Belt's package configuration emits its
+JavaScript under `lib`, outside the watched `src` directory.
+
+A new runtime file therefore does not trigger the build script. Instead,
+`snapshot --check` catches it after the package builds in `make lib` and CI
+(the added-module CLI test proves this). Normal builds detect the changed
+source digest and compile the runtime from source. Belt additions do trigger
+the build script because its source-only directory is watched. This deliberately
+replaces the original C.1 proposal to close D5 through runtime-root watching.
+
+Manual output-exclusion verification: build the executable, run
+`rescript build packages/@rescript/runtime`, then repeat
+`cargo build --manifest-path rewatch/Cargo.toml`; repeat those steps for Belt.
+With `RESCRIPT_RUNTIME` selecting the checkout runtime and the built executable,
+both second Cargo builds printed **no `Compiling` line**. Verbose output marked
+`rescript-cli` fresh, with no build-script execution. Running `snapshot --check`
+after both package builds exited zero. The commands used an isolated
+`CARGO_TARGET_DIR`; no source or configuration was touched between builds.
+
+### S4 production and freshness implementation
+
+The single public producer is `snapshot::produce` (previously named `compile`).
+Both hidden commands enter before public CLI parsing, like `bsc`; they are not
+listed in public help. `RESCRIPT_RUNTIME` selects the runtime root; otherwise
+normal project runtime resolution is used. Belt is its sibling `belt`, exactly
+as in the build script's producer, not independently resolved from a project.
+The commands require source package configurations, not the config-less
+published layout accepted by the normal snapshot consumer.
+
+`--check` produces once and compares the complete bytes. On mismatch it borrows
+index/blob slices; it never decodes embedded stored cores. B.2's format now has
+a cold trailer: sorted `(package name, source filename, BLAKE3(source))` records,
+with length-prefixed names and a final little-endian `u32` trailer byte length.
+Normal loading does not read the trailer. This is necessary because editing a
+source can leave all compiled cores equal: the previous package-wide digest
+could detect this but could not name the module. The trailer adds one source
+read/hash during production only. A source/options digest mismatch with identical
+source records and cores is reported at package level, rather than falsely
+naming an unchanged module. Compilation errors are reported by the producer.
+
+Tests cover two productions in one process, writes in separate processes,
+freshness in a relocated copy, edits to each package, a new runtime module,
+hidden help, absence, and a linear scan of 10,000 source records. No new
+per-node type or normal-build walk is introduced; the borrowed reader is 16
+bytes. Normal builds execute none of the freshness or manifest code. The
+expected default-path saving is zero, not an optimization claim.
+
+`make lib` checks after both package build stamps. CI should run the same check
+after building runtime and Belt; the exact workflow insertion is supplied in
+the pull request, not a workflow edit here.
+
+### S5 as found
+
+Inventory against `8f6bd7884e` (line numbers refer to that revision).
+
+| Reader or event | Result and evidence |
+| --- | --- |
+| Installed Belt source edit in watch | The premise that Belt starts from the snapshot is false: `rewatch/src/build/snapshot.rs:1057–1059` rejects watch mode. `watcher.rs:134–137` watches only local dependencies; `packages.rs:503–512` excludes installed dependencies outside a monorepo. In a disposable project resolving copied Belt/runtime packages, the initial `-vv watch` log says `Not using the prebuilt @rescript/belt: watch mode is not supported by this snapshot stage`. A comment appended to `Belt_Array.res`, followed by an application edit, produced `Parsed 1 source file` and `Compiled 1 module`, not a dependency rebuild. Installed dependency changes are not watched. |
+| Runtime source edit in watch | Initial log: `Registered 113 embedded runtime interfaces`. Appending invalid syntax (`let = invalid`) to the copied `Stdlib_List.res`, then editing the application, still produced `Finished incremental compilation`, with only the application compiled. Runtime is not among the watched package roots (`watcher.rs:118–174`); `compile.rs:3096–3104` returns immediately when the registry already has its snapshot. Thus runtime state remains stale even when another event triggers a build. |
+| Editor tooling, project/Belt units | Correct by code path: `tooling.rs:159–205` obtains the registry and reparses project source with `parse_for_tooling`, then typechecks against that registry. It does not require a typed tree from the original compilation. `tooling.rs:364–375` dispatches project and runtime sources separately. Snapshot-backed Belt still has project module/source metadata. |
+| Editor tooling, runtime source discovery | Partly incorrect: `tooling.rs:112–124` reads source paths from the runtime root, **not** `lib/ocaml`. However, `packages::read_config(root).ok()?` removes the entire runtime from tooling when the published layout lacks configuration. Snapshot loading accepts this layout through `snapshot::runtime_config` (`snapshot.rs:552`); tooling should use the same configuration semantics. |
+| Editor tooling, runtime typechecking | Correct when discovery succeeds: `tooling.rs:209–264` reads and parses the requested source/interface on demand with `runtime_compiler_options`, then typechecks using the registry. It does not require runtime ASTs from startup. |
+| genType contexts | Correct by code path: `compile.rs:2163–2204` constructs configuration and a resolver from package paths and options, not a previous compile result; `build_types.rs:557–580` caches these per package and clears them between builds. Snapshot production rejects genType declarations in its packages; dependent packages still compile normally. |
+| Build item-digest cache | Correct by code path: `compile.rs:687–688` clears published item digests and prepared interfaces before compilation. `incremental.rs:202–215` recomputes missing digests from `ModuleRegistry::item_digests`; `compiler-rust/src/cmi/persistent_env.rs:835–844` obtains the registered signature and metadata, including lazy snapshot units. No compile-local AST is assumed. Clearing the cache does not revoke stale registered units. |
+
+The manual reproduction used `let value = Belt.Array.length([1, 2])` and
+`let length = List.length(list{1, 2})`, ES-module in-source `.mjs` output,
+`dependencies: ["@rescript/belt"]`, and a copied runtime selected through
+`RESCRIPT_RUNTIME`. It polled compilation completion before editing and stopped
+the recorded watcher PID afterwards. These are baseline observations, not the
+S5 acceptance tests or a claim of completion. No instruction count has yet
+been measured for S5.
+
+## D14: duplicate runtime compilation investigation
+
+At `37ba9b513`, a clean runtime build with `RESCRIPT_BACKEND=check`
+compiles the runtime twice, not merely reports it twice. With
+`RESCRIPT_COMPILER_COUNTERS=1`, the driver signature census reports
+`exported_signatures units=226`; the log reports both
+`Compiled 113 runtime modules from source into registry` and
+`Compiled 113 modules`. Backend statistics contain 226 distinct unit paths,
+113 containing `/./`.
+
+`build::build` starts `pre_compile_runtime_modules_with_mode` concurrently
+with project parsing. `compile::compile` also ensures runtime availability;
+its already-registered guard avoids a third compilation. The first compile
+uses `runtime_source_paths` (directory-entry paths directly under the runtime
+root). The project compile uses `packages::read_folders_and_dirs`, which
+preserves the configured `.` source directory in module paths. The project
+compiler identifies the runtime by `package.name == "@rescript/runtime"`.
+It nevertheless schedules those same modules after the precompile.
+
+For a clean single-worker runtime build, release binaries measured with
+`valgrind --tool=cachegrind`, `RAYON_NUM_THREADS=1`, and
+`RESCRIPT_BACKEND=check` retire:
+
+| Revision | Instructions |
+| --- | ---: |
+| `10227bc20` (parent of `fc46a63933`) | 2,313,762,526 |
+| `37ba9b513` | 4,155,284,504 |
+
+These historical revisions also differ in other compiler changes; this is
+not an isolated measurement of the snapshot commit. Hardware `perf stat`
+was unavailable because the environment prohibits performance counters;
+Cachegrind supplies the instruction measurements instead.
+
+A verbose build of the `core_patterns.res` fixture under the same environment
+prints exactly:
+
+```text
+Not using the prebuilt @rescript/runtime: RESCRIPT_BACKEND is not supported. Compiling it from source.
+```
+
+Its signature census is 114 units (113 runtime plus one fixture). This is
+intentional: `snapshot::alternate_backend_option` rejects `check` and `new`
+so that the selected backend actually processes runtime sources. Reusing
+legacy-produced snapshot interfaces would bypass the shadow oracle. The
+sources match; source freshness is not the reason for rejection. Accordingly,
+the fixture coverage corpus must remain 593 units (480 fixtures plus 113
+runtime units), not 480. No snapshot eligibility change is warranted.
+
+### D14 correction and verification
+
+Runtime projects now skip runtime precompilation at both build entry points;
+the ordinary dependency scheduler is their only compilation path. This uses
+the existing runtime package identity, not a path-spelling heuristic or a
+new option. `read_folders_and_dirs` normalizes the source directory before
+forming unit paths, reusing its existing directory buffer. Work is linear in
+directory components once per directory, not a pass over compiled nodes.
+No new compile-path function, node representation, hash table, synchronization,
+or per-node allocation is introduced.
+
+The regression test counts the driver's main-signature census (which executes
+for each compiled implementation, not loaded interfaces), independently of
+backend report filenames. On the corrected release build it reports:
+
+```text
+runtime: 113 compile entries, 113 distinct normalized unit paths
+```
+
+The historical binary's clean-build census is 113 exports. The original
+226-path observation is reproduced with a canonical runtime root; alternate
+symlink spellings of the checkout can add further report identities when
+reusing a report directory. All measurements here use fresh report directories.
+
+Final single-worker Cachegrind measurements (same checkout and source inputs):
+
+| Build | Baseline instructions | Corrected instructions | Change |
+| --- | ---: | ---: | ---: |
+| runtime, backend check | 4,155,284,504 | 2,270,400,494 | -45.36% |
+| tests/tests, default backend | 4,059,614,015 | 4,060,289,943 | +0.01665% |
+
+This saves no intended work on the ordinary tests/tests path; the measured
+change is within the requested +0.02% bound. Both builds compile 736 modules.
+These are individual runs, not a claim of a statistically significant speedup
+on ordinary projects.
+
+`python3 scripts/test_backend_coverage.py --record` produces 113 runtime
+units in every stage. Contrary to the initial task's description, the baseline
+has 226 runtime units only in `lambda-alias` and `lower`; the other stages
+already record 113. The alias count becomes 113 identical; lower becomes
+92 identical with assign 1, let rec 3, loop 7, try 10 (exactly half of each
+previous count). All tests/tests entries are byte-for-byte unchanged. Fixture
+entries are also unchanged: 593 units in the Lambda/lower stages, 480 in
+`js-bridge`, which does not report the runtime precompilation's interface-only
+work. No ratchet rule or backend IR code changes.
+
+Local verification: Rewatch debug and release builds pass; its test suites
+report 205 unit tests, one embedded-runtime test and seven snapshot tests
+passing. JavaScript parity reports 730/730 snapshot files and all focused
+fixtures passing. The runtime regression passes separately.
+
+The 3,735-module application benchmark retires 67,522,628,165 instructions
+before and 67,508,249,057 after (-0.0213%); generated outputs are identical.
+The independent checker comparison reports no differences in 3,735
+signatures, diagnostics from 18 files, or 3,980 generated files. These small
+ordinary-project differences are measurement variation, not intended savings.
+
+### Integration with assignment/exception lowering
+
+After merging trunk `1878df548`, the baseline was regenerated again with
+`python3 scripts/test_backend_coverage.py --record`, not resolved by choosing
+one side of the conflicting JSON. Runtime lower coverage is now 102 identical
+of 113 units, with let rec 3 and loop 8, exactly half of trunk's 204 of 226
+and its unsupported counts. Every runtime stage has 113 units; all fixtures
+and tests/tests entries equal trunk (lower: fixtures 502/593, tests/tests
+619/730). The assignment and exception lowering improvements are retained.
+
+The instruction measurements above describe the pre-merge candidate against
+`37ba9b513`, not an isolated measurement against the newer trunk. After the
+merge, Rewatch debug/release builds, its 205 unit tests plus eight integration
+snapshot tests, the runtime compile-count regression, and JavaScript parity
+(730/730 plus focused fixtures) pass again. The PR's final Instruction count
+CI comparison measures against the updated base.

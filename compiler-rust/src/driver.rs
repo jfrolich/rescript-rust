@@ -3,6 +3,7 @@
 //! This module wires together parsing, type-checking, Lambda conversion, and
 //! JS IR codegen to produce JavaScript output.
 
+mod derived_check;
 mod type_clash;
 
 use crate::types::path::PathView;
@@ -297,11 +298,138 @@ fn publish_signature(
     Ok(Some(pers_struct))
 }
 
+/// The path derived items take: the switch `RESCRIPT_DERIVED_PATH`
+/// (`compiler-rust/docs/DERIVED_CODECS.md`, "The oracle"). It exists until
+/// every supported item is planned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DerivedPath {
+    /// Unset: the items the classifier supports are planned.
+    Plans,
+    /// `general`: the classifier keeps every item on the general path.
+    General,
+    /// `check`: a unit with a planned item is compiled both ways in the
+    /// same process, and a difference between the two fails its compile.
+    Check,
+}
+
+impl DerivedPath {
+    /// Read the switch once per process; later calls are O(1). A value that
+    /// is not one of the three ends the process with a message.
+    pub fn from_env() -> DerivedPath {
+        static PATH: std::sync::OnceLock<DerivedPath> = std::sync::OnceLock::new();
+        *PATH.get_or_init(|| match std::env::var("RESCRIPT_DERIVED_PATH").as_deref() {
+            Err(_) | Ok("") => DerivedPath::Plans,
+            Ok("general") => DerivedPath::General,
+            Ok("check") => DerivedPath::Check,
+            Ok(other) => {
+                eprintln!(
+                    "RESCRIPT_DERIVED_PATH is `{other}`; it is unset, `general` or `check`"
+                );
+                std::process::exit(2)
+            }
+        })
+    }
+}
+
+/// Unit checker selection; the old checker remains the default during construction.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CheckerChoice {
+    /// Use the existing checker.
+    #[default]
+    Old,
+    /// Offer units to the new checker first.
+    New,
+    /// Compare both checkers on covered units.
+    Both,
+}
+
+impl CheckerChoice {
+    /// O(1): parse one of three fixed-length mode names.
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "" | "old" => Some(Self::Old),
+            "new" => Some(Self::New),
+            "both" => Some(Self::Both),
+            _ => None,
+        }
+    }
+
+    /// O(1) after the first call; reads the environment once per process.
+    pub fn from_env() -> Self {
+        static CHOICE: std::sync::OnceLock<CheckerChoice> = std::sync::OnceLock::new();
+        *CHOICE.get_or_init(|| {
+            let value = std::env::var("RESCRIPT_CHECKER").unwrap_or_default();
+            Self::parse(&value).unwrap_or_else(|| {
+                eprintln!("checker choice must be old, new or both; got `{value}`");
+                std::process::exit(2)
+            })
+        })
+    }
+}
+
+#[cfg(test)]
+mod checker_choice_tests {
+    use super::CheckerChoice;
+
+    #[test]
+    fn checker_choice_names_and_layout() {
+        assert_eq!(std::mem::size_of::<CheckerChoice>(), 1);
+        assert_eq!(CheckerChoice::parse(""), Some(CheckerChoice::Old));
+        assert_eq!(CheckerChoice::parse("old"), Some(CheckerChoice::Old));
+        assert_eq!(CheckerChoice::parse("new"), Some(CheckerChoice::New));
+        assert_eq!(CheckerChoice::parse("both"), Some(CheckerChoice::Both));
+        assert_eq!(CheckerChoice::parse("other"), None);
+    }
+
+    #[test]
+    fn both_compares_fake_observations_but_does_not_force_declined_ones() {
+        use super::checker_results_agree;
+        use crate::tc::Declined;
+        // Signature, ordered diagnostics, and unit reads are independent observations.
+        let old = ("signature", "warning:1:2", [3, 5]);
+        assert!(checker_results_agree(Ok(old), || old));
+        assert!(!checker_results_agree(Ok(("different", old.1, old.2)), || old));
+        assert!(!checker_results_agree(Ok((old.0, "warning:2:3", old.2)), || old));
+        assert!(!checker_results_agree(Ok((old.0, old.1, [3, 6])), || old));
+        assert!(checker_results_agree::<()>(Err(Declined::NotBuilt), || panic!("declined")));
+    }
+}
+
+/// O(1) on a decline; otherwise the cost of producing and comparing observations.
+/// The old observations are lazy: declined units need no canonicalization.
+fn checker_results_agree<T: PartialEq>(
+    new: Result<T, crate::tc::Declined>,
+    old: impl FnOnce() -> T,
+) -> bool {
+    match new {
+        Err(crate::tc::Declined::NotBuilt) => true,
+        Ok(new) => new == old(),
+    }
+}
+
+/// O(1) per unit, before the old checker can emit warnings or publish anything.
+/// No successful new result exists in R0; Both's comparison is consequently empty.
+fn offer_unit_to_checker(choice: CheckerChoice, filename: &str) {
+    if choice == CheckerChoice::Old {
+        return;
+    }
+    let new = crate::tc::check_unit();
+    let Err(reason) = new;
+    log::debug!(target: "rescript_checker", "tc-declined {reason:?} {filename}");
+    if choice == CheckerChoice::Both {
+        assert!(checker_results_agree(new.map(|never| match never {}), || ()));
+    }
+}
+
 /// Compiler options that can be passed to the driver.
 #[derive(Clone)]
 pub struct CompilerOptions {
+    /// Selected once at setup; all modes currently use the old checker.
+    pub checker: CheckerChoice,
     /// Optional derived-code census output, read once when options are created.
     pub derived_census: Option<PathBuf>,
+    /// The path derived items take, read once when options are created.
+    pub derived_path: DerivedPath,
     /// Dormant backend migration mode, selected before compiling modules.
     pub backend: crate::bir::shadow::BackendMode,
     /// Dormant publication equality oracle; configured once, not per unit.
@@ -395,6 +523,9 @@ pub struct CompilerOptions {
     pub module_name: Option<String>,
     /// Current npm package name from `-bs-package-name`.
     pub package_name: Option<String>,
+    /// Source package root, used only to derive relocation-stable declaration
+    /// identities as package name plus the path within the package.
+    pub package_root: Option<PathBuf>,
     /// Compile the runtime package (`-make-runtime`).
     pub make_runtime: bool,
     /// Mirror `Clflags.assume_no_mli := Mli_exists` from `-bs-read-cmi`.
@@ -555,6 +686,28 @@ fn parse_diagnostics_report(parser: &Parser<'_>, source: &str, filename: &str) -
 }
 
 impl CompilerOptions {
+    /// O(path bytes), one owned identity per compilation when package metadata
+    /// exists, otherwise borrow the standalone filename. Never called per node.
+    fn location_identity<'a>(&self, filename: &'a str) -> std::borrow::Cow<'a, str> {
+        let (Some(package), Some(root)) = (&self.package_name, &self.package_root) else {
+            return std::borrow::Cow::Borrowed(filename);
+        };
+        // Package discovery supplies normalized roots and source paths. Check
+        // the separator boundary in bytes instead of walking every component
+        // again for every implementation/interface compilation.
+        let relative = root.to_str().and_then(|root| {
+            let suffix = filename.strip_prefix(root)?;
+            if root.ends_with(std::path::is_separator) || suffix.is_empty() {
+                Some(suffix)
+            } else {
+                suffix.strip_prefix(std::path::is_separator)
+            }
+        }).unwrap_or(filename);
+        #[cfg(windows)]
+        let relative = relative.replace('\\', "/");
+        std::borrow::Cow::Owned(format!("{package}/{relative}"))
+    }
+
     /// Read the census switch once per process. Subsequent option creation is
     /// O(1) when disabled, or O(path bytes) to copy an enabled output path.
     pub fn derived_census_from_env() -> Option<PathBuf> {
@@ -570,7 +723,9 @@ impl CompilerOptions {
 impl Default for CompilerOptions {
     fn default() -> Self {
         Self {
+            checker: CheckerChoice::from_env(),
             derived_census: Self::derived_census_from_env(),
+            derived_path: DerivedPath::from_env(),
             backend: crate::bir::shadow::BackendMode::from_env(),
             signature_check: crate::cmi::signature_check::SignatureCheck::from_env(),
             js_printer: crate::emit::PrinterMode::from_env(),
@@ -612,6 +767,7 @@ impl Default for CompilerOptions {
             nopervasives: false,
             module_name: None,
             package_name: None,
+            package_root: None,
             make_runtime: false,
             assume_compiled_interface: false,
             gentype_config: None,
@@ -6107,6 +6263,9 @@ pub fn run_implementation_frontend(
     )
     .map_err(|err| ppx_error_to_anyhow(err, parser.arena(), source, filename))?;
     parser.arena_mut().set_builtin_spice(options.builtin_spice());
+    parser
+        .arena_mut()
+        .set_derived_plans(options.derived_path != DerivedPath::General);
     let frontend_warnings =
         ppx::collect_leading_builtin_warning_attributes(&structure, parser.arena())
             .map_err(|err| ppx_error_to_anyhow(err, parser.arena(), source, filename))?;
@@ -6301,7 +6460,7 @@ fn compile_source_to_js_with_options_inner(
 
     // Type check
     let type_ctx = fresh_type_context();
-    type_ctx.set_location_namespace(filename);
+    type_ctx.set_location_namespace(&options.location_identity(filename));
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
@@ -6313,9 +6472,6 @@ fn compile_source_to_js_with_options_inner(
         apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
     }
     apply_file_config_warning_options(&mut tctx, &file_config);
-    let mut env = initial_env(&type_ctx);
-
-    // Load Pervasives and extend the initial environment
     let mut pers_env = PersistentEnv::new();
     let (load_path, load_path_display) = shared_load_path_with_display(options);
     type_ctx.set_load_paths_shared(load_path.clone());
@@ -6326,48 +6482,49 @@ fn compile_source_to_js_with_options_inner(
     pers_env.set_jsx_module(options.jsx_module.clone());
     let current_unit_name = options.current_unit_name();
     pers_env.set_compiling_module(current_unit_name.clone());
-    load_pervasives(
-        &mut pers_env,
-        &mut env,
-        &type_ctx,
-        &file_config.open_modules(options),
-        file_config.nopervasives(options),
-        current_unit_name.as_deref(),
-    );
 
     // Store persistent env in the type check context for module resolution
     tctx.set_persistent_env(pers_env);
 
-    let (typed_structure, final_env) =
-        match type_structure(&mut tctx, &env, parser.arena(), &structure) {
-            Ok(result) => result,
-            Err(e) => {
-                // OCaml compiler/ext/misc.ml:337-392: `Color.color_enabled`
-                // starts as `true` and takes the configured `-color` value at
-                // the first `Location.setup_colors` (location.ml:45-47), which
-                // printing a warning triggers. Messages formatted afterwards
-                // only carry style escapes when colors are enabled.
-                tctx.drain_open_slot_uses();
-                let suppress_info_style =
-                    !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
-                emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
-                if let Some(error) = tctx
-                    .persistent_env
-                    .as_ref()
-                    .and_then(|persistent_env| persistent_env.last_error())
-                {
-                    return Err(persistent_env_error_to_anyhow(error, filename));
-                }
-                return Err(type_mod_error_to_anyhow(
-                    e,
-                    &type_ctx,
-                    parser.arena(),
-                    source,
-                    filename,
-                    suppress_info_style,
-                ));
+    let typed = initial_type_env(
+        &mut tctx,
+        &file_config.open_modules(options),
+        file_config.nopervasives(options),
+        current_unit_name.as_deref(),
+    )
+    .and_then(|env| {
+        offer_unit_to_checker(options.checker, filename);
+        type_structure(&mut tctx, &env, parser.arena(), &structure).map(|typed| (typed, env))
+    });
+    let ((typed_structure, final_env), env) = match typed {
+        Ok(result) => result,
+        Err(e) => {
+            // OCaml compiler/ext/misc.ml:337-392: `Color.color_enabled`
+            // starts as `true` and takes the configured `-color` value at
+            // the first `Location.setup_colors` (location.ml:45-47), which
+            // printing a warning triggers. Messages formatted afterwards
+            // only carry style escapes when colors are enabled.
+            tctx.drain_open_slot_uses();
+            let suppress_info_style =
+                !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
+            emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+            if let Some(error) = tctx
+                .persistent_env
+                .as_ref()
+                .and_then(|persistent_env| persistent_env.last_error())
+            {
+                return Err(persistent_env_error_to_anyhow(error, filename));
             }
-        };
+            return Err(type_mod_error_to_anyhow(
+                e,
+                &type_ctx,
+                parser.arena(),
+                source,
+                filename,
+                suppress_info_style,
+            ));
+        }
+    };
     if let Some(error) = tctx
         .persistent_env
         .as_ref()
@@ -7553,7 +7710,7 @@ pub fn typecheck_interface_source(
 
     // Type check
     let type_ctx = fresh_type_context();
-    type_ctx.set_location_namespace(filename);
+    type_ctx.set_location_namespace(&options.location_identity(filename));
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
@@ -7565,9 +7722,6 @@ pub fn typecheck_interface_source(
         apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
     }
     apply_file_config_warning_options(&mut tctx, &file_config);
-    let mut env = initial_env(&type_ctx);
-
-    // Load Pervasives and extend the initial environment
     let mut pers_env = PersistentEnv::new();
     let (load_path, load_path_display) = shared_load_path_with_display(options);
     type_ctx.set_load_paths_shared(load_path.clone());
@@ -7578,19 +7732,22 @@ pub fn typecheck_interface_source(
     pers_env.set_jsx_module(options.jsx_module.clone());
     let current_unit_name = options.current_unit_name();
     pers_env.set_compiling_module(current_unit_name.clone());
-    load_pervasives(
-        &mut pers_env,
-        &mut env,
-        &type_ctx,
-        &file_config.open_modules(options),
-        file_config.nopervasives(options),
-        current_unit_name.as_deref(),
-    );
 
     tctx.set_persistent_env(pers_env);
 
-    let typed_signature = match transl_signature(&mut tctx, &env, parser.arena(), &signature) {
-        Ok(typed_signature) => typed_signature,
+    let typed = initial_type_env(
+        &mut tctx,
+        &file_config.open_modules(options),
+        file_config.nopervasives(options),
+        current_unit_name.as_deref(),
+    )
+    .and_then(|env| {
+        offer_unit_to_checker(options.checker, filename);
+        transl_signature(&mut tctx, &env, parser.arena(), &signature)
+            .map(|typed_signature| (typed_signature, env))
+    });
+    let (typed_signature, env) = match typed {
+        Ok(typed) => typed,
         Err(e) => {
             // See the implementation path above (compiler/ext/misc.ml:337-392).
             tctx.drain_open_slot_uses();
@@ -7878,98 +8035,57 @@ fn normalize_lexical_path(path: PathBuf) -> PathBuf {
     }
 }
 
-/// Load the Pervasives and Stdlib modules into the initial environment.
+/// Build the initial environment of a compile: the predefined types, the
+/// implicit Pervasives and Stdlib opens and the explicit `-open` modules.
 ///
-/// This is equivalent to OCaml's `res_compmisc.ml:initial_env()` which loads
-/// Pervasives.cmi and Stdlib.cmi and opens them into the environment.
+/// This is OCaml's `Res_compmisc.initial_env` (compiler/core/res_compmisc.ml:48-66).
+/// It reads modules through `tctx`'s persistent environment, which must be set.
 ///
 /// When `nopervasives` is true (matching OCaml's `-nopervasives` flag), the
 /// implicit Pervasives and Stdlib opens are skipped. This is used by
 /// `@rescript/runtime` modules which bootstrap Pervasives themselves.
 ///
-/// When `compiling_module` is `Some(name)`, any explicit `-open` that matches
-/// that module name is skipped to prevent circular self-loading (matching
-/// OCaml's `res_compmisc.ml:initial_env` which filters `modulename` from
-/// `open_modules`).
-pub fn load_pervasives(
-    pers_env: &mut PersistentEnv,
-    env: &mut Env,
-    ctx: &TypeContext,
+/// The `-open` modules are opened in argument order. When `compiling_module`
+/// is `Some(name)`, an `-open` of that module is skipped to prevent circular
+/// self-loading (OCaml filters `modulename` from `open_modules`). A module
+/// that cannot be found stops the compile with an error located at "command
+/// line", as in OCaml.
+pub fn initial_type_env(
+    tctx: &mut TypeCheckContext<'_>,
     open_modules: &[String],
     nopervasives: bool,
     compiling_module: Option<&str>,
-) {
-    if !nopervasives {
-        // Try to load and open Pervasives
-        if pers_env.open_module(
-            "Pervasives",
-            crate::types::Path::pident(crate::ident::Ident::create_persistent("Pervasives")),
-            env,
-            ctx,
-            None,
-        ) {
-            env.mark_implicit_open_root("Pervasives");
-            // OCaml `Res_compmisc.initial_env` opens implicit modules through
-            // `type_open` (compiler/core/res_compmisc.ml:48-63). In in-process
-            // and standalone builds alike, that reaches Env.open_signature at
-            // compiler/ml/env.ml:1874-1877, which adds opened components but
-            // not a root `Pervasives` module binding. Keep the raw signature
-            // registered for ps_comps-style descriptor lookup without changing
-            // source module lookup shape.
-            register_opened_raw_sig(pers_env, ctx, "Pervasives");
-        }
-
-        // Try to load and open Stdlib
-        if pers_env.open_module(
-            "Stdlib",
-            crate::types::Path::pident(crate::ident::Ident::create_persistent("Stdlib")),
-            env,
-            ctx,
-            None,
-        ) {
-            env.mark_implicit_open_root("Stdlib");
-            // Same implicit-open behavior as above; keep the opened bindings,
-            // but let explicit module lookup use the persistent registry.
-            register_opened_raw_sig(pers_env, ctx, "Stdlib");
-        }
-    }
-
-    // Apply explicit `-open` modules in argument order, skipping self-opens.
-    for module_name in open_modules {
-        if let Some(compiling) = compiling_module {
-            if module_name == compiling {
-                continue;
+) -> crate::types::typemod::TypeModResult<Env> {
+    let ctx = tctx.type_ctx;
+    let mut env = initial_env(ctx);
+    if !nopervasives && let Some(pers_env) = tctx.persistent_env.as_mut() {
+        for name in ["Pervasives", "Stdlib"] {
+            if pers_env.open_module(
+                name,
+                crate::types::Path::pident(crate::ident::Ident::create_persistent(name)),
+                &mut env,
+                ctx,
+                None,
+            ) {
+                env.mark_implicit_open_root(name);
+                // OCaml `Res_compmisc.initial_env` opens implicit modules
+                // through `type_open` (compiler/core/res_compmisc.ml:48-63). In
+                // in-process and standalone builds alike, that reaches
+                // Env.open_signature at compiler/ml/env.ml:1874-1877, which
+                // adds opened components but not a root module binding. Keep
+                // the raw signature registered for ps_comps-style descriptor
+                // lookup without changing source module lookup shape.
+                pers_env.register_opened_raw_sig(ctx, name);
             }
         }
-        if pers_env.open_module(
-            module_name,
-            crate::types::Path::pident(crate::ident::Ident::create_persistent(module_name.as_str())),
-            env,
-            ctx,
-            None,
-        ) {
-            // OCaml compiler/core/res_compmisc.ml:42-66 applies command-line
-            // `-open` modules through Typemod.type_open_ (typemod.ml:83-96),
-            // which calls Env.open_signature (env.ml:1874-1877). That exposes
-            // opened components but does not install a root module binding, so
-            // later Env.normalize_path can still reach the persistent-root
-            // force path through env.ml:903-914.
-            register_opened_raw_sig(pers_env, ctx, module_name);
+    }
+    for module_name in open_modules {
+        if compiling_module == Some(module_name.as_str()) {
+            continue;
         }
+        crate::types::typemod::type_command_line_open(tctx, &mut env, module_name)?;
     }
-}
-
-/// Keep an opened module's raw signature registered for ps_comps-style
-/// descriptor lookup (disk mode only).
-fn register_opened_raw_sig(pers_env: &mut PersistentEnv, ctx: &TypeContext, name: &str) {
-    if pers_env.is_in_process_mode() {
-        return;
-    }
-    if let Some(md) = pers_env.get_module_declaration(name, ctx) {
-        if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-            ctx.register_raw_module_sig(name, sig.clone());
-        }
-    }
+    Ok(env)
 }
 
 use crate::types::env::Env;
@@ -8155,7 +8271,26 @@ fn moregen_link_structure(
             crate::types::typedtree::StructureItemDesc::Tstr_module(mb) => {
                 moregen_link_mod_expr(type_ctx, ta, ta.module_expr(mb.mb_expr), iface_val_types);
             }
-            _ => {}
+            // A derived binding is a `let` of a variable bound to a function.
+            crate::types::typedtree::StructureItemDesc::Tstr_derived(idx) => {
+                for bound in ta.derived.bound(*idx) {
+                    let Some(&iface_ty) = iface_val_types.get(bound.ident.name()) else {
+                        continue;
+                    };
+                    let iface_inst = crate::types::ctype::instance(type_ctx, iface_ty);
+                    moregen_link(type_ctx, bound.ty, iface_inst, &mut ahash::AHashSet::new());
+                }
+            }
+            crate::types::typedtree::StructureItemDesc::Tstr_eval(..)
+            | crate::types::typedtree::StructureItemDesc::Tstr_primitive(_)
+            | crate::types::typedtree::StructureItemDesc::Tstr_type(..)
+            | crate::types::typedtree::StructureItemDesc::Tstr_typext(_)
+            | crate::types::typedtree::StructureItemDesc::Tstr_exception(_)
+            | crate::types::typedtree::StructureItemDesc::Tstr_recmodule(_)
+            | crate::types::typedtree::StructureItemDesc::Tstr_modtype(_)
+            | crate::types::typedtree::StructureItemDesc::Tstr_open(_)
+            | crate::types::typedtree::StructureItemDesc::Tstr_include(_)
+            | crate::types::typedtree::StructureItemDesc::Tstr_attribute(_) => {}
         }
     }
 }
@@ -9310,6 +9445,10 @@ pub struct InProcessPreJsCompileResult {
     /// What the typed tree read of other units (with
     /// `CompilerOptions::collect_unit_reads`).
     pub unit_reads: Vec<crate::cmi::item_deps::UnitRead>,
+    /// With `RESCRIPT_DERIVED_PATH=check`, the same unit compiled from the
+    /// general forms of its derived items; the JS backend runs on both and
+    /// compares what they produce.
+    pub derived_reference: Option<Box<InProcessPreJsCompileResult>>,
 }
 
 /// The `.cmj` metadata of an in-process compile, available after the JS
@@ -10086,7 +10225,8 @@ fn fresh_type_context() -> TypeContext {
 /// The type-checking context and initial environment an in-process
 /// implementation or interface is typed in: the registry's units are the persistent
 /// environment, Pervasives (and `-open`s) opened as `Res_compmisc.initial_env`
-/// does (res_compmisc.ml:56-62).
+/// does (res_compmisc.ml:56-62). The environment is an error when an `-open`
+/// module cannot be found; report it like a type error of the unit.
 fn in_process_type_check_context<'a>(
     type_ctx: &'a TypeContext,
     arena: &'a crate::parse_arena::ParseArena,
@@ -10095,7 +10235,10 @@ fn in_process_type_check_context<'a>(
     module_name: &str,
     file_config: &FileConfigOverrides,
     frontend_warning_specs: &[ppx::WarningAttributeSpec],
-) -> (TypeCheckContext<'a>, Env) {
+) -> (
+    TypeCheckContext<'a>,
+    crate::types::typemod::TypeModResult<Env>,
+) {
     let effective_options = file_config.apply(options);
     let options = &*effective_options;
     let mut tctx = TypeCheckContext::new(type_ctx, arena);
@@ -10108,8 +10251,6 @@ fn in_process_type_check_context<'a>(
         apply_leading_warning_attribute_options(&mut tctx, frontend_warning_specs);
     }
     apply_file_config_warning_options(&mut tctx, file_config);
-    let mut env = initial_env(type_ctx);
-
     let mut pers_env = PersistentEnv::from_registry(registry);
     pers_env.set_visible_package_roots(options.visible_package_roots.clone());
     let (load_path, load_path_display) = shared_load_path_with_display(options);
@@ -10121,15 +10262,13 @@ fn in_process_type_check_context<'a>(
     pers_env.set_jsx_module(options.jsx_module.clone());
     pers_env.set_nopervasives(options.nopervasives);
     pers_env.set_compiling_module(Some(module_name.to_string()));
-    load_pervasives(
-        &mut pers_env,
-        &mut env,
-        type_ctx,
+    tctx.set_persistent_env(pers_env);
+    let env = initial_type_env(
+        &mut tctx,
         &file_config.open_modules(options),
         file_config.nopervasives(options),
         Some(module_name),
     );
-    tctx.set_persistent_env(pers_env);
     (tctx, env)
 }
 
@@ -10171,7 +10310,7 @@ pub fn typecheck_structure_for_tooling(
         ppx::collect_leading_builtin_warning_attribute_specs(structure, arena)
             .expect("the frontend read these attributes");
     let type_ctx = fresh_type_context();
-    type_ctx.set_location_namespace(filename);
+    type_ctx.set_location_namespace(&options.location_identity(filename));
     let (typed, typed_arena) = {
         let (mut tctx, env) = in_process_type_check_context(
             &type_ctx,
@@ -10182,7 +10321,8 @@ pub fn typecheck_structure_for_tooling(
             &file_config,
             &frontend_warning_specs,
         );
-        let typed = match type_structure(&mut tctx, &env, arena, structure) {
+        offer_unit_to_checker(options.checker, filename);
+        let typed = match env.and_then(|env| type_structure(&mut tctx, &env, arena, structure)) {
             Ok((typed_structure, _final_env)) => ToolingTyped::Implementation(typed_structure),
             Err(e) => {
                 let source = read_in_process_source(filename);
@@ -10222,7 +10362,7 @@ pub fn typecheck_signature_for_tooling(
         ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena)
             .expect("the frontend read these attributes");
     let type_ctx = fresh_type_context();
-    type_ctx.set_location_namespace(filename);
+    type_ctx.set_location_namespace(&options.location_identity(filename));
     let (typed, typed_arena) = {
         let (mut tctx, env) = in_process_type_check_context(
             &type_ctx,
@@ -10233,7 +10373,8 @@ pub fn typecheck_signature_for_tooling(
             &file_config,
             &frontend_warning_specs,
         );
-        let typed = match transl_signature(&mut tctx, &env, arena, signature) {
+        offer_unit_to_checker(options.checker, filename);
+        let typed = match env.and_then(|env| transl_signature(&mut tctx, &env, arena, signature)) {
             Ok(typed_signature) => ToolingTyped::Interface(typed_signature),
             Err(e) => {
                 let source = read_in_process_source(filename);
@@ -10274,9 +10415,56 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     registry: &ModuleRegistry,
     has_interface: bool,
     gentype_interface: Option<crate::gentype::main::InterfaceRead>,
-    mut signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
+    signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
     publication: SignaturePublicationMode,
 ) -> Result<InProcessPreJsCompileResult> {
+    let unit = UntilJs {
+        arena,
+        structure,
+        filename,
+        module_name,
+        registry,
+        has_interface,
+        publication,
+    };
+    // O(1): one comparison per unit; only `check` compiles a unit twice.
+    if options.derived_path == DerivedPath::Check && arena.plans().item_count() > 0 {
+        return derived_check::until_js(&unit, options, gentype_interface, signature_ready);
+    }
+    compile_until_js(&unit, options, gentype_interface, signature_ready, true)
+}
+
+/// The unit an in-process compile works on.
+struct UntilJs<'a> {
+    arena: &'a crate::parse_arena::ParseArena,
+    structure: &'a Structure,
+    filename: &'a str,
+    module_name: &'a str,
+    registry: &'a ModuleRegistry,
+    has_interface: bool,
+    publication: SignaturePublicationMode,
+}
+
+/// [`compile_preprocessed_structure_in_process_until_js`] for one path of
+/// the unit's derived items: from their plans (`derived_plans`), or, for the
+/// reference compile of `RESCRIPT_DERIVED_PATH=check`, from their general
+/// forms.
+fn compile_until_js(
+    unit: &UntilJs<'_>,
+    options: &CompilerOptions,
+    gentype_interface: Option<crate::gentype::main::InterfaceRead>,
+    mut signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
+    derived_plans: bool,
+) -> Result<InProcessPreJsCompileResult> {
+    let UntilJs {
+        arena,
+        structure,
+        filename,
+        module_name,
+        registry,
+        has_interface,
+        publication,
+    } = *unit;
     if !arena.stores_locations()
         && (options.source_map != crate::js_ir::source_map::SourceMapMode::None
             || options.capture_intermediates
@@ -10315,7 +10503,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let env_setup_span = info_span!("compiler.env_setup").entered();
     let env_setup_start = crate::timing::enabled().then(std::time::Instant::now);
     let type_ctx = fresh_type_context();
-    type_ctx.set_location_namespace(filename);
+    type_ctx.set_location_namespace(&options.location_identity(filename));
     let (mut tctx, env) = in_process_type_check_context(
         &type_ctx,
         arena,
@@ -10325,7 +10513,11 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         &file_config,
         &frontend_warning_specs,
     );
-    tctx.derived_census = arena.derived_census.clone();
+    tctx.derived_plans = derived_plans;
+    // The reference compile of a check is not part of the census.
+    if derived_plans {
+        tctx.derived_census = arena.derived_census.clone();
+    }
     drop(env_setup_span);
     if let Some(start) = env_setup_start {
         crate::timing::record(crate::timing::Phase::EnvSetup, start.elapsed());
@@ -10338,9 +10530,12 @@ pub fn compile_preprocessed_structure_in_process_until_js(
 
     let typed = crate::timing::measure(crate::timing::Phase::Typecheck, || {
         let _phase = info_span!("compiler.type_structure").entered();
-        type_structure(&mut tctx, &env, arena, structure)
+        env.and_then(|env| {
+            offer_unit_to_checker(options.checker, filename);
+            type_structure(&mut tctx, &env, arena, structure).map(|typed| (typed, env))
+        })
     });
-    let (typed_structure, final_env) = match typed {
+    let ((typed_structure, final_env), env) = match typed {
         Ok(result) => result,
         Err(e) => {
             // As in the file compile: the warnings reported so far precede
@@ -11078,6 +11273,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             .as_ref()
             .map(PersistentEnv::loaded_units)
             .unwrap_or_default(),
+        derived_reference: None,
     })
 }
 
@@ -11097,6 +11293,53 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary(
 /// [`finish_preprocessed_structure_in_process_from_js_boundary`], handing
 /// the `.cmj` metadata to `metadata_ready` before the JavaScript is printed.
 pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_hook(
+    mut pre_js: InProcessPreJsCompileResult,
+    options: &CompilerOptions,
+    registry: &ModuleRegistry,
+    metadata_ready: Option<&mut InProcessJsMetadataReadyHook<'_>>,
+) -> Result<InProcessCompileResult> {
+    // O(1): absent unless `RESCRIPT_DERIVED_PATH=check` compiled a unit
+    // with a planned item.
+    let Some(reference) = pre_js.derived_reference.take() else {
+        return finish_from_js_boundary(pre_js, options, registry, metadata_ready);
+    };
+    let unit = options.module_name.as_deref().unwrap_or("");
+    let reference = finish_from_js_boundary(*reference, options, registry, None)?;
+    let result = match metadata_ready {
+        // The hook takes the export summary: compare what it is handed.
+        Some(forward) => {
+            let mut hook = |metadata: InProcessJsMetadataReady| {
+                derived_check::compare_exports(
+                    unit,
+                    metadata.is_pure,
+                    &metadata.cmj_export_constants,
+                    &metadata.cmj_export_arities,
+                    &metadata.cmj_export_lambdas,
+                    &reference,
+                )?;
+                forward(metadata)
+            };
+            finish_from_js_boundary(pre_js, options, registry, Some(&mut hook))?
+        }
+        None => {
+            let result = finish_from_js_boundary(pre_js, options, registry, None)?;
+            derived_check::compare_exports(
+                unit,
+                result.is_pure,
+                &result.cmj_export_constants,
+                &result.cmj_export_arities,
+                &result.cmj_export_lambdas,
+                &reference,
+            )?;
+            result
+        }
+    };
+    derived_check::compare_js(unit, &result, &reference)?;
+    Ok(result)
+}
+
+/// The JS backend and printer of one pre-JS result.
+fn finish_from_js_boundary(
     mut pre_js: InProcessPreJsCompileResult,
     options: &CompilerOptions,
     registry: &ModuleRegistry,
@@ -11371,7 +11614,7 @@ pub fn typecheck_preprocessed_signature_in_process(
             .expect("the frontend read these attributes");
 
     let type_ctx = fresh_type_context();
-    type_ctx.set_location_namespace(filename);
+    type_ctx.set_location_namespace(&options.location_identity(filename));
     let (mut tctx, env) = in_process_type_check_context(
         &type_ctx,
         arena,
@@ -11389,9 +11632,13 @@ pub fn typecheck_preprocessed_signature_in_process(
 
     let typed = crate::timing::measure(crate::timing::Phase::Typecheck, || {
         let _phase = info_span!("compiler.type_signature").entered();
-        transl_signature(&mut tctx, &env, arena, signature)
+        env.and_then(|env| {
+            offer_unit_to_checker(options.checker, filename);
+            transl_signature(&mut tctx, &env, arena, signature)
+                .map(|typed_signature| (typed_signature, env))
+        })
     });
-    let typed_signature = match typed {
+    let (typed_signature, env) = match typed {
         Ok(typed_signature) => typed_signature,
         Err(e) => {
             // As in the file compile: the warnings reported so far precede
@@ -12369,5 +12616,28 @@ let value: M.t = {M.x: 3, y: 4}
                 "second directive;".to_string()
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod package_location_identity_tests {
+    use super::*;
+
+    #[test]
+    fn package_relative_identity_survives_relocation_without_collisions() {
+        let mut options = CompilerOptions {
+            package_name: Some("@rescript/runtime".into()),
+            package_root: Some(PathBuf::from("build/runtime")),
+            ..Default::default()
+        };
+        assert_eq!(options.location_identity("build/runtime/src/Module.res"), "@rescript/runtime/src/Module.res");
+        assert_eq!(options.location_identity("build/runtime-other/Module.res"), "@rescript/runtime/build/runtime-other/Module.res");
+        assert_eq!(options.location_identity("src/Module.res"), "@rescript/runtime/src/Module.res");
+        options.package_root = Some(PathBuf::from("installed/runtime"));
+        assert_eq!(options.location_identity("installed/runtime/src/Module.res"), "@rescript/runtime/src/Module.res");
+        assert_ne!(options.location_identity("installed/runtime/src/Module.resi"), options.location_identity("installed/runtime/src/Module.res"));
+        assert_ne!(options.location_identity("installed/runtime/other/Module.res"), options.location_identity("installed/runtime/src/Module.res"));
+        options.package_name = Some("other-package".into());
+        assert_eq!(options.location_identity("installed/runtime/src/Module.res"), "other-package/src/Module.res");
     }
 }

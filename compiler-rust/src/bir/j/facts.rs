@@ -144,3 +144,46 @@ pub(crate) fn runs_no_code(b: &Bir, mut id: NodeId) -> bool {
         }
     }
 }
+
+/// A:28 delay_safe. O(immediate operands), reading already-constructed child
+/// facts rather than rescanning arithmetic/literal trees during sequencing.
+/// Unlike purity, arbitrary property reads are not safe to defer.
+pub(crate) fn delay_safe(b: &Bir, id: NodeId) -> bool {
+    let safe = |node| b.node(node).flags().contains(NodeFlags::DELAY_SAFE);
+    match b.view(id) {
+        View::Var { var } => !b.vars.flags(var).contains(crate::bir::VarFlags::ASSIGNED)
+            && !b.vars.flags(var).contains(crate::bir::VarFlags::JS_GLOBAL),
+        View::JUndefined | View::JNull | View::JBool | View::JNumber { .. }
+        | View::JStr { .. } | View::JJson { .. } | View::JFun { .. }
+        | View::JQualified { .. } => true,
+        View::JBin { left, right } => b.node(id).aux() != BinOp::Eq as u16
+            && b.node(id).flags().contains(NodeFlags::PURE) && safe(left) && safe(right),
+        View::JStrAppend { left, right } => safe(left) && safe(right),
+        View::JNot { value } | View::JBnot { value } | View::JTypeof { value }
+        | View::JIsNullish { value } | View::JOptional { value } => safe(value),
+        View::JCond { condition, then_, else_ } => safe(condition) && safe(then_) && safe(else_),
+        View::JTemplate { values, .. } | View::JArray { values } | View::JBlockLit { values, .. } => values.iter().all(|&v| safe(v)),
+        View::JObject { values, info } => {
+            let JsPayload::Object(keys) = b.javascript(info) else { unreachable!("object keys") };
+            keys.iter().zip(values).all(|(k,&v)| !matches!(k,PropertyKey::Spread | PropertyKey::RecordSpread) && safe(v))
+        }
+        // Calls, property accesses, assignment, and statement/L nodes do not
+        // establish this J-only fact.
+        _ => false,
+    }
+}
+
+/// X:60 duplicable. O(1): at most three immediate cached operand reads.
+/// Template literals are duplicable regardless of their interpolations, as in X.
+pub(crate) fn external_duplicable(b: &Bir, id: NodeId) -> bool {
+    let child = |node: NodeId| b.j_duplicable.get(node.index()).copied().unwrap_or(false);
+    match b.view(id) {
+        View::JUndefined | View::JBool | View::JNumber { .. } | View::JStr { .. }
+        | View::JTemplate { .. } | View::JQualified { .. } => true,
+        View::Var { var } => !b.vars.flags(var).contains(crate::bir::VarFlags::JS_GLOBAL),
+        View::JDot { object, position, .. } => position.get().is_some() && child(object),
+        View::JIndex { object, index } => child(object) && child(index),
+        View::JCond { condition, then_, else_ } => child(condition) && child(then_) && child(else_),
+        _ => false,
+    }
+}

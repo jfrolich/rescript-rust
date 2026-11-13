@@ -21,7 +21,6 @@
 use super::context::TypeNodes;
 use super::type_expr::{AbbrevMemo, AbbrevMemoRef, RowField, RowFieldRef, TypeDesc, TypeExprRef};
 use super::variant_runtime::{Layout, LayoutRef};
-use crate::fast_hash::AHashMap as HashMap;
 use crate::intern::StrIdx;
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
@@ -66,14 +65,11 @@ pub(crate) fn next_store_stamp() -> i32 {
     STORE_STAMP.fetch_add(1, Ordering::Relaxed) + 1
 }
 
-/// A persistent-rooted component view and the replay record of building it.
-type SharedComponents = (
-    Rc<crate::types::env_lazy::QualifiedModuleComponents>,
-    Rc<crate::types::context::StorePiece>,
-);
-
 /// Shared dependency state for one worker thread.
 pub(crate) struct ThreadTypeStore {
+    /// The private store of a view build's scratch context: dropped with
+    /// it, never kept as the worker's store.
+    scratch: bool,
     types: TypeNodes,
     /// Initial memo values of store `Tconstr` nodes (always `Mnil` after
     /// internalization, like `compiler/ml/subst.ml:173-177` on save). Writes go
@@ -83,14 +79,10 @@ pub(crate) struct ThreadTypeStore {
     type_lists: super::type_expr::TypePayloadPool,
     variant_layouts: RefCell<Vec<Layout>>,
     next_type_id: Cell<i32>,
-    /// Component views of persistent-rooted module paths built as store
-    /// builds, with the replay record of building them (OCaml builds such a
-    /// view once per process, from `Env.empty`: compiler/ml/env.ml:669-678).
-    shared_components: RefCell<
-        HashMap<crate::types::context::QualifiedModuleComponentsCacheKey, SharedComponents>,
-    >,
     /// The `lbl_all` arrays built during store builds (`LabelArrayRef::store`).
     label_families: RefCell<Vec<Arc<Vec<crate::types::decl::LabelDescription>>>>,
+    /// What this worker derived from each world view, by view id.
+    view_tables: RefCell<Vec<Option<Rc<crate::types::env_lazy::ViewTables>>>>,
     generation: u64,
     /// The build's world; holding it keeps every frozen node this store's
     /// data refers to alive.
@@ -105,18 +97,29 @@ impl ThreadTypeStore {
 
 
     fn new() -> Self {
+        Self::with_storage(
+            TypeNodes::new(),
+            super::type_expr::TypePayloadPool::with_tag(super::type_expr::STORE_REF_TAG),
+            false,
+        )
+    }
+
+    fn with_storage(
+        types: TypeNodes,
+        type_lists: super::type_expr::TypePayloadPool,
+        scratch: bool,
+    ) -> Self {
         let generation = BUILD_GENERATION.load(Ordering::SeqCst);
         ThreadTypeStore {
-            types: TypeNodes::new(),
+            scratch,
+            types,
             abbrevs: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
-            type_lists: super::type_expr::TypePayloadPool::with_tag(
-                super::type_expr::STORE_REF_TAG,
-            ),
+            type_lists,
             variant_layouts: RefCell::new(Vec::new()),
             next_type_id: Cell::new(STORE_TYPE_ID_BASE),
-            shared_components: RefCell::new(HashMap::new()),
             label_families: RefCell::new(Vec::new()),
+            view_tables: RefCell::new(Vec::new()),
             generation,
             world: super::world::World::current(),
             decl_locs: Default::default(),
@@ -215,26 +218,20 @@ impl ThreadTypeStore {
         self.world.pool()
     }
 
-    pub(crate) fn shared_components(
+    /// This worker's tables for `view`, created on first use. One read of
+    /// a table indexed by the view's id.
+    pub(crate) fn view_tables(
         &self,
-        key: &crate::types::context::QualifiedModuleComponentsCacheKey,
-    ) -> Option<(
-        Rc<crate::types::env_lazy::QualifiedModuleComponents>,
-        Rc<crate::types::context::StorePiece>,
-    )> {
-        self.shared_components.borrow().get(key).cloned()
-    }
-
-    pub(crate) fn publish_shared_components(
-        &self,
-        key: crate::types::context::QualifiedModuleComponentsCacheKey,
-        components: Rc<crate::types::env_lazy::QualifiedModuleComponents>,
-        piece: Rc<crate::types::context::StorePiece>,
-    ) {
-        self.shared_components
-            .borrow_mut()
-            .entry(key)
-            .or_insert((components, piece));
+        view: &crate::types::module_view::ModuleView,
+    ) -> Rc<crate::types::env_lazy::ViewTables> {
+        let index = view.id().index();
+        let mut tables = self.view_tables.borrow_mut();
+        if tables.len() <= index {
+            tables.resize(index + 1, None);
+        }
+        tables[index]
+            .get_or_insert_with(|| Rc::new(crate::types::env_lazy::ViewTables::new(view)))
+            .clone()
     }
 
     /// Store a label array built during a store build; its index for
@@ -471,7 +468,7 @@ impl Deref for StoreLease {
 impl Drop for StoreLease {
     fn drop(&mut self) {
         // A panic may leave a mark traversal unfinished. Do not reuse its graph.
-        if !std::thread::panicking() {
+        if !std::thread::panicking() && !self.scratch {
             let store = self.0.take();
             // TLS may already be gone during thread shutdown.
             let _returned = THREAD_TYPE_STORE.try_with(|slot| slot.replace(store));
@@ -485,6 +482,18 @@ impl Drop for StoreLease {
 fn fresh_store_per_compilation() -> bool {
     static FRESH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FRESH.get_or_init(|| std::env::var_os("RESCRIPT_FRESH_STORE").is_some())
+}
+
+/// The private store of a view build's scratch context: empty, ladder-only
+/// (no first array is initialised) and dropped with the context, so the
+/// worker's own store, leased by the compilation that started the build,
+/// is not replaced. One store is created per view build.
+pub(crate) fn scratch() -> StoreLease {
+    StoreLease(Some(Box::new(ThreadTypeStore::with_storage(
+        TypeNodes::ladder_only(),
+        super::type_expr::TypePayloadPool::ladder_only(super::type_expr::STORE_REF_TAG),
+        true,
+    ))))
 }
 
 pub(crate) fn current() -> StoreLease {

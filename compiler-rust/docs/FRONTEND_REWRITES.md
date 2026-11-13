@@ -14,7 +14,7 @@ entry points. `check::Checker` validates the original tree before mapping;
 just because a node's successful rewrite is the identity.
 
 JSX lowering is a separate parser frontend mapper (`parser/jsx_ppx.rs`);
-`ppx::rewrite_jsx_element` only recursively maps its expressions. Derives enter
+the `Pexp_jsx_element` arm of `ppx::rewrite_expr` only recursively maps its expressions. Derives enter
 through `binary_ast::derive`, which delegates to `spice_ppx` on the current tree.
 External executable PPXs are not part of this pipeline.
 
@@ -33,16 +33,16 @@ claims that these moves have been implemented.
 | Relative-path module external | Constrained include containing external, preventing cross-module inlining | `rewrite_structure_item_no_spice`, `check_decl`, `is_package_relative_path` | Declaration's module source | Checker declaration entry |
 | `@inline` single nonrecursive constant binding | Inline external primitive | `transform_inline_binding`, `inline_string_semantic` | Binding pattern, recursiveness; semantic literal text | Parser completed binding or checker binding entry |
 | `@inline(value)` signature value | Inline external primitive | `transform_inline_sig_value` | Declared type and payload | Checker signature value entry |
-| Integer expression with `l` suffix | Integer without suffix; original attributes retained | `rewrite_expr` | None | Parser literal completion |
-| Integer pattern with `l` suffix | Pattern constant without suffix | `rewrite_pattern` | None | Parser pattern completion |
+| Integer expression with `l` suffix | Original node retained; digits read by `Constant::integer_digits` | `typecore::convert_constant`, `check_constant`, inline constant consumers | None | Direct (implemented) |
+| Integer pattern with `l` suffix | Original pattern handle retained; same digit accessor | `typecore::convert_constant`, `check_constant` | None | Direct (implemented) |
 | Binary `a -> f` | Application, constructor/variant application or tuple pipe, with temporary binding when needed | `desugar_pipe`, `rewrite_pipe_rhs`, `pipe_tuple_map`, `pipe_bound`, `fresh_bound_name` | Names in RHS, evaluation count/order | Parser completed pipe or checker expression entry |
-| Single nonrecursive record/dictionary-pattern local binding (including alias), except packed module RHS | One-case match with merged expression/binding attributes | `rewrite_single_binding_let` | Binding group and RHS shape | Parser completed local binding |
-| Supported `let?`/unwrap binding | Match with early-return and continuation cases | `classify_let_unwrap_pattern`, `rewrite_single_binding_let` | Experimental-feature setting, top-level vs local context | Checker binding entry |
+| Single nonrecursive record/dictionary-pattern local binding (including alias), except packed module RHS | Typed match from one borrowed case; merged expression/binding attributes | `parsetree_viewer::single_record_binding`, `typecore::type_match` | Binding group and RHS shape | Direct (implemented) |
+| Supported `let?`/unwrap binding | Match with early-return and continuation cases | `classify_let_unwrap_pattern`, `rewrite_unwrap_binding_let` | Experimental-feature setting, top-level vs local context | Checker binding entry |
 | Simple tuple binding with matching tuple RHS (possibly under opens) | Separate bindings, preserving opens | `rewrite_value_binding`, `destruct_open_tuple`, `restore_exp` | Complete pattern/RHS; recursive bindings excluded; value-constraint side data | Parser completed binding group or checker binding entry |
 | Record pattern binding to packed module identifier | Separate bindings referring to module fields | `rewrite_value_binding` | Complete RHS and unqualified field patterns | Checker binding entry |
-| Two unguarded true/false match cases | If/then/else with arms in boolean order | `boolean_match_arms`, `rewrite_expr` (`Pexp_match`) | Both cases | Parser completed match |
-| `async` function | Function body wrapped with promise/unsafe-async operations | `rewrite_fun`, `wrap_with_unsafe_async` | N-ary parameter/default/newtype side tables, parameter location | Checker function entry |
-| `await e` | `Primitive_promise.unsafe_await` application | `transform_await` | Validation needs enclosing async function; generated ghost location comes from operand | Checker expression entry |
+| Two unguarded true/false match cases | Typed conditional with arms in boolean order | `parsetree_viewer::boolean_match_arms`, `typecore::type_conditional` | Both cases | Direct (implemented) |
+| `async` function | Existing typed promise application, without a parsed wrapper | `typecore::type_body_with_module_unpacks`, `type_promise_application` | Parameter/module-unpack scope and parameter location | Direct (implemented) |
+| `await e` | Existing typed `Primitive_promise.unsafe_await` application, without a parsed wrapper | `typecore::type_promise_application`, `ParseArena::ghost_location` | Validation needs enclosing async function; ghost location comes from operand | Direct (implemented); `transform_await` serves module await only |
 | Awaited module alias, with optional module-type constraint | Dynamic import expression, module unpack and module type declaration | `transform_module_await`, `create_await_module_expression`, `local_module_type_decl` | Per-structure module-type-name deduplication | Checker module entry; not node-local parser work |
 | Local awaited module inside a value binding | Hoisted module type declarations plus rewritten local module | `spelunk_value_bindings_for_await_module_types`, `spelunk_expression_for_await_module_types`, `rewrite_expr` (`Pexp_letmodule`) | Enclosing structure, deduplication, original binding before rewriting | Checker structure/binding entry |
 | `@this` function | Method callback record/constrained callback/unsafe-to-method application | `rewrite_method_callback_expression`, `split_this_attrs` | Function arity, async body and parameter shape | Checker function entry |
@@ -58,7 +58,7 @@ claims that these moves have been implemented.
 | `@deriving(accessors)` type group | Type declarations and generated record getters / variant constructors in constrained includes | `handle_deriving_type`, `generate_accessor_include`, `generate_record_accessors_and_sigs`, `generate_variant_accessors_and_sigs` | Whole mutually recursive type group; gentype attributes; structure/signature distinction | Checker type-group entry |
 | Spice derive attributes | Encoder/decoder declarations and signatures | `derive::expand_structure_item_with_mapper`, `derive::expand_signature_item_with_mapper`, `spice_ppx::map_type_decl_structure`, `spice_ppx::generate_sig_decls` | Mapper activation over containing structure/signature; derive configuration, type group | Checker type-group entry; preserve activation semantics |
 | Attributes and extension payloads traversed by the mapper | Recursively rewritten payload AST | `rewrite_attribute`, `rewrite_payload`, `rewrite_attributes` | Payload kind; `PTyp` is retained; unknown expression extensions are retained without descending | Parser payload completion or checker attribute consumer |
-| JSX component annotations on bindings/descriptions | Annotation round-trip through attributes and dedicated component side data | `rewrite_value_binding_without_flattening`, `rewrite_structure_item_no_spice`, `rewrite_signature_item_no_spice`, `ast_jsx_component::take` | Binding/description representation | Checker binding/description entry |
+| JSX component annotations on bindings/descriptions | Annotation round-trip through attributes and dedicated component side data | `rewrite_structure_item_body`, `rewrite_structure_item_no_spice`, `rewrite_signature_item_no_spice`, `ast_jsx_component::take` | Binding/description representation | Checker binding/description entry |
 | JSX elements/fragments and component declarations (separate mapper) | React/JSX runtime calls, props records and component wrappers/signatures | `parser::jsx_ppx::{transform_jsx_element,transform_jsx_fragment,mk_react_jsx,make_props_record_type,make_props_record_type_sig}` | JSX version/module/mode configuration and component scope | Parser completion with explicit configuration, or checker component entry |
 
 Many comments still describe string-delimiter normalization from an older
@@ -116,10 +116,11 @@ is no hashing.
 
 A node gets an expansion in two cases:
 
-- a rewrite of the inventory applies to it (the pipe, `let?`, the record
-  `let`, the boolean match, `async` and `@this` functions, `await`, an awaited
-  local module, raw, ffi, regexp, todo, an `l` integer, braces whose location
-  follows a rewritten operand or that forward `@this`);
+- a rewrite of the inventory applies to it (the pipe, `let?`, `@this`
+  functions, an awaited local module, raw, ffi, regexp, todo, braces whose
+  location follows a rewritten operand or that forward `@this`); the record
+  `let`, the boolean match, `async` functions, `await` and `l` integers got
+  one until T7 and are now typed as written (rows "Direct (implemented)");
 - a child that is not an expression changed its handle: a pattern
   (`rewrite_pat_idx`), a core type (`rewrite_core_type_idx`), a module
   expression, a value binding that was flattened or carries a locally
@@ -160,7 +161,7 @@ types visit tagged field types in reverse, excluding inherited types and the
 object's own attributes. Attribute payloads recurse through structures,
 signatures, types, and pattern guards (guard before pattern). Expression
 extensions validate their own payload without traversing it; raw/todo nodes
-also have dedicated handling. Integer `l` expressions/patterns ignore attributes.
+also have dedicated handling. Integer `l` expressions/patterns now retain their source nodes; the ordinary attribute traversal applies.
 `@@config` is not mapped; consumed deriving attributes are omitted.
 
 The diagnostic-producing sites (other nodes only lead to these sites) are:
@@ -423,3 +424,203 @@ The saving is below the 1% that THREE_TREES section 11 expected of this
 slice: the rebuilt spine was 0.70% of the build, not the 4.13% of the two
 entry paths. What is left in those paths is not rebuilding.
 
+
+### T7 pre-change inventory
+
+Baseline: `3fa9eb29e` (includes T2). Line numbers below refer to that commit.
+These are shared functions, not four independently removable passes.
+
+| Row | Implementation in `binary_ast/ppx.rs` | What must remain |
+| --- | --- | --- |
+| A, `l` integer | `rewrite_expr:7173` constant arm at 7190; `rewrite_pattern:6670` constant arm at 6676; `pattern_needs_no_rewrite:7082` certificate test | The expression/pattern traversals serve all other rewrites. Remove their integer arms, not these shared functions. Patterns are rebuilt, not entered in the expression expansion table. |
+| B, boolean match | `boolean_match_arms:7728`, called by `rewrite_expr:7346` | Ordinary match case traversal remains. Recognition requires exactly two unguarded nullary unqualified constructors, in either order. |
+| C, record/dictionary let | `rewrite_single_binding_let:7761`, record arm after the unwrap arm | The same function implements `let?`, which stays an expansion. Includes one alias wrapper; excludes recursive/grouped bindings and packed-module RHS. |
+| D, async/await | `rewrite_fun:7901`, `wrap_with_unsafe_async:5575`, `transform_await:5536`; `rewrite_expr:7552` | `transform_await` is also called by `create_await_module_expression:5787`; the async wrapper is also called by `rewrite_method_callback_expression:6923`. Module await and method callbacks are separate expansion rows. |
+
+#### Readers of the compiled form
+
+Audit command: `rg -n 'expanded\(|get_expanded_expr' compiler-rust/src`.
+At the baseline this returns 207 lines. Three `types/ctype.rs` hits are
+`has_constr_row_expanded`, unrelated to parse expansions. The parse-arena
+hits include accessor definitions and tests, not independent consumers.
+
+| Reader | A: integer | B: boolean match | C: record let | D: async/await |
+| --- | --- | --- | --- | --- |
+| `types/typecore.rs` (143 hits), `types/typemod.rs` (12 hits) | `convert_constant` must accept the digits without treating `l` as an unknown modifier; both expression and pattern consumers use it | Dispatch to the existing conditional rule, preserving `IfCondition`/`IfReturn` and boolean arm order; shape-sensitive diagnostic/nonexpansiveness readers also need auditing | Dispatch to `type_match` with one borrowed case, not ordinary let typing; preserve merged attributes and the packed-module exclusion | Build the same primitive identifier/application typed nodes, with the same type instantiation, locations and attributes; the existing `type_await:17138` is an incomplete stub, not an implementation to reuse |
+| `binary_ast/deps.rs:137` | No dependencies in the digits | Same source children; boolean constructors add no module dependency | Same RHS, pattern and body; preserve module-unpack scope | The generated identifier supplies `Primitive_promise`; original async/await nodes must contribute that implicit dependency explicitly |
+| `binary_ast/ast_iter.rs:38`, used by `UnusedAttributeSweep` | `check_constant:1219` currently warns only on suffix-free integers; it must recognize `l` through the same digit accessor | Expansion discards the case patterns; walking originals must not introduce warnings for their attributes | Expansion merges binding attributes onto the match; preserve sweep ordering and warning locations | Expansion drops await-node attributes, uses a ghost operand location, and wraps async bodies at parameter location; walking original nodes must preserve that attribute policy |
+| `binary_ast/mapper_to0.rs:233` | Can encode the original suffix; any compiled-value consumer needs the digit accessor | Original match is representable in v0 | Original let is representable in v0 | Original await is encoded with `res.await`; original async with the function marker. This is not the same v0 shape as the primitive expansion |
+| `binary_ast/writer.rs` | Uses `mapper_to0` and dependency collection, not a separate expansion lookup | Same | Same | Same; artifact usability must be verified, not inferred from changed bytes |
+| `binary_ast/ppx.rs` (32 hits) | Inline implementation/signature constants currently match `Integer(_, None)`; these consumers must also use the accessor | Pipe and payload readers inspect expanded shapes; removal must not change their classification | Same; retain the separate unwrap and packed-module rules | Braces copy an expanded inner location; removing await also affects the braces expansion count. Method callbacks and module await share the primitive helpers |
+| `ast_payload.rs:14` | String-only extraction does not consume integer values | Unwraps braces; no boolean-specific need | Unwraps braces; no let-specific need | Unwraps braces; location/attribute policy belongs to callers |
+| genType | Reads typed constants, not parsed digits | Reads the resulting typed conditional | Reads the resulting typed match | Reads the resulting primitive application/function; no parse-expansion lookup found |
+| Editor analysis | Reads typed constants and original source locations | Reads typed conditional and source | Reads typed match and source | Reads typed applications/function and source; no parse-expansion lookup found |
+
+The binary writer's module comment still promises byte-identical `.ast`
+files, whereas the correctness contract requires usable artifacts, not
+identical intermediate representations. A direct implementation must check
+usability explicitly. In particular, simply deleting an await expansion is
+not sufficient: the checker stub neither constrains the operand to a promise
+nor constructs the primitive application used today.
+
+#### Baseline instruction profile
+
+One clean, single-worker `tests/tests` build, Linux x86-64, normal fat-LTO
+release, Callgrind `--dump-instr=yes`: **4,043,070,987 Ir**, 735 modules.
+The runtime was built before measurement. Inclusive attribution from
+`callgrind_annotate --inclusive=yes --threshold=100`:
+
+| Function | Ir (inclusive, recursion contexts combined) |
+| --- | ---: |
+| `rewrite_expr` | 124,080,794 |
+| `rewrite_pattern` | 1,970,655 |
+| `rewrite_single_binding_let` | 382,901 |
+| `rewrite_fun` | 22,323,820 |
+| `transform_await` | 157,831 |
+| `wrap_with_unsafe_async` | 120,476 |
+
+These are overlapping inclusive costs, not additive row savings.
+`boolean_match_arms` has no separate symbol in this optimized profile; its
+instructions are charged to `rewrite_expr`. The shared functions include
+other rewrites and child visits, so none of these numbers is an exclusive
+cost of a direct row. No performance saving is claimed by this inventory.
+
+#### Baseline rewrite counts
+
+A temporary, uncommitted `eprintln!` probe at each direct rewrite arm, and
+at `expand`, was compiled into a second release executable. A clean
+single-worker build of `tests/tests` (735 compiled modules, the runtime
+already built) produced:
+
+```text
+      3 T7 A-expression
+      0 T7 A-pattern
+      2 T7 B
+     15 T7 C
+    171 T7 D-async
+    167 T7 D-await
+   3400 T7 expansion
+```
+
+The four direct arms fire **358** times. `expand` counts expression
+expansions through that helper, not calls to `set_expansion` made directly
+by the unwrap binding or extension paths. The async count excludes the
+separate method-callback rewrite, and the await count excludes module
+await. The probes were removed after measurement. Additional expansions
+caused by changed brace locations or pattern handles are not attributed by
+these probes; the end-state exact-delta gate needs those accounted for,
+not silently included in the 358.
+
+#### T7 row D: direct promise typing and immutable ghost views
+
+The initial location-ownership blocker is resolved in `a2873133f`.
+`ParseArena::ghost_location` sets an existing index bit; `get_location`
+returns a 12-byte value with that bit applied. A source location and its
+immutable ghost view share coordinates, without a new pool row, allocation,
+lock, atomic or thread-local access. Pool limits reserve the bit. Tests pin
+the returned location to 12 bytes and prove that 10,000 ghost views leave the
+location count unchanged.
+
+The two primitive longidents are allocated once per arena. The checker
+supplies their handles and a borrowed one-element argument slice to the same
+identifier and application rules used by explicit calls. The borrowed callee
+view is 16 bytes (size pinned); nothing is stored per syntax node. Async body
+typing occurs after parameter module unpacks are in scope. Dependency
+collection likewise adds the implicit primitive dependency inside that scope.
+
+`wrap_with_unsafe_async` and the dormant `type_await` stub are deleted.
+`transform_await` remains with exactly one caller,
+`create_await_module_expression`; awaited-module expansion is a separate
+rewrite. Neither ordinary await nor async functions reaches it. The mapper
+only visits their existing children; the unused-attribute sweep preserves the
+old await attribute-discard policy. A 10,000-function test proves that ordinary
+async/await functions append no expression nodes.
+
+#### Same-base expansion census (all four rows)
+
+A temporary, uncommitted probe at `ParseArena::set_expansion` counted every
+entry during clean single-worker `tests/tests` builds, with the runtime
+already built. Both builds compiled 735 modules, including location retries.
+Base is `10227bc20`; head includes direct typing for all four rows. Probes
+were removed after measurement. Counts grouped by the original expression:
+
+| Original expression / reason | Base | Direct typing | Removed |
+| --- | ---: | ---: | ---: |
+| `l` integer | 3 | 0 | 3 |
+| Two boolean cases | 2 | 0 | 2 |
+| Single record/dictionary let | 21 | 18 | 3 |
+| Async function | 172 | 25 | 147 |
+| Await expression | 167 | 0 | 167 |
+| Braces whose location changed | 7 | 0 | 7 |
+| Every other expression | 3,038 | 3,038 | 0 |
+| **Total** | **3,410** | **3,081** | **329** |
+
+The retained record-let entries are six packed-module bindings (outside row
+C) and twelve record-rest pattern/type rewrites. The retained async entries
+are one method-callback rewrite and twenty-four parameter/type rewrites.
+These are independent rewrites of non-expression children, not record-let or
+promise desugaring, and still produce the same shapes they produced before.
+The ordinary direct rules never record an expansion.
+
+**Correction to the initial inventory:** the 358 direct-arm hits were not
+358 independently removable expansion entries. Twelve record lets and
+twenty-four async functions also needed those independent rewrites; seven
+brace copies existed only to propagate the old await ghost location. Thus
+`358 - 12 - 24 + 7 = 329`, exactly the observed reduction. No unrelated
+expression expansion count changes. The earlier eight-entry reduction for
+A–C was the same overlap effect (`20 - 12`), not an upstream change.
+
+#### Historical T7 A–C measurements
+
+The saved release binaries at `3fa9eb29e` and `655dfcbf2` isolate A–C
+before integrating subsequent trunk changes. Linux x86-64, ordinary fat-LTO
+release, one worker; runtime preparation is outside the measurements.
+
+| Corpus | Base instructions | A–C instructions | Change |
+| --- | ---: | ---: | ---: |
+| `tests/tests`, minimum of three Cachegrind runs | 4,048,215,873 | 4,049,924,082 | +0.0422% |
+| 3,735-module application, one Cachegrind run each | 67,588,537,024 | 67,625,184,174 | +0.0542% |
+
+The three `tests/tests` counts were 4,049,932,181 / 4,048,215,873 /
+4,049,320,612 at base and 4,049,924,082 / 4,050,498,052 / 4,050,144,472
+after A–C. These small increases are below the 0.1% instruction gate but
+are **not instruction savings**. No individual-row saving was measured.
+Hyperfine (two warmups, ten clean builds each) measured base 566.8 ± 40.4 ms
+(range 504.3–615.5) and A–C 558.9 ± 19.6 ms (535.3–591.0). The ranges overlap;
+there is no established speedup.
+
+`compare_checker_builds.py` found no differences on either corpus: 735
+signatures and 729 generated files on `tests/tests`, and all signatures,
+diagnostics and generated files on the 3,735-module application.
+
+The later same-base census above resolves the initial expansion-count
+attribution. The A–C figures remain measurements of those saved binaries,
+not claims about the completed four-row implementation.
+
+After merging trunk at `88ca1bd53`, both Rust crates build, rewatch tests and
+strict all-features clippy pass. The local compiler unit run reports 1,937
+passed, 50 failed and 25 ignored in the checkout without OCaml reference
+artifacts; it is not a passing full-suite gate. Baseline/head comparisons
+pass for all 745 single-file and 79 multi-file error fixtures. Local JS
+snapshot comparison passes 729/729, but the complete JS/stdlib/genType parity
+scripts remain blocked by missing reference/package prerequisites. CI is
+the reference-compiler gate. These are historical A–C validation results;
+the completed implementation is checked again on the final head.
+
+#### Completed four-row validation
+
+At `9d6235b9a`, against `10227bc20`, all 745 single-file and 79 multi-file
+diagnostic fixtures match. The checker comparison reports 735 matching
+signatures, one matching diagnostic and 729 matching generated files.
+The compiler unit suite locally has 1,973 passes and 48 missing-reference
+artifact failures; the reference-enabled CI compiler suite is the gate.
+
+The first completed implementation exceeded the CI instruction threshold:
+4,018,024,706 versus 4,023,019,518 (minimum of five), **+0.124%**. That result
+is not a performance improvement. The profile identified empty attribute
+slice-to-vector conversions in the extracted identifier rule and out-of-line
+location-value copies. The follow-up keeps the original compact `Attributes`
+clone and inlines the location getter so field-only readers do not copy unused
+coordinates. The final instruction check must pass without a waiver; its
+results are reported on pull request #206. Historical A–C application
+measurements above remain separately attributable to those saved binaries.

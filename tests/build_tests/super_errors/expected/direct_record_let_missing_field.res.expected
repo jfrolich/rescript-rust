@@ -1,0 +1,11 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/direct_record_let_missing_field.res[0m:[2m2:29-35[0m
+
+  1 [2m│[0m type t = {a: int}
+  [1;31m2[0m [2m│[0m let value = (r: t) => {let {[1;31mmissing[0m} = r; missing}
+  3 [2m│[0m 
+
+  The field [1;31mmissing[0m does not belong to type [1;33mt[0m
+  
+  This record pattern is expected to have type [1;33mt[0m

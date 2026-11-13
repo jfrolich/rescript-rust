@@ -835,13 +835,14 @@ impl LambdaCompiler {
             let before = if CHECK { Some(deps.clone()) } else { None };
             let deps = self.finish_lowered_output(deps, &possible_required_modules);
             let checked = candidate.map(|candidate| match candidate {
-                Ok((j, compiled, dynamic)) => {
+                Ok((j, compiled, dynamic, stats)) => {
                     let saved_stamp = self.id_gen.current_stamp();
                     let new_before = self.coerce_lowered_output(j, compiled, shadow_side_effect);
                     self.id_gen.restore_current_stamp(saved_stamp);
                     self.dynamic_import_modules = dynamic;
                     let new_after = self.finish_lowered_output(new_before.clone(), &possible_required_modules);
                     crate::bir::shadow::LowerCheck::Supported(Box::new(crate::bir::shadow::LowerPair {
+                        stats,
                         before: [before.expect("check capture"), new_before],
                         after: [deps.clone(), new_after],
                         locations: self.source_map_enabled.then(|| std::sync::Arc::new(self.lam_locs.clone())),
@@ -3215,70 +3216,32 @@ impl LambdaCompiler {
         if handlers.len() > 1 {
             return self.compile_multi_staticcatch_return_output(a, &handlers, flat_body);
         }
-        if self.uses_fallthrough_staticcatch_return(a, body, label, bindings, handler) {
-            return self
-                .compile_fallthrough_staticcatch_return_output(a, label, bindings, body, handler);
-        }
-        if self.uses_pseudo_fallthrough_staticcatch_return(a, body, label, bindings, handler) {
-            return self
-                .compile_fallthrough_staticcatch_return_output(a, label, bindings, body, handler);
-        }
-        if bindings.is_empty()
-            && self.try_body_depth == 0
-            && matches!(
-                a.view(body),
-                View::StaticCatch(_, _, _, nested_handler)
-                    if lambda_contains_static_raise(a, nested_handler)
-            )
-            && !self.handler_returns_unit_undefined(a, bindings, handler)
-            && no_static_raise_in_handler_like_ocaml(a, handler)
-        {
-            return self
-                .compile_fallthrough_staticcatch_return_output(a, label, bindings, body, handler);
-        }
-        let requires_explicit_jump = (self.return_unit_stack.last().copied() == Some(true)
-            && !bindings.is_empty())
-            || self.try_body_depth > 0
-            || self.return_staticcatch_requires_explicit_jump(a, label, bindings, body, handler);
-        if requires_explicit_jump {
+        let body_exits = lambda_contains_static_raise_to_label(a, body, label, bindings.len());
+        if !self.staticcatch_takes_pseudo_jump(a, handler) {
+            // lam_compile.ml:1197-1255: the exit variable and a dispatch.
             self.compile_staticcatch_return_output(a, label, bindings, body, handler)
-        } else if no_static_raise_in_handler_like_ocaml(a, handler)
-            && !lambda_contains_staticcatch(a, handler)
-            && lambda_contains_static_raise_to_label(a, body, label, bindings.len())
-        {
-            // OCaml's `compile_staticcatch` pseudo-jmp path
-            // (compiler/core/lam_compile.ml:983-1008, add_pseudo_jmp
-            // at compiler/core/lam_compile_context.ml:125-130) fires
-            // for any single code_table with `no_static_raise_in_handler`
-            // (compiler/core/lam_compile_context.ml:105-106:
-            // `has_exit_code handler
-            // (fun _ -> true)`). We mirror that here via the ported
-            // `Lam_exit_code.has_exit_code`, which STOPS at Lfunction
-            // boundaries (lam_exit_code.ml:28). Rust's prior
-            // `lambda_contains_static_raise` predicate crossed
-            // Lfunction, over-counting raises that live inside
-            // closures and can't escape, which kept this
-            // fallthrough path from firing on handlers whose
-            // tail-loop body contains an inner closure with a
-            // static_raise.
+        } else if body_exits {
+            // lam_compile.ml:1173-1196: the handler follows the body.
             self.compile_fallthrough_staticcatch_return_output(a, label, bindings, body, handler)
-        } else if lambda_contains_static_raise_to_label(a, body, label, bindings.len()) {
-            // OCaml has no `with_static_handler` analog — when the
-            // handler contains static_raise or nested staticcatch
-            // and body raises to this label, OCaml's pseudo-jmp
-            // path fails its `no_static_raise_in_handler` guard
-            // (lam_compile.ml:943) and falls through to the
-            // explicit-jump arm at lam_compile.ml:963-1017. Take
-            // explicit-jump here; the `with_static_handler` path
-            // inlines the handler at every raise site via
-            // `resolve_static_raise`, while OCaml emits it ONCE
-            // gated by `if (exit === N)` after the body.
-            self.compile_staticcatch_return_output(a, label, bindings, body, handler)
         } else {
             self.with_static_handler(label, bindings, handler, |this| {
                 this.compile_return_output(a, body)
             })
         }
+    }
+
+    /// The test of `compile_staticcatch`'s pseudo-jump arm
+    /// (lam_compile.ml:1171-1179) for a table of one handler in a return
+    /// continuation: `Tail_with_name {in_staticcatch = false}`, which
+    /// excludes the body of a `try` (`Tail_in_try`) and everything compiled
+    /// under an enclosing static catch, and
+    /// `Lam_compile_context.no_static_raise_in_handler`.
+    fn staticcatch_takes_pseudo_jump(&self, a: &LamArena, handler: Lam) -> bool {
+        self.try_body_depth == 0
+            && self.static_handlers.is_empty()
+            && self.static_jump_handlers.is_empty()
+            && self.fallthrough_return_handlers.is_empty()
+            && no_static_raise_in_handler_like_ocaml(a, handler)
     }
 
     fn compile_static_raise_jump_output(
@@ -3723,222 +3686,6 @@ impl LambdaCompiler {
         None
     }
 
-    fn handler_returns_unit_undefined(
-        &self,
-        a: &LamArena,
-        bindings: &[Ident],
-        handler: Lam,
-    ) -> bool {
-        if !bindings.is_empty() {
-            return false;
-        }
-
-        match a.view(handler) {
-            View::Const(Constant::JsUndefined { is_unit: true }) => true,
-            View::Sequence(_, rest) => self.handler_returns_unit_undefined(a, &[], rest),
-            View::Let(_, _, _, body) => self.handler_returns_unit_undefined(a, &[], body),
-            View::LetRec(_, _, body) => self.handler_returns_unit_undefined(a, &[], body),
-            _ => false,
-        }
-    }
-
-    fn staticcatch_handler_is_identity_binding(
-        &self,
-        a: &LamArena,
-        bindings: &[Ident],
-        handler: Lam,
-    ) -> bool {
-        matches!(
-            (bindings, a.view(handler)),
-            ([binding], View::Var(id)) if id.same(binding)
-        )
-    }
-
-    fn uses_fallthrough_staticcatch_return(
-        &self,
-        a: &LamArena,
-        body: Lam,
-        label: i32,
-        bindings: &[Ident],
-        handler: Lam,
-    ) -> bool {
-        // The pseudo-jump arm of OCaml compile_staticcatch (lam_compile.ml:1052-1060)
-        // requires Tail_with_name {in_staticcatch = false}. A nested catch
-        // compiled in an enclosing catch body has in_staticcatch = true and
-        // must use the explicit exit dispatch instead of unconditionally
-        // falling through to its handler.
-        if self.try_body_depth > 0
-            || !self.fallthrough_return_handlers.is_empty()
-            || !self.static_handlers.is_empty()
-            || !self.static_jump_handlers.is_empty()
-        {
-            return false;
-        }
-        // lam_compile.ml:937-962: the pseudo-jmp arm needs
-        // `Tail_with_name {in_staticcatch = false}`; a staticcatch compiled
-        // inside another one's body or dispatched handlers has
-        // `in_staticcatch = true` and takes the exit-variable arm.
-        if !self.static_handlers.is_empty() || !self.static_jump_handlers.is_empty() {
-            return false;
-        }
-        // OCaml flattens nested staticcatch chains before deciding whether the
-        // current handler can fall through after the switch. Once we're already
-        // under an enclosing static handler/jump chain, keep plain handlers
-        // resolved inside the switch/default instead of peeling them out.
-        let inside_enclosing_staticcatch_chain =
-            !self.static_handlers.is_empty() || !self.static_jump_handlers.is_empty();
-        let arity = bindings.len();
-        let body_has_target_exit = lambda_contains_static_raise_to_label(a, body, label, arity);
-        let keep_complete_named_variant_plain_handler_inline = matches!(
-            a.view(body),
-            View::Switch(_, switch)
-                if self.uses_named_variant_view(&switch)
-                    && switch.actions.fail.is_none()
-                    && switch.payload.consts_full
-                    && switch.payload.blocks_full
-                    && no_static_raise_in_handler_like_ocaml(a, handler)
-                    && lambda_contains_static_raise_to_other_label(a, body, label)
-        );
-        // Lam_pass_exits can inline outward handlers away before backend
-        // lowering. OCaml's compile_staticcatch pseudo-jump path still keeps a
-        // shared non-raising handler outside the switch when several direct
-        // exits now target the same label.
-        let shared_multi_exit_fallthrough_like_ocaml = !inside_enclosing_staticcatch_chain
-            && !keep_complete_named_variant_plain_handler_inline
-            && !self.handler_returns_unit_undefined(a, bindings, handler)
-            && no_static_raise_in_handler_like_ocaml(a, handler)
-            && body_has_target_exit
-            && lambda_has_multiple_static_raises_to_label(a, body, label, arity);
-        let handler_is_raise_of_arity =
-            matches!(a.view(handler), View::StaticRaise(_, args) if args.len() == arity);
-        match a.view(body) {
-            View::Switch(_, switch) => {
-                let (consts, blocks) = (switch.actions.consts, switch.actions.blocks);
-                if (handler_is_raise_of_arity && body_has_target_exit)
-                    || (!self.uses_untagged_variant_view(&switch)
-                        && !keep_complete_named_variant_plain_handler_inline
-                        && shared_multi_exit_fallthrough_like_ocaml)
-                    || (!self.uses_untagged_variant_view(&switch)
-                        && !keep_complete_named_variant_plain_handler_inline
-                        && no_static_raise_in_handler_like_ocaml(a, handler)
-                        && !lambda_contains_staticcatch(a, handler)
-                        && switch_cases_contain_static_raise_to_label(
-                            a, consts, blocks, label, arity,
-                        )
-                        && body_has_target_exit
-                        && (lambda_contains_static_raise_to_other_label(a, body, label)
-                            || switch_cases_contain_nontrivial_static_raise_to_label(
-                                a, consts, blocks, label, arity,
-                            )))
-                {
-                    true
-                }
-                // OCaml takes the pseudo-jmp/fallthrough arm for any
-                // tail-return staticcatch with a single handler whose handler
-                // has no static raise (compiler/core/lam_compile.ml:983-1008).
-                // It is not gated on function `return_unit`; switches reach the
-                // same `compile_staticcatch` arm through
-                // compiler/core/lam_compile.ml:1907-1911.
-                else if !inside_enclosing_staticcatch_chain
-                    && !self.handler_returns_unit_undefined(a, bindings, handler)
-                    && no_static_raise_in_handler_like_ocaml(a, handler)
-                {
-                    if !bindings.is_empty() {
-                        body_has_target_exit
-                    } else {
-                        consts.len() + blocks.len() == 1
-                            && switch.actions.fail.is_some_and(|fail| {
-                                matches!(a.view(fail), View::StaticRaise(id, args)
-                                    if id == label && args.len() == arity)
-                            })
-                    }
-                } else {
-                    false
-                }
-            }
-            View::StringSwitch(_, sw) => {
-                if (handler_is_raise_of_arity && body_has_target_exit)
-                    || (!keep_complete_named_variant_plain_handler_inline
-                        && shared_multi_exit_fallthrough_like_ocaml)
-                    || (no_static_raise_in_handler_like_ocaml(a, handler)
-                        && !keep_complete_named_variant_plain_handler_inline
-                        && !lambda_contains_staticcatch(a, handler)
-                        && string_switch_cases_contain_static_raise_to_label(
-                            a, sw.actions, label, arity,
-                        )
-                        && body_has_target_exit
-                        && (lambda_contains_static_raise_to_other_label(a, body, label)
-                            || string_switch_cases_contain_nontrivial_static_raise_to_label(
-                                a, sw.actions, label, arity,
-                            )))
-                {
-                    true
-                }
-                // OCaml takes the pseudo-jmp/fallthrough arm for any
-                // tail-return staticcatch with a single handler whose handler
-                // has no static raise (compiler/core/lam_compile.ml:983-1008).
-                // It is not gated on function `return_unit`; string switches
-                // reach the same `compile_staticcatch` arm through
-                // compiler/core/lam_compile.ml:1907-1911.
-                else if !inside_enclosing_staticcatch_chain
-                    && !self.handler_returns_unit_undefined(a, bindings, handler)
-                    && no_static_raise_in_handler_like_ocaml(a, handler)
-                {
-                    if !bindings.is_empty() {
-                        body_has_target_exit
-                    } else {
-                        sw.len() == 1
-                            && sw.default.is_some_and(|default| {
-                                matches!(a.view(default), View::StaticRaise(id, args)
-                                    if id == label && args.len() == arity)
-                            })
-                    }
-                } else {
-                    false
-                }
-            }
-            View::TryWith(try_body, _, _)
-                if !inside_enclosing_staticcatch_chain
-                    && !bindings.is_empty()
-                    && !self.staticcatch_handler_is_identity_binding(a, bindings, handler)
-                    && !self.handler_returns_unit_undefined(a, bindings, handler)
-                    && no_static_raise_in_handler_like_ocaml(a, handler)
-                    && !lambda_contains_staticcatch(a, handler)
-                    && body_has_target_exit
-                    && !lambda_contains_static_raise_to_other_label(a, try_body, label) =>
-            {
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn uses_pseudo_fallthrough_staticcatch_return(
-        &self,
-        a: &LamArena,
-        body: Lam,
-        label: i32,
-        bindings: &[Ident],
-        handler: Lam,
-    ) -> bool {
-        if self.try_body_depth > 0
-            || !self.static_handlers.is_empty()
-            || !self.static_jump_handlers.is_empty()
-            || !self.fallthrough_return_handlers.is_empty()
-        {
-            return false;
-        }
-        self.return_unit_stack.last().copied() == Some(true)
-            && !bindings.is_empty()
-            && self.fallthrough_return_handlers.is_empty()
-            && !matches!(
-                a.node(body),
-                Node::Switch { .. } | Node::StringSwitch { .. }
-            )
-            && lambda_contains_static_raise_to_label(a, body, label, bindings.len())
-            && no_static_raise_in_handler_like_ocaml(a, handler)
-    }
-
     pub(crate) fn active_fallthrough_return_handler(&self) -> Option<&FallthroughReturnHandler> {
         self.fallthrough_return_handlers.last()
     }
@@ -4207,26 +3954,54 @@ impl LambdaCompiler {
         // `NeedValue should_return` first and emit `return e ? a : b` when
         // neither needs statements. A branch with a self tail call compiles
         // to the loop jump there, so it always has a block.
-        if !function_has_self_tailcall(a, &tail_loop.tail_targets, then_)
-            && !function_has_self_tailcall(a, &tail_loop.tail_targets, else_)
+        let no_self_calls = !function_has_self_tailcall(a, &tail_loop.tail_targets, then_)
+            && !function_has_self_tailcall(a, &tail_loop.tail_targets, else_);
+        let label_start = self.loop_label_counter;
+        let (mut then_block, mut else_block) = if no_self_calls
+            && !Self::lambda_contains_statement_value_form(a, then_)
+            && !Self::lambda_contains_statement_value_form(a, else_)
         {
-            let then_value = self.compile_expr(a, then_);
-            let else_value = self.compile_expr(a, else_);
-            if then_value.prelude.is_empty() && else_value.prelude.is_empty() {
+            // compiler/core/lam_compile.ml:1258-1259,1636-1712 probes in
+            // NeedValue should_return: short circuits stay conditionals in
+            // that context, not the &&/|| produced by compile_expr. Reuse the
+            // return blocks when they cannot fold rather than compiling again.
+            let then_block = self.compile_tail_loop_return_block(a, then_, tail_loop);
+            let else_block = self.compile_tail_loop_return_block(a, else_, tail_loop);
+            if let (Some(then_value), Some(else_value)) = (
+                self.try_fold_effect_only_return_tail(&then_block),
+                self.try_fold_effect_only_return_tail(&else_block),
+            ) {
                 let mut block = cond_compiled.prelude;
-                let expr = JE::cond(
-                    cond_compiled.expr,
-                    then_value.expr,
-                    else_value.expr,
-                    &mut self.j,
-                );
+                let expr = JE::cond(cond_compiled.expr, then_value, else_value, &mut self.j);
                 block.push(JS::return_(expr, &mut self.j));
                 return BlockOutput::finished(block);
             }
-        }
-        let then_block = self.compile_tail_loop_return_block(a, then_, tail_loop);
-        let else_block = self.compile_tail_loop_return_block(a, else_, tail_loop);
+            (then_block, else_block)
+        } else {
+            if no_self_calls {
+                let then_value = self.compile_expr(a, then_);
+                let else_value = self.compile_expr(a, else_);
+                if then_value.prelude.is_empty() && else_value.prelude.is_empty() {
+                    let mut block = cond_compiled.prelude;
+                    let expr = JE::cond(cond_compiled.expr, then_value.expr, else_value.expr, &mut self.j);
+                    block.push(JS::return_(expr, &mut self.j));
+                    return BlockOutput::finished(block);
+                }
+            }
+            (
+                self.compile_tail_loop_return_block(a, then_, tail_loop),
+                self.compile_tail_loop_return_block(a, else_, tail_loop),
+            )
+        };
 
+        // compiler/core/lam_compile.ml:1514-1518 first probes with the tail
+        // return context, even when a self call prevents folding. Preserve the
+        // label allocations of that discarded pass. O(branches) only when the
+        // first pass allocated a label; the ordinary self-tail-call path is O(1).
+        if !no_self_calls && self.loop_label_counter != label_start {
+            then_block = self.compile_tail_loop_return_block(a, then_, tail_loop);
+            else_block = self.compile_tail_loop_return_block(a, else_, tail_loop);
+        }
         let mut block = cond_compiled.prelude;
 
         // Mirror OCaml's Lifthenelse compile (lam_compile.ml:1428-1436), which
@@ -4374,53 +4149,14 @@ impl LambdaCompiler {
                         a, &handlers, flat_body, tail_loop,
                     );
                 }
-                let uses_fallthrough =
-                    self.uses_fallthrough_staticcatch_return(a, body, label, &bindings, handler);
-                let requires_explicit_jump = (self.return_unit_stack.last().copied() == Some(true)
-                    && !bindings.is_empty())
-                    || self.try_body_depth > 0
-                    || self.return_staticcatch_requires_explicit_jump(
-                        a, label, &bindings, body, handler,
-                    );
-                if uses_fallthrough {
-                    self.compile_fallthrough_staticcatch_tail_loop_return_output(
-                        a, label, &bindings, body, handler, tail_loop,
-                    )
-                } else if requires_explicit_jump {
+                let body_exits =
+                    lambda_contains_static_raise_to_label(a, body, label, bindings.len());
+                if !self.staticcatch_takes_pseudo_jump(a, handler) {
                     self.compile_staticcatch_tail_loop_return_output(
                         a, label, &bindings, body, handler, tail_loop,
                     )
-                } else if no_static_raise_in_handler_like_ocaml(a, handler)
-                    && !lambda_contains_staticcatch(a, handler)
-                    && lambda_contains_static_raise_to_label(a, body, label, bindings.len())
-                {
-                    // Mirror the fallthrough / pseudo-jmp arm from
-                    // `compile_return_block`. OCaml's pseudo-jmp path
-                    // (compiler/core/lam_compile.ml:983-1008) gates on
-                    // `no_static_raise_in_handler`
-                    // (compiler/core/lam_compile_context.ml:105-106) which
-                    // itself wraps `has_exit_code handler (fun _ -> true)`,
-                    // stopping at
-                    // Lfunction boundaries. Using `has_exit_code` here lets
-                    // handlers whose only static_raises live inside a
-                    // nested closure reach the fallthrough emission
-                    // (compiler/core/lam_compile.ml:1002-1008), eliminating
-                    // the spurious outer explicit-jump layer that
-                    // miss_colon_test saw when `lambda_contains_static_raise`
-                    // over-counted.
+                } else if body_exits {
                     self.compile_fallthrough_staticcatch_tail_loop_return_output(
-                        a, label, &bindings, body, handler, tail_loop,
-                    )
-                } else if lambda_contains_static_raise_to_label(a, body, label, bindings.len()) {
-                    // OCaml has no `with_static_handler` analog — when
-                    // body raises to this label, OCaml emits the handler
-                    // ONCE via explicit-jump (lam_compile.ml:1005-1010 for
-                    // Assign / lam_compile.ml:1000-1010 for EffectCall).
-                    // Rust's `with_static_handler` path inlines the handler
-                    // at every raise site via `resolve_static_raise`.
-                    // Prefer explicit-jump to match OCaml's single-emission
-                    // shape on miss_colon_test / gpr_1698_test.
-                    self.compile_staticcatch_tail_loop_return_output(
                         a, label, &bindings, body, handler, tail_loop,
                     )
                 } else {
@@ -5749,6 +5485,12 @@ impl LambdaCompiler {
             return block;
         }
 
+        // compiler/core/lam_compile.ml:794-799 lowers the default first.
+        let default_block = default.map(|fallback| {
+            let block = self.compile_assign_to_target_block(a, result, fallback);
+            self.with_block_source_loc(a, fallback, block)
+        });
+
         let grouped = self.grouped_switch_cases(a, &cases, default, |_, _| true);
         let mut clauses = Vec::with_capacity(grouped.len());
         for (tag, body, is_last) in grouped {
@@ -5773,11 +5515,6 @@ impl LambdaCompiler {
                 clause,
             });
         }
-
-        let default_block = default.map(|fallback| {
-            let block = self.compile_assign_to_target_block(a, result, fallback);
-            self.with_block_source_loc(a, fallback, block)
-        });
 
         block.push(JS::string_switch(
             scrut_compiled.expr,
@@ -5923,12 +5660,13 @@ impl LambdaCompiler {
             return block;
         }
 
-        let grouped = self.grouped_switch_cases(a, &cases, default, |_, _| true);
-        let clauses = self.grouped_return_string_clauses(a, grouped, SwitchCaseTag::String);
-
+        // compiler/core/lam_compile.ml:794-799 lowers the default first.
         let default_block = default
             .map(|fallback| self.compile_return_block(a, fallback))
             .filter(|body| !body.is_empty());
+
+        let grouped = self.grouped_switch_cases(a, &cases, default, |_, _| true);
+        let clauses = self.grouped_return_string_clauses(a, grouped, SwitchCaseTag::String);
 
         block.push(JS::string_switch(
             scrut_compiled.expr,
@@ -6066,6 +5804,14 @@ impl LambdaCompiler {
             return block;
         }
 
+        // compiler/core/lam_compile.ml:794-799 lowers the default first.
+        let default_block = default
+            .map(|fallback| {
+                let block = self.compile_effect_block(a, fallback);
+                self.with_block_source_loc(a, fallback, block)
+            })
+            .filter(|body| !body.is_empty());
+
         let grouped = self.grouped_switch_cases(a, &cases, default, |_, _| true);
         let mut clauses = Vec::with_capacity(grouped.len());
         for (tag, body, is_last) in grouped {
@@ -6089,13 +5835,6 @@ impl LambdaCompiler {
                 clause,
             });
         }
-
-        let default_block = default
-            .map(|fallback| {
-                let block = self.compile_effect_block(a, fallback);
-                self.with_block_source_loc(a, fallback, block)
-            })
-            .filter(|body| !body.is_empty());
 
         let has_effectful_case = clauses
             .iter()
@@ -6275,205 +6014,6 @@ impl LambdaCompiler {
             .zip(a.list(args).iter().copied())
             .collect();
         Some(crate::lambda::lam_subst::subst(a, &subst, handler.handler))
-    }
-
-    fn return_staticcatch_requires_explicit_jump(
-        &self,
-        a: &LamArena,
-        label: i32,
-        bindings: &[Ident],
-        body: Lam,
-        handler: Lam,
-    ) -> bool {
-        if bindings.is_empty()
-            && matches!(a.node(body), Node::StaticCatch { .. })
-            && self.handler_is_inlineable_pure_return_static_raise_dispatch(a, handler)
-        {
-            return false;
-        }
-
-        // OCaml's `compile_staticcatch` (lam_compile.ml:937-1017) uses the
-        // pseudo-jmp path only when `in_staticcatch=false` (lam_compile.ml:939).
-        // Any staticcatch that OCaml compiles while `in_staticcatch=true` takes
-        // the full exit_id path (lam_compile.ml:963-1017). `in_staticcatch=true`
-        // is set inside the body of BOTH the inline path (lam_compile.ml:952)
-        // and the explicit-jump path (lam_compile.ml:1002), so Rust must force
-        // explicit-jump for any staticcatch encountered while another inline-
-        // path or explicit-jump-path staticcatch's body is being compiled. The
-        // handler-inline at a `LstaticRaise` site pops the matching entry from
-        // `static_handlers` first, so the handler body sees the depth as it
-        // was at the outer Lstaticcatch's entry — matching OCaml's
-        // `compile_lambda lambda_cxt handler` (lam_compile.ml:962),
-        // which uses the original `lambda_cxt` for the handler.
-        if !self.static_handlers.is_empty()
-            || !self.static_jump_handlers.is_empty()
-            || !self.fallthrough_return_handlers.is_empty()
-        {
-            return true;
-        }
-
-        self.return_handler_requires_explicit_staticcatch_jump(a, handler)
-            || (lambda_has_multiple_static_raises_to_label(a, body, label, bindings.len())
-                && lambda_contains_static_raise_to_other_label(a, handler, label)
-                && !self.handler_is_pure_outward_static_raise_forwarder(a, handler))
-    }
-
-    fn handler_is_pure_outward_static_raise_forwarder(&self, a: &LamArena, lam: Lam) -> bool {
-        match a.view(lam) {
-            View::StaticRaise(label, args) => {
-                self.active_static_raise_target_exists(label, args.len())
-                    && args.iter().all(|x| lam_analysis::no_side_effects(a, *x))
-            }
-            View::Let(kind, _, value, body)
-                if matches!(kind, LetKind::Alias | LetKind::Strict | LetKind::StrictOpt)
-                    && lam_analysis::no_side_effects(a, value)
-                    && !self.lambda_requires_explicit_staticcatch_jump(a, value) =>
-            {
-                self.handler_is_pure_outward_static_raise_forwarder(a, body)
-            }
-            View::Sequence(first, second)
-                if lam_analysis::no_side_effects(a, first)
-                    && !self.lambda_requires_explicit_staticcatch_jump(a, first) =>
-            {
-                self.handler_is_pure_outward_static_raise_forwarder(a, second)
-            }
-            _ => false,
-        }
-    }
-
-    fn active_static_raise_target_exists(&self, label: i32, arity: usize) -> bool {
-        self.static_jump_handlers
-            .iter()
-            .rev()
-            .any(|handler| handler.label == label && handler.bindings.len() == arity)
-            || self
-                .fallthrough_return_handlers
-                .iter()
-                .rev()
-                .any(|handler| handler.label == label && handler.bindings.len() == arity)
-            || self
-                .static_handlers
-                .iter()
-                .rev()
-                .any(|handler| handler.label == label && handler.bindings.len() == arity)
-    }
-
-    fn return_handler_requires_explicit_staticcatch_jump(&self, a: &LamArena, lam: Lam) -> bool {
-        match a.view(lam) {
-            View::Var(_) | View::GlobalModule(_) | View::Const(_) => false,
-            View::If(..)
-            | View::Switch(..)
-            | View::StringSwitch(..)
-            | View::Let(..)
-            | View::Sequence(..)
-                if handler_has_static_raise_like_ocaml(a, lam)
-                    && !self.handler_is_pure_outward_static_raise_forwarder(a, lam) =>
-            {
-                true
-            }
-            View::Function { .. } => false,
-            View::StaticRaise(label, args) => {
-                !self.active_static_raise_target_exists(label, args.len())
-                    || args
-                        .iter()
-                        .any(|arg| self.return_handler_requires_explicit_staticcatch_jump(a, *arg))
-            }
-            View::StaticCatch(body, label, bindings, handler) => {
-                ((self.return_unit_stack.last().copied() == Some(true)) && !bindings.is_empty())
-                    || self.return_staticcatch_requires_explicit_jump(
-                        a, label, bindings, body, handler,
-                    )
-            }
-            _ => any_child(a, lam, |x| {
-                self.return_handler_requires_explicit_staticcatch_jump(a, x)
-            }),
-        }
-    }
-
-    fn handler_is_inlineable_pure_return_static_raise_dispatch(
-        &self,
-        a: &LamArena,
-        lam: Lam,
-    ) -> bool {
-        self.handler_is_pure_outward_static_raise_forwarder(a, lam)
-            || self
-                .pure_return_static_raise_dispatch_has_terminal_value(a, lam)
-                .unwrap_or(false)
-    }
-
-    fn pure_return_static_raise_dispatch_has_terminal_value(
-        &self,
-        a: &LamArena,
-        lam: Lam,
-    ) -> Option<bool> {
-        match a.view(lam) {
-            View::StaticRaise(label, args) => {
-                let args_are_pure = args.iter().all(|x| lam_analysis::no_side_effects(a, *x));
-                if self.active_static_raise_target_exists(label, args.len()) && args_are_pure {
-                    Some(false)
-                } else {
-                    None
-                }
-            }
-            View::Let(kind, _, value, body)
-                if matches!(kind, LetKind::Alias | LetKind::Strict | LetKind::StrictOpt)
-                    && lam_analysis::no_side_effects(a, value) =>
-            {
-                self.pure_return_static_raise_dispatch_has_terminal_value(a, body)
-            }
-            View::Sequence(first, second) if lam_analysis::no_side_effects(a, first) => {
-                self.pure_return_static_raise_dispatch_has_terminal_value(a, second)
-            }
-            View::If(cond, then_, else_) if lam_analysis::no_side_effects(a, cond) => {
-                let then_has_value =
-                    self.pure_return_static_raise_dispatch_has_terminal_value(a, then_)?;
-                let else_has_value =
-                    self.pure_return_static_raise_dispatch_has_terminal_value(a, else_)?;
-                Some(then_has_value || else_has_value)
-            }
-            View::Switch(scrut, switch) if lam_analysis::no_side_effects(a, scrut) => {
-                let mut has_terminal_value = false;
-                for body in switch
-                    .actions
-                    .consts
-                    .iter()
-                    .chain(switch.actions.blocks)
-                    .copied()
-                    .chain(switch.actions.fail)
-                {
-                    has_terminal_value |=
-                        self.pure_return_static_raise_dispatch_has_terminal_value(a, body)?;
-                }
-                Some(has_terminal_value)
-            }
-            View::StringSwitch(scrut, sw) if lam_analysis::no_side_effects(a, scrut) => {
-                let mut has_terminal_value = false;
-                for body in sw.actions.iter().copied().chain(sw.default) {
-                    has_terminal_value |=
-                        self.pure_return_static_raise_dispatch_has_terminal_value(a, body)?;
-                }
-                Some(has_terminal_value)
-            }
-            _ if lam_analysis::no_side_effects(a, lam) => Some(true),
-            _ => None,
-        }
-    }
-
-    fn lambda_requires_explicit_staticcatch_jump(&self, a: &LamArena, lam: Lam) -> bool {
-        match a.view(lam) {
-            View::Var(_) | View::GlobalModule(_) | View::Const(_) => false,
-            View::StaticRaise(label, args) => {
-                !self.active_static_raise_target_exists(label, args.len())
-                    || args
-                        .iter()
-                        .any(|arg| self.lambda_requires_explicit_staticcatch_jump(a, *arg))
-            }
-            View::StaticCatch(..) => true,
-            // Including function bodies.
-            _ => any_child(a, lam, |x| {
-                self.lambda_requires_explicit_staticcatch_jump(a, x)
-            }),
-        }
     }
 
     fn next_static_jump_exit_code(&self) -> i32 {
@@ -7644,14 +7184,6 @@ pub(crate) fn compiled_from_effect_block(j: &mut JsArena, block: Block) -> Compi
     }
 }
 
-fn lambda_contains_static_raise(a: &LamArena, lam: Lam) -> bool {
-    // Including function bodies.
-    match a.node(lam) {
-        Node::StaticRaise { .. } => true,
-        _ => any_child(a, lam, |x| lambda_contains_static_raise(a, x)),
-    }
-}
-
 fn handler_has_static_raise_like_ocaml(a: &LamArena, handler: Lam) -> bool {
     // OCaml's `Lam_compile_context.no_static_raise_in_handler`
     // (compiler/core/lam_compile_context.ml:105-106) is defined in terms of
@@ -7677,14 +7209,6 @@ pub(crate) fn lambda_has_exit(a: &LamArena, lam: Lam) -> bool {
 
 impl LambdaCompiler {}
 
-fn lambda_contains_staticcatch(a: &LamArena, lam: Lam) -> bool {
-    // Including function bodies.
-    match a.node(lam) {
-        Node::StaticCatch { .. } => true,
-        _ => any_child(a, lam, |x| lambda_contains_staticcatch(a, x)),
-    }
-}
-
 fn lambda_contains_static_raise_to_label(a: &LamArena, lam: Lam, label: i32, arity: usize) -> bool {
     match a.node(lam) {
         Node::Function { .. } => false,
@@ -7694,108 +7218,6 @@ fn lambda_contains_static_raise_to_label(a: &LamArena, lam: Lam, label: i32, ari
         } => raise_label == label && a.list_len(args) == arity,
         _ => any_child(a, lam, |x| {
             lambda_contains_static_raise_to_label(a, x, label, arity)
-        }),
-    }
-}
-
-fn switch_cases_contain_static_raise_to_label(
-    a: &LamArena,
-    const_cases: &[Lam],
-    block_cases: &[Lam],
-    label: i32,
-    arity: usize,
-) -> bool {
-    const_cases
-        .iter()
-        .chain(block_cases)
-        .any(|body| lambda_contains_static_raise_to_label(a, *body, label, arity))
-}
-
-fn string_switch_cases_contain_static_raise_to_label(
-    a: &LamArena,
-    cases: &[Lam],
-    label: i32,
-    arity: usize,
-) -> bool {
-    cases
-        .iter()
-        .any(|body| lambda_contains_static_raise_to_label(a, *body, label, arity))
-}
-
-fn lambda_is_direct_static_raise_to_label(
-    a: &LamArena,
-    lam: Lam,
-    label: i32,
-    arity: usize,
-) -> bool {
-    matches!(a.node(lam), Node::StaticRaise { label: raise_label, args }
-        if raise_label == label && a.list_len(args) == arity)
-}
-
-fn switch_cases_contain_nontrivial_static_raise_to_label(
-    a: &LamArena,
-    const_cases: &[Lam],
-    block_cases: &[Lam],
-    label: i32,
-    arity: usize,
-) -> bool {
-    string_switch_cases_contain_nontrivial_static_raise_to_label(a, const_cases, label, arity)
-        || string_switch_cases_contain_nontrivial_static_raise_to_label(
-            a,
-            block_cases,
-            label,
-            arity,
-        )
-}
-
-fn string_switch_cases_contain_nontrivial_static_raise_to_label(
-    a: &LamArena,
-    cases: &[Lam],
-    label: i32,
-    arity: usize,
-) -> bool {
-    cases.iter().any(|body| {
-        lambda_contains_static_raise_to_label(a, *body, label, arity)
-            && !lambda_is_direct_static_raise_to_label(a, *body, label, arity)
-    })
-}
-
-fn lambda_has_multiple_static_raises_to_label(
-    a: &LamArena,
-    lam: Lam,
-    label: i32,
-    arity: usize,
-) -> bool {
-    lambda_static_raise_count_to_label(a, lam, label, arity) >= 2
-}
-
-/// Static raises to `label` with `arity` arguments outside function bodies,
-/// saturated at 2.
-fn lambda_static_raise_count_to_label(a: &LamArena, lam: Lam, label: i32, arity: usize) -> usize {
-    let mut count = match a.node(lam) {
-        Node::Function { .. } => return 0,
-        Node::StaticRaise {
-            label: raise_label,
-            args,
-        } => usize::from(raise_label == label && a.list_len(args) == arity),
-        _ => 0,
-    };
-    a.iter_children(lam, |x| {
-        if count < 2 {
-            count = (count + lambda_static_raise_count_to_label(a, x, label, arity)).min(2);
-        }
-    });
-    count
-}
-
-fn lambda_contains_static_raise_to_other_label(a: &LamArena, lam: Lam, label: i32) -> bool {
-    match a.node(lam) {
-        Node::Function { .. } => false,
-        Node::StaticRaise {
-            label: raise_label, ..
-        } => raise_label != label,
-        _ => any_child(a, lam, |x| {
-            lambda_contains_static_raise_to_other_label(a, x, label)
         }),
     }
 }
@@ -8080,5 +7502,39 @@ impl StrSw {
     pub(crate) fn default(self, a: &LamArena) -> Option<Lam> {
         let p = a.str_switch_payload(self.info);
         p.has_default.then(|| a.list(self.actions)[p.n_cases()])
+    }
+}
+
+#[cfg(test)]
+mod tail_conditional_oracle_tests {
+    use super::*;
+
+    #[test]
+    fn q3_unit_conditional_distinguishes_return_rows() {
+        let mut a = LamArena::new();
+        let c = a.var(Ident::new("c", 1, crate::ident::IdentFlags::NONE));
+        let t = a.unit();
+        let e = a.unit();
+        let root = a.if_raw(c, t, e);
+        let mut ordinary = LambdaCompiler::new();
+        let r5 = ordinary.with_return_unit_context(true, |compiler| {
+            compiler.compile_return_output(&mut a, root)
+        });
+        let mut looping = LambdaCompiler::new();
+        let mut frame = TailLoopState::new(vec![], vec![]);
+        let r6 = looping.with_return_unit_context(true, |compiler| {
+            compiler.compile_tail_loop_if_return_output(&mut a, c, t, e, &mut frame)
+        });
+        assert!(r5.block.is_empty());
+        assert_eq!(r6.block.len(), 1);
+        assert!(matches!(looping.j.sk(r6.block[0]), StmtKind::Return(_)));
+        let print = |compiler: LambdaCompiler, output: BlockOutput| {
+            let program = DepsProgram { program: Program::new_in(output.block, vec![], compiler.j), modules: vec![], side_effect: None };
+            crate::js_ir::print_deps_program_with_directives_and_options(&program, None, &[], false, false, false)
+        };
+        let r5 = print(ordinary, r5);
+        let r6 = print(looping, r6);
+        eprintln!("R5: {r5:?}\nR6: {r6:?}");
+        assert_ne!(r5, r6);
     }
 }

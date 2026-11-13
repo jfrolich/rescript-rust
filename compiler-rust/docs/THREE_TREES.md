@@ -1,7 +1,8 @@
 # Three trees plus the type graph
 
-Status: design, not implemented. No production code changes with this
-document. It answers six questions from the code and one profile, states how
+Status: design. No production code changes with this
+document. T1, T2 and T7 have been implemented since ([STATUS.md](STATUS.md)).
+It answers six questions from the code and one profile, states how
 many intermediate representations a batch build needs, and re-cuts the work
 that is in flight.
 
@@ -20,8 +21,8 @@ Conventions.
 - Related documents: [FRONTEND_REWRITES.md](FRONTEND_REWRITES.md),
   [CHECKER_REDESIGN.md](CHECKER_REDESIGN.md) (section K),
   [BACKEND_REDESIGN.md](BACKEND_REDESIGN.md),
-  [BACKEND_LOWERING.md](BACKEND_LOWERING.md). `PRINTER_INSTRUCTIONS.md` is on
-  the branch of pull request #175 and is quoted from there.
+  [BACKEND_LOWERING.md](BACKEND_LOWERING.md). [PRINTER_INSTRUCTIONS.md](PRINTER_INSTRUCTIONS.md) arrived with pull request
+  #175 and is quoted from there.
 
 ## 0. Summary
 
@@ -340,7 +341,8 @@ What oxc's tree supports (read from `oxc_ast` and `oxc_allocator` 0.158):
   `ocaml_eq_expression` is deliberately partial (false for kinds outside a
   fixed set), so the builder needs its own.
 - What oxc nodes do not carry: the flags `PURE`, `STRICT`, `DELAY_SAFE`,
-  `RUNS_NO_CODE` (BACKEND_LOWERING 7.1), and the J-level meaning the printer
+  `J_SUBEXPR` (BACKEND_LOWERING 7.1, where `runs_no_code` is a predicate, not
+  a flag), and the J-level meaning the printer
   turns into a shape: a block's tag and mutability, a record's field names, a
   call's arity information, `undefined` that is a unit, comments. The rules
   and the rounds read these (J3 needs "immutable block with these fields",
@@ -427,7 +429,9 @@ That is 12 to 16 bytes a node against 72.
 
 ## 5. Q6: the built-in rewrites
 
-Read first: where the "rewritten copy" is. The mapper
+Read first: where the "rewritten copy" is. (This paragraph describes the
+mapper before T2; since #193 the expression mapper rebuilds no ancestor and
+`rewrite_child` and `rewrite_expression_generic` are gone.) The mapper
 (`ppx::rewrite_structure_with_warnings`, `rewrite_signature_with_warnings`)
 takes `arena: &mut ParseArena` and appends to the same arena. The nodes as
 parsed stay; what is new is every rewritten construct **and every ancestor of
@@ -638,21 +642,21 @@ was measured on it.
 | Level L rounds S4.1 to S4.4 (`bir/engine.rs`, `bir/l/{norm,flatten,exits,alias,beta,arity}.rs`) | merged | **stay as they are.** Level L is the core IR |
 | S4.5 to S4.9 | planned | **stay as they are** |
 | Lowering S3.3 (`bir/lower/*`, pull requests #170 and #182) | merged | **stays.** It writes J-level `Bir` nodes through `bir::j` and `View`; the two-text gate of BACKEND_LOWERING 8.1 does not depend on the storage |
-| Lowering S3.4 to S3.9 (BACKEND_LOWERING 8.3) | in flight | **stay as they are**, written against the same `bir::j` interface. The storage is swapped under them once, in T6 |
+| Lowering S3.4 to S3.9 (BACKEND_LOWERING 8.3) | merged, except loops and `LetRec` with value members (S3.7) | **stay as they are**, written against the same `bir::j` interface. The storage is swapped under them once, in T6 |
 | J normalising rules (pull request #183, `bir/j/norm.rs`) | merged | **stays**: the rules are the specification of the builder's constructors. In T6 their pattern matches move from `View::J*` to oxc nodes plus the facts table; the rule tests carry over |
 | Rounds J1 to J4 as passes over J-level `Bir` (S3.2: `bir/j/{inline_return,rest,subst,shake}.rs`) | not built | **change target**: decisions of the lowering at scope close (T1, T4), not passes |
 | Export extraction and coercion on J-level `Bir` (S3.9b) | not built | **changes target**: on the lowering's top-level rows (T4) |
 | Emitter under `emit/`: `literal.rs`, `raw.rs`, `sourcemap.rs`, `program.rs`, the node construction of `build.rs` | merged | **stay.** They are how oxc nodes are built; the builder of T6 calls them |
 | `emit/naming.rs` | merged | **changes target**: its group and suffix tables stay, its walk (`walk.rs`, the `Visitor` over the JS IR) is replaced by the replay of T5 |
-| Emit from J-level `Bir` (pull request #175: the view adapter, `bridge_j::import_js`) | open | **dropped as a product path.** Its measurement is the evidence for this document, and its parity suites stay as the check of the oxc printer on the JS IR until T6 |
+| Emit from J-level `Bir` (pull request #175: the view adapter, `bridge_j::import_js`) | not merged; #175 merged its measurement only | **dropped as a product path.** Its measurement is the evidence for this document, and its parity suites stay as the check of the oxc printer on the JS IR until T6 |
 | `bir/bridge_j.rs` (`export_js`) | merged | **stays until T6** as the gate's bridge, then deleted |
 | S5.1 builder trait, S5.2 `Bir` builder | planned | **change target**: the builder reads the syntax tree and the tables (T9) instead of the typed tree; the trait of S5.1 gets an input side |
 | S5.3 to S5.5 match compiler work | done or planned | **stay** |
 | Checker slices W1 to W11, K.6 (CHECKER_REDESIGN) | in flight | **stay**; independent |
 | Subtree skipping of FRONTEND_REWRITES | merged | **stays**: the certificate bits become the expansion bit's neighbours (T2) |
 
-Nothing that is merged is discarded. The only open pull request whose product
-goal is dropped is #175.
+Nothing that is merged is discarded. The only pull request whose product
+goal is dropped is #175, which merged as the record of its measurement.
 
 ## 11. The new slices
 
@@ -669,7 +673,7 @@ model" says whether the slice can be handed to one with this document.
 | T4 | Tail-call inlining at scope close (1.1); top-level rows, the shake filter and export coercion on them (1.4, S3.9b). Also owns original T1 items 3–6: block facts/substitution, dead declarations, record rest and the gate split. New side runs without legacy passes 3–6 | `bir/lower/{scope,tail,export}.rs`, `bir/shadow.rs` | the planned `bir/j/{inline_return,shake}.rs` are never created | `rg 'apply_js_tailcall_inline_pass\|apply_js_shake_pass' bir/shadow.rs` shows the legacy side only | the two-text gate; a counter of inlines where the level L count is not one | 1,500 | no: strong reviewer |
 | T5 | Naming events logged by the lowering; names assigned at scope close by the tables of `emit/naming.rs`; compared with the names the pass computes | `bir/lower/scope.rs`, `emit/naming.rs`, `bir/shadow.rs` | nothing yet (the pass is the oracle) | `rg 'fn replay' emit/naming.rs` has one hit | name tables equal on every supported unit of the corpora | 900 | no |
 | T6 | The builder over oxc nodes (section 3): `bir::j` reimplemented on oxc storage and the facts table; `RESCRIPT_BACKEND=new` prints from it | new `emit/builder.rs`, `bir/j/*`, `bir/lower/*` (types only), `driver.rs` | `bir/bridge_j.rs`, the J opcodes of `bir/node.rs`, the `Bir` view of `emit/walk.rs` | `rg 'JSeq\|JBlockLit' bir/node.rs` is empty; `rg bridge_j .` is empty | reformat-and-compare suites; instruction count of `new` below legacy | 3,000 | no |
-| T7 | Direct typing for the node-local rows of section 5 (`l` integers, boolean match, single record `let`, `async`/`await`) | `types/typecore.rs`, `binary_ast/ppx.rs`, the core IR builder | their arms in the mapper | `rg 'fn transform_await' binary_ast/ppx.rs` is empty | diagnostics parity | 800 | yes, one row per commit |
+| T7 | Direct typing for the node-local rows of section 5 (`l` integers, boolean match, single record `let`, `async`/`await`) | `types/typecore.rs`, `binary_ast/ppx.rs`, the core IR builder | their arms in the mapper | `rg 'fn transform_await' binary_ast/ppx.rs` is empty (as built: one hit, kept for the awaited-module rewrite; section 13) | diagnostics parity | 800 | yes, one row per commit |
 | T8 | Checker result tables written beside the typed tree; a debug check that table and tree agree | `types/typecore.rs`, `types/typemod.rs`, new `types/tables.rs` | nothing | `rg 'struct ExprRow' types/tables.rs` has one hit | the agreement check on all corpora | 1,200 | yes |
 | T9 | The core IR builder reads the syntax tree and the tables (replaces the input of S5.2) | `raw_lambda/convert.rs`, `convert/jsx.rs`, `typeopt.rs`, the `Bir` builder | reads of `Expression` in `raw_lambda/convert.rs` | `rg 'typedtree::Expression' raw_lambda` is empty | JavaScript parity; `Check` from the tables | 3,500 | no |
 | T10 | Patterns: `parmatch.rs` and `matching.rs` read a view over syntax pattern, table row and overlay | `types/parmatch.rs`, `raw_lambda/matching.rs`, `types/dict_pattern.rs` | `TypedArena`'s pattern pools | `rg 'push_pattern' types` is empty | diagnostics and JavaScript parity; the exhaustiveness fixtures | 4,000 | no |
@@ -865,6 +869,278 @@ compiler-rust/src/types/unit_reads.rs` empty; the CI instruction count, which
 must fall by about 1% of tests/tests (structure_reads is 1.16% today).
 ```
 
+### 11.4 T4 design
+
+Status: design and findings. No decision is implemented yet; the tests named
+below pin the legacy behaviour each finding rests on
+(`bir/lower/oracle_tests.rs`). "P1" to "P6" are the six legacy passes in
+order (flatten, external shadow, tail-call inlining, record rest,
+substitution with dead marks, shake); "C0" is the count of `Var` occurrences
+in the program P3 receives.
+
+#### Findings: what row T4 and section 1 did not account for
+
+1. **P3 reads the tree P1 wrote, not the tree the lowering wrote.** The
+   lowering merges two returning branches into `return c ? f(1) : 2`; P1
+   splits it into an `if` again, and only then does a block end in `return
+   f(1)`. Test `a_tail_call_site_inside_a_returned_conditional_exists_only_
+   after_the_flatten_pass`: with P1 first, `f` is inlined; with P3 first it
+   is kept. So a tail-call site is "a call that P1 leaves as the last
+   statement of a block": through the branches of a returned conditional and
+   the last operand of a returned sequence. P1 can also drop occurrences (a
+   pure branch of a conditional in statement position), so `built` is C0 only
+   if the lowering never leaves such a statement; that is not verified.
+2. **The top level cannot be decided before export coercion.** P3 and P5
+   give a declaration the status `Exported` from the export set, and C0 of a
+   top-level variable is counted after coercion consumed the export tuple,
+   added the rebound declarations and substituted moved aliases
+   (`coerce_toplevel_exports_with_name_reservations` in `lam_compile.rs`,
+   `move_same_name_export_alias_to_export_tail` and `substitute_after` in
+   `js_shake.rs`). Both sides of the gate run that code on the JS IR after
+   the lowering. So export extraction and coercion in the lowering (S3.9b) is
+   a precondition of every top-level decision, not the sixth commit. It is
+   about 1,500 lines of legacy code whose helpers scan the block
+   (`statement_mentions_ident_anywhere`,
+   `statement_uses_ident_only_in_tail_move_safe_positions`); on rows they
+   need, per reference, the statement it is in and whether its position is
+   safe for a moved alias.
+3. **A dead mark is not final when its scope closes.** Test
+   `inlining_from_an_outer_scope_takes_the_last_use_of_a_variable_of_a_
+   closed_scope`: `f` is declared outside a function whose body is `let y =
+   ext(); return f(y)`. When that body is complete `y` has one use (the test
+   reads `built` and `remaining`, both one). The outer scope then inlines
+   `f`, whose parameter is renamed to `y` and never read; P5, which runs
+   after all of P3, prints `ext();`. Pruning a branch of an inlined body does
+   the same to variables of the body.
+4. **Scope-close edits make `built` drift after a later release.** The
+   lowering can release a subtree after scopes inside it closed (a discarded
+   tail after a finished output, a folded branch, a pure effect). The release
+   subtracts the occurrences that are there now, not the ones C0 had. Read,
+   not tested.
+5. **P3 removes a dead block binding before P5 can materialise it.** Test
+   `a_declaration_the_tail_call_pass_finds_dead_is_not_materialised`: an
+   unused `let x = (ext(1), ext(2))` prints as the expression statement
+   `[ext(1), ext(2)];`. Hoisting where the declaration is lowered prints `let
+   x_0 = ext(1); let x_1 = ext(2);`. Whether `x` is dead is C0, known at the
+   close.
+6. **P4 reads a field read that P5 would replace.** `replace_source_fields`
+   looks for `source.label`; when the source is bound to a record literal,
+   P5 replaces that read by the field. Replacing where the read is lowered
+   hides it from the record rest. Read, not tested.
+7. **The inlined callee has no status if a decision created it.** The
+   boundary shape: `pair_0` exists only after P5, so P3 never inlines it.
+
+Consequences for 1.1 to 1.5: hoisting and substitution cannot happen "while
+lowering" (1.3); they happen at the close, after the P3 and P4 decisions of
+the same run. "Removal when the statements are copied" (1.3) holds only for
+a variable no pending inline site can reach; the rest is marked in place.
+1.4's rows need the position facts of finding 2.
+
+#### The design
+
+**Two counts** (`bir/lower/scope.rs`, `Uses`). `built` is C0: it changes
+only where the lowering itself builds or releases a `Var`. `remaining` is
+what the dead marks of P5 count. A scope-close decision writes `remaining`
+only.
+
+**A late mark** on every node a scope-close decision creates (a substituted
+field value, a renamed parameter, the occurrence of a hoisted variable). P3
+treats a late node as absent from C0: a late `Var` is no callee, and a late
+argument is neither a variable nor a constant for parameter substitution,
+because P3 saw the field read it replaced. `NodeFlags` has no free bit; the
+mark is a bit of the leaf's `aux`.
+
+**Where a scope closes.** `StatementStack::take_list`: every use of a
+variable is lowered before the run that holds its declaration is copied (a
+use is in the body of the `let`; a deferred value travels with the run). The
+close visits the slots of the run, never a statement's body.
+
+**Order at the close of a run**, with the count each step reads:
+
+| Step | Decision | Reads | Writes |
+| --- | --- | --- | --- |
+| A (P3) | Status of each declaration, in slot order: `built == 0` is dead (dropped when strictly pure, an expression statement otherwise); `built == 1`, strictly pure, lexical kind, a function literal that is not a method, not `async`, without directive: inline candidate | `built` | `remaining` of the variables in a dropped value |
+| A (P3) | The site recorded for a candidate is spliced when the arity matches | `built` of the callee; the late marks of the arguments | the site becomes the callee's statements; parameters renamed, replaced or declared; `remaining` |
+| B (P4) | Record rest, only in a run that has one, last declaration first | the slots after the declaration, as A left them | the pattern; the reads of the source |
+| C (P5) | Substitution, in slot order: a surviving lexical declaration of an immutable block literal with two or more fields is materialised, then each recorded read is replaced when the field is simple | field facts; the read sites of the variable | late nodes; `remaining` |
+| D (P5) | Dead marks while the slots are copied | `remaining` after A to C | dropped, or an expression statement |
+
+For an inner run, C and D have run before the A of an outer run; the late
+mark keeps that A on the C0 shape (finding 7).
+
+**Facts recorded while lowering**, dense by `VarId`: `Uses` (8 bytes);
+`VarFacts` (16 bytes): the declaration's statement node, the head of the
+variable's read sites (`x[i]`, `x.f` with a constant index), its single
+tail-call site (recorded while `built` is one and the site is not inside the
+variable's own initialiser; a second occurrence clears it), and state bits.
+Read sites are `(node, next)` pairs in a pool, 8 bytes each.
+
+**Late zero** (finding 3). A decrement that brings `remaining` of a variable
+whose run is closed to zero marks its declaration in place, through
+`VarFacts`. Marks are one level, as in P5: the occurrences inside a
+declaration that D drops stay counted.
+
+**Graves** (finding 4). Where a decision removes occurrences C0 counted, they
+are logged against the variable whose declaration anchors them (the dead
+variable, the inlined function); the anchor stays in its list as a dead
+declaration without value, and a release that reaches it subtracts the log
+from `built`.
+
+**A site in a closed list.** The splice rewrites the `return` node in place
+into a block of the callee's statements. P1's `block_items` splices a nested
+block into its list; whether every later reader treats the two alike is to
+be shown by the gate of T4c.
+
+**The boundary shape.** `return pair[0](2)` is no site (the callee is a field
+read) and is recorded as a read site of `pair`. At the top-level close A
+finds no candidate; C hoists `pair_0` and replaces the read by a late `Var
+pair_0`; `pair_0` has no P3 status; D drops `pair`: the legacy output.
+
+**The counter.** Sites spliced, and of those the number whose callee has a
+level L use count other than one, in the check report.
+
+#### Re-cut: one legacy step leaves the new side per slice
+
+The commit order of the T4 prompt (block facts, dead declarations, record
+rest, inlining, rows, gate) cannot be gated step by step: a decision moved
+ahead of a legacy pass that still runs changes that pass's input (the
+boundary finding; findings 1, 2, 5, 6). In legacy order every step can: the
+new side drops exactly the pass whose decisions moved, and the two printed
+texts stay equal.
+
+| Slice | Moves into the lowering | New side stops running | Needs |
+| --- | --- | --- | --- |
+| T4a | Export extraction and coercion on top-level rows (`bir/lower/export.rs`, S3.9b), with the position facts of finding 2 | `coerce_lowered_output` | - |
+| T4b | P1 as rules applied where a run is copied; or the proof that sites can be read through P1's reshaping and that P1 commutes with T4c to T4e | `apply_js_flatten_pass`, or nothing | - |
+| T4c | Step A, late marks, late zero, graves, the counter | `apply_js_tailcall_inline_pass` | T4a, T4b |
+| T4d | Step B | `apply_js_record_rest_pass` | T4c |
+| T4e | Steps C and D | `apply_js_flatten_and_mark_dead_pass` | T4d |
+| T4f | The shake as a filter over the rows | `apply_js_shake_pass` | T4a, T4e |
+
+`apply_external_shadow_pass` (P2) rewrites references to JavaScript globals
+that a binding shadows. It changes no count of a declared variable, but it
+reads which bindings exist, so it has to see the declarations P3 and P5
+remove; it stays until the names are decided in the lowering (T5).
+
+### 11.5 Worker prompt for T4b
+
+Which form: it needs one experiment, because nothing read so far proves that
+no rule of the lowering reads a list after it was copied in a way the
+flatten pass would change (`nested_if`, `equal_statements`, `single_value`,
+`simplify_if_head` in `bir/j/norm.rs` read copied lists). Commit 2 is that
+experiment; its result selects the form, and the prompt says which result
+selects which.
+
+```text
+Task T4b: the backend lowering applies the rules of the legacy flatten pass
+(pass 1, apply_js_flatten_pass) where it copies a statement run to its list,
+so that the new side of the `lower` gate stops running that pass. Repository:
+compiler-rust/. Read first: docs/THREE_TREES.md 11.4 (finding 1 and the
+re-cut table); docs/BACKEND_LOWERING.md 1.3, 7.2, 8.1;
+src/lambda/js_pass_flatten_and_mark_dead.rs from `struct Flatten` to the end
+of the file (flatten_block, Flatten::block_items, Flatten::statement,
+flatten_sequence_statements, flatten_sequence_expressions);
+src/bir/lower/out.rs (StatementStack::take_list); src/bir/j/norm.rs
+(js1_exp, js2_block, je8_not, jm14_push_effect_expression, nested_if,
+equal_statements, single_value, simplify_if_head); src/bir/shadow.rs
+(prepare_lower, check_lower); finish_lowered_output and
+compile_deps_program_with_lower_check in src/lambda/lam_compile.rs.
+
+The rules, each from Flatten::statement, applied to one statement:
+ R1 SExp of a JSeq: one statement per operand, left to right, each made by
+    js1_exp and flattened again; the result goes through js2_block.
+ R2 SExp of a JBlockLit: one statement per field, the same way.
+ R3 SExp of a JCond: each branch whose value has an effect becomes
+    [flatten(js1_exp(branch))]; both empty: the test as SExp, or an empty
+    SBlock when the test is pure; only the else branch: SIf(je8_not(test),
+    else, []); otherwise SIf(test, then, else). The statement's location is
+    the conditional expression's.
+ R4 SExp of an assignment whose right side is a JSeq: the operands before
+    the last as R1, then the assignment of the last operand.
+ R5 SReturn of a JCond: SIf(test, [flatten(return then)], [flatten(return
+    else)]), location as R3.
+ R6 SReturn of a JSeq: the operands before the last as R1, then the return
+    of the last, through js2_block.
+ R7 An SBlock of exactly one statement is that statement, flattened.
+ R8 In a list, the statements of an SBlock take the SBlock's place.
+Every other statement is left as it is: its nested lists were flattened when
+they were copied.
+
+Do exactly this, one commit each, in this order, each pushed when made:
+1. src/bir/j/flatten.rs: `pub(crate) fn flatten_into(bir, statement, out:
+   &mut Vec<NodeId>)` implementing R1 to R8 with an explicit work stack kept
+   in a struct the caller owns (no recursion, no Vec created per statement).
+   Its doc comment states the cost: one step per statement it writes plus
+   one per operand of a flattened sequence. Unit tests in
+   src/bir/j/flatten_tests.rs, one per rule, in the oracle form: build the
+   statement in a JsArena and in a Bir, run Flatten on the first and
+   flatten_into on the second, export the second with bridge_j::export_js,
+   compare the two printed texts. Nothing calls flatten_into yet outside
+   tests in this commit only; commit 2 follows in the same pull request.
+2. The experiment. StatementStack::take_list calls flatten_into for each
+   statement it copies (the scratch vector lives in StatementStack). In
+   compile_deps_program_with_lower_check the new side's
+   finish_lowered_output skips apply_js_flatten_pass (a const generic or a
+   bool parameter; the legacy side and the default path keep all six
+   passes). Run scripts/test_backend_coverage.py and RESCRIPT_BACKEND=check
+   on the 3,735-module application. Also add to check_lower a comparison of
+   the new side's `built` count of every variable with the count
+   js_pass_tailcall_inline::UseCounts gives on the legacy side after passes
+   1 and 2, as an error naming the unit and the variable.
+   RESULT A: every unit of the three corpora and of the application is
+   identical and no count differs. Continue with commit 3.
+   RESULT B: a unit differs or a count differs. Do not try to repair it by
+   changing a rule of norm.rs or by flattening later. Reduce the first
+   differing unit to the smallest Lambda, add it to
+   src/bir/lower/oracle_tests.rs as a test that asserts both texts (the form
+   of block_substitution_and_dead_removal_do_not_commute_with_tailcall_
+   inlining), revert the call in take_list and the skipped pass, keep
+   flatten.rs out of the tree (delete it: nothing may be dormant), keep the
+   count comparison if it passes, write under 11.4 which reader of a copied
+   list saw the changed shape, and stop. T4c then reads sites through the
+   reshaping (finding 1) and pass 1 stays until T6.
+3. Only after RESULT A. Rule tests in src/bir/lower/oracle_tests.rs, in the
+   oracle form (the same Lambda through the legacy pipeline with all six
+   passes and through the new one without pass 1, texts compared), one per
+   reader of a copied list with a statement of R1 to R7 inside the list it
+   reads: nested_if, equal_statements, single_value, simplify_if_head. A
+   failing one is RESULT B.
+4. Step-count and allocation tests: a run of 10,000 statements of which
+   half match R1 with two operands is copied in at most 25,000 steps of
+   flatten_into's counter; a sequence of 10,000 operands in one statement
+   in at most 10,001; a returned conditional nested 10,000 deep in its else
+   branch without recursion (it must not overflow the stack); a zero
+   allocation test in the form of src/bir/j/norm_tests.rs for a run that
+   needs no rule; size_of of the work-stack entry pinned (at most 16 bytes).
+5. tests/backend_coverage.txt if a count improved; docs/STATUS.md (a row
+   T4b); docs/THREE_TREES.md 11.4 (the re-cut table: T4b done, which form);
+   changes/lowering-flatten.internal.md, one line starting with "- ".
+
+End state, to paste in the pull request with the output:
+- `rg -n 'apply_js_flatten_pass' compiler-rust/src/lambda/lam_compile.rs`
+  shows it skipped for the new side only.
+- `rg -n 'lam_compile|js_exp_make|js_ir::build|js_pass_' compiler-rust/src/
+  bir/j/flatten.rs` is empty.
+- scripts/test_backend_coverage.py passes, stage `lower` unchanged or better
+  in every corpus, no new Unsupported reason; the application: no
+  difference in any unit.
+- cargo test for compiler-rust; the CI instruction count within +0.02% (the
+  default path is untouched); check-mode instructions on tests/tests before
+  and after.
+
+Shortcuts that count as failure: flattening in a pass over the finished unit
+or a finished function body instead of at the copy; calling the legacy
+Flatten from bir/; a hash map; a Vec, Box or String per statement; weakening
+or deleting a test; adding an Unsupported reason; changing a rule of
+norm.rs so that a unit passes; leaving flatten.rs in the tree unused.
+
+When a unit differs: print both texts for that unit (the error of
+check_lower names the first differing line), find the statement, and decide
+only between "a rule R1 to R8 is implemented wrongly" (fix it, add the rule
+test) and RESULT B. If you cannot tell which within the unit, it is RESULT
+B: report the unit and the line.
+```
+
 ## 12. Risks and what was not measured
 
 Not measured:
@@ -925,3 +1201,12 @@ Risks:
 | The prompt of T2 (11.2), step 3 | `type_expect` and `type_exp` resolve in their expression entry | both take `&Expression`, not a handle; the checker resolves where it reads a handle (`ParseArena::get_expanded_expr`) |
 | Section 11, row T2 | the instruction count falls by at least 1% | it falls by 0.97% on `tests/tests` and 0.69% on a 3,735-module application; the rebuild alone was 0.70% of the build (FRONTEND_REWRITES, "Expansions instead of rebuilt ancestors") |
 | Section 5 | every ancestor of a rewritten construct is new | also every expression without a certificate was cloned and pushed again, rewritten construct below it or not; and a node still gets a copy when its pattern, type, module or attribute child changes its handle, because those mappers still rebuild |
+| Section 5, direct rows and row T7 | direct rows need matching arms in the core IR builder | T7 retains the existing typed conditional, match, constant and application nodes, so A–D require no core IR builder change |
+| FRONTEND_REWRITES, attribute handling | integer `l` expressions/patterns ignore attributes | the pattern mapper already rewrote attributes; T7 now uses the ordinary attribute traversal for both and retains the source literal |
+| T7 deletion check and shared helper names | row-specific mapper code is deleted | `rewrite_expr`, `rewrite_pattern` and `rewrite_fun` are shared traversals, not row-specific helpers; delete their direct-row arms, not unrelated rewrites. The record-let helper also handled `let?`, which remains as `rewrite_unwrap_binding_let` |
+| T7 async/await direct rule | the existing checker can construct the same typed tree without per-node storage or synchronization | the previous full-location ghost-copy API boxed a location under a write lock; T7 adds an immutable ghost-index view and returns a 12-byte location value, so promise typing needs neither allocation nor locking |
+| T7 expansion measurement | direct-arm visits measure independently removable expansion entries | 358 arm visits overlap with 12 record-rest/type rewrites and 24 async parameter/type rewrites; removing await also removes 7 brace copies. The measured net reduction is 329, and all 3,038 unrelated entries are unchanged (FRONTEND_REWRITES, same-base census) |
+| Section 1.3 | hoisting and substitution happen while lowering, removal when the statements are copied | the tail-call pass drops a dead block binding before it is materialised, and record rest reads the field reads substitution would replace; both tested or read in 11.4 (findings 5 and 6), so they happen at the close |
+| Section 1.1 | the site is a final `return f(args)` of a statement-stack run | the pass finds sites on the tree the flatten pass wrote: inside a returned conditional the lowering writes no such statement (11.4, finding 1, tested) |
+| Section 1.3, 1.5 | a declaration with no remaining use is removed at scope close | inlining from an outer scope can take the last use later (11.4, finding 3, tested) |
+| Row T4 and the T4 prompt | export coercion on rows is the sixth step, after the scope-close decisions | every top-level status reads the export set and counts taken after coercion (11.4, finding 2); it is the first step |

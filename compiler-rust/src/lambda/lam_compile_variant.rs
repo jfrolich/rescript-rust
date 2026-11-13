@@ -680,27 +680,6 @@ impl LambdaCompiler {
         }
     }
 
-    pub(crate) fn uses_named_variant_view(
-        &self,
-        switch: &crate::lambda::arena::SwitchView<'_>,
-    ) -> bool {
-        named_payload_switch(switch.payload, switch.const_keys, switch.block_keys)
-    }
-
-    /// [`untagged_switch`] of a switch view.
-    pub(crate) fn uses_untagged_variant_view(
-        &self,
-        switch: &crate::lambda::arena::SwitchView<'_>,
-    ) -> bool {
-        untagged_switch(
-            &switch.payload.dispatch,
-            switch.payload.consts_full,
-            switch.const_keys.iter(),
-            switch.payload.blocks_full,
-            switch.block_keys.iter(),
-        )
-    }
-
     fn compile_switch_inner(
         &mut self,
         a: &mut LamArena,
@@ -879,6 +858,17 @@ impl LambdaCompiler {
             &mut self.j,
         ));
 
+        // compiler/core/lam_compile.ml:794-799 lowers the default first.
+        // OCaml `compile_general_cases` only calls `Js_output.to_break_block`
+        // for grouped cases (compiler/core/lam_compile.ml:610-624). The
+        // switch default is `Js_output.output_as_block`
+        // (compiler/core/lam_compile.ml:595-605), so it must not get the
+        // case-only trailing `break`.
+        let default_block = default.map(|fallback| {
+            let block = self.compile_assign_to_target_block(a, &tmp, fallback);
+            self.with_block_source_loc(a, fallback, block)
+        });
+
         let clauses: Vec<_> = self
             .grouped_switch_cases(a, cases, default, |_, _| true)
             .into_iter()
@@ -905,16 +895,6 @@ impl LambdaCompiler {
                 },
             )
             .collect();
-
-        // OCaml `compile_general_cases` only calls `Js_output.to_break_block`
-        // for grouped cases (compiler/core/lam_compile.ml:610-624). The
-        // switch default is `Js_output.output_as_block`
-        // (compiler/core/lam_compile.ml:595-605), so it must not get the
-        // case-only trailing `break`.
-        let default_block = default.map(|fallback| {
-            let block = self.compile_assign_to_target_block(a, &tmp, fallback);
-            self.with_block_source_loc(a, fallback, block)
-        });
 
         prelude.push(JS::string_switch(
             scrut_compiled.expr,

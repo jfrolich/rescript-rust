@@ -19,10 +19,12 @@ pub mod lower;
 pub mod replay;
 pub mod shadow;
 mod dump;
+mod dense;
 mod edit;
 mod node;
 mod pools;
 mod validate;
+mod tail_facts;
 mod vars;
 
 use crate::lambda::{ApInfo, FunctionAttribute, LamLoc};
@@ -45,9 +47,15 @@ pub struct Bir {
     exports: Vec<(VarId, Name)>,
     free_nodes: Vec<NodeId>,
     js_scope: Option<lower::scope::Scope>,
+    /// X:60 event-argument duplicability, maintained with construction facts.
+    j_duplicable: Vec<bool>,
     death_candidates: Vec<NodeId>,
     deaths_deferred: bool,
     func_owners: Vec<Option<NodeId>>,
+    tail_candidates: Vec<tail_facts::Candidates>,
+    tail_calls: Vec<tail_facts::Candidate>,
+    self_tail: Vec<bool>,
+    loop_facts: Vec<tail_facts::LoopFacts>,
     capture_boundaries: usize,
     weighted_switches: usize,
     // Zero is unknown; every valid use weight is positive. Cache invalidation
@@ -65,6 +73,8 @@ pub struct Bir {
     bulk_binders: Vec<(u64, u32)>,
     #[cfg(test)]
     steps: std::cell::Cell<u64>,
+    #[cfg(test)]
+    loop_fact_folds: std::cell::Cell<u64>,
     #[cfg(test)]
     intern_comparisons: std::cell::Cell<u64>,
 }
@@ -128,6 +138,7 @@ impl Bir {
         let id = VarId(index(self.vars.len()));
         self.capture_binders.push(0);
         self.bulk_binders.push((0, 0));
+        self.vars.j_origin.push(id);
         self.vars.name.push(name);
         self.vars.order.push(order);
         self.vars.flags.push(VarFlags::default());
@@ -332,6 +343,14 @@ impl Bir {
     /// Read a function header.
     pub fn function(&self, id: FuncId) -> &FuncHeader {
         &self.pools.funcs[id.index()]
+    }
+    /// O(1): read a parameter, including a lowered loop's noncontiguous copies.
+    pub fn function_parameter(&self, id: FuncId, index: usize) -> VarId {
+        let h = self.function(id);
+        assert!(index < h.params.len());
+        if h.flags & FuncHeader::INDIRECT_PARAMS != 0 {
+            self.pools.function_params[h.params.start as usize + index]
+        } else { VarId(h.params.start + index as u32) }
     }
     /// Read a function's cold attributes.
     pub fn function_attributes(&self, id: FuncId) -> &FunctionAttribute {

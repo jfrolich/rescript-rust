@@ -45,6 +45,9 @@ pub(super) struct Conditional {
     unit: bool,
     /// A slot for a declaration is reserved before the head slot.
     declares: bool,
+    /// Row R5 step 1 may apply: neither branch holds a construct that is
+    /// lowered to statements in every continuation (C:5139).
+    folds: bool,
 }
 
 /// Where the output of a conditional starts and where its head slot is. The
@@ -53,15 +56,36 @@ pub(super) struct Conditional {
 struct Parts {
     start: u32,
     head: u32,
+    /// Row R5 step 1 may apply (`Conditional::folds`).
+    folds: bool,
 }
 
-const EMPTY: Span = Span { start: 0, len: 0 };
+pub(super) const EMPTY: Span = Span { start: 0, len: 0 };
+
+impl norm::IfLists for super::out::StatementStack {
+    type Handle = Span;
+    /// O(recorded empty blocks), with no retained-tail scan.
+    fn trim(&mut self, b: &mut Bir, span: Span) { self.drop_empty_blocks(b, span); }
+    /// O(1): a zero-length run.
+    fn empty(&mut self, _: &mut Bir) -> Span { EMPTY }
+    /// O(1) on trimmed runs, plus counted dead-slot skips.
+    fn last(&mut self, _: &Bir, span: Span) -> Option<NodeId> { self.last(span) }
+    /// O(1) on trimmed runs, plus counted dead-slot skips.
+    fn only(&mut self, _: &Bir, span: Span) -> Option<NodeId> {
+        self.only(span).map(|(_, statement)| statement)
+    }
+    /// O(released nodes), leaving other stack runs in place.
+    fn release(&mut self, b: &mut Bir, span: Span) {
+        for statement in self.statements(span) { b.release(statement); }
+        self.kill(span);
+    }
+    /// O(run length): copy each surviving statement into the pool once.
+    fn take(&mut self, b: &mut Bir, span: Span) -> ListId { self.take_list(b, span) }
+}
 
 impl State {
     /// K1: C:1812, rows R1 to R6 and section 3.7, on entering the node. One
-    /// call is constant, except in a return continuation of a function that
-    /// returns unit: there it reads the Let/Seq spine of both branches (row
-    /// R5 step 0), and a spine node belongs to one conditional.
+    /// call is constant, including the two cached branch facts for R5 step 0.
     pub(super) fn conditional(
         &mut self,
         cx: Cx,
@@ -70,18 +94,11 @@ impl State {
         then_: NodeId,
         else_: NodeId,
     ) -> Result<Conditional, Unsupported> {
-        if matches!(
-            cx.cont,
-            Cont::Effect(Tail::Return(Ret::Named { loop_: Some(_), .. }))
-                | Cont::Value(Tail::Return(Ret::Named { loop_: Some(_), .. }))
-        ) {
-            // R6 needs the tail-loop record owned by the let-rec slice.
-            return Err(Unsupported("let rec"));
-        }
         let returns = matches!(cx.cont, Cont::Effect(Tail::Return(_)));
         // R5 step 0, C:3691 compile_if_unit_return_tail_block: decided before
         // the branches are lowered, so nothing is lowered and discarded.
         let unit = returns
+            && !matches!(cx.cont, Cont::Effect(Tail::Return(Ret::Named { loop_: Some(_), .. })))
             && cx.return_unit
             && kind == Kind::If
             && self.trivial_unit(then_)
@@ -95,6 +112,11 @@ impl State {
             // 3.7: the result of a short circuit is created after its operands.
             (Kind::And | Kind::Or, Cont::Value(_) | Cont::Effect(_)) => (Target::None, !returns),
         };
+        // C:5139 lambda_contains_statement_value_form, as two flag reads.
+        let statement = |node: NodeId| {
+            self.source.node(node).flags().contains(NodeFlags::HAS_STATEMENT)
+        };
+        let folds = !statement(then_) && !statement(else_);
         Ok(Conditional {
             condition,
             then_,
@@ -103,6 +125,7 @@ impl State {
             kind,
             unit,
             declares,
+            folds,
         })
     }
 
@@ -228,6 +251,7 @@ impl State {
         let parts = Parts {
             start,
             head: end - 1,
+            folds: conditional.folds,
         };
         let yes = children.next().expect("first branch");
         if conditional.kind == Kind::If {
@@ -334,7 +358,7 @@ impl State {
 
     /// Fill a reserved slot; an explicit empty block is recorded for the
     /// `if_` of an enclosing conditional. Constant.
-    fn place(&mut self, slot: u32, statement: NodeId) {
+    pub(super) fn place(&mut self, slot: u32, statement: NodeId) {
         self.statements.fill(slot, statement);
         if matches!(self.arena.view(statement), View::SBlock { statements } if statements.is_empty())
         {
@@ -343,6 +367,7 @@ impl State {
     }
 
     /// B:1225 block of no statement: an explicit empty block.
+    #[cfg(test)]
     fn empty_block(&mut self) -> NodeId {
         self.arena.new_node(View::SBlock { statements: &[] }, 1)
     }
@@ -360,7 +385,7 @@ impl State {
     }
 
     /// Release the statements of a discarded run: one step per statement.
-    fn release_run(&mut self, run: Span) {
+    pub(super) fn release_run(&mut self, run: Span) {
         for statement in self.statements.statements(run) {
             self.arena.release(statement);
         }
@@ -379,7 +404,7 @@ impl State {
 
     /// C:5187 take_single_result_assignment: `[target = value]`, the
     /// statement and the value. Constant on a trimmed run.
-    fn single_assignment(&mut self, run: Span, target: VarId) -> Option<(NodeId, NodeId)> {
+    pub(super) fn single_assignment(&mut self, run: Span, target: VarId) -> Option<(NodeId, NodeId)> {
         let (_, statement) = self.statements.only(run)?;
         let View::SExp { value } = self.arena.view(statement) else {
             return None;
@@ -415,6 +440,7 @@ impl State {
     }
 
     /// `if (test) yes else no` with both lists as given: no rule of J-S3.
+    #[cfg(test)]
     fn raw_if(&mut self, test: NodeId, yes: ListId, no: ListId) -> NodeId {
         let then_ = self.arena.block_from_list(yes);
         let else_ = self.arena.block_from_list(no);
@@ -428,144 +454,33 @@ impl State {
         )
     }
 
-    /// J-S3 (B:1575 simplify_if) gives exactly `raw_if` for these operands.
-    /// Reads the test, and the first and last statement of each run: constant
-    /// on trimmed runs.
-    fn plain_if(&mut self, test: NodeId, yes: Span, no: Span) -> bool {
-        if matches!(self.arena.view(test), View::JBool) {
-            return false;
-        }
-        let Some(last) = self.statements.last(yes) else {
-            return false;
-        };
-        let terminal = self.terminal(last);
-        let nested = |state: &Self, only: Option<(u32, NodeId)>| {
-            only.is_some_and(|(_, s)| matches!(state.arena.view(s), View::SIf { .. }))
-        };
-        let only_yes = self.statements.only(yes);
-        if self.statements.first(no).is_none() {
-            // Rule 6 with nothing after the guard; else rule 9 on a nested if.
-            return terminal || !nested(self, only_yes);
-        }
-        if matches!(self.arena.view(test), View::JNot { .. }) || terminal {
-            return false;
-        }
-        let only_no = self.statements.only(no);
-        let is = |state: &Self, only: Option<(u32, NodeId)>, effect: bool| {
-            only.is_some_and(|(_, s)| match state.arena.view(s) {
-                View::SExp { .. } => effect,
-                View::SReturn { .. } => !effect,
-                _ => false,
-            })
-        };
-        !is(self, only_no, false)
-            && !(is(self, only_yes, true) && is(self, only_no, true))
-            && !nested(self, only_yes)
-            && !nested(self, only_no)
-    }
-
-    /// B:1575 simplify_if as one statement, consuming both runs. One step per
-    /// statement of the runs (each is copied to its list once). The rules
-    /// that rewrite the operands are `norm::js3_simplify_if`'s; it takes
-    /// owned vectors, and is called only when `plain_if` says a rule applies.
-    fn if_statement(&mut self, test: NodeId, yes: Span, no: Span) -> NodeId {
+    /// B:1575 simplify_if as one statement. Each run is copied into the
+    /// arena once; all rules receive pool handles, never branch vectors.
+    pub(super) fn if_statement(&mut self, test: NodeId, yes: Span, no: Span) -> NodeId {
         self.statements.drop_empty_blocks(&mut self.arena, yes);
         self.statements.drop_empty_blocks(&mut self.arena, no);
-        if self.plain_if(test, yes, no) {
-            let (yes, no) = if yes.start >= no.start {
-                let yes = self.statements.take_list(&mut self.arena, yes);
-                (yes, self.statements.take_list(&mut self.arena, no))
-            } else {
-                let no = self.statements.take_list(&mut self.arena, no);
-                (self.statements.take_list(&mut self.arena, yes), no)
-            };
-            return self.raw_if(test, yes, no);
-        }
-        let then_: Vec<NodeId> = self.statements.statements(yes).collect();
-        let else_: Vec<NodeId> = self.statements.statements(no).collect();
-        self.statements.copied += then_.len() + else_.len();
-        self.kill(yes, no);
-        norm::js3_simplify_if(&mut self.arena, test, then_, else_)
+        let (yes, no) = if yes.start >= no.start {
+            let yes = self.statements.take_list(&mut self.arena, yes);
+            (yes, self.statements.take_list(&mut self.arena, no))
+        } else {
+            let no = self.statements.take_list(&mut self.arena, no);
+            (self.statements.take_list(&mut self.arena, yes), no)
+        };
+        norm::js3_simplify_if(&mut self.arena, test, yes, no)
     }
 
-    /// B:1575 simplify_if without the block around its result: the head
-    /// statement goes to the `head` slot and a branch the rules keep as the
-    /// following statements stays where it is. Constant, plus the statements
-    /// of a run that becomes a list or is discarded; the kept run is not read.
+    /// Shared J-S3 rules 0..6 leave a retained tail on the statement stack.
+    /// O(consumed statements + test negations), never the untouched tail.
     fn if_in_place(&mut self, head: u32, mut test: NodeId, mut yes: Span, mut no: Span) {
-        self.statements.drop_empty_blocks(&mut self.arena, yes);
-        self.statements.drop_empty_blocks(&mut self.arena, no);
-        loop {
-            if matches!(self.arena.view(test), View::JBool) {
-                // Rule 0: block of the branch taken.
-                let taken = self.arena.node(test).aux() != 0;
-                self.arena.release(test);
-                let (kept, dropped) = if taken { (yes, no) } else { (no, yes) };
-                self.release_run(dropped);
-                if self.statements.first(kept).is_none() {
-                    let block = self.empty_block();
-                    self.place(head, block);
-                }
-                return;
-            }
-            let no_empty = self.statements.first(no).is_none();
-            if !no_empty && let Some(value) = self.positive(test) {
-                // Rule 1.
-                test = value;
-                std::mem::swap(&mut yes, &mut no);
-                continue;
-            }
-            let Some(last) = self.statements.last(yes) else {
-                if no_empty {
-                    // Rule 2: the test alone.
-                    let statement = if self.arena.node(test).flags().contains(NodeFlags::PURE) {
-                        self.arena.release(test);
-                        self.empty_block()
-                    } else {
-                        norm::js1_exp(&mut self.arena, test)
-                    };
-                    self.place(head, statement);
-                    return;
-                }
-                // Rule 3.
-                test = norm::je8_not(&mut self.arena, test);
-                std::mem::swap(&mut yes, &mut no);
-                continue;
-            };
-            if let Some((statement, value)) = self.single_return(no) {
-                self.arena.detach(value);
-                self.arena.release(statement);
-                self.statements.kill(no);
-                let statement = if let Some((statement, then_)) = self.single_return(yes) {
-                    // Rule 4: one return of a conditional expression.
-                    self.arena.detach(then_);
-                    self.arena.release(statement);
-                    self.statements.kill(yes);
-                    let value = norm::je7_cond(&mut self.arena, test, then_, value);
-                    self.arena.new_node(View::SReturn { value }, 0)
-                } else {
-                    // Rule 5: `if (!test) return value`, then `yes` in place.
-                    let test = norm::je8_not(&mut self.arena, test);
-                    let statement = self.arena.new_node(View::SReturn { value }, 0);
-                    let then_ = self.arena.lists.push(&[statement]);
-                    let else_ = self.arena.lists.push(&[]);
-                    self.raw_if(test, then_, else_)
-                };
+        if let Some(result) = norm::simplify_if_head(
+            &mut self.arena, &mut self.statements, &mut test, &mut yes, &mut no,
+        ) {
+            if let Some(statement) = result.statement {
                 self.place(head, statement);
-                return;
             }
-            if self.terminal(last) {
-                // Rule 6: `if (test) yes`, then `no` in place.
-                let then_ = self.statements.take_list(&mut self.arena, yes);
-                let else_ = self.arena.lists.push(&[]);
-                let statement = self.raw_if(test, then_, else_);
-                self.place(head, statement);
-                return;
-            }
-            // Rules 7 to 10, or the plain statement.
+        } else {
             let statement = self.if_statement(test, yes, no);
             self.place(head, statement);
-            return;
         }
     }
 
@@ -587,7 +502,7 @@ impl State {
     /// B:1565 unnest_block over the output from `start`: a block that is its
     /// only statement is replaced by its statements. Constant when it is not;
     /// else one step per statement of the block.
-    fn unnest(&mut self, start: u32) -> Option<(u32, NodeId)> {
+    pub(super) fn unnest(&mut self, start: u32) -> Option<(u32, NodeId)> {
         loop {
             let run = self.statements.trim(Self::from(start));
             let only = self.statements.only(run)?;
@@ -696,7 +611,7 @@ impl State {
     /// normalize_if_assignment_merge_order, then the conditional expression
     /// when each run is the one statement `target = x` (the runs are
     /// consumed), else the operands after the swap. Constant on trimmed runs.
-    fn merge_assignments(
+    pub(super) fn merge_assignments(
         &mut self,
         mut test: NodeId,
         target: VarId,
@@ -724,7 +639,7 @@ impl State {
     }
 
     /// Row R3 as one statement: `target = cond(...)` or `if_(c, T, E)`.
-    fn assignment_statement(
+    pub(super) fn assignment_statement(
         &mut self,
         target: VarId,
         merged: Result<NodeId, (NodeId, Span, Span)>,
@@ -837,10 +752,12 @@ impl State {
     ) -> Probed {
         let yes = self.run(cx, yes);
         let no = self.run(cx, no);
-        // Step 1, C:5241 try_fold_effect_only_return_tail. The legacy gate
-        // lambda_contains_statement_value_form (C:5139) holds for every unit
-        // this lowering accepts: each such form is still Unsupported.
-        if self.returns_after_effects(yes) && self.returns_after_effects(no) {
+        if matches!(cx.cont, Cont::Effect(Tail::Return(Ret::Named { loop_: Some(_), .. }))) {
+            return self.tail_return_conditional(parts, test, yes, no);
+        }
+        // Step 1, C:5241 try_fold_effect_only_return_tail, behind the legacy
+        // gate lambda_contains_statement_value_form (C:5139): `folds`.
+        if parts.folds && self.returns_after_effects(yes) && self.returns_after_effects(no) {
             let then_ = self.fold_return_tail(yes);
             let else_ = self.fold_return_tail(no);
             self.kill(yes, no);
@@ -869,6 +786,54 @@ impl State {
             self.unnest(parts.start);
         }
         Probed::Out(self.output(parts.start, None, Finished::False))
+    }
+
+    /// R6: O(consumed statements), with the fallthrough run kept in place.
+    /// Unlike R5, do not discard unit returns or fold non-free return tails.
+    /// A unit return exits the loop; falling through repeats it.
+    fn tail_return_conditional(&mut self, parts: Parts, test: NodeId, yes: Span, no: Span) -> Probed {
+        let conjunction = matches!(self.arena.view(test), View::JBin { .. })
+            && self.arena.node(test).aux() == crate::js_ir::BinOp::And as u16;
+        let continues = self.statements.last(yes).is_some_and(|s| matches!(self.arena.view(s), View::SContinue { .. }));
+        let terminal = self.statements.last(no).is_some_and(|s| matches!(self.arena.view(s), View::SReturn { .. } | View::SThrow { .. } | View::SBreak { .. }));
+        if conjunction && continues && terminal {
+            let then_ = self.merge_tail_guard(no);
+            let else_ = self.arena.new_node(View::SBlock { statements: &[] }, 0);
+            let condition = norm::je8_not(&mut self.arena, test);
+            let statement = self.arena.new_node(View::SIf { condition, then_, else_: Some(else_) }, 0);
+            self.place(parts.head, statement);
+        } else {
+            self.if_in_place(parts.head, test, yes, no);
+            let prelude = Span { start: parts.start, len: parts.head - parts.start };
+            if self.statements.first(prelude).is_some() { self.block_statement(parts.head); }
+        }
+        self.unnest(parts.start);
+        Probed::Out(self.output(parts.start, None, Finished::False))
+    }
+
+    /// R6 guard merge (legacy merge_terminal_guard_fallthrough_else): O(s)
+    /// consumed statements; inspect the leading guard and terminal endpoints.
+    fn merge_tail_guard(&mut self, run: Span) -> NodeId {
+        let merge = self.statements.first_single_slot(run).and_then(|(slot, statement)| {
+            let View::SIf { condition, then_, else_ } = self.arena.view(statement) else { return None };
+            let empty = else_.is_none_or(|b| matches!(self.arena.view(b), View::SBlock { statements } if statements.is_empty()));
+            let View::SBlock { statements } = self.arena.view(then_) else { return None };
+            let terminal = statements.last().is_some_and(|&s| self.terminal(s));
+            (empty && terminal && self.statements.last(run) != Some(statement)).then_some((slot, statement, condition, then_))
+        });
+        if let Some((slot, statement, condition, then_)) = merge {
+            self.statements.clear(slot);
+            self.arena.detach(condition);
+            self.arena.detach(then_);
+            self.arena.release(statement);
+            let rest = self.statements.take_list(&mut self.arena, run);
+            let else_ = self.arena.block_from_list(rest);
+            let statement = self.arena.new_node(View::SIf { condition, then_, else_: Some(else_) }, 0);
+            self.arena.new_node(View::SBlock { statements: &[statement] }, 0)
+        } else {
+            let list = self.statements.take_list(&mut self.arena, run);
+            self.arena.block_from_list(list)
+        }
     }
 
     /// C:5241: the run is expression statements followed by one `return`.
@@ -915,30 +880,12 @@ impl State {
         result.expect("a return statement")
     }
 
-    /// C:3662 lambda_is_trivial_unit_undefined on the forms this lowering
-    /// accepts. One step per Let/Seq node of the spine, counted in
-    /// `spine_steps`; purity is the node's cached flag.
-    fn trivial_unit(&mut self, mut node: NodeId) -> bool {
-        let pure =
-            |state: &Self, node: NodeId| state.source.node(node).flags().contains(NodeFlags::PURE);
-        loop {
-            self.spine_steps += 1;
-            match self.source.view(node) {
-                View::Const { value } => {
-                    return matches!(
-                        self.arena.constant(value),
-                        crate::bir::Constant::Undefined(true)
-                    );
-                }
-                View::Seq { first, second } if pure(self, first) => node = second,
-                View::Let {
-                    value: Some(value),
-                    body,
-                    ..
-                } if pure(self, value) => node = body,
-                _ => return false,
-            }
-        }
+    /// C:3662 lambda_is_trivial_unit_undefined. One cached flag read,
+    /// independent of branch size. Bir::repair records TRIVIAL_UNIT when
+    /// building/importing L nodes; Bir::validate independently checks it.
+    fn trivial_unit(&mut self, node: NodeId) -> bool {
+        self.spine_steps += 1;
+        self.source.node(node).flags().contains(NodeFlags::TRIVIAL_UNIT)
     }
 
     /// Section 3.7 outside a return continuation: C:2918
@@ -1054,6 +1001,12 @@ impl State {
 
 #[cfg(test)]
 mod tests {
+    fn pooled_if(b: &mut crate::bir::Bir, test: crate::bir::NodeId, yes: Vec<crate::bir::NodeId>, no: Vec<crate::bir::NodeId>) -> crate::bir::NodeId {
+        let yes = b.lists.push(&yes);
+        let no = b.lists.push(&no);
+        norm::js3_simplify_if(b, test, yes, no)
+    }
+
     use super::super::oracle_tests::compare;
     use super::*;
     use crate::bir::{bridge, bridge_j};
@@ -1443,7 +1396,7 @@ mod tests {
         });
     }
     #[test]
-    fn r6_tail_loop_is_unsupported_until_let_rec() {
+    fn r6_free_conditionals_accept_a_tail_continuation() {
         let mut a = LamArena::new();
         let (yes, no) = (int(&mut a, 1), int(&mut a, 2));
         let conditional = if_(&mut a, 1, yes, no);
@@ -1461,10 +1414,9 @@ mod tests {
                 Cont::Effect(Tail::Return(named)),
                 Cont::Value(Tail::Return(named)),
             ] {
-                assert!(matches!(
-                    state.probe(Cx::new(cont), node),
-                    Err(Unsupported("let rec"))
-                ));
+                let output = state.probe(Cx::new(cont), node).unwrap();
+                let out = state.realize(Cx::new(cont), output);
+                assert_eq!(out.finished, if matches!(cont, Cont::Effect(_)) { Finished::True } else { Finished::False });
             }
         }
     }
@@ -1571,17 +1523,11 @@ mod tests {
         let one = int(&mut a, 1);
         let (yes, no) = (a.seq_raw(loop_, one), int(&mut a, 2));
         let root = if_(&mut a, 1, yes, no);
-        let input = bridge::import_lambda(&a, root).unwrap();
-        let root = input.root;
-        let mut state = State::new(input);
-        assert!(matches!(
-            state.probe(Cx::returning(), root),
-            Err(Unsupported("loop"))
-        ));
+        super::super::oracle_tests::compare(a, root);
     }
 
     #[test]
-    fn q5_nested_rec_keeps_the_let_rec_boundary() {
+    fn q5_nested_rec_in_a_conditional_matches_legacy() {
         let mut a = LamArena::new();
         let id = Ident::new("nested", 2, IdentFlags::NONE);
         let body = a.const_(Constant::JsTrue);
@@ -1590,13 +1536,7 @@ mod tests {
         let yes = a.letrec(&[(id, function)], yes);
         let no = a.const_(Constant::JsFalse);
         let root = if_(&mut a, 1, yes, no);
-        let input = bridge::import_lambda(&a, root).unwrap();
-        let root = input.root;
-        let mut state = State::new(input);
-        assert!(matches!(
-            state.probe(Cx::returning(), root),
-            Err(Unsupported("let rec"))
-        ));
+        super::super::oracle_tests::compare(a, root);
     }
 
     // Level-J rule tests. The lowering cannot yet produce a constant test,
@@ -1741,7 +1681,7 @@ mod tests {
         let mut hand = Hand::new();
         let (yes, no) = (hand.list(0, yes), hand.list(1, no));
         let test = hand.test(test);
-        let statement = norm::js3_simplify_if(&mut hand.state.arena, test, yes, no);
+        let statement = pooled_if(&mut hand.state.arena, test, yes, no);
         hand.state.statements.push(statement);
         hand.text(None)
     }
@@ -1805,15 +1745,15 @@ mod tests {
         let arena = &mut hand.state.arena;
         let statements = if no == "r" {
             let test = norm::je8_not(arena, test);
-            let mut statements = vec![norm::js3_simplify_if(arena, test, else_, vec![])];
+            let mut statements = vec![pooled_if(arena, test, else_, vec![])];
             statements.extend(then_);
             statements
         } else if yes.ends_with(['r', 't', 'b', 'k']) {
-            let mut statements = vec![norm::js3_simplify_if(arena, test, then_, vec![])];
+            let mut statements = vec![pooled_if(arena, test, then_, vec![])];
             statements.extend(else_);
             statements
         } else {
-            vec![norm::js3_simplify_if(arena, test, then_, else_)]
+            vec![pooled_if(arena, test, then_, else_)]
         };
         for statement in statements {
             hand.state.statements.push(statement);
@@ -1833,7 +1773,7 @@ mod tests {
         };
         let (then_, else_) = (branch(&mut hand, 0, yes), branch(&mut hand, 1, no));
         let test = hand.test(0);
-        let parts = Parts { start: 0, head };
+        let parts = Parts { start: 0, head, folds: true };
         let Probed::Out(out) =
             hand.state
                 .effect_conditional(Cx::effect(), parts, test, then_, else_)
@@ -2034,9 +1974,29 @@ mod tests {
         let root = input.root;
         let mut state = State::new(input);
         state.probe(Cx::value(), root).unwrap();
-        assert_eq!(state.spine_steps, DEPTH as usize + 2);
+        assert_eq!(state.spine_steps, 2);
         // Only the test was lowered: the conditional, its test, the function.
         assert_eq!(state.source_steps, 3);
+    }
+
+    #[test]
+    fn r5_forty_thousand_nodes_cost_one_flag_read() {
+        let mut a = LamArena::new();
+        let mut body = unit(&mut a);
+        for level in 0..20_000 {
+            let pure = int(&mut a, level);
+            body = a.seq_raw(pure, body);
+        }
+        let mut input = bridge::import_lambda(&a, body).unwrap();
+        input.arena.validate(Some(input.root)).unwrap();
+        let root = input.root;
+        let flags = input.arena.node(root).flags();
+        input.arena.nodes[root.index()].set_flags(NodeFlags(flags.0 ^ NodeFlags::TRIVIAL_UNIT));
+        assert_eq!(input.arena.validate(Some(root)), Err("stale trivial unit flag".into()));
+        input.arena.nodes[root.index()].set_flags(flags);
+        let mut state = State::new(input);
+        assert!(state.trivial_unit(root));
+        assert_eq!(state.spine_steps, 1);
     }
 
     #[test]
@@ -2045,7 +2005,7 @@ mod tests {
         assert_eq!(size_of::<Kind>(), 1);
         assert_eq!(size_of::<Target>(), 8);
         assert_eq!(size_of::<Conditional>(), 24);
-        assert_eq!(size_of::<Parts>(), 8);
+        assert_eq!(size_of::<Parts>(), 12);
         assert_eq!(size_of::<Cx>(), 32);
     }
 }

@@ -24,12 +24,26 @@ impl NodeFlags {
     pub const JS_LOC_PRESENT: u8 = 64;
     /// A JNumber carries an optional character decoration in its spare word.
     pub const JS_CHAR_PRESENT: u8 = 128;
+    /// L-only: a pure Let/Seq spine ending in the unit constant.
+    /// Shares the J strict-purity bit; L and J operations are disjoint.
+    pub const TRIVIAL_UNIT: u8 = 8;
     /// J-only: strict purity.
     pub const STRICT: u8 = 8;
     /// J-only: removable by E:146 is_pure_subexpression (not general purity).
     pub const J_SUBEXPR: u8 = Self::DEAD;
     /// J-only: safe to defer evaluation, reusing the L discarded-value bit.
     pub const DELAY_SAFE: u8 = Self::VALUE_UNUSED;
+    /// L-only: the subtree holds an `Exit` that is not under a `Fun`
+    /// (`Lam_exit_code.has_exit`, lam_exit_code.ml:35). Reuses the bit that
+    /// only a `JNumber` reads as `JS_CHAR_PRESENT`.
+    pub const HAS_EXIT: u8 = Self::JS_CHAR_PRESENT;
+    /// L-only, never on a `Var`: the subtree holds, outside a `Fun`, a
+    /// construct that is lowered to statements in every continuation (C:5139
+    /// lambda_contains_statement_value_form). Reuses the bit level J reads as
+    /// `JS_LOC_PRESENT`.
+    pub const HAS_STATEMENT: u8 = Self::JS_LOC_PRESENT;
+    /// L-only facts maintained together from immediate child flags.
+    pub(super) const CONTROL: u8 = Self::HAS_EXIT | Self::HAS_STATEMENT | Self::TRIVIAL_UNIT;
     /// Test a flag.
     pub fn contains(self, flag: u8) -> bool {
         self.0 & flag != 0
@@ -348,11 +362,22 @@ impl Node {
     pub fn aux(self) -> u16 {
         self.aux
     }
+    /// Borrow the existing switch action-list handle. O(1).
+    pub(crate) fn switch_actions(self) -> ListId {
+        assert!(matches!(self.op, Op::Switch | Op::StrSwitch));
+        ListId(self.words[1])
+    }
     /// O(1): retain the existing primitive operand-list handle without copying
     /// its elements into a traversal resume record.
     pub(crate) fn primitive_arguments(self) -> ListId {
         assert_eq!(self.op, Op::Prim);
         ListId(self.words[0])
+    }
+    /// O(1): the argument-list handle of an exit, for a traversal resume
+    /// record that does not copy the arguments.
+    pub(crate) fn exit_arguments(self) -> ListId {
+        assert_eq!(self.op, Op::Exit);
+        ListId(self.words[1])
     }
     /// Original integer character decoration; not necessarily the integer value.
     pub fn js_char(self) -> Option<i32> {
@@ -363,6 +388,10 @@ impl Node {
         assert_eq!(self.op, Op::JNumber);
         self.flags.0 |= NodeFlags::JS_CHAR_PRESENT;
         self.words[1] = code as u32;
+    }
+    /// O(1): borrow an SBlock's list identity without copying its elements.
+    pub(super) fn block_list_id(self) -> Option<ListId> {
+        (self.op == Op::SBlock).then_some(ListId(self.words[0]))
     }
     pub(super) fn block_list(list: ListId) -> Self {
         Self { op: Op::SBlock, flags: NodeFlags::default(), aux: 0, words: [list.0, 0, 0] }

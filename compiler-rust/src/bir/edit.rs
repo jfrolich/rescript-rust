@@ -13,7 +13,8 @@ impl Bir {
     }
 
     /// Attach a finalized lowering statement list without copying its elements
-    /// a second time. Bulk construction owns each detached statement once.
+    /// a second time. O(statements), plus any changed use-weight recounts
+    /// outside bulk construction. Each detached statement is adopted once.
     pub(crate) fn block_from_list(&mut self, list: ListId) -> NodeId {
         self.attach_list(Node::block_list(list), list)
     }
@@ -24,12 +25,17 @@ impl Bir {
     }
 
     fn attach_list(&mut self, node: Node, list: ListId) -> NodeId {
-        assert!(self.bulk, "statement-stack blocks require bulk construction");
         let id = self.allocate(node);
         for i in 0..self.lists.get(list).len() {
             let child = self.lists.get(list)[i];
             self.node(child);
             assert!(self.parents[child.index()].is_none(), "statement already attached");
+            if !self.bulk {
+                let weight = self.weight(child);
+                if weight != 1 {
+                    self.adjust_counts(child, 1 - i64::from(weight));
+                }
+            }
             self.parents[child.index()] = Some(id);
         }
         self.repair(id);
@@ -169,6 +175,11 @@ impl Bir {
         self.register_kind(node, true);
         if let Some(id) = self.free_nodes.pop() {
             self.nodes[id.index()] = node;
+            if id.index() < self.tail_candidates.len() {
+                self.tail_candidates[id.index()] = Default::default();
+                self.self_tail[id.index()] = false;
+                self.loop_facts[id.index()] = Default::default();
+            }
             self.parents[id.index()] = None;
             self.weights[id.index()] = 0;
             if !self.cold.is_empty() {
@@ -270,7 +281,7 @@ impl Bir {
             | View::For { var, .. }
             | View::ForOf { var, .. }
             | View::ForAwaitOf { var, .. }
-            | View::SForRange { var, .. }
+            | View::SForRange { var, parts: [_, _, _], .. }
             | View::SForOf { var, .. }
             | View::SForAwaitOf { var, .. } => smallvec![var],
             View::SRest { var, info, .. } => {
@@ -286,7 +297,7 @@ impl Bir {
                 .map(|i| VarId(first.0 + i))
                 .collect(),
             View::Fun { header, .. } | View::JFun { header, .. } => {
-                self.function(header).params.iter().collect()
+                (0..self.function(header).params.len()).map(|i| self.function_parameter(header, i)).collect()
             }
             View::Catch { header, .. } => self.catch(header).params.iter().collect(),
             _ => SmallVec::new(),
@@ -384,6 +395,14 @@ impl Bir {
     }
     fn update_facts(&mut self, id: NodeId) -> bool {
         let mut changed = false;
+        // Only the lowering arena consumes this J-only fact. L rewrite arenas
+        // must not allocate or maintain an unused per-node J table.
+        if self.js_scope.is_some() {
+            let duplicable = j::facts::external_duplicable(self, id);
+            if self.j_duplicable.len() <= id.index() { self.j_duplicable.resize(id.index() + 1, false); }
+            changed = self.j_duplicable[id.index()] != duplicable;
+            self.j_duplicable[id.index()] = duplicable;
+        }
         for (var, fact) in self.binding_facts(id) {
             changed |= self.vars.fact[var.index()] != fact;
             self.vars.fact[var.index()] = fact;
@@ -396,6 +415,13 @@ impl Bir {
         }
         if let View::Assign { var, .. } = self.view(id) {
             self.vars.flags[var.index()].0 |= VarFlags::ASSIGNED;
+        }
+        // The lowering's arena keeps `ASSIGNED` as level L recorded it
+        // (C:404 `assignable`, the targets of L assignments): a result
+        // temporary or handler parameter the lowering assigns stays
+        // delay-safe (A:28), as it is for the legacy lowering.
+        if self.js_scope.is_some() {
+            return changed;
         }
         if let View::JBin { left, .. } = self.view(id) {
             if self.node(id).aux() == crate::js_ir::op::BinOp::Eq as u16 {
@@ -549,11 +575,12 @@ impl Bir {
         id: NodeId,
         child_effects: impl Fn(NodeId) -> (bool, bool),
     ) -> (bool, bool) {
-        let children = self.view(id).children();
+        let view = self.view(id);
+        let children = view.children();
         let j_pure = j::facts::purity(self, id, false, |c| child_effects(c).0);
         let all_pure = children.iter().all(|&c| child_effects(c).0);
         let no_alloc = children.iter().all(|&c| child_effects(c).1);
-        let effects = match self.view(id) {
+        let effects = match view {
             View::Var { .. }
             | View::Global { .. }
             | View::JQualified { .. }
@@ -617,16 +644,95 @@ impl Bir {
         };
         (j_pure.unwrap_or(effects.0), effects.1)
     }
-    fn repair(&mut self, mut id: NodeId) {
+    /// O(arity): compute L control facts in one immediate-child fold, including
+    /// loop labels and tail candidates supplied by the construction callback.
+    /// Fun is a control boundary (compiler/core/lam_exit_code.ml:28).
+    pub(super) fn control_facts(
+        &self,
+        node: Node,
+        mut child_facts: impl FnMut(NodeId) -> (NodeFlags, super::tail_facts::LoopFacts),
+    ) -> (NodeFlags, super::tail_facts::LoopFacts) {
+        use super::tail_facts::LoopFacts as L;
+        let empty = L::default();
+        let own = match node.op() {
+            Op::Exit => return (NodeFlags(NodeFlags::HAS_EXIT | NodeFlags::HAS_STATEMENT), empty),
+            Op::Fun | Op::Var => return (NodeFlags::default(), empty),
+            Op::Break | Op::Continue => return (NodeFlags(NodeFlags::HAS_STATEMENT), L(L::JUMP)),
+            Op::Switch | Op::StrSwitch | Op::Catch | Op::Try | Op::TryFinally | Op::While
+            | Op::For | Op::ForOf | Op::ForAwaitOf | Op::Assign => true,
+            op if op as u8 <= Op::Continue as u8 => false,
+            _ => return (NodeFlags::default(), empty),
+        };
+        let view = node.view(&self.lists);
+        let tail = match view {
+            View::Const { value } => return (NodeFlags(if matches!(self.constant(value), Constant::Undefined(true)) {
+                NodeFlags::TRIVIAL_UNIT
+            } else { 0 }), empty),
+            View::Seq { second, .. } => Some(second),
+            View::Let { value: Some(_), body, .. } => Some(body),
+            _ => None,
+        };
+        let loop_body = match view {
+            View::While { body, .. }
+            | View::ForOf { body, .. } | View::ForAwaitOf { body, .. } => Some(body),
+            View::For { parts, .. } => parts.get(2).copied(),
+            _ => None,
+        };
+        #[cfg(test)]
+        if loop_body.is_some() { self.loop_fact_folds.set(self.loop_fact_folds.get() + 1); }
+        let scrutinee = match view {
+            View::Switch { scrutinee, .. } | View::StrSwitch { scrutinee, .. } => Some(scrutinee),
+            _ => None,
+        };
+        let mut unit = tail.is_some();
+        let both = NodeFlags::HAS_EXIT | NodeFlags::HAS_STATEMENT;
+        let mut facts = NodeFlags(if own { NodeFlags::HAS_STATEMENT } else { 0 });
+        let mut loops = empty;
+        for child in view.children() {
+            let (flags, jumps) = child_facts(child);
+            facts.0 |= flags.0 & both;
+            unit &= flags.contains(if tail == Some(child) { NodeFlags::TRIVIAL_UNIT } else { NodeFlags::PURE });
+            if let Some(body) = loop_body {
+                if body == child {
+                    if jumps.0 & L::SWITCH_JUMP != 0 { loops.0 |= L::NEEDS_LABEL; }
+                    if jumps.0 & L::JUMP != 0 { loops.0 |= L::BODY_JUMP; }
+                } else {
+                    // Bounds run outside the new frame. A while condition
+                    // with statements runs inside its generated JS loop,
+                    // so its outward jump crosses that loop (lam_compile.ml:1322).
+                    loops.0 |= jumps.0 & (L::JUMP | L::SWITCH_JUMP);
+                    if node.op() == Op::While && jumps.0 & L::JUMP != 0 { loops.0 |= L::SWITCH_JUMP; }
+                }
+            } else {
+                loops.0 |= jumps.0 & (L::JUMP | L::SWITCH_JUMP);
+                if scrutinee.is_some_and(|s| s != child) && jumps.0 & L::JUMP != 0 {
+                    loops.0 |= L::SWITCH_JUMP;
+                }
+            }
+        }
+        if unit { facts.0 |= NodeFlags::TRIVIAL_UNIT; }
+        (facts, loops)
+    }
+    /// O(affected ancestor edges and their direct operands); stops at an unchanged fact.
+    fn repair(&mut self, id: NodeId) {
+        self.repair_with_tail_child(id, None);
+    }
+    /// Same bound as repair, including changed tail-position edges whose list
+    /// endpoints stayed fixed. A recursive binding also reads its tail candidates.
+    fn repair_with_tail_child(&mut self, mut id: NodeId, mut changed_child: Option<NodeId>) {
         loop {
             let (pure, no_alloc) = self.effects(id, |c| {
                 let f = self.node(c).flags();
                 (f.contains(NodeFlags::PURE), f.contains(NodeFlags::NO_ALLOC))
             });
             let old_node = self.node(id);
+            let (control, tail_changed) = self.repair_control_facts(id, changed_child);
             let old_flags = old_node.flags();
             let mut flags = old_flags;
             flags.0 &= !(NodeFlags::PURE | NodeFlags::NO_ALLOC);
+            if old_node.op() != Op::Var && old_node.op() as u8 <= Op::Continue as u8 {
+                flags.0 = (flags.0 & !NodeFlags::CONTROL) | control.0;
+            }
             if pure {
                 flags.0 |= NodeFlags::PURE;
             }
@@ -646,10 +752,11 @@ impl Bir {
                 }
             }
             self.nodes[id.index()].set_flags(flags);
-            let facts_changed = self.update_facts(id);
+            let facts_changed = self.update_facts(id) || tail_changed;
             if flags == old_flags && !facts_changed {
                 break;
             }
+            changed_child = tail_changed.then_some(id);
             match self.parents[id.index()] {
                 Some(parent) => id = parent,
                 None => break,
@@ -674,18 +781,6 @@ impl Bir {
                 None => return false,
             }
         }
-    }
-    pub(super) fn is_captured(&self, id: NodeId, var: VarId) -> bool {
-        let mut child = id;
-        while let Some(parent) = self.parents[child.index()] {
-            if self.capture_boundary(parent, child)
-                && !self.vars.binder[var.index()].is_some_and(|b| self.is_descendant(b, parent))
-            {
-                return true;
-            }
-            child = parent;
-        }
-        false
     }
     fn next_capture_epoch(&mut self) -> u64 {
         self.capture_epoch = self
@@ -819,12 +914,25 @@ impl Bir {
             self.adjust_counts(replacement, -i64::from(replacement_weight));
         }
         let parent = self.parents[target.index()];
-        let effect_bits = NodeFlags::PURE | NodeFlags::NO_ALLOC | NodeFlags::STRICT | NodeFlags::J_SUBEXPR;
+        // The two level-L control facts share their bits with level-J
+        // metadata: a change of either re-derives the parent, which reads
+        // them from its children.
+        let effect_bits = NodeFlags::PURE | NodeFlags::NO_ALLOC | NodeFlags::STRICT
+            | NodeFlags::J_SUBEXPR | NodeFlags::HAS_EXIT | NodeFlags::HAS_STATEMENT;
         let effects_before = self.nodes[target.index()].flags().0 & effect_bits;
         self.release_nodes(target, Some(replacement), false);
         let content = self.nodes[replacement.index()];
         let cold = self.cold.get(replacement.index()).copied().flatten();
         self.unbind(replacement);
+        let tail_changed = if !self.tail_candidates.is_empty() {
+            let before = self.tail_candidates[target.index()];
+            let loop_changed = self.loop_facts[target.index()] != self.loop_facts[replacement.index()];
+            self.loop_facts[target.index()] = self.loop_facts[replacement.index()];
+            self.tail_candidates[target.index()] = self.tail_candidates[replacement.index()];
+            self.self_tail[target.index()] = self.self_tail[replacement.index()];
+            loop_changed || before != self.tail_candidates[target.index()]
+                || parent.is_some_and(|parent| matches!(self.view(parent), View::Apply { callee, .. } if callee == target))
+        } else { false };
         self.nodes[target.index()] = content;
         self.parents[target.index()] = parent;
         for child in self.view(target).children() {
@@ -860,8 +968,8 @@ impl Bir {
                 View::Prim { args, .. } if args.get(1) == Some(&target)
             );
             let j_shape = matches!(self.view(parent), View::JBin { .. } | View::JCall { .. });
-            if effects_changed || second_operand || j_shape || self.update_facts(parent) {
-                self.repair(parent);
+            if effects_changed || second_operand || j_shape || self.update_facts(parent) || tail_changed {
+                self.repair_with_tail_child(parent, tail_changed.then_some(target));
             }
             // Array.isArray recognises a two-edge callee shape, not just purity.
             if matches!(self.view(parent), View::JDot { .. }) {
@@ -1039,9 +1147,18 @@ impl Bir {
             match self.view(id) {
                 View::Fun { header, .. } | View::JFun { header, .. } => {
                     let old = *self.function(header);
-                    let params = VarSpan {
-                        start: old.params.iter().next().map_or(0, |v| vars[&v].0),
-                        len: old.params.len,
+                    let params = if old.flags & FuncHeader::INDIRECT_PARAMS != 0 {
+                        let start = index(self.pools.function_params.len());
+                        for i in 0..old.params.len() {
+                            let original = self.function_parameter(header, i);
+                            self.pools.function_params.push(vars[&original]);
+                        }
+                        VarSpan { start, len: old.params.len }
+                    } else {
+                        VarSpan {
+                            start: old.params.iter().next().map_or(0, |v| vars[&v].0),
+                            len: old.params.len,
+                        }
                     };
                     let new = self.function_header(
                         params,
@@ -1100,11 +1217,11 @@ impl Bir {
             for child in self.view(new).children() {
                 self.parents[child.index()] = Some(new);
                 let multiplier = self.edge_weight(new, child);
-                if multiplier != 1 {
+                if !self.bulk && multiplier != 1 {
                     self.adjust_counts(child, i64::from(multiplier) - 1);
                 }
             }
-            self.adjust_direct(new, 1);
+            if !self.bulk { self.adjust_direct(new, 1); }
             self.repair(new);
             if let Some(cold) = self.cold(id) {
                 self.set_cold(new, cold);
@@ -1155,6 +1272,181 @@ mod tests {
         assert_eq!(size_of::<SwitchId>(), 4);
         assert_eq!(size_of::<ColdId>(), 4);
         assert_eq!(size_of::<StrId>(), 4);
+    }
+
+    fn has_exit_flag(b: &Bir, id: NodeId) -> bool {
+        b.node(id).flags().contains(NodeFlags::HAS_EXIT)
+    }
+
+    fn switched_jump(b: &mut Bir, continue_: bool) -> (NodeId, NodeId) {
+        let jump = b.new_node(if continue_ { View::Continue } else { View::Break }, 0);
+        let scrutinee = lit(b);
+        let header = b.switch_header(SwitchHeader {
+            keys: vec![], clauses: vec![], constants: 0, consts_full: false,
+            blocks_full: false, has_default: true, dispatch: SwitchDispatch::Direct,
+        });
+        (b.new_node(View::Switch { scrutinee, actions: &[jump], header }, 0), jump)
+    }
+
+    #[test]
+    fn loop_label_facts_follow_boundaries_edits_and_validation() {
+        assert_eq!(std::mem::size_of::<super::super::tail_facts::LoopFacts>(), 1);
+        for continue_ in [false, true] {
+            let mut b = Bir::default();
+            let (body, jump) = switched_jump(&mut b, continue_);
+            let condition = lit(&mut b);
+            let inner = b.new_node(View::While { condition, body }, 0);
+            let condition = lit(&mut b);
+            let outer = b.new_node(View::While { condition, body: inner }, 0);
+            assert!(b.loop_needs_label(inner));
+            assert!(!b.loop_needs_label(outer));
+            valid(&b, outer);
+            let replacement = lit(&mut b);
+            b.replace(jump, replacement);
+            assert!(!b.loop_needs_label(inner));
+            valid(&b, outer);
+            let replacement = b.new_node(View::Break, 0);
+            b.replace(jump, replacement);
+            assert!(b.loop_needs_label(inner));
+            valid(&b, outer);
+            b.loop_facts[inner.index()].0 = 0;
+            assert_eq!(b.validate(Some(outer)), Err("stale loop-label fact".to_string()));
+
+            let mut b = Bir::default();
+            let body = b.new_node(if continue_ { View::Continue } else { View::Break }, 0);
+            let condition = lit(&mut b);
+            let root = b.new_node(View::While { condition, body }, 0);
+            assert!(!b.loop_needs_label(root));
+            valid(&b, root);
+
+            let mut b = Bir::default();
+            let (body, _) = switched_jump(&mut b, continue_);
+            let params = b.new_vars(&[]);
+            let header = b.function_header(params, FunctionAttribute::default(), LamLoc::NONE);
+            let body = b.new_node(View::Fun { body, header }, 0);
+            let condition = lit(&mut b);
+            let root = b.new_node(View::While { condition, body }, 0);
+            assert!(!b.loop_needs_label(root));
+            valid(&b, root);
+        }
+    }
+
+    #[test]
+    fn loop_label_facts_ten_thousand_nested_loops() {
+        let mut b = Bir::default();
+        let (mut root, _) = switched_jump(&mut b, false);
+        let mut inner = root;
+        for i in 0..10_000 {
+            let condition = lit(&mut b);
+            root = b.new_node(View::While { condition, body: root }, 0);
+            if i == 0 { inner = root; }
+        }
+        assert_eq!(b.loop_fact_folds.get(), 10_000);
+        println!("10,000 nested loops: {} construction folds", b.loop_fact_folds.get());
+        assert!(b.loop_needs_label(inner));
+        assert!(!b.loop_needs_label(root));
+        valid(&b, root);
+        assert_eq!(b.loop_fact_folds.get(), 20_000);
+    }
+
+    #[test]
+    fn has_exit_is_recorded_when_a_node_is_built_and_stops_at_a_function() {
+        let mut b = Bir::default();
+        let header = b.catch_header(1, VarSpan::default());
+        let exit = b.new_node(View::Exit { label: 1, args: &[] }, 0);
+        let other = lit(&mut b);
+        let seq = b.new_node(View::Seq { first: other, second: exit }, 0);
+        let condition = lit(&mut b);
+        let else_ = lit(&mut b);
+        let branch = b.new_node(View::If { condition, then_: seq, else_ }, 0);
+        // An exit under a function does not leave it (lam_exit_code.ml:28).
+        let params = b.new_vars(&[]);
+        let function = b.function_header(params, FunctionAttribute::default(), LamLoc::NONE);
+        let closed = b.new_node(View::Exit { label: 1, args: &[] }, 0);
+        let fun = b.new_node(View::Fun { body: closed, header: function }, 0);
+        let body = b.new_node(View::Seq { first: fun, second: branch }, 0);
+        let handler = lit(&mut b);
+        let root = b.new_node(View::Catch { body, handler, header }, 0);
+        for flagged in [exit, seq, branch, closed, body, root] {
+            assert!(has_exit_flag(&b, flagged));
+            assert!(b.node(flagged).flags().contains(NodeFlags::HAS_STATEMENT));
+        }
+        for clear in [other, condition, else_, fun, handler] {
+            assert!(!has_exit_flag(&b, clear));
+            assert!(!b.node(clear).flags().contains(NodeFlags::HAS_STATEMENT));
+        }
+        valid(&b, root);
+    }
+
+    #[test]
+    fn has_statement_marks_statement_forms_without_exits() {
+        let mut b = Bir::default();
+        let v = b.new_var_id(Name::new("x"), 0);
+        let value = lit(&mut b);
+        let assign = b.new_node(View::Assign { var: v, value }, 0);
+        let first = lit(&mut b);
+        let seq = b.new_node(View::Seq { first, second: assign }, 0);
+        let condition = b.new_node(View::Break, 0);
+        let body = lit(&mut b);
+        let looped = b.new_node(View::While { condition, body }, 0);
+        let root = b.new_node(View::Seq { first: seq, second: looped }, 0);
+        for flagged in [assign, seq, condition, looped, root] {
+            assert!(b.node(flagged).flags().contains(NodeFlags::HAS_STATEMENT));
+            assert!(!has_exit_flag(&b, flagged));
+        }
+        for clear in [value, first, body] {
+            assert!(!b.node(clear).flags().contains(NodeFlags::HAS_STATEMENT));
+        }
+        valid(&b, root);
+        let mut flags = b.node(first).flags();
+        flags.0 |= NodeFlags::HAS_STATEMENT;
+        b.nodes[first.index()].set_flags(flags);
+        assert_eq!(b.validate(Some(root)), Err("stale statement-form flag".to_string()));
+    }
+
+    #[test]
+    fn has_exit_follows_an_edit_up_ten_thousand_parents() {
+        let mut b = Bir::default();
+        b.catch_header(1, VarSpan::default());
+        let exit = b.new_node(View::Exit { label: 1, args: &[] }, 0);
+        let mut root = exit;
+        for _ in 0..10_000 {
+            let first = lit(&mut b);
+            root = b.new_node(View::Seq { first, second: root }, 0);
+        }
+        assert!(has_exit_flag(&b, root));
+        valid(&b, root);
+        let replacement = lit(&mut b);
+        b.replace(exit, replacement);
+        assert!(!has_exit_flag(&b, root));
+        valid(&b, root);
+        let again = b.new_node(View::Exit { label: 1, args: &[] }, 0);
+        b.replace(exit, again);
+        assert!(has_exit_flag(&b, root));
+        valid(&b, root);
+    }
+
+    #[test]
+    fn validate_rejects_a_stale_exit_flag() {
+        let mut b = Bir::default();
+        b.catch_header(1, VarSpan::default());
+        let exit = b.new_node(View::Exit { label: 1, args: &[] }, 0);
+        let first = lit(&mut b);
+        let root = b.new_node(View::Seq { first, second: exit }, 0);
+        valid(&b, root);
+        for (node, set) in [(root, false), (first, true)] {
+            let old = b.node(node).flags();
+            let mut flags = old;
+            if set {
+                flags.0 |= NodeFlags::HAS_EXIT;
+            } else {
+                flags.0 &= !NodeFlags::HAS_EXIT;
+            }
+            b.nodes[node.index()].set_flags(flags);
+            assert_eq!(b.validate(Some(root)), Err("stale exit flag".to_string()));
+            b.nodes[node.index()].set_flags(old);
+        }
+        valid(&b, root);
     }
 
     #[test]

@@ -689,6 +689,24 @@ mod tests {
     }
 
     #[test]
+    fn import_records_has_exit_on_every_node_above_an_exit() {
+        let mut a = LamArena::new();
+        let exit = a.static_raise(1, &[]);
+        let head = a.const_(C::JsNull);
+        let body = a.seq_raw(head, exit);
+        let handler = a.const_(C::JsNull);
+        let root = a.static_catch(body, 1, &[], handler);
+        let imported = import_lambda(&a, root).unwrap();
+        let bir = &imported.arena;
+        let flagged = |id| bir.node(id).flags().contains(crate::bir::NodeFlags::HAS_EXIT);
+        let View::Catch { body, handler, .. } = bir.view(imported.root) else { panic!() };
+        let View::Seq { first, second } = bir.view(body) else { panic!() };
+        assert!(flagged(imported.root) && flagged(body) && flagged(second));
+        assert!(!flagged(first) && !flagged(handler));
+        bir.validate(Some(imported.root)).unwrap();
+    }
+
+    #[test]
     fn shared_parameterless_catch_is_a_binder_fallback() {
         let mut a = LamArena::new();
         let body = a.static_raise(1, &[]);
@@ -1191,6 +1209,21 @@ mod roundtrip_tests {
         let body = a.var(f);
         let root = a.letrec(&[(f, fun)], body);
         identity(&a, root);
+    }
+
+    #[test]
+    fn import_records_loop_label_fact() {
+        let mut a = LamArena::new();
+        let jump = a.break_();
+        let scrutinee = a.const_(C::int(0));
+        let info = a.add_switch(false, [], false, [], true, SwitchDispatch::Direct);
+        let actions = a.add_list(&[jump]);
+        let body = a.switch_raw(scrutinee, actions, info);
+        let condition = a.const_(C::JsTrue);
+        let root = a.while_(condition, body);
+        let imported = import_lambda(&a, root).unwrap();
+        assert!(imported.arena.loop_needs_label(imported.root));
+        imported.arena.validate(Some(imported.root)).unwrap();
     }
 
     #[test]
