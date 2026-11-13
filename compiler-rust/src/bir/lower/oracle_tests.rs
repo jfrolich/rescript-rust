@@ -973,7 +973,9 @@ fn export_tuple_occurrences_are_not_the_tailcall_pass_input_counts() {
     let reference = a.var(f);
     let exports = a.prim_raw(Primitive::Pmakeblock(TagInfo::ModuleExport(vec![f]), Mutable::Immutable), &[reference], LamLoc::NONE);
     let root = a.let_(LetKind::Strict, f, function, exports);
-    let input = bridge::import_lambda(&a, root).unwrap();
+    // The lowering reads the variables the importer records for an export
+    // block, so the unit is imported the way the gate imports it.
+    let input = bridge::import_for_lowering(&a, root).0.unwrap();
     let lowered = lower(input, None, false).unwrap();
     let var = lowered.program.idents.iter().position(|&id| id == f).unwrap();
     let built = lowered.program.arena.js_scope.as_ref().unwrap().uses[var].built;
