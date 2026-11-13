@@ -941,6 +941,47 @@ mod tests {
         }
     }
 
+    /// The steps and the terms of lowering the item of a record of `fields`
+    /// `int` fields, and the body nodes of its plan.
+    fn record_lowering(fields: usize) -> (usize, usize, usize) {
+        let mut counts = (0, 0, 0);
+        crate::types::derived::tests::with_record(fields, |tctx, env, item, type_ctx| {
+            let arena = tctx.arena;
+            crate::types::derived::discharge(tctx, env, item).unwrap();
+            let rb = RawArena::new();
+            let mut converter = RawLambdaConverter::new(arena, &tctx.typed, type_ctx, env, &rb);
+            let tail = rb.unit();
+            let before = rb.get().node_count();
+            let mut steps = Counted(0);
+            lower(&mut converter, item, tail, &mut steps);
+            counts = (steps.0, rb.get().node_count() - before, arena.plans().body_count());
+        });
+        counts
+    }
+
+    /// Lowering a record's item visits each body node once, and makes a
+    /// fixed number of terms per field: `record_of` one block for the
+    /// record and `construct_of` one block or constant per construction,
+    /// whatever the number of fields.
+    #[test]
+    fn a_record_of_ten_thousand_fields_lowers_in_linear_steps() {
+        // The decoder's matches nest once per field.
+        let lowered = std::thread::Builder::new()
+            .stack_size(1 << 30)
+            .spawn(|| (record_lowering(1), record_lowering(2), record_lowering(10_000)))
+            .unwrap()
+            .join()
+            .unwrap();
+        let ((steps_1, terms_1, nodes_1), (steps_2, terms_2, nodes_2), (steps, terms, nodes)) =
+            lowered;
+        // One step per body node.
+        assert_eq!((steps_1, steps_2, steps), (nodes_1, nodes_2, nodes));
+        assert_eq!(nodes_2 - nodes_1, 46);
+        assert_eq!(terms_2 - terms_1, 59);
+        assert_eq!(nodes, nodes_1 + 9_999 * (nodes_2 - nodes_1));
+        assert_eq!(terms, terms_1 + 9_999 * (terms_2 - terms_1));
+    }
+
     /// A body of 10,000 nodes is lowered in 10,000 steps that make 10,000
     /// terms: one per node.
     #[test]

@@ -1153,6 +1153,65 @@ pub(crate) mod tests {
         test(&mut tctx, &env, item, &type_ctx);
     }
 
+    /// A record of `fields` `int` fields, typed up to its derived item:
+    /// `test` gets the context, the environment before the item, the item
+    /// and the parse arena's plans.
+    pub(crate) fn with_record(
+        fields: usize,
+        test: impl FnOnce(&mut TypeCheckContext<'_>, &Env, DerivedIdx, &TypeContext),
+    ) {
+        let labels: Vec<String> = (0..fields).map(|i| format!("f{i}: int")).collect();
+        let source = format!("@spice type t = {{{}}}", labels.join(", "));
+        let (parser, structure) =
+            crate::binary_ast::derive::fixtures::frontend_source(&source, true);
+        let (derived, before) = structure.split_last().unwrap();
+        let crate::parser::ast::StructureItemDesc::Pstr_derived(item) = derived.pstr_desc else {
+            panic!("the record takes a plan")
+        };
+        let arena = parser.arena();
+        let type_ctx = type_context();
+        let mut tctx = TypeCheckContext::new(&type_ctx, arena);
+        let env = initial_env(&type_ctx);
+        let (_, env) =
+            crate::types::typemod::type_structure(&mut tctx, &env, arena, before).unwrap();
+        test(&mut tctx, &env, item, &type_ctx);
+    }
+
+    /// The discharge of a record's item is linear in its fields, with an
+    /// exact count per field: its 22 obligations (3 in the encoder, 3 in
+    /// its JSON twin, 16 in the decoder) take one lookup each, the 16 that
+    /// are values, constructors or labels of the record expression one
+    /// instance each (a field access instantiates inside the checker's
+    /// lookup, a type has none), and one counted unification each (a label
+    /// or a constructor unifies its argument and its result).
+    #[test]
+    fn a_record_of_ten_thousand_fields_is_discharged_in_linear_steps() {
+        let steps = |fields: usize| {
+            let mut steps = Counted::default();
+            with_record(fields, |tctx, env, item, _| {
+                discharge_counting(tctx, env, item, &mut steps).unwrap();
+            });
+            steps
+        };
+        let (one, two, many) = (steps(1), steps(2), steps(10_000));
+        let per_field = Counted {
+            lookups: two.lookups - one.lookups,
+            instances: two.instances - one.instances,
+            unifications: two.unifications - one.unifications,
+        };
+        assert_eq!(
+            per_field,
+            Counted {
+                lookups: 22,
+                instances: 16,
+                unifications: 22
+            }
+        );
+        assert_eq!(many.lookups, one.lookups + 9_999 * per_field.lookups);
+        assert_eq!(many.instances, one.instances + 9_999 * per_field.instances);
+        assert_eq!(many.unifications, one.unifications + 9_999 * per_field.unifications);
+    }
+
     /// An item with 10,000 obligations performs exactly 10,000 lookups,
     /// 10,000 instances and 10,000 unifications.
     #[test]
