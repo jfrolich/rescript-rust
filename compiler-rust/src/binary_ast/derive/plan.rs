@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::parse_arena::{LidentIdx, LocIdx, StrIdx};
+use crate::parse_arena::{ExprIdx, LidentIdx, LocIdx, StrIdx};
 use crate::parser::ast::Attributes;
 
 macro_rules! handle {
@@ -89,6 +89,44 @@ pub enum ExprLoc {
     Dummy,
 }
 
+/// The type a constructor obligation states its constructor belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Owner {
+    /// The predefined `option`.
+    Option,
+    /// The predefined `result`.
+    Result,
+    /// The type a `Type` obligation resolved.
+    Type,
+}
+
+/// Where the body uses a constructor, and the location its name carries
+/// there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Site {
+    /// In an expression; the name carries the dummy location.
+    Construct,
+    /// In a pattern; the name carries no location.
+    Pattern,
+    /// In a pattern; the name carries the dummy location.
+    PatternDummy,
+}
+
+/// How the body uses a label, and the location its name carries there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LabelUse {
+    /// A field access; the name carries no location.
+    Access,
+    /// A field access; the name carries the dummy location.
+    AccessDummy,
+    /// A field of a record expression; the name carries no location. The
+    /// labels of one record expression are consecutive obligations.
+    Construct,
+}
+
+/// No variable slot: a `Type` obligation that annotates nothing.
+pub const NO_VAR: u32 = u32::MAX;
+
 /// What the checker must establish for one name the body uses. Obligations
 /// of a binding are stored in the order inference meets the identifiers of
 /// the general form, which fixes the first failure and the order of warnings.
@@ -119,15 +157,58 @@ pub enum Obligation {
         name_loc: LocIdx,
         /// The number of type arguments skeletons apply it to.
         arity: u16,
+        /// The variable slot the type annotates (`(e: t)`), which is unified
+        /// with the constructor applied to nothing, or [`NO_VAR`].
+        var: u32,
+    },
+    /// A record label, found as a field access or a record expression finds
+    /// it: instantiated once, its argument and result unified with the two
+    /// skeletons at `skeleton` (the argument's, then the record's).
+    Label {
+        /// The label's name.
+        name: LidentIdx,
+        /// The argument's skeleton, followed by the record's.
+        skeleton: SkeletonIdx,
+        /// How the body uses the label.
+        usage: LabelUse,
+    },
+    /// A constructor: looked up by name, it must be the one of `of`;
+    /// instantiated once, its argument (when it has one) and result unified
+    /// with the skeletons at `skeleton`.
+    Constructor {
+        /// The constructor's name.
+        name: LidentIdx,
+        /// The `Type` obligation of an [`Owner::Type`] constructor.
+        ty: ObligationIdx,
+        /// The argument's skeleton when `has_arg`, followed by the result's.
+        skeleton: SkeletonIdx,
+        /// The type the constructor must belong to.
+        of: Owner,
+        /// Where the body uses it.
+        site: Site,
+        /// Whether the body gives it one argument, or none.
+        has_arg: bool,
+    },
+    /// A constant of the user's source (`@spice.key("k")`,
+    /// `@spice.default(0)`): its type is unified with the skeleton.
+    Literal {
+        /// The constant expression.
+        expr: ExprIdx,
+        /// The type the body uses it at.
+        skeleton: SkeletonIdx,
     },
 }
 
 impl Obligation {
-    /// The name the obligation resolves. Cost: O(1).
+    /// The name the obligation resolves; a literal has none. Cost: O(1).
     #[inline]
-    pub fn name(self) -> LidentIdx {
+    pub fn name(self) -> Option<LidentIdx> {
         match self {
-            Obligation::Value { name, .. } | Obligation::Type { name, .. } => name,
+            Obligation::Value { name, .. }
+            | Obligation::Type { name, .. }
+            | Obligation::Label { name, .. }
+            | Obligation::Constructor { name, .. } => Some(name),
+            Obligation::Literal { .. } => None,
         }
     }
 }
@@ -153,6 +234,49 @@ pub enum SkeletonNode {
         /// Number of type arguments.
         args: u16,
     },
+    /// A tuple of the `len` skeletons that follow.
+    Tuple {
+        /// Number of components.
+        len: u16,
+    },
+    /// A predefined type constructor applied to the `args` skeletons that
+    /// follow.
+    Predef {
+        /// The constructor.
+        ty: Predef,
+        /// Number of type arguments.
+        args: u8,
+    },
+    /// Inside an `Arrow`, before a parameter's skeleton: the parameter is
+    /// optional and labelled, and the skeleton that follows is the type of
+    /// the value it holds when supplied.
+    Optional(StrIdx),
+}
+
+/// The predefined types a skeleton names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Predef {
+    /// `string`.
+    String,
+    /// `option<'a>`.
+    Option,
+    /// `array<'a>`.
+    Array,
+    /// `result<'a, 'b>`.
+    Result,
+}
+
+/// The optional first argument of an application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionalArg {
+    /// The callee is applied to unlabelled arguments only.
+    Absent,
+    /// The callee's first parameter is optional and the application leaves
+    /// it out.
+    Omitted,
+    /// The callee's first parameter is optional and the first argument is
+    /// supplied for it.
+    Supplied,
 }
 
 /// One node of a binding's body: the core language the backend lowers.
@@ -163,7 +287,7 @@ pub enum BodyNode {
     Local(u32),
     /// The value a `Value` obligation resolved.
     Free(ObligationIdx),
-    /// An application to unlabelled arguments.
+    /// An application to unlabelled arguments, after an optional one.
     Apply {
         /// The callee.
         funct: BodyIdx,
@@ -173,6 +297,8 @@ pub enum BodyNode {
         len: u16,
         /// Whether the call is written as a partial application (`f(a, ...)`).
         partial: bool,
+        /// The optional first argument.
+        optional: OptionalArg,
     },
     /// A function of one parameter.
     Function {
@@ -181,6 +307,97 @@ pub enum BodyNode {
         /// The function's body.
         body: BodyIdx,
     },
+    /// A field access.
+    Field {
+        /// The record.
+        record: BodyIdx,
+        /// The `Label` obligation.
+        label: ObligationIdx,
+    },
+    /// A record expression that writes every field: field `i` has the label
+    /// of obligation `labels + i` and the value of argument `fields + i`.
+    Record {
+        /// The first `Label` obligation.
+        labels: ObligationIdx,
+        /// The values: a range of the argument pool.
+        fields: u32,
+        /// Number of fields.
+        len: u32,
+    },
+    /// A constructor applied to one argument or to none.
+    Construct {
+        /// The `Constructor` obligation.
+        constructor: ObligationIdx,
+        /// The argument, when the obligation has one.
+        arg: BodyIdx,
+    },
+    /// A tuple.
+    Tuple {
+        /// The components: a range of the argument pool.
+        args: u32,
+        /// Number of components.
+        len: u32,
+    },
+    /// An array literal.
+    Array {
+        /// The elements: a range of the argument pool.
+        args: u32,
+        /// Number of elements.
+        len: u32,
+    },
+    /// A string constant the derive made.
+    Str(StrIdx),
+    /// The constant of a `Literal` obligation.
+    Literal(ObligationIdx),
+    /// A match whose cases are total: each tests one constructor or is a
+    /// wildcard.
+    Switch {
+        /// The scrutinee.
+        scrutinee: BodyIdx,
+        /// The cases: a range of the case pool.
+        cases: u32,
+        /// Number of cases.
+        len: u16,
+    },
+}
+
+/// The pattern of a case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CasePattern {
+    /// `_`.
+    Any,
+    /// A constructor applied to a variable, which the case's body sees as
+    /// its innermost local.
+    Construct {
+        /// The `Constructor` obligation.
+        constructor: ObligationIdx,
+        /// The variable's name.
+        binder: StrIdx,
+    },
+}
+
+/// One case of a `Switch`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Case {
+    /// The pattern.
+    pub pattern: CasePattern,
+    /// The body.
+    pub body: BodyIdx,
+}
+
+/// Where the type of a binding comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeSource {
+    /// The function type that remains of the value `obligation` resolved
+    /// after `applied` leading parameters were supplied.
+    ResultOf {
+        /// A `Value` obligation of the binding.
+        obligation: ObligationIdx,
+        /// Number of parameters supplied.
+        applied: u32,
+    },
+    /// The instance of a skeleton, made after the binding's obligations.
+    Stated(SkeletonIdx),
 }
 
 /// One binding of a derived item.
@@ -197,12 +414,8 @@ pub struct Binding {
     pub body: BodyIdx,
     /// Number of skeleton variable slots the binding uses.
     pub vars: u32,
-    /// The type source `ResultOf(obligation, applied)`: the binding's type is
-    /// the function type that remains of the value `result_of` resolved after
-    /// `applied` leading parameters were supplied.
-    pub result_of: ObligationIdx,
-    /// See `result_of`.
-    pub applied: u32,
+    /// Where the binding's type comes from.
+    pub ty: TypeSource,
 }
 
 /// The plan pools of one `ParseArena`.
@@ -214,6 +427,7 @@ pub struct Plans {
     skeletons: Vec<SkeletonNode>,
     body: Vec<BodyNode>,
     body_args: Vec<BodyIdx>,
+    cases: Vec<Case>,
 }
 
 impl Plans {
@@ -231,6 +445,11 @@ impl Plans {
     /// `ObligationIdx`. Cost: O(1).
     pub fn obligation_count(&self) -> usize {
         self.obligations.len()
+    }
+
+    /// Number of body nodes of all items. Cost: O(1).
+    pub fn body_count(&self) -> usize {
+        self.body.len()
     }
 
     /// The handle the next pushed binding gets. Cost: O(1).
@@ -296,7 +515,36 @@ impl Plans {
             args: start,
             len: args.len() as u16,
             partial,
+            optional: OptionalArg::Absent,
         })
+    }
+
+    /// Append `args` to the argument pool: the start of their range.
+    /// Cost: O(arguments), one slot each.
+    pub fn push_args(&mut self, args: &[BodyIdx]) -> u32 {
+        let start = self.body_args.len() as u32;
+        self.body_args.extend_from_slice(args);
+        start
+    }
+
+    /// Append the cases of one `Switch`: the start of their range.
+    /// Cost: O(cases), one 16-byte slot each.
+    pub fn push_cases(&mut self, cases: &[Case]) -> u32 {
+        let start = self.cases.len() as u32;
+        self.cases.extend_from_slice(cases);
+        start
+    }
+
+    /// The cases of a `Switch` node. Cost: O(1).
+    #[inline]
+    pub fn cases(&self, start: u32, len: u16) -> &[Case] {
+        &self.cases[start as usize..start as usize + len as usize]
+    }
+
+    /// A range of the argument pool. Cost: O(1).
+    #[inline]
+    pub fn args(&self, start: u32, len: u32) -> &[BodyIdx] {
+        &self.body_args[start as usize..(start + len) as usize]
     }
 
     /// The item of a handle. Cost: O(1).
@@ -350,7 +598,9 @@ mod tests {
         assert_eq!(size_of::<SkeletonIdx>(), 4);
         assert_eq!(size_of::<BodyIdx>(), 4);
         assert_eq!(size_of::<Obligation>(), 16);
-        assert_eq!(size_of::<BodyNode>(), 12);
+        assert_eq!(size_of::<BodyNode>(), 16);
+        assert_eq!(size_of::<Case>(), 16);
+        assert_eq!(size_of::<TypeSource>(), 12);
         assert_eq!(size_of::<SkeletonNode>(), 8);
         assert_eq!(size_of::<Item>(), 8);
         assert_eq!(size_of::<Binding>(), 40);
@@ -388,8 +638,10 @@ mod tests {
             obligations: Span { start: 0, len: 10_000 },
             body,
             vars: 10_000,
-            result_of: ObligationIdx(0),
-            applied: 0,
+            ty: TypeSource::ResultOf {
+                obligation: ObligationIdx(0),
+                applied: 0,
+            },
         });
         let item = plans.push_item(first);
         assert_eq!(plans.obligation_count(), 10_000);

@@ -19,6 +19,7 @@ use smallvec::SmallVec;
 
 use crate::binary_ast::derive::plan::{
     Binding, BindingIdx, DerivedIdx, ExprLoc, Obligation, ObligationIdx, Plans, SkeletonNode, Span,
+    TypeSource,
 };
 use crate::ident::Ident;
 use crate::parse_arena::ParseArena;
@@ -408,10 +409,16 @@ fn discharge_binding(
                     .map_err(|_| Fallback)?;
                 Resolved::Value { path, instance }
             }
+            // The obligations of records are discharged by the next commit;
+            // no plan holds one before the classifier admits records.
+            Obligation::Label { .. }
+            | Obligation::Constructor { .. }
+            | Obligation::Literal { .. } => return Err(Fallback),
             Obligation::Type {
                 name,
                 name_loc,
                 arity,
+                var: _,
             } => {
                 steps.lookup();
                 let (path, decl) = crate::types::typecore::find_type_for_lid(
@@ -443,15 +450,22 @@ fn discharge_binding(
     // obligation resolved, the one parameter that remains after `applied`
     // were supplied, and its result (typecore.ml `type_application`, total
     // application of a partial application's result).
-    let head = tctx.typed.derived.resolved(binding.result_of).instance();
+    let TypeSource::ResultOf {
+        obligation: result_of,
+        applied,
+    } = binding.ty
+    else {
+        return Err(Fallback);
+    };
+    let head = tctx.typed.derived.resolved(result_of).instance();
     let head = crate::types::ctype::expand_head(ctx, env, head);
     let (param, result) = match &*ctx.borrow_desc(ctx.repr(head)) {
         TypeDesc::Tarrow { args, ret } => {
             let args = ctx.type_args(*args);
-            if args.len() != binding.applied as usize + 1 {
+            if args.len() != applied as usize + 1 {
                 return Err(Fallback);
             }
-            let Some(param) = args.get(binding.applied as usize) else {
+            let Some(param) = args.get(applied as usize) else {
                 return Err(Fallback);
             };
             (param.typ, *ret)
@@ -505,6 +519,9 @@ fn instantiate(
                 used += span;
             }
             (ctx.new_constr(table.resolved(ty).path(), types.into_vec()), used)
+        }
+        SkeletonNode::Tuple { .. } | SkeletonNode::Predef { .. } | SkeletonNode::Optional(_) => {
+            unreachable!("a skeleton of a record plan, which no discharged item has yet")
         }
     }
 }
@@ -663,8 +680,10 @@ pub(crate) mod tests {
             },
             body: BodyIdx(0),
             vars: count,
-            result_of: start,
-            applied: 0,
+            ty: TypeSource::ResultOf {
+                obligation: start,
+                applied: 0,
+            },
         });
         plans.push_item(first)
     }
@@ -776,8 +795,10 @@ pub(crate) mod tests {
                 obligations: Span { start: start.0, len },
                 body: BodyIdx(0),
                 vars: 3,
-                result_of: start,
-                applied: 0,
+                ty: TypeSource::ResultOf {
+                    obligation: start,
+                    applied: 0,
+                },
             });
             let item = plans.push_item(first);
             crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
@@ -829,6 +850,7 @@ pub(crate) mod tests {
                 name: box_name,
                 name_loc,
                 arity,
+                var: crate::binary_ast::derive::plan::NO_VAR,
             });
             // make : 'a => box<'a>
             let skeleton = plans.push_skeleton(SkeletonNode::Arrow { params: 1 });
@@ -848,8 +870,10 @@ pub(crate) mod tests {
                 obligations: Span { start: ty.0, len: 2 },
                 body: BodyIdx(0),
                 vars: 1,
-                result_of: value,
-                applied: 0,
+                ty: TypeSource::ResultOf {
+                    obligation: value,
+                    applied: 0,
+                },
             });
             let item = plans.push_item(first);
             crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());

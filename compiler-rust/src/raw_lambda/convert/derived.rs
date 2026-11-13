@@ -171,6 +171,7 @@ impl<S: Steps> Lowering<'_, S> {
                 args,
                 len,
                 partial,
+                optional: _,
             } => {
                 let (funct_lam, remaining) = self.node(conv, funct);
                 // translcore.ml `Texp_apply`: a partial application of a
@@ -183,9 +184,8 @@ impl<S: Steps> Lowering<'_, S> {
                             self.table.resolved(obligation).instance(),
                         ),
                         BodyNode::Apply { .. } => remaining,
-                        // A plan applies no parameter and no function
-                        // partially; neither has a recorded type.
-                        BodyNode::Local(_) | BodyNode::Function { .. } => None,
+                        // A plan applies nothing else partially.
+                        _ => None,
                     };
                     arity.filter(|arity| *arity > i32::from(len))
                 } else {
@@ -198,6 +198,16 @@ impl<S: Steps> Lowering<'_, S> {
             }
             BodyNode::Function { .. } => {
                 unreachable!("a plan's only function is the root of a binding's body")
+            }
+            BodyNode::Field { .. }
+            | BodyNode::Record { .. }
+            | BodyNode::Construct { .. }
+            | BodyNode::Tuple { .. }
+            | BodyNode::Array { .. }
+            | BodyNode::Str(_)
+            | BodyNode::Literal(_)
+            | BodyNode::Switch { .. } => {
+                unreachable!("a node of a record plan, which no discharged item has yet")
             }
         }
     }
@@ -223,7 +233,7 @@ impl<B: RawLambdaBuilder, S: Steps> ArgLowering<B, BodyIdx> for Lowering<'_, S> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::binary_ast::derive::plan::{SkeletonNode, Span};
+    use crate::binary_ast::derive::plan::{SkeletonNode, Span, TypeSource};
     use crate::parser::ast::Attributes;
     use crate::parser::{Parser, module};
     use crate::raw_lambda::RawArena;
@@ -597,8 +607,10 @@ mod tests {
             },
             body,
             vars: 1,
-            result_of: obligation,
-            applied: 0,
+            ty: TypeSource::ResultOf {
+                obligation: obligation,
+                applied: 0,
+            },
         });
         let item = plans.push_item(first);
         crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());

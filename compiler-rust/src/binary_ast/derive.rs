@@ -155,7 +155,7 @@ pub fn free_names(
         .bindings(plans.item(idx))
         .iter()
         .flat_map(|binding| binding.obligations.range())
-        .map(move |slot| plans.obligation(plan::ObligationIdx(slot as u32)).name())
+        .filter_map(move |slot| plans.obligation(plan::ObligationIdx(slot as u32)).name())
 }
 
 /// The names of the values a planned item uses: what the identifier
@@ -172,7 +172,10 @@ pub fn value_names(
         .flat_map(|binding| binding.obligations.range())
         .filter_map(move |slot| match plans.obligation(plan::ObligationIdx(slot as u32)) {
             plan::Obligation::Value { name, .. } => Some(name),
-            plan::Obligation::Type { .. } => None,
+            plan::Obligation::Type { .. }
+            | plan::Obligation::Label { .. }
+            | plan::Obligation::Constructor { .. }
+            | plan::Obligation::Literal { .. } => None,
         })
 }
 

@@ -16,10 +16,14 @@
 
 use super::*;
 use crate::binary_ast::derive::plan::{
-    Binding, BodyIdx, BodyNode, DerivedIdx, ExprLoc, Obligation, SkeletonNode, Span,
+    Binding, BodyIdx, BodyNode, Case, CasePattern, DerivedIdx, ExprLoc, LabelUse, NO_VAR,
+    Obligation, ObligationIdx, OptionalArg, Owner, Predef, Site, SkeletonIdx, SkeletonNode, Span,
+    TypeSource,
 };
 use crate::binary_ast::derive::{Classification, GeneralReason};
 use crate::parse_arena::TypeList;
+
+mod record;
 
 /// Whether an attribute payload is a constant: a literal, or a template
 /// without interpolation. Anything else is a user expression typed among the
@@ -246,6 +250,10 @@ enum Spec {
     /// `Spice.optionToJson(codec)` or `Spice.optionFromJson(codec)` for the
     /// values of a dictionary of options (`codecs_generate_dict_codecs`).
     OptionOf(CoreTypeIdx),
+    /// `Spice.optionToJson(codec)` or `Spice.optionalFieldFromJson(codec)`
+    /// for a record field that may be absent
+    /// (`records_make_omittable_codecs`).
+    Omittable(CoreTypeIdx),
 }
 
 /// Where the skeleton of a codec's head finds the type it is used at.
@@ -313,7 +321,7 @@ impl Builder<'_> {
     /// Cost: O(1), plus O(path depth) comparisons for a one-argument type.
     fn arity(&self, spec: Spec) -> usize {
         match spec {
-            Spec::OptionOf(_) => 1,
+            Spec::OptionOf(_) | Spec::Omittable(_) => 1,
             Spec::Type(typ, _) => match &self.arena.get_core_type(typ).ptyp_desc {
                 CoreTypeDesc::Ptyp_constr((_, args)) => args.len(),
                 _ => unreachable!("the classifier admits constructor applications only"),
@@ -340,6 +348,13 @@ impl Builder<'_> {
                 let name = match self.side {
                     Side::Encode => "optionToJson",
                     Side::Decode => "optionFromJson",
+                };
+                return self.library(name, Args::One(Spec::Type(inner, EncodeContext::Value)));
+            }
+            Spec::Omittable(inner) => {
+                let name = match self.side {
+                    Side::Encode => "optionToJson",
+                    Side::Decode => "optionalFieldFromJson",
                 };
                 return self.library(name, Args::One(Spec::Type(inner, EncodeContext::Value)));
             }
@@ -383,6 +398,25 @@ impl Builder<'_> {
         }
     }
 
+    /// Push the skeleton of a parameter that takes the codec of `spec`, and
+    /// give the slot that codec is then emitted with: a variable for a plain
+    /// name, a function of one parameter for an application.
+    /// Cost: O(1): one or three skeleton nodes.
+    fn arg_slot(&mut self, spec: Spec) -> Slot {
+        if self.arity(spec) == 0 {
+            let var = self.fresh();
+            self.arena.plans_mut().push_skeleton(SkeletonNode::Var(var));
+            Slot::Plain(var)
+        } else {
+            let (param, result) = (self.fresh(), self.fresh());
+            let plans = self.arena.plans_mut();
+            plans.push_skeleton(SkeletonNode::Arrow { params: 1 });
+            plans.push_skeleton(SkeletonNode::Var(param));
+            plans.push_skeleton(SkeletonNode::Var(result));
+            Slot::Applied(param, result)
+        }
+    }
+
     /// Emit the codec of `spec`: its obligation and skeleton, then those of
     /// its arguments, and the body node that applies the head to each
     /// argument's codec in turn.
@@ -401,18 +435,7 @@ impl Builder<'_> {
                 });
                 for i in 0..arity {
                     let arg = parts.args.get(i, self.arena);
-                    let arg_slot = if self.arity(arg) == 0 {
-                        let var = self.fresh();
-                        self.arena.plans_mut().push_skeleton(SkeletonNode::Var(var));
-                        Slot::Plain(var)
-                    } else {
-                        let (param, result) = (self.fresh(), self.fresh());
-                        let plans = self.arena.plans_mut();
-                        plans.push_skeleton(SkeletonNode::Arrow { params: 1 });
-                        plans.push_skeleton(SkeletonNode::Var(param));
-                        plans.push_skeleton(SkeletonNode::Var(result));
-                        Slot::Applied(param, result)
-                    };
+                    let arg_slot = self.arg_slot(arg);
                     self.slots.push(arg_slot);
                 }
                 let (param, result) = match slot {
@@ -487,8 +510,10 @@ fn binding(
         obligations,
         body,
         vars,
-        result_of: first,
-        applied,
+        ty: TypeSource::ResultOf {
+            obligation: first,
+            applied,
+        },
     });
 }
 
@@ -507,8 +532,12 @@ pub(super) fn build(
         let Some(settings) = *settings else {
             continue;
         };
-        let manifest = decl.ptype_manifest.expect("a planned declaration has a manifest");
         let type_name = arena.get_string(decl.ptype_name.txt).to_string();
+        if let TypeKind::Ptype_record(labels) = &decl.ptype_kind {
+            record::bindings(arena, &type_name, labels, settings, &mut slots);
+            continue;
+        }
+        let manifest = decl.ptype_manifest.expect("a planned declaration has a manifest");
         if settings.do_encode {
             let encoder = Spec::Type(manifest, EncodeContext::Optional);
             binding(arena, &type_name, ENCODER_FUNC_SUFFIX, Side::Encode, encoder, Attributes::new(), &mut slots);
@@ -816,10 +845,249 @@ mod tests {
         assert_eq!(bindings.len(), 2);
         for binding in bindings {
             assert_eq!(binding.obligations.len as usize, depth + 1);
-            assert_eq!(binding.applied, 1);
+            assert!(matches!(binding.ty, TypeSource::ResultOf { applied: 1, .. }));
             // Root: p, r and the (p, r) of its argument; then two per level;
             // the innermost `int` is a plain name with one variable.
             assert_eq!(binding.vars as usize, 2 + 2 * (depth - 1) + 1);
         }
+    }
+
+    /// The plan of the last type declaration of `source`, built whatever the
+    /// classifier says, beside the same source expanded to syntax.
+    fn record_plan(source: &str) -> (DerivedIdx, ParseArena, Vec<StructureItem>, ParseArena) {
+        let mut parser = crate::parser::Parser::new("Test.res", source);
+        let items = crate::parser::module::parse_structure(&mut parser);
+        assert!(!parser.has_errors(), "{source}");
+        let mut arena = parser.into_arena();
+        let StructureItemDesc::Pstr_type(inner) = &items.last().unwrap().pstr_desc else {
+            panic!("a type declaration")
+        };
+        let settings: Vec<_> = inner
+            .1
+            .iter()
+            .map(|decl| get_generator_settings_from_attributes(&decl.ptype_attributes, &mut arena).unwrap())
+            .collect();
+        let idx = build(&mut arena, &inner.1, &settings);
+        let (syntax, syntax_arena) = expand_on(source, Some(GeneralReason::Switch));
+        (idx, arena, syntax, syntax_arena)
+    }
+
+    /// What inference meets in a generated expression, in its order: a
+    /// function's body; a callee, then its arguments; an annotation's type,
+    /// then its expression; a constructor, then its argument; a record, then
+    /// its label; the labels of a record expression, then its values; the
+    /// scrutinee of a match, the patterns of all its cases, then their
+    /// bodies. A constant with a source location is the user's.
+    fn events(arena: &ParseArena, expr: ExprIdx, locals: &mut Vec<String>, out: &mut Vec<String>) {
+        let expr = arena.get_expr(expr);
+        let type_name = |typ: CoreTypeIdx| {
+            let CoreTypeDesc::Ptyp_constr((lid, _)) = &arena.get_core_type(typ).ptyp_desc else {
+                panic!("a generated annotation names a type")
+            };
+            format!("type {} {:?}", longident_text(arena, arena.get_longident(lid.txt)), lid.loc)
+        };
+        let name = |lid: &Located<LidentIdx>| {
+            format!("{} {:?}", longident_text(arena, arena.get_longident(lid.txt)), lid.loc)
+        };
+        match &expr.pexp_desc {
+            ExpressionDesc::Pexp_fun(fun) => {
+                let PatternDesc::Ppat_var(param) = &arena.get_pat(fun.lhs).ppat_desc else {
+                    panic!("a generated function binds a variable")
+                };
+                locals.push(arena.get_string(param.txt).to_string());
+                events(arena, fun.rhs, locals, out);
+                locals.pop();
+            }
+            ExpressionDesc::Pexp_apply(apply) => {
+                events(arena, apply.funct, locals, out);
+                for (_, arg) in arena.apply_args(apply.args) {
+                    events(arena, *arg, locals, out);
+                }
+            }
+            ExpressionDesc::Pexp_ident(lid) => {
+                let text = longident_text(arena, arena.get_longident(lid.txt));
+                if !locals.contains(&text) {
+                    out.push(format!("value {text} {:?} {:?}", lid.loc, expr.pexp_loc));
+                }
+            }
+            ExpressionDesc::Pexp_constraint(inner) => {
+                out.push(type_name(inner.1));
+                events(arena, inner.0, locals, out);
+            }
+            ExpressionDesc::Pexp_construct(lid, args) => {
+                out.push(format!("construct {}", name(lid)));
+                for arg in arena.expr_list(args.txt) {
+                    events(arena, *arg, locals, out);
+                }
+            }
+            ExpressionDesc::Pexp_field(record, lid) => {
+                events(arena, *record, locals, out);
+                out.push(format!("access {}", name(lid)));
+            }
+            ExpressionDesc::Pexp_record((fields, None)) => {
+                let fields = arena.expr_field_list(*fields);
+                for field in fields {
+                    out.push(format!("field {}", name(&field.lid)));
+                }
+                for field in fields {
+                    events(arena, field.expr, locals, out);
+                }
+            }
+            ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
+                for item in arena.expr_list(*items) {
+                    events(arena, *item, locals, out);
+                }
+            }
+            ExpressionDesc::Pexp_constant(_) => {
+                if expr.pexp_loc != arena.none_loc() && expr.pexp_loc != arena.dummy_loc() {
+                    let literal = format!("literal {:?}", expr.pexp_loc);
+                    if !out.contains(&literal) {
+                        out.push(literal);
+                    }
+                }
+            }
+            ExpressionDesc::Pexp_match((scrutinee, cases)) => {
+                events(arena, *scrutinee, locals, out);
+                let cases = arena.case_list(*cases);
+                let mut binders = Vec::new();
+                for case in cases {
+                    let mut pattern = arena.get_pat(case.pc_lhs);
+                    let mut binder = None;
+                    loop {
+                        match &pattern.ppat_desc {
+                            PatternDesc::Ppat_construct(lid, args) => {
+                                out.push(format!("pattern {}", name(lid)));
+                                let [arg] = arena.pat_list(args.txt) else {
+                                    panic!("a generated pattern has one argument")
+                                };
+                                pattern = arena.get_pat(*arg);
+                            }
+                            PatternDesc::Ppat_constraint(inner) => {
+                                out.push(type_name(inner.1));
+                                pattern = arena.get_pat(inner.0);
+                            }
+                            PatternDesc::Ppat_var(var) => {
+                                binder = Some(arena.get_string(var.txt).to_string());
+                                break;
+                            }
+                            PatternDesc::Ppat_any => break,
+                            other => panic!("unexpected generated pattern: {other:?}"),
+                        }
+                    }
+                    binders.push(binder);
+                }
+                for (case, binder) in cases.iter().zip(binders) {
+                    let bound = binder.is_some();
+                    locals.extend(binder);
+                    events(arena, case.pc_rhs, locals, out);
+                    if bound {
+                        locals.pop();
+                    }
+                }
+            }
+            other => panic!("unexpected node in a planned body: {other:?}"),
+        }
+    }
+
+    /// The obligations of a record's plan are what inference meets in its
+    /// general form, binding by binding, in typing order, with the same
+    /// names and locations.
+    #[test]
+    fn record_obligations_follow_the_general_form() {
+        for source in [
+            "@spice type t = {x: int}",
+            "@spice type t = {label: string, value: array<option<A.t>>}",
+            "@spice type t = {a: option<string>, b?: int, c: Null.t<float>}",
+            "@spice type t = {@spice.key(\"k\") a: int, @spice.default(0) b: int, @spice.default(1.5) c: float, d?: bool}",
+            "@spice.decode type d = {@spice.key(\"other\") x: dict<id>, y?: array<int>}",
+        ] {
+            let run = move || {
+                let (idx, arena, syntax, syntax_arena) = record_plan(source);
+                let StructureItemDesc::Pstr_value((_, general)) = syntax.last().unwrap().pstr_desc
+                else {
+                    panic!("the general form of a derived item is a value group")
+                };
+                let plans = arena.plans();
+                let bindings = plans.bindings(plans.item(idx));
+                let general = syntax_arena.vb_list(general);
+                assert_eq!(general.len(), bindings.len(), "{source}");
+                for (binding, vb) in bindings.iter().zip(general) {
+                    let PatternDesc::Ppat_var(name) = &syntax_arena.get_pat(vb.pvb_pat).ppat_desc
+                    else {
+                        panic!("a generated binding binds a variable")
+                    };
+                    assert_eq!(arena.get_string(binding.name), syntax_arena.get_string(name.txt));
+                    assert_eq!(binding.attributes.len(), vb.pvb_attributes.len());
+                    assert!(matches!(binding.ty, TypeSource::Stated(_)));
+                    let mut expected = Vec::new();
+                    events(&syntax_arena, vb.pvb_expr, &mut Vec::new(), &mut expected);
+                    let text = |name: LidentIdx| longident_text(&arena, arena.get_longident(name));
+                    let (none, dummy) = (arena.none_loc(), arena.dummy_loc());
+                    let actual: Vec<String> = binding
+                        .obligations
+                        .range()
+                        .map(|i| match plans.obligation(ObligationIdx(i as u32)) {
+                            Obligation::Value { name, name_loc, expr_loc, .. } => {
+                                let expr_loc = match expr_loc {
+                                    ExprLoc::OfName => name_loc,
+                                    ExprLoc::Dummy => dummy,
+                                };
+                                format!("value {} {name_loc:?} {expr_loc:?}", text(name))
+                            }
+                            Obligation::Type { name, name_loc, .. } => {
+                                format!("type {} {name_loc:?}", text(name))
+                            }
+                            Obligation::Label { name, usage, .. } => match usage {
+                                LabelUse::Access => format!("access {} {none:?}", text(name)),
+                                LabelUse::AccessDummy => format!("access {} {dummy:?}", text(name)),
+                                LabelUse::Construct => format!("field {} {none:?}", text(name)),
+                            },
+                            Obligation::Constructor { name, site, .. } => match site {
+                                Site::Construct => format!("construct {} {dummy:?}", text(name)),
+                                Site::Pattern => format!("pattern {} {none:?}", text(name)),
+                                Site::PatternDummy => format!("pattern {} {dummy:?}", text(name)),
+                            },
+                            Obligation::Literal { expr, .. } => {
+                                format!("literal {:?}", arena.get_expr(expr).pexp_loc)
+                            }
+                        })
+                        .collect();
+                    assert_eq!(actual, expected, "{source}: {}", arena.get_string(binding.name));
+                }
+            };
+            std::thread::Builder::new()
+                .stack_size(64 << 20)
+                .spawn(run)
+                .unwrap()
+                .join()
+                .unwrap();
+        }
+    }
+
+    /// A record of 10,000 fields: per field three obligations and seven body
+    /// nodes in an encoder, sixteen obligations and thirty-two body nodes in
+    /// its decoder, beside a fixed number per binding.
+    #[test]
+    fn a_record_plan_is_linear_in_its_fields() {
+        let fields = 10_000;
+        let source = format!(
+            "@spice type t = {{{}}}",
+            (0..fields).map(|i| format!("f{i}: int")).collect::<Vec<_>>().join(", ")
+        );
+        let mut parser = crate::parser::Parser::new("Test.res", &source);
+        let items = crate::parser::module::parse_structure(&mut parser);
+        assert!(!parser.has_errors());
+        let mut arena = parser.into_arena();
+        let StructureItemDesc::Pstr_type(inner) = &items[0].pstr_desc else {
+            panic!("a type declaration")
+        };
+        let settings =
+            [get_generator_settings_from_attributes(&inner.1[0].ptype_attributes, &mut arena).unwrap()];
+        let idx = build(&mut arena, &inner.1, &settings);
+        let plans = arena.plans();
+        let bindings = plans.bindings(plans.item(idx));
+        let obligations: Vec<_> = bindings.iter().map(|binding| binding.obligations.len as usize).collect();
+        assert_eq!(obligations, [4 + 3 * fields, 4 + 3 * fields, 4 + 16 * fields]);
+        assert_eq!(plans.body_count(), 2 * (10 + 7 * fields) + 12 + 32 * fields);
     }
 }
