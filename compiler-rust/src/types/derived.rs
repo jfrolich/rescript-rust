@@ -465,7 +465,14 @@ fn discharge_binding(
                 let primitive = match &desc.val_kind {
                     crate::types::decl::ValueKind::ValReg => false,
                     crate::types::decl::ValueKind::ValPrim(prim) => {
-                        if crate::raw_lambda::convert::primitive_reads_syntax(prim) {
+                        // An optional parameter of an external is part of
+                        // its FFI specification, not an option.
+                        if crate::raw_lambda::convert::primitive_reads_syntax(prim)
+                            || matches!(
+                                plans.skeleton_from(skeleton).get(1),
+                                Some(SkeletonNode::Optional(_))
+                            )
+                        {
                             return Err(Fallback);
                         }
                         true
@@ -561,7 +568,12 @@ fn discharge_binding(
                                 (label.lbl_all, 0)
                             }
                         };
-                        if label.lbl_all != family || label.lbl_pos as u32 != position {
+                        // typecore.ml `type_label_a_list` rejects the
+                        // construction of a private record.
+                        if label.lbl_all != family
+                            || label.lbl_pos as u32 != position
+                            || label.lbl_private == crate::types::PrivateFlag::Private
+                        {
                             return Err(Fallback);
                         }
                         // With several candidates inference may report the
@@ -666,9 +678,16 @@ fn discharge_binding(
                         .1
                     }
                 };
+                // A plan describes an ordinary constructor of a regular
+                // variant, applied to what it takes; typecore.ml
+                // `type_construct` rejects the construction of a private
+                // one.
                 if desc.cstr_generalized
                     || desc.cstr_inlined.is_some()
                     || desc.cstr_arity != i32::from(has_arg)
+                    || !matches!(desc.cstr_kind, crate::types::ConstructorKind::Ordinary(_))
+                    || (site == Site::Construct
+                        && desc.cstr_private == crate::types::PrivateFlag::Private)
                 {
                     return Err(Fallback);
                 }
@@ -1044,6 +1063,7 @@ pub(crate) mod tests {
             "@spice type t = {@spice.default(\"x\") b: int}",
             "@spice type t = {@spice.key(1) b: int}",
             "type plain = {p: int}\n@spice type t = {a: plain}",
+            "@spice.decode type t = private {a: int}",
         ] {
             let planned = check_records(source, true).unwrap_err();
             let general = check_records(source, false).unwrap_err();
