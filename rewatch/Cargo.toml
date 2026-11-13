@@ -43,6 +43,7 @@ rescript-compiler = { path = "../compiler-rust" }
 # OpenTelemetry for tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-log = "0.2"
 tracing-opentelemetry = "0.33"
 opentelemetry = "0.32"
 opentelemetry_sdk = "0.32"

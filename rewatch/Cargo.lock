@@ -1809,6 +1809,7 @@ dependencies = [
  "signal-hook",
  "tempfile",
  "tracing",
+ "tracing-log",
  "tracing-opentelemetry",
  "tracing-subscriber",
 ]
