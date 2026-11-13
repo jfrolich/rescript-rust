@@ -12,6 +12,8 @@ mod expr;
 mod konst;
 mod prim;
 mod record;
+mod rec;
+mod tail;
 mod import;
 mod jsx;
 mod prim_cmp;
@@ -324,6 +326,16 @@ enum ModuleConstants {
 }
 
 struct State {
+    tail_arguments: usize,
+    tail_parameters: usize,
+    tail_sort_comparisons: usize,
+    tail_body_statements: usize,
+    tail_frames: Vec<tail::Frame>,
+    tail_functions: Vec<Option<LoopRef>>,
+    tail_copies: Vec<Option<VarId>>,
+    tail_assignments: Vec<NodeId>,
+    tail_order: Vec<VarId>,
+    rec_values: Vec<Option<NodeId>>,
     switches: Vec<Option<switch::Plan>>,
     variants: Vec<Option<variant::Plan>>,
     untagged: Vec<Option<untagged::Plan>>,
@@ -408,6 +420,10 @@ impl State {
             .map(|i| input.arena.vars.order(VarId(i as u32)))
             .max().unwrap_or(0).checked_add(1).expect("identifier order capacity");
         Self {
+            tail_arguments: 0, tail_parameters: 0, tail_sort_comparisons: 0, tail_body_statements: 0,
+            tail_frames: Vec::new(), tail_functions: Vec::new(), tail_copies: Vec::new(),
+            tail_assignments: Vec::new(), tail_order: Vec::new(),
+            rec_values: Vec::new(),
             switch_facts: vec![switch::Facts::default(); input.arena.nodes.len()],
             switches: Vec::new(), variants: Vec::new(), untagged: Vec::new(), switch_work: Vec::new(), switch_pairs: Vec::new(),
             switch_primitive_hashes: Vec::new(), switch_constant_hashes: Vec::new(),
@@ -541,18 +557,14 @@ impl ProbeRules for State {
             ),
             View::Const { value } => self.constant(value),
             View::Apply { callee, args, info } => {
-                // K7: C:4558 try_compile_self_tailcall_block. S3.6 owns the
-                // loop record and matching callee; no such record exists yet.
-                if matches!(cx.cont, Cont::Value(Tail::Return(Ret::Named { loop_: Some(_), .. }))
-                    | Cont::Effect(Tail::Return(Ret::Named { loop_: Some(_), .. }))) {
-                    return Err(Unsupported("let rec"));
-                }
                 let args = args.to_vec();
-                let call = self.application(cx, callee, &args, info)?;
+                let tail = self.self_call(cx, callee);
+                let mut call = self.application(cx, callee, &args, info)?;
+                call.tail = tail;
                 return Ok(ProbePlan::Children(expr::Resume::Call(call)));
             }
             View::Fun { body, header } => {
-                return Ok(ProbePlan::Children(expr::Resume::Fun { body, header }));
+                return Ok(ProbePlan::Children(expr::Resume::Fun { body, header, loop_: self.tail_functions.get(node.index()).copied().flatten() }));
             }
             View::Let { var, value, body } => {
                 if let Some(value) = value { self.record_awaited_unit(var, value); }
@@ -578,7 +590,7 @@ impl ProbeRules for State {
             View::Seq { first, second } => {
                 return Ok(ProbePlan::Children(expr::Resume::Seq { first, second }));
             }
-            View::LetRec { .. } => return Err(Unsupported("let rec")),
+            View::LetRec { .. } => return Ok(ProbePlan::Children(expr::Resume::Rec(self.recursive_group(node)?))),
             View::Prim { primitive, args }
                 if matches!(
                     self.arena.primitive(primitive).primitive,

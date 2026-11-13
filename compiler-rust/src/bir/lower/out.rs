@@ -138,6 +138,13 @@ impl StatementStack {
         let at = self.live(span.start as usize, span.end())?;
         Some(self.slot(at)[0])
     }
+    /// First slot when it contains one statement. O(leading holes/dead ranges),
+    /// using the same bounded scan as first; held multi-statement slots stay put.
+    pub(super) fn first_single_slot(&mut self, span: Span) -> Option<(u32, NodeId)> {
+        let at = self.live(span.start as usize, span.end())?;
+        let &[statement] = self.slot(at) else { return None };
+        Some((at as u32, statement))
+    }
     /// B:1575 simplify_if, `[statement]` patterns: the slot and the statement
     /// when the run holds exactly one. Costs the holes and dead ranges of the
     /// run, which a trimmed run has only before its first statement.

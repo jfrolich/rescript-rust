@@ -5,6 +5,7 @@ use crate::lambda::ApplyStatus;
 
 /// C:1144 compile_apply_call_inner: operands saved before their single visit.
 pub(super) struct Call {
+    pub tail: Option<LoopRef>,
     pub operands: Vec<NodeId>,
     pub inline: bool,
     pub status: ApplyStatus,
@@ -62,7 +63,7 @@ impl State {
                             && crate::lambda::lam_analysis::attr_can_be_inlined(&function.attr)
                         {
                             let reduced = self.inline_external_function(cx, function, &operands[1..])?;
-                            return Ok(Call { operands: vec![reduced], inline: true, status, loc, external: None });
+                            return Ok(Call { tail: None, operands: vec![reduced], inline: true, status, loc, external: None });
                         }
                     }
                 }
@@ -75,6 +76,7 @@ impl State {
             None
         };
         Ok(Call {
+            tail: None,
             operands,
             inline: false,
             status,
@@ -172,6 +174,7 @@ impl State {
             })
             .collect();
         let (statements, values) = self.sequence_arguments(false, outputs);
+        if let Some(frame) = call.tail { return self.finish_self_call(frame, statements, values); }
         if call.inline {
             return self.primitive_result(cx, statements, values[0]);
         }

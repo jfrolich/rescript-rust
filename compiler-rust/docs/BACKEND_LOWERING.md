@@ -984,8 +984,20 @@ test in row R6 approximates. The new lowering therefore implements:
 Rows R5 step 0, R5 step 3's wrapper and R6's guard merge are legacy forms
 that OCaml reaches through `S.if_` and block wrappers. They are ported as
 written and are the first place to look when `Check` reports a difference in
-a conditional. Open (Q3): whether rows R5 and R6 ever give different J for the
-same conditional; if they do, one of them differs from OCaml.
+a conditional. Resolved Q3: the rows differ on `(if c unit unit)` when the
+function returns unit. R5 step 0 emits nothing for a pure `c`; R6 emits
+`return;`. Inside `while (true)` the return is essential: falling through
+would repeat the loop. The context difference is meaningful, not evidence
+that one row must disagree with OCaml. Keep both rows (see section 10).
+
+S3.6 also found a separate legacy discrepancy: R6's value probe changed a
+short circuit under a conditional to `&&`/`||`, unlike OCaml's
+`NeedValue should_return`. The legacy path now folds return blocks for
+expression-only branches, preserving conditional returns, and reuses the
+blocks when folding fails. `tests/tests/src/lowering_tail_short_circuit.res`
+is the reference-compiler fixture. R6 retains the block produced by `S.if_`
+when it follows statements of the test; the explicit conjunction/continue
+guard remains unwrapped.
 
 `realize(Free::Cond { test, then_, else_ }, k)`:
 
@@ -1787,7 +1799,15 @@ Design (`compile_recursive_let`, `lam_compile.ml:507-575`; `compile_apply`,
   parameter's `VarId`. This is a second place where the relative order of
   identifiers reaches the output (section 9).
 
-No pre-pass is needed and the body is never lowered twice. The legacy code
+The L arena records whether a recursive function has a self tail call during
+construction/import, not lowering. Tail candidates are concatenated in the
+same `control_facts` immediate-child fold as `HAS_EXIT`, `HAS_STATEMENT` and
+`TRIVIAL_UNIT`. Tail-position children concatenate bounded
+segments of pooled callee candidates; a `LetRec` matches the candidates of
+each function against its binding. Candidate cells survive node relocation,
+and the independent validator rebuilds the answer. The lowering reads this
+fact to select the function's continuation. No pre-pass is needed and the
+body is never lowered twice. The legacy code
 asks `function_has_self_tailcall` (C:6772) before, threads `TailLoopState` through
 its own family (row K7), and lowers the function again without the loop when
 nothing was triggered.
@@ -1831,7 +1851,7 @@ Legacy differences from this design, all "read" unless marked:
 
 | Difference | Where | Consequence |
 | --- | --- | --- |
-| A conditional in a function compiled as a loop is lowered by row R6, otherwise by row R5 | 3.6 | Q3 |
+| A conditional in a function compiled as a loop is lowered by row R6, otherwise by row R5 | 3.6 | Q3 resolved: unit returns must exit the loop |
 | The function is lowered twice when the pre-check says yes and nothing triggers | C:4027 | cost only, and the label counter (4.5) |
 
 The J1 rule (C.3) inlines a function at a final `return f(...)` after
@@ -2822,7 +2842,7 @@ Each with the experiment that settles it; resolved rows retain their measured re
 | --- | --- | --- |
 | Q1 | **Measured by S3.5: never.** A counter at the two entries of `with_static_handler` stayed at zero over the runtime library, Belt, `tests/tests` (736 modules) and a 3,735-module application. The legacy path remains until the legacy lowering is deleted; the new lowering has no counterpart (4.1). Original question: is the handler substitution of row K15 (`resolve_static_raise` (C:6113), `compile_hoisted_static_raise_chain_return_tail` (C:3932)) ever executed? By reading it needs a catch whose body has no exit to its label, which `simplify_exits` removes | count its successful returns in a `Check` build over the three in-repository corpora and the application; zero closes the row |
 | Q2 | **Resolved:** the original variant dispatch needs no loop label; a return-position conditional retaining a real JS switch prints `loop_1`, including the discarded value probe (4.5) | OCaml/Rust parity: `tests/tests/src/lowering_conditional_loop.res` and its `.mjs`; corrected switch-context entry and value-probe order. Reference: `compiler/core/lam_compile.ml:793,1636-1644,2086-2118` |
-| Q3 | Do rows R5 and R6 of 3.6 ever produce different J for one conditional, so that making a function a loop changes how its conditionals print? | a `Check` assertion in S3.6: lower each loop function's conditionals by both rows and compare |
+| Q3 (resolved) | Yes: `(if c unit unit)` in a unit-returning function. R5 drops the pure test and emits no statements; R6 emits `return;`, which exits the enclosing loop. Both rules are required. | `tail_conditional_oracle_tests::q3_unit_conditional_distinguishes_return_rows` compares the same raw Lambda under both legacy rows; `lower::tail::tests::q3_unit_branch_must_return_from_the_loop` compares the enclosing recursive function with the new lowering. 192 generated loop-conditional shapes compare new and legacy J in five continuations and both probe modes. |
 | Q4 | Is a `LetRec` reachable in the continuations where the legacy code lowers its body as a value (K2, K4, K5, K7; 3.4)? | count in a `Check` build; if reachable, compile one such unit with OCaml |
 | Q5 | **Resolved:** the self call after nested `let rec` is a loop jump; the enclosing `Tail_with_name` return label survives the nested bindings (5.1) | OCaml/Rust parity: `tests/tests/src/lowering_nested_rec.res` and its `.mjs`, with and without capture; corrected the precheck and tail-loop body lowering. Reference: `compiler/core/lam_compile.ml:525-568,1745-1752,2046-2057` |
 | Q6 | Does the cross-module inline attempt in the lowering (3.3) fire after the three inlining rounds? | count with cross-module inlining on, over a corpus built that way |
@@ -2831,3 +2851,27 @@ Each with the experiment that settles it; resolved rows retain their measured re
 | Q9 | The exact order and holding rules of external arguments (S3.8) | the table S3.8 writes first, from X |
 | Q10 | Termination measures for J-E7 and J-S3 (section 6) | S3.2 |
 | Q11 | Whether invariant P1 (1.5) holds for every construct: `probe` then `realize` equals a direct lowering | the debug assertion, on from S3.3 |
+
+### S3.6 measured lowering work
+
+The S3.6 cost tests count source entries and tail-loop work independently:
+
+| Shape | Source entries | Sequenced tail operands | Parameters | Body statements moved |
+| --- | ---: | ---: | ---: | ---: |
+| 10,000 distinct switch cases, each a self tail call | 30,005 | 20,000 | 1 | 1 |
+| Same switch, each recursive call an argument of another call | 50,005 | 0 | 0 | 0 |
+| 10,000 recursive function members without tail calls | 20,002 | 0 | 0 | 0 |
+| One self call exchanging 10,000 parameters | 10,005 | 10,001 | 10,000 | 10,001 |
+
+Both switch functions are lowered once; the second creates no loop record.
+The 10,000-parameter case takes 9,999 sort comparisons and emits each alias
+and assignment once.
+Construction of 10,001 tail candidates takes 780,060 arena visits, including
+all ordinary node construction facts. The two endpoint and candidate-cell
+representations are each 8 bytes; the recursive group and loop frame are each
+16 bytes. Loop headers use a pooled parameter-reference run because a mix of
+unchanged parameters and lazily created copies is not a contiguous VarId run.
+
+The default compiler still uses the legacy backend; this slice itself saves
+nothing on that path. The separate short-circuit correction changes default
+JavaScript only where the old loop probe differed from the OCaml reference.

@@ -11,8 +11,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 730,
-      "units": 730,
+      "identical": 732,
+      "units": 732,
       "unsupported": {}
     }
   },
@@ -28,8 +28,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 730,
-      "units": 730,
+      "identical": 732,
+      "units": 732,
       "unsupported": {}
     }
   },
@@ -45,8 +45,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 730,
-      "units": 730,
+      "identical": 732,
+      "units": 732,
       "unsupported": {}
     }
   },
@@ -62,8 +62,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 730,
-      "units": 730,
+      "identical": 732,
+      "units": 732,
       "unsupported": {}
     }
   },
@@ -79,8 +79,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 730,
-      "units": 730,
+      "identical": 732,
+      "units": 732,
       "unsupported": {}
     }
   },
@@ -96,37 +96,35 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 730,
-      "units": 730,
+      "identical": 732,
+      "units": 732,
       "unsupported": {}
     }
   },
   "lower": {
     "fixtures": {
-      "identical": 502,
+      "identical": 519,
       "shared_catch_only": 0,
       "units": 593,
       "unsupported": {
-        "let rec": 19,
-        "loop": 72
+        "loop": 74
       }
     },
     "runtime": {
-      "identical": 102,
+      "identical": 103,
       "shared_catch_only": 0,
       "units": 113,
       "unsupported": {
-        "let rec": 3,
-        "loop": 8
+        "loop": 10
       }
     },
     "tests/tests": {
-      "identical": 619,
+      "identical": 668,
       "shared_catch_only": 1,
-      "units": 730,
+      "units": 732,
       "unsupported": {
-        "let rec": 73,
-        "loop": 37,
+        "let rec": 13,
+        "loop": 50,
         "shared Lambda subtree with binder": 1
       }
     }

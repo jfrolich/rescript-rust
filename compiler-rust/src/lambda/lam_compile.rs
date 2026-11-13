@@ -3954,25 +3954,44 @@ impl LambdaCompiler {
         // `NeedValue should_return` first and emit `return e ? a : b` when
         // neither needs statements. A branch with a self tail call compiles
         // to the loop jump there, so it always has a block.
-        if !function_has_self_tailcall(a, &tail_loop.tail_targets, then_)
-            && !function_has_self_tailcall(a, &tail_loop.tail_targets, else_)
+        let no_self_calls = !function_has_self_tailcall(a, &tail_loop.tail_targets, then_)
+            && !function_has_self_tailcall(a, &tail_loop.tail_targets, else_);
+        let (then_block, else_block) = if no_self_calls
+            && !Self::lambda_contains_statement_value_form(a, then_)
+            && !Self::lambda_contains_statement_value_form(a, else_)
         {
-            let then_value = self.compile_expr(a, then_);
-            let else_value = self.compile_expr(a, else_);
-            if then_value.prelude.is_empty() && else_value.prelude.is_empty() {
+            // compiler/core/lam_compile.ml:1258-1259,1636-1712 probes in
+            // NeedValue should_return: short circuits stay conditionals in
+            // that context, not the &&/|| produced by compile_expr. Reuse the
+            // return blocks when they cannot fold rather than compiling again.
+            let then_block = self.compile_tail_loop_return_block(a, then_, tail_loop);
+            let else_block = self.compile_tail_loop_return_block(a, else_, tail_loop);
+            if let (Some(then_value), Some(else_value)) = (
+                self.try_fold_effect_only_return_tail(&then_block),
+                self.try_fold_effect_only_return_tail(&else_block),
+            ) {
                 let mut block = cond_compiled.prelude;
-                let expr = JE::cond(
-                    cond_compiled.expr,
-                    then_value.expr,
-                    else_value.expr,
-                    &mut self.j,
-                );
+                let expr = JE::cond(cond_compiled.expr, then_value, else_value, &mut self.j);
                 block.push(JS::return_(expr, &mut self.j));
                 return BlockOutput::finished(block);
             }
-        }
-        let then_block = self.compile_tail_loop_return_block(a, then_, tail_loop);
-        let else_block = self.compile_tail_loop_return_block(a, else_, tail_loop);
+            (then_block, else_block)
+        } else {
+            if no_self_calls {
+                let then_value = self.compile_expr(a, then_);
+                let else_value = self.compile_expr(a, else_);
+                if then_value.prelude.is_empty() && else_value.prelude.is_empty() {
+                    let mut block = cond_compiled.prelude;
+                    let expr = JE::cond(cond_compiled.expr, then_value.expr, else_value.expr, &mut self.j);
+                    block.push(JS::return_(expr, &mut self.j));
+                    return BlockOutput::finished(block);
+                }
+            }
+            (
+                self.compile_tail_loop_return_block(a, then_, tail_loop),
+                self.compile_tail_loop_return_block(a, else_, tail_loop),
+            )
+        };
 
         let mut block = cond_compiled.prelude;
 
@@ -7471,5 +7490,39 @@ impl StrSw {
     pub(crate) fn default(self, a: &LamArena) -> Option<Lam> {
         let p = a.str_switch_payload(self.info);
         p.has_default.then(|| a.list(self.actions)[p.n_cases()])
+    }
+}
+
+#[cfg(test)]
+mod tail_conditional_oracle_tests {
+    use super::*;
+
+    #[test]
+    fn q3_unit_conditional_distinguishes_return_rows() {
+        let mut a = LamArena::new();
+        let c = a.var(Ident::new("c", 1, crate::ident::IdentFlags::NONE));
+        let t = a.unit();
+        let e = a.unit();
+        let root = a.if_raw(c, t, e);
+        let mut ordinary = LambdaCompiler::new();
+        let r5 = ordinary.with_return_unit_context(true, |compiler| {
+            compiler.compile_return_output(&mut a, root)
+        });
+        let mut looping = LambdaCompiler::new();
+        let mut frame = TailLoopState::new(vec![], vec![]);
+        let r6 = looping.with_return_unit_context(true, |compiler| {
+            compiler.compile_tail_loop_if_return_output(&mut a, c, t, e, &mut frame)
+        });
+        assert!(r5.block.is_empty());
+        assert_eq!(r6.block.len(), 1);
+        assert!(matches!(looping.j.sk(r6.block[0]), StmtKind::Return(_)));
+        let print = |compiler: LambdaCompiler, output: BlockOutput| {
+            let program = DepsProgram { program: Program::new_in(output.block, vec![], compiler.j), modules: vec![], side_effect: None };
+            crate::js_ir::print_deps_program_with_directives_and_options(&program, None, &[], false, false, false)
+        };
+        let r5 = print(ordinary, r5);
+        let r6 = print(looping, r6);
+        eprintln!("R5: {r5:?}\nR6: {r6:?}");
+        assert_ne!(r5, r6);
     }
 }

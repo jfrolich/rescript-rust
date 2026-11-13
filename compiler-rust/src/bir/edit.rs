@@ -175,6 +175,10 @@ impl Bir {
         self.register_kind(node, true);
         if let Some(id) = self.free_nodes.pop() {
             self.nodes[id.index()] = node;
+            if id.index() < self.tail_candidates.len() {
+                self.tail_candidates[id.index()] = Default::default();
+                self.self_tail[id.index()] = false;
+            }
             self.parents[id.index()] = None;
             self.weights[id.index()] = 0;
             if !self.cold.is_empty() {
@@ -292,7 +296,7 @@ impl Bir {
                 .map(|i| VarId(first.0 + i))
                 .collect(),
             View::Fun { header, .. } | View::JFun { header, .. } => {
-                self.function(header).params.iter().collect()
+                (0..self.function(header).params.len()).map(|i| self.function_parameter(header, i)).collect()
             }
             View::Catch { header, .. } => self.catch(header).params.iter().collect(),
             _ => SmallVec::new(),
@@ -640,14 +644,15 @@ impl Bir {
         (j_pure.unwrap_or(effects.0), effects.1)
     }
     /// L control facts, including R5's TRIVIAL_UNIT, in one immediate-child
-    /// fold. O(arity), stopping when both control bits are set and unit is
-    /// impossible; constant for Fun, Exit, Var, Const and every J operation.
+    /// fold. O(arity); construction visits every child to concatenate tail
+    /// candidates in the same fold. Validation can stop when both control bits
+    /// are set and unit is impossible. Constant for Fun, Exit, Var, Const and J.
     /// Child flags include independently known PURE for unit-spine prefixes.
     /// Fun is a control boundary (compiler/core/lam_exit_code.ml:28).
-    pub(super) fn control_facts(
+    pub(super) fn control_facts<const ALL_CHILDREN: bool>(
         &self,
         node: Node,
-        child_facts: impl Fn(NodeId) -> NodeFlags,
+        mut child_facts: impl FnMut(NodeId) -> NodeFlags,
     ) -> NodeFlags {
         let own = match node.op() {
             Op::Exit => return NodeFlags(NodeFlags::HAS_EXIT | NodeFlags::HAS_STATEMENT),
@@ -673,29 +678,27 @@ impl Bir {
             let flags = child_facts(child);
             facts.0 |= flags.0 & both;
             unit &= flags.contains(if tail == Some(child) { NodeFlags::TRIVIAL_UNIT } else { NodeFlags::PURE });
-            if facts.0 == both && !unit {
+            if !ALL_CHILDREN && facts.0 == both && !unit {
                 break;
             }
         }
         if unit { facts.0 |= NodeFlags::TRIVIAL_UNIT; }
         facts
     }
-    fn repair(&mut self, mut id: NodeId) {
+    /// O(affected ancestor edges and their direct operands); stops at an unchanged fact.
+    fn repair(&mut self, id: NodeId) {
+        self.repair_with_tail_child(id, None);
+    }
+    /// Same bound as repair, including changed tail-position edges whose list
+    /// endpoints stayed fixed. A recursive binding also reads its tail candidates.
+    fn repair_with_tail_child(&mut self, mut id: NodeId, mut changed_child: Option<NodeId>) {
         loop {
             let (pure, no_alloc) = self.effects(id, |c| {
                 let f = self.node(c).flags();
                 (f.contains(NodeFlags::PURE), f.contains(NodeFlags::NO_ALLOC))
             });
             let old_node = self.node(id);
-            let control = self.control_facts(old_node, |c| {
-                let child = self.node(c);
-                let mut flags = child.flags();
-                // J reuses these bits for unrelated facts and metadata.
-                if child.op() == Op::Var || child.op() as u8 > Op::Continue as u8 {
-                    flags.0 &= !NodeFlags::CONTROL;
-                }
-                flags
-            });
+            let (control, tail_changed) = self.repair_control_facts(id, changed_child);
             let old_flags = old_node.flags();
             let mut flags = old_flags;
             flags.0 &= !(NodeFlags::PURE | NodeFlags::NO_ALLOC);
@@ -721,10 +724,11 @@ impl Bir {
                 }
             }
             self.nodes[id.index()].set_flags(flags);
-            let facts_changed = self.update_facts(id);
+            let facts_changed = self.update_facts(id) || tail_changed;
             if flags == old_flags && !facts_changed {
                 break;
             }
+            changed_child = tail_changed.then_some(id);
             match self.parents[id.index()] {
                 Some(parent) => id = parent,
                 None => break,
@@ -892,6 +896,13 @@ impl Bir {
         let content = self.nodes[replacement.index()];
         let cold = self.cold.get(replacement.index()).copied().flatten();
         self.unbind(replacement);
+        let tail_changed = if !self.tail_candidates.is_empty() {
+            let before = self.tail_candidates[target.index()];
+            self.tail_candidates[target.index()] = self.tail_candidates[replacement.index()];
+            self.self_tail[target.index()] = self.self_tail[replacement.index()];
+            before != self.tail_candidates[target.index()]
+                || parent.is_some_and(|parent| matches!(self.view(parent), View::Apply { callee, .. } if callee == target))
+        } else { false };
         self.nodes[target.index()] = content;
         self.parents[target.index()] = parent;
         for child in self.view(target).children() {
@@ -927,8 +938,8 @@ impl Bir {
                 View::Prim { args, .. } if args.get(1) == Some(&target)
             );
             let j_shape = matches!(self.view(parent), View::JBin { .. } | View::JCall { .. });
-            if effects_changed || second_operand || j_shape || self.update_facts(parent) {
-                self.repair(parent);
+            if effects_changed || second_operand || j_shape || self.update_facts(parent) || tail_changed {
+                self.repair_with_tail_child(parent, tail_changed.then_some(target));
             }
             // Array.isArray recognises a two-edge callee shape, not just purity.
             if matches!(self.view(parent), View::JDot { .. }) {
@@ -1106,9 +1117,18 @@ impl Bir {
             match self.view(id) {
                 View::Fun { header, .. } | View::JFun { header, .. } => {
                     let old = *self.function(header);
-                    let params = VarSpan {
-                        start: old.params.iter().next().map_or(0, |v| vars[&v].0),
-                        len: old.params.len,
+                    let params = if old.flags & FuncHeader::INDIRECT_PARAMS != 0 {
+                        let start = index(self.pools.function_params.len());
+                        for i in 0..old.params.len() {
+                            let original = self.function_parameter(header, i);
+                            self.pools.function_params.push(vars[&original]);
+                        }
+                        VarSpan { start, len: old.params.len }
+                    } else {
+                        VarSpan {
+                            start: old.params.iter().next().map_or(0, |v| vars[&v].0),
+                            len: old.params.len,
+                        }
                     };
                     let new = self.function_header(
                         params,
