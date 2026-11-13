@@ -1125,6 +1125,64 @@ re-check. Their output is today's by construction (the second attempt *is*
 today's checker), but that the success mode fails for each of them was not
 tested here. Slice R8 tests it.
 
+### 4.2 as landed: implementation candidate
+
+The implementation is on a review branch, **not yet landed**. Its one
+`driver::type_structure_two_modes` attempt owner serves batch builds,
+single-file compilation, interfaces and tooling; the playground reaches the
+batch path. The mode is fixed during context preparation. A retained-attempt
+continuation keeps the type context alive without a self-referential owner.
+A discarded attempt's typed result, environment and context are dropped before
+the Explain context is constructed. Settings contain both the mode and the
+derived-plan choice so another retry reason can share the loop.
+
+`RESCRIPT_CHECK_MODE=explain`, read once alongside `RESCRIPT_DERIVED_PATH`,
+selects the original snapshot policy for comparisons and bisection.
+`RESCRIPT_COMPILER_COUNTERS=1` includes `explain_reruns`; the CLI prints the
+counter report as well as the in-process build. These are diagnostic controls,
+not changes to generated JavaScript.
+
+The journal's mutation/snapshot/backtrack counters are plain attempt-local
+integers published only for a retained attempt. Dropped local type-node
+counts are suppressed. Other contextual instrumentation still needs migration:
+`record_fresh_var`, `record_copy`, `record_store_build_nodes`, `census_unify`,
+`census_instance`, `census_generalize`, `census_update_level`, the qualified
+component probes, and `frozen::record`, `store_views::*` and `world::*` probes
+still publish directly. The implementation therefore does **not yet satisfy**
+the complete discarded-counter isolation requirement.
+
+Measured evidence, not a replacement for the remaining gates:
+
+- CI on the enabled batch revision: a clean single-worker test-project build
+  used 4,018,700,171 instructions versus 4,045,415,710 for its base, **-0.660%**
+  (minimum of five cachegrind runs, 742 modules). This is not a measurement of
+  the final revision after integrating newer trunk changes.
+- The subsequent candidate reported `explain_reruns=0` on both the test project
+  and the 3,735-module application.
+- The diagnostic parity script passed 2,137 cases after integrating trunk.
+- `scripts/test_check_modes.py` compared 747 fixture outputs byte-for-byte
+  against forced Explain: no output differences, 584 rechecked fixtures.
+  Its stronger assertion **fails for 75 expected-error fixtures**. Some fail
+  before typing; others fail in validation after `type_structure` returns.
+  For example, `ModuleAwait.res` fails before the unit checker, while
+  `non_generalizable.res` fails in `check_nongen_schemes` after the retained
+  continuation has begun. Both report `explain_reruns=0` when run with
+  counters enabled. The retry boundary must cover the latter validation
+  before this candidate meets the complete error-recheck contract. No
+  expected diagnostic was rewritten and the failing assertion remains.
+- Tests compare a warning before a type error, and a warning after a caught
+  failed unification, with forced Explain; both reports match byte-for-byte.
+- A comparison against an older downloaded base had identical JavaScript
+  and diagnostics on both projects, but different canonical signature
+  formatting after trunk changed that formatter. That run is **not** a
+  passing current-trunk signature comparison.
+
+Still unmeasured: the final candidate's application instruction count, the
+failing-unit/passing-unit instruction ratio, and wall-time distributions.
+The prototype's speedup is supported by the enabled batch measurement, but
+its implication that rerunning only a failed `type_structure` covers every
+unit error is too narrow: later signature validation also reports errors.
+
 ### 4.3 What the two prototypes do not prove
 
 - Nothing about names (2.3, items 3, 6 and 9), the largest group and the
