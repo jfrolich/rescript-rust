@@ -353,10 +353,10 @@ Section 11 gives an `rg` end state per slice, run in `compiler-rust/src`.
 | T11 | `rg 'tctx.typed' driver.rs` hits only the tooling functions | 23 hits | not started | - |
 | T12 | `rg 'TypedArena' .` is empty | 230 | not started | - |
 
-The tree count today is the six of the document's summary (seven with the
-oxc printer): the parse tree, the typed tree, raw Lambda, Lambda, the JS IR,
-and the oxc tree when selected. T2 removed the rebuilt parse spine for
-expressions; nothing else of the count has changed.
+The document counted six materialisations of a module (seven with the oxc
+printer): the parse tree, its rebuilt spine, the typed tree, raw Lambda,
+Lambda and the JS IR. T2 removed the rebuilt spine for expressions. The
+other five (six with the oxc printer) are built in every compilation today.
 
 ## 4. DERIVED_CODECS.md
 
@@ -456,7 +456,7 @@ marks a departure the document allows or records; the others are open.
 | 4 | S3.2: rounds J1 to J4 as passes in `bir/j/` | Not built. THREE_TREES changed the target to decisions of the lowering (T1, T4); the legacy passes run on both sides of the gate meanwhile | `ls src/bir/j` | #189 (the decision) |
 | 5 | T1 (original prompt): dead declarations, block-field substitution and record rest decided in the lowering; the new side skips legacy passes 4 and 5 | Reduced to use counts and the deletion of the tail-position analysis. A test shows that substitution and dead removal do not commute with the legacy tail-call pass, so items 3 to 6 moved to T4 | `rg -n 'block_substitution_and_dead_removal_do_not_commute_with_tailcall_inlining' src/bir/lower/oracle_tests.rs` gives 1; "T1/T4 boundary finding" | #198 |
 | 6 | S3.7: loops, labels, `Assign`, `Try`, `LetRec` with value members in one slice | `Assign`, `Try` and `TryFinally` only | reasons `"loop"` (3 sites) and `"let rec"` (1) remain; no `loops.rs` or `label.rs` | #216 |
-| 7 | BACKEND_LOWERING 7.1: `lambda_contains_statement_value_form` needs no fact | It needs one: `HAS_STATEMENT`, recorded where `HAS_EXIT` is | `rg -n 'HAS_STATEMENT' src/bir` gives 13; #210's body, finding 3 | #210 |
+| 7 | BACKEND_LOWERING 7.1, as first written: `lambda_contains_statement_value_form` needs no fact | It needs one: `HAS_STATEMENT`, recorded where `HAS_EXIT` is. The document was amended in the same pull request | `rg -n 'HAS_STATEMENT' src/bir` gives 13; #210's body, finding 3 | #210 |
 | 8 | A stub left beside its replacement | `bir/bridge.rs` still has `import_js` returning `Unsupported("JS arena import not implemented")`; the real one is `bir/bridge_j.rs::import_js` | `rg -n 'fn import_js' src/bir` gives both | #129, #167 |
 | 9 | Every stage "deletes the code it replaces" (0.2 item 7) | No backend stage has reached its deletion: S1.5, S3.10, S4.9 and S5.6 are not started, so 47,094 lines of new code sit beside 88,768 lines of legacy backend | the `wc -l` counts of 2.3 | - |
 
@@ -590,3 +590,40 @@ No document was changed for these.
 8. **AGENTS.md** names `tests/ERROR_VARIANTS.md`, which does not exist on
    trunk, and says builds write `.cmt` files, which THREE_TREES section 13
    found they do not. Outside this audit's files.
+
+## 10. Corrections made to the design documents with this audit
+
+Statements that no longer held on trunk, each changed by a minimal edit. No
+design decision was changed.
+
+| Document | Correction |
+| --- | --- |
+| CHECKER_REDESIGN.md | The status line points here. J's introduction: #154 is merged, not open. F.1: P1b, P2 and P3 marked as landed with their pull requests. J.4: a line under the slice table naming the merged slices. "W4 as built": the substitution-map seeds were fixed in #205. K.6: C1, C2 and C3 marked as merged |
+| BACKEND_REDESIGN.md | The status line: implemented in part, not on the default path |
+| BACKEND_LOWERING.md | The status line: which slices are implemented. Section 9, item 9: the tail flags were removed in #198. Item 18: `import_js` exists in `bir/bridge_j.rs` since #167 |
+| THREE_TREES.md | The status line: T1, T2 and T7 are implemented. `PRINTER_INSTRUCTIONS.md` is on trunk. Section 3: `RUNS_NO_CODE` is not a flag; the fourth J flag is `J_SUBEXPR`. Section 5: the description of the mapper is of the code before T2. Section 10: S3.4 to S3.9 are merged except loops; #175 merged as a measurement record. Row T7: its end-state check gives one hit, as section 13 explains |
+| DERIVED_CODECS.md | The status line: slice 1 is implemented. The fixtures and the buildable `tests/ppx_spice` exist. #194 is merged. The lowering's path is `raw_lambda/convert/derived.rs` (seven mentions), so that slice 2's end-state check names a file that exists |
+| RUNTIME_SNAPSHOT.md | S7's dependency names the slices that replaced P5 and P10. The S1 note on watch mode says S5 changed it |
+| FRONTEND_REWRITES.md | `ppx::rewrite_jsx_element` and `rewrite_value_binding_without_flattening` no longer exist; the text names the code that does that work now. "Expansions": the four rows T7 made direct no longer get an expansion |
+
+## 11. What could not be verified
+
+- No instruction count, memory figure or timing was measured for this
+  audit. Every such number is quoted from a document or a pull request body
+  and attributed there.
+- Counts on the application (store-built views, lowered units, derived
+  bindings) are quoted, not re-run: they need a release build and a check
+  build of the application.
+- J.2's row "a lookup copy when a value is read through a view" for
+  `env_lazy.rs`: whether the two call sites are reached only for local
+  module paths needs reading their callers.
+- Rules 2, 7 and 8 of I.3.3 have no pattern to search for.
+- Whether the fixtures of I.2.3 and I.2.4 are all in the suites was taken
+  from #137's body.
+- W10 and W11 have no `rg` check in the document; "not started" rests on
+  the absence of a pull request and, for W11, on `begin_build` still
+  discarding the world.
+- Departure 7.1 entry 8, 7.3 entry 5 and 7.4 entries 3 and 4 rest on the
+  pull request body or the document's own implementation note.
+- `cargo build`, `cargo test` and `cargo doc` were not run: no manifest's
+  sources and no doc comment changed.
