@@ -208,6 +208,9 @@ pub struct Fallback;
 pub struct Discharged {
     /// The environment extended with the item's bindings.
     pub env: Env,
+    /// The item's bindings as signature items, in binding order: the value
+    /// descriptions that were entered in `env`.
+    pub sig_items: Vec<crate::types::decl::SignatureItem>,
 }
 
 /// The steps of a discharge, for the tests that prove its cost. The checker
@@ -233,9 +236,10 @@ impl Steps for () {
 /// Discharge the obligations of a derived item and enter its bindings.
 /// Cost: O(obligations + skeleton nodes of the item): per value obligation
 /// one environment lookup, one instance of the value's type and one
-/// unification; per binding one function type and one environment entry. No
+/// unification; per binding one function type, one environment entry and one
+/// signature item made of the same value description, without a lookup. No
 /// allocation per obligation beyond the type nodes of the instances and
-/// skeletons.
+/// skeletons; one buffer of signature items per item.
 pub fn discharge(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -299,21 +303,24 @@ pub fn discharge_counting(
     let mut new_env = env.clone();
     let env_ref = ctx.store_typed_env(env);
     let val_loc = tctx.intern_ast_loc(arena, arena.none_loc());
+    let mut sig_items = Vec::with_capacity(bindings.len());
     for (i, binding) in bindings.iter().enumerate() {
         let binding_idx = BindingIdx(item.bindings.start + i as u32);
         let ty = tctx.typed.derived.pending[binding_idx.index()];
         crate::types::ctype::generalize(ctx, ty);
         let ident = ctx.create_ident(arena.name(binding.name));
-        new_env.add_value(
-            ident,
-            crate::types::decl::ValueDescription {
-                val_type: ty,
-                val_kind: crate::types::decl::ValueKind::ValReg,
-                val_loc,
-                val_attributes: Default::default(),
-                val_path: None,
-            },
-        );
+        // typemod.ml `type_structure`: the signature holds the value
+        // description the binding has in the environment. It is made once
+        // and entered in both.
+        let description = crate::types::decl::ValueDescription {
+            val_type: ty,
+            val_kind: crate::types::decl::ValueKind::ValReg,
+            val_loc,
+            val_attributes: Default::default(),
+            val_path: None,
+        };
+        new_env.add_value(ident, description.clone());
+        sig_items.push(crate::types::decl::SignatureItem::SigValue(ident, description));
         tctx.typed.derived.set_bound(
             binding_idx,
             Bound {
@@ -332,7 +339,10 @@ pub fn discharge_counting(
         _ => Span { start: 0, len: 0 },
     };
     tctx.typed.derived.set_item(idx, item.bindings, obligations);
-    Ok(Discharged { env: new_env })
+    Ok(Discharged {
+        env: new_env,
+        sig_items,
+    })
 }
 
 /// Discharge the obligations of one binding and give its type.
@@ -703,7 +713,12 @@ pub(crate) mod tests {
                 crate::types::printtyp::Printtyp::new(type_ctx).type_expr(bound[0].ty),
                 "int => int"
             );
-            assert!(discharged.env.lookup_value(&Path::pident(bound[0].ident)).is_ok());
+            // The signature item is the description that was entered.
+            let entered = discharged.env.lookup_value(&Path::pident(bound[0].ident)).unwrap();
+            assert_eq!(
+                discharged.sig_items,
+                [SignatureItem::SigValue(bound[0].ident, entered.clone())]
+            );
         });
     }
 
