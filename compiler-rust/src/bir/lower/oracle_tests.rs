@@ -1732,3 +1732,38 @@ fn an_imported_module_shadows_the_global_of_its_name_everywhere() {
     assert_eq!(marked, 1);
     assert!(text.contains("return ext(Other.run, globalThis.Other);"), "{text}");
 }
+
+#[test]
+fn a_module_whose_only_reference_the_flatten_pass_drops_still_shadows_the_global_of_its_name() {
+    // THREE_TREES.md 11.4, "T5 design" (a), the hazard: `run = c => {
+    // ignore(c ? Other.run : ext()); return ext(<global Other>) }`. The
+    // lowering counts one live reference to the module `Other` and
+    // qualifies the global; P1 drops the pure branch `Other.run`, so the
+    // legacy external-shadow pass, after P1, sees no reference to the
+    // module and leaves the global plain. Both texts are pinned.
+    use crate::cmi::persistent_env::CmjExportArity;
+    use crate::js_ir::ModulePathResolver;
+    use crate::lambda::{FieldDbgInfo, LamLoc, lam_arity::Arity, lam_primitive::Primitive};
+    let resolver = ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+    resolver.set_bir_test_export("Other", "run", CmjExportArity::Single(Arity::info(vec![1], false)), None);
+    let build = |a: &mut LamArena| {
+        let c = Ident::new("c", 12, IdentFlags::NONE);
+        let module = a.global_module(Ident::create_persistent("Other"));
+        let field = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Module { name: crate::name::Name::new("run") }), &[module], LamLoc::NONE);
+        let test = a.var(c);
+        let other = ext_call(a, &[]);
+        let chosen = a.if_(test, field, other);
+        let ignored = a.prim_raw(Primitive::Pignore, &[chosen], LamLoc::NONE);
+        let global = js_global(a, "Other");
+        let result = ext_call(a, &[global]);
+        let body = a.seq_raw(ignored, result);
+        a.function_(1, &[c], body, Default::default(), LamLoc::NONE)
+    };
+    let (new, marked) = new_text(build, Some(&resolver), &[1, 3, 4, 5, 6]);
+    let legacy = legacy_text(build, &[1, 2, 3, 4, 5, 6]);
+    assert_eq!(marked, 1);
+    // The new side: qualified.
+    assert_eq!(new, "\n\n\nfunction run(c) {\n  if (!c) {\n    ext();\n  }\n  return ext(globalThis.Other);\n}\n\nexport {\n  run,\n}\n/* No side effect */\n");
+    // The legacy side: the global stays plain.
+    assert_eq!(legacy, "\n\n\nfunction run(c) {\n  if (!c) {\n    ext();\n  }\n  return ext(Other);\n}\n\nexport {\n  run,\n}\n/* No side effect */\n");
+}
