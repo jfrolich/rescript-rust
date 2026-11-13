@@ -325,7 +325,7 @@ impl State {
     }
 
     /// O(count): reserve one output slot per group, plus an optional default.
-    fn reserve_switch_outputs(&mut self, count: usize) -> Span {
+    pub(super) fn reserve_switch_outputs(&mut self, count: usize) -> Span {
         let run = Span {
             start: self.switch_output_nodes.len() as u32,
             len: count as u32,

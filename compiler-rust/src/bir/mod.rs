@@ -222,7 +222,8 @@ impl Bir {
             bits: value.to_bits(),
         })))
     }
-    /// Intern a constant. Compound fields must already exist.
+    /// Intern a constant in O(encoded payload bytes), using retained encoding
+    /// scratch and a flat key-byte pool. Compound fields must already exist.
     pub fn intern_const(&mut self, value: Constant) -> ConstId {
         if let Constant::Float(ref float) = value {
             self.pools.floats.resize(self.pools.strings.len(), None);
@@ -232,20 +233,30 @@ impl Bir {
             let id = ConstId(index(self.pools.consts.len()));
             self.pools.floats[float.spelling.index()] = Some(id);
             self.pools.consts.push(value);
-            self.pools.const_keys.push(Vec::new());
+            self.pools.const_keys.push((0, 0));
             return id;
         }
-        let key = value.key();
+        let mut key = std::mem::take(&mut self.pools.const_key_scratch);
+        crate::binser::to_vec_reuse(&value, &mut key).expect("Bir constant serialization");
         let hash = self.pools.hash_builder.hash_one(&key);
         if let Some(&(_, id)) = self.pools.const_index.find(hash, |&(_, id)| {
             self.compare_interned();
-            self.pools.const_keys[id.index()] == key
+            let (start, len) = self.pools.const_keys[id.index()];
+            self.pools.const_key_bytes[start as usize..(start + len) as usize] == key
         }) {
+            key.clear();
+            self.pools.const_key_scratch = key;
             return id;
         }
         let id = ConstId(index(self.pools.consts.len()));
         self.pools.consts.push(value);
-        self.pools.const_keys.push(key);
+        let start = index(self.pools.const_key_bytes.len());
+        let len = index(key.len());
+        start.checked_add(len).expect("constant key pool capacity");
+        self.pools.const_key_bytes.extend_from_slice(&key);
+        self.pools.const_keys.push((start, len));
+        key.clear();
+        self.pools.const_key_scratch = key;
         self.pools
             .const_index
             .insert_unique(hash, (hash, id), |&(hash, _)| hash);

@@ -2661,19 +2661,19 @@ The statement stack and node-list pool must be used end to end.
 | `call.rs:300` `apply_with_arity` | `callee = self.call_node(callee, &remaining[..count], full.clone());` | per construct | stays: call-info scalar clone; no heap value | non-allocating |
 | `call.rs:313` `apply_with_arity` | `let mut full_args = remaining.to_vec();` | per construct | reusable scratch buffer; clear, do not free | pending |
 | `cond.rs:154` `conditional_children` | `into: &mut Vec<(Cx, NodeId)>,` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `exit.rs:75` `Plan` | `groups: Vec<usize>,` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `exit.rs:76` `Plan` | `next: Vec<usize>,` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `exit.rs:77` `Plan` | `bodies: Vec<NodeId>,` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `exit.rs:78` `Plan` | `output: Vec<NodeId>,` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `exit.rs:79` `Plan` | `clauses: Vec<ClauseMeta>,` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `exit.rs:282` `catch` | `(Vec::new(), Vec::new(), Vec::new())` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `exit.rs:300` `catch` | `output: Vec::new(),` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `exit.rs:301` `catch` | `clauses: Vec::new(),` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `exit.rs:314` `catch_children` | `pub(super) fn catch_children(&self, cx: Cx, frame: Catch, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `exit.rs:436` `exit_dispatch` | `let mut keys = Vec::with_capacity(plan.len as usize);` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `exit.rs:437` `exit_dispatch` | `let mut clauses = Vec::with_capacity(plan.len as usize);` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `exit.rs:438` `exit_dispatch` | `let mut actions = Vec::with_capacity(plan.len as usize);` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `exit.rs:509` `exit_children` | `pub(super) fn exit_children(&self, cx: Cx, exit: &Exit, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `exit.rs:75` `Plan` | `groups: Vec<usize>,` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
+| `exit.rs:76` `Plan` | `next: Vec<usize>,` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
+| `exit.rs:77` `Plan` | `bodies: Vec<NodeId>,` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
+| `exit.rs:78` `Plan` | `output: Vec<NodeId>,` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
+| `exit.rs:79` `Plan` | `clauses: Vec<ClauseMeta>,` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
+| `exit.rs:282` `catch` | `(Vec::new(), Vec::new(), Vec::new())` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
+| `exit.rs:300` `catch` | `output: Vec::new(),` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
+| `exit.rs:301` `catch` | `clauses: Vec::new(),` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
+| `exit.rs:314` `catch_children` | `pub(super) fn catch_children(&self, cx: Cx, frame: Catch, into: &mut Vec<(Cx, NodeId)>) {` | per construct | borrows the retained source traversal queue; owns no buffer | retained |
+| `exit.rs:436` `exit_dispatch` | `let mut keys = Vec::with_capacity(plan.len as usize);` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
+| `exit.rs:437` `exit_dispatch` | `let mut clauses = Vec::with_capacity(plan.len as usize);` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
+| `exit.rs:438` `exit_dispatch` | `let mut actions = Vec::with_capacity(plan.len as usize);` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
+| `exit.rs:509` `exit_children` | `pub(super) fn exit_children(&self, cx: Cx, exit: &Exit, into: &mut Vec<(Cx, NodeId)>) {` | per construct | borrows the retained source traversal queue; owns no buffer | retained |
 | `expr.rs:42` `expression_children` | `into: &mut Vec<(Cx, NodeId)>,` | per visited node | reusable scratch buffer; clear, do not free | pending |
 | `expr.rs:278` `finish_expression` | `let attr = attr.clone();` | per visited node | borrow payload or retain typed pool handle | pending |
 | `expr.rs:308` `drop_pure_effect` | `let mut effects = Vec::new();` | per construct/walk | reusable traversal/output/argument buffer retained in lowering state | removed |
@@ -2968,6 +2968,15 @@ Subtree copying and literal-test conversion also remain outstanding.
 | `untagged_dispatch.rs` grouping, payload partitioning and simplification vectors | per general plan | pending: replace with typed runs and retained scratch |
 | `untagged.rs` literal and instance arm metadata clones | per arm | pending: replace owned tag payloads with metadata handles |
 | `edit.rs` `copy_subtree_recording` temporary maps and vectors | per copied action | pending: reusable indexed copy state required |
+
+Catch plans now own no vectors and occupy 80 bytes (120 before the output
+conversion, 168 before grouping was pooled). The 10,000-catch whole-Lambda
+fixture emits a flattened integer dispatch and measures zero allocations on its
+warmed second pass, with unchanged recorded capacities, 20,001 source visits,
+9,999 flattening flag reads and 20,000 grouping steps. This also exposed constant
+interning's temporary serialized-key vector: constant keys now use an 8-byte
+byte-pool span and retained encoding scratch, rather than one owned vector per
+constant. Compound constant contents and canonical encodings are unchanged.
 
 ### 7.5.1 Concurrent loop, label and recursive-value additions
 
