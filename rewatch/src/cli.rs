@@ -667,6 +667,20 @@ pub enum Command {
         #[arg(long = "ppx")]
         ppx: Vec<String>,
     },
+    /// Build, then run the project's checks: every law (a `let` marked
+    /// `@law`) on values made from the types of its parameters.
+    Verify {
+        #[command(flatten)]
+        folder: FolderArg,
+
+        /// The seed of the random cases. A failing run prints its seed.
+        #[arg(long)]
+        seed: Option<u32>,
+
+        /// The number of random cases a law is run on.
+        #[arg(long, default_value_t = 1000)]
+        cases: u32,
+    },
     /// Print the compiler arguments for a ReScript source file.
     CompilerArgs {
         /// Path to a ReScript source file (.res or .resi)
