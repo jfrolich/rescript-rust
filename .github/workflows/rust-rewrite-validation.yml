@@ -477,6 +477,16 @@ jobs:
           rewatch/target/release/rescript clean tests/ppx_spice
           RESCRIPT_DERIVED_PATH=check \
             rewatch/target/release/rescript build tests/ppx_spice
+      # A unit of a package below the build root, compiled again with
+      # locations: the reference compile needs the unit's source.
+      - name: Compile derived items of a monorepo package both ways and compare
+        run: |
+          export RESCRIPT_RUNTIME="$PWD/packages/@rescript/runtime"
+          mkdir -p tests/ppx_spice_monorepo/node_modules/@derived-code-monorepo
+          ln -sfn ../../packages/shared tests/ppx_spice_monorepo/node_modules/@derived-code-monorepo/shared
+          rewatch/target/release/rescript clean tests/ppx_spice_monorepo
+          RESCRIPT_DERIVED_PATH=check \
+            rewatch/target/release/rescript build tests/ppx_spice_monorepo
       # The diagnostics and warnings of derived code, from plans, from the
       # general form, and compared both ways.
       - name: Diagnostics of derived code
@@ -581,10 +591,12 @@ jobs:
               RUST_BSC="$PWD/rewatch/target/release/bsc" \
                 ./scripts/test_gentype_output_parity.sh
           - suite: analysis
-            # The Rust editor analysis against the OCaml analysis snapshots.
+            # The Rust editor analysis against the OCaml analysis snapshots,
+            # and `rescript-tools doc` against the OCaml doc snapshots.
             run: |
               ./tests/analysis_tests/no-watcher.sh
               ./tests/analysis_tests/test-rust.sh
+              ./tests/tools_tests/test-doc-rust.sh
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-node
