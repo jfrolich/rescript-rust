@@ -60,12 +60,15 @@ pub struct Graph {
     pub(crate) work: Vec<Ty>,
     pub(crate) forward: Vec<super::template::Forward>,
     pub(crate) copy_generation: u32,
+    pub(crate) template_nodes: Vec<Node>,
+    pub(crate) template_lists: Vec<Ty>,
+    pub(crate) template_params: Vec<Param>,
 }
 
 impl Default for Graph {
     /// O(1), empty pools allocate nothing.
     fn default() -> Self {
-        Self { nodes: Vec::new(), lists: Vec::new(), params: Vec::new(), level: 1, mode: Mode::Success, trail: Vec::new(), speculation_depth: 0, work: Vec::new(), forward: Vec::new(), copy_generation: 0 }
+        Self { nodes: Vec::new(), lists: Vec::new(), params: Vec::new(), level: 1, mode: Mode::Success, trail: Vec::new(), speculation_depth: 0, work: Vec::new(), forward: Vec::new(), copy_generation: 0, template_nodes: Vec::new(), template_lists: Vec::new(), template_params: Vec::new() }
     }
 }
 
