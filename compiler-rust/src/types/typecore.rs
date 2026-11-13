@@ -11125,8 +11125,14 @@ fn collect_module_expr_ident_heads(
                     | StructureItemDesc::Tstr_modtype(_)
                     | StructureItemDesc::Tstr_open(_)
                     | StructureItemDesc::Tstr_attribute(_) => {}
-                    StructureItemDesc::Tstr_derived(_) => {
-                        unreachable!("{}", crate::types::derived::TOP_LEVEL_ONLY)
+                    // The identifiers of a derived item are the values its
+                    // obligations resolved.
+                    StructureItemDesc::Tstr_derived(idx) => {
+                        for bound in ta.derived.bound(*idx) {
+                            for path in ta.derived.values_of(&bound) {
+                                path.for_each_head(&mut |id| ids.push(*id));
+                            }
+                        }
                     }
                 }
             }
@@ -12319,8 +12325,14 @@ fn collect_lident_idents_in_module_expr(
                             );
                         }
                     }
-                    SID::Pstr_derived(_) => {
-                        unreachable!("{}", crate::types::derived::TOP_LEVEL_ONLY)
+                    // The identifiers of a derived item are the names of its
+                    // value obligations.
+                    SID::Pstr_derived(idx) => {
+                        for name in crate::binary_ast::derive::value_names(arena, *idx) {
+                            if let Longident::Lident(id) = arena.get_longident(name) {
+                                out.push(arena.get_string(*id).to_string());
+                            }
+                        }
                     }
                     SID::Pstr_module(binding) => {
                         collect_lident_idents_in_module_expr(
@@ -20101,9 +20113,11 @@ fn typed_structure_item_uses_ident(ta: &TypedArena, item: &StructureItem, target
         | StructureItemDesc::Tstr_exception(_)
         | StructureItemDesc::Tstr_open(_)
         | StructureItemDesc::Tstr_attribute(_) => false,
-        StructureItemDesc::Tstr_derived(_) => {
-            unreachable!("{}", crate::types::derived::TOP_LEVEL_ONLY)
-        }
+        StructureItemDesc::Tstr_derived(idx) => ta.derived.bound(*idx).any(|bound| {
+            ta.derived.values_of(&bound).any(|path| {
+                matches!(path.view(), crate::types::path::PathView::Pident(id) if id.same(target))
+            })
+        }),
     }
 }
 
@@ -20515,8 +20529,24 @@ fn rec_structure_item(
         | crate::types::typedtree::StructureItemDesc::Tstr_attribute(_) => {
             (RecEnv::default(), RecUse::default())
         }
-        crate::types::typedtree::StructureItemDesc::Tstr_derived(_) => {
-            unreachable!("{}", crate::types::derived::TOP_LEVEL_ONLY)
+        // Each binding of a derived item is a function whose body uses the
+        // values its obligations resolved: a non-recursive group of
+        // `Texp_function` bindings (`rec_value_bindings`).
+        crate::types::typedtree::StructureItemDesc::Tstr_derived(idx) => {
+            let mut item_env = RecEnv::default();
+            let mut item_use = RecUse::default();
+            for bound in ta.derived.bound(*idx) {
+                let use_ = rec_use_delay(
+                    ta.derived
+                        .values_of(&bound)
+                        .fold(RecUse::default(), |use_, path| {
+                            rec_use_join(use_, rec_path(env, &path))
+                        }),
+                );
+                item_env.insert(bound.ident, use_.clone());
+                item_use = rec_use_join(item_use, use_);
+            }
+            (item_env, item_use)
         }
     }
 }

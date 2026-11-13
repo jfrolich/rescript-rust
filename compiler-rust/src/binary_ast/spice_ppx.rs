@@ -5541,7 +5541,6 @@ fn classify_group(
     rec_flag: RecFlag,
     decls: &[TypeDeclaration],
     settings: &[Option<GeneratorSettings>],
-    scope: super::derive::Scope,
 ) -> super::derive::Classification {
     use super::derive::Classification;
     let deriving = settings.iter().filter(|settings| settings.is_some()).count();
@@ -5554,7 +5553,7 @@ fn classify_group(
         if count == 0 {
             continue;
         }
-        match plan::classify(arena, decl, rec_flag, shares_names, scope) {
+        match plan::classify(arena, decl, rec_flag, shares_names) {
             Classification::Plan => plannable += count,
             general @ Classification::General(_) => {
                 counts.add(general, count);
@@ -5575,7 +5574,6 @@ fn map_structure_item_spice(
     item: &StructureItem,
     arena: &mut ParseArena,
     mapper_active: bool,
-    scope: super::derive::Scope,
 ) -> SpiceResult<Vec<StructureItem>> {
     match &item.pstr_desc {
         StructureItemDesc::Pstr_type(inner) => {
@@ -5593,7 +5591,7 @@ fn map_structure_item_spice(
                 .cloned()
                 .collect::<SpiceResult<smallvec::SmallVec<[Option<GeneratorSettings>; 4]>>>()
                 && settings.iter().any(|settings| settings.is_some())
-                && classify_group(arena, *rec_flag, decls, &settings, scope)
+                && classify_group(arena, *rec_flag, decls, &settings)
                     == super::derive::Classification::Plan
             {
                 let mapped_item = clone_mapped_structure_item(item, arena)?;
@@ -5854,12 +5852,11 @@ pub fn expand_structure_item_with_mapper(
     item: &StructureItem,
     arena: &mut ParseArena,
     mapper_active: bool,
-    scope: super::derive::Scope,
 ) -> SpiceResult<Vec<StructureItem>> {
     if !arena.builtin_spice_enabled() {
         return Ok(vec![item.clone()]);
     }
-    map_structure_item_spice(item, arena, mapper_active, scope)
+    map_structure_item_spice(item, arena, mapper_active)
 }
 
 fn map_structure_items_with_mapper(
@@ -5874,7 +5871,6 @@ fn map_structure_items_with_mapper(
             item,
             arena,
             mapper_active,
-            super::derive::Scope::Nested,
         )?);
     }
     Ok(expanded)

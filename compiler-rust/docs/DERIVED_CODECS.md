@@ -386,7 +386,6 @@ returning `Plan` or `General(reason)`; there is no "unknown" result. General:
 | a `type … and …` group in which two declarations share a label or constructor name | the label obligations would resolve to the wrong declaration |
 | `@spice.serde` variants and polymorphic variants, polymorphic variants (57 bindings), tuples | not among the three measured shapes; each can move later if a census shows it matters |
 | `@unboxed` declarations | a different body per representation; rare |
-| any item nested in a functor body or a first-class module | not examined |
 
 An item reaches the general path in two ways: the classifier returns `General`
 in the front end (the syntax is generated as today and the item is an ordinary
@@ -813,8 +812,11 @@ types are not sliced. Each needs a census first that shows its share.
 - **Editor tooling.** Whether hover, references or rename read the typed
   bodies of derived bindings (through the type-constructor locations the
   built-in codec identifiers carry) was not established.
-- **Functor bodies and first-class modules** containing derived items were not
-  examined and are classified general.
+- **Functor bodies and first-class modules.** A derived declaration inside a
+  module expression takes a plan like one at the top level (slice 2); the
+  walks over nested structures read the obligation results where they read
+  the identifiers of a typed body. `%%private` admits no type declaration, so
+  no derived declaration sits in one.
 - **Obligation order.** The first reported failure and the order of
   deprecation warnings depend on discharging in today's typing order. The
   order tests assert it for a handful of declarations; the fixtures and the

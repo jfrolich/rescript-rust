@@ -341,11 +341,7 @@ mod tests {
         let mut tctx = TypeCheckContext::new(&type_ctx, arena);
         let env = initial_env(&type_ctx);
         let (typed, _) = typemod::type_structure(&mut tctx, &env, arena, &structure).unwrap();
-        let planned = tctx
-            .typed
-            .structure_items(typed.str_items)
-            .iter()
-            .any(|item| matches!(item.str_desc, StructureItemDesc::Tstr_derived(_)));
+        let planned = tctx.typed.derived.discharged() > 0;
         let mut collector = Collector {
             ctx: &type_ctx,
             ta: &tctx.typed,
@@ -367,7 +363,8 @@ mod tests {
     /// A discharged item reads the paths its general form reads.
     #[test]
     fn a_discharged_item_reads_what_its_general_form_reads() {
-        for source in DECLARATIONS {
+        let nested = crate::binary_ast::derive::fixtures::NESTED.map(|(source, _)| source);
+        for source in DECLARATIONS.into_iter().chain(nested) {
             let (planned, discharged) = paths_read(source, true);
             let (mut general, none) = paths_read(source, false);
             assert!(discharged && !none);

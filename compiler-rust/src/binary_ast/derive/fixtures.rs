@@ -1,7 +1,6 @@
 //! Programs that derive codecs, for the tests of the checker and the
 //! backend, which compile them with plans and without and compare the two.
 
-use super::Scope;
 use crate::parser::ast::StructureItem;
 use crate::parser::{Parser, module};
 
@@ -56,6 +55,34 @@ pub(crate) const DECLARATIONS: [&str; 10] = [
     "@spice type a = string\n@spice and b = array<int>\n@spice type c = result<a, b>",
 ];
 
+/// Declarations inside a module expression: a submodule, a submodule of a
+/// submodule, a functor body, a first-class module and a module bound in an
+/// expression. Each is followed by values that use its codecs, so the types
+/// the codecs get are visible at the top level. The second number is how
+/// many items take a plan.
+pub(crate) const NESTED: [(&str, usize); 5] = [
+    (
+        "module M = {\n  @spice type id = string\n  @spice type ids = array<id>\n}\nlet e = M.ids_encode\nlet d = M.ids_decode",
+        2,
+    ),
+    (
+        "module M = {\n  @spice type id = string\n  module N = {\n    @spice type ids = array<option<id>>\n  }\n}\nlet e = M.N.ids_encode\nlet d = M.N.ids_decode",
+        2,
+    ),
+    (
+        "module F = (X: {\n  type t\n  let t_encode: t => json\n  let t_encodeJson: t => json\n  let t_decode: json => decoded<t>\n}) => {\n  @spice type ids = array<X.t>\n}\nmodule I = F(A)\nlet e = I.ids_encode\nlet d = I.ids_decode",
+        1,
+    ),
+    (
+        "module type S = {\n  type id\n  let id_encode: id => json\n  let id_decode: json => decoded<id>\n}\nlet m: module(S) = module({\n  @spice type id = string\n})",
+        1,
+    ),
+    (
+        "let e = {\n  module L = {\n    @spice type ids = array<int>\n  }\n  L.ids_encode\n}",
+        1,
+    ),
+];
+
 /// Parse `source` after the library and run the derive over its items,
 /// with plans (`true`) or with every item as syntax.
 pub(crate) fn derive_source(
@@ -69,11 +96,10 @@ pub(crate) fn derive_source(
     parser
         .arena_mut()
         .set_derived_plans((!plans).then_some(super::GeneralReason::Switch));
-    let scope = Scope::TopLevel;
     let expanded: Vec<StructureItem> = items
         .iter()
         .flat_map(|item| {
-            super::expand_structure_item_with_mapper(item, parser.arena_mut(), true, scope)
+            super::expand_structure_item_with_mapper(item, parser.arena_mut(), true)
                 .unwrap()
         })
         .collect();

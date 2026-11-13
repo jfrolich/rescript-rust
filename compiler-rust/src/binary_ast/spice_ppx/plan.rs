@@ -18,7 +18,7 @@ use super::*;
 use crate::binary_ast::derive::plan::{
     Binding, BodyIdx, BodyNode, DerivedIdx, ExprLoc, Obligation, SkeletonNode, Span,
 };
-use crate::binary_ast::derive::{Classification, GeneralReason, Scope};
+use crate::binary_ast::derive::{Classification, GeneralReason};
 use crate::parse_arena::TypeList;
 
 /// Whether an attribute payload is a constant: a literal, or a template
@@ -160,13 +160,9 @@ pub(in crate::binary_ast) fn classify(
     decl: &TypeDeclaration,
     rec_flag: RecFlag,
     shares_names: bool,
-    scope: Scope,
 ) -> Classification {
     use GeneralReason::*;
     let general = Classification::General;
-    if scope == Scope::Nested {
-        return general(Nested);
-    }
     if rec_flag == RecFlag::Recursive {
         return general(RecursiveGroup);
     }
@@ -500,7 +496,7 @@ fn binding(
 /// each, the bindings `generate_codec_decls` makes, in its order.
 /// Cost: O(codecs of the manifests); one string per binding name and codec
 /// name, as the generator allocates them.
-pub(in crate::binary_ast) fn build(
+pub(super) fn build(
     arena: &mut ParseArena,
     group: &[TypeDeclaration],
     settings: &[Option<GeneratorSettings>],
@@ -540,14 +536,13 @@ mod tests {
 
     /// Parse `source` and run the derive over its top-level items, with
     /// plans.
-    fn expand(source: &str, scope: Scope) -> (Vec<StructureItem>, ParseArena) {
-        expand_on(source, scope, None)
+    fn expand(source: &str) -> (Vec<StructureItem>, ParseArena) {
+        expand_on(source, None)
     }
 
     /// [`expand`], with plans or with every item as syntax.
     fn expand_on(
         source: &str,
-        scope: Scope,
         plans_off: Option<GeneralReason>,
     ) -> (Vec<StructureItem>, ParseArena) {
         let mut parser = crate::parser::Parser::new("Test.res", source);
@@ -558,14 +553,14 @@ mod tests {
         let expanded = items
             .iter()
             .flat_map(|item| {
-                derive::expand_structure_item_with_mapper(item, &mut arena, true, scope).unwrap()
+                derive::expand_structure_item_with_mapper(item, &mut arena, true).unwrap()
             })
             .collect();
         (expanded, arena)
     }
 
     /// The classification of the last type declaration of `source`.
-    fn classification(source: &str, scope: Scope) -> Classification {
+    fn classification(source: &str) -> Classification {
         let mut parser = crate::parser::Parser::new("Test.res", source);
         let items = crate::parser::module::parse_structure(&mut parser);
         assert!(!parser.has_errors(), "{source}");
@@ -580,14 +575,13 @@ mod tests {
             })
             .expect("a type declaration");
         let shares_names = group_shares_names(decls, &arena);
-        classify(&arena, decls.last().unwrap(), rec_flag, shares_names, scope)
+        classify(&arena, decls.last().unwrap(), rec_flag, shares_names)
     }
 
     #[test]
     fn every_reason_of_the_general_path() {
         use GeneralReason::*;
-        let top = Scope::TopLevel;
-        let general = |source| match classification(source, top) {
+        let general = |source| match classification(source) {
             Classification::General(reason) => reason,
             Classification::Plan => panic!("{source} takes a plan"),
         };
@@ -610,10 +604,6 @@ mod tests {
         assert_eq!(general("@spice type t = JSON.t"), NotYetPlanned);
         assert_eq!(general("@spice type t = array<Js.Json.t>"), NotYetPlanned);
         assert_eq!(general("@spice @spice.fallback(\"x\") type t = string"), NotYetPlanned);
-        assert_eq!(
-            classification("@spice type t = string", Scope::Nested),
-            Classification::General(Nested)
-        );
         for planned in [
             "@spice type t = string",
             "@spice type t = array<id>",
@@ -622,22 +612,21 @@ mod tests {
             "@spice type t = dict<option<array<int>>>",
             "@spice type a = string @spice and b = array<a>",
         ] {
-            assert_eq!(classification(planned, top), Classification::Plan, "{planned}");
+            assert_eq!(classification(planned), Classification::Plan, "{planned}");
         }
     }
 
     /// Only a group whose derived declarations all take a plan becomes a
-    /// plan; a nested item never does.
+    /// plan.
     #[test]
     fn a_group_is_planned_as_a_whole() {
-        let derived = |source, scope| {
-            let (items, _) = expand(source, scope);
+        let derived = |source| {
+            let (items, _) = expand(source);
             matches!(items.last().unwrap().pstr_desc, StructureItemDesc::Pstr_derived(_))
         };
-        assert!(derived("@spice type a = string @spice and b = array<a>", Scope::TopLevel));
-        assert!(derived("type a = {x: int} @spice and b = array<int>", Scope::TopLevel));
-        assert!(!derived("@spice type a = {x: int} @spice and b = array<a>", Scope::TopLevel));
-        assert!(!derived("@spice type a = string", Scope::Nested));
+        assert!(derived("@spice type a = string @spice and b = array<a>"));
+        assert!(derived("type a = {x: int} @spice and b = array<int>"));
+        assert!(!derived("@spice type a = {x: int} @spice and b = array<a>"));
     }
 
     /// With plans off, which a tree is unless the driver says it is compiled
@@ -655,12 +644,12 @@ mod tests {
         };
         for decl in &inner.1 {
             assert_eq!(
-                classify(&arena, decl, inner.0, false, Scope::TopLevel),
+                classify(&arena, decl, inner.0, false),
                 Classification::General(GeneralReason::Switch)
             );
         }
         let expanded =
-            derive::expand_structure_item_with_mapper(&items[0], &mut arena, true, Scope::TopLevel)
+            derive::expand_structure_item_with_mapper(&items[0], &mut arena, true)
                 .unwrap();
         assert!(matches!(expanded.last().unwrap().pstr_desc, StructureItemDesc::Pstr_value(..)));
         assert_eq!(arena.plans().item_count(), 0);
@@ -674,7 +663,7 @@ mod tests {
         arena.set_derived_plans(None);
         let before = arena.reserve_pat();
         let expanded = derive::expand_structure_item_with_mapper(
-            &items[0], &mut arena, true, Scope::TopLevel,
+            &items[0], &mut arena, true,
         ).unwrap();
         assert!(matches!(expanded[1].pstr_desc, StructureItemDesc::Pstr_derived(_)));
         // Even a single general binding would allocate its parameter and
@@ -742,12 +731,12 @@ mod tests {
             "@spice type r = result<array<option<int>>, dict<B.C.t>>",
             "@spice.decode type d = dict<option<list<id>>>\n@spice.encode type e = Null.t<float>",
         ] {
-            let (items, arena) = expand(source, Scope::TopLevel);
+            let (items, arena) = expand(source);
             // The same parse with every item as syntax: the two trees have
             // the same items, and the locations of the source are the same
             // handles in both arenas.
             let (syntax, syntax_arena) =
-                expand_on(source, Scope::TopLevel, Some(GeneralReason::Switch));
+                expand_on(source, Some(GeneralReason::Switch));
             assert_eq!(items.len(), syntax.len());
             let mut plans = 0;
             for (item, syntax) in items.iter().zip(&syntax) {
@@ -815,7 +804,7 @@ mod tests {
         let source = format!("@spice.encode type t = {}int{}", "array<".repeat(depth), ">".repeat(depth));
         let (items, arena) = std::thread::Builder::new()
             .stack_size(256 << 20)
-            .spawn(move || expand(&source, Scope::TopLevel))
+            .spawn(move || expand(&source))
             .unwrap()
             .join()
             .unwrap();

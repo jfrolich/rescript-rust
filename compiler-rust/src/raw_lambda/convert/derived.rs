@@ -231,7 +231,6 @@ mod tests {
     use crate::binary_ast::derive::fixtures::{DECLARATIONS, derive_source};
     use crate::types::derived::tests::type_context;
     use crate::types::typecore::TypeCheckContext;
-    use crate::types::typedtree::StructureItemDesc;
     use crate::types::{initial_env, typemod};
 
     /// The printed raw Lambda of a program whose derived items are planned
@@ -244,12 +243,7 @@ mod tests {
         let mut tctx = TypeCheckContext::new(&type_ctx, arena);
         let env = initial_env(&type_ctx);
         let (typed, _) = typemod::type_structure(&mut tctx, &env, arena, &structure).unwrap();
-        let planned = tctx
-            .typed
-            .structure_items(typed.str_items)
-            .iter()
-            .filter(|item| matches!(item.str_desc, StructureItemDesc::Tstr_derived(_)))
-            .count();
+        let planned = tctx.typed.derived.discharged();
         let rb = RawArena::new();
         let mut converter = RawLambdaConverter::new(arena, &tctx.typed, &type_ctx, &env, &rb);
         let lam = converter.convert_structure(&typed);
@@ -289,6 +283,19 @@ mod tests {
             assert_eq!(items, source.matches("type ").count());
             assert_eq!(none, 0);
             assert!(planned.contains("_decode") || planned.contains("_encode"), "{planned}");
+            assert_eq!(planned, general, "{source}");
+        }
+    }
+
+    /// A planned item inside a module expression lowers to the raw Lambda
+    /// of its general form.
+    #[test]
+    fn a_nested_plan_lowers_to_the_lambda_of_the_general_form() {
+        for (source, items) in crate::binary_ast::derive::fixtures::NESTED {
+            let (planned, lowered) = raw_lambda(source, true);
+            let (general, none) = raw_lambda(source, false);
+            assert_eq!(lowered, items, "{source}");
+            assert_eq!(none, 0);
             assert_eq!(planned, general, "{source}");
         }
     }

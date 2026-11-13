@@ -13567,8 +13567,20 @@ fn extract_module_type_from_mod_expr_inner(
                 let current_env_snapshot = local_env.clone();
                 let current_env = current_env_snapshot.as_ref().or(env);
                 match &item.str_desc {
-                    StructureItemDesc::Tstr_derived(_) => {
-                        unreachable!("{}", crate::types::derived::TOP_LEVEL_ONLY)
+                    // A derived item declares its bindings as regular values.
+                    StructureItemDesc::Tstr_derived(idx) => {
+                        for bound in ta.derived.bound(*idx) {
+                            sig_items.push(SigItem::SigValue(
+                                bound.ident,
+                                crate::types::decl::ValueDescription {
+                                    val_type: bound.ty,
+                                    val_kind: crate::types::decl::ValueKind::ValReg,
+                                    val_loc: crate::types::DeclLoc::none(),
+                                    val_attributes: Default::default(),
+                                    val_path: None,
+                                },
+                            ));
+                        }
                     }
                     StructureItemDesc::Tstr_value(_, bindings) => {
                         for vb in ta.value_bindings(*bindings) {

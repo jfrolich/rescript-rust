@@ -29,12 +29,6 @@ use crate::types::type_expr::{TypeArg, TypeDesc, TypeExprRef};
 use crate::types::typecore::{RecArg, TypeCheckContext};
 use crate::types::typedtree::EnvRef;
 
-/// Why the walks over the structure of a module expression have no case for
-/// a derived item: the seam plans an item only at the top level of a unit
-/// (`derive::Scope`), and everything nested keeps its value group.
-pub(crate) const TOP_LEVEL_ONLY: &str =
-    "a derived item is planned only at the top level of a unit";
-
 /// What a discharged obligation resolved to.
 #[derive(Debug, Clone, Copy)]
 pub enum Resolved {
@@ -85,6 +79,8 @@ pub struct Bound {
     pub ty: TypeExprRef,
     /// The environment the item was checked in.
     pub env: EnvRef,
+    /// The obligations of the binding: its slots of the result table.
+    pub obligations: Span,
 }
 
 /// The tables of one typed arena. `reserve` sizes them once per compilation.
@@ -170,6 +166,25 @@ impl DerivedTable {
         self.bound[self.items[idx.index()].bindings.range()]
             .iter()
             .map(|bound| bound.expect("the bindings of a typed derived item are entered"))
+    }
+
+    /// The paths of the values a binding of a discharged item uses, in typing
+    /// order: what the identifier expressions of its general form resolve
+    /// to. Cost: O(1) to obtain; one slot read per obligation of the binding.
+    pub fn values_of(&self, bound: &Bound) -> impl Iterator<Item = Path> + '_ {
+        self.resolved[bound.obligations.range()]
+            .iter()
+            .filter_map(|resolved| match resolved {
+                Some(Resolved::Value { path, .. }) => Some(*path),
+                Some(Resolved::Type(_)) => None,
+                None => unreachable!("the obligations of a typed derived item are discharged"),
+            })
+    }
+
+    /// The number of items that were discharged, wherever they are nested.
+    #[cfg(test)]
+    pub(crate) fn discharged(&self) -> usize {
+        self.items.iter().filter(|slots| slots.bindings.len > 0).count()
     }
 
     /// The results of the obligations of a discharged item, in typing order.
@@ -305,6 +320,7 @@ pub fn discharge_counting(
                 ident,
                 ty,
                 env: env_ref,
+                obligations: binding.obligations,
             },
         );
     }
@@ -499,7 +515,7 @@ pub(crate) mod tests {
     #[test]
     fn sizes_are_pinned() {
         assert_eq!(std::mem::size_of::<Option<Resolved>>(), 16);
-        assert_eq!(std::mem::size_of::<Option<Bound>>(), 24);
+        assert_eq!(std::mem::size_of::<Option<Bound>>(), 32);
     }
 
     pub(crate) fn type_context() -> TypeContext {
@@ -536,13 +552,7 @@ pub(crate) mod tests {
                 _ => None,
             })
             .collect();
-        let discharged = tctx
-            .typed
-            .structure_items(typed.str_items)
-            .iter()
-            .filter(|item| matches!(item.str_desc, crate::types::typedtree::StructureItemDesc::Tstr_derived(_)))
-            .count();
-        Ok((values, discharged))
+        Ok((values, tctx.typed.derived.discharged()))
     }
 
     /// A discharged binding has the type inference gives its general form.
@@ -553,6 +563,20 @@ pub(crate) mod tests {
             let (general, none) = check(source, false).unwrap();
             assert_eq!(discharged, source.matches("type ").count());
             assert_eq!(none, 0);
+            assert_eq!(planned, general, "{source}");
+        }
+    }
+
+    /// A declaration inside a module expression is discharged like one at
+    /// the top level, and its bindings get the types of the general form.
+    #[test]
+    fn a_nested_item_is_discharged() {
+        for (source, items) in crate::binary_ast::derive::fixtures::NESTED {
+            let (planned, discharged) = check(source, true).unwrap();
+            let (general, none) = check(source, false).unwrap();
+            assert_eq!(discharged, items, "{source}");
+            assert_eq!(none, 0);
+            assert!(!planned.is_empty());
             assert_eq!(planned, general, "{source}");
         }
     }

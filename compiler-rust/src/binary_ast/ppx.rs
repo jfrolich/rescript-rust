@@ -9799,7 +9799,6 @@ fn rewrite_structure_impl(
                                 work,
                                 arena,
                                 spice_mapper_active,
-                                derive::Scope::Nested,
                             )?);
                         } else {
                             mapped.extend(rewrite_structure_item_no_spice(work, arena));
@@ -9846,7 +9845,6 @@ fn rewrite_structure_unit(
                     item,
                     arena,
                     spice_mapper_active,
-                    derive::Scope::TopLevel,
                 )?);
             } else {
                 result.extend(rewrite_structure_item_no_spice(item, arena));
@@ -9872,7 +9870,6 @@ fn rewrite_structure_unit(
                     item,
                     arena,
                     spice_mapper_active,
-                    derive::Scope::TopLevel,
                 )?);
             } else {
                 result.extend(rewrite_structure_item_no_spice(item, arena));
@@ -9885,7 +9882,6 @@ fn rewrite_structure_unit(
                     item,
                     arena,
                     spice_mapper_active,
-                    derive::Scope::TopLevel,
                 )?);
             } else {
                 result.extend(rewrite_structure_item_no_spice(item, arena));
@@ -10361,11 +10357,10 @@ fn try_rewrite_structure_item(
     item: &StructureItem,
     arena: &mut ParseArena,
     spice_mapper_active: bool,
-    scope: derive::Scope,
 ) -> PpxResult<Vec<StructureItem>> {
     let mut result = Vec::new();
     for expanded in
-        derive::expand_structure_item_with_mapper(item, arena, spice_mapper_active, scope)
+        derive::expand_structure_item_with_mapper(item, arena, spice_mapper_active)
         .map_err(PpxError::message)?
     {
         if let StructureItemDesc::Pstr_primitive(vd) = &expanded.pstr_desc {
@@ -10381,8 +10376,7 @@ fn try_rewrite_structure_item(
 fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<StructureItem> {
     let spice_mapper_active =
         derive::structure_uses_spice_mapper(std::slice::from_ref(item), arena);
-    // Reached for the items of a module expression only.
-    try_rewrite_structure_item(item, arena, spice_mapper_active, derive::Scope::Nested)
+    try_rewrite_structure_item(item, arena, spice_mapper_active)
         .unwrap_or_else(|error| {
         arena.defer_ppx_error(error);
         rewrite_structure_item_no_spice(item, arena)
@@ -11560,7 +11554,7 @@ let e = () =>
         );
         assert!(source.iter().all(|item| !derive::is_derived_item(item, &arena)));
         let expanded: Vec<_> = source.iter().flat_map(|item|
-            derive::expand_structure_item_with_mapper(item, &mut arena, true, derive::Scope::TopLevel).unwrap()
+            derive::expand_structure_item_with_mapper(item, &mut arena, true).unwrap()
         ).collect();
         assert_eq!(expanded.iter().map(|item| derive::is_derived_item(item, &arena))
             .collect::<Vec<_>>(), vec![false, false, true, false, true, false]);
