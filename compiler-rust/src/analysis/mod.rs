@@ -7,6 +7,7 @@
 //! analysis/bin/main.ml) and returns what that binary prints.
 
 pub mod commands;
+pub mod docgen;
 pub mod document_symbol;
 pub mod hashtbl;
 pub mod hover;
@@ -305,6 +306,12 @@ pub fn run(request: &Request, project: &dyn session::Project) -> Result<Vec<u8>,
             cli.references(&mut out, path, parse_pos(line, col)?, false)
         }
         ["test", path] => test(&mut out, &mut cli, path)?,
+        // `rescript-tools doc` (tools/bin/main.ml), which prints the JSON
+        // and a newline, or fails with the reason.
+        ["doc", path] => {
+            let docs = docgen::extract_docs(&cli.session, &request.cwd, path)?;
+            out.print_endline(&docs);
+        }
         [command, ..] => {
             return Err(format!(
                 "`{command}` is not available inside the watcher yet"
