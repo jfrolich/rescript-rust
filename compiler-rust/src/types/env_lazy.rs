@@ -938,10 +938,11 @@ fn scan_child_component_from_signature(
                         runtime_pos as i32,
                     ));
                 }
-                if let (Some(view), Some((_, stored))) = (view, &stored)
-                    && view.world_child_kind(cursor.modules).is_some()
-                {
-                    let _ = stored.world_child.set((view.clone(), cursor.modules));
+                if let (Some(view), Some((_, stored))) = (view, &stored) {
+                    stored.of_view.set(true);
+                    if view.world_child_kind(cursor.modules).is_some() {
+                        let _ = stored.world_child.set((view.clone(), cursor.modules));
+                    }
                 }
                 cursor.modules += 1;
                 // OCaml `Tbl.add` shadows earlier entries with the same name
@@ -1266,12 +1267,6 @@ impl QualifiedModuleComponents {
         let layers = Rc::new(build());
         let _ = self.tables.opened_layers.set((layers.clone(), None));
         layers
-    }
-
-    /// Keep these tables private to this compilation (their build read
-    /// compilation-local state): later entries are forced locally.
-    pub(crate) fn make_private(&self) {
-        self.tables.in_store.set(false);
     }
 
     /// Drop an entry forced from compilation-local state so that other
@@ -2418,6 +2413,12 @@ pub(crate) struct StoredModuleComponents {
     /// when the module's own path is a view key
     /// (`ModuleView::structure_child`): its components are that view.
     world_child: OnceCell<(Arc<super::module_view::ModuleView>, u32)>,
+    /// A child of a world view, kept by the worker for every compilation
+    /// that adopts the view (`ViewTables`). Nothing a compilation builds is
+    /// cached in it: its tables, when its path has no world view (a functor,
+    /// a module type declared in another unit), are built for the
+    /// compilation that asks and kept by that compilation.
+    of_view: std::cell::Cell<bool>,
     /// Built during a store build (see `StructureComponentTables::in_store`).
     in_store: bool,
     /// Key of this module's compilation-private components (see
@@ -2466,6 +2467,7 @@ impl StoredModuleComponents {
             source_prefix: OnceCell::new(),
             cached: OnceCell::new(),
             world_child: OnceCell::new(),
+            of_view: std::cell::Cell::new(false),
             in_store: super::thread_store::store_build_active(),
             local_id: {
                 static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2514,6 +2516,16 @@ impl StoredModuleComponents {
         cache_mode: super::typecore::ComponentLookupApi,
         f: impl FnOnce(&QualifiedModuleComponents) -> R,
     ) -> Option<R> {
+        if self.of_view.get() {
+            // One probe of the compilation's table; the build is once per
+            // compilation.
+            if let Some(components) = ctx.local_stored_components(self.local_id) {
+                return Some(f(components.as_ref()));
+            }
+            let components = Rc::new(self.build_components(pers_env, ctx, cache_mode)?);
+            ctx.set_local_stored_components(self.local_id, components.clone());
+            return Some(f(components.as_ref()));
+        }
         if let Some(components) = self.cached.get().cloned() {
             // A shared result is valid for this compilation only when it
             // answers the build's guarded reads the same way.
@@ -2617,7 +2629,11 @@ impl StoredModuleComponents {
                 ctx,
             )
         };
-        let component_result = if let Some(cached) = self.functor_component_result.get() {
+        let component_result = if self.of_view.get() {
+            // Instantiated for the compilation: the result's nodes are its
+            // own, and the compilation caches the applied path's components.
+            compute_component_result()
+        } else if let Some(cached) = self.functor_component_result.get() {
             if let Some(piece) = self.functor_component_piece.get() {
                 ctx.touch_store_piece(piece);
             }
@@ -2643,7 +2659,9 @@ impl StoredModuleComponents {
                 ctx,
             )
         };
-        let (substituted, piece, cacheable) = if self.in_store {
+        let (substituted, piece, cacheable) = if self.of_view.get() {
+            (substitute(), None, false)
+        } else if self.in_store {
             if shareable_arg {
                 let (substituted, piece) = ctx.build_in_store(substitute);
                 let cacheable = piece.is_some();
@@ -2665,9 +2683,10 @@ impl StoredModuleComponents {
 }
 
 /// What one worker derives from a world view: the layer tables `open`
-/// installs, and the component tables of the view's children whose paths the
-/// world has no view of (kept as today: built as store builds, once per
-/// worker).
+/// installs, and one `StoredModuleComponents` per child module, which names
+/// the child's world view when its path has one and otherwise holds what a
+/// compilation needs to build the child's tables for itself. No type node
+/// and no store build.
 pub(crate) struct ViewTables {
     access_path: Arc<Path>,
     opened: OnceCell<Rc<super::env::OpenedLayers>>,
@@ -2719,21 +2738,27 @@ impl ViewTables {
         {
             cursor.working_env = Some(stored.seed_env().clone());
         }
-        // The children's tables are shared by the compilations of this
-        // worker: they are created in a store build, like their contents.
-        let ((found, _scanned), _) = ctx.build_in_store(|| {
-            scan_child_component_from_signature(
-                &self.access_path,
-                view.value_source(),
-                view.signature_ref(),
-                view.raw_signature(),
-                Some(view),
-                &mut self.children.borrow_mut(),
-                &mut self.scan.borrow_mut(),
-                name,
-                ctx,
-            )
-        });
+        // The scan's results are kept by the worker for every compilation
+        // that adopts the view, so it must create nothing a compilation
+        // owns: it installs the view's frozen declarations in the evolving
+        // environment and creates no type node.
+        let nodes_before = ctx.type_expr_count();
+        let (found, _scanned) = scan_child_component_from_signature(
+            &self.access_path,
+            view.value_source(),
+            view.signature_ref(),
+            view.raw_signature(),
+            Some(view),
+            &mut self.children.borrow_mut(),
+            &mut self.scan.borrow_mut(),
+            name,
+            ctx,
+        );
+        debug_assert_eq!(
+            nodes_before,
+            ctx.type_expr_count(),
+            "the child scan of a view created a type node"
+        );
         #[cfg(test)]
         CHILD_SCAN_STEPS.with(|steps| steps.set(steps.get() + _scanned as u64));
         found
@@ -2749,31 +2774,29 @@ impl ViewTables {
         self.opened
             .get_or_init(|| {
                 let items = view.opened_items();
-                let (module_components, _) = ctx.build_in_store(|| {
-                    let mut module_components = Vec::new();
-                    for module in &items.modules {
-                        let stored = if module.direct_persistent_alias {
-                            // env.ml:1516-1518: the components of an alias
-                            // of a persistent unit are that unit's.
-                            let stored = StoredModuleComponents::new(
-                                super::env::Env::empty(),
-                                module.decl.md_path.expect("an opened module has its path"),
-                                module.decl.as_ref().clone(),
-                            );
-                            if let Some((ordinal, _)) = view.world_child(module.id.name()) {
-                                let _ = stored.world_child.set((view.clone(), ordinal));
-                            }
-                            Some(Rc::new(stored))
-                        } else {
-                            self.child_components(view, module.id.name(), ctx)
-                                .map(|(_, stored)| stored)
-                        };
-                        if let Some(stored) = stored {
-                            module_components.push((module.id, stored, module.pos));
+                let mut module_components = Vec::with_capacity(items.modules.len());
+                for module in &items.modules {
+                    let stored = if module.direct_persistent_alias {
+                        // env.ml:1516-1518: the components of an alias
+                        // of a persistent unit are that unit's.
+                        let stored = StoredModuleComponents::new(
+                            super::env::Env::empty(),
+                            module.decl.md_path.expect("an opened module has its path"),
+                            module.decl.as_ref().clone(),
+                        );
+                        stored.of_view.set(true);
+                        if let Some((ordinal, _)) = view.world_child(module.id.name()) {
+                            let _ = stored.world_child.set((view.clone(), ordinal));
                         }
+                        Some(Rc::new(stored))
+                    } else {
+                        self.child_components(view, module.id.name(), ctx)
+                            .map(|(_, stored)| stored)
+                    };
+                    if let Some(stored) = stored {
+                        module_components.push((module.id, stored, module.pos));
                     }
-                    module_components
-                });
+                }
                 Rc::new(super::env::OpenedLayers::from_view(items, module_components))
             })
             .clone()
