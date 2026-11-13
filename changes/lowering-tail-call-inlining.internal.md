@@ -1,0 +1,1 @@
+- The backend lowering decides the status and the tail-call site of each declaration where it copies a run, and check mode compares them with the legacy tail-call pass, which keeps running on both sides of the `lower` check.

@@ -52,6 +52,10 @@ handle!(
     /// One node of a binding's body.
     BodyIdx
 );
+handle!(
+    /// The first node of a case pattern, stored in prefix order.
+    PatIdx
+);
 
 /// A half-open range of slots in one pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +102,11 @@ pub enum Owner {
     Result,
     /// The type a `Type` obligation resolved.
     Type,
+    /// The declaration being derived: an unqualified name whose first
+    /// candidate in scope is an ordinary constructor, possibly of an inline
+    /// record. The skeletons of a binding's declared constructors share their
+    /// result variable, so they belong to one type.
+    Declared,
 }
 
 /// Where the body uses a constructor, and the location its name carries
@@ -106,6 +115,8 @@ pub enum Owner {
 pub enum Site {
     /// In an expression; the name carries the dummy location.
     Construct,
+    /// In an expression; the name carries no location.
+    ConstructNone,
     /// In a pattern; the name carries no location.
     Pattern,
     /// In a pattern; the name carries the dummy location.
@@ -122,6 +133,17 @@ pub enum LabelUse {
     /// A field of a record expression; the name carries no location. The
     /// labels of one record expression are consecutive obligations.
     Construct,
+    /// A field of a closed record pattern of an inline record; the name
+    /// carries no location. Found by the type of the record, which a
+    /// preceding constructor obligation fixed; the labels of one pattern are
+    /// consecutive obligations, all of the record's, in order.
+    Pattern,
+    /// A field of a record expression of an inline record; the name carries
+    /// no location. Found as `Pattern` is.
+    ConstructInline,
+    /// The field a record update `{...base, label: value}` writes; the name
+    /// carries the dummy location. Found by the type of the base.
+    Update,
 }
 
 /// No variable slot: a `Type` obligation that annotates nothing.
@@ -173,21 +195,20 @@ pub enum Obligation {
         usage: LabelUse,
     },
     /// A constructor: looked up by name, it must be the one of `of`;
-    /// instantiated once, its argument (when it has one) and result unified
-    /// with the skeletons at `skeleton`.
+    /// instantiated once, its arguments and result unified with the
+    /// skeletons at `skeleton`.
     Constructor {
         /// The constructor's name.
         name: LidentIdx,
-        /// The `Type` obligation of an [`Owner::Type`] constructor.
-        ty: ObligationIdx,
-        /// The argument's skeleton when `has_arg`, followed by the result's.
+        /// The skeletons of the `args` arguments, followed by the result's.
         skeleton: SkeletonIdx,
         /// The type the constructor must belong to.
         of: Owner,
         /// Where the body uses it.
         site: Site,
-        /// Whether the body gives it one argument, or none.
-        has_arg: bool,
+        /// The number of arguments the body gives it; a constructor of an
+        /// inline record takes the record as its one argument.
+        args: u16,
     },
     /// A constant of the user's source (`@spice.key("k")`,
     /// `@spice.default(0)`): its type is unified with the skeleton.
@@ -264,6 +285,10 @@ pub enum Predef {
     Array,
     /// `result<'a, 'b>`.
     Result,
+    /// `int`.
+    Int,
+    /// `bool`.
+    Bool,
 }
 
 /// The optional first argument of an application.
@@ -283,6 +308,13 @@ pub enum OptionalArg {
 /// Children precede their parents in the pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyNode {
+    /// Preserve the source location of this application, not its children.
+    At {
+        /// The location used by the general converter for this application.
+        loc: LocIdx,
+        /// The application whose children retain their own locations.
+        body: BodyIdx,
+    },
     /// The parameter of an enclosing function, counted from the outermost.
     Local(u32),
     /// The value a `Value` obligation resolved.
@@ -350,7 +382,7 @@ pub enum BodyNode {
     /// The constant of a `Literal` obligation.
     Literal(ObligationIdx),
     /// A match whose cases are total: each tests one constructor or is a
-    /// wildcard.
+    /// wildcard, or is a nested pattern.
     Switch {
         /// The scrutinee.
         scrutinee: BodyIdx,
@@ -358,6 +390,45 @@ pub enum BodyNode {
         cases: u32,
         /// Number of cases.
         len: u16,
+    },
+    /// A constructor applied to two or more arguments: as many as its
+    /// obligation's `args`, a range of the argument pool.
+    ConstructArgs {
+        /// The `Constructor` obligation.
+        constructor: ObligationIdx,
+        /// The arguments: a range of the argument pool.
+        args: u32,
+    },
+    /// An integer constant the derive made.
+    Int(i32),
+    /// `if cond { then } else { else_ }`.
+    If {
+        /// The condition.
+        cond: BodyIdx,
+        /// The value when it holds.
+        then: BodyIdx,
+        /// The value otherwise.
+        else_: BodyIdx,
+    },
+    /// `let param = value; body`: `body` sees `param` as its innermost
+    /// local.
+    Let {
+        /// The bound variable's name.
+        param: StrIdx,
+        /// The bound value.
+        value: BodyIdx,
+        /// The body.
+        body: BodyIdx,
+    },
+    /// A copy of the record `base` with the field of the `Label`
+    /// obligation `label` set to `value`: `{...base, label: value}`.
+    Update {
+        /// The record copied.
+        base: BodyIdx,
+        /// The `Label` obligation of the field written.
+        label: ObligationIdx,
+        /// The field's new value.
+        value: BodyIdx,
     },
 }
 
@@ -374,6 +445,40 @@ pub enum CasePattern {
         /// The variable's name.
         binder: StrIdx,
     },
+    /// A pattern of the pattern pool. Its variables are the case body's
+    /// locals in prefix order: the last is the innermost.
+    Nested(PatIdx),
+}
+
+/// One node of a case pattern. A pattern is stored in prefix order: a node
+/// is followed by its sub-patterns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatNode {
+    /// `_`.
+    Any,
+    /// A variable.
+    Var(StrIdx),
+    /// A constructor, followed by as many sub-patterns as its obligation's
+    /// `args`.
+    Construct(ObligationIdx),
+    /// A tuple of the `len` sub-patterns that follow.
+    Tuple {
+        /// Number of components.
+        len: u16,
+    },
+    /// A closed record pattern of an inline record that names every field
+    /// in order: field `i` has the label of obligation `labels + i` and the
+    /// `i`-th of the `len` sub-patterns that follow.
+    Record {
+        /// The first `Label` obligation.
+        labels: ObligationIdx,
+        /// Number of fields.
+        len: u16,
+    },
+    /// The empty array `[]`.
+    EmptyArray,
+    /// A string constant the derive made.
+    Str(StrIdx),
 }
 
 /// One case of a `Switch`.
@@ -428,6 +533,7 @@ pub struct Plans {
     body: Vec<BodyNode>,
     body_args: Vec<BodyIdx>,
     cases: Vec<Case>,
+    patterns: Vec<PatNode>,
 }
 
 impl Plans {
@@ -489,6 +595,11 @@ impl Plans {
         idx
     }
 
+    /// The handle the next pushed skeleton node gets. Cost: O(1).
+    pub fn next_skeleton(&self) -> SkeletonIdx {
+        SkeletonIdx(self.skeletons.len() as u32)
+    }
+
     /// Append one skeleton node; a skeleton is the node and the children
     /// pushed after it. Cost: O(1) amortised; one 8-byte slot.
     pub fn push_skeleton(&mut self, node: SkeletonNode) -> SkeletonIdx {
@@ -533,6 +644,26 @@ impl Plans {
         let start = self.cases.len() as u32;
         self.cases.extend_from_slice(cases);
         start
+    }
+
+    /// Append one pattern node; a pattern is the node and the sub-patterns
+    /// pushed after it. Cost: O(1) amortised; one 8-byte slot.
+    pub fn push_pattern(&mut self, node: PatNode) -> PatIdx {
+        let idx = PatIdx(self.patterns.len() as u32);
+        self.patterns.push(node);
+        idx
+    }
+
+    /// Number of pattern nodes of all items. Cost: O(1).
+    pub fn pattern_count(&self) -> usize {
+        self.patterns.len()
+    }
+
+    /// The pattern pool from `idx` on: the pattern's nodes in prefix order,
+    /// then whatever follows it. Cost: O(1).
+    #[inline]
+    pub fn pattern_from(&self, idx: PatIdx) -> &[PatNode] {
+        &self.patterns[idx.index()..]
     }
 
     /// The cases of a `Switch` node. Cost: O(1).
@@ -597,6 +728,9 @@ mod tests {
         assert_eq!(size_of::<ObligationIdx>(), 4);
         assert_eq!(size_of::<SkeletonIdx>(), 4);
         assert_eq!(size_of::<BodyIdx>(), 4);
+        assert_eq!(size_of::<PatIdx>(), 4);
+        assert_eq!(size_of::<PatNode>(), 8);
+        assert_eq!(size_of::<CasePattern>(), 12);
         assert_eq!(size_of::<Obligation>(), 16);
         assert_eq!(size_of::<BodyNode>(), 16);
         assert_eq!(size_of::<Case>(), 16);

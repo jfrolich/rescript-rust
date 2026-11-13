@@ -9,7 +9,7 @@ RESCRIPT_DERIVED_PATH=general node tests/build_tests/super_errors_derived/input.
 RESCRIPT_DERIVED_PATH=check node tests/build_tests/super_errors_derived/input.js
 ```
 
-These commands compare the 14 diagnostic snapshots without updating them.
+These commands compare the 15 diagnostic snapshots without updating them.
 The harness normalizes newlines, trims surrounding whitespace and replaces
 project paths before comparing; it does not compare raw log bytes or assert
 build exit statuses.
@@ -26,3 +26,7 @@ adaptations keep the existing snapshots unchanged:
 - Remove `include Spice_Codecs` (original line 236). The fixtures do not need
   that separate package module; including it reports a missing module before
   the fixture diagnostics can be produced.
+
+`Aliased_variant_payload` pins a variant form that cannot discharge: its scalar
+alias decoder tries to read `json_arr`, which that form never binds. It must
+stay general (`unsupported_variant`), not trigger a second compilation.
