@@ -260,7 +260,7 @@ is given; all exist on trunk except where "to add" is written.
 | O8 | The JavaScript of a comparison depends on the name: `a > Green` is `Primitive_object.greaterthan` after `a`'s node was linked to `id<color>` | `checker_identity_comparison.res` | follows from O1 |
 | O9 | An abbreviation with a phantom parameter turns a ground occurrence into a type with a variable; the check for weak variables expands first | `checker_identity_09_phantom.res`, `checker_identity_09b_weak_phantom.res` | follows from O2 and from expansion |
 | O10 | Whether a node is generic decides copy or share, per node, for structure nodes as for variables. It is set by `generalize` (every node above the current level) and by `generalize_structure` (annotations, patterns that are not a plain variable) | `checker_identity_02_annotated.res` against `alias_name_follows_unification.res` | **stored**: a level in every node |
-| O11 | A copy of a nullary constructor links to the node whose expansion is memoised, while that memo lives (`find_repr` in `Ctype.copy`, `compiler/ml/ctype.ml`; `copy_type_cached` in Rust) | to add: no fixture isolates it. Slice R0 writes one or records that no program shows it | **stored** if observable: the simple-abbreviation memo |
+| O11 | A copy of a nullary constructor links to the node whose expansion is memoised, while that memo lives (`find_repr` in `Ctype.copy`, `compiler/ml/ctype.ml`; `copy_type_cached` in Rust) | R0 found no isolating program in the five shapes tested below | **stored** if observable: the simple-abbreviation memo |
 | O12 | Lowering a level can fail (a type constructor would escape its scope) and can expand an abbreviation to avoid that, which renames | `weak_variable_escapes_later_type.res`, `gadt_existential_escape.res` | follows from O10 with the scope of each path; the walk must run where OCaml's runs |
 | O13 | Programs with a cyclic type are rejected | `occurs_check_function_type.res`, `occurs_check_large_type.res`, `occurs_check_through_constructor.res` | follows: a check, not a state |
 | O14 | Weak variables: a variable that is not generalised stays one node for the rest of the unit; one left at the end is an error | `non_generalizable.res`, `identity_does_not_generalize.res` | follows from O10 |
@@ -268,6 +268,38 @@ is given; all exist on trunk except where "to add" is written.
 | O16 | A type clash prints the two types as they stood when unification failed, with the trace expanded | every `type clash` fixture, e.g. `checker_identity_02_annotated.res` | **failure path only** (2.4, idea 8) |
 | O17 | The names of type variables in printed types (`'a`, `'b`, weak `_a`) follow the order the printer meets them and the names variables carry | `fun_return_poly2.res` | **stored**: the name in a variable node; `link_type`'s rule for which name survives |
 | O18 | The output does not depend on worker count or scheduling | `scripts/test_worker_determinism.py` | **order of work**: nothing shared is written in an order that depends on scheduling |
+
+**O11 experiment (R0).** No tested program isolated the rule. The reference
+OCaml compiler was built with OCaml 5.5.1 and compared with a separate build
+changing only `compiler/ml/ctype.ml:781`: `find_repr p !abbrevs` becomes
+`if tl = [] then None else find_repr p !abbrevs` in `copy`. Both were run
+with `-nopervasives -bs-no-version-header -I .`, with a 10-second timeout
+per invocation. The common declarations were `type a = int`, `type b = int`,
+`external forceInt: int => int = "%identity"`, and
+`let id = (x: a) => x`. These five shapes were tried:
+
+- Two instantiations with expansion between them:
+  `let observed = (id, forceInt(id(1)), id)`.
+- Through a record field: `type box = {value: a => a}` and
+  `let record = {value: id}`, then
+  `(record.value, forceInt(record.value(1)), record.value)`.
+- Through a constructor argument: `type box = Box(a => a)`,
+  `let unwrap = x => switch x { | Box(f) => f }`, `let value = Box(id)`,
+  then `(unwrap(value), forceInt(unwrap(value)(1)), unwrap(value))`.
+- Across two units: compile the common declarations in `A.res`, then
+  `(A.id, forceInt(A.id(1)), A.id)` in the consumer, loading that build's
+  own `A.cmi` and `A.cmj`.
+- A later unification that could print a different name:
+  `(id, forceInt(id(1)), (id: b => b), id)`.
+
+Each was compiled both as an accepted program and with
+`let _: string = observed` appended. All five accepted programs produced
+identical JavaScript; all five forced clashes produced identical diagnostics
+(text and locations). The last clash printed
+`(a => a, int, b => b, a => a)` in both builds; the cross-unit clash printed
+`(A.a => A.a, int, A.a => A.a)`. This is a negative experiment, not a proof
+that the rule is unobservable: O11 remains a constraint pending an isolating
+program or an explicit decision to drop it.
 
 What a representation is therefore free to change: where a node is stored
 and how large it is; how a copy is made; how a descriptor is found; whether
@@ -1940,7 +1972,9 @@ Together these floors are about 900 a line of the design's 14,200.
 - The OCaml compiler was not run for this document. The program of 2.4
   idea 1 was compiled with the Rust compiler of trunk only; the fixtures
   of 2.1 carry expected files written by the OCaml compiler.
-- Whether O11 is observable: no program was found or written.
+- Whether O11 is observable: R0 tried the five program shapes in section 2.1
+  against a reference build with the copy-time nullary memo lookup disabled;
+  none isolated it. This does not prove that no program can.
 - That the success mode fails every `super_errors` fixture (4.2).
 - Whether storing templates per exported item loses anything: two items of
   one signature that share a generic node are stored as two nodes. No
