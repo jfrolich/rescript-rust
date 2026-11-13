@@ -807,3 +807,27 @@ fn an_inlined_function_that_holds_a_catch_is_lowered_after_a_catch_of_the_unit()
     let root = a.seq_raw(own, call);
     compare_oracle(a, root, Some(&resolver), true, &[0, 1, 2, 3, 4], None, true);
 }
+
+#[test]
+fn cross_module_inline_after_lowering_a_closure_with_assignment() {
+    use crate::cmi::persistent_env::CmjExportArity;
+    use crate::js_ir::ModulePathResolver;
+    use crate::lambda::{ApInfo, ApplyStatus, FieldDbgInfo, LamLoc, Lambda, lam_arity::Arity, lam_primitive::Primitive};
+    let resolver = ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+    let param = Ident::new("arg", 100, IdentFlags::NONE);
+    resolver.set_bir_test_export("Other", "run", CmjExportArity::Single(Arity::info(vec![1], false)),
+        Some(Lambda::function_(1, vec![param], Lambda::var(param), Default::default(), LamLoc::NONE)));
+    let mut a = LamArena::new();
+    let global = a.global_module(Ident::create_persistent("Other"));
+    let callee = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Module { name: crate::name::Name::new("run") }), &[global], LamLoc::NONE);
+    let arg = a.const_(C::JsNull);
+    let call = a.apply_raw(callee, &[arg], ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE });
+    let mutable = Ident::new("mutable", 10, IdentFlags::NONE);
+    let assignment = a.assign(mutable, arg);
+    let unit = Ident::new("unit", 11, IdentFlags::NONE);
+    let mut attr = crate::lambda::FunctionAttribute::default();
+    attr.one_unit_arg = true;
+    let closure = a.function_(1, &[unit], assignment, attr, LamLoc::NONE);
+    let root = a.seq_raw(closure, call);
+    compare_oracle(a, root, Some(&resolver), true, &[0,1,2,3,4], None, true);
+}

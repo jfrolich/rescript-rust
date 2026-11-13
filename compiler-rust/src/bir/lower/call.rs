@@ -101,6 +101,9 @@ impl State {
         let mut globals = std::mem::take(&mut self.inline_globals);
         let mut foreign = Vec::new();
         std::mem::swap(&mut self.source.pools, &mut self.arena.pools);
+        // J lowering can append function headers before another L fragment is
+        // imported. Its dense owner table must cover those header identities.
+        self.source.func_owners.resize(self.source.pools.funcs.len(), None);
         let result = (|| {
             let function = bridge::import_fragment(&mut self.source, &mut globals, &mut foreign, &lambda, root)?;
             let View::Fun { body, header } = self.source.view(function) else { unreachable!("imported external function") };

@@ -373,6 +373,7 @@ struct State {
     catch_table: Vec<(NodeId, crate::bir::CatchId)>,
     catches: Vec<Option<exit::Plan>>,
     tries: Vec<try_::Plan>,
+    try_form_reads: usize,
     catch_work: Vec<NodeId>,
     /// `HAS_EXIT` reads that decided a flattening or a form.
     catch_flag_reads: usize,
@@ -442,6 +443,7 @@ impl State {
             catch_table: Vec::new(),
             catches: Vec::new(),
             tries: Vec::new(),
+            try_form_reads: 0,
             catch_work: Vec::new(),
             catch_flag_reads: 0,
             catch_walk_steps: 0,
