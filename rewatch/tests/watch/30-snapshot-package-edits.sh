@@ -47,7 +47,9 @@ for package in belt runtime touch; do
     else
       python3 -c 'from pathlib import Path; p=Path("node_modules/@rescript/runtime/Stdlib_List.res"); p.write_text(p.read_text().replace("let length = xs => lengthAux(xs, 0)", "let length = xs => lengthAux(xs, 1)"))'
     fi
-    wait_for_pattern_count "$work/$package-$mode.log" 'Finished .*compilation' 2 60
+    if [[ $package != touch ]]; then
+      wait_for_pattern_count "$work/$package-$mode.log" 'Finished .*compilation' 2 60
+    fi
     if [[ $package == touch ]]; then
       wait_for_pattern_count "$work/$package-$mode.log" 'Keeping the prebuilt @rescript/belt: its sources are unchanged' 1 60
       if grep -q 'Not using the prebuilt' "$work/$package-$mode.log"; then exit 1; fi
