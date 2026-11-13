@@ -419,44 +419,38 @@ fn located_functions_match_mapping_sequences() {
     } else {
         source.function_(0, &[], body, FunctionAttribute::default(), loc)
     };
-    let input = bridge::import_lambda(&source, root).unwrap();
-    let lowered = super::lower(input, Some(&locations), false).unwrap();
-    let actual = bridge_j::export_js(&lowered.program).unwrap();
+    // The unit exports the value, so that it is printed. The gate compares
+    // both texts and their mapping sequences.
+    let root = source.prim_raw(
+        crate::lambda::lam_primitive::Primitive::Pmakeblock(
+            crate::lambda::TagInfo::ModuleExport(vec![Ident::new("value", 11, IdentFlags::NONE)]),
+            crate::lambda::lam_primitive::Mutable::Immutable,
+        ),
+        &[root],
+        crate::lambda::LamLoc::NONE,
+    );
     let mut compiler = LambdaCompiler::new();
     compiler.set_source_map_enabled(true);
     compiler.set_lam_locs(locations.clone());
-    let compiled = compiler.bir_lower_oracle(
-        &mut source,
-        root,
-        Cx::value().cont,
-        Ident::new("unused", 1, IdentFlags::NONE),
-    );
-    let stmt = compiler.j.stmt(StmtKind::Exp(compiled.expr));
-    let expected = JsDepsProgram {
-        program: JsProgram::new_in(vec![stmt], vec![], compiler.j),
-        modules: vec![],
-        side_effect: None,
-    };
+    let (deps, check) = compiler.compile_deps_program_with_lower_check::<true>(source, root, Default::default());
+    let check = check.unwrap();
+    assert!(matches!(check, crate::bir::shadow::LowerCheck::Supported(_)));
+    crate::bir::shadow::check_lower(check, "Mapping.res", false).unwrap();
     let locations = Arc::new(locations);
-    let print = |p| {
-        crate::js_ir::print_deps_program_with_source_map(
-            p,
-            None,
-            &[],
-            false,
-            false,
-            false,
-            std::path::Path::new("Mapping.js"),
-            std::path::Path::new("Mapping.res"),
-            SourceMapMode::Hidden,
-            false,
-            "",
-            locations.clone(),
-        )
-    };
-    let expected = print(&expected);
-    let actual = print(&actual);
-    assert_eq!(actual, expected);
+    let actual = crate::js_ir::print_deps_program_with_source_map(
+        &deps,
+        None,
+        &[],
+        false,
+        false,
+        false,
+        std::path::Path::new("Mapping.js"),
+        std::path::Path::new("Mapping.res"),
+        SourceMapMode::Hidden,
+        false,
+        "",
+        locations.clone(),
+    );
     let map: serde_json::Value = serde_json::from_str(actual.1.as_ref().unwrap()).unwrap();
     assert_ne!(map["mappings"], "");
     }
@@ -959,10 +953,13 @@ fn a_declaration_the_tail_call_pass_finds_dead_is_not_materialised() {
 }
 
 #[test]
-fn export_tuple_occurrences_are_not_the_tailcall_pass_input_counts() {
-    // T4b count experiment, reduced from Dom_storage.getItem: the output
-    // tuple carries one reference which export coercion consumes before P1/P2.
-    // No statement-list reader or flattening rule is involved in this drift.
+fn export_coercion_consumes_the_export_tuple_occurrence() {
+    // Reduced from Dom_storage.getItem. The output tuple carries one
+    // reference, which export coercion consumes before P1/P2. While the
+    // lowering left coercion to the legacy code, `built` kept that reference
+    // (1 against the tail-call pass's 0: the drift the T4b count experiment
+    // met). With coercion on rows (T4a) the lowering releases the reference
+    // itself, so `built` is the count the tail-call pass reads.
     use crate::lambda::{LamLoc, TagInfo};
     use crate::lambda::lam_primitive::{Mutable, Primitive};
     use crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_pass;
@@ -976,11 +973,13 @@ fn export_tuple_occurrences_are_not_the_tailcall_pass_input_counts() {
     let reference = a.var(f);
     let exports = a.prim_raw(Primitive::Pmakeblock(TagInfo::ModuleExport(vec![f]), Mutable::Immutable), &[reference], LamLoc::NONE);
     let root = a.let_(LetKind::Strict, f, function, exports);
-    let input = bridge::import_lambda(&a, root).unwrap();
+    // The lowering reads the variables the importer records for an export
+    // block, so the unit is imported the way the gate imports it.
+    let input = bridge::import_for_lowering(&a, root).0.unwrap();
     let lowered = lower(input, None, false).unwrap();
     let var = lowered.program.idents.iter().position(|&id| id == f).unwrap();
     let built = lowered.program.arena.js_scope.as_ref().unwrap().uses[var].built;
-    assert_eq!(built, 1);
+    assert_eq!(built, 0);
 
     let mut compiler = LambdaCompiler::new();
     let (_, check) = compiler.compile_deps_program_with_lower_check::<true>(a, root, Default::default());
