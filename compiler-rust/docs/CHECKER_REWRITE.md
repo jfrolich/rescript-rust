@@ -811,7 +811,7 @@ rewrite does with each slice of J and K:
 | W11 the world outlives a build in watch mode | not started | **kept**, unchanged in intent: segments are keyed by unit digest |
 | C4 the other walk families in place | not started | **must not be built**: the walk is replaced |
 | C5 snapshots without journal bookkeeping | not started | **must not be built**: 3.5 replaces it; the prototype of 4.2 measures it |
-| P6 `env_log.rs` (test-only, 4,466 lines) | built, not switched on | **deleted** by the slice that builds scopes (R3) |
+| P6 `env_log.rs` (test-only, 4,466 lines) | built, not switched on | **deleted** by the slice that builds scopes (R4) |
 
 What must keep being built in the meantime: nothing in the checker. Work
 that is not the checker (the backend, the printer, the build system) is
@@ -838,14 +838,20 @@ readers:
 - **The published segment** for genType's and the build system's view of a
   unit's signature.
 
-Both checkers implement the interface: the old one over the typed tree and
-`Env` (slice R1, which is a refactor of the readers), the new one over its
-tables. That is what lets the backend stay untouched while the checker
-underneath it changes, and what the oracle compares through.
+The readers are ported to this interface late (slices R9 and R10), not
+first. Until then the new checker's results are converted to what the
+readers take today, a typed tree and types in the old representation, by
+`tc::bridge::to_old`, lazily and per unit. That keeps the backend untouched
+while the checker under it changes, gives byte-identical JavaScript a
+single owner (the unchanged backend) during the whole beside period, and
+makes the conversion's cost visible in every profile until the readers are
+ported and the bridge deleted. Its price is bounded by what it rebuilds:
+the typed tree (1.28% of a build as a floor, THREE_TREES section 6) and
+the bindings of an `Env` (0.7% of a build, H.2.11: 450 M of 75.3 G).
 
-Editor tooling asks for a typed tree today. Until it is ported to rows
-(THREE_TREES T12) a tooling session keeps using the old checker on the file
-being inspected; the last slice ports it and deletes that use.
+Editor tooling asks for a typed tree. After slice R8 it checks with the
+new checker and takes the tree from the same bridge; slice R10 ports it to
+rows and deletes the bridge.
 
 ### 3.8 What is not designed here
 
@@ -873,7 +879,7 @@ files. They are measurement prototypes, not reviewed code.
 ### 4.1 Instantiation from templates
 
 [instantiation-prototype.patch](prototypes/instantiation-prototype.patch):
-429 lines added, of which `types/templates.rs` is 330.
+429 lines added, of which `types/templates.rs` is 349.
 
 **What it does.** `ctype::instance` of a generic root asks for the root's
 template. The second time a root is instantiated its generic part is
@@ -939,10 +945,11 @@ numbers separate.**
    inclusive cost of the capture); so 74,513 nodes save 22 M before
    capture, 295 a node, of the general copy's 523. What is left is not
    the copy: it is creating a node today. `alloc_type` (a store-build
-   test, an atomic increment for the identifier, the push), a list
-   allocated in a pool behind a `SmallVec`, and a memo cell pushed on a
-   `RefCell<Vec<RefCell<_>>>` for every constructor are 32.6 M, 60 M and
-   26.2 M inclusive on the test project, and a template pays all three.
+   test, an atomic increment for the identifier, the push) and the memo
+   cell pushed on a `RefCell<Vec<RefCell<_>>>` for every copied
+   constructor are 32.6 M and 26.2 M inclusive on the test project (2.5%
+   and 2.0% of the checker), and a list is allocated in a pool through a
+   `SmallVec`; a template pays all three.
 3. *Capture eats half of the gain.* At 4.4 to 5.8 instances per template
    and about 1,400 instructions a capture, a scheme has to be
    instantiated three times before its template has paid for itself.
@@ -966,7 +973,8 @@ numbers separate.**
   its first two copies use the forwarding array (3.3).
 - The estimate of item 4 is corrected in section 7: the kernel's figure
   (600 a line) is kept as the design's, and the figure the prototype
-  supports is stated beside it: 4,341 x 230 / 592 = 1,690 a line if only
+  supports is stated beside it: a templated node at 44% of a copied
+  node's cost (230 of 523 on the test project) is 1,900 a line if only
   the copy changed and every node were covered.
 
 No program was found for which the prototype's output differs; the
@@ -1053,3 +1061,647 @@ tested here. Slice R8 tests it.
   both projects.
 - Not measured: wall time, cycles, cache misses, memory, the profile-guided
   build, more than one worker.
+
+## 5. The route
+
+### 5.1 Beside the old checker, one switch, a unit at a time
+
+The new checker is built beside the old one in `compiler-rust/src/tc/`,
+behind one switch, `RESCRIPT_CHECKER`:
+
+- `old`: today's checker. The default until slice R7.
+- `new`: every unit is offered to the new checker first. It either checks
+  the unit or **declines** it, before it has published anything, with a
+  reason from a closed enum (`Declined::Polyvariant`, `Declined::Gadt`,
+  ...). A declined unit, and a unit the new checker finds an error in, is
+  checked by the old checker.
+- `both`: every unit is checked by both and compared before either result
+  is used: canonical signature (`--dump sig`), warnings with their
+  locations, and the unit reads. `scripts/compare_checker_builds.py`
+  compares the generated JavaScript of an `old` build and a `new` build of
+  the same project. This is the oracle of every slice.
+
+Why not family by family inside the old checker: a unit's type graph cannot
+be half 32-byte nodes behind cells and half 16-byte nodes in a `Vec`. The
+type representation is the thing being replaced, every function of the old
+checker reads it, so the smallest piece that can change hands is the
+checking of one unit. Fast paths in front of old code are what sections I
+and K already did, and what this task rules out.
+
+Why a unit at a time and not a build at a time: a slice has to show a
+measurement on the test project and on the application, and neither is
+covered whole until late. With per-unit declining, a slice that adds a
+construct family lowers the count of declined units and the instruction
+count of both projects in the same pull request, with identical output by
+construction (a declined unit takes the old road).
+
+What per-unit mixing costs: a unit checked by one checker must be readable
+by a dependent checked by the other. Two converters do that,
+`tc::bridge::to_old` (a segment as the old checker's shared graph; the rows
+as a typed tree for the backend) and `tc::bridge::from_old` (an old shared
+graph as a segment). Both are lazy, one `OnceLock` per unit, so a build in
+which no unit needs the other format pays nothing. Both are deleted:
+`from_old` in R7, `to_old` in R9 and R10.
+
+A coverage ratchet keeps the direction: `compiler-rust/tc_coverage.txt`
+lists, per corpus (the test project, the runtime library, the application
+by count only), the number of units declined for each reason. CI fails if
+a count rises. It is the same instrument as the backend's ratchet file.
+
+### 5.2 The end state
+
+Run from `compiler-rust/`. "0" means no match.
+
+**Exists.**
+
+| Fact | Check |
+|---|---|
+| The checker is `src/tc/` | `ls src/tc` shows `graph.rs`, `template.rs`, `unify.rs`, `expand.rs`, `level.rs`, `scope.rs`, `names.rs`, `decl.rs`, `walk/`, `pattern.rs`, `exhaust.rs`, `module.rs`, `include.rs`, `segment.rs`, `publish.rs`, `rows.rs`, `facts.rs`, `explain.rs`, `print.rs` |
+| A node is 16 bytes, a row 12, a value passed down the walk 16 | `rg -n 'size_of::<Node>\(\), 16' src/tc/graph.rs`, `rg -n 'size_of::<ExprRow>\(\), 12' src/tc/rows.rs`, `rg -n 'size_of::<Walk>\(\), 16' src/tc/walk/mod.rs` give 1 each |
+| No shared ownership, cell or lock in the checker's data | `rg -n 'Rc<\|Arc<\|RefCell<\|Cell<\|Mutex<\|RwLock<' src/tc --glob '!world.rs'` gives 0 |
+| No hash map keyed by a handle | `rg -n 'HashMap<(Ty\|u32\|NodeIdx\|Binder)' src/tc` gives 0 |
+| A segment is shared between threads | `rg -n 'assert_send_sync::<Segment>' src/tc/segment.rs` gives 1 |
+| Instantiation is one pass | `rg -n 'fn instance' -A30 src/tc/template.rs` shows no recursion and no map |
+| The success path takes no snapshot | `rg -n 'fn unify' -A12 src/tc/unify.rs` shows the mode test before any trail use |
+| One checker context per worker | `rg -n 'fn reset_for_unit' src/tc/context.rs` gives 1; its body destructures every field without `..` |
+
+**Gone.**
+
+| What | Check, expecting 0 or absence |
+|---|---|
+| The old checker's five files | `src/types/typecore.rs`, `src/types/ctype.rs`, `src/types/typemod.rs`, `src/types/env.rs`, `src/types/thread_store.rs` do not exist |
+| Their satellites | `src/types/{context,type_expr,env_lazy,env_log,env_log_tests,shared_store,module_view,world,btype,includemod,includecore,parmatch,type_marks,printtyp}.rs` do not exist |
+| The typed tree | `src/types/{typedtree,tast_arena,tast_iterator,sexp_typedtree}.rs` do not exist; `rg -n 'TypedArena' src` gives 0 |
+| The old handles and context | `rg -n 'TypeExprRef\|TypeContext\|TypeCheckContext' src` gives 0 |
+| The switch, declining, the bridge | `rg -n 'RESCRIPT_CHECKER\|Declined::\|tc::bridge' src ../scripts ../rewatch` gives 0; `tc_coverage.txt` does not exist |
+| The mechanisms J listed as gone | every "Gone" row of CHECKER_REDESIGN J.2 gives 0, because the files they are in are gone |
+
+### 5.3 The slices, in order
+
+Gates of every slice, not repeated: `cargo build` and `cargo test` for
+`compiler-rust` and `rewatch`; CI green with the four output parity suites
+and the instruction count; `scripts/test_worker_determinism.py`. From R5
+on: `scripts/compare_checker_builds.py` between an `old` and a `new` build
+with no difference on the test project and the application, and a `both`
+build of each with no mismatch.
+
+"Model" says whether a less capable model can build the slice from its
+prompt in section 6.
+
+| # | Builds | Deletes | Lines | Extra gate | Measurement it must show | Depends on | Model |
+|---|---|---|---:|---|---|---|---|
+| R0 | The switch (`old` only does anything), `both` mode's comparison, the ratchet file with every unit declined, the canonical signature numbering shared structure nodes (CHECKER_REDESIGN I.3.5), a fixture for O11, the step-count test helper | Nothing: it replaces nothing | 900 | the new canonical form differs between `dup` and `two` of `checker_identity_07b_sharing.res` | instruction count unchanged (±0.1%) | - | yes |
+| R1 | `tc/graph.rs`, `tc/level.rs`, `tc/template.rs`: nodes, pools, `repr`, links, the trail, levels, generalisation, templates with capture and instance, the general copy with a forwarding array. Not wired to the driver | Nothing yet | 2,500 | step counts at 10,000; a property test against the old `instance`, `generalize` and `update_level` through R2's converters is added by R3 | the kernel's operations within 25% of 2.2 when run from the crate's bench | R0 | yes |
+| R2 | `tc/segment.rs`, `tc/publish.rs`, `tc/bridge/{from_old,to_old}.rs` for signatures; the canonical signature printed from a segment | Nothing yet | 3,000 | for every unit of both corpora: `to_old(from_old(g))` and `g` print the same canonical signature, with shared-node numbers | publication of a segment from an old graph costs at most what `publish_signature` costs today (1.34% of the application) | R1 | yes |
+| R3 | `tc/unify.rs`, `tc/expand.rs`: unification with every case of `ctype.rs`, expansion and its memo, `moregeneral`, `equal`, subtyping | Nothing yet | 6,000 | differential property test: random graphs converted both ways, the same operations on both, canonical forms and failures equal; the `checker_identity_*` shapes as unit tests on the new graph | kernel operations with abbreviations added, reported | R1, R2 | no |
+| R4 | `tc/scope.rs`, `tc/names.rs`: binders, scopes, open layers over export tables, path resolution, usage bits, lookup-time warnings | `types/env_log.rs`, `types/env_log_tests.rs` (4,466 lines: the binding log P6 built and did not switch on) | 3,000 | step counts at 10,000 binders and 10,000 nested scopes; a differential test of lookups against `Env` on every identifier of both corpora in `both` mode | lookup by name at most 80 instructions, by binder at most 10, in the crate's bench | R2 | no |
+| R5a | `tc/decl.rs`, `tc/walk/typetexp.rs`: type declarations (records, variants, abbreviations, abstract, externals), annotations | Nothing yet | 4,000 | `both` mode on declaration-only units | - | R3, R4 | no |
+| R5b | `tc/walk/`: the core expression language on the success path, patterns, `tc/exhaust.rs`, `tc/rows.rs`; structures, aliases and opens in `tc/module.rs` | Nothing yet | 9,000 | step counts at 10,000 for sequences, applications, record fields, match cases | - | R5a | no |
+| R5c | The driver takes the new road for units that are not declined; `to_old` for rows (typed tree for the backend); `RESCRIPT_CHECKER=new` works | The ratchet entries of every unit now covered | 2,500 | the oracle, first time on real units | type checking of the covered units of the test project at most 60% of the old checker's instructions for the same units, the bridge included | R5b | no |
+| R6a..R6f | One family each, each with its `Declined` reasons: (a) labelled and optional arguments, JSX; (b) polymorphic variants, objects, rows; (c) GADTs, existentials, locally abstract types; (d) functors, module types, `include`, first-class and recursive modules; (e) exceptions, `async`, dicts, unboxed and untagged variants, coercions; (f) interface files and signature inclusion (`tc/include.rs`) | The `Declined` variants of the family and their ratchet rows | 2,000 to 5,000 each | the oracle; the family's `super_errors` fixtures still fail (through the old checker) | the declined count of the family goes to 0 on both corpora; instructions per line of type checking reported | R5c | first of each kind no, then yes |
+| R7 | `new` is the default. The old checker runs only for a unit with an error and for tooling | `Declined`, `tc_coverage.txt`, `tc/bridge/from_old.rs` | 600 | every project under `tests/` builds with zero declined units | **type checking at most 24,000 instructions per line on the application** (surroundings included, bridge included), and the CI instruction count of the test project down by at least 12% | all R6 | yes |
+| R8a..R8c | The explaining mode: `tc/explain.rs`, `tc/print.rs`. (a) type clashes and the type printer; (b) every other expression and pattern error; (c) declaration, module and inclusion errors. Tooling entry points check with the new checker and get their typed tree from `to_old` | (c) deletes `types/typecore.rs`, `types/typemod.rs`, `types/includemod.rs`, `types/includecore.rs`, `types/parmatch.rs`, `types/printtyp.rs`, and every function of `types/ctype.rs` the backend does not call | 3,000 each | `scripts/test_error_output_parity.sh`, the `super_errors` and `super_errors_multi` suites, with `RESCRIPT_CHECKER=old` no longer accepted after (c) | a failing unit costs at most 2.2 times a passing one | R7 | (a) no, (b) and (c) yes, one error at a time |
+| R9a..R9c | Readers on rows and `TypeFacts`: (a) `raw_lambda/typeopt.rs` and `convert.rs`; (b) `matching.rs` and the pattern pool; (c) genType and unit reads (THREE_TREES T9, T10, T11, T3) | (c) deletes the batch build's use of `to_old`, the rest of `types/ctype.rs`, `types/context.rs`, `types/type_expr.rs`, `types/env.rs`, `types/env_lazy.rs`, `types/thread_store.rs`, `types/shared_store.rs`, `types/module_view.rs`, `types/world.rs`, `types/btype.rs`, `types/type_marks.rs` | 3,000 each | JavaScript, stdlib and genType parity | **type checking at most 20,000 instructions per line on the application** | R8 | (a) and (b) no, (c) yes |
+| R10 | Editor analysis on rows (THREE_TREES T12) | `types/{typedtree,tast_arena,tast_iterator,sexp_typedtree}.rs`, `tc/bridge/`, the switch | 3,000 | analysis tests | - | R9 | yes, arm by arm |
+
+About 55,000 lines built, 110,000 deleted (`src/types` is 123,242 lines
+today, tests included).
+
+**What a slice deletes, plainly.** R0 to R5b delete almost nothing, because
+until R5c nothing of the old checker is replaced: they build a second
+checker that no build uses. The first deletion of old code that matters is
+R8c. That is a property of replacing a representation and not a choice:
+the alternative, deleting piece by piece, needs the two representations in
+one graph. What keeps the beside period honest is the ratchet (no slice
+may land without lowering a count from R5c on), the two hard measurement
+gates (R7, R9), and the rule that the bridge's converters are lazy and
+therefore visible in a profile whenever something still needs them.
+
+**The order is forced** except for two freedoms: R6a to R6f can be built in
+parallel by different workers once R5c has landed, and R9a to R9c can
+start after R7 on the old checker's side of `TypeFacts` if workers are
+free (they then land before R8 and R8c deletes less).
+
+**If a gate fails.** R7's gate is the test of the whole design. If the
+application is above 24,000, the profile of section 1.1 is run on the new
+checker and its top item is fixed before the default flips; the default
+does not flip on a promise.
+
+## 6. Worker prompts
+
+Each prompt is given verbatim, with the common part in front of it. `rg` is
+run from `compiler-rust/`. In a pattern, type `|` where a table of this
+document wrote `\|`.
+
+### 6.0 The common part
+
+```text
+You build one slice of the type checker rewrite. Read first, in this order:
+AGENTS.md; compiler-rust/docs/CHECKER_REWRITE.md sections 2.1, 3 and 5; the
+row of your slice in 5.3. The old checker (compiler-rust/src/types/) and the
+OCaml sources (compiler/ml/) are the reference for behaviour. The new
+checker lives in compiler-rust/src/tc/ and shares no type with the old one
+except through tc/bridge.
+
+The contract: the same programs accepted and rejected, the same warnings
+and errors in text and location, byte-identical JavaScript, no dependence
+on worker count. The list of what is observable is section 2.1; when your
+code decides whether two types are one node, which way a link points,
+whether a node is generic or which path a node carries, it does what OCaml
+does, and you cite the OCaml location in a comment.
+
+Engineering standard, checked by the reviewer:
+1. Every function you add on a compile path states in its doc comment what
+   one call costs. Wherever it has a loop or a recursion, a test builds an
+   input of 10,000 elements, counts steps with tc::steps (R0), and asserts
+   the bound (for example: at most 3 steps per element).
+2. No hash map keyed by a handle, a binder, a unit or a node: use a dense
+   table indexed by it. A hash map in new code needs one sentence in the
+   pull request saying why no index exists.
+3. No allocation per visited node: no Vec, String, Box, format!, Rc or Arc
+   clone inside a walk. Use the context's pools and handles.
+4. No lock, atomic write or thread-local access per node or per lookup.
+5. No second pass over a tree for a fact the first pass could record.
+6. A size_of test for every struct or enum stored per node or passed down
+   a walk; a value passed down a walk is at most 16 bytes.
+7. Instruction counts before and after, on tests/tests (CI) and on the
+   application where you can reach it. Say plainly when nothing is saved.
+8. One path: what your slice replaces is deleted in the same pull request.
+   No second switch, no fallback other than Declined, no dead code.
+
+Shortcuts that count as failure, in every slice:
+- weakening, deleting or re-recording a test or an expected file to make a
+  gate pass;
+- sharing two type nodes because they are equal, interning a type, or
+  skipping a level write for a type without variables (CHECKER_REDESIGN
+  I.1 to I.3 say why);
+- calling into compiler-rust/src/types/ from tc/ outside tc/bridge;
+- a `Declined` reason that is not in the closed enum, or declining after
+  anything was published or any warning was emitted;
+- a number in the pull request that you did not measure.
+
+Gates: cargo build and cargo test for compiler-rust and rewatch;
+scripts/test_worker_determinism.py; CI green (JavaScript, diagnostics,
+stdlib and genType parity; the instruction count). Paste real output.
+One pull request against ocaml-to-rust-rewrite, commits in the order given,
+each building and passing tests on its own.
+```
+
+### 6.1 R0: oracle, switch, ratchet
+
+```text
+Task R0: the instruments of the rewrite. No checker code.
+
+End state:
+- rg -n 'RESCRIPT_CHECKER' src/driver.rs gives the one read, into an enum
+  CheckerChoice { Old, New, Both } carried in CompilerOptions.
+- rg -n 'pub\(crate\) enum Declined' src/tc/mod.rs gives 1, with one
+  variant, NotBuilt; rg -n 'fn check_unit' src/tc/mod.rs gives 1, a
+  function that returns Err(Declined::NotBuilt).
+- compiler-rust/tc_coverage.txt exists: one line per corpus and reason,
+  "tests/tests NotBuilt <n>", written by scripts/tc_coverage.py, which
+  also checks it (exit 1 when a count rose).
+- rg -n 'fn write_shared' src/types/canonical_sig.rs gives 1: a structure
+  node reached twice in one item is printed with a number, as variables
+  are, so that `dup: int => (int, int)` with one shared node and with two
+  nodes print differently.
+- src/tc/steps.rs: a counter compiled only under cfg(test), `steps::tick()`
+  and `steps::scope(|| ..) -> u64`.
+- tests/build_tests/super_errors/fixtures/checker_identity_12_memo.res with
+  its expected file, or a paragraph added to CHECKER_REWRITE.md 2.1 row O11
+  saying which programs were tried and that none shows the rule.
+
+Commits, in order:
+1. CheckerChoice and its plumbing; Both behaves as Old.
+2. tc/mod.rs with Declined and check_unit; in New and Both the driver calls
+   it, gets NotBuilt and takes the old road. In Both it also compares the
+   two results; with one checker that is a no-op you unit-test with a fake.
+3. scripts/tc_coverage.py, the file, its CI wiring given as lines in the
+   pull request body (do not edit .github/workflows).
+4. Shared-node numbers in the canonical signature; expected dumps updated
+   by scripts/update_expect_dumps.py only.
+5. tc/steps.rs with its own test.
+6. The O11 fixture or the paragraph.
+
+Tests: a unit test that the canonical text of fixture 7b's `dup` and `two`
+differ; scripts/compare_checker_builds.py with base and candidate the same
+executable reports no difference under RESCRIPT_CHECKER=both.
+
+Failure: changing any behaviour of the old checker; a canonical form that
+depends on node indices.
+```
+
+### 6.2 R1: the graph
+
+```text
+Task R1: the type graph of the new checker, not wired to the driver.
+
+End state:
+- src/tc/graph.rs: Ty(u32), Node (16 bytes, layout of CHECKER_REWRITE 3.2),
+  Graph { nodes, lists, params, trail, level, mode }, repr with path
+  halving, link (Btype.link_type's naming rule for variables), write
+  (logs only while a speculation is open), speculation open/keep/restore.
+- src/tc/level.rs: begin_def, end_def, lower (OCaml update_level without
+  the scope test, which R3 adds), generalize, generalize_structure.
+- src/tc/template.rs: Template (16 bytes), capture(root) -> Template,
+  instance(template) -> Ty in one pass, copy(root) for a scheme without a
+  template using a forwarding array indexed by node (no map).
+- rg -n 'size_of::<Node>\(\), 16|size_of::<Template>\(\), 16' src/tc gives 2.
+- rg -n 'HashMap|RefCell|Rc<' src/tc/graph.rs src/tc/level.rs
+  src/tc/template.rs gives 0.
+
+Commits, in order: graph and repr; links and the trail; levels; the
+general copy; templates; the bench (benches/tc_kernel.rs, the operations
+of docs/prototypes/checker-kernel).
+
+Tests, each with a step count at 10,000:
+- repr of a chain of 10,000 links: at most 2 steps a link, and a second
+  repr is 1 step;
+- instance of a template of 10,000 nodes: exactly 10,000 node steps and
+  one per list slot;
+- copy of a scheme of 10,000 generic nodes, half of them reached twice:
+  one step per node, the shared ones copied once;
+- lower of a 10,000-node type whose root is already at the level: 1 step;
+- generalize of 10,000 nodes: one step a node, and 0 on a second call;
+- restore of a speculation with 10,000 writes: 10,000 steps, and a
+  speculation that is kept costs 0;
+- the shapes of fixtures 2, 3, 4 and 7b of CHECKER_REDESIGN I.2.3, built by
+  hand: which uses are one node.
+The bench must show each kernel operation within 25% of the table in
+CHECKER_REWRITE 2.2; put its output in the pull request.
+
+Failure: a copy session object, a map from node to copy, recursion in
+instance, a level stored anywhere but in the node, a flags summary of a
+subtree.
+```
+
+### 6.3 R2: segments and the two converters
+
+```text
+Task R2: what a unit publishes, and the converters between the old shared
+graph and it.
+
+End state:
+- src/tc/segment.rs: Segment (boxed slices: nodes, lists, params,
+  templates, type declarations, members, export items sorted by name,
+  child tables, digest), ExportItem (12 bytes), lookup(name) by binary
+  search, const assert_send_sync::<Segment>.
+- src/tc/publish.rs: publish(graph, items) -> Segment in one walk: every
+  generic node reachable from an item goes into that item's template, in
+  the order tc::template::capture gives; a node that is not generic is
+  stored once per segment and referenced absolutely; paths are absolute.
+- src/tc/bridge/from_old.rs: an old published unit (the SharedGraph the
+  world holds) as a Segment. src/tc/bridge/to_old.rs: a Segment as the old
+  graph. Both lazy, one OnceLock per unit in the world's unit slot.
+- src/tc/canonical.rs prints the canonical signature of a Segment; its
+  text equals types/canonical_sig.rs's for the same unit.
+
+Commits: Segment; publish; canonical; from_old; to_old; the world slot.
+
+Tests:
+- a property test over generated signatures: canonical(to_old(from_old(g)))
+  equals canonical(g), shared-node numbers included;
+- on tests/tests and the runtime library, a debug check run under
+  RESCRIPT_CHECKER=both that does the same for every published unit;
+- step counts at 10,000: publish of 10,000 items of one node each is at
+  most 4 steps an item; lookup in 10,000 items is at most 15 probes;
+  from_old of a 10,000-node graph is one step a node;
+- fixture 8 (super_errors_multi/checker_identity_08) by hand: two
+  positions that are one node in the exporter are one node in an instance
+  made from the segment.
+
+Measurement: instructions of from_old over the application's units,
+against publish_signature's (1.34% of the build).
+
+Failure: merging equal nodes of two items; a segment that holds a pointer,
+a lock or a cell; a converter that runs for a unit nobody asked for.
+```
+
+### 6.4 R3: unification and expansion
+
+```text
+Task R3: unification on the new graph. The reference is
+compiler-rust/src/types/ctype.rs function by function, and
+compiler/ml/ctype.ml where the two differ in form.
+
+End state:
+- src/tc/unify.rs: unify (inline test for one node, then unify_distinct),
+  every case of ctype.rs's unify_types and unify_after_expansion, rows,
+  objects, universal variables, polymorphic types, packages, pattern mode
+  and GADT equations; moregeneral, equal, matches; subtype.
+- src/tc/expand.rs: is-abbreviation as one bit of TypeDecl; the memo as
+  slot 0 of a constructor's list; expand_head and its modes; the simple
+  abbreviation memo (O11).
+- lower gains the scope test and the expanding retry of OCaml's
+  update_level.
+- In Mode::Success a top-level unify opens no speculation; in
+  Mode::Explain it does (compiler/ml/ctype.ml, the outer unify).
+- The pair set exists only on the paths that do not link:
+  rg -n 'pairs' src/tc/unify.rs shows it in the abbreviation, row and
+  object cases only.
+
+Commits: variables and the binding walk; arrows, tuples, constructors;
+expansion and the memo; rows and objects; universal variables and
+polymorphic types; pattern mode and equations; moregeneral, equal,
+matches; subtype.
+
+Tests:
+- differential property test: generate a graph and a declaration table in
+  the old representation, convert with from_old, run the same sequence of
+  instance, unify, generalize on both, compare canonical forms with
+  shared-node numbers and compare which operations failed. 10,000 cases in
+  CI, seeds printed on failure;
+- step counts at 10,000: unify of two 10,000-node equal types is at most
+  4 steps a pair; binding a variable to a 10,000-node type at the
+  variable's level is at most 2 steps a node, and 1 step in total when the
+  type's root is below the variable's level; a second unify of the same
+  pair is 0 steps;
+- fixtures 1, 6b, 7, 9, 10 and 11 of CHECKER_REDESIGN I.2.3 and the
+  program of CHECKER_REWRITE 2.4 idea 1 as unit tests that read the path
+  of the representative.
+
+Failure: a link written after the children; a link in the other
+direction "because the result is equal"; an occurrence check skipped at
+equal levels; a snapshot in Mode::Success.
+```
+
+### 6.5 R4: scopes and names
+
+```text
+Task R4: binders, scopes and lookups.
+
+End state:
+- src/tc/scope.rs: binder arrays (type, name, location, kind, used bit),
+  Scope (12 bytes), the per-namespace head table indexed by interned name,
+  the undo log, open layers that point at a Segment's export table or a
+  local module's member range.
+- src/tc/names.rs: lookup of a value, type, module, constructor, label by
+  name and by path; the warnings a lookup raises (deprecation, unused
+  open) and the usage bit; unit reads logged at the lookup.
+- src/types/env_log.rs and src/types/env_log_tests.rs are deleted, with
+  their `mod` line in types/env.rs.
+- rg -n 'HashMap|Rc<|RefCell' src/tc/scope.rs src/tc/names.rs gives 0.
+
+Commits: binders; scopes and the undo log; open layers; paths; warnings
+and usage; unit reads; delete env_log.
+
+Tests:
+- step counts at 10,000: 10,000 bindings in one scope then leaving it is
+  at most 3 steps a binding; a lookup under 10,000 nested scopes is 1
+  step; a lookup under 10 opened modules probes at most 10 layers and
+  stops at the first younger hit; marking 10,000 uses is 10,000 steps;
+- shadowing, open shadowing a local and a local shadowing an open, the
+  same name in two namespaces, a qualified path through two aliases;
+- under RESCRIPT_CHECKER=both, a debug check that every identifier the old
+  checker resolved in tests/tests resolves to the same item here (through
+  bridge::from_old for dependencies).
+
+Measurement: the crate bench, lookup by name at most 80 instructions and
+by binder at most 10.
+
+Failure: an environment value that is cloned; a lookup by name outside
+the walk's current scope; a warning raised before the walk reaches the
+use (CHECKER_REWRITE 2.4 idea 5).
+```
+
+### 6.6 R5a: declarations and annotations
+
+```text
+Task R5a: type declarations, externals and type annotations.
+
+End state:
+- src/tc/decl.rs: a recursive group is entered (binders for all), then
+  translated to TypeDecl rows (32 bytes) and member rows with their
+  templates, then checked as Typedecl does: well-foundedness, constraints,
+  variance, immediacy, unboxed, the runtime representation tables the
+  backend reads.
+- src/tc/walk/typetexp.rs: annotations to nodes, the type-variable scope
+  of an item, CoreTypeRow (8 bytes).
+- A unit that holds only these items and anything R5b will add is still
+  Declined; add Declined::Expression for that and one variant per
+  declaration feature you do not build here (GADT constructors, private
+  rows, extensible types).
+
+Commits: abstract and abbreviation; records; variants; recursion checks;
+variance; immediacy and representation; externals; annotations.
+
+Tests: step counts at 10,000 (a variant with 10,000 constructors, a record
+with 10,000 fields, a group of 10,000 declarations: linear, at most 6
+steps a member); a debug check under both mode that the Segment published
+for a declaration-only unit has the canonical text of the old one.
+
+Failure: cloning a declaration to read it; looking a declaration up by
+path where an index exists.
+```
+
+### 6.7 R5b: the walk
+
+```text
+Task R5b: expressions and patterns on the success path.
+
+End state:
+- src/tc/walk/: one function per construct family, each taking
+  Walk (16 bytes: Expected, scope, flags) and returning Ty. Infer returns
+  the node found; Check(t) unifies where OCaml's type_expect does, in the
+  same order. Rows are written at the node's index (tc/rows.rs: ExprRow
+  and PatRow 12 bytes).
+- Constructs: constants, identifiers, application with OCaml's argument
+  order and its generalisation rule, functions, let and let rec with
+  begin_def/end_def/generalize and generalize_structure exactly where
+  typecore.ml has them, sequences, if, tuples, arrays, records and field
+  access with type-directed label resolution, constructors, switch,
+  type-annotated expressions.
+- src/tc/pattern.rs and src/tc/exhaust.rs: patterns into a pool of
+  handles; Parmatch ported onto it, with its warnings.
+- src/tc/module.rs: structures, aliases, opens.
+- Anything else is a Declined variant, decided by a pre-scan of the unit's
+  syntax tree before the walk starts.
+
+Commits: one per construct family in the order above, then patterns,
+exhaustiveness, modules, the pre-scan.
+
+Tests: step counts at 10,000 (a sequence of 10,000 expressions, an
+application with 10,000 arguments, a record with 10,000 fields, a switch
+with 10,000 cases over a variant: linear; say the constant); for every
+construct a unit test that reads the rows; the checker_identity fixtures
+that use only these constructs, as tests that compare the printed type
+with the fixture's expected file.
+
+Failure: a Vec, String or Arc per expression; a fresh variable made only
+to be unified with a result; begin_def/end_def moved "because it is
+equivalent"; resolving a use before the walk reaches it.
+```
+
+### 6.8 R5c: the driver takes the new road
+
+```text
+Task R5c: units the new checker covers are compiled through it.
+
+End state:
+- RESCRIPT_CHECKER=new: the driver calls tc::check_unit; on Ok it
+  publishes the Segment, converts rows to the typed tree and types the
+  backend reads with tc::bridge::to_old, and continues as today; on
+  Err(Declined) or a type error it runs the old checker on the unit,
+  reading dependencies through to_old.
+- RESCRIPT_CHECKER=both compares, per unit both checkers accept: the
+  canonical signature, the warnings with locations, the unit reads.
+- tc_coverage.txt has real counts.
+
+Commits: to_old for rows; the driver; both mode; the coverage file.
+
+Tests: scripts/compare_checker_builds.py between old and new on tests/tests
+and the application: no difference; a both build of each: no mismatch;
+scripts/test_worker_determinism.py under new.
+
+Measurement, in the pull request: for the units of tests/tests that are
+covered, instructions of type checking under old and under new (callgrind
+toggled on the two entry functions), bridge included. The gate is at most
+60%. Also the instruction count of the whole build under new against old.
+
+Failure: declining after a warning was recorded or a segment published;
+running both checkers on a unit in new mode when the first one succeeded.
+```
+
+### 6.9 R6a to R6f: one family each
+
+```text
+Task R6<x>: the construct family <family> in the new checker.
+
+Families and their Declined reasons:
+(a) labelled and optional arguments with defaults, partial application,
+    JSX and props records;
+(b) polymorphic variants, objects, rows, the coercions between them;
+(c) GADT constructors, existentials, locally abstract types, local
+    constraints and their scope;
+(d) functors, module types, include, first-class modules, recursive
+    modules, module type of: with tc/subst.rs for the substitution OCaml's
+    Subst does;
+(e) exceptions and extensible types, async and await, dicts and dict
+    patterns, unboxed and untagged variants, :> on records and variants,
+    the built-in rewrites that are typed where consumed;
+(f) interface files, and the inferred signature against the interface
+    (tc/include.rs, a port of includemod.rs and includecore.rs).
+
+End state: the Declined variants of the family are deleted from the enum;
+their rows are gone from tc_coverage.txt for every corpus; no new variant
+is added.
+
+Commits: one per construct, each lowering a count.
+
+Tests: for each construct, a unit test on rows and a step-count test at
+10,000 where the construct has a list (10,000 row fields, 10,000 items in
+a signature for inclusion, 10,000 functor applications in sequence:
+linear); the oracle; the family's super_errors fixtures still produce
+their expected files (through the old checker).
+
+Measurement: declined units before and after per corpus; instructions per
+line of type checking of the application under new.
+
+Failure: a construct accepted that the old checker rejects (run the
+family's error fixtures under RESCRIPT_CHECKER=both: the new checker must
+fail each of them, at any point).
+```
+
+### 6.10 R7: the default flips
+
+```text
+Task R7: RESCRIPT_CHECKER defaults to new.
+
+End state:
+- rg -n 'Declined' src gives 0; tc_coverage.txt and scripts/tc_coverage.py
+  are deleted; src/tc/bridge/from_old.rs is deleted (no unit is published
+  by the old checker any more: it runs only for a unit that has an error,
+  and such a unit publishes nothing).
+- The old checker is reached from two places:
+  rg -n 'type_structure\(' src/driver.rs shows the failing-unit rerun and
+  the tooling entry points only.
+
+Commits: the default; delete Declined; delete from_old.
+
+Gate, measured by you and pasted: on the application, instructions of type
+checking with its surroundings (the functions of CHECKER_REWRITE 1.4) per
+source line, at most 24,000; the CI instruction count of tests/tests down
+by at least 12% against the base. If either fails, do not flip: profile
+with docs/prototypes/checker-attribution, report the top three items, stop.
+
+Failure: flipping with a unit still declined in any project under tests/.
+```
+
+### 6.11 R8a to R8c: the explaining mode
+
+```text
+Task R8<x>: diagnostics from the new checker.
+
+(a) Mode::Explain: the speculation around a top-level unify, traces,
+    clash sites passed down the walk as a Copy value of at most 16 bytes
+    in total with Walk, tc/print.rs (a port of printtyp.rs: names of
+    variables, weak variables, the loop marks), type clash messages
+    through driver/type_clash.rs.
+(b) Every other error of expressions and patterns, one TypeCoreError
+    variant per commit, following tests/ERROR_VARIANTS.md.
+(c) Declaration, module and inclusion errors. Tooling entry points
+    (typecheck_structure_for_tooling, typecheck_signature_for_tooling)
+    check with the new checker and take their typed tree from
+    tc::bridge::to_old.
+
+End state after (c): src/types/typecore.rs, typemod.rs, includemod.rs,
+includecore.rs, parmatch.rs and printtyp.rs do not exist; types/ctype.rs
+holds only what rg shows the backend and genType call; RESCRIPT_CHECKER
+accepts new only.
+
+Tests: scripts/test_error_output_parity.sh; the super_errors and
+super_errors_multi suites; for (a) a step-count test that a unit of 10,000
+items that fails in its last item is checked exactly twice; a test that
+every fixture fails in Mode::Success too.
+
+Measurement: a failing unit against the same unit made to pass: at most
+2.2 times the instructions.
+
+Failure: an error text assembled on the success path; a fixture's
+expected file changed.
+```
+
+### 6.12 R9a to R9c: readers on rows
+
+```text
+Task R9<x>: a reader of the checker's results reads rows and TypeFacts.
+
+(a) raw_lambda/typeopt.rs and raw_lambda/convert.rs (THREE_TREES T9);
+(b) raw_lambda/matching.rs, switch.rs and the pattern pool (T10);
+(c) genType and the unit reads (T11, T3).
+
+End state: (a) rg -n 'typedtree::' src/raw_lambda/convert.rs
+src/raw_lambda/typeopt.rs gives 0. (b) the same for matching.rs and
+switch.rs. (c) rg -n 'to_old' src/driver.rs shows the tooling entry points
+only, and the files listed in CHECKER_REWRITE 5.3 row R9 do not exist.
+
+src/tc/facts.rs: the TypeFacts trait, about twenty methods, each with its
+cost in the doc comment, each O(1) or one expansion.
+
+Tests: JavaScript, stdlib and genType parity; a step-count test that
+converting a function of 10,000 expressions reads each row once.
+
+Gate for (c), measured and pasted: type checking with its surroundings at
+most 20,000 instructions per source line on the application.
+
+Failure: a TypeFacts method that walks a type; a reader that looks a name
+up again.
+```
+
+### 6.13 R10: tooling, and the last deletions
+
+```text
+Task R10: editor analysis reads rows; the bridge and the switch go.
+
+End state: src/types/typedtree.rs, tast_arena.rs, tast_iterator.rs and
+sexp_typedtree.rs do not exist; src/tc/bridge does not exist;
+rg -n 'RESCRIPT_CHECKER|TypedArena|TypeExprRef|TypeContext' src ../scripts
+../rewatch gives 0; -dtypedtree prints rows.
+
+Commits: one per analysis file (process_cmt.rs, process_extra.rs,
+hover.rs, ...), arm by arm; then the dump; then the deletions.
+
+Tests: make test-analysis; the watch-mode tests of rewatch.
+
+Failure: a typed tree rebuilt under another name.
+```
