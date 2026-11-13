@@ -422,11 +422,8 @@ pub fn walk_structure_item<V: AstIter + ?Sized>(
                 v.value_binding(arena, vb);
             }
         }
-        StructureItemDesc::Pstr_derived(idx) => {
-            for vb in arena.vb_list(arena.plans().item(*idx).general) {
-                v.value_binding(arena, vb);
-            }
-        }
+        // A plan holds no syntax to visit.
+        StructureItemDesc::Pstr_derived(_) => {}
         StructureItemDesc::Pstr_primitive(vd) => v.value_description(arena, vd),
         StructureItemDesc::Pstr_type(inner) => {
             for td in &inner.1 {

@@ -1,0 +1,1 @@
+- Build the runtime interfaces for release packages with `rescript-ocaml`, so that the published `@rescript/runtime` contains `Pervasives.cmi` and the other compiled interfaces.

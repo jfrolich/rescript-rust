@@ -866,6 +866,21 @@ pub fn incremental_build_without_lock(
     let retry_with_locations = build_state
         .diagnostic_retry
         .swap(false, std::sync::atomic::Ordering::Relaxed);
+    // `RESCRIPT_DERIVED_PATH=check`: every unit that differs, in a fixed
+    // order, whether or not the compile phase went through.
+    let mut differences = std::mem::take(&mut *build_state.derived_differences.lock().unwrap());
+    differences.sort();
+    let compile_result = compile_result.map(|(mut errors, warnings, compiled)| {
+        for difference in &differences {
+            errors.push_str(difference);
+        }
+        (errors, warnings, compiled)
+    });
+    if compile_result.is_err() {
+        for difference in &differences {
+            eprint!("{difference}");
+        }
+    }
     let (compile_errors, compile_warnings, num_compiled_modules) = compile_result.map_err(|e| {
         let _error_span = info_span!("build.compile_error").entered();
         print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);

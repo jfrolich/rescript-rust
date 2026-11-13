@@ -957,3 +957,111 @@ fn a_declaration_the_tail_call_pass_finds_dead_is_not_materialised() {
     let early = legacy_text(build, &[1, 5, 6]);
     assert!(early.contains("  let x_0 = ext(1);\n  let x_1 = ext(2);\n  return 3;\n"), "{early}");
 }
+
+#[test]
+fn export_tuple_occurrences_are_not_the_tailcall_pass_input_counts() {
+    // T4b count experiment, reduced from Dom_storage.getItem: the output
+    // tuple carries one reference which export coercion consumes before P1/P2.
+    // No statement-list reader or flattening rule is involved in this drift.
+    use crate::lambda::{LamLoc, TagInfo};
+    use crate::lambda::lam_primitive::{Mutable, Primitive};
+    use crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_pass;
+    use crate::lambda::js_pass_external_shadow::apply_external_shadow_pass;
+    use crate::lambda::js_pass_tailcall_inline::UseCounts;
+    use crate::bir::shadow::LowerCheck;
+    let mut a = LamArena::new();
+    let f = Ident::new("f", 10, IdentFlags::NONE);
+    let one = a.const_(C::Int { i: 1, comment: None });
+    let function = a.function_(0, &[], one, Default::default(), LamLoc::NONE);
+    let reference = a.var(f);
+    let exports = a.prim_raw(Primitive::Pmakeblock(TagInfo::ModuleExport(vec![f]), Mutable::Immutable), &[reference], LamLoc::NONE);
+    let root = a.let_(LetKind::Strict, f, function, exports);
+    let input = bridge::import_lambda(&a, root).unwrap();
+    let lowered = lower(input, None, false).unwrap();
+    let var = lowered.program.idents.iter().position(|&id| id == f).unwrap();
+    let built = lowered.program.arena.js_scope.as_ref().unwrap().uses[var].built;
+    assert_eq!(built, 1);
+
+    let mut compiler = LambdaCompiler::new();
+    let (_, check) = compiler.compile_deps_program_with_lower_check::<true>(a, root, Default::default());
+    let Some(LowerCheck::Supported(pair)) = check else { panic!("supported export tuple") };
+    let legacy = apply_external_shadow_pass(apply_js_flatten_pass(pair.before[0].clone()));
+    let mut counts = UseCounts::default();
+    crate::js_ir::walk::walk_block(&mut counts, &legacy.program.arena, &legacy.program.block);
+    assert_eq!(counts.counts.get(&f).copied().unwrap_or(0), 0);
+    let print = |p: &JsDepsProgram| crate::js_ir::print_deps_program_with_directives_and_options(p, None, &[], false, false, false);
+    let expected = "\n\n\nfunction f() {\n  return 1;\n}\n\nexport {\n  f,\n}\n/* No side effect */\n";
+    assert_eq!(print(&pair.after[0]), expected);
+    assert_eq!(print(&pair.after[1]), expected);
+}
+
+#[test]
+fn flattening_a_copied_return_branch_changes_the_simplify_if_head_reader() {
+    // Reduced from Primitive_object.res, lower mismatch at line 75. A one-case
+    // string switch lowers via State::if_statement: take_list, then J-S3.
+    // R5 changes its last then-statement from Return(Cond) to If. The
+    // simplify_if_head exit test stops recognizing it as a return and keeps
+    // the else branch, whereas the legacy order moves that branch after it.
+    use crate::js_ir::arena::ExprKind;
+    use crate::js_ir::build::stmt;
+    use crate::lambda::{LamLoc, lam_primitive::Primitive};
+    use crate::lambda::js_pass_flatten_and_mark_dead::{apply_js_flatten_pass as flatten, apply_js_flatten_and_mark_dead_pass as dead};
+    use crate::lambda::js_pass_external_shadow::apply_external_shadow_pass as shadow;
+    use crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass as inline;
+    use crate::lambda::js_pass_record_rest::apply_js_record_rest_pass as rest;
+    use crate::lambda::js_shake::apply_js_shake_pass as shake;
+    let mut a = LamArena::new();
+    let x = Ident::new("x", 10, IdentFlags::NONE);
+    let y = Ident::new("y", 11, IdentFlags::NONE);
+    let exported = Ident::new("run", 900, IdentFlags::NONE);
+    let test = a.var(y);
+    let one = a.const_(C::Int { i: 1, comment: None });
+    let two = a.const_(C::Int { i: 2, comment: None });
+    let yes = a.if_(test, one, two);
+    let effect = a.prim_raw(Primitive::PinitMod, &[], LamLoc::NONE);
+    let three = a.const_(C::Int { i: 3, comment: None });
+    let no = a.seq_raw(effect, three);
+    let test = a.var(x);
+    let switch = a.string_switch(test, &[("a", yes)], Some(no));
+    let root = a.function_(2, &[x, y], switch, Default::default(), LamLoc::NONE);
+    let mut compiler = LambdaCompiler::new();
+    let compiled = compiler.bir_lower_oracle(&mut a, root, Cont::Declare(LetKind::Strict, VarId(0)), exported);
+    let raw = JsDepsProgram { program: JsProgram::new_in(compiled.prelude, vec![exported], compiler.j), modules: vec![], side_effect: None };
+    let mut early = raw.clone();
+    let j = &early.program.arena;
+    let StmtKind::Variable(declaration) = j.sk(early.program.block[0]) else { panic!("run declaration") };
+    let mut declaration = j.var(declaration).clone();
+    let ExprKind::Fun(function) = j.ek(declaration.value.unwrap()) else { panic!("run function") };
+    let mut function = j.fun(function);
+    let mut body = j.stmts(function.body).to_vec();
+    while let [statement] = body.as_slice() {
+        let StmtKind::Block(inner) = j.sk(*statement) else { break; };
+        body = j.stmts(inner).to_vec();
+    }
+    let StmtKind::If(test, yes, no) = j.sk(body[0]) else { panic!("switch guard") };
+    assert!(j.stmts(no).is_empty());
+    let &[returned] = j.stmts(yes) else { panic!("one returned conditional") };
+    let StmtKind::Return(value) = j.sk(returned) else { panic!("R5 input") };
+    assert!(matches!(j.ek(value), ExprKind::Cond(..)));
+    assert_eq!(body.len(), 3);
+
+    // Recreate exactly the copied-branch boundary, not a new production path.
+    // The legacy Flatten is the oracle for R5; all other input is unchanged.
+    early.program.block = j.stmts(yes).to_vec();
+    early = flatten(early);
+    let yes = std::mem::take(&mut early.program.block);
+    assert!(matches!(early.program.arena.sk(yes[0]), StmtKind::If(..)));
+    let j = &mut early.program.arena;
+    let statement = stmt::if_(test, &yes, &body[1..], j);
+    function.body = j.stmt_list(&[statement]);
+    let function = j.fun_id(function);
+    declaration.value = Some(j.expr(ExprKind::Fun(function)));
+    let declaration = j.var_id(declaration);
+    early.program.block = vec![j.stmt(StmtKind::Variable(declaration))];
+    let finish = |p| shake(dead(rest(inline(shadow(p))), false));
+    let legacy = finish(flatten(raw));
+    let moved = finish(early);
+    let print = |p: &JsDepsProgram| crate::js_ir::print_deps_program_with_directives_and_options(p, None, &[], false, false, false);
+    assert_eq!(print(&legacy), "\n\n\nfunction run(x, y) {\n  if (x === \"a\") {\n    if (y) {\n      return 1;\n    } else {\n      return 2;\n    }\n  }\n  Primitive_module.init();\n  return 3;\n}\n\nexport {\n  run,\n}\n/* No side effect */\n");
+    assert_eq!(print(&moved), "\n\n\nfunction run(x, y) {\n  if (x === \"a\") {\n    if (y) {\n      return 1;\n    } else {\n      return 2;\n    }\n  } else {\n    Primitive_module.init();\n    return 3;\n  }\n}\n\nexport {\n  run,\n}\n/* No side effect */\n");
+}
