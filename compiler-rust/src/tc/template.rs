@@ -259,6 +259,10 @@ impl Graph {
             generation: self.copy_generation,
             target: relative,
         };
+        assert!(
+            matches!(node.tag(), VAR | CONSTR | TUPLE | ARROW),
+            "unsupported template descriptor"
+        );
         self.template_nodes.push(node);
         self.work.push(ty);
         Ty(relative)
@@ -437,6 +441,9 @@ impl Graph {
                 }
             }));
         }
+        // Tag order is VAR, LINK (never captured), CONSTR, TUPLE, ARROW.
+        // Capture validates descriptors before publishing template nodes.
+        let b_addend = [0, 0, list_base, list_base, param_base];
         let source =
             &template_nodes[template.nodes as usize..(template.nodes + template.node_len) as usize];
         nodes.extend(source.iter().map(|&original| {
@@ -446,14 +453,9 @@ impl Graph {
                 level: *level,
                 ..original
             };
-            match node.tag() {
-                VAR => {}
-                ARROW => {
-                    node.a = at(Ty(node.a)).0;
-                    node.b += param_base;
-                }
-                CONSTR | TUPLE => node.b += list_base,
-                _ => panic!("invalid template descriptor"),
+            node.b += b_addend[node.tag() as usize];
+            if node.tag() == ARROW {
+                node.a = at(Ty(node.a)).0;
             }
             node
         }));
@@ -470,6 +472,19 @@ mod template_tests {
         assert_eq!(std::mem::size_of::<Template>(), 16);
         assert_eq!(std::mem::size_of::<TemplatePools>(), 20);
     }
+    #[test]
+    #[should_panic(expected = "unsupported template descriptor")]
+    fn capture_rejects_unknown_tags_before_template_write() {
+        let mut g = Graph::default();
+        let root = g.push(Node {
+            head: 15,
+            level: GENERIC,
+            a: 0,
+            b: 0,
+        });
+        g.capture(root);
+    }
+
     #[test]
     fn ten_thousand_instances_do_not_grow_forwarding() {
         let mut g = Graph::default();
