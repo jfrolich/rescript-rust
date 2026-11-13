@@ -1046,6 +1046,129 @@ its sites through P1's reshaping (finding 1), without moving that reshaping
 ahead of the lowering's copied-list readers. R1–R8, their copy-time call,
 the skipped pass and the experimental count comparison have been deleted.
 
+#### T4c design: RESULT (the inlining cannot leave before P1 and P2)
+
+With step A in the lowering, the new side's order is A, P1, P2, P4, P5, P6
+against P1, P2, P3, P4, P5, P6. Three things must hold for the two printed
+texts to stay equal. (a) holds. (b) holds only with two additions that are
+not facts of a statement. (c) fails, twice, each with a test that asserts
+both complete texts. So P3 stays on the new side, as P1 does.
+
+**(a) The sites.** P3 inlines at the last statement of a statement list when
+it is `return f(args)` (`TailcallInlineState::block_items`,
+`try_inline_single_return_statement`). Read through P1, as a function of the
+returned expression `e` of a `return` the lowering wrote:
+
+```text
+sites(e) = sites(a) + sites(b)   e = c ? a : b    (P1: Return(Cond) becomes If(c, [return a], [return b]))
+         = sites(b)              e = (a, b)       (P1: Return(Seq) becomes a; return b)
+         = { e }                 e = f(args), f a variable
+         = {}                    otherwise
+```
+
+P1 applies its `return` rules to the `return`s it creates, so the function is
+recursive in the same places. A `return` that P1 creates inside the `if` of a
+returned conditional is the only statement of its list, so a site below a
+conditional is a site wherever the `return` stands. A site reached without
+passing a conditional is one only if the `return` is the last statement of
+its list after P1 spliced nested blocks; the lowering knows that where the
+run is copied (`StatementStack::take_list`: the last slot). The predicate `c`
+and the heads `a` hold no site: P1 leaves `c` in the predicate of the `if`
+and makes each head an expression statement. No other P1 rule creates a
+`return`. `try_inline_single_return_statement` also inlines a function
+literal called in place (`return (function (p) {...})(x)`), with the arity
+rule and without a status; `sites` has the same case with `e` a call of a
+function literal.
+
+**(b) The count.** P3's `UseCounts` counts `Var` nodes by identifier in the
+program after P1 and P2.
+
+- P2 replaces a reference to a JavaScript global by `globalThis.name`. A
+  global is never declared, so no count of a declared variable changes.
+- P1 moves nodes in every rule but one: an expression statement that is a
+  conditional loses a branch that has no side effect, and the whole
+  statement when both branches and the predicate have none (`Flatten::
+  statement`, `Exp(Cond)`). Every variable read in such a branch has one
+  occurrence less in C0 than in `built`. The lowering leaves such
+  statements (`jm14_push_effect_expression` drops a strictly pure value, not
+  a pure branch). Which variables lose an occurrence is a property of the
+  branch's contents, not of the statement: recording it where the statement
+  is built means visiting the branch there, which is P1's rule applied at
+  that point. It is the rule T4b could not move.
+- Identity. P3 counts by identifier. The lowering gives a copied function
+  literal (`copy_j` in `bir/j/logic.rs`: a repeated pure function) binders of
+  its own that print as the originals (`vars.j_origin`); the legacy arena
+  shares the one function. A variable declared inside a function that is
+  copied has C0 equal to the sum of `built` over its copies, and the copy is
+  made after the runs inside the function closed. A status read from `built`
+  at the close is wrong for it: `built` is one per copy, C0 is two, P3 does
+  not inline.
+
+So `built` at the close is C0 for a variable that is read in no dropped
+branch and declared in no function that is copied later. The second
+condition is not known at the close. Commit 2 of T4c measures both: the
+lowering computes the status of each declaration of a run from `built` where
+the run is copied, records the site, and check mode compares them with what
+P3 computes on the same program after P1 and P2 (the same identifiers, so
+the comparison is by declaration; the caution about generated identifiers of
+the T4b experiment concerns comparisons between the two lowerings).
+
+**(c) P1 and P2 after the splice.** Two counterexamples
+(`bir/lower/oracle_tests.rs`).
+
+1. *P2 reads the bindings around a reference.*
+   `inlining_before_the_external_shadow_pass_hides_the_binding_that_shadows_
+   a_global`: `run = a => { let g = location => ext(location, location')
+   ; return g(a) }`, where `location'` is the JavaScript global. P2 qualifies
+   a global when a binding of an enclosing list, a parameter, a loop
+   variable or a catch variable prints with its name. In legacy order the
+   parameter `location` is around the reference when P2 runs:
+   `return ext(a, globalThis.location)`. With the splice first, the parameter
+   was renamed to `a` and the function is gone: `return ext(a, location)`.
+   The reverse happens too: the declarations of the callee's body land in the
+   caller's list and shadow globals read anywhere in that list. A grave (a
+   dead declaration kept without value) keeps a removed declaration visible
+   to P2; nothing keeps a parameter visible, and nothing hides a spliced
+   declaration from the rest of the caller's list.
+2. *P1 maps the predicate of an `if` it did not create.*
+   `flattening_after_a_site_in_a_returned_conditional_was_spliced_maps_its_
+   predicate`: `run = c => { let f = p => ext(p, p); return ext(z => z ? 1 :
+   2) ? f(c) : 3 }`. The callee's statements can only stand in a branch of an
+   `if`, so step A has to write the `if` that P1's `Return(Cond)` rule would
+   write. That rule leaves the predicate unmapped: in legacy order the
+   callback prints `z => z ? 1 : 2`. P1 run afterwards meets an `if`
+   statement and maps its predicate (`map_statement_children`): the callback
+   prints as `if (z) { return 1; } else { return 2; }`. No expression P1
+   passes over can stand for the callee's statements, so the `if` cannot be
+   left for P1 to write.
+
+The remaining parts of (c) hold as read: P1 flattens a spliced body as it
+flattens the function body in place (`block_items` splices the block the
+site becomes; a block of one statement is unwrapped), and the substitution
+of a parameter by a variable or a constant does not change which branches
+P1's purity tests drop (a variable and a substitutable constant are both
+pure).
+
+**What has to move first.** P3's decisions can leave the new side only when
+neither P1 nor P2 runs after the lowering:
+
+- with P1's `return` and expression-statement rules (T6), which removes
+  counterexample 2 and the dropped-branch term of (b): the lowering then
+  writes the `if` itself, once, and releases the dropped branch through the
+  path that maintains `built`;
+- with the names decided in the lowering (T5), which removes
+  counterexample 1: P2 is a naming decision (which printed names are bound
+  around a reference), and after a splice the binding structure P2 would
+  read no longer exists;
+- with a count by origin, or with copies made before the runs inside the
+  copied function close.
+
+Until then step A's *decisions* are computed and compared (commit 2 of T4c),
+and the splice is not performed. T4d and T4e read the tree P3 wrote (finding
+5 and 6), so they stay behind P3 as well: the next legacy step that can
+leave the new side is the shake (T4f needs the dead marks of P5, so it waits
+too) or, in legacy order from the other end, P1 at T6.
+
 #### Re-cut: one legacy step leaves the new side per slice
 
 The commit order of the T4 prompt (block facts, dead declarations, record
@@ -1059,8 +1182,8 @@ texts stay equal.
 | --- | --- | --- | --- |
 | T4a (done) | Export extraction and coercion on top-level rows (`bir/lower/export.rs`, S3.9b), with the position facts of finding 2 as sites ("T4a as built") | `extract_toplevel_exports`, `coerce_lowered_output` | - |
 | T4b (done, RESULT B) | Counterexample: R5 changes the `simplify_if_head` reader of a copied branch; read sites through P1 instead | Nothing; P1 stays until T6 | - |
-| T4c | Step A, late marks, late zero, graves, the counter | `apply_js_tailcall_inline_pass` | T4a, T4b |
-| T4d | Step B | `apply_js_record_rest_pass` | T4c |
+| T4c (done, counterexamples) | The statuses and the site of step A, computed and compared in check mode; no splice ("T4c design") | Nothing; P3 stays until P1 (T6) and P2 (T5) have left | T4a, T4b |
+| T4d | Step B | `apply_js_record_rest_pass` | P3 gone (T5, T6) |
 | T4e | Steps C and D | `apply_js_flatten_and_mark_dead_pass` | T4d |
 | T4f | The shake as a filter over the rows | `apply_js_shake_pass` | T4a, T4e |
 
@@ -1370,6 +1493,7 @@ Risks:
 | Section 1.3 | hoisting and substitution happen while lowering, removal when the statements are copied | the tail-call pass drops a dead block binding before it is materialised, and record rest reads the field reads substitution would replace; both tested or read in 11.4 (findings 5 and 6), so they happen at the close |
 | Section 1.1 | the site is a final `return f(args)` of a statement-stack run | the pass finds sites on the tree the flatten pass wrote: inside a returned conditional the lowering writes no such statement (11.4, finding 1, tested) |
 | Section 1.3, 1.5 | a declaration with no remaining use is removed at scope close | inlining from an outer scope can take the last use later (11.4, finding 3, tested) |
+| 11.4, "The design" and the re-cut table | step A runs in the lowering, before P1 and P2, and the new side then drops P3 | P2 reads the bindings around a reference and P1 maps the predicate of an `if` it did not create: the text differs in both cases (11.4, "T4c design" (c), tested), and a copied function doubles C0 of its variables after their runs closed ((b), read) |
 | Row T4 and the T4 prompt | export coercion on rows is the sixth step, after the scope-close decisions | every top-level status reads the export set and counts taken after coercion (11.4, finding 2); it is the first step |
 | 11.4, finding 2 and "The design" | per reference, the statement it is in and whether its position is safe are recorded where the reference is lowered | a reference is built before its parent and before its statement has a slot (reserved slots and held runs are filled later), so only the site (node, next) is recorded there; the row and the position are read through the parent links at the end of the top level ("T4a as built") |
 | BACKEND_LOWERING 8.1 step 4 and 8.2 | export extraction and coercion are in the shared tail; the unit's last value is the export block, carried for `extract_toplevel_exports` | the lowering extracts, coerces and resolves the exports itself; the shared tail is the six passes; S3.9b is done as T4a, first of the T4 slices, not last |
