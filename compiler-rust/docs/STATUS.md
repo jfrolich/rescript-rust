@@ -420,3 +420,173 @@ T7 (section 3 above).
 | Rows marked "Direct (implemented)" in the inventory | `l` integers (two rows), the single record `let`, the boolean match, `async` functions, `await` | `wrap_with_unsafe_async` 0 matches; `transform_await` has one caller, the awaited-module rewrite | done (T7) | #206 |
 | Every other row of the inventory | "Destinations are proposals, not claims that these moves have been implemented" | the mapper still handles them: externals, `@inline`, the pipe, `let?`, tuple bindings, `@this`, `%raw`, `%ffi`, regexp, `%todo`, `%%private`, `@deriving(accessors)`, JSX | not started; THREE_TREES section 5 assigns each a destination (expansion, direct or declaration table) but only the T2 and T7 slices exist for them |  - |
 | The three validation walks | They stay (`check::Checker`, `NestedExternals`, `UnusedAttributeSweep`) | all three present | kept, as designed | - |
+
+## 7. Where the work departed from the documents
+
+Every entry is a merged change that did something other than the document's
+row, with the check that shows it. The documents' own "as built" sections
+were the starting list; each was verified against the code. "By design"
+marks a departure the document allows or records; the others are open.
+
+### 7.1 Checker
+
+| # | The document | What merged | Verified by | Pull request |
+| --- | --- | --- | --- | --- |
+| 1 | W4: `ViewTable::get_or_build`, one `OnceLock` per path (J.2) | No table of paths: a unit's view cell is a field of the unit, `PersStruct::ps_view` | `rg -n 'fn get_or_build' src/types/world.rs` gives 0; `rg -n 'ps_view' src/cmi/persistent_env.rs` shows the `OnceLock<Arc<ViewCell>>` field. Recorded in "W4 as built" | #196 |
+| 2 | W4: keys are a unit or a chain of structure-typed children | Units only. Children came in W5 (`ViewKey::Child`) | `enum ViewKey` has `Unit`, `Child`, `Alias`; "W4 as built" | #196, #208 |
+| 3 | W3 and W4: `ViewScratch` is one context per worker thread | One fresh context per view build | `rg -n 'fn fresh' src/types/world.rs` gives `ViewScratch::fresh`; "W4 as built" | #196 |
+| 4 | W4: an item that needs no substitution is taken from the unit's graph without a copy | Not built: every value of a view is copied | the counter line is the literal `world_view_nodes copied={} shared=0` in `perf_counters.rs`. "W5 as built" names this as what the one-worker cost waits for | #196 |
+| 5 | W4 deletes the store build for its keys | A bridge was added to the mechanism W6 deletes: a seventh effect kind | `rg -n 'AdoptView' src` gives 4 | #196 |
+| 6 | W5 deletes `shared_components`, the three registration tables, four `StoreEffect` kinds and `RESCRIPT_NO_SHARED_COMPONENTS`; "after this slice no store build starts" | Nothing was deleted. Views exist for three kinds of key; store builds still start for a structure child of an alias view, an alias whose target is not a unit, the scans and opened layers of `ViewTables`, store-resident tables and functor results | `rg -n 'shared_components\|publish_shared_components' src` gives 10; the registration row of J.2 gives 16; `rg -n 'struct ViewTables' src/types/env_lazy.rs` gives 1; `RESCRIPT_NO_SHARED_COMPONENTS` is still read in `typecore.rs`. Recorded in "W5 as built" | #208 |
+| 7 | J.4: a slice that costs instructions carries a trailer naming where it is repaid | W5 costs +0.49% on `tests/tests` and +0.36% on the application with one worker, and saves 1.86% on the application with 8 workers. The one-worker cost is owed by W6 and by entry 4 | the table of "W5 as built" (not re-measured here) | #208 |
+| 8 | W3 deletes the worker store's unit map | A unit the pool has no room for is still internalised into the worker store by each compilation that loads it, until W7 | #188's body, item 4; `thread_store.rs` exists. The branch itself was not traced here | #188 |
+| 9 | C1: `FIRST_LEN` "try 8,192 and 16,384 and take the smallest that keeps the instruction count within 0.2% of 65,536" | 65,536, because neither smaller size met the criterion (they cost 4.3% and 2.5% more on the application). The peak-memory gate of the task was not met: +2.74% at the maximum of two 8-worker runs, +1.55% at the mean | `const FIRST_LEN: usize = 1 << 16` in `context.rs`; #187's body, "Gate concern" | #187 |
+| 10 | C1 and C2 (by design): the old addressing stays for nodes above the first array and while a store build is active | `direct` beside `node_far`; `set_direct` sets `fast_limit` to 0 during store builds. K.6 says both go with W6 and W7 | `rg -n 'fn set_direct\|fn node_far' src/types/context.rs` gives 2 | #187, #199 |
+| 11 | P2: one row of C.9 per pull request until every construct handles `Infer` | Five cases converted; the variable of `type_application` after `end_def` stays because it can lower the function type and report an escape | #132's body; `rg -n 'Expected::Infer' src/types/typecore.rs` gives 6 | #132 |
+| 12 | P6 (by design, H.2.11): the log replaces the tables | 4,466 lines of log and tests stay in the tree, compiled only under `cfg(test)`; the production `Env` is unchanged | `#[cfg(test)] #[path = "env_log.rs"] mod env_log;` in `env.rs` | #146, #168 |
+| 13 | P1: a flags byte and fast paths for ground types | Withdrawn after it was built and measured (+3.4% for the flags byte; the fast paths change output) | section I; `rg -n 'HAS_VAR' src` matches comments only | #124, #133 |
+
+### 7.2 Backend
+
+| # | The document | What merged | Verified by | Pull request |
+| --- | --- | --- | --- | --- |
+| 1 | BACKEND_REDESIGN G.1: `New` is "the new path; if it reports `Unsupported(reason)` for a module, the legacy path compiles that module" | `New` keeps the legacy lowering; only `Check` runs the new lowering, and its output is discarded | `BackendMode::checks_lowering` in `bir/shadow.rs` matches `Check` only. BACKEND_LOWERING 8.1 states it | #170, #182 |
+| 2 | S1.3 and S1.4: the suites switch to reformat-and-compare, then the default printer is oxc | The oxc printer is a second printer, opt-in, with a whole-file fallback to the first; the suites run both ways. It was measured slower than the legacy printer (+1.51% of the build on `tests/tests`) | `PrinterMode` default `Legacy`; `PRINTER_INSTRUCTIONS.md` | #127 to #174, #175 |
+| 3 | S3.1: emit reads J-level `Bir` | Built on a branch, measured at +10.23% of the build, not merged. What merged is its bridge (`bir/bridge_j.rs`, 35 references) which T6 deletes | `PRINTER_INSTRUCTIONS.md`, "Historical experiment"; `rg bridge_j src` gives 35 | #167, #175 |
+| 4 | S3.2: rounds J1 to J4 as passes in `bir/j/` | Not built. THREE_TREES changed the target to decisions of the lowering (T1, T4); the legacy passes run on both sides of the gate meanwhile | `ls src/bir/j` | #189 (the decision) |
+| 5 | T1 (original prompt): dead declarations, block-field substitution and record rest decided in the lowering; the new side skips legacy passes 4 and 5 | Reduced to use counts and the deletion of the tail-position analysis. A test shows that substitution and dead removal do not commute with the legacy tail-call pass, so items 3 to 6 moved to T4 | `rg -n 'block_substitution_and_dead_removal_do_not_commute_with_tailcall_inlining' src/bir/lower/oracle_tests.rs` gives 1; "T1/T4 boundary finding" | #198 |
+| 6 | S3.7: loops, labels, `Assign`, `Try`, `LetRec` with value members in one slice | `Assign`, `Try` and `TryFinally` only | reasons `"loop"` (3 sites) and `"let rec"` (1) remain; no `loops.rs` or `label.rs` | #216 |
+| 7 | BACKEND_LOWERING 7.1: `lambda_contains_statement_value_form` needs no fact | It needs one: `HAS_STATEMENT`, recorded where `HAS_EXIT` is | `rg -n 'HAS_STATEMENT' src/bir` gives 13; #210's body, finding 3 | #210 |
+| 8 | A stub left beside its replacement | `bir/bridge.rs` still has `import_js` returning `Unsupported("JS arena import not implemented")`; the real one is `bir/bridge_j.rs::import_js` | `rg -n 'fn import_js' src/bir` gives both | #129, #167 |
+| 9 | Every stage "deletes the code it replaces" (0.2 item 7) | No backend stage has reached its deletion: S1.5, S3.10, S4.9 and S5.6 are not started, so 47,094 lines of new code sit beside 88,768 lines of legacy backend | the `wc -l` counts of 2.3 | - |
+
+### 7.3 Derived code
+
+All from #215, whose body lists them under "Where this differs from the
+design note"; each verified.
+
+| # | The document | What merged | Verified by |
+| --- | --- | --- | --- |
+| 1 | A planned item "is no longer expanded to syntax" | The general form is still generated in the front end and stored beside the plan, because the checker holds the parse arena by shared reference. A plan saves checking and conversion, not generation or the front-end rewrite | `pub fn general_form(arena: &ParseArena, idx: DerivedIdx)` in `binary_ast/derive.rs` takes a shared reference |
+| 2 | The Q5 table of general reasons | One more reason: `Nested` (a declaration not at the top level of its unit); 23% of the application's derived bindings by #215's count | `GeneralReason::Nested` in `binary_ast/derive.rs` |
+| 3 | New file `raw_lambda/derived.rs` | `raw_lambda/convert/derived.rs` | `ls src/raw_lambda` |
+| 4 | `RESCRIPT_DERIVED_PATH` matches only `driver.rs` | Also `driver/derived_check.rs` and two doc comments | the `rg` of section 4 |
+| 5 | `check` compares the stored interface | It compares the canonical signature; stored bytes differ in which nodes two values share | #215's body (not re-run here) |
+| 6 | Commit 1 of the prompt updates `tests/ERROR_VARIANTS.md` | Not done: the file does not exist on trunk (AGENTS.md still names it) | `ls tests/ERROR_VARIANTS.md` fails |
+
+### 7.4 Runtime snapshot
+
+| # | The document | What merged | Verified by | Pull request |
+| --- | --- | --- | --- | --- |
+| 1 | S3: "on a from-source runtime compile, stop before code generation (D6)" | Not made: the lowering computes purity, constants, arities and inlinable bodies that dependents read; only rendering is skipped, as before | the document's "D6 inspection at SN2" | #202 |
+| 2 | S5: "drop that package's snapshot entries and compile it from source" | A mismatch revokes the package for the session and requests the existing full rebuild, which recompiles all project dependents | `rg -n 'revoke\|revoked' rewatch/src` gives 13; F.5 says "rather than adding a second invalidation planner" | #220 |
+| 3 | B.7: the fallback message is verbose-only | It is at info level, which the CLI shows by default | the document's S1 implementation notes (not re-run here) | #195 |
+| 4 | B.4: one filename table to rebase | Three: original and imported tables of exported Lambda locations and an imported index; signatures have two more | the document's S1 implementation notes (not re-run here) | #195 |
+
+### 7.5 Three trees and the front end
+
+| # | The document | What merged | Verified by | Pull request |
+| --- | --- | --- | --- | --- |
+| 1 | T2: the instruction count falls by at least 1% | -0.97% on `tests/tests`, -0.69% on the application | #193's body; THREE_TREES section 13 | #193 |
+| 2 | T2 prompt, step 6: the unused-attribute sweep gets a predicate computed from the tree as written | No predicate: the sweep walks the expansions | `walk_expr(self, arena, arena.expanded(idx))` in `binary_ast/ast_iter.rs`; section 13 | #193 |
+| 3 | T2: the mapper's rebuild goes | For expressions. Patterns, core types, module expressions and structure items are still rebuilt by their mappers, and an expression whose such child changed gets a copy as its expansion | FRONTEND_REWRITES, "Expansions" | #193 |
+| 4 | T7: `rg 'fn transform_await' binary_ast/ppx.rs` is empty | One hit: the awaited-module rewrite still uses it | the `rg` of section 3 | #206 |
+| 5 | T7: direct rows need matching arms in the core IR builder | None was needed: the checker builds the same typed nodes as before | THREE_TREES section 13 (not re-verified beyond the diff being confined to the front end and checker) | #206 |
+| 6 | T3 can start at once | Open as a draft since 2026-11-12; trunk still walks the typed tree for unit reads | `gh pr view 192` : `"isDraft":true,"state":"OPEN"` | #192 |
+
+## 8. What is left, in dependency order
+
+Taken from the documents' dependency columns, corrected by sections 1 to 7.
+A slice is listed once, under the first thing it waits for.
+
+**Checker (CHECKER_REDESIGN J.4 and K.6).**
+
+1. **W5, the rest**: views for a structure child of an alias view, an alias
+   whose target is not a unit, a child that is a module type name; then the
+   row's deletions. Waits for nothing.
+2. **W4's sharing without a copy**: owed since W4; it is what repays the
+   one-worker cost of whole views. Waits for nothing.
+3. **W6** (delete store builds, pieces, replay, guards, poisoning): waits
+   for 1. K.6 says `fast_limit` becomes a constant and `set_direct` goes in
+   the same slice.
+4. **W7** (delete the worker-store tier and `thread_store.rs`): waits for
+   W6.
+5. **W9** (one checker context per worker): waits for W7. **W10** waits for
+   W9. **W11** (watch mode) waits for W7.
+6. **W8** (publication is one export walk): waits for #154 and W3, both
+   merged. It can start now.
+7. **C4** (walk families) waits for C3, merged; **C5** (snapshots) waits
+   for C1 and W2, merged. Both start with a probe, by K.6.
+8. **P2, the remaining rows of C.9**: waits for nothing.
+
+**Backend (BACKEND_LOWERING 8.3, BACKEND_REDESIGN H.1, THREE_TREES 11).**
+
+1. **S3.7, the rest** (loops, labels, `LetRec` with value members): waits
+   for nothing; S3.4 and S3.6 are merged.
+2. **T4** (scope-close decisions, top-level rows, export coercion; it
+   absorbs S3.2's rounds and S3.9b): waits for T1, merged.
+3. **T5** (naming events): waits for T1, merged.
+4. **T6** (the builder over oxc nodes): waits for T4, T5 and S3.9 (merged,
+   but 1 above has to finish for full coverage).
+5. **S3.10** (default `New` for level J; delete the legacy lowering, the JS
+   passes and the JS IR): waits for T6 and for G.4's conditions.
+6. **S4.5 to S4.8** (rounds 3 to 7 of C.3): wait for S4.1, merged. **S4.9**
+   (delete the Lambda passes) waits for S4.8 and S3.10.
+7. **S6** (summaries) waits for S4.9.
+
+**Trees (THREE_TREES 11).**
+
+1. **T3** (unit reads without a walk): open as #192.
+2. **T8** (result tables beside the typed tree): waits for nothing.
+3. **T9** (the core IR builder reads the syntax tree and tables) waits for
+   T8 and S4.9. **S5.6** follows it.
+4. **T10, T11, T12** in sequence after T9. The document allows stopping
+   after T9.
+5. The inventory rows of FRONTEND_REWRITES that are neither expansions nor
+   direct yet have no slice. THREE_TREES names their destinations only.
+
+**Derived code.** Slice 2 (records), then 3 (variants), then 4 (remove the
+switch), in sequence. Slice 2's first commit is the document's one decision
+point: whether `compile_matching` can be called without typed expression
+nodes.
+
+**Snapshot.** S6 waits for the product decision of G.7. S7 waits for the
+checker's W8 to W10.
+
+## 9. Open questions
+
+Places where the audit suggests a decision in a document may no longer hold.
+No document was changed for these.
+
+1. **CHECKER_REDESIGN J.4, W5.** The slice was to be one pull request that
+   deletes what it replaces. As merged it adds a third way to build a
+   component view (world view, store build, private build) and deletes
+   none. The remaining keys ("W5 as built": 103 views on the application)
+   decide whether W6 can ever start. Is finishing W5 the next checker task,
+   ahead of W8 and C4?
+2. **CHECKER_REDESIGN J.6 against "W5 as built".** Whole views cost
+   instructions with one worker on both projects. If sharing without a copy
+   (W4) does not repay it, is a whole view still the right unit, or should
+   a view describe names on first use as B.6 had it?
+3. **BACKEND_REDESIGN G.4.** "`Check` mode has been clean on trunk for two
+   weeks" gates every deletion. With four deletions in sequence that is two
+   months of calendar time in which both backends are built and tested. Is
+   the rule still wanted as written?
+4. **BACKEND_REDESIGN S1.** The oxc printer over the JS IR is slower than
+   the legacy printer and is a product path only until T6. Should it stay
+   selectable (`RESCRIPT_JS_PRINTER=oxc`, with its CI jobs) for that time,
+   or be kept as a test oracle only?
+5. **THREE_TREES T2.** The saving came in under the row's 1%. Patterns,
+   core types and module expressions are still rebuilt. Is extending
+   expansions to them worth a slice, or does T9 make it moot?
+6. **DERIVED_CODECS slice 1.** The general form is still generated for
+   every planned item, so the generation and rewrite rows of the savings
+   table (0.2% to 0.4% and 0.3% to 0.4% of the application build) are not
+   reachable by the
+   design as built. Should the savings table be re-derived before slice 2?
+7. **CHECKER_REDESIGN H.2.11.** The environment log (4,466 lines with its
+   tests) is kept test-only after the switch was dropped. Is it still
+   wanted in the tree?
+8. **AGENTS.md** names `tests/ERROR_VARIANTS.md`, which does not exist on
+   trunk, and says builds write `.cmt` files, which THREE_TREES section 13
+   found they do not. Outside this audit's files.
