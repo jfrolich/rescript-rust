@@ -3956,7 +3956,8 @@ impl LambdaCompiler {
         // to the loop jump there, so it always has a block.
         let no_self_calls = !function_has_self_tailcall(a, &tail_loop.tail_targets, then_)
             && !function_has_self_tailcall(a, &tail_loop.tail_targets, else_);
-        let (then_block, else_block) = if no_self_calls
+        let label_start = self.loop_label_counter;
+        let (mut then_block, mut else_block) = if no_self_calls
             && !Self::lambda_contains_statement_value_form(a, then_)
             && !Self::lambda_contains_statement_value_form(a, else_)
         {
@@ -3993,6 +3994,14 @@ impl LambdaCompiler {
             )
         };
 
+        // compiler/core/lam_compile.ml:1514-1518 first probes with the tail
+        // return context, even when a self call prevents folding. Preserve the
+        // label allocations of that discarded pass. O(branches) only when the
+        // first pass allocated a label; the ordinary self-tail-call path is O(1).
+        if !no_self_calls && self.loop_label_counter != label_start {
+            then_block = self.compile_tail_loop_return_block(a, then_, tail_loop);
+            else_block = self.compile_tail_loop_return_block(a, else_, tail_loop);
+        }
         let mut block = cond_compiled.prelude;
 
         // Mirror OCaml's Lifthenelse compile (lam_compile.ml:1428-1436), which
@@ -5476,6 +5485,12 @@ impl LambdaCompiler {
             return block;
         }
 
+        // compiler/core/lam_compile.ml:794-799 lowers the default first.
+        let default_block = default.map(|fallback| {
+            let block = self.compile_assign_to_target_block(a, result, fallback);
+            self.with_block_source_loc(a, fallback, block)
+        });
+
         let grouped = self.grouped_switch_cases(a, &cases, default, |_, _| true);
         let mut clauses = Vec::with_capacity(grouped.len());
         for (tag, body, is_last) in grouped {
@@ -5500,11 +5515,6 @@ impl LambdaCompiler {
                 clause,
             });
         }
-
-        let default_block = default.map(|fallback| {
-            let block = self.compile_assign_to_target_block(a, result, fallback);
-            self.with_block_source_loc(a, fallback, block)
-        });
 
         block.push(JS::string_switch(
             scrut_compiled.expr,
@@ -5650,12 +5660,13 @@ impl LambdaCompiler {
             return block;
         }
 
-        let grouped = self.grouped_switch_cases(a, &cases, default, |_, _| true);
-        let clauses = self.grouped_return_string_clauses(a, grouped, SwitchCaseTag::String);
-
+        // compiler/core/lam_compile.ml:794-799 lowers the default first.
         let default_block = default
             .map(|fallback| self.compile_return_block(a, fallback))
             .filter(|body| !body.is_empty());
+
+        let grouped = self.grouped_switch_cases(a, &cases, default, |_, _| true);
+        let clauses = self.grouped_return_string_clauses(a, grouped, SwitchCaseTag::String);
 
         block.push(JS::string_switch(
             scrut_compiled.expr,
@@ -5793,6 +5804,14 @@ impl LambdaCompiler {
             return block;
         }
 
+        // compiler/core/lam_compile.ml:794-799 lowers the default first.
+        let default_block = default
+            .map(|fallback| {
+                let block = self.compile_effect_block(a, fallback);
+                self.with_block_source_loc(a, fallback, block)
+            })
+            .filter(|body| !body.is_empty());
+
         let grouped = self.grouped_switch_cases(a, &cases, default, |_, _| true);
         let mut clauses = Vec::with_capacity(grouped.len());
         for (tag, body, is_last) in grouped {
@@ -5816,13 +5835,6 @@ impl LambdaCompiler {
                 clause,
             });
         }
-
-        let default_block = default
-            .map(|fallback| {
-                let block = self.compile_effect_block(a, fallback);
-                self.with_block_source_loc(a, fallback, block)
-            })
-            .filter(|body| !body.is_empty());
 
         let has_effectful_case = clauses
             .iter()

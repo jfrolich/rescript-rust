@@ -178,6 +178,7 @@ impl Bir {
             if id.index() < self.tail_candidates.len() {
                 self.tail_candidates[id.index()] = Default::default();
                 self.self_tail[id.index()] = false;
+                self.loop_facts[id.index()] = Default::default();
             }
             self.parents[id.index()] = None;
             self.weights[id.index()] = 0;
@@ -280,7 +281,7 @@ impl Bir {
             | View::For { var, .. }
             | View::ForOf { var, .. }
             | View::ForAwaitOf { var, .. }
-            | View::SForRange { var, .. }
+            | View::SForRange { var, parts: [_, _, _], .. }
             | View::SForOf { var, .. }
             | View::SForAwaitOf { var, .. } => smallvec![var],
             View::SRest { var, info, .. } => {
@@ -643,47 +644,74 @@ impl Bir {
         };
         (j_pure.unwrap_or(effects.0), effects.1)
     }
-    /// L control facts, including R5's TRIVIAL_UNIT, in one immediate-child
-    /// fold. O(arity); construction visits every child to concatenate tail
-    /// candidates in the same fold. Validation can stop when both control bits
-    /// are set and unit is impossible. Constant for Fun, Exit, Var, Const and J.
-    /// Child flags include independently known PURE for unit-spine prefixes.
+    /// O(arity): compute L control facts in one immediate-child fold, including
+    /// loop labels and tail candidates supplied by the construction callback.
     /// Fun is a control boundary (compiler/core/lam_exit_code.ml:28).
-    pub(super) fn control_facts<const ALL_CHILDREN: bool>(
+    pub(super) fn control_facts(
         &self,
         node: Node,
-        mut child_facts: impl FnMut(NodeId) -> NodeFlags,
-    ) -> NodeFlags {
+        mut child_facts: impl FnMut(NodeId) -> (NodeFlags, super::tail_facts::LoopFacts),
+    ) -> (NodeFlags, super::tail_facts::LoopFacts) {
+        use super::tail_facts::LoopFacts as L;
+        let empty = L::default();
         let own = match node.op() {
-            Op::Exit => return NodeFlags(NodeFlags::HAS_EXIT | NodeFlags::HAS_STATEMENT),
-            Op::Fun | Op::Var => return NodeFlags::default(),
+            Op::Exit => return (NodeFlags(NodeFlags::HAS_EXIT | NodeFlags::HAS_STATEMENT), empty),
+            Op::Fun | Op::Var => return (NodeFlags::default(), empty),
+            Op::Break | Op::Continue => return (NodeFlags(NodeFlags::HAS_STATEMENT), L(L::JUMP)),
             Op::Switch | Op::StrSwitch | Op::Catch | Op::Try | Op::TryFinally | Op::While
-            | Op::For | Op::ForOf | Op::ForAwaitOf | Op::Assign | Op::Break | Op::Continue => true,
+            | Op::For | Op::ForOf | Op::ForAwaitOf | Op::Assign => true,
             op if op as u8 <= Op::Continue as u8 => false,
-            _ => return NodeFlags::default(),
+            _ => return (NodeFlags::default(), empty),
         };
         let view = node.view(&self.lists);
         let tail = match view {
-            View::Const { value } => return NodeFlags(if matches!(self.constant(value), Constant::Undefined(true)) {
+            View::Const { value } => return (NodeFlags(if matches!(self.constant(value), Constant::Undefined(true)) {
                 NodeFlags::TRIVIAL_UNIT
-            } else { 0 }),
+            } else { 0 }), empty),
             View::Seq { second, .. } => Some(second),
             View::Let { value: Some(_), body, .. } => Some(body),
+            _ => None,
+        };
+        let loop_body = match view {
+            View::While { body, .. }
+            | View::ForOf { body, .. } | View::ForAwaitOf { body, .. } => Some(body),
+            View::For { parts, .. } => parts.get(2).copied(),
+            _ => None,
+        };
+        #[cfg(test)]
+        if loop_body.is_some() { self.loop_fact_folds.set(self.loop_fact_folds.get() + 1); }
+        let scrutinee = match view {
+            View::Switch { scrutinee, .. } | View::StrSwitch { scrutinee, .. } => Some(scrutinee),
             _ => None,
         };
         let mut unit = tail.is_some();
         let both = NodeFlags::HAS_EXIT | NodeFlags::HAS_STATEMENT;
         let mut facts = NodeFlags(if own { NodeFlags::HAS_STATEMENT } else { 0 });
+        let mut loops = empty;
         for child in view.children() {
-            let flags = child_facts(child);
+            let (flags, jumps) = child_facts(child);
             facts.0 |= flags.0 & both;
             unit &= flags.contains(if tail == Some(child) { NodeFlags::TRIVIAL_UNIT } else { NodeFlags::PURE });
-            if !ALL_CHILDREN && facts.0 == both && !unit {
-                break;
+            if let Some(body) = loop_body {
+                if body == child {
+                    if jumps.0 & L::SWITCH_JUMP != 0 { loops.0 |= L::NEEDS_LABEL; }
+                    if jumps.0 & L::JUMP != 0 { loops.0 |= L::BODY_JUMP; }
+                } else {
+                    // Bounds run outside the new frame. A while condition
+                    // with statements runs inside its generated JS loop,
+                    // so its outward jump crosses that loop (lam_compile.ml:1322).
+                    loops.0 |= jumps.0 & (L::JUMP | L::SWITCH_JUMP);
+                    if node.op() == Op::While && jumps.0 & L::JUMP != 0 { loops.0 |= L::SWITCH_JUMP; }
+                }
+            } else {
+                loops.0 |= jumps.0 & (L::JUMP | L::SWITCH_JUMP);
+                if scrutinee.is_some_and(|s| s != child) && jumps.0 & L::JUMP != 0 {
+                    loops.0 |= L::SWITCH_JUMP;
+                }
             }
         }
         if unit { facts.0 |= NodeFlags::TRIVIAL_UNIT; }
-        facts
+        (facts, loops)
     }
     /// O(affected ancestor edges and their direct operands); stops at an unchanged fact.
     fn repair(&mut self, id: NodeId) {
@@ -898,9 +926,11 @@ impl Bir {
         self.unbind(replacement);
         let tail_changed = if !self.tail_candidates.is_empty() {
             let before = self.tail_candidates[target.index()];
+            let loop_changed = self.loop_facts[target.index()] != self.loop_facts[replacement.index()];
+            self.loop_facts[target.index()] = self.loop_facts[replacement.index()];
             self.tail_candidates[target.index()] = self.tail_candidates[replacement.index()];
             self.self_tail[target.index()] = self.self_tail[replacement.index()];
-            before != self.tail_candidates[target.index()]
+            loop_changed || before != self.tail_candidates[target.index()]
                 || parent.is_some_and(|parent| matches!(self.view(parent), View::Apply { callee, .. } if callee == target))
         } else { false };
         self.nodes[target.index()] = content;
@@ -1246,6 +1276,77 @@ mod tests {
 
     fn has_exit_flag(b: &Bir, id: NodeId) -> bool {
         b.node(id).flags().contains(NodeFlags::HAS_EXIT)
+    }
+
+    fn switched_jump(b: &mut Bir, continue_: bool) -> (NodeId, NodeId) {
+        let jump = b.new_node(if continue_ { View::Continue } else { View::Break }, 0);
+        let scrutinee = lit(b);
+        let header = b.switch_header(SwitchHeader {
+            keys: vec![], clauses: vec![], constants: 0, consts_full: false,
+            blocks_full: false, has_default: true, dispatch: SwitchDispatch::Direct,
+        });
+        (b.new_node(View::Switch { scrutinee, actions: &[jump], header }, 0), jump)
+    }
+
+    #[test]
+    fn loop_label_facts_follow_boundaries_edits_and_validation() {
+        assert_eq!(std::mem::size_of::<super::super::tail_facts::LoopFacts>(), 1);
+        for continue_ in [false, true] {
+            let mut b = Bir::default();
+            let (body, jump) = switched_jump(&mut b, continue_);
+            let condition = lit(&mut b);
+            let inner = b.new_node(View::While { condition, body }, 0);
+            let condition = lit(&mut b);
+            let outer = b.new_node(View::While { condition, body: inner }, 0);
+            assert!(b.loop_needs_label(inner));
+            assert!(!b.loop_needs_label(outer));
+            valid(&b, outer);
+            let replacement = lit(&mut b);
+            b.replace(jump, replacement);
+            assert!(!b.loop_needs_label(inner));
+            valid(&b, outer);
+            let replacement = b.new_node(View::Break, 0);
+            b.replace(jump, replacement);
+            assert!(b.loop_needs_label(inner));
+            valid(&b, outer);
+            b.loop_facts[inner.index()].0 = 0;
+            assert_eq!(b.validate(Some(outer)), Err("stale loop-label fact".to_string()));
+
+            let mut b = Bir::default();
+            let body = b.new_node(if continue_ { View::Continue } else { View::Break }, 0);
+            let condition = lit(&mut b);
+            let root = b.new_node(View::While { condition, body }, 0);
+            assert!(!b.loop_needs_label(root));
+            valid(&b, root);
+
+            let mut b = Bir::default();
+            let (body, _) = switched_jump(&mut b, continue_);
+            let params = b.new_vars(&[]);
+            let header = b.function_header(params, FunctionAttribute::default(), LamLoc::NONE);
+            let body = b.new_node(View::Fun { body, header }, 0);
+            let condition = lit(&mut b);
+            let root = b.new_node(View::While { condition, body }, 0);
+            assert!(!b.loop_needs_label(root));
+            valid(&b, root);
+        }
+    }
+
+    #[test]
+    fn loop_label_facts_ten_thousand_nested_loops() {
+        let mut b = Bir::default();
+        let (mut root, _) = switched_jump(&mut b, false);
+        let mut inner = root;
+        for i in 0..10_000 {
+            let condition = lit(&mut b);
+            root = b.new_node(View::While { condition, body: root }, 0);
+            if i == 0 { inner = root; }
+        }
+        assert_eq!(b.loop_fact_folds.get(), 10_000);
+        println!("10,000 nested loops: {} construction folds", b.loop_fact_folds.get());
+        assert!(b.loop_needs_label(inner));
+        assert!(!b.loop_needs_label(root));
+        valid(&b, root);
+        assert_eq!(b.loop_fact_folds.get(), 20_000);
     }
 
     #[test]

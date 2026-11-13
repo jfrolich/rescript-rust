@@ -173,7 +173,10 @@ impl State {
                 Probed::Free(_) => unreachable!("argument realized before its next sibling"),
             })
             .collect();
-        let (statements, values) = self.sequence_arguments(false, outputs);
+        let method_callee = !call.inline && call.external.is_none()
+            && matches!(self.source.view(call.operands[0]), View::Prim { primitive, .. }
+                if matches!(self.arena.primitive(primitive).primitive, crate::lambda::lam_primitive::Primitive::PjsObjectGet(_)));
+        let (statements, values) = self.sequence_arguments(method_callee, outputs);
         if let Some(frame) = call.tail { return self.finish_self_call(frame, statements, values); }
         if call.inline {
             return self.primitive_result(cx, statements, values[0]);
