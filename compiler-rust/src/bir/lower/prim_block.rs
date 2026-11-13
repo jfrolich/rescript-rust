@@ -61,6 +61,7 @@ impl State {
         }
         visited.clear();
         self.scratch = visited;
+        name.clear();
         self.tail_name = name;
         result
     }
@@ -166,6 +167,7 @@ impl State {
             }
             FieldDbgInfo::PolyVarTag | FieldDbgInfo::PolyVarContent => unreachable!(),
         };
+        field.clear();
         self.tail_name = field;
         let position = FieldPos::new(if matches!(info, FieldDbgInfo::VariantTag) {
             None
@@ -473,6 +475,31 @@ mod tests {
             assert_eq!(allocations.count_total, 0, "valid={valid}: {allocations:?}");
             assert_eq!(state.source_steps - visits, if valid { 1 } else { 10_001 });
             assert_eq!(state.primitive_steps - steps, if valid { 10_001 } else { 40_000 });
+        }
+    }
+
+    #[test]
+    fn field_spelling_does_not_prefix_tail_parameter_names() {
+        for flat in [false, true] {
+            let mut a = LamArena::new();
+            let f = Ident::new("loop", 10, crate::ident::IdentFlags::NONE);
+            let x = Ident::new("x", 11, crate::ident::IdentFlags::NONE);
+            let argument = if flat {
+                let global = a.global_module(Ident::create_persistent("Other"));
+                let inner = a.prim_raw(P::Pfield(0, FieldDbgInfo::Module { name: Name::new("Inner") }), &[global], LamLoc::NONE);
+                a.prim_raw(P::Pfield(0, FieldDbgInfo::Module { name: Name::new("make") }), &[inner], LamLoc::NONE)
+            } else {
+                let value = a.var(x);
+                a.prim_raw(P::Pfield(1, FieldDbgInfo::Cons), &[value], LamLoc::NONE)
+            };
+            let callee = a.var(f);
+            let body = a.apply_raw(callee, &[argument], crate::lambda::ApInfo {
+                status: crate::lambda::ApplyStatus::InferFull, loc: LamLoc::NONE,
+            });
+            let function = a.function_(1, &[x], body, Default::default(), LamLoc::NONE);
+            let end = a.var(f);
+            let root = a.letrec(&[(f, function)], end);
+            super::super::oracle_tests::compare(a, root);
         }
     }
 
