@@ -20,7 +20,7 @@ use crate::binary_ast::derive::plan::{
     Obligation, ObligationIdx, OptionalArg, Owner, Predef, Site, SkeletonIdx, SkeletonNode, Span,
     TypeSource,
 };
-use crate::binary_ast::derive::{Classification, GeneralReason};
+use crate::binary_ast::derive::{Classification, GeneralReason, UnplannedForm};
 use crate::parse_arena::TypeList;
 
 mod record;
@@ -73,7 +73,7 @@ struct TypeFacts {
     /// A type whose codec is not a plain name applied to codecs: `JSON.t`,
     /// whose codec is a function literal, a user's type applied to
     /// arguments, or a type the derive rejects.
-    unplanned: bool,
+    unplanned: Option<UnplannedForm>,
 }
 
 /// Collect the facts of one type and the types under it.
@@ -90,11 +90,18 @@ fn type_facts(typ_idx: CoreTypeIdx, arena: &ParseArena, facts: &mut TypeFacts) {
             // The codec of a user's type that takes arguments takes their
             // codecs one at a time (`t_encode(a)(b)(v)`); a plan describes
             // the library's, which take them at once.
-            facts.unplanned |= is_json_identifier(lid.txt, arena)
-                || matches!(arena.get_longident(lid.txt), Longident::Lapply(_, _))
-                || (!args.is_empty()
-                    && library_codec(EncodeContext::Value, Side::Encode, lid.txt, arena)
-                        .is_none());
+            let unplanned = if is_json_identifier(lid.txt, arena) {
+                Some(UnplannedForm::JsonIdentity)
+            } else if matches!(arena.get_longident(lid.txt), Longident::Lapply(_, _)) {
+                Some(UnplannedForm::AppliedModulePath)
+            } else if !args.is_empty()
+                && library_codec(EncodeContext::Value, Side::Encode, lid.txt, arena).is_none()
+            {
+                Some(UnplannedForm::AppliedUserCodec)
+            } else {
+                None
+            };
+            facts.unplanned = facts.unplanned.or(unplanned);
             for i in 0..args.len() {
                 type_facts(arena.type_list(*args)[i], arena, facts);
             }
@@ -113,7 +120,9 @@ fn type_facts(typ_idx: CoreTypeIdx, arena: &ParseArena, facts: &mut TypeFacts) {
         | CoreTypeDesc::Ptyp_alias(_)
         | CoreTypeDesc::Ptyp_poly(_)
         | CoreTypeDesc::Ptyp_package(_)
-        | CoreTypeDesc::Ptyp_extension(_) => facts.unplanned = true,
+        | CoreTypeDesc::Ptyp_extension(_) => {
+            facts.unplanned.get_or_insert(UnplannedForm::UnsupportedType);
+        }
     }
 }
 
@@ -230,7 +239,7 @@ pub(in crate::binary_ast) fn classify(
     });
     if facts.unmeasured
         || has("spice.serde")
-        || (decl.ptype_manifest.is_some() && !manifest_is_application && !facts.unplanned)
+        || (decl.ptype_manifest.is_some() && !manifest_is_application && facts.unplanned.is_none())
     {
         return general(UnmeasuredShape);
     }
@@ -248,11 +257,25 @@ pub(in crate::binary_ast) fn classify(
         }
         TypeKind::Ptype_open => false,
     };
-    if !planned_shape || has_fallback || facts.unplanned {
+    if !planned_shape || has_fallback || facts.unplanned.is_some() {
         return general(if matches!(decl.ptype_kind, TypeKind::Ptype_variant(_)) {
             UnsupportedVariant
         } else {
-            NotYetPlanned
+            NotYetPlanned(facts.unplanned.unwrap_or_else(|| {
+                if has_fallback {
+                    UnplannedForm::ConstantFallback
+                } else if let TypeKind::Ptype_record(labels) = &decl.ptype_kind {
+                    if labels.is_empty() {
+                        UnplannedForm::EmptyRecord
+                    } else if decl.ptype_manifest.is_none() {
+                        UnplannedForm::TemplateLiteral
+                    } else {
+                        UnplannedForm::DeclarationShape
+                    }
+                } else {
+                    UnplannedForm::DeclarationShape
+                }
+            }))
         });
     }
     // A declaration that could take a plan, in a tree that is not planned.
@@ -712,11 +735,11 @@ mod tests {
         assert_eq!(general("@spice type t = [#a | #b]"), UnmeasuredShape);
         assert_eq!(general("@spice.serde type t = A | B"), UnmeasuredShape);
         assert_eq!(general("@spice @unboxed type t = A(int)"), Unboxed);
-        assert_eq!(general("@spice type t = {}"), NotYetPlanned);
-        assert_eq!(general("@spice type t = {@spice.key(`k`) x: int}"), NotYetPlanned);
-        assert_eq!(general("@spice type t = {x: JSON.t}"), NotYetPlanned);
-        assert_eq!(general("@spice type t = {x: pair<string, int>}"), NotYetPlanned);
-        assert_eq!(general("@spice type t = array<A.box<int>>"), NotYetPlanned);
+        assert_eq!(general("@spice type t = {}"), NotYetPlanned(UnplannedForm::EmptyRecord));
+        assert_eq!(general("@spice type t = {@spice.key(`k`) x: int}"), NotYetPlanned(UnplannedForm::TemplateLiteral));
+        assert_eq!(general("@spice type t = {x: JSON.t}"), NotYetPlanned(UnplannedForm::JsonIdentity));
+        assert_eq!(general("@spice type t = {x: pair<string, int>}"), NotYetPlanned(UnplannedForm::AppliedUserCodec));
+        assert_eq!(general("@spice type t = array<A.box<int>>"), NotYetPlanned(UnplannedForm::AppliedUserCodec));
         assert_eq!(general("@spice type t = {x: (int, string)}"), UnmeasuredShape);
         assert_eq!(general("@spice @unboxed type t = {x: int}"), Unboxed);
         assert_eq!(general("@spice type rec t = {x: array<t>}"), RecursiveGroup);
@@ -724,9 +747,9 @@ mod tests {
         assert_eq!(general("@spice type t = @spice.as(\"A\") A(int)"), UnsupportedVariant);
         assert_eq!(general("@spice type t = A(pair<string, int>)"), UnsupportedVariant);
         assert_eq!(general("@spice type t = A(JSON.t)"), UnsupportedVariant);
-        assert_eq!(general("@spice type t = JSON.t"), NotYetPlanned);
-        assert_eq!(general("@spice type t = array<Js.Json.t>"), NotYetPlanned);
-        assert_eq!(general("@spice @spice.fallback(\"x\") type t = string"), NotYetPlanned);
+        assert_eq!(general("@spice type t = JSON.t"), NotYetPlanned(UnplannedForm::JsonIdentity));
+        assert_eq!(general("@spice type t = array<Js.Json.t>"), NotYetPlanned(UnplannedForm::JsonIdentity));
+        assert_eq!(general("@spice @spice.fallback(\"x\") type t = string"), NotYetPlanned(UnplannedForm::ConstantFallback));
         for planned in [
             "@spice type t = string",
             "@spice type t = array<id>",

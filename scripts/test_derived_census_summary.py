@@ -77,6 +77,17 @@ class DerivedCensusSummaryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             summarize([item])
 
+    def test_unplanned_forms_reconcile(self):
+        item = row()
+        item["paths"] = {"not_yet_planned": 3, "unplanned_forms": [1, 2, 0, 0, 0, 0, 0, 0]}
+        result = summarize([item, item])
+        self.assertEqual(result["unplanned_forms"]["json_identity"], 2)
+        self.assertEqual(result["unplanned_forms"]["applied_user_codec"], 4)
+        self.assertIn("First unplanned form", markdown(result))
+        item["paths"]["not_yet_planned"] = 4
+        with self.assertRaises(ValueError):
+            summarize([item])
+
     def test_counter_sides(self):
         item = row()
         item["checker_counters"] = [[1, 2, 3, 4], [10, 20, 30, 40]]

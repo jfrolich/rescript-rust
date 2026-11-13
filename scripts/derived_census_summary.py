@@ -7,6 +7,10 @@ import collections
 import math
 from pathlib import Path
 
+UNPLANNED_FORMS = ("json_identity", "applied_user_codec", "applied_module_path",
+                   "unsupported_type", "constant_fallback", "empty_record",
+                   "template_literal", "declaration_shape")
+
 PHASES = (
     "parse_other", "generation", "frontend", "environment", "typecheck",
     "signature", "conversion", "lambda_lowering", "lambda_passes", "lowering",
@@ -19,7 +23,7 @@ def summarize(rows):
               for key in (*PHASES, "js_bytes", "js_lines")}
     result.update(modules=0, bindings=[0, 0], syntax_nodes=[0, 0],
                   checker_counters=[[0] * 4, [0] * 4], counter_modules=0, paths={}, path_timing_records=0,
-                  planned_typecheck_ns=0, planned_conversion_ns=0,
+                  planned_typecheck_ns=0, planned_conversion_ns=0, unplanned_forms={},
                   general_typecheck_ns=0, general_conversion_ns=0)
     shapes = collections.defaultdict(list)
     templates = []
@@ -29,6 +33,14 @@ def summarize(rows):
             raise ValueError(f"Unsupported census version: {row.get('version')!r}")
         result["modules"] += 1
         for reason, count in row.get("paths", {}).items():
+            if reason == "unplanned_forms":
+                if len(count) != len(UNPLANNED_FORMS) or any(type(n) is not int or n < 0 for n in count):
+                    raise ValueError("Invalid unplanned form counts")
+                if sum(count) != row["paths"].get("not_yet_planned", 0):
+                    raise ValueError("Unplanned form counts do not reconcile")
+                for form, n in zip(UNPLANNED_FORMS, count):
+                    result["unplanned_forms"][form] = result["unplanned_forms"].get(form, 0) + n
+                continue
             if type(count) is not int or count < 0:
                 raise ValueError(f"Invalid path count {reason}: {count!r}")
             result["paths"][reason] = result["paths"].get(reason, 0) + count
@@ -117,6 +129,10 @@ def markdown(summary):
         lines += ["", "| Path | Bindings |", "|---|---:|"]
         for reason, count in sorted(summary["paths"].items()):
             lines.append(f"| {reason} | {count} |")
+    if summary["unplanned_forms"]:
+        lines += ["", "| First unplanned form | Bindings |", "|---|---:|"]
+        for form, count in summary["unplanned_forms"].items():
+            lines.append(f"| {form} | {count} |")
     lines += ["", "| Size | Derived | Other |", "|---|---:|---:|"]
     for key in ("bindings", "syntax_nodes"):
         lines.append(f"| {key} | {summary[key][0]} | {summary[key][1]} |")

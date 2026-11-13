@@ -14,6 +14,21 @@ use crate::parse_arena::ParseArena;
 use crate::parser::ast::{RecFlag, SignatureItem, StructureItem, StructureItemDesc};
 use plan::DerivedIdx;
 
+/// First unsupported form in declaration traversal order, after Q5 exclusions.
+/// One byte carried with a classification; no names or allocated payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum UnplannedForm {
+    JsonIdentity,
+    AppliedUserCodec,
+    AppliedModulePath,
+    UnsupportedType,
+    ConstantFallback,
+    EmptyRecord,
+    TemplateLiteral,
+    DeclarationShape,
+}
+
 /// Why a derived declaration stays on the general path: the rows of the
 /// table in `compiler-rust/docs/DERIVED_CODECS.md`, Q5, and the shapes later
 /// slices plan.
@@ -36,7 +51,7 @@ pub enum GeneralReason {
     /// An `@unboxed` declaration.
     Unboxed,
     /// A record or constructor application needing forms not yet planned.
-    NotYetPlanned,
+    NotYetPlanned(UnplannedForm),
     /// A variant with a representation, attribute or payload codec outside
     /// the plan language; classify it before checking rather than retrying.
     UnsupportedVariant,
@@ -78,6 +93,8 @@ pub struct PathCounts {
     pub unboxed: u64,
     /// See [`GeneralReason::NotYetPlanned`].
     pub not_yet_planned: u64,
+    /// Counts indexed by `UnplannedForm`, exactly one per unplanned binding.
+    pub unplanned_forms: [u64; 8],
     /// See [`GeneralReason::UnsupportedVariant`].
     pub unsupported_variant: u64,
     /// See [`GeneralReason::Switch`].
@@ -98,6 +115,9 @@ impl PathCounts {
         self.unmeasured_shape += other.unmeasured_shape;
         self.unboxed += other.unboxed;
         self.not_yet_planned += other.not_yet_planned;
+        for (count, increment) in self.unplanned_forms.iter_mut().zip(other.unplanned_forms) {
+            *count += increment;
+        }
         self.unsupported_variant += other.unsupported_variant;
         self.switch += other.switch;
         self.failed_obligation += other.failed_obligation;
@@ -115,7 +135,10 @@ impl PathCounts {
                 GeneralReason::SharedNames => &mut self.shared_names,
                 GeneralReason::UnmeasuredShape => &mut self.unmeasured_shape,
                 GeneralReason::Unboxed => &mut self.unboxed,
-                GeneralReason::NotYetPlanned => &mut self.not_yet_planned,
+                GeneralReason::NotYetPlanned(form) => {
+                    self.unplanned_forms[form as usize] += bindings;
+                    &mut self.not_yet_planned
+                },
                 GeneralReason::UnsupportedVariant => &mut self.unsupported_variant,
                 GeneralReason::Switch => &mut self.switch,
                 GeneralReason::FailedObligation => &mut self.failed_obligation,
@@ -294,5 +317,28 @@ fn derive_error_fixture_messages() {
             expand_structure_item_with_mapper(item, &mut arena, true)).collect();
         let error = result.expect_err(name);
         assert!(error.contains(expected), "{name}: expected {expected:?}, got {error:?}");
+    }
+}
+
+#[cfg(test)]
+mod census_reason_tests {
+    use super::*;
+
+    #[test]
+    fn unplanned_forms_count_each_binding_once_at_ten_thousand() {
+        assert_eq!(std::mem::size_of::<UnplannedForm>(), 1);
+        assert_eq!(std::mem::size_of::<GeneralReason>(), 1);
+        assert_eq!(std::mem::size_of::<Classification>(), 1);
+        let mut counts = PathCounts::default();
+        for _ in 0..10_000 {
+            let mut group = PathCounts::default();
+            group.add(Classification::General(GeneralReason::NotYetPlanned(
+                UnplannedForm::JsonIdentity,
+            )), 1);
+            counts.merge(group);
+        }
+        assert_eq!(counts.not_yet_planned, 10_000);
+        assert_eq!(counts.unplanned_forms.iter().sum::<u64>(), 10_000);
+        assert_eq!(counts.unplanned_forms[UnplannedForm::JsonIdentity as usize], 10_000);
     }
 }
