@@ -14,6 +14,32 @@ JavaScript is byte-identical; output does not depend on worker count or
 scheduling; no `.cmi` files; the artifacts editor tooling reads stay usable.
 Everything else may change.
 
+Short version:
+
+- The checker is 40,656 instructions per source line of a 3,735-module
+  application (45,022 with publication, interfaces, setup and teardown),
+  39% of a build. 61% of it is not checking: allocation, copying, hashing,
+  addressing nodes, cells, a journal. Names (lookups, loading
+  dependencies, substitution copies) are 24%, unification with its journal
+  20%, the walk 13%, instantiation 11% (section 1).
+- The identity of type nodes stays observable and the design keeps it. It
+  changes what every operation on the graph costs: 16-byte nodes in one
+  array, schemes as templates, binders as indices and names resolved once,
+  rows instead of a typed tree, nothing kept for an error that does not
+  happen (sections 2 and 3).
+- Two prototypes on trunk, both with identical output on both projects.
+  Unification without a journal on the success path: predicted 2.1% to
+  2.4% of the checker, measured 2.2% and 2.1%. Instantiation from
+  templates: predicted 4% to 5%, measured 0.6% and 0.9%; the cost is
+  creating nodes in today's storage, not the copy (section 4).
+- The design reaches about 14,100 instructions per line on its own
+  figures and about 22,400 when every unconfirmed figure is doubled; the
+  budget is 18,000 to 22,000. 4% of that reduction is measured in a
+  checker, the rest on a stand-alone kernel or estimated (section 7).
+- It is built beside the old checker, a unit at a time behind one switch,
+  in slices R0 to R10 with two hard measurement gates; the last slices
+  delete the old checker's files and the switch (sections 5 and 6).
+
 Sections:
 
 1. Where the instructions go (measured).
@@ -1705,3 +1731,149 @@ Tests: make test-analysis; the watch-mode tests of rewatch.
 
 Failure: a typed tree rebuilt under another name.
 ```
+
+## 7. The ceiling
+
+### 7.1 Instructions per source line, item by item
+
+The application, one worker. "Today" is measured (1.2, 1.4). "Design" is
+what section 2.3 derives. "Cautious" doubles every figure that rests on
+the kernel and adds half to every estimate, which is what prototype 4.1
+says an unconfirmed figure deserves. The label says what the design figure
+rests on.
+
+| Item | Today | Design | Cautious | The design figure is |
+|---|---:|---:|---:|---|
+| Unification and the journal | 8,297 | 1,850 | 3,700 | extrapolated from the kernel and counted shapes; sizes assumed. 865 of the reduction is **measured** in situ (4.2) |
+| The walk | 5,411 | 4,200 | 4,900 | extrapolated from CHECKER_REDESIGN K.4 (a measured 54% of one family's allocation and copying) to 4,960, then estimated |
+| Environment lookups | 5,279 | 570 | 1,150 | extrapolated from the kernel and H.2.11's operation counts; layers per lookup assumed |
+| Loading dependencies | 2,996 | 600 | 1,200 | estimated |
+| Substitution copies | 1,537 | 250 | 550 | estimated |
+| Instantiation | 4,341 | 600 | 1,900 | extrapolated from the kernel. The cautious figure is what prototype 4.1 **measured** a templated node to cost in today's storage |
+| The allocator | 3,463 | 500 | 1,000 | estimated |
+| Expansion | 2,474 | 800 | 1,200 | estimated; expansions not counted |
+| Levels and generalisation | 2,042 | 550 | 1,100 | extrapolated from the kernel and counted visits |
+| Patterns and exhaustiveness | 1,478 | 1,000 | 1,250 | estimated |
+| Warnings and usage | 1,382 | 400 | 700 | estimated |
+| Declarations | 1,017 | 700 | 850 | estimated |
+| Modules, disambiguation, annotations, error preparation | 943 | 750 | 850 | estimated at 80% |
+| **`type_structure`** | **40,656** | **12,770** | **20,350** | |
+| Interfaces, and the implementation against its interface | 1,367 | 600 | 900 | estimated: the same mechanisms |
+| Publication | 1,380 | 500 | 700 | estimated: one export walk (CHECKER_REDESIGN J.6) |
+| Per-unit setup | 396 | 60 | 100 | estimated: a reset of a dozen vectors |
+| Per-unit teardown | 1,200 | 150 | 300 | estimated: no destructors in the pools |
+| **The checker with its surroundings** | **45,022** | **14,080** | **22,350** | |
+| Unit reads | 2,607 | 300 | 600 | estimated (THREE_TREES T3) |
+
+The budget is 18,000 to 22,000.
+
+- **The design reaches about 14,100 instructions per line**, 31% of
+  today, if every figure holds.
+- **The cautious reading is about 22,400**, at the budget's upper edge.
+- What is **measured in situ** of that reduction of 23,000 to 31,000 is
+  865 (the journal) plus 320 a line that a template saves on today's
+  storage (4.1): 4%. Everything else is a kernel measurement multiplied by
+  a count, a quoted measurement extended, or an estimate.
+
+So the plain answer: the design is under the budget on paper and at its
+edge when the paper is distrusted, and this document has not proved either
+in a checker. The proof is slice R5c (covered units at 60% or less, bridge
+included) and slice R7 (24,000 with the bridge still there). R9 removes
+the bridge: about 3% of a build, 3,000 a line, which is why R7's gate is
+24,000 and R9's is 20,000.
+
+### 7.2 What stands between the design and the budget
+
+Nothing in the contract. Three things in the engineering:
+
+1. **Names are 9,812 a line today and 1,420 in the design, and none of it
+   is prototyped.** It is the largest single reduction (8,400) and the one
+   earlier attempt at a different environment (CHECKER_REDESIGN H.2.11)
+   came out 1.9 times worse than what it replaced. The design differs in
+   kind (no versioned environments, binders as indices, results stored
+   per syntax node), but R4's bench gate and R5c's measurement are the
+   first evidence there will be.
+2. **A mechanism measured alone does not deliver its number when the rest
+   stays** (4.1: predicted 4% to 5% of the checker, measured 0.6% to
+   0.9%). The design's figures are for all of it together. Until R5c
+   nothing can be measured together.
+3. **The beside period costs.** Two converters, a bridge to the typed tree
+   for the backend, and a second check of failing units through the old
+   checker until R8. None of it is on the default path before R7.
+
+### 7.3 Items that cannot go lower, and the observation that holds them
+
+| Item | Floor | Held by | Fixture |
+|---|---|---|---|
+| Instantiation | one copied node per generic node per use: 4.8 M nodes on the application, 27 instructions each on the kernel, about 200 a line | O4 and O5: every use of a generalised binding is its own copy, with the scheme's sharing | `checker_identity_03_generalized.res`, `checker_identity_07b_sharing.res` |
+| Unification of two identical types without variables | 877,885 on the application cannot be answered by comparing handles: each links a pair of nodes and lowers levels; about 350 a line on the kernel | O2 and O10: the link decides the printed name, the level decides a later copy | `alias_name_follows_unification.res`, `checker_identity_02_annotated.res` |
+| Level updates and generalisation of types without variables | 63% of level-update visits and 89% of generalisation visits are of such nodes; they must be written | O10 | `checker_identity_02_annotated.res` against `checker_identity_04_local.res` |
+| Lookups in the order of the walk | a use is resolved when the walk reaches it, not in a pass before | O15 | `fun_return_poly1.res` |
+| A second check of a failing unit | once per failing unit | O16: the message prints the types as they stood | any type clash fixture |
+
+Together these floors are about 900 a line of the design's 14,100.
+
+### 7.4 What could not be measured
+
+- The profile-guided build (what ships), wall time, cycles, cache misses,
+  memory, and more than one worker. Every number here is instructions with
+  one worker on the fat-LTO build.
+- How many pairs of nodes a unification visits and how many expansions
+  run: the counters count top-level calls. The figures of 2.3 item 1
+  assume two pairs for an identical variable-free unification.
+- How many opened layers a lookup probes.
+- The kernel with abbreviations, rows or two tiers of handles; 40% to 50%
+  was added for them without a measurement.
+- The OCaml compiler was not run for this document. The program of 2.4
+  idea 1 was compiled with the Rust compiler of trunk only; the fixtures
+  of 2.1 carry expected files written by the OCaml compiler.
+- Whether O11 is observable: no program was found or written.
+- That the success mode fails every `super_errors` fixture (4.2).
+- Whether storing templates per exported item loses anything: two items of
+  one signature that share a generic node are stored as two nodes. No
+  operation was found that relates the generic nodes of two items without
+  copying each (every use instantiates; `include` and functor application
+  copy item by item), but that is an argument, not a test. Slice R2's
+  property test and fixture 8 are where it would show.
+- The share assigned by the proportional rule in section 1 (34%) is an
+  attribution, not a measurement of each call.
+
+### 7.5 Questions for the owner
+
+Each is an observation of the contract that the design keeps. Listed with
+what dropping it would buy; the design does not assume any of them.
+
+1. **Must the printed name of a type follow unification (O1, O2, O6), and
+   must the comparison of O8 stay generic when a node was linked to an
+   abbreviation?** This is the observation that forces one node per
+   occurrence. Without it (names from the declaration or the annotation,
+   immediacy read after expansion) variable-free types could be interned:
+   69% of the nodes `instance` copies, the 877,885 identical unifications,
+   63% of level-update visits and 89% of generalisation visits would
+   become a handle compare or nothing. On the design's figures that is
+   about 1,300 a line (9%); on today's it was the 4% to 6% of a build that
+   CHECKER_REDESIGN F.10 claimed. It changes diagnostics text
+   (`alias_name_follows_unification.res` would print `int => int`),
+   signatures, genType output and, for O8, generated JavaScript
+   (`checker_identity_comparison.res` would emit `a > "Green"`).
+2. **Must the warnings printed before a type error be exactly those the
+   OCaml checker had met when it failed (O15)?** If a failing unit could
+   print all of its lookup-time warnings, or none, names could be resolved
+   in a pass before typing. That buys no instruction on the success path;
+   it would let the name pass of large units run apart from typing and
+   simplifies R4 and R8.
+3. **Must a type clash print the two types as they stood at the failed
+   unification, with the partial links made before it failed (O16)?** If
+   the state before the failing unification is acceptable, the explaining
+   mode needs no exact replay of a partial unification. No instruction on
+   the success path; it removes the riskiest part of R8a.
+4. **Does the budget of 18,000 to 22,000 count the surroundings of 1.4
+   (publication, interfaces, setup, teardown: 4,343 a line today) and the
+   unit reads (2,607)?** This document counts the first and lists the
+   second apart.
+5. **Is a transition in which a failing unit is checked a second time by
+   the old checker (R5c to R8), and the backend reads a converted typed
+   tree (R5c to R9, about 3% of a build), acceptable?** The alternative is
+   to port the readers and the diagnostics before the default flips, which
+   moves the first measured saving on the default path from R7 to R9.
+6. **May O11 be dropped if R0 finds no program that shows it?**
