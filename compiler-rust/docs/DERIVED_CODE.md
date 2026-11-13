@@ -665,3 +665,30 @@ Both produce 3,980 files with digest
 `0a3d301322cf7febdbf8793ae8c3dcbc1ecbadf44670c3b52cecbc5437a02408`.
 Counts from separate comparison runs vary; this delta uses the two sides of the
 same run, not a baseline borrowed from the previous experiment.
+
+#### Application lowering experiment (not retained)
+
+A sequential, one-worker Cachegrind comparison on the same 3,735-module
+application measured these three release binaries (census disabled):
+
+| Candidate | Instructions | Change from this run's base |
+|---|---:|---:|
+| Constructor sharing, before JSON identity plans | 65,135,411,254 | — |
+| JSON identity plans, without application lowering | 65,035,855,522 | −0.1528% |
+| JSON identity plans, generic application-callee lowering | 65,217,553,800 | +0.1261% |
+
+The experiment instances an applied generic value in a definition scope, then
+calls `lower_args` outside that scope before discharging argument equations;
+it does not lower values merely passed as arguments. It passes the unchanged
+Spice check-mode oracle, including `JSONIdentity`, and all 14 discharge tests,
+but fails the required improvement of at least 0.05% against base. The lowering
+change was therefore not retained. All three candidates produce the same 3,980
+files and the digest reported above.
+
+A fresh application check-mode build without the lowering succeeds. All 136
+formerly unplanned bindings are in 23 units; neither of the two units that retry
+general typing is among those 23. Thus **136 agree and zero differ** in this
+application comparison; the container-sharing counterexample is demonstrated
+by the separate `JSONIdentity` fixture, not by those application bindings.
+The oracle, fixture and classification remain unchanged pending the decision
+on that counterexample. See `DERIVED_CODECS.md` for its traced memo mechanism.

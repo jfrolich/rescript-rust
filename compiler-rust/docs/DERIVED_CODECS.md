@@ -493,6 +493,19 @@ the compiler options are created (where `RESCRIPT_DERIVED_CENSUS` is read in
   - the unit reads, as sets;
   - the warnings, as text in order.
 
+The JSON identity fixture also checks the abbreviation-memo observation O11
+in `CHECKER_REWRITE.md`, not an independently demonstrated diagnostic difference.
+General application inference instances the callee and runs `lower_args`
+(`types/typecore.rs::type_application_parts`; `compiler/ml/typecore.ml:2826–2828`),
+whose arrow-spine walk expands the return type as well as lowering argument
+levels (`compiler/ml/typecore.ml:2503–2514`). Expanding `JSON.t` records its
+representative in the simple-abbreviation memo, so a later instance can reuse
+that representative for both concrete occurrences through `find_repr`
+(`types/ctype.rs::copy_type_cached`; `compiler/ml/ctype.ml:778–782`). This explains
+why the general path's later `values_encodeJson` shares its array element and
+result nodes while the plan without application lowering does not; the signature
+oracle and successful-program fixture retain that distinction.
+
 Diagnostics are gated on the error fixtures by running each with the switch
 unset and with `general` and comparing the output byte for byte, and by the
 `super_errors` expectations themselves.
