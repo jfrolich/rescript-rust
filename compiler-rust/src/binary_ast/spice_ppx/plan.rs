@@ -70,7 +70,8 @@ struct TypeFacts {
     /// A tuple or a polymorphic variant.
     unmeasured: bool,
     /// A type whose codec is not a plain name applied to codecs: `JSON.t`,
-    /// whose codec is a function literal, or a type the derive rejects.
+    /// whose codec is a function literal, a user's type applied to
+    /// arguments, or a type the derive rejects.
     unplanned: bool,
 }
 
@@ -85,8 +86,14 @@ fn type_facts(typ_idx: CoreTypeIdx, arena: &ParseArena, facts: &mut TypeFacts) {
         .any(|attr| arena.get_string(attr.0.txt) == "spice.codec");
     match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr((lid, args)) => {
+            // The codec of a user's type that takes arguments takes their
+            // codecs one at a time (`t_encode(a)(b)(v)`); a plan describes
+            // the library's, which take them at once.
             facts.unplanned |= is_json_identifier(lid.txt, arena)
-                || matches!(arena.get_longident(lid.txt), Longident::Lapply(_, _));
+                || matches!(arena.get_longident(lid.txt), Longident::Lapply(_, _))
+                || (!args.is_empty()
+                    && library_codec(EncodeContext::Value, Side::Encode, lid.txt, arena)
+                        .is_none());
             for i in 0..args.len() {
                 type_facts(arena.type_list(*args)[i], arena, facts);
             }
@@ -634,6 +641,8 @@ mod tests {
         assert_eq!(general("@spice type t = {}"), NotYetPlanned);
         assert_eq!(general("@spice type t = {@spice.key(`k`) x: int}"), NotYetPlanned);
         assert_eq!(general("@spice type t = {x: JSON.t}"), NotYetPlanned);
+        assert_eq!(general("@spice type t = {x: pair<string, int>}"), NotYetPlanned);
+        assert_eq!(general("@spice type t = array<A.box<int>>"), NotYetPlanned);
         assert_eq!(general("@spice type t = {x: (int, string)}"), UnmeasuredShape);
         assert_eq!(general("@spice @unboxed type t = {x: int}"), Unboxed);
         assert_eq!(general("@spice type rec t = {x: array<t>}"), RecursiveGroup);
