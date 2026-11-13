@@ -1252,7 +1252,7 @@ the dependency is read from the code and no test asserts two texts for it.
 | Legacy pass | Leaves at | Must have left first | Shown by |
 | --- | --- | --- | --- |
 | P1 flatten | T6 | none; but its rules cannot be applied where a run is copied, so it leaves with the lowering's list readers | `flattening_a_copied_return_branch_changes_the_simplify_if_head_reader` |
-| P2 external shadow | T5 | none: it is before P3 in legacy order, and a decision taken where the reference is lowered sees the bindings P2 sees | not tested |
+| P2 external shadow | T5 (left: "T5 as built") | none: it is before P3 in legacy order; the decision is taken once at the unit root, on the lists P1 receives | the rule tests of "T5 as built"; the four corpora |
 | P3 tail-call inlining | T4g | P1 | `flattening_after_a_site_in_a_returned_conditional_was_spliced_maps_its_predicate`; for the count, `a_pure_branch_the_flatten_pass_drops_takes_an_occurrence_built_still_counts` |
 | | | P2 | `inlining_before_the_external_shadow_pass_hides_the_binding_that_shadows_a_global` |
 | | | (also: a count by origin, or no copy after a close) | `a_copied_function_doubles_the_legacy_count_of_the_variables_declared_inside_it` |
@@ -1553,6 +1553,41 @@ omits (`walk::prints_declaration`, `omitted_expression`, `else_omitted`,
 the finished statement that the log has to carry as a bit of the event or
 decide at replay.
 
+#### T5 as built: part A (part B is a skeleton, 11.7)
+
+`bir/lower/globals.rs` (`decide`, called from `State::finish`), the bit
+(`Bir::qualify_global`, `Node::var_qualified`), the count of live
+references per import (`Scope::import_reference`, from
+`Bir::register_kind`), `bridge_j::export_lowered` and `bridge_j::qualify`,
+and the gate (`lam_compile.rs`: the new side qualifies, flattens, compares
+the step A decisions on that program and continues with
+`finish_flattened_output`; `apply_external_shadow_pass` is called by the
+legacy side only). As designed, with one addition: the printed text of a
+qualified reference drops the reference's comment and location, as the
+legacy pass does (`JsArena::overwrite_expr`).
+
+Check mode, zero text differences at both comparison points:
+
+| Corpus | Units | References qualified (units) | Steps of the decision | Step A differences |
+| --- | --- | --- | --- | --- |
+| runtime | 113 | 0 | 2,734 | 0 |
+| tests/tests | 855 (736 in the ratchet's count) | 29 (6) | 23,992 | 0 |
+| fixtures | 609 | 0 | 22,542 | 0 |
+| the application | 3,848 | 29 (16) | 478,518 | 0 |
+
+`scripts/test_backend_coverage.py` passes with the ratchet unchanged.
+Tests: the two inlining cases and one rule per kind of binding in the
+oracle form (`bir/lower/oracle_tests.rs`, from
+`the_lowering_decides_the_shadowed_global_the_tail_call_pass_would_hide`
+on: the new side without pass 2 prints what the legacy side prints with
+it); steps at 10,000 references, at 10,000 bindings and at depth 10,000,
+zero allocations on a second decision, sizes (`globals.rs`).
+
+Not done: the instruction counts (check build and default build, before
+and after) were not measured; the hazard of (a) (a module whose last
+reference only P1 drops) has no test; `SForRangeExisting` is covered by
+reading only. These are in the build prompt.
+
 ### 11.5 Worker prompt for T4b
 
 Which form: it needs one experiment, because nothing read so far proves that
@@ -1785,6 +1820,96 @@ test) and "another legacy pass reads what the splice changed" (commit the
 Lambda as a test asserting both texts, keep the pass on the new side, write
 which pass under 11.4, stop).
 ```
+
+### 11.7 Build prompt for T5
+
+Part A of T5 is built ("T5 as built"). Part B is a skeleton: types, sizes,
+signatures with their costs, and ignored acceptance tests. Verbatim prompt
+for the builder:
+
+> Task: build part B of T5 of `compiler-rust/docs/THREE_TREES.md` (the
+> naming log) and close part A's open measurements. Read first: AGENTS.md;
+> THREE_TREES section 2; 11.4 "T5 design" (e) and "T5 as built"; the header
+> of `emit/naming.rs`; `bir/lower/names.rs` (the skeleton);
+> `bir/lower/globals.rs` (how part A records nothing new and decides at
+> `State::finish`); `bir/shadow.rs` and `lam_compile.rs` (the gate).
+>
+> Decided, not yours to change: the events (`Declare`, `Params`, `Enter`,
+> `Leave`, `Binder`; a reference is no event), the free-variable list with
+> one membership bit per variable, filled where a reference is built and
+> finalised at `Log::leave`; the replay through the existing `Names`
+> tables; the oracle is `Names::collect` run on the lowering's own program
+> before the JS passes (the passes still change which statements exist, so
+> the final program is not what the log describes), with its module list
+> filled in; part A's decision point, bit and bridge.
+>
+> Commits, in order, each building without warnings
+> (`cargo clippy --all-targets -- -D warnings`) and passing
+> `cargo test --lib bir::` and `emit::`:
+>
+> 1. `Log::declare`, `binder`, `reference`, `enter`, `leave`
+>    (`bir/lower/names.rs`). Turns on nothing yet (the tests also need the
+>    replay); add no test of your own in place of the ignored ones.
+> 2. `emit::naming::replay`. Turns on, in `bir/lower/names.rs`:
+>    `a_local_takes_the_name_of_an_outer_variable_the_function_does_not_capture`,
+>    `a_removed_declaration_takes_its_event_with_it`,
+>    `two_variables_first_named_by_one_reservation_are_named_in_order`,
+>    `a_loop_variable_is_named_before_the_declarations_of_its_body`,
+>    `ten_thousand_declarations_are_logged_and_replayed_in_one_step_each`,
+>    `ten_thousand_nested_functions_cost_a_constant_number_of_steps_each`.
+> 3. `emit::naming::compare_with_pass`. Turns on
+>    `the_comparison_counts_a_name_the_replay_gets_wrong`
+>    (`emit/naming.rs`).
+> 4. The lowering logs: remove `cfg(test)` from `mod names`, `replay`,
+>    `compare_with_pass` and their types; a `Log` on `lower::scope::Scope`;
+>    `reference` from `Bir::allocate` beside `Scope::site`; `declare` where
+>    an `SDecl` is written, `binder` where loop and `try` statements are
+>    built, `enter`/`leave` around a function body (K10,
+>    `with_function_scope`). Add one oracle-form test per event kind in
+>    `bir/lower/oracle_tests.rs`: Lambda lowered, the log replayed, the
+>    table compared with `compare_with_pass` on the exported program, zero
+>    differences; and the three hard examples of section 2 as Lambda.
+> 5. Check mode: after `prepare_lower`, replay and `compare_with_pass` on
+>    `new_before` with its modules filled in
+>    (`collect_modules_from_js_block`); `NameStats` flattened into the
+>    `lower` report; a difference is an error naming the unit and the
+>    identifier. The printer shape tests the pass applies
+>    (`walk::prints_declaration`, `omitted_expression`, `else_omitted`,
+>    `tail_effect`, the eta form of `function_form`) are bits you add to
+>    the event where the statement is written or tests at replay: say
+>    which, per test, in "T5 as built: part B".
+> 6. Part A leftovers: a test for the hazard of "T5 design" (a) (a module
+>    of a global's printed name whose only reference stands in a pure
+>    branch of a conditional statement: assert both complete texts, as the
+>    T4c hazards are pinned); a rule test for `SForRangeExisting`.
+> 7. Measurements and documents: instruction counts of a clean build of
+>    `tests/tests` (release binary, `RAYON_NUM_THREADS=1`, cachegrind as
+>    `scripts/compare_build_instructions.py` does) with
+>    `RESCRIPT_BACKEND=check` and by default, at `be1b3a482e`, at this
+>    skeleton's head and at your head; "T5 as built: part B"; STATUS.md row
+>    T5; the worker prompt for T6 in the form of 11.6.
+>
+> End state, checkable: `rg -n 'fn replay' compiler-rust/src/emit/naming.rs`
+> has one hit; `rg -n 'cfg\(test\)' compiler-rust/src/bir/lower/names.rs`
+> shows the test module only; `rg -n 'T5 build' compiler-rust/src` is
+> empty; `rg -n 'apply_external_shadow_pass'
+> compiler-rust/src/lambda/lam_compile.rs compiler-rust/src/bir/shadow.rs`
+> still shows the legacy side only; `name_differences` is zero on every
+> unit the pass supports in the runtime library, tests/tests, the fixtures
+> and the application, with the number of supported units per corpus
+> reported; `scripts/test_backend_coverage.py` passes with the ratchet
+> unchanged or risen; the default build's instruction count is within
+> noise.
+>
+> Shortcuts that count as failure: changing a signature, a doc-comment
+> cost, a pinned size or a test of the skeleton instead of meeting it (if
+> one cannot be met, stop and report the function and the reason); a walk
+> over a statement body or a finished tree to find references, bindings or
+> free variables; a hash map keyed by a variable, node or scope in the log
+> (the `Names` tables stay as they are: they are the pass's, and the pass
+> is not removed in this slice); an `allow` attribute; an ignored test
+> other than the ones named above before their commit; a number you did
+> not measure.
 
 ## 12. Risks and what was not measured
 

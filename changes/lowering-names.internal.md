@@ -1,0 +1,1 @@
+- The backend lowering decides which references to JavaScript globals are shadowed; check mode no longer runs the external-shadow pass on the lowered program. The naming log is added as a skeleton.
