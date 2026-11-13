@@ -288,6 +288,10 @@ impl std::fmt::Debug for ModuleView {
 pub(crate) struct ModuleView {
     id: ViewId,
     access_path: Path,
+    /// The path the signature's own items are named through: the access
+    /// path, except for a child of an alias view that is declared with a
+    /// signature (see [`describe_view`]).
+    item_root: Path,
     /// The signature the tables are built from. A unit's own: its items
     /// name each other by local identifier. A child's: its declared
     /// signature with its own items at the access path and its ancestors'
@@ -472,6 +476,7 @@ fn describe_view(world: &World, scratch: &ViewScratch, key: &ViewKey<'_>) -> Opt
                 .unwrap_or_else(|| Arc::new(SignatureIndex::build(&signature)));
             Some(describe_tables(
                 access_path,
+                access_path,
                 signature.clone(),
                 index,
                 signature,
@@ -486,10 +491,27 @@ fn describe_view(world: &World, scratch: &ViewScratch, key: &ViewKey<'_>) -> Opt
             target,
         }) => {
             let (idx, runtime_pos) = parent.index.module_item(*ordinal as usize);
-            let SignatureItem::SigModule(id, _, _) = &parent.signature[idx] else {
+            let SignatureItem::SigModule(id, md, _) = &parent.signature[idx] else {
                 return None;
             };
             let access_path = Path::pdot_pos(parent.access_path, id.name(), runtime_pos as i32);
+            // Where the items of the signature are put. OCaml's
+            // `prefix_idents` (env.ml:1454-1481) puts them at the access
+            // path. The alias views of trunk put the items of a child
+            // declared with a signature at the parent's root and the
+            // child's name without a runtime position
+            // (`QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix`
+            // re-roots a child module of the scraped signature that way),
+            // and the canonical signature dump prints positions, so a child
+            // of an alias view keeps that spelling. Nothing compares or
+            // emits the position of a type path (`Path::same`).
+            let item_root = if parent.source.is_some()
+                && matches!(md.md_type, ModuleType::MtySignature(_))
+            {
+                Path::pdot(parent.item_root, id.name())
+            } else {
+                access_path
+            };
             let source = target.access_path();
             // The tables below read the alias sources of this path, of its
             // ancestors and of its target's chain as a compilation holds
@@ -503,7 +525,7 @@ fn describe_view(world: &World, scratch: &ViewScratch, key: &ViewKey<'_>) -> Opt
             // env.ml:1516-1518, 1435-1446: the target's signature, its
             // items put at this path and strengthened against the target.
             let signature = super::env_lazy::QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
-                access_path,
+                item_root,
                 target.signature().clone(),
                 Default::default(),
                 Some(source),
@@ -513,6 +535,7 @@ fn describe_view(world: &World, scratch: &ViewScratch, key: &ViewKey<'_>) -> Opt
             let index = Arc::new(SignatureIndex::build(&signature));
             Some(describe_tables(
                 access_path,
+                item_root,
                 signature.clone(),
                 index,
                 signature,
@@ -556,6 +579,7 @@ fn describe_view(world: &World, scratch: &ViewScratch, key: &ViewKey<'_>) -> Opt
             let index = Arc::new(SignatureIndex::build(&signature));
             Some(describe_tables(
                 access_path,
+                access_path,
                 signature,
                 index,
                 raw.clone(),
@@ -581,6 +605,7 @@ fn describe_view(world: &World, scratch: &ViewScratch, key: &ViewKey<'_>) -> Opt
 /// built at most three times, each one pass.
 fn describe_tables(
     access_path: Path,
+    item_root: Path,
     signature: Arc<Signature>,
     index: Arc<SignatureIndex>,
     raw: Arc<Signature>,
@@ -589,6 +614,7 @@ fn describe_tables(
     ctx: &TypeContext,
 ) -> ModuleView {
     let shared_access_path = Arc::new(access_path);
+    let shared_item_root = Arc::new(item_root);
 
     let mut values: Vec<Option<ViewValue>> = Vec::with_capacity(signature.len());
     let mut labels: AHashMap<SmolStr, Vec<LabelDescription>> = AHashMap::default();
@@ -618,7 +644,7 @@ fn describe_tables(
                         crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
                             &[SignatureItem::SigValue(*id, desc.clone())],
                             prefix,
-                            &shared_access_path,
+                            &shared_item_root,
                             ctx,
                         );
                         value_source = match target {
@@ -737,6 +763,7 @@ fn describe_tables(
         // Numbered when it is published.
         id: ViewId(u32::MAX),
         access_path,
+        item_root,
         children: (0..index.module_count())
             .map(|_| ViewCell::default())
             .collect(),
