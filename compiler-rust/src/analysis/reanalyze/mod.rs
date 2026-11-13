@@ -6,6 +6,7 @@
 //! type-checks it, and print what the OCaml tool prints.
 
 pub mod annotation;
+pub mod arnold;
 pub mod common;
 pub mod dce;
 pub mod dce_solve;
@@ -348,6 +349,7 @@ fn module_name_of_source(source: &str) -> String {
 struct Collected {
     dce: Vec<dce::FileData>,
     exception: Vec<exception::FileResult>,
+    termination: arnold::Stats,
 }
 
 /// One analysis run: its configuration, output and the project it reads.
@@ -471,6 +473,17 @@ impl Run<'_> {
                 exception::process_structure(&tree, &mut self.log, config, &file, structure);
             self.collected.exception.push(result);
         }
+        if config.run.termination
+            && let ToolingTyped::Implementation(structure) = &source.typed.typed
+        {
+            arnold::process_structure(
+                &tree,
+                &mut self.log,
+                config,
+                &mut self.collected.termination,
+                structure,
+            );
+        }
     }
 
     /// `Reanalyze.run_analysis`.
@@ -516,6 +529,9 @@ impl Run<'_> {
         if self.config.run.exception {
             let results = std::mem::take(&mut self.collected.exception);
             exception::run_checks(self.config, self.files, &mut self.log, results);
+        }
+        if self.config.run.termination && self.config.cli.debug {
+            self.collected.termination.report(&mut self.log);
         }
     }
 }
