@@ -6364,9 +6364,6 @@ fn compile_source_to_js_with_options_inner(
         apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
     }
     apply_file_config_warning_options(&mut tctx, &file_config);
-    let mut env = initial_env(&type_ctx);
-
-    // Load Pervasives and extend the initial environment
     let mut pers_env = PersistentEnv::new();
     let (load_path, load_path_display) = shared_load_path_with_display(options);
     type_ctx.set_load_paths_shared(load_path.clone());
@@ -6377,48 +6374,48 @@ fn compile_source_to_js_with_options_inner(
     pers_env.set_jsx_module(options.jsx_module.clone());
     let current_unit_name = options.current_unit_name();
     pers_env.set_compiling_module(current_unit_name.clone());
-    load_pervasives(
-        &mut pers_env,
-        &mut env,
-        &type_ctx,
-        &file_config.open_modules(options),
-        file_config.nopervasives(options),
-        current_unit_name.as_deref(),
-    );
 
     // Store persistent env in the type check context for module resolution
     tctx.set_persistent_env(pers_env);
 
-    let (typed_structure, final_env) =
-        match type_structure(&mut tctx, &env, parser.arena(), &structure) {
-            Ok(result) => result,
-            Err(e) => {
-                // OCaml compiler/ext/misc.ml:337-392: `Color.color_enabled`
-                // starts as `true` and takes the configured `-color` value at
-                // the first `Location.setup_colors` (location.ml:45-47), which
-                // printing a warning triggers. Messages formatted afterwards
-                // only carry style escapes when colors are enabled.
-                tctx.drain_open_slot_uses();
-                let suppress_info_style =
-                    !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
-                emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
-                if let Some(error) = tctx
-                    .persistent_env
-                    .as_ref()
-                    .and_then(|persistent_env| persistent_env.last_error())
-                {
-                    return Err(persistent_env_error_to_anyhow(error, filename));
-                }
-                return Err(type_mod_error_to_anyhow(
-                    e,
-                    &type_ctx,
-                    parser.arena(),
-                    source,
-                    filename,
-                    suppress_info_style,
-                ));
+    let typed = initial_type_env(
+        &mut tctx,
+        &file_config.open_modules(options),
+        file_config.nopervasives(options),
+        current_unit_name.as_deref(),
+    )
+    .and_then(|env| {
+        type_structure(&mut tctx, &env, parser.arena(), &structure).map(|typed| (typed, env))
+    });
+    let ((typed_structure, final_env), env) = match typed {
+        Ok(result) => result,
+        Err(e) => {
+            // OCaml compiler/ext/misc.ml:337-392: `Color.color_enabled`
+            // starts as `true` and takes the configured `-color` value at
+            // the first `Location.setup_colors` (location.ml:45-47), which
+            // printing a warning triggers. Messages formatted afterwards
+            // only carry style escapes when colors are enabled.
+            tctx.drain_open_slot_uses();
+            let suppress_info_style =
+                !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
+            emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+            if let Some(error) = tctx
+                .persistent_env
+                .as_ref()
+                .and_then(|persistent_env| persistent_env.last_error())
+            {
+                return Err(persistent_env_error_to_anyhow(error, filename));
             }
-        };
+            return Err(type_mod_error_to_anyhow(
+                e,
+                &type_ctx,
+                parser.arena(),
+                source,
+                filename,
+                suppress_info_style,
+            ));
+        }
+    };
     if let Some(error) = tctx
         .persistent_env
         .as_ref()
@@ -7616,9 +7613,6 @@ pub fn typecheck_interface_source(
         apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
     }
     apply_file_config_warning_options(&mut tctx, &file_config);
-    let mut env = initial_env(&type_ctx);
-
-    // Load Pervasives and extend the initial environment
     let mut pers_env = PersistentEnv::new();
     let (load_path, load_path_display) = shared_load_path_with_display(options);
     type_ctx.set_load_paths_shared(load_path.clone());
@@ -7629,19 +7623,21 @@ pub fn typecheck_interface_source(
     pers_env.set_jsx_module(options.jsx_module.clone());
     let current_unit_name = options.current_unit_name();
     pers_env.set_compiling_module(current_unit_name.clone());
-    load_pervasives(
-        &mut pers_env,
-        &mut env,
-        &type_ctx,
-        &file_config.open_modules(options),
-        file_config.nopervasives(options),
-        current_unit_name.as_deref(),
-    );
 
     tctx.set_persistent_env(pers_env);
 
-    let typed_signature = match transl_signature(&mut tctx, &env, parser.arena(), &signature) {
-        Ok(typed_signature) => typed_signature,
+    let typed = initial_type_env(
+        &mut tctx,
+        &file_config.open_modules(options),
+        file_config.nopervasives(options),
+        current_unit_name.as_deref(),
+    )
+    .and_then(|env| {
+        transl_signature(&mut tctx, &env, parser.arena(), &signature)
+            .map(|typed_signature| (typed_signature, env))
+    });
+    let (typed_signature, env) = match typed {
+        Ok(typed) => typed,
         Err(e) => {
             // See the implementation path above (compiler/ext/misc.ml:337-392).
             tctx.drain_open_slot_uses();
@@ -7929,98 +7925,57 @@ fn normalize_lexical_path(path: PathBuf) -> PathBuf {
     }
 }
 
-/// Load the Pervasives and Stdlib modules into the initial environment.
+/// Build the initial environment of a compile: the predefined types, the
+/// implicit Pervasives and Stdlib opens and the explicit `-open` modules.
 ///
-/// This is equivalent to OCaml's `res_compmisc.ml:initial_env()` which loads
-/// Pervasives.cmi and Stdlib.cmi and opens them into the environment.
+/// This is OCaml's `Res_compmisc.initial_env` (compiler/core/res_compmisc.ml:48-66).
+/// It reads modules through `tctx`'s persistent environment, which must be set.
 ///
 /// When `nopervasives` is true (matching OCaml's `-nopervasives` flag), the
 /// implicit Pervasives and Stdlib opens are skipped. This is used by
 /// `@rescript/runtime` modules which bootstrap Pervasives themselves.
 ///
-/// When `compiling_module` is `Some(name)`, any explicit `-open` that matches
-/// that module name is skipped to prevent circular self-loading (matching
-/// OCaml's `res_compmisc.ml:initial_env` which filters `modulename` from
-/// `open_modules`).
-pub fn load_pervasives(
-    pers_env: &mut PersistentEnv,
-    env: &mut Env,
-    ctx: &TypeContext,
+/// The `-open` modules are opened in argument order. When `compiling_module`
+/// is `Some(name)`, an `-open` of that module is skipped to prevent circular
+/// self-loading (OCaml filters `modulename` from `open_modules`). A module
+/// that cannot be found stops the compile with an error located at "command
+/// line", as in OCaml.
+pub fn initial_type_env(
+    tctx: &mut TypeCheckContext<'_>,
     open_modules: &[String],
     nopervasives: bool,
     compiling_module: Option<&str>,
-) {
-    if !nopervasives {
-        // Try to load and open Pervasives
-        if pers_env.open_module(
-            "Pervasives",
-            crate::types::Path::pident(crate::ident::Ident::create_persistent("Pervasives")),
-            env,
-            ctx,
-            None,
-        ) {
-            env.mark_implicit_open_root("Pervasives");
-            // OCaml `Res_compmisc.initial_env` opens implicit modules through
-            // `type_open` (compiler/core/res_compmisc.ml:48-63). In in-process
-            // and standalone builds alike, that reaches Env.open_signature at
-            // compiler/ml/env.ml:1874-1877, which adds opened components but
-            // not a root `Pervasives` module binding. Keep the raw signature
-            // registered for ps_comps-style descriptor lookup without changing
-            // source module lookup shape.
-            register_opened_raw_sig(pers_env, ctx, "Pervasives");
-        }
-
-        // Try to load and open Stdlib
-        if pers_env.open_module(
-            "Stdlib",
-            crate::types::Path::pident(crate::ident::Ident::create_persistent("Stdlib")),
-            env,
-            ctx,
-            None,
-        ) {
-            env.mark_implicit_open_root("Stdlib");
-            // Same implicit-open behavior as above; keep the opened bindings,
-            // but let explicit module lookup use the persistent registry.
-            register_opened_raw_sig(pers_env, ctx, "Stdlib");
-        }
-    }
-
-    // Apply explicit `-open` modules in argument order, skipping self-opens.
-    for module_name in open_modules {
-        if let Some(compiling) = compiling_module {
-            if module_name == compiling {
-                continue;
+) -> crate::types::typemod::TypeModResult<Env> {
+    let ctx = tctx.type_ctx;
+    let mut env = initial_env(ctx);
+    if !nopervasives && let Some(pers_env) = tctx.persistent_env.as_mut() {
+        for name in ["Pervasives", "Stdlib"] {
+            if pers_env.open_module(
+                name,
+                crate::types::Path::pident(crate::ident::Ident::create_persistent(name)),
+                &mut env,
+                ctx,
+                None,
+            ) {
+                env.mark_implicit_open_root(name);
+                // OCaml `Res_compmisc.initial_env` opens implicit modules
+                // through `type_open` (compiler/core/res_compmisc.ml:48-63). In
+                // in-process and standalone builds alike, that reaches
+                // Env.open_signature at compiler/ml/env.ml:1874-1877, which
+                // adds opened components but not a root module binding. Keep
+                // the raw signature registered for ps_comps-style descriptor
+                // lookup without changing source module lookup shape.
+                pers_env.register_opened_raw_sig(ctx, name);
             }
         }
-        if pers_env.open_module(
-            module_name,
-            crate::types::Path::pident(crate::ident::Ident::create_persistent(module_name.as_str())),
-            env,
-            ctx,
-            None,
-        ) {
-            // OCaml compiler/core/res_compmisc.ml:42-66 applies command-line
-            // `-open` modules through Typemod.type_open_ (typemod.ml:83-96),
-            // which calls Env.open_signature (env.ml:1874-1877). That exposes
-            // opened components but does not install a root module binding, so
-            // later Env.normalize_path can still reach the persistent-root
-            // force path through env.ml:903-914.
-            register_opened_raw_sig(pers_env, ctx, module_name);
+    }
+    for module_name in open_modules {
+        if compiling_module == Some(module_name.as_str()) {
+            continue;
         }
+        crate::types::typemod::type_command_line_open(tctx, &mut env, module_name)?;
     }
-}
-
-/// Keep an opened module's raw signature registered for ps_comps-style
-/// descriptor lookup (disk mode only).
-fn register_opened_raw_sig(pers_env: &mut PersistentEnv, ctx: &TypeContext, name: &str) {
-    if pers_env.is_in_process_mode() {
-        return;
-    }
-    if let Some(md) = pers_env.get_module_declaration(name, ctx) {
-        if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-            ctx.register_raw_module_sig(name, sig.clone());
-        }
-    }
+    Ok(env)
 }
 
 use crate::types::env::Env;
@@ -10160,7 +10115,8 @@ fn fresh_type_context() -> TypeContext {
 /// The type-checking context and initial environment an in-process
 /// implementation or interface is typed in: the registry's units are the persistent
 /// environment, Pervasives (and `-open`s) opened as `Res_compmisc.initial_env`
-/// does (res_compmisc.ml:56-62).
+/// does (res_compmisc.ml:56-62). The environment is an error when an `-open`
+/// module cannot be found; report it like a type error of the unit.
 fn in_process_type_check_context<'a>(
     type_ctx: &'a TypeContext,
     arena: &'a crate::parse_arena::ParseArena,
@@ -10169,7 +10125,10 @@ fn in_process_type_check_context<'a>(
     module_name: &str,
     file_config: &FileConfigOverrides,
     frontend_warning_specs: &[ppx::WarningAttributeSpec],
-) -> (TypeCheckContext<'a>, Env) {
+) -> (
+    TypeCheckContext<'a>,
+    crate::types::typemod::TypeModResult<Env>,
+) {
     let effective_options = file_config.apply(options);
     let options = &*effective_options;
     let mut tctx = TypeCheckContext::new(type_ctx, arena);
@@ -10182,8 +10141,6 @@ fn in_process_type_check_context<'a>(
         apply_leading_warning_attribute_options(&mut tctx, frontend_warning_specs);
     }
     apply_file_config_warning_options(&mut tctx, file_config);
-    let mut env = initial_env(type_ctx);
-
     let mut pers_env = PersistentEnv::from_registry(registry);
     pers_env.set_visible_package_roots(options.visible_package_roots.clone());
     let (load_path, load_path_display) = shared_load_path_with_display(options);
@@ -10195,15 +10152,13 @@ fn in_process_type_check_context<'a>(
     pers_env.set_jsx_module(options.jsx_module.clone());
     pers_env.set_nopervasives(options.nopervasives);
     pers_env.set_compiling_module(Some(module_name.to_string()));
-    load_pervasives(
-        &mut pers_env,
-        &mut env,
-        type_ctx,
+    tctx.set_persistent_env(pers_env);
+    let env = initial_type_env(
+        &mut tctx,
         &file_config.open_modules(options),
         file_config.nopervasives(options),
         Some(module_name),
     );
-    tctx.set_persistent_env(pers_env);
     (tctx, env)
 }
 
@@ -10256,7 +10211,7 @@ pub fn typecheck_structure_for_tooling(
             &file_config,
             &frontend_warning_specs,
         );
-        let typed = match type_structure(&mut tctx, &env, arena, structure) {
+        let typed = match env.and_then(|env| type_structure(&mut tctx, &env, arena, structure)) {
             Ok((typed_structure, _final_env)) => ToolingTyped::Implementation(typed_structure),
             Err(e) => {
                 let source = read_in_process_source(filename);
@@ -10307,7 +10262,7 @@ pub fn typecheck_signature_for_tooling(
             &file_config,
             &frontend_warning_specs,
         );
-        let typed = match transl_signature(&mut tctx, &env, arena, signature) {
+        let typed = match env.and_then(|env| transl_signature(&mut tctx, &env, arena, signature)) {
             Ok(typed_signature) => ToolingTyped::Interface(typed_signature),
             Err(e) => {
                 let source = read_in_process_source(filename);
@@ -10463,9 +10418,11 @@ fn compile_until_js(
 
     let typed = crate::timing::measure(crate::timing::Phase::Typecheck, || {
         let _phase = info_span!("compiler.type_structure").entered();
-        type_structure(&mut tctx, &env, arena, structure)
+        env.and_then(|env| {
+            type_structure(&mut tctx, &env, arena, structure).map(|typed| (typed, env))
+        })
     });
-    let (typed_structure, final_env) = match typed {
+    let ((typed_structure, final_env), env) = match typed {
         Ok(result) => result,
         Err(e) => {
             // As in the file compile: the warnings reported so far precede
@@ -11562,9 +11519,12 @@ pub fn typecheck_preprocessed_signature_in_process(
 
     let typed = crate::timing::measure(crate::timing::Phase::Typecheck, || {
         let _phase = info_span!("compiler.type_signature").entered();
-        transl_signature(&mut tctx, &env, arena, signature)
+        env.and_then(|env| {
+            transl_signature(&mut tctx, &env, arena, signature)
+                .map(|typed_signature| (typed_signature, env))
+        })
     });
-    let typed_signature = match typed {
+    let (typed_signature, env) = match typed {
         Ok(typed_signature) => typed_signature,
         Err(e) => {
             // As in the file compile: the warnings reported so far precede

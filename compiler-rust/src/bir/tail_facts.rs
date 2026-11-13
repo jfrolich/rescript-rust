@@ -21,7 +21,30 @@ pub(super) struct Candidate {
     next: u32,
 }
 
+/// Dense L-only loop summary: jumps visible to the nearest enclosing loop,
+/// jumps under a switch, and the label requirement owned by this loop.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct LoopFacts(pub(super) u8);
+impl LoopFacts {
+    pub(super) const JUMP: u8 = 1;
+    pub(super) const SWITCH_JUMP: u8 = 2;
+    pub(super) const NEEDS_LABEL: u8 = 4;
+    pub(super) const BODY_JUMP: u8 = 8;
+}
+
 impl Bir {
+    /// O(1): read the construction-time label requirement; never walk a body.
+    pub fn loop_needs_label(&self, node: NodeId) -> bool {
+        self.loop_facts.get(node.index()).is_some_and(|f| f.0 & LoopFacts::NEEDS_LABEL != 0)
+    }
+
+    /// O(1), one dense fact read: inherited switch context also labels direct
+    /// body jumps (compiler/core/lam_compile_context.ml:88 preserves depth).
+    pub fn loop_needs_label_in_context(&self, node: NodeId, in_switch: bool) -> bool {
+        let mask = LoopFacts::NEEDS_LABEL | if in_switch { LoopFacts::BODY_JUMP } else { 0 };
+        self.loop_facts.get(node.index()).is_some_and(|f| f.0 & mask != 0)
+    }
+
     /// O(1): read the construction fact of a recursive function.
     pub fn has_self_tail_call(&self, function: NodeId) -> bool {
         self.self_tail.get(function.index()).copied().unwrap_or(false)
@@ -60,10 +83,12 @@ impl Bir {
     /// Cells survive node relocation, so collapsing a wrapper changes no fact.
     pub(super) fn repair_control_facts(&mut self, id: NodeId, changed_child: Option<NodeId>) -> (NodeFlags, bool) {
         if self.js_scope.is_some() {
-            return (self.control_facts::<false>(self.nodes[id.index()], |c| self.child_control_flags(c)), false);
+            return (self.control_facts(self.nodes[id.index()], |c| (self.child_control_flags(c), LoopFacts::default())).0, false);
         }
         self.tail_candidates.resize(self.nodes.len(), Candidates::default());
         self.self_tail.resize(self.nodes.len(), false);
+        self.loop_facts.resize(self.nodes.len(), LoopFacts::default());
+        let old_loop = self.loop_facts[id.index()];
         let old_self = self.self_tail[id.index()];
         // A function's bit is owned by its binding, not by its body repair.
         if self.nodes[id.index()].op() != Op::Fun { self.self_tail[id.index()] = false; }
@@ -90,7 +115,7 @@ impl Bir {
         // the pool permits link writes while the immutable tree is borrowed;
         // it preserves the allocation and does not copy any cells.
         let mut calls = std::mem::take(&mut self.tail_calls);
-        let control = self.control_facts::<true>(node, |child| {
+        let (control, loops) = self.control_facts(node, |child| {
             if self.tail_child(node, child) {
                 let part = self.tail_candidates[child.index()];
                 if part.first != NONE {
@@ -99,8 +124,9 @@ impl Bir {
                     out.last = part.last;
                 }
             }
-            self.child_control_flags(child)
+            (self.child_control_flags(child), self.loop_facts[child.index()])
         });
+        self.loop_facts[id.index()] = loops;
         self.tail_calls = calls;
         self.tail_candidates[id.index()] = out;
         if let View::LetRec { first, values, .. } = node.view(&self.lists) {
@@ -120,7 +146,7 @@ impl Bir {
             changed |= self.tail_child(node, child)
                 || matches!(node.view(&self.lists), View::Fun { body, .. } if body == child);
         }
-        (control, old != out || changed || (old_self && node.op() != Op::Fun))
+        (control, old_loop != loops || old != out || changed || (old_self && node.op() != Op::Fun))
     }
 
     /// O(c) for c tail candidates, never the size or depth of the body. Called
