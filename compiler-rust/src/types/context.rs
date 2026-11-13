@@ -2038,7 +2038,10 @@ impl TypeContext {
         self.poison_store_build_for("read:find_module_alias_in_components");
         let key = QualifiedModuleComponentsCacheKey::new(*parent_path, None);
         self.with_qualified_module_components(&key, |components| {
-            components.lookup_module_alias_target(module_name, true, self)
+            // env.ml:865-882 `find_module ~alias:true` follows `Mty_alias`
+            // only: a module declared with a module type name (`N: S`) is
+            // not an alias of `S`.
+            components.lookup_module_alias_target(module_name, false, self)
         })
         .flatten()
     }
