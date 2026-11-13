@@ -2514,10 +2514,8 @@ impl<'a> Mapper<'a> {
         desc: &current::StructureItemDesc,
     ) -> pt0::StructureItemDesc {
         match desc {
-            // The PPX-facing tree holds the value group the item stands for.
-            current::StructureItemDesc::Pstr_derived(idx) => {
-                let general = crate::binary_ast::derive::general_form(self.arena, *idx);
-                self.map_structure_item_desc(&general)
+            current::StructureItemDesc::Pstr_derived(_) => {
+                unreachable!("{}", crate::binary_ast::derive::NO_SYNTAX)
             }
             current::StructureItemDesc::Pstr_eval(inner) => {
                 let (ref e_idx, ref attrs) = **inner;

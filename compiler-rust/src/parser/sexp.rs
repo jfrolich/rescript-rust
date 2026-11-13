@@ -1677,9 +1677,8 @@ fn structure_inner(arena: &ParseArena, items: &[StructureItem]) -> Sexp {
 
 fn structure_item(arena: &ParseArena, si: &StructureItem) -> Sexp {
     let desc = match &si.pstr_desc {
-        StructureItemDesc::Pstr_derived(idx) => {
-            let general = crate::binary_ast::derive::general_item(arena, si.pstr_loc, *idx);
-            return structure_item(arena, &general);
+        StructureItemDesc::Pstr_derived(_) => {
+            unreachable!("{}", crate::binary_ast::derive::NO_SYNTAX)
         }
         StructureItemDesc::Pstr_eval(inner) => {
             let (ref e, ref attrs) = **inner;

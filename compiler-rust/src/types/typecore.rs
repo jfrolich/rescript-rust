@@ -1442,10 +1442,10 @@ struct DelayedOpenCheck {
 pub struct TypeCheckContext<'a> {
     /// Optional item accounting; absent in ordinary compilation.
     pub derived_census: Option<Box<crate::derived_census::Census>>,
-    /// Whether a derived item is checked from its plan. The reference
-    /// compile of `RESCRIPT_DERIVED_PATH=check` types every item's general
-    /// form instead.
-    pub derived_plans: bool,
+    /// An obligation of a derived item's plan failed: the checking of the
+    /// unit was abandoned, and the unit is to be compiled again with plans
+    /// off, whatever the checker returned.
+    pub derived_fallback: bool,
     /// Type context for allocation.
     pub type_ctx: &'a TypeContext,
     /// Parse arena for location conversion and longident allocation.
@@ -1663,7 +1663,7 @@ impl<'a> TypeCheckContext<'a> {
         type_ctx.register_arena_longident_names(arena);
         TypeCheckContext {
             derived_census: None,
-            derived_plans: true,
+            derived_fallback: false,
             type_ctx,
             arena,
             typed: TypedArena::new(),
@@ -6032,22 +6032,15 @@ fn type_pattern_construct(
     if cstr_desc.cstr_generalized && state.counter_example && mode == PatternMode::InsideOr {
         return Err(TypeCoreError::NeedBacktrack);
     }
-    mark_constructor(
-        tctx.type_ctx,
+    // typecore.ml:1392-1393.
+    note_constructor_use(
+        tctx,
         env,
+        loc,
         crate::types::usage::ConstructorUsage::Pattern,
         &lid_name,
         &cstr_desc,
-    );
-    // typecore.ml:1393: `Builtin_attributes.check_deprecated loc
-    // constr.cstr_attributes constr.cstr_name`.
-    record_deprecated_used(tctx, loc, &cstr_desc.cstr_attributes, None)?;
-    if let Some(warning) =
-        deprecated_warning_from_attrs(&cstr_desc.cstr_name, &cstr_desc.cstr_attributes)
-            .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
-    {
-        tctx.report_warning(loc, warning);
-    }
+    )?;
     if !allow_existentials && !cstr_desc.cstr_existentials.is_empty() {
         return Err(TypeCoreError::UnexpectedExistential { loc });
     }
@@ -8104,6 +8097,32 @@ pub(crate) fn note_value_ident_use(
         Some(deprecated_context),
     )?;
     if let Some(warning) = deprecated_warning_for_value(path, desc)
+        .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
+    {
+        tctx.report_warning(loc, warning);
+    }
+    Ok(())
+}
+
+/// What the use of a chosen constructor records, in an expression
+/// (typecore.ml:4228-4229) or a pattern (typecore.ml:1392-1393):
+/// `Env.mark_constructor usage env name constr`, then
+/// `Builtin_attributes.check_deprecated loc constr.cstr_attributes
+/// constr.cstr_name`. Shared with the discharge of a derived item's
+/// constructor obligation.
+/// Cost: O(1) plus a scan of the constructor's attributes.
+#[inline(always)]
+pub(crate) fn note_constructor_use(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    usage: crate::types::usage::ConstructorUsage,
+    name: &str,
+    desc: &crate::types::decl::ConstructorDescription,
+) -> TypeCoreResult<()> {
+    mark_constructor(tctx.type_ctx, env, usage, name, desc);
+    record_deprecated_used(tctx, loc, &desc.cstr_attributes, None)?;
+    if let Some(warning) = deprecated_warning_from_attrs(&desc.cstr_name, &desc.cstr_attributes)
         .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
     {
         tctx.report_warning(loc, warning);
@@ -11125,8 +11144,14 @@ fn collect_module_expr_ident_heads(
                     | StructureItemDesc::Tstr_modtype(_)
                     | StructureItemDesc::Tstr_open(_)
                     | StructureItemDesc::Tstr_attribute(_) => {}
-                    StructureItemDesc::Tstr_derived(_) => {
-                        unreachable!("{}", crate::types::derived::TOP_LEVEL_ONLY)
+                    // The identifiers of a derived item are the values its
+                    // obligations resolved.
+                    StructureItemDesc::Tstr_derived(idx) => {
+                        for bound in ta.derived.bound(*idx) {
+                            for path in ta.derived.values_of(&bound) {
+                                path.for_each_head(&mut |id| ids.push(*id));
+                            }
+                        }
                     }
                 }
             }
@@ -12319,13 +12344,13 @@ fn collect_lident_idents_in_module_expr(
                             );
                         }
                     }
+                    // The identifiers of a derived item are the names of its
+                    // value obligations.
                     SID::Pstr_derived(idx) => {
-                        for binding in arena.vb_list(arena.plans().item(*idx).general).iter() {
-                            collect_lident_idents_in_expression(
-                                arena,
-                                arena.get_expanded_expr(binding.pvb_expr),
-                                out,
-                            );
+                        for name in crate::binary_ast::derive::value_names(arena, *idx) {
+                            if let Longident::Lident(id) = arena.get_longident(name) {
+                                out.push(arena.get_string(*id).to_string());
+                            }
                         }
                     }
                     SID::Pstr_module(binding) => {
@@ -14415,22 +14440,16 @@ fn type_construct(
     // env.ml:1197-1206), then typecore.ml:4228: `Env.mark_constructor
     // Env.Positive env (Longident.last lid.txt) constr`.
     mark_type_path_of(tctx.type_ctx, env, cstr_desc.cstr_res);
-    mark_constructor(
-        tctx.type_ctx,
+    // typecore.ml:4228-4229.
+    let arena = tctx.arena;
+    note_constructor_use(
+        tctx,
         env,
+        loc,
         crate::types::usage::ConstructorUsage::Positive,
-        tctx.longident_last_name_str(&longident),
+        arena.get_string(longident.last_idx()),
         &cstr_desc,
-    );
-    // typecore.ml:4229: `Builtin_attributes.check_deprecated loc
-    // constr.cstr_attributes constr.cstr_name`.
-    record_deprecated_used(tctx, loc, &cstr_desc.cstr_attributes, None)?;
-    if let Some(warning) =
-        deprecated_warning_from_attrs(&cstr_desc.cstr_name, &cstr_desc.cstr_attributes)
-            .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
-    {
-        tctx.report_warning(loc, warning);
-    }
+    )?;
     let sargs = normalize_constructor_expr_args(tctx.arena, cstr_desc.cstr_arity, sargs);
     if sargs.len() != cstr_desc.cstr_arity as usize {
         return Err(TypeCoreError::ConstructorArityMismatch {
@@ -14795,7 +14814,7 @@ fn fast_exact_unqualified_opath_record_label(
 /// default, and finding the types a name is ambiguous between compares every
 /// candidate in scope with the ones kept so far, so callers only look for
 /// them when this holds.
-fn ambiguous_name_warning_is_active(tctx: &TypeCheckContext<'_>) -> bool {
+pub(crate) fn ambiguous_name_warning_is_active(tctx: &TypeCheckContext<'_>) -> bool {
     tctx.warning_config.is_active(&Warning::AmbiguousName {
         names: Vec::new(),
         types: Vec::new(),
@@ -16163,7 +16182,7 @@ fn wrong_record_field_name_error(
 }
 
 /// Create a ConstructorDescription for the `Some` constructor.
-fn make_some_constructor(ctx: &TypeContext) -> crate::types::ConstructorDescription {
+pub(crate) fn make_some_constructor(ctx: &TypeContext) -> crate::types::ConstructorDescription {
     let (inner_ty, option_ty) = ctx.predef_option_scheme();
     crate::types::ConstructorDescription {
         cstr_name: "Some".to_string(),
@@ -16184,7 +16203,7 @@ fn make_some_constructor(ctx: &TypeContext) -> crate::types::ConstructorDescript
 }
 
 /// Create a ConstructorDescription for the `None` constructor.
-fn make_none_constructor(ctx: &TypeContext) -> crate::types::ConstructorDescription {
+pub(crate) fn make_none_constructor(ctx: &TypeContext) -> crate::types::ConstructorDescription {
     let (_, option_ty) = ctx.predef_option_scheme();
     crate::types::ConstructorDescription {
         cstr_name: "None".to_string(),
@@ -16405,8 +16424,6 @@ fn type_field(
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
     let resolved_lid = tctx.resolve_lid(field_lid.txt).clone();
-    let field_name = tctx.longident_last_name(&resolved_lid);
-
     // Match OCaml type_label_access: type record first, then disambiguate.
     let typed_record = type_expect_with_recarg(
         tctx,
@@ -16417,9 +16434,52 @@ fn type_field(
         RecArg::Allowed,
     )?;
     let ty_exp = typed_record.exp_type;
+    let (label_desc, field_ty, ty_res) =
+        label_access(tctx, env, ty_exp, &resolved_lid, field_lid.loc)?;
+
+    // OCaml compiler/ml/typecore.ml:2993-3005 types `Pexp_field` by
+    // `type_label_access`, `instance_label`, and `unify_exp`, then returns
+    // `ty_arg` without recursively forcing paths inside the field argument type.
+    unify_expression_types(
+        tctx,
+        proper_exp_loc(&tctx.typed, &typed_record),
+        ty_exp,
+        ty_res,
+        None,
+    )?;
+    Ok({
+        let typed_node = Expression::new(
+            ExpressionDesc::Texp_field(
+                tctx.push_expr(typed_record),
+                *field_lid,
+                std::sync::Arc::new(label_desc),
+            ),
+            loc,
+            field_ty,
+            tctx.type_ctx.store_typed_env(env),
+        );
+        tctx.typed
+            .with_exp_attributes(typed_node, attributes.to_vec().into())
+    })
+}
+
+/// typecore.ml `type_label_access` after the record is typed: the label
+/// `resolved_lid` names in a record of type `ty_exp`, with an instance of
+/// its argument and result types. Shared by the typing of a field access
+/// and the discharge of a derived item's label obligation.
+/// Cost: one label lookup (by the record's type when it is known, else by
+/// name in scope) and one instance of the label.
+pub(crate) fn label_access(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    ty_exp: TypeExprRef,
+    resolved_lid: &Longident,
+    lid_loc: LocIdx,
+) -> TypeCoreResult<(crate::types::LabelDescription, TypeExprRef, TypeExprRef)> {
+    let field_name = tctx.longident_last_name(resolved_lid);
     // typecore.ml `type_label_access`: `someDict.name` points to `Dict.get`.
     if expands_to_dict(tctx.type_ctx, env, ty_exp) {
-        return Err(TypeCoreError::FieldAccessOnDictType { loc: field_lid.loc });
+        return Err(TypeCoreError::FieldAccessOnDictType { loc: lid_loc });
     }
     // OCaml typecore.ml:3648-3669 computes `opath` with
     // `extract_concrete_typedecl`, but only keeps it for concrete records.
@@ -16432,8 +16492,8 @@ fn type_field(
 
     if let Some(err) = label_expected_record_ty.and_then(|expected_record_ty| {
         qualified_label_name_type_mismatch(
-            field_lid.loc,
-            &resolved_lid,
+            lid_loc,
+            resolved_lid,
             tctx.arena,
             env,
             &mut tctx.persistent_env,
@@ -16447,31 +16507,31 @@ fn type_field(
     // Disambiguate label: use the record expression's type to find the right label
     let env_label = if let Some(label) = lookup_label_by_lid(
         tctx,
-        &resolved_lid,
-        Some(field_lid.loc),
+        resolved_lid,
+        Some(lid_loc),
         env,
         label_expected_record_ty,
         None,
     ) {
         Some(label)
-    } else if matches!(resolved_lid, Longident::Ldot(..)) {
+    } else if matches!(*resolved_lid, Longident::Ldot(..)) {
         // OCaml `find_all_labels` on a qualified label only reads that module's
         // labels, and `Name_choice.lookup_from_type` (typecore.ml:852-891) only
         // matches unqualified names, so a miss is `Unbound_label (lid, Some ty)`.
-        if let Some(err) = unbound_module_prefix_error(tctx, env, field_lid.loc, &resolved_lid) {
+        if let Some(err) = unbound_module_prefix_error(tctx, env, lid_loc, resolved_lid) {
             return Err(err);
         }
         let ty_exp_repr = tctx.type_ctx.repr(ty_exp);
         return Err(TypeCoreError::UnboundRecordField {
-            loc: field_lid.loc,
-            field_name: tctx.longident_to_string(&resolved_lid),
+            loc: lid_loc,
+            field_name: tctx.longident_to_string(resolved_lid),
             from_type: Some(ty_exp_repr),
             alternatives: unbound_label_alternatives(
                 tctx.arena,
                 env,
                 &mut tctx.persistent_env,
                 tctx.type_ctx,
-                &resolved_lid,
+                resolved_lid,
             ),
         });
     } else {
@@ -16484,13 +16544,13 @@ fn type_field(
         )
     };
     if label_expected_record_ty.is_none()
-        && matches!(resolved_lid, Longident::Lident(_))
+        && matches!(*resolved_lid, Longident::Lident(_))
         && let Some(label) = env_label.as_ref()
     {
-        warn_ambiguous_label_access(tctx, env, field_lid.loc, &field_name, label);
+        warn_ambiguous_label_access(tctx, env, lid_loc, &field_name, label);
     }
 
-    let (label_desc, field_ty, ty_res) = if let Some(env_label) = env_label {
+    Ok(if let Some(env_label) = env_label {
         let (_poly_vars, ty_arg, ty_res) =
             crate::types::ctype::instance_label(tctx.type_ctx, false, &env_label);
         let module_access_path = {
@@ -16530,7 +16590,7 @@ fn type_field(
         if let Some(err) = wrong_record_field_name_error(
             tctx,
             env,
-            field_lid.loc,
+            lid_loc,
             ty_exp,
             &field_name,
             "This expression has",
@@ -16547,42 +16607,17 @@ fn type_field(
         )
         .then_some(ty_exp_repr);
         return Err(TypeCoreError::UnboundRecordField {
-            loc: field_lid.loc,
-            field_name: tctx.longident_to_string(&resolved_lid),
+            loc: lid_loc,
+            field_name: tctx.longident_to_string(resolved_lid),
             from_type,
             alternatives: unbound_label_alternatives(
                 tctx.arena,
                 env,
                 &mut tctx.persistent_env,
                 tctx.type_ctx,
-                &resolved_lid,
+                resolved_lid,
             ),
         });
-    };
-
-    // OCaml compiler/ml/typecore.ml:2993-3005 types `Pexp_field` by
-    // `type_label_access`, `instance_label`, and `unify_exp`, then returns
-    // `ty_arg` without recursively forcing paths inside the field argument type.
-    unify_expression_types(
-        tctx,
-        proper_exp_loc(&tctx.typed, &typed_record),
-        ty_exp,
-        ty_res,
-        None,
-    )?;
-    Ok({
-        let typed_node = Expression::new(
-            ExpressionDesc::Texp_field(
-                tctx.push_expr(typed_record),
-                *field_lid,
-                std::sync::Arc::new(label_desc),
-            ),
-            loc,
-            field_ty,
-            tctx.type_ctx.store_typed_env(env),
-        );
-        tctx.typed
-            .with_exp_attributes(typed_node, attributes.to_vec().into())
     })
 }
 
@@ -20107,9 +20142,11 @@ fn typed_structure_item_uses_ident(ta: &TypedArena, item: &StructureItem, target
         | StructureItemDesc::Tstr_exception(_)
         | StructureItemDesc::Tstr_open(_)
         | StructureItemDesc::Tstr_attribute(_) => false,
-        StructureItemDesc::Tstr_derived(_) => {
-            unreachable!("{}", crate::types::derived::TOP_LEVEL_ONLY)
-        }
+        StructureItemDesc::Tstr_derived(idx) => ta.derived.bound(*idx).any(|bound| {
+            ta.derived.values_of(&bound).any(|path| {
+                matches!(path.view(), crate::types::path::PathView::Pident(id) if id.same(target))
+            })
+        }),
     }
 }
 
@@ -20521,8 +20558,24 @@ fn rec_structure_item(
         | crate::types::typedtree::StructureItemDesc::Tstr_attribute(_) => {
             (RecEnv::default(), RecUse::default())
         }
-        crate::types::typedtree::StructureItemDesc::Tstr_derived(_) => {
-            unreachable!("{}", crate::types::derived::TOP_LEVEL_ONLY)
+        // Each binding of a derived item is a function whose body uses the
+        // values its obligations resolved: a non-recursive group of
+        // `Texp_function` bindings (`rec_value_bindings`).
+        crate::types::typedtree::StructureItemDesc::Tstr_derived(idx) => {
+            let mut item_env = RecEnv::default();
+            let mut item_use = RecUse::default();
+            for bound in ta.derived.bound(*idx) {
+                let use_ = rec_use_delay(
+                    ta.derived
+                        .values_of(&bound)
+                        .fold(RecUse::default(), |use_, path| {
+                            rec_use_join(use_, rec_path(env, &path))
+                        }),
+                );
+                item_env.insert(bound.ident, use_.clone());
+                item_use = rec_use_join(item_use, use_);
+            }
+            (item_env, item_use)
         }
     }
 }
@@ -23839,7 +23892,7 @@ fn compare_type_paths_for_disambiguation_impl(
     same
 }
 
-fn label_result_path(
+pub(crate) fn label_result_path(
     ctx: &crate::types::context::TypeContext,
     label: &crate::types::LabelDescription,
 ) -> Option<Path> {

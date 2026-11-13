@@ -593,8 +593,10 @@ pub struct ParseArena {
     /// Whether the builtin spice mapper stands in for a configured external
     /// spice derive (see `binary_ast::derive`).
     builtin_spice_disabled: bool,
-    /// The derive seam plans no item (`RESCRIPT_DERIVED_PATH=general`).
-    derived_plans_disabled: bool,
+    /// Why the derive seam plans no item of this tree, or `None` when it
+    /// plans. Only a tree that is compiled in the same process is planned:
+    /// one that is stored, printed or handed to another program holds syntax.
+    derived_plans_off: Option<crate::binary_ast::derive::GeneralReason>,
     /// `Experimental_features.is_enabled LetUnwrap` for the builtin PPX run on
     /// this arena, which decides the error a `let?` binding raises
     /// (bs_builtin_ppx.ml:273, 366, 565). Set by the rewrite entry points.
@@ -1098,7 +1100,7 @@ impl Default for ParseArena {
             value_constraint_varify_errors: HashMap::new(),
             ppx_deferred_error: None,
             builtin_spice_disabled: false,
-            derived_plans_disabled: false,
+            derived_plans_off: Some(crate::binary_ast::derive::GeneralReason::Switch),
             experimental_let_unwrap: false,
             used_attributes: std::sync::Mutex::new(HashSet::new()),
             has_gentype_annotations: false,
@@ -3413,16 +3415,17 @@ impl ParseArena {
         self.builtin_spice_disabled = !enabled;
     }
 
-    /// Let the derive seam plan items, or keep every item on the general
-    /// path.
-    pub fn set_derived_plans(&mut self, enabled: bool) {
-        self.derived_plans_disabled = !enabled;
+    /// Let the derive seam plan items (`None`), or keep every item on the
+    /// general path for `off`. Cost: O(1).
+    pub fn set_derived_plans(&mut self, off: Option<crate::binary_ast::derive::GeneralReason>) {
+        self.derived_plans_off = off;
     }
 
-    /// Whether the derive seam plans items. Cost: O(1).
+    /// Why the derive seam plans no item, or `None` when it plans.
+    /// Cost: O(1).
     #[inline]
-    pub fn derived_plans_enabled(&self) -> bool {
-        !self.derived_plans_disabled
+    pub fn derived_plans_off(&self) -> Option<crate::binary_ast::derive::GeneralReason> {
+        self.derived_plans_off
     }
 
     /// Whether built-in Spice deriving is enabled for this parse.

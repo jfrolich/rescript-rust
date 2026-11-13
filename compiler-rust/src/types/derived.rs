@@ -3,9 +3,10 @@
 //! [`discharge`] establishes the obligations of the item's plan in order and
 //! enters its bindings in the environment without typing a body: per value
 //! obligation one lookup, one instance and one unification with the
-//! obligation's skeleton. When an obligation fails it undoes what it did and
-//! reports [`Fallback`]; the caller then types the item's general form, so
-//! every diagnostic comes from the code that types syntax.
+//! obligation's skeleton. When an obligation fails it reports [`Fallback`]:
+//! the checking of the unit is abandoned, and the unit is compiled again
+//! with its derived items as syntax, so every diagnostic comes from the code
+//! that types syntax. Nothing is generated for an item whose plan holds.
 //!
 //! What a discharge records is in two dense tables of the typed arena,
 //! indexed by the plan's binding and obligation handles: the identifier,
@@ -17,8 +18,11 @@
 use smallvec::SmallVec;
 
 use crate::binary_ast::derive::plan::{
-    Binding, BindingIdx, DerivedIdx, ExprLoc, Obligation, ObligationIdx, Plans, SkeletonNode, Span,
+    Binding, BindingIdx, DerivedIdx, ExprLoc, LabelUse, NO_VAR, Obligation, ObligationIdx, Owner,
+    Plans, Predef, Site, SkeletonNode, Span, TypeSource,
 };
+use crate::types::decl::{ConstructorDescription, LabelDescription, ValueDescription};
+use std::sync::Arc;
 use crate::ident::Ident;
 use crate::parse_arena::ParseArena;
 use crate::types::env::Env;
@@ -27,12 +31,6 @@ use crate::types::asttypes::ArgLabel;
 use crate::types::type_expr::{TypeArg, TypeDesc, TypeExprRef};
 use crate::types::typecore::{RecArg, TypeCheckContext};
 use crate::types::typedtree::EnvRef;
-
-/// Why the walks over the structure of a module expression have no case for
-/// a derived item: the seam plans an item only at the top level of a unit
-/// (`derive::Scope`), and everything nested keeps its value group.
-pub(crate) const TOP_LEVEL_ONLY: &str =
-    "a derived item is planned only at the top level of a unit";
 
 /// What a discharged obligation resolved to.
 #[derive(Debug, Clone, Copy)]
@@ -47,6 +45,21 @@ pub enum Resolved {
     },
     /// A type constructor: the path its name resolved to.
     Type(Path),
+    /// A label: its description, in [`DerivedTable::label`].
+    Label(u32),
+    /// A constructor: its description, in [`DerivedTable::constructor`], and
+    /// the instances of its argument (null when it has none) and result that
+    /// were unified with its skeletons.
+    Constructor {
+        /// Slot of the description.
+        desc: u32,
+        /// The instance of the argument's type.
+        arg: TypeExprRef,
+        /// The instance of the result type.
+        res: TypeExprRef,
+    },
+    /// A constant: the typed constant, in [`DerivedTable::constant`].
+    Literal(u32),
 }
 
 impl Resolved {
@@ -55,6 +68,9 @@ impl Resolved {
     pub fn path(self) -> Path {
         match self {
             Resolved::Value { path, .. } | Resolved::Type(path) => path,
+            Resolved::Label(_) | Resolved::Constructor { .. } | Resolved::Literal(_) => {
+                unreachable!("a skeleton names a type obligation, a body's free node a value")
+            }
         }
     }
 
@@ -63,7 +79,12 @@ impl Resolved {
     pub fn instance(self) -> TypeExprRef {
         match self {
             Resolved::Value { instance, .. } => instance,
-            Resolved::Type(_) => unreachable!("a body and a type source name value obligations"),
+            Resolved::Type(_)
+            | Resolved::Label(_)
+            | Resolved::Constructor { .. }
+            | Resolved::Literal(_) => {
+                unreachable!("a body and a type source name value obligations")
+            }
         }
     }
 }
@@ -84,6 +105,8 @@ pub struct Bound {
     pub ty: TypeExprRef,
     /// The environment the item was checked in.
     pub env: EnvRef,
+    /// The obligations of the binding: its slots of the result table.
+    pub obligations: Span,
 }
 
 /// The tables of one typed arena. `reserve` sizes them once per compilation.
@@ -100,6 +123,15 @@ pub struct DerivedTable {
     /// The skeleton variables of the binding being discharged: one buffer
     /// for the whole compilation.
     vars: Vec<Option<TypeExprRef>>,
+    /// The description of each value obligation that resolved to a
+    /// primitive, indexed by obligation.
+    primitives: Vec<Option<Arc<ValueDescription>>>,
+    /// The descriptions `Resolved::Label` names.
+    labels: Vec<Arc<LabelDescription>>,
+    /// The descriptions `Resolved::Constructor` names.
+    constructors: Vec<Arc<ConstructorDescription>>,
+    /// The constants `Resolved::Literal` names.
+    constants: Vec<crate::types::typedtree::Constant>,
 }
 
 impl DerivedTable {
@@ -110,6 +142,7 @@ impl DerivedTable {
     pub fn reserve(&mut self, plans: &Plans) {
         if self.resolved.len() != plans.obligation_count() {
             self.resolved.resize(plans.obligation_count(), None);
+            self.primitives.resize(plans.obligation_count(), None);
         }
         if self.bound.len() != plans.binding_count() {
             self.bound.resize(plans.binding_count(), None);
@@ -153,6 +186,46 @@ impl DerivedTable {
         self.resolved[idx.index()].expect("the obligations of a typed derived item are discharged")
     }
 
+    /// The description of the primitive a value obligation resolved to, or
+    /// `None` for a regular value. Cost: O(1).
+    #[inline]
+    pub fn primitive(&self, idx: ObligationIdx) -> Option<&Arc<ValueDescription>> {
+        self.primitives[idx.index()].as_ref()
+    }
+
+    /// The label a label obligation resolved to. Cost: O(1).
+    #[inline]
+    pub fn label(&self, idx: ObligationIdx) -> &Arc<LabelDescription> {
+        match self.resolved(idx) {
+            Resolved::Label(slot) => &self.labels[slot as usize],
+            _ => unreachable!("a field names a label obligation"),
+        }
+    }
+
+    /// The constructor a constructor obligation resolved to, with the
+    /// instances of its argument and result. Cost: O(1).
+    #[inline]
+    pub fn constructor(
+        &self,
+        idx: ObligationIdx,
+    ) -> (&Arc<ConstructorDescription>, TypeExprRef, TypeExprRef) {
+        match self.resolved(idx) {
+            Resolved::Constructor { desc, arg, res } => {
+                (&self.constructors[desc as usize], arg, res)
+            }
+            _ => unreachable!("a construction or a case names a constructor obligation"),
+        }
+    }
+
+    /// The constant of a literal obligation. Cost: O(1).
+    #[inline]
+    pub fn constant(&self, idx: ObligationIdx) -> &crate::types::typedtree::Constant {
+        match self.resolved(idx) {
+            Resolved::Literal(slot) => &self.constants[slot as usize],
+            _ => unreachable!("a literal node names a literal obligation"),
+        }
+    }
+
     /// Record the slots of a discharged item: its bindings, and their
     /// obligations, which are consecutive. Cost: O(1).
     #[inline]
@@ -171,6 +244,30 @@ impl DerivedTable {
             .map(|bound| bound.expect("the bindings of a typed derived item are entered"))
     }
 
+    /// The paths of the values a binding of a discharged item uses, in typing
+    /// order: what the identifier expressions of its general form resolve
+    /// to. Cost: O(1) to obtain; one slot read per obligation of the binding.
+    pub fn values_of(&self, bound: &Bound) -> impl Iterator<Item = Path> + '_ {
+        self.resolved[bound.obligations.range()]
+            .iter()
+            .filter_map(|resolved| match resolved {
+                Some(Resolved::Value { path, .. }) => Some(*path),
+                Some(
+                    Resolved::Type(_)
+                    | Resolved::Label(_)
+                    | Resolved::Constructor { .. }
+                    | Resolved::Literal(_),
+                ) => None,
+                None => unreachable!("the obligations of a typed derived item are discharged"),
+            })
+    }
+
+    /// The number of items that were discharged, wherever they are nested.
+    #[cfg(test)]
+    pub(crate) fn discharged(&self) -> usize {
+        self.items.iter().filter(|slots| slots.bindings.len > 0).count()
+    }
+
     /// The results of the obligations of a discharged item, in typing order.
     /// Cost: O(1) to obtain; one slot read per obligation yielded.
     pub fn resolved_of(&self, idx: DerivedIdx) -> impl Iterator<Item = Resolved> + '_ {
@@ -180,10 +277,10 @@ impl DerivedTable {
     }
 }
 
-/// The item cannot be established from its plan: the checker types its
-/// general form instead. Nothing the failed discharge did remains: the type
-/// state is restored, and the warnings and deprecated uses it recorded are
-/// dropped.
+/// The item cannot be established from its plan. The type state, the
+/// warnings and the deprecated uses of the failed discharge are left as they
+/// are: the caller abandons the checking of the unit, which is compiled
+/// again with plans off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fallback;
 
@@ -192,6 +289,9 @@ pub struct Fallback;
 pub struct Discharged {
     /// The environment extended with the item's bindings.
     pub env: Env,
+    /// The item's bindings as signature items, in binding order: the value
+    /// descriptions that were entered in `env`.
+    pub sig_items: Vec<crate::types::decl::SignatureItem>,
 }
 
 /// The steps of a discharge, for the tests that prove its cost. The checker
@@ -217,9 +317,11 @@ impl Steps for () {
 /// Discharge the obligations of a derived item and enter its bindings.
 /// Cost: O(obligations + skeleton nodes of the item): per value obligation
 /// one environment lookup, one instance of the value's type and one
-/// unification; per binding one function type and one environment entry. One
-/// snapshot of the type state per item; no allocation per obligation beyond
-/// the type nodes of the instances and skeletons.
+/// unification; per label or constructor obligation one lookup, one instance
+/// and two unifications; per literal one unification; per binding one function type, one environment entry and one
+/// signature item made of the same value description, without a lookup. No
+/// allocation per obligation beyond the type nodes of the instances and
+/// skeletons; one buffer of signature items per item.
 pub fn discharge(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -241,13 +343,10 @@ pub fn discharge_counting(
     let bindings = plans.bindings(item);
     tctx.typed.derived.reserve(plans);
 
-    let warnings = tctx.warnings.len();
-    let deprecated_uses = tctx.type_ctx.deprecated_use_count();
     // `Typecore.type_binding` starts with `Typetexp.reset_type_variables`.
     tctx.reset_type_variables();
     tctx.set_unify_env(env);
     let ctx = tctx.type_ctx;
-    let snapshot = ctx.snapshot_type_state();
     ctx.begin_def();
     let mut vars = std::mem::take(&mut tctx.typed.derived.vars);
     let mut established = Ok(());
@@ -278,13 +377,7 @@ pub fn discharge_counting(
     }
     tctx.typed.derived.vars = vars;
     ctx.end_def();
-    if established.is_err() {
-        ctx.restore_type_state(snapshot);
-        tctx.warnings.truncate(warnings);
-        ctx.truncate_deprecated_uses(deprecated_uses);
-        return Err(Fallback);
-    }
-    drop(snapshot);
+    established?;
 
     // typecore.ml `type_let`: every binding is a function, so its type is
     // generalised in full, and the bound variables enter the environment in
@@ -292,27 +385,31 @@ pub fn discharge_counting(
     let mut new_env = env.clone();
     let env_ref = ctx.store_typed_env(env);
     let val_loc = tctx.intern_ast_loc(arena, arena.none_loc());
+    let mut sig_items = Vec::with_capacity(bindings.len());
     for (i, binding) in bindings.iter().enumerate() {
         let binding_idx = BindingIdx(item.bindings.start + i as u32);
         let ty = tctx.typed.derived.pending[binding_idx.index()];
         crate::types::ctype::generalize(ctx, ty);
         let ident = ctx.create_ident(arena.name(binding.name));
-        new_env.add_value(
-            ident,
-            crate::types::decl::ValueDescription {
-                val_type: ty,
-                val_kind: crate::types::decl::ValueKind::ValReg,
-                val_loc,
-                val_attributes: Default::default(),
-                val_path: None,
-            },
-        );
+        // typemod.ml `type_structure`: the signature holds the value
+        // description the binding has in the environment. It is made once
+        // and entered in both.
+        let description = crate::types::decl::ValueDescription {
+            val_type: ty,
+            val_kind: crate::types::decl::ValueKind::ValReg,
+            val_loc,
+            val_attributes: Default::default(),
+            val_path: None,
+        };
+        new_env.add_value(ident, description.clone());
+        sig_items.push(crate::types::decl::SignatureItem::SigValue(ident, description));
         tctx.typed.derived.set_bound(
             binding_idx,
             Bound {
                 ident,
                 ty,
                 env: env_ref,
+                obligations: binding.obligations,
             },
         );
     }
@@ -324,7 +421,10 @@ pub fn discharge_counting(
         _ => Span { start: 0, len: 0 },
     };
     tctx.typed.derived.set_item(idx, item.bindings, obligations);
-    Ok(Discharged { env: new_env })
+    Ok(Discharged {
+        env: new_env,
+        sig_items,
+    })
 }
 
 /// Discharge the obligations of one binding and give its type.
@@ -341,6 +441,9 @@ fn discharge_binding(
     let ctx = tctx.type_ctx;
     vars.clear();
     vars.resize(binding.vars as usize, None);
+    // The record expression whose labels are being discharged: its labels,
+    // the position of the next one, and how many it has.
+    let mut record_expression: Option<(crate::types::decl::LabelArrayRef, u32, u32)> = None;
     for slot in binding.obligations.range() {
         let obligation = ObligationIdx(slot as u32);
         let resolved = match plans.obligation(obligation) {
@@ -356,10 +459,25 @@ fn discharge_binding(
                 let (path, desc) =
                     crate::types::typecore::lookup_value_ident(tctx, env, longident, name_loc)
                         .map_err(|_| Fallback)?;
-                // A primitive is not a plain value to the backend.
-                if !matches!(desc.val_kind, crate::types::decl::ValueKind::ValReg) {
-                    return Err(Fallback);
-                }
+                // A primitive is applied by the backend from its declared
+                // type; one that reads the syntax of its arguments has no
+                // meaning in a body without syntax.
+                let primitive = match &desc.val_kind {
+                    crate::types::decl::ValueKind::ValReg => false,
+                    crate::types::decl::ValueKind::ValPrim(prim) => {
+                        // An optional parameter of an external is part of
+                        // its FFI specification, not an option.
+                        if crate::raw_lambda::convert::primitive_reads_syntax(prim)
+                            || matches!(
+                                plans.skeleton_from(skeleton).get(1),
+                                Some(SkeletonNode::Optional(_))
+                            )
+                        {
+                            return Err(Fallback);
+                        }
+                        true
+                    }
+                };
                 crate::types::typecore::note_value_ident_use(
                     tctx, env, longident, name_loc, &path, &desc, called,
                 )
@@ -377,12 +495,25 @@ fn discharge_binding(
                 .map_err(|_| Fallback)?;
                 steps.instance();
                 let instance = crate::types::ctype::instance(ctx, desc.val_type);
-                let (expected, _) = instantiate(
-                    ctx,
-                    &tctx.typed.derived,
-                    plans.skeleton_from(skeleton),
-                    vars,
-                );
+                let nodes = plans.skeleton_from(skeleton);
+                // typecore.ml `type_application` reads the parameters off the
+                // function's own type: a value the body applies must be a
+                // function of that many parameters before anything is
+                // unified, or inference would have made the arrow itself.
+                if let SkeletonNode::Arrow { params } = nodes[0] {
+                    let head = crate::types::ctype::expand_head(ctx, env, instance);
+                    let arity = match &*ctx.borrow_desc(ctx.repr(head)) {
+                        TypeDesc::Tarrow { args, .. } => ctx.type_args(*args).len(),
+                        _ => return Err(Fallback),
+                    };
+                    if arity != params as usize {
+                        return Err(Fallback);
+                    }
+                }
+                let (expected, _) = instantiate(ctx, arena, &tctx.typed.derived, nodes, vars);
+                if primitive {
+                    tctx.typed.derived.primitives[obligation.index()] = Some(desc.clone());
+                }
                 // typecore.ml `type_expect` of an identifier: the instance
                 // against the expected type, in this order.
                 steps.unification();
@@ -390,10 +521,226 @@ fn discharge_binding(
                     .map_err(|_| Fallback)?;
                 Resolved::Value { path, instance }
             }
+            Obligation::Label {
+                name,
+                skeleton,
+                usage,
+            } => {
+                let nodes = plans.skeleton_from(skeleton);
+                let (arg, used) = instantiate(ctx, arena, &tctx.typed.derived, nodes, vars);
+                let (record, _) =
+                    instantiate(ctx, arena, &tctx.typed.derived, &nodes[used..], vars);
+                let longident = arena.get_longident(name);
+                steps.lookup();
+                let (label, ty_arg, ty_res) = match usage {
+                    // A field access: the checker's own lookup, by the
+                    // record's type when it is known, else by name.
+                    LabelUse::Access | LabelUse::AccessDummy => {
+                        let loc = match usage {
+                            LabelUse::Access => arena.none_loc(),
+                            _ => arena.dummy_loc(),
+                        };
+                        crate::types::typecore::label_access(tctx, env, record, longident, loc)
+                            .map_err(|_| Fallback)?
+                    }
+                    // A field of the record expression the body makes of the
+                    // declaration being derived. typecore.ml
+                    // `type_label_a_list` chooses the labels from all the
+                    // names of the expression; it chooses these when each
+                    // name's first candidate is the label at the field's
+                    // position of one record, whose every label is written.
+                    // Anything else is left to the general form.
+                    LabelUse::Construct => {
+                        let last = arena.get_string(longident.last_idx());
+                        let label = env.find_label(last).map_err(|_| Fallback)?.clone();
+                        let (family, position) = match record_expression {
+                            Some((family, position, _)) => (family, position),
+                            None => {
+                                let len = ctx.label_family(label.lbl_all).map_or(0, |all| all.len());
+                                record_expression = Some((label.lbl_all, 0, len as u32));
+                                // `Label.disambiguate` marks the type of the
+                                // chosen labels (env.ml:1230-1238), once here.
+                                if let Some(path) =
+                                    crate::types::typecore::label_result_path(ctx, &label)
+                                {
+                                    crate::types::typecore::mark_type_path(ctx, env, &path);
+                                }
+                                (label.lbl_all, 0)
+                            }
+                        };
+                        // typecore.ml `type_label_a_list` rejects the
+                        // construction of a private record.
+                        if label.lbl_all != family
+                            || label.lbl_pos as u32 != position
+                            || label.lbl_private == crate::types::PrivateFlag::Private
+                        {
+                            return Err(Fallback);
+                        }
+                        // With several candidates inference may report the
+                        // choice (warning 41).
+                        if crate::types::typecore::ambiguous_name_warning_is_active(tctx)
+                            && env.find_all_labels(last).len() > 1
+                        {
+                            return Err(Fallback);
+                        }
+                        if let Some((_, position, _)) = &mut record_expression {
+                            *position += 1;
+                        }
+                        steps.instance();
+                        let (_, ty_arg, ty_res) =
+                            crate::types::ctype::instance_label(ctx, true, &label);
+                        (label, ty_arg, ty_res)
+                    }
+                };
+                steps.unification();
+                crate::types::ctype::unify(ctx, &mut tctx.unify_state, record, ty_res)
+                    .map_err(|_| Fallback)?;
+                crate::types::ctype::unify(ctx, &mut tctx.unify_state, ty_arg, arg)
+                    .map_err(|_| Fallback)?;
+                let table = &mut tctx.typed.derived;
+                table.labels.push(Arc::new(label));
+                Resolved::Label(table.labels.len() as u32 - 1)
+            }
+            Obligation::Constructor {
+                name,
+                ty: _,
+                skeleton,
+                of,
+                site,
+                has_arg,
+            } => {
+                let nodes = plans.skeleton_from(skeleton);
+                let (arg, used) = if has_arg {
+                    let (arg, used) = instantiate(ctx, arena, &tctx.typed.derived, nodes, vars);
+                    (Some(arg), used)
+                } else {
+                    (None, 0)
+                };
+                let (result, _) =
+                    instantiate(ctx, arena, &tctx.typed.derived, &nodes[used..], vars);
+                let longident = arena.get_longident(name);
+                let last = arena.get_string(longident.last_idx());
+                let (loc, usage) = match site {
+                    Site::Construct => (
+                        arena.dummy_loc(),
+                        crate::types::usage::ConstructorUsage::Positive,
+                    ),
+                    Site::Pattern => (arena.none_loc(), crate::types::usage::ConstructorUsage::Pattern),
+                    Site::PatternDummy => (
+                        arena.dummy_loc(),
+                        crate::types::usage::ConstructorUsage::Pattern,
+                    ),
+                };
+                steps.lookup();
+                let desc = match of {
+                    // An unqualified name: inference takes the first
+                    // candidate in scope unless the expected type names
+                    // another. The plan holds when that candidate is the
+                    // predefined constructor; the unification below fails
+                    // when the expected type is another.
+                    Owner::Option | Owner::Result => {
+                        let desc = env.find_constructor(last).map_err(|_| Fallback)?;
+                        let predefined = match of {
+                            Owner::Option => crate::types::predef::path_option(),
+                            _ => crate::types::predef::path_result(),
+                        };
+                        let is_predefined = matches!(
+                            &*ctx.borrow_desc(ctx.repr(desc.cstr_res)),
+                            TypeDesc::Tconstr { path, .. } if path.same(&predefined)
+                        );
+                        if !is_predefined {
+                            return Err(Fallback);
+                        }
+                        desc.clone()
+                    }
+                    // A qualified name: the lookup of typecore.ml
+                    // `type_construct`, in the module that qualifies it. That
+                    // it is a constructor of the stated type is the
+                    // unification of its result below.
+                    Owner::Type => {
+                        crate::types::typecore::mark_open_lid_use(
+                            ctx,
+                            env,
+                            arena,
+                            longident,
+                            crate::types::env::OpenLookupKind::Component,
+                            Some(loc),
+                        );
+                        crate::types::typecore::lookup_constructor_in_module(
+                            longident,
+                            arena,
+                            env,
+                            &mut tctx.persistent_env,
+                            ctx,
+                            Some(result),
+                        )
+                        .ok_or(Fallback)?
+                        .1
+                    }
+                };
+                // A plan describes an ordinary constructor of a regular
+                // variant, applied to what it takes; typecore.ml
+                // `type_construct` rejects the construction of a private
+                // one.
+                if desc.cstr_generalized
+                    || desc.cstr_inlined.is_some()
+                    || desc.cstr_arity != i32::from(has_arg)
+                    || !matches!(desc.cstr_kind, crate::types::ConstructorKind::Ordinary(_))
+                    || (site == Site::Construct
+                        && desc.cstr_private == crate::types::PrivateFlag::Private)
+                {
+                    return Err(Fallback);
+                }
+                crate::types::typecore::mark_type_path_of(ctx, env, desc.cstr_res);
+                crate::types::typecore::note_constructor_use(tctx, env, loc, usage, last, &desc)
+                    .map_err(|_| Fallback)?;
+                steps.instance();
+                let (args, res) = crate::types::instance_constructor(ctx, &desc);
+                steps.unification();
+                crate::types::ctype::unify(ctx, &mut tctx.unify_state, res, result)
+                    .map_err(|_| Fallback)?;
+                if let Some(arg) = arg {
+                    crate::types::ctype::unify(ctx, &mut tctx.unify_state, args[0], arg)
+                        .map_err(|_| Fallback)?;
+                }
+                let table = &mut tctx.typed.derived;
+                table.constructors.push(Arc::new(desc));
+                Resolved::Constructor {
+                    desc: table.constructors.len() as u32 - 1,
+                    arg: args.first().copied().unwrap_or_else(TypeExprRef::null),
+                    res,
+                }
+            }
+            Obligation::Literal { expr, skeleton } => {
+                let expr = arena.get_expanded_expr(expr);
+                let crate::parser::ast::ExpressionDesc::Pexp_constant(constant) = &expr.pexp_desc
+                else {
+                    return Err(Fallback);
+                };
+                // typecore.ml `type_expect` of a constant.
+                let constant =
+                    crate::types::typecore::convert_constant(constant, expr.pexp_loc, arena)
+                        .map_err(|_| Fallback)?;
+                let ty = crate::types::typecore::type_constant(ctx, env, &constant);
+                let (expected, _) = instantiate(
+                    ctx,
+                    arena,
+                    &tctx.typed.derived,
+                    plans.skeleton_from(skeleton),
+                    vars,
+                );
+                steps.unification();
+                crate::types::ctype::unify(ctx, &mut tctx.unify_state, ty, expected)
+                    .map_err(|_| Fallback)?;
+                let table = &mut tctx.typed.derived;
+                table.constants.push(constant);
+                Resolved::Literal(table.constants.len() as u32 - 1)
+            }
             Obligation::Type {
                 name,
                 name_loc,
                 arity,
+                var,
             } => {
                 steps.lookup();
                 let (path, decl) = crate::types::typecore::find_type_for_lid(
@@ -415,25 +762,69 @@ fn discharge_binding(
                 if !plain_params {
                     return Err(Fallback);
                 }
+                // An annotation `(e: t)`: the annotated type is `t`.
+                if var != NO_VAR {
+                    let annotated =
+                        *vars[var as usize].get_or_insert_with(|| ctx.new_var(None));
+                    steps.unification();
+                    crate::types::ctype::unify(
+                        ctx,
+                        &mut tctx.unify_state,
+                        annotated,
+                        ctx.new_constr(path, Vec::new()),
+                    )
+                    .map_err(|_| Fallback)?;
+                }
                 Resolved::Type(path)
             }
         };
+        // The labels of a record expression are consecutive, and all of
+        // the record's.
+        if !matches!(resolved, Resolved::Label(_))
+            && let Some((_, position, len)) = record_expression.take()
+            && position != len
+        {
+            return Err(Fallback);
+        }
         tctx.typed.derived.set_resolved(obligation, resolved);
+    }
+    if let Some((_, position, len)) = record_expression
+        && position != len
+    {
+        return Err(Fallback);
     }
 
     // The type source `ResultOf(obligation, applied)`: of the function the
     // obligation resolved, the one parameter that remains after `applied`
     // were supplied, and its result (typecore.ml `type_application`, total
     // application of a partial application's result).
-    let head = tctx.typed.derived.resolved(binding.result_of).instance();
+    let (result_of, applied) = match binding.ty {
+        TypeSource::ResultOf {
+            obligation,
+            applied,
+        } => (obligation, applied),
+        // The type the body's own shape states, its variables unified by
+        // the obligations.
+        TypeSource::Stated(skeleton) => {
+            let (ty, _) = instantiate(
+                ctx,
+                arena,
+                &tctx.typed.derived,
+                plans.skeleton_from(skeleton),
+                vars,
+            );
+            return Ok(ty);
+        }
+    };
+    let head = tctx.typed.derived.resolved(result_of).instance();
     let head = crate::types::ctype::expand_head(ctx, env, head);
     let (param, result) = match &*ctx.borrow_desc(ctx.repr(head)) {
         TypeDesc::Tarrow { args, ret } => {
             let args = ctx.type_args(*args);
-            if args.len() != binding.applied as usize + 1 {
+            if args.len() != applied as usize + 1 {
                 return Err(Fallback);
             }
-            let Some(param) = args.get(binding.applied as usize) else {
+            let Some(param) = args.get(applied as usize) else {
                 return Err(Fallback);
             };
             (param.typ, *ret)
@@ -455,10 +846,22 @@ fn discharge_binding(
 /// allocation.
 fn instantiate(
     ctx: &crate::types::context::TypeContext,
+    arena: &ParseArena,
     table: &DerivedTable,
     nodes: &[SkeletonNode],
     vars: &mut [Option<TypeExprRef>],
 ) -> (TypeExprRef, usize) {
+    // The `count` skeletons after the node, and the nodes they span.
+    let children = |count: usize, vars: &mut [Option<TypeExprRef>]| {
+        let mut used = 1;
+        let mut types: SmallVec<[TypeExprRef; 4]> = SmallVec::new();
+        for _ in 0..count {
+            let (ty, span) = instantiate(ctx, arena, table, &nodes[used..], vars);
+            types.push(ty);
+            used += span;
+        }
+        (types, used)
+    };
     match nodes[0] {
         SkeletonNode::Var(slot) => {
             (*vars[slot as usize].get_or_insert_with(|| ctx.new_var(None)), 1)
@@ -467,11 +870,26 @@ fn instantiate(
             let mut used = 1;
             let mut args: SmallVec<[TypeArg; 4]> = SmallVec::new();
             for _ in 0..params {
-                let (param, span) = instantiate(ctx, table, &nodes[used..], vars);
-                args.push(TypeArg::new(ArgLabel::Nolabel, param));
+                // An optional parameter holds an option of its type
+                // (typecore.ml `type_function`, `type_option`).
+                let label = match nodes[used] {
+                    SkeletonNode::Optional(label) => {
+                        used += 1;
+                        Some(label)
+                    }
+                    _ => None,
+                };
+                let (param, span) = instantiate(ctx, arena, table, &nodes[used..], vars);
                 used += span;
+                args.push(match label {
+                    None => TypeArg::new(ArgLabel::Nolabel, param),
+                    Some(label) => TypeArg::new(
+                        ArgLabel::optional(arena.get_string(label), crate::types::DeclLoc::none()),
+                        ctx.new_predef_constr(crate::types::predef::path_option(), vec![param]),
+                    ),
+                });
             }
-            let (ret, span) = instantiate(ctx, table, &nodes[used..], vars);
+            let (ret, span) = instantiate(ctx, arena, table, &nodes[used..], vars);
             let arrow = ctx.new_type(TypeDesc::Tarrow {
                 args: ctx.new_type_args_from(args),
                 ret,
@@ -479,22 +897,36 @@ fn instantiate(
             (arrow, used + span)
         }
         SkeletonNode::Named { ty, args } => {
-            let mut used = 1;
-            let mut types: SmallVec<[TypeExprRef; 4]> = SmallVec::new();
-            for _ in 0..args {
-                let (arg, span) = instantiate(ctx, table, &nodes[used..], vars);
-                types.push(arg);
-                used += span;
-            }
+            let (types, used) = children(args as usize, vars);
             (ctx.new_constr(table.resolved(ty).path(), types.into_vec()), used)
         }
+        SkeletonNode::Tuple { len } => {
+            let (types, used) = children(len as usize, vars);
+            (ctx.new_type(TypeDesc::Ttuple(ctx.new_type_list(&types))), used)
+        }
+        SkeletonNode::Predef { ty, args } => {
+            let (types, used) = children(args as usize, vars);
+            let ty = match ty {
+                Predef::String => crate::types::ctype::instance(ctx, ctx.predef_string()),
+                Predef::Option => {
+                    ctx.new_predef_constr(crate::types::predef::path_option(), types.into_vec())
+                }
+                Predef::Array => {
+                    ctx.new_predef_constr(crate::types::predef::path_array(), types.into_vec())
+                }
+                Predef::Result => {
+                    ctx.new_predef_constr(crate::types::predef::path_result(), types.into_vec())
+                }
+            };
+            (ty, used)
+        }
+        SkeletonNode::Optional(_) => unreachable!("an optional marker precedes a parameter"),
     }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::binary_ast::derive::Scope;
     use crate::binary_ast::derive::fixtures::{
         CURRIED_LIBRARY, DECLARATIONS, FAILING, derive_source,
     };
@@ -508,7 +940,7 @@ pub(crate) mod tests {
     #[test]
     fn sizes_are_pinned() {
         assert_eq!(std::mem::size_of::<Option<Resolved>>(), 16);
-        assert_eq!(std::mem::size_of::<Option<Bound>>(), 24);
+        assert_eq!(std::mem::size_of::<Option<Bound>>(), 32);
     }
 
     pub(crate) fn type_context() -> TypeContext {
@@ -519,16 +951,35 @@ pub(crate) mod tests {
     }
 
     /// The values a program declares, with their printed types, and how many
-    /// items were discharged; `Err` is the type error.
-    fn check(source: &str, scope: Scope) -> Result<(Vec<(String, String)>, usize), String> {
-        let (parser, structure) = derive_source(source, scope);
+    /// items were discharged; `Err` is the type error. With `plans`, a
+    /// program one of whose plans cannot be used is checked again without,
+    /// as the driver does, and reports no discharged item.
+    fn check(source: &str, plans: bool) -> Result<(Vec<(String, String)>, usize), String> {
+        check_with(derive_source, source, plans)
+    }
+
+    /// [`check`] of a program after the record library, through the whole
+    /// front end.
+    fn check_records(source: &str, plans: bool) -> Result<(Vec<(String, String)>, usize), String> {
+        check_with(crate::binary_ast::derive::fixtures::frontend_source, source, plans)
+    }
+
+    fn check_with(
+        parse: fn(&str, bool) -> (Parser<'static>, Vec<crate::parser::ast::StructureItem>),
+        source: &str,
+        plans: bool,
+    ) -> Result<(Vec<(String, String)>, usize), String> {
+        let (parser, structure) = parse(source, plans);
         let arena = parser.arena();
         let type_ctx = type_context();
         let mut tctx = TypeCheckContext::new(&type_ctx, arena);
         let env = initial_env(&type_ctx);
-        let (typed, _) =
-            crate::types::typemod::type_structure(&mut tctx, &env, arena, &structure)
-                .map_err(|error| without_type_handles(&format!("{error:?}")))?;
+        let typed = crate::types::typemod::type_structure(&mut tctx, &env, arena, &structure);
+        if tctx.derived_fallback {
+            assert!(plans && typed.is_err());
+            return check_with(parse, source, false);
+        }
+        let (typed, _) = typed.map_err(|error| format!("{error:?}"))?;
         let values = typed
             .str_type
             .iter()
@@ -540,54 +991,101 @@ pub(crate) mod tests {
                 _ => None,
             })
             .collect();
-        let discharged = tctx
-            .typed
-            .structure_items(typed.str_items)
-            .iter()
-            .filter(|item| matches!(item.str_desc, crate::types::typedtree::StructureItemDesc::Tstr_derived(_)))
-            .count();
-        Ok((values, discharged))
-    }
-
-    /// A printed error without the numbers of its type handles: a failed
-    /// discharge leaves type nodes behind, so the general form's are later.
-    fn without_type_handles(error: &str) -> String {
-        let mut out = String::new();
-        let mut rest = error;
-        while let Some(at) = rest.find("TypeExprRef(") {
-            let end = at + "TypeExprRef(".len();
-            out.push_str(&rest[..end]);
-            rest = rest[end..].trim_start_matches(|c: char| c.is_ascii_digit());
-        }
-        out + rest
+        Ok((values, tctx.typed.derived.discharged()))
     }
 
     /// A discharged binding has the type inference gives its general form.
     #[test]
     fn a_discharge_records_the_types_of_the_general_form() {
         for source in DECLARATIONS {
-            let (planned, discharged) = check(source, Scope::TopLevel).unwrap();
-            let (general, none) = check(source, Scope::Nested).unwrap();
+            let (planned, discharged) = check(source, true).unwrap();
+            let (general, none) = check(source, false).unwrap();
             assert_eq!(discharged, source.matches("type ").count());
             assert_eq!(none, 0);
             assert_eq!(planned, general, "{source}");
         }
     }
 
-    /// A failed obligation gives the diagnostic of the general form.
+    /// A declaration inside a module expression is discharged like one at
+    /// the top level, and its bindings get the types of the general form.
     #[test]
-    fn a_failed_obligation_reports_as_the_general_form() {
-        for source in FAILING {
-            let planned = check(source, Scope::TopLevel).unwrap_err();
-            let general = check(source, Scope::Nested).unwrap_err();
+    fn a_nested_item_is_discharged() {
+        for (source, items) in crate::binary_ast::derive::fixtures::NESTED {
+            let (planned, discharged) = check(source, true).unwrap();
+            let (general, none) = check(source, false).unwrap();
+            assert_eq!(discharged, items, "{source}");
+            assert_eq!(none, 0);
+            assert!(!planned.is_empty());
             assert_eq!(planned, general, "{source}");
         }
-        // A library of another shape: the obligation fails, the general form
-        // types, and the result is the same.
+    }
+
+    /// The bindings of a record's plan get the types inference gives its
+    /// general form: fields of every kind, constant keys and defaults, a
+    /// record of records, and labels another record declares too. The
+    /// library's `Dict.fromArray`, `Dict.get` and `++` are primitives.
+    #[test]
+    fn a_record_is_discharged_with_the_types_of_the_general_form() {
+        for (source, items) in [
+            ("@spice type t = {x: int}", 1),
+            ("@spice type t = {label: string, value: array<option<int>>}", 1),
+            ("@spice type t = {a: option<string>, b?: int, c: Null.t<float>}", 1),
+            (
+                "@spice type t = {@spice.key(\"k\") a: int, @spice.default(0) b: int, @spice.default(1.5) c: float, d?: bool}",
+                1,
+            ),
+            ("@spice type inner = {value: int}\n@spice.decode type outer = {one: inner}", 2),
+            ("@spice type a = {x: int}\n@spice.encode type b = {x: int, y: string}", 2),
+        ] {
+            let (planned, discharged) = check_records(source, true).unwrap();
+            let (general, none) = check_records(source, false).unwrap();
+            assert_eq!(discharged, items, "{source}");
+            assert_eq!(none, 0);
+            let codecs = |values: &[(String, String)]| {
+                values
+                    .iter()
+                    .filter(|(name, _)| name.contains("_encode") || name.contains("_decode"))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            assert!(!codecs(&planned).is_empty());
+            assert_eq!(codecs(&planned), codecs(&general), "{source}");
+        }
+    }
+
+    /// A record whose plan does not hold is left to the general form, with
+    /// its diagnostic: a shadowed `Ok`, a default of another type, a field
+    /// type without codecs, a label a later record redeclares.
+    #[test]
+    fn a_record_with_a_failed_obligation_is_general() {
+        for source in [
+            "type mine = Ok(int) | Bad\n@spice type r = {a: int}",
+            "@spice type t = {@spice.default(\"x\") b: int}",
+            "@spice type t = {@spice.key(1) b: int}",
+            "type plain = {p: int}\n@spice type t = {a: plain}",
+            "@spice.decode type t = private {a: int}",
+        ] {
+            let planned = check_records(source, true).unwrap_err();
+            let general = check_records(source, false).unwrap_err();
+            assert_eq!(planned, general, "{source}");
+        }
+    }
+
+    /// A failed obligation abandons the unit, which is then checked from
+    /// the syntax of its derived code.
+    #[test]
+    fn a_failed_obligation_abandons_the_unit() {
+        for source in FAILING {
+            let planned = check(source, true).unwrap_err();
+            let general = check(source, false).unwrap_err();
+            assert_eq!(planned, general, "{source}");
+        }
+        // A library of another shape: the obligation fails and the syntax
+        // types.
         let curried = CURRIED_LIBRARY;
-        let (planned, discharged) = check(curried, Scope::TopLevel).unwrap();
+        let (planned, discharged) = check(curried, true).unwrap();
         assert_eq!(discharged, 0);
-        assert_eq!(planned, check(curried, Scope::Nested).unwrap().0);
+        assert_eq!(planned, check(curried, false).unwrap().0);
     }
 
     #[derive(Default, Debug, PartialEq)]
@@ -618,7 +1116,6 @@ pub(crate) mod tests {
         names: impl Fn(u32) -> &'static str,
     ) -> DerivedIdx {
         use crate::binary_ast::derive::plan::BodyIdx;
-        use crate::parse_arena::VbList;
         let first = arena.plans().next_binding();
         let start = arena.plans().next_obligation();
         for i in 0..count {
@@ -646,10 +1143,12 @@ pub(crate) mod tests {
             },
             body: BodyIdx(0),
             vars: count,
-            result_of: start,
-            applied: 0,
+            ty: TypeSource::ResultOf {
+                obligation: start,
+                applied: 0,
+            },
         });
-        plans.push_item(first, VbList::EMPTY)
+        plans.push_item(first)
     }
 
     /// Type `source`, then run `test` on a context whose arena holds the
@@ -674,6 +1173,65 @@ pub(crate) mod tests {
         test(&mut tctx, &env, item, &type_ctx);
     }
 
+    /// A record of `fields` `int` fields, typed up to its derived item:
+    /// `test` gets the context, the environment before the item, the item
+    /// and the parse arena's plans.
+    pub(crate) fn with_record(
+        fields: usize,
+        test: impl FnOnce(&mut TypeCheckContext<'_>, &Env, DerivedIdx, &TypeContext),
+    ) {
+        let labels: Vec<String> = (0..fields).map(|i| format!("f{i}: int")).collect();
+        let source = format!("@spice type t = {{{}}}", labels.join(", "));
+        let (parser, structure) =
+            crate::binary_ast::derive::fixtures::frontend_source(&source, true);
+        let (derived, before) = structure.split_last().unwrap();
+        let crate::parser::ast::StructureItemDesc::Pstr_derived(item) = derived.pstr_desc else {
+            panic!("the record takes a plan")
+        };
+        let arena = parser.arena();
+        let type_ctx = type_context();
+        let mut tctx = TypeCheckContext::new(&type_ctx, arena);
+        let env = initial_env(&type_ctx);
+        let (_, env) =
+            crate::types::typemod::type_structure(&mut tctx, &env, arena, before).unwrap();
+        test(&mut tctx, &env, item, &type_ctx);
+    }
+
+    /// The discharge of a record's item is linear in its fields, with an
+    /// exact count per field: its 22 obligations (3 in the encoder, 3 in
+    /// its JSON twin, 16 in the decoder) take one lookup each, the 16 that
+    /// are values, constructors or labels of the record expression one
+    /// instance each (a field access instantiates inside the checker's
+    /// lookup, a type has none), and one counted unification each (a label
+    /// or a constructor unifies its argument and its result).
+    #[test]
+    fn a_record_of_ten_thousand_fields_is_discharged_in_linear_steps() {
+        let steps = |fields: usize| {
+            let mut steps = Counted::default();
+            with_record(fields, |tctx, env, item, _| {
+                discharge_counting(tctx, env, item, &mut steps).unwrap();
+            });
+            steps
+        };
+        let (one, two, many) = (steps(1), steps(2), steps(10_000));
+        let per_field = Counted {
+            lookups: two.lookups - one.lookups,
+            instances: two.instances - one.instances,
+            unifications: two.unifications - one.unifications,
+        };
+        assert_eq!(
+            per_field,
+            Counted {
+                lookups: 22,
+                instances: 16,
+                unifications: 22
+            }
+        );
+        assert_eq!(many.lookups, one.lookups + 9_999 * per_field.lookups);
+        assert_eq!(many.instances, one.instances + 9_999 * per_field.instances);
+        assert_eq!(many.unifications, one.unifications + 9_999 * per_field.unifications);
+    }
+
     /// An item with 10,000 obligations performs exactly 10,000 lookups,
     /// 10,000 instances and 10,000 unifications.
     #[test]
@@ -696,21 +1254,23 @@ pub(crate) mod tests {
                 crate::types::printtyp::Printtyp::new(type_ctx).type_expr(bound[0].ty),
                 "int => int"
             );
-            assert!(discharged.env.lookup_value(&Path::pident(bound[0].ident)).is_ok());
+            // The signature item is the description that was entered.
+            let entered = discharged.env.lookup_value(&Path::pident(bound[0].ident)).unwrap();
+            assert_eq!(
+                discharged.sig_items,
+                [SignatureItem::SigValue(bound[0].ident, entered.clone())]
+            );
         });
     }
 
-    /// A failed discharge leaves no warning, no deprecated use and no change
-    /// of the type state behind.
+    /// A discharge stops at the first obligation that fails, and records
+    /// the deprecated uses of the ones that hold.
     #[test]
-    fn a_failed_discharge_restores_what_it_did() {
+    fn a_discharge_stops_at_the_first_failed_obligation() {
         use crate::binary_ast::derive::plan::BodyIdx;
-        use crate::parse_arena::VbList;
-        let source = "type cell<'a> = {mutable contents: option<'a>}\n\
-            let weak = {contents: None}\n\
-            module M = {\n  @deprecated(\"old\") let take = (x: cell<int>) => x\n}";
-        // `weak` at 'a, then `take` at 'a => 'b, which makes the weak
-        // variable `int`, then, unless `complete`, a name that is not bound.
+        let source = "module M = {\n  @deprecated(\"old\") let take = (x: int) => x\n}\nlet one = 1";
+        // `M.take` at 'a => 'b, `one` at 'a, then, unless `complete`, a name
+        // that is not bound.
         let run = |complete: bool| {
             let mut parser = Parser::new("Test.res", source);
             let structure = module::parse_structure(&mut parser);
@@ -744,7 +1304,7 @@ pub(crate) mod tests {
                 SkeletonNode::Var(1),
             ];
             obligation(arena, &["M", "take"], &take);
-            obligation(arena, &["weak"], &[SkeletonNode::Var(0)]);
+            obligation(arena, &["one"], &[SkeletonNode::Var(0)]);
             if !complete {
                 obligation(arena, &["missing"], &[SkeletonNode::Var(2)]);
             }
@@ -757,10 +1317,12 @@ pub(crate) mod tests {
                 obligations: Span { start: start.0, len },
                 body: BodyIdx(0),
                 vars: 3,
-                result_of: start,
-                applied: 0,
+                ty: TypeSource::ResultOf {
+                    obligation: start,
+                    applied: 0,
+                },
             });
-            let item = plans.push_item(first, VbList::EMPTY);
+            let item = plans.push_item(first);
             crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
             let arena = parser.arena();
             let type_ctx = type_context();
@@ -768,22 +1330,13 @@ pub(crate) mod tests {
             let env = initial_env(&type_ctx);
             let (_, env) =
                 crate::types::typemod::type_structure(&mut tctx, &env, arena, &structure).unwrap();
-            let state = |tctx: &TypeCheckContext<'_>| {
-                let (_, weak) = env.find_value_arc_with_path(crate::name::Name::new("weak")).unwrap();
-                (
-                    tctx.warnings.len(),
-                    type_ctx.deprecated_use_count(),
-                    crate::types::printtyp::Printtyp::new(&type_ctx).type_expr(weak.val_type),
-                    type_ctx.current_level(),
-                )
-            };
-            let before = state(&tctx);
+            let warnings = tctx.warnings.len();
             let mut steps = Counted::default();
             let result = discharge_counting(&mut tctx, &env, item, &mut steps);
-            (before, state(&tctx), result.map(|_| ()), steps)
+            (result.map(|_| ()), steps, tctx.warnings.len() - warnings)
         };
 
-        let (before, after, result, steps) = run(false);
+        let (result, steps, _) = run(false);
         assert_eq!(result, Err(Fallback));
         assert_eq!(
             steps,
@@ -793,23 +1346,15 @@ pub(crate) mod tests {
                 unifications: 2
             }
         );
-        assert_eq!(after, before);
-        assert!(before.2.contains("cell<'"), "{}", before.2);
-
-        // Without the unbound name the same obligations hold: the deprecated
-        // use is recorded and warned about, and the weak variable is `int`.
-        let (before, after, result, _) = run(true);
+        let (result, _, warnings) = run(true);
         assert_eq!(result, Ok(()));
-        assert_eq!((after.0, after.1), (before.0 + 1, before.1 + 1));
-        assert_eq!(after.2, "cell<int>");
-        assert_eq!(after.3, before.3);
+        assert_eq!(warnings, 1);
     }
 
     /// A type obligation resolves a constructor that skeletons then name.
     #[test]
     fn a_type_obligation_names_a_constructor() {
         use crate::binary_ast::derive::plan::BodyIdx;
-        use crate::parse_arena::VbList;
         let source = "type box<'a> = {v: 'a}\nlet make = (x: int): box<int> => {v: x}";
         for (arity, discharges) in [(1u16, true), (2, false)] {
             let mut parser = Parser::new("Test.res", source);
@@ -827,6 +1372,7 @@ pub(crate) mod tests {
                 name: box_name,
                 name_loc,
                 arity,
+                var: crate::binary_ast::derive::plan::NO_VAR,
             });
             // make : 'a => box<'a>
             let skeleton = plans.push_skeleton(SkeletonNode::Arrow { params: 1 });
@@ -846,10 +1392,12 @@ pub(crate) mod tests {
                 obligations: Span { start: ty.0, len: 2 },
                 body: BodyIdx(0),
                 vars: 1,
-                result_of: value,
-                applied: 0,
+                ty: TypeSource::ResultOf {
+                    obligation: value,
+                    applied: 0,
+                },
             });
-            let item = plans.push_item(first, VbList::EMPTY);
+            let item = plans.push_item(first);
             crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
             let arena = parser.arena();
             let type_ctx = type_context();
