@@ -328,7 +328,7 @@ pub fn run(request: &Request, project: &dyn session::Project) -> Result<Vec<u8>,
 /// `rescript-tools reanalyze <args>` (tools/bin/main.ml): what it prints,
 /// the reports of the dead code, exception and termination analyses of the
 /// project `cwd` is in. `color` says the output goes to a terminal.
-/// `project` must be built with source locations (see [`reanalyze`]), which
+/// `project` must be built with source locations (see [`mod@reanalyze`]), which
 /// a watcher's builds leave out, so this is no watcher command.
 pub fn reanalyze(
     cwd: &Path,
