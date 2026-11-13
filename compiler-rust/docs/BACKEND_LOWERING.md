@@ -3361,6 +3361,95 @@ so no vector rotation is needed. Label finalization runs after each successful
 probe while the retained traversal counts only that probe's new visits. All four
 existing whole-Lambda zero-allocation fixtures still pass after integration.
 
+### 7.5.2 Final audit validation and measurements
+
+The measured implementation is `9de839339`; the later arity-comment cleanup
+changes no executable code. All inventoried non-export sites now have a
+conversion or an explicit unit/import/output-boundary justification. The
+production lowering scan has no small-vector occurrences: `rg SmallVec
+compiler-rust/src/bir/lower` finds only the `ffi_args.rs` test module.
+`export.rs` is identical to integrated trunk `be1b3a482`; its allocations remain
+inventory-only, not part of the conversion claim.
+
+The final inlining diff was reviewed directly, including scratch restoration on
+rejection/error, fresh binders, source-argument consumption, pool exchange and
+summary invalidation. Variable-keyed substitutions use dense vectors. The
+remaining template dictionary has a composite module/member key, not an existing
+dense template index; the retained label dictionary uses sparse source labels
+and is never iterated to determine output order. No per-node synchronization was
+introduced. Allocation proofs measure warmed lowering, **not** source import,
+first-use immutable export-template import, or final owned compatibility output.
+
+Independent validation of the final implementation:
+
+| Gate | Result |
+| --- | --- |
+| Compiler build / strict all-target clippy | Pass |
+| BIR tests | 768 passed |
+| Full compiler unit suite, serial | 2,448 passed, 25 ignored, zero failures |
+| Compiler printer/source-map integration tests | 4 passed |
+| Compiler doctests | 5 passed, 7 ignored |
+| Rewatch build / tests | 210 unit and 9 integration tests passed |
+| Exact focused JS reference fixtures | 472/472 passed |
+| Canonical JS snapshots | 737/737 passed |
+| Exact stdlib reference parity | 113/113 passed |
+| In-repository GenType suites | 2/2 passed, including typechecking |
+| Backend coverage ratchet, debug executable | Passed without recording a new baseline |
+
+The full compiler suite requires file-backed reference artifacts. After building
+the OCaml compiler, `rescript build-reference --bsc <reference-bsc>` was run for
+the runtime, Belt and `tests/tests`, then the suite ran with `--test-threads=1`.
+This resolved the earlier missing-artifact and parallel shared-page failures;
+they are not counted as passing runs. The reference used OCaml 5.5.1. The external
+3,735-module application comparison and its GenType suite were **not run**.
+
+#### Pinned check-mode comparison
+
+Both executables compiled the same `e5ada1df93` source corpus (`tests/tests`,
+738 compiled modules), in separate directories. The 925 runtime/project
+`.res`/`.resi` source inputs were hash-compared before measurement. Each build
+used release fat LTO with the repository's default **16 codegen units**,
+`RAYON_NUM_THREADS=1`, and `RESCRIPT_BACKEND=check`. The project was cleaned before
+each measured build. Runtime preparation is outside the interval; normal build
+work remains inside it. Cachegrind counts use the minimum of five runs. Hyperfine
+uses ten measured runs after two warmups. These results include changes merged
+from trunk since the original baseline, not just this audit's isolated effect.
+
+| Check-mode measurement | Original `e5ada1df93` | Candidate `9de839339` |
+| --- | ---: | ---: |
+| Minimum instructions | 20,239,125,629 | 20,243,874,351 |
+| Hyperfine mean ± standard deviation | 1.952 ± 0.136 s | 1.955 ± 0.104 s |
+| Hyperfine minimum–maximum | 1.833–2.265 s | 1.769–2.117 s |
+
+Instruction change: **+4,748,722 (+0.02346%)**. Wall time is within observed
+variation. **This audit demonstrates the bounded warmed allocation properties,
+not a measured compiler speedup.**
+
+Five instruction counts, in run order:
+
+- Original: 20,239,125,629; 20,240,176,326; 20,244,341,457; 20,245,730,450; 20,239,316,676.
+- Candidate: 20,256,554,850; 20,249,280,224; 20,245,855,715; 20,253,557,268; 20,243,874,351.
+
+#### Default-path instruction gate and profile sensitivity
+
+For the default-path gate, both current trunk `be1b3a482` and the candidate were
+rebuilt with the CI profile: release fat LTO and **one codegen unit**. Both used
+the identical pinned corpus, one worker, and `RESCRIPT_BACKEND` unset. Five-run
+minima are **4,054,000,770 → 4,054,528,801**, an increase of **528,031
+(+0.01302%)**, within the audit's **+0.02%** budget.
+
+- Trunk: 4,054,220,098; 4,054,850,998; 4,054,958,689; 4,054,000,770; 4,054,612,378.
+- Candidate: 4,054,528,801; 4,057,561,718; 4,055,634,860; 4,056,042,783; 4,057,139,755.
+
+The default 16-codegen-unit profile behaves differently and is **not** hidden by
+that gate result: its minimum rises from **4,078,047,529** on current trunk to
+**4,090,187,328** on the candidate (**+0.29769%**). Against the original baseline's
+**4,081,609,225**, the same candidate is **+0.21016%**. Callgrind attributes most
+of the 16-codegen-unit difference to generated memcpy calls in parser paths;
+that observation does not establish its root cause. Do not describe this as a
+profile-independent performance improvement, or interchange the one- and
+16-codegen-unit measurements.
+
 ## 8. The gate and the slices
 
 ### 8.1 The gate
