@@ -28,6 +28,23 @@ pub(crate) use checker::{
 static ENABLED: OnceLock<bool> = OnceLock::new();
 
 static EXPLAIN_RERUNS: AtomicU64 = AtomicU64::new(0);
+static CHECK_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+
+/// The CLI has finished preparing dependencies; subsequent attempts belong to
+/// its selected source unit. Build commands retain the process-wide totals.
+pub(crate) fn begin_cli_unit() {
+    if enabled() {
+        CHECK_ATTEMPTS.store(0, Ordering::Relaxed);
+        EXPLAIN_RERUNS.store(0, Ordering::Relaxed);
+    }
+}
+
+
+/// O(1) per whole-unit attempt, including attempts subsequently discarded.
+pub(crate) fn record_check_attempt() {
+    if enabled() { CHECK_ATTEMPTS.fetch_add(1, Ordering::Relaxed); }
+}
+
 
 /// O(1), at most one atomic increment per unit, and only with counters enabled.
 pub(crate) fn record_explain_rerun() {
@@ -1138,6 +1155,7 @@ pub fn print_report() {
     }
 
     eprintln!("[compiler-counter] explain_reruns={}", EXPLAIN_RERUNS.load(Ordering::Relaxed));
+    eprintln!("[compiler-counter] check_attempts={}", CHECK_ATTEMPTS.load(Ordering::Relaxed));
     eprintln!("[compiler-counter] snapshot_modules_decoded={}", SNAPSHOT_MODULE_DECODES.load(Ordering::Relaxed));
     eprintln!(
         "[compiler-counter] published_signature_decodes={}",
