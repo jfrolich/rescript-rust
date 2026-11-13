@@ -32,6 +32,13 @@ rescript-tools doc src/EntryPointLibFile.res > doc.json
 the module from, so it type-checks the file's project first, without writing
 files, and fails when the project has an error.
 
+Several files are type-checked together, once per package, and printed as a
+JSON list of their documentation, in the order given:
+
+```sh
+rescript-tools doc src/A.res src/B.res > docs.json
+```
+
 ### Reanalyze
 
 ```sh

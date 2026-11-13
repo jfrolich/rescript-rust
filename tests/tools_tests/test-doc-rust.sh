@@ -37,6 +37,31 @@ if ! (cd / && doc "$OLDPWD/src/ModC.res" > "$actual") || ! diff -u src/expected/
   fail "rescript-tools doc <absolute path> differs from src/expected/ModC.res.json"
 fi
 
+# Several files in one call print a JSON list of their docs, in order.
+same_json() {
+  node -e '
+    const fs = require("node:fs");
+    const [actual, ...expected] = process.argv
+      .slice(1)
+      .map(file => JSON.parse(fs.readFileSync(file, "utf8")));
+    process.exit(JSON.stringify(actual) === JSON.stringify(expected) ? 0 : 1);
+  ' "$@"
+}
+if ! doc src/ModC.res src/DocExtraction2.resi > "$actual"; then
+  fail "rescript-tools doc of two files failed"
+elif ! same_json "$actual" src/expected/ModC.res.json src/expected/DocExtraction2.resi.json; then
+  fail "rescript-tools doc of two files is not the list of their snapshots"
+fi
+
+# The rescript-tools executable itself, where a build has put it next to
+# rescript.exe, documents with the build system too.
+tools_exe=$(node -e 'import(process.argv[1]).then(bins => console.log(bins.rescript_tools_exe))' "$PWD/../../cli/common/bins.js")
+if [ -x "$tools_exe" ]; then
+  if ! "$tools_exe" doc src/ModC.res > "$actual" || ! diff -u src/expected/ModC.res.json "$actual"; then
+    fail "$tools_exe doc differs from src/expected/ModC.res.json"
+  fi
+fi
+
 # Failures exit with a status other than 0 and print no docs.
 for file in src/Missing.res rescript.json; do
   if doc "$file" > "$actual" 2> /dev/null; then
