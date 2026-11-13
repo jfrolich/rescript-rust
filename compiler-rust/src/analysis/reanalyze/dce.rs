@@ -6,6 +6,7 @@
 use super::annotation;
 use super::common::*;
 use super::log::{Log, filename_concat, has_prefix, is_relative};
+use super::ocaml_hash;
 use super::traverse::{self, Visitor};
 use crate::parse_arena::LocIdx;
 use crate::parser::ast::{Attribute, Attributes, RecFlag};
@@ -1303,34 +1304,24 @@ impl<'t> Collector<'t, '_, '_> {
     }
 
     /// `Dead_value.add_record_rest_type_references`: a record pattern's rest
-    /// reads every label of the rest's type.
-    fn add_record_rest_type_references(&mut self, pat: &tt::Pattern, rest: &tt::RecordPatternRest) {
+    /// reads the labels of the rest's type.
+    ///
+    /// OCaml first looks the type up in the pattern's environment, which in
+    /// a `.cmt` is a summary no type is found in, so it always falls back to
+    /// `add_record_rest_type_references_from_path`: the labels this file
+    /// declares for a type of that name. A rest type that is an alias of a
+    /// record type therefore reads no label.
+    fn add_record_rest_type_references(&mut self, rest: &tt::RecordPatternRest) {
         let pos_from = self.tree.loc(rest.rest_name.loc).start;
         let types = self.tree.types;
-        let concrete = types.get_typed_env(pat.pat_env).and_then(|env| {
-            crate::types::ctype::extract_concrete_typedecl(types, &env, rest.rest_type)
-        });
-        if let Some((_, _, decl)) = &concrete
-            && let decl::TypeKind::TypeRecord(labels, _) = &decl.type_kind
-        {
-            for ld in labels.iter() {
-                let loc = self.tree.decl_loc(ld.ld_loc);
-                if !loc.ghost {
-                    self.add_type_reference(pos_from, loc.start);
-                }
-            }
-            return;
-        }
-        // `add_record_rest_type_references_from_path`.
         let rest_type = types.repr(rest.rest_type);
         let TypeDesc::Tconstr { path, .. } = &*types.get_desc(rest_type) else {
             return;
         };
         let type_paths = self.type_path_candidates(path);
         let labels: Vec<Pos> = self
-            .data
-            .decls
-            .values()
+            .declarations_as_listed()
+            .into_iter()
             .filter(|decl| {
                 decl.decl_kind == DeclKind::RecordLabel
                     && type_paths
@@ -1342,6 +1333,30 @@ impl<'t> Collector<'t, '_, '_> {
         for pos_to in labels {
             self.add_type_reference(pos_from, pos_to);
         }
+    }
+
+    /// `Declarations.builder_to_list`: the file's declarations in the order
+    /// OCaml lists its table of them, a `Pos_hash` created with 256 buckets
+    /// and folded into a list. The debug output shows this order.
+    fn declarations_as_listed(&self) -> Vec<&Decl> {
+        // `Pos_hash.hash`.
+        let hashes: Vec<u32> = self
+            .data
+            .decls
+            .keys()
+            .map(|pos| {
+                let file = self.tree.files.name(pos.file);
+                ocaml_hash::hash_int_string(i64::from(pos.cnum), basename(&file))
+            })
+            .collect();
+        let mut order = ocaml_hash::iteration_order(256, &hashes);
+        // Folding conses, so the list is the reverse of the visits.
+        order.reverse();
+        order
+            .into_iter()
+            .filter_map(|i| self.data.decls.get_index(i))
+            .map(|(_, decl)| decl)
+            .collect()
     }
 
     /// `Dead_value.process_value_dependency`: a value an interface or a
@@ -1407,7 +1422,7 @@ impl<'t> Visitor<'t> for Collector<'t, '_, '_> {
                 self.add_type_reference(pos_from, pos_to);
             }
             if let Some(rest) = rest {
-                self.add_record_rest_type_references(pat, rest);
+                self.add_record_rest_type_references(rest);
             }
         }
         traverse::super_pat(self, p);
