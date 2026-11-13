@@ -1401,6 +1401,158 @@ not `Alias`) and `blocked_by_literal_alias_preserved_in_block` (the kind is
 `later_toplevel_effect_allows_tail_move` are unreachable from it. The rows
 implement the reachable behaviour: a literal stays.
 
+#### T5 design
+
+Status: design, written before any code. Part A moves P2's decision into the
+lowering; part B is the naming log of section 2. "Read" marks a claim from
+the cited code that no test asserts yet.
+
+**(a) Where P2's decision is taken: once, when the unit's root block
+exists** (`State::finish` in `bir/lower/mod.rs`, after the export coercion).
+Not at the close of a run, for three reasons read from the code:
+
+- P2 reads all declarations of a list, also those after the reference. A
+  run is copied each time the lowering moves its statements ("T4c design",
+  as built: one decision in five replaced), so at the close of a run the
+  list a reference ends up in is not known. At the root every list is the
+  one P1 receives.
+- A statement's list is a node (`SBlock`, `aux` 0 for a body, 1 for an
+  explicit block statement) and every node has its parent
+  (`Bir::parents`, maintained by every constructor and edit). So "the
+  bindings around a reference" is its ancestor chain: no position has to be
+  recorded while lowering, and nothing is keyed by a list.
+- Every binding has one binder node (`VarTable::binder`, written by
+  `Bir::bind` where the node is built: `SDecl`, `SRest`, `JFun` for
+  parameters, `SForRange`/`SForOf`/`SForAwaitOf`, `STry` for the catch
+  variable), and every reference is a site (`Scope::sites`, written by
+  `Bir::allocate`, chained per variable, cleared on release; T4a). Both are
+  recorded where the lowering writes them, already.
+
+*What P1 does to the lists P2 reads* (`Flatten` in
+`js_pass_flatten_and_mark_dead.rs`; P2 runs after it). `block_items`
+splices a block statement into the list it stands in, so the declarations
+of an explicit block become declarations of the enclosing list and shadow
+references of that whole list: `{ let location = 1; f(location) }
+g(location')` has the global `location'` qualified only after P1. The
+lowering writes explicit blocks (`explicit_block_from_list` in
+`bir/j/norm.rs` and `bir/lower/cond.rs`). So the scope of a declaration is
+its nearest enclosing block that is not an explicit block statement. P1's
+other rules move no declaration: `Return(Cond)` and `Exp(Cond)` build lists
+of `return`s and expression statements, the sequence rules build blocks of
+expression statements. P1 drops references (a pure branch of a conditional
+in statement position): a dropped reference needs no decision, and a
+dropped function takes its sites with it. One input of P2 does depend on
+what P1 drops: an imported module is a binding of the program only while a
+`Qualified` reference to it is in the tree (`ReferencedNames`). The lowering
+counts the references it built and released (a count per import, kept like
+the counts of T1); a module whose last reference stands in a branch that
+only P1 drops is counted as a binding by the lowering and not by P2. That
+is the hazard of "T4c design" (b) again, it leaves with P1 at T6, and it
+needs a module and a global of one printed name. Read, not tested.
+
+*The decision.* A reference to a JavaScript global `g` (P2's `is_js_global`
+on the identifier the variable prints as) is qualified when a binding that
+prints as `g` (c) is: a declaration whose scope block is an ancestor of the
+reference; a parameter of an enclosing function; the variable of an
+enclosing `for` statement (the whole statement, bounds included); the catch
+variable of a `try` whose handler block is an ancestor; a declaration in
+any case of an enclosing `switch` whose case block, not its discriminant,
+is on the path (the cases share a scope: P2's `add_switch_declarations`);
+or an imported module with a live reference that is not a dynamic import.
+`SForRangeExisting` binds no variable of its own: its target is declared in
+an enclosing block, which covers the loop (read).
+
+*Algorithm* (`bir/lower/globals.rs`), per name, with an epoch per name and
+one mark per node (`u32`, dense by node, allocated the first time a unit
+has a binding that prints as a referenced global):
+
+1. One read per variable: those whose identifier is a JavaScript global and
+   that have a site are the referenced globals. None: done. This is the
+   only cost for a unit without such a reference.
+2. One read per variable with a binder: its printed name looked up among
+   the referenced globals' names. The key is an interned name: P2 relates
+   a binding to a global through the spelling only, and a `Name` is a
+   process-wide pointer without a per-unit index, so this is one table
+   keyed by `Name` (its hash is stored in the name), built per unit that
+   reaches step 2. No match and no matching import: done.
+3. Per matching binding, one mark on its scope node: the block (through
+   explicit blocks), the `switch` statement when the block is a case, the
+   function, the loop, the handler block.
+4. Per site of the name, its ancestors are read up to the first marked one
+   (or the root), then the nodes passed are marked with the result, so a
+   node is read at most twice per name whatever the number of sites below
+   it. At a marked `switch` the walk continues when it arrived from the
+   discriminant.
+
+No statement body and no finished tree is walked to find a reference or a
+binding; the walk is from a recorded site towards the root.
+
+**(b) A copied or moved statement.** The decision is taken after every
+copy and move of the lowering (`take_list`, `hold_run`,
+`simplify_if_head`, `copy_j`), on the tree as it is then: a moved
+statement has the parent it ended with, and the references of a copied
+function are sites of their own, decided in the place the copy stands.
+Nothing is decided per copy, and nothing is re-taken. For T4g: a splice
+must run after this point (the decision is on the binding structure the
+lowering wrote; P3 in legacy order runs after P2 on the whole program), or
+call it first. The bit stays with the node when a splice moves it.
+
+**(c) `printed_binding_name`** is `convert_ident_name` of the identifier's
+name, and nothing for an identifier with the JavaScript flag. It reads the
+name only (not the suffix the naming pass gives), so it is known when the
+variable is created; it is read at the decision, through the variable's
+origin (`vars.j_origin`: a copied binder prints as its original).
+
+**The fact, not the qualified form.** The reference stays a `Var` node and
+gets one bit (`aux`). Why not build `globalThis.name`: (1) the name is
+decided after the node has been read by the lowering's own rules, which
+must see what the legacy lowering sees, a variable (purity, delay safety,
+`return_sites`); (2) the first comparison point of check mode prints the
+program before any pass, where the legacy side has no qualified
+reference. The reader of the bit is whoever turns `Bir` into JavaScript:
+`bridge_j` today (it returns the handles of the marked references, and the
+new side rewrites exactly those to `globalThis.name` before P1: one write
+per marked reference, no walk), the builder of T6 afterwards. P1 reads a
+qualified reference as it reads a variable (`expression_has_no_side_effects`
+is true for a static index of a variable; no rule of `Flatten` matches
+either); read, and the gate asserts it on the corpora.
+
+**(d) The T4c comparison without P2.** `compare_decisions` needs the
+program P3 receives. Legacy: P1, P2. New side: the marked references
+rewritten, then P1: the same program, built by the path the new side takes
+anyway, so the extra P1 and P2 on a copy that T4c added are gone. P2
+changes no count of a declared variable ("T4c design" (b)), so the
+comparison itself is unchanged. The report gains the number of qualified
+references and the steps of the decision.
+
+**(e) Part B: the naming log.** The oracle is `emit/naming.rs` run on the
+program the lowering wrote (exported, before the passes); the log
+describes that same tree.
+
+| Event | Logged where | Answers |
+| --- | --- | --- |
+| `Declare(var)` | where an `SDecl` is written (binder before initialiser; after the reservation for a function declaration that is not eta-reduced) | hard example 2: the event carries its statement, and an event whose statement is not in the final list is skipped |
+| `Params(function)` | where the `JFun` is built | - |
+| `Enter(function)`, `Leave` | around the function's events: `Enter` carries the function's free-variable list | hard examples 1 and 3: the list is final at the close and is sorted by `order` there |
+| `Binder(var)` | loop and catch variables, before their bodies | - |
+| `Use(var)` | no event: a use names nothing unless it is the first print of a free variable, which `Enter` reserves | hard example 1 |
+
+The free variables of a function: every site built between the function's
+entry and its close whose variable has no binder inside, with one
+membership bit per variable (dense, cleared through the list at the
+close). A function's list is added to its parent's at the close (the
+oracle's `used.extend(free[f])`). Replay (`fn replay` in
+`emit/naming.rs`) reads the events of one scope in final statement order
+through the existing `Group` and `Scope` tables and writes a name per
+variable; check mode compares that table with `Names::printed`.
+
+Open before code, to be settled by the first comparison run and written
+into "T5 as built": the oracle skips statements and branches the printer
+omits (`walk::prints_declaration`, `omitted_expression`, `else_omitted`,
+`tail_effect`, the eta form of `function_form`); each is a shape test on
+the finished statement that the log has to carry as a bit of the event or
+decide at replay.
+
 ### 11.5 Worker prompt for T4b
 
 Which form: it needs one experiment, because nothing read so far proves that
