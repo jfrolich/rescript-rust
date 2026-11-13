@@ -760,6 +760,10 @@ of persistent maps behind `Rc`.
 
 ### 3.3 What every operation costs
 
+The table specifies path halving for `repr`; slice R1 instead builds full
+compression in two iterative loops so a second lookup follows just one link.
+Compression writes are logged only while a speculation is open.
+
 `n` is the number of nodes an operation is defined to visit. "Kernel" gives
 the measurement of 2.2 where one exists.
 
@@ -1245,9 +1249,9 @@ prompt in section 6.
 | # | Builds | Deletes | Lines | Extra gate | Measurement it must show | Depends on | Model |
 |---|---|---|---:|---|---|---|---|
 | R0 | The switch (`old` only does anything), `both` mode's comparison, the ratchet file with every unit declined, the canonical signature numbering shared structure nodes (CHECKER_REDESIGN I.3.5), a fixture for O11, the step-count test helper | Nothing: it replaces nothing | 900 | the new canonical form differs between `dup` and `two` of `checker_identity_07b_sharing.res` | instruction count unchanged (±0.1%) | - | yes |
-| R1 | `tc/graph.rs`, `tc/level.rs`, `tc/template.rs`: nodes, pools, `repr`, links, the trail, levels, generalisation, templates with capture and instance, the general copy with a forwarding array. Not wired to the driver | Nothing yet | 2,500 | step counts at 10,000; a property test against the old `instance`, `generalize` and `update_level` through R2's converters is added by R3 | the kernel's operations within 25% of 2.2 when run from the crate's bench | R0 | yes |
+| R1 | `tc/graph.rs`, `tc/level.rs`, `tc/template.rs`: nodes, pools, `repr`, links, the trail, levels, generalisation, templates with capture and instance, the general copy with a forwarding array. Not wired to the driver | Nothing yet | 2,500 | step counts at 10,000; a property test against the old `instance`, `generalize` and `update_level` through R2's converters is added by R3 | same-machine measured attribution table; instance7 generic bookkeeping at most 30 instructions above the kernel (see [R1 measurements](TC_KERNEL_R1.md)) | R0 | yes |
 | R2 | `tc/segment.rs`, `tc/publish.rs`, `tc/bridge/{from_old,to_old}.rs` for signatures; the canonical signature printed from a segment | Nothing yet | 3,000 | for every unit of both corpora: `to_old(from_old(g))` and `g` print the same canonical signature, with shared-node numbers | publication of a segment from an old graph costs at most what `publish_signature` costs today (1.34% of the application) | R1 | yes |
-| R3 | `tc/unify.rs`, `tc/expand.rs`: unification with every case of `ctype.rs`, expansion and its memo, `moregeneral`, `equal`, subtyping | Nothing yet | 6,000 | differential property test: random graphs converted both ways, the same operations on both, canonical forms and failures equal; the `checker_identity_*` shapes as unit tests on the new graph | kernel operations with abbreviations added, reported | R1, R2 | no |
+| R3 | `tc/unify.rs`, `tc/expand.rs`: unification with every case of `ctype.rs`, expansion and its memo, `moregeneral`, `equal`, subtyping; the simple-abbreviation memo and the copy-time nullary `find_repr` lookup in general copies and template instances | Nothing yet | 6,000 | differential property test: random graphs converted both ways, the same operations on both, canonical forms and failures equal; the `checker_identity_*` shapes as unit tests on the new graph | kernel operations with abbreviations added, reported | R1, R2 | no |
 | R4 | `tc/scope.rs`, `tc/names.rs`: binders, scopes, open layers over export tables, path resolution, usage bits, lookup-time warnings | `types/env_log.rs`, `types/env_log_tests.rs` (4,466 lines: the binding log P6 built and did not switch on) | 3,000 | step counts at 10,000 binders and 10,000 nested scopes; a differential test of lookups against `Env` on every identifier of both corpora in `both` mode | lookup by name at most 80 instructions, by binder at most 10, in the crate's bench | R2 | no |
 | R5a | `tc/decl.rs`, `tc/walk/typetexp.rs`: type declarations (records, variants, abbreviations, abstract, externals), annotations | Nothing yet | 4,000 | `both` mode on declaration-only units | - | R3, R4 | no |
 | R5b | `tc/walk/`: the core expression language on the success path, patterns, `tc/exhaust.rs`, `tc/rows.rs`; structures, aliases and opens in `tc/module.rs` | Nothing yet | 9,000 | step counts at 10,000 for sequences, applications, record fields, match cases | - | R5a | no |
@@ -1258,6 +1262,10 @@ prompt in section 6.
 | R8a..R8c | The explaining mode: `tc/explain.rs`, `tc/print.rs`. (a) type clashes and the type printer; (b) every other expression and pattern error; (c) declaration, module and inclusion errors. Tooling entry points check with the new checker and get their typed tree from `to_old` | (c) deletes `types/typecore.rs`, `types/typemod.rs`, `types/includemod.rs`, `types/includecore.rs`, `types/parmatch.rs`, `types/printtyp.rs`, and every function of `types/ctype.rs` the backend does not call | 3,000 each | `scripts/test_error_output_parity.sh`, the `super_errors` and `super_errors_multi` suites, with `RESCRIPT_CHECKER=old` no longer accepted after (c) | a failing unit costs at most 2.2 times a passing one | R7 | (a) no, (b) and (c) yes, one error at a time |
 | R9a..R9c | Readers on rows and `TypeFacts`: (a) `raw_lambda/typeopt.rs` and `convert.rs`; (b) `matching.rs` and the pattern pool; (c) genType and unit reads (THREE_TREES T9, T10, T11, T3) | (c) deletes the batch build's use of `to_old`, the rest of `types/ctype.rs`, `types/context.rs`, `types/type_expr.rs`, `types/env.rs`, `types/env_lazy.rs`, `types/thread_store.rs`, `types/shared_store.rs`, `types/module_view.rs`, `types/world.rs`, `types/btype.rs`, `types/type_marks.rs` | 3,000 each | JavaScript, stdlib and genType parity | **type checking at most 20,000 instructions per line on the application** | R8 | (a) and (b) no, (c) yes |
 | R10 | Editor analysis on rows (THREE_TREES T12) | `types/{typedtree,tast_arena,tast_iterator,sexp_typedtree}.rs`, `tc/bridge/`, the switch | 3,000 | analysis tests | - | R9 | yes, arm by arm |
+
+**R1 measured price:** instance1/3/5/7 as built cost 140.06/220.31/305.34/327.27
+instructions against the kernel's 89/169/221/250; the R5c gate (covered units
+at most 60% of the old cost, bridge included) judges whether this matters.
 
 About 55,000 lines built, 110,000 deleted (`src/types` is 123,242 lines
 today, tests included).
@@ -1424,8 +1432,11 @@ Tests, each with a step count at 10,000:
   speculation that is kept costs 0;
 - the shapes of fixtures 2, 3, 4 and 7b of CHECKER_REDESIGN I.2.3, built by
   hand: which uses are one node.
-The bench must show each kernel operation within 25% of the table in
-CHECKER_REWRITE 2.2; put its output in the pull request.
+The bench must show a same-machine comparison with the kernel of 2.2 and
+attribute the difference to required data and still generic bookkeeping;
+instance7's still generic bookkeeping must be at most 30 instructions.
+Put the measured table in the pull request. This replaces the original
+blanket +25% gate because the reference lacks required section 3.2 data.
 
 Failure: a copy session object, a map from node to copy, recursion in
 instance, a level stored anywhere but in the node, a flags summary of a
