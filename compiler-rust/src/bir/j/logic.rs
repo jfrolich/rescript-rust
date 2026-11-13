@@ -512,7 +512,7 @@ impl<'a> Plan<'a> {
 
 // A repeated pure function is a second owned tree, not a shared binder. Keep
 // its source printing identities: the legacy arena shares that same function.
-fn copy_j(b: &mut Bir, root: NodeId) -> NodeId {
+pub(crate) fn copy_j(b: &mut Bir, root: NodeId) -> NodeId {
     let copy = b.copy_subtree(root, &[]);
     let mut stack = vec![(root, copy)];
     while let Some((old, new)) = stack.pop() {

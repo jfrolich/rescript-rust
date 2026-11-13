@@ -1340,3 +1340,86 @@ fn ten_thousand_declarations_close_in_three_steps_each() {
     // 10,000 declarations and the sentinel statement, 10,000 bodies.
     assert_eq!(lowered.switch_stats.close_steps, 10_001 + 2 * 10_000);
 }
+
+#[test]
+fn a_pure_branch_the_flatten_pass_drops_takes_an_occurrence_built_still_counts() {
+    // THREE_TREES.md 11.4, "T4c design" (b), first hazard.
+    // `c => { let x = ext(); ignore(c ? x : ext()); 3 }`: the lowering writes
+    // the expression statement `c ? x : ext();`. P1 drops the branch `x`
+    // (`if (!c) { ext(); }`), so P3 counts no use of `x` and makes the
+    // declaration an expression statement; `built` is still one.
+    use crate::js_ir::op::UsedStats;
+    use crate::lambda::LamLoc;
+    use crate::lambda::lam_primitive::Primitive;
+    let build = |a: &mut LamArena| {
+        let (c, x) = (Ident::new("c", 12, IdentFlags::NONE), Ident::new("x", 14, IdentFlags::NONE));
+        let ext = Ident::new("ext", 13, IdentFlags::NONE);
+        let callee = a.var(ext);
+        let effect = call(a, callee, &[]);
+        let (test, read) = (a.var(c), a.var(x));
+        let chosen = a.if_(test, read, effect);
+        let ignored = a.prim_raw(Primitive::Pignore, &[chosen], LamLoc::NONE);
+        let three = a.const_(C::Int { i: 3, comment: None });
+        let body = a.seq_raw(ignored, three);
+        let callee = a.var(ext);
+        let value = call(a, callee, &[]);
+        let body = a.let_(LetKind::Strict, x, value, body);
+        a.function_(1, &[c], body, Default::default(), LamLoc::NONE)
+    };
+    assert!(legacy_text(build, &[]).contains("  let x = ext();\n  c ? x : ext();\n  return 3;\n"));
+    assert!(legacy_text(build, &[1, 2, 3, 4, 5, 6]).contains("  ext();\n  if (!c) {\n    ext();\n  }\n  return 3;\n"));
+    let (stats, rows) = step_a(build);
+    // The lowering's decision, from `built`: used once (and not pure).
+    assert_eq!(rows, vec![("x".to_string(), UsedStats::Used, false, 1)]);
+    // The legacy pass counts zero after P1: one count and one status differ.
+    assert_eq!((stats.decision_count_differences, stats.decision_status_differences), (1, 1));
+}
+
+#[test]
+fn a_copied_function_doubles_the_legacy_count_of_the_variables_declared_inside_it() {
+    // THREE_TREES.md 11.4, "T4c design" (b), second hazard.
+    // `() => { let g = p => ext(p); g(1) }`, then the function value copied
+    // as the J normaliser copies a repeated pure function (`copy_j`): the
+    // copy's `g` is a variable of its own that prints as the original. The
+    // run inside the function closed before the copy: `g` was decided an
+    // inline candidate with `built` one. P3 counts the identifier: two.
+    use crate::js_ir::op::UsedStats;
+    use crate::lambda::LamLoc;
+    use crate::lambda::js_pass_external_shadow::apply_external_shadow_pass as shadow;
+    use crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_pass as flatten;
+    let mut a = LamArena::new();
+    let (g, p) = (Ident::new("g", 10, IdentFlags::NONE), Ident::new("p", 11, IdentFlags::NONE));
+    let (ext, read) = (a.var(Ident::new("ext", 13, IdentFlags::NONE)), a.var(p));
+    let value = call(&mut a, ext, &[read]);
+    let function = a.function_(1, &[p], value, Default::default(), LamLoc::NONE);
+    let (callee, one) = (a.var(g), a.const_(C::Int { i: 1, comment: None }));
+    let applied = call(&mut a, callee, &[one]);
+    let body = a.let_(LetKind::Strict, g, function, applied);
+    let root = a.function_(0, &[], body, Default::default(), LamLoc::NONE);
+    let input = bridge::import_lambda(&a, root).unwrap();
+    let source_root = input.root;
+    let mut state = State::new(input);
+    let probed = state.probe(Cx::value(), source_root).unwrap();
+    let out = state.realize(Cx::value(), probed);
+    let copy = crate::bir::j::logic::copy_j(&mut state.arena, out.value.unwrap());
+    let statement = state.arena.new_node(View::SExp { value: copy }, 0);
+    state.statements.push(statement);
+    let lowered = state.complete(Cx::value(), Probed::Out(out));
+    lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
+    let scope = lowered.program.arena.js_scope.as_ref().unwrap();
+    let origin = |var: usize| lowered.program.arena.vars.j_origin[var].index();
+    let copies: Vec<usize> = (0..scope.uses.len()).filter(|&var| lowered.program.idents[origin(var)] == g).collect();
+    // Two variables print as `g`; each has one occurrence.
+    assert_eq!(copies.len(), 2);
+    assert!(copies.iter().all(|&var| scope.uses[var].built == 1));
+    // One decision, taken before the copy: an inline candidate.
+    let decisions: Vec<_> = scope.decisions.iter().map(|decision| (lowered.program.idents[origin(decision.var.index())], *decision)).collect();
+    assert_eq!(decisions.len(), 1);
+    assert_eq!((decisions[0].1.status(), decisions[0].1.inline(), decisions[0].1.built()), (UsedStats::OncePure as u32, true, 1));
+    // The legacy pass on the same program: `g` is used twice, no candidate.
+    let program = shadow(flatten(bridge_j::export_js(&lowered.program).unwrap()));
+    let legacy = crate::lambda::js_pass_tailcall_inline::decisions(&program.program);
+    assert_eq!(legacy[&g], (UsedStats::Used, 2, false));
+    let stats = crate::bir::shadow::compare_decisions(&decisions, &program.program);
+    assert_eq!((stats.decision_count_differences, stats.decision_status_differences, stats.decision_inline, stats.decision_legacy_inline), (1, 1, 1, 0));
+}

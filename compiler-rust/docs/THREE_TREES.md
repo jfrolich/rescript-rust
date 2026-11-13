@@ -1191,9 +1191,15 @@ compares, per declared identifier, with `js_pass_tailcall_inline::decisions`.
 | the application | 3,848 | 144,584 | 2,279 / 2,279 | 0, 0, 0 | 0, 0, 0 | 31,158 |
 
 (The fixtures corpus was not run: it needs the reference compiler's
-executable.) So on these corpora neither hazard of (b) occurs: no variable is
-read in a branch P1 drops, and no declaration is inside a function the
-lowering copies. They remain possible by reading. The counter 11.4 asked for
+executable.) So (b) holds on these corpora only. Both hazards are pinned as
+differences between `built` and the count P3 reads:
+`a_pure_branch_the_flatten_pass_drops_takes_an_occurrence_built_still_
+counts` (`ignore(c ? x : ext())` leaves the statement `c ? x : ext();`;
+`built` of `x` is one, P3 counts zero and makes `let x = ext()` an expression
+statement) and `a_copied_function_doubles_the_legacy_count_of_the_variables_
+declared_inside_it` (the function is copied with `copy_j` after its run
+closed: `built` is one per copy and the decision is "inline candidate", P3
+counts two and keeps the function). No unit of the corpora has either shape. The counter 11.4 asked for
 (sites spliced) is the inline-candidate column: nothing is spliced.
 
 Two places where the code is not what "The design" says:
