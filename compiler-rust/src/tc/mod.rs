@@ -1,5 +1,8 @@
 //! New checker boundary. R0 deliberately cannot produce a checked unit.
 
+#[cfg(test)]
+pub(crate) mod steps;
+
 use std::convert::Infallible;
 
 /// Closed set of reasons a unit must take the old road, before any effects.

@@ -219,7 +219,6 @@ struct Canonical<'a> {
     out: String,
     indent: usize,
     numbers: NodeNumbers,
-
 }
 
 impl Canonical<'_> {
@@ -635,13 +634,13 @@ impl Canonical<'_> {
 
     /// O(nodes + edges + output bytes), excluding existing path/row normalization.
     /// One explicit task pool and text pool replace recursion; shared nodes are
-    /// expanded once per item. Returns the number of dispatched tasks for tests.
-    fn write_type(&mut self, output: &mut String, root: TypeExprRef) -> u64 {
+    /// expanded once per item. Test builds count each dispatched task.
+    fn write_type(&mut self, output: &mut String, root: TypeExprRef) {
         let mut work = vec![PrintTask::Type(root)];
         let mut text = String::new();
-        let mut steps = 0;
         while let Some(task) = work.pop() {
-            steps += 1;
+            #[cfg(test)]
+            crate::tc::steps::tick();
             let ty = match task {
                 PrintTask::Text { start, end } => {
                     output.push_str(&text[start as usize..end as usize]);
@@ -686,129 +685,128 @@ impl Canonical<'_> {
                     }
                 }};
             }
-        match desc {
-            TypeDesc::Tvar(_)
-            | TypeDesc::Tunivar(_)
-            | TypeDesc::Tlink(_)
-            | TypeDesc::Tsubst(_) => out.push_str("<link>"),
-            TypeDesc::Tnil => out.push_str("nil"),
-            TypeDesc::Tarrow { args, ret } => {
-                out.push('(');
-                for (index, arg) in ctx.type_args(args).iter().enumerate() {
-                    if index > 0 {
-                        out.push_str(", ");
-                    }
-                    let label = arg.label();
-                    if let Some(name) = label.label_name() {
-                        out.push(if label.is_optional() { '?' } else { '~' });
-                        out.push_str(name);
-                        out.push(':');
-                    }
-                    child!(arg.typ);
-                }
-                out.push_str(") => ");
-                child!(ret);
-            }
-            TypeDesc::Ttuple(types) => {
-                out.push_str("tuple(");
-                children!(ctx.type_list(types).iter());
-                out.push(')');
-            }
-            TypeDesc::Tconstr { path, args, .. } => {
-                self.write_path(out, &path);
-                if !args.is_empty() {
-                    out.push('<');
-                    children!(ctx.type_list(args).iter());
-                    out.push('>');
-                }
-            }
-            TypeDesc::Tobject { fields } => {
-                out.push_str("object{");
-                child!(fields);
-                out.push('}');
-            }
-            TypeDesc::Tfield {
-                name,
-                mutability,
-                typ,
-                rest,
-            } => {
-                let _ = write!(
-                    out,
-                    "{}[{:?}]: ",
-                    name.as_str(),
-                    ctx.mutability_repr(mutability)
-                );
-                child!(typ);
-                out.push_str("; ");
-                child!(rest);
-            }
-            TypeDesc::Tvariant(row) => {
-                let row = ctx.row_desc(row);
-                let row = btype::row_repr(ctx, &row);
-                out.push_str("variant[");
-                for (index, (label, field)) in row.row_fields.iter().enumerate() {
-                    if index > 0 {
-                        out.push_str(" | ");
-                    }
-                    let _ = write!(out, "#{label}");
-                    match btype::row_field_repr(ctx, field) {
-                        RowField::Rpresent(None) => {}
-                        RowField::Rpresent(Some(ty)) => {
-                            out.push('(');
-                            child!(ty);
-                            out.push(')');
+            match desc {
+                TypeDesc::Tvar(_)
+                | TypeDesc::Tunivar(_)
+                | TypeDesc::Tlink(_)
+                | TypeDesc::Tsubst(_) => out.push_str("<link>"),
+                TypeDesc::Tnil => out.push_str("nil"),
+                TypeDesc::Tarrow { args, ret } => {
+                    out.push('(');
+                    for (index, arg) in ctx.type_args(args).iter().enumerate() {
+                        if index > 0 {
+                            out.push_str(", ");
                         }
-                        RowField::Reither {
-                            constant,
-                            types,
-                            matched,
-                            ..
-                        } => {
-                            let _ = write!(out, " either constant={constant} matched={matched} (");
-                            children!(types);
-                            out.push(')');
+                        let label = arg.label();
+                        if let Some(name) = label.label_name() {
+                            out.push(if label.is_optional() { '?' } else { '~' });
+                            out.push_str(name);
+                            out.push(':');
                         }
-                        RowField::Rabsent => out.push_str(" absent"),
+                        child!(arg.typ);
+                    }
+                    out.push_str(") => ");
+                    child!(ret);
+                }
+                TypeDesc::Ttuple(types) => {
+                    out.push_str("tuple(");
+                    children!(ctx.type_list(types).iter());
+                    out.push(')');
+                }
+                TypeDesc::Tconstr { path, args, .. } => {
+                    self.write_path(out, &path);
+                    if !args.is_empty() {
+                        out.push('<');
+                        children!(ctx.type_list(args).iter());
+                        out.push('>');
                     }
                 }
-                out.push_str("] more=");
-                child!(row.row_more);
-                let _ = write!(out, " closed={} fixed={}", row.row_closed, row.row_fixed);
-                if let Some((path, args)) = &row.row_name {
-                    out.push_str(" name=");
-                    self.write_path(out, path);
-                    out.push('<');
-                    children!(args.iter().copied());
-                    out.push('>');
+                TypeDesc::Tobject { fields } => {
+                    out.push_str("object{");
+                    child!(fields);
+                    out.push('}');
+                }
+                TypeDesc::Tfield {
+                    name,
+                    mutability,
+                    typ,
+                    rest,
+                } => {
+                    let _ = write!(
+                        out,
+                        "{}[{:?}]: ",
+                        name.as_str(),
+                        ctx.mutability_repr(mutability)
+                    );
+                    child!(typ);
+                    out.push_str("; ");
+                    child!(rest);
+                }
+                TypeDesc::Tvariant(row) => {
+                    let row = ctx.row_desc(row);
+                    let row = btype::row_repr(ctx, &row);
+                    out.push_str("variant[");
+                    for (index, (label, field)) in row.row_fields.iter().enumerate() {
+                        if index > 0 {
+                            out.push_str(" | ");
+                        }
+                        let _ = write!(out, "#{label}");
+                        match btype::row_field_repr(ctx, field) {
+                            RowField::Rpresent(None) => {}
+                            RowField::Rpresent(Some(ty)) => {
+                                out.push('(');
+                                child!(ty);
+                                out.push(')');
+                            }
+                            RowField::Reither {
+                                constant,
+                                types,
+                                matched,
+                                ..
+                            } => {
+                                let _ = write!(out, " either constant={constant} matched={matched} (");
+                                children!(types);
+                                out.push(')');
+                            }
+                            RowField::Rabsent => out.push_str(" absent"),
+                        }
+                    }
+                    out.push_str("] more=");
+                    child!(row.row_more);
+                    let _ = write!(out, " closed={} fixed={}", row.row_closed, row.row_fixed);
+                    if let Some((path, args)) = &row.row_name {
+                        out.push_str(" name=");
+                        self.write_path(out, path);
+                        out.push('<');
+                        children!(args.iter().copied());
+                        out.push('>');
+                    }
+                }
+                TypeDesc::Tpoly { body, vars } => {
+                    out.push_str("poly[");
+                    children!(ctx.type_list(vars).iter());
+                    out.push_str("] ");
+                    child!(body);
+                }
+                TypeDesc::Tpackage { path, lids, args } => {
+                    out.push_str("package(");
+                    self.write_path(out, &path);
+                    let lids = ctx.package_lids(lids);
+                    for (lid, arg) in lids.iter().zip(ctx.type_list(args).iter()) {
+                        out.push_str(" with ");
+                        self.write_longident(out, lid);
+                        out.push_str(" = ");
+                        child!(arg);
+                    }
+                    out.push(')');
                 }
             }
-            TypeDesc::Tpoly { body, vars } => {
-                out.push_str("poly[");
-                children!(ctx.type_list(vars).iter());
-                out.push_str("] ");
-                child!(body);
-            }
-            TypeDesc::Tpackage { path, lids, args } => {
-                out.push_str("package(");
-                self.write_path(out, &path);
-                let lids = ctx.package_lids(lids);
-                for (lid, arg) in lids.iter().zip(ctx.type_list(args).iter()) {
-                    out.push_str(" with ");
-                    self.write_longident(out, lid);
-                    out.push_str(" = ");
-                    child!(arg);
-                }
-                out.push(')');
-            }
-        }
 
             out.push(')');
             flush!();
             debug_assert_eq!(start, out.len());
             work[first..].reverse();
         }
-        steps
     }
 
     fn write_longident(&self, out: &mut String, lid: &Longident) {
@@ -920,7 +918,7 @@ let deep: Inner.Deep.v = (1, inner)
         };
         printer.numbers.clear();
         let mut text = String::new();
-        let steps = printer.write_type(&mut text, ty);
+        let steps = crate::tc::steps::scope(|| printer.write_type(&mut text, ty));
         (text, steps)
     }
 
