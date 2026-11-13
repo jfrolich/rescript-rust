@@ -2660,7 +2660,7 @@ The statement stack and node-list pool must be used end to end.
 | `call.rs:289` `apply_with_arity` | `args: Vec<NodeId>,` | per construct | apply_with_arity borrows a node slice; it does not own an argument vector. | removed |
 | `call.rs:300` `apply_with_arity` | `callee = self.call_node(callee, &remaining[..count], full.clone());` | per construct | stays: call-info scalar clone; no heap value | non-allocating |
 | `call.rs:313` `apply_with_arity` | `let mut full_args = remaining.to_vec();` | per construct | Eta expansion uses retained cleared argument storage and preserves left-to-right fresh parameter creation. | removed |
-| `cond.rs:154` `conditional_children` | `into: &mut Vec<(Cx, NodeId)>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `cond.rs:154` `conditional_children` | `into: &mut Vec<(Cx, NodeId)>,` | per construct | Borrowed child-buffer parameter appends to retained SourceProbe.children; the signature owns no per-node allocation. | justified |
 | `exit.rs:75` `Plan` | `groups: Vec<usize>,` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
 | `exit.rs:76` `Plan` | `next: Vec<usize>,` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
 | `exit.rs:77` `Plan` | `bodies: Vec<NodeId>,` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
@@ -2674,7 +2674,7 @@ The statement stack and node-list pool must be used end to end.
 | `exit.rs:437` `exit_dispatch` | `let mut clauses = Vec::with_capacity(plan.len as usize);` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
 | `exit.rs:438` `exit_dispatch` | `let mut actions = Vec::with_capacity(plan.len as usize);` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
 | `exit.rs:509` `exit_children` | `pub(super) fn exit_children(&self, cx: Cx, exit: &Exit, into: &mut Vec<(Cx, NodeId)>) {` | per construct | borrows the retained source traversal queue; owns no buffer | retained |
-| `expr.rs:42` `expression_children` | `into: &mut Vec<(Cx, NodeId)>,` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `expr.rs:42` `expression_children` | `into: &mut Vec<(Cx, NodeId)>,` | per visited node | Borrowed child-buffer parameter appends to retained SourceProbe.children; the signature owns no per-node allocation. | justified |
 | `expr.rs:278` `finish_expression` | `let attr = attr.clone();` | per visited node | Replacement headers share the source immutable attribute handle; directive strings are not cloned. | removed |
 | `expr.rs:308` `drop_pure_effect` | `let mut effects = Vec::new();` | per construct/walk | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `external.rs:8` `module` | `use smallvec::SmallVec;` | declaration | removed SmallVec import | removed |
@@ -2726,12 +2726,12 @@ The statement stack and node-list pool must be used end to end.
 | `ffi_args.rs:552` `assemble_external_args_with_splice` | `let mut effects: SmallVec<[NodeId; 4]> = SmallVec::new();` | per construct | ListId input/output and reusable argument assembly buffer | removed |
 | `ffi_args.rs:595` `assemble_external_args` | `args: SmallVec<[NodeId; 4]>,` | per construct | ListId input/output and reusable argument assembly buffer | removed |
 | `ffi_args.rs:597` `assemble_external_args` | `) -> (SmallVec<[NodeId; 4]>, Option<NodeId>) {` | per construct | ListId input/output and reusable argument assembly buffer | removed |
-| `import.rs:110` `external_module` | `name: external.bundle.clone(),` | per construct | borrow payload or retain typed pool handle | pending |
-| `import.rs:114` `external_module` | `.clone()` | per construct | borrow payload or retain typed pool handle | pending |
-| `import.rs:176` `compile_import` | `.push(self.arena.pools.j_modules[module.index()].clone());` | per construct | borrow payload or retain typed pool handle | pending |
-| `import.rs:194` `capitalize` | `let mut result = String::with_capacity(s.len());` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `import.rs:218` `external_binding_name` | `let mut result = String::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `import.rs:234` `external_binding_name` | `name.clone()` | per construct | borrow payload or retain typed pool handle | pending |
+| `import.rs:110` `external_module` | `name: external.bundle.clone(),` | per construct | Owned bundle/attribute payload is created only for a distinct immutable unit module key; cache-hit references use ImportId without cloning. | justified |
+| `import.rs:114` `external_module` | `.clone()` | per construct | Owned bundle/attribute payload is created only for a distinct immutable unit module key; cache-hit references use ImportId without cloning. | justified |
+| `import.rs:176` `compile_import` | `.push(self.arena.pools.j_modules[module.index()].clone());` | per construct | Dynamic dependency occurrences retain ImportId handles during lowering, preserving order and duplicates; owned compatibility records materialize only at final output. | removed |
+| `import.rs:194` `capitalize` | `let mut result = String::with_capacity(s.len());` | per construct | Binding capitalization and sanitization append to retained cleared spelling storage. | removed |
+| `import.rs:218` `external_binding_name` | `let mut result = String::new();` | per construct | Binding capitalization and sanitization append to retained cleared spelling storage. | removed |
+| `import.rs:234` `external_binding_name` | `name.clone()` | per construct | Binding capitalization and sanitization append to retained cleared spelling storage. | removed |
 | `jsx.rs:70` `compile_jsx` | `let mut props = Vec::with_capacity(jsx.jsx_props.len());` | per visited node | Converted: JSX property metadata is an eight-byte PropertySpan into the unit property-key pool. | converted |
 | `jsx.rs:71` `compile_jsx` | `let mut values = Vec::with_capacity(` | per visited node | Converted: reserve operand-list slots once, compact omitted props in place, and attach that list directly. | converted |
 | `jsx.rs:159` `duplicate_jsx_key` | `let mut spine = smallvec::SmallVec::<[NodeId; 4]>::new();` | per visited node | Converted: duplicate member spines using retained unit node scratch, cleared on success and rejection. | converted |
@@ -2739,11 +2739,11 @@ The statement stack and node-list pool must be used end to end.
 | `konst.rs:56` `Work` | `let mut values: Vec<(NodeId, bool)> = Vec::new();` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `konst.rs:60` `Work` | `let constant = self.arena.constant(id).clone();` | per visited node | Compound metadata stays behind source handles; leaf decoding snapshots only scalars and spans in retained spelling storage, never clones Constant. | removed |
 | `konst.rs:177` `Work` | `let children: Vec<_> = values.drain(start..).map(&#124;(node, _)&#124; node).collect();` | per visited node | Block operands use retained cleared constant_children storage. | removed |
-| `mod.rs:190` `children` | `fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>);` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `mod.rs:190` `children` | `fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>);` | per construct | Borrowed child-buffer parameter appends to retained SourceProbe.children; the signature owns no per-node allocation. | justified |
 | `mod.rs:230` `Work` | `let mut work = vec![Work::Enter(cx, node)];` | per construct | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `mod.rs:231` `Work` | `let mut values = Vec::new();` | per construct | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `mod.rs:232` `Work` | `let mut children = Vec::new();` | per construct | reusable traversal/output/argument buffer retained in lowering state | removed |
-| `mod.rs:295` `Lowered` | `pub dynamic_imports: Vec<crate::js_ir::ModuleId>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `mod.rs:295` `Lowered` | `pub dynamic_imports: Vec<crate::js_ir::ModuleId>,` | per construct | Legacy output ownership boundary: lowering records ImportIds; final compatibility output materializes owned dependency records once, outside lowering allocation proofs. | justified |
 | `mod.rs:333` `State` | `tail_frames: Vec<tail::Frame>,` | once per unit | stays: reusable lowering-state storage | retained |
 | `mod.rs:334` `State` | `tail_functions: Vec<Option<LoopRef>>,` | once per unit | stays: reusable lowering-state storage | retained |
 | `mod.rs:335` `State` | `tail_copies: Vec<Option<VarId>>,` | once per unit | stays: reusable lowering-state storage | retained |
@@ -2800,11 +2800,11 @@ The statement stack and node-list pool must be used end to end.
 | `mod.rs:461` `new` | `tries: Vec::new(),` | once per unit | stays: once per unit | retained |
 | `mod.rs:463` `new` | `catch_work: Vec::new(),` | once per unit | stays: once per unit | retained |
 | `mod.rs:560` `enter` | `let args = args.to_vec();` | per construct | pooled source operand lists and retained spine scratch; four-byte call frame | removed |
-| `mod.rs:713` `children` | `fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `mod.rs:713` `children` | `fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>) {` | per construct | Borrowed child-buffer parameter appends to retained SourceProbe.children; the signature owns no per-node allocation. | justified |
 | `out.rs:52` `StatementStack` | `slots: Vec<Option<Slot>>,` | once per unit | stays: reusable statement-stack storage | retained |
 | `out.rs:53` `StatementStack` | `held: Vec<NodeId>,` | once per unit | stays: reusable statement-stack storage | retained |
 | `out.rs:62` `StatementStack` | `empties: Vec<(u32, NodeId)>,` | once per unit | stays: reusable statement-stack storage | retained |
-| `out.rs:378` `FreePool` | `nodes: Vec<Option<Free>>,` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `out.rs:378` `FreePool` | `nodes: Vec<Option<Free>>,` | per visited node | Append-only unit FreePool node storage, not a separately owned container per visited node. | justified |
 | `out.rs:435` `Work` | `let mut work = vec![Work::Enter(root, cx)];` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `out.rs:436` `Work` | `let mut outputs = Vec::new();` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `prim.rs:122` `finish_primitive_payload` | `.collect();` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
@@ -2856,7 +2856,7 @@ The statement stack and node-list pool must be used end to end.
 | `switch.rs:892` `switch_constants_equal` | `let mut work = smallvec::SmallVec::<[(crate::bir::ConstId, crate::bir::ConstId); 8]>::new();` | per construct | retained constant-pair scratch buffer | removed |
 | `switch.rs:962` `finish_small_switch` | `let key = self.arena.switch(plan.header).keys[0].clone();` | per construct | borrowed key from its temporarily acquired pool; no clone | removed |
 | `tail.rs:40` `finish_self_call` | `pub(super) fn finish_self_call(&mut self, frame: LoopRef, statements: Span, values: smallvec::SmallVec<[NodeId; 4]>) -> Probed {` | per construct | borrowed node slice supplied by reusable sequencing buffer | removed |
-| `try_.rs:65` `try_children` | `pub(super) fn try_children(&self, cx: Cx, frame: Try, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `try_.rs:65` `try_children` | `pub(super) fn try_children(&self, cx: Cx, frame: Try, into: &mut Vec<(Cx, NodeId)>) {` | per construct | Borrowed child-buffer parameter appends to retained SourceProbe.children; the signature owns no per-node allocation. | justified |
 | `unit.rs:33` `lower` | `.collect();` | once per unit | stays: once per unit | retained |
 | `untagged.rs:53` `Plan` | `program: Vec<Op>,` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
 | `untagged.rs:55` `Plan` | `actions: Vec<Action>,` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
@@ -3180,6 +3180,28 @@ groups. Append-only reservations include variable columns and JS occurrence rows
 All-five-continuation oracle tests also exercise the six-group summary.
 Cross-module *body inlining* and its fresh import graph remain separate pending
 sites; this proof does not exercise them.
+
+Import metadata is now shared by the complete immutable external-module key
+(identifier, bundle, attributes, default flag and dynamic flag). Cache hits clone
+no owned payload. Binding spelling, flat-make joining and export-name conversion
+use retained cleared strings; resolved ML paths are cached as unit text handles.
+Dynamic dependency occurrences retain ImportIds, including duplicates and order.
+Owned ModuleId compatibility records are materialized only in final `complete`;
+that legacy-output ownership boundary is outside probe/realize/release proofs.
+
+Whole-Lambda fixtures execute 10,000 attributed external imports with two callback
+members and 10,000 resolved ML imports with mangled flat-make callbacks. Both
+measure zero warmed allocations with unchanged recorded capacities, 10,001 source
+visits and respectively 40,001 / 30,001 primitive steps. All occurrences share one
+module descriptor; callback/global variables and dynamic occurrence runs reserve
+append-only growth before measurement. Metadata-key and unusual-name oracle tests
+preserve flag/attribute distinctions and first-binding naming.
+
+| Newly found site | Previous ownership | Disposition |
+| --- | --- | --- |
+| import resolver cache-hit path | owned returned path per occurrence | removed: unit text-handle resolution cache |
+| import flat-make and export-name callbacks | temporary joined/mangled strings and singleton owned arrays | removed: retained spellings and borrowed iterator |
+| final dependency compatibility records | one owned ModuleId per output occurrence | final export boundary, outside lowering allocation claim; order and duplicates preserved |
 
 ### 7.5.1 Concurrent loop, label and recursive-value additions
 

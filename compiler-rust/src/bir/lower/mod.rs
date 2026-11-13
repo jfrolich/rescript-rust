@@ -408,7 +408,8 @@ struct State {
     source_steps: usize,
     invalid_module_paths: Vec<bool>,
     awaited_units: Vec<bool>,
-    dynamic_imports: Vec<crate::js_ir::ModuleId>,
+    dynamic_imports: Vec<crate::bir::ImportId>,
+    import_storage: import::Storage,
     external_references: Vec<Option<crate::bir::ImportId>>,
     external_globals: Vec<Option<VarId>>,
     external_pending: Vec<(u32, NodeId)>,
@@ -498,7 +499,7 @@ impl State {
             switch_comparisons: 0, switch_compared: 0, switch_visits: 0,
             invalid_module_paths: vec![false; input.arena.nodes.len()],
             awaited_units: vec![false; input.arena.vars.len()],
-            dynamic_imports: Vec::new(),
+            dynamic_imports: Vec::new(), import_storage: Default::default(),
             external_references: Vec::new(),
             external_globals: Vec::new(),
             external_pending: Vec::new(),
@@ -607,10 +608,12 @@ impl State {
             header.uses = 0;
         }
         self.arena.finish_bulk(root);
+        // Materialize legacy-owned dependency records only at the output boundary.
+        let dynamic_imports = self.dynamic_imports.iter().map(|id| self.arena.pools.j_modules[id.index()].clone()).collect();
         Lowered {
             program: super::bridge_j::Imported::from_lowering(self.arena, root, self.idents),
             finished: out.finished,
-            dynamic_imports: self.dynamic_imports,
+            dynamic_imports,
             switch_stats: SwitchStats {
                 source_visits: self.source_steps,
                 fingerprint_visits: self.switch_visits,
