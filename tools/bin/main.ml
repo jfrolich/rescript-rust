@@ -3,9 +3,7 @@ let doc_help =
 
 Output documentation to standard output
 
-Usage: rescript-tools doc <FILE>...
-
-Several files print a JSON list of their documentation.
+Usage: rescript-tools doc <FILE>
 
 Example: rescript-tools doc ./path/to/EntryPointLib.res|}
 
@@ -80,8 +78,8 @@ let main () =
   | "doc" :: rest -> (
     match rest with
     | ["-h"] | ["--help"] -> log_and_exit (Ok doc_help)
-    | _ :: _ when Sys.file_exists build_system_exe ->
-      run_build_system ("doc" :: rest)
+    | [path] when Sys.file_exists build_system_exe ->
+      run_build_system ["doc"; path]
     | [path] ->
       (* NOTE: Internal use to generate docs from compiler *)
       let () =

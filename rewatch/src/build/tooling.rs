@@ -10,7 +10,6 @@ use super::build_types::{BuildCommandState, SourceType, StoredAst, StoredSignatu
 use super::{compile, packages, parse};
 use crate::{config, helpers};
 use anyhow::{Result, anyhow};
-use rescript_compiler::analysis::json::Json;
 use rescript_compiler::analysis::session::{Project, SourcePaths, TypedSource};
 use rescript_compiler::cmi::persistent_env::ModuleRegistry;
 use rescript_compiler::parse_arena::ParseArena;
@@ -386,7 +385,7 @@ impl Project for WatchProject<'_> {
 /// Run `command` on a thread of its own, with the stack the build's compile
 /// workers get: typed trees are not `Send`, so a tooling command type-checks
 /// and reads its modules on one thread.
-fn on_tooling_thread<T: Send>(command: impl FnOnce() -> Result<T, String> + Send) -> Result<T> {
+fn on_tooling_thread(command: impl FnOnce() -> Result<Vec<u8>, String> + Send) -> Result<Vec<u8>> {
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .name("rewatch-tooling".to_string())
@@ -408,25 +407,33 @@ pub fn run_command(build_state: &BuildCommandState, cwd: PathBuf, args: Vec<Stri
     })
 }
 
-/// The documentation of the modules at `paths`, which are in the package at
-/// `root`, in that order.
+/// `rescript-tools doc <path>`: the documentation of the module at `path`
+/// (relative to `cwd`) as JSON.
 ///
-/// The package is type-checked first, as `build::build` does in check-only
-/// mode (no lock taken, no files written), printing no warnings. The docs
-/// give the position of every item, also of those other modules declare, so
-/// this build keeps source locations, as the diagnostic rebuild does.
-fn package_docs(root: &Path, cwd: &Path, paths: &[String], plain_output: bool) -> Result<Vec<Json>> {
+/// The OCaml tool reads the module's `.cmt`, which builds do not write.
+/// Instead the project of the file is type-checked here, writing no files,
+/// and the module is documented from its Rust typed tree. The docs give the
+/// position of every item, also of those other modules declare, so this
+/// build keeps source locations, as the diagnostic rebuild does.
+pub fn doc(cwd: &Path, path: &str, plain_output: bool) -> Result<Vec<u8>> {
+    let file = cwd.join(path);
+    if !file.is_file() {
+        return Err(anyhow!(
+            "error: failed to generate doc for {path}, there is no such file"
+        ));
+    }
+    let project_root = helpers::get_nearest_config(&file)
+        .ok_or_else(|| anyhow!("error: failed to generate doc for {path}, it is in no ReScript project"))?;
     let failed = |err: &dyn std::fmt::Display| {
-        anyhow!(
-            "error: failed to generate doc for {}, the project does not build: {err:#}",
-            paths.join(", ")
-        )
+        anyhow!("error: failed to generate doc for {path}, the project does not build: {err:#}")
     };
+    // `build::build` in check-only mode (no lock taken, no files written),
+    // keeping locations and printing no warnings.
     let mut build_state = super::initialize_build_with_mode(
         /* no_timing */ true,
         &None,
         /* show_progress */ false,
-        root,
+        &project_root,
         plain_output,
         /* warn_error */ None,
         /* prod */ false,
@@ -448,49 +455,12 @@ fn package_docs(root: &Path, cwd: &Path, paths: &[String], plain_output: bool) -
     )
     .map_err(|err| failed(&err))?;
     let docs = on_tooling_thread(|| {
-        let project = WatchProject::new(&build_state, cwd, paths);
-        rescript_compiler::analysis::docs(cwd, paths, &project)
+        let project = WatchProject::new(&build_state, cwd, &[path.to_string()]);
+        rescript_compiler::analysis::doc(cwd, path, &project)
     });
     // A one-shot command: let the OS reclaim the build graph at exit.
     std::mem::forget(build_state);
     docs
-}
-
-/// `rescript-tools doc <path>...`: what it prints, the documentation of the
-/// modules at `paths` (relative to `cwd`) as JSON.
-///
-/// The OCaml tool reads a module's `.cmt`, which builds do not write.
-/// Instead the package of each file is type-checked here, once for all of
-/// its files, and the modules are documented from their Rust typed trees.
-pub fn doc(cwd: &Path, paths: &[String], plain_output: bool) -> Result<Vec<u8>> {
-    // The packages of the files, each with the indices of its files.
-    let mut packages: Vec<(PathBuf, Vec<usize>)> = Vec::new();
-    for (index, path) in paths.iter().enumerate() {
-        let file = cwd.join(path);
-        if !file.is_file() {
-            return Err(anyhow!(
-                "error: failed to generate doc for {path}, there is no such file"
-            ));
-        }
-        let root = helpers::get_nearest_config(&file).ok_or_else(|| {
-            anyhow!("error: failed to generate doc for {path}, it is in no ReScript project")
-        })?;
-        match packages.iter_mut().find(|(package, _)| *package == root) {
-            Some((_, indices)) => indices.push(index),
-            None => packages.push((root, vec![index])),
-        }
-    }
-    let mut docs: Vec<Option<Json>> = paths.iter().map(|_| None).collect();
-    for (root, indices) in packages {
-        let package_paths: Vec<String> = indices.iter().map(|index| paths[*index].clone()).collect();
-        let package_docs = package_docs(&root, cwd, &package_paths, plain_output)?;
-        for (index, doc) in indices.into_iter().zip(package_docs) {
-            docs[index] = Some(doc);
-        }
-    }
-    Ok(rescript_compiler::analysis::print_docs(
-        docs.into_iter().flatten().collect(),
-    ))
 }
 
 #[cfg(test)]

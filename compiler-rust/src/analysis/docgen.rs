@@ -938,13 +938,13 @@ fn package_root(path: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// `Tools.extract_docs`: the documentation of `entry_point_file` as JSON, or
-/// why there is none.
+/// `Tools.extract_docs`: the documentation of `entry_point_file` as pretty
+/// JSON, or why there is none.
 pub fn extract_docs(
     session: &ProjectSession<'_>,
     cwd: &Path,
     entry_point_file: &str,
-) -> Result<Json, String> {
+) -> Result<String, String> {
     let path = if Path::new(entry_point_file).is_relative() {
         let joined = cwd.join(entry_point_file);
         joined
@@ -992,7 +992,7 @@ pub fn extract_docs(
         std::slice::from_ref(&full.file.module_name),
         &full.file.structure,
     );
-    Ok(docs_for_module_json(&docs))
+    Ok(docs_for_module_json(&docs).pretty())
 }
 
 #[cfg(test)]
