@@ -30,8 +30,12 @@
 // The command rewrites the package.json files in place: run it on a throwaway
 // checkout, after the platform binaries are in place. A platform package whose
 // binaries are missing is left out of the compiler's optional dependencies.
-// The runtime is published from its sources and the JavaScript checked in
-// with them: the build system compiles it from source.
+// The runtime is published with its sources, the JavaScript checked in with
+// them, and the compiled interfaces in lib/rescript. `rescript` compiles the
+// runtime from its sources on every build, but `rescript-ocaml` reads
+// Pervasives.cmi and the other interfaces from <runtime>/lib/rescript
+// (compiler/core/res_compmisc.ml), so the command builds them with
+// `rescript-ocaml` for this machine's platform, whose binaries must be in place.
 //
 // The workflow publishes with npm trusted publishing (OIDC), without a token.
 // npm can only trust a workflow for a package that exists, so each package is
@@ -55,6 +59,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
 import semver from "semver";
+import { getTarget } from "../cli/common/platform.cjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const platforms = ["darwin-arm64", "linux-arm64", "linux-x64", "win32-x64"];
@@ -182,6 +187,8 @@ if (publishWithOidc) {
   }
 }
 
+buildRuntimeInterfaces();
+
 for (const { dir, rewrite } of packages) {
   const manifest = rewrite(readManifest(dir));
   manifest.name = scopedName(manifest.name);
@@ -225,6 +232,43 @@ for (const { dir, rewrite } of packages) {
 }
 
 writeSummary();
+
+/**
+ * Builds the runtime with rescript-ocaml, which writes its compiled interfaces
+ * to packages/@rescript/runtime/lib/rescript. lib/.npmignore leaves the other
+ * build files out of the package.
+ */
+function buildRuntimeInterfaces() {
+  const target = getTarget(process.platform, process.arch, os.release());
+  if (target === undefined || !builtPlatforms.includes(target)) {
+    fail(
+      `The runtime interfaces are built with rescript-ocaml for this machine, but packages/@rescript/${target ?? `${process.platform}-${process.arch}`}/bin has no binaries.`,
+    );
+  }
+  const runtimeDir = path.join(root, "packages/@rescript/runtime");
+  const exe = path.join(
+    root,
+    `packages/@rescript/${target}/bin/rescript-ocaml.exe`,
+  );
+  console.log("Building the runtime interfaces with rescript-ocaml");
+  run(exe, ["build"], runtimeDir, undefined, { RESCRIPT_RUNTIME: runtimeDir });
+  if (!fs.existsSync(path.join(runtimeDir, "lib/rescript/Pervasives.cmi"))) {
+    fail("rescript-ocaml build left no lib/rescript/Pervasives.cmi.");
+  }
+  // The package ships the checked-in JavaScript, which the .cmj files
+  // describe; the build must reproduce it.
+  const changed = git(
+    "status",
+    "--porcelain",
+    "--",
+    "packages/@rescript/runtime/lib",
+  );
+  if (changed !== "") {
+    fail(
+      `rescript-ocaml build changed the runtime's checked-in JavaScript:\n${changed}`,
+    );
+  }
+}
 
 /**
  * Creates the packages that do not exist yet and makes the nightly workflow
@@ -406,10 +450,12 @@ function git(...gitArgs) {
  * @param {string[]} commandArgs
  * @param {string} cwd
  * @param {string} [hint] added to the error when the command fails
+ * @param {Record<string, string>} [env] added to the environment
  */
-function run(command, commandArgs, cwd, hint) {
+function run(command, commandArgs, cwd, hint, env) {
   const result = child_process.spawnSync(command, commandArgs, {
     cwd,
+    env: { ...process.env, ...env },
     stdio: "inherit",
     shell: process.platform === "win32",
   });
