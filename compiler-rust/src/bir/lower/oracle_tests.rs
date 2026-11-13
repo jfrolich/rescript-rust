@@ -556,7 +556,7 @@ fn application_width_and_na_spines_have_linear_step_counts() {
 }
 
 #[test]
-fn unsupported_arguments_keep_their_own_reason() {
+fn loop_arguments_match_legacy() {
     use crate::lambda::{ApInfo, ApplyStatus, LamLoc};
     let mut source = LamArena::new();
     let f = source.var(Ident::new("f", 1, IdentFlags::NONE));
@@ -564,10 +564,7 @@ fn unsupported_arguments_keep_their_own_reason() {
     let b = source.const_(C::JsTrue);
     let arg = source.while_(b, a);
     let root = source.apply_raw(f, &[arg], ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE });
-    let input = bridge::import_lambda(&source, root).unwrap();
-    let root = input.root;
-    let mut state = State::new(input);
-    assert!(matches!(state.probe(Cx::value(), root), Err(Unsupported("loop"))));
+    compare(source, root);
 }
 
 #[test]
@@ -638,12 +635,7 @@ fn inline_body_with_effectful_argument_matches_legacy() {
     compare_oracle(a.clone(), root, Some(&resolver), true, &[0,1,2,3,4], None, true);
     resolver.set_bir_test_export("Other", "run", CmjExportArity::Single(Arity::info(vec![1], false)),
         Some(Lambda::function_(1, vec![param], Lambda::Lwhile(Box::new(Lambda::var(param)), Box::new(Lambda::var(param))), Default::default(), LamLoc::NONE)));
-    let input = bridge::import_lambda(&a, root).unwrap();
-    let root = input.root;
-    let mut state = State::new(input);
-    state.resolver = Some(resolver);
-    state.cross_module_inline = true;
-    assert!(matches!(state.probe(Cx::value(), root), Err(Unsupported("loop"))));
+    compare_oracle(a, root, Some(&resolver), true, &[0,1,2,3,4], None, true);
 }
 
 #[test]

@@ -2,6 +2,7 @@
 //! Context references are indices, never references into growing state pools.
 mod args;
 mod assign;
+mod loops;
 mod try_;
 mod ffi_args;
 mod external;
@@ -385,6 +386,7 @@ struct State {
     catch_table: Vec<(NodeId, crate::bir::CatchId)>,
     catches: Vec<Option<exit::Plan>>,
     tries: Vec<try_::Plan>,
+    loops: Vec<loops::Plan>,
     try_form_reads: usize,
     catch_work: Vec<NodeId>,
     /// `HAS_EXIT` reads that decided a flattening or a form.
@@ -459,6 +461,7 @@ impl State {
             catch_table: Vec::new(),
             catches: Vec::new(),
             tries: Vec::new(),
+            loops: Vec::new(),
             try_form_reads: 0,
             catch_work: Vec::new(),
             catch_flag_reads: 0,
@@ -648,9 +651,8 @@ impl ProbeRules for State {
             }
             View::Try { body, exception, handler } => return Ok(ProbePlan::Children(expr::Resume::Try(self.try_statement(cx, body, Some(exception), Some(handler), None)))),
             View::TryFinally { body, finaliser } => return Ok(ProbePlan::Children(expr::Resume::Try(self.compile_try_finally(cx, body, finaliser)))),
-            View::While { .. }
-            | View::For { .. }
-            | View::ForOf { .. }
+            View::While { .. } | View::For { .. } => return Ok(ProbePlan::Children(expr::Resume::Loop(self.loop_statement(node)))),
+            View::ForOf { .. }
             | View::ForAwaitOf { .. }
             | View::Break
             | View::Continue => return Err(Unsupported("loop")),

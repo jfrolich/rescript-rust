@@ -281,7 +281,7 @@ impl Bir {
             | View::For { var, .. }
             | View::ForOf { var, .. }
             | View::ForAwaitOf { var, .. }
-            | View::SForRange { var, .. }
+            | View::SForRange { var, parts: [_, _, _], .. }
             | View::SForOf { var, .. }
             | View::SForAwaitOf { var, .. } => smallvec![var],
             View::SRest { var, info, .. } => {

@@ -1105,7 +1105,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_child_keeps_its_own_reason() {
+    fn loop_children_match_legacy() {
         for string in [false, true] {
             let mut a = LamArena::new();
             let x = a.var(Ident::new("x", 10, crate::ident::IdentFlags::NONE));
@@ -1124,13 +1124,7 @@ mod tests {
                 let actions = a.add_list(&[body]);
                 a.switch_raw(x, actions, info)
             };
-            let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
-            let root = input.root;
-            let mut state = State::new(input);
-            assert!(matches!(
-                state.probe(Cx::returning(), root),
-                Err(Unsupported("loop"))
-            ));
+            super::super::oracle_tests::compare(a, root);
         }
     }
 

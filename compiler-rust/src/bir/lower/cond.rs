@@ -1523,13 +1523,7 @@ mod tests {
         let one = int(&mut a, 1);
         let (yes, no) = (a.seq_raw(loop_, one), int(&mut a, 2));
         let root = if_(&mut a, 1, yes, no);
-        let input = bridge::import_lambda(&a, root).unwrap();
-        let root = input.root;
-        let mut state = State::new(input);
-        assert!(matches!(
-            state.probe(Cx::returning(), root),
-            Err(Unsupported("loop"))
-        ));
+        super::super::oracle_tests::compare(a, root);
     }
 
     #[test]
