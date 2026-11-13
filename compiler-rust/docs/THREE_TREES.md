@@ -1199,8 +1199,9 @@ counts` (`ignore(c ? x : ext())` leaves the statement `c ? x : ext();`;
 statement) and `a_copied_function_doubles_the_legacy_count_of_the_variables_
 declared_inside_it` (the function is copied with `copy_j` after its run
 closed: `built` is one per copy and the decision is "inline candidate", P3
-counts two and keeps the function). No unit of the corpora has either shape. The counter 11.4 asked for
-(sites spliced) is the inline-candidate column: nothing is spliced.
+counts two and keeps the function). No unit of the corpora has either shape.
+The counter 11.4 asked for (sites spliced) is the inline-candidate column:
+nothing is spliced.
 
 Two places where the code is not what "The design" says:
 
@@ -1230,14 +1231,53 @@ texts stay equal.
 | T4a (done) | Export extraction and coercion on top-level rows (`bir/lower/export.rs`, S3.9b), with the position facts of finding 2 as sites ("T4a as built") | `extract_toplevel_exports`, `coerce_lowered_output` | - |
 | T4b (done, RESULT B) | Counterexample: R5 changes the `simplify_if_head` reader of a copied branch; read sites through P1 instead | Nothing; P1 stays until T6 | - |
 | T4c (done, counterexamples) | The statuses and the site of step A, computed and compared in check mode; no splice ("T4c design") | Nothing; P3 stays until P1 (T6) and P2 (T5) have left | T4a, T4b |
-| T4d | Step B | `apply_js_record_rest_pass` | P3 gone (T5, T6) |
+| T4g | The splice of step A, late marks, late zero, graves, the counter (11.6) | `apply_js_tailcall_inline_pass` | T5, T6 |
+| T4d | Step B | `apply_js_record_rest_pass` | T4g |
 | T4e | Steps C and D | `apply_js_flatten_and_mark_dead_pass` | T4d |
 | T4f | The shake as a filter over the rows | `apply_js_shake_pass` | T4a, T4e |
 
+**The order as read after T4c**: for each legacy pass still on the new side,
+the passes that must have left it first, and what shows the dependency. A
+pass leaves when its decisions are taken in the lowering; "not tested" means
+the dependency is read from the code and no test asserts two texts for it.
+
+| Legacy pass | Leaves at | Must have left first | Shown by |
+| --- | --- | --- | --- |
+| P1 flatten | T6 | none; but its rules cannot be applied where a run is copied, so it leaves with the lowering's list readers | `flattening_a_copied_return_branch_changes_the_simplify_if_head_reader` |
+| P2 external shadow | T5 | none: it is before P3 in legacy order, and a decision taken where the reference is lowered sees the bindings P2 sees | not tested |
+| P3 tail-call inlining | T4g | P1 | `flattening_after_a_site_in_a_returned_conditional_was_spliced_maps_its_predicate`; for the count, `a_pure_branch_the_flatten_pass_drops_takes_an_occurrence_built_still_counts` |
+| | | P2 | `inlining_before_the_external_shadow_pass_hides_the_binding_that_shadows_a_global` |
+| | | (also: a count by origin, or no copy after a close) | `a_copied_function_doubles_the_legacy_count_of_the_variables_declared_inside_it` |
+| P4 record rest | T4d | P3: it reads the slots after the declaration as P3 left them | not tested |
+| P5 substitution and dead marks | T4e | P3 | `a_declaration_the_tail_call_pass_finds_dead_is_not_materialised`, `block_substitution_and_dead_removal_do_not_commute_with_tailcall_inlining`, `inlining_from_an_outer_scope_takes_the_last_use_of_a_variable_of_a_closed_scope` |
+| | | P4: it reads the field reads P5 replaces (finding 6) | not tested |
+| P6 shake | T4f | P5: it reads the dead marks (`used_stats` in `js_shake.rs`) | not tested |
+
 `apply_external_shadow_pass` (P2) rewrites references to JavaScript globals
 that a binding shadows. It changes no count of a declared variable, but it
-reads which bindings exist, so it has to see the declarations P3 and P5
-remove; it stays until the names are decided in the lowering (T5).
+reads which bindings exist, so it has to see the parameters and declarations
+P3 removes and must not see the ones P3 moves into another list.
+
+**What T5 must deliver for P3 to leave.** P2's decision for a reference to a
+JavaScript global is: some binding around the reference prints with the
+global's name (`printed_binding_name`, `convert_ident_name`). The bindings
+are the declarations of every enclosing statement list (all of the list, not
+only those before the reference; the cases of one `switch` share a scope),
+the parameters of every enclosing function, loop variables, catch variables,
+and the imported modules of the unit. T5 delivers that decision as a fact of
+the reference node, taken on the binding structure the lowering wrote and
+not changed by a later scope-close decision: a reference that P2 would
+qualify is built as `globalThis.name` (or carries a bit the printer reads),
+and one P2 would leave stays plain even when a splice later puts a
+declaration of that name into its list. The check a worker can run: with T5
+in, `rg -n 'apply_external_shadow_pass' src/lambda/lam_compile.rs` shows the
+legacy side only, and the Lambda of
+`inlining_before_the_external_shadow_pass_hides_the_binding_that_shadows_a_
+global` lowered by the new side and run through P1, P3, P4, P5, P6 (no P2)
+prints `return ext(a, globalThis.location);`. The reverse case needs its own
+test in T5: a callee whose body declares `let location = ...`, inlined into
+a caller that reads the global `location`, prints the global unqualified,
+as the legacy order does.
 
 #### T4a as built
 
@@ -1470,6 +1510,120 @@ check_lower names the first differing line), find the statement, and decide
 only between "a rule R1 to R8 is implemented wrongly" (fix it, add the rule
 test) and RESULT B. If you cannot tell which within the unit, it is RESULT
 B: report the unit and the line.
+```
+
+### 11.6 Worker prompt for T4g
+
+To be issued when T5 and T6 are merged, not before ("T4c design"). It takes
+over what T4c could not do. Two things in it come from what T4c measured and
+are not in "The design": a list is copied more than once, so the splice
+needs a close that happens once; and a function copied after its runs closed
+has variables whose count is split over the copies.
+
+```text
+Task T4g: the backend lowering splices a function at its single tail call
+(step A of docs/THREE_TREES.md 11.4), so that the new side of the `lower`
+gate stops running the legacy pass apply_js_tailcall_inline_pass.
+Repository: compiler-rust/. Preconditions, check them first and stop with a
+report if one fails: `rg -n 'apply_js_flatten_pass|apply_external_shadow_
+pass' src/lambda/lam_compile.rs` shows both skipped for the new side (T6 and
+T5 are in); `shadow::compare_decisions` reports no count, status or site
+difference on the runtime, tests/tests and the application.
+
+Read first: docs/THREE_TREES.md 1.1, 1.5 and all of 11.4 ("The design",
+"T4c design" with its two counterexamples, the two count hazards, "as built
+and measured", the order table); src/lambda/js_pass_tailcall_inline.rs whole
+(statuses, try_inline_single_return_statement including the function literal
+called in place, inline_named_call and active_decls, immutable_param_mask,
+inline_tailcall_call, is_substitutable_constant, substituted_truth,
+SubstituteInline and its shadowing rules); src/bir/lower/close.rs,
+scope.rs (Uses, VarFacts, Decision, return_sites), out.rs (take_list),
+export.rs (the top-level close); src/bir/j/logic.rs (copy_j); src/bir/
+shadow.rs (compare_decisions, check_lower); the tests named in the order
+table.
+
+What exists: close::decide gives every declaration of a copied list its
+status from `built` and return_sites records the site of a callee. A
+declaration is decided once per copy of its statement (the last decision
+stands), so a list being copied is not "the scope closing".
+
+Do exactly this, one commit each, in this order, each pushed when made:
+1. Design, in 11.4 under "T4g as built", before any code. Answer: (a) where
+   the splice happens so that it happens once per declaration and after
+   every use of the callee is lowered: the copy of a function body's list
+   and the top-level list after coercion are the candidates; say how the
+   decisions of the lists inside that body are found without walking it (a
+   mark in `Scope::decisions` at function entry is the suggestion; it is not
+   tested); (b) with P1 gone, what a site is: state it on the statements
+   the lowering now writes and delete return_sites if the last statement of
+   a list is all that remains; (c) copy_j: either the copy keeps one count
+   per origin, or a function that holds a candidate is never copied after
+   its body closed, or a copied candidate is not spliced; choose one, and
+   turn a_copied_function_doubles_the_legacy_count_of_the_variables_
+   declared_inside_it into a test of the final text; (d) the function
+   literal called in place (no status, arity rule only).
+2. VarFacts grows to 16 bytes: the declaration's statement node, the site,
+   the head of the read sites, state bits. The late mark (a bit of a leaf's
+   aux) on every node a scope-close decision creates.
+3. The splice with the legacy rules: arity equal or no splice; a parameter
+   never assigned in the body is renamed to an argument that is a variable,
+   replaced by a substitutable constant, otherwise declared `let p = arg`
+   (kind Variable); a conditional or a negation on a parameter replaced by a
+   boolean or integer constant keeps one branch; shadowing by an inner
+   declaration, parameter, loop or catch variable ends the substitution for
+   that name. The callee's statements take the place of the `return`; the
+   declaration becomes dead and pure. Late zero: a decrement that brings
+   `remaining` of a variable of a closed run to zero marks its declaration
+   through VarFacts. Graves: occurrences a decision removes are logged
+   against the anchoring variable and subtracted from `built` when a later
+   release reaches the anchor. The new side skips
+   apply_js_tailcall_inline_pass; compare_decisions and
+   js_pass_tailcall_inline::decisions are deleted (one path).
+4. Rule tests in src/bir/lower/oracle_tests.rs in the oracle form (the same
+   Lambda through the legacy pipeline with all passes and through the new
+   one, texts compared): a function inlined at its single tail call; the
+   call in a branch of a returned conditional and as the last operand of a
+   returned sequence; count two; a count that becomes one only after a
+   later pass; `pair[0](2)`; fewer, equal, more arguments; a parameter
+   replaced by a variable, by a constant, declared, never read, assigned; a
+   method, `async`, a directive; late zero (finding 3); a dead block binding
+   (finding 5); an exported function; a candidate used inside its own
+   initialiser; the two T4c counterexamples and the two count hazards, now
+   with equal texts.
+5. Step-count tests at 10,000: a run of 10,000 declarations of which half
+   are single-use functions with a tail-call site (state the bound per
+   declaration and assert it); 10,000 nested scopes each inlining into the
+   next, without recursion on the native stack; a body inlined once is
+   rewritten once. A zero-allocation test with warm pools in the form of
+   src/bir/j/norm_tests.rs. size_of pinned: VarFacts 16, Uses 8, a read
+   site 8. The counter in the lower report: sites spliced, and of those the
+   number whose callee's level L use count is not one.
+6. docs/STATUS.md (row T4g), the re-cut table, tests/backend_coverage.txt
+   if a count improved, changes/lowering-tail-call-splice.internal.md.
+
+End state, to paste in the pull request with the output:
+- `rg -n 'apply_js_tailcall_inline_pass' src/lambda/lam_compile.rs src/bir`
+  shows it skipped for the new side only.
+- `rg -n 'lam_compile|js_exp_make|js_ir::build|js_pass_' src/bir/lower
+  src/bir/j` matches only inside #[cfg(test)] modules.
+- scripts/test_backend_coverage.py passes with stage `lower` unchanged in
+  every corpus; RESCRIPT_BACKEND=check on the application: no difference in
+  any unit.
+- cargo test for compiler-rust; the CI instruction count within +0.02%;
+  check-mode instructions on tests/tests before and after (one pass fewer:
+  it should fall).
+
+Shortcuts that count as failure: splicing where a list is copied instead of
+at a close that happens once; finding a site or a parameter's occurrences by
+walking a body that is not being inlined; a hash map keyed by a variable or
+a node; a Vec, Box or String per declaration or per site; an Unsupported
+reason; a weakened test; the legacy pass called from bir/ outside tests.
+
+When a unit differs: reduce it to the smallest Lambda and decide only
+between "a rule of the splice is implemented wrongly" (fix it, add the rule
+test) and "another legacy pass reads what the splice changed" (commit the
+Lambda as a test asserting both texts, keep the pass on the new side, write
+which pass under 11.4, stop).
 ```
 
 ## 12. Risks and what was not measured
