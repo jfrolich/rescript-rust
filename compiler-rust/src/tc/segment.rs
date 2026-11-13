@@ -136,7 +136,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<ChildTable>(), 8);
         assert_eq!(std::mem::size_of::<TypeDecl>(), 32);
         assert_eq!(std::mem::size_of::<MemberDecl>(), 16);
-        assert_eq!(std::mem::size_of::<Segment>(), 1016);
+        assert_eq!(std::mem::size_of::<Segment>(), 1000);
     }
 
     #[test]
@@ -222,7 +222,11 @@ macro_rules! row {
 }
 
 row!(PositionRow, 16, { filename: u32, line: i32, beginning_of_line: i32, offset: i32 });
-row!(LocationRow, 36, { start: PositionRow, end: PositionRow, ghost: bool });
+row!(LocationRow, 40, {
+    start: PositionRow, end: PositionRow,
+    /// `Location::origin`: the declaration identity of a coordinate-free location.
+    origin: u32, ghost: bool,
+});
 
 row!(UnitRow, 16, {
     name: u32, deprecated: u32, signature: u32, path: u32,
@@ -230,8 +234,19 @@ row!(UnitRow, 16, {
 row!(IdentRow, 16, {
     name: u32, stamp: i32, flags: u32,
     /// Absolute enclosing scope; distinct functor binders remain distinct.
+    /// An item binder (and every identifier naming it) holds the binder's
+    /// `ordered_items` index; a functor parameter `FUNCTOR_SCOPE | ` its
+    /// functor's `module_types` index; the unit itself `UNIT_SCOPE`; an
+    /// identifier bound outside the signature graph::NONE.
     scope: u32,
 });
+/// `IdentRow::scope` of the persistent identifier naming the unit itself.
+pub const UNIT_SCOPE: u32 = u32::MAX - 1;
+/// `IdentRow::scope` flag of a functor parameter.
+pub const FUNCTOR_SCOPE: u32 = 1 << 31;
+/// `ExportItem::payload` flag of a constructor that is an `extensions` row
+/// rather than a `members` row.
+pub const EXTENSION_PAYLOAD: u32 = 1 << 31;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PathRow {
@@ -286,8 +301,17 @@ pub enum ItemStatus {
 row!(SignatureItemRow, 12, {
     ident: u32, declaration: u32, kind: SignatureKind, status: ItemStatus,
 });
-row!(ValueRow, 16, { ty: u32, primitive: u32, attributes: Range });
-row!(ModuleRow, 16, { module_type: u32, attributes: Range, loc: u32 });
+row!(ValueRow, 24, {
+    ty: u32, primitive: u32, attributes: Range, loc: u32,
+    /// Original path, or an absolute (unit, item) binder address.
+    path: u32,
+});
+row!(
+    /// A module declaration, or (for a `SignatureKind::ModuleType` item) a module
+    /// type declaration, whose module type is NONE when abstract. Its path is
+    /// original or an absolute (unit, item) binder address.
+    ModuleRow, 20, { module_type: u32, attributes: Range, loc: u32, path: u32 }
+);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModuleTypeRow {
     Ident(u32),
@@ -511,29 +535,54 @@ pub enum InlineConstantRow {
 }
 
 // Cold payloads for descriptors outside the four R1 kernel descriptor shapes.
-// References here are occurrence handles, never structurally interned types.
-/// Descriptor payload for the non-kernel shapes. Node.a indexes this pool;
-/// Node still owns the occurrence's level and physical identity.
+//
+// Such a node is `TUPLE | EXTENDED | arity << 8`: `tag()` stays TUPLE and its
+// children (every type it refers to) live in the graph's ordinary list pool at
+// `b`, so R1's capture, copy and instance relocate them without knowing the
+// descriptor. `a` indexes `SignaturePools::descriptor_extras`, which is never
+// rewritten by those operations: payloads name children by their position in
+// the node's own list (a "slot"), never by a graph handle. Slot ranges are
+// relative to the node's list start. The occurrence's level and physical
+// identity stay in the node.
+
+/// Head flag of an extended descriptor; bit 4 is outside the tag nibble.
+pub const EXTENDED: u32 = 1 << 4;
+
+/// Descriptor payload of an `EXTENDED` node, with its children's slot layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExtraDescriptor {
-    Object(Ty),
-    Field(u32),
+    /// `Tobject`: slot 0 is the field list.
+    Object,
+    /// `Tfield`: slot 0 the field's type, slot 1 the rest of the list. The name
+    /// is a string; the mutability is the persistent cell's value.
+    Field { name: u32, mutable: bool },
+    /// `Tnil`: no children.
     Nil,
+    /// `Tunivar` with its optional name (NONE), no children.
     Univar(u32),
-    Poly { body: Ty, variables: Range },
+    /// `Tpoly`: slot 0 the body, slots 1.. the bound variables.
+    Poly,
+    /// `Tvariant`: the `variants` row; its slots are listed there.
     Variant(u32),
+    /// `Tpackage`: the `packages` row; every slot is a package argument.
     Package(u32),
-    Substitution(Ty),
+    /// `Tsubst`: slot 0 the target.
+    Substitution,
 }
 row!(
     /// A root within one item's template. Multiple declaration fields use roots
-    /// of the same template, preserving sharing across those fields.
+    /// of the same template, preserving sharing across those fields. `ty` is
+    /// a template reference: with bit 30 set, a node relative to the first
+    /// node of an instance of `template`; otherwise an absolute node of the
+    /// segment (a non-generic root, shared across items).
     SchemeRoot, 8, { template: u32, ty: Ty }
 );
 
-row!(FieldTypeRow, 16, { name: u32, mutability: u32, ty: Ty, rest: Ty });
-row!(VariantRow, 28, {
-    fields: Range, more: Ty, name: u32, name_arguments: Range,
+row!(
+    /// A row: `fields` index `row_fields`; `more` is a slot and
+    /// `name_arguments` a slot range of the owning node; `name` a path or NONE.
+    VariantRow, 28, {
+    fields: Range, more: u32, name: u32, name_arguments: Range,
     closed: bool, fixed: bool,
 });
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -542,8 +591,16 @@ pub enum RowFieldKind {
     Absent,
     Either { constant: bool, matched: bool },
 }
-row!(RowFieldRow, 20, { name: u32, types: Range, link: u32, kind: RowFieldKind });
-row!(PackageRow, 20, { path: u32, longidents: Range, arguments: Range });
+row!(
+    /// `types` is a slot range of the owning node (one slot for a present
+    /// field with an argument). `link` is NONE: a frozen row has no links.
+    RowFieldRow, 20, { name: u32, types: Range, link: u32, kind: RowFieldKind }
+);
+row!(
+    /// `longidents` indexes `indices`, each a `longidents` row; `arguments` is
+    /// the owning node's slot range.
+    PackageRow, 20, { path: u32, longidents: Range, arguments: Range }
+);
 
 /// All cold signature metadata. Type nodes and templates remain in Segment's
 /// hot pools. Ranges select boxed slices; no row owns a string, Vec or pointer.
@@ -589,7 +646,6 @@ pub struct SignaturePools {
     pub external_declarations: Box<[ExternalDeclRow]>,
     pub external_modules: Box<[ExternalModuleRow]>,
     pub inline_constants: Box<[InlineConstantRow]>,
-    pub field_types: Box<[FieldTypeRow]>,
     pub variants: Box<[VariantRow]>,
     pub row_fields: Box<[RowFieldRow]>,
     pub packages: Box<[PackageRow]>,
@@ -608,11 +664,11 @@ mod schema_tests {
             ($($ty:ty => $n:expr),* $(,)?) => { $(assert_eq!(std::mem::size_of::<$ty>(), $n, stringify!($ty));)* };
         }
         sizes!(
-            DeclarationKind => 1, PositionRow => 16, LocationRow => 36,
-            SignaturePools => 776, ExtraDescriptor => 16, SchemeRoot => 8, Range => 8, UnitRow => 16, IdentRow => 16, PathRow => 16,
+            DeclarationKind => 1, PositionRow => 16, LocationRow => 40,
+            SignaturePools => 760, ExtraDescriptor => 8, SchemeRoot => 8, Range => 8, UnitRow => 16, IdentRow => 16, PathRow => 16,
             LongidentRow => 12, SignatureKind => 1, RecStatus => 1,
             ExtensionStatus => 1, ItemStatus => 2, SignatureItemRow => 12,
-            ValueRow => 16, ModuleRow => 16, ModuleTypeRow => 16,
+            ValueRow => 24, ModuleRow => 20, ModuleTypeRow => 16,
             TypeDetailsRow => 48, InlinedRecordRow => 12, RecordRepresentationRow => 16,
             LabelRow => 28, ConstructorArgumentsRow => 12, ConstructorRow => 28,
             ExtensionRow => 36, BlockTypeRow => 16, ShapeRow => 8, LiteralRow => 16,
@@ -623,7 +679,7 @@ mod schema_tests {
             ConstantArgumentRow => 16, FfiAttributeRow => 12, FfiLabelRow => 8,
             FfiParamRow => 12, ReturnWrapperRow => 1, FfiRow => 16,
             ExternalKindRow => 8, ModuleSourceRow => 8, ExternalDeclRow => 40,
-            ExternalModuleRow => 12, InlineConstantRow => 8, FieldTypeRow => 16,
+            ExternalModuleRow => 12, InlineConstantRow => 8,
             VariantRow => 28, RowFieldKind => 2, RowFieldRow => 20, PackageRow => 20,
         );
     }

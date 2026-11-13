@@ -225,6 +225,20 @@ enum PublishedSignature {
     Shared(super::shared_reader::PublishedGraph),
 }
 
+#[cfg(test)]
+impl PortablePersStruct {
+    /// O(1) plus `f`: the frozen graph of a unit published as one.
+    pub(crate) fn with_shared_graph<R>(
+        &self,
+        f: impl FnOnce(&super::shared_reader::PublishedGraph) -> R,
+    ) -> Option<R> {
+        match self.decoded.lock().unwrap().as_ref() {
+            Some((PublishedSignature::Shared(graph), _)) => Some(f(graph)),
+            _ => None,
+        }
+    }
+}
+
 impl PublishedSignature {
     fn portable(&self) -> std::borrow::Cow<'_, PortableSignature> {
         match self {
