@@ -150,6 +150,7 @@ pub fn declared_for_tip(stamps: &Stamps, stamp: i32, tip: &Tip) -> Option<Declar
         Declared {
             name: d.name.clone(),
             extent_loc: d.extent_loc,
+            extent_file: d.extent_file.clone(),
             stamp: d.stamp,
             module_path: d.module_path.clone(),
             is_exported: d.is_exported,

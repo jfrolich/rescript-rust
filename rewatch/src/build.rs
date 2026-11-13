@@ -641,14 +641,14 @@ pub fn incremental_build_without_lock(
             }
         }
         let has_parse_warnings = has_output(&parse_warnings);
-        if has_parse_warnings {
+        if has_parse_warnings && build_state.print_warnings {
             eprintln!("{}", compiler_output(&parse_warnings));
         }
         let has_compile_warnings = has_output(&compile_warnings);
-        if has_compile_warnings {
+        if has_compile_warnings && build_state.print_warnings {
             eprintln!("{}", compiler_output(&compile_warnings));
         }
-        if initial_build {
+        if initial_build && build_state.print_warnings {
             log_config_warnings(build_state);
         }
         if compiler_info_write == CompilerInfoWrite::AfterBuild {
@@ -931,7 +931,7 @@ pub fn incremental_build_without_lock(
         return result;
     }
 
-    if has_parse_warnings {
+    if has_parse_warnings && (build_state.print_warnings || !compile_errors.is_empty()) {
         eprintln!("{}", compiler_output(&parse_warnings));
     }
     let compile_duration = start_compiling.elapsed();
@@ -995,10 +995,10 @@ pub fn incremental_build_without_lock(
             }
         }
 
-        if has_compile_warnings {
+        if has_compile_warnings && build_state.print_warnings {
             eprintln!("{}", compiler_output(&compile_warnings));
         }
-        if initial_build {
+        if initial_build && build_state.print_warnings {
             log_config_warnings(build_state);
         }
 
