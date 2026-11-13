@@ -409,7 +409,11 @@ impl Project for WatchProject<'_> {
         interface: bool,
     ) -> Option<Arc<dyn rescript_compiler::analysis::session::ParsedSource>> {
         if let Some(source) = self.project_source(module_name) {
-            let relative = if interface { source.interface? } else { source.implementation };
+            let relative = if interface {
+                source.interface?
+            } else {
+                source.implementation
+            };
             return match parse::parse_for_tooling(source.package, relative, self.build_state).ok()? {
                 StoredAst::Structure(ast) => Some(ast),
                 StoredAst::Signature(ast) => Some(ast),
@@ -431,9 +435,13 @@ impl Project for WatchProject<'_> {
         };
         let source = compile::read_source_latin1(&path).ok()?;
         let arena = if interface {
-            compile::parse_runtime_signature(&path, &source, options.experimental_let_unwrap).ok()?.0
+            compile::parse_runtime_signature(&path, &source, options.experimental_let_unwrap)
+                .ok()?
+                .0
         } else {
-            compile::parse_runtime_structure(&path, &source, options.experimental_let_unwrap).ok()?.0
+            compile::parse_runtime_structure(&path, &source, options.experimental_let_unwrap)
+                .ok()?
+                .0
         };
         Some(Arc::new(RuntimeParsed(arena)))
     }
@@ -549,6 +557,47 @@ pub fn doc(cwd: &Path, path: &str, plain_output: bool) -> Result<Vec<u8>> {
     // A one-shot command: let the OS reclaim the build graph at exit.
     std::mem::forget(build_state);
     docs
+}
+
+/// `rescript-tools reanalyze <args>`: the dead code, exception and
+/// termination analyses of the project `cwd` is in. The OCaml tool reads
+/// the `.cmt` files of a build, which builds do not write, so the project
+/// is type-checked first, without writing files, and the analyses read the
+/// Rust typed trees. `color` says standard output is a terminal.
+pub fn reanalyze(cwd: &Path, args: &[String], plain_output: bool, color: bool) -> Result<Vec<u8>> {
+    let project_root = helpers::get_nearest_config(cwd)
+        .ok_or_else(|| anyhow!("Error: cannot find project root containing rescript.json."))?;
+    let failed = |err: &dyn std::fmt::Display| anyhow!("error: the project does not build: {err:#}");
+    let mut build_state = super::initialize_build_with_mode(
+        /* no_timing */ true,
+        &None,
+        /* show_progress */ false,
+        &project_root,
+        plain_output,
+        /* warn_error */ None,
+        /* prod */ false,
+        /* features */ None,
+        config::SourceMapCommand::Build,
+        /* check_only */ true,
+    )
+    .map_err(|err| failed(&format!("{err:#}")))?;
+    build_state.print_warnings = false;
+    super::incremental_build_without_lock(
+        &mut build_state,
+        /* no_timing */ true,
+        /* initial_build */ true,
+        /* show_progress */ false,
+        /* only_incremental */ false,
+        plain_output,
+        super::CompilerInfoWrite::WithRecord,
+    )
+    .map_err(|err| failed(&err))?;
+    let mut command = vec!["reanalyze".to_string()];
+    command.extend(args.iter().cloned());
+    let report = run_command_for_terminal(&build_state, cwd.to_path_buf(), command, color);
+    // A one-shot command: let the OS reclaim the build graph at exit.
+    std::mem::forget(build_state);
+    report
 }
 
 #[cfg(test)]
