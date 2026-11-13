@@ -15,6 +15,7 @@
 use super::annotation::{self, AttributePayload};
 use super::common::*;
 use super::log::{Description, Log, Termination};
+use super::ocaml_hash;
 use super::traverse::{self, Visitor};
 use crate::parser::ast::{Attributes, RecFlag};
 use crate::types::asttypes::ArgLabel;
@@ -423,9 +424,21 @@ impl FunctionTable {
             .is_some_and(|definition| definition.kind.iter().any(|entry| entry.label == label))
     }
 
-    /// The table's functions in the order `Hashtbl.iter` visits them.
+    /// The table's functions in the order `Hashtbl.iter` visits them: OCaml
+    /// compiles the functions of a group in this order, which is the order
+    /// their errors are reported in. The table is made by `Hashtbl.create
+    /// 1`, which has 16 buckets.
     fn hashtbl_order(&self) -> Vec<String> {
-        ocaml_hashtbl_order(self.functions.keys().map(String::as_str))
+        let hashes: Vec<u32> = self
+            .functions
+            .keys()
+            .map(|name| ocaml_hash::hash_string(name))
+            .collect();
+        ocaml_hash::iteration_order(16, &hashes)
+            .into_iter()
+            .filter_map(|i| self.functions.get_index(i))
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     /// `Function_table.dump`.
@@ -451,75 +464,6 @@ impl FunctionTable {
         out.push('\n');
         log.print(&out);
     }
-}
-
-/// `Hashtbl.hash` of a string (runtime/hash.c: `caml_hash_mix_string`, then
-/// the final mix, kept to 30 bits).
-fn ocaml_hash(s: &str) -> u32 {
-    fn mix(h: u32, mut d: u32) -> u32 {
-        d = d.wrapping_mul(0xcc9e_2d51);
-        d = d.rotate_left(15);
-        d = d.wrapping_mul(0x1b87_3593);
-        let h = (h ^ d).rotate_left(13);
-        h.wrapping_mul(5).wrapping_add(0xe654_6b64)
-    }
-    let bytes = s.as_bytes();
-    let mut h = 0u32;
-    let mut chunks = bytes.chunks_exact(4);
-    for chunk in &mut chunks {
-        h = mix(
-            h,
-            u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
-        );
-    }
-    let rest = chunks.remainder();
-    if !rest.is_empty() {
-        let mut w = 0u32;
-        for (i, byte) in rest.iter().enumerate() {
-            w |= u32::from(*byte) << (8 * i);
-        }
-        h = mix(h, w);
-    }
-    h ^= bytes.len() as u32;
-    h ^= h >> 16;
-    h = h.wrapping_mul(0x85eb_ca6b);
-    h ^= h >> 13;
-    h = h.wrapping_mul(0xc2b2_ae35);
-    h ^= h >> 16;
-    h & 0x3fff_ffff
-}
-
-/// The order `Hashtbl.iter` visits distinct string keys added in the order
-/// of `keys` (stdlib/hashtbl.ml): bucket by bucket, the latest key of a
-/// bucket first. The table starts with 16 buckets and doubles when it holds
-/// more than two keys per bucket, which keeps each bucket's order.
-///
-/// OCaml compiles the functions of a group in this order, which is the
-/// order their errors are reported in.
-fn ocaml_hashtbl_order<'a>(keys: impl Iterator<Item = &'a str>) -> Vec<String> {
-    let keys: Vec<&str> = keys.collect();
-    let mut buckets = 16usize;
-    for count in 1..=keys.len() {
-        if count > buckets * 2 {
-            buckets *= 2;
-        }
-    }
-    let mut order: Vec<(usize, std::cmp::Reverse<usize>, &str)> = keys
-        .iter()
-        .enumerate()
-        .map(|(i, key)| {
-            (
-                ocaml_hash(key) as usize & (buckets - 1),
-                std::cmp::Reverse(i),
-                *key,
-            )
-        })
-        .collect();
-    order.sort();
-    order
-        .into_iter()
-        .map(|(_, _, key)| key.to_string())
-        .collect()
 }
 
 /// What `value_bindings_table` holds for a variable: its definition and,
@@ -1592,39 +1536,6 @@ pub fn process_structure<'t>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn strings_hash_as_in_ocaml() {
-        // `Hashtbl.hash` of each string.
-        for (s, hash) in [
-            ("", 0),
-            ("a", 721651713),
-            ("ab", 856662637),
-            ("abc", 767105082),
-            ("abcd", 65890154),
-            ("abcde", 335633756),
-            ("alwaysLoop", 1064116890),
-            ("parseList$loop", 961654741),
-            ("testParametricFunction2", 382332246),
-            ("callParseFunction", 927326645),
-        ] {
-            assert_eq!(ocaml_hash(s), hash, "{s}");
-        }
-    }
-
-    #[test]
-    fn keys_iterate_as_an_ocaml_hashtbl() {
-        // `Hashtbl.iter` over a table these keys were added to in this
-        // order; 35 keys make the table grow once.
-        let keys = "f g h parseList parseListInt parseListListInt a1 a2 a3 b c d e \
-                    x1 x2 x3 x4 x5 x6 x7 x8 x9 y1 y2 y3 y4 y5 y6 y7 y8 y9 z1 z2 z3 z4";
-        let order = ocaml_hashtbl_order(keys.split_whitespace());
-        assert_eq!(
-            order.join(" "),
-            "z2 y6 y1 h x2 a2 y3 y9 e b x6 x1 x5 z4 parseListListInt x4 a3 g x9 x7 z3 z1 y2 d x8 f x3 \
-             parseListInt y5 a1 y4 y7 y8 parseList c"
-        );
-    }
 
     fn call(name: &str) -> Command {
         Command::Call(Call::FunctionCall(FunctionCall::no_args(name)), Loc::NONE)

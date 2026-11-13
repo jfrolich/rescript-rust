@@ -13,6 +13,7 @@ pub mod dce_solve;
 pub mod exception;
 pub mod exn_lib;
 pub mod log;
+pub mod ocaml_hash;
 pub mod traverse;
 
 use super::session::{Project, TypedSource};
