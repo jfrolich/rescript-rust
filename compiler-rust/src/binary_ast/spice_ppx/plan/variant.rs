@@ -80,7 +80,7 @@ fn alias_is_string(expr: ExprIdx, arena: &ParseArena) -> bool {
 /// one; none with a return type; no `@spice.*` attribute but `@spice.as`, at
 /// most once; either no constructor has `@spice.as` or every one has it, is
 /// constant, and its payload is a string or float constant (the general path
-/// reports the other cases); at most 65,535 arguments; and an inline record that
+/// reports the other cases); fewer than 65,535 arguments; and an inline record that
 /// `record::planned` admits. The types of the arguments are classified by
 /// the caller.
 /// Cost: O(constructors + their attributes and labels' attributes); no
@@ -89,7 +89,9 @@ pub(in crate::binary_ast) fn planned(
     constructors: &[ConstructorDeclaration],
     arena: &ParseArena,
 ) -> bool {
-    if constructors.is_empty() {
+    // Decoder switches include a wildcard; tuple-result matches include
+    // the success case plus one failure case per argument.
+    if constructors.is_empty() || constructors.len() >= usize::from(u16::MAX) {
         return false;
     }
     let mut aliased = 0;
@@ -127,8 +129,10 @@ pub(in crate::binary_ast) fn planned(
             }
         }
         let admitted = match &constructor.pcd_args {
-            ConstructorArguments::Pcstr_tuple(args) => args.len() <= usize::from(u16::MAX),
-            ConstructorArguments::Pcstr_record(labels) => record::planned(labels, arena),
+            ConstructorArguments::Pcstr_tuple(args) => args.len() < usize::from(u16::MAX),
+            ConstructorArguments::Pcstr_record(labels) => {
+                labels.len() <= usize::from(u16::MAX) && record::planned(labels, arena)
+            },
         };
         if !admitted {
             return false;
@@ -1115,6 +1119,20 @@ pub(super) fn bindings(
 #[cfg(test)]
 mod layout_tests {
     use super::*;
+
+    #[test]
+    fn variant_case_counts_cannot_truncate() {
+        let mut parser = crate::parser::Parser::new("Limit.res", "type t = C(int)");
+        let items = crate::parser::module::parse_structure(&mut parser);
+        let StructureItemDesc::Pstr_type(group) = &items[0].pstr_desc else { unreachable!() };
+        let TypeKind::Ptype_variant(constructors) = &group.1[0].ptype_kind else { unreachable!() };
+        let mut constructor = constructors[0].clone();
+        let many = vec![constructor.clone(); usize::from(u16::MAX)];
+        assert!(!planned(&many, parser.arena()));
+        let ConstructorArguments::Pcstr_tuple(args) = &mut constructor.pcd_args else { unreachable!() };
+        args.resize(usize::from(u16::MAX), args[0]);
+        assert!(!planned(&[constructor], parser.arena()));
+    }
 
     #[test]
     fn variant_builder_state_sizes_are_pinned() {
