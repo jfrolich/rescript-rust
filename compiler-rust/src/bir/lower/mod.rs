@@ -362,6 +362,8 @@ struct State {
     rec_steps: usize,
     switches: Vec<Option<switch::Plan>>,
     variants: Vec<Option<variant::Plan>>,
+    named_metadata: variant::Metadata,
+    switch_spelling: String,
     untagged: Vec<Option<untagged::Plan>>,
     untagged_storage: untagged::Storage,
     untagged_dispatch: crate::lambda::untagged_dispatch::Plan<u32>,
@@ -470,6 +472,7 @@ impl State {
             .map(|i| input.arena.vars.order(VarId(i as u32)))
             .max().unwrap_or(0).checked_add(1).expect("identifier order capacity");
         let (untagged_storage, untagged_dispatch) = untagged::prepare(&mut arena);
+        let named_metadata = variant::prepare(&mut arena);
         Self {
             evaluation: args::Evaluation::default(),
             record_scratch: record::Scratch::default(),
@@ -478,7 +481,7 @@ impl State {
             tail_assignments: Vec::new(), tail_name: String::new(), call_reversed: Vec::new(), calls: Vec::new(), tail_order: Vec::new(),
             rec_members: Vec::new(), rec_steps: 0,
             switch_facts: vec![switch::Facts::default(); input.arena.nodes.len()],
-            switches: Vec::new(), variants: Vec::new(), untagged: Vec::new(), untagged_storage, untagged_dispatch, switch_work: Vec::new(), switch_pairs: Vec::new(),
+            switches: Vec::new(), variants: Vec::new(), named_metadata, switch_spelling: String::new(), untagged: Vec::new(), untagged_storage, untagged_dispatch, switch_work: Vec::new(), switch_pairs: Vec::new(),
             group_indices: Vec::new(), group_nodes: Vec::new(), group_table: hashbrown::HashTable::new(),
             group_order: Vec::new(), group_heads: Vec::new(),
             switch_output_nodes: Vec::new(), switch_output_clauses: Vec::new(), switch_group_steps: 0,

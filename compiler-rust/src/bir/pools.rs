@@ -99,6 +99,17 @@ impl Lists {
         self.items.extend_from_within(tail.index() + 1..tail.index() + 1 + len);
         id
     }
+    /// Copy an immutable source run and optional fallback directly into the pool.
+    pub(super) fn slice_append(&mut self, source: ListId, start: usize, len: usize, tail: Option<NodeId>) -> ListId {
+        assert!(start + len <= self.get(source).len());
+        #[cfg(test)] { self.pushes += 1; }
+        let id = ListId(index(self.items.len()));
+        self.items.push(NodeId(index(len + usize::from(tail.is_some()))));
+        let begin = source.index() + 1 + start;
+        self.items.extend_from_within(begin..begin + len);
+        self.items.extend(tail);
+        id
+    }
     /// O(len): copy a sublist inside the existing pool without a temporary vector.
     pub(super) fn slice(&mut self, source: ListId, start: usize, len: usize) -> ListId {
         assert!(start + len <= self.get(source).len());

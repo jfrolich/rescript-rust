@@ -2891,20 +2891,20 @@ The statement stack and node-list pool must be used end to end.
 | `untagged.rs:523` `untagged_switch_statement` | `let mut clauses = Vec::with_capacity(actions.capacity());` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
 | `untagged.rs:589` `untagged_test` | `let mut work = vec![(test, false)];` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
 | `untagged.rs:590` `untagged_test` | `let mut values = Vec::new();` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
-| `variant.rs:29` `Plan` | `sides: Vec<Side>,` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `variant.rs:89` `named_variant` | `let tag_name = facts.tag_name.as_deref().unwrap_or("TAG").to_owned();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `variant.rs:90` `named_variant` | `let keys: Vec<_> = h` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `variant.rs:101` `named_variant` | `.collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `variant.rs:102` `named_variant` | `let mut keys = [keys, Vec::new()];` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `variant.rs:131` `named_variant` | `let mut sides = Vec::with_capacity(2);` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `variant.rs:139` `named_variant` | `let actions: Vec<_> = range` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `variant.rs:140` `named_variant` | `.clone()` | per construct | borrow payload or retain typed pool handle | pending |
-| `variant.rs:143` `named_variant` | `.collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `variant.rs:147` `named_variant` | `clauses: Vec::new(),` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `variant.rs:183` `literal_tag` | `Literal::String(s) => Tag::String(s.clone()),` | per construct | borrow payload or retain typed pool handle | pending |
-| `variant.rs:185` `literal_tag` | `Literal::Float(s) => Tag::Float(s.clone()),` | per construct | borrow payload or retain typed pool handle | pending |
-| `variant.rs:186` `literal_tag` | `Literal::BigInt(s) => Tag::BigInt(s.clone()),` | per construct | borrow payload or retain typed pool handle | pending |
-| `variant.rs:255` `variant_children` | `pub(super) fn variant_children(&self, cx: Cx, frame: Variant, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `variant.rs:29` `Plan` | `sides: Vec<Side>,` | per construct | Two bounded sides live inline in a fixed two-slot record (48 bytes), never a heap vector. | removed |
+| `variant.rs:89` `named_variant` | `let tag_name = facts.tag_name.as_deref().unwrap_or("TAG").to_owned();` | per construct | Tag-name spelling is a unit-interned StrId prepared once; lowering borrows the descriptor. | removed |
+| `variant.rs:90` `named_variant` | `let keys: Vec<_> = h` | per construct | Imported typed key spans address the flat unit key pool; side headers reuse subspans. | removed |
+| `variant.rs:101` `named_variant` | `.collect();` | per construct | No collected key vector remains; metadata preparation appends directly to the unit pool. | removed |
+| `variant.rs:102` `named_variant` | `let mut keys = [keys, Vec::new()];` | per construct | No split vectors remain; constant and block sides select scalar subspans. | removed |
+| `variant.rs:131` `named_variant` | `let mut sides = Vec::with_capacity(2);` | per construct | Fixed two-slot sides replace the capacity-two vector. | removed |
+| `variant.rs:139` `named_variant` | `let actions: Vec<_> = range` | per construct | Source actions and optional fallback copy directly into the unit list pool. | removed |
+| `variant.rs:140` `named_variant` | `.clone()` | per construct | The scalar range clone allocated nothing; direct list-span copying now removes even that clone. | removed |
+| `variant.rs:143` `named_variant` | `.collect();` | per construct | The temporary action collection is gone; slice_append appends directly into the unit list pool. | removed |
+| `variant.rs:147` `named_variant` | `clauses: Vec::new(),` | per construct | The empty vector allocated nothing; headers now carry an empty ClauseSpan directly. | removed |
+| `variant.rs:183` `literal_tag` | `Literal::String(s) => Tag::String(s.clone()),` | per construct | String keys use unit-interned spelling handles, not owned tag clones. | removed |
+| `variant.rs:185` `literal_tag` | `Literal::Float(s) => Tag::Float(s.clone()),` | per construct | Float keys retain original spelling handles and prepared ConstIds. | removed |
+| `variant.rs:186` `literal_tag` | `Literal::BigInt(s) => Tag::BigInt(s.clone()),` | per construct | Bigint keys retain original spelling handles and canonical ConstIds; float and bigint columns stay distinct. | removed |
+| `variant.rs:255` `variant_children` | `pub(super) fn variant_children(&self, cx: Cx, frame: Variant, into: &mut Vec<(Cx, NodeId)>) {` | per construct | This borrowed child-buffer parameter appends to retained SourceProbe.children and owns no construct allocation. | justified |
 
 The external allocation tests now start from their Lambda source nodes, after
 one-time import, and include source traversal, constant lowering, FFI holding,
@@ -3080,6 +3080,23 @@ without adding an attribute entry; its warmed probe/realize/release pass allocat
 zero times with unchanged recorded capacities and 20,001 source visits. Function
 headers remain 20 bytes. A small directive fixture compares all continuations
 against legacy output.
+
+Named dispatch now stores its two sides inline (48 bytes), immutable constructor
+spelling/value descriptors in unit pools, and source action runs directly in the
+unit list pool. The whole-Lambda 10,000-case fixture has 5,000 constants and 5,000
+tagged blocks with distinct bodies and a fallback: warmed probe/realize/release
+allocates zero with unchanged recorded capacities, 10,004 source visits and
+20,000 grouping steps. A two-case float/bigint fixture with identical source
+spelling also allocates zero (six visits, two grouping steps), and compares against
+legacy output. Float and bigint descriptor columns remain distinct. The plan is
+112 bytes (formerly 88); imported descriptors are 12 bytes. Initial unit metadata
+import is outside these measurements; preparation does no body grouping.
+
+| Newly found site | Previous ownership | Disposition |
+| --- | --- | --- |
+| `variant::named_variant` key `split_off` | per-side vector allocation | removed: unit-key subspans |
+| `variant::switch_key_expression` large integer `to_string` | temporary string | removed: retained cleared encoding buffer |
+| `variant::switch_key_expression` bigint parser and `format!` | temporary strings | removed: caller-owned bigint encoding buffer; named numeric descriptors bypass reconstruction |
 
 ### 7.5.1 Concurrent loop, label and recursive-value additions
 
