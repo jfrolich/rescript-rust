@@ -67,6 +67,7 @@ pub mod string_literal;
 /// Optional aggregate compiler phase timings.
 pub mod timing;
 pub mod types;
+pub mod verify;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm_vfs;
 

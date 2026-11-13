@@ -2631,6 +2631,26 @@ fn value_descriptions(
         warnings.push(warning);
     }
 
+    // A signature that declares an effect (`@pure`, `@mutates`) requires it
+    // of the value matched against it; the purity check discharges that
+    // after typing, on the binding itself. O(1) for a declaration without
+    // attributes.
+    if !sig_desc.val_attributes.is_empty()
+        && !std::ptr::eq(impl_desc, sig_desc)
+        && let Some(declared) =
+            crate::verify::purity::declared_of_decl_attributes(&sig_desc.val_attributes)
+        && crate::verify::purity::declared_of_decl_attributes(&impl_desc.val_attributes)
+            != Some(declared)
+    {
+        type_ctx.require_effect(crate::verify::purity::Obligation {
+            stamp: id.stamp(),
+            name: id.name(),
+            declared,
+            signature_loc: sig_desc.val_loc,
+            ty: impl_desc.val_type,
+        });
+    }
+
     // Check that the value types are compatible
     // The implementation type should be more general than (or equal to) the signature type
     // A signature checked against itself (js_implementation.ml:62 marks an
