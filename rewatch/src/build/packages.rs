@@ -511,9 +511,12 @@ fn is_local_dependency(project_context: &ProjectContext, package_name: &str, can
         Some(MonoRepoContext::MonorepoRoot { .. }) => {
             helpers::is_local_package(project_context.get_root_path(), canonical_path)
         }
-        Some(MonoRepoContext::MonorepoPackage { parent_config }) => {
-            helpers::is_local_package(&parent_config.path, canonical_path)
-        }
+        // A build started in a workspace member owns only that member: the
+        // other workspace packages resolve through the workspace, but owning
+        // them would include their dev sources, clean their outputs and
+        // watch them (rewatch-ocaml/project_context.ml,
+        // `dependency_is_local_canonical`).
+        Some(MonoRepoContext::MonorepoPackage { .. }) => false,
     }
 }
 
