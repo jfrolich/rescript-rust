@@ -334,7 +334,7 @@ pub fn reanalyze(
     cwd: &Path,
     args: &[String],
     color: bool,
-    project: &dyn session::Project,
+    project: &(dyn session::Project + Sync),
 ) -> Result<Vec<u8>, String> {
     let report = reanalyze::run(project, cwd, args, color)?;
     let mut out = Output::default();

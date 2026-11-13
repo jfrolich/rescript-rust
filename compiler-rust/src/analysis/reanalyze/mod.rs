@@ -23,9 +23,9 @@ pub mod traverse;
 use super::session::{Project, TypedSource};
 use crate::driver::ToolingTyped;
 use common::{Config, FileContext, Files, Tree};
-use log::{Log, filename_concat, has_prefix, is_relative};
+use log::{Log, Logged, filename_concat, has_prefix, is_relative};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// `Version.version` (analysis/reanalyze/src/version.ml).
 const VERSION: &str = "2.22.0";
@@ -341,26 +341,34 @@ fn module_name_of_source(source: &str) -> String {
     }
 }
 
-/// What a run collects from the files it reads.
+/// What the analyses collect from one file.
 #[derive(Default)]
 struct Collected {
-    dce: Vec<dce::FileData>,
-    exception: Vec<exception::FileResult>,
+    dce: Option<dce::FileData>,
+    exception: Option<exception::FileResult>,
     termination: arnold::Stats,
 }
 
-/// One analysis run: its configuration, output and the project it reads.
-struct Run<'a> {
-    config: &'a Config,
-    files: &'a Files,
-    project: &'a dyn Project,
-    log: Log<'a>,
-    collected: Collected,
+/// A file to read: the `.cmt` or `.cmti` file the OCaml compiler would
+/// write for a module's implementation or interface.
+struct Artifact<'a> {
+    path: String,
+    module_name: &'a str,
+    interface: bool,
+    has_interface: bool,
 }
 
-impl Run<'_> {
+/// What reading the project's files needs. The files are read in parallel.
+struct Reader<'a> {
+    config: &'a Config,
+    files: &'a Files,
+    project: &'a (dyn Project + Sync),
+    color: bool,
+}
+
+impl Reader<'_> {
     /// `Find_source_file.cmt`: the file of the first item whose file exists.
-    fn find_source_file(&mut self, source: &TypedSource) -> Option<Arc<str>> {
+    fn find_source_file(&self, log: &mut Log<'_>, source: &TypedSource) -> Option<Arc<str>> {
         let arena = source.parsed.arena();
         let ta = &source.typed.typed_arena;
         let (locs, what): (Vec<crate::parse_arena::LocIdx>, &str) = match &source.typed.typed {
@@ -381,7 +389,7 @@ impl Run<'_> {
             ToolingTyped::Failed(_) => return None,
         };
         if self.config.cli.debug && locs.is_empty() {
-            self.log.item(&format!("{what} 0\n"));
+            log.item(&format!("{what} 0\n"));
         }
         locs.into_iter().find_map(|loc| {
             let location = arena.to_location(loc);
@@ -390,16 +398,30 @@ impl Run<'_> {
         })
     }
 
+    /// Type-check the module of `artifact` and run the analyses on it: what
+    /// they log and collect.
+    fn read(&self, artifact: &Artifact<'_>) -> (Logged, Collected) {
+        let mut log = Log::new(self.config, self.files, self.color);
+        let mut collected = Collected::default();
+        self.process_module(artifact, &mut log, &mut collected);
+        (log.into_logged(), collected)
+    }
+
     /// `Reactive_analysis.process_cmt_infos`: run the analyses on a module's
-    /// implementation or interface. `artifact` is the `.cmt` or `.cmti` file
-    /// the OCaml compiler would write for it.
+    /// implementation or interface.
     fn process_module(
-        &mut self,
-        module_name: &str,
-        interface: bool,
-        has_interface: bool,
-        artifact: &str,
+        &self,
+        artifact: &Artifact<'_>,
+        log: &mut Log<'_>,
+        collected: &mut Collected,
     ) {
+        let Artifact {
+            path: artifact,
+            module_name,
+            interface,
+            has_interface,
+        } = artifact;
+        let (interface, has_interface) = (*interface, *has_interface);
         let Some(source) = self.project.typecheck(module_name, interface) else {
             return;
         };
@@ -409,7 +431,7 @@ impl Run<'_> {
             return;
         }
         let arena = source.parsed.arena();
-        let Some(source_file) = self.find_source_file(&source) else {
+        let Some(source_file) = self.find_source_file(log, &source) else {
             return;
         };
         let config = self.config;
@@ -438,7 +460,7 @@ impl Run<'_> {
                     path.to_string()
                 }
             };
-            self.log.item(&format!(
+            log.item(&format!(
                 "Scanning {} Source:{}\n",
                 shown(artifact),
                 shown(&source_file)
@@ -456,43 +478,45 @@ impl Run<'_> {
             ToolingTyped::Failed(_) => return,
         };
         if config.run.dce {
-            let data =
-                dce::process_file(&tree, &mut self.log, config, &file, annots, has_interface);
-            self.collected.dce.push(data);
+            collected.dce = Some(dce::process_file(
+                &tree,
+                log,
+                config,
+                &file,
+                annots,
+                has_interface,
+            ));
         }
         if config.run.exception
             && let ToolingTyped::Implementation(structure) = &source.typed.typed
         {
-            let result =
-                exception::process_structure(&tree, &mut self.log, config, &file, structure);
-            self.collected.exception.push(result);
+            collected.exception = Some(exception::process_structure(
+                &tree, log, config, &file, structure,
+            ));
         }
         if config.run.termination
             && let ToolingTyped::Implementation(structure) = &source.typed.typed
         {
-            arnold::process_structure(
-                &tree,
-                &mut self.log,
-                config,
-                &mut self.collected.termination,
-                structure,
-            );
+            arnold::process_structure(&tree, log, config, &mut collected.termination, structure);
         }
     }
 
-    /// `Reanalyze.run_analysis`.
-    fn run(&mut self) {
-        for package in self.project.local_packages() {
+    /// `Reanalyze.run_analysis`: read the project's files, then report what
+    /// the analyses find in `log`.
+    fn run(&self, log: &mut Log<'_>) {
+        let packages = self.project.local_packages();
+        let mut artifacts: Vec<Artifact<'_>> = Vec::new();
+        for package in &packages {
             // `Reanalyze.collect_cmt_file_paths`: a package's artifacts, in
             // the order of their file names.
-            let mut artifacts: Vec<(String, &str, bool, bool)> = Vec::new();
+            let mut names: Vec<(String, &str, bool, bool)> = Vec::new();
             for module in &package.modules {
                 let Some(paths) = self.project.paths_for_module(&module.name) else {
                     continue;
                 };
                 let has_interface = paths.interface.is_some();
                 if paths.implementation.is_some() {
-                    artifacts.push((
+                    names.push((
                         format!("{}.cmt", module.artifact),
                         &module.name,
                         false,
@@ -500,7 +524,7 @@ impl Run<'_> {
                     ));
                 }
                 if has_interface {
-                    artifacts.push((
+                    names.push((
                         format!("{}.cmti", module.artifact),
                         &module.name,
                         true,
@@ -508,24 +532,48 @@ impl Run<'_> {
                     ));
                 }
             }
-            artifacts.sort();
-            for (artifact, module_name, interface, has_interface) in artifacts {
-                let artifact = filename_concat(&package.build_root, &artifact);
-                self.process_module(module_name, interface, has_interface, &artifact);
-            }
+            names.sort();
+            artifacts.extend(names.into_iter().map(
+                |(name, module_name, interface, has_interface)| Artifact {
+                    path: filename_concat(&package.build_root, &name),
+                    module_name,
+                    interface,
+                    has_interface,
+                },
+            ));
+        }
+        // A typed tree stays on the thread that checked it; what a file's
+        // analyses log and collect is put together in the files' order, so
+        // the report does not depend on the number of threads.
+        let read: Vec<Mutex<Option<(Logged, Collected)>>> =
+            artifacts.iter().map(|_| Mutex::new(None)).collect();
+        self.project.run_jobs(artifacts.len(), &|index| {
+            let result = self.read(&artifacts[index]);
+            *read[index].lock().unwrap_or_else(PoisonError::into_inner) = Some(result);
+        });
+        let mut dce = Vec::new();
+        let mut exception = Vec::new();
+        let mut termination = arnold::Stats::default();
+        for slot in read {
+            let (logged, collected) = slot
+                .into_inner()
+                .unwrap_or_else(PoisonError::into_inner)
+                .expect("project must run every analysis job before returning");
+            log.append(logged);
+            dce.extend(collected.dce);
+            exception.extend(collected.exception);
+            termination.add(&collected.termination);
         }
         if self.config.run.dce {
-            let data = std::mem::take(&mut self.collected.dce);
-            for issue in dce_solve::solve(self.config, self.files, data) {
-                self.log.warning(issue.loc, issue.description);
+            for issue in dce_solve::solve(self.config, self.files, dce) {
+                log.warning(issue.loc, issue.description);
             }
         }
         if self.config.run.exception {
-            let results = std::mem::take(&mut self.collected.exception);
-            exception::run_checks(self.config, self.files, &mut self.log, results);
+            exception::run_checks(self.config, self.files, log, exception);
         }
         if self.config.run.termination && self.config.cli.debug {
-            self.collected.termination.report(&mut self.log);
+            termination.report(log);
         }
     }
 }
@@ -534,7 +582,7 @@ impl Run<'_> {
 /// `reanalyze`) in `cwd` and return what it prints. `color` says standard
 /// output is a terminal.
 pub fn run(
-    project: &dyn Project,
+    project: &(dyn Project + Sync),
     cwd: &Path,
     args: &[String],
     color: bool,
@@ -544,23 +592,23 @@ pub fn run(
         Command::Print(text) => return Ok(text),
     };
     let files = Files::new();
-    let mut run = Run {
+    let reader = Reader {
         config: &config,
         files: &files,
         project,
-        log: Log::new(&config, &files, color),
-        collected: Collected::default(),
+        color,
     };
-    run.log.print(&printed);
+    let mut log = Log::new(&config, &files, color);
+    log.print(&printed);
     if config.cli.json {
-        run.log.json_start();
+        log.json_start();
     }
-    run.run();
-    run.log.report();
+    reader.run(&mut log);
+    log.report();
     if config.cli.json {
-        run.log.json_finish();
+        log.json_finish();
     }
-    Ok(run.log.into_output())
+    Ok(log.into_output())
 }
 
 #[cfg(test)]

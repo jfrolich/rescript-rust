@@ -7,7 +7,7 @@ use crate::types::typedtree as tt;
 use crate::types::{DeclLoc, Path as TypePath};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard};
 
 /// `Name.t`: a name, with a leading `+` when it is an implementation's.
 pub type Name = Arc<str>;
@@ -152,14 +152,17 @@ pub fn path_to_module_name(is_type: bool, path: &[Name]) -> Name {
     Arc::from(path_to_string(rest))
 }
 
-/// A file name, interned for the run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// A file name, interned for the run. Files are read in parallel, so which
+/// file gets which number differs from run to run: identities are compared
+/// for equality only, and files are ordered by their names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FileId(pub u32);
 
-/// The file names of a run: `pos_fname` values, compared by identity.
+/// The file names of a run: `pos_fname` values, compared by identity. The
+/// threads reading the project's files share them.
 #[derive(Default)]
 pub struct Files {
-    names: RefCell<indexmap::IndexSet<Arc<str>>>,
+    names: RwLock<indexmap::IndexSet<Arc<str>>>,
 }
 
 impl Files {
@@ -173,17 +176,24 @@ impl Files {
 
     /// The identity of file name `name`.
     pub fn intern(&self, name: &str) -> FileId {
-        let mut names = self.names.borrow_mut();
-        if let Some(index) = names.get_index_of(name) {
+        if let Some(index) = self.read().get_index_of(name) {
             return FileId(index as u32);
         }
-        let (index, _) = names.insert_full(Arc::from(name));
+        let mut names = self.names.write().unwrap_or_else(PoisonError::into_inner);
+        let index = match names.get_index_of(name) {
+            Some(index) => index,
+            None => names.insert_full(Arc::from(name)).0,
+        };
         FileId(index as u32)
     }
 
     /// The name of `file`.
     pub fn name(&self, file: FileId) -> Arc<str> {
-        self.names.borrow()[file.0 as usize].clone()
+        self.read()[file.0 as usize].clone()
+    }
+
+    fn read(&self) -> RwLockReadGuard<'_, indexmap::IndexSet<Arc<str>>> {
+        self.names.read().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -193,7 +203,7 @@ pub const NONE_FILE: FileId = FileId(0);
 pub const DUMMY_FILE: FileId = FileId(1);
 
 /// `Lexing.position`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Pos {
     /// `pos_fname`.
     pub file: FileId,
@@ -228,7 +238,7 @@ impl Pos {
 }
 
 /// `Location.t`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Loc {
     /// `loc_start`.
     pub start: Pos,
@@ -473,5 +483,30 @@ impl ModulePath {
             loc,
             path,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DUMMY_FILE, Files, NONE_FILE};
+
+    #[test]
+    fn concurrent_interning_preserves_file_identity() {
+        let files = Files::new();
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for index in 0..100 {
+                        let name = format!("Module{index}.res");
+                        let id = files.intern(&name);
+                        assert_eq!(files.intern(&name), id);
+                        assert_eq!(&*files.name(id), name);
+                    }
+                });
+            }
+        });
+        assert_eq!(files.intern("_none_"), NONE_FILE);
+        assert_eq!(files.intern(""), DUMMY_FILE);
+        assert_eq!(files.read().len(), 102);
     }
 }

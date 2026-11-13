@@ -88,6 +88,16 @@ pub trait Project {
     fn local_packages(&self) -> Vec<LocalPackage> {
         Vec::new()
     }
+    /// Run `job` on each of `0..count`: on several threads at once where
+    /// the project has them, each with the stack type-checking needs. A
+    /// command that reads every module (`reanalyze`) type-checks them this
+    /// way. Each index must run exactly once, and all jobs must complete
+    /// before this method returns.
+    fn run_jobs(&self, count: usize, job: &(dyn Fn(usize) + Sync)) {
+        for index in 0..count {
+            job(index);
+        }
+    }
 }
 
 /// A loaded module: OCaml's `full` (a `File.t` and its `extra`).

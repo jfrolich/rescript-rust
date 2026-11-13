@@ -325,6 +325,15 @@ pub struct Log<'a> {
     color: bool,
 }
 
+/// What one file's analyses logged: the text they printed and the issues
+/// they found. Files are read in parallel, each into a log of its own, and
+/// the run's log takes them in the order the files are read in.
+#[derive(Default)]
+pub struct Logged {
+    out: String,
+    issues: Vec<Issue>,
+}
+
 impl<'a> Log<'a> {
     /// An empty log.
     pub fn new(config: &'a Config, files: &'a Files, color: bool) -> Log<'a> {
@@ -341,6 +350,20 @@ impl<'a> Log<'a> {
     /// What was printed.
     pub fn into_output(self) -> String {
         self.out
+    }
+
+    /// What was printed and found.
+    pub fn into_logged(self) -> Logged {
+        Logged {
+            out: self.out,
+            issues: self.issues,
+        }
+    }
+
+    /// Continue this log with what another one holds.
+    pub fn append(&mut self, logged: Logged) {
+        self.out.push_str(&logged.out);
+        self.issues.extend(logged.issues);
     }
 
     /// `print_string`.

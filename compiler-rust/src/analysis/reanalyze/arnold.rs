@@ -98,6 +98,26 @@ pub struct Stats {
 }
 
 impl Stats {
+    /// Count what `other`, another file's counters, counted.
+    pub fn add(&mut self, other: &Stats) {
+        let Stats {
+            cache_checks,
+            cache_hits,
+            files,
+            functions,
+            hygiene_errors,
+            infinite_loops,
+            recursive_blocks,
+        } = other;
+        self.cache_checks += cache_checks;
+        self.cache_hits += cache_hits;
+        self.files += files;
+        self.functions += functions;
+        self.hygiene_errors += hygiene_errors;
+        self.infinite_loops += infinite_loops;
+        self.recursive_blocks += recursive_blocks;
+    }
+
     /// `Arnold.report_stats`.
     pub fn report(&self, log: &mut Log<'_>) {
         let dim = |n: String| log.tag("dim", &n);

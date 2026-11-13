@@ -415,6 +415,12 @@ impl Project for WatchProject<'_> {
         packages
     }
 
+    fn run_jobs(&self, count: usize, job: &(dyn Fn(usize) + Sync)) {
+        use rayon::prelude::*;
+        // The pool a build compiles `count` modules in.
+        super::pools::with_pool_for(count, || (0..count).into_par_iter().for_each(job));
+    }
+
     fn typecheck(&self, module_name: &str, interface: bool) -> Option<TypedSource> {
         let result = match self.project_source(module_name) {
             Some(source) => self.typecheck_project_module(&source, interface),
@@ -522,7 +528,9 @@ pub fn doc(cwd: &Path, path: &str, plain_output: bool) -> Result<Vec<u8>> {
 /// write. Instead the project is type-checked here, writing no files, and
 /// the analyses read the Rust typed trees. They refer to the declarations of
 /// other modules by position, so this build keeps source locations, as the
-/// diagnostic rebuild does.
+/// diagnostic rebuild does. The build keeps no typed trees, so each module
+/// is type-checked again to read its tree, on the workers a build compiles
+/// with.
 pub fn reanalyze(cwd: &Path, args: &[String], plain_output: bool, color: bool) -> Result<Vec<u8>> {
     // The version and the list of options need no project.
     if let Some(text) = rescript_compiler::analysis::reanalyze::output_without_project(args) {

@@ -8,7 +8,8 @@ cd "$(dirname "$0")"
 
 tools="$PWD/../../../cli/rescript-tools.js"
 actual=$(mktemp)
-trap 'rm -f "$actual"' EXIT
+serial=$(mktemp)
+trap 'rm -f "$actual" "$serial"' EXIT
 status=0
 
 # check <project> <snapshot> <reanalyze options...>
@@ -24,13 +25,28 @@ check() {
   fi
 }
 
-check deadcode expected/deadcode.txt -config -debug -ci \
-  -exclude-paths src/exception \
-  -live-names globallyLive1 -live-names globallyLive2,globallyLive3 \
-  -suppress src/ToSuppress.res
-check deadcode expected/exception.txt -exception -ci \
-  -suppress src -unsuppress src/exception
-check termination expected/termination.txt -config -ci -debug
+# Exercise both sequential and parallel collection against the same oracle,
+# including debug output, exception findings and termination counters.
+for threads in 1 4; do
+  export RAYON_NUM_THREADS=$threads
+  check deadcode expected/deadcode.txt -config -debug -ci \
+    -exclude-paths src/exception \
+    -live-names globallyLive1 -live-names globallyLive2,globallyLive3 \
+    -suppress src/ToSuppress.res
+  check deadcode expected/exception.txt -exception -ci \
+    -suppress src -unsuppress src/exception
+  check termination expected/termination.txt -config -ci -debug
+done
+
+# JSON and the non-transitive report must also be independent of scheduling.
+for format in -ci -json; do
+  if ! (cd deadcode && RAYON_NUM_THREADS=1 node "$tools" reanalyze -all -no-transitive "$format") > "$serial" \
+    || ! (cd deadcode && RAYON_NUM_THREADS=4 node "$tools" reanalyze -all -no-transitive "$format") > "$actual" \
+    || ! diff -u "$serial" "$actual"; then
+    printf "\033[0;31m❌ reanalyze %s depends on the thread count\033[0m\n" "$format"
+    status=1
+  fi
+done
 
 # The rescript-tools executable itself, where a build has put it next to
 # rescript.exe, analyzes with the build system too.
