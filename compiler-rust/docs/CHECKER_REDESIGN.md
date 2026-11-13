@@ -5069,6 +5069,44 @@ with 8 workers. `scripts/compare_checker_builds.py` between trunk and the
 head reports no difference in signatures, diagnostics or JavaScript on
 both projects, and `scripts/test_worker_determinism.py` exits 0 on both.
 
+Added after the first report of the slice: `super_errors_multi` fixtures
+for the three kinds (`Cross_alias_of_nested_module_type`,
+`Cross_child_of_alias_type`, `Cross_child_of_module_type_name`, expectations
+from the reference compiler). The third one failed on trunk and on the
+branch alike: path normalization took a child declared with a module type
+name for an alias of that name (`find_module_alias_in_components` asked for
+module type paths too), so an error printed `Dep.N.t (defined as Dep.S.t)`.
+Fixed in `TypeContext::find_module_alias_in_components`. And
+`expand_modtype_name` scanned every module type item per child; the
+signature index now maps a module type name to its item
+(`expanding_module_type_names_costs_two_probes_per_child`, 10,000 children).
+
+Who reads the registration tables, measured (a probe at each reader, the
+application, 8 workers; not committed):
+
+| Reader | Calls | With an answer |
+| --- | --- | --- |
+| `alias_sources_for_component_path` from `component_alias_sources` (`cmi/persistent_env.rs`) | 37,246 | 8,531 |
+| the same from `typecore.rs` (`rewrite_flattened_alias_child_prefixes`), `typemod.rs` (two sites), `env_lazy.rs` | 563 | 18 |
+| `component_paths_for_alias_source` (`build_module_signature_for_path`, `env_lazy.rs`) | 7,305 | 0 |
+| `has_component_paths_for_alias_source` (`flattened_alias_component_parent`) | 121 | 1 |
+| `find_qualified_module_decl` past its test for a persistent or global head | 0 | 0 |
+
+So on the application the forward table is what is read; the reverse table
+answers once; the declaration table is written for every forced child of a
+view and never read (its readers are the tables a compilation builds for
+itself, and none was built for a persistent path). What a deletion has to
+keep, and why it was not made here: (a) a pair a view registers carries
+"flattened backing sources" computed from the alias rewrites the adopting
+compilation has loaded when it adopts (`flattened_backing_sources_for_alias_source`),
+so the forward answer is not yet a function of the view; (b) the reverse
+question (which component paths are aliases of this source) has no answer
+in a view: it needs an index over the views one compilation adopted, in
+adoption order, which is the table under another name; (c) the tables of a
+persistent path that a compilation builds for itself (a key scoped to an
+environment, a unit the world does not own, a view the pool had no room
+for) read what views registered, and no fixture reaches those paths.
+
 What the next slices start from:
 
 1. The registration tables (above) are the one deletion of the W5 row that
