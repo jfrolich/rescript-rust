@@ -856,8 +856,9 @@ pub(crate) fn replay(
 /// `program`, the lowering's own program before the JS passes with its
 /// module list filled in. `idents[var]` is the identifier `printed[var]`
 /// belongs to. `Err` when the pass does not support the unit (no
-/// comparison). Check mode only; one hash lookup per named variable (the
-/// pass is keyed by identifier).
+/// comparison). Check mode only. Builds two hash sets (the modules and the
+/// replayed identifiers) and does one hash lookup per named variable and
+/// one per entry of the pass's table (the pass is keyed by identifier).
 #[cfg(test)]
 pub(crate) fn compare_with_pass(
     printed: &[Option<Name>],

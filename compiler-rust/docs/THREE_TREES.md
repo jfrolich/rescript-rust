@@ -1617,7 +1617,11 @@ function referenced or declared finds its membership bit set and is not
 added to the inner run; a reference to a parameter of the enclosing
 function finds the bound bit `enter` set and is read as bound at the inner
 close. Either way the variable is missing from the inner free list, which
-`Names::analyze_fun` has. The program scope is not affected (it keeps no
+`Names::analyze_fun` has. The shared bound bit also errs the other way
+(read from the code, not tested): in `let f = () => { let rec g = () => g(); g() }`
+the bit `declare` sets for `g` in `f` is cleared by `g`'s own close, because
+`g` referenced itself, so `f`'s later reference to `g` reads `g` as free in
+`f`. The redesign must cover both directions. The program scope is not affected (it keeps no
 run), so every skeleton test passes: they nest functions in the program or
 capture program-level variables only. Reproduction, the events the
 lowering would log for

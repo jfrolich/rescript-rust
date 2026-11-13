@@ -187,8 +187,9 @@ impl Log {
     /// `Params`, mark the parameters bound (naming.rs `function`: `reserve`,
     /// `enter`, then the parameters). Returns the scope's row. The
     /// reservation list is not known yet: it is the free-variable run
-    /// `leave` writes, read by the replay through the row. Cost: two
-    /// pushes and one bit write per parameter; two steps.
+    /// `leave` writes, read by the replay through the row. Cost: five
+    /// pushes (the row, two events, the open scope, its mark) and one bit
+    /// write per parameter; two steps.
     pub(crate) fn enter(&mut self, function: FuncId, statement: NodeId, vars: &VarTable) -> u32 {
         let row = u32::try_from(self.scopes.len()).expect("naming scope capacity");
         self.scopes.push(ScopeRow { function, free_start: 0, free_len: 0 });
