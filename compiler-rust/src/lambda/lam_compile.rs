@@ -656,6 +656,34 @@ impl LambdaCompiler {
         Compiled { prelude: output.block, expr: JE::undefined(false, &mut self.j), finished: output.finished }
     }
 
+    /// The legacy export pipeline on a Lambda that is not simplified first,
+    /// for the rule tests of `bir/lower/export.rs`: the coerced program
+    /// before the JS passes.
+    #[cfg(test)]
+    pub(crate) fn bir_export_oracle(&mut self, arena: &mut LamArena, root: Lam) -> DepsProgram {
+        self.j = JsArena::new();
+        let compiled = self.compile_expr(arena, root);
+        let j = std::mem::take(&mut self.j);
+        self.coerce_lowered_output(j, compiled, None)
+    }
+
+    /// The six JS passes, for the same tests.
+    #[cfg(test)]
+    pub(crate) fn bir_passes_oracle(&mut self, deps: DepsProgram) -> DepsProgram {
+        self.finish_lowered_output(deps, &AHashSet::new())
+    }
+
+    /// The program the new lowering's coercion describes, for the same tests.
+    #[cfg(test)]
+    pub(crate) fn bir_coerced_program(
+        j: JsArena,
+        block: Block,
+        exports: Vec<Ident>,
+        name_reservations: Vec<Ident>,
+    ) -> DepsProgram {
+        coerced_program(j, block, exports, name_reservations, None)
+    }
+
     /// Compile a Lambda expression into a JS IR program with module metadata.
     pub fn compile_deps_program(&mut self, lam: &Lambda) -> DepsProgram {
         self.compile_deps_program_with_possible_required_modules(lam, &AHashSet::new())

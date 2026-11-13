@@ -547,10 +547,7 @@ impl State {
             }
             _ => (
                 self.statements.take_list(&mut self.arena, run),
-                export::Coerced {
-                    exports: Vec::new(),
-                    reservations: Vec::new(),
-                },
+                export::Coerced::default(),
             ),
         };
         self.finish(list, out.finished, coerced)
@@ -571,16 +568,17 @@ impl State {
             len: 0,
         });
         let list = self.statements.take_list(&mut self.arena, run);
-        let coerced = export::Coerced {
-            exports: Vec::new(),
-            reservations: Vec::new(),
-        };
-        self.finish(list, out.finished, coerced)
+        self.finish(list, out.finished, export::Coerced::default())
     }
 
     /// The root block over the top-level list. One step per statement of
     /// the list and one write per catch of the unit.
     fn finish(mut self, list: crate::bir::ListId, _finished: Finished, coerced: export::Coerced) -> Lowered {
+        #[cfg(test)]
+        let coerced = export::Coerced {
+            steps: self.coercion.steps,
+            ..coerced
+        };
         let root = self.arena.block_from_list(list);
         // The headers keep their labels and parameters; the exits they count
         // stay in the source, which reads the counts while a function of

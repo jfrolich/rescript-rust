@@ -139,14 +139,51 @@ pub(super) struct Tables {
     last_effect: u32,
     /// Rows, exports, alias-chain links, sites and ancestors visited.
     pub(super) steps: usize,
+    #[cfg(test)]
+    arms: Vec<Arm>,
+    #[cfg(test)]
+    resolved: Vec<Resolved>,
 }
 
 /// The exports of a unit as the lowering hands them over.
+#[derive(Default)]
 pub(crate) struct Coerced {
     /// The exported identifiers after coercion, in export order.
     pub exports: Vec<Ident>,
     /// The original export identifiers whose name a selected local shadows.
     pub reservations: Vec<Ident>,
+    /// The arm of the fold and the arm of the resolution each export took.
+    #[cfg(test)]
+    pub arms: Vec<(Arm, Resolved)>,
+    /// `Tables::steps` when the unit was complete.
+    #[cfg(test)]
+    pub steps: usize,
+}
+
+/// The arm of C:1099 an export took, recorded for the rule tests.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Arm {
+    MovedAlias,
+    DeclaredExport,
+    DeclaredTarget,
+    Undefined,
+    MovedReused,
+    KeptReused,
+    Reused,
+    Inserted,
+    Rebound,
+}
+
+/// The arm of O:30 an export took, recorded for the rule tests.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Resolved {
+    KeptFunction,
+    SelfAlias,
+    ReusableDeclared,
+    /// The alias chain; true when it left the selected variable.
+    Chain(bool),
 }
 
 impl State {
@@ -282,6 +319,11 @@ impl State {
         t.row_of.clear();
         t.inserted.clear();
         t.selected.clear();
+        #[cfg(test)]
+        {
+            t.arms.clear();
+            t.resolved.clear();
+        }
         t.folding = true;
         t.flattened = false;
         t.last_function = 0;
@@ -1314,6 +1356,8 @@ impl State {
                     self.arena.release(value);
                     self.define(index, Row::TAIL, export, Some(late), property);
                     selected.push(export);
+                    #[cfg(test)]
+                    self.coercion.arms.push(Arm::MovedAlias);
                     continue;
                 }
             }
@@ -1330,6 +1374,8 @@ impl State {
                         }
                         selected.push(chosen);
                         self.arena.release(value);
+                        #[cfg(test)]
+                        self.coercion.arms.push(Arm::DeclaredExport);
                         continue;
                     }
                     if self.declared(target) {
@@ -1343,6 +1389,8 @@ impl State {
                         }
                         selected.push(chosen);
                         self.arena.release(value);
+                        #[cfg(test)]
+                        self.coercion.arms.push(Arm::DeclaredTarget);
                         continue;
                     }
                 }
@@ -1352,6 +1400,8 @@ impl State {
             {
                 selected.push(export);
                 self.arena.release(value);
+                #[cfg(test)]
+                self.coercion.arms.push(Arm::Undefined);
                 continue;
             }
             if self.reusable_candidate(value) {
@@ -1362,6 +1412,8 @@ impl State {
                     self.arena.release(value);
                     self.define(index, Row::TAIL, export, Some(late), property);
                     selected.push(export);
+                    #[cfg(test)]
+                    self.coercion.arms.push(Arm::MovedReused);
                     continue;
                 }
                 if let Some(row) = self.reused_binding(index, value) {
@@ -1370,6 +1422,8 @@ impl State {
                     if reused == export && property != LetKind::Variable {
                         selected.push(export);
                         self.arena.release(value);
+                        #[cfg(test)]
+                        self.coercion.arms.push(Arm::KeptReused);
                         continue;
                     }
                 }
@@ -1377,11 +1431,15 @@ impl State {
                 if let Some(reused) = self.reusable_binding(index, export, value) {
                     selected.push(reused);
                     self.arena.release(value);
+                    #[cfg(test)]
+                    self.coercion.arms.push(Arm::Reused);
                     continue;
                 }
             }
             if self.insert_before_equivalent(index, export, value, &exports) {
                 selected.push(export);
+                #[cfg(test)]
+                self.coercion.arms.push(Arm::Inserted);
                 continue;
             }
             // coercion.ml:140-156: `Ident.rename` of the export.
@@ -1395,12 +1453,24 @@ impl State {
             };
             selected.push(rebound);
             self.define(index, Row::TAIL, rebound, Some(value), property);
+            #[cfg(test)]
+            self.coercion.arms.push(Arm::Rebound);
         }
         self.coercion.selected = selected;
         let exports = self.resolve_exports(finished);
         Coerced {
             exports,
             reservations,
+            #[cfg(test)]
+            arms: self
+                .coercion
+                .arms
+                .iter()
+                .copied()
+                .zip(self.coercion.resolved.iter().copied())
+                .collect(),
+            #[cfg(test)]
+            steps: 0,
         }
     }
 
@@ -1436,15 +1506,36 @@ impl State {
         for (index, &var) in selected.iter().enumerate() {
             self.coercion.steps += 1;
             let index = index as u32;
+            #[cfg(test)]
+            let arm;
             let resolved = if self.keeps_function_alias(index, var) {
+                #[cfg(test)]
+                {
+                    arm = Resolved::KeptFunction;
+                }
                 var
             } else if let Some(target) = self.self_alias_target(var) {
+                #[cfg(test)]
+                {
+                    arm = Resolved::SelfAlias;
+                }
                 target
             } else if let Some(reused) = self.reusable_declared(index, var) {
+                #[cfg(test)]
+                {
+                    arm = Resolved::ReusableDeclared;
+                }
                 reused
             } else {
-                self.alias_chain(var)
+                let end = self.alias_chain(var);
+                #[cfg(test)]
+                {
+                    arm = Resolved::Chain(end != var);
+                }
+                end
             };
+            #[cfg(test)]
+            self.coercion.resolved.push(arm);
             exports.push(self.ident(resolved));
         }
         self.coercion.selected = selected;
@@ -1617,6 +1708,7 @@ impl State {
 
 #[cfg(test)]
 mod tests {
+    use super::{Arm, Resolved};
     use crate::ident::{Ident, IdentFlags};
     use crate::lambda::arena::{Lam, LamArena};
     use crate::lambda::lam_compat::LetKind;
@@ -1668,6 +1760,390 @@ mod tests {
             false,
             false,
         )
+    }
+
+    /// The rule form (BACKEND_LOWERING 8.3): the same Lambda, not simplified,
+    /// through the legacy lowering with the legacy export code and through
+    /// the new lowering without it. Both printed texts (before and after the
+    /// JS passes) must be equal. Returns the arms the exports took and the
+    /// text before the passes.
+    fn rule(a: LamArena, root: Lam) -> (Vec<(Arm, Resolved)>, String) {
+        let print = |deps: &crate::js_ir::arena::JsDepsProgram| {
+            crate::js_ir::print_deps_program_with_directives_and_options(
+                deps,
+                None,
+                &[],
+                false,
+                false,
+                false,
+            )
+        };
+        let input = crate::bir::bridge::import_for_lowering(&a, root).0.unwrap();
+        let lowered = super::super::lower(input, None, false).unwrap();
+        lowered
+            .program
+            .arena
+            .validate(Some(lowered.program.root))
+            .unwrap();
+        let exported = crate::bir::bridge_j::export_js(&lowered.program).unwrap();
+        let new_before = LambdaCompiler::bir_coerced_program(
+            exported.program.arena,
+            exported.program.block,
+            lowered.coerced.exports.clone(),
+            lowered.coerced.reservations.clone(),
+        );
+        let mut a = a;
+        let mut compiler = LambdaCompiler::new();
+        let before = compiler.bir_export_oracle(&mut a, root);
+        let text = print(&before);
+        assert_eq!(print(&new_before), text, "before the passes");
+        let after = compiler.bir_passes_oracle(before);
+        let new_after = compiler.bir_passes_oracle(new_before);
+        assert_eq!(print(&new_after), print(&after), "after the passes");
+        (lowered.coerced.arms, text)
+    }
+    fn function(a: &mut LamArena, stamp: i32) -> Lam {
+        let param = id("arg", stamp);
+        let body = a.var(param);
+        a.function_(1, &[param], body, Default::default(), LamLoc::NONE)
+    }
+    fn member(a: &mut LamArena, module: &str, name: &str) -> Lam {
+        let module = a.global_module(Ident::create_persistent(module));
+        a.prim_raw(
+            P::Pfield(0, crate::lambda::FieldDbgInfo::Module { name: name.into() }),
+            &[module],
+            LamLoc::NONE,
+        )
+    }
+    fn call_with(a: &mut LamArena, name: &str, stamp: i32, arg: Lam) -> Lam {
+        let callee = a.var(id(name, stamp));
+        a.apply_raw(
+            callee,
+            &[arg],
+            ApInfo {
+                status: ApplyStatus::InferFull,
+                loc: LamLoc::NONE,
+            },
+        )
+    }
+
+    #[test]
+    fn a_plain_export_keeps_its_declaration() {
+        let mut a = LamArena::new();
+        let x = id("x", 10);
+        let value = call(&mut a, "ext", 1);
+        let read = a.var(x);
+        let block = exports(&mut a, &[x], &[read]);
+        let root = a.let_(LetKind::Strict, x, value, block);
+        let (arms, text) = rule(a, root);
+        assert_eq!(arms, [(Arm::DeclaredExport, Resolved::Chain(false))]);
+        assert!(text.contains("let x = ext();"), "{text}");
+    }
+
+    #[test]
+    fn an_export_used_internally_keeps_its_declaration() {
+        let mut a = LamArena::new();
+        let x = id("x", 10);
+        let value = call(&mut a, "ext", 1);
+        let read = a.var(x);
+        let used = call_with(&mut a, "use", 2, read);
+        let read = a.var(x);
+        let block = exports(&mut a, &[x], &[read]);
+        let tail = a.seq_raw(used, block);
+        let root = a.let_(LetKind::Strict, x, value, tail);
+        let (arms, text) = rule(a, root);
+        assert_eq!(arms, [(Arm::DeclaredExport, Resolved::Chain(false))]);
+        assert!(text.contains("use(x);"), "{text}");
+    }
+
+    #[test]
+    fn an_export_of_a_same_name_local_is_renamed_to_it() {
+        // `let x = ext()` under another stamp than the export `x`.
+        let mut a = LamArena::new();
+        let (local, export) = (id("x", 10), id("x", 20));
+        let value = call(&mut a, "ext", 1);
+        let read = a.var(local);
+        let block = exports(&mut a, &[export], &[read]);
+        let root = a.let_(LetKind::Strict, local, value, block);
+        let (arms, _) = rule(a, root);
+        assert_eq!(arms, [(Arm::DeclaredTarget, Resolved::Chain(false))]);
+    }
+
+    #[test]
+    fn an_export_of_another_value_is_rebound() {
+        for variable in [false, true] {
+            let mut a = LamArena::new();
+            let y = id("y", 10);
+            let value = if variable {
+                a.var(y)
+            } else {
+                call(&mut a, "ext", 1)
+            };
+            let block = exports(&mut a, &[id("x", 20)], &[value]);
+            let root = if variable {
+                let bound = call(&mut a, "ext", 1);
+                a.let_(LetKind::Strict, y, bound, block)
+            } else {
+                block
+            };
+            let (arms, text) = rule(a, root);
+            assert_eq!(arms, [(Arm::Rebound, Resolved::Chain(false))]);
+            assert!(
+                text.contains(if variable { "let x$1 = y;" } else { "let x$1 = ext();" }),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_export_of_a_literal_is_rebound() {
+        let mut a = LamArena::new();
+        let value = a.const_(C::Int { i: 42, comment: None });
+        let root = exports(&mut a, &[id("answer", 10)], &[value]);
+        let (arms, text) = rule(a, root);
+        assert_eq!(arms, [(Arm::Rebound, Resolved::Chain(false))]);
+        assert!(text.contains("let answer$1 = 42;"), "{text}");
+    }
+
+    /// `let f = function; let x = f; export x` where the export `x` has
+    /// another stamp: the alias moves to the export tail and the references
+    /// after it read `f`.
+    fn alias_of_function(a: &mut LamArena, later: impl FnOnce(&mut LamArena, Ident) -> Option<Lam>) -> Lam {
+        let (f, local, export) = (id("f", 5), id("x", 10), id("x", 20));
+        let read = a.var(local);
+        let block = exports(a, &[export], &[read]);
+        let tail = match later(a, local) {
+            Some(effect) => a.seq_raw(effect, block),
+            None => block,
+        };
+        let alias = a.var(f);
+        let inner = a.let_(LetKind::Alias, local, alias, tail);
+        let function = function(a, 6);
+        a.let_(LetKind::Strict, f, function, inner)
+    }
+
+    #[test]
+    fn a_same_name_alias_moves_to_the_export_tail() {
+        let mut a = LamArena::new();
+        let root = alias_of_function(&mut a, |_, _| None);
+        let (arms, text) = rule(a, root);
+        assert_eq!(arms, [(Arm::MovedAlias, Resolved::Chain(false))]);
+        assert!(text.contains("let x = f;"), "{text}");
+    }
+
+    #[test]
+    fn a_moved_alias_is_replaced_where_it_is_called() {
+        let mut a = LamArena::new();
+        let root = alias_of_function(&mut a, |a, local| {
+            let callee = a.var(local);
+            let unit = a.const_(C::JsUndefined { is_unit: true });
+            Some(a.apply_raw(
+                callee,
+                &[unit],
+                ApInfo {
+                    status: ApplyStatus::InferFull,
+                    loc: LamLoc::NONE,
+                },
+            ))
+        });
+        let (arms, text) = rule(a, root);
+        assert_eq!(arms, [(Arm::MovedAlias, Resolved::Chain(false))]);
+        assert!(text.contains("f();"), "{text}");
+        assert!(!text.contains("x();"), "{text}");
+    }
+
+    #[test]
+    fn an_alias_used_as_an_argument_before_an_effect_stays() {
+        let mut a = LamArena::new();
+        let root = alias_of_function(&mut a, |a, local| {
+            let read = a.var(local);
+            Some(call_with(a, "use", 2, read))
+        });
+        let (arms, text) = rule(a, root);
+        assert_eq!(arms, [(Arm::DeclaredTarget, Resolved::Chain(false))]);
+        assert!(text.contains("let x$1 = f;") && text.contains("use(x$1);"), "{text}");
+    }
+
+    #[test]
+    fn an_alias_used_before_its_declaration_row_or_in_a_later_function_stays() {
+        // A later function literal that mentions the alias captures it.
+        let mut a = LamArena::new();
+        let root = alias_of_function(&mut a, |a, local| {
+            let g = id("g", 30);
+            let read = a.var(local);
+            let param = id("arg", 31);
+            let function = a.function_(1, &[param], read, Default::default(), LamLoc::NONE);
+            let unit = a.const_(C::JsUndefined { is_unit: true });
+            let bound = a.let_(LetKind::Strict, g, function, unit);
+            Some(bound)
+        });
+        let (arms, _) = rule(a, root);
+        assert_eq!(arms[0].0, Arm::DeclaredTarget);
+    }
+
+    #[test]
+    fn an_alias_of_a_module_member_moves_unless_a_function_follows() {
+        for followed in [false, true] {
+            let mut a = LamArena::new();
+            let (local, export) = (id("x", 10), id("x", 20));
+            let read = a.var(local);
+            let block = exports(&mut a, &[export], &[read]);
+            let tail = if followed {
+                let function = function(&mut a, 6);
+                a.let_(LetKind::Strict, id("g", 30), function, block)
+            } else {
+                block
+            };
+            let value = member(&mut a, "Other", "x");
+            let root = a.let_(LetKind::Alias, local, value, tail);
+            let (arms, _) = rule(a, root);
+            assert_eq!(
+                arms[0].0,
+                if followed { Arm::DeclaredTarget } else { Arm::MovedAlias }
+            );
+        }
+    }
+
+    #[test]
+    fn an_export_shadowing_a_javascript_global() {
+        let mut a = LamArena::new();
+        let export = id("parseInt", 10);
+        let global = a.var(Ident::create_persistent("parseInt"));
+        let read = a.var(export);
+        let block = exports(&mut a, &[export], &[read]);
+        let root = a.let_(LetKind::Alias, export, global, block);
+        let (arms, text) = rule(a, root);
+        assert_eq!(arms, [(Arm::DeclaredExport, Resolved::Chain(false))]);
+        assert!(text.contains("parseInt"), "{text}");
+    }
+
+    #[test]
+    fn an_undefined_export_reuses_its_declaration() {
+        let mut a = LamArena::new();
+        let x = id("x", 10);
+        let value = a.const_(C::JsUndefined { is_unit: false });
+        let block = exports(&mut a, &[x], &[value]);
+        let bound = a.const_(C::JsNull);
+        let root = a.let_(LetKind::Strict, x, bound, block);
+        let (arms, _) = rule(a, root);
+        assert_eq!(arms, [(Arm::Undefined, Resolved::Chain(false))]);
+    }
+
+    #[test]
+    fn an_export_of_a_member_reuses_a_same_name_binding() {
+        // `let x = Other.f`, read by a later initialiser, so it cannot move.
+        for own in [false, true] {
+            let mut a = LamArena::new();
+            let (local, export) = (id("x", 10), id("x", 20));
+            let value = member(&mut a, "Other", "f");
+            let block = exports(&mut a, &[if own { local } else { export }], &[value]);
+            let read = a.var(local);
+            let tail = a.let_(LetKind::Strict, id("y", 30), read, block);
+            let bound = member(&mut a, "Other", "f");
+            let root = a.let_(LetKind::Strict, local, bound, tail);
+            let (arms, _) = rule(a, root);
+            assert_eq!(arms[0].0, if own { Arm::KeptReused } else { Arm::Reused });
+        }
+    }
+
+    #[test]
+    fn an_export_of_a_member_moves_the_reused_binding() {
+        let mut a = LamArena::new();
+        let (local, export) = (id("x", 10), id("x", 20));
+        let value = member(&mut a, "Other", "f");
+        let block = exports(&mut a, &[export], &[value]);
+        let bound = member(&mut a, "Other", "f");
+        let root = a.let_(LetKind::Strict, local, bound, block);
+        let (arms, _) = rule(a, root);
+        assert_eq!(arms[0].0, Arm::MovedReused);
+    }
+
+    #[test]
+    fn a_literal_export_is_inserted_before_equal_later_bindings() {
+        // `let b = 1` is the end of the block and `b` is a later export.
+        let mut a = LamArena::new();
+        let (first, b) = (id("a", 10), id("b", 20));
+        let value = a.const_(C::Int { i: 1, comment: None });
+        let read = a.var(b);
+        let block = exports(&mut a, &[first, b], &[value, read]);
+        let bound = a.const_(C::Int { i: 1, comment: None });
+        let root = a.let_(LetKind::Variable, b, bound, block);
+        let (arms, text) = rule(a, root);
+        assert_eq!(arms[0].0, Arm::Inserted);
+        let (first, second) = (text.find("let a = 1;").unwrap(), text.find("let b = 1;").unwrap());
+        assert!(first < second, "{text}");
+    }
+
+    #[test]
+    fn resolution_keeps_a_function_export_with_a_second_same_name_root() {
+        let mut a = LamArena::new();
+        let (other, export) = (id("x", 10), id("x", 20));
+        let read = a.var(export);
+        let block = exports(&mut a, &[export], &[read]);
+        let second = function(&mut a, 6);
+        let inner = a.let_(LetKind::Strict, export, second, block);
+        let first = function(&mut a, 7);
+        let root = a.let_(LetKind::Strict, other, first, inner);
+        let (arms, _) = rule(a, root);
+        assert_eq!(arms, [(Arm::DeclaredExport, Resolved::KeptFunction)]);
+    }
+
+    /// `let x = <first>; let x' = <second>; export x' = undefined`: the fold
+    /// keeps the declaration, the resolution decides.
+    fn resolved(kind: LetKind, first: fn(&mut LamArena) -> Lam, second: fn(&mut LamArena, Ident) -> Lam) -> Vec<(Arm, Resolved)> {
+        let mut a = LamArena::new();
+        let (other, export) = (id("x", 10), id("x", 20));
+        let value = a.const_(C::JsUndefined { is_unit: false });
+        let block = exports(&mut a, &[export], &[value]);
+        let second = second(&mut a, other);
+        let inner = a.let_(kind, export, second, block);
+        let first = first(&mut a);
+        let root = a.let_(LetKind::Strict, other, first, inner);
+        rule(a, root).0
+    }
+
+    #[test]
+    fn resolution_follows_a_same_name_self_alias() {
+        let arms = resolved(LetKind::Alias, |a| call(a, "ext", 1), |a, other| a.var(other));
+        assert_eq!(arms, [(Arm::Undefined, Resolved::SelfAlias)]);
+    }
+
+    #[test]
+    fn resolution_reuses_a_same_name_binding_with_the_same_initialiser() {
+        let arms = resolved(
+            LetKind::Strict,
+            |a| member(a, "Other", "f"),
+            |a, _| member(a, "Other", "f"),
+        );
+        assert_eq!(arms, [(Arm::Undefined, Resolved::ReusableDeclared)]);
+    }
+
+    #[test]
+    fn resolution_follows_the_alias_chain_through_a_variable_binding() {
+        let arms = resolved(LetKind::Variable, |a| call(a, "ext", 1), |a, other| a.var(other));
+        assert_eq!(arms, [(Arm::Undefined, Resolved::Chain(true))]);
+    }
+
+    #[test]
+    fn resolution_leaves_an_export_without_alias() {
+        let arms = resolved(LetKind::Strict, |a| call(a, "ext", 1), |a, _| call(a, "ext", 2));
+        assert_eq!(arms, [(Arm::Undefined, Resolved::Chain(false))]);
+    }
+
+    #[test]
+    fn a_finished_top_level_declares_its_undeclared_exports() {
+        let mut a = LamArena::new();
+        let (x, y) = (id("x", 10), id("y", 11));
+        let payload = a.const_(C::JsNull);
+        let raised = a.prim_raw(P::Praise, &[payload], LamLoc::NONE);
+        let (rx, ry) = (a.var(x), a.var(y));
+        let block = exports(&mut a, &[x, y], &[rx, ry]);
+        let bound = call(&mut a, "ext", 1);
+        let inner = a.let_(LetKind::Strict, y, raised, block);
+        let root = a.let_(LetKind::Strict, x, bound, inner);
+        let (arms, text) = rule(a, root);
+        assert_eq!(arms.len(), 2);
+        assert!(text.contains("let y;"), "{text}");
     }
 
     #[test]
