@@ -22,6 +22,7 @@
 
 #### :bug: Bug fix
 
+- Build system: with OpenTelemetry export on (`OTEL_EXPORTER_OTLP_ENDPOINT`), `rescript build` and `rescript watch` print logs at the `-v`/`-vv` verbosity again instead of every debug line; records are still exported at `RUST_LOG`'s level, `debug` by default.
 - JSX v4: keep `@directive` on an async component's own function instead of its generated sync wrapper, so `@react.component let make = @directive("'use cache';") async (...) => ...` compiles to an async function that starts with `'use cache'` (ReScript 12 dropped the directive; Next.js rejects it on a sync function).
 
 #### :memo: Documentation

@@ -7,10 +7,9 @@ use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::trace::SdkTracerProvider;
+use tracing_log::{AsLog, LogTracer};
 use tracing_subscriber::EnvFilter;
-use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
 /// Guard that ensures telemetry is properly flushed and shut down.
 /// Drop this at the end of main to flush all spans.
@@ -23,6 +22,54 @@ impl TelemetryGuard {
     /// Returns whether OTLP span export was successfully initialized.
     pub fn otel_enabled(&self) -> bool {
         self.provider.is_some()
+    }
+
+    /// Install `console` as the global `log` logger, showing records up to
+    /// `console_level` (the CLI verbosity).
+    ///
+    /// With OTLP export on, every record also goes to `tracing`, so `log::*`
+    /// calls are exported as span events at the subscriber's own level
+    /// (`RUST_LOG`, `debug` by default) without changing what the console shows.
+    pub fn install_logger(&self, console: Box<dyn log::Log>, console_level: log::LevelFilter) {
+        let (logger, max_level): (Box<dyn log::Log>, _) = if self.otel_enabled() {
+            let export_level = tracing::level_filters::LevelFilter::current().as_log();
+            (
+                Box::new(ConsoleAndExportLogger {
+                    console,
+                    export: LogTracer::new(),
+                }),
+                console_level.max(export_level),
+            )
+        } else {
+            (console, console_level)
+        };
+        log::set_max_level(max_level);
+        log::set_boxed_logger(logger).expect("Failed to initialize logger");
+    }
+}
+
+/// Sends each `log` record to the console logger and to `tracing` for export;
+/// each side applies its own level filter.
+struct ConsoleAndExportLogger {
+    console: Box<dyn log::Log>,
+    export: LogTracer,
+}
+
+impl log::Log for ConsoleAndExportLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        self.console.enabled(metadata) || self.export.enabled(metadata)
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.console.enabled(record.metadata()) {
+            self.console.log(record);
+        }
+        self.export.log(record);
+    }
+
+    fn flush(&self) {
+        self.console.flush();
+        self.export.flush();
     }
 }
 
@@ -104,19 +151,18 @@ fn init_with_otlp() -> TelemetryGuard {
     let telemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
     // Default to debug level so that diagnostic tracing::debug! events
-    // (e.g. in the watcher) are captured as OTEL span events.
+    // (e.g. in the watcher) are captured as OTEL span events. This filter
+    // only decides what is exported: the console keeps following the CLI
+    // verbosity, see `TelemetryGuard::install_logger`.
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
 
-    // Also write logs to stderr. Without this layer, `log::*` / `tracing::*`
-    // output is silently swallowed when telemetry is enabled, since the
-    // OTEL layer only exports spans — it does not print them.
-    let fmt_layer = fmt::layer().with_writer(std::io::stderr);
-
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(telemetry_layer)
-        .with(fmt_layer)
-        .init();
+    // `set_global_default` rather than `init`: `init` would also make
+    // `tracing_log::LogTracer` the global `log` logger, which replaces the
+    // console logger and leaves `log::*` output to this subscriber's filter.
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::registry().with(filter).with(telemetry_layer),
+    )
+    .expect("the tracing subscriber is installed once, at startup");
 
     TelemetryGuard {
         provider: Some(provider),
