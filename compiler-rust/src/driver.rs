@@ -6350,43 +6350,17 @@ fn compile_source_to_js_with_options_inner(
     };
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
-    // Type check
-    let type_ctx = fresh_type_context();
-    type_ctx.set_location_namespace(&options.location_identity(filename));
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
-    let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
-    tctx.experimental_let_unwrap = experimental_let_unwrap;
-    tctx.transparent_modules = options.transparent_modules;
-    apply_warning_options(&mut tctx, options);
-    // Ppx_entry.rewrite_* (ppx_entry.ml:28, 47) applies the leading warning
-    // attributes; compiling a preprocessed `.ast` does not run it again.
-    if !options.frontend_already_reported {
-        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
-    }
-    apply_file_config_warning_options(&mut tctx, &file_config);
-    let mut pers_env = PersistentEnv::new();
-    let (load_path, load_path_display) = shared_load_path_with_display(options);
-    type_ctx.set_load_paths_shared(load_path.clone());
-    pers_env.set_load_path_shared(load_path.clone(), load_path_display);
-    pers_env.set_open_modules(options.open_modules.clone());
-    pers_env.set_jsx_version(options.jsx_version);
-    pers_env.set_experimental_let_unwrap(options.experimental_let_unwrap);
-    pers_env.set_jsx_module(options.jsx_module.clone());
     let current_unit_name = options.current_unit_name();
-    pers_env.set_compiling_module(current_unit_name.clone());
-
-    // Store persistent env in the type check context for module resolution
-    tctx.set_persistent_env(pers_env);
-
-    let typed = initial_type_env(
-        &mut tctx,
-        &file_config.open_modules(options),
-        file_config.nopervasives(options),
-        current_unit_name.as_deref(),
-    )
-    .and_then(|env| {
-        type_structure(&mut tctx, &env, parser.arena(), &structure).map(|typed| (typed, env))
-    });
+    let (type_ctx, result) = type_structure_two_modes(
+        CheckUnit { arena: parser.arena(), filename, options, registry: None,
+            module_name: current_unit_name.as_deref(), file_config: &file_config,
+            frontend_warning_specs: &frontend_warning_specs, derived_plans: true },
+        |tctx, env, arena| {
+            tctx.experimental_let_unwrap = experimental_let_unwrap;
+            type_structure(tctx, env, arena, &structure)
+        },
+        |type_ctx, mut tctx, typed| {
     let ((typed_structure, final_env), env) = match typed {
         Ok(result) => result,
         Err(e) => {
@@ -6408,7 +6382,7 @@ fn compile_source_to_js_with_options_inner(
             }
             return Err(type_mod_error_to_anyhow(
                 e,
-                &type_ctx,
+                type_ctx,
                 parser.arena(),
                 source,
                 filename,
@@ -6451,7 +6425,7 @@ fn compile_source_to_js_with_options_inner(
     // OCaml's Includemod.compunit -> moregeneral -> moregen links weak (non-generic)
     // type variables from value-restricted expressions to the corresponding types
     // from the .resi interface. This happens BEFORE sexp serialization.
-    apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options, has_resi);
+    apply_moregen_constraints(&mut tctx, type_ctx, &typed_structure, options, has_resi);
     if has_resi {
         check_compunit_inclusion_for_errors(
             &mut tctx,
@@ -6484,12 +6458,12 @@ fn compile_source_to_js_with_options_inner(
             crate::types::includemod::simplify_signature(&typed_structure.str_type);
         // typemod.ml `type_implementation_more`: `check_js_names ~toplevel:true
         // simple_sg` before the inferred-signature inclusion.
-        if let Err(e) = crate::types::typemod::check_js_names(&type_ctx, true, &simple_signature) {
+        if let Err(e) = crate::types::typemod::check_js_names(type_ctx, true, &simple_signature) {
             let suppress_info_style =
                 !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
             return Err(type_mod_error_to_anyhow(
                 e,
-                &type_ctx,
+                type_ctx,
                 parser.arena(),
                 source,
                 filename,
@@ -6497,7 +6471,7 @@ fn compile_source_to_js_with_options_inner(
             ));
         }
         let implementation_coercion = coerce_to_inferred_signature(
-            &type_ctx,
+            type_ctx,
             &env,
             source_file_for_interface,
             &typed_structure.str_type,
@@ -6505,13 +6479,13 @@ fn compile_source_to_js_with_options_inner(
         );
         // A payload reader's error escapes the inclusion (includecore.ml:45).
         let implementation_coercion =
-            match crate::types::includemod::escaped(&type_ctx, implementation_coercion) {
+            match crate::types::includemod::escaped(type_ctx, implementation_coercion) {
                 Ok(coercion) => coercion,
                 Err(e) => {
                     emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
                     return Err(type_mod_error_to_anyhow(
                         e.into(),
-                        &type_ctx,
+                        type_ctx,
                         parser.arena(),
                         source,
                         filename,
@@ -6522,21 +6496,21 @@ fn compile_source_to_js_with_options_inner(
             }
             .map_err(|e| anyhow!("Inferred signature inclusion failed: {e:?}"))?;
         if let Err(e) =
-            crate::types::typemod::check_nongen_schemes(&type_ctx, &final_env, &simple_signature)
+            crate::types::typemod::check_nongen_schemes(type_ctx, &final_env, &simple_signature)
         {
             // The warnings printed so far have set up colors (misc.ml:337-392).
             let suppress_info_style =
                 !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
             return Err(type_mod_error_to_anyhow(
                 e,
-                &type_ctx,
+                type_ctx,
                 parser.arena(),
                 source,
                 filename,
                 suppress_info_style,
             ));
         }
-        normalize_signature(&type_ctx, &final_env, &simple_signature);
+        normalize_signature(type_ctx, &final_env, &simple_signature);
         (Some(simple_signature), Some(implementation_coercion))
     } else {
         (None, None)
@@ -6560,7 +6534,7 @@ fn compile_source_to_js_with_options_inner(
         let mut stderr = std::io::stderr();
         let _ = print_typed_structure(
             parser.arena(),
-            &type_ctx,
+            type_ctx,
             &tctx.typed,
             &typed_structure,
             &mut stderr,
@@ -6570,7 +6544,7 @@ fn compile_source_to_js_with_options_inner(
         let mut stderr = std::io::stderr();
         let _ = print_typed_structure_with_locs(
             parser.arena(),
-            &type_ctx,
+            type_ctx,
             &tctx.typed,
             &typed_structure,
             &mut stderr,
@@ -6582,7 +6556,7 @@ fn compile_source_to_js_with_options_inner(
     if let Some(simple_signature) = inferred_simple_signature.as_deref()
         && !has_resi
     {
-        saved_signature_copy(&type_ctx, simple_signature);
+        saved_signature_copy(type_ctx, simple_signature);
     }
 
     // `process_with_gentype` runs after the JS is emitted
@@ -6600,7 +6574,7 @@ fn compile_source_to_js_with_options_inner(
             let current_raw_sig =
                 std::sync::Arc::new(crate::types::typecore::copy_lookup_signature_for_subst(
                     simple_signature,
-                    &type_ctx,
+                    type_ctx,
                 ));
             type_ctx.register_gentype_raw_module_sig(&module_name, current_raw_sig.clone());
             type_ctx.register_raw_module_sig(&module_name, current_raw_sig);
@@ -6612,7 +6586,7 @@ fn compile_source_to_js_with_options_inner(
                 annots: crate::gentype::main::TypedArtifactAnnots::Implementation(&typed_structure),
                 arena: parser.arena(),
                 ta: &tctx.typed,
-                type_ctx: &type_ctx,
+                type_ctx,
                 source: &|| source.to_string(),
                 filename: source_file_for_interface,
                 module_name: &module_name,
@@ -6621,13 +6595,13 @@ fn compile_source_to_js_with_options_inner(
         print!("{}", apply_gentype_outcome(gentype, "", source_file_for_interface)?);
     }
 
-    let lambda_start_stamp = synchronize_lambda_start_stamp(&type_ctx);
+    let lambda_start_stamp = synchronize_lambda_start_stamp(type_ctx);
 
     let unit_name = options.current_unit_name().unwrap_or_default();
     let implementation_coercion = inferred_implementation_coercion.unwrap_or_else(|| {
         compute_raw_implementation_coercion(
             &mut tctx,
-            &type_ctx,
+            type_ctx,
             &env,
             &typed_structure,
             options,
@@ -6639,7 +6613,7 @@ fn compile_source_to_js_with_options_inner(
         crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
             parser.arena(),
             &tctx.typed,
-            &type_ctx,
+            type_ctx,
             &env,
             lambda_start_stamp,
             unit_name,
@@ -6659,7 +6633,7 @@ fn compile_source_to_js_with_options_inner(
     let interface_signature = if has_resi {
         implementation_interface_signature(
             &mut tctx.persistent_env,
-            &type_ctx,
+            type_ctx,
             source_file_for_interface,
             current_unit_name.as_deref(),
         )
@@ -6668,7 +6642,7 @@ fn compile_source_to_js_with_options_inner(
     };
     let flat_make_paths = flat_make_paths_of_signature(
         &mut tctx.persistent_env,
-        &type_ctx,
+        type_ctx,
         &final_env,
         if has_resi {
             interface_signature.as_deref().map(Vec::as_slice)
@@ -6890,12 +6864,17 @@ fn compile_source_to_js_with_options_inner(
         std::mem::forget(final_env);
         std::mem::forget(env);
         std::mem::forget(tctx);
+    }
+
+    Ok(js)
+        },
+    );
+    if result.is_ok() && SKIP_CLI_CLEANUP.load(Ordering::Relaxed) {
         std::mem::forget(type_ctx);
         std::mem::forget(structure);
         std::mem::forget(parser);
     }
-
-    Ok(js)
+    result
 }
 
 /// Build a structural module coercion by matching interface items to implementation
@@ -7599,43 +7578,17 @@ pub fn typecheck_interface_source(
     };
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
-    // Type check
-    let type_ctx = fresh_type_context();
-    type_ctx.set_location_namespace(&options.location_identity(filename));
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
-    let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
-    tctx.experimental_let_unwrap = experimental_let_unwrap;
-    tctx.transparent_modules = options.transparent_modules;
-    apply_warning_options(&mut tctx, options);
-    // Ppx_entry.rewrite_* (ppx_entry.ml:28, 47) applies the leading warning
-    // attributes; compiling a preprocessed `.ast` does not run it again.
-    if !options.frontend_already_reported {
-        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
-    }
-    apply_file_config_warning_options(&mut tctx, &file_config);
-    let mut pers_env = PersistentEnv::new();
-    let (load_path, load_path_display) = shared_load_path_with_display(options);
-    type_ctx.set_load_paths_shared(load_path.clone());
-    pers_env.set_load_path_shared(load_path.clone(), load_path_display);
-    pers_env.set_open_modules(options.open_modules.clone());
-    pers_env.set_jsx_version(options.jsx_version);
-    pers_env.set_experimental_let_unwrap(options.experimental_let_unwrap);
-    pers_env.set_jsx_module(options.jsx_module.clone());
     let current_unit_name = options.current_unit_name();
-    pers_env.set_compiling_module(current_unit_name.clone());
-
-    tctx.set_persistent_env(pers_env);
-
-    let typed = initial_type_env(
-        &mut tctx,
-        &file_config.open_modules(options),
-        file_config.nopervasives(options),
-        current_unit_name.as_deref(),
-    )
-    .and_then(|env| {
-        transl_signature(&mut tctx, &env, parser.arena(), &signature)
-            .map(|typed_signature| (typed_signature, env))
-    });
+    type_structure_two_modes(
+        CheckUnit { arena: parser.arena(), filename, options, registry: None,
+            module_name: current_unit_name.as_deref(), file_config: &file_config,
+            frontend_warning_specs: &frontend_warning_specs, derived_plans: true },
+        |tctx, env, arena| {
+            tctx.experimental_let_unwrap = experimental_let_unwrap;
+            transl_signature(tctx, env, arena, &signature)
+        },
+        |type_ctx, mut tctx, typed| {
     let (typed_signature, env) = match typed {
         Ok(typed) => typed,
         Err(e) => {
@@ -7653,7 +7606,7 @@ pub fn typecheck_interface_source(
             }
             return Err(type_mod_error_to_anyhow(
                 e,
-                &type_ctx,
+                type_ctx,
                 parser.arena(),
                 source,
                 filename,
@@ -7674,17 +7627,17 @@ pub fn typecheck_interface_source(
         &tctx.typed,
         &typed_signature,
         parser.arena(),
-        &type_ctx,
+        type_ctx,
     );
     // js_implementation.ml `after_parsing_sig`: `Typemod.check_js_names
     // ~toplevel:true sg` before the self-inclusion.
-    if let Err(e) = crate::types::typemod::check_js_names(&type_ctx, true, &sig_type) {
+    if let Err(e) = crate::types::typemod::check_js_names(type_ctx, true, &sig_type) {
         let suppress_info_style =
             !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
         emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
         return Err(type_mod_error_to_anyhow(
             e,
-            &type_ctx,
+            type_ctx,
             parser.arena(),
             source,
             filename,
@@ -7694,15 +7647,15 @@ pub fn typecheck_interface_source(
     // js_implementation.ml:56: `ignore (Includemod.signatures initial_env sg
     // sg)` drops the coercion; a payload reader's error escapes it.
     let self_inclusion = crate::types::includemod::compunit(
-        &type_ctx, &env, filename, &sig_type, filename, &sig_type,
+        type_ctx, &env, filename, &sig_type, filename, &sig_type,
     );
-    if let Err(e) = crate::types::includemod::escaped(&type_ctx, self_inclusion) {
+    if let Err(e) = crate::types::includemod::escaped(type_ctx, self_inclusion) {
         let suppress_info_style =
             !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
         emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
         return Err(type_mod_error_to_anyhow(
             e.into(),
-            &type_ctx,
+            type_ctx,
             parser.arena(),
             source,
             filename,
@@ -7721,7 +7674,7 @@ pub fn typecheck_interface_source(
         let mut stderr = std::io::stderr();
         let _ = print_typed_signature(
             parser.arena(),
-            &type_ctx,
+            type_ctx,
             &tctx.typed,
             &typed_signature,
             &mut stderr,
@@ -7731,7 +7684,7 @@ pub fn typecheck_interface_source(
         let mut stderr = std::io::stderr();
         let _ = print_typed_signature_with_locs(
             parser.arena(),
-            &type_ctx,
+            type_ctx,
             &tctx.typed,
             &typed_signature,
             &mut stderr,
@@ -7739,6 +7692,8 @@ pub fn typecheck_interface_source(
     }
 
     Ok(())
+        },
+    ).1
 }
 
 /// Type-check an interface file and dump typed sexp if requested.
@@ -10265,18 +10220,15 @@ pub fn typecheck_structure_for_tooling(
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_attribute_specs(structure, arena)
             .expect("the frontend read these attributes");
-    let type_ctx = fresh_type_context();
-    type_ctx.set_location_namespace(&options.location_identity(filename));
-    let (typed, typed_arena) = {
-        let (mut tctx, env) = in_process_type_check_context(
-            &type_ctx,
-            &CheckUnit { arena, filename, options, registry: Some(registry),
-                module_name: Some(module_name), file_config: &file_config,
-                frontend_warning_specs: &frontend_warning_specs, derived_plans: false },
-            crate::types::context::CheckMode::Explain,
-        );
-        let typed = match env.and_then(|env| type_structure(&mut tctx, &env, arena, structure)) {
-            Ok((typed_structure, _final_env)) => ToolingTyped::Implementation(typed_structure),
+    let (type_ctx, (typed, typed_arena)) = type_structure_two_modes(
+        CheckUnit { arena, filename, options, registry: Some(registry),
+            module_name: Some(module_name), file_config: &file_config,
+            frontend_warning_specs: &frontend_warning_specs, derived_plans: true },
+        |tctx, env, arena| type_structure(tctx, env, arena, structure),
+        |type_ctx, mut tctx, result| {
+        let typed = match result {
+
+            Ok(((typed_structure, _final_env), _env)) => ToolingTyped::Implementation(typed_structure),
             Err(e) => {
                 let source = read_in_process_source(filename);
                 let report = match tctx
@@ -10285,13 +10237,14 @@ pub fn typecheck_structure_for_tooling(
                     .and_then(|env| env.last_error())
                 {
                     Some(error) => persistent_env_error_to_anyhow(error, filename),
-                    None => type_mod_error_to_anyhow(e, &type_ctx, arena, &source, filename, false),
+                    None => type_mod_error_to_anyhow(e, type_ctx, arena, &source, filename, false),
                 };
                 ToolingTyped::Failed(format!("{report:#}"))
             }
         };
         (typed, tctx.take_typed_arena())
-    };
+        },
+    );
     ToolingTypedModule {
         type_ctx,
         typed,
@@ -10314,18 +10267,15 @@ pub fn typecheck_signature_for_tooling(
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena)
             .expect("the frontend read these attributes");
-    let type_ctx = fresh_type_context();
-    type_ctx.set_location_namespace(&options.location_identity(filename));
-    let (typed, typed_arena) = {
-        let (mut tctx, env) = in_process_type_check_context(
-            &type_ctx,
-            &CheckUnit { arena, filename, options, registry: Some(registry),
-                module_name: Some(module_name), file_config: &file_config,
-                frontend_warning_specs: &frontend_warning_specs, derived_plans: false },
-            crate::types::context::CheckMode::Explain,
-        );
-        let typed = match env.and_then(|env| transl_signature(&mut tctx, &env, arena, signature)) {
-            Ok(typed_signature) => ToolingTyped::Interface(typed_signature),
+    let (type_ctx, (typed, typed_arena)) = type_structure_two_modes(
+        CheckUnit { arena, filename, options, registry: Some(registry),
+            module_name: Some(module_name), file_config: &file_config,
+            frontend_warning_specs: &frontend_warning_specs, derived_plans: true },
+        |tctx, env, arena| transl_signature(tctx, env, arena, signature),
+        |type_ctx, mut tctx, result| {
+        let typed = match result {
+
+            Ok((typed_signature, _env)) => ToolingTyped::Interface(typed_signature),
             Err(e) => {
                 let source = read_in_process_source(filename);
                 let report = match tctx
@@ -10334,13 +10284,14 @@ pub fn typecheck_signature_for_tooling(
                     .and_then(|env| env.last_error())
                 {
                     Some(error) => persistent_env_error_to_anyhow(error, filename),
-                    None => type_mod_error_to_anyhow(e, &type_ctx, arena, &source, filename, false),
+                    None => type_mod_error_to_anyhow(e, type_ctx, arena, &source, filename, false),
                 };
                 ToolingTyped::Failed(format!("{report:#}"))
             }
         };
         (typed, tctx.take_typed_arena())
-    };
+        },
+    );
     ToolingTypedModule {
         type_ctx,
         typed,
@@ -11540,28 +11491,14 @@ pub fn typecheck_preprocessed_signature_in_process(
         ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena)
             .expect("the frontend read these attributes");
 
-    let type_ctx = fresh_type_context();
-    type_ctx.set_location_namespace(&options.location_identity(filename));
-    let (mut tctx, env) = in_process_type_check_context(
-        &type_ctx,
-        &CheckUnit { arena, filename, options, registry: Some(registry),
-            module_name: Some(module_name), file_config: &file_config,
-            frontend_warning_specs: &frontend_warning_specs, derived_plans: false },
-        crate::types::context::CheckMode::Explain,
-    );
-
-    // Diagnostics are reported against the source file, read only when
-    // there is something to report.
     let source_cell = std::cell::OnceCell::new();
     let source = || -> &str { source_cell.get_or_init(|| read_in_process_source(filename)) };
-
-    let typed = crate::timing::measure(crate::timing::Phase::Typecheck, || {
-        let _phase = info_span!("compiler.type_signature").entered();
-        env.and_then(|env| {
-            transl_signature(&mut tctx, &env, arena, signature)
-                .map(|typed_signature| (typed_signature, env))
-        })
-    });
+    type_structure_two_modes(
+        CheckUnit { arena, filename, options, registry: Some(registry),
+            module_name: Some(module_name), file_config: &file_config,
+            frontend_warning_specs: &frontend_warning_specs, derived_plans: true },
+        |tctx, env, arena| transl_signature(tctx, env, arena, signature),
+        |type_ctx, mut tctx, typed| {
     let (typed_signature, env) = match typed {
         Ok(typed_signature) => typed_signature,
         Err(e) => {
@@ -11588,7 +11525,7 @@ pub fn typecheck_preprocessed_signature_in_process(
                 &warnings,
                 type_mod_error_to_anyhow(
                     e,
-                    &type_ctx,
+                    type_ctx,
                     arena,
                     source(),
                     filename,
@@ -11599,7 +11536,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     };
     let unit_reads = if options.collect_unit_reads {
         crate::types::unit_reads::signature_reads(
-            &type_ctx,
+            type_ctx,
             &tctx.typed,
             &typed_signature,
             &options.open_modules,
@@ -11613,11 +11550,11 @@ pub fn typecheck_preprocessed_signature_in_process(
         &tctx.typed,
         &typed_signature,
         arena,
-        &type_ctx,
+        type_ctx,
     );
     // js_implementation.ml `after_parsing_sig`: `Typemod.check_js_names
     // ~toplevel:true sg` before the self-inclusion.
-    if let Err(e) = crate::types::typemod::check_js_names(&type_ctx, true, &sig_type) {
+    if let Err(e) = crate::types::typemod::check_js_names(type_ctx, true, &sig_type) {
         if !arena.stores_locations() {
             return Err(LocationRetry::Diagnostic.into());
         }
@@ -11626,18 +11563,18 @@ pub fn typecheck_preprocessed_signature_in_process(
             !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
         return Err(prefix_diagnostic(
             &warnings,
-            type_mod_error_to_anyhow(e, &type_ctx, arena, source(), filename, suppress_info_style),
+            type_mod_error_to_anyhow(e, type_ctx, arena, source(), filename, suppress_info_style),
         ));
     }
     // js_implementation.ml:56: `ignore (Includemod.signatures initial_env sg
     // sg)` drops the coercion; a payload reader's error escapes it.
     let self_inclusion = crate::types::includemod::compunit(
-        &type_ctx, &env, filename, &sig_type, filename, &sig_type,
+        type_ctx, &env, filename, &sig_type, filename, &sig_type,
     );
-    if let Err(e) = crate::types::includemod::escaped(&type_ctx, self_inclusion) {
+    if let Err(e) = crate::types::includemod::escaped(type_ctx, self_inclusion) {
         return Err(in_process_typed_unit_error(
             e.into(),
-            &type_ctx,
+            type_ctx,
             arena,
             &source,
             filename,
@@ -11664,11 +11601,11 @@ pub fn typecheck_preprocessed_signature_in_process(
         if options.dumps.contains(&kind) {
             let mut buf = Vec::new();
             let _ = if kind == DumpKind::TypedTree {
-                print_typed_signature(arena, &type_ctx, &tctx.typed, &typed_signature, &mut buf)
+                print_typed_signature(arena, type_ctx, &tctx.typed, &typed_signature, &mut buf)
             } else {
                 print_typed_signature_with_locs(
                     arena,
-                    &type_ctx,
+                    type_ctx,
                     &tctx.typed,
                     &typed_signature,
                     &mut buf,
@@ -11685,7 +11622,7 @@ pub fn typecheck_preprocessed_signature_in_process(
             annots: crate::gentype::main::TypedArtifactAnnots::Interface(&typed_signature),
             arena,
             ta: &tctx.typed,
-            type_ctx: &type_ctx,
+            type_ctx,
             source: &|| source().to_string(),
             filename,
             module_name,
@@ -11699,7 +11636,7 @@ pub fn typecheck_preprocessed_signature_in_process(
         &tctx.typed,
         &typed_signature,
         arena,
-        &type_ctx,
+        type_ctx,
     );
 
     let typed_module_type = crate::types::typedtree::ModuleType {
@@ -11727,7 +11664,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     // the copy still takes its stamps, as in OCaml.
     if let crate::types::typedtree::ModuleTypeDesc::Tmty_signature(_) = &typed_module_type.mty_desc
     {
-        saved_signature_copy(&type_ctx, &published_signature);
+        saved_signature_copy(type_ctx, &published_signature);
     }
 
     let mut internal_env = tctx
@@ -11744,7 +11681,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     let raw_signature = {
         let mut raw = crate::types::typecore::copy_lookup_signature_for_subst(
             &published_signature,
-            &type_ctx,
+            type_ctx,
         );
         // The check reads the signature as saved in the `.cmi`
         // (env.ml:1949-1952 reads the file back), so drop the same locations.
@@ -11763,7 +11700,7 @@ pub fn typecheck_preprocessed_signature_in_process(
         crate::types::typemod::deprecated_of_sig(arena, signature).map_err(|error| {
             in_process_typed_unit_error(
                 payload_type_error(error),
-                &type_ctx,
+                type_ctx,
                 arena,
                 &source,
                 filename,
@@ -11771,11 +11708,11 @@ pub fn typecheck_preprocessed_signature_in_process(
             )
         })?;
     if type_ctx.compiler_counters_enabled() {
-        crate::perf_counters::census_exported_signature(&type_ctx, module_name, &raw_signature);
+        crate::perf_counters::census_exported_signature(type_ctx, module_name, &raw_signature);
     }
     if options.dumps.contains(&DumpKind::Sig) {
         dumps.push(canonical_signature_dump(
-            &type_ctx,
+            type_ctx,
             module_name,
             &raw_signature,
             deprecated.as_deref(),
@@ -11788,7 +11725,7 @@ pub fn typecheck_preprocessed_signature_in_process(
         filename,
         deprecated,
         crcs,
-        &type_ctx,
+        type_ctx,
     );
     type_ctx.register_raw_module_sig(module_name, raw_signature);
 
@@ -11798,7 +11735,7 @@ pub fn typecheck_preprocessed_signature_in_process(
         options,
         module_name,
         filename,
-        &type_ctx,
+        type_ctx,
         arena,
         SignaturePublicationMode::Eager,
     )?;
@@ -11819,6 +11756,8 @@ pub fn typecheck_preprocessed_signature_in_process(
         loaded_units: internal_env.loaded_units(),
         unit_reads,
     })
+        },
+    ).1
 }
 
 #[cfg(test)]
