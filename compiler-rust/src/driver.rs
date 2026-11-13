@@ -10673,9 +10673,6 @@ pub struct ToolingTypedModule {
     pub typed: ToolingTyped,
     /// Node storage of `typed`.
     pub typed_arena: crate::types::typedtree::TypedArena,
-    /// Whether the file's `@@config` leaves binary annotations on: with
-    /// `-bs-no-bin-annot` OCaml writes no `.cmt` or `.cmti` for it.
-    pub binary_annotations: bool,
 }
 
 /// What type-checking a module for editor tooling produced.
@@ -10698,7 +10695,6 @@ pub fn typecheck_structure_for_tooling(
     module_name: &str,
     options: &CompilerOptions,
     registry: &ModuleRegistry,
-    has_interface: bool,
 ) -> ToolingTypedModule {
     let file_config = extract_file_config_from_structure(structure, arena);
     // The frontend raised on any payload these cannot read.
@@ -10716,23 +10712,7 @@ pub fn typecheck_structure_for_tooling(
         |tctx, env, syntax| type_structure(tctx, env, syntax.arena, syntax.tree),
         |type_ctx, mut tctx, result, UnitSyntax { arena, .. }, _attempt_output| {
         let typed = match result {
-
-            Ok(((typed_structure, _final_env), env)) => {
-                // typemod.ml:1742-1758: an implementation is checked against
-                // its interface, which records the values the interface
-                // exports (`Cmt_format.record_value_dependency`). The build
-                // reported a mismatch already.
-                if has_interface {
-                    drop(check_compunit_inclusion_for_errors(
-                        &mut tctx,
-                        &env,
-                        &typed_structure,
-                        filename,
-                        &|| read_in_process_source(filename),
-                        filename,
-                        options.current_unit_name().as_deref(),
-                    ));
-                }
+            Ok(((typed_structure, _final_env), _env)) => {
                 ToolingTyped::Implementation(typed_structure)
             }
             Err(e) => {
@@ -10756,7 +10736,6 @@ pub fn typecheck_structure_for_tooling(
         type_ctx,
         typed,
         typed_arena,
-        binary_annotations: !file_config.no_bin_annot,
     }
 }
 
@@ -10808,7 +10787,6 @@ pub fn typecheck_signature_for_tooling(
         type_ctx,
         typed,
         typed_arena,
-        binary_annotations: !file_config.no_bin_annot,
     }
 }
 
