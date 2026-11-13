@@ -1,8 +1,9 @@
-// The runner of `rescript verify` (docs/verify/law.md).
+// The runner of `rescript verify` (docs/verify/law.md, docs/verify/spec.md).
 //
 // The compiler describes each check of a file: where its export is and, for
-// a law, the shape of each parameter (compiler-rust/src/verify/shape.rs).
-// This file makes values from the shapes, runs the checks and reports.
+// a law, the shape of each parameter; for a spec, the shapes of its states
+// and actions (compiler-rust/src/verify/shape.rs). This file makes values
+// from the shapes, runs the checks and reports.
 //
 // It has no dependency and uses nothing of Node outside `main`, so a page
 // can import `run` and give it its own `load` and `write`.
@@ -80,7 +81,7 @@ class Shapes {
     this.sizes = new Map();
     // The least number of nested definitions a value needs: Bellman-Ford
     // over the definitions, which may refer to each other.
-    const ids = Object.keys(defs);
+    const ids = Object.keys(defs).filter(id => defs[id] !== null);
     for (const id of ids) this.heights.set(id, Infinity);
     for (let round = 0; round <= ids.length; round++) {
       for (const id of ids) this.heights.set(id, this.defHeight(defs[id]));
@@ -163,7 +164,7 @@ class Shapes {
         return shape.cases.reduce((n, c) => n + (c.arg ? this.size(c.arg, open) : 1), 0);
       case "named": {
         if (this.sizes.has(shape.id)) return this.sizes.get(shape.id);
-        if (open.has(shape.id)) return Infinity;
+        if (open.has(shape.id) || !this.def(shape)) return Infinity;
         open.add(shape.id);
         const def = this.def(shape);
         const fields = fs => fs.reduce((n, f) => n * this.size(f.s, open), 1);
@@ -451,10 +452,28 @@ export function show(shapes, shape, value) {
       const chosen = shape.cases.find(c => c.n === value.NAME);
       return chosen && chosen.arg ? `#${value.NAME}(${again(chosen.arg, value.VAL)})` : `#${value.NAME}`;
     }
-    case "named":
-      return showNamed(shapes, shapes.def(shape), value);
+    case "named": {
+      const def = shapes.def(shape);
+      return def ? showNamed(shapes, def, value) : showUnknown(value);
+    }
+    case "opaque":
+      return showUnknown(value);
     default:
       return String(value);
+  }
+}
+
+// A value whose type the compiler did not describe (an abstract type).
+function showUnknown(value) {
+  if (value === undefined) return "undefined";
+  if (typeof value === "function") return "<function>";
+  if (typeof value === "bigint") return `${value}n`;
+  if (value instanceof Map) return `Map(${showUnknown([...value])})`;
+  if (value instanceof Set) return `Set(${showUnknown([...value])})`;
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
   }
 }
 
@@ -628,6 +647,365 @@ export function checkLaw(fn, name, detail, options) {
 }
 
 // ---------------------------------------------------------------------------
+// Specs (docs/verify/spec.md): a state machine, and what must be true of it.
+//
+// A spec is checked by going through every state the machine can get into,
+// breadth first, so the steps to a state are the fewest there are.
+
+const PROPERTIES = ["always", "sometimes", "reachable", "eventually"];
+
+// Stops the check of a spec: `step` or one of its functions raised.
+class Stop {
+  constructor(failure) {
+    this.failure = failure;
+  }
+}
+
+// A text that is the same for two states exactly when they are equal.
+function keyOf(value) {
+  switch (typeof value) {
+    case "number":
+      return String(value);
+    case "string":
+      return JSON.stringify(value);
+    case "boolean":
+      return value ? "t" : "f";
+    case "undefined":
+      return "u";
+    case "bigint":
+      return `${value}n`;
+    case "object":
+      if (value === null) return "n";
+      if (Array.isArray(value)) return `[${value.map(keyOf).join(",")}]`;
+      if (value instanceof Map) {
+        return `M{${[...value].map(([k, v]) => `${keyOf(k)}:${keyOf(v)}`).sort().join(",")}}`;
+      }
+      if (value instanceof Set) return `S{${[...value].map(keyOf).sort().join(",")}}`;
+      if (value instanceof Date) return `D${value.getTime()}`;
+      return `{${Object.keys(value)
+        .sort()
+        .map(key => `${JSON.stringify(key)}:${keyOf(value[key])}`)
+        .join(",")}}`;
+    default:
+      throw new Error(`a state holds a ${typeof value}, and states are compared`);
+  }
+}
+
+// Every value of a shape that has few.
+function allValues(shapes, shape) {
+  const values = [];
+  let prefix = [];
+  for (;;) {
+    const choices = new Choices(prefix, null);
+    values.push(new Maker(shapes, choices, 0).make(shape, 2));
+    let at = choices.taken.length - 1;
+    while (at >= 0 && choices.taken[at] + 1 >= choices.arity[at]) at--;
+    if (at < 0) return values;
+    prefix = choices.taken.slice(0, at);
+    prefix.push(choices.taken[at] + 1);
+  }
+}
+
+// Checks one spec. `options`: `{ states }`, the most states to go through.
+// The result has `failures` (`{property, heading, trace}`) and a `summary`
+// of what holds.
+export function checkSpec(spec, name, detail, options) {
+  const shapes = new Shapes(detail.defs);
+  const limit = options.states ?? 100000;
+  const properties = PROPERTIES.filter(property => typeof spec[property] === "function");
+  const failures = [];
+  const fail = (property, heading, trace = []) => failures.push({ property, heading, trace });
+  const steps = n => (n === 0 ? "in the first state" : `after ${plural(n, "step")}`);
+
+  // states[i] is `{value, parent, action, depth}`; edges[i] is the states it
+  // goes to, each with the first action that leads there.
+  const states = [];
+  const edges = [];
+  const index = new Map();
+  let complete = true;
+
+  const showAction = action => show(shapes, detail.action, action);
+  const line = (label, state) => ({ label, state: show(shapes, detail.state, state) });
+  // The lines of a run: `path` is a list of `{action, to}` from the first state.
+  const render = groups => {
+    const width = Math.max(4, ...groups.flatMap(g => (g.rows ?? []).map(row => row.label.length)));
+    const out = [];
+    for (const group of groups) {
+      if (group.text !== undefined) out.push(group.text);
+      for (const row of group.rows ?? []) {
+        out.push(`${row.label.padEnd(width)}  ${row.first ? " " : "→"}  ${row.state}`);
+      }
+    }
+    return out;
+  };
+  const pathTo = (i, parents = states) => {
+    const rows = [];
+    for (let at = i; at !== -1; at = parents[at].parent) {
+      const { parent, action } = parents[at];
+      rows.push(
+        parent === -1
+          ? { ...line("init", states[at].value), first: true }
+          : line(showAction(action), states[at].value),
+      );
+    }
+    return rows.reverse();
+  };
+  // Runs a function of the spec in state `i`; `action` is the one `step`
+  // was given.
+  const guarded = (what, i, run, action) => {
+    try {
+      return run();
+    } catch (error) {
+      const raised = describeError(error);
+      const rows = pathTo(i);
+      if (action !== undefined) rows.push({ label: showAction(action), state: `raises ${raised}` });
+      throw new Stop({
+        property: what,
+        heading: `\`${what}\` raised ${raised} ${steps(states[i].depth)}:`,
+        trace: render([{ rows }]),
+      });
+    }
+  };
+  const holds = (property, i) => guarded(property, i, () => spec[property](states[i].value) === true);
+
+  try {
+    if (typeof spec.step !== "function") {
+      throw new Stop({ property: "step", heading: "the spec has no `step`", trace: [] });
+    }
+    let everyAction = null;
+    if (typeof spec.actions !== "function") {
+      if (!(shapes.size(detail.action) <= EXHAUSTIVE_LIMIT)) {
+        throw new Stop({
+          property: "actions",
+          heading:
+            "the actions cannot be listed: the action type has too many values. Give the spec `actions: state => [...]`.",
+          trace: [],
+        });
+      }
+      everyAction = allValues(shapes, detail.action);
+    }
+
+    const add = (value, parent, action) => {
+      const key = keyOf(value);
+      const known = index.get(key);
+      if (known !== undefined) return known;
+      if (states.length >= limit) {
+        complete = false;
+        return -1;
+      }
+      const i = states.length;
+      index.set(key, i);
+      states.push({ value, parent, action, depth: parent === -1 ? 0 : states[parent].depth + 1 });
+      edges.push([]);
+      return i;
+    };
+
+    add(spec.init, -1, undefined);
+    let alwaysHolds = true;
+    for (let i = 0; i < states.length; i++) {
+      const state = states[i].value;
+      if (alwaysHolds && properties.includes("always") && !holds("always", i)) {
+        alwaysHolds = false;
+        fail("always", `\`always\` is false ${steps(states[i].depth)}:`, render([{ rows: pathTo(i) }]));
+        // Nothing else to find out: stop here.
+        if (properties.length === 1) break;
+      }
+      const actions = everyAction ?? guarded("actions", i, () => spec.actions(state));
+      if (!Array.isArray(actions)) {
+        throw new Stop({ property: "actions", heading: "`actions` did not give an array", trace: [] });
+      }
+      const seen = new Set();
+      for (const action of actions) {
+        const next = guarded("step", i, () => spec.step(state, action), action);
+        const to = guarded("step", i, () => add(next, i, action), action);
+        if (to !== -1 && !seen.has(to)) {
+          seen.add(to);
+          edges[i].push({ to, action });
+        }
+      }
+    }
+
+    const count = states.length;
+    const undecided = property =>
+      fail(
+        property,
+        `\`${property}\` was not decided: the machine has more than ${count} states. Give it fewer, or raise --states.`,
+      );
+
+    if (properties.includes("sometimes")) {
+      let found = false;
+      for (let i = 0; i < count && !found; i++) found = holds("sometimes", i);
+      if (!found && complete) {
+        fail("sometimes", `\`sometimes\` is true in none of the ${plural(count, "state")} the machine can get into`);
+      } else if (!found) undecided("sometimes");
+    }
+
+    if (properties.includes("reachable")) {
+      if (!complete) undecided("reachable");
+      else {
+        // Backwards from the states where it is true.
+        const back = states.map(() => []);
+        edges.forEach((targets, from) => targets.forEach(({ to }) => back[to].push(from)));
+        const can = new Uint8Array(count);
+        const queue = [];
+        for (let i = 0; i < count; i++) {
+          if (holds("reachable", i)) {
+            can[i] = 1;
+            queue.push(i);
+          }
+        }
+        for (let at = 0; at < queue.length; at++) {
+          for (const from of back[queue[at]]) {
+            if (!can[from]) {
+              can[from] = 1;
+              queue.push(from);
+            }
+          }
+        }
+        const lost = can.indexOf(0);
+        if (lost !== -1) {
+          fail(
+            "reachable",
+            `\`reachable\` is out of reach ${steps(states[lost].depth)}: no actions lead from the last state to one where it is true`,
+            render([{ rows: pathTo(lost) }]),
+          );
+        }
+      }
+    }
+
+    if (properties.includes("eventually")) {
+      if (!complete) undecided("eventually");
+      else {
+        const run = neverReaching(i => holds("eventually", i), states, edges);
+        if (run !== null) {
+          const prefix = { rows: pathTo(run.end, run.parents) };
+          if (run.loop === null) {
+            fail(
+              "eventually",
+              "`eventually` is never true in this run, which ends: no action changes its last state",
+              render([prefix]),
+            );
+          } else {
+            const rows = run.loop.map(({ to, action }) => line(showAction(action), states[to].value));
+            fail(
+              "eventually",
+              "`eventually` is never true in this run, which can go on forever:",
+              render([prefix, { text: "and then, again and again:", rows }]),
+            );
+          }
+        }
+      }
+    }
+  } catch (stop) {
+    if (!(stop instanceof Stop)) throw stop;
+    failures.push(stop.failure);
+  }
+
+  const count = states.length;
+  const names = properties.join(", ");
+  const verb = properties.length === 1 ? "holds" : "hold";
+  const summary = complete
+    ? `${names} ${verb} over all ${plural(count, "state")}`
+    : `${names} held over the first ${plural(count, "state")} (there are more)`;
+  return { failures, summary, states: count, complete };
+}
+
+// A run that never gets to a state where `holds`: one that ends (no action
+// changes its last state) or one that goes round. `null` when every run
+// gets there. An action that leaves the state as it is, is no step.
+function neverReaching(holds, states, edges) {
+  const count = states.length;
+  if (holds(0)) return null;
+  // The states a run can be in before it gets there, with the fewest steps
+  // to each that stay among them.
+  const parents = states.map(() => null);
+  parents[0] = { parent: -1, action: undefined, depth: 0 };
+  const order = [0];
+  const truth = new Int8Array(count).fill(-1);
+  truth[0] = 0;
+  const before = i => {
+    if (truth[i] === -1) truth[i] = holds(i) ? 1 : 0;
+    return truth[i] === 0;
+  };
+  for (let at = 0; at < order.length; at++) {
+    const from = order[at];
+    for (const { to, action } of edges[from]) {
+      if (to !== from && parents[to] === null && before(to)) {
+        parents[to] = { parent: from, action, depth: parents[from].depth + 1 };
+        order.push(to);
+      }
+    }
+  }
+  const among = i => parents[i] !== null;
+  const moves = i => edges[i].filter(edge => edge.to !== i);
+
+  // A run that ends.
+  let best = null;
+  for (const i of order) {
+    if (moves(i).length === 0) {
+      best = { end: i, parents, loop: null, length: parents[i].depth };
+      break;
+    }
+  }
+
+  // A run that goes round: a state that leads back to itself.
+  const color = new Uint8Array(count);
+  let onLoop = -1;
+  for (const root of order) {
+    if (color[root] !== 0 || onLoop !== -1) continue;
+    const stack = [{ node: root, next: 0 }];
+    color[root] = 1;
+    while (stack.length > 0 && onLoop === -1) {
+      const top = stack[stack.length - 1];
+      const targets = moves(top.node).filter(edge => among(edge.to));
+      if (top.next >= targets.length) {
+        color[top.node] = 2;
+        stack.pop();
+        continue;
+      }
+      const { to } = targets[top.next++];
+      if (color[to] === 1) {
+        // The states of the loop: of those, start from the nearest one.
+        const at = stack.findIndex(frame => frame.node === to);
+        onLoop = stack
+          .slice(at)
+          .map(frame => frame.node)
+          .reduce((a, b) => (parents[b].depth < parents[a].depth ? b : a));
+      } else if (color[to] === 0) {
+        color[to] = 1;
+        stack.push({ node: to, next: 0 });
+      }
+    }
+  }
+  if (onLoop !== -1) {
+    // The shortest way from that state back to itself.
+    const via = new Map([[onLoop, null]]);
+    const queue = [onLoop];
+    let last = null;
+    for (let at = 0; at < queue.length && last === null; at++) {
+      const from = queue[at];
+      for (const edge of moves(from)) {
+        if (!among(edge.to)) continue;
+        if (edge.to === onLoop) {
+          last = { from, edge };
+          break;
+        }
+        if (!via.has(edge.to)) {
+          via.set(edge.to, { from, edge });
+          queue.push(edge.to);
+        }
+      }
+    }
+    const loop = [last.edge];
+    for (let step = via.get(last.from); step !== null; step = via.get(step.from)) loop.push(step.edge);
+    loop.reverse();
+    const length = parents[onLoop].depth + loop.length;
+    if (best === null || length < best.length) best = { end: onLoop, parents, loop, length };
+  }
+  return best;
+}
+
+// ---------------------------------------------------------------------------
 // The report.
 
 function painter(color) {
@@ -656,7 +1034,7 @@ function plural(n, word) {
 // `host.load(file)` gives a compiled module, `host.write(text)` prints.
 export async function run(manifest, host) {
   const paint = painter(manifest.color);
-  const options = { seed: manifest.seed >>> 0, cases: manifest.cases };
+  const options = { seed: manifest.seed >>> 0, cases: manifest.cases, states: manifest.states };
   const out = text => host.write(text + "\n");
   let checked = 0;
   let failed = 0;
@@ -716,6 +1094,15 @@ export function runItem(item, name, value, options, lines) {
     lines.push(result.raised === undefined ? "the law returned false" : `the law raised ${result.raised}`);
     const shrunk = result.shrinks > 0 ? `, made smaller ${plural(result.shrinks, "time")}` : "";
     return { ok: false, summary: `fails (case ${result.cases}${shrunk})` };
+  }
+  if (item.kind === "spec") {
+    const result = checkSpec(value, name, item.detail, options);
+    if (result.failures.length === 0) return { ok: true, summary: result.summary };
+    for (const failure of result.failures) {
+      lines.push(failure.heading);
+      for (const line of failure.trace) lines.push(`  ${line}`);
+    }
+    return { ok: false, summary: `fails: ${result.failures.map(failure => failure.property).join(", ")}` };
   }
   lines.push(`this version of rescript cannot run a ${item.kind}`);
   return { ok: false, summary: "was not run" };

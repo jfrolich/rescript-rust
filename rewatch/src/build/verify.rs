@@ -1,6 +1,7 @@
 //! `rescript verify`: run the checks of a project (docs/verify).
 //!
-//! A build type checks every `@law` and leaves it out of the JavaScript.
+//! A build type checks every `@law` and `@spec` and leaves it out of the
+//! JavaScript.
 //! After a build, this compiles each file that has checks once more, in
 //! memory against the build's interfaces, with its checks kept as exports,
 //! and writes the result next to the file's JavaScript as `<name>.verify`
@@ -24,6 +25,8 @@ pub struct Options {
     pub seed: u32,
     /// The number of random cases per law.
     pub cases: u32,
+    /// The most states of a spec's machine to go through.
+    pub states: u32,
     /// Whether the report is coloured.
     pub color: bool,
 }
@@ -45,7 +48,7 @@ fn companion_path(js: &Path) -> PathBuf {
 
 /// Whether a source can have a check. O(source bytes), with no parse.
 fn mentions_check(source: &str) -> bool {
-    source.contains("@law")
+    source.contains("@law") || source.contains("@spec")
 }
 
 /// Compile one module with its checks kept. `None` when it has none.
@@ -182,7 +185,9 @@ fn verify_built(build_state: &BuildCommandState, options: &Options) -> Result<i3
     let result = match failure {
         Some(error) => Err(error),
         None if companions.is_empty() => {
-            println!("No checks found: mark a property of the program with @law.");
+            println!(
+                "No checks found: mark a property of the program with @law, or a state machine with @spec."
+            );
             Ok(0)
         }
         None => run(build_state, &companions, options),
@@ -220,6 +225,7 @@ fn run(build_state: &BuildCommandState, companions: &[Companion], options: &Opti
         serde_json::to_string(&serde_json::json!({
             "seed": options.seed,
             "cases": options.cases,
+            "states": options.states,
             "color": options.color,
             "modules": modules,
         }))?,
@@ -251,6 +257,7 @@ mod tests {
     #[test]
     fn a_source_without_the_attribute_is_not_parsed() {
         assert!(mentions_check("@law\nlet a = () => true"));
+        assert!(mentions_check("@spec\nlet a: Spec.t<int, bool> = machine"));
         assert!(!mentions_check("let law = 1"));
     }
 }
