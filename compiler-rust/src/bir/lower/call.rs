@@ -7,7 +7,7 @@ use crate::lambda::ApplyStatus;
 #[derive(Clone, Copy)]
 pub(super) struct Call(pub u32);
 
-/// Immutable arity groups in the unit pool, without an owning SmallVec.
+/// Immutable arity groups in the unit pool, without per-call ownership.
 #[derive(Clone, Copy)]
 pub(super) struct AritySpan { start: u32, len: u32 }
 
