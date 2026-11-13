@@ -258,7 +258,7 @@ graph and changes the price of every operation on it.
 
 Before item by item: what does the graph of 2.1 cost when nothing else is
 in the way? [The kernel](prototypes/checker-kernel/src/main.rs) is a
-stand-alone program of 480 lines (measurement probe, not compiler code): a
+stand-alone program of 520 lines (measurement probe, not compiler code): a
 16-byte node (tag and arity, level, two words), one `Vec` of nodes and one
 of list slots, templates with relative references, unification with
 links in the specified direction and levels written on every node, the
@@ -499,7 +499,8 @@ let g = n => { let b: box<string> = {value: "", count: n}; (n, b) }
 Typing the record against `box<string>` instantiates the label `count` at
 `myint` and unifies that copy with `n`'s node. `n`'s node, a variable,
 links to the *copy* of `myint`: the copy survives as the representative and
-`g` is printed `myint => (myint, box<string>)`. A check that read the field
+`g` is printed `myint => (myint, box<string>)` (compiled with trunk for
+this document, with a type clash forced on `g`). A check that read the field
 type "from the expected type" has no node to give `n`. So the rule is: the
 copy of a declaration's node may be skipped only where the unifier's table
 (CHECKER_REDESIGN I.2.1) says the copy would be linked *away*, and that
@@ -616,3 +617,242 @@ Two conditions make it sound.
 
 The prototype of 4.2 is this mechanism on today's checker: the application
 and the test project compile with no unit checked twice.
+
+## 3. The design
+
+### 3.1 One page
+
+**Types are a graph in one array.** A type node is 16 bytes: tag and arity,
+level, two words. A unit's nodes are one `Vec`, cleared when the unit is
+done. A handle is 4 bytes with one tier bit: a node of this unit, or a
+frozen node of the world. The graph is the one of 2.1: one node per
+occurrence, links in OCaml's direction, a level on every node, a path in
+every constructor. Nothing is shared because it is equal and nothing is
+interned.
+
+**A scheme is a template.** The generic part of a value's type, of a
+constructor's or a label's declaration, of an abbreviation's manifest is a
+contiguous run of nodes with relative references. An instance is one pass
+that copies the run and adds an offset. A dependency's templates are
+frozen in its segment and instantiated from there; nothing of a dependency
+is copied into a worker.
+
+**A name is resolved once.** A binder is a dense index; everything known
+about it is in arrays indexed by it. The current scope is a dense table
+from interned name to binder with an undo log, and an opened module is one
+frozen layer. A use is looked up when the walk reaches it and the answer is
+written in the row of its syntax node. An environment, wherever one has to
+be remembered, is a scope index.
+
+**The walk writes rows, not a tree.** One pass over a unit's items, in
+order; inside an item one bidirectional pass over the expression, each
+construct either checked against a node or returning one. The result is a
+12-byte row per expression and per pattern, indexed by the syntax node, and
+a pool for the patterns the match compiler needs. There is no typed tree.
+
+**Nothing is kept for an error that does not happen.** The success path
+has no snapshot per unification, no trace, no clash context. A unit with an
+error is checked again from its first item in the explaining mode, the same
+checker with those kept, and its diagnostics are that run's.
+
+**The world is frozen segments.** A checked unit publishes one segment: its
+export table, its declaration rows, its templates. Segments are immutable
+and read in place by every worker. A worker owns one checker context for
+the whole build and resets its vectors between units.
+
+The algorithms that decide what is accepted are OCaml's and are ported,
+not redesigned: unification's cases, expansion, rows and objects, the
+exhaustiveness check, signature inclusion, variance. The rewrite is the
+representation under them, the walk above them, and the names beside them.
+
+### 3.2 The data structures
+
+Sizes are pinned by a `size_of` test in the slice that introduces the type
+(section 5). All of this lives in a new directory, `compiler-rust/src/tc/`.
+
+| Type | Bytes | One per | Layout |
+|---|---:|---|---|
+| `Ty` | 4 | reference | `u32`; bit 31 set: frozen node (segment page and offset in the other 31 bits); clear: index into the unit's nodes |
+| `Node` | 16 | type occurrence | `head: u32` (tag in bits 0..4, flags in 4..8, arity in 8..32), `level: u32`, `a: u32`, `b: u32`. Variable: `a` name, `b` serial. Link: `a` target. Constructor: `a` type index, `b` first slot of its list (slot 0 is the abbreviation memo, then the arguments). Tuple: `b` list. Arrow: `a` result, `b` first parameter. Object, field, row, universal variable, polymorphic type, package: `a` and `b` index their pools |
+| list slot | 4 | argument, component | `Ty` in the unit's list pool |
+| `Param` | 12 | arrow parameter | `ty: Ty`, `label: u32` (interned name, low bit optional), `loc: u32` |
+| `Template` | 16 | scheme | `nodes: u32`, `lists: u32`, `node_len: u16`, `list_len: u16`, `externals: u32` (first of its references to nodes that are not generic). A reference inside a template with bit 30 set is relative to the instance's first node |
+| `TypeDecl` | 32 | type declaration | `kind: u8`, `flags: u8` (abbreviation, private, immediate, unboxed, has a local constraint), `arity: u16`, `params: Template`'s index, `manifest: u32` (template or none), `members: u32` and `member_len: u32` (constructors or labels), `path: u32`, `loc: u32`, `variance: u32` |
+| `MemberDecl` | 16 | constructor, label | `name: u32`, `args: u32` (template), `tag_or_pos: u32`, `flags: u32` |
+| `Binder` | arrays | bound name | `binder_ty: Vec<Ty>` (4), `binder_name: Vec<u32>` (4), `binder_loc: Vec<u32>` (4), `binder_kind: Vec<u8>` (1), one used bit |
+| scope log entry | 8 | binding in scope | `name: u32`, `previous: u32` |
+| `Scope` | 12 | scope | `parent: u32`, `first_binder: u32`, `opens: u32` (innermost opened layer) |
+| `Expected` | 8 | passed down | `Infer` or `Check(Ty)` |
+| `Walk` | 16 | passed down | `expected: Expected`, `scope: u32`, `flags: u32` (in a function body, in a pattern, generalisable so far) |
+| `ExprRow` | 12 | expression node | `ty: Ty`, `scope: u32`, `resolved: u32` (a binder, an export item, a member declaration or a primitive, by the node's kind); flags in a parallel byte |
+| `PatRow` | 12 | pattern node | `ty: Ty`, `scope: u32`, `resolved: u32` |
+| `CoreTypeRow` | 8 | type annotation node | `ty: Ty`, `resolved: u32` |
+| `ModRow` | 8 | module expression | module type index, coercion index |
+| trail entry | 20 | write under a speculation | node index and the node's previous 16 bytes |
+| `ExportItem` | 12 | exported name | `name: u32`, `kind: u8`, `payload: u32` (template, declaration, member or child table) |
+| `Segment` | per unit | published unit | boxed slices: nodes, list slots, params, templates, type declarations, members, export items sorted by name, child tables; a digest |
+
+There is no `Rc`, `Arc`, `RefCell`, `Cell` or lock in any of them. A
+segment is `Send + Sync` because it is plain data.
+
+Today, for scale: `TypeNode` 32 bytes with a 24-byte descriptor in `Cell`s,
+typed expressions and patterns 72 bytes with `Arc` descriptions, an `Env`
+of persistent maps behind `Rc`.
+
+### 3.3 What every operation costs
+
+`n` is the number of nodes an operation is defined to visit. "Kernel" gives
+the measurement of 2.2 where one exists.
+
+| Operation | Cost | Kernel |
+|---|---|---|
+| Read a local node | one indexed load of 16 bytes | |
+| Read a frozen node | page table load, then the indexed load; done once per template, not per node | |
+| `repr` | one load when the node is a representative; one load and one store per link otherwise (path halving) | in every row below |
+| `instance(root)`, root not generic | two loads and a compare | 8 |
+| `instance(root)`, root generic with a template | O(template): one copy per node and per list slot, one compare per reference to a node that is not generic | 62 + 27 a node |
+| `instance(root)`, first use of a local scheme | the general copy, O(generic nodes), with the forwarding address in a side array indexed by node, no hashing | |
+| template capture, second use of a local scheme | O(generic nodes), once per scheme | |
+| `unify`, one node on both sides | two `repr` and a compare, inline | 26 |
+| `unify`, variable against a type | O(nodes of the type at or above the variable's level): one walk for occurrence, universal variables and levels; one link | 100 a node |
+| `unify`, two structures of one constructor that is not an abbreviation | O(pairs): two level compares, one link, the children | 126 a pair |
+| `unify`, an abbreviation on either side | one bit test to know; then expansion and OCaml's `unify2`, `unify3` | not in the kernel |
+| expansion of an abbreviation | the memo slot when present; else an instance of the manifest's template with the parameters bound, and one memo cell | 62 + 27 a node |
+| level update | O(nodes above the target level); one compare when the root is not | 58 a node |
+| `generalize` | O(nodes above the current level reachable from the root) | 58 a node |
+| `begin_def`, `end_def` | an increment, a decrement | |
+| open a speculation, close it without restoring | set a flag and remember the trail's length; clear it | |
+| restore a speculation | O(writes made under it) | |
+| bind a name | one binder row, one log entry, one table write | 44 with its undo |
+| look up a name | one table load, plus one probe per opened layer younger than the hit | 5 without layers |
+| look up a binder, a declaration, a member | one indexed load | 5 |
+| leave a scope | O(names bound in it) | in the 44 |
+| open a module | O(1): push a layer that points at the module's export table | |
+| mark a use | set one bit | |
+| write a row | one 12-byte store at the node's index | |
+| type an expression node | its case; no allocation, no `Vec`, no reference count | |
+| exhaustiveness of a match | OCaml's algorithm, on rows of pattern handles | |
+| publish a unit | O(exported nodes): one walk that writes the segment, the canonical hash and the digests | |
+| reset a checker context for the next unit | O(number of pools): set lengths to zero | |
+| check a failing unit again | one more check of that unit, in the explaining mode | |
+
+The step-count tests of the slices (section 6) pin the rows that have a
+loop or a recursion, at 10,000 elements.
+
+### 3.4 The passes, in order
+
+For one unit, on its worker:
+
+1. **Reset** the worker's checker context: the lengths of its pools go to
+   zero; the frozen prefix (predefined types, the opened initial modules)
+   is scope 0 and is not rebuilt.
+2. **Items in order**, one walk:
+   - a type declaration group: enter the binders of the whole group, then
+     translate the bodies into `TypeDecl` rows and templates, then the
+     checks of OCaml's `Typedecl` (well-foundedness, variance, immediacy);
+   - an external, an exception, a module type: its row;
+   - a module binding: type the module expression; a structure is a nested
+     run of this pass in a child scope; a path is an export table lookup;
+     a functor application and a constraint go through signature inclusion
+     and substitution, ported from `Includemod` and `Subst`;
+   - a `let`: `begin_def`, the patterns, the bodies with the bidirectional
+     walk, `end_def`, generalisation, the binders' types written.
+   A use of a name inside a body is resolved when the walk reaches it
+   (2.4, idea 5). Unit reads for incremental builds are logged at that
+   lookup (THREE_TREES T3), not collected by a second walk.
+3. **End of unit**: the delayed checks (unused values, opens, types) are a
+   scan of the binder arrays' used bits in binder order; weak variables
+   left in the signature are an error (O14).
+4. **Against the interface**, when there is one: signature inclusion of
+   the inferred signature in the interface's segment.
+5. **Publish**: one walk over the exported items writes the segment
+   (templates with absolute paths), the canonical signature hash and the
+   digests the build system compares.
+6. **Hand over**: the rows, the pattern pool and the unit's nodes stay
+   alive for the backend and genType, then the context is reset by the
+   next unit's step 1.
+
+An interface file runs steps 1, 2 for signature items, and 5.
+
+If step 2, 3 or 4 fails, or a unification fails outside a speculation, the
+worker runs the unit again from step 1 in the explaining mode and reports
+what that run finds. The mode is a field of the checker context set when
+the context is prepared for the unit, not a flag flipped during a walk.
+
+### 3.5 The explaining mode
+
+The same code with three things switched on by the mode: a top-level
+unification opens a speculation so that a failure can undo path compression
+and expand its trace (`compiler/ml/ctype.ml`, the outer `unify`); the walk
+passes the clash site of each construct (today's `ClashSite`); a failed
+unification keeps its trace. Printing types, the messages and the code
+frames are today's `printtyp.rs` and `driver/type_clash.rs` ported to the
+new graph. Nothing else differs, so the two modes accept the same programs
+by construction, and the oracle of section 5 checks it: every fixture of
+`super_errors` is checked in both modes and must fail in both.
+
+### 3.6 What is shared between compilations
+
+The world of CHECKER_REDESIGN J, with its storage replaced. What the
+rewrite does with each slice of J and K:
+
+| Slice | State on trunk (STATUS 1.3, 1.4) | Under the rewrite |
+|---|---|---|
+| W1 determinism gate | done | **kept**: `scripts/test_worker_determinism.py` is a gate of every slice |
+| W2 frozen writes in one table | done | **kept as a mechanism**: 322 of 358,825 published nodes are not generic and can be linked by a dependent; that write goes to the compilation's table |
+| W3 the world object | done | **kept**: the unit table and its slots hold segments instead of `SharedGraph`s |
+| W4, W5 module views by substitution, adoption | done in part | **subsumed**: a segment already has absolute paths and one export table per module path, children included; there is no view to build and nothing to adopt. `module_view.rs` is deleted with the old checker |
+| W5's remaining deletions (registration tables, per-worker views) | not made | **must not be built**: they are edits to `TypeContext` and `env_lazy.rs`, which the rewrite deletes whole |
+| W6 delete store builds | not started | **must not be built**: the new checker has no store build to delete; the old one is deleted whole |
+| W7 delete the worker-store tier | not started | **must not be built**, same reason; `Ty` has two tiers from the start |
+| W8 publication is one export walk | not started | **subsumed**: step 5 of 3.4 is that walk |
+| W9 one checker context per worker | not started | **subsumed**: step 1 of 3.4. The reset list is a dozen vectors, not the hundred fields of `TypeContext` (CHECKER_REDESIGN I.6) |
+| W10 the opened initial environment once per worker | not started | **subsumed**: scope 0 is frozen in the world, once per build |
+| W11 the world outlives a build in watch mode | not started | **kept**, unchanged in intent: segments are keyed by unit digest |
+| C4 the other walk families in place | not started | **must not be built**: the walk is replaced |
+| C5 snapshots without journal bookkeeping | not started | **must not be built**: 3.5 replaces it; the prototype of 4.2 measures it |
+| P6 `env_log.rs` (test-only, 4,466 lines) | built, not switched on | **deleted** by the slice that builds scopes (R3) |
+
+What must keep being built in the meantime: nothing in the checker. Work
+that is not the checker (the backend, the printer, the build system) is
+independent.
+
+### 3.7 What the backend and the tooling read
+
+Today the conversion to Lambda, match compilation, genType and the unit
+reads walk the typed tree and call the checker's own functions on its
+types and environments (THREE_TREES section 4: 13 and 27 environment uses
+in the two backend files). They cannot keep doing that across a change of
+representation. The design puts one interface between the checker and its
+readers:
+
+- **Rows** (3.2): type, scope and resolved reference per expression,
+  pattern and annotation, read by the syntax node's handle; the pattern
+  pool for match compilation.
+- **`TypeFacts`**, a trait with the questions readers ask about a type and
+  nothing else: its head after expansion, whether it is immediate, the
+  runtime representation of a variant or a record (today
+  `variant_layout.rs`, `variant_runtime.rs`, `record_runtime.rs`), the
+  declaration behind a path, the labels and constructors of a
+  declaration. About twenty methods; each is O(1) or one expansion.
+- **The published segment** for genType's and the build system's view of a
+  unit's signature.
+
+Both checkers implement the interface: the old one over the typed tree and
+`Env` (slice R1, which is a refactor of the readers), the new one over its
+tables. That is what lets the backend stay untouched while the checker
+underneath it changes, and what the oracle compares through.
+
+Editor tooling asks for a typed tree today. Until it is ported to rows
+(THREE_TREES T12) a tooling session keeps using the old checker on the file
+being inspected; the last slice ports it and deletes that use.
+
+### 3.8 What is not designed here
+
+- The module language beyond paths and structures (functors, first-class
+  modules, `module type of`, recursive modules): ported onto the new
+  graph, with substitution as OCaml has it. 1.1% of the checker on the
+  application, 3.5% on the test project.
+- Rows, objects, polymorphic variants, universal variables, GADT
+  equations: ported. They are the `false` branches of the kernel.
+- The exhaustiveness algorithm: ported onto pattern handles.
