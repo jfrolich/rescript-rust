@@ -50,8 +50,6 @@ enum Slot {
 #[derive(Default)]
 pub struct StatementStack {
     slots: Vec<Option<Slot>>,
-    flatten: crate::bir::j::flatten::Flatten,
-    flattened: Vec<NodeId>,
     held: Vec<NodeId>,
     /// Statements written, excluding holes.
     pub pushed: usize,
@@ -324,31 +322,17 @@ impl StatementStack {
     /// K2: C:4752 compiled_to_effect_block. Copy each statement of the run
     /// into the child-list pool once: one step per statement, hole and dead
     /// range of the run. The top run is popped; a run below the top becomes
-    /// one dead range, so that what follows it is not moved. R1–R8 apply here,
-    /// costing one step per written statement and flattened operand.
+    /// one dead range, so that what follows it is not moved. Never flattens
+    /// SBlock here.
     pub fn take_list(&mut self, bir: &mut Bir, span: Span) -> ListId {
-        self.take_list_with_value(bir, span, None)
-    }
-    /// O(copied statements and flattened operands). The export sentinel is a
-    /// transported value, not an effect statement: append it without R1–R8.
-    pub(super) fn take_list_with_value(&mut self, bir: &mut Bir, span: Span, value: Option<NodeId>) -> ListId {
-        if span.len == 0 && value.is_none() {
+        if span.len == 0 {
             // An empty run holds no slot. Its start is above the top when
             // the run before it was the top and has been taken.
             return bir.lists.push_iter(0, std::iter::empty());
         }
         assert!(span.end() <= self.slots.len());
-        let mut flatten = std::mem::take(&mut self.flatten);
-        let mut flattened = std::mem::take(&mut self.flattened);
-        flattened.clear();
-        for statement in self.statements(span) {
-            flatten.flatten_into(bir, statement, &mut flattened);
-        }
-        flattened.extend(value);
-        let count = flattened.len();
-        let id = bir.lists.push(&flattened);
-        self.flatten = flatten;
-        self.flattened = flattened;
+        let count = self.statements(span).count();
+        let id = bir.lists.push_iter(count, self.statements(span));
         self.copied += count;
         self.kill(span);
         id
@@ -551,7 +535,7 @@ mod tests {
         assert_eq!(size_of::<FreeId>(), 4);
         assert_eq!(size_of::<Free>(), 16);
         assert_eq!(size_of::<Probed>(), 20);
-        assert_eq!(size_of::<StatementStack>(), 176);
+        assert_eq!(size_of::<StatementStack>(), 96);
         assert_eq!(size_of::<Option<Slot>>(), 12);
         assert_eq!(size_of::<FreePool>(), 40);
     }
@@ -563,16 +547,13 @@ mod tests {
         let hole = stack.reserve();
         stack.reserve();
         for n in 0..10_000 {
-            let value = crate::bir::j::plain::int(&mut bir, n);
-            stack.push(crate::bir::j::plain::node(&mut bir, crate::bir::View::SReturn { value }, 0));
+            stack.push(NodeId(n));
         }
-        let value = crate::bir::j::plain::int(&mut bir, 10_000);
-        let first = crate::bir::j::plain::node(&mut bir, crate::bir::View::SReturn { value }, 0);
-        stack.fill(hole, first);
+        stack.fill(hole, NodeId(10_000));
         let span = stack.since(mark);
         let list = stack.take_list(&mut bir, span);
         assert_eq!(bir.lists.get(list).len(), 10_001);
-        assert_eq!(bir.lists.get(list)[0], first);
+        assert_eq!(bir.lists.get(list)[0], NodeId(10_000));
         assert_eq!(stack.pushed, 10_001);
         assert_eq!(stack.copied, 10_001);
         assert_eq!(stack.mark(), Span::default());

@@ -529,11 +529,12 @@ impl State {
             .value
             .unwrap_or_else(|| self.pure_expression(View::JUndefined, 0));
         let value = self.arena.new_node(View::SExp { value }, 0);
+        self.statements.push(value);
         let run = self.statements.since(Span {
             start: out.stmts.start,
             len: 0,
         });
-        let list = self.statements.take_list_with_value(&mut self.arena, run, Some(value));
+        let list = self.statements.take_list(&mut self.arena, run);
         let root = self.arena.block_from_list(list);
         // The headers keep their labels and parameters; the exits they count
         // stay in the source, which reads the counts while a function of
