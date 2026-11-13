@@ -714,6 +714,13 @@ mod tests {
     use crate::types::typecore::TypeCheckContext;
     use crate::types::{initial_env, typemod};
 
+    #[test]
+    fn variant_fixture_general_types() {
+        let source = include_str!("../../../../tests/ppx_spice/src/Variants.res");
+        let (_, lowered) = record_lambda(source, false);
+        assert_eq!(lowered, 0);
+    }
+
     /// The printed raw Lambda of a program whose derived items are planned
     /// or syntax, with its stamps renumbered in order of first appearance,
     /// and the number of items lowered from plans.
@@ -856,11 +863,17 @@ mod tests {
         }
     }
 
+    /// Every variant fixture must preserve its raw Lambda, including general
+    /// forms (unboxed and parameterized declarations). Cost: one compilation
+    /// of the fixture per path; test-only.
     #[test]
-    fn variant_fixture_general_types() {
+    fn variant_fixture_plans_equal_the_general_lambda() {
         let source = include_str!("../../../../tests/ppx_spice/src/Variants.res");
-        let (_, lowered) = record_lambda(source, false);
-        assert_eq!(lowered, 0);
+        let (planned, lowered) = record_lambda(source, true);
+        let (general, none) = record_lambda(source, false);
+        assert_eq!(lowered, 9);
+        assert_eq!(none, 0);
+        assert_eq!(planned, general);
     }
 
     /// The printed raw Lambda of the value `probe` of `source`, compiled
@@ -1209,6 +1222,58 @@ let probe = r => switch r {
             assert_eq!(none, 0);
             assert_eq!(planned, general, "{source}");
         }
+    }
+
+    #[derive(Default)]
+    struct VariantSteps {
+        bodies: usize,
+        patterns: usize,
+    }
+
+    impl Steps for VariantSteps {
+        fn node(&mut self) { self.bodies += 1; }
+        fn pattern(&mut self) { self.patterns += 1; }
+    }
+
+    /// Count visits and resulting Lambda terms for one variant declaration.
+    /// Test-only cost: source construction and lowering are O(constructors),
+    /// plus the checker and match compiler's work.
+    fn variant_lowering(constructors: usize) -> (usize, usize, usize) {
+        use std::fmt::Write;
+        let mut source = String::from("@spice type t = ");
+        for i in 0..constructors {
+            write!(source, " | C{i}(int)").unwrap();
+        }
+        let (parser, structure) =
+            crate::binary_ast::derive::fixtures::frontend_source(&source, true);
+        let arena = parser.arena();
+        assert_eq!(arena.plans().item_count(), 1);
+        let type_ctx = type_context();
+        let mut tctx = TypeCheckContext::new(&type_ctx, arena);
+        let env = initial_env(&type_ctx);
+        typemod::type_structure(&mut tctx, &env, arena, &structure).unwrap();
+        let rb = RawArena::new();
+        let mut converter = RawLambdaConverter::new(arena, &tctx.typed, &type_ctx, &env, &rb);
+        let tail = rb.unit();
+        let before = rb.get().node_count();
+        let mut steps = VariantSteps::default();
+        lower(&mut converter, DerivedIdx(0), tail, &mut steps);
+        (steps.bodies, steps.patterns, rb.get().node_count() - before)
+    }
+
+    #[test]
+    fn ten_thousand_variant_constructors_lower_in_linear_steps() {
+        let (one, two, many) = std::thread::Builder::new()
+            .stack_size(1 << 30)
+            .spawn(|| (variant_lowering(2), variant_lowering(3), variant_lowering(10_000)))
+            .unwrap().join().unwrap();
+        assert_eq!(one, (124, 22, 184));
+        assert_eq!((two.0 - one.0, two.1 - one.1, two.2 - one.2), (43, 10, 58));
+        assert_eq!(many, (430_038, 100_002, 580_068));
+        assert_eq!(many.0, one.0 + 9_998 * (two.0 - one.0));
+        assert_eq!(many.1, one.1 + 9_998 * (two.1 - one.1));
+        assert_eq!(many.2, one.2 + 9_998 * (two.2 - one.2));
+        assert_eq!(std::mem::size_of::<VariantSteps>(), 16);
     }
 
     struct Counted(usize);

@@ -1298,6 +1298,43 @@ pub(crate) mod tests {
         test(&mut tctx, &env, item, &type_ctx);
     }
 
+    /// Count the discharge of one-argument constructors. Test-only cost:
+    /// O(constructors), plus parsing and checking the declaration.
+    fn variant_discharge(constructors: usize) -> Counted {
+        use std::fmt::Write;
+        let mut source = String::from("@spice type t = ");
+        for i in 0..constructors {
+            write!(source, " | C{i}(int)").unwrap();
+        }
+        let (parser, structure) =
+            crate::binary_ast::derive::fixtures::frontend_source(&source, true);
+        let (derived, before) = structure.split_last().unwrap();
+        let crate::parser::ast::StructureItemDesc::Pstr_derived(item) = derived.pstr_desc else {
+            panic!("the variant takes a plan")
+        };
+        let arena = parser.arena();
+        let type_ctx = type_context();
+        let mut tctx = TypeCheckContext::new(&type_ctx, arena);
+        let env = initial_env(&type_ctx);
+        let (_, env) = crate::types::typemod::type_structure(&mut tctx, &env, arena, before).unwrap();
+        let mut steps = Counted::default();
+        discharge_counting(&mut tctx, &env, item, &mut steps).unwrap();
+        steps
+    }
+
+    #[test]
+    fn ten_thousand_variant_constructors_discharge_in_linear_steps() {
+        let one = variant_discharge(1);
+        let two = variant_discharge(2);
+        let many = variant_discharge(10_000);
+        assert_eq!(one, Counted { lookups: 33, instances: 27, unifications: 30 });
+        assert_eq!(two, Counted { lookups: 56, instances: 47, unifications: 53 });
+        assert_eq!(many, Counted { lookups: 230_010, instances: 200_007, unifications: 230_007 });
+        assert_eq!(many.lookups, one.lookups + 9_999 * (two.lookups - one.lookups));
+        assert_eq!(many.instances, one.instances + 9_999 * (two.instances - one.instances));
+        assert_eq!(many.unifications, one.unifications + 9_999 * (two.unifications - one.unifications));
+    }
+
     /// The discharge of a record's item is linear in its fields, with an
     /// exact count per field: its 22 obligations (3 in the encoder, 3 in
     /// its JSON twin, 16 in the decoder) take one lookup each, the 16 that

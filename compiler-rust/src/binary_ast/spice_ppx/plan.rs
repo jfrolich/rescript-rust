@@ -244,7 +244,7 @@ pub(in crate::binary_ast) fn classify(
             decl.ptype_manifest.is_none() && record::planned(labels, arena)
         }
         TypeKind::Ptype_variant(constructors) => {
-            VARIANTS_PLANNED && decl.ptype_manifest.is_none() && variant::planned(constructors, arena)
+            decl.ptype_manifest.is_none() && variant::planned(constructors, arena)
         }
         TypeKind::Ptype_open => false,
     };
@@ -257,10 +257,6 @@ pub(in crate::binary_ast) fn classify(
     }
     Classification::Plan
 }
-
-/// Whether a variant that [`variant::planned`] admits takes a plan. Off
-/// until variant plans are lowered: the builder is tested on its own.
-const VARIANTS_PLANNED: bool = false;
 
 /// A type whose codec the plan needs.
 #[derive(Clone, Copy)]
@@ -680,7 +676,7 @@ mod tests {
         assert_eq!(general("@spice type t = {x: (int, string)}"), UnmeasuredShape);
         assert_eq!(general("@spice @unboxed type t = {x: int}"), Unboxed);
         assert_eq!(general("@spice type rec t = {x: array<t>}"), RecursiveGroup);
-        assert_eq!(general("@spice type t = A | B(int)"), NotYetPlanned);
+        assert_eq!(classification("@spice type t = A | B(int)"), Classification::Plan);
         assert_eq!(general("@spice type t = JSON.t"), NotYetPlanned);
         assert_eq!(general("@spice type t = array<Js.Json.t>"), NotYetPlanned);
         assert_eq!(general("@spice @spice.fallback(\"x\") type t = string"), NotYetPlanned);
@@ -711,7 +707,7 @@ mod tests {
         assert!(derived("@spice type a = string @spice and b = array<a>"));
         assert!(derived("type a = {x: int} @spice and b = array<int>"));
         assert!(derived("@spice type a = {x: int} @spice and b = array<a>"));
-        assert!(!derived("@spice type a = A | B(int) @spice and b = array<a>"));
+        assert!(derived("@spice type a = A | B(int) @spice and b = array<a>"));
     }
 
     /// With plans off, which a tree is unless the driver says it is compiled
