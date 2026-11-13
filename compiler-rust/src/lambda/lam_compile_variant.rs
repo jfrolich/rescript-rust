@@ -290,11 +290,11 @@ impl LambdaCompiler {
     fn untagged_test_expr(&mut self, plan: &Plan<Lam>, scrut: Expr, test: TestId) -> Expr {
         match plan.test(test) {
             UntaggedTest::Equals(literal) => {
-                let value = self.switch_case_expr(&Self::literal_tag_value(literal));
+                let value = self.switch_case_expr(&Self::literal_tag_value(&plan.metadata.owned_literal(*literal)));
                 JE::bin(BinOp::EqEqEq, scrut, value, &mut self.j)
             }
-            UntaggedTest::Typeof(kind) => self.untagged_typeof_expr(scrut, kind),
-            UntaggedTest::Instance(instance) => self.is_instance_of(instance, scrut),
+            UntaggedTest::Typeof(kind) => self.untagged_typeof_expr(scrut, &kind.block_type()),
+            UntaggedTest::Instance(instance) => self.is_instance_of(&plan.metadata.owned_instance(*instance), scrut),
             UntaggedTest::NotNull => {
                 let test = self.is_null_expr(scrut);
                 JE::not(test, &mut self.j)
@@ -362,7 +362,7 @@ impl LambdaCompiler {
                     .value_clauses(*clauses)
                     .iter()
                     .map(|(literal, clause)| StringClauseInfo {
-                        tag_type: Self::literal_tag_value(literal),
+                        tag_type: Self::literal_tag_value(&plan.metadata.owned_literal(*literal)),
                         clause: this.emit_untagged_clause(a, emit, tail_loop, clause),
                     })
                     .collect();
@@ -375,7 +375,7 @@ impl LambdaCompiler {
                 let (kind, clause) = &plan.typeof_clauses(*clauses)[0];
                 let clause = self.emit_untagged_clause(a, emit, tail_loop, clause);
                 let default = self.emit_untagged_tree(a, emit, tail_loop, *default);
-                let cond = self.untagged_typeof_expr(emit.scrut, kind);
+                let cond = self.untagged_typeof_expr(emit.scrut, &kind.block_type());
                 self.untagged_if(emit.mode, cond, self.j.block_vec(clause.body), default)
             }
             Tree::SwitchTypeof(clauses, default) => self.with_switch_depth(|this| {

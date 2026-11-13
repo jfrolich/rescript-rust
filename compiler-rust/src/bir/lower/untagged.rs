@@ -6,7 +6,7 @@ use crate::bir::j::{norm, plain};
 use crate::bir::{CaseKey, ClauseMeta};
 use crate::lambda::untagged_dispatch::{self as dispatch, Clause, Test, TestId, Tree, TreeId};
 use crate::lambda::{SwitchCaseTag, SwitchDispatch, SwitchKey};
-use crate::types::{VariantBlockType, VariantConstructorCase as Case, VariantInstance};
+use crate::types::VariantConstructorCase as Case;
 
 #[derive(Clone, Copy)]
 pub(super) struct Untagged(pub u32);
@@ -126,9 +126,68 @@ pub(super) struct Storage {
     copied_vars: Vec<(VarId, VarId)>,
     copied_labels: Vec<(u32, u32)>,
     program_steps: usize,
-    literal_arms: Vec<(crate::types::VariantLiteralTag, u32)>,
-    payload_arms: Vec<(VariantBlockType, u32)>,
+    imported: Vec<Option<ImportedPlan>>,
+    literals: Vec<LiteralEmission>,
     aliases: Vec<Option<u32>>,
+}
+
+struct ImportedPlan {
+    facts: dispatch::Facts,
+    literals: Vec<(dispatch::LiteralId, u32)>,
+    payloads: Vec<(dispatch::Kind, u32)>,
+}
+#[derive(Clone, Copy)]
+enum LiteralValue { String(crate::bir::StrId), Number(crate::bir::ConstId), Bool(bool), Null, Undefined }
+struct LiteralEmission { key: CaseKey, value: LiteralValue }
+
+/// Metadata-only import: no grouping, planning or simplification runs here.
+pub(super) fn prepare(arena: &mut Bir) -> (Storage, dispatch::Plan<u32>) {
+    let mut storage = Storage::default();
+    let mut graph = dispatch::Plan::default();
+    for i in 0..arena.pools.switches.len() {
+        let h = arena.switch(crate::bir::SwitchId(i as u32));
+        let SwitchDispatch::Variant(facts) = h.dispatch else { storage.imported.push(None); continue };
+        let facts = graph.metadata.import_facts(facts);
+        let mut literals = Vec::new();
+        let mut payloads = Vec::new();
+        for (i, key) in h.keys.iter().enumerate() {
+            match key {
+                CaseKey::Lambda(SwitchKey::Constructor(Case::Constant(tag))) =>
+                    literals.push((graph.metadata.import_literal(&tag.literal), i as u32)),
+                CaseKey::Lambda(SwitchKey::Constructor(Case::Block(block))) => {
+                    if let Some(kind) = block.block_type() {
+                        payloads.push((graph.metadata.import_kind(kind), i as u32));
+                    }
+                }
+                _ => {}
+            }
+        }
+        storage.imported.push(Some(ImportedPlan { facts, literals, payloads }));
+    }
+    for i in 0..graph.metadata.literal_count() {
+        use dispatch::Literal as L;
+        let (key, value) = match graph.metadata.literal(dispatch::LiteralId(i as u32)) {
+            L::String(s) => { let text = arena.intern_text(graph.metadata.text(s));
+                (CaseKey::String(text), LiteralValue::String(text)) },
+            L::Float(s) => { let spelling = graph.metadata.text(s);
+                let text = arena.intern_text(spelling);
+                let value = arena.intern_float(spelling).expect("valid literal float");
+                (CaseKey::Float(text), LiteralValue::Number(value)) },
+            L::BigInt(s) => { let spelling = graph.metadata.text(s);
+                let text = arena.intern_text(spelling);
+                let (positive, digits) = crate::types::typecore::parse_bigint_literal(spelling);
+                let canonical = arena.intern_text(&format!("{}{digits}", if positive { '+' } else { '-' }));
+                let value = arena.intern_const(crate::bir::Constant::BigInt(canonical));
+                (CaseKey::BigInt(text), LiteralValue::Number(value)) },
+            L::Int(i) => { let value = arena.intern_const(crate::bir::Constant::Int(i64::from(i as i32)));
+                (CaseKey::JavaScript(SwitchCaseTag::Int(i64::from(i as i32))), LiteralValue::Number(value)) },
+            L::Bool(b) => (CaseKey::JavaScript(SwitchCaseTag::Bool(b)), LiteralValue::Bool(b)),
+            L::Null => (CaseKey::JavaScript(SwitchCaseTag::Null), LiteralValue::Null),
+            L::Undefined => (CaseKey::JavaScript(SwitchCaseTag::Undefined), LiteralValue::Undefined),
+        };
+        storage.literals.push(LiteralEmission { key, value });
+    }
+    (storage, graph)
 }
 
 pub(super) struct Plan {
@@ -179,50 +238,28 @@ impl State {
             }
         }
         let mut dispatch = std::mem::take(&mut self.untagged_dispatch);
-        let mut literal_arms = std::mem::take(&mut self.untagged_storage.literal_arms);
-        let mut payload_arms = std::mem::take(&mut self.untagged_storage.payload_arms);
         let h = self.arena.switch(header);
         let n = h.constants as usize;
         let full = (h.consts_full, h.blocks_full);
         let payload_only = h.consts_full && n == 0;
         let fallback = h.has_default.then_some(h.keys.len() as u32);
-        let SwitchDispatch::Variant(facts) = h.dispatch else {
-            unreachable!("untagged dispatch")
-        };
-        for (i, key) in h.keys.iter().enumerate() {
-            match key {
-                CaseKey::Lambda(SwitchKey::Constructor(Case::Constant(tag))) => {
-                    literal_arms.push((tag.literal.clone(), i as u32));
-                }
-                CaseKey::Lambda(SwitchKey::Constructor(Case::Block(block))) => {
-                    payload_arms.push((
-                        block.block_type().expect("untagged payload").clone(),
-                        i as u32,
-                    ));
-                }
-                _ => unreachable!("untagged constructor key"),
-            }
-        }
+        let imported = self.untagged_storage.imported[header.index()].as_ref().expect("imported dispatch");
         dispatch::append(
             &mut dispatch,
             |a: &u32, b: &u32| {
                 aliases[*a as usize].is_some() && aliases[*a as usize] == aliases[*b as usize]
             },
             dispatch::BorrowedInput {
-                facts,
-                literal_arms: &literal_arms,
-                payload_arms: &payload_arms,
+                facts: &imported.facts,
+                literal_arms: &imported.literals,
+                payload_arms: &imported.payloads,
                 literals_complete: full.0,
                 payloads_complete: full.1,
                 fallback,
             },
         );
         let (program, actions) = self.untagged_program(&dispatch, operands, fallback, cx.switch_depth);
-        literal_arms.clear();
-        payload_arms.clear();
         aliases.clear();
-        self.untagged_storage.literal_arms = literal_arms;
-        self.untagged_storage.payload_arms = payload_arms;
         self.untagged_storage.aliases = aliases;
         self.untagged_dispatch = dispatch;
         let start = self.statements.mark();
@@ -709,20 +746,6 @@ impl State {
         )
     }
 
-    /// O(spelling bytes): intern a literal key without cloning an owned tag.
-    fn untagged_literal_key(&mut self, literal: &crate::types::VariantLiteralTag) -> CaseKey {
-        use crate::types::VariantLiteralTag as L;
-        match literal {
-            L::String(s) => CaseKey::String(self.arena.intern_text(s)),
-            L::Float(s) => CaseKey::Float(self.arena.intern_text(s)),
-            L::BigInt(s) => CaseKey::BigInt(self.arena.intern_text(s)),
-            L::Int(i) => CaseKey::JavaScript(SwitchCaseTag::Int(i64::from(*i as i32))),
-            L::Bool(b) => CaseKey::JavaScript(SwitchCaseTag::Bool(*b)),
-            L::Null => CaseKey::JavaScript(SwitchCaseTag::Null),
-            L::Undefined => CaseKey::JavaScript(SwitchCaseTag::Undefined),
-        }
-    }
-
     /// V: emit_untagged_tree's value/typeof switch arms. O(clauses + statements
     /// transferred), with default-first source order and case-first output.
     fn untagged_switch_statement(
@@ -767,7 +790,7 @@ impl State {
         };
         for i in 0..count {
             let key = if value_switch {
-                self.untagged_literal_key(&dispatch.value_clauses(cases)[i].0)
+                self.untagged_storage.literals[dispatch.value_clauses(cases)[i].0.0 as usize].key.clone()
             } else {
                 CaseKey::String(
                     self.arena
@@ -829,7 +852,7 @@ impl State {
     }
 
     /// V: untagged_typeof_expr. O(1), retaining raw typeof rather than folding.
-    fn untagged_typeof(&mut self, value: NodeId, kind: &VariantBlockType) -> NodeId {
+    fn untagged_typeof(&mut self, value: NodeId, kind: &dispatch::Kind) -> NodeId {
         let value = plain::node(&mut self.arena, View::JTypeof { value }, 0);
         let text = plain::string(&mut self.arena, kind.typeof_name().expect("typeof kind"));
         norm::je4_bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, value, text)
@@ -858,8 +881,13 @@ impl State {
             let value = match test {
                 Test::Equals(tag) => {
                     let left = self.untagged_scrutinee(p);
-                    let right =
-                        self.switch_key_expression(&CaseKey::JavaScript(Self::literal_tag(tag)));
+                    let right = match self.untagged_storage.literals[tag.0 as usize].value {
+                        LiteralValue::String(text) => plain::node(&mut self.arena, View::JStr { text }, 0),
+                        LiteralValue::Number(value) => plain::node(&mut self.arena, View::JNumber { value }, 0),
+                        LiteralValue::Bool(b) => plain::boolean(&mut self.arena, b),
+                        LiteralValue::Null => plain::node(&mut self.arena, View::JNull, 0),
+                        LiteralValue::Undefined => plain::node(&mut self.arena, View::JUndefined, 0),
+                    };
                     norm::je4_bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, left, right)
                 }
                 Test::Typeof(kind) => {
@@ -868,7 +896,7 @@ impl State {
                 }
                 Test::Instance(instance) => {
                     let value = self.untagged_scrutinee(p);
-                    self.untagged_instance(value, instance)
+                    self.untagged_instance(value, &dispatch.metadata, *instance)
                 }
                 Test::NotNull => {
                     let value = self.untagged_scrutinee(p);
@@ -902,11 +930,8 @@ impl State {
 
     /// V: class_constructor / is_instance_of. O(class path bytes); array tests
     /// use the same ordinary CallInfo as the legacy constructor.
-    fn untagged_instance(&mut self, value: NodeId, instance: &VariantInstance) -> NodeId {
-        let name = match instance {
-            VariantInstance::Array(_) => "Array",
-            VariantInstance::Class { name, .. } => name,
-        };
+    fn untagged_instance(&mut self, value: NodeId, metadata: &dispatch::Metadata, instance: dispatch::InstanceId) -> NodeId {
+        let name = metadata.instance_name(instance);
         let mut parts = name.split('.');
         let first = parts.next().unwrap();
         let var = self.arena.new_var_id(crate::name::Name::new(first), 0);
@@ -926,7 +951,7 @@ impl State {
                 0,
             );
         }
-        if matches!(instance, VariantInstance::Array(_)) {
+        if !metadata.is_class(instance) {
             let property = self.arena.intern_text("isArray");
             let callee = plain::node(
                 &mut self.arena,
@@ -997,7 +1022,7 @@ mod tests {
         arena::LamArena, lam_constant::Constant as C, lam_primitive::Primitive as LambdaPrimitive,
     };
     use crate::types::{
-        ShapeAllocation, VariantBlock, VariantLiteralTag as Literal, VariantMatchingFacts,
+        ShapeAllocation, VariantBlock, VariantBlockType, VariantInstance, VariantLiteralTag as Literal, VariantMatchingFacts,
         VariantTag,
     };
 
@@ -1032,6 +1057,9 @@ mod tests {
         for kinds in forms {
             for literals in [
                 vec![],
+                vec![Literal::String("single".into())],
+                vec![Literal::Float("1.5".into())],
+                vec![Literal::BigInt("2".into())],
                 vec![
                     Literal::Null,
                     Literal::Undefined,
@@ -1305,8 +1333,8 @@ mod tests {
                 d.outputs.values.capacity(),
                 d.work.capacity(),
                 d.cache.capacity(),
-                d.literal_arms.capacity(),
-                d.payload_arms.capacity(),
+                d.imported.capacity(),
+                d.literals.capacity(),
                 d.aliases.capacity(),
             ]
         };
