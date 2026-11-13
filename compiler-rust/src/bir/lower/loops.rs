@@ -41,6 +41,9 @@ impl State {
                 }
                 ([Some(end), Some(parts[0]), Some(parts[2])], Some(var), direction as u16)
             }
+            View::ForOf { var, iterable, body } | View::ForAwaitOf { var, iterable, body } => {
+                ([Some(iterable), Some(body), None], Some(var), 0)
+            }
             _ => unreachable!("loop dispatch"),
         };
         let frame = Loop(self.loops.len() as u32);
@@ -52,7 +55,7 @@ impl State {
     /// O(1): at most three children, end before start for integer ranges.
     pub(super) fn loop_children(&self, cx: Cx, frame: Loop, into: &mut Vec<(Cx, NodeId)>) {
         let plan = &self.loops[frame.0 as usize];
-        let body_index = if plan.var.is_some() { 2 } else { 1 };
+        let body_index = if plan.nodes[2].is_some() { 2 } else { 1 };
         for (index, &node) in plan.nodes.iter().enumerate() {
             if let Some(node) = node {
                 let body = index == body_index;
@@ -68,7 +71,7 @@ impl State {
     /// saved blocks are attached in execution order without moving statements.
     pub(super) fn loop_child(&mut self, cx: Cx, frame: Loop, index: usize, child: Probed) -> Probed {
         let mut out = self.realize(cx, child);
-        let body_index = if self.loops[frame.0 as usize].var.is_some() { 2 } else { 1 };
+        let body_index = if self.loops[frame.0 as usize].nodes[2].is_some() { 2 } else { 1 };
         if index == body_index {
             if let Some(value) = out.value.take() { self.drop_pure_effect(value); }
         } else {
@@ -77,6 +80,14 @@ impl State {
         let span = self.statements.since(Span { start: out.stmts.start, len: 0 });
         let list = self.statements.take_list(&mut self.arena, span);
         self.loops[frame.0 as usize].blocks[index] = Some(list);
+        if index == 0 {
+            let plan = &self.loops[frame.0 as usize];
+            let op = self.source.node(plan.node).op();
+            if matches!(op, Op::ForOf | Op::ForAwaitOf) && self.source.vars.uses(plan.var.unwrap()) == 0 {
+                let var = self.fresh_variable(if op == Op::ForOf { "_for_of" } else { "_for_await_of" });
+                self.loops[frame.0 as usize].var = Some(var);
+            }
+        }
         Probed::Out(Out { stmts: self.statements.mark(), value: None, finished: Finished::False })
     }
 
@@ -121,6 +132,14 @@ impl State {
                 condition = crate::bir::j::plain::boolean(&mut self.arena, true);
             } else { body = self.arena.block_from_list(body_list); }
             self.arena.new_node(View::SWhile { condition, body, label: None }, 0)
+        } else if matches!(op, Op::ForOf | Op::ForAwaitOf) {
+            self.push_loop_list(blocks[0].unwrap());
+            let body = self.arena.block_from_list(blocks[1].unwrap());
+            let var = var.unwrap();
+            let parts = [end, body];
+            self.arena.new_node(if op == Op::ForOf {
+                View::SForOf { var, parts: &parts, label: None }
+            } else { View::SForAwaitOf { var, parts: &parts, label: None } }, 0)
         } else {
             let var = var.unwrap();
             let init = values[1].unwrap_or_else(|| self.pure_expression(View::JUndefined, 0));
@@ -173,6 +192,20 @@ mod tests {
                     1 => a.for_(var, start, end, DirectionFlag::Upto, body),
                     _ => a.for_(var, start, end, DirectionFlag::Downto, body),
                 };
+                super::super::oracle_tests::compare(a, root);
+            }
+        }
+    }
+
+    #[test]
+    fn for_of_and_await_in_every_continuation() {
+        for await_ in [false, true] {
+            for used in [false, true] {
+                let mut a = LamArena::new();
+                let var = Ident::new("element", 1, IdentFlags::NONE);
+                let iterable = a.var(Ident::new("iterable", 2, IdentFlags::NONE));
+                let body = if used { a.var(var) } else { a.const_(Constant::JsUndefined { is_unit: true }) };
+                let root = if await_ { a.for_await_of(var, iterable, body) } else { a.for_of(var, iterable, body) };
                 super::super::oracle_tests::compare(a, root);
             }
         }

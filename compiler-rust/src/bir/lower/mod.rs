@@ -651,10 +651,8 @@ impl ProbeRules for State {
             }
             View::Try { body, exception, handler } => return Ok(ProbePlan::Children(expr::Resume::Try(self.try_statement(cx, body, Some(exception), Some(handler), None)))),
             View::TryFinally { body, finaliser } => return Ok(ProbePlan::Children(expr::Resume::Try(self.compile_try_finally(cx, body, finaliser)))),
-            View::While { .. } | View::For { .. } => return Ok(ProbePlan::Children(expr::Resume::Loop(self.loop_statement(node)))),
-            View::ForOf { .. }
-            | View::ForAwaitOf { .. }
-            | View::Break
+            View::While { .. } | View::For { .. } | View::ForOf { .. } | View::ForAwaitOf { .. } => return Ok(ProbePlan::Children(expr::Resume::Loop(self.loop_statement(node)))),
+            View::Break
             | View::Continue => return Err(Unsupported("loop")),
             View::Assign { var, value } => return Ok(ProbePlan::Children(expr::Resume::Assign { var, value })),
             View::JBin { .. }
