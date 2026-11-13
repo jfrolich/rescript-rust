@@ -13,6 +13,8 @@ mod cond;
 mod exit;
 mod export;
 mod globals;
+#[cfg(test)]
+pub(crate) mod names;
 mod expr;
 mod konst;
 mod prim;

@@ -644,6 +644,82 @@ impl Names {
     }
 }
 
+/// What the program scope names besides its statements, in the pass's
+/// order (`Names::collect`): the imported modules first, then the
+/// reservations of export coercion, then the statements, then the exports.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct ProgramNames<'a> {
+    pub(crate) imports: &'a [Ident],
+    pub(crate) reservations: &'a [Ident],
+    pub(crate) exports: &'a [Ident],
+}
+
+/// The pass's group and suffix tables, kept between replays so that a
+/// replay with warm tables allocates nothing.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct ReplayTables(Names);
+
+/// The names of the replay against the names of the pass, by identifier.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct NameStats {
+    /// Identifiers the pass names.
+    pub(crate) names_pass: usize,
+    /// Variables the replay names.
+    pub(crate) names_replayed: usize,
+    /// Identifiers with different names, or named by one side only.
+    pub(crate) name_differences: usize,
+}
+
+/// Assign the printed names of a unit from its naming log (THREE_TREES
+/// section 2; the rule is this file's header): the events in order, through
+/// `Names::add`, `reserve`, `enter` and `leave`, the same group and suffix
+/// tables the pass uses. `Declare` and `Binder` are `add`; `Enter` reserves
+/// the scope's free variables and the binder of its declaration (the
+/// `Declare` that follows, when it is of the same statement) and enters;
+/// `Params` adds the function's parameters; `Leave` leaves. An event whose
+/// statement `live` rejects is skipped, with the events of a function
+/// literal it holds. `printed[var]` receives the name of every variable
+/// named (by variable, through `idents` for the base and stamp). Returns
+/// the steps: one per event read and one per reserved free variable.
+///
+/// Cost: that, plus the suffix probes of `Names::assign`; nothing is
+/// allocated when `tables` has replayed a log of this size before, except
+/// the spelling of a new suffixed name.
+#[cfg(test)]
+pub(crate) fn replay(
+    tables: &mut ReplayTables,
+    log: &crate::bir::lower::names::Log,
+    vars: &crate::bir::VarTable,
+    idents: &[Ident],
+    program: &ProgramNames<'_>,
+    live: impl Fn(crate::bir::NodeId) -> bool,
+    printed: &mut [Option<Name>],
+) -> Result<usize, Unsupported> {
+    let _ = (&mut tables.0, log, vars, idents, program.imports, program.reservations, program.exports, &live, printed);
+    todo!("T5 build")
+}
+
+/// Check mode: the names of a replay against `Names::collect` on
+/// `program`, the lowering's own program before the JS passes with its
+/// module list filled in. `idents[var]` is the identifier `printed[var]`
+/// belongs to. `Err` when the pass does not support the unit (no
+/// comparison). Check mode only; one hash lookup per named variable (the
+/// pass is keyed by identifier).
+#[cfg(test)]
+pub(crate) fn compare_with_pass(
+    printed: &[Option<Name>],
+    idents: &[Ident],
+    program: &JsDepsProgram,
+    resolver: &ModulePathResolver,
+    jsx_preserve: bool,
+) -> Result<NameStats, Unsupported> {
+    let _ = (printed, idents, program, resolver, jsx_preserve);
+    todo!("T5 build")
+}
+
 // Child order is the legacy printer's order. Shape decisions remain in walk;
 // constructs not yet handled by Build keep exactly their existing fallback.
 fn children(
@@ -974,5 +1050,36 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+
+    #[test]
+    fn replay_sizes() {
+        assert_eq!(std::mem::size_of::<ProgramNames<'_>>(), 48);
+        assert_eq!(std::mem::size_of::<NameStats>(), 24);
+    }
+
+    #[test]
+    #[ignore = "T5 build"]
+    fn the_comparison_counts_a_name_the_replay_gets_wrong() {
+        // `let x = 1`, exported: the pass names it `x`.
+        let mut a = JsArena::new();
+        let x = Ident::new("x", 1, crate::ident::IdentFlags::NONE);
+        let one = crate::js_ir::build::exp::int(1, &mut a);
+        let declaration = crate::js_ir::build::stmt::define(x, Some(one), crate::lambda::lam_compat::LetKind::Strict, &mut a);
+        let program = JsDepsProgram {
+            program: crate::js_ir::arena::JsProgram::new_in(vec![declaration], vec![x], a),
+            modules: vec![],
+            side_effect: None,
+        };
+        let resolver = ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+        let equal = compare_with_pass(&[Some(Name::new("x"))], &[x], &program, &resolver, false).unwrap();
+        assert_eq!(equal, NameStats { names_pass: 1, names_replayed: 1, name_differences: 0 });
+        let wrong = compare_with_pass(&[Some(Name::new("x$1"))], &[x], &program, &resolver, false).unwrap();
+        assert_eq!(wrong.name_differences, 1);
     }
 }
