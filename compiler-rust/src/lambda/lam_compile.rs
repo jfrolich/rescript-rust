@@ -5485,6 +5485,12 @@ impl LambdaCompiler {
             return block;
         }
 
+        // compiler/core/lam_compile.ml:794-799 lowers the default first.
+        let default_block = default.map(|fallback| {
+            let block = self.compile_assign_to_target_block(a, result, fallback);
+            self.with_block_source_loc(a, fallback, block)
+        });
+
         let grouped = self.grouped_switch_cases(a, &cases, default, |_, _| true);
         let mut clauses = Vec::with_capacity(grouped.len());
         for (tag, body, is_last) in grouped {
@@ -5509,11 +5515,6 @@ impl LambdaCompiler {
                 clause,
             });
         }
-
-        let default_block = default.map(|fallback| {
-            let block = self.compile_assign_to_target_block(a, result, fallback);
-            self.with_block_source_loc(a, fallback, block)
-        });
 
         block.push(JS::string_switch(
             scrut_compiled.expr,
@@ -5659,12 +5660,13 @@ impl LambdaCompiler {
             return block;
         }
 
-        let grouped = self.grouped_switch_cases(a, &cases, default, |_, _| true);
-        let clauses = self.grouped_return_string_clauses(a, grouped, SwitchCaseTag::String);
-
+        // compiler/core/lam_compile.ml:794-799 lowers the default first.
         let default_block = default
             .map(|fallback| self.compile_return_block(a, fallback))
             .filter(|body| !body.is_empty());
+
+        let grouped = self.grouped_switch_cases(a, &cases, default, |_, _| true);
+        let clauses = self.grouped_return_string_clauses(a, grouped, SwitchCaseTag::String);
 
         block.push(JS::string_switch(
             scrut_compiled.expr,
@@ -5802,6 +5804,14 @@ impl LambdaCompiler {
             return block;
         }
 
+        // compiler/core/lam_compile.ml:794-799 lowers the default first.
+        let default_block = default
+            .map(|fallback| {
+                let block = self.compile_effect_block(a, fallback);
+                self.with_block_source_loc(a, fallback, block)
+            })
+            .filter(|body| !body.is_empty());
+
         let grouped = self.grouped_switch_cases(a, &cases, default, |_, _| true);
         let mut clauses = Vec::with_capacity(grouped.len());
         for (tag, body, is_last) in grouped {
@@ -5825,13 +5835,6 @@ impl LambdaCompiler {
                 clause,
             });
         }
-
-        let default_block = default
-            .map(|fallback| {
-                let block = self.compile_effect_block(a, fallback);
-                self.with_block_source_loc(a, fallback, block)
-            })
-            .filter(|body| !body.is_empty());
 
         let has_effectful_case = clauses
             .iter()
