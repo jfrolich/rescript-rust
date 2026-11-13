@@ -119,8 +119,6 @@ pub struct Request {
     /// The command line after the program name, as `rescript-editor-analysis`
     /// receives it: the command name, then its arguments.
     pub args: Vec<String>,
-    /// Whether what the command prints goes to a terminal.
-    pub color: bool,
 }
 
 /// Collects what a command prints (`print_string`/`print_endline`).
@@ -314,11 +312,6 @@ pub fn run(request: &Request, project: &dyn session::Project) -> Result<Vec<u8>,
             cli.references(&mut out, path, parse_pos(line, col)?, false)
         }
         ["test", path] => test(&mut out, &mut cli, path)?,
-        // `rescript-tools reanalyze` (tools/bin/main.ml).
-        ["reanalyze", ..] => {
-            let report = reanalyze::run(project, &request.cwd, &request.args[1..], request.color)?;
-            out.print(&report);
-        }
         [command, ..] => {
             return Err(format!(
                 "`{command}` is not available inside the watcher yet"
@@ -329,6 +322,23 @@ pub fn run(request: &Request, project: &dyn session::Project) -> Result<Vec<u8>,
     if let Some(failure) = cli.session.failure() {
         return Err(failure);
     }
+    Ok(out.into_bytes())
+}
+
+/// `rescript-tools reanalyze <args>` (tools/bin/main.ml): what it prints,
+/// the reports of the dead code, exception and termination analyses of the
+/// project `cwd` is in. `color` says the output goes to a terminal.
+/// `project` must be built with source locations (see [`reanalyze`]), which
+/// a watcher's builds leave out, so this is no watcher command.
+pub fn reanalyze(
+    cwd: &Path,
+    args: &[String],
+    color: bool,
+    project: &dyn session::Project,
+) -> Result<Vec<u8>, String> {
+    let report = reanalyze::run(project, cwd, args, color)?;
+    let mut out = Output::default();
+    out.print(&report);
     Ok(out.into_bytes())
 }
 

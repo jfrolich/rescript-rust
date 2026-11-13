@@ -415,49 +415,6 @@ impl Project for WatchProject<'_> {
         packages
     }
 
-    fn parse_located(
-        &self,
-        module_name: &str,
-        interface: bool,
-    ) -> Option<Arc<dyn rescript_compiler::analysis::session::ParsedSource>> {
-        if let Some(source) = self.project_source(module_name) {
-            let relative = if interface {
-                source.interface?
-            } else {
-                source.implementation
-            };
-            return match parse::parse_for_tooling(source.package, relative, self.build_state).ok()? {
-                StoredAst::Structure(ast) => Some(ast),
-                StoredAst::Signature(ast) => Some(ast),
-            };
-        }
-        let runtime = self.runtime.as_ref()?;
-        let implementation = runtime.modules.get(module_name)?;
-        let options = compile::runtime_compiler_options(
-            &runtime.root,
-            &runtime.path,
-            module_name,
-            implementation,
-            &runtime.config,
-        );
-        let path = if interface {
-            Runtime::interface(implementation)?
-        } else {
-            implementation.clone()
-        };
-        let source = compile::read_source_latin1(&path).ok()?;
-        let arena = if interface {
-            compile::parse_runtime_signature(&path, &source, options.experimental_let_unwrap)
-                .ok()?
-                .0
-        } else {
-            compile::parse_runtime_structure(&path, &source, options.experimental_let_unwrap)
-                .ok()?
-                .0
-        };
-        Some(Arc::new(RuntimeParsed(arena)))
-    }
-
     fn typecheck(&self, module_name: &str, interface: bool) -> Option<TypedSource> {
         let result = match self.project_source(module_name) {
             Some(source) => self.typecheck_project_module(&source, interface),
@@ -495,23 +452,9 @@ fn on_tooling_thread(command: impl FnOnce() -> Result<Vec<u8>, String> + Send) -
 /// Run an editor tooling command (the arguments of `rescript-editor-analysis`,
 /// relative paths resolved against `cwd`) and return what it prints.
 pub fn run_command(build_state: &BuildCommandState, cwd: PathBuf, args: Vec<String>) -> Result<Vec<u8>> {
-    run_command_for_terminal(build_state, cwd, args, false)
-}
-
-/// [`run_command`], saying whether what the command prints goes to a
-/// terminal.
-fn run_command_for_terminal(
-    build_state: &BuildCommandState,
-    cwd: PathBuf,
-    args: Vec<String>,
-    color: bool,
-) -> Result<Vec<u8>> {
     on_tooling_thread(|| {
         let project = WatchProject::new(build_state, &cwd, &args);
-        rescript_compiler::analysis::run(
-            &rescript_compiler::analysis::Request { cwd, args, color },
-            &project,
-        )
+        rescript_compiler::analysis::run(&rescript_compiler::analysis::Request { cwd, args }, &project)
     })
 }
 
@@ -572,10 +515,14 @@ pub fn doc(cwd: &Path, path: &str, plain_output: bool) -> Result<Vec<u8>> {
 }
 
 /// `rescript-tools reanalyze <args>`: the dead code, exception and
-/// termination analyses of the project `cwd` is in. The OCaml tool reads
-/// the `.cmt` files of a build, which builds do not write, so the project
-/// is type-checked first, without writing files, and the analyses read the
-/// Rust typed trees. `color` says standard output is a terminal.
+/// termination analyses of the project `cwd` is in. `color` says standard
+/// output is a terminal.
+///
+/// The OCaml tool reads the `.cmt` files of a build, which builds do not
+/// write. Instead the project is type-checked here, writing no files, and
+/// the analyses read the Rust typed trees. They refer to the declarations of
+/// other modules by position, so this build keeps source locations, as the
+/// diagnostic rebuild does.
 pub fn reanalyze(cwd: &Path, args: &[String], plain_output: bool, color: bool) -> Result<Vec<u8>> {
     // The version and the list of options need no project.
     if let Some(text) = rescript_compiler::analysis::reanalyze::output_without_project(args) {
@@ -584,6 +531,8 @@ pub fn reanalyze(cwd: &Path, args: &[String], plain_output: bool, color: bool) -
     let project_root = helpers::get_nearest_config(cwd)
         .ok_or_else(|| anyhow!("Error: cannot find project root containing rescript.json."))?;
     let failed = |err: &dyn std::fmt::Display| anyhow!("error: the project does not build: {err:#}");
+    // `build::build` in check-only mode (no lock taken, no files written),
+    // keeping locations and printing no warnings.
     let mut build_state = super::initialize_build_with_mode(
         /* no_timing */ true,
         &None,
@@ -598,6 +547,7 @@ pub fn reanalyze(cwd: &Path, args: &[String], plain_output: bool, color: bool) -
     )
     .map_err(|err| failed(&format!("{err:#}")))?;
     build_state.print_warnings = false;
+    build_state.diagnostic_locations = true;
     super::incremental_build_without_lock(
         &mut build_state,
         /* no_timing */ true,
@@ -608,9 +558,10 @@ pub fn reanalyze(cwd: &Path, args: &[String], plain_output: bool, color: bool) -
         super::CompilerInfoWrite::WithRecord,
     )
     .map_err(|err| failed(&err))?;
-    let mut command = vec!["reanalyze".to_string()];
-    command.extend(args.iter().cloned());
-    let report = run_command_for_terminal(&build_state, cwd.to_path_buf(), command, color);
+    let report = on_tooling_thread(|| {
+        let project = WatchProject::new(&build_state, cwd, &[]);
+        rescript_compiler::analysis::reanalyze(cwd, args, color, &project)
+    });
     // A one-shot command: let the OS reclaim the build graph at exit.
     std::mem::forget(build_state);
     report

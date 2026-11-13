@@ -4,6 +4,10 @@
 //! The OCaml tool reads the `.cmt` and `.cmti` files of a build. Builds
 //! write none, so the analyses read each module's typed tree as the session
 //! type-checks it, and print what the OCaml tool prints.
+//!
+//! The analyses refer to declarations of other modules by position, so the
+//! project must be built with source locations, which a watcher's builds
+//! leave out: this is no watcher command.
 
 pub mod annotation;
 pub mod arnold;
@@ -18,12 +22,9 @@ pub mod traverse;
 
 use super::session::{Project, TypedSource};
 use crate::driver::ToolingTyped;
-use common::{Config, FileContext, Files, SlotPositions, Tree};
+use common::{Config, FileContext, Files, Tree};
 use log::{Log, filename_concat, has_prefix, is_relative};
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::path::Path;
-use std::rc::Rc;
 use std::sync::Arc;
 
 /// `Version.version` (analysis/reanalyze/src/version.ml).
@@ -326,48 +327,6 @@ fn parse_argv(cwd: &Path, args: &[String]) -> Result<Command, String> {
     Ok(Command::Analyze(config, printed))
 }
 
-/// The start of each location a parse allocates, by slot.
-type SlotTable = Vec<(i32, i32, i32)>;
-
-fn slot_table(arena: &crate::parse_arena::ParseArena) -> SlotTable {
-    let count = arena.parse_location_slot_count().unwrap_or(0);
-    (0..count)
-        .map(|slot| {
-            let location = arena.to_location(crate::parse_arena::LocIdx(slot));
-            let start = location.loc_start;
-            (start.line, start.bol, start.cnum)
-        })
-        .collect()
-}
-
-/// The located parses of the files declarations are imported from, by file
-/// name.
-struct Slots<'p> {
-    project: &'p dyn Project,
-    tables: RefCell<HashMap<String, Option<Rc<SlotTable>>>>,
-}
-
-impl SlotPositions for Slots<'_> {
-    fn slot_start(&self, file: &str, slot: u32) -> Option<(i32, i32, i32)> {
-        if let Some(table) = self.tables.borrow().get(file) {
-            return table.as_ref()?.get(slot as usize).copied();
-        }
-        let table = self
-            .project
-            .module_for_path(Path::new(file))
-            .and_then(|module_name| {
-                self.project
-                    .parse_located(&module_name, file.ends_with('i'))
-            })
-            .map(|parsed| Rc::new(slot_table(parsed.arena())));
-        let start = table
-            .as_ref()
-            .and_then(|table| table.get(slot as usize).copied());
-        self.tables.borrow_mut().insert(file.to_string(), table);
-        start
-    }
-}
-
 /// `Paths.get_module_name` of a source file: its base name, without its
 /// extension or a `-Namespace` suffix.
 fn module_name_of_source(source: &str) -> String {
@@ -394,7 +353,6 @@ struct Collected {
 struct Run<'a> {
     config: &'a Config,
     files: &'a Files,
-    slots: &'a Slots<'a>,
     project: &'a dyn Project,
     log: Log<'a>,
     collected: Collected,
@@ -454,12 +412,6 @@ impl Run<'_> {
         let Some(source_file) = self.find_source_file(&source) else {
             return;
         };
-        // Other files' declarations are located in this parse.
-        self.slots
-            .tables
-            .borrow_mut()
-            .entry(source_file.to_string())
-            .or_insert_with(|| Some(Rc::new(slot_table(arena))));
         let config = self.config;
         let excluded = config.cli.exclude_paths.iter().any(|prefix| {
             let prefix = if is_relative(&source_file) {
@@ -497,7 +449,6 @@ impl Run<'_> {
             &source.typed.type_ctx,
             &source.typed.typed_arena,
             self.files,
-            self.slots,
         );
         let annots = match &source.typed.typed {
             ToolingTyped::Implementation(structure) => dce::Annots::Implementation(structure),
@@ -593,14 +544,9 @@ pub fn run(
         Command::Print(text) => return Ok(text),
     };
     let files = Files::new();
-    let slots = Slots {
-        project,
-        tables: RefCell::new(HashMap::new()),
-    };
     let mut run = Run {
         config: &config,
         files: &files,
-        slots: &slots,
         project,
         log: Log::new(&config, &files, color),
         collected: Collected::default(),

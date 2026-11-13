@@ -88,12 +88,6 @@ pub trait Project {
     fn local_packages(&self) -> Vec<LocalPackage> {
         Vec::new()
     }
-    /// Parse a module's interface or implementation with locations, as
-    /// [`Project::typecheck`] parses it.
-    fn parse_located(&self, module_name: &str, interface: bool) -> Option<Arc<dyn ParsedSource>> {
-        self.typecheck(module_name, interface)
-            .map(|source| source.parsed)
-    }
 }
 
 /// A loaded module: OCaml's `full` (a `File.t` and its `extra`).

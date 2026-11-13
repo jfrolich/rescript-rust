@@ -336,15 +336,6 @@ impl FileContext {
     }
 }
 
-/// Where the coordinates of a declaration imported from another file's
-/// published interface are found. Builds compile without locations, so such
-/// a declaration's location has no coordinates: it names the slot a located
-/// parse of the declaring file allocates for it.
-pub trait SlotPositions {
-    /// The start of slot `slot` in a located parse of `file`.
-    fn slot_start(&self, file: &str, slot: u32) -> Option<(i32, i32, i32)>;
-}
-
 /// A typed tree and what its locations are read with.
 pub struct Tree<'a> {
     /// The parsed tree the typed tree was checked from.
@@ -355,26 +346,22 @@ pub struct Tree<'a> {
     pub ta: &'a tt::TypedArena,
     /// The run's file names.
     pub files: &'a Files,
-    /// Coordinates of declarations imported from other files.
-    pub slots: &'a dyn SlotPositions,
     file_ids: RefCell<HashMap<crate::intern::StrIdx, FileId>>,
 }
 
 impl<'a> Tree<'a> {
-    /// A typed tree read with `files` and `slots`.
+    /// A typed tree read with `files`.
     pub fn new(
         arena: &'a ParseArena,
         types: &'a TypeContext,
         ta: &'a tt::TypedArena,
         files: &'a Files,
-        slots: &'a dyn SlotPositions,
     ) -> Tree<'a> {
         Tree {
             arena,
             types,
             ta,
             files,
-            slots,
             file_ids: RefCell::new(HashMap::new()),
         }
     }
@@ -412,60 +399,29 @@ impl<'a> Tree<'a> {
         self.arena.loc_ghost(idx)
     }
 
-    /// A declaration's location. A declaration imported from another file
-    /// has only its start, read from that file's located parse; both ends
-    /// are that position.
+    /// A declaration's location, in this file or in the file another
+    /// module declares it in. The project is built with source locations
+    /// (see [`super::run`]), so every declaration carries its position, as in
+    /// OCaml's `.cmi`.
     pub fn decl_loc(&self, loc: DeclLoc) -> Loc {
         let location = self.types.resolve_loc(loc);
         if location.is_none() {
             return Loc::NONE;
         }
         let file_name = location.loc_start.file_name;
-        let imported = self.types.resolve_cmi_longident_component(file_name);
-        if loc.source_location().is_none() {
-            // A location with coordinates.
-            let file = match &imported {
-                Some(name) => self.files.intern(name),
-                None => self.own_file(file_name),
-            };
-            let pos = |p: &crate::location::Position| Pos {
-                file,
-                lnum: p.line,
-                bol: p.bol,
-                cnum: p.cnum,
-            };
-            return Loc {
-                start: pos(&location.loc_start),
-                end: pos(&location.loc_end),
-                ghost: location.loc_ghost,
-            };
-        }
-        let name: String = match imported {
-            Some(name) => name,
-            None => self
-                .arena
-                .own_file_name(file_name)
-                .unwrap_or_default()
-                .to_string(),
+        let file = match self.types.resolve_cmi_longident_component(file_name) {
+            Some(name) => self.files.intern(&name),
+            None => self.own_file(file_name),
         };
-        let file = self.files.intern(&name);
-        let (lnum, bol, cnum) = self
-            .slots
-            .slot_start(&name, location.origin.raw())
-            .unwrap_or((
-                location.loc_start.line,
-                location.loc_start.bol,
-                location.loc_start.cnum,
-            ));
-        let start = Pos {
+        let pos = |p: &crate::location::Position| Pos {
             file,
-            lnum,
-            bol,
-            cnum,
+            lnum: p.line,
+            bol: p.bol,
+            cnum: p.cnum,
         };
         Loc {
-            start,
-            end: start,
+            start: pos(&location.loc_start),
+            end: pos(&location.loc_end),
             ghost: location.loc_ghost,
         }
     }
