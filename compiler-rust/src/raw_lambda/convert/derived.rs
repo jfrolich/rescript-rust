@@ -636,7 +636,61 @@ mod tests {
             }
             rest = &rest[at + 1 + digits..];
         }
-        out + rest
+        renumber_exits(&(out + rest))
+    }
+
+    /// Canonicalize static-exit numbers in first-occurrence order, ignoring
+    /// quoted strings. Test-only cost: O(bytes + exits squared), with one
+    /// table shared by exit uses and catch binders.
+    fn renumber_exits(printed: &str) -> String {
+        let mut seen = Vec::new();
+        let mut out = String::with_capacity(printed.len());
+        let mut rest = printed;
+        let mut quoted = false;
+        let mut escaped = false;
+        while !rest.is_empty() {
+            let prefix = if !quoted && rest.starts_with("(exit ") {
+                Some("(exit ")
+            } else if !quoted && rest.starts_with("with (") {
+                Some("with (")
+            } else {
+                None
+            };
+            if let Some(prefix) = prefix {
+                out.push_str(prefix);
+                rest = &rest[prefix.len()..];
+                let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+                let number = &rest[..end];
+                if !number.is_empty() {
+                    let index = seen.iter().position(|old| *old == number).unwrap_or_else(|| {
+                        seen.push(number);
+                        seen.len() - 1
+                    });
+                    out.push_str(&(index + 1).to_string());
+                    rest = &rest[end..];
+                }
+            } else {
+                let c = rest.chars().next().unwrap();
+                out.push(c);
+                rest = &rest[c.len_utf8()..];
+                if quoted && escaped {
+                    escaped = false;
+                } else if quoted && c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    quoted = !quoted;
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn static_exit_numbers_are_canonical_but_literals_are_not() {
+        assert_eq!(
+            renumber_exits("(catch (exit 42) with (42) \"with (7) (exit 8)\")"),
+            "(catch (exit 1) with (1) \"with (7) (exit 8)\")",
+        );
     }
 
     /// A planned item lowers to the raw Lambda of its general form.
@@ -673,6 +727,13 @@ mod tests {
             assert_eq!(none, 0);
             assert_eq!(planned, general, "{source}");
         }
+    }
+
+    #[test]
+    fn variant_fixture_general_types() {
+        let source = include_str!("../../../../tests/ppx_spice/src/Variants.res");
+        let (_, lowered) = record_lambda(source, false);
+        assert_eq!(lowered, 0);
     }
 
     /// The printed raw Lambda of the value `probe` of `source`, compiled
@@ -788,7 +849,7 @@ let probe = (json_arr, bad, decoded) => if length(json_arr) != 2 {bad} else {dec
             ("argument", r#"type t = A(int)
 let probe = r => switch r {
 | Ok(v0) => Ok(A(v0))
-| Error(e: Spice.decodeError) => Spice.error(~path="[1]" ++ e.path, e.message, e.value)
+| Error(e: Spice.decodeError) => Error({...e, path: "[1]" ++ e.path})
 }"#),
         ] {
         let expected = match name {
@@ -840,13 +901,14 @@ let probe = r => switch r {
            (makeblock Ok/4 (makeblock A/5 v0/2)))
         case constructor "Error":
          (let (e/6 =a (field:var/3 r/1))
-           (apply (field:error/3 Spice/7)
-             (makeblock some_not_nested
-               (string.concat "[1]" (field:path/3 e/6)))
-             (field:message/5 e/6) (field:value/4 e/6)))))"#,
+           (makeblock Error/4
+             (let (init/7 = e/6)
+               (makeblock [path;message;value]
+                 (string.concat "[1]" (field:path/3 e/6))
+                 (field:message/5 init/7) (field:value/4 init/7)))))))"#,
             _ => unreachable!(),
         };
-        assert_eq!(probe(source), expected, "{name}");
+        assert_eq!(probe(source), renumber_exits(expected), "{name}");
         }
     }
 

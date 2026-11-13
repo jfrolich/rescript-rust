@@ -125,6 +125,18 @@ pub(crate) const CURRIED_LIBRARY: &str = "module Curried = {\n  module Spice = {
 /// `Spice.error` with an optional `~path`. Self-contained, so the tests need
 /// no compiled standard library.
 pub(crate) const RECORD_LIBRARY: &str = r#"
+external \"==": ('a, 'a) => bool = "%equal"
+external \"!=": ('a, 'a) => bool = "%notequal"
+module Result = {
+  let map = (r, f) => switch r {
+  | Ok(v) => Ok(f(v))
+  | Error(e) => Error(e)
+  }
+}
+module Array = {
+  external length: array<'a> => int = "%array_length"
+  external getUnsafe: (array<'a>, int) => 'a = "%array_unsafe_get"
+}
 external \"++": (string, string) => string = "%string_concat"
 module JSON = {
   @unboxed
