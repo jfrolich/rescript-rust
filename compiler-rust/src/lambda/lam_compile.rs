@@ -886,11 +886,16 @@ impl LambdaCompiler {
             let deps = self.finish_lowered_output(deps, &possible_required_modules);
             let checked = candidate.map(|candidate| match candidate {
                 Ok(candidate) => {
-                    let crate::bir::shadow::LowerCandidate { arena: j, block, exports, reservations, dynamic_imports: dynamic, stats } = candidate;
+                    let crate::bir::shadow::LowerCandidate { arena: j, block, exports, reservations, dynamic_imports: dynamic, mut stats, decisions } = candidate;
                     // The lowering extracted, coerced and resolved the
                     // exports (bir/lower/export.rs): no legacy export code.
                     let new_before = coerced_program(j, block, exports, reservations, shadow_side_effect);
                     self.dynamic_import_modules = dynamic;
+                    // THREE_TREES 11.4, "T4c design": the lowering's step A
+                    // against the tail-call pass on the program that pass
+                    // receives. Counted in the report; the pass decides.
+                    let decided = apply_external_shadow_pass(apply_js_flatten_pass(new_before.clone()));
+                    stats.decisions = crate::bir::shadow::compare_decisions(&decisions, &decided.program);
                     let new_after = self.finish_lowered_output(new_before.clone(), &possible_required_modules);
                     crate::bir::shadow::LowerCheck::Supported(Box::new(crate::bir::shadow::LowerPair {
                         stats,

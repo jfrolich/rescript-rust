@@ -8,6 +8,7 @@ mod try_;
 mod ffi_args;
 mod external;
 mod call;
+mod close;
 mod cond;
 mod exit;
 mod export;
@@ -294,6 +295,42 @@ pub(crate) struct SwitchStats {
     pub comparisons: usize,
     pub compared_pairs: usize,
     pub location_visits: usize,
+    /// Steps of `close::decide` over every copied run.
+    pub close_steps: usize,
+    /// Step A against the legacy tail-call pass (`shadow::compare_decisions`),
+    /// zero until check mode compares.
+    #[serde(flatten)]
+    pub decisions: DecisionStats,
+}
+
+/// The decisions of step A (`close::decide`) compared with those of the
+/// legacy tail-call pass on the same program after the flatten and
+/// external-shadow passes, by declared identifier (THREE_TREES 11.4, "T4c
+/// design" (a) and (b)).
+#[derive(Clone, Copy, Default, serde::Serialize)]
+pub(crate) struct DecisionStats {
+    /// Declarations the lowering decided.
+    pub decision_rows: usize,
+    /// Identifiers the legacy pass gives a status.
+    pub decision_legacy: usize,
+    /// Rows whose identifier the legacy pass does not see declared.
+    pub decision_extra: usize,
+    /// Identifiers of the legacy pass without a row.
+    pub decision_missing: usize,
+    /// Identifiers with more than one row: copies that print alike.
+    pub decision_copied: usize,
+    /// Identifiers whose `built`, summed over their rows, is not the count
+    /// the legacy pass reads.
+    pub decision_count_differences: usize,
+    /// Rows whose status is not the legacy status of their identifier.
+    pub decision_status_differences: usize,
+    /// Rows with the legacy status whose inline candidacy (a recorded site)
+    /// is not the legacy pass's.
+    pub decision_site_differences: usize,
+    /// Rows the lowering would inline, and identifiers the legacy pass
+    /// keeps for inlining.
+    pub decision_inline: usize,
+    pub decision_legacy_inline: usize,
 }
 
 pub(crate) struct Lowered {
@@ -543,7 +580,9 @@ impl State {
         let (list, coerced) = match exports {
             Some(exports) if !exports.is_empty() => {
                 let coerced = self.coerce_exports(run, exports, out.finished);
-                (self.coerced_list(run), coerced)
+                let list = self.coerced_list(run);
+                self.statements.close(&mut self.arena, list);
+                (list, coerced)
             }
             _ => (
                 self.statements.take_list(&mut self.arena, run),
@@ -600,6 +639,8 @@ impl State {
                 comparisons: self.switch_comparisons,
                 compared_pairs: self.switch_compared,
                 location_visits: self.location_steps,
+                close_steps: self.statements.closed,
+                decisions: DecisionStats::default(),
             },
         }
     }

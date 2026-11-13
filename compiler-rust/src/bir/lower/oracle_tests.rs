@@ -1132,3 +1132,206 @@ fn flattening_after_a_site_in_a_returned_conditional_was_spliced_maps_its_predic
         text("z => {\n      if (z) {\n        return 1;\n      } else {\n        return 2;\n      }\n    }"),
     );
 }
+
+/// Step A's decisions for one Lambda (not simplified first) against the
+/// legacy tail-call pass on the same program after P1 and P2: the comparison
+/// counters, and `(name, status, inline, built)` per decided declaration.
+fn step_a(build: impl Fn(&mut LamArena) -> Lam) -> (DecisionStats, Vec<(String, crate::js_ir::op::UsedStats, bool, u32)>) {
+    use crate::js_ir::op::UsedStats;
+    use crate::lambda::js_pass_external_shadow::apply_external_shadow_pass as shadow;
+    use crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_pass as flatten;
+    let mut a = LamArena::new();
+    let root = build(&mut a);
+    let input = bridge::import_lambda(&a, root).unwrap();
+    let source_root = input.root;
+    let mut state = State::new(input);
+    let probed = state.probe(Cx::value(), source_root).unwrap();
+    let lowered = state.complete(Cx::value(), probed);
+    let program = shadow(flatten(bridge_j::export_js(&lowered.program).unwrap()));
+    let scope = lowered.program.arena.js_scope.as_ref().unwrap();
+    let decisions: Vec<_> = scope.decisions.iter().map(|decision| (lowered.program.idents[decision.var.index()], *decision)).collect();
+    let stats = crate::bir::shadow::compare_decisions(&decisions, &program.program);
+    let status = |bits| [UsedStats::DeadPure, UsedStats::DeadNonPure, UsedStats::Exported, UsedStats::OncePure, UsedStats::Used]
+        .into_iter().find(|status| *status as u32 == bits).unwrap();
+    let rows = decisions.iter().map(|(ident, d)| (ident.name().to_string(), status(d.status()), d.inline(), d.built())).collect();
+    (stats, rows)
+}
+
+fn agrees(stats: &DecisionStats) {
+    assert_eq!(
+        (stats.decision_extra, stats.decision_missing, stats.decision_copied, stats.decision_count_differences, stats.decision_status_differences, stats.decision_site_differences),
+        (0, 0, 0, 0, 0, 0)
+    );
+    assert_eq!(stats.decision_rows, stats.decision_legacy);
+    assert_eq!(stats.decision_inline, stats.decision_legacy_inline);
+}
+
+/// `c => { let f = p => ext(p, p); <body(f, c)> }`.
+fn with_local_function(a: &mut LamArena, body: impl Fn(&mut LamArena, Ident, Ident) -> Lam) -> Lam {
+    use crate::lambda::LamLoc;
+    let (f, p, c) = (Ident::new("f", 10, IdentFlags::NONE), Ident::new("p", 11, IdentFlags::NONE), Ident::new("c", 12, IdentFlags::NONE));
+    let ext = a.var(Ident::new("ext", 13, IdentFlags::NONE));
+    let (p1, p2) = (a.var(p), a.var(p));
+    let value = call(a, ext, &[p1, p2]);
+    let function = a.function_(1, &[p], value, Default::default(), LamLoc::NONE);
+    let body = body(a, f, c);
+    let inner = a.let_(LetKind::Strict, f, function, body);
+    a.function_(1, &[c], inner, Default::default(), LamLoc::NONE)
+}
+
+#[test]
+fn step_a_decides_as_the_tail_call_pass_does() {
+    // THREE_TREES.md 11.4, "T4c design" (a) and (b): the decisions only.
+    use crate::js_ir::op::UsedStats;
+    use crate::lambda::LamLoc;
+    use crate::lambda::lam_primitive::Primitive;
+    let int = |a: &mut LamArena, i| a.const_(C::Int { i, comment: None });
+    let apply_f = |a: &mut LamArena, f: Ident, i: i32| {
+        let callee = a.var(f);
+        let arg = a.const_(C::Int { i, comment: None });
+        call(a, callee, &[arg])
+    };
+    let row = |rows: &[(String, UsedStats, bool, u32)], name: &str| rows.iter().find(|row| row.0 == name).cloned().unwrap();
+    // A function called once, by the `return` that ends its scope.
+    let (stats, rows) = step_a(|a| with_local_function(a, |a, f, _| apply_f(a, f, 1)));
+    agrees(&stats);
+    assert_eq!(row(&rows, "f"), ("f".into(), UsedStats::OncePure, true, 1));
+    // The same call in a branch of a returned conditional (finding 1).
+    let (stats, rows) = step_a(|a| with_local_function(a, |a, f, c| {
+        let applied = apply_f(a, f, 1);
+        let (test, two) = (a.var(c), int(a, 2));
+        a.if_(test, applied, two)
+    }));
+    agrees(&stats);
+    assert_eq!(row(&rows, "f"), ("f".into(), UsedStats::OncePure, true, 1));
+    // Below two conditionals and as the last operand of a sequence.
+    let (stats, rows) = step_a(|a| with_local_function(a, |a, f, c| {
+        let applied = apply_f(a, f, 1);
+        let effect = a.prim_raw(Primitive::PinitMod, &[], LamLoc::NONE);
+        let sequence = a.seq_raw(effect, applied);
+        let (test, two) = (a.var(c), int(a, 2));
+        let inner = a.if_(test, sequence, two);
+        let (test, three) = (a.var(c), int(a, 3));
+        a.if_(test, three, inner)
+    }));
+    agrees(&stats);
+    assert_eq!(row(&rows, "f"), ("f".into(), UsedStats::OncePure, true, 1));
+    // Two calls: used, no candidate.
+    let (stats, rows) = step_a(|a| with_local_function(a, |a, f, c| {
+        let (first, second, test) = (apply_f(a, f, 1), apply_f(a, f, 2), a.var(c));
+        a.if_(test, first, second)
+    }));
+    agrees(&stats);
+    assert_eq!(row(&rows, "f"), ("f".into(), UsedStats::Used, false, 2));
+    // One use that is no tail call: an argument.
+    let (stats, rows) = step_a(|a| with_local_function(a, |a, f, _| {
+        let (ext, argument) = (a.var(Ident::new("ext", 13, IdentFlags::NONE)), a.var(f));
+        call(a, ext, &[argument])
+    }));
+    agrees(&stats);
+    assert_eq!(row(&rows, "f"), ("f".into(), UsedStats::OncePure, false, 1));
+    // The call is a predicate, or the head of a sequence: no site.
+    let (stats, rows) = step_a(|a| with_local_function(a, |a, f, _| {
+        let (test, one, two) = (apply_f(a, f, 1), int(a, 1), int(a, 2));
+        a.if_(test, one, two)
+    }));
+    agrees(&stats);
+    assert_eq!(row(&rows, "f"), ("f".into(), UsedStats::OncePure, false, 1));
+    // Never used: dead and pure.
+    let (stats, rows) = step_a(|a| with_local_function(a, |a, _, _| int(a, 3)));
+    agrees(&stats);
+    assert_eq!(row(&rows, "f"), ("f".into(), UsedStats::DeadPure, false, 0));
+}
+
+#[test]
+fn step_a_finds_a_dead_block_binding_and_no_site_in_the_boundary_shape() {
+    use crate::js_ir::op::UsedStats;
+    use crate::lambda::{LamLoc, TagInfo};
+    use crate::lambda::lam_compat::FieldDbgInfo;
+    use crate::lambda::lam_primitive::{Mutable, Primitive};
+    // Finding 5: `() => { let x = (ext(1), ext(2)); 3 }`.
+    let (stats, rows) = step_a(|a| {
+        let x = Ident::new("x", 10, IdentFlags::NONE);
+        let ext = Ident::new("ext", 13, IdentFlags::NONE);
+        let (one, two) = (a.const_(C::Int { i: 1, comment: None }), a.const_(C::Int { i: 2, comment: None }));
+        let (e1, e2) = (a.var(ext), a.var(ext));
+        let (first, second) = (call(a, e1, &[one]), call(a, e2, &[two]));
+        let block = a.prim_raw(Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable), &[first, second], LamLoc::NONE);
+        let three = a.const_(C::Int { i: 3, comment: None });
+        let body = a.let_(LetKind::Strict, x, block, three);
+        a.function_(0, &[], body, Default::default(), LamLoc::NONE)
+    });
+    agrees(&stats);
+    assert_eq!(rows, vec![("x".to_string(), UsedStats::DeadNonPure, false, 0)]);
+    // The boundary shape: `() => { let pair = (x => x, 1); pair[0](2) }`.
+    let (stats, rows) = step_a(|a| {
+        let (pair, x) = (Ident::new("pair", 10, IdentFlags::NONE), Ident::new("x", 11, IdentFlags::NONE));
+        let read = a.var(x);
+        let function = a.function_(1, &[x], read, Default::default(), LamLoc::NONE);
+        let one = a.const_(C::Int { i: 1, comment: None });
+        let block = a.prim_raw(Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable), &[function, one], LamLoc::NONE);
+        let target = a.var(pair);
+        let field = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Tuple), &[target], LamLoc::NONE);
+        let two = a.const_(C::Int { i: 2, comment: None });
+        let applied = call(a, field, &[two]);
+        let body = a.let_(LetKind::Strict, pair, block, applied);
+        a.function_(0, &[], body, Default::default(), LamLoc::NONE)
+    });
+    agrees(&stats);
+    assert_eq!(rows, vec![("pair".to_string(), UsedStats::OncePure, false, 1)]);
+    assert_eq!(stats.decision_inline, 0);
+}
+
+#[test]
+fn step_a_reads_the_export_set_at_the_top_level() {
+    // The unit path: `let f = () => 1` exported, and `g` called once by the
+    // exported `h`. Lambda simplification is skipped by lowering directly.
+    use crate::bir::shadow::LowerCheck;
+    use crate::lambda::{LamLoc, TagInfo};
+    use crate::lambda::lam_primitive::{Mutable, Primitive};
+    let mut a = LamArena::new();
+    let f = Ident::new("f", 10, IdentFlags::NONE);
+    let one = a.const_(C::Int { i: 1, comment: None });
+    let function = a.function_(0, &[], one, Default::default(), LamLoc::NONE);
+    let reference = a.var(f);
+    let exports = a.prim_raw(Primitive::Pmakeblock(TagInfo::ModuleExport(vec![f]), Mutable::Immutable), &[reference], LamLoc::NONE);
+    let root = a.let_(LetKind::Strict, f, function, exports);
+    let mut compiler = LambdaCompiler::new();
+    let (_, check) = compiler.compile_deps_program_with_lower_check::<true>(a, root, Default::default());
+    let Some(LowerCheck::Supported(pair)) = check else { panic!("supported unit") };
+    let stats = pair.stats.decisions;
+    agrees(&stats);
+    assert_eq!((stats.decision_rows, stats.decision_inline), (1, 0));
+}
+
+#[test]
+fn ten_thousand_declarations_close_in_three_steps_each() {
+    // A run of 10,000 declarations: `f_i = p => ext(p)` and
+    // `g_i = () => f_i(1)`, alternating; every `f_i` has one use, the tail
+    // call of `g_i`. `close::decide` takes one step per declaration and two
+    // per function body (its `return` and the call it returns).
+    use crate::lambda::LamLoc;
+    let mut a = LamArena::new();
+    let mut root = a.const_(C::JsNull);
+    for i in (0..5_000).rev() {
+        let (f, g, p) = (Ident::new("f", 3 * i + 1, IdentFlags::NONE), Ident::new("g", 3 * i + 2, IdentFlags::NONE), Ident::new("p", 3 * i + 3, IdentFlags::NONE));
+        let (ext, read) = (a.var(Ident::new("ext", 20_000, IdentFlags::NONE)), a.var(p));
+        let value = call(&mut a, ext, &[read]);
+        let callee_function = a.function_(1, &[p], value, Default::default(), LamLoc::NONE);
+        let (callee, one) = (a.var(f), a.const_(C::Int { i: 1, comment: None }));
+        let applied = call(&mut a, callee, &[one]);
+        let caller = a.function_(0, &[], applied, Default::default(), LamLoc::NONE);
+        root = a.let_(LetKind::Strict, g, caller, root);
+        root = a.let_(LetKind::Strict, f, callee_function, root);
+    }
+    let input = bridge::import_lambda(&a, root).unwrap();
+    let source_root = input.root;
+    let mut state = State::new(input);
+    let probed = state.probe(Cx::value(), source_root).unwrap();
+    let lowered = state.complete(Cx::value(), probed);
+    let scope = lowered.program.arena.js_scope.as_ref().unwrap();
+    assert_eq!(scope.decisions.len(), 10_000);
+    assert_eq!(scope.decisions.iter().filter(|decision| decision.inline()).count(), 5_000);
+    // 10,000 declarations and the sentinel statement, 10,000 bodies.
+    assert_eq!(lowered.switch_stats.close_steps, 10_001 + 2 * 10_000);
+}

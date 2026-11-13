@@ -932,6 +932,52 @@ pub(crate) struct LowerCandidate {
     pub reservations: Vec<crate::ident::Ident>,
     pub dynamic_imports: Vec<crate::js_ir::ModuleId>,
     pub stats: super::lower::SwitchStats,
+    /// Step A's decision per declaration, with the identifier it prints as.
+    pub decisions: Vec<(crate::ident::Ident, super::lower::scope::Decision)>,
+}
+
+/// Step A's decisions (`lower::close`) against the legacy tail-call pass's
+/// on `program`, the new side's program after the flatten and
+/// external-shadow passes: the same identifiers on both sides, so the
+/// comparison is by declared identifier. A difference is a finding, counted
+/// in the report, not a failure of the gate: the legacy pass still decides.
+/// Check mode only. One hash lookup per row and per legacy identifier; the
+/// identifiers are those of the legacy JS IR, which has no dense index.
+pub(crate) fn compare_decisions(
+    decisions: &[(crate::ident::Ident, super::lower::scope::Decision)],
+    program: &crate::js_ir::arena::JsProgram,
+) -> super::lower::DecisionStats {
+    use ahash::AHashMap;
+    let legacy = crate::lambda::js_pass_tailcall_inline::decisions(program);
+    let mut stats = super::lower::DecisionStats { decision_rows: decisions.len(), decision_legacy: legacy.len(), ..Default::default() };
+    // Per identifier: its rows and the sum of their counts.
+    let mut rows: AHashMap<crate::ident::Ident, (u32, u64)> = AHashMap::with_capacity(decisions.len());
+    for (ident, decision) in decisions {
+        let row = rows.entry(*ident).or_default();
+        row.0 += 1;
+        row.1 += u64::from(decision.built());
+        stats.decision_inline += usize::from(decision.inline());
+        let Some(&(status, _, inline)) = legacy.get(ident) else {
+            stats.decision_extra += 1;
+            continue;
+        };
+        if decision.status() != status as u32 {
+            stats.decision_status_differences += 1;
+        } else if decision.inline() != inline {
+            stats.decision_site_differences += 1;
+        }
+    }
+    for (ident, &(_, count, inline)) in &legacy {
+        stats.decision_legacy_inline += usize::from(inline);
+        match rows.get(ident) {
+            None => stats.decision_missing += 1,
+            Some(&(copies, built)) => {
+                stats.decision_copied += usize::from(copies > 1);
+                stats.decision_count_differences += usize::from(built != count as u64);
+            }
+        }
+    }
+    stats
 }
 
 /// Import exactly the simplified root about to enter legacy compile_expr.
@@ -972,7 +1018,17 @@ pub(crate) fn prepare_lower(
         compare_lower_text("P1", "probe vs direct", &print(&direct), &print(&exported))
             .map_err(LowerFailure::Error)?;
     }
+    let scope = lowered.program.arena.js_scope.as_ref().expect("lowering scope");
+    let decisions = scope
+        .decisions
+        .iter()
+        .map(|decision| {
+            let origin = lowered.program.arena.vars.j_origin[decision.var.index()];
+            (lowered.program.idents[origin.index()], *decision)
+        })
+        .collect();
     Ok(LowerCandidate {
+        decisions,
         arena: exported.program.arena,
         block: exported.program.block,
         exports: lowered.coerced.exports,

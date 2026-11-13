@@ -23,6 +23,61 @@ pub(crate) struct Site {
     pub(crate) next: u32,
 }
 
+/// What the close of a run reads about one variable besides its counts
+/// (THREE_TREES 11.4, "T4c design"). Dense by VarId. The declaration's node
+/// and the head of the read sites join it with the decisions that use them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct VarFacts {
+    /// The call that is the variable's tail-call site: the last one a
+    /// copied run showed with the variable as callee. `NO_SITE` for none.
+    pub(crate) site: NodeId,
+    /// `EXPORTED`.
+    pub(crate) state: u32,
+}
+impl VarFacts {
+    pub(crate) const NO_SITE: NodeId = NodeId(u32::MAX);
+    /// The unit exports the variable (written once per export, after the
+    /// coercion; read through the variable's origin).
+    pub(crate) const EXPORTED: u32 = 1;
+}
+impl Default for VarFacts {
+    fn default() -> Self {
+        Self { site: Self::NO_SITE, state: 0 }
+    }
+}
+
+/// What step A decides for one declaration where its run is copied: the
+/// status the legacy tail-call pass would give it, read from `built`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Decision {
+    pub(crate) var: VarId,
+    /// The status in bits 0..3 (`js_ir::op::UsedStats`), `INLINE` in bit 3,
+    /// `built` in the bits above, saturating.
+    pub(crate) bits: u32,
+}
+impl Decision {
+    /// An inline candidate with a recorded site.
+    pub(crate) const INLINE: u32 = 8;
+    const COUNT_SHIFT: u32 = 4;
+    /// Constant.
+    pub(crate) fn new(var: VarId, status: crate::js_ir::op::UsedStats, inline: bool, built: u32) -> Self {
+        let count = built.min(u32::MAX >> Self::COUNT_SHIFT);
+        Self { var, bits: status as u32 | if inline { Self::INLINE } else { 0 } | (count << Self::COUNT_SHIFT) }
+    }
+    /// Constant.
+    pub(crate) fn status(self) -> u32 {
+        self.bits & 7
+    }
+    /// Constant.
+    pub(crate) fn inline(self) -> bool {
+        self.bits & Self::INLINE != 0
+    }
+    /// Constant.
+    pub(crate) fn built(self) -> u32 {
+        self.bits >> Self::COUNT_SHIFT
+    }
+}
+
 /// Enabled only on the lowering's J arena. Source L arenas need no rows.
 #[derive(Default)]
 pub(crate) struct Scope {
@@ -31,6 +86,10 @@ pub(crate) struct Scope {
     pub(crate) sites: Vec<Site>,
     /// The last site of each variable plus one, zero for none. Dense by VarId.
     pub(crate) site_heads: Vec<u32>,
+    /// Dense by VarId.
+    pub(crate) facts: Vec<VarFacts>,
+    /// One per declaration of every copied run, last slot first within a run.
+    pub(crate) decisions: Vec<Decision>,
     #[cfg(test)]
     pub(crate) updates: usize,
 }
@@ -41,6 +100,8 @@ impl Scope {
             uses: vec![Uses::default(); variables],
             sites: Vec::new(),
             site_heads: vec![0; variables],
+            facts: vec![VarFacts::default(); variables],
+            decisions: Vec::new(),
             #[cfg(test)]
             updates: 0,
         }
@@ -50,6 +111,7 @@ impl Scope {
     pub(crate) fn push(&mut self) {
         self.uses.push(Uses::default());
         self.site_heads.push(0);
+        self.facts.push(VarFacts::default());
     }
 
     /// Record the reference `node` of `var` where it is built. Returns the
@@ -89,6 +151,8 @@ mod tests {
     fn count_row_size() {
         assert_eq!(std::mem::size_of::<Uses>(), 8);
         assert_eq!(std::mem::size_of::<Site>(), 8);
+        assert_eq!(std::mem::size_of::<VarFacts>(), 8);
+        assert_eq!(std::mem::size_of::<Decision>(), 8);
     }
 
     #[test]

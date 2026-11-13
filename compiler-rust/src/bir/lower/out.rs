@@ -60,6 +60,10 @@ pub struct StatementStack {
     /// Slots of explicit empty block statements, sorted by slot. An entry is
     /// stale once its slot was consumed; `drop_empty_blocks` checks the slot.
     empties: Vec<(u32, NodeId)>,
+    /// Pending operands of the returned expression `close::decide` reads.
+    spine: Vec<super::close::Pending>,
+    /// Steps of `close::decide` over every copied run.
+    pub closed: usize,
 }
 impl StatementStack {
     /// K0: C:89 BlockOutput::make, start an empty output at the current top.
@@ -323,7 +327,8 @@ impl StatementStack {
     /// into the child-list pool once: one step per statement, hole and dead
     /// range of the run. The top run is popped; a run below the top becomes
     /// one dead range, so that what follows it is not moved. Never flattens
-    /// SBlock here.
+    /// SBlock here. The copied run is closed (`close::decide`: one more step
+    /// per statement) when the arena counts JavaScript occurrences.
     pub fn take_list(&mut self, bir: &mut Bir, span: Span) -> ListId {
         if span.len == 0 {
             // An empty run holds no slot. Its start is above the top when
@@ -335,7 +340,15 @@ impl StatementStack {
         let id = bir.lists.push_iter(count, self.statements(span));
         self.copied += count;
         self.kill(span);
+        self.close(bir, id);
         id
+    }
+    /// THREE_TREES 11.4, step A: decide the declarations of a copied list.
+    /// Cost: that of `close::decide`; nothing on an arena without counts.
+    pub(super) fn close(&mut self, bir: &mut Bir, list: ListId) {
+        if bir.js_scope.is_some() {
+            self.closed += super::close::decide(bir, list, &mut self.spine);
+        }
     }
 }
 
@@ -535,7 +548,7 @@ mod tests {
         assert_eq!(size_of::<FreeId>(), 4);
         assert_eq!(size_of::<Free>(), 16);
         assert_eq!(size_of::<Probed>(), 20);
-        assert_eq!(size_of::<StatementStack>(), 96);
+        assert_eq!(size_of::<StatementStack>(), 128);
         assert_eq!(size_of::<Option<Slot>>(), 12);
         assert_eq!(size_of::<FreePool>(), 40);
     }
