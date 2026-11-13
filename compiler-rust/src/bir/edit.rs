@@ -695,6 +695,7 @@ impl Bir {
             if let Some(body) = loop_body {
                 if body == child {
                     if jumps.0 & L::SWITCH_JUMP != 0 { loops.0 |= L::NEEDS_LABEL; }
+                    if jumps.0 & L::JUMP != 0 { loops.0 |= L::BODY_JUMP; }
                 } else {
                     // Bounds run outside the new frame. A while condition
                     // with statements runs inside its generated JS loop,

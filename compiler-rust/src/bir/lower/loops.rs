@@ -16,15 +16,14 @@ pub(super) struct Plan {
     start: Span,
     var: Option<VarId>,
     direction: u16,
-    label: Option<StrId>,
-    relowered: bool,
+    pub(super) label: Option<StrId>,
     needs_label: bool,
 }
 
 impl State {
     /// O(1): decode loop operands; the upward exclusive-bound rule inspects
     /// only the end primitive and its literal operand (C:6390).
-    pub(super) fn loop_statement(&mut self, node: NodeId) -> Loop {
+    pub(super) fn loop_statement(&mut self, cx: Cx, node: NodeId) -> Loop {
         let (nodes, var, direction) = match self.source.view(node) {
             View::While { condition, body } => ([Some(condition), Some(body), None], None, 0),
             View::For { var, parts } => {
@@ -52,7 +51,7 @@ impl State {
         let frame = Loop(self.loops.len() as u32);
         self.loops.push(Plan { node, nodes, blocks: [None; 3], values: [None; 2],
             start: self.statements.mark(), var, direction, label: None,
-            relowered: self.label_conditional_depth != 0, needs_label: self.source.loop_needs_label(node) });
+            needs_label: self.source.loop_needs_label_in_context(node, cx.switch_depth != 0) });
         frame
     }
 
@@ -63,7 +62,7 @@ impl State {
         for (index, &node) in plan.nodes.iter().enumerate() {
             if let Some(node) = node {
                 let body = index == body_index;
-                let switch_depth = if body { 0 } else if plan.var.is_none() { cx.switch_depth + 1 } else { cx.switch_depth };
+                let switch_depth = if body { cx.switch_depth } else if plan.var.is_none() { cx.switch_depth + 1 } else { cx.switch_depth };
                 into.push((Cx { cont: if body { Cont::Effect(Tail::No) } else { Cont::Value(Tail::No) },
                     switch_depth, loops: if body { LoopTop(frame.0 + 1) } else { cx.loops }, probing: false, ..cx }, node));
             }
@@ -102,12 +101,8 @@ impl State {
         let index = cx.loops.0 as usize - 1;
         let label = if cx.switch_depth == 0 { None } else {
             assert!(self.loops[index].needs_label, "missing construction-time loop label fact");
-            if self.loops[index].relowered {
-                return Err(Unsupported("loop label under a re-lowered conditional"));
-            }
             if self.loops[index].label.is_none() {
-                let label = self.arena.intern_text(&format!("loop_{}", self.next_loop_label));
-                self.next_loop_label += 1;
+                let label = self.symbolic_label();
                 self.loops[index].label = Some(label);
             }
             self.loops[index].label

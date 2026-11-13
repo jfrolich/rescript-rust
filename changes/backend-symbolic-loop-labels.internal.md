@@ -1,0 +1,1 @@
+Schedule loop labels symbolically in the opt-in backend, including labels consumed by discarded conditional probes, inherited switch contexts, and copied dispatch arms. Check 512 generated shapes against legacy printed output without re-lowering source bodies.

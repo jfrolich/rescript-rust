@@ -3,6 +3,7 @@
 mod args;
 mod assign;
 mod loops;
+mod label;
 mod try_;
 mod ffi_args;
 mod external;
@@ -181,6 +182,10 @@ pub enum ProbePlan<R> {
 pub trait ProbeRules {
     /// Decoded operands required after visiting children.
     type Resume;
+    /// O(1): observe source entry for symbolic label scheduling.
+    fn source_enter(&mut self, _cx: Cx, _node: NodeId) {}
+    /// O(arity): compose symbolic events after one completed lowering.
+    fn source_leave(&mut self, _output: &Probed) {}
     /// K1: C:1529 compile_expr; inspect and lower a source node exactly once.
     fn enter(
         &mut self,
@@ -243,8 +248,9 @@ impl SourceProbe {
                 Work::EnterChild(..) => unreachable!("resolved child context"),
                 Work::Enter(cx, node) => {
                     self.steps += 1;
+                    rules.source_enter(cx, node);
                     match rules.enter(cx, node)? {
-                        ProbePlan::Ready(value) => values.push(value),
+                        ProbePlan::Ready(value) => { rules.source_leave(&value); values.push(value); },
                         ProbePlan::Children(resume) => {
                             rules.children(cx, &resume, &mut children);
                             let parent = work.len();
@@ -270,6 +276,7 @@ impl SourceProbe {
                         .checked_sub(count)
                         .expect("source probe children");
                     let value = rules.finish(cx, resume, values.drain(start..))?;
+                    rules.source_leave(&value);
                     values.push(value);
                 }
             }
@@ -389,7 +396,7 @@ struct State {
     tries: Vec<try_::Plan>,
     loops: Vec<loops::Plan>,
     next_loop_label: u32,
-    label_conditional_depth: u32,
+    labels: label::Schedule,
     try_form_reads: usize,
     catch_work: Vec<NodeId>,
     /// `HAS_EXIT` reads that decided a flattening or a form.
@@ -466,7 +473,7 @@ impl State {
             tries: Vec::new(),
             loops: Vec::new(),
             next_loop_label: 0,
-            label_conditional_depth: 0,
+            labels: label::Schedule::default(),
             try_form_reads: 0,
             catch_work: Vec::new(),
             catch_flag_reads: 0,
@@ -493,6 +500,7 @@ impl State {
         let mut traversal = SourceProbe::default();
         let output = traversal.probe(self, cx, node);
         self.source_steps += traversal.steps;
+        if output.is_ok() { self.finish_labels(); }
         output
     }
     /// K2/K6: C:4715 append_effect_output / C:5144 compile_if_return_output.
@@ -551,6 +559,8 @@ impl State {
 }
 
 impl ProbeRules for State {
+    fn source_enter(&mut self, cx: Cx, node: NodeId) { self.label_enter(cx, node); }
+    fn source_leave(&mut self, output: &Probed) { self.label_leave(output); }
     type Resume = expr::Resume;
     /// K1/H12: C:1529 compile_expr and K:60 compile_constant.
     fn enter(&mut self, cx: Cx, node: NodeId) -> Result<ProbePlan<Self::Resume>, Unsupported> {
@@ -656,7 +666,7 @@ impl ProbeRules for State {
             }
             View::Try { body, exception, handler } => return Ok(ProbePlan::Children(expr::Resume::Try(self.try_statement(cx, body, Some(exception), Some(handler), None)))),
             View::TryFinally { body, finaliser } => return Ok(ProbePlan::Children(expr::Resume::Try(self.compile_try_finally(cx, body, finaliser)))),
-            View::While { .. } | View::For { .. } | View::ForOf { .. } | View::ForAwaitOf { .. } => return Ok(ProbePlan::Children(expr::Resume::Loop(self.loop_statement(node)))),
+            View::While { .. } | View::For { .. } | View::ForOf { .. } | View::ForAwaitOf { .. } => return Ok(ProbePlan::Children(expr::Resume::Loop(self.loop_statement(cx, node)))),
             View::Break => return Ok(ProbePlan::Ready(self.loop_jump(cx, false)?)),
             View::Continue => return Ok(ProbePlan::Ready(self.loop_jump(cx, true)?)),
             View::Assign { var, value } => return Ok(ProbePlan::Children(expr::Resume::Assign { var, value })),

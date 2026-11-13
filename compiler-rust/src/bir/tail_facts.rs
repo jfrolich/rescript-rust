@@ -29,12 +29,20 @@ impl LoopFacts {
     pub(super) const JUMP: u8 = 1;
     pub(super) const SWITCH_JUMP: u8 = 2;
     pub(super) const NEEDS_LABEL: u8 = 4;
+    pub(super) const BODY_JUMP: u8 = 8;
 }
 
 impl Bir {
     /// O(1): read the construction-time label requirement; never walk a body.
     pub fn loop_needs_label(&self, node: NodeId) -> bool {
         self.loop_facts.get(node.index()).is_some_and(|f| f.0 & LoopFacts::NEEDS_LABEL != 0)
+    }
+
+    /// O(1), one dense fact read: inherited switch context also labels direct
+    /// body jumps (compiler/core/lam_compile_context.ml:88 preserves depth).
+    pub fn loop_needs_label_in_context(&self, node: NodeId, in_switch: bool) -> bool {
+        let mask = LoopFacts::NEEDS_LABEL | if in_switch { LoopFacts::BODY_JUMP } else { 0 };
+        self.loop_facts.get(node.index()).is_some_and(|f| f.0 & mask != 0)
     }
 
     /// O(1): read the construction fact of a recursive function.
