@@ -13,16 +13,29 @@ use crate::lambda::{InlineAttribute, TagInfo};
 
 /// Check if a primitive operation is pure (no side effects).
 pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Constant>) -> bool {
+    is_pure_primitive_with_properties(prim, ConstantProperties {
+        nonzero: second_constant.is_some_and(not_zero_constant),
+        nonnegative_bigint: matches!(second_constant, Some(Constant::BigInt { negative: false, .. })),
+    })
+}
+
+/// Scalar constant facts needed by primitive purity; no owned payload required.
+pub(crate) struct ConstantProperties {
+    pub(crate) nonzero: bool,
+    pub(crate) nonnegative_bigint: bool,
+}
+
+pub(crate) fn is_pure_primitive_with_properties(prim: &Primitive, second: ConstantProperties) -> bool {
     match prim {
         Primitive::Pidentity | Primitive::Pignore => true,
         // Division can raise division by zero.
         Primitive::Pmodint | Primitive::Pdivint | Primitive::Pdivbigint | Primitive::Pmodbigint => {
-            second_constant.is_some_and(not_zero_constant)
+            second.nonzero
         }
         // lam_analysis.ml: raises on a negative exponent, so pure only when
         // the exponent is a nonnegative constant.
         Primitive::Ppowbigint => {
-            matches!(second_constant, Some(Constant::BigInt { negative: false, .. }))
+            second.nonnegative_bigint
         }
 
         // Creation and type checking primitives

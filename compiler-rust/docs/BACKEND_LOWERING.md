@@ -3266,11 +3266,22 @@ the beta helper allocations below remain active work.
 
 | Newly exposed inlining site | Ownership | Disposition |
 | --- | --- | --- |
-| `beta::delay_safe` traversal | fresh work vector per argument classification | pending |
-| `beta::simple` motion/usage/order/operand buffers | owning SmallVecs spill on wide applications | pending |
-| `beta::can_move` analysis | fresh saved/work vectors | pending |
+| `beta::delay_safe` traversal | retained work and separate purity walk; indexed children avoid SmallVec spills | removed |
+| `beta::simple` motion/usage/order/operand buffers | retained vectors cleared on acceptance and rejection; original ordering test unchanged | removed |
+| `beta::can_move` analysis | retained effect-state/traversal and hit/purity buffers, including early rejection | removed |
 | `beta::copy` traversal, operands, binder enumeration and static labels | fresh traversal collections and map entries | pending |
 | `beta::reduce` effects/rest/spare/moved runs | owning SmallVecs spill on wide applications | pending |
+
+Beta motion/simple-plan classification now retains its motion, usage, ordering,
+operand, traversal and effect-state buffers. Both acceptance and early rejection
+clear the buffers. Hit and purity walkers share storage-taking implementations
+with their existing callers; indexed children avoid hidden SmallVec spills.
+Primitive purity consumes scalar constant properties, avoiding owned bigint
+reconstruction while preserving the same decision table. A helper regression
+repeats a rejected 16-operand simple plan plus both classification walks 10,000
+times with zero warmed allocations and stable capacities. This is deliberately
+only a helper proof: copying/reduction buffers remain pending before the final
+whole-Lambda inlining zero-allocation gate.
 
 ### 7.5.1 Concurrent loop, label and recursive-value additions
 

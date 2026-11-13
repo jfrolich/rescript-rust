@@ -17,7 +17,7 @@
 //! through the list of entries touched, so a reduction costs its body, not
 //! the variable table.
 use super::exits::size_upto;
-use super::flatten::{hit, pure, refine};
+use super::flatten::{hit_with_work, pure, pure_with_work, refine};
 use crate::bir::bridge::Unsupported;
 use crate::bir::engine::{Engine, OpMask};
 use crate::bir::*;
@@ -51,6 +51,9 @@ pub(crate) struct Scratch {
     touched: Vec<VarId>,
     local: Vec<u32>,
     epoch: u32,
+    simple: Simple,
+    read_work: Vec<ReadWork>,
+    read_saved: Vec<bool>,
     /// Static labels of the handlers copied so far, by source label.
     labels: std::collections::BTreeMap<u32, (u32, CatchId)>,
 }
@@ -91,9 +94,10 @@ fn param_index(params: VarSpan, var: VarId) -> Option<usize> {
 
 /// `Lam_analysis.delay_safe` (lam_analysis.rs:264-305, lam_analysis.ml:141-193).
 /// `assignable` is the `ASSIGNED` flag.
-fn delay_safe(e: &Engine<'_>, root: NodeId) -> bool {
+fn delay_safe(e: &Engine<'_>, root: NodeId, work: &mut Vec<NodeId>, purity: &mut Vec<NodeId>) -> bool {
     let b = e.bir();
-    let mut work = vec![root];
+    work.clear(); work.push(root);
+    let result = (|| {
     while let Some(n) = work.pop() {
         match b.view(n) {
             View::Const { .. } | View::Fun { .. } | View::Global { .. } => continue,
@@ -109,7 +113,7 @@ fn delay_safe(e: &Engine<'_>, root: NodeId) -> bool {
                 | Primitive::Pdivbigint
                 | Primitive::Pmodbigint
                 | Primitive::Ppowbigint => {
-                    if !pure(e, n) {
+                    if !pure_with_work(e, n, purity) {
                         return false;
                     }
                 }
@@ -121,9 +125,12 @@ fn delay_safe(e: &Engine<'_>, root: NodeId) -> bool {
             },
             _ => return false,
         }
-        work.extend(b.view(n).children());
+        let view = b.view(n);
+        work.extend((0..view.child_count()).map(|at| view.child_at(at)));
     }
     true
+    })();
+    work.clear(); result
 }
 
 /// `Lam_beta_reduce_util` motion (lam_beta_reduce.rs:20-48).
@@ -133,10 +140,10 @@ enum Motion {
     Reads,
     Effects,
 }
-fn motion(e: &Engine<'_>, n: NodeId) -> Motion {
-    if delay_safe(e, n) {
+fn motion(e: &Engine<'_>, n: NodeId, work: &mut Vec<NodeId>, purity: &mut Vec<NodeId>) -> Motion {
+    if delay_safe(e, n, work, purity) {
         Motion::Anywhere
-    } else if pure(e, n) {
+    } else if pure_with_work(e, n, purity) {
         Motion::Reads
     } else {
         Motion::Effects
@@ -157,11 +164,17 @@ enum Operand {
 }
 
 /// `SimpleReduction` (lam_beta_reduce.rs:53-143).
+#[derive(Default)]
 struct Simple {
     params: VarSpan,
-    motions: SmallVec<[Motion; 8]>,
-    used: SmallVec<[bool; 8]>,
-    evaluated: SmallVec<[(usize, Motion); 8]>,
+    motions: Vec<Motion>,
+    used: Vec<bool>,
+    evaluated: Vec<(usize, Motion)>,
+    delay: Vec<NodeId>,
+    purity: Vec<NodeId>,
+    operands: Vec<Operand>,
+    built: Vec<NodeId>,
+    order: Vec<(usize, Motion)>,
 }
 impl Simple {
     fn evaluate(&mut self, conditional: bool, rank: usize, motion: Motion) -> Option<()> {
@@ -180,7 +193,8 @@ impl Simple {
                 Some(Operand::Arg(i))
             }
             None => {
-                self.evaluate(conditional, self.params.len(), motion(e, n))?;
+                let motion = motion(e, n, &mut self.delay, &mut self.purity);
+                self.evaluate(conditional, self.params.len(), motion)?;
                 Some(Operand::Var(x))
             }
         }
@@ -190,25 +204,25 @@ impl Simple {
         e: &Engine<'_>,
         conditional_from: usize,
         nodes: &[NodeId],
-    ) -> Option<SmallVec<[Operand; 8]>> {
-        let mut result = SmallVec::with_capacity(nodes.len());
+    ) -> Option<()> {
+        self.operands.clear();
         for (i, &n) in nodes.iter().enumerate() {
             match e.bir().view(n) {
-                View::Var { var } => result.push(self.variable(e, i >= conditional_from, n, var)?),
-                View::Const { value } => result.push(Operand::Const(value)),
+                View::Var { var } => { let operand = self.variable(e, i >= conditional_from, n, var)?; self.operands.push(operand); }
+                View::Const { value } => self.operands.push(Operand::Const(value)),
                 _ => return None,
             }
         }
-        Some(result)
+        Some(())
     }
-    fn in_call_order(&self) -> bool {
-        let order: SmallVec<[(usize, Motion); 16]> = (0..self.used.len())
+    fn in_call_order(&mut self) -> bool {
+        self.order.clear();
+        self.order.extend((0..self.used.len())
             .filter(|i| !self.used[*i])
             .map(|i| (i, self.motions[i]))
-            .chain(self.evaluated.iter().copied())
-            .collect();
-        order.iter().enumerate().all(|(k, &(rank, m))| {
-            order[k + 1..]
+            .chain(self.evaluated.iter().copied()));
+        self.order.iter().enumerate().all(|(k, &(rank, m))| {
+            self.order[k + 1..]
                 .iter()
                 .all(|&(later_rank, later)| rank <= later_rank || !conflict(m, later))
         })
@@ -228,18 +242,18 @@ fn leaf(e: &mut Engine<'_>, operand: Operand, args: &[NodeId], weight: u32) -> N
 /// built, so a refusal leaves the arguments untouched.
 fn simple(
     e: &mut Engine<'_>,
+    scratch: &mut Scratch,
     params: VarSpan,
     body: NodeId,
     args: &[NodeId],
     weight: u32,
 ) -> Option<NodeId> {
     let n = params.len().min(args.len());
-    let mut r = Simple {
-        params,
-        motions: args[..n].iter().map(|arg| motion(e, *arg)).collect(),
-        used: SmallVec::from_elem(false, n),
-        evaluated: SmallVec::new(),
-    };
+    let mut r = std::mem::take(&mut scratch.simple);
+    r.params = params;
+    for &arg in &args[..n] { let motion = motion(e, arg, &mut r.delay, &mut r.purity); r.motions.push(motion); }
+    r.used.resize(n, false);
+    let result = (|| {
     let result = match e.bir().view(body) {
         View::Prim {
             args: operands,
@@ -250,15 +264,14 @@ fn simple(
             } else {
                 usize::MAX
             };
-            let plan = r.operands(e, conditional_from, operands)?;
+            r.operands(e, conditional_from, operands)?;
             if !r.in_call_order() {
                 return None;
             }
-            let built: SmallVec<[NodeId; 8]> =
-                plan.iter().map(|o| leaf(e, *o, args, weight)).collect();
+            r.built.extend(r.operands.iter().map(|o| leaf(e, *o, args, weight)));
             let node = e.node(
                 View::Prim {
-                    args: &built,
+                    args: &r.built,
                     primitive,
                 },
                 0,
@@ -286,7 +299,7 @@ fn simple(
                 }
                 _ => return None,
             };
-            let plan = r.operands(e, usize::MAX, operands)?;
+            r.operands(e, usize::MAX, operands)?;
             if !r.in_call_order() {
                 return None;
             }
@@ -316,12 +329,11 @@ fn simple(
                     field
                 }
             };
-            let built: SmallVec<[NodeId; 8]> =
-                plan.iter().map(|o| leaf(e, *o, args, weight)).collect();
+            r.built.extend(r.operands.iter().map(|o| leaf(e, *o, args, weight)));
             let node = e.node(
                 View::Apply {
                     callee: new_callee,
-                    args: &built,
+                    args: &r.built,
                     info,
                 },
                 0,
@@ -349,12 +361,16 @@ fn simple(
         }
     }
     Some(result)
+    })();
+    r.motions.clear(); r.used.clear(); r.evaluated.clear(); r.delay.clear(); r.purity.clear();
+    r.operands.clear(); r.built.clear(); r.order.clear();
+    scratch.simple = r;
+    result
 }
 
 /// `Lam_beta_reduce.read_before_effects` (lam_beta_reduce.rs:262-336,
 /// lam_beta_reduce.ml:52-92).
-fn read_before_effects(e: &Engine<'_>, param: VarId, body: NodeId) -> bool {
-    enum Work {
+enum ReadWork {
         Visit(NodeId),
         PrimDone(NodeId),
         ApplyDone,
@@ -362,26 +378,29 @@ fn read_before_effects(e: &Engine<'_>, param: VarId, body: NodeId) -> bool {
         Swap,
         Join,
     }
+fn read_before_effects(e: &Engine<'_>, scratch: &mut Scratch, param: VarId, body: NodeId) -> bool {
     let b = e.bir();
     let mut effects = false;
-    let mut saved: Vec<bool> = Vec::new();
-    let mut work = vec![Work::Visit(body)];
+    let mut saved = std::mem::take(&mut scratch.read_saved);
+    let mut work = std::mem::take(&mut scratch.read_work);
+    work.push(ReadWork::Visit(body));
+    let result = (|| {
     while let Some(task) = work.pop() {
         match task {
-            Work::PrimDone(n) => {
-                if !pure(e, n) {
+            ReadWork::PrimDone(n) => {
+                if !pure_with_work(e, n, &mut scratch.simple.purity) {
                     effects = true;
                 }
             }
-            Work::ApplyDone => effects = true,
-            Work::Save => saved.push(effects),
-            Work::Swap => {
+            ReadWork::ApplyDone => effects = true,
+            ReadWork::Save => saved.push(effects),
+            ReadWork::Swap => {
                 let before = saved.pop().expect("saved effects");
                 saved.push(effects);
                 effects = before;
             }
-            Work::Join => effects |= saved.pop().expect("saved effects"),
-            Work::Visit(n) => match b.view(n) {
+            ReadWork::Join => effects |= saved.pop().expect("saved effects"),
+            ReadWork::Visit(n) => match b.view(n) {
                 View::Var { var } => {
                     if effects && var == param {
                         return false;
@@ -389,40 +408,40 @@ fn read_before_effects(e: &Engine<'_>, param: VarId, body: NodeId) -> bool {
                 }
                 View::Const { .. } | View::Global { .. } => {}
                 View::Prim { args, .. } => {
-                    work.push(Work::PrimDone(n));
-                    work.extend(args.iter().rev().copied().map(Work::Visit));
+                    work.push(ReadWork::PrimDone(n));
+                    work.extend(args.iter().rev().copied().map(ReadWork::Visit));
                 }
                 View::Apply { callee, args, .. } => {
-                    work.push(Work::ApplyDone);
-                    work.extend(args.iter().rev().copied().map(Work::Visit));
-                    work.push(Work::Visit(callee));
+                    work.push(ReadWork::ApplyDone);
+                    work.extend(args.iter().rev().copied().map(ReadWork::Visit));
+                    work.push(ReadWork::Visit(callee));
                 }
                 View::Let { value, body, .. } => {
-                    work.push(Work::Visit(body));
-                    work.extend(value.map(Work::Visit));
+                    work.push(ReadWork::Visit(body));
+                    work.extend(value.map(ReadWork::Visit));
                 }
                 View::Seq { first, second } => {
-                    work.push(Work::Visit(second));
-                    work.push(Work::Visit(first));
+                    work.push(ReadWork::Visit(second));
+                    work.push(ReadWork::Visit(first));
                 }
                 View::If {
                     condition,
                     then_,
                     else_,
                 } => {
-                    work.push(Work::Join);
-                    work.push(Work::Visit(else_));
-                    work.push(Work::Swap);
-                    work.push(Work::Visit(then_));
-                    work.push(Work::Save);
-                    work.push(Work::Visit(condition));
+                    work.push(ReadWork::Join);
+                    work.push(ReadWork::Visit(else_));
+                    work.push(ReadWork::Swap);
+                    work.push(ReadWork::Visit(then_));
+                    work.push(ReadWork::Save);
+                    work.push(ReadWork::Visit(condition));
                 }
                 // lam_beta_reduce.rs:312-333: code that may run later.
                 _ => {
-                    if hit(e, n, param) {
+                    if hit_with_work(e, n, param, &mut scratch.simple.delay) {
                         return false;
                     }
-                    if !pure(e, n) {
+                    if !pure_with_work(e, n, &mut scratch.simple.purity) {
                         effects = true;
                     }
                 }
@@ -430,11 +449,14 @@ fn read_before_effects(e: &Engine<'_>, param: VarId, body: NodeId) -> bool {
         }
     }
     true
+    })();
+    saved.clear(); work.clear(); scratch.read_saved = saved; scratch.read_work = work;
+    result
 }
 
 /// `Lam_beta_reduce.can_move` (lam_beta_reduce.rs:345-356, lam_beta_reduce.ml:94-105).
-fn can_move(e: &Engine<'_>, effects_after: bool, param: VarId, body: NodeId, arg: NodeId) -> bool {
-    delay_safe(e, arg) || (pure(e, arg) && !effects_after && read_before_effects(e, param, body))
+fn can_move(e: &Engine<'_>, scratch: &mut Scratch, effects_after: bool, param: VarId, body: NodeId, arg: NodeId) -> bool {
+    delay_safe(e, arg, &mut scratch.simple.delay, &mut scratch.simple.purity) || (pure_with_work(e, arg, &mut scratch.simple.purity) && !effects_after && read_before_effects(e, scratch, param, body))
 }
 
 /// `Lam_closure` statistics of one parameter (lam_closure.rs:16-70).
@@ -1036,7 +1058,7 @@ pub(crate) fn reduce(
     weight: u32,
     bound: &mut dyn FnMut(&Engine<'_>, VarId, NodeId),
 ) -> Result<NodeId, Unsupported> {
-    if let Some(result) = simple(e, params, body, args, weight) {
+    if let Some(result) = simple(e, scratch, params, body, args, weight) {
         *e.stats.rules.entry("beta-simple").or_default() += 1;
         return Ok(result);
     }
@@ -1058,7 +1080,7 @@ pub(crate) fn reduce(
                 scratch.set(param, Sub::Const(value));
                 spare.push(arg);
             }
-            View::Var { var } if can_move(e, after, param, body, arg) => {
+            View::Var { var } if can_move(e, scratch, after, param, body, arg) => {
                 scratch.set(param, Sub::Var(var));
                 spare.push(arg);
             }
@@ -1069,7 +1091,7 @@ pub(crate) fn reduce(
                     && pure(e, arg)
                     && stats[param_index(params, param).expect("parameter")]
                         .top_and_used_zero_or_one()
-                    && can_move(e, after, param, body, arg)
+                    && can_move(e, scratch, after, param, body, arg)
                 {
                     scratch.set(param, Sub::Node(arg));
                     moved.push((param, arg));
@@ -1544,5 +1566,35 @@ mod tests {
             let applied = app(&mut a, function, &[argument]);
             compare(a, applied, shape % 2 == 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::*;
+    #[test]
+    fn rejected_wide_simple_plans_and_motion_walks_reuse_storage() {
+        let mut b = Bir::default();
+        let params = b.new_vars(&[crate::name::Name::new("p"); 16]);
+        let operands: Vec<_> = (0..16).map(|i| b.new_node(View::Var { var: VarId(params.start + if i == 15 { 0 } else { i }) }, 0)).collect();
+        let primitive = b.intern_prim(PrimPayload { primitive: Primitive::Pmakearray, loc: LamLoc::NONE });
+        let body = b.new_node(View::Prim { args: &operands, primitive }, 0);
+        let value = b.intern_const(Constant::Int(1));
+        let args: Vec<_> = (0..16).map(|_| b.new_node(View::Const { value }, 0)).collect();
+        let mut e = Engine::new(&mut b); let mut scratch = Scratch::default();
+        let run = |e: &mut Engine<'_>, scratch: &mut Scratch| {
+            assert!(simple(e, scratch, params, body, &args, 1).is_none());
+            assert!(delay_safe(e, body, &mut scratch.simple.delay, &mut scratch.simple.purity));
+            assert!(read_before_effects(e, scratch, VarId(params.start), body));
+        };
+        run(&mut e, &mut scratch);
+        let capacities = |s: &Scratch| [s.simple.motions.capacity(), s.simple.used.capacity(), s.simple.evaluated.capacity(),
+            s.simple.operands.capacity(), s.simple.built.capacity(), s.simple.order.capacity(), s.simple.delay.capacity(), s.simple.purity.capacity(),
+            s.read_work.capacity(), s.read_saved.capacity()];
+        let before = capacities(&scratch);
+        let allocations = allocation_counter::measure(|| { for _ in 0..10_000 { run(&mut e, &mut scratch); } });
+        assert_eq!(allocations.count_total, 0, "{allocations:?}"); assert_eq!(capacities(&scratch), before);
+        assert!(scratch.simple.used.is_empty() && scratch.simple.operands.is_empty() && scratch.simple.delay.is_empty()
+            && scratch.read_work.is_empty() && scratch.read_saved.is_empty());
     }
 }
