@@ -827,6 +827,37 @@ fn cross_module_inline_after_lowering_a_closure_with_assignment() {
     compare_oracle(a, root, Some(&resolver), true, &[0,1,2,3,4], None, true);
 }
 
+#[test]
+fn cross_module_inline_of_a_body_that_holds_a_function() {
+    // The function inside the inlined body gets its header while the fragment
+    // is imported, after the unit's own header (the closure's). The lowering
+    // reads headers from its own arena, so that header must be made there: a
+    // header left in the source's table is read out of bounds, or as the
+    // closure's.
+    use crate::cmi::persistent_env::CmjExportArity;
+    use crate::js_ir::ModulePathResolver;
+    use crate::lambda::{ApInfo, ApplyStatus, FieldDbgInfo, LamLoc, Lambda, lam_arity::Arity, lam_primitive::Primitive};
+    let resolver = ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+    let param = Ident::new("arg", 100, IdentFlags::NONE);
+    let first = Ident::new("first", 101, IdentFlags::NONE);
+    let second = Ident::new("second", 102, IdentFlags::NONE);
+    let inner = Lambda::function_(2, vec![first, second], Lambda::var(param), Default::default(), LamLoc::NONE);
+    resolver.set_bir_test_export("Other", "run", CmjExportArity::Single(Arity::info(vec![1], false)),
+        Some(Lambda::function_(1, vec![param], inner, Default::default(), LamLoc::NONE)));
+    let mut a = LamArena::new();
+    let global = a.global_module(Ident::create_persistent("Other"));
+    let callee = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Module { name: crate::name::Name::new("run") }), &[global], LamLoc::NONE);
+    let arg = a.const_(C::JsNull);
+    let call = a.apply_raw(callee, &[arg], ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE });
+    let mutable = Ident::new("mutable", 10, IdentFlags::NONE);
+    let assignment = a.assign(mutable, arg);
+    let unit = Ident::new("unit", 11, IdentFlags::NONE);
+    let attr = crate::lambda::FunctionAttribute { one_unit_arg: true, ..Default::default() };
+    let closure = a.function_(1, &[unit], assignment, attr, LamLoc::NONE);
+    let root = a.seq_raw(closure, call);
+    compare_oracle(a, root, Some(&resolver), true, &[0,1,2,3,4], None, true);
+}
+
 /// The legacy pipeline on one function bound to an exported `run`, with the
 /// passes `order` names (1 flatten, 2 external shadow, 3 tail-call inlining,
 /// 4 record rest, 5 substitution and dead marks, 6 shake), printed. For the T4
