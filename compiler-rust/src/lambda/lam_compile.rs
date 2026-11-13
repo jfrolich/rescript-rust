@@ -836,11 +836,9 @@ impl LambdaCompiler {
             let deps = self.finish_lowered_output(deps, &possible_required_modules);
             let checked = candidate.map(|candidate| match candidate {
                 Ok(candidate) => {
-                    let crate::bir::shadow::LowerCandidate { arena: j, block, exports, finished, dynamic_imports: dynamic, stats } = candidate;
-                    let saved_stamp = self.id_gen.current_stamp();
-                    // The lowering extracted the exports; the fold is still the legacy one.
-                    let new_before = self.coerce_extracted_output(j, block, exports, finished, shadow_side_effect);
-                    self.id_gen.restore_current_stamp(saved_stamp);
+                    let crate::bir::shadow::LowerCandidate { arena: j, block, exports, reservations, finished, dynamic_imports: dynamic, stats } = candidate;
+                    // The lowering extracted and coerced the exports.
+                    let new_before = self.finish_coerced_output(j, block, exports, reservations, finished, shadow_side_effect);
                     self.dynamic_import_modules = dynamic;
                     let new_after = self.finish_lowered_output(new_before.clone(), &possible_required_modules);
                     crate::bir::shadow::LowerCheck::Supported(Box::new(crate::bir::shadow::LowerPair {
@@ -876,8 +874,7 @@ impl LambdaCompiler {
         self.coerce_extracted_output(j, block, extracted, compiled.finished, side_effect)
     }
 
-    /// C:790–827: export coercion on extracted exports. The new lowering
-    /// extracts them itself (`bir/lower/export.rs`) and enters here.
+    /// C:790–800: the export fold of the legacy lowering.
     fn coerce_extracted_output(
         &mut self,
         mut j: JsArena,
@@ -899,6 +896,20 @@ impl LambdaCompiler {
                 (vec![], vec![])
             }
         };
+        self.finish_coerced_output(j, block, exports, name_reservations, finished, side_effect)
+    }
+
+    /// C:801–827: undeclared exports and alias resolution after the fold.
+    /// The new lowering folds on rows (`bir/lower/export.rs`) and enters here.
+    fn finish_coerced_output(
+        &mut self,
+        mut j: JsArena,
+        mut block: Block,
+        exports: Vec<Ident>,
+        name_reservations: Vec<Ident>,
+        finished: OutputFinished,
+        side_effect: Option<String>,
+    ) -> DepsProgram {
         // lam_compile_main.ml `declare_undeclared_exports`: when the
         // toplevel always throws, the groups after the throw are dropped
         // and the identifiers they bind are undeclared. Declare each such

@@ -926,8 +926,10 @@ pub(crate) struct LowerCandidate {
     pub arena: crate::js_ir::arena::JsArena,
     /// The top-level statements, effects of the last value included.
     pub block: Vec<crate::js_ir::arena::Stmt>,
-    /// The export identifiers and their values, extracted by the lowering.
-    pub exports: Option<crate::lambda::lam_coercion::ExtractedExports>,
+    /// The exported identifiers after the lowering's coercion, and the
+    /// original identifiers whose names they reserve.
+    pub exports: Vec<crate::ident::Ident>,
+    pub reservations: Vec<crate::ident::Ident>,
     pub finished: crate::lambda::lam_compile::OutputFinished,
     pub dynamic_imports: Vec<crate::js_ir::ModuleId>,
     pub stats: super::lower::SwitchStats,
@@ -955,7 +957,7 @@ pub(crate) fn prepare_lower(
         .map_err(|error| LowerFailure::Error(anyhow::anyhow!("lower validation: {error}")))?;
     // bridge_j's exporter uses expr_with/stmt_with and alloc_* only: no
     // smart constructor and no normalize.
-    let mut exported = super::bridge_j::export_js(&lowered.program)
+    let exported = super::bridge_j::export_js(&lowered.program)
         .map_err(|error| LowerFailure::Error(anyhow::anyhow!("lower export: {error}")))?;
     super::j::write_stats(lowered.program.arena.j_stats)
         .map_err(|error| LowerFailure::Error(anyhow::anyhow!("J normalisation stats: {error}")))?;
@@ -971,26 +973,6 @@ pub(crate) fn prepare_lower(
         compare_lower_text("P1", "probe vs direct", &print(&direct), &print(&exported))
             .map_err(LowerFailure::Error)?;
     }
-    // The values of the exports are the last statements, one plain SExp each.
-    let exports = match lowered.exports {
-        None => None,
-        Some(exports) => {
-            let block = &mut exported.program.block;
-            let start = block.len().checked_sub(exports.len()).ok_or_else(|| {
-                LowerFailure::Error(anyhow::anyhow!("lower export lacks export values"))
-            })?;
-            let mut values = Vec::with_capacity(exports.len());
-            for carrier in block.drain(start..) {
-                let crate::js_ir::arena::StmtKind::Exp(value) = exported.program.arena.sk(carrier) else {
-                    return Err(LowerFailure::Error(anyhow::anyhow!(
-                        "lower export value is not SExp"
-                    )));
-                };
-                values.push(value);
-            }
-            Some(crate::lambda::lam_coercion::ExtractedExports { exports, values })
-        }
-    };
     use crate::lambda::lam_compile::OutputFinished;
     let finished = match lowered.finished {
         super::lower::Finished::True => OutputFinished::True,
@@ -1000,7 +982,8 @@ pub(crate) fn prepare_lower(
     Ok(LowerCandidate {
         arena: exported.program.arena,
         block: exported.program.block,
-        exports,
+        exports: lowered.coerced.exports,
+        reservations: lowered.coerced.reservations,
         finished,
         dynamic_imports: lowered.dynamic_imports,
         stats: lowered.switch_stats,

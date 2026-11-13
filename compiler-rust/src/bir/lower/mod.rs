@@ -299,10 +299,8 @@ pub(crate) struct SwitchStats {
 pub(crate) struct Lowered {
     pub program: super::bridge_j::Imported,
     pub finished: Finished,
-    /// The identifiers of the unit's export block, or `None` without one.
-    /// Their values are the last statements of the root block, one plain
-    /// `SExp` each, in the same order.
-    pub exports: Option<Vec<Ident>>,
+    /// The exports after coercion and the names they reserve (`export.rs`).
+    pub coerced: export::Coerced,
     pub dynamic_imports: Vec<crate::js_ir::ModuleId>,
     pub switch_stats: SwitchStats,
 }
@@ -406,6 +404,10 @@ struct State {
     catch_flag_reads: usize,
     /// Handler nodes read to find the label of an exit (4.1 step 1).
     catch_walk_steps: usize,
+    /// The variables of the export blocks, as the importer recorded them.
+    export_vars: Vec<u32>,
+    /// The tables of the export fold (`export.rs`).
+    coercion: export::Tables,
 }
 impl State {
     /// N1: C:481 new. Transfer cold pools, while source hot nodes/list operands
@@ -481,6 +483,8 @@ impl State {
             catch_work: Vec::new(),
             catch_flag_reads: 0,
             catch_walk_steps: 0,
+            export_vars: input.export_vars,
+            coercion: Default::default(),
         }
     }
     /// K1: C:1529 compile_expr. Direct mode is the bounded P1 oracle: convert
@@ -530,7 +534,24 @@ impl State {
     fn complete_unit(mut self, probed: Probed) -> Lowered {
         let out = self.realize(Cx::value(), probed);
         let exports = self.extract_exports(out.value, out.finished);
-        self.finish(out.stmts, out.finished, exports)
+        let run = self.statements.since(Span {
+            start: out.stmts.start,
+            len: 0,
+        });
+        let (list, coerced) = match exports {
+            Some(exports) if !exports.is_empty() => {
+                let coerced = self.coerce_exports(run, exports, out.finished);
+                (self.coerced_list(run), coerced)
+            }
+            _ => (
+                self.statements.take_list(&mut self.arena, run),
+                export::Coerced {
+                    exports: Vec::new(),
+                    reservations: Vec::new(),
+                },
+            ),
+        };
+        self.finish(list, out.finished, coerced)
     }
 
     /// The output of one construct in `cx`, for the rule tests: the value is
@@ -543,17 +564,21 @@ impl State {
             .unwrap_or_else(|| self.pure_expression(View::JUndefined, 0));
         let value = self.arena.new_node(View::SExp { value }, 0);
         self.statements.push(value);
-        self.finish(out.stmts, out.finished, None)
-    }
-
-    /// Copy the top-level run that starts at `stmts` to the root block: one
-    /// step per statement of the run and one write per catch of the unit.
-    fn finish(mut self, stmts: Span, finished: Finished, exports: Option<Vec<Ident>>) -> Lowered {
         let run = self.statements.since(Span {
-            start: stmts.start,
+            start: out.stmts.start,
             len: 0,
         });
         let list = self.statements.take_list(&mut self.arena, run);
+        let coerced = export::Coerced {
+            exports: Vec::new(),
+            reservations: Vec::new(),
+        };
+        self.finish(list, out.finished, coerced)
+    }
+
+    /// The root block over the top-level list. One step per statement of
+    /// the list and one write per catch of the unit.
+    fn finish(mut self, list: crate::bir::ListId, finished: Finished, coerced: export::Coerced) -> Lowered {
         let root = self.arena.block_from_list(list);
         // The headers keep their labels and parameters; the exits they count
         // stay in the source, which reads the counts while a function of
@@ -565,7 +590,7 @@ impl State {
         Lowered {
             program: super::bridge_j::Imported::from_lowering(self.arena, root, self.idents),
             finished,
-            exports,
+            coerced,
             dynamic_imports: self.dynamic_imports,
             switch_stats: SwitchStats {
                 source_visits: self.source_steps,

@@ -419,8 +419,9 @@ fn located_functions_match_mapping_sequences() {
     } else {
         source.function_(0, &[], body, FunctionAttribute::default(), loc)
     };
-    // The unit exports the value: its carrier statement prints as the value.
-    let exported = source.prim_raw(
+    // The unit exports the value, so that it is printed. The gate compares
+    // both texts and their mapping sequences.
+    let root = source.prim_raw(
         crate::lambda::lam_primitive::Primitive::Pmakeblock(
             crate::lambda::TagInfo::ModuleExport(vec![Ident::new("value", 11, IdentFlags::NONE)]),
             crate::lambda::lam_primitive::Mutable::Immutable,
@@ -428,45 +429,28 @@ fn located_functions_match_mapping_sequences() {
         &[root],
         crate::lambda::LamLoc::NONE,
     );
-    let input = bridge::import_lambda(&source, exported).unwrap();
-    let lowered = super::lower(input, Some(&locations), false).unwrap();
-    assert_eq!(lowered.exports.as_ref().map(Vec::len), Some(1));
-    let actual = bridge_j::export_js(&lowered.program).unwrap();
     let mut compiler = LambdaCompiler::new();
     compiler.set_source_map_enabled(true);
     compiler.set_lam_locs(locations.clone());
-    let compiled = compiler.bir_lower_oracle(
-        &mut source,
-        root,
-        Cx::value().cont,
-        Ident::new("unused", 1, IdentFlags::NONE),
-    );
-    let stmt = compiler.j.stmt(StmtKind::Exp(compiled.expr));
-    let expected = JsDepsProgram {
-        program: JsProgram::new_in(vec![stmt], vec![], compiler.j),
-        modules: vec![],
-        side_effect: None,
-    };
+    let (deps, check) = compiler.compile_deps_program_with_lower_check::<true>(source, root, Default::default());
+    let check = check.unwrap();
+    assert!(matches!(check, crate::bir::shadow::LowerCheck::Supported(_)));
+    crate::bir::shadow::check_lower(check, "Mapping.res", false).unwrap();
     let locations = Arc::new(locations);
-    let print = |p| {
-        crate::js_ir::print_deps_program_with_source_map(
-            p,
-            None,
-            &[],
-            false,
-            false,
-            false,
-            std::path::Path::new("Mapping.js"),
-            std::path::Path::new("Mapping.res"),
-            SourceMapMode::Hidden,
-            false,
-            "",
-            locations.clone(),
-        )
-    };
-    let expected = print(&expected);
-    let actual = print(&actual);
-    assert_eq!(actual, expected);
+    let actual = crate::js_ir::print_deps_program_with_source_map(
+        &deps,
+        None,
+        &[],
+        false,
+        false,
+        false,
+        std::path::Path::new("Mapping.js"),
+        std::path::Path::new("Mapping.res"),
+        SourceMapMode::Hidden,
+        false,
+        "",
+        locations.clone(),
+    );
     let map: serde_json::Value = serde_json::from_str(actual.1.as_ref().unwrap()).unwrap();
     assert_ne!(map["mappings"], "");
     }
