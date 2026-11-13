@@ -380,6 +380,45 @@ mod checker_choice_tests {
         assert_eq!(CheckerChoice::parse("both"), Some(CheckerChoice::Both));
         assert_eq!(CheckerChoice::parse("other"), None);
     }
+
+    #[test]
+    fn both_compares_fake_observations_but_does_not_force_declined_ones() {
+        use super::checker_results_agree;
+        use crate::tc::Declined;
+        // Signature, ordered diagnostics, and unit reads are independent observations.
+        let old = ("signature", "warning:1:2", [3, 5]);
+        assert!(checker_results_agree(Ok(old), || old));
+        assert!(!checker_results_agree(Ok(("different", old.1, old.2)), || old));
+        assert!(!checker_results_agree(Ok((old.0, "warning:2:3", old.2)), || old));
+        assert!(!checker_results_agree(Ok((old.0, old.1, [3, 6])), || old));
+        assert!(checker_results_agree::<()>(Err(Declined::NotBuilt), || panic!("declined")));
+    }
+}
+
+/// O(1) on a decline; otherwise the cost of producing and comparing observations.
+/// The old observations are lazy: declined units need no canonicalization.
+fn checker_results_agree<T: PartialEq>(
+    new: Result<T, crate::tc::Declined>,
+    old: impl FnOnce() -> T,
+) -> bool {
+    match new {
+        Err(crate::tc::Declined::NotBuilt) => true,
+        Ok(new) => new == old(),
+    }
+}
+
+/// O(1) per unit, before the old checker can emit warnings or publish anything.
+/// No successful new result exists in R0; Both's comparison is consequently empty.
+fn offer_unit_to_checker(choice: CheckerChoice, filename: &str) {
+    if choice == CheckerChoice::Old {
+        return;
+    }
+    let new = crate::tc::check_unit();
+    let Err(reason) = new;
+    log::debug!(target: "rescript_checker", "tc-declined {reason:?} {filename}");
+    if choice == CheckerChoice::Both {
+        assert!(checker_results_agree(new.map(|never| match never {}), || ()));
+    }
 }
 
 /// Compiler options that can be passed to the driver.
@@ -6439,6 +6478,7 @@ fn compile_source_to_js_with_options_inner(
         current_unit_name.as_deref(),
     )
     .and_then(|env| {
+        offer_unit_to_checker(options.checker, filename);
         type_structure(&mut tctx, &env, parser.arena(), &structure).map(|typed| (typed, env))
     });
     let ((typed_structure, final_env), env) = match typed {
@@ -7687,6 +7727,7 @@ pub fn typecheck_interface_source(
         current_unit_name.as_deref(),
     )
     .and_then(|env| {
+        offer_unit_to_checker(options.checker, filename);
         transl_signature(&mut tctx, &env, parser.arena(), &signature)
             .map(|typed_signature| (typed_signature, env))
     });
@@ -10265,6 +10306,7 @@ pub fn typecheck_structure_for_tooling(
             &file_config,
             &frontend_warning_specs,
         );
+        offer_unit_to_checker(options.checker, filename);
         let typed = match env.and_then(|env| type_structure(&mut tctx, &env, arena, structure)) {
             Ok((typed_structure, _final_env)) => ToolingTyped::Implementation(typed_structure),
             Err(e) => {
@@ -10316,6 +10358,7 @@ pub fn typecheck_signature_for_tooling(
             &file_config,
             &frontend_warning_specs,
         );
+        offer_unit_to_checker(options.checker, filename);
         let typed = match env.and_then(|env| transl_signature(&mut tctx, &env, arena, signature)) {
             Ok(typed_signature) => ToolingTyped::Interface(typed_signature),
             Err(e) => {
@@ -10473,6 +10516,7 @@ fn compile_until_js(
     let typed = crate::timing::measure(crate::timing::Phase::Typecheck, || {
         let _phase = info_span!("compiler.type_structure").entered();
         env.and_then(|env| {
+            offer_unit_to_checker(options.checker, filename);
             type_structure(&mut tctx, &env, arena, structure).map(|typed| (typed, env))
         })
     });
@@ -11574,6 +11618,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     let typed = crate::timing::measure(crate::timing::Phase::Typecheck, || {
         let _phase = info_span!("compiler.type_signature").entered();
         env.and_then(|env| {
+            offer_unit_to_checker(options.checker, filename);
             transl_signature(&mut tctx, &env, arena, signature)
                 .map(|typed_signature| (typed_signature, env))
         })
