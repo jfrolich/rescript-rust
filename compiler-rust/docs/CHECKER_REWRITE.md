@@ -284,7 +284,8 @@ graph and changes the price of every operation on it.
 
 Before item by item: what does the graph of 2.1 cost when nothing else is
 in the way? [The kernel](prototypes/checker-kernel/src/main.rs) is a
-stand-alone program of 520 lines (measurement probe, not compiler code): a
+stand-alone program of 520 lines with eight tests (measurement probe, not
+compiler code): a
 16-byte node (tag and arity, level, two words), one `Vec` of nodes and one
 of list slots, templates with relative references, unification with
 links in the specified direction and levels written on every node, the
@@ -1240,7 +1241,9 @@ Engineering standard, checked by the reviewer:
 1. Every function you add on a compile path states in its doc comment what
    one call costs. Wherever it has a loop or a recursion, a test builds an
    input of 10,000 elements, counts steps with tc::steps (R0), and asserts
-   the bound (for example: at most 3 steps per element).
+   the bound (for example: at most 3 steps per element). A walk over a
+   type 10,000 nodes deep must not overflow a 2 MB stack: use an explicit
+   stack.
 2. No hash map keyed by a handle, a binder, a unit or a node: use a dense
    table indexed by it. A hash map in new code needs one sentence in the
    pull request saying why no index exists.
@@ -1765,13 +1768,15 @@ rests on.
 | **The checker with its surroundings** | **45,022** | **14,080** | **22,350** | |
 | Unit reads | 2,607 | 300 | 600 | estimated (THREE_TREES T3) |
 
-The budget is 18,000 to 22,000.
+The budget is 18,000 to 22,000. (The rows of today add up to 44,999; 1.4's
+45,022 uses the inclusive count of `type_structure`, 0.06% above the
+toggled one.)
 
 - **The design reaches about 14,100 instructions per line**, 31% of
   today, if every figure holds.
 - **The cautious reading is about 22,400**, at the budget's upper edge.
 - What is **measured in situ** of that reduction of 23,000 to 31,000 is
-  865 (the journal) plus 320 a line that a template saves on today's
+  865 (the journal) plus 345 a line that a template saves on today's
   storage (4.1): 4%. Everything else is a kernel measurement multiplied by
   a count, a quoted measurement extended, or an estimate.
 
@@ -1824,6 +1829,15 @@ Together these floors are about 900 a line of the design's 14,100.
 - How many opened layers a lookup probes.
 - The kernel with abbreviations, rows or two tiers of handles; 40% to 50%
   was added for them without a measurement.
+- The invariant the pruned occurrence check relies on (a node's level is
+  never below its children's) is argued from where `update_level`,
+  `generalize` and `instance` write levels, not checked on a build. Slice
+  R3's differential test is where a counterexample would show; if there
+  is one, the occurrence check walks the whole type as today and item 1
+  of 2.3 loses that part.
+- The kernel's walks recurse: a type 10,000 nodes deep overflows a 2 MB
+  stack in its tests, which run on a larger one. The checker's walks over
+  types need an explicit stack; its cost is not in the kernel's figures.
 - The OCaml compiler was not run for this document. The program of 2.4
   idea 1 was compiled with the Rust compiler of trunk only; the fixtures
   of 2.1 carry expected files written by the OCaml compiler.

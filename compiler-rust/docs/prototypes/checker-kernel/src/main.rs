@@ -15,6 +15,9 @@ const GENERIC: u32 = 100_000_000;
 const TAG_VAR: u32 = 0;
 const TAG_LINK: u32 = 1;
 const TAG_CONSTR: u32 = 2;
+/// Tuples are built by one test only; the probe's operations use
+/// constructors and arrows.
+#[cfg(test)]
 const TAG_TUPLE: u32 = 3;
 const TAG_ARROW: u32 = 4;
 /// In a template, a reference with this bit is relative to the instance.
@@ -517,4 +520,146 @@ fn main() {
     }
     println!("{op} n={n} sink={sink} steps={}", g.steps);
     assert_eq!(std::mem::size_of::<Node>(), 16);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const N: u32 = 10_000;
+
+    /// The kernel's walks recurse; a type 10,000 deep needs more than a
+    /// test thread's stack. (The checker's walks over types must not
+    /// depend on that: CHECKER_REWRITE 6.0.)
+    fn deep(test: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(256 << 20)
+            .spawn(test)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// `option<option<...<int>>>`, `N` nodes.
+    fn chain(g: &mut Graph) -> Template {
+        template(g, |g| {
+            let mut t = g.tconstr(INT, &[]);
+            for _ in 1..N {
+                t = g.tconstr(OPTION, &[t]);
+            }
+            t
+        })
+    }
+
+    #[test]
+    fn node_is_16_bytes() {
+        assert_eq!(std::mem::size_of::<Node>(), 16);
+    }
+
+    #[test]
+    fn instance_is_one_step_a_node() {
+        let mut g = Graph::new();
+        let t = chain(&mut g);
+        g.instance(&t);
+        assert_eq!(g.steps, N as u64);
+        assert_eq!(g.nodes.len(), N as usize);
+    }
+
+    #[test]
+    fn unify_is_one_step_a_pair_and_none_the_second_time() {
+        deep(|| {
+            let mut g = Graph::new();
+            let t = chain(&mut g);
+            let x = g.instance(&t);
+            let y = g.instance(&t);
+            g.steps = 0;
+            assert!(g.unify(x, y));
+            assert_eq!(g.steps, N as u64);
+            g.steps = 0;
+            assert!(g.unify(x, y));
+            assert_eq!(g.steps, 0);
+        });
+    }
+
+    #[test]
+    fn binding_walks_the_type_once_and_skips_what_is_below_the_variable() {
+        deep(|| {
+            let mut g = Graph::new();
+            let t = chain(&mut g);
+            let x = g.instance(&t);
+            let v = g.push(Node { head: TAG_VAR, level: g.level, a: 0, b: 0 });
+            g.steps = 0;
+            assert!(g.unify(v, x));
+            // One step for the pair and one a node of the type.
+            assert_eq!(g.steps, N as u64 + 1);
+            // A variable of an inner scope against a type of the outer one.
+            let y = g.instance(&t);
+            g.level += 1;
+            let w = g.push(Node { head: TAG_VAR, level: g.level, a: 0, b: 0 });
+            g.steps = 0;
+            assert!(g.unify(w, y));
+            assert_eq!(g.steps, 1);
+        });
+    }
+
+    #[test]
+    fn a_variable_does_not_unify_with_a_type_that_holds_it() {
+        let mut g = Graph::new();
+        let v = g.push(Node { head: TAG_VAR, level: g.level, a: 0, b: 0 });
+        let start = g.lists.len() as u32;
+        g.lists.push(v);
+        let option_v =
+            g.push(Node { head: TAG_CONSTR | 1 << 8, level: g.level, a: OPTION, b: start });
+        assert!(!g.unify(v, option_v));
+    }
+
+    #[test]
+    fn generalize_is_one_step_a_node_and_none_the_second_time() {
+        deep(|| {
+            let mut g = Graph::new();
+            let t = chain(&mut g);
+            g.level += 1;
+            let x = g.instance(&t);
+            g.level -= 1;
+            g.steps = 0;
+            g.generalize(x);
+            assert_eq!(g.steps, N as u64);
+            g.steps = 0;
+            g.generalize(x);
+            assert_eq!(g.steps, 0);
+        });
+    }
+
+    #[test]
+    fn two_positions_of_a_scheme_stay_one_node_in_an_instance() {
+        // 'a => ('a, 'a): fixture 7b's sharing.
+        let mut g = Graph::new();
+        let t = template(&mut g, |g| {
+            let a = g.tvar();
+            let start = g.tlists.len() as u32;
+            g.tlists.extend_from_slice(&[a, a]);
+            g.tnodes.push(Node { head: TAG_TUPLE | 2 << 8, level: GENERIC, a: 0, b: start });
+            let pair = (g.tnodes.len() as u32 - 1) | REL;
+            g.tarrow(&[a], pair)
+        });
+        let f = g.instance(&t);
+        let arrow = g.nodes[f as usize];
+        let param = g.lists[arrow.b as usize];
+        let pair = g.nodes[arrow.a as usize];
+        assert_eq!(g.lists[pair.b as usize], param);
+        assert_eq!(g.lists[pair.b as usize + 1], param);
+        let other = g.instance(&t);
+        assert_ne!(g.lists[g.nodes[other as usize].b as usize], param);
+    }
+
+    #[test]
+    fn scopes_restore_the_shadowed_binding() {
+        let mut scopes = Scopes { head: vec![0; 16], log: Vec::new(), binders: vec![0] };
+        let outer = scopes.bind(3, 100);
+        let mark = scopes.log.len();
+        let inner = scopes.bind(3, 200);
+        assert_eq!(scopes.lookup(3), inner);
+        scopes.close(mark);
+        assert_eq!(scopes.lookup(3), outer);
+    }
 }
