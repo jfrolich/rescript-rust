@@ -12,6 +12,7 @@
 use super::common::*;
 use super::dce::*;
 use super::log::{DeadOptional, DeadWarning, Description, Issue, Severity, dead_warning_name};
+use super::ocaml_hash;
 use indexmap::{IndexMap, IndexSet};
 use std::collections::{HashMap, HashSet};
 
@@ -349,6 +350,30 @@ fn dead_module_loc(loc: Loc, file: FileId) -> Loc {
     }
 }
 
+/// The declaration whose module location a dead module is reported at.
+/// Declarations of one module agree on it; two modules of the same path,
+/// one shadowing the other, do not.
+///
+/// OCaml keeps the declarations of a module name in a hash table keyed by
+/// position (`Reactive.flat_map`'s contributions, created with `Hashtbl.create
+/// 4`, which has 16 buckets) and takes the one the table is visited at last.
+fn dead_module_representative<'a>(files: &Files, decls: &[&'a Decl]) -> &'a Decl {
+    let hashes: Vec<u32> = decls
+        .iter()
+        .map(|decl| {
+            let pos = decl.pos;
+            ocaml_hash::hash_position(
+                &files.name(pos.file),
+                i64::from(pos.lnum),
+                i64::from(pos.bol),
+                i64::from(pos.cnum),
+            )
+        })
+        .collect();
+    let last = ocaml_hash::iteration_order(16, &hashes).pop().unwrap_or(0);
+    decls[last]
+}
+
 /// `Dead_common.ref_is_below`.
 fn ref_is_below(decl: &Decl, pos_from: &Pos) -> bool {
     decl.pos.file != pos_from.file
@@ -600,16 +625,23 @@ pub fn solve(config: &Config, files: &Files, data: Vec<FileData>) -> Vec<Issue> 
     let mut dead_modules: IndexMap<Name, (Loc, FileId)> = IndexMap::new();
     if transitive {
         let mut modules_with_live: HashSet<Name> = HashSet::new();
+        let mut dead_by_module: IndexMap<Name, Vec<&Decl>> = IndexMap::new();
         for decl in merged.decls.values() {
             if is_live_decl(decl) {
                 modules_with_live.insert(decl_module_name(decl));
             } else {
-                dead_modules
+                dead_by_module
                     .entry(decl_module_name(decl))
-                    .or_insert((decl.module_loc, decl.pos.file));
+                    .or_default()
+                    .push(decl);
             }
         }
-        dead_modules.retain(|name, _| !modules_with_live.contains(name));
+        for (name, decls) in dead_by_module {
+            if !modules_with_live.contains(&name) {
+                let decl = dead_module_representative(files, &decls);
+                dead_modules.insert(name, (decl.module_loc, decl.pos.file));
+            }
+        }
     }
 
     // Live declarations annotated `@dead`.
