@@ -1005,7 +1005,8 @@ pub(crate) fn check_lower(check: LowerCheck, unit: &str, jsx_preserve: bool) -> 
             Err(anyhow::anyhow!("{unit}: lower: {error:#}"))
         }
         LowerCheck::Supported(pair) => {
-            let LowerPair { before, after, locations, stats } = *pair;
+            let LowerPair { mut before, after, locations, stats } = *pair;
+            before[0] = crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_pass(before[0].clone());
             for (text, pair) in [("lower", before), ("lower+passes", after)] {
                 let print = |p| {
                     crate::js_ir::print_deps_program_with_directives_and_options(

@@ -833,14 +833,14 @@ impl LambdaCompiler {
             let shadow_side_effect = if CHECK { side_effect.clone() } else { None };
             let deps = self.coerce_lowered_output(j, compiled, side_effect);
             let before = if CHECK { Some(deps.clone()) } else { None };
-            let deps = self.finish_lowered_output(deps, &possible_required_modules);
+            let deps = self.finish_lowered_output::<true>(deps, &possible_required_modules);
             let checked = candidate.map(|candidate| match candidate {
                 Ok((j, compiled, dynamic, stats)) => {
                     let saved_stamp = self.id_gen.current_stamp();
                     let new_before = self.coerce_lowered_output(j, compiled, shadow_side_effect);
                     self.id_gen.restore_current_stamp(saved_stamp);
                     self.dynamic_import_modules = dynamic;
-                    let new_after = self.finish_lowered_output(new_before.clone(), &possible_required_modules);
+                    let new_after = self.finish_lowered_output::<false>(new_before.clone(), &possible_required_modules);
                     crate::bir::shadow::LowerCheck::Supported(Box::new(crate::bir::shadow::LowerPair {
                         stats,
                         before: [before.expect("check capture"), new_before],
@@ -918,15 +918,15 @@ impl LambdaCompiler {
     }
 
     /// C:828–881: the six JS passes and dependency tail, shared by both lowerings.
-    fn finish_lowered_output(
+    fn finish_lowered_output<const FLATTEN: bool>(
         &mut self,
         mut deps: DepsProgram,
         possible_required_modules: &AHashSet<ModuleId>,
     ) -> DepsProgram {
-        deps = {
+        if FLATTEN {
             let _phase = info_span!("compiler.js_pass_flatten").entered();
-            apply_js_flatten_pass(deps)
-        };
+            deps = apply_js_flatten_pass(deps);
+        }
         deps = {
             let _phase = info_span!("compiler.js_pass_external_shadow").entered();
             apply_external_shadow_pass(deps)
