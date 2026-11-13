@@ -893,3 +893,51 @@ expected default-path saving is zero, not an optimization claim.
 `make lib` checks after both package build stamps. CI should run the same check
 after building runtime and Belt; the exact workflow insertion is supplied in
 the pull request, not a workflow edit here.
+
+## D14: duplicate runtime compilation investigation
+
+At `37ba9b513`, a clean runtime build with `RESCRIPT_BACKEND=check`
+compiles the runtime twice, not merely reports it twice. With
+`RESCRIPT_COMPILER_COUNTERS=1`, the driver signature census reports
+`exported_signatures units=226`; the log reports both
+`Compiled 113 runtime modules from source into registry` and
+`Compiled 113 modules`. Backend statistics contain 226 distinct unit paths,
+113 containing `/./`.
+
+`build::build` starts `pre_compile_runtime_modules_with_mode` concurrently
+with project parsing. `compile::compile` also ensures runtime availability;
+its already-registered guard avoids a third compilation. The first compile
+uses `runtime_source_paths` (directory-entry paths directly under the runtime
+root). The project compile uses `packages::read_folders_and_dirs`, which
+preserves the configured `.` source directory in module paths. The project
+compiler identifies the runtime by `package.name == "@rescript/runtime"`.
+It nevertheless schedules those same modules after the precompile.
+
+For a clean single-worker runtime build, release binaries measured with
+`valgrind --tool=cachegrind`, `RAYON_NUM_THREADS=1`, and
+`RESCRIPT_BACKEND=check` retire:
+
+| Revision | Instructions |
+| --- | ---: |
+| `10227bc20` (parent of `fc46a63933`) | 2,313,762,526 |
+| `37ba9b513` | 4,155,284,504 |
+
+These historical revisions also differ in other compiler changes; this is
+not an isolated measurement of the snapshot commit. Hardware `perf stat`
+was unavailable because the environment prohibits performance counters;
+Cachegrind supplies the instruction measurements instead.
+
+A verbose build of the `core_patterns.res` fixture under the same environment
+prints exactly:
+
+```text
+Not using the prebuilt @rescript/runtime: RESCRIPT_BACKEND is not supported. Compiling it from source.
+```
+
+Its signature census is 114 units (113 runtime plus one fixture). This is
+intentional: `snapshot::alternate_backend_option` rejects `check` and `new`
+so that the selected backend actually processes runtime sources. Reusing
+legacy-produced snapshot interfaces would bypass the shadow oracle. The
+sources match; source freshness is not the reason for rejection. Accordingly,
+the fixture coverage corpus must remain 593 units (480 fixtures plus 113
+runtime units), not 480. No snapshot eligibility change is warranted.
