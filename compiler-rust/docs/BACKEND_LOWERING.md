@@ -2655,11 +2655,11 @@ The statement stack and node-list pool must be used end to end.
 | `call.rs:94` `inline_external_function` | `let root = lambda.function_(function.arity, &function.params, body, function.attr.clone(), function.loc);` | per construct | borrow payload or retain typed pool handle | pending |
 | `call.rs:104` `inline_external_function` | `let mut foreign = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
 | `call.rs:175` `finish_application` | `.collect();` | per construct | reusable traversal/output/argument buffer retained in lowering state | removed |
-| `call.rs:197` `finish_application` | `self.apply_with_arity(callee, arity, values.into_vec())` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `call.rs:267` `resolve_cmj_module_field_arity` | `crate::cmi::persistent_env::CmjExportArity::Single(arity) => Some(arity.clone()),` | per construct | borrow payload or retain typed pool handle | pending |
-| `call.rs:289` `apply_with_arity` | `args: Vec<NodeId>,` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `call.rs:197` `finish_application` | `self.apply_with_arity(callee, arity, values.into_vec())` | per construct | Call arguments borrow the retained sequencing value buffer; no into_vec conversion remains. | removed |
+| `call.rs:267` `resolve_cmj_module_field_arity` | `crate::cmi::persistent_env::CmjExportArity::Single(arity) => Some(arity.clone()),` | per construct | Each module/member summary is resolved once and represented by an 8-byte span over unit arity groups, including groups wider than SmallVec inline capacity. | removed |
+| `call.rs:289` `apply_with_arity` | `args: Vec<NodeId>,` | per construct | apply_with_arity borrows a node slice; it does not own an argument vector. | removed |
 | `call.rs:300` `apply_with_arity` | `callee = self.call_node(callee, &remaining[..count], full.clone());` | per construct | stays: call-info scalar clone; no heap value | non-allocating |
-| `call.rs:313` `apply_with_arity` | `let mut full_args = remaining.to_vec();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `call.rs:313` `apply_with_arity` | `let mut full_args = remaining.to_vec();` | per construct | Eta expansion uses retained cleared argument storage and preserves left-to-right fresh parameter creation. | removed |
 | `cond.rs:154` `conditional_children` | `into: &mut Vec<(Cx, NodeId)>,` | per construct | reusable scratch buffer; clear, do not free | pending |
 | `exit.rs:75` `Plan` | `groups: Vec<usize>,` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
 | `exit.rs:76` `Plan` | `next: Vec<usize>,` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
@@ -3167,6 +3167,19 @@ inhibit literal merging; nested tagged/ordinary templates retain separate shapes
 | `jm12_interpolated_template` parts / merged / kept | temporary vectors per normalization | removed: streaming pooled quasis and retained kept buffer |
 | `jm12_interpolated_template` literal reconstruction | cloned source/cooked strings | removed: borrowed strings appended to retained buffers |
 | template concatenation/encoding helpers | temporary decoded/encoded vectors and strings | removed from lowering path: shared cores accept retained storage |
+
+External call arity summaries now resolve once per module/member into 8-byte
+AritySpans over unit-owned groups. Known empty arity remains distinct from unknown
+arity. Eta expansion borrows the sequenced arguments and reuses a cleared full-call
+argument buffer; fresh parameters retain left-to-right creation order. The
+whole-Lambda 10,000-partial-call fixture uses a six-group summary (past SmallVec's
+inline limit), saturates four groups and actually creates one eta parameter per
+call. Its warmed pass allocates zero with unchanged recorded capacities, 80,001
+source visits and 60,000 sequencing steps; all 10,000 calls share six stored arity
+groups. Append-only reservations include variable columns and JS occurrence rows.
+All-five-continuation oracle tests also exercise the six-group summary.
+Cross-module *body inlining* and its fresh import graph remain separate pending
+sites; this proof does not exercise them.
 
 ### 7.5.1 Concurrent loop, label and recursive-value additions
 

@@ -584,7 +584,7 @@ fn export_summaries_and_partial_calls_in_all_five_contexts() {
     use crate::cmi::persistent_env::CmjExportArity;
     use crate::js_ir::ModulePathResolver;
     use crate::lambda::{ApInfo, ApplyStatus, FieldDbgInfo, LamLoc, lam_arity::Arity, lam_primitive::Primitive};
-    for groups in [vec![], vec![0], vec![2], vec![1, 2], vec![2, 1, 3]] {
+    for groups in [vec![], vec![0], vec![2], vec![1, 2], vec![2, 1, 3], vec![1, 1, 1, 1, 2, 1]] {
         for count in 0..7 {
             for effectful in [false, true] {
                 for status in [ApplyStatus::Na, ApplyStatus::InferFull, ApplyStatus::Uncurry] {

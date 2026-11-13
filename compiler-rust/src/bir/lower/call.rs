@@ -7,6 +7,10 @@ use crate::lambda::ApplyStatus;
 #[derive(Clone, Copy)]
 pub(super) struct Call(pub u32);
 
+/// Immutable arity groups in the unit pool, without an owning SmallVec.
+#[derive(Clone, Copy)]
+pub(super) struct AritySpan { start: u32, len: u32 }
+
 /// Cold call metadata; the source walk carries only its four-byte handle.
 pub(super) struct Plan {
     pub tail: Option<LoopRef>,
@@ -17,7 +21,7 @@ pub(super) struct Plan {
     pub external: Option<(
         crate::bir::ImportId,
         crate::bir::StrId,
-        Option<crate::lambda::lam_arity::Arity>,
+        Option<AritySpan>,
     )>,
 }
 
@@ -89,7 +93,7 @@ impl State {
                     }
                 }
             }
-            let arity = self.resolve_cmj_module_field_arity(module, name);
+            let arity = self.resolve_cmj_module_field_arity(module, member);
             operands = self.source.lists.slice(operands, 1, self.source.lists.get(operands).len() - 1);
             self.source_steps += 2; // recognized field and global callee
             Some((module, member, arity))
@@ -222,7 +226,7 @@ impl State {
                     Self::call_info_of_apply_status(call.status),
                 ),
                 ApplyStatus::Na => {
-                    if let Some(arity) = arity.filter(|arity| !arity.is_na()) {
+                    if let Some(arity) = arity {
                         self.apply_with_arity(callee, arity, &values)
                     } else {
                         self.call_node(callee, &values, crate::js_ir::CallInfo::default())
@@ -290,16 +294,26 @@ impl State {
     /// C:1222 resolve_cmj_module_field_arity. Missing and submodule entries are
     /// unknown arity; no hash iteration contributes to output order.
     fn resolve_cmj_module_field_arity(
-        &self,
+        &mut self,
         module: crate::bir::ImportId,
-        field: &str,
-    ) -> Option<crate::lambda::lam_arity::Arity> {
+        field: crate::bir::StrId,
+    ) -> Option<AritySpan> {
+        if let Some(arity) = self.call_arity_index.get(&(module, field)) { return *arity; }
         let name = self.arena.pools.j_modules[module.index()].id.name();
-        let table = self.resolver.as_ref()?.module_cmj_export_arities(name)?;
-        match table.get(field)? {
-            crate::cmi::persistent_env::CmjExportArity::Single(arity) => Some(arity.clone()),
-            crate::cmi::persistent_env::CmjExportArity::Submodule(_) => None,
-        }
+        let table = self.resolver.as_ref().and_then(|resolver| resolver.module_cmj_export_arities(name));
+        let arity = match table.as_ref().and_then(|table| table.get(self.arena.text(field))) {
+            Some(crate::cmi::persistent_env::CmjExportArity::Single(arity)) => self.store_call_arity(arity),
+            _ => None,
+        };
+        self.call_arity_index.insert((module, field), arity);
+        arity
+    }
+
+    fn store_call_arity(&mut self, arity: &crate::lambda::lam_arity::Arity) -> Option<AritySpan> {
+        let crate::lambda::lam_arity::Arity::Info { arities, .. } = arity else { return None };
+        let start = u32::try_from(self.call_arities.len()).expect("arity pool");
+        self.call_arities.extend_from_slice(arities);
+        Some(AritySpan { start, len: arities.len() as u32 })
     }
 
     /// C:1144 compile_apply_call_inner: the call constructor performs no rewrite.
@@ -318,12 +332,13 @@ impl State {
     fn apply_with_arity(
         &mut self,
         mut callee: NodeId,
-        arity: crate::lambda::lam_arity::Arity,
+        arity: AritySpan,
         args: &[NodeId],
     ) -> NodeId {
         let mut offset = 0;
         let full = Self::call_info_of_apply_status(ApplyStatus::InferFull);
-        for group in arity.extract_arity() {
+        for index in arity.start..arity.start + arity.len {
+            let group = self.call_arities[index as usize];
             if offset == args.len() {
                 return callee;
             }
@@ -343,12 +358,15 @@ impl State {
                     start: self.arena.vars.len() as u32,
                     len: missing as u32,
                 };
-                let mut full_args = remaining.to_vec();
+                let mut full_args = std::mem::take(&mut self.eta_arguments);
+                debug_assert!(full_args.is_empty());
+                full_args.extend_from_slice(remaining);
                 for _ in 0..missing {
                     let var = self.fresh_variable("param");
                     full_args.push(self.pure_expression(View::Var { var }, 0));
                 }
                 let call = self.call_node(callee, &full_args, full);
+                full_args.clear(); self.eta_arguments = full_args;
                 let ret = crate::bir::j::return_value(&mut self.arena, call);
                 let body = self.arena.new_node(View::SBlock { statements: &[ret] }, 0);
                 let header = self.arena.function_header(
@@ -384,7 +402,7 @@ mod tests {
     /// C:1341 apply_with_arity: saturation, partial expansion and unknown tails.
     #[test]
     fn arity_groups_match_legacy() {
-        for groups in [vec![], vec![0], vec![2], vec![1, 2], vec![2, 1, 3]] {
+        for groups in [vec![], vec![0], vec![2], vec![1, 2], vec![2, 1, 3], vec![1, 1, 1, 1, 2, 1]] {
             for count in 0..7 {
                 for effectful in [false, true] {
                     let mut source = LamArena::new();
@@ -409,7 +427,8 @@ mod tests {
                         }
                     }
                     let arity = Arity::info(groups.clone(), false);
-                    let value = state.apply_with_arity(func, arity.clone(), &args);
+                    let span = state.store_call_arity(&arity).unwrap();
+                    let value = state.apply_with_arity(func, span, &args);
                     let lowered = state.complete(
                         Cx::value(),
                         Probed::Out(Out {
@@ -449,5 +468,70 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod allocation_tests {
+    use super::*;
+    use crate::lambda::{ApInfo, LamLoc, FieldDbgInfo, arena::LamArena, lam_constant::Constant, lam_primitive::Primitive, lam_arity::Arity};
+
+    #[test]
+    fn ten_thousand_wide_arity_partial_calls_lower_without_allocations() {
+        let resolver = crate::js_ir::ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+        resolver.set_bir_test_export("Other", "run", crate::cmi::persistent_env::CmjExportArity::Single(Arity::info(vec![1, 1, 1, 1, 2, 1], false)), None);
+        let mut a = LamArena::new();
+        let calls: Vec<_> = (0..10_000).map(|_| {
+            let global = a.global_module(Ident::create_persistent("Other"));
+            let callee = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Module { name: crate::name::Name::new("run") }), &[global], LamLoc::NONE);
+            let args: Vec<_> = (0..5).map(|_| a.const_(Constant::JsNull)).collect();
+            a.apply_raw(callee, &args, ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE })
+        }).collect();
+        let root = a.prim_raw(Primitive::Pmakearray, &calls, LamLoc::NONE);
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let root = input.root; let mut state = State::new(input); state.resolver = Some(resolver);
+        let run = |s: &mut State| {
+            let out = s.probe(Cx::returning(), root).unwrap(); let out = s.realize(Cx::returning(), out);
+            for node in s.statements.statements(out.stmts) { s.arena.release(node); }
+            if let Some(value) = out.value { s.arena.release(value); }
+            s.statements.kill(out.stmts);
+        };
+        let lists = state.arena.lists.storage_shape().0; let source_lists = state.source.lists.storage_shape().0;
+        let funcs = state.arena.pools.funcs.len(); let attrs = state.arena.pools.attrs.len();
+        let infos = state.arena.pools.js.len(); let vars = state.arena.vars.len();
+        run(&mut state);
+        assert_eq!(state.call_arities.len(), 6); assert_eq!(state.call_arity_index.len(), 1);
+        assert_eq!(state.arena.vars.len() - vars, 10_000);
+        state.arena.lists.reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
+        state.source.lists.reserve_test_growth(state.source.lists.storage_shape().0 - source_lists);
+        state.arena.pools.funcs.reserve(state.arena.pools.funcs.len() - funcs);
+        state.arena.func_owners.reserve(state.arena.pools.funcs.len() - funcs);
+        state.arena.pools.attrs.reserve(state.arena.pools.attrs.len() - attrs);
+        state.arena.pools.js.reserve(state.arena.pools.js.len() - infos);
+        state.arena.vars.j_origin.reserve(10_000); state.arena.vars.name.reserve(10_000);
+        state.arena.vars.order.reserve(10_000); state.arena.vars.flags.reserve(10_000);
+        state.arena.vars.uses.reserve(10_000); state.arena.vars.binder.reserve(10_000);
+        state.arena.vars.fact.reserve(10_000); state.arena.vars.printed.reserve(10_000);
+        state.arena.js_scope.as_mut().unwrap().uses.reserve(10_000);
+        state.arena.capture_binders.reserve(10_000); state.arena.bulk_binders.reserve(10_000); state.idents.reserve(10_000);
+        state.free.reserve_repeat();
+        let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
+            s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1, s.source.lists.storage_shape().1,
+            s.arena.pools.funcs.capacity(), s.arena.func_owners.capacity(), s.arena.pools.attrs.capacity(), s.arena.pools.js.capacity(),
+            s.call_arities.capacity(), s.call_arity_index.capacity(), s.eta_arguments.capacity(), s.call_reversed.capacity(), s.calls.capacity(),
+            s.arena.vars.j_origin.capacity(), s.arena.vars.name.capacity(), s.arena.vars.order.capacity(), s.arena.vars.flags.capacity(),
+            s.arena.vars.uses.capacity(), s.arena.vars.binder.capacity(), s.arena.vars.fact.capacity(), s.arena.vars.printed.capacity(),
+            s.arena.capture_binders.capacity(), s.arena.bulk_binders.capacity(), s.idents.capacity(), s.arena.js_scope.as_ref().unwrap().uses.capacity(),
+            s.argument_outputs.capacity(), s.argument_values.capacity(), s.traversal.work.capacity(), s.traversal.values.capacity(), s.traversal.children.capacity()];
+        let before = capacities(&state); let free_before = state.free.capacities(); let stmts = state.statements.capacities();
+        let visits = state.source_steps; let sequences = state.sequence_steps;
+        let allocations = allocation_counter::measure(|| run(&mut state));
+        println!("partial calls: {allocations:?}, source={}, sequencing={}", state.source_steps-visits, state.sequence_steps-sequences);
+        assert_eq!(capacities(&state), before); assert_eq!(state.free.capacities(), free_before); assert_eq!(state.statements.capacities(), stmts);
+        assert_eq!(allocations.count_total, 0);
+        assert_eq!(state.arena.vars.len() - vars, 20_000); assert_eq!(state.call_arities.len(), 6);
+        assert!(state.eta_arguments.is_empty());
+        assert_eq!((state.source_steps - visits, state.sequence_steps - sequences), (80_001, 60_000));
+        assert_eq!(std::mem::size_of::<AritySpan>(), 8);
     }
 }

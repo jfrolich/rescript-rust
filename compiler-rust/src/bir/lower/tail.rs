@@ -124,7 +124,7 @@ mod tests {
     fn frame_size() {
         assert_eq!(std::mem::size_of::<Frame>(), 16);
         assert_eq!(std::mem::size_of::<super::super::call::Call>(), 4);
-        assert_eq!(std::mem::size_of::<super::super::call::Plan>(), 64);
+        assert_eq!(std::mem::size_of::<super::super::call::Plan>(), 40);
     }
 
     #[test]
