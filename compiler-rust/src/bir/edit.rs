@@ -481,6 +481,12 @@ impl Bir {
                 }
             }
         }
+        if node.op() == Op::JQualified {
+            if let Some(scope) = &mut self.js_scope {
+                let View::JQualified { module, .. } = node.view(&self.lists) else { unreachable!() };
+                scope.import_reference(module, add);
+            }
+        }
         if self.is_weighted_switch(node) {
             if add {
                 self.weighted_switches += 1;

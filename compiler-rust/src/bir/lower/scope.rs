@@ -95,6 +95,11 @@ pub(crate) struct Scope {
     spine: Vec<(NodeId, bool)>,
     /// Steps of `close::decide` and `return_sites`.
     pub(crate) close_steps: usize,
+    /// Live `JQualified` references per imported module. Dense by ImportId,
+    /// grown where a module is first referenced.
+    pub(crate) import_uses: Vec<u32>,
+    /// The tables of the external-shadow decision (`globals::decide`).
+    pub(crate) globals: super::globals::Globals,
     #[cfg(test)]
     pub(crate) updates: usize,
 }
@@ -109,9 +114,21 @@ impl Scope {
             decisions: Vec::new(),
             spine: Vec::new(),
             close_steps: 0,
+            import_uses: Vec::new(),
+            globals: Default::default(),
             #[cfg(test)]
             updates: 0,
         }
+    }
+
+    /// Account for one constructed or released reference to an imported
+    /// module. Cost: O(1), amortized over the unit's imports.
+    pub(crate) fn import_reference(&mut self, module: crate::bir::ImportId, add: bool) {
+        if self.import_uses.len() <= module.index() {
+            self.import_uses.resize(module.index() + 1, 0);
+        }
+        let uses = &mut self.import_uses[module.index()];
+        *uses = if add { uses.checked_add(1) } else { uses.checked_sub(1) }.expect("import reference count");
     }
 
     /// Add a fresh variable's row. Cost: amortized O(1), no node walk.

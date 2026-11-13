@@ -12,6 +12,7 @@ mod close;
 mod cond;
 mod exit;
 mod export;
+mod globals;
 mod expr;
 mod konst;
 mod prim;
@@ -300,6 +301,11 @@ pub(crate) struct SwitchStats {
     /// Statements copied into lists (`StatementStack::copied`): a moved
     /// statement is copied, and decided, once per move.
     pub statements_copied: usize,
+    /// References to JavaScript globals the lowering marked to print as
+    /// `globalThis.name`, and the steps of that decision
+    /// (`globals::decide`).
+    pub globals_qualified: usize,
+    pub global_steps: usize,
     /// Step A against the legacy tail-call pass (`shadow::compare_decisions`),
     /// zero until check mode compares.
     #[serde(flatten)]
@@ -633,7 +639,11 @@ impl State {
             header.uses = 0;
         }
         self.arena.finish_bulk(root);
-        let close_steps = self.arena.js_scope.as_ref().map_or(0, |scope| scope.close_steps);
+        // THREE_TREES 11.4, "T5 design": every list is the one the flatten
+        // pass receives, so the bindings around a reference are final.
+        globals::decide(&mut self.arena, &self.idents);
+        let (close_steps, globals_qualified, global_steps) = self.arena.js_scope.as_ref()
+            .map_or((0, 0, 0), |scope| (scope.close_steps, scope.globals.qualified, scope.globals.steps));
         Lowered {
             program: super::bridge_j::Imported::from_lowering(self.arena, root, self.idents),
             #[cfg(test)]
@@ -648,6 +658,8 @@ impl State {
                 location_visits: self.location_steps,
                 close_steps,
                 statements_copied: self.statements.copied,
+                globals_qualified,
+                global_steps,
                 decisions: DecisionStats::default(),
             },
         }

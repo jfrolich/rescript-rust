@@ -173,6 +173,15 @@ impl Bir {
     pub fn set_printed(&mut self, var: VarId, name: Name) {
         self.vars.printed[var.index()] = Some(name);
     }
+    /// Mark the reference `node` as shadowed: it prints as
+    /// `globalThis.name` (`lower::globals`). One write.
+    pub(crate) fn qualify_global(&mut self, node: NodeId) {
+        self.nodes[node.index()].set_var_qualified();
+    }
+    /// Whether the reference `node` prints as `globalThis.name`. One read.
+    pub(crate) fn global_qualified(&self, node: NodeId) -> bool {
+        self.node(node).var_qualified()
+    }
     /// Mark an external JavaScript variable (it has no local binder).
     pub fn mark_js_global(&mut self, var: VarId) {
         self.vars.flags[var.index()].0 |= VarFlags::JS_GLOBAL;
