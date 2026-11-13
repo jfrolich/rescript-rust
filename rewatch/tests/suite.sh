@@ -95,6 +95,7 @@ fi
 ./compile/27-warning-build-modes.sh &&
 ./compile/28-runtime-compiled-once.sh &&
 ./compile/29-otel-console-verbosity.sh &&
+./compile/30-nested-package-warnings.sh &&
 ./compile/25-deterministic-records.sh &&
 ./compile/26-external-ppx-rejected.sh &&
 ./compile/14-no-testrepo-changes.sh &&

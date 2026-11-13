@@ -437,9 +437,8 @@ pub fn print_signature_ml(signature: &[SignatureItem], arena: &ParseArena, out: 
 
 fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item: &StructureItem) {
     match &item.pstr_desc {
-        StructureItemDesc::Pstr_derived(idx) => {
-            let general = crate::binary_ast::derive::general_item(arena, item.pstr_loc, *idx);
-            print_structure_item(f, arena, &general);
+        StructureItemDesc::Pstr_derived(_) => {
+            unreachable!("{}", crate::binary_ast::derive::NO_SYNTAX)
         }
         StructureItemDesc::Pstr_eval(inner) => {
             let (ref expr_idx, ref attrs) = **inner;

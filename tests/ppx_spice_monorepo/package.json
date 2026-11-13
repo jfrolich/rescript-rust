@@ -1,0 +1,5 @@
+{
+  "name": "derived-code-monorepo",
+  "private": true,
+  "workspaces": ["packages/shared"]
+}

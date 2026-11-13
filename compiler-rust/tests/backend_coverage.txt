@@ -11,8 +11,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 732,
-      "units": 732,
+      "identical": 736,
+      "units": 736,
       "unsupported": {}
     }
   },
@@ -28,8 +28,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 732,
-      "units": 732,
+      "identical": 736,
+      "units": 736,
       "unsupported": {}
     }
   },
@@ -45,8 +45,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 732,
-      "units": 732,
+      "identical": 736,
+      "units": 736,
       "unsupported": {}
     }
   },
@@ -62,8 +62,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 732,
-      "units": 732,
+      "identical": 736,
+      "units": 736,
       "unsupported": {}
     }
   },
@@ -79,8 +79,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 732,
-      "units": 732,
+      "identical": 736,
+      "units": 736,
       "unsupported": {}
     }
   },
@@ -96,8 +96,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 732,
-      "units": 732,
+      "identical": 736,
+      "units": 736,
       "unsupported": {}
     }
   },
@@ -115,9 +115,9 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 731,
+      "identical": 735,
       "shared_catch_only": 1,
-      "units": 732,
+      "units": 736,
       "unsupported": {
         "shared Lambda subtree with binder": 1
       }

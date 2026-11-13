@@ -233,13 +233,23 @@ Produced with probes (rewatch build, default warnings plus the corpus flags):
 | non-exhaustive or redundant match (8, 11), unused variable (26, 27) | cannot occur: every generated match is total and every binder is used (checked by reading the generators; the oracle asserts no such warning on the corpus) | not produced |
 | unused constructor or label of a private declaration | suppressed today because the body uses each | the `Label` and `Constructor` obligations mark each |
 
-**Fallback rule.** When any obligation of an item fails, the checker restores
-the type state (`snapshot_type_state` in `types/context.rs`), discards the
-warnings buffered for the item, asks the seam for the item's general form, and
-checks that with `type_binding`. The diagnostic is today's because it is
-produced by today's code on today's syntax. Warnings of a discharge are
-buffered per item and committed only on success, so a fallback does not report
-a deprecation twice.
+**Fallback rule.** When any obligation of an item fails, the checker abandons
+the unit: nothing of the attempt is reported or published. Whoever holds the
+unit's source runs the front end again with plans off, which generates the
+unit's derived code as syntax, and compiles that. The diagnostic is today's
+because it is produced by today's code on today's syntax, and a deprecation is
+reported once because the warnings of the abandoned attempt are dropped with
+it. The syntax of an item is therefore generated only where it is needed: for
+a unit with a failed obligation, for `RESCRIPT_DERIVED_PATH=general` and for
+the reference compile of `check`, and for a tree that is stored or printed
+instead of compiled. An item whose plan holds costs no generation and no
+front-end rewrite. (Slice 1 generated the syntax beside every plan and typed
+it per item after restoring the type state; the checker holds the parse arena
+by shared reference, so syntax made on demand has no arena to live in that
+the readers of the typed tree could also read. Compiling the unit again needs
+no second handle space. Its cost, one more front end and type check of the
+unit, falls only on a unit with a failed obligation: one that reports an
+error, or one whose library has another shape than the plan states.)
 
 ### What reads the typed body afterwards
 
@@ -376,12 +386,11 @@ returning `Plan` or `General(reason)`; there is no "unknown" result. General:
 | a `type … and …` group in which two declarations share a label or constructor name | the label obligations would resolve to the wrong declaration |
 | `@spice.serde` variants and polymorphic variants, polymorphic variants (57 bindings), tuples | not among the three measured shapes; each can move later if a census shows it matters |
 | `@unboxed` declarations | a different body per representation; rare |
-| any item nested in a functor body or a first-class module | not examined |
 
 An item reaches the general path in two ways: the classifier returns `General`
 in the front end (the syntax is generated as today and the item is an ordinary
-derived value group), or a plan's obligations fail in the checker (the seam
-generates the syntax then). Both are tested by the same three means: a unit
+derived value group), or a plan's obligations fail in the checker (the unit is
+compiled again with plans off, and the seam generates the syntax then). Both are tested by the same three means: a unit
 test per reason that the classifier returns it; the error fixtures added in
 slice 1 (the probes of Q1) under `tests/build_tests/super_errors/` with a
 project that enables the derive; and the oracle, which compiles every unit of
@@ -397,8 +406,8 @@ type declaration with @spice
                          │
    checker: type_structure_item, arm Pstr_derived
         discharge obligations in order (lookups, instances, unifications)
-        ├── one fails ──► restore, drop buffered warnings,
-        │                 derive::general_form(item) ──► type_binding (today)
+        ├── one fails ──► abandon the unit; its source is compiled again
+        │                 with plans off (every item as syntax, as today)
         └── all hold ──► enter bindings, record results
                          Tstr_derived { plan, idents, results }
                          │
@@ -422,9 +431,10 @@ are pinned: an obligation and a body node are at most 16 bytes, a skeleton node
 
 **The seam** grows from four functions to these: the two detectors, the
 signature expander (interfaces are unchanged: they contain only value
-declarations), `classify`, `plan` (build the plan of a supported item),
-`general_form` (today's `map_type_decl_structure` for one item, used for
-`General` items and for fallback), and `lower`. Deleting the derive still means
+declarations), the structure expander, which classifies each group of
+declarations and makes its plan or its syntax (today's
+`map_type_decl_structure`), `free_names` (the names a plan resolves, for the
+dependency scan), and the lowering. Deleting the derive still means
 emptying these bodies.
 
 **State per compilation.** Obligation results are a dense table indexed by
@@ -625,6 +635,16 @@ body for the maintainers to add.
 
 ### Slice 2. Records
 
+**Status: done.** A record with at least one field takes a plan. The
+discharge of its labels does not split `type_record`: the labels of the record
+expression hold when each name's first candidate in scope is the label at the
+field's position of one non-private record, all of whose labels are written,
+and anything else fails the obligation. Kept general beyond the table of Q5: an
+empty record, a template literal as a key or default, a `JSON.t` field, and a
+field of a user's type applied to arguments (its codec takes the arguments'
+codecs one at a time, which a plan's skeleton does not describe).
+`check` compared source maps already. Not measured: the application.
+
 - **Files:** `binary_ast/spice_ppx.rs` (plan builder for records),
   `binary_ast/derive/plan.rs` (the remaining body nodes), `types/derived.rs`
   (`Label`, `Constructor`, `Literal`), `raw_lambda/convert/derived.rs`,
@@ -802,8 +822,11 @@ types are not sliced. Each needs a census first that shows its share.
 - **Editor tooling.** Whether hover, references or rename read the typed
   bodies of derived bindings (through the type-constructor locations the
   built-in codec identifiers carry) was not established.
-- **Functor bodies and first-class modules** containing derived items were not
-  examined and are classified general.
+- **Functor bodies and first-class modules.** A derived declaration inside a
+  module expression takes a plan like one at the top level (slice 2); the
+  walks over nested structures read the obligation results where they read
+  the identifiers of a typed body. `%%private` admits no type declaration, so
+  no derived declaration sits in one.
 - **Obligation order.** The first reported failure and the order of
   deprecation warnings depend on discharging in today's typing order. The
   order tests assert it for a handful of declarations; the fixtures and the

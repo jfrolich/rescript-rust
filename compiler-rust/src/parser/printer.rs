@@ -8572,10 +8572,8 @@ fn print_structure_item_sequential(
 ) -> Doc {
     match &item.pstr_desc {
         StructureItemDesc::Pstr_type(_) | StructureItemDesc::Pstr_primitive(_) => {}
-        // A derived item prints as the value group it stands for.
-        StructureItemDesc::Pstr_derived(idx) => {
-            let general = crate::binary_ast::derive::general_item(arena, item.pstr_loc, *idx);
-            return print_structure_item_sequential(state, protect_regexp, &general, cmt_tbl, arena);
+        StructureItemDesc::Pstr_derived(_) => {
+            unreachable!("{}", crate::binary_ast::derive::NO_SYNTAX)
         }
         StructureItemDesc::Pstr_value(_)
         | StructureItemDesc::Pstr_typext(_)
@@ -8594,7 +8592,9 @@ fn print_structure_item_sequential(
     }
 
     match &item.pstr_desc {
-        StructureItemDesc::Pstr_derived(_) => unreachable!("printed as its general form above"),
+        StructureItemDesc::Pstr_derived(_) => {
+            unreachable!("{}", crate::binary_ast::derive::NO_SYNTAX)
+        }
         StructureItemDesc::Pstr_value(inner) => {
             let (ref rec_flag, ref bindings) = *inner;
             print_value_bindings(state, arena.vb_list(*bindings), rec_flag, cmt_tbl, arena)
