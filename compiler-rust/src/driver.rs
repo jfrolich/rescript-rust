@@ -331,9 +331,62 @@ impl DerivedPath {
     }
 }
 
+/// Unit checker selection; the old checker remains the default during construction.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CheckerChoice {
+    /// Use the existing checker.
+    #[default]
+    Old,
+    /// Offer units to the new checker first.
+    New,
+    /// Compare both checkers on covered units.
+    Both,
+}
+
+impl CheckerChoice {
+    /// O(1): parse one of three fixed-length mode names.
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "" | "old" => Some(Self::Old),
+            "new" => Some(Self::New),
+            "both" => Some(Self::Both),
+            _ => None,
+        }
+    }
+
+    /// O(1) after the first call; reads the environment once per process.
+    pub fn from_env() -> Self {
+        static CHOICE: std::sync::OnceLock<CheckerChoice> = std::sync::OnceLock::new();
+        *CHOICE.get_or_init(|| {
+            let value = std::env::var("RESCRIPT_CHECKER").unwrap_or_default();
+            Self::parse(&value).unwrap_or_else(|| {
+                eprintln!("checker choice must be old, new or both; got `{value}`");
+                std::process::exit(2)
+            })
+        })
+    }
+}
+
+#[cfg(test)]
+mod checker_choice_tests {
+    use super::CheckerChoice;
+
+    #[test]
+    fn checker_choice_names_and_layout() {
+        assert_eq!(std::mem::size_of::<CheckerChoice>(), 1);
+        assert_eq!(CheckerChoice::parse(""), Some(CheckerChoice::Old));
+        assert_eq!(CheckerChoice::parse("old"), Some(CheckerChoice::Old));
+        assert_eq!(CheckerChoice::parse("new"), Some(CheckerChoice::New));
+        assert_eq!(CheckerChoice::parse("both"), Some(CheckerChoice::Both));
+        assert_eq!(CheckerChoice::parse("other"), None);
+    }
+}
+
 /// Compiler options that can be passed to the driver.
 #[derive(Clone)]
 pub struct CompilerOptions {
+    /// Selected once at setup; all modes currently use the old checker.
+    pub checker: CheckerChoice,
     /// Optional derived-code census output, read once when options are created.
     pub derived_census: Option<PathBuf>,
     /// The path derived items take, read once when options are created.
@@ -628,6 +681,7 @@ impl CompilerOptions {
 impl Default for CompilerOptions {
     fn default() -> Self {
         Self {
+            checker: CheckerChoice::from_env(),
             derived_census: Self::derived_census_from_env(),
             derived_path: DerivedPath::from_env(),
             backend: crate::bir::shadow::BackendMode::from_env(),
