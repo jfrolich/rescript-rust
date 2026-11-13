@@ -97,6 +97,10 @@ pub(crate) struct Log {
 }
 
 impl Log {
+    /// The statement of a `Leave`: it closes the `Enter` it matches and is
+    /// read with it, never on its own.
+    pub(crate) const NO_STATEMENT: NodeId = NodeId(u32::MAX);
+
     /// A log for a unit of `variables` variables, with the program scope
     /// open. Cost: two bits per variable, allocated once.
     pub(crate) fn new(variables: usize) -> Self {
@@ -110,16 +114,55 @@ impl Log {
     /// first unless the function is eta-reduced, `function`). Cost: one
     /// push and two bit writes; one step.
     pub(crate) fn declare(&mut self, var: VarId, statement: NodeId) {
-        let _ = (var, statement);
-        todo!("T5 build")
+        let binder = self.binds_function(statement);
+        self.log(EventKind::Declare, var.0, statement);
+        // The program scope keeps no run: nothing is free in it.
+        if self.open.is_empty() {
+            return;
+        }
+        if binder {
+            // The binder of the function declaration just entered binds in
+            // the enclosing scope; the open run is still empty.
+            if self.open.len() > 1 {
+                set(&mut self.bound, var);
+            }
+            return;
+        }
+        set(&mut self.bound, var);
+        self.join(var);
+    }
+
+    /// Whether a `Declare` of `statement` logged now is the binder of the
+    /// function declaration it follows: the last two events are that
+    /// function's `Enter` and `Params`. Constant.
+    fn binds_function(&self, statement: NodeId) -> bool {
+        matches!(self.events.as_slice(), [.., enter, params]
+            if enter.kind() == EventKind::Enter && params.kind() == EventKind::Params && enter.statement == statement)
+    }
+
+    /// Push one event. Constant; one step.
+    fn log(&mut self, kind: EventKind, payload: u32, statement: NodeId) {
+        self.steps += 1;
+        self.events.push(Event::new(kind, payload, statement));
+    }
+
+    /// `var` joins the innermost open run unless it is in it. Constant.
+    fn join(&mut self, var: VarId) {
+        if !test(&self.member, var) {
+            set(&mut self.member, var);
+            self.seen.push(var);
+        }
     }
 
     /// Log `Binder(var)` for the loop or `try` statement `statement`
     /// (naming.rs `stmt`, `StatementChild::Binder`: before the body). Cost:
     /// as `declare`.
     pub(crate) fn binder(&mut self, var: VarId, statement: NodeId) {
-        let _ = (var, statement);
-        todo!("T5 build")
+        self.log(EventKind::Binder, var.0, statement);
+        if !self.open.is_empty() {
+            set(&mut self.bound, var);
+            self.join(var);
+        }
     }
 
     /// Record one reference to `var` where the lowering builds it: `var`
@@ -127,8 +170,10 @@ impl Log {
     /// `analyze_expr`, `ExprKind::Var`). No event. Cost: one bit test, and
     /// one push the first time; one step.
     pub(crate) fn reference(&mut self, var: VarId) {
-        let _ = var;
-        todo!("T5 build")
+        self.steps += 1;
+        if !self.open.is_empty() {
+            self.join(var);
+        }
     }
 
     /// Open the scope of `function` inside `statement`: log `Enter` and
@@ -138,8 +183,16 @@ impl Log {
     /// `leave` writes, read by the replay through the row. Cost: two
     /// pushes and one bit write per parameter; two steps.
     pub(crate) fn enter(&mut self, function: FuncId, statement: NodeId, vars: &VarTable) -> u32 {
-        let _ = (function, statement, vars);
-        todo!("T5 build")
+        let row = u32::try_from(self.scopes.len()).expect("naming scope capacity");
+        self.scopes.push(ScopeRow { function, free_start: 0, free_len: 0 });
+        self.log(EventKind::Enter, row, statement);
+        self.log(EventKind::Params, function.0, statement);
+        self.open.push(row);
+        self.marks.push(u32::try_from(self.seen.len()).expect("naming run capacity"));
+        for param in vars.parameters(function) {
+            set(&mut self.bound, param);
+        }
+        row
     }
 
     /// Close the innermost open scope: its free variables are the
@@ -153,8 +206,34 @@ impl Log {
     /// comparisons); nothing is allocated once the vectors have their
     /// capacity.
     pub(crate) fn leave(&mut self, vars: &VarTable) {
-        let _ = vars;
-        todo!("T5 build")
+        let row = self.open.pop().expect("an open function scope");
+        let mark = self.marks.pop().expect("an open function run") as usize;
+        self.log(EventKind::Leave, row, Self::NO_STATEMENT);
+        let start = self.free.len();
+        for index in mark..self.seen.len() {
+            let var = self.seen[index];
+            self.steps += 1;
+            clear(&mut self.member, var);
+            if test(&self.bound, var) {
+                clear(&mut self.bound, var);
+            } else {
+                self.free.push(var);
+            }
+        }
+        self.seen.truncate(mark);
+        let free = &mut self.free[start..];
+        free.sort_unstable_by(|&a, &b| vars.order(a).cmp(&vars.order(b)).then_with(|| vars.name(a).cmp(&vars.name(b))));
+        let scope = &mut self.scopes[row as usize];
+        scope.free_start = u32::try_from(start).expect("free-variable capacity");
+        scope.free_len = u32::try_from(self.free.len() - start).expect("free-variable capacity");
+        // naming.rs `analyze_expr`, `ExprKind::Fun`: the enclosing scope
+        // uses what the function uses.
+        if !self.open.is_empty() {
+            for index in start..self.free.len() {
+                let var = self.free[index];
+                self.join(var);
+            }
+        }
     }
 
     /// The free variables of a closed scope. Constant.
@@ -162,6 +241,17 @@ impl Log {
         let row = self.scopes[scope as usize];
         &self.free[row.free_start as usize..(row.free_start + row.free_len) as usize]
     }
+}
+
+/// Bit `var` of a dense bit set. Constant.
+fn test(bits: &[u64], var: VarId) -> bool {
+    bits[var.index() / 64] & 1 << (var.index() % 64) != 0
+}
+fn set(bits: &mut [u64], var: VarId) {
+    bits[var.index() / 64] |= 1 << (var.index() % 64);
+}
+fn clear(bits: &mut [u64], var: VarId) {
+    bits[var.index() / 64] &= !(1 << (var.index() % 64));
 }
 
 #[cfg(test)]
