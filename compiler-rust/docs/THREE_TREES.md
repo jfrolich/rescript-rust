@@ -1022,6 +1022,125 @@ that a binding shadows. It changes no count of a declared variable, but it
 reads which bindings exist, so it has to see the declarations P3 and P5
 remove; it stays until the names are decided in the lowering (T5).
 
+### 11.5 Worker prompt for T4b
+
+Which form: it needs one experiment, because nothing read so far proves that
+no rule of the lowering reads a list after it was copied in a way the
+flatten pass would change (`nested_if`, `equal_statements`, `single_value`,
+`simplify_if_head` in `bir/j/norm.rs` read copied lists). Commit 2 is that
+experiment; its result selects the form, and the prompt says which result
+selects which.
+
+```text
+Task T4b: the backend lowering applies the rules of the legacy flatten pass
+(pass 1, apply_js_flatten_pass) where it copies a statement run to its list,
+so that the new side of the `lower` gate stops running that pass. Repository:
+compiler-rust/. Read first: docs/THREE_TREES.md 11.4 (finding 1 and the
+re-cut table); docs/BACKEND_LOWERING.md 1.3, 7.2, 8.1;
+src/lambda/js_pass_flatten_and_mark_dead.rs from `struct Flatten` to the end
+of the file (flatten_block, Flatten::block_items, Flatten::statement,
+flatten_sequence_statements, flatten_sequence_expressions);
+src/bir/lower/out.rs (StatementStack::take_list); src/bir/j/norm.rs
+(js1_exp, js2_block, je8_not, jm14_push_effect_expression, nested_if,
+equal_statements, single_value, simplify_if_head); src/bir/shadow.rs
+(prepare_lower, check_lower); finish_lowered_output and
+compile_deps_program_with_lower_check in src/lambda/lam_compile.rs.
+
+The rules, each from Flatten::statement, applied to one statement:
+ R1 SExp of a JSeq: one statement per operand, left to right, each made by
+    js1_exp and flattened again; the result goes through js2_block.
+ R2 SExp of a JBlockLit: one statement per field, the same way.
+ R3 SExp of a JCond: each branch whose value has an effect becomes
+    [flatten(js1_exp(branch))]; both empty: the test as SExp, or an empty
+    SBlock when the test is pure; only the else branch: SIf(je8_not(test),
+    else, []); otherwise SIf(test, then, else). The statement's location is
+    the conditional expression's.
+ R4 SExp of an assignment whose right side is a JSeq: the operands before
+    the last as R1, then the assignment of the last operand.
+ R5 SReturn of a JCond: SIf(test, [flatten(return then)], [flatten(return
+    else)]), location as R3.
+ R6 SReturn of a JSeq: the operands before the last as R1, then the return
+    of the last, through js2_block.
+ R7 An SBlock of exactly one statement is that statement, flattened.
+ R8 In a list, the statements of an SBlock take the SBlock's place.
+Every other statement is left as it is: its nested lists were flattened when
+they were copied.
+
+Do exactly this, one commit each, in this order, each pushed when made:
+1. src/bir/j/flatten.rs: `pub(crate) fn flatten_into(bir, statement, out:
+   &mut Vec<NodeId>)` implementing R1 to R8 with an explicit work stack kept
+   in a struct the caller owns (no recursion, no Vec created per statement).
+   Its doc comment states the cost: one step per statement it writes plus
+   one per operand of a flattened sequence. Unit tests in
+   src/bir/j/flatten_tests.rs, one per rule, in the oracle form: build the
+   statement in a JsArena and in a Bir, run Flatten on the first and
+   flatten_into on the second, export the second with bridge_j::export_js,
+   compare the two printed texts. Nothing calls flatten_into yet outside
+   tests in this commit only; commit 2 follows in the same pull request.
+2. The experiment. StatementStack::take_list calls flatten_into for each
+   statement it copies (the scratch vector lives in StatementStack). In
+   compile_deps_program_with_lower_check the new side's
+   finish_lowered_output skips apply_js_flatten_pass (a const generic or a
+   bool parameter; the legacy side and the default path keep all six
+   passes). Run scripts/test_backend_coverage.py and RESCRIPT_BACKEND=check
+   on the 3,735-module application. Also add to check_lower a comparison of
+   the new side's `built` count of every variable with the count
+   js_pass_tailcall_inline::UseCounts gives on the legacy side after passes
+   1 and 2, as an error naming the unit and the variable.
+   RESULT A: every unit of the three corpora and of the application is
+   identical and no count differs. Continue with commit 3.
+   RESULT B: a unit differs or a count differs. Do not try to repair it by
+   changing a rule of norm.rs or by flattening later. Reduce the first
+   differing unit to the smallest Lambda, add it to
+   src/bir/lower/oracle_tests.rs as a test that asserts both texts (the form
+   of block_substitution_and_dead_removal_do_not_commute_with_tailcall_
+   inlining), revert the call in take_list and the skipped pass, keep
+   flatten.rs out of the tree (delete it: nothing may be dormant), keep the
+   count comparison if it passes, write under 11.4 which reader of a copied
+   list saw the changed shape, and stop. T4c then reads sites through the
+   reshaping (finding 1) and pass 1 stays until T6.
+3. Only after RESULT A. Rule tests in src/bir/lower/oracle_tests.rs, in the
+   oracle form (the same Lambda through the legacy pipeline with all six
+   passes and through the new one without pass 1, texts compared), one per
+   reader of a copied list with a statement of R1 to R7 inside the list it
+   reads: nested_if, equal_statements, single_value, simplify_if_head. A
+   failing one is RESULT B.
+4. Step-count and allocation tests: a run of 10,000 statements of which
+   half match R1 with two operands is copied in at most 25,000 steps of
+   flatten_into's counter; a sequence of 10,000 operands in one statement
+   in at most 10,001; a returned conditional nested 10,000 deep in its else
+   branch without recursion (it must not overflow the stack); a zero
+   allocation test in the form of src/bir/j/norm_tests.rs for a run that
+   needs no rule; size_of of the work-stack entry pinned (at most 16 bytes).
+5. tests/backend_coverage.txt if a count improved; docs/STATUS.md (a row
+   T4b); docs/THREE_TREES.md 11.4 (the re-cut table: T4b done, which form);
+   changes/lowering-flatten.internal.md, one line starting with "- ".
+
+End state, to paste in the pull request with the output:
+- `rg -n 'apply_js_flatten_pass' compiler-rust/src/lambda/lam_compile.rs`
+  shows it skipped for the new side only.
+- `rg -n 'lam_compile|js_exp_make|js_ir::build|js_pass_' compiler-rust/src/
+  bir/j/flatten.rs` is empty.
+- scripts/test_backend_coverage.py passes, stage `lower` unchanged or better
+  in every corpus, no new Unsupported reason; the application: no
+  difference in any unit.
+- cargo test for compiler-rust; the CI instruction count within +0.02% (the
+  default path is untouched); check-mode instructions on tests/tests before
+  and after.
+
+Shortcuts that count as failure: flattening in a pass over the finished unit
+or a finished function body instead of at the copy; calling the legacy
+Flatten from bir/; a hash map; a Vec, Box or String per statement; weakening
+or deleting a test; adding an Unsupported reason; changing a rule of
+norm.rs so that a unit passes; leaving flatten.rs in the tree unused.
+
+When a unit differs: print both texts for that unit (the error of
+check_lower names the first differing line), find the statement, and decide
+only between "a rule R1 to R8 is implemented wrongly" (fix it, add the rule
+test) and RESULT B. If you cannot tell which within the unit, it is RESULT
+B: report the unit and the line.
+```
+
 ## 12. Risks and what was not measured
 
 Not measured:
