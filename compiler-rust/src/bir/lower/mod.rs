@@ -469,7 +469,7 @@ impl State {
         let mut arena = Bir::default();
         arena.begin_bulk();
         arena.pools = std::mem::take(&mut input.arena.pools);
-        arena.func_owners.resize(arena.pools.funcs.len(), None);
+        arena.func_owners.resize(arena.vars.funcs.len(), None);
         for i in 0..input.arena.vars.len() {
             let var = VarId(i as u32);
             let made = arena.new_var_id(input.arena.vars.name(var), input.arena.vars.order(var));

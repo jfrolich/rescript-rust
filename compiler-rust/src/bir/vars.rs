@@ -87,6 +87,12 @@ pub struct VarTable {
     pub(super) binder: Vec<Option<NodeId>>,
     pub(super) fact: Vec<Fact>,
     pub(super) printed: Vec<Option<Name>>,
+    /// Function headers, dense by FuncId. A header is a run of parameters,
+    /// so it lives with the variables: the naming log reads a function's
+    /// parameters through this table (`lower::names`).
+    pub(super) funcs: Vec<FuncHeader>,
+    /// The parameter runs of headers with `INDIRECT_PARAMS`.
+    pub(super) function_params: Vec<VarId>,
 }
 impl VarTable {
     /// Number of variables, including released binders.
@@ -120,6 +126,29 @@ impl VarTable {
     /// Current binding summary.
     pub fn fact(&self, v: VarId) -> Fact {
         self.fact[v.index()]
+    }
+    /// The header of `f`. Constant.
+    pub fn function(&self, f: FuncId) -> &FuncHeader {
+        &self.funcs[f.index()]
+    }
+    /// Parameter `index` of `f`, including a lowered loop's noncontiguous
+    /// copies. Constant.
+    pub fn parameter(&self, f: FuncId, index: usize) -> VarId {
+        let h = &self.funcs[f.index()];
+        assert!(index < h.params.len());
+        if h.flags & FuncHeader::INDIRECT_PARAMS != 0 {
+            self.function_params[h.params.start as usize + index]
+        } else {
+            VarId(h.params.start + index as u32)
+        }
+    }
+    /// The parameters of `f` in order. Constant per parameter.
+    pub fn parameters(&self, f: FuncId) -> impl Iterator<Item = VarId> + '_ {
+        (0..self.funcs[f.index()].params.len()).map(move |index| self.parameter(f, index))
+    }
+    /// The variable a J copy prints as (itself for an original). Constant.
+    pub fn origin(&self, v: VarId) -> VarId {
+        self.j_origin[v.index()]
     }
     /// Name assigned by a future naming pass.
     pub fn printed(&self, v: VarId) -> Option<Name> {

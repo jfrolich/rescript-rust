@@ -326,11 +326,11 @@ impl Bir {
         attr: FunctionAttribute,
         loc: LamLoc,
     ) -> FuncId {
-        let id = FuncId(index(self.pools.funcs.len()));
+        let id = FuncId(index(self.vars.funcs.len()));
         let attr_id = index(self.pools.attrs.len());
         self.pools.attrs.push(attr);
         self.func_owners.push(None);
-        self.pools.funcs.push(FuncHeader {
+        self.vars.funcs.push(FuncHeader {
             params,
             attr: attr_id,
             loc,
@@ -346,20 +346,16 @@ impl Bir {
         loc: LamLoc,
     ) -> FuncId {
         let id = self.function_header(params, attr, loc);
-        self.pools.funcs[id.index()].flags |= FuncHeader::METHOD;
+        self.vars.funcs[id.index()].flags |= FuncHeader::METHOD;
         id
     }
     /// Read a function header.
     pub fn function(&self, id: FuncId) -> &FuncHeader {
-        &self.pools.funcs[id.index()]
+        &self.vars.funcs[id.index()]
     }
     /// O(1): read a parameter, including a lowered loop's noncontiguous copies.
     pub fn function_parameter(&self, id: FuncId, index: usize) -> VarId {
-        let h = self.function(id);
-        assert!(index < h.params.len());
-        if h.flags & FuncHeader::INDIRECT_PARAMS != 0 {
-            self.pools.function_params[h.params.start as usize + index]
-        } else { VarId(h.params.start + index as u32) }
+        self.vars.parameter(id, index)
     }
     /// Read a function's cold attributes.
     pub fn function_attributes(&self, id: FuncId) -> &FunctionAttribute {

@@ -105,7 +105,7 @@ impl State {
         std::mem::swap(&mut self.source.pools, &mut self.arena.pools);
         // J lowering can append function headers before another L fragment is
         // imported. Its dense owner table must cover those header identities.
-        self.source.func_owners.resize(self.source.pools.funcs.len(), None);
+        self.source.func_owners.resize(self.source.vars.funcs.len(), None);
         let result = (|| {
             let function = bridge::import_fragment(&mut self.source, &mut globals, &mut foreign, &lambda, root)?;
             let View::Fun { body, header } = self.source.view(function) else { unreachable!("imported external function") };
@@ -137,7 +137,7 @@ impl State {
             self.module_constants.push(ModuleConstants::Unread);
         }
         self.inline_globals = globals;
-        self.arena.func_owners.resize(self.arena.pools.funcs.len(), None);
+        self.arena.func_owners.resize(self.arena.vars.funcs.len(), None);
         self.awaited_units.resize(self.arena.vars.len(), false);
         self.invalid_module_paths.resize(self.source.nodes.len(), false);
         self.switch_facts.resize(self.source.nodes.len(), super::switch::Facts::default());
