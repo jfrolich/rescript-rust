@@ -1,1 +1,1 @@
-- Inventory allocation sites in the check-mode backend lowering before conversion to reusable buffers and pool handles.
+- Replace per-construct check-mode lowering storage with typed pools and retained scratch, including mixed switches and cross-module inlining. Add 10,000-element warmed allocation proofs, complete the non-export allocation inventory, and document parity and instruction-count measurements without claiming a compiler speedup. [#225](https://github.com/jfrolich/rescript-rust/pull/225)
