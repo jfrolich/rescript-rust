@@ -1027,7 +1027,7 @@ mod tests {
             body,
             vars: 1,
             ty: TypeSource::ResultOf {
-                obligation: obligation,
+                obligation,
                 applied: 0,
             },
         });
