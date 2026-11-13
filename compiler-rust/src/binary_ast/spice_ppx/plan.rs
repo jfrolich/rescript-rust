@@ -154,6 +154,13 @@ pub(in crate::binary_ast) fn group_shares_names(group: &[TypeDeclaration], arena
         .any(|pair| pair[0].0 == pair[1].0 && pair[0].1 == pair[1].1 && pair[0].2 != pair[1].2)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Whether the classifier admits records: set by the tests of the
+    /// checker while the backend does not lower a record's plan yet.
+    pub(crate) static PLAN_RECORDS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Classify one declaration that derives codecs: the plan path, or the
 /// general path with the first reason of the Q5 table that applies. Total:
 /// every declaration gets one of the two.
@@ -225,6 +232,18 @@ pub(in crate::binary_ast) fn classify(
         || (decl.ptype_manifest.is_some() && !manifest_is_application && !facts.unplanned)
     {
         return general(UnmeasuredShape);
+    }
+    // A record takes a plan once the backend lowers one (the next commit);
+    // until then only the tests of the checker ask for it.
+    #[cfg(test)]
+    if PLAN_RECORDS.get()
+        && let TypeKind::Ptype_record(labels) = &decl.ptype_kind
+        && record::planned(labels, arena)
+        && decl.ptype_manifest.is_none()
+        && !has_fallback
+        && !facts.unplanned
+    {
+        return Classification::Plan;
     }
     // Records and variants are slices 2 and 3; a constant fallback and the
     // identity codec of `JSON.t` need body nodes this slice does not lower.

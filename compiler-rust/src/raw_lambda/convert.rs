@@ -232,6 +232,17 @@ impl<B: RawLambdaBuilder> ArgLowering<B, ApplyArg> for TypedArgs {
     }
 }
 
+/// Whether a primitive reads the syntax of its arguments instead of their
+/// values: a location primitive, a dynamic import, raw JavaScript. The
+/// converter handles these on the typed arguments
+/// ([`RawLambdaConverter::convert_apply_raw`]), so a body without typed
+/// expressions cannot apply them. Cost: O(1) string comparisons.
+pub(crate) fn primitive_reads_syntax(prim: &crate::types::PrimitiveDescription) -> bool {
+    let name = prim.prim_name.as_str();
+    name.starts_with("%loc_")
+        || matches!(name, "%import" | "#import" | "%raw" | "#raw_expr" | "#raw_stmt")
+}
+
 /// What the choice of a primitive reads of the arguments it is applied to
 /// ([`RawLambdaConverter::translate_primitive_application_raw`]).
 #[derive(Clone, Copy)]

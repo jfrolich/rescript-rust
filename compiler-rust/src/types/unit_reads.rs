@@ -152,6 +152,7 @@ impl Collector<'_> {
                     self.ty(instance);
                 }
                 Resolved::Type(path) => self.path(&path, Kind::Type),
+                Resolved::Label(_) | Resolved::Constructor { .. } | Resolved::Literal(_) => {}
             }
         }
         for bound in table.bound(idx) {

@@ -58,6 +58,23 @@ fn constant_payload(label: &LabelDeclaration, name: &str, arena: &ParseArena) ->
     Some(eval.0)
 }
 
+/// Whether the labels of a record are ones a plan describes: at least one
+/// field, and every `@spice.key` and `@spice.default` a literal constant (a
+/// template without interpolation is a constant to the derive, but not one
+/// expression node).
+/// Cost: O(attributes of the labels); no allocation.
+#[cfg(test)]
+pub(super) fn planned(labels: &[LabelDeclaration], arena: &ParseArena) -> bool {
+    !labels.is_empty()
+        && labels.iter().all(|label| {
+            ["spice.key", "spice.default"].iter().all(|name| {
+                constant_payload(label, name, arena).is_none_or(|expr| {
+                    matches!(arena.get_expr(expr).pexp_desc, ExpressionDesc::Pexp_constant(_))
+                })
+            })
+        })
+}
+
 /// Read a field. Cost: O(attributes of the label).
 fn field(label: &LabelDeclaration, arena: &ParseArena) -> Field {
     let has = |name: &str| {
