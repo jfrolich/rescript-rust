@@ -10,6 +10,7 @@ mod external;
 mod call;
 mod cond;
 mod exit;
+mod export;
 mod expr;
 mod konst;
 mod prim;
@@ -286,8 +287,6 @@ impl SourceProbe {
     }
 }
 
-/// N1: C:663 compile_deps_program_in_arena. The final statement is a plain
-/// SExp carrying Out::value for the migration exporter, not an emitted effect.
 #[derive(Clone, Copy, Default, serde::Serialize)]
 pub(crate) struct SwitchStats {
     pub source_visits: usize,
@@ -300,6 +299,10 @@ pub(crate) struct SwitchStats {
 pub(crate) struct Lowered {
     pub program: super::bridge_j::Imported,
     pub finished: Finished,
+    /// The identifiers of the unit's export block, or `None` without one.
+    /// Their values are the last statements of the root block, one plain
+    /// `SExp` each, in the same order.
+    pub exports: Option<Vec<Ident>>,
     pub dynamic_imports: Vec<crate::js_ir::ModuleId>,
     pub switch_stats: SwitchStats,
 }
@@ -521,8 +524,18 @@ impl State {
         self.statements.append(first, second, value)
     }
 
-    /// N1: C:663 compile_deps_program_in_arena. Export transports the last value
-    /// in a plain sentinel SExp removed before export extraction and coercion.
+    /// N1: C:663 compile_deps_program_in_arena, the unit: the last value is
+    /// read for the exports (`export.rs`). Cost: that of `extract_exports`
+    /// and of `finish`.
+    fn complete_unit(mut self, probed: Probed) -> Lowered {
+        let out = self.realize(Cx::value(), probed);
+        let exports = self.extract_exports(out.value, out.finished);
+        self.finish(out.stmts, out.finished, exports)
+    }
+
+    /// The output of one construct in `cx`, for the rule tests: the value is
+    /// carried by a plain sentinel SExp after the statements.
+    #[cfg(test)]
     fn complete(mut self, cx: Cx, probed: Probed) -> Lowered {
         let out = self.realize(cx, probed);
         let value = out
@@ -530,8 +543,14 @@ impl State {
             .unwrap_or_else(|| self.pure_expression(View::JUndefined, 0));
         let value = self.arena.new_node(View::SExp { value }, 0);
         self.statements.push(value);
+        self.finish(out.stmts, out.finished, None)
+    }
+
+    /// Copy the top-level run that starts at `stmts` to the root block: one
+    /// step per statement of the run and one write per catch of the unit.
+    fn finish(mut self, stmts: Span, finished: Finished, exports: Option<Vec<Ident>>) -> Lowered {
         let run = self.statements.since(Span {
-            start: out.stmts.start,
+            start: stmts.start,
             len: 0,
         });
         let list = self.statements.take_list(&mut self.arena, run);
@@ -545,7 +564,8 @@ impl State {
         self.arena.finish_bulk(root);
         Lowered {
             program: super::bridge_j::Imported::from_lowering(self.arena, root, self.idents),
-            finished: out.finished,
+            finished,
+            exports,
             dynamic_imports: self.dynamic_imports,
             switch_stats: SwitchStats {
                 source_visits: self.source_steps,

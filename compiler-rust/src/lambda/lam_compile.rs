@@ -835,9 +835,11 @@ impl LambdaCompiler {
             let before = if CHECK { Some(deps.clone()) } else { None };
             let deps = self.finish_lowered_output(deps, &possible_required_modules);
             let checked = candidate.map(|candidate| match candidate {
-                Ok((j, compiled, dynamic, stats)) => {
+                Ok(candidate) => {
+                    let crate::bir::shadow::LowerCandidate { arena: j, block, exports, finished, dynamic_imports: dynamic, stats } = candidate;
                     let saved_stamp = self.id_gen.current_stamp();
-                    let new_before = self.coerce_lowered_output(j, compiled, shadow_side_effect);
+                    // The lowering extracted the exports; the fold is still the legacy one.
+                    let new_before = self.coerce_extracted_output(j, block, exports, finished, shadow_side_effect);
                     self.id_gen.restore_current_stamp(saved_stamp);
                     self.dynamic_import_modules = dynamic;
                     let new_after = self.finish_lowered_output(new_before.clone(), &possible_required_modules);
@@ -854,7 +856,7 @@ impl LambdaCompiler {
         })
     }
 
-    /// C:774–827: export extraction and coercion, shared by both lowerings.
+    /// C:774–827: export extraction and coercion of the legacy lowering.
     fn coerce_lowered_output(
         &mut self,
         mut j: JsArena,
@@ -862,21 +864,36 @@ impl LambdaCompiler {
         side_effect: Option<String>,
     ) -> DepsProgram {
         let mut block = compiled.prelude;
-        let compiled_expr = compiled.expr;
+        let mut extracted = extract_toplevel_exports(&mut j, compiled.expr, &mut block);
+        // lam_compile_main.ml:390-395: a finished toplevel output.
+        if compiled.finished == OutputFinished::True
+            && let Some(exports) = &mut extracted
+        {
+            for value in &mut exports.values {
+                *value = JE::undefined(false, &mut j);
+            }
+        }
+        self.coerce_extracted_output(j, block, extracted, compiled.finished, side_effect)
+    }
+
+    /// C:790–827: export coercion on extracted exports. The new lowering
+    /// extracts them itself (`bir/lower/export.rs`) and enters here.
+    fn coerce_extracted_output(
+        &mut self,
+        mut j: JsArena,
+        mut block: Block,
+        extracted: Option<ExtractedExports>,
+        finished: OutputFinished,
+        side_effect: Option<String>,
+    ) -> DepsProgram {
         let (exports, name_reservations) = {
             let _phase = info_span!("compiler.lambda_exports").entered();
-            if let Some(mut exports) = extract_toplevel_exports(&mut j, compiled_expr, &mut block) {
-                // lam_compile_main.ml:390-395: a finished toplevel output.
-                if compiled.finished == OutputFinished::True {
-                    for value in &mut exports.values {
-                        *value = JE::undefined(false, &mut j);
-                    }
-                }
+            if let Some(exports) = extracted {
                 self.coerce_toplevel_exports_with_name_reservations(
                     &mut j,
                     &mut block,
                     exports,
-                    compiled.finished,
+                    finished,
                 )
             } else {
                 (vec![], vec![])
@@ -886,7 +903,7 @@ impl LambdaCompiler {
         // toplevel always throws, the groups after the throw are dropped
         // and the identifiers they bind are undeclared. Declare each such
         // exported identifier after the throw.
-        if compiled.finished == OutputFinished::True {
+        if finished == OutputFinished::True {
             let declared: AHashSet<Ident> = block
                 .iter()
                 .filter_map(|stmt| match j.sk(*stmt) {

@@ -419,8 +419,18 @@ fn located_functions_match_mapping_sequences() {
     } else {
         source.function_(0, &[], body, FunctionAttribute::default(), loc)
     };
-    let input = bridge::import_lambda(&source, root).unwrap();
+    // The unit exports the value: its carrier statement prints as the value.
+    let exported = source.prim_raw(
+        crate::lambda::lam_primitive::Primitive::Pmakeblock(
+            crate::lambda::TagInfo::ModuleExport(vec![Ident::new("value", 11, IdentFlags::NONE)]),
+            crate::lambda::lam_primitive::Mutable::Immutable,
+        ),
+        &[root],
+        crate::lambda::LamLoc::NONE,
+    );
+    let input = bridge::import_lambda(&source, exported).unwrap();
     let lowered = super::lower(input, Some(&locations), false).unwrap();
+    assert_eq!(lowered.exports.as_ref().map(Vec::len), Some(1));
     let actual = bridge_j::export_js(&lowered.program).unwrap();
     let mut compiler = LambdaCompiler::new();
     compiler.set_source_map_enabled(true);
