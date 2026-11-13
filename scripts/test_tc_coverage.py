@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import unittest
+from pathlib import Path
 from tc_coverage import counts, increases
 
 
@@ -17,6 +18,13 @@ class CoverageTests(unittest.TestCase):
 
     def test_reruns_count_once(self):
         self.assertEqual(counts("debug: tc-declined NotBuilt a.res\ndebug: tc-declined NotBuilt a.res"), {"NotBuilt": 1})
+
+    def test_runtime_snapshot_does_not_change_project_count(self):
+        project = "debug: tc-declined NotBuilt /project/A.res"
+        runtime = "debug: tc-declined NotBuilt /runtime/Int.res"
+        self.assertEqual(counts(project, Path("/runtime")),
+                         counts(project + "\n" + runtime, Path("/runtime")))
+        self.assertEqual(counts(runtime), {"NotBuilt": 1})
 
     def test_fail_closed(self):
         for output in ("", "debug: tc-declined Unknown a.res"):

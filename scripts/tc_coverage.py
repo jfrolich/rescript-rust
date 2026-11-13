@@ -6,7 +6,7 @@
   python3 scripts/tc_coverage.py --corpus application=/path/to/project --write
 
 Counts are actual checker entries, not a source-file census. Dependencies compiled
-by a corpus count in that corpus. A runtime-only build is measured separately.
+by a corpus count in that corpus, except the runtime, measured separately.
 Only labels and counts are stored: private source paths never enter the ratchet.
 """
 import argparse
@@ -22,7 +22,7 @@ RECORD = re.compile(r"^debug: tc-declined (\w+) (.+)$", re.MULTILINE)
 REASONS = {"NotBuilt"}
 
 
-def counts(output):
+def counts(output, exclude=None):
     """O(log bytes); reject unrecognized reasons; count diagnostic reruns once."""
     result = Counter()
     seen = set()
@@ -32,7 +32,8 @@ def counts(output):
         if (reason, unit) in seen:
             continue
         seen.add((reason, unit))
-        result[reason] += 1
+        if exclude is None or not Path(unit).resolve().is_relative_to(exclude):
+            result[reason] += 1
     if not seen:
         raise ValueError("no checker entries: check executable and verbose logging")
     return result
@@ -77,7 +78,11 @@ def main():
         if build.returncode:
             # Do not echo private source paths or diagnostics into a public report.
             raise ValueError(f"{label}: build failed with exit {build.returncode}")
-        for reason, count in counts(build.stdout + build.stderr).items():
+        # Embedded runtime snapshots are optional. Do not let their availability
+        # change a project count; runtime has its own measured corpus.
+        runtime = args.runtime.resolve()
+        exclude = None if Path(project).resolve() == runtime else runtime
+        for reason, count in counts(build.stdout + build.stderr, exclude).items():
             measured[label, reason] = count
             print(f"{label} {reason} {count}")
     baseline = read_baseline(args.file) if args.file.exists() else {}
