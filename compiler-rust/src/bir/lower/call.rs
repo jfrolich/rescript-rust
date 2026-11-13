@@ -6,6 +6,7 @@ use crate::lambda::ApplyStatus;
 /// C:1144 compile_apply_call_inner: operands saved before their single visit.
 pub(super) struct Call {
     pub operands: Vec<NodeId>,
+    pub inline: bool,
     pub status: ApplyStatus,
     pub loc: crate::lambda::LamLoc,
     pub external: Option<(
@@ -20,6 +21,7 @@ impl State {
     /// copying the growing argument prefix. Arguments retain left-to-right order.
     pub(super) fn application(
         &mut self,
+        cx: Cx,
         mut callee: NodeId,
         args: &[NodeId],
         info: ApplyId,
@@ -59,7 +61,8 @@ impl State {
                         if function.params.len() == operands.len() - 1
                             && crate::lambda::lam_analysis::attr_can_be_inlined(&function.attr)
                         {
-                            return Err(Unsupported("cross-module inline"));
+                            let reduced = self.inline_external_function(cx, function, &operands[1..])?;
+                            return Ok(Call { operands: vec![reduced], inline: true, status, loc, external: None });
                         }
                     }
                 }
@@ -73,10 +76,67 @@ impl State {
         };
         Ok(Call {
             operands,
+            inline: false,
             status,
             loc,
             external,
         })
+    }
+
+    /// C:1377 compile_external_field_apply. O(imported function + beta work
+    /// + newly allocated variables), using the existing L beta reducer.
+    fn inline_external_function(&mut self, _cx: Cx, function: &crate::lambda::LFunction, args: &[NodeId]) -> Result<NodeId, Unsupported> {
+        use crate::bir::{bridge, engine::Engine, l::beta};
+        let mut lambda = crate::lambda::arena::LamArena::new();
+        let body = lambda.import(&function.body);
+        let root = lambda.function_(function.arity, &function.params, body, function.attr.clone(), function.loc);
+        // Align source identities with temporaries already allocated by J.
+        while self.source.vars.len() < self.arena.vars.len() {
+            let var = VarId(self.source.vars.len() as u32);
+            self.source.new_var_id(self.arena.vars.name(var), self.arena.vars.order(var));
+            self.source.vars.flags[var.index()] = self.arena.vars.flags[var.index()];
+        }
+        let first_var = self.source.vars.len();
+        self.inline_globals.extend(self.arena.pools.j_modules[self.inline_globals.len()..].iter().map(|module| module.id));
+        let mut globals = std::mem::take(&mut self.inline_globals);
+        let mut foreign = Vec::new();
+        std::mem::swap(&mut self.source.pools, &mut self.arena.pools);
+        let result = (|| {
+            let function = bridge::import_fragment(&mut self.source, &mut globals, &mut foreign, &lambda, root)?;
+            let View::Fun { body, header } = self.source.view(function) else { unreachable!("imported external function") };
+            let params = self.source.function(header).params;
+            for &arg in args { self.source.detach(arg); }
+            let mut engine = Engine::new(&mut self.source);
+            engine.set_current_stamp(self.next_order - 1);
+            let (_, stats) = beta::closed_with_stats(&engine, &mut self.inline_scratch, params, body);
+            let reduced = beta::reduce(&mut engine, &mut self.inline_scratch, params, body, args, Some(&stats), 1, &mut |_, _, _| {})?;
+            self.next_order = engine.current_stamp() + 1;
+            Ok((reduced, std::mem::take(&mut engine.stats.renames)))
+        })();
+        std::mem::swap(&mut self.source.pools, &mut self.arena.pools);
+        let (reduced, renames) = result?;
+        self.idents.extend(foreign);
+        for (var, origin) in renames {
+            assert_eq!(var.index(), self.idents.len());
+            let old = self.idents[origin.index()];
+            self.idents.push(Ident::new(old.name_atom(), self.source.vars.order(var) as i32, old.flags()));
+        }
+        for i in first_var..self.source.vars.len() {
+            let var = VarId(i as u32);
+            let made = self.arena.new_var_id(self.source.vars.name(var), self.source.vars.order(var));
+            assert_eq!(made, var);
+            self.arena.vars.flags[i] = self.source.vars.flags[i];
+        }
+        for &id in &globals[self.arena.pools.j_modules.len()..] {
+            self.arena.pools.j_modules.push(crate::js_ir::ModuleId { id, kind: crate::js_ir::Kind::Ml, dynamic_import: false });
+            self.module_constants.push(ModuleConstants::Unread);
+        }
+        self.inline_globals = globals;
+        self.arena.func_owners.resize(self.arena.pools.funcs.len(), None);
+        self.awaited_units.resize(self.arena.vars.len(), false);
+        self.invalid_module_paths.resize(self.source.nodes.len(), false);
+        self.switch_facts.resize(self.source.nodes.len(), super::switch::Facts::default());
+        Ok(reduced)
     }
 
     /// C:320 call_info_of_apply_status. Local calls never consult export arity.
@@ -109,6 +169,9 @@ impl State {
             })
             .collect();
         let (statements, values) = self.sequence_arguments(false, outputs);
+        if call.inline {
+            return self.primitive_result(cx, statements, values[0]);
+        }
         let value = if let Some((module, member, arity)) = call.external {
             let callee = self.pure_expression(
                 View::JQualified {

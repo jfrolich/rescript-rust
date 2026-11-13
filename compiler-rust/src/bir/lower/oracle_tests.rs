@@ -23,14 +23,14 @@ fn compare_with_options(arena: LamArena, root: Lam, resolver: Option<&crate::js_
 }
 
 pub(super) fn compare_in_contexts(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, checks: bool, contexts: &[u8]) {
-    compare_oracle(arena, root, resolver, checks, contexts, None);
+    compare_oracle(arena, root, resolver, checks, contexts, None, false);
 }
 
 pub(super) fn compare_mapped(arena: LamArena, root: Lam, locations: &crate::lambda::LamLocTable) {
-    compare_oracle(arena, root, None, true, &[0,1,2,3,4], Some(locations));
+    compare_oracle(arena, root, None, true, &[0,1,2,3,4], Some(locations), false);
 }
 
-fn compare_oracle(mut arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, checks: bool, contexts: &[u8], locations: Option<&crate::lambda::LamLocTable>) {
+fn compare_oracle(mut arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, checks: bool, contexts: &[u8], locations: Option<&crate::lambda::LamLocTable>, inline: bool) {
     let target = Ident::new("result", arena.ident_stamp_bound() + 1, IdentFlags::NONE);
     for direct in [false, true] {
         for &context in contexts {
@@ -50,6 +50,7 @@ fn compare_oracle(mut arena: LamArena, root: Lam, resolver: Option<&crate::js_ir
             let source_root = input.root;
             let mut state = State::new(input);
             state.direct = direct;
+            state.cross_module_inline = inline;
             state.locations = locations.cloned();
             state.check_div_by_zero = checks;
             state.resolver = resolver.cloned();
@@ -71,6 +72,7 @@ fn compare_oracle(mut arena: LamArena, root: Lam, resolver: Option<&crate::js_ir
                 assert_eq!(row.remaining, row.built);
             }
             let mut compiler = LambdaCompiler::new();
+            compiler.cross_module_inline = inline;
             compiler.module_path_resolver = resolver.cloned();
             if let Some(locations) = locations {
                 compiler.set_source_map_enabled(true);
@@ -560,12 +562,12 @@ fn unsupported_arguments_keep_their_own_reason_and_loops_wait_for_rec() {
     let f = source.var(Ident::new("f", 1, IdentFlags::NONE));
     let a = source.const_(C::JsNull);
     let b = source.const_(C::JsTrue);
-    let arg = source.prim_raw(crate::lambda::lam_primitive::Primitive::PjsApply, &[a, b], LamLoc::NONE);
+    let arg = source.while_(b, a);
     let root = source.apply_raw(f, &[arg], ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE });
     let input = bridge::import_lambda(&source, root).unwrap();
     let root = input.root;
     let mut state = State::new(input);
-    assert!(matches!(state.probe(Cx::value(), root), Err(Unsupported("external"))));
+    assert!(matches!(state.probe(Cx::value(), root), Err(Unsupported("loop"))));
     let cx = Cx::new(Cont::Effect(Tail::Return(Ret::Named { loop_: Some(LoopRef(0)), in_catch: false })));
     assert!(matches!(state.probe(cx, root), Err(Unsupported("let rec"))));
 }
@@ -601,7 +603,7 @@ fn export_summaries_and_partial_calls_in_all_five_contexts() {
 }
 
 #[test]
-fn eligible_cross_module_inline_has_its_named_fallback() {
+fn eligible_cross_module_inline_matches_legacy() {
     use crate::cmi::persistent_env::CmjExportArity;
     use crate::js_ir::ModulePathResolver;
     use crate::lambda::{ApInfo, ApplyStatus, FieldDbgInfo, LamLoc, Lambda, lam_arity::Arity, lam_primitive::Primitive};
@@ -615,14 +617,35 @@ fn eligible_cross_module_inline_has_its_named_fallback() {
     let arg = a.const_(C::JsNull);
     let root = a.apply_raw(callee, &[arg], ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE });
     compare_with_resolver(a.clone(), root, Some(&resolver));
-    for cx in [Cx::value(), Cx::effect(), Cx::declare(LetKind::Strict, VarId(0)), Cx::assign(VarId(0)), Cx::returning()] {
-        let input = bridge::import_lambda(&a, root).unwrap();
-        let root = input.root;
-        let mut state = State::new(input);
-        state.resolver = Some(resolver.clone());
-        state.cross_module_inline = true;
-        assert!(matches!(state.probe(cx, root), Err(Unsupported("cross-module inline"))));
-    }
+    compare_oracle(a, root, Some(&resolver), true, &[0,1,2,3,4], None, true);
+}
+
+#[test]
+fn inline_body_with_effectful_argument_matches_legacy() {
+    use crate::cmi::persistent_env::CmjExportArity;
+    use crate::js_ir::ModulePathResolver;
+    use crate::lambda::{ApInfo, ApplyStatus, FieldDbgInfo, LamLoc, Lambda, lam_arity::Arity, lam_primitive::Primitive};
+    let resolver = ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+    let param = Ident::new("arg", 100, IdentFlags::NONE);
+    let mut body = LamArena::new();
+    let arg = body.var(param);
+    let root = body.prim_raw(Primitive::Pmakearray, &[arg, arg], LamLoc::NONE);
+    resolver.set_bir_test_export("Other", "run", CmjExportArity::Single(Arity::info(vec![1], false)),
+        Some(Lambda::function_(1, vec![param], body.export(root), Default::default(), LamLoc::NONE)));
+    let mut a = LamArena::new();
+    let global = a.global_module(Ident::create_persistent("Other"));
+    let callee = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Module { name: crate::name::Name::new("run") }), &[global], LamLoc::NONE);
+    let arg = a.prim_raw(Primitive::PinitMod, &[], LamLoc::NONE);
+    let root = a.apply_raw(callee, &[arg], ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE });
+    compare_oracle(a.clone(), root, Some(&resolver), true, &[0,1,2,3,4], None, true);
+    resolver.set_bir_test_export("Other", "run", CmjExportArity::Single(Arity::info(vec![1], false)),
+        Some(Lambda::function_(1, vec![param], Lambda::Lwhile(Box::new(Lambda::var(param)), Box::new(Lambda::var(param))), Default::default(), LamLoc::NONE)));
+    let input = bridge::import_lambda(&a, root).unwrap();
+    let root = input.root;
+    let mut state = State::new(input);
+    state.resolver = Some(resolver);
+    state.cross_module_inline = true;
+    assert!(matches!(state.probe(Cx::value(), root), Err(Unsupported("loop"))));
 }
 
 #[test]
@@ -663,4 +686,124 @@ fn block_substitution_and_dead_removal_do_not_commute_with_tailcall_inlining() {
     let print = |p: &JsDepsProgram| crate::js_ir::print_deps_program_with_directives_and_options(p, None, &[], false, false, false);
     assert_eq!(print(&old), "\n\n\nfunction pair_0(x) {\n  return x;\n}\n\nfunction run() {\n  return pair_0(2);\n}\n\nexport {\n  run,\n}\n/* No side effect */\n");
     assert_eq!(print(&new), "\n\n\nfunction run() {\n  return 2;\n}\n\nexport {\n  run,\n}\n/* No side effect */\n");
+}
+
+#[test]
+fn a_return_conditional_does_not_fold_over_a_statement_form() {
+    // C:5139 lambda_contains_statement_value_form: the branch is a string
+    // switch of one complete case, lowered to its body `e; return 5`. The
+    // conditional stays a statement instead of `return x ? (e, 5) : 2`.
+    use crate::lambda::LamLoc;
+    use crate::lambda::lam_primitive::Primitive as P;
+    let mut a = LamArena::new();
+    let one = a.const_(C::Int { i: 1, comment: None });
+    let effect = a.prim_raw(P::PinitMod, &[one], LamLoc::NONE);
+    let five = a.const_(C::Int { i: 5, comment: None });
+    let body = a.seq_raw(effect, five);
+    let y = a.var(Ident::new("y", 11, IdentFlags::NONE));
+    let branch = a.string_switch(y, &[("a", body)], None);
+    let x = a.var(Ident::new("x", 10, IdentFlags::NONE));
+    let two = a.const_(C::Int { i: 2, comment: None });
+    let root = a.if_(x, branch, two);
+    compare(a, root);
+}
+
+#[test]
+fn a_result_the_lowering_assigns_is_not_held_before_a_statement_argument() {
+    // A:28 delay_safe reads C:404 `assignable`, the targets of level-L
+    // assignments: the temporary of the first argument is passed as it is.
+    use crate::lambda::lam_primitive::Primitive as P;
+    use crate::lambda::{ApInfo, ApplyStatus, LamLoc};
+    let mut a = LamArena::new();
+    let arg = |a: &mut LamArena, name: &str, stamp: i32| {
+        let test = a.var(Ident::new(name, stamp, IdentFlags::NONE));
+        let thrown = a.const_(C::Int { i: stamp, comment: None });
+        let yes = a.prim_raw(P::Praise, &[thrown], LamLoc::NONE);
+        let value = a.const_(C::Int { i: stamp + 1, comment: None });
+        let no = a.prim_raw(P::PinitMod, &[value], LamLoc::NONE);
+        a.if_(test, yes, no)
+    };
+    let first = arg(&mut a, "x", 10);
+    let second = arg(&mut a, "y", 20);
+    let f = a.var(Ident::new("f", 30, IdentFlags::NONE));
+    let info = ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE };
+    let root = a.apply_raw(f, &[first, second], info);
+    compare(a, root);
+}
+
+#[test]
+fn a_result_the_lowering_assigns_is_not_held_before_a_statement_argument_of_an_external() {
+    // The same arguments through the external argument holding: a result
+    // temporary the lowering assigned stays delay-safe there as well.
+    use crate::lambda::lam_primitive::{DeclKind, ExternalDecl, JsCall, Param, Primitive as P};
+    use crate::lambda::LamLoc;
+    for (kind, count) in [
+        (DeclKind::DeclVal { name: "f".into() }, 2),
+        (DeclKind::DeclVal { name: "f".into() }, 3),
+        (DeclKind::DeclNew { name: "F".into() }, 2),
+        (DeclKind::DeclSend { name: "f".into() }, 3),
+    ] {
+        let mut a = LamArena::new();
+        let args: Vec<_> = (0..count)
+            .map(|i| {
+                let stamp = 10 * (i + 1);
+                let test = a.var(Ident::new("x", stamp, IdentFlags::NONE));
+                let thrown = a.const_(C::Int { i: stamp, comment: None });
+                let yes = a.prim_raw(P::Praise, &[thrown], LamLoc::NONE);
+                let value = a.const_(C::Int { i: stamp + 1, comment: None });
+                let no = a.prim_raw(P::PinitMod, &[value], LamLoc::NONE);
+                a.if_(test, yes, no)
+            })
+            .collect();
+        let call = JsCall {
+            prim_name: "f".into(),
+            arg_types: vec![Param::dummy(); count as usize],
+            ffi: ExternalDecl {
+                kind,
+                module_: None,
+                scopes: vec![],
+                variadic: false,
+                effective_arity: count as _,
+            },
+        };
+        let root = a.prim_raw(P::PjsCall(Box::new(call)), &args, LamLoc::NONE);
+        compare(a, root);
+    }
+}
+
+#[test]
+fn an_inlined_function_that_holds_a_catch_is_lowered_after_a_catch_of_the_unit() {
+    // The inlined body brings a catch header the unit did not have when its
+    // first catch sized the jump table.
+    use crate::cmi::persistent_env::CmjExportArity;
+    use crate::js_ir::ModulePathResolver;
+    use crate::lambda::lam_primitive::Primitive as P;
+    use crate::lambda::{ApInfo, ApplyStatus, FieldDbgInfo, LamLoc, Lambda, lam_arity::Arity};
+    let effect = |a: &mut LamArena, i: i32| {
+        let value = a.const_(C::Int { i, comment: None });
+        a.prim_raw(P::PinitMod, &[value], LamLoc::NONE)
+    };
+    let catch = |a: &mut LamArena, test: Ident, label: i32| {
+        let test = a.var(test);
+        let (exit, other) = (a.static_raise(label, &[]), effect(a, label));
+        let body = a.if_(test, exit, other);
+        let first = effect(a, label + 1);
+        let second = effect(a, label + 2);
+        let handler = a.seq_raw(first, second);
+        a.static_catch(body, label, &[], handler)
+    };
+    let resolver = ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+    let param = Ident::new("arg", 100, IdentFlags::NONE);
+    let mut body = LamArena::new();
+    let root = catch(&mut body, param, 50);
+    resolver.set_bir_test_export("Other", "run", CmjExportArity::Single(Arity::info(vec![1], false)),
+        Some(Lambda::function_(1, vec![param], body.export(root), Default::default(), LamLoc::NONE)));
+    let mut a = LamArena::new();
+    let own = catch(&mut a, Ident::new("x", 10, IdentFlags::NONE), 1);
+    let global = a.global_module(Ident::create_persistent("Other"));
+    let callee = a.prim_raw(P::Pfield(0, FieldDbgInfo::Module { name: crate::name::Name::new("run") }), &[global], LamLoc::NONE);
+    let arg = a.var(Ident::new("y", 11, IdentFlags::NONE));
+    let call = a.apply_raw(callee, &[arg], ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE });
+    let root = a.seq_raw(own, call);
+    compare_oracle(a, root, Some(&resolver), true, &[0, 1, 2, 3, 4], None, true);
 }

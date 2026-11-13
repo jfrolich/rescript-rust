@@ -1222,8 +1222,8 @@ fn check_constant(
     warnings: &mut Vec<PpxWarning>,
     arena: &ParseArena,
 ) {
-    if let Constant::Integer(s, None) = constant {
-        if !crate::types::typecore::int32_literal_fits_ocaml(arena.get_string(*s)) {
+    if let Some(digits) = constant.integer_digits() {
+        if !crate::types::typecore::int32_literal_fits_ocaml(arena.get_string(digits)) {
             warnings.push(PpxWarning {
                 loc,
                 warning: Warning::BsIntegerLiteralOverflow,
@@ -1395,6 +1395,30 @@ macro_rules! validation_methods {
                             arena,
                         );
                         self.attributes(arena, expr.pexp_attributes.as_slice());
+                    }
+                }
+                ExpressionDesc::Pexp_await(operand) => self.expr(arena, *operand),
+                ExpressionDesc::Pexp_let((flag, bindings, body)) => {
+                    if let Some(binding) = crate::parser::parsetree_viewer::single_record_binding(arena, *flag, *bindings) {
+                        self.attributes(arena, expr.pexp_attributes.as_slice());
+                        self.attributes(arena, binding.pvb_attributes.as_slice());
+                        self.expr(arena, binding.pvb_expr);
+                        self.pat(arena, binding.pvb_pat);
+                        self.expr(arena, *body);
+                    } else {
+                        super::ast_iter::walk_expr(self, arena, idx);
+                    }
+                }
+                ExpressionDesc::Pexp_match((scrutinee, cases)) => {
+                    if let Some((yes, no)) = crate::parser::parsetree_viewer::boolean_match_arms(arena, *cases) {
+                        // The old conditional expansion discarded the patterns and
+                        // visited branches in boolean order (bs_builtin_ppx.ml:138-167).
+                        self.attributes(arena, expr.pexp_attributes.as_slice());
+                        self.expr(arena, *scrutinee);
+                        self.expr(arena, yes);
+                        self.expr(arena, no);
+                    } else {
+                        super::ast_iter::walk_expr(self, arena, idx);
                     }
                 }
                 _ => super::ast_iter::walk_expr(self, arena, idx),
@@ -4763,8 +4787,9 @@ fn transform_inline_sig_value(
         ExpressionDesc::Pexp_constant(c) => match c {
             Constant::String(_) => None,
             // @inline(42) let x: t
-            Constant::Integer(s, None) => {
-                let i = arena.get_string(*s).parse::<i32>().ok()?;
+            Constant::Integer(_, None | Some('l')) => {
+                let digits = c.integer_digits().expect("machine integer");
+                let i = arena.get_string(digits).parse::<i32>().ok()?;
                 let prim = inline_int_primitive(i);
                 Some(ValueDescription {
                     pval_jsx_component: None,
@@ -4878,8 +4903,9 @@ fn transform_inline_binding(
         ExpressionDesc::Pexp_constant(c) => match c {
             Constant::String(_) => None,
             // @inline let x = 42
-            Constant::Integer(s, None) => {
-                let i = arena.get_string(*s).parse::<i32>().ok()?;
+            Constant::Integer(_, None | Some('l')) => {
+                let digits = c.integer_digits().expect("machine integer");
+                let i = arena.get_string(digits).parse::<i32>().ok()?;
                 let prim = inline_int_primitive(i);
                 Some(StructureItem {
                     pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
@@ -5776,43 +5802,6 @@ fn transform_await(inner: ExprIdx, loc: LocIdx, arena: &mut ParseArena) -> Expre
             transformed_jsx: false,
         }),
         pexp_loc: ghost_loc,
-        pexp_attributes: Attributes::new(),
-    }
-}
-
-/// Wrap expression with `Primitive_promise.unsafe_async(expr)`
-/// OCaml: ast_async.ml add_promise_type
-///
-/// OCaml uses the loc directly (not ghosted): `Ast_helper.Exp.ident ~loc` and
-/// `Ast_helper.Exp.apply ~loc`. All three uses of loc (pexp_ident.loc, ident.pexp_loc,
-/// apply.pexp_loc) share the same ppat_loc object for pointer-identity-based sharing.
-fn wrap_with_unsafe_async(inner: ExprIdx, loc: LocIdx, arena: &mut ParseArena) -> Expression {
-    // Create Primitive_promise.unsafe_async identifier
-    let promise_str = arena.intern_string("Primitive_promise");
-    let promise_lident = arena.push_lident_from_idx(promise_str);
-    let unsafe_async_lid = arena.push_ldot_static(promise_lident, "unsafe_async");
-
-    // OCaml uses the same loc object for all three positions
-    let func_ident = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(Located {
-            txt: unsafe_async_lid,
-            loc,
-        }),
-        pexp_loc: loc,
-        pexp_attributes: Attributes::new(),
-    };
-
-    Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
-            funct: arena.push_expr(func_ident),
-            args: {
-                let items = [(ArgLabel::Nolabel, inner)];
-                arena.push_apply_args(&items)
-            },
-            partial: false,
-            transformed_jsx: false,
-        }),
-        pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     }
 }
@@ -6885,14 +6874,7 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
     let attrs = rewrite_attributes(&pat.ppat_attributes, arena);
 
     let desc = match &pat.ppat_desc {
-        PatternDesc::Ppat_constant(c) => match c {
-            // Strip 'l' suffix from integer literals
-            Constant::Integer(s, Some('l')) => {
-                PatternDesc::Ppat_constant(Constant::Integer(*s, None))
-            }
-            // Other constants: no transformation needed
-            _ => PatternDesc::Ppat_constant(*c),
-        },
+        PatternDesc::Ppat_constant(c) => PatternDesc::Ppat_constant(*c),
 
         // Alias pattern: recurse into the aliased pattern
         PatternDesc::Ppat_alias(inner_idx, name) => {
@@ -7058,16 +7040,6 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
     }
 }
 
-/// OCaml async rewriting uses the mapped lhs pattern location, and for
-/// `Ppat_var` that location is pointer-identical to `name.loc`. Keep the same
-/// identity when arena indices differ but location contents are equal.
-fn async_lhs_loc(lhs: &Pattern, _arena: &ParseArena) -> LocIdx {
-    if let PatternDesc::Ppat_var(name) = &lhs.ppat_desc {
-        return name.loc;
-    }
-    lhs.ppat_loc
-}
-
 fn split_this_attrs(attrs: &[Attribute], arena: &ParseArena) -> (bool, Vec<Attribute>) {
     let mut has_this = false;
     let mut remaining = Vec::new();
@@ -7130,15 +7102,7 @@ fn rewrite_method_callback_expression(
         arena.set_nary_fun_newtypes(first.p_pat, newtypes);
     }
 
-    // Ast_async.make_function_async, with the location of the mapped first
-    // pattern.
-    let rhs = if is_async {
-        let async_loc = async_lhs_loc(arena.get_pat(first.p_pat), arena);
-        let wrapped = wrap_with_unsafe_async(body, async_loc, arena);
-        arena.push_expr(wrapped)
-    } else {
-        body
-    };
+    let rhs = body;
     let method_body = Expression {
         pexp_desc: ExpressionDesc::Pexp_fun(Box::new(PexpFun {
             arg_label: first.p_lbl,
@@ -7307,7 +7271,7 @@ fn pattern_needs_no_rewrite(arena: &ParseArena, idx: PatIdx) -> bool {
             .all(|p| pattern_needs_no_rewrite(arena, *p))
     };
     match &pat.ppat_desc {
-        PatternDesc::Ppat_constant(c) => !matches!(c, Constant::Integer(_, Some('l'))),
+        PatternDesc::Ppat_constant(_) => true,
         PatternDesc::Ppat_alias(inner, _) | PatternDesc::Ppat_exception(inner) => {
             pattern_needs_no_rewrite(arena, *inner)
         }
@@ -7398,27 +7362,14 @@ fn rewrite_expr(idx: ExprIdx, arena: &mut ParseArena) {
     MAPPER_STEPS.with(|steps| steps.set(steps.get() + 1));
     let expr = arena.get_expr(idx);
     let loc = expr.pexp_loc;
-    match &expr.pexp_desc {
-        // bs_builtin_ppx.ml: `{e with pexp_desc = Pexp_constant
-        // (Pconst_integer (s, None))}`, the attributes as they are.
-        ExpressionDesc::Pexp_constant(Constant::Integer(digits, Some('l'))) => {
-            let expanded = Expression {
-                pexp_desc: ExpressionDesc::Pexp_constant(Constant::Integer(*digits, None)),
-                pexp_loc: loc,
-                pexp_attributes: expr.pexp_attributes.clone(),
-            };
-            return expand(arena, idx, expanded);
-        }
-        ExpressionDesc::Pexp_apply(apply) => {
-            if let Some((a, f)) = pipe_operands(arena, apply) {
-                let attrs = expr.pexp_attributes.clone();
-                rewrite_expr(a, arena);
-                rewrite_expr(f, arena);
-                let expanded = desugar_pipe(loc, &attrs, a, f, arena);
-                return expand(arena, idx, expanded);
-            }
-        }
-        _ => {}
+    if let ExpressionDesc::Pexp_apply(apply) = &expr.pexp_desc
+        && let Some((a, f)) = pipe_operands(arena, apply)
+    {
+        let attrs = expr.pexp_attributes.clone();
+        rewrite_expr(a, arena);
+        rewrite_expr(f, arena);
+        let expanded = desugar_pipe(loc, &attrs, a, f, arena);
+        return expand(arena, idx, expanded);
     }
     arena.mark_rewritten_expr_loc(loc);
 
@@ -7527,7 +7478,7 @@ fn rewrite_expr(idx: ExprIdx, arena: &mut ParseArena) {
             let (rec_flag, bindings, body) = *inner;
             if rec_flag == RecFlag::Nonrecursive
                 && bindings.len() == 1
-                && rewrite_single_binding_let(idx, bindings, body, arena)
+                && rewrite_unwrap_binding_let(idx, bindings, body, arena)
             {
                 return;
             }
@@ -7553,26 +7504,6 @@ fn rewrite_expr(idx: ExprIdx, arena: &mut ParseArena) {
 
         ExpressionDesc::Pexp_match(inner) => {
             let (scrutinee, cases) = *inner;
-            // bs_builtin_ppx.ml (lines 138-167):
-            //   switch b { | true => t | false => f }
-            // becomes
-            //   if b { t } else { f }
-            if let Some((t_exp, f_exp)) = boolean_match_arms(arena, cases) {
-                let attrs = arena.get_expr(idx).pexp_attributes.clone();
-                rewrite_expr(scrutinee, arena);
-                rewrite_expr(t_exp, arena);
-                rewrite_expr(f_exp, arena);
-                let expanded = Expression {
-                    pexp_desc: ExpressionDesc::Pexp_ifthenelse(Box::new((
-                        scrutinee,
-                        t_exp,
-                        Some(f_exp),
-                    ))),
-                    pexp_loc: loc,
-                    pexp_attributes: rewrite_attributes(&attrs, arena).into(),
-                };
-                return expand(arena, idx, expanded);
-            }
             rewrite_expr(scrutinee, arena);
             rewrite_cases(cases, arena).map(|cases| ExpressionDesc::Pexp_match((scrutinee, cases)))
         }
@@ -7759,16 +7690,10 @@ fn rewrite_expr(idx: ExprIdx, arena: &mut ParseArena) {
             None
         }
 
-        // `await e` is `Primitive_promise.unsafe_await(e)`. OCaml's
-        // `create_await_expression` takes the ghost location from the
-        // operand as written, and makes a new expression without the
-        // attributes of the `Pexp_await` node.
         ExpressionDesc::Pexp_await(e) => {
-            let e = *e;
-            let e_loc = arena.get_expr(e).pexp_loc;
-            rewrite_expr(e, arena);
-            let expanded = transform_await(e, e_loc, arena);
-            return expand(arena, idx, expanded);
+            rewrite_expr(*e, arena);
+            // The old expansion discarded this node's attributes entirely.
+            return;
         }
 
         // The default mapper maps the packed module with `sub.module_expr`
@@ -7939,40 +7864,14 @@ fn rewrite_expr_list(list: ExprList, arena: &mut ParseArena) {
 /// in either order and without guards.
 ///
 /// Cost: constant.
-fn boolean_match_arms(arena: &ParseArena, cases: CaseList) -> Option<(ExprIdx, ExprIdx)> {
-    let [first, second] = arena.case_list(cases) else {
-        return None;
-    };
-    if first.pc_guard.is_some() || second.pc_guard.is_some() {
-        return None;
-    }
-    let is = |pat: PatIdx, name: &str| {
-        if let PatternDesc::Ppat_construct(lid, args) = &arena.get_pat(pat).ppat_desc
-            && args.txt.is_empty()
-        {
-            matches!(arena.get_longident(lid.txt), Longident::Lident(s) if arena.get_string(*s) == name)
-        } else {
-            false
-        }
-    };
-    if is(first.pc_lhs, "true") && is(second.pc_lhs, "false") {
-        Some((first.pc_rhs, second.pc_rhs))
-    } else if is(first.pc_lhs, "false") && is(second.pc_lhs, "true") {
-        Some((second.pc_rhs, first.pc_rhs))
-    } else {
-        None
-    }
-}
-
 /// The rewrites of `let pattern = e; body` with one non-recursive binding
 /// (bs_builtin_ppx.ml lines 295-319): a supported `let?` is a match with an
-/// early-return case and a continuation case, and a record or dictionary
-/// pattern is a one-case match. Returns false, having done nothing, for any
-/// other binding.
+/// early-return case and a continuation case. Returns false, having done
+/// nothing, for any other binding.
 ///
 /// Cost: constant beside the visits of the binding's pattern, expression
 /// and body.
-fn rewrite_single_binding_let(
+fn rewrite_unwrap_binding_let(
     idx: ExprIdx,
     bindings: VbList,
     body: ExprIdx,
@@ -8071,39 +7970,7 @@ fn rewrite_single_binding_let(
         arena.set_expansion(idx, unwrapped);
         return true;
     }
-    let is_record_pat = match &arena.get_pat(vb_pat).ppat_desc {
-        PatternDesc::Ppat_record(..) | PatternDesc::Ppat_dict(_) => true,
-        PatternDesc::Ppat_alias(inner, _) => {
-            matches!(
-                &arena.get_pat(*inner).ppat_desc,
-                PatternDesc::Ppat_record(..) | PatternDesc::Ppat_dict(_)
-            )
-        }
-        _ => false,
-    };
-    if !is_record_pat {
-        return false;
-    }
-    // The attributes of the expression, then those of the binding.
-    let mut attrs = arena.get_expr(idx).pexp_attributes.clone();
-    attrs.extend(arena.vb_list(bindings)[0].pvb_attributes.iter().cloned());
-    rewrite_expr(vb_expr, arena);
-    let pat = rewrite_pat_idx(vb_pat, arena);
-    rewrite_expr(body, arena);
-    let attrs = rewrite_attributes(&attrs, arena);
-    let case = Case {
-        pc_bar: None,
-        pc_lhs: pat,
-        pc_guard: None,
-        pc_rhs: body,
-    };
-    let expanded = Expression {
-        pexp_desc: ExpressionDesc::Pexp_match((vb_expr, arena.push_case_list(&[case]))),
-        pexp_loc: loc,
-        pexp_attributes: attrs.into(),
-    };
-    expand(arena, idx, expanded);
-    true
+    false
 }
 
 /// The built-in rewrites of a function: `@this` makes a method callback, an
@@ -8144,12 +8011,6 @@ fn rewrite_fun(idx: ExprIdx, arena: &mut ParseArena) {
             changed.push((i, new_pat));
         }
     }
-    let first_pat = match changed.first() {
-        Some((0, pat)) => *pat,
-        _ => params[0].1,
-    };
-    // OCaml takes the location from the mapped lhs pattern.
-    let pattern_loc = async_lhs_loc(arena.get_pat(first_pat), arena);
     rewrite_expr(body, arena);
     let newtypes_have_attributes = arena
         .nary_fun_newtypes(&fun)
@@ -8181,14 +8042,7 @@ fn rewrite_fun(idx: ExprIdx, arena: &mut ParseArena) {
     }
     let attrs = arena.get_expr(idx).pexp_attributes.clone();
     let new_attrs = rewritten_attributes(&attrs, arena);
-    // Ast_async.make_function_async: the body of an `async` function is
-    // `Primitive_promise.unsafe_async(body)`.
-    let rhs = if fun.is_async {
-        let wrapped = wrap_with_unsafe_async(body, pattern_loc, arena);
-        arena.push_expr(wrapped)
-    } else {
-        body
-    };
+    let rhs = body;
     if rhs != fun.rhs || shape.2 != fun.lhs || new_attrs.is_some() {
         let expanded = Expression {
             pexp_desc: ExpressionDesc::Pexp_fun(Box::new(PexpFun {
@@ -11777,7 +11631,11 @@ let e = () =>
         assert_eq!(arena.get_expr(root), &root_before);
         for (idx, before) in items.iter().zip(&before) {
             assert_eq!(arena.get_expr(*idx), before, "the node as parsed is kept");
-            assert_ne!(arena.expanded(*idx), *idx, "the rewrite is recorded");
+            if items[4..].contains(idx) {
+                assert_eq!(arena.expanded(*idx), *idx, "direct construct stays as written");
+            } else {
+                assert_ne!(arena.expanded(*idx), *idx, "the rewrite is recorded");
+            }
         }
         let expanded = |i: usize| &arena.get_expr(arena.expanded(items[i])).pexp_desc;
         assert!(matches!(expanded(0), ExpressionDesc::Pexp_constraint(_)));
@@ -11795,10 +11653,10 @@ let e = () =>
         assert_eq!(arena.apply_args(call.args).len(), 2);
         assert!(matches!(
             expanded(4),
-            ExpressionDesc::Pexp_constant(Constant::Integer(_, None))
+            ExpressionDesc::Pexp_constant(Constant::Integer(_, Some('l')))
         ));
-        assert!(matches!(expanded(5), ExpressionDesc::Pexp_apply(_)));
-        assert!(matches!(expanded(6), ExpressionDesc::Pexp_ifthenelse(_)));
+        assert!(matches!(expanded(5), ExpressionDesc::Pexp_await(_)));
+        assert!(matches!(expanded(6), ExpressionDesc::Pexp_match(_)));
         assert!(matches!(expanded(7), ExpressionDesc::Pexp_fun(_)));
     }
 
@@ -11823,24 +11681,56 @@ let e = () =>
     }
 
     #[test]
-    fn a_changed_pattern_expands_only_the_expression_that_holds_it() {
+    fn integer_patterns_keep_their_handles_and_create_no_expansion() {
         let (mut arena, root, items) =
             bound_tuple("let x = (a, switch b { | 1l => (c, d) | _ => (d, c) })\n");
+        let before = arena.get_expr(items[1]).clone();
         let appended = appended_exprs(&mut arena, |arena| rewrite_expr(root, arena));
-        assert_eq!(appended, 1, "the match with its mapped pattern");
+        assert_eq!(appended, 0);
         assert_eq!(arena.expanded(root), root);
-        let expanded = arena.expanded(items[1]);
-        assert_ne!(expanded, items[1]);
-        let (ExpressionDesc::Pexp_match((scrutinee, cases)), ExpressionDesc::Pexp_match((_, old))) =
-            (&arena.get_expr(expanded).pexp_desc, &arena.get_expr(items[1]).pexp_desc)
-        else {
-            panic!("expected matches");
-        };
-        assert!(matches!(arena.get_expr(*scrutinee).pexp_desc, ExpressionDesc::Pexp_ident(_)));
-        let (new, old) = (arena.case_list(*cases), arena.case_list(*old));
-        assert_ne!(new[0].pc_lhs, old[0].pc_lhs);
-        assert_eq!(new[0].pc_rhs, old[0].pc_rhs);
-        assert_eq!(new[1], old[1]);
+        assert_eq!(arena.expanded(items[1]), items[1]);
+        assert_eq!(arena.get_expr(items[1]), &before);
+    }
+
+    #[test]
+    fn ten_thousand_async_await_functions_append_nothing() {
+        let mut source = String::from("let x = [");
+        source.push_str(&"async p => await p, ".repeat(10_000));
+        source.push_str("]\n");
+        // Array, then each function, parameter pattern and await.
+        assert_eq!(mapper_cost(&source), (30_001, 0));
+    }
+
+    #[test]
+    fn ten_thousand_record_lets_append_nothing() {
+        let mut source = String::from("let x = [");
+        source.push_str(&"{let {a} = b; a}, ".repeat(10_000));
+        source.push_str("]\n");
+        // Array, and per element: braces, let, record pattern and variable.
+        assert_eq!(mapper_cost(&source), (40_001, 0));
+    }
+
+    #[test]
+    fn ten_thousand_boolean_matches_append_nothing() {
+        let mut source = String::from("let x = [");
+        source.push_str(&"switch b { | false => 0 | true => 1 }, ".repeat(10_000));
+        source.push_str("]\n");
+        // One array, then each match and its two constant patterns.
+        assert_eq!(mapper_cost(&source), (30_001, 0));
+    }
+
+    #[test]
+    fn ten_thousand_integer_suffixes_append_nothing() {
+        let mut source = String::from("let x = [");
+        source.push_str(&"1l, ".repeat(10_000));
+        source.push_str("]\n");
+        assert_eq!(mapper_cost(&source), (0, 0));
+        let mut source = String::from("let x = switch a {\n");
+        for i in 0..10_000 {
+            source.push_str(&format!("| {i}l => b\n"));
+        }
+        source.push_str("}\n");
+        assert_eq!(mapper_cost(&source), (10_001, 0));
     }
 
     /// `rewrite_expr` on the single binding of `source`: the nodes entered

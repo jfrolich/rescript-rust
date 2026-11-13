@@ -384,6 +384,14 @@ impl Bir {
     }
     fn update_facts(&mut self, id: NodeId) -> bool {
         let mut changed = false;
+        // Only the lowering arena consumes this J-only fact. L rewrite arenas
+        // must not allocate or maintain an unused per-node J table.
+        if self.js_scope.is_some() {
+            let duplicable = j::facts::external_duplicable(self, id);
+            if self.j_duplicable.len() <= id.index() { self.j_duplicable.resize(id.index() + 1, false); }
+            changed = self.j_duplicable[id.index()] != duplicable;
+            self.j_duplicable[id.index()] = duplicable;
+        }
         for (var, fact) in self.binding_facts(id) {
             changed |= self.vars.fact[var.index()] != fact;
             self.vars.fact[var.index()] = fact;
@@ -396,6 +404,13 @@ impl Bir {
         }
         if let View::Assign { var, .. } = self.view(id) {
             self.vars.flags[var.index()].0 |= VarFlags::ASSIGNED;
+        }
+        // The lowering's arena keeps `ASSIGNED` as level L recorded it
+        // (C:404 `assignable`, the targets of L assignments): a result
+        // temporary or handler parameter the lowering assigns stays
+        // delay-safe (A:28), as it is for the legacy lowering.
+        if self.js_scope.is_some() {
+            return changed;
         }
         if let View::JBin { left, .. } = self.view(id) {
             if self.node(id).aux() == crate::js_ir::op::BinOp::Eq as u16 {
@@ -549,11 +564,12 @@ impl Bir {
         id: NodeId,
         child_effects: impl Fn(NodeId) -> (bool, bool),
     ) -> (bool, bool) {
-        let children = self.view(id).children();
+        let view = self.view(id);
+        let children = view.children();
         let j_pure = j::facts::purity(self, id, false, |c| child_effects(c).0);
         let all_pure = children.iter().all(|&c| child_effects(c).0);
         let no_alloc = children.iter().all(|&c| child_effects(c).1);
-        let effects = match self.view(id) {
+        let effects = match view {
             View::Var { .. }
             | View::Global { .. }
             | View::JQualified { .. }
@@ -617,6 +633,37 @@ impl Bir {
         };
         (j_pure.unwrap_or(effects.0), effects.1)
     }
+    /// `HAS_EXIT` and `HAS_STATEMENT` of a node that was already read,
+    /// from its children's. An `Exit` has both; a loop, switch, catch, try,
+    /// assignment, `Break` or `Continue` is a statement form; a `Fun` has
+    /// neither (an exit cannot leave a function, lam_exit_code.ml:28); any
+    /// other level-L node has what a child has. One read per child, until
+    /// both are known; constant for a `Fun`, an `Exit`, a `Var` and every
+    /// level-J node.
+    pub(super) fn control_facts(
+        &self,
+        node: Node,
+        child_facts: impl Fn(NodeId) -> (bool, bool),
+    ) -> (bool, bool) {
+        let own = match node.op() {
+            Op::Exit => return (true, true),
+            Op::Fun | Op::Var => return (false, false),
+            Op::Switch | Op::StrSwitch | Op::Catch | Op::Try | Op::TryFinally | Op::While
+            | Op::For | Op::ForOf | Op::ForAwaitOf | Op::Assign | Op::Break | Op::Continue => true,
+            op if op as u8 <= Op::Continue as u8 => false,
+            _ => return (false, false),
+        };
+        let mut facts = (false, own);
+        for &child in &node.view(&self.lists).children() {
+            let (exit, statement) = child_facts(child);
+            facts.0 |= exit;
+            facts.1 |= statement;
+            if facts == (true, true) {
+                break;
+            }
+        }
+        facts
+    }
     fn repair(&mut self, mut id: NodeId) {
         loop {
             let (pure, no_alloc) = self.effects(id, |c| {
@@ -624,9 +671,22 @@ impl Bir {
                 (f.contains(NodeFlags::PURE), f.contains(NodeFlags::NO_ALLOC))
             });
             let old_node = self.node(id);
+            let (has_exit, has_statement) = self.control_facts(old_node, |c| {
+                let f = self.node(c).flags();
+                (f.contains(NodeFlags::HAS_EXIT), f.contains(NodeFlags::HAS_STATEMENT))
+            });
             let old_flags = old_node.flags();
             let mut flags = old_flags;
             flags.0 &= !(NodeFlags::PURE | NodeFlags::NO_ALLOC);
+            if old_node.op() != Op::Var && old_node.op() as u8 <= Op::Continue as u8 {
+                flags.0 &= !(NodeFlags::HAS_EXIT | NodeFlags::HAS_STATEMENT);
+                if has_exit {
+                    flags.0 |= NodeFlags::HAS_EXIT;
+                }
+                if has_statement {
+                    flags.0 |= NodeFlags::HAS_STATEMENT;
+                }
+            }
             if pure {
                 flags.0 |= NodeFlags::PURE;
             }
@@ -819,7 +879,11 @@ impl Bir {
             self.adjust_counts(replacement, -i64::from(replacement_weight));
         }
         let parent = self.parents[target.index()];
-        let effect_bits = NodeFlags::PURE | NodeFlags::NO_ALLOC | NodeFlags::STRICT | NodeFlags::J_SUBEXPR;
+        // The two level-L control facts share their bits with level-J
+        // metadata: a change of either re-derives the parent, which reads
+        // them from its children.
+        let effect_bits = NodeFlags::PURE | NodeFlags::NO_ALLOC | NodeFlags::STRICT
+            | NodeFlags::J_SUBEXPR | NodeFlags::HAS_EXIT | NodeFlags::HAS_STATEMENT;
         let effects_before = self.nodes[target.index()].flags().0 & effect_bits;
         self.release_nodes(target, Some(replacement), false);
         let content = self.nodes[replacement.index()];
@@ -1155,6 +1219,110 @@ mod tests {
         assert_eq!(size_of::<SwitchId>(), 4);
         assert_eq!(size_of::<ColdId>(), 4);
         assert_eq!(size_of::<StrId>(), 4);
+    }
+
+    fn has_exit_flag(b: &Bir, id: NodeId) -> bool {
+        b.node(id).flags().contains(NodeFlags::HAS_EXIT)
+    }
+
+    #[test]
+    fn has_exit_is_recorded_when_a_node_is_built_and_stops_at_a_function() {
+        let mut b = Bir::default();
+        let header = b.catch_header(1, VarSpan::default());
+        let exit = b.new_node(View::Exit { label: 1, args: &[] }, 0);
+        let other = lit(&mut b);
+        let seq = b.new_node(View::Seq { first: other, second: exit }, 0);
+        let condition = lit(&mut b);
+        let else_ = lit(&mut b);
+        let branch = b.new_node(View::If { condition, then_: seq, else_ }, 0);
+        // An exit under a function does not leave it (lam_exit_code.ml:28).
+        let params = b.new_vars(&[]);
+        let function = b.function_header(params, FunctionAttribute::default(), LamLoc::NONE);
+        let closed = b.new_node(View::Exit { label: 1, args: &[] }, 0);
+        let fun = b.new_node(View::Fun { body: closed, header: function }, 0);
+        let body = b.new_node(View::Seq { first: fun, second: branch }, 0);
+        let handler = lit(&mut b);
+        let root = b.new_node(View::Catch { body, handler, header }, 0);
+        for flagged in [exit, seq, branch, closed, body, root] {
+            assert!(has_exit_flag(&b, flagged));
+            assert!(b.node(flagged).flags().contains(NodeFlags::HAS_STATEMENT));
+        }
+        for clear in [other, condition, else_, fun, handler] {
+            assert!(!has_exit_flag(&b, clear));
+            assert!(!b.node(clear).flags().contains(NodeFlags::HAS_STATEMENT));
+        }
+        valid(&b, root);
+    }
+
+    #[test]
+    fn has_statement_marks_statement_forms_without_exits() {
+        let mut b = Bir::default();
+        let v = b.new_var_id(Name::new("x"), 0);
+        let value = lit(&mut b);
+        let assign = b.new_node(View::Assign { var: v, value }, 0);
+        let first = lit(&mut b);
+        let seq = b.new_node(View::Seq { first, second: assign }, 0);
+        let condition = b.new_node(View::Break, 0);
+        let body = lit(&mut b);
+        let looped = b.new_node(View::While { condition, body }, 0);
+        let root = b.new_node(View::Seq { first: seq, second: looped }, 0);
+        for flagged in [assign, seq, condition, looped, root] {
+            assert!(b.node(flagged).flags().contains(NodeFlags::HAS_STATEMENT));
+            assert!(!has_exit_flag(&b, flagged));
+        }
+        for clear in [value, first, body] {
+            assert!(!b.node(clear).flags().contains(NodeFlags::HAS_STATEMENT));
+        }
+        valid(&b, root);
+        let mut flags = b.node(first).flags();
+        flags.0 |= NodeFlags::HAS_STATEMENT;
+        b.nodes[first.index()].set_flags(flags);
+        assert_eq!(b.validate(Some(root)), Err("stale statement-form flag".to_string()));
+    }
+
+    #[test]
+    fn has_exit_follows_an_edit_up_ten_thousand_parents() {
+        let mut b = Bir::default();
+        b.catch_header(1, VarSpan::default());
+        let exit = b.new_node(View::Exit { label: 1, args: &[] }, 0);
+        let mut root = exit;
+        for _ in 0..10_000 {
+            let first = lit(&mut b);
+            root = b.new_node(View::Seq { first, second: root }, 0);
+        }
+        assert!(has_exit_flag(&b, root));
+        valid(&b, root);
+        let replacement = lit(&mut b);
+        b.replace(exit, replacement);
+        assert!(!has_exit_flag(&b, root));
+        valid(&b, root);
+        let again = b.new_node(View::Exit { label: 1, args: &[] }, 0);
+        b.replace(exit, again);
+        assert!(has_exit_flag(&b, root));
+        valid(&b, root);
+    }
+
+    #[test]
+    fn validate_rejects_a_stale_exit_flag() {
+        let mut b = Bir::default();
+        b.catch_header(1, VarSpan::default());
+        let exit = b.new_node(View::Exit { label: 1, args: &[] }, 0);
+        let first = lit(&mut b);
+        let root = b.new_node(View::Seq { first, second: exit }, 0);
+        valid(&b, root);
+        for (node, set) in [(root, false), (first, true)] {
+            let old = b.node(node).flags();
+            let mut flags = old;
+            if set {
+                flags.0 |= NodeFlags::HAS_EXIT;
+            } else {
+                flags.0 &= !NodeFlags::HAS_EXIT;
+            }
+            b.nodes[node.index()].set_flags(flags);
+            assert_eq!(b.validate(Some(root)), Err("stale exit flag".to_string()));
+            b.nodes[node.index()].set_flags(old);
+        }
+        valid(&b, root);
     }
 
     #[test]

@@ -81,22 +81,29 @@ impl State {
         self.call_node(then, &[callback], Default::default())
     }
 
-    /// X: external_module_id. O(m + bundle/hint bytes) for m imports. No
-    /// source index exists for external bundle/default pairs; reuse the first
-    /// binding by scanning the small per-unit module inventory.
+    /// X:581 external_module_id. O(bundle/hint bytes) on first encounter,
+    /// then a dense lookup by interned bundle and default-import bit. All
+    /// static and dynamic references share this binding table.
     pub(super) fn external_module(
         &mut self,
         external: &ExternalModuleName,
         default: bool,
         dynamic: bool,
     ) -> ImportId {
-        let existing = self.arena.pools.j_modules.iter().find(|module| matches!(&module.kind,
-            crate::js_ir::Kind::External { name, default: d, .. } if name == &external.bundle && *d == default)).map(|m| m.id);
-        let id = existing.unwrap_or_else(|| {
-            let name = external_binding_name(external);
-            let var = self.fresh_variable(&name);
-            self.idents[var.index()]
-        });
+        let bundle = self.arena.intern_text(&external.bundle);
+        if self.external_bindings.len() <= bundle.index() {
+            self.external_bindings.resize(bundle.index() + 1, [None; 2]);
+        }
+        let var = match self.external_bindings[bundle.index()][usize::from(default)] {
+            Some(var) => var,
+            None => {
+                let name = external_binding_name(external);
+                let var = self.fresh_variable(&name);
+                self.external_bindings[bundle.index()][usize::from(default)] = Some(var);
+                var
+            }
+        };
+        let id = self.idents[var.index()];
         let module = crate::js_ir::ModuleId {
             id,
             kind: crate::js_ir::Kind::External {

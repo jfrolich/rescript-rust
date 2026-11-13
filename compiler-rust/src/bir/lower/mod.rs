@@ -1,8 +1,11 @@
 //! Continuations for the level-L to level-J lowering (BACKEND_LOWERING §1).
 //! Context references are indices, never references into growing state pools.
 mod args;
+mod ffi_args;
+mod external;
 mod call;
 mod cond;
+mod exit;
 mod expr;
 mod konst;
 mod prim;
@@ -339,6 +342,11 @@ struct State {
     invalid_module_paths: Vec<bool>,
     awaited_units: Vec<bool>,
     dynamic_imports: Vec<crate::js_ir::ModuleId>,
+    external_references: Vec<Option<crate::bir::ImportId>>,
+    external_globals: Vec<Option<VarId>>,
+    inline_globals: Vec<Ident>,
+    inline_scratch: crate::bir::l::beta::Scratch,
+    external_bindings: Vec<[Option<VarId>; 2]>,
     module_constants: Vec<ModuleConstants>,
     direct: bool,
     located_functions: Vec<bool>,
@@ -356,6 +364,17 @@ struct State {
     spine_steps: usize,
     /// Reused by the J rules that push onto a vector.
     scratch: Vec<NodeId>,
+    /// 4.1: the jump table, indexed by catch header; grown where a catch is
+    /// entered and the unit has more headers than entries.
+    jumps: Vec<exit::Jump>,
+    /// The handlers of the catches being lowered, a stack of flattened tables.
+    catch_table: Vec<(NodeId, crate::bir::CatchId)>,
+    catches: Vec<Option<exit::Plan>>,
+    catch_work: Vec<NodeId>,
+    /// `HAS_EXIT` reads that decided a flattening or a form.
+    catch_flag_reads: usize,
+    /// Handler nodes read to find the label of an exit (4.1 step 1).
+    catch_walk_steps: usize,
 }
 impl State {
     /// N1: C:481 new. Transfer cold pools, while source hot nodes/list operands
@@ -392,6 +411,11 @@ impl State {
             invalid_module_paths: vec![false; input.arena.nodes.len()],
             awaited_units: vec![false; input.arena.vars.len()],
             dynamic_imports: Vec::new(),
+            external_references: Vec::new(),
+            external_globals: Vec::new(),
+            inline_globals: Vec::new(),
+            inline_scratch: Default::default(),
+            external_bindings: Vec::new(),
             module_constants: (0..arena.pools.j_modules.len()).map(|_| ModuleConstants::Unread).collect(),
             source: input.arena,
             arena,
@@ -411,6 +435,12 @@ impl State {
             primitive_steps: 0,
             spine_steps: 0,
             scratch: Vec::new(),
+            jumps: Vec::new(),
+            catch_table: Vec::new(),
+            catches: Vec::new(),
+            catch_work: Vec::new(),
+            catch_flag_reads: 0,
+            catch_walk_steps: 0,
         }
     }
     /// K1: C:1529 compile_expr. Direct mode is the bounded P1 oracle: convert
@@ -468,6 +498,12 @@ impl State {
         });
         let list = self.statements.take_list(&mut self.arena, run);
         let root = self.arena.block_from_list(list);
+        // The headers keep their labels and parameters; the exits they count
+        // stay in the source, which reads the counts while a function of
+        // another module is inlined. One write per catch of the unit.
+        for header in &mut self.arena.pools.catches {
+            header.uses = 0;
+        }
         self.arena.finish_bulk(root);
         Lowered {
             program: super::bridge_j::Imported::from_lowering(self.arena, root, self.idents),
@@ -506,7 +542,7 @@ impl ProbeRules for State {
                     return Err(Unsupported("let rec"));
                 }
                 let args = args.to_vec();
-                let call = self.application(callee, &args, info)?;
+                let call = self.application(cx, callee, &args, info)?;
                 return Ok(ProbePlan::Children(expr::Resume::Call(call)));
             }
             View::Fun { body, header } => {
@@ -563,21 +599,9 @@ impl ProbeRules for State {
                         return Ok(ProbePlan::Ready(self.probe_leaf(cx, value)));
                     }
                 }
-                let reason = match &self.arena.primitive(primitive).primitive {
-                    Primitive::Psequand | Primitive::Psequor => {
-                        unreachable!("short circuits are lowered above")
-                    }
-                    Primitive::PjsCall(_)
-                    | Primitive::PjsApply
-                    | Primitive::PjsObjectCreate(_)
-                    | Primitive::PjsObjectGet(_)
-                    | Primitive::PjsObjectSet(_)
-                    | Primitive::PjsFnMethod => "external",
-                    _ => return Ok(ProbePlan::Children(expr::Resume::Prim(prim::Prim {
-                        primitive, operands: self.source.node(node).primitive_arguments(),
-                    }))),
-                };
-                return Err(Unsupported(reason));
+                return Ok(ProbePlan::Children(expr::Resume::Prim(prim::Prim {
+                    primitive, operands: self.source.node(node).primitive_arguments(),
+                })));
             }
             View::If { condition, then_, else_ } => {
                 let conditional = self.conditional(cx, cond::Kind::If, condition, then_, else_)?;
@@ -597,7 +621,13 @@ impl ProbeRules for State {
                 let operands = self.source.node(node).switch_actions();
                 return Ok(ProbePlan::Children(expr::Resume::Switch(self.string_switch(cx, scrutinee, operands, header)?)));
             }
-            View::Catch { .. } | View::Exit { .. } => return Err(Unsupported("static catch")),
+            View::Catch { .. } => {
+                return Ok(ProbePlan::Children(expr::Resume::Catch(self.catch(cx, node))));
+            }
+            View::Exit { label, .. } => {
+                let args = self.source.node(node).exit_arguments();
+                return Ok(ProbePlan::Children(expr::Resume::Exit(self.exit(label, args))));
+            }
             View::Try { .. } | View::TryFinally { .. } => return Err(Unsupported("try")),
             View::While { .. }
             | View::For { .. }

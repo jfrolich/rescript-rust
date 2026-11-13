@@ -415,7 +415,7 @@ impl State {
                     self.statements.copied += body.len();
                     self.statements.kill(out.run);
                     let block = norm::js2_block(&mut self.arena, body);
-                    self.statements.fill(start.start, block);
+                    self.place(start.start, block);
                     p.outputs.push(Output {
                         run: self.statements.since(start),
                         action: NONE,
@@ -431,7 +431,7 @@ impl State {
     fn untagged_if(&mut self, p: &mut Plan, test: NodeId, yes: Span, no: Span) {
         let start = p.marks.pop().unwrap();
         let statement = self.if_statement(test, yes, no);
-        self.statements.fill(start.start, statement);
+        self.place(start.start, statement);
         if matches!(p.cont, Cont::Effect(Tail::Return(_))) {
             self.unnest(start.start);
         }
@@ -860,6 +860,65 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_clause_without_statements_follows_a_clause_that_was_taken() {
+        // A clause that is an exit to a catch whose handler follows its body
+        // lowers to no statement, so the run of the clause before it is the
+        // top of the stack when that clause is taken.
+        let kinds = [VariantBlockType::Object];
+        // Three literal cases and one block case; `mask` says which exit.
+        // The smallest that needs it is the third literal alone (mask 4).
+        for mask in 1..16u32 {
+            let literals: Vec<_> = (0..3).map(|i| Literal::String(format!("l{i}"))).collect();
+            let exits: Vec<_> = (0..4).map(|i| mask >> i & 1 == 1).collect();
+            let mut a = LamArena::new();
+            let constants: Vec<_> = literals
+                .iter()
+                .enumerate()
+                .map(|(i, literal)| {
+                    SwitchKey::Constructor(Case::Constant(VariantTag {
+                        name: crate::name::Name::new(&format!("C{i}")),
+                        literal: literal.clone(),
+                    }))
+                })
+                .collect();
+            let block = SwitchKey::Constructor(Case::Block(VariantBlock::Untagged {
+                tag: VariantTag {
+                    name: crate::name::Name::new("B"),
+                    literal: Literal::String("B".into()),
+                },
+                block_type: kinds[0].clone(),
+            }));
+            let effect = |a: &mut LamArena, i: i32| {
+                let value = a.const_(C::Int { i, comment: None });
+                a.prim_raw(LambdaPrimitive::PinitMod, &[value], crate::lambda::LamLoc::NONE)
+            };
+            let actions: Vec<_> = exits
+                .iter()
+                .enumerate()
+                .map(|(i, &exit)| if exit { a.static_raise(1, &[]) } else { effect(&mut a, i as i32) })
+                .collect();
+            let info = a.add_switch(
+                true,
+                constants,
+                true,
+                [block],
+                false,
+                SwitchDispatch::Variant(VariantMatchingFacts {
+                    tag_name: None,
+                    literal_tags: literals.to_vec(),
+                    block_types: kinds.to_vec(),
+                }),
+            );
+            let actions = a.add_list(&actions);
+            let x = a.var(Ident::new("x", 100, crate::ident::IdentFlags::NONE));
+            let body = a.switch_raw(x, actions, info);
+            let handler = effect(&mut a, 9);
+            let root = a.static_catch(body, 1, &[], handler);
+            oracle_tests::compare(a, root);
         }
     }
 

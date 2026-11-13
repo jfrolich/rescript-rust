@@ -1186,6 +1186,58 @@ pub fn collect_or_pattern_chain<'a>(arena: &'a ParseArena, pat: &'a Pattern) -> 
     result
 }
 
+/// Recognize the two unguarded, nullary boolean cases in boolean order.
+/// Cost: at most four pattern/identifier reads; no loop or allocation.
+pub(crate) fn boolean_match_arms(arena: &ParseArena, cases: crate::parse_arena::CaseList) -> Option<(ExprIdx, ExprIdx)> {
+    let [first, second] = arena.case_list(cases) else {
+        return None;
+    };
+    if first.pc_guard.is_some() || second.pc_guard.is_some() {
+        return None;
+    }
+    let is = |pat: crate::parse_arena::PatIdx, name: &str| {
+        if let PatternDesc::Ppat_construct(lid, args) = &arena.get_pat(pat).ppat_desc
+            && args.txt.is_empty()
+        {
+            matches!(arena.get_longident(lid.txt), Longident::Lident(s) if arena.get_string(*s) == name)
+        } else {
+            false
+        }
+    };
+    if is(first.pc_lhs, "true") && is(second.pc_lhs, "false") {
+        Some((first.pc_rhs, second.pc_rhs))
+    } else if is(first.pc_lhs, "false") && is(second.pc_lhs, "true") {
+        Some((second.pc_rhs, first.pc_rhs))
+    } else {
+        None
+    }
+}
+
+/// The local binding typed as one match case by the built-in record rule.
+/// Cost: one binding and at most two pattern reads, plus one read per RHS
+/// brace (the existing `unwrap_braces` walk); no allocation or stored state.
+pub(crate) fn single_record_binding(
+    arena: &ParseArena,
+    flag: RecFlag,
+    bindings: crate::parse_arena::VbList,
+) -> Option<&ValueBinding> {
+    if flag != RecFlag::Nonrecursive {
+        return None;
+    }
+    let [binding] = arena.vb_list(bindings) else { return None; };
+    let pattern = match &arena.get_pat(binding.pvb_pat).ppat_desc {
+        PatternDesc::Ppat_alias(inner, _) => &arena.get_pat(*inner).ppat_desc,
+        pattern => pattern,
+    };
+    if !matches!(pattern, PatternDesc::Ppat_record(..) | PatternDesc::Ppat_dict(_))
+        || matches!(unwrap_braces(arena, arena.get_expr(binding.pvb_expr)).pexp_desc,
+            ExpressionDesc::Pexp_pack(_))
+    {
+        return None;
+    }
+    Some(binding)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

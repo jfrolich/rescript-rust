@@ -1,0 +1,1 @@
+- Check in CI that the snapshot embedded in the executable matches the runtime and Belt sources.

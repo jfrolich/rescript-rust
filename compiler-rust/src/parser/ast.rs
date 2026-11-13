@@ -194,6 +194,18 @@ pub enum Constant {
     Float(StrIdx, Option<char>),
 }
 
+impl Constant {
+    /// Digits of a machine integer, including the source-only `l` suffix.
+    /// Cost: one tag/suffix test; no parsing, allocation or arena access.
+    #[inline]
+    pub fn integer_digits(self) -> Option<StrIdx> {
+        match self {
+            Self::Integer(digits, None | Some('l')) => Some(digits),
+            _ => None,
+        }
+    }
+}
+
 /// OCaml `String_literal.payload` with both spellings interned in the owning
 /// `ParseArena` (see `crate::string_literal::StringLiteral`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
