@@ -700,6 +700,7 @@ pub fn incremental_build_without_lock(
         let runtime_store = compile::RuntimeStore::of_build(build_state);
         let check_only = build_state.check_only;
         let dump = build_state.dump.is_some();
+        let snapshot_revoked = build_state.revoked_snapshots[0];
         let (result_asts, precompile_result) = std::thread::scope(|scope| {
             let handle = compile::spawn_runtime_precompile(scope, || {
                 let result = compile::pre_compile_runtime_modules_with_mode(
@@ -708,6 +709,7 @@ pub fn incremental_build_without_lock(
                     runtime_store.as_ref(),
                     check_only,
                     dump,
+                    snapshot_revoked,
                 );
                 phase_mark("runtime-precompile-done");
                 result
