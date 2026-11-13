@@ -1,0 +1,1 @@
+- Build the monorepo fixture of derived codecs both ways in CI.
