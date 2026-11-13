@@ -244,6 +244,7 @@ pub struct Engine<'a> {
     bir: &'a mut Bir,
     worklist: Vec<NodeId>,
     summary: Vec<OpMask>,
+    purity_work: Vec<NodeId>,
     summaries_valid: bool,
     in_sweep: bool,
     facts: Vec<Fact>,
@@ -266,7 +267,16 @@ pub struct Engine<'a> {
 pub(crate) struct Reuse {
     worklist: Vec<NodeId>,
     summary: Vec<OpMask>,
+    purity_work: Vec<NodeId>,
     pub(crate) stats: Stats,
+}
+
+#[cfg(test)]
+impl Reuse {
+    pub(crate) fn reserve_node_growth(&mut self, nodes: usize) { self.summary.reserve(nodes); }
+    pub(crate) fn capacities(&self) -> [usize; 5] {
+        [self.worklist.capacity(), self.summary.capacity(), self.purity_work.capacity(), self.stats.renames.capacity(), self.stats.labels.capacity()]
+    }
 }
 
 impl<'a> Engine<'a> {
@@ -277,6 +287,7 @@ impl<'a> Engine<'a> {
             bir,
             worklist: Vec::new(),
             summary: Vec::new(),
+            purity_work: Vec::new(),
             summaries_valid: false,
             in_sweep: false,
             facts: Vec::new(),
@@ -291,6 +302,14 @@ impl<'a> Engine<'a> {
         }
     }
 
+    /// Purity query with retained, non-reentrant traversal storage.
+    pub(crate) fn pure(&mut self, root: NodeId) -> bool {
+        let mut work = std::mem::take(&mut self.purity_work);
+        let result = l::flatten::pure_with_work(self, root, &mut work);
+        self.purity_work = work;
+        result
+    }
+
     /// Start a round's private identifier counter. Constant time.
     pub fn set_current_stamp(&mut self, stamp: u32) {
         self.stamp = stamp;
@@ -302,6 +321,7 @@ impl<'a> Engine<'a> {
         debug_assert!(self.worklist.is_empty() && reuse.worklist.is_empty());
         std::mem::swap(&mut self.worklist, &mut reuse.worklist);
         std::mem::swap(&mut self.summary, &mut reuse.summary);
+        std::mem::swap(&mut self.purity_work, &mut reuse.purity_work);
         std::mem::swap(&mut self.stats, &mut reuse.stats);
     }
 
@@ -373,7 +393,9 @@ impl<'a> Engine<'a> {
 
     fn set_summary(&mut self, node: NodeId) {
         let mut mask = OpMask::of(self.bir.node(node).op());
-        for child in self.bir.view(node).children() {
+        let view = self.bir.view(node);
+        for at in 0..view.child_count() {
+            let child = view.child_at(at);
             mask = mask.or(self
                 .summary
                 .get(child.index())
@@ -814,8 +836,7 @@ impl<'a> Engine<'a> {
     /// A function header for a function node a rule builds.
     pub fn function_header(&mut self, params: VarSpan, like: FuncId) -> FuncId {
         let old = *self.bir.function(like);
-        let attrs = self.bir.function_attributes(like).clone();
-        let new = self.bir.function_header(params, attrs, old.loc);
+        let new = self.bir.function_header_from(like, params);
         self.bir.pools.funcs[new.index()].flags = old.flags;
         new
     }

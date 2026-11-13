@@ -54,10 +54,62 @@ pub(crate) struct Scratch {
     simple: Simple,
     read_work: Vec<ReadWork>,
     read_saved: Vec<bool>,
+    copy_work: Vec<CopyWork>,
+    copy_values: Vec<NodeId>,
+    effects_after: Vec<bool>,
+    rest: Vec<(VarId, NodeId)>,
+    spare: Vec<NodeId>,
+    moved: Vec<(VarId, NodeId)>,
     /// Static labels of the handlers copied so far, by source label.
-    labels: std::collections::BTreeMap<u32, (u32, CatchId)>,
+    labels: hashbrown::HashMap<u32, (u32, CatchId), ahash::RandomState>,
 }
 impl Scratch {
+    #[cfg(test)]
+    pub(crate) fn capacities(&self) -> [usize; 20] {
+        [
+            self.sub.capacity(),
+            self.touched.capacity(),
+            self.local.capacity(),
+            self.labels.capacity(),
+            self.simple.motions.capacity(),
+            self.simple.used.capacity(),
+            self.simple.evaluated.capacity(),
+            self.simple.delay.capacity(),
+            self.simple.purity.capacity(),
+            self.simple.operands.capacity(),
+            self.simple.built.capacity(),
+            self.simple.order.capacity(),
+            self.read_work.capacity(),
+            self.read_saved.capacity(),
+            self.copy_work.capacity(),
+            self.copy_values.capacity(),
+            self.effects_after.capacity(),
+            self.rest.capacity(),
+            self.spare.capacity(),
+            self.moved.capacity(),
+        ]
+    }
+    #[cfg(test)]
+    pub(crate) fn is_clear(&self) -> bool {
+        self.touched.is_empty()
+            && self.labels.is_empty()
+            && self.simple.motions.is_empty()
+            && self.simple.used.is_empty()
+            && self.simple.evaluated.is_empty()
+            && self.simple.delay.is_empty()
+            && self.simple.purity.is_empty()
+            && self.simple.operands.is_empty()
+            && self.simple.built.is_empty()
+            && self.simple.order.is_empty()
+            && self.read_work.is_empty()
+            && self.read_saved.is_empty()
+            && self.copy_work.is_empty()
+            && self.copy_values.is_empty()
+            && self.effects_after.is_empty()
+            && self.rest.is_empty()
+            && self.spare.is_empty()
+            && self.moved.is_empty()
+    }
     fn get(&self, var: VarId) -> Sub {
         self.sub.get(var.index()).copied().unwrap_or(Sub::Keep)
     }
@@ -669,7 +721,9 @@ fn destruct_pattern(e: &Engine<'_>, params: VarSpan, body: NodeId, args: &[NodeI
             Some(c) => {
                 let compared = std::cell::Cell::new(0);
                 match super::norm::decide_switch_on(b, c, actions, header, &compared) {
-                    Some((action, _)) => size_upto(b, action, SMALL_INLINE_SIZE) < SMALL_INLINE_SIZE,
+                    Some((action, _)) => {
+                        size_upto(b, action, SMALL_INLINE_SIZE) < SMALL_INLINE_SIZE
+                    }
                     None => false,
                 }
             }
@@ -718,23 +772,27 @@ const SMART: OpMask = OpMask::SHALLOW_MAP.or(OpMask::IF).or(OpMask::SEQ);
 /// `Lam_bounded_vars.rewrite` (lam_beta_reduce.rs:476-645,
 /// lam_bounded_vars.ml): copy `root`, substituting and renaming every binder
 /// in the order the legacy function renames them. The source is not edited.
+enum CopyWork {
+    Enter(NodeId),
+    Rebind(NodeId),
+    Build(NodeId, u32),
+    /// `Lambda.for_ ident (aux l1) l2 dir l3`: the start expression is
+    /// rewritten a second time (lam_beta_reduce.rs:616-618).
+    Again,
+    Release(NodeId),
+}
 fn copy(
     e: &mut Engine<'_>,
     scratch: &mut Scratch,
     root: NodeId,
     weight: u32,
 ) -> Result<NodeId, Unsupported> {
-    enum Work {
-        Enter(NodeId),
-        Rebind(NodeId),
-        Build(NodeId, usize),
-        /// `Lambda.for_ ident (aux l1) l2 dir l3`: the start expression is
-        /// rewritten a second time (lam_beta_reduce.rs:616-618).
-        Again,
-        Release(NodeId),
-    }
     fn rebind(e: &mut Engine<'_>, scratch: &mut Scratch, n: NodeId) {
-        for var in e.bir().binders(n) {
+        let run = e.bir().binder_run(n);
+        for slot in 0..run.len() {
+            let Some(var) = run.at(e.bir(), slot) else {
+                continue;
+            };
             let fresh = e.rename_var(var);
             scratch.set(var, Sub::Var(fresh));
         }
@@ -745,300 +803,335 @@ fn copy(
             _ => unreachable!("binder was not renamed"),
         }
     }
-    let mut work = vec![Work::Enter(root)];
-    let mut values: Vec<NodeId> = Vec::new();
-    while let Some(task) = work.pop() {
-        match task {
-            Work::Rebind(n) => rebind(e, scratch, n),
-            Work::Release(n) => e.release(n),
-            Work::Again => {
-                let at = values.len() - 3;
-                let start = values.remove(at);
-                work.push(Work::Release(start));
-                work.push(Work::Enter(start));
-            }
-            Work::Enter(n) => {
-                let children = e.bir().view(n).children();
-                match e.bir().view(n) {
-                    View::Var { var } => {
-                        let built = match scratch.get(var) {
-                            Sub::Keep => e.node(View::Var { var }, 0, weight),
-                            Sub::Var(var) => e.node(View::Var { var }, 0, weight),
-                            Sub::Const(value) => e.node(View::Const { value }, 0, weight),
-                            Sub::Identity(var) => {
-                                let v = e.node(View::Var { var }, 0, weight);
-                                let primitive = e.intern_prim(Primitive::Pidentity, LamLoc::NONE);
-                                let boxed = e.node(
-                                    View::Prim {
-                                        args: &[v],
-                                        primitive,
-                                    },
-                                    0,
-                                    weight,
-                                );
-                                e.normalise(boxed);
-                                boxed
-                            }
-                            Sub::Node(arg) => {
-                                scratch.set(var, Sub::Taken);
-                                arg
-                            }
-                            Sub::Taken => unreachable!("an argument moved to one use was used twice"),
-                        };
-                        values.push(built);
-                    }
-                    View::Const { value } => {
-                        let built = e.node(View::Const { value }, 0, weight);
-                        values.push(built);
-                    }
-                    View::Global { module } => {
-                        let built = e.node(View::Global { module }, 0, weight);
-                        values.push(built);
-                    }
-                    View::Break => {
-                        let built = e.node(View::Break, 0, weight);
-                        values.push(built);
-                    }
-                    View::Continue => {
-                        let built = e.node(View::Continue, 0, weight);
-                        values.push(built);
-                    }
-                    View::Fun { .. } | View::Let { .. } | View::LetRec { .. } => {
-                        if matches!(e.bir().view(n), View::Let { value: None, .. }) {
-                            return Err(Unsupported("released let value"));
-                        }
-                        rebind(e, scratch, n);
-                        work.push(Work::Build(n, children.len()));
-                        work.extend(children.into_iter().rev().map(Work::Enter));
-                    }
-                    View::Try { body, handler, .. } => {
-                        work.push(Work::Build(n, 2));
-                        work.push(Work::Enter(handler));
-                        work.push(Work::Rebind(n));
-                        work.push(Work::Enter(body));
-                    }
-                    View::For { .. } => {
-                        rebind(e, scratch, n);
-                        work.push(Work::Build(n, 3));
-                        work.push(Work::Again);
-                        work.extend(children.into_iter().rev().map(Work::Enter));
-                    }
-                    View::ForOf { .. } | View::ForAwaitOf { .. } => {
-                        rebind(e, scratch, n);
-                        work.push(Work::Build(n, 2));
-                        work.extend(children.into_iter().rev().map(Work::Enter));
-                    }
-                    // The legacy copy keeps the label; Bir identifies a
-                    // handler by its label, so the copy gets a new one that
-                    // the bridge exports under the old name.
-                    View::Catch {
-                        body,
-                        handler,
-                        header,
-                    } => {
-                        let source = e.bir().catch(header).label;
-                        let copied = e.copy_catch_header(source);
-                        scratch.labels.insert(source, copied);
-                        work.push(Work::Build(n, 2));
-                        work.push(Work::Enter(handler));
-                        work.push(Work::Rebind(n));
-                        work.push(Work::Enter(body));
-                    }
-                    View::Exit { .. } => {
-                        work.push(Work::Build(n, children.len()));
-                        work.extend(children.into_iter().rev().map(Work::Enter));
-                    }
-                    View::Apply { .. }
-                    | View::Prim { .. }
-                    | View::Switch { .. }
-                    | View::StrSwitch { .. }
-                    | View::TryFinally { .. }
-                    | View::If { .. }
-                    | View::Seq { .. }
-                    | View::While { .. }
-                    | View::Assign { .. } => {
-                        work.push(Work::Build(n, children.len()));
-                        work.extend(children.into_iter().rev().map(Work::Enter));
-                    }
-                    _ => return Err(Unsupported("JS-level node in Lambda export")),
+    let mut work = std::mem::take(&mut scratch.copy_work);
+    let mut values = std::mem::take(&mut scratch.copy_values);
+    work.push(CopyWork::Enter(root));
+    let result = (|| {
+        while let Some(task) = work.pop() {
+            match task {
+                CopyWork::Rebind(n) => rebind(e, scratch, n),
+                CopyWork::Release(n) => e.release(n),
+                CopyWork::Again => {
+                    let at = values.len() - 3;
+                    let start = values.remove(at);
+                    work.push(CopyWork::Release(start));
+                    work.push(CopyWork::Enter(start));
                 }
-            }
-            Work::Build(n, count) => {
-                let c: SmallVec<[NodeId; 8]> = values.drain(values.len() - count..).collect();
-                let aux = e.bir().node(n).aux();
-                let built = match e.bir().view(n) {
-                    View::Apply { info, .. } => e.node(
-                        View::Apply {
-                            callee: c[0],
-                            args: &c[1..],
-                            info,
-                        },
-                        aux,
-                        weight,
-                    ),
-                    View::Fun { header, .. } => {
-                        let old = e.bir().function(header).params;
-                        let params = VarSpan {
-                            start: old.iter().next().map_or(0, |v| renamed(scratch, v).0),
-                            len: old.len,
-                        };
-                        debug_assert!(
-                            old.iter()
-                                .zip(params.iter())
-                                .all(|(o, p)| renamed(scratch, o) == p)
-                        );
-                        let header = e.function_header(params, header);
-                        e.node(View::Fun { body: c[0], header }, aux, weight)
-                    }
-                    View::Let { var, .. } => e.node(
-                        View::Let {
-                            var: renamed(scratch, var),
-                            value: Some(c[0]),
-                            body: c[1],
-                        },
-                        aux,
-                        weight,
-                    ),
-                    View::LetRec { first, .. } => e.node(
-                        View::LetRec {
-                            first: renamed(scratch, first),
-                            values: &c[..count - 1],
-                            body: c[count - 1],
-                        },
-                        aux,
-                        weight,
-                    ),
-                    View::Prim { primitive, .. } => e.node(
-                        View::Prim {
-                            args: &c,
-                            primitive,
-                        },
-                        aux,
-                        weight,
-                    ),
-                    View::Switch { header, .. } => e.node(
-                        View::Switch {
-                            scrutinee: c[0],
-                            actions: &c[1..],
+                CopyWork::Enter(n) => {
+                    let count = e.bir().view(n).child_count();
+                    match e.bir().view(n) {
+                        View::Var { var } => {
+                            let built = match scratch.get(var) {
+                                Sub::Keep => e.node(View::Var { var }, 0, weight),
+                                Sub::Var(var) => e.node(View::Var { var }, 0, weight),
+                                Sub::Const(value) => e.node(View::Const { value }, 0, weight),
+                                Sub::Identity(var) => {
+                                    let v = e.node(View::Var { var }, 0, weight);
+                                    let primitive =
+                                        e.intern_prim(Primitive::Pidentity, LamLoc::NONE);
+                                    let boxed = e.node(
+                                        View::Prim {
+                                            args: &[v],
+                                            primitive,
+                                        },
+                                        0,
+                                        weight,
+                                    );
+                                    e.normalise(boxed);
+                                    boxed
+                                }
+                                Sub::Node(arg) => {
+                                    scratch.set(var, Sub::Taken);
+                                    arg
+                                }
+                                Sub::Taken => {
+                                    unreachable!("an argument moved to one use was used twice")
+                                }
+                            };
+                            values.push(built);
+                        }
+                        View::Const { value } => {
+                            let built = e.node(View::Const { value }, 0, weight);
+                            values.push(built);
+                        }
+                        View::Global { module } => {
+                            let built = e.node(View::Global { module }, 0, weight);
+                            values.push(built);
+                        }
+                        View::Break => {
+                            let built = e.node(View::Break, 0, weight);
+                            values.push(built);
+                        }
+                        View::Continue => {
+                            let built = e.node(View::Continue, 0, weight);
+                            values.push(built);
+                        }
+                        View::Fun { .. } | View::Let { .. } | View::LetRec { .. } => {
+                            if matches!(e.bir().view(n), View::Let { value: None, .. }) {
+                                return Err(Unsupported("released let value"));
+                            }
+                            rebind(e, scratch, n);
+                            work.push(CopyWork::Build(n, index(count)));
+                            work.extend(
+                                (0..count)
+                                    .rev()
+                                    .map(|at| CopyWork::Enter(e.bir().view(n).child_at(at))),
+                            );
+                        }
+                        View::Try { body, handler, .. } => {
+                            work.push(CopyWork::Build(n, 2));
+                            work.push(CopyWork::Enter(handler));
+                            work.push(CopyWork::Rebind(n));
+                            work.push(CopyWork::Enter(body));
+                        }
+                        View::For { .. } => {
+                            rebind(e, scratch, n);
+                            work.push(CopyWork::Build(n, 3));
+                            work.push(CopyWork::Again);
+                            work.extend(
+                                (0..count)
+                                    .rev()
+                                    .map(|at| CopyWork::Enter(e.bir().view(n).child_at(at))),
+                            );
+                        }
+                        View::ForOf { .. } | View::ForAwaitOf { .. } => {
+                            rebind(e, scratch, n);
+                            work.push(CopyWork::Build(n, 2));
+                            work.extend(
+                                (0..count)
+                                    .rev()
+                                    .map(|at| CopyWork::Enter(e.bir().view(n).child_at(at))),
+                            );
+                        }
+                        // The legacy copy keeps the label; Bir identifies a
+                        // handler by its label, so the copy gets a new one that
+                        // the bridge exports under the old name.
+                        View::Catch {
+                            body,
+                            handler,
                             header,
-                        },
-                        aux,
-                        weight,
-                    ),
-                    View::StrSwitch { header, .. } => e.node(
-                        View::StrSwitch {
-                            scrutinee: c[0],
-                            actions: &c[1..],
-                            header,
-                        },
-                        aux,
-                        weight,
-                    ),
-                    View::Exit { label, .. } => {
-                        let label = scratch.labels.get(&label).map_or(label, |copied| copied.0);
-                        e.node(View::Exit { label, args: &c }, aux, weight)
+                        } => {
+                            let source = e.bir().catch(header).label;
+                            let copied = e.copy_catch_header(source);
+                            scratch.labels.insert(source, copied);
+                            work.push(CopyWork::Build(n, 2));
+                            work.push(CopyWork::Enter(handler));
+                            work.push(CopyWork::Rebind(n));
+                            work.push(CopyWork::Enter(body));
+                        }
+                        View::Exit { .. } => {
+                            work.push(CopyWork::Build(n, index(count)));
+                            work.extend(
+                                (0..count)
+                                    .rev()
+                                    .map(|at| CopyWork::Enter(e.bir().view(n).child_at(at))),
+                            );
+                        }
+                        View::Apply { .. }
+                        | View::Prim { .. }
+                        | View::Switch { .. }
+                        | View::StrSwitch { .. }
+                        | View::TryFinally { .. }
+                        | View::If { .. }
+                        | View::Seq { .. }
+                        | View::While { .. }
+                        | View::Assign { .. } => {
+                            work.push(CopyWork::Build(n, index(count)));
+                            work.extend(
+                                (0..count)
+                                    .rev()
+                                    .map(|at| CopyWork::Enter(e.bir().view(n).child_at(at))),
+                            );
+                        }
+                        _ => return Err(Unsupported("JS-level node in Lambda export")),
                     }
-                    View::Catch { header, .. } => {
-                        let old = *e.bir().catch(header);
-                        let params = VarSpan {
-                            start: old.params.iter().next().map_or(0, |v| renamed(scratch, v).0),
-                            len: old.params.len,
-                        };
-                        let header = scratch.labels[&old.label].1;
-                        e.set_catch_params(header, params);
-                        e.node(
-                            View::Catch {
-                                body: c[0],
-                                handler: c[1],
+                }
+                CopyWork::Build(n, count) => {
+                    let count = count as usize;
+                    let start = values.len() - count;
+                    let c = &values[start..];
+                    let aux = e.bir().node(n).aux();
+                    let built = match e.bir().view(n) {
+                        View::Apply { info, .. } => e.node(
+                            View::Apply {
+                                callee: c[0],
+                                args: &c[1..],
+                                info,
+                            },
+                            aux,
+                            weight,
+                        ),
+                        View::Fun { header, .. } => {
+                            let old = e.bir().function(header).params;
+                            let params = VarSpan {
+                                start: old.iter().next().map_or(0, |v| renamed(scratch, v).0),
+                                len: old.len,
+                            };
+                            debug_assert!(
+                                old.iter()
+                                    .zip(params.iter())
+                                    .all(|(o, p)| renamed(scratch, o) == p)
+                            );
+                            let header = e.function_header(params, header);
+                            e.node(View::Fun { body: c[0], header }, aux, weight)
+                        }
+                        View::Let { var, .. } => e.node(
+                            View::Let {
+                                var: renamed(scratch, var),
+                                value: Some(c[0]),
+                                body: c[1],
+                            },
+                            aux,
+                            weight,
+                        ),
+                        View::LetRec { first, .. } => e.node(
+                            View::LetRec {
+                                first: renamed(scratch, first),
+                                values: &c[..count - 1],
+                                body: c[count - 1],
+                            },
+                            aux,
+                            weight,
+                        ),
+                        View::Prim { primitive, .. } => {
+                            e.node(View::Prim { args: c, primitive }, aux, weight)
+                        }
+                        View::Switch { header, .. } => e.node(
+                            View::Switch {
+                                scrutinee: c[0],
+                                actions: &c[1..],
                                 header,
                             },
                             aux,
                             weight,
-                        )
+                        ),
+                        View::StrSwitch { header, .. } => e.node(
+                            View::StrSwitch {
+                                scrutinee: c[0],
+                                actions: &c[1..],
+                                header,
+                            },
+                            aux,
+                            weight,
+                        ),
+                        View::Exit { label, .. } => {
+                            let label = scratch.labels.get(&label).map_or(label, |copied| copied.0);
+                            e.node(View::Exit { label, args: c }, aux, weight)
+                        }
+                        View::Catch { header, .. } => {
+                            let old = *e.bir().catch(header);
+                            let params = VarSpan {
+                                start: old
+                                    .params
+                                    .iter()
+                                    .next()
+                                    .map_or(0, |v| renamed(scratch, v).0),
+                                len: old.params.len,
+                            };
+                            let header = scratch.labels[&old.label].1;
+                            e.set_catch_params(header, params);
+                            e.node(
+                                View::Catch {
+                                    body: c[0],
+                                    handler: c[1],
+                                    header,
+                                },
+                                aux,
+                                weight,
+                            )
+                        }
+                        View::Try { exception, .. } => e.node(
+                            View::Try {
+                                body: c[0],
+                                exception: renamed(scratch, exception),
+                                handler: c[1],
+                            },
+                            aux,
+                            weight,
+                        ),
+                        View::TryFinally { .. } => e.node(
+                            View::TryFinally {
+                                body: c[0],
+                                finaliser: c[1],
+                            },
+                            aux,
+                            weight,
+                        ),
+                        View::If { .. } => e.node(
+                            View::If {
+                                condition: c[0],
+                                then_: c[1],
+                                else_: c[2],
+                            },
+                            aux,
+                            weight,
+                        ),
+                        View::Seq { .. } => e.node(
+                            View::Seq {
+                                first: c[0],
+                                second: c[1],
+                            },
+                            aux,
+                            weight,
+                        ),
+                        View::While { .. } => e.node(
+                            View::While {
+                                condition: c[0],
+                                body: c[1],
+                            },
+                            aux,
+                            weight,
+                        ),
+                        // After `Again` the values are the end, the body, then
+                        // the start expression rewritten twice.
+                        View::For { var, .. } => e.node(
+                            View::For {
+                                var: renamed(scratch, var),
+                                parts: &[c[2], c[0], c[1]],
+                            },
+                            aux,
+                            weight,
+                        ),
+                        View::ForOf { var, .. } => e.node(
+                            View::ForOf {
+                                var: renamed(scratch, var),
+                                iterable: c[0],
+                                body: c[1],
+                            },
+                            aux,
+                            weight,
+                        ),
+                        View::ForAwaitOf { var, .. } => e.node(
+                            View::ForAwaitOf {
+                                var: renamed(scratch, var),
+                                iterable: c[0],
+                                body: c[1],
+                            },
+                            aux,
+                            weight,
+                        ),
+                        // lam_beta_reduce.rs:632-635: the target is not renamed.
+                        View::Assign { var, .. } => {
+                            e.node(View::Assign { var, value: c[0] }, aux, weight)
+                        }
+                        _ => unreachable!("only the nodes entered are built"),
+                    };
+                    e.copy_cold(n, built);
+                    if SMART.intersects(OpMask::of(e.bir().node(built).op())) {
+                        e.normalise(built);
                     }
-                    View::Try { exception, .. } => e.node(
-                        View::Try {
-                            body: c[0],
-                            exception: renamed(scratch, exception),
-                            handler: c[1],
-                        },
-                        aux,
-                        weight,
-                    ),
-                    View::TryFinally { .. } => e.node(
-                        View::TryFinally {
-                            body: c[0],
-                            finaliser: c[1],
-                        },
-                        aux,
-                        weight,
-                    ),
-                    View::If { .. } => e.node(
-                        View::If {
-                            condition: c[0],
-                            then_: c[1],
-                            else_: c[2],
-                        },
-                        aux,
-                        weight,
-                    ),
-                    View::Seq { .. } => e.node(
-                        View::Seq {
-                            first: c[0],
-                            second: c[1],
-                        },
-                        aux,
-                        weight,
-                    ),
-                    View::While { .. } => e.node(
-                        View::While {
-                            condition: c[0],
-                            body: c[1],
-                        },
-                        aux,
-                        weight,
-                    ),
-                    // After `Again` the values are the end, the body, then
-                    // the start expression rewritten twice.
-                    View::For { var, .. } => e.node(
-                        View::For {
-                            var: renamed(scratch, var),
-                            parts: &[c[2], c[0], c[1]],
-                        },
-                        aux,
-                        weight,
-                    ),
-                    View::ForOf { var, .. } => e.node(
-                        View::ForOf {
-                            var: renamed(scratch, var),
-                            iterable: c[0],
-                            body: c[1],
-                        },
-                        aux,
-                        weight,
-                    ),
-                    View::ForAwaitOf { var, .. } => e.node(
-                        View::ForAwaitOf {
-                            var: renamed(scratch, var),
-                            iterable: c[0],
-                            body: c[1],
-                        },
-                        aux,
-                        weight,
-                    ),
-                    // lam_beta_reduce.rs:632-635: the target is not renamed.
-                    View::Assign { var, .. } => e.node(View::Assign { var, value: c[0] }, aux, weight),
-                    _ => unreachable!("only the nodes entered are built"),
-                };
-                e.copy_cold(n, built);
-                if SMART.intersects(OpMask::of(e.bir().node(built).op())) {
-                    e.normalise(built);
+                    values.truncate(start);
+                    values.push(built);
                 }
-                values.push(built);
             }
         }
-    }
-    Ok(values.pop().expect("copied root"))
+        Ok(values.pop().expect("copied root"))
+    })();
+    work.clear();
+    values.clear();
+    scratch.copy_work = work;
+    scratch.copy_values = values;
+    result
 }
 
 /// `Lam_beta_reduce.propagate_beta_reduce` and `..._with_map`
@@ -1064,99 +1157,111 @@ pub(crate) fn reduce(
     }
     *e.stats.rules.entry("beta-copy").or_default() += 1;
     // `effects_after` (lam_beta_reduce.rs:361-369).
-    let mut effects_after: SmallVec<[bool; 8]> = SmallVec::from_elem(false, args.len());
-    let mut effects = false;
-    for (i, &arg) in args.iter().enumerate().rev() {
-        effects_after[i] = effects;
-        effects = effects || !pure(e, arg);
-    }
-    let mut rest: SmallVec<[(VarId, NodeId); 8]> = SmallVec::new();
-    let mut spare: SmallVec<[NodeId; 8]> = SmallVec::new();
-    let mut moved: SmallVec<[(VarId, NodeId); 8]> = SmallVec::new();
-    for ((param, &arg), &after) in params.iter().zip(args).zip(&effects_after) {
-        let op = e.bir().node(arg).op();
-        match e.bir().view(arg) {
-            View::Const { value } => {
-                scratch.set(param, Sub::Const(value));
-                spare.push(arg);
-            }
-            View::Var { var } if can_move(e, scratch, after, param, body, arg) => {
-                scratch.set(param, Sub::Var(var));
-                spare.push(arg);
-            }
-            _ => {
-                if op != Op::Global
-                    && let Some(stats) = stats
-                    && op != Op::Var
-                    && pure(e, arg)
-                    && stats[param_index(params, param).expect("parameter")]
-                        .top_and_used_zero_or_one()
-                    && can_move(e, scratch, after, param, body, arg)
-                {
-                    scratch.set(param, Sub::Node(arg));
-                    moved.push((param, arg));
-                    continue;
+    let mut effects_after = std::mem::take(&mut scratch.effects_after);
+    let mut rest = std::mem::take(&mut scratch.rest);
+    let mut spare = std::mem::take(&mut scratch.spare);
+    let mut moved = std::mem::take(&mut scratch.moved);
+    effects_after.resize(args.len(), false);
+    let result = (|| {
+        let mut effects = false;
+        for (i, &arg) in args.iter().enumerate().rev() {
+            effects_after[i] = effects;
+            effects = effects || !pure_with_work(e, arg, &mut scratch.simple.purity);
+        }
+        for ((param, &arg), &after) in params.iter().zip(args).zip(&effects_after) {
+            let op = e.bir().node(arg).op();
+            match e.bir().view(arg) {
+                View::Const { value } => {
+                    scratch.set(param, Sub::Const(value));
+                    spare.push(arg);
                 }
-                let fresh = e.rename_var(param);
-                // `is_boxed_optional_binding` (lam_beta_reduce.rs:468-473).
-                let boxed = matches!(e.bir().view(arg), View::Prim { primitive, .. }
+                View::Var { var } if can_move(e, scratch, after, param, body, arg) => {
+                    scratch.set(param, Sub::Var(var));
+                    spare.push(arg);
+                }
+                _ => {
+                    if op != Op::Global
+                        && let Some(stats) = stats
+                        && op != Op::Var
+                        && pure_with_work(e, arg, &mut scratch.simple.purity)
+                        && stats[param_index(params, param).expect("parameter")]
+                            .top_and_used_zero_or_one()
+                        && can_move(e, scratch, after, param, body, arg)
+                    {
+                        scratch.set(param, Sub::Node(arg));
+                        moved.push((param, arg));
+                        continue;
+                    }
+                    let fresh = e.rename_var(param);
+                    // `is_boxed_optional_binding` (lam_beta_reduce.rs:468-473).
+                    let boxed = matches!(e.bir().view(arg), View::Prim { primitive, .. }
                     if matches!(e.bir().primitive(primitive).primitive,
                         Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt));
-                // A module without statistics takes the same road as any
-                // other argument (lam_beta_reduce.rs:411-416 and 417-446).
-                let binding = if boxed && (op != Op::Global) {
-                    let primitive = e.intern_prim(Primitive::Pidentity, LamLoc::NONE);
-                    let wrapped = e.node(
-                        View::Prim {
-                            args: &[arg],
-                            primitive,
-                        },
-                        0,
-                        weight,
-                    );
-                    e.normalise(wrapped);
-                    wrapped
-                } else {
-                    arg
-                };
-                rest.push((fresh, binding));
-                scratch.set(
-                    param,
-                    if boxed {
-                        Sub::Identity(fresh)
+                    // A module without statistics takes the same road as any
+                    // other argument (lam_beta_reduce.rs:411-416 and 417-446).
+                    let binding = if boxed && (op != Op::Global) {
+                        let primitive = e.intern_prim(Primitive::Pidentity, LamLoc::NONE);
+                        let wrapped = e.node(
+                            View::Prim {
+                                args: &[arg],
+                                primitive,
+                            },
+                            0,
+                            weight,
+                        );
+                        e.normalise(wrapped);
+                        wrapped
                     } else {
-                        Sub::Var(fresh)
-                    },
-                );
+                        arg
+                    };
+                    rest.push((fresh, binding));
+                    scratch.set(
+                        param,
+                        if boxed {
+                            Sub::Identity(fresh)
+                        } else {
+                            Sub::Var(fresh)
+                        },
+                    );
+                }
             }
         }
-    }
-    let copied = copy(e, scratch, body, weight);
-    for (param, arg) in moved {
-        if scratch.get(param) == Sub::Node(arg) {
-            spare.push(arg);
+        let copied = copy(e, scratch, body, weight);
+        for (param, arg) in moved.drain(..) {
+            if scratch.get(param) == Sub::Node(arg) {
+                spare.push(arg);
+            }
         }
-    }
-    scratch.reset();
-    let mut result = copied?;
-    for arg in spare {
-        e.release(arg);
-    }
-    // The first argument's binding is outermost.
-    for (param, value) in rest.into_iter().rev() {
-        bound(e, param, value);
-        result = e.node(
-            View::Let {
-                var: param,
-                value: Some(value),
-                body: result,
-            },
-            0,
-            weight,
-        );
-        refine(e, result);
-    }
-    Ok(result)
+        scratch.reset();
+        let mut result = copied?;
+        for arg in spare.drain(..) {
+            e.release(arg);
+        }
+        // The first argument's binding is outermost.
+        for (param, value) in rest.drain(..).rev() {
+            bound(e, param, value);
+            result = e.node(
+                View::Let {
+                    var: param,
+                    value: Some(value),
+                    body: result,
+                },
+                0,
+                weight,
+            );
+            refine(e, result);
+        }
+        Ok(result)
+    })();
+    effects_after.clear();
+    rest.clear();
+    spare.clear();
+    moved.clear();
+    scratch.effects_after = effects_after;
+    scratch.rest = rest;
+    scratch.spare = spare;
+    scratch.moved = moved;
+    result
 }
 
 /// The module and field of `Pfield(_, Fld_module name) [Lglobal_module id]`
@@ -1206,14 +1311,23 @@ pub(crate) mod testing {
             },
         )
     }
-    pub(crate) fn fun_attr(a: &mut LamArena, params: &[Ident], body: Lam, attr: FunctionAttribute) -> Lam {
+    pub(crate) fn fun_attr(
+        a: &mut LamArena,
+        params: &[Ident],
+        body: Lam,
+        attr: FunctionAttribute,
+    ) -> Lam {
         a.function_(params.len() as i32, params, body, attr, LamLoc::NONE)
     }
     pub(crate) fn fun(a: &mut LamArena, params: &[Ident], body: Lam) -> Lam {
         fun_attr(a, params, body, FunctionAttribute::default())
     }
     pub(crate) fn tuple(a: &mut LamArena, args: &[Lam]) -> Lam {
-        prim(a, Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable), args)
+        prim(
+            a,
+            Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
+            args,
+        )
     }
     pub(crate) fn field(a: &mut LamArena, i: i32, of: Lam) -> Lam {
         prim(a, Primitive::Pfield(i, FieldDbgInfo::Tuple), &[of])
@@ -1574,6 +1688,7 @@ mod storage_tests {
     use super::*;
     #[test]
     fn rejected_wide_simple_plans_and_motion_walks_reuse_storage() {
+        assert_eq!(std::mem::size_of::<CopyWork>(), 12);
         let mut b = Bir::default();
         let params = b.new_vars(&[crate::name::Name::new("p"); 16]);
         let operands: Vec<_> = (0..16).map(|i| b.new_node(View::Var { var: VarId(params.start + if i == 15 { 0 } else { i }) }, 0)).collect();

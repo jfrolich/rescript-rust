@@ -145,9 +145,9 @@ impl State {
                 let params = self.source.function(header).params;
                 let engine = Engine::new(&mut self.source);
                 let (_, stats) = beta::closed_with_stats(&engine, &mut self.inline_scratch, params, body);
-                let stats_start = self.inline_param_stats.len() as u32;
+                let stats_start = crate::bir::index(self.inline_param_stats.len());
                 self.inline_param_stats.extend_from_slice(&stats);
-                let template = InlineTemplate { function, stats_start, stats_len: stats.len() as u32 };
+                let template = InlineTemplate { function, stats_start, stats_len: crate::bir::index(stats.len()) };
                 self.inline_templates.insert(key, template);
                 self.inline_imports += 1;
                 template
@@ -562,5 +562,104 @@ mod allocation_tests {
         assert!(state.eta_arguments.is_empty());
         assert_eq!((state.source_steps - visits, state.sequence_steps - sequences), (80_001, 60_000));
         assert_eq!(std::mem::size_of::<AritySpan>(), 8);
+    }
+}
+
+#[cfg(test)]
+mod inline_allocation_tests {
+    use super::*;
+    use crate::lambda::{ApInfo, LamLoc, Lambda, LetKind, FieldDbgInfo, arena::LamArena, lam_constant::Constant, lam_primitive::Primitive, lam_arity::Arity};
+
+    #[test]
+    fn ten_thousand_copied_external_bodies_reuse_storage() {
+        for width in [1, 16] {
+            let params: Vec<_> = (0..width).map(|i| Ident::new("arg", 100 + i, crate::ident::IdentFlags::NONE)).collect();
+            let local = Ident::new("local", 200, crate::ident::IdentFlags::NONE);
+            let mut body = LamArena::new(); let arg = body.var(params[0]);
+            let init = body.prim_raw(Primitive::PinitMod, &[arg], LamLoc::NONE);
+            let mut values = vec![body.var(local), body.var(local)];
+            values.extend(params[1..].iter().map(|&p| body.var(p)));
+            let result = body.prim_raw(Primitive::Pmakearray, &values, LamLoc::NONE);
+            let root = body.let_(LetKind::Strict, local, init, result);
+            let resolver = crate::js_ir::ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+            resolver.set_bir_test_export("Other", "run", crate::cmi::persistent_env::CmjExportArity::Single(Arity::info(vec![width], false)),
+                Some(Lambda::function_(width, params, body.export(root), Default::default(), LamLoc::NONE)));
+            let mut a = LamArena::new();
+            // Inlining consumes argument nodes. Import two independent units
+            // before warming; never rerun a source whose arguments were consumed.
+            let mut roots = Vec::new();
+            for _ in 0..2 {
+                let calls: Vec<_> = (0..10_000).map(|_| {
+                    let global = a.global_module(Ident::create_persistent("Other"));
+                    let callee = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Module { name: "run".into() }), &[global], LamLoc::NONE);
+                    let args: Vec<_> = (0..width).map(|i| {
+                        let value = a.const_(Constant::JsNull);
+                        if width > 1 && i % 3 == 0 { a.prim_raw(Primitive::PinitMod, &[value], LamLoc::NONE) } else { value }
+                    }).collect();
+                    a.apply_raw(callee, &args, ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE })
+                }).collect();
+                roots.push(a.prim_raw(Primitive::Pmakearray, &calls, LamLoc::NONE));
+            }
+            let root = a.prim_raw(Primitive::Pmakearray, &roots, LamLoc::NONE);
+            let input = crate::bir::bridge::import_lambda(&a, root).unwrap(); let root = input.root;
+            let mut state = State::new(input); state.resolver = Some(resolver); state.cross_module_inline = true;
+            let View::Prim { args: [warm, measured], .. } = state.source.view(root) else { unreachable!() };
+            let (warm, measured) = (*warm, *measured);
+            let run = |s: &mut State, root| {
+                let out = s.probe(Cx::returning(), root).unwrap(); let out = s.realize(Cx::returning(), out);
+                for n in s.statements.statements(out.stmts) { s.arena.release(n); }
+                if let Some(n) = out.value { s.arena.release(n); } s.statements.kill(out.stmts);
+            };
+            macro_rules! stores { ($m:ident, $s:ident) => {
+                $m!($s, arena.nodes); $m!($s, arena.parents); $m!($s, arena.free_nodes); $m!($s, arena.release_stack);
+                $m!($s, source.nodes); $m!($s, source.parents); $m!($s, source.free_nodes); $m!($s, source.release_stack);
+                $m!($s, arena.cold); $m!($s, arena.j_duplicable); $m!($s, arena.death_candidates); $m!($s, arena.tail_candidates); $m!($s, arena.tail_calls); $m!($s, arena.self_tail); $m!($s, arena.loop_facts); $m!($s, arena.weights); $m!($s, arena.weight_path); $m!($s, arena.count_stack); $m!($s, arena.effect_work); $m!($s, arena.capture_chain); $m!($s, arena.capture_stack); $m!($s, arena.capture_uses);
+                $m!($s, source.cold); $m!($s, source.j_duplicable); $m!($s, source.death_candidates); $m!($s, source.tail_candidates); $m!($s, source.tail_calls); $m!($s, source.self_tail); $m!($s, source.loop_facts); $m!($s, source.weights); $m!($s, source.weight_path); $m!($s, source.count_stack); $m!($s, source.effect_work); $m!($s, source.capture_chain); $m!($s, source.capture_stack); $m!($s, source.capture_uses);
+                $m!($s, arena.pools.funcs); $m!($s, arena.func_owners); $m!($s, source.func_owners); $m!($s, arena.pools.attrs); $m!($s, arena.pools.js);
+                $m!($s, arena.vars.j_origin); $m!($s, arena.vars.name); $m!($s, arena.vars.order); $m!($s, arena.vars.flags);
+                $m!($s, arena.vars.uses); $m!($s, arena.vars.binder); $m!($s, arena.vars.fact); $m!($s, arena.vars.printed);
+                $m!($s, source.vars.j_origin); $m!($s, source.vars.name); $m!($s, source.vars.order); $m!($s, source.vars.flags);
+                $m!($s, source.vars.uses); $m!($s, source.vars.binder); $m!($s, source.vars.fact); $m!($s, source.vars.printed);
+                $m!($s, arena.capture_binders); $m!($s, arena.bulk_binders); $m!($s, source.capture_binders); $m!($s, source.bulk_binders);
+                $m!($s, idents); $m!($s, awaited_units); $m!($s, invalid_module_paths); $m!($s, switch_facts);
+                $m!($s, argument_outputs); $m!($s, argument_values); $m!($s, traversal.work); $m!($s, traversal.values); $m!($s, traversal.children);
+                #[cfg(debug_assertions)] { $m!($s, arena.checked_children); $m!($s, source.checked_children); }
+            }; }
+            let mut lengths = std::collections::HashMap::new();
+            macro_rules! length { ($s:ident, $($p:ident).+) => { lengths.insert(stringify!($($p).+), $s.$($p).+.len()); }; }
+            stores!(length, state);
+            let lists = state.arena.lists.storage_shape().0; let source_lists = state.source.lists.storage_shape().0;
+            let nodes = state.source.nodes.len();
+            run(&mut state, warm);
+            macro_rules! reserve { ($s:ident, $($p:ident).+) => { $s.$($p).+.reserve($s.$($p).+.len().saturating_sub(lengths[stringify!($($p).+)])); }; }
+            stores!(reserve, state);
+            state.arena.lists.reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
+            state.source.lists.reserve_test_growth(state.source.lists.storage_shape().0 - source_lists);
+            state.inline_engine.reserve_node_growth(state.source.nodes.len() - nodes);
+            state.free.reserve_repeat(); state.arena.js_scope.as_mut().unwrap().reserve_repeat();
+            let capacities = |s: &State| {
+                let mut out = Vec::new();
+                macro_rules! capacity { ($s:ident, $($p:ident).+) => { out.push((stringify!($($p).+), $s.$($p).+.capacity())); }; }
+                stores!(capacity, s); out
+            };
+            let before = capacities(&state); let source_before = state.source_steps;
+            let sequence_before = state.sequence_steps; let primitive_before = state.primitive_steps;
+            let inline_capacities = |s: &State| [s.inline_templates.capacity(), s.inline_param_stats.capacity(), s.inline_foreign.capacity(),
+                s.inline_globals.capacity(), s.inline_engine.stats.rules.len(), s.arena.lists.storage_shape().1, s.source.lists.storage_shape().1];
+            let inline_before = inline_capacities(&state); let beta_before = state.inline_scratch.capacities(); let engine_before = state.inline_engine.capacities();
+            let scope_before = state.arena.js_scope.as_ref().unwrap().capacities(); let free_before = state.free.capacities(); let statements_before = state.statements.capacities();
+            let allocations = allocation_counter::measure(|| run(&mut state, measured));
+            let costs = (state.source_steps-source_before, state.sequence_steps-sequence_before, state.primitive_steps-primitive_before);
+            println!("inline width={width}: {allocations:?}, costs={costs:?}");
+            assert_eq!(costs, if width == 1 { (70_001, 59_999, 60_001) } else { (400_001, 269_999, 330_001) });
+            assert_eq!(inline_capacities(&state), inline_before); assert_eq!(state.inline_scratch.capacities(), beta_before);
+            assert_eq!(state.inline_engine.capacities(), engine_before); assert!(state.inline_scratch.is_clear());
+            assert!(state.inline_foreign.is_empty() && state.inline_engine.stats.renames.is_empty() && state.inline_engine.stats.labels.is_empty());
+            assert_eq!(state.inline_param_stats.len(), width as usize); assert_eq!(state.inline_templates.len(), 1);
+            assert_eq!(std::mem::size_of::<InlineTemplate>(), 12);
+            assert_eq!(capacities(&state), before); assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
+            assert_eq!(state.free.capacities(), free_before); assert_eq!(state.statements.capacities(), statements_before);
+            assert_eq!(state.inline_imports, 1); assert_eq!(state.inline_reductions, 20_000); assert_eq!(allocations.count_total, 0);
+        }
     }
 }

@@ -2923,8 +2923,8 @@ bytes, and `JsPayload` 40 bytes. Bounded FFI argument conversion uses a fixed
 are stored in typed pools, referenced by 8-byte spans; the cold stored switch
 record is 96 bytes. Existing import builders transfer their owned input into
 these pools; the FFI emitter writes directly into the pools without an owned
-intermediate switch header. Other switch emitters' transient input vectors
-remain pending in their inventory rows.
+intermediate switch header. The other switch emitters now use retained planner
+storage and immutable metadata handles, as recorded below.
 
 Source traversal, deferred realization, constant traversal, argument holding
 and sequencing retain their work buffers between probes. Debug child-sharing
@@ -3106,7 +3106,7 @@ detachment, duplicate-key order and release behavior. Whole-Lambda proofs for
 warmed allocations and unchanged recorded capacities. Their exact source/primitive
 counts are 30,002/50,003 and 50,001/100,001 respectively. The buffers are empty after
 both complete probe/realize/release passes. These fixtures use tuple block metadata;
-owned constructor/record block tags remain a separate pending inventory item.
+owned constructor/record block tags are handled by the shared-shape conversion below.
 
 Compound-constant block metadata now references its immutable source ConstId;
 block work entries are 12 bytes and final operand lists use cleared retained
@@ -3178,8 +3178,8 @@ call. Its warmed pass allocates zero with unchanged recorded capacities, 80,001
 source visits and 60,000 sequencing steps; all 10,000 calls share six stored arity
 groups. Append-only reservations include variable columns and JS occurrence rows.
 All-five-continuation oracle tests also exercise the six-group summary.
-Cross-module *body inlining* and its fresh import graph remain separate pending
-sites; this proof does not exercise them.
+This arity proof does not exercise cross-module *body inlining*; the separate
+copied-body proofs below cover that path.
 
 Import metadata is now shared by the complete immutable external-module key
 (identifier, bundle, attributes, default flag and dynamic flag). Cache hits clone
@@ -3261,16 +3261,19 @@ renames its binders. Engine worklist/summary storage and rule/provenance statist
 are retained across invocations. A whole-Lambda 10,000-call test exercises both
 simple substitution and a copied let-binding body, asserting exactly one source
 import and 10,000 reductions; repeated-call all-continuation oracles preserve
-fresh binder behavior. This slice is **not** a zero-allocation inlining proof:
-the beta helper allocations below remain active work.
+fresh binder behavior. Those import-count tests alone are not allocation proofs;
+the complete probe/realize/release measurements below provide that gate.
 
 | Newly exposed inlining site | Ownership | Disposition |
 | --- | --- | --- |
 | `beta::delay_safe` traversal | retained work and separate purity walk; indexed children avoid SmallVec spills | removed |
 | `beta::simple` motion/usage/order/operand buffers | retained vectors cleared on acceptance and rejection; original ordering test unchanged | removed |
 | `beta::can_move` analysis | retained effect-state/traversal and hit/purity buffers, including early rejection | removed |
-| `beta::copy` traversal, operands, binder enumeration and static labels | fresh traversal collections and map entries | pending |
-| `beta::reduce` effects/rest/spare/moved runs | owning SmallVecs spill on wide applications | pending |
+| `beta::copy` traversal, operands, binder enumeration and static labels | retained work/value vectors, borrowed operand suffixes, binder-run descriptors and a cleared retained label map | removed |
+| `beta::reduce` effects/rest/spare/moved runs | retained vectors restored on every exit; original reduction and binding order unchanged | removed |
+| Engine normalization summaries and refinement purity | retained work vectors; indexed children | removed |
+| Engine copied function attributes | shared immutable attribute handle | removed |
+| Source node facts and occurrence recount children | indexed children, no transient SmallVec spills | removed |
 
 Beta motion/simple-plan classification now retains its motion, usage, ordering,
 operand, traversal and effect-state buffers. Both acceptance and early rejection
@@ -3280,8 +3283,39 @@ Primitive purity consumes scalar constant properties, avoiding owned bigint
 reconstruction while preserving the same decision table. A helper regression
 repeats a rejected 16-operand simple plan plus both classification walks 10,000
 times with zero warmed allocations and stable capacities. This is deliberately
-only a helper proof: copying/reduction buffers remain pending before the final
-whole-Lambda inlining zero-allocation gate.
+only a helper proof; the following whole-Lambda measurements exercise real copies.
+
+The final body-inlining gate runs complete probe/realize/release for 10,000 calls
+to a non-simple external function: a strict effectful local binding whose value
+occurs twice in the returned array. The 16-parameter variant additionally uses
+six effectful call arguments, exercising retained argument bindings, sequencing
+and wide operands. Neither fixture is an identity-only substitution. Both use
+one imported immutable function template and one flat parameter-statistics run.
+The beta copy work item is 12 bytes; the template descriptor is 12 bytes.
+
+Inlining consumes source arguments, so the tests import **two independent
+whole-Lambda trees before measurement**, warm the first and measure the second.
+They reserve observed append-only growth, not transient per-call collections.
+The measured interval includes every call, body copy, normalization, lowering,
+realization and output release. Final owned legacy-output conversion is excluded.
+
+| Whole-Lambda copied-body fixture | Calls | Allocations | Source visits | Sequencing steps | Primitive steps |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| One parameter, repeated local use | 10,000 | 0 | 70,001 | 59,999 | 60,001 |
+| Sixteen parameters, six effectful arguments | 10,000 | 0 | 400,001 | 269,999 | 330,001 |
+
+Both fixtures assert unchanged recorded capacities for source/output node and
+variable columns, lists, metadata headers, traversal storage, beta scratch,
+Engine reuse, template/statistics/foreign storage, Scope, FreePool and statement
+runs. They assert one import across both passes, 20,000 total reductions, empty
+transient buffers and exact logical costs. Repeated-call all-five-continuation
+oracles cover simple substitution and both copied-body shapes, including wide
+effectful arguments and distinct emitted local binders. Existing beta oracles
+continue to cover nested binders, capture, labels and loop-start rewriting;
+these two whole-Lambda allocation fixtures do not claim exhaustive opcode
+coverage. All inventoried non-export conversions are complete; export ownership
+allocations remain explicitly deferred above. No wall-time speedup is inferred
+from these allocation proofs.
 
 ### 7.5.1 Concurrent loop, label and recursive-value additions
 

@@ -297,7 +297,7 @@ pub(crate) fn refine(e: &mut Engine<'_>, n: NodeId) -> Changed {
     let kind = e.bir().node(n).aux();
     let next = if matches!(kind, 0 | 2) && safe_alias(e, value) {
         1
-    } else if kind == 0 && pure(e, value) {
+    } else if kind == 0 && e.pure(value) {
         2
     } else {
         kind

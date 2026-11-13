@@ -1491,26 +1491,31 @@ fn a_declaration_is_decided_once_per_copy_of_its_statement() {
 fn cached_external_templates_keep_fresh_binders_and_import_once() {
     use crate::cmi::persistent_env::CmjExportArity;
     use crate::lambda::{ApInfo, ApplyStatus, FieldDbgInfo, LamLoc, Lambda, lam_arity::Arity, lam_primitive::Primitive};
-    for copied in [false, true] {
-        let param = Ident::new("arg", 100, IdentFlags::NONE);
-        let local = Ident::new("local", 101, IdentFlags::NONE);
+    for (copied, width) in [(false, 1), (true, 1), (true, 16)] {
+        let params: Vec<_> = (0..width).map(|i| Ident::new("arg", 100 + i, IdentFlags::NONE)).collect();
+        let local = Ident::new("local", 200, IdentFlags::NONE);
         let mut body = LamArena::new();
-        let value = body.var(param);
+        let value = body.var(params[0]);
         let body_root = if copied {
             let init = body.prim_raw(Primitive::PinitMod, &[value], LamLoc::NONE);
-            let result = body.var(local);
+            let mut uses = vec![body.var(local), body.var(local)];
+            uses.extend(params[1..].iter().map(|&p| body.var(p)));
+            let result = body.prim_raw(Primitive::Pmakearray, &uses, LamLoc::NONE);
             body.let_(LetKind::Strict, local, init, result)
         } else { value };
         let resolver = crate::js_ir::ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
-        resolver.set_bir_test_export("Other", "run", CmjExportArity::Single(Arity::info(vec![1], false)),
-            Some(Lambda::function_(1, vec![param], body.export(body_root), Default::default(), LamLoc::NONE)));
+        resolver.set_bir_test_export("Other", "run", CmjExportArity::Single(Arity::info(vec![width], false)),
+            Some(Lambda::function_(width, params, body.export(body_root), Default::default(), LamLoc::NONE)));
         for count in [2, 10_000] {
             let mut a = LamArena::new();
             let calls: Vec<_> = (0..count).map(|i| {
                 let module = a.global_module(Ident::create_persistent("Other"));
                 let callee = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Module { name: "run".into() }), &[module], LamLoc::NONE);
-                let arg = a.const_(C::Int { i, comment: None });
-                a.apply_raw(callee, &[arg], ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE })
+                let args: Vec<_> = (0..width).map(|j| {
+                    let arg = a.const_(C::Int { i: i + j, comment: None });
+                    if width > 1 && j % 3 == 0 { a.prim_raw(Primitive::PinitMod, &[arg], LamLoc::NONE) } else { arg }
+                }).collect();
+                a.apply_raw(callee, &args, ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE })
             }).collect();
             let root = a.prim_raw(Primitive::Pmakearray, &calls, LamLoc::NONE);
             if count == 2 { compare_oracle(a.clone(), root, Some(&resolver), true, &[0,1,2,3,4], None, true); }
@@ -1518,7 +1523,7 @@ fn cached_external_templates_keep_fresh_binders_and_import_once() {
             let mut state = State::new(input); state.cross_module_inline = true; state.resolver = Some(resolver.clone());
             let out = state.probe(Cx::returning(), root).unwrap(); let out = state.realize(Cx::returning(), out);
             assert_eq!(state.inline_imports, 1); assert_eq!(state.inline_reductions, count as usize);
-            assert_eq!(state.inline_templates.len(), 1); assert_eq!(state.inline_param_stats.len(), 1);
+            assert_eq!(state.inline_templates.len(), 1); assert_eq!(state.inline_param_stats.len(), width as usize);
             assert!(state.inline_foreign.is_empty() && state.inline_engine.stats.renames.is_empty());
             for node in state.statements.statements(out.stmts) { state.arena.release(node); }
             if let Some(value) = out.value { state.arena.release(value); }

@@ -27,7 +27,7 @@ impl CopyScratch {
 }
 
 #[derive(Clone, Copy)]
-enum BinderRun {
+pub(super) enum BinderRun {
     Empty,
     One(Option<VarId>),
     Vars(VarSpan),
@@ -35,7 +35,7 @@ enum BinderRun {
     Rest(VarId, RestSpan),
 }
 impl BinderRun {
-    fn len(self) -> usize {
+    pub(super) fn len(self) -> usize {
         match self {
             Self::Empty => 0,
             Self::One(_) => 1,
@@ -43,7 +43,7 @@ impl BinderRun {
             Self::Rest(_, s) => 1 + s.len as usize,
         }
     }
-    fn at(self, b: &Bir, slot: usize) -> Option<VarId> {
+    pub(super) fn at(self, b: &Bir, slot: usize) -> Option<VarId> {
         match self {
             Self::Empty => None,
             Self::One(v) => v,
@@ -413,7 +413,7 @@ impl Bir {
 
     /// Snapshot handles, not a materialized list of binders. The descriptor
     /// stays valid while fresh binders and metadata are appended to the arena.
-    fn binder_run(&self, id: NodeId) -> BinderRun {
+    pub(super) fn binder_run(&self, id: NodeId) -> BinderRun {
         self.binders_in(self.view(id))
     }
     fn binders_in(&self, view: View<'_>) -> BinderRun {
@@ -715,7 +715,9 @@ impl Bir {
             // a newly doubled default. All other cached paths stay valid.
             self.weights[id.index()] = 0;
             self.adjust_direct(id, delta);
-            for child in self.view(id).children() {
+            let view = self.view(id);
+            for at in 0..view.child_count() {
+                let child = view.child_at(at);
                 stack.push((
                     child,
                     delta
@@ -844,7 +846,8 @@ impl Bir {
         let both = NodeFlags::HAS_EXIT | NodeFlags::HAS_STATEMENT;
         let mut facts = NodeFlags(if own { NodeFlags::HAS_STATEMENT } else { 0 });
         let mut loops = empty;
-        for child in view.children() {
+        for at in 0..view.child_count() {
+            let child = view.child_at(at);
             let (flags, jumps) = child_facts(child);
             facts.0 |= flags.0 & both;
             unit &= flags.contains(if tail == Some(child) { NodeFlags::TRIVIAL_UNIT } else { NodeFlags::PURE });
