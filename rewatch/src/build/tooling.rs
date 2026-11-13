@@ -405,6 +405,39 @@ pub fn run_command(build_state: &BuildCommandState, cwd: PathBuf, args: Vec<Stri
     })
 }
 
+/// `rescript-tools doc <path>`: the documentation of the module at `path`
+/// as JSON. Builds write no `.cmt` for it to read, so the project of the
+/// file is type-checked first, without writing files, and the module is
+/// read from its Rust typed tree.
+pub fn doc(cwd: &Path, path: &str, plain_output: bool) -> Result<Vec<u8>> {
+    let file = cwd.join(path);
+    let project_root = helpers::get_nearest_config(&file)
+        .ok_or_else(|| anyhow!("error: failed to generate doc for {path}, it is in no ReScript project"))?;
+    let build_state = super::build(
+        &None,
+        &project_root,
+        /* show_progress */ false,
+        /* no_timing */ true,
+        plain_output,
+        /* warn_error */ None,
+        /* prod */ false,
+        /* features */ None,
+        /* dump */ None,
+        /* check_only */ true,
+    )
+    .map_err(|err| {
+        anyhow!("error: failed to generate doc for {path}, the project does not build: {err:#}")
+    })?;
+    let docs = run_command(
+        &build_state,
+        cwd.to_path_buf(),
+        vec!["doc".to_string(), path.to_string()],
+    );
+    // A one-shot command: let the OS reclaim the build graph at exit.
+    std::mem::forget(build_state);
+    docs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

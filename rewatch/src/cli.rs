@@ -663,6 +663,14 @@ pub enum Command {
         #[arg(value_parser = parse_source_path)]
         path: String,
     },
+    /// Print the documentation of a ReScript module as JSON (what
+    /// `rescript-tools doc` prints). Type-checks the project without writing
+    /// files first.
+    #[command(hide = true)]
+    Doc {
+        /// Path to a ReScript source file (.res or .resi)
+        path: String,
+    },
     /// Run an editor tooling command in the project's running `rescript watch`.
     ///
     /// Exits with 69 when no watcher serves the project.
