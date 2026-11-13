@@ -387,6 +387,8 @@ struct State {
     catches: Vec<Option<exit::Plan>>,
     tries: Vec<try_::Plan>,
     loops: Vec<loops::Plan>,
+    next_loop_label: u32,
+    label_conditional_depth: u32,
     try_form_reads: usize,
     catch_work: Vec<NodeId>,
     /// `HAS_EXIT` reads that decided a flattening or a form.
@@ -462,6 +464,8 @@ impl State {
             catches: Vec::new(),
             tries: Vec::new(),
             loops: Vec::new(),
+            next_loop_label: 0,
+            label_conditional_depth: 0,
             try_form_reads: 0,
             catch_work: Vec::new(),
             catch_flag_reads: 0,
@@ -652,8 +656,8 @@ impl ProbeRules for State {
             View::Try { body, exception, handler } => return Ok(ProbePlan::Children(expr::Resume::Try(self.try_statement(cx, body, Some(exception), Some(handler), None)))),
             View::TryFinally { body, finaliser } => return Ok(ProbePlan::Children(expr::Resume::Try(self.compile_try_finally(cx, body, finaliser)))),
             View::While { .. } | View::For { .. } | View::ForOf { .. } | View::ForAwaitOf { .. } => return Ok(ProbePlan::Children(expr::Resume::Loop(self.loop_statement(node)))),
-            View::Break
-            | View::Continue => return Err(Unsupported("loop")),
+            View::Break => return Ok(ProbePlan::Ready(self.loop_jump(cx, false)?)),
+            View::Continue => return Ok(ProbePlan::Ready(self.loop_jump(cx, true)?)),
             View::Assign { var, value } => return Ok(ProbePlan::Children(expr::Resume::Assign { var, value })),
             View::JBin { .. }
             | View::JNot { .. }

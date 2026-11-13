@@ -94,6 +94,7 @@ impl State {
         then_: NodeId,
         else_: NodeId,
     ) -> Result<Conditional, Unsupported> {
+        self.label_conditional_depth += 1;
         let returns = matches!(cx.cont, Cont::Effect(Tail::Return(_)));
         // R5 step 0, C:3691 compile_if_unit_return_tail_block: decided before
         // the branches are lowered, so nothing is lowered and discarded.
@@ -237,6 +238,7 @@ impl State {
         conditional: Conditional,
         mut children: impl Iterator<Item = Probed>,
     ) -> Probed {
+        self.label_conditional_depth -= 1;
         let Some(Probed::Out(test)) = children.next() else {
             unreachable!("the test was realized")
         };

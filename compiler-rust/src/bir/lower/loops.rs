@@ -1,6 +1,6 @@
 //! Loop statements (BACKEND_LOWERING §3.11).
 use super::*;
-use crate::bir::{ListId, NodeFlags, Op};
+use crate::bir::{ListId, NodeFlags, Op, StrId};
 use crate::js_ir::ForDirection;
 
 /// O(1) index into the unit's loop-plan pool.
@@ -16,6 +16,9 @@ pub(super) struct Plan {
     start: Span,
     var: Option<VarId>,
     direction: u16,
+    label: Option<StrId>,
+    relowered: bool,
+    needs_label: bool,
 }
 
 impl State {
@@ -48,7 +51,8 @@ impl State {
         };
         let frame = Loop(self.loops.len() as u32);
         self.loops.push(Plan { node, nodes, blocks: [None; 3], values: [None; 2],
-            start: self.statements.mark(), var, direction });
+            start: self.statements.mark(), var, direction, label: None,
+            relowered: self.label_conditional_depth != 0, needs_label: self.source.loop_needs_label(node) });
         frame
     }
 
@@ -61,7 +65,7 @@ impl State {
                 let body = index == body_index;
                 let switch_depth = if body { 0 } else if plan.var.is_none() { cx.switch_depth + 1 } else { cx.switch_depth };
                 into.push((Cx { cont: if body { Cont::Effect(Tail::No) } else { Cont::Value(Tail::No) },
-                    switch_depth, probing: false, ..cx }, node));
+                    switch_depth, loops: if body { LoopTop(frame.0 + 1) } else { cx.loops }, probing: false, ..cx }, node));
             }
         }
     }
@@ -91,6 +95,30 @@ impl State {
         Probed::Out(Out { stmts: self.statements.mark(), value: None, finished: Finished::False })
     }
 
+    /// O(1), apart from formatting a newly requested label's bounded integer.
+    /// A jump only consults its innermost frame and the switch depth.
+    pub(super) fn loop_jump(&mut self, cx: Cx, continue_: bool) -> Result<Probed, Unsupported> {
+        assert!(cx.loops.0 != 0, "jump outside a loop");
+        let index = cx.loops.0 as usize - 1;
+        let label = if cx.switch_depth == 0 { None } else {
+            assert!(self.loops[index].needs_label, "missing construction-time loop label fact");
+            if self.loops[index].relowered {
+                return Err(Unsupported("loop label under a re-lowered conditional"));
+            }
+            if self.loops[index].label.is_none() {
+                let label = self.arena.intern_text(&format!("loop_{}", self.next_loop_label));
+                self.next_loop_label += 1;
+                self.loops[index].label = Some(label);
+            }
+            self.loops[index].label
+        };
+        let start = self.statements.mark();
+        let statement = self.arena.new_node(if continue_ { View::SContinue { label } } else { View::SBreak { label } }, 0);
+        self.statements.push(statement);
+        let value = self.pure_expression(View::JUndefined, 0);
+        Ok(Probed::Out(Out { stmts: self.statements.since(start), value: Some(value), finished: Finished::True }))
+    }
+
     /// O(s): attach s saved prelude statements in execution order. Each
     /// prelude is replayed once; nested loop bodies remain one statement.
     fn push_loop_list(&mut self, list: ListId) {
@@ -108,6 +136,7 @@ impl State {
         let values = plan.values;
         let var = plan.var;
         let direction = plan.direction;
+        let label = plan.label;
         let op = self.source.node(plan.node).op();
         let end = values[0].unwrap_or_else(|| self.pure_expression(View::JUndefined, 0));
         let statement = if op == Op::While {
@@ -131,15 +160,15 @@ impl State {
                 body = self.arena.block_from_list(list);
                 condition = crate::bir::j::plain::boolean(&mut self.arena, true);
             } else { body = self.arena.block_from_list(body_list); }
-            self.arena.new_node(View::SWhile { condition, body, label: None }, 0)
+            self.arena.new_node(View::SWhile { condition, body, label }, 0)
         } else if matches!(op, Op::ForOf | Op::ForAwaitOf) {
             self.push_loop_list(blocks[0].unwrap());
             let body = self.arena.block_from_list(blocks[1].unwrap());
             let var = var.unwrap();
             let parts = [end, body];
             self.arena.new_node(if op == Op::ForOf {
-                View::SForOf { var, parts: &parts, label: None }
-            } else { View::SForAwaitOf { var, parts: &parts, label: None } }, 0)
+                View::SForOf { var, parts: &parts, label }
+            } else { View::SForAwaitOf { var, parts: &parts, label } }, 0)
         } else {
             let var = var.unwrap();
             let init = values[1].unwrap_or_else(|| self.pure_expression(View::JUndefined, 0));
@@ -154,9 +183,9 @@ impl State {
             self.push_loop_list(end_block);
             let body = self.arena.block_from_list(blocks[2].unwrap());
             if hold {
-                self.arena.new_node(View::SForRange { var, parts: &[end, body], label: None }, direction)
+                self.arena.new_node(View::SForRange { var, parts: &[end, body], label }, direction)
             } else {
-                self.arena.new_node(View::SForRange { var, parts: &[init, end, body], label: None }, direction)
+                self.arena.new_node(View::SForRange { var, parts: &[init, end, body], label }, direction)
             }
         };
         self.statements.push(statement);
@@ -212,9 +241,58 @@ mod tests {
     }
 
     #[test]
+    fn jumps_in_innermost_loops() {
+        for continue_ in [false, true] {
+            for form in 0..4 {
+                for wrapper in 0..6 {
+                    for nested in [false, true] {
+                        let mut a = LamArena::new();
+                        let id = Ident::new("i", 1, IdentFlags::NONE);
+                        let x = a.var(Ident::new("x", 2, IdentFlags::NONE));
+                        let unit = a.const_(Constant::JsUndefined { is_unit: true });
+                        let jump = if continue_ { a.continue_() } else { a.break_() };
+                        let body = match wrapper {
+                            0 => jump,
+                            1 => a.if_(x, jump, unit),
+                            2 => a.string_switch(x, &[("a", jump), ("b", unit), ("c", x), ("d", jump)], Some(unit)),
+                            3 => a.try_(jump, Ident::new("exn", 3, IdentFlags::NONE), unit),
+                            4 => {
+                                let raise = a.static_raise(7, &[]);
+                                a.static_catch(raise, 7, &[], jump)
+                            }
+                            _ => a.try_finally(jump, unit),
+                        };
+                        let mut root = match form {
+                            0 => a.while_(x, body),
+                            1 => a.for_(id, x, x, DirectionFlag::Upto, body),
+                            2 => a.for_of(id, x, body),
+                            _ => a.for_await_of(id, x, body),
+                        };
+                        if nested { root = a.while_(x, root); }
+                        super::super::oracle_tests::compare(a, root);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inner_while_condition_targets_outer_loop() {
+        for continue_ in [false, true] {
+            let mut a = LamArena::new();
+            let x = a.var(Ident::new("x", 2, IdentFlags::NONE));
+            let jump = if continue_ { a.continue_() } else { a.break_() };
+            let condition = a.if_(x, jump, x);
+            let inner = a.while_(condition, x);
+            let root = a.while_(x, inner);
+            super::super::oracle_tests::compare(a, root);
+        }
+    }
+
+    #[test]
     fn loop_plan_layout() {
         assert_eq!(std::mem::size_of::<Loop>(), 4);
-        assert_eq!(std::mem::size_of::<Plan>(), 88);
+        assert_eq!(std::mem::size_of::<Plan>(), 96);
     }
 
     #[test]

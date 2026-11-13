@@ -693,7 +693,15 @@ impl Bir {
             facts.0 |= flags.0 & both;
             unit &= flags.contains(if tail == Some(child) { NodeFlags::TRIVIAL_UNIT } else { NodeFlags::PURE });
             if let Some(body) = loop_body {
-                if body == child && jumps.0 & L::SWITCH_JUMP != 0 { loops.0 |= L::NEEDS_LABEL; }
+                if body == child {
+                    if jumps.0 & L::SWITCH_JUMP != 0 { loops.0 |= L::NEEDS_LABEL; }
+                } else {
+                    // Bounds run outside the new frame. A while condition
+                    // with statements runs inside its generated JS loop,
+                    // so its outward jump crosses that loop (lam_compile.ml:1322).
+                    loops.0 |= jumps.0 & (L::JUMP | L::SWITCH_JUMP);
+                    if node.op() == Op::While && jumps.0 & L::JUMP != 0 { loops.0 |= L::SWITCH_JUMP; }
+                }
             } else {
                 loops.0 |= jumps.0 & (L::JUMP | L::SWITCH_JUMP);
                 if scrutinee.is_some_and(|s| s != child) && jumps.0 & L::JUMP != 0 {
