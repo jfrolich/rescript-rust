@@ -1,0 +1,1 @@
+- Add `@law` and `rescript verify`: a `let` marked `@law` is a property of the program (a pure function that returns `bool`), which a build type checks and leaves out of the JavaScript, and which `rescript verify` runs on values made from the types of its parameters, reporting the smallest values that break it. See `docs/verify/law.md`.
