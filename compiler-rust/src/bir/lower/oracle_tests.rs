@@ -825,8 +825,7 @@ fn cross_module_inline_after_lowering_a_closure_with_assignment() {
     let mutable = Ident::new("mutable", 10, IdentFlags::NONE);
     let assignment = a.assign(mutable, arg);
     let unit = Ident::new("unit", 11, IdentFlags::NONE);
-    let mut attr = crate::lambda::FunctionAttribute::default();
-    attr.one_unit_arg = true;
+    let attr = crate::lambda::FunctionAttribute { one_unit_arg: true, ..Default::default() };
     let closure = a.function_(1, &[unit], assignment, attr, LamLoc::NONE);
     let root = a.seq_raw(closure, call);
     compare_oracle(a, root, Some(&resolver), true, &[0,1,2,3,4], None, true);
