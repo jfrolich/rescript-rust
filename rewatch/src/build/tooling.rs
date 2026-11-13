@@ -181,6 +181,7 @@ impl<'a> WatchProject<'a> {
                     source.module_name,
                     &options,
                     self.registry(),
+                    source.interface.is_some(),
                 );
                 TypedSource {
                     parsed: ast,
@@ -256,6 +257,7 @@ impl<'a> WatchProject<'a> {
                 module_name,
                 &options,
                 self.registry(),
+                Runtime::interface(implementation).is_some(),
             );
             TypedSource {
                 parsed: Arc::new(RuntimeParsed(arena)),
