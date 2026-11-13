@@ -1813,6 +1813,29 @@ impl ParseArena {
         LocIdx::from_u32(SYNTHETIC_LOCATION_BASE + slot as u32)
     }
 
+    /// OCaml `Location.in_file "command line"` (location.ml:24-26), where
+    /// `Res_compmisc.open_implicit_module` locates `-open` modules: a ghost
+    /// location without a printable range, so reports show only the name.
+    pub fn push_typecheck_command_line_loc(&self) -> LocIdx {
+        if !self.store_locations {
+            return self.fresh_location_identity(true);
+        }
+        let pos = Position {
+            file_name: self.push_shared_string("command line".to_string()),
+            line: 1,
+            bol: 0,
+            cnum: -1,
+        };
+        let start_slot = self.synthetic_positions.len();
+        self.synthetic_positions.push(Box::new(pos));
+        let start = PosIdx::from_u32(SYNTHETIC_POSITION_BASE + start_slot as u32);
+        let slot = self.synthetic_locations.len();
+        assert!(slot < 1 << 30, "synthetic location pool overflow");
+        self.synthetic_locations
+            .push(Box::new(InternedLocation::new(start, start, true)));
+        LocIdx::from_u32(SYNTHETIC_LOCATION_BASE + slot as u32)
+    }
+
     /// A typechecker-generated ghost location from `start` to `end` (OCaml
     /// `{Location.loc_start; loc_end; loc_ghost = true}`), appended to the
     /// synthetic storage like `push_typecheck_ghost_loc`.

@@ -173,7 +173,10 @@ impl State {
             Probed::Free(_) => unreachable!("argument realized before its next sibling"),
         }));
         let mut values = std::mem::take(&mut self.argument_values);
-        let statements = self.sequence_arguments(false, &outputs, &mut values);
+        let method_callee = !call.inline && call.external.is_none()
+            && matches!(self.source.view(call.operands[0]), View::Prim { primitive, .. }
+                if matches!(self.arena.primitive(primitive).primitive, crate::lambda::lam_primitive::Primitive::PjsObjectGet(_)));
+        let statements = self.sequence_arguments(method_callee, &outputs, &mut values);
         outputs.clear();
         self.argument_outputs = outputs;
         let result = (|| {

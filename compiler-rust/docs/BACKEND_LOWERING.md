@@ -1,7 +1,6 @@
 # Backend lowering: level L to level J (S3.3 to S3.9)
 
-Status: specification. S3.3 to S3.6, S3.8, S3.9 and part of S3.7 are
-implemented, in check mode only ([STATUS.md](STATUS.md)). It is the table
+Status: specification. S3.3 to S3.9 are implemented, in check mode only ([STATUS.md](STATUS.md)). It is the table
 [BACKEND_REDESIGN.md](BACKEND_REDESIGN.md) H.1 asks for before stage S3.3
 ("a table mapping each context function of `lam_compile.rs` (A.5) to a
 continuation case"), and the slicing of S3.3 to S3.9. Sections A to I of that
@@ -124,7 +123,7 @@ pub enum Ret {
 pub struct Cx {
     cont: Cont,
     jumps: JumpTop,     // top of the jump stack visible here (4.1)
-    switch_depth: u32,  // L switches between here and the closest loop
+    switch_depth: u32,  // inherited switch scopes; a source loop preserves depth
     loops: LoopTop,     // top of the loop-frame stack visible here
     return_unit: bool,  // the enclosing function's `return_unit` attribute
     probing: bool,      // a conditional reads whether this output is free (1.5)
@@ -1216,8 +1215,13 @@ arms).
 | `Break`, `Continue` | | `SBreak`, `SContinue`, labelled with the innermost frame's label when `switch_depth > 0`; **finished** | arms of `compile_expr` (C:1529); 4.5 for the label |
 | `Assign(v, x)` | `V(x)` | `SExp(v = x)` | arm of `compile_expr` (C:1529) |
 
-A loop frame is pushed for the body only. A function body starts with no
-frames and `switch_depth = 0` (row K10).
+A loop frame is pushed for the body only, preserving the enclosing switch
+depth (`compiler/core/lam_compile_context.ml:88`). Thus a loop inside a
+switch may label even a direct body jump; resetting depth at loop entry would
+change reference output. A function body starts with no frames and
+`switch_depth = 0` (row K10). The dense one-byte loop fact records both a
+body switch-crossing jump and a direct body jump. Entry reads that byte once
+with the inherited context; no body scan decides whether a label is needed.
 
 ### 3.12 `Try`, `TryFinally`, `LetRec`; source locations
 
@@ -1240,6 +1244,8 @@ the depth of the case body. Smart constructors drop or keep locations as the
 legacy ones do (for example J-E8 keeps the comment and drops the location of
 a negated literal); the J rules of section 6 are ported with their location
 handling, and the gate with source maps on (8.1) is the judge.
+
+S3.7b validation and measurements: [LOWERING_LOOPS_RECURSIVE_RESULTS.md](LOWERING_LOOPS_RECURSIVE_RESULTS.md).
 
 ## 4. Exits: `Catch` and `Exit`, and loop labels
 
@@ -1688,44 +1694,42 @@ a non-return conditional, nested loops, and string dispatch. The minimal
 before-change outputs are recorded in
 [LOWERING_REFERENCE_EXPERIMENTS.md](LOWERING_REFERENCE_EXPERIMENTS.md).
 
-The rule lives in the lowering. With `probe` there are no discarded
-lowerings, so the numbers are computed:
+The rule lives in `bir/lower/label.rs`. Only retained lowering builds J:
 
-- a label is symbolic while a group is lowered (`LabelRef`, an index into a
-  table of the group); `SWhile`, `SForRange`, `SForOf`, `SBreak` and
-  `SContinue` refer to it; numbers are written when the group is done;
-- the **schedule** is normative: the passes the legacy code makes over the
-  branches of a conditional, in order, and which pass's output is kept. They
-  are rows R1 to R6 of 3.6, the short circuits in **R** (3.7), and the second
-  lowering of a recursive function whose loop was not triggered
-  (`compile_recursive_function_expr` (C:3989), C:4027). Every other construct
-  lowers each child once;
-- a frame that is created inside a pass is new in every pass, so each pass
-  that asks for its label takes a new number; the number in the output is the
-  one taken in the kept pass. A frame created outside the conditional keeps
-  the number of the first request, which can be made in a discarded pass;
-- every `Out` carries the number of labels one pass over its subtree takes,
-  per kind of pass (**V**, **A** which also serves **D**, **E**, **R**, **R**
-  in a loop): five small integers, absent when all are zero, composed from
-  the children's by the pass table. It does not depend on the state outside
-  the subtree, because requests for outer frames are counted where the frame
-  is, not where the request is;
-- when a conditional is done, the labels allocated inside each branch are a
-  contiguous range of the table; the numbers the earlier passes take are added
-  to the range (a difference array over the table, one prefix sum when the
-  group is done). A request for a frame outside the conditional is resolved
-  along the first pass at each enclosing conditional, from the per-kind
-  running counts kept on a stack of the conditionals being lowered.
+- Each requested loop gets a unique, non-interned symbolic `StrId`. Loop
+  statements and jumps, including copied untagged arms, share that handle.
+  Group finalization aliases its string-pool entry to the numbered spelling;
+  no J traversal or per-user patch list is needed.
+- During the same source traversal, a pooled event program summarizes six
+  continuation classes: **V**, **D**, **A**, **E**, **R**, and named tail-loop
+  **R**. **D** cannot alias **A** (it probes conditional branches), nor **V**
+  (only **V** resets counters along a top-level binding spine).
+- Each summary is a pair: internal allocations and the offset of the first
+  enclosing-frame request. Composition counts that external request once
+  across discarded passes. Loop boundaries consume the body's request;
+  conditions and bounds keep the outer frame.
+- A single explicit-stack replay follows retained events. A discarded pass
+  consumes its cached summary in O(1), assigning an external frame on its
+  first request. Top-level groups reset and restore counters explicitly.
+  No source body is re-lowered, and nested conditionals do not cause repeated
+  subtree walks or range remapping.
+- Event edges and source frames are 12 bytes; scheduling tasks are 16 bytes.
+  All lists are pooled. Six fixed-size summaries per event and one replay
+  make scheduling O(source edges + retained events), independent of the
+  exponential work the discarded legacy probes would perform.
 
-The algorithm is specified by a reference implementation that S3.7 writes
-first and keeps under `cfg(test)`: lowering with real discarded passes, as
-the legacy code does (exponential, small inputs only). The property test is
-"computed numbers equal the reference's" on random trees of conditionals,
-loops, switches and breaks in every continuation.
-
-Until that is built, a group in which a label is requested and a conditional
-has a branch that needs statements returns
-`Unsupported("loop label under a re-lowered conditional")`.
+Q2 is checked by 512 deterministic generated loop/switch/conditional shapes,
+using the actual legacy lowering as the discarded-pass reference and comparing
+printed text in every tested continuation and both parenthesis modes. Separate
+oracles cover top-level counter restoration and recursive self-tail calls.
+The latter exposed a legacy discrepancy: a self-call prevented the initial
+probe's labels from being consumed. The isolated fix is covered against OCaml
+by `tests/js_output_parity/fixtures/self_tail_loop_labels.res` in eight modes.
+A second reference fixture, `inherited_loop_labels.res`, found case-first
+label allocation in legacy general string switches. Both lowerers now visit
+the default first, as `compiler/core/lam_compile.ml:794-799` does, while
+emitting grouped cases before the default. The temporary conditional-label
+Unsupported arm has been removed.
 
 ### 4.6 What S3.5 found in the legacy choice
 
@@ -2024,8 +2028,9 @@ into recursive clusters (`raw_lambda/lambda_scc.rs`, A.2).
    | a `Pmakeblock` of a record, an inline record with one non-constant constructor, or a constructor with one non-constant constructor, whose arguments are each a constant or a variable that is the member itself or not another member of the group (`compile_recursive_self_binding_makeblock` (C:2293)) | `let id = <dummy>` (kind `Variable`), then one field assignment per argument, in order (`compile_set_field` (K:246)) | none |
    | any other `Pmakeblock` | the statements of `V(value)`, then `Primitive_object.updateDummy(id, value)` | `let id = <dummy>` (kind `Variable`) |
 
-   The dummy is `[]` for an array record, a tuple and a module block, `{}`
-   otherwise (`recursive_dummy_object_expr` (C:2345)).
+   The dummy is `[]` for an array record, a tuple and a `ModuleExport` block;
+   it is `{}` for `Module` and the other object-shaped tags
+   (`recursive_dummy_object_expr` (C:2345)).
 4. The placeholders of all members are put in front of the group's
    statements, in group order.
 5. Then the body, in the continuation of the `LetRec` (3.4 for the legacy
@@ -2950,6 +2955,32 @@ measures zero warmed allocations and unchanged capacity; this is a storage test,
 planning still owns metadata and scratch vectors, test literal conversion still
 clones tags, and subtree copying still allocates. Those paths remain outstanding.
 
+### 7.5.1 Concurrent loop, label and recursive-value additions
+
+The baseline exclusions for `loops.rs`, `label.rs` and `rec.rs` no longer apply
+after integrating `81b8b26a5`. These are the new production `Vec` sites; no
+production `SmallVec` site was introduced in these three files. Test-fixture
+vectors are not compile-path allocations.
+
+| Site at integration | Storage | Frequency | Disposition |
+| --- | --- | --- | --- |
+| `loops.rs:59` `loop_children` | borrowed `&mut Vec<(Cx, NodeId)>` | shared source traversal | retained caller-owned buffer; not an owned construct vector |
+| `rec.rs:77` `recursive_children` | borrowed `&mut Vec<(Cx, NodeId)>` | shared source traversal | retained caller-owned buffer; not an owned construct vector |
+| `rec.rs:93` `recursive_dummy` | `JsPayload::Object(Vec::new())` | per dummy | removed: `object_info(&[])` adopts property-pool metadata |
+| `label.rs:115` `Schedule.frames` | `Vec<Frame>` | once-per-unit stack | retained typed frame pool; high-water capacity reused |
+| `label.rs:116` `Schedule.values` | `Vec<Edge>` | once-per-unit stack | retained typed event stack; high-water capacity reused |
+| `label.rs:117` `Schedule.edges` | `Vec<Edge>` | once-per-unit pool | retained indexed event-edge pool |
+| `label.rs:118` `Schedule.steps` | `Vec<Step>` | once-per-unit pool | retained indexed scheduling-step pool |
+| `label.rs:119` `Schedule.costs` | `Vec<[Cost; 6]>` | once-per-unit pool | retained dense costs indexed by scheduling step |
+| `label.rs:120` `Schedule.numbers` | `Vec<Option<u32>>` | once-per-unit pool | retained dense numbers indexed by loop |
+| `label.rs:121` `Schedule.work` | `Vec<Work>` | once-per-unit stack | retained scheduling scratch; high-water capacity reused |
+
+The integration keeps method-callee evaluation order and default-first string
+switch traversal from trunk. Group outputs still write their stable pooled slots,
+so no vector rotation is needed. Label finalization runs after each successful
+probe while the retained traversal counts only that probe's new visits. All four
+existing whole-Lambda zero-allocation fixtures still pass after integration.
+
 ## 8. The gate and the slices
 
 ### 8.1 The gate
@@ -3194,7 +3225,7 @@ Each with the experiment that settles it; resolved rows retain their measured re
 | # | Question | Experiment |
 | --- | --- | --- |
 | Q1 | **Measured by S3.5: never.** A counter at the two entries of `with_static_handler` stayed at zero over the runtime library, Belt, `tests/tests` (736 modules) and a 3,735-module application. The legacy path remains until the legacy lowering is deleted; the new lowering has no counterpart (4.1). Original question: is the handler substitution of row K15 (`resolve_static_raise` (C:6113), `compile_hoisted_static_raise_chain_return_tail` (C:3932)) ever executed? By reading it needs a catch whose body has no exit to its label, which `simplify_exits` removes | count its successful returns in a `Check` build over the three in-repository corpora and the application; zero closes the row |
-| Q2 | **Resolved:** the original variant dispatch needs no loop label; a return-position conditional retaining a real JS switch prints `loop_1`, including the discarded value probe (4.5) | OCaml/Rust parity: `tests/tests/src/lowering_conditional_loop.res` and its `.mjs`; corrected switch-context entry and value-probe order. Reference: `compiler/core/lam_compile.ml:793,1636-1644,2086-2118` |
+| Q2 | **Resolved and implemented:** symbolic scheduling matches 512 generated shapes; real-switch conditional probes consume discarded labels, including self-tail-call branches (4.5) | OCaml/Rust parity: `tests/tests/src/lowering_conditional_loop.res` and its `.mjs`; corrected switch-context entry and value-probe order. Reference: `compiler/core/lam_compile.ml:793,1636-1644,2086-2118` |
 | Q3 (resolved) | Yes: `(if c unit unit)` in a unit-returning function. R5 drops the pure test and emits no statements; R6 emits `return;`, which exits the enclosing loop. Both rules are required. | `tail_conditional_oracle_tests::q3_unit_conditional_distinguishes_return_rows` compares the same raw Lambda under both legacy rows; `lower::tail::tests::q3_unit_branch_must_return_from_the_loop` compares the enclosing recursive function with the new lowering. 192 generated loop-conditional shapes compare new and legacy J in five continuations and both probe modes. |
 | Q4 | Is a `LetRec` reachable in the continuations where the legacy code lowers its body as a value (K2, K4, K5, K7; 3.4)? | count in a `Check` build; if reachable, compile one such unit with OCaml |
 | Q5 | **Resolved:** the self call after nested `let rec` is a loop jump; the enclosing `Tail_with_name` return label survives the nested bindings (5.1) | OCaml/Rust parity: `tests/tests/src/lowering_nested_rec.res` and its `.mjs`, with and without capture; corrected the precheck and tail-loop body lowering. Reference: `compiler/core/lam_compile.ml:525-568,1745-1752,2046-2057` |

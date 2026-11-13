@@ -2,6 +2,8 @@
 //! Context references are indices, never references into growing state pools.
 mod args;
 mod assign;
+mod loops;
+mod label;
 mod try_;
 mod ffi_args;
 mod external;
@@ -180,6 +182,10 @@ pub enum ProbePlan<R> {
 pub trait ProbeRules {
     /// Decoded operands required after visiting children.
     type Resume;
+    /// O(1): observe source entry for symbolic label scheduling.
+    fn source_enter(&mut self, _cx: Cx, _node: NodeId) {}
+    /// O(arity): compose symbolic events after one completed lowering.
+    fn source_leave(&mut self, _output: &Probed) {}
     /// K1: C:1529 compile_expr; inspect and lower a source node exactly once.
     fn enter(
         &mut self,
@@ -254,8 +260,9 @@ impl<R> SourceProbe<R> {
                 ProbeWork::EnterChild(..) => unreachable!("resolved child context"),
                 ProbeWork::Enter(cx, node) => {
                     self.steps += 1;
+                    rules.source_enter(cx, node);
                     match rules.enter(cx, node)? {
-                        ProbePlan::Ready(value) => values.push(value),
+                        ProbePlan::Ready(value) => { rules.source_leave(&value); values.push(value); },
                         ProbePlan::Children(resume) => {
                             rules.children(cx, &resume, children);
                             let parent = work.len();
@@ -281,6 +288,7 @@ impl<R> SourceProbe<R> {
                         .checked_sub(count)
                         .expect("source probe children");
                     let value = rules.finish(cx, resume, values.drain(start..))?;
+                    rules.source_leave(&value);
                     values.push(value);
                 }
             }
@@ -347,7 +355,8 @@ struct State {
     tail_copies: Vec<Option<VarId>>,
     tail_assignments: Vec<NodeId>,
     tail_order: Vec<VarId>,
-    rec_values: Vec<Option<NodeId>>,
+    rec_members: Vec<rec::Member>,
+    rec_steps: usize,
     switches: Vec<Option<switch::Plan>>,
     variants: Vec<Option<variant::Plan>>,
     untagged: Vec<Option<untagged::Plan>>,
@@ -417,6 +426,9 @@ struct State {
     catch_table: Vec<(NodeId, crate::bir::CatchId)>,
     catches: Vec<Option<exit::Plan>>,
     tries: Vec<try_::Plan>,
+    loops: Vec<loops::Plan>,
+    next_loop_label: u32,
+    labels: label::Schedule,
     try_form_reads: usize,
     catch_work: Vec<NodeId>,
     /// `HAS_EXIT` reads that decided a flattening or a form.
@@ -455,7 +467,7 @@ impl State {
             tail_arguments: 0, tail_parameters: 0, tail_sort_comparisons: 0, tail_body_statements: 0,
             tail_frames: Vec::new(), tail_functions: Vec::new(), tail_copies: Vec::new(),
             tail_assignments: Vec::new(), tail_order: Vec::new(),
-            rec_values: Vec::new(),
+            rec_members: Vec::new(), rec_steps: 0,
             switch_facts: vec![switch::Facts::default(); input.arena.nodes.len()],
             switches: Vec::new(), variants: Vec::new(), untagged: Vec::new(), untagged_storage: untagged::Storage::default(), switch_work: Vec::new(), switch_pairs: Vec::new(),
             group_indices: Vec::new(), group_nodes: Vec::new(), group_table: hashbrown::HashTable::new(),
@@ -501,6 +513,9 @@ impl State {
             catch_table: Vec::new(),
             catches: Vec::new(),
             tries: Vec::new(),
+            loops: Vec::new(),
+            next_loop_label: 0,
+            labels: label::Schedule::default(),
             try_form_reads: 0,
             catch_work: Vec::new(),
             catch_flag_reads: 0,
@@ -529,6 +544,7 @@ impl State {
         let output = traversal.probe(self, cx, node);
         self.source_steps += traversal.steps - before;
         self.traversal = traversal;
+        if output.is_ok() { self.finish_labels(); }
         output
     }
     /// K2/K6: C:4715 append_effect_output / C:5144 compile_if_return_output.
@@ -587,6 +603,8 @@ impl State {
 }
 
 impl ProbeRules for State {
+    fn source_enter(&mut self, cx: Cx, node: NodeId) { self.label_enter(cx, node); }
+    fn source_leave(&mut self, output: &Probed) { self.label_leave(output); }
     type Resume = expr::Resume;
     /// K1/H12: C:1529 compile_expr and K:60 compile_constant.
     fn enter(&mut self, cx: Cx, node: NodeId) -> Result<ProbePlan<Self::Resume>, Unsupported> {
@@ -692,12 +710,9 @@ impl ProbeRules for State {
             }
             View::Try { body, exception, handler } => return Ok(ProbePlan::Children(expr::Resume::Try(self.try_statement(cx, body, Some(exception), Some(handler), None)))),
             View::TryFinally { body, finaliser } => return Ok(ProbePlan::Children(expr::Resume::Try(self.compile_try_finally(cx, body, finaliser)))),
-            View::While { .. }
-            | View::For { .. }
-            | View::ForOf { .. }
-            | View::ForAwaitOf { .. }
-            | View::Break
-            | View::Continue => return Err(Unsupported("loop")),
+            View::While { .. } | View::For { .. } | View::ForOf { .. } | View::ForAwaitOf { .. } => return Ok(ProbePlan::Children(expr::Resume::Loop(self.loop_statement(cx, node)))),
+            View::Break => return Ok(ProbePlan::Ready(self.loop_jump(cx, false)?)),
+            View::Continue => return Ok(ProbePlan::Ready(self.loop_jump(cx, true)?)),
             View::Assign { var, value } => return Ok(ProbePlan::Children(expr::Resume::Assign { var, value })),
             View::JBin { .. }
             | View::JNot { .. }

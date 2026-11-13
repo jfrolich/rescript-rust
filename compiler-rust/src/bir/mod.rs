@@ -55,6 +55,7 @@ pub struct Bir {
     tail_candidates: Vec<tail_facts::Candidates>,
     tail_calls: Vec<tail_facts::Candidate>,
     self_tail: Vec<bool>,
+    loop_facts: Vec<tail_facts::LoopFacts>,
     capture_boundaries: usize,
     weighted_switches: usize,
     // Zero is unknown; every valid use weight is positive. Cache invalidation
@@ -77,6 +78,8 @@ pub struct Bir {
     bulk_binders: Vec<(u64, u32)>,
     #[cfg(test)]
     steps: std::cell::Cell<u64>,
+    #[cfg(test)]
+    loop_fact_folds: std::cell::Cell<u64>,
     #[cfg(test)]
     intern_comparisons: std::cell::Cell<u64>,
 }

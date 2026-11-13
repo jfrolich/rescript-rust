@@ -61,6 +61,7 @@ pub(super) fn lower(
         } else {
             (Cx::value(), node, None)
         };
+        state.next_loop_label = 0;
         let probed = state.probe(cx, group)?;
         let mut out = state.realize(cx, probed);
         if next.is_some() {

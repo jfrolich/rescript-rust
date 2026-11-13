@@ -54,7 +54,7 @@ pub(super) struct Plan {
 
 impl State {
     /// C: compile_switch_*_block_inner. O(c + compared nodes), apart from
-    /// fingerprint indexing. Children are queued in grouped order, then default.
+    /// fingerprint indexing. General string switches queue their default first.
     pub(super) fn integer_switch(
         &mut self,
         cx: Cx,
@@ -623,7 +623,8 @@ impl State {
         }
     }
 
-    /// C: compile_switch_*_block_inner: scrutinee V, then groups, then default.
+    /// C: compile_switch_*_block_inner: scrutinee V, then default/groups in
+    /// reference order (general string defaults precede grouped cases).
     /// O(number of groups); no body is offered to the traversal twice.
     pub(super) fn switch_children(&self, cx: Cx, frame: Switch, into: &mut Vec<(Cx, NodeId)>) {
         let plan = self.switch_plan(frame);
@@ -641,12 +642,12 @@ impl State {
                 + u32::from(plan.kind != Kind::Named || plan.form == Form::General),
             ..cx
         };
-        into.extend(
-            self.grouped_bodies(&plan.groups)
-                .iter()
-                .chain(plan.default.iter())
-                .map(|&n| (body_cx, n)),
-        );
+        let bodies = self.grouped_bodies(&plan.groups);
+        if plan.kind == Kind::String && plan.form == Form::General {
+            into.extend(plan.default.iter().chain(bodies.iter()).map(|&n| (body_cx, n)));
+        } else {
+            into.extend(bodies.iter().chain(plan.default.iter()).map(|&n| (body_cx, n)));
+        }
     }
 
     /// C: compile_switch_value_block / return_case_needs_break. O(statements)
@@ -678,6 +679,10 @@ impl State {
                 self.drop_pure_effect(value);
             }
             let p = self.switch_plan(frame);
+            // O(1): default-first traversal still writes stable pooled case slots.
+            let index = if p.kind == Kind::String && p.form == Form::General && p.default.is_some() {
+                if index == 1 { p.groups.bodies.len as usize + 1 } else { index - 1 }
+            } else { index };
             let is_default = index > p.groups.bodies.len as usize;
             let source = if is_default {
                 p.default.unwrap()
@@ -749,6 +754,7 @@ impl State {
         let plan = self.switches[frame.0 as usize]
             .take()
             .expect("live switch frame");
+        // switch_child writes stable case slots even for default-first traversal.
         while self.switches.last().is_some_and(Option::is_none) {
             self.switches.pop();
         }
@@ -1248,7 +1254,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_child_keeps_its_own_reason() {
+    fn loop_children_match_legacy() {
         for string in [false, true] {
             let mut a = LamArena::new();
             let x = a.var(Ident::new("x", 10, crate::ident::IdentFlags::NONE));
@@ -1267,13 +1273,7 @@ mod tests {
                 let actions = a.add_list(&[body]);
                 a.switch_raw(x, actions, info)
             };
-            let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
-            let root = input.root;
-            let mut state = State::new(input);
-            assert!(matches!(
-                state.probe(Cx::returning(), root),
-                Err(Unsupported("loop"))
-            ));
+            super::super::oracle_tests::compare(a, root);
         }
     }
 
