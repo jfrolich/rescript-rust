@@ -32,6 +32,14 @@ fn compile(source: &str) -> Result<String, String> {
 }
 
 fn compile_with(source: &str, options: CompilerOptions) -> Result<String, String> {
+    compile_in(source, options, &registry())
+}
+
+fn compile_in(
+    source: &str,
+    options: CompilerOptions,
+    registry: &ModuleRegistry,
+) -> Result<String, String> {
     rescript_compiler::parser::code_frame::set_color_mode(
         rescript_compiler::parser::code_frame::ColorMode::Never,
     );
@@ -45,7 +53,7 @@ fn compile_with(source: &str, options: CompilerOptions) -> Result<String, String
         "/app/src/Demo.res",
         "Demo",
         &options,
-        &registry(),
+        registry,
         false,
         None,
     )
@@ -616,6 +624,74 @@ let f = (x: A.client) => (x :> B.client)
         message.contains(
             "A.client is the class Client of \"a\" and declares no superclass. B.client is the class Client of \"b\"."
         ),
+        "{message}"
+    );
+}
+
+#[test]
+fn the_declarations_are_in_other_files() {
+    // Each package is a file of its own, type checked on its own: the class
+    // of a type is part of what a module's signature says about it.
+    let directory = std::env::temp_dir().join(format!("class-identity-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut registry = registry();
+    for (name, source) in [
+        (
+            "ReactDom",
+            r#"
+@instanceOf("Node") type node
+@instanceOf("Element") type element = private node
+type root
+external createRoot: element => root = "createRoot"
+"#,
+        ),
+        (
+            "WebApi",
+            r#"
+@instanceOf("Node") type node = private {nodeName: string}
+@instanceOf("Element") @extends(: node)
+type element = private {nodeName: string, tagName: string}
+@instanceOf("HTMLInputElement") @extends(: element)
+type input = private {nodeName: string, tagName: string, mutable value: string}
+"#,
+        ),
+    ] {
+        let path = directory.join(format!("{name}.res"));
+        std::fs::write(&path, source).unwrap();
+        registry.insert_source_fallback_path(name.to_string(), path);
+    }
+    let result = compile_in(
+        r#"
+let mount = (input: WebApi.input) => ReactDom.createRoot(input)
+let node = (input: WebApi.input) => (input :> ReactDom.node)
+let tag = (el: ReactDom.element) => (el :> WebApi.element).tagName
+@unboxed type target = Input(WebApi.input) | Other(ReactDom.node)
+let value = (node: ReactDom.node) =>
+  switch Other(node) {
+  | Input(input) => input.value
+  | Other(_) => ""
+  }
+"#,
+        CompilerOptions::default(),
+        &registry,
+    );
+    let down = compile_in(
+        "let f = (el: ReactDom.element) => (el :> WebApi.input)",
+        CompilerOptions::default(),
+        &registry,
+    );
+    std::fs::remove_file(directory.join("ReactDom.res")).unwrap();
+    std::fs::remove_file(directory.join("WebApi.res")).unwrap();
+    std::fs::remove_dir(&directory).unwrap();
+    let js = result.unwrap();
+    assert!(
+        js.contains("return ReactDom.createRoot(input);") || js.contains("createRoot(input)"),
+        "{js}"
+    );
+    assert!(js.contains("node instanceof HTMLInputElement"), "{js}");
+    let message = down.unwrap_err();
+    assert!(
+        message.contains("ReactDom.element is the class Element, a subclass of Node."),
         "{message}"
     );
 }
