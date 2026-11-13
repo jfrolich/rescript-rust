@@ -2402,10 +2402,7 @@ impl Marshal for StructureItem {
 impl Marshal for StructureItemDesc {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         match self {
-            // The stored tree holds the value group the item stands for.
-            StructureItemDesc::Pstr_derived(idx) => {
-                super::derive::general_form(w.get_arena(), *idx).marshal(w)
-            }
+            StructureItemDesc::Pstr_derived(_) => unreachable!("{}", super::derive::NO_SYNTAX),
             StructureItemDesc::Pstr_eval(inner) => {
                 let (ref e, ref attrs) = **inner;
                 w.write_block_header(0, 2);

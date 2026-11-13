@@ -3343,6 +3343,10 @@ pub enum UnboundTypeVarDetail {
 pub enum TypeModError {
     /// Core type checking error.
     CoreError(TypeCoreError),
+    /// An obligation of a derived item's plan failed
+    /// (`TypeCheckContext::derived_fallback`): no diagnostic, the unit is
+    /// compiled again with plans off.
+    DerivedFallback,
     /// Module type not found.
     UnboundModtype {
         /// Source location to report.
@@ -13637,8 +13641,20 @@ fn extract_module_type_from_mod_expr_inner(
                 let current_env_snapshot = local_env.clone();
                 let current_env = current_env_snapshot.as_ref().or(env);
                 match &item.str_desc {
-                    StructureItemDesc::Tstr_derived(_) => {
-                        unreachable!("{}", crate::types::derived::TOP_LEVEL_ONLY)
+                    // A derived item declares its bindings as regular values.
+                    StructureItemDesc::Tstr_derived(idx) => {
+                        for bound in ta.derived.bound(*idx) {
+                            sig_items.push(SigItem::SigValue(
+                                bound.ident,
+                                crate::types::decl::ValueDescription {
+                                    val_type: bound.ty,
+                                    val_kind: crate::types::decl::ValueKind::ValReg,
+                                    val_loc: crate::types::DeclLoc::none(),
+                                    val_attributes: Default::default(),
+                                    val_path: None,
+                                },
+                            ));
+                        }
                     }
                     StructureItemDesc::Tstr_value(_, bindings) => {
                         for vb in ta.value_bindings(*bindings) {
@@ -16821,46 +16837,22 @@ fn type_structure_item<'a>(
             ))
         }
 
-        // A derived item: discharge the obligations of its plan, or, when one
-        // fails, type the value group it stands for.
-        ParsedStructureItemDesc::Pstr_derived(idx) if !tctx.derived_plans => {
-            let general = crate::binary_ast::derive::general_item(arena, loc, *idx);
-            type_structure_item(tctx, env, arena, &general)
-        }
+        // A derived item: discharge the obligations of its plan. When one
+        // fails the unit is compiled again with plans off.
         ParsedStructureItemDesc::Pstr_derived(idx) => {
             match crate::types::derived::discharge(tctx, env, *idx) {
-                Ok(discharged) => {
-                    // typemod.ml type_structure: the signature holds the
-                    // value descriptions the bindings have in the environment.
-                    let sig_items = tctx
-                        .typed
-                        .derived
-                        .bound(*idx)
-                        .map(|bound| {
-                            let value_desc = discharged
-                                .env
-                                .lookup_value(&Path::pident(bound.ident))
-                                .expect("derived binding missing from structure environment")
-                                .clone();
-                            crate::types::decl::SignatureItem::SigValue(bound.ident, value_desc)
-                        })
-                        .collect();
-                    Ok((
-                        StructureItem {
-                            str_desc: StructureItemDesc::Tstr_derived(*idx),
-                            str_loc: loc,
-                            str_env: EnvRef(0),
-                        },
-                        sig_items,
-                        discharged.env,
-                    ))
-                }
+                Ok(discharged) => Ok((
+                    StructureItem {
+                        str_desc: StructureItemDesc::Tstr_derived(*idx),
+                        str_loc: loc,
+                        str_env: EnvRef(0),
+                    },
+                    discharged.sig_items,
+                    discharged.env,
+                )),
                 Err(crate::types::derived::Fallback) => {
-                    if let Some(census) = &mut tctx.derived_census {
-                        census.paths.fallback += arena.plans().item(*idx).bindings.len as u64;
-                    }
-                    let general = crate::binary_ast::derive::general_item(arena, loc, *idx);
-                    type_structure_item(tctx, env, arena, &general)
+                    tctx.derived_fallback = true;
+                    Err(TypeModError::DerivedFallback)
                 }
             }
         }

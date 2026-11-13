@@ -461,6 +461,8 @@ marks a departure the document allows or records; the others are open.
 | 7 | BACKEND_LOWERING 7.1, as first written: `lambda_contains_statement_value_form` needs no fact | It needs one: `HAS_STATEMENT`, recorded where `HAS_EXIT` is. The document was amended in the same pull request | `rg -n 'HAS_STATEMENT' src/bir` gives 13; #210's body, finding 3 | #210 |
 | 8 | A stub left beside its replacement | `bir/bridge.rs` still has `import_js` returning `Unsupported("JS arena import not implemented")`; the real one is `bir/bridge_j.rs::import_js` | `rg -n 'fn import_js' src/bir` gives both | #129, #167 |
 | 9 | Every stage "deletes the code it replaces" (0.2 item 7) | No backend stage has reached its deletion: S1.5, S3.10, S4.9 and S5.6 are not started, so 47,094 lines of new code sit beside 88,768 lines of legacy backend | the `wc -l` counts of 2.3 | - |
+| 10 | T4b: move flatten rules to statement-list copies | Done as RESULT B, not a pass removal. R5 changes the copied-branch `simplify_if_head` reader; both final texts are pinned. No dormant implementation; pass 1 stays until T6 | `flattening_a_copied_return_branch_changes_the_simplify_if_head_reader` in `src/bir/lower/oracle_tests.rs`; THREE_TREES §11.4 | #233 |
+
 
 ### 7.3 Derived code
 

@@ -999,6 +999,53 @@ pair_0`; `pair_0` has no P3 status; D drops `pair`: the legacy output.
 **The counter.** Sites spliced, and of those the number whose callee has a
 level L use count other than one, in the check report.
 
+#### T4b experiment: RESULT B (copied-branch reader)
+
+Copy-time R1–R8 were tested and removed. The first printed-text difference
+was `Primitive_object.res`, `lower` line 75: a following `if` became an
+`else if`. The reduced Lambda is a one-case string switch:
+
+```text
+function (x, y) => stringswitch x {
+  "a": if y then 1 else 2;
+  default: sequence(initMod(), 3)
+}
+```
+
+`State::if_statement` (`bir/lower/cond.rs`) copies both branches with
+`StatementStack::take_list`, then calls `js3_simplify_if`. Its
+`simplify_if_head` reader tests the last statement syntactically. Before
+R5 the case is `Return(Cond(y, 1, 2))`, so the default is moved after the
+guard. Copy-time R5 makes that last statement an `If`, so the default stays
+inside `else`. This is not an incorrect implementation of R5: the rule's
+printed-text oracle agrees with legacy Flatten. The test
+`flattening_a_copied_return_branch_changes_the_simplify_if_head_reader`
+pins both complete final texts and recreates this one copied-branch
+boundary using the legacy rule oracle; no alternate production path remains.
+
+The count trial initially included export-tuple references. These belong to
+finding 2/T4a, not to a flattening failure: the test
+`export_tuple_occurrences_are_not_the_tailcall_pass_input_counts` pins
+built=1 versus post-coercion C0=0 with identical final text. Repeating the
+experiment subtracted exactly the references in that sentinel tuple from
+the comparison (not from `built`); the printed-text difference remained.
+The trial observed 331 excluded occurrences in 331 variable rows across 73
+runtime units, each row excluding one reference. The application attempt
+observed 209 such rows across 61 runtime units before failure; these are
+partial observations, not whole-corpus counts. The tests and fixtures
+corpora were not reached by the failed runtime-first experiment.
+
+The count comparison is not retained: generated variables also need an
+identity correspondence between lowerings (`_list/1024` and `_list/1027`
+both have two references), and raw Ident lookup is not that correspondence.
+The printed-text counterexample alone establishes RESULT B. No inference
+about count parity or commutation with T4c–T4e follows from this experiment.
+
+T4b is done in the counterexample form: pass 1 stays until T6. T4c must read
+its sites through P1's reshaping (finding 1), without moving that reshaping
+ahead of the lowering's copied-list readers. R1–R8, their copy-time call,
+the skipped pass and the experimental count comparison have been deleted.
+
 #### Re-cut: one legacy step leaves the new side per slice
 
 The commit order of the T4 prompt (block facts, dead declarations, record
@@ -1011,7 +1058,7 @@ texts stay equal.
 | Slice | Moves into the lowering | New side stops running | Needs |
 | --- | --- | --- | --- |
 | T4a (done) | Export extraction and coercion on top-level rows (`bir/lower/export.rs`, S3.9b), with the position facts of finding 2 as sites ("T4a as built") | `extract_toplevel_exports`, `coerce_lowered_output` | - |
-| T4b | P1 as rules applied where a run is copied; or the proof that sites can be read through P1's reshaping and that P1 commutes with T4c to T4e | `apply_js_flatten_pass`, or nothing | - |
+| T4b (done, RESULT B) | Counterexample: R5 changes the `simplify_if_head` reader of a copied branch; read sites through P1 instead | Nothing; P1 stays until T6 | - |
 | T4c | Step A, late marks, late zero, graves, the counter | `apply_js_tailcall_inline_pass` | T4a, T4b |
 | T4d | Step B | `apply_js_record_rest_pass` | T4c |
 | T4e | Steps C and D | `apply_js_flatten_and_mark_dead_pass` | T4d |
