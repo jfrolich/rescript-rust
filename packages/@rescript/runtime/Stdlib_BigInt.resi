@@ -15,7 +15,7 @@ BigInt.asIntN(~width=4, 25n) == -7n
 BigInt.asIntN(~width=4, 3n) == 3n
 ```
 */
-@val external asIntN: (~width: int, bigint) => bigint = "BigInt.asIntN"
+@pure @val external asIntN: (~width: int, bigint) => bigint = "BigInt.asIntN"
 
 /**
 `asUintN(~width, bigint)` returns a bigint value truncated to the given number of bits as an unsigned integer.
@@ -29,7 +29,7 @@ BigInt.asUintN(~width=4, 25n) == 9n
 BigInt.asUintN(~width=4, 3n) == 3n
 ```
 */
-@val external asUintN: (~width: int, bigint) => bigint = "BigInt.asUintN"
+@pure @val external asUintN: (~width: int, bigint) => bigint = "BigInt.asUintN"
 
 /**
 Parses the given `string` into a `bigint` using JavaScript semantics. Return the
@@ -55,7 +55,7 @@ switch BigInt.fromStringOrThrow("a") {
 }
 ```
 */
-@val
+@val @pure
 external fromStringOrThrow: string => bigint = "BigInt"
 
 /**
@@ -78,6 +78,7 @@ BigInt.fromString("0o11") == Some(9n)
 BigInt.fromString("invalid") == None
 ```
 */
+@pure
 let fromString: string => option<bigint>
 
 /**
@@ -91,7 +92,7 @@ BigInt.fromInt(0) == 0n
 BigInt.fromInt(-456) == -456n
 ```
 */
-@val external fromInt: int => bigint = "BigInt"
+@pure @val external fromInt: int => bigint = "BigInt"
 
 /**
 Converts a `float` to a `bigint` using JavaScript semantics.
@@ -113,7 +114,7 @@ switch BigInt.fromFloatOrThrow(123.5) {
 }
 ```
 */
-@val
+@val @pure
 external fromFloatOrThrow: float => bigint = "BigInt"
 
 /**
@@ -129,6 +130,7 @@ BigInt.fromFloat(-456.0) == Some(-456n)
 BigInt.fromFloat(123.5) == None
 ```
 */
+@pure
 let fromFloat: float => option<bigint>
 
 /**
@@ -141,7 +143,7 @@ See [`toString`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Referen
 BigInt.toString(123n) == "123"
 ```
 */
-@send
+@send @pure
 external toString: (bigint, ~radix: int=?) => string = "toString"
 
 /**
@@ -153,7 +155,7 @@ Returns a string with a language-sensitive representation of this BigInt value.
 BigInt.toString(123n) == "123"
 ```
 */
-@send
+@send @pure
 external toLocaleString: bigint => string = "toLocaleString"
 
 /**
@@ -167,7 +169,7 @@ BigInt.toFloat(0n) == 0.0
 BigInt.toFloat(-456n) == -456.0
 ```
 */
-@val external toFloat: bigint => float = "Number"
+@pure @val external toFloat: bigint => float = "Number"
 
 /**
 `toInt(bigint)` converts a `bigint` to an `int`.
@@ -180,6 +182,7 @@ BigInt.toInt(0n) == 0
 BigInt.toInt(-456n) == -456
 ```
 */
+@pure
 let toInt: bigint => int
 
 /**
@@ -192,6 +195,7 @@ BigInt.add(5n, 3n) == 8n
 BigInt.add(-2n, 7n) == 5n
 ```
 */
+@pure
 external add: (bigint, bigint) => bigint = "%addbigint"
 
 /**
@@ -204,6 +208,7 @@ BigInt.sub(8n, 3n) == 5n
 BigInt.sub(2n, 7n) == -5n
 ```
 */
+@pure
 external sub: (bigint, bigint) => bigint = "%subbigint"
 
 /**
@@ -216,6 +221,7 @@ BigInt.mul(5n, 3n) == 15n
 BigInt.mul(-2n, 7n) == -14n
 ```
 */
+@pure
 external mul: (bigint, bigint) => bigint = "%mulbigint"
 
 /**
@@ -228,6 +234,7 @@ BigInt.div(15n, 3n) == 5n
 BigInt.div(14n, 3n) == 4n
 ```
 */
+@pure
 external div: (bigint, bigint) => bigint = "%divbigint"
 
 /**
@@ -240,6 +247,7 @@ BigInt.mod(15n, 4n) == 3n
 BigInt.mod(14n, 3n) == 2n
 ```
 */
+@pure
 external mod: (bigint, bigint) => bigint = "%modbigint"
 
 /**
@@ -252,6 +260,7 @@ BigInt.bitwiseAnd(7n, 4n) == 4n
 BigInt.bitwiseAnd(15n, 8n) == 8n
 ```
 */
+@pure
 external bitwiseAnd: (bigint, bigint) => bigint = "%andbigint"
 
 /**
@@ -264,6 +273,7 @@ BigInt.bitwiseOr(7n, 4n) == 7n
 BigInt.bitwiseOr(8n, 4n) == 12n
 ```
 */
+@pure
 external bitwiseOr: (bigint, bigint) => bigint = "%orbigint"
 
 /**
@@ -276,6 +286,7 @@ BigInt.bitwiseXor(7n, 4n) == 3n
 BigInt.bitwiseXor(15n, 8n) == 7n
 ```
 */
+@pure
 external bitwiseXor: (bigint, bigint) => bigint = "%xorbigint"
 
 /**
@@ -288,6 +299,7 @@ BigInt.bitwiseNot(2n) == -3n
 BigInt.bitwiseNot(-1n) == 0n
 ```
 */
+@pure
 external bitwiseNot: bigint => bigint = "%bitnot_bigint"
 
 /**
@@ -300,6 +312,7 @@ BigInt.shiftLeft(4n, 1n) == 8n
 BigInt.shiftLeft(1n, 3n) == 8n
 ```
 */
+@pure
 external shiftLeft: (bigint, bigint) => bigint = "%lslbigint"
 
 /**
@@ -312,6 +325,7 @@ BigInt.shiftRight(8n, 1n) == 4n
 BigInt.shiftRight(16n, 2n) == 4n
 ```
 */
+@pure
 external shiftRight: (bigint, bigint) => bigint = "%asrbigint"
 
 /**
@@ -320,4 +334,5 @@ external shiftRight: (bigint, bigint) => bigint = "%asrbigint"
   This helper is useful when you want to discard a value (for example, the result of an operation with side effects)
   without having to store or process it further.
 */
+@pure
 external ignore: bigint => unit = "%ignore"

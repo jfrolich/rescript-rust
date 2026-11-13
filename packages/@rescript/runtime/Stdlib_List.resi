@@ -27,6 +27,7 @@ type t<'a> = list<'a>
 List.length(list{1, 2, 3}) == 3
 ```
 */
+@pure
 let length: list<'a> => int
 
 /**
@@ -38,6 +39,7 @@ let length: list<'a> => int
 List.size(list{1, 2, 3}) == 3
 ```
 */
+@pure
 let size: list<'a> => int
 
 /**
@@ -51,6 +53,7 @@ List.head(list{}) == None
 List.head(list{1, 2, 3}) == Some(1)
 ```
 */
+@pure
 let head: list<'a> => option<'a>
 
 /**
@@ -71,6 +74,7 @@ switch List.headOrThrow(list{}) {
 
 - Throws an Error if list is empty.
 */
+@pure
 let headOrThrow: list<'a> => 'a
 
 /**
@@ -85,6 +89,7 @@ List.tail(list{1, 2, 3}) == Some(list{2, 3})
 List.tail(list{}) == None
 ```
 */
+@pure
 let tail: list<'a> => option<list<'a>>
 
 /**
@@ -105,6 +110,7 @@ switch List.tailOrThrow(list{}) {
 
 - Throws an Error if list is empty.
 */
+@pure
 let tailOrThrow: list<'a> => list<'a>
 
 /**
@@ -118,6 +124,7 @@ List.add(list{2, 3}, 1) == list{1, 2, 3}
 List.add(list{"World", "!"}, "Hello") == list{"Hello", "World", "!"}
 ```
 */
+@pure
 let add: (list<'a>, 'a) => list<'a>
 
 /**
@@ -134,6 +141,7 @@ abc->List.get(1) == Some("B")
 abc->List.get(4) == None
 ```
 */
+@pure
 let get: (list<'a>, int) => option<'a>
 
 /**
@@ -156,6 +164,7 @@ switch abc->List.getOrThrow(4) {
 
 - Throws an Error if `index` is larger than the length of list.
 */
+@pure
 let getOrThrow: (list<'a>, int) => 'a
 
 /**
@@ -168,6 +177,7 @@ with `value`. Returns an empty list if `value` is negative.
 List.make(~length=3, 1) == list{1, 1, 1}
 ```
 */
+@pure
 let make: (~length: int, 'a) => list<'a>
 
 /**
@@ -182,6 +192,7 @@ List.fromInitializer(~length=5, i => i) == list{0, 1, 2, 3, 4}
 List.fromInitializer(~length=5, i => i * i) == list{0, 1, 4, 9, 16}
 ```
 */
+@pure
 let fromInitializer: (~length: int, int => 'a) => list<'a>
 
 /**
@@ -209,6 +220,7 @@ list{1, 2, 3}->List.drop(3) == Some(list{})
 list{1, 2, 3}->List.drop(4) == None
 ```
 */
+@pure
 let drop: (list<'a>, int) => option<list<'a>>
 
 /**
@@ -225,6 +237,7 @@ list{1, 2, 3}->List.take(2) == Some(list{1, 2})
 list{1, 2, 3}->List.take(4) == None
 ```
 */
+@pure
 let take: (list<'a>, int) => option<list<'a>>
 
 /**
@@ -239,6 +252,7 @@ list{"Hello", "World"}->List.splitAt(1) == Some((list{"Hello"}, list{"World"}))
 list{0, 1, 2, 3, 4}->List.splitAt(2) == Some((list{0, 1}, list{2, 3, 4}))
 ```
 */
+@pure
 let splitAt: (list<'a>, int) => option<(list<'a>, list<'a>)>
 
 /**
@@ -250,6 +264,7 @@ let splitAt: (list<'a>, int) => option<(list<'a>, list<'a>)>
 List.concat(list{1, 2, 3}, list{4, 5}) == list{1, 2, 3, 4, 5}
 ```
 */
+@pure
 let concat: (list<'a>, list<'a>) => list<'a>
 
 /**
@@ -262,6 +277,7 @@ array `arr`, in order.
 List.concatMany([list{1, 2, 3}, list{}, list{3}]) == list{1, 2, 3, 3}
 ```
 */
+@pure
 let concatMany: array<list<'a>> => list<'a>
 
 /**
@@ -273,6 +289,7 @@ let concatMany: array<list<'a>> => list<'a>
 List.reverseConcat(list{1, 2}, list{3, 4}) == list{2, 1, 3, 4}
 ```
 */
+@pure
 let reverseConcat: (list<'a>, list<'a>) => list<'a>
 
 /**
@@ -285,6 +302,7 @@ let reverseConcat: (list<'a>, list<'a>) => list<'a>
 List.flat(list{list{1, 2, 3}, list{}, list{3}}) == list{1, 2, 3, 3}
 ```
 */
+@pure
 let flat: list<list<'a>> => list<'a>
 
 /**
@@ -296,6 +314,7 @@ let flat: list<list<'a>> => list<'a>
 list{1, 2}->List.map(x => x + 1) == list{2, 3}
 ```
 */
+@pure
 let map: (list<'a>, 'a => 'b) => list<'b>
 
 /**
@@ -308,6 +327,7 @@ of the shorter list.
 List.zip(list{1, 2}, list{3, 4, 5}) == list{(1, 3), (2, 4)}
 ```
 */
+@pure
 let zip: (list<'a>, list<'b>) => list<('a, 'b)>
 
 /**
@@ -319,6 +339,7 @@ let zip: (list<'a>, list<'b>) => list<('a, 'b)>
 List.zipBy(list{1, 2, 3}, list{4, 5}, (a, b) => 2 * a + b) == list{6, 9}
 ```
 */
+@pure
 let zipBy: (list<'a>, list<'b>, ('a, 'b) => 'c) => list<'c>
 
 /**
@@ -332,6 +353,7 @@ that order.
 list{1, 2, 3}->List.mapWithIndex((x, index) => index + x) == list{1, 3, 5}
 ```
 */
+@pure
 let mapWithIndex: (list<'a>, ('a, int) => 'b) => list<'b>
 
 /**
@@ -343,6 +365,7 @@ let mapWithIndex: (list<'a>, ('a, int) => 'b) => list<'b>
 List.fromArray([1, 2, 3]) == list{1, 2, 3}
 ```
 */
+@pure
 let fromArray: array<'a> => list<'a>
 
 /**
@@ -354,6 +377,7 @@ let fromArray: array<'a> => list<'a>
 List.toArray(list{1, 2, 3}) == [1, 2, 3]
 ```
 */
+@pure
 let toArray: list<'a> => array<'a>
 
 /**
@@ -366,6 +390,7 @@ reversed order.
 List.reverse(list{1, 2, 3}) == list{3, 2, 1}
 ```
 */
+@pure
 let reverse: list<'a> => list<'a>
 
 /**
@@ -383,6 +408,7 @@ let withMapReverse = l->List.mapReverse(f)
 Console.log(withMap == withMapReverse) // true
 ```
 */
+@pure
 let mapReverse: (list<'a>, 'a => 'b) => list<'b>
 
 /**
@@ -402,6 +428,7 @@ List.forEach(list{"a", "b", "c"}, x => Console.log("Item: " ++ x))
 */
 ```
 */
+@pure
 let forEach: (list<'a>, 'a => unit) => unit
 
 /**
@@ -423,6 +450,7 @@ List.forEachWithIndex(list{"a", "b", "c"}, (x, index) => {
 */
 ```
 */
+@pure
 let forEachWithIndex: (list<'a>, ('a, int) => unit) => unit
 
 /**
@@ -441,6 +469,7 @@ list{1, 2, 3, 4}->List.reduce(0, (a, b) => a + b) == 10
 list{1, 2, 3, 4}->List.reduce(0, (acc, item) => acc + item) == 10
 ```
 */
+@pure
 let reduce: (list<'a>, 'b, ('b, 'a) => 'b) => 'b
 
 /**
@@ -455,6 +484,7 @@ of each element. `reduceWithIndex` returns the final value of the accumulator.
 list{1, 2, 3, 4}->List.reduceWithIndex(0, (acc, item, index) => acc + item + index) == 16
 ```
 */
+@pure
 let reduceWithIndex: (list<'a>, 'b, ('b, 'a, int) => 'b) => 'b
 
 /**
@@ -471,6 +501,7 @@ list{1, 2, 3, 4}->List.reduceReverse(10, (a, b) => a - b) == 0
 list{1, 2, 3, 4}->List.reduceReverse(list{}, List.add) == list{1, 2, 3, 4}
 ```
 */
+@pure
 let reduceReverse: (list<'a>, 'b, ('b, 'a) => 'b) => 'b
 
 /**
@@ -482,6 +513,7 @@ let reduceReverse: (list<'a>, 'b, ('b, 'a) => 'b) => 'b
 List.mapReverse2(list{1, 2, 3}, list{1, 2}, (a, b) => a + b) == list{4, 2}
 ```
 */
+@pure
 let mapReverse2: (list<'a>, list<'b>, ('a, 'b) => 'c) => list<'c>
 
 /**
@@ -500,6 +532,7 @@ List.forEach2(list{"Z", "Y"}, list{"A", "B", "C"}, (x, y) => Console.log2(x, y))
 */
 ```
 */
+@pure
 let forEach2: (list<'a>, list<'b>, ('a, 'b) => 'c) => unit
 
 /**
@@ -516,6 +549,7 @@ List.reduce2(list{1, 2, 3}, list{4, 5}, 0, (acc, x, y) => acc + x * x + y) ==
   0 + (1 * 1 + 4) + (2 * 2 + 5)
 ```
 */
+@pure
 let reduce2: (list<'b>, list<'c>, 'a, ('a, 'b, 'c) => 'a) => 'a
 
 /**
@@ -532,6 +566,7 @@ List.reduceReverse2(list{1, 2, 3}, list{4, 5}, 0, (acc, x, y) => acc + x * x + y
   0 + (1 * 1 + 4) + (2 * 2 + 5)
 ```
 */
+@pure
 let reduceReverse2: (list<'a>, list<'b>, 'c, ('c, 'a, 'b) => 'c) => 'c
 
 /**
@@ -548,6 +583,7 @@ list{1, 9, 8, 2}->List.every(isBelow10) == true
 list{1, 99, 8, 2}->List.every(isBelow10) == false
 ```
 */
+@pure
 let every: (list<'a>, 'a => bool) => bool
 
 /**
@@ -565,6 +601,7 @@ list{101, 1, 2, 3}->List.some(isAbove100) == true
 list{1, 2, 3, 4}->List.some(isAbove100) == false
 ```
 */
+@pure
 let some: (list<'a>, 'a => bool) => bool
 
 /**
@@ -583,6 +620,7 @@ List.every2(list{2, 3}, list{1}, (a, b) => a > b) == true
 List.every2(list{0, 1}, list{5, 0}, (a, b) => a > b) == false
 ```
 */
+@pure
 let every2: (list<'a>, list<'b>, ('a, 'b) => bool) => bool
 
 /**
@@ -601,6 +639,7 @@ List.some2(list{2, 3}, list{1}, (a, b) => a > b) == true
 List.some2(list{0, 1}, list{5, 0}, (a, b) => a > b) == true
 ```
 */
+@pure
 let some2: (list<'a>, list<'b>, ('a, 'b) => bool) => bool
 
 /**
@@ -618,6 +657,7 @@ List.compareLength(list{1, 2, 3}, list{4, 5, 6}) == 0.
 List.compareLength(list{1, 2, 3, 4}, list{5, 6}) == 1.
 ```
 */
+@pure
 let compareLength: (list<'a>, list<'a>) => Stdlib_Ordering.t
 
 /**
@@ -645,6 +685,7 @@ List.compare(list{1, 3, 5}, list{1, 3, 5}, (a, b) => Int.compare(a, b)) == 0.
 for Array, we compare the length first and, only if the lengths are equal, elements one by one.
 For lists, we just compare elements one by one.
 */
+@pure
 let compare: (list<'a>, list<'a>, ('a, 'a) => Stdlib_Ordering.t) => Stdlib_Ordering.t
 
 /**
@@ -663,6 +704,7 @@ List.equal(list{1, 2}, list{1, 2}, (a, b) => a == b) == true
 List.equal(list{1, 2, 3}, list{-1, -2, -3}, (a, b) => Math.Int.abs(a) == Math.Int.abs(b)) == true
 ```
 */
+@pure
 let equal: (list<'a>, list<'a>, ('a, 'a) => bool) => bool
 
 /**
@@ -683,6 +725,7 @@ list{item}->List.includes(item) == true
 list{item}->List.includes({"language": "ReScript"}) == false
 ```
 */
+@pure
 let includes: (list<'a>, 'a) => bool
 
 /**
@@ -698,6 +741,7 @@ List.find(list{1, 4, 3, 2}, x => x > 3) == Some(4)
 List.find(list{1, 4, 3, 2}, x => x > 4) == None
 ```
 */
+@pure
 let find: (list<'a>, 'a => bool) => option<'a>
 
 /**
@@ -714,6 +758,7 @@ List.filter(list{1, 2, 3, 4}, isEven) == list{2, 4}
 List.filter(list{None, Some(2), Some(3), None}, Option.isSome) == list{Some(2), Some(3)}
 ```
 */
+@pure
 let filter: (list<'a>, 'a => bool) => list<'a>
 
 /**
@@ -728,6 +773,7 @@ let isEven = x => mod(x, 2) == 0
 List.filterWithIndex(list{1, 2, 3, 4}, (_x, index) => isEven(index)) == list{1, 3}
 ```
 */
+@pure
 let filterWithIndex: (list<'a>, ('a, int) => bool) => list<'a>
 
 /**
@@ -751,6 +797,7 @@ list{1, 2, 3, 4}->List.filterMap(x =>
 list{Some(1), Some(2), None}->List.filterMap(x => x) == list{1, 2}
 ```
 */
+@pure
 let filterMap: (list<'a>, 'a => option<'b>) => list<'b>
 
 /**
@@ -766,6 +813,7 @@ consists of all elements of `list` that _do not_ satisfy `f`.
 List.partition(list{1, 2, 3, 4}, x => x > 2) == (list{3, 4}, list{1, 2})
 ```
 */
+@pure
 let partition: (list<'a>, 'a => bool) => (list<'a>, list<'a>)
 
 /**
@@ -782,6 +830,7 @@ List.unzip(list{("H", "W"), ("e", "o"), ("l", "r"), ("l", "l"), ("o", "d"), (" "
   (list{"H", "e", "l", "l", "o", " "}, list{"W", "o", "r", "l", "d", "!"})
 ```
 */
+@pure
 let unzip: list<('a, 'b)> => (list<'a>, list<'b>)
 
 /**
@@ -793,6 +842,7 @@ let unzip: list<('a, 'b)> => (list<'a>, list<'b>)
 List.sort(list{5, 4, 9, 3, 7}, Int.compare) == list{3, 4, 5, 7, 9}
 ```
 */
+@pure
 let sort: (list<'a>, ('a, 'a) => Stdlib_Ordering.t) => list<'a>
 
 /**
@@ -801,4 +851,5 @@ let sort: (list<'a>, ('a, 'a) => Stdlib_Ordering.t) => list<'a>
   This helper is useful when you want to discard a value (for example, the result of an operation with side effects)
   without having to store or process it further.
 */
+@pure
 external ignore: list<'a> => unit = "%ignore"

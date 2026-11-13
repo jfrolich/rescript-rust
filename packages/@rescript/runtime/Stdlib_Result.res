@@ -149,6 +149,7 @@ let all6 = ((a, b, c, d, e, f)) => {
   }
 }
 
+@pure
 external ignore: result<'res, 'err> => unit = "%ignore"
 
 let mapOkAsync = async (res, f) =>

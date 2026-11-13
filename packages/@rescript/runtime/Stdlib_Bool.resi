@@ -17,6 +17,7 @@ Bool.toString(true) == "true"
 Bool.toString(false) == "false"
 ```
 */
+@pure
 let toString: bool => string
 
 /**
@@ -29,6 +30,7 @@ Bool.fromString("false") == Some(false)
 Bool.fromString("notAValidBoolean") == None
 ```
 */
+@pure
 let fromString: string => option<bool>
 
 /**
@@ -45,6 +47,7 @@ switch Bool.fromStringOrThrow("notAValidBoolean") {
 }
 ```
 */
+@pure
 let fromStringOrThrow: string => bool
 
 /**
@@ -58,6 +61,7 @@ Bool.compare(true, false) == Ordering.greater
 Bool.compare(false, true) == Ordering.less
 ```
 */
+@pure
 external compare: (bool, bool) => Stdlib_Ordering.t = "%compare"
 
 /**
@@ -71,6 +75,7 @@ Bool.equal(true, false) == false
 Bool.equal(false, true) == false
 ```
 */
+@pure
 external equal: (bool, bool) => bool = "%equal"
 
 /**
@@ -79,4 +84,5 @@ external equal: (bool, bool) => bool = "%equal"
   This helper is useful when you want to discard a value (for example, the result of an operation with side effects)
   without having to store or process it further.
 */
+@pure
 external ignore: bool => unit = "%ignore"

@@ -37,6 +37,7 @@ Option.filter(Some(4), x => x > 5) // None
 Option.filter(None, x => x > 5) // None
 ```
 */
+@pure
 let filter: (option<'a>, 'a => bool) => option<'a>
 
 /**
@@ -50,6 +51,7 @@ Option.forEach(Some("thing"), x => Console.log(x)) // logs "thing"
 Option.forEach(None, x => Console.log(x)) // returns ()
 ```
 */
+@pure
 let forEach: (option<'a>, 'a => unit) => unit
 
 /**
@@ -73,6 +75,7 @@ switch Option.getOrThrow(None, ~message="was None!") {
 
 - Throws an error if `opt` is `None`
 */
+@pure
 let getOrThrow: (option<'a>, ~message: string=?) => 'a
 
 /**
@@ -89,6 +92,7 @@ Option.getUnsafe((None: option<int>)) // Returns `undefined`, which is not a val
 
 - This is an unsafe operation. It assumes `value` is not `None`, and may cause undefined behaviour if it is.
 */
+@pure
 external getUnsafe: option<'a> => 'a = "%identity"
 
 /**
@@ -104,6 +108,7 @@ let noneValue = None
 noneValue->Option.mapOr(0, x => x + 5) // 0
 ```
 */
+@pure
 let mapOr: (option<'a>, 'b, 'a => 'b) => 'b
 
 /**
@@ -116,6 +121,7 @@ Option.map(Some(3), x => x * x) // Some(9)
 Option.map(None, x => x * x) // None
 ```
 */
+@pure
 let map: (option<'a>, 'a => 'b) => option<'b>
 
 /**
@@ -136,6 +142,7 @@ Option.flatMap(Some(-4), addIfAboveOne) // None
 Option.flatMap(None, addIfAboveOne) // None
 ```
 */
+@pure
 let flatMap: (option<'a>, 'a => option<'b>) => option<'b>
 
 /**
@@ -153,6 +160,7 @@ Some("Jane")->greet // "Greetings Jane"
 None->greet // "Greetings Anonymous"
 ```
 */
+@pure
 let getOr: (option<'a>, 'a) => 'a
 
 /**
@@ -166,6 +174,7 @@ Option.orElse(None, Some(1066)) == Some(1066)
 Option.orElse(None, None) == None
 ```
 */
+@pure
 let orElse: (option<'a>, option<'a>) => option<'a>
 
 /**
@@ -178,6 +187,7 @@ Option.isSome(None) // false
 Option.isSome(Some(1)) // true
 ```
 */
+@pure
 let isSome: option<'a> => bool
 
 /**
@@ -190,6 +200,7 @@ Option.isNone(None) // true
 Option.isNone(Some(1)) // false
 ```
 */
+@pure
 let isNone: option<'a> => bool
 
 /**
@@ -212,6 +223,7 @@ equal(None, Some(3), clockEqual) // false
 equal(None, None, clockEqual) // true
 ```
 */
+@pure
 let equal: (option<'a>, option<'b>, ('a, 'b) => bool) => bool
 
 /**
@@ -240,6 +252,7 @@ Option.compare(Some(14), None, clockCompare) // 1.
 Option.compare(None, None, clockCompare) // 0.
 ```
 */
+@pure
 let compare: (option<'a>, option<'b>, ('a, 'b) => Stdlib_Ordering.t) => Stdlib_Ordering.t
 
 /**
@@ -252,26 +265,31 @@ Option.all([Some(1), Some(2), Some(3)]) // Some([1, 2, 3])
 Option.all([Some(1), None]) // None
 ```
 */
+@pure
 let all: array<option<'a>> => option<array<'a>>
 
 /**
 `all2((o1, o2))`. Like `all()`, but with a fixed size tuple of 2
 */
+@pure
 let all2: ((option<'a>, option<'b>)) => option<('a, 'b)>
 
 /**
 `all3((o1, o2, o3))`. Like `all()`, but with a fixed size tuple of 3
 */
+@pure
 let all3: ((option<'a>, option<'b>, option<'c>)) => option<('a, 'b, 'c)>
 
 /**
 `all4((o1, o2, o3, o4))`. Like `all()`, but with a fixed size tuple of 4
 */
+@pure
 let all4: ((option<'a>, option<'b>, option<'c>, option<'d>)) => option<('a, 'b, 'c, 'd)>
 
 /**
 `all5((o1, o2, o3, o4, o5))`. Like `all()`, but with a fixed size tuple of 5
 */
+@pure
 let all5: ((option<'a>, option<'b>, option<'c>, option<'d>, option<'e>)) => option<(
   'a,
   'b,
@@ -283,6 +301,7 @@ let all5: ((option<'a>, option<'b>, option<'c>, option<'d>, option<'e>)) => opti
 /**
 `all6((o1, o2, o3, o4, o5, o6))`. Like `all()`, but with a fixed size tuple of 6
 */
+@pure
 let all6: ((option<'a>, option<'b>, option<'c>, option<'d>, option<'e>, option<'f>)) => option<(
   'a,
   'b,
@@ -298,4 +317,5 @@ let all6: ((option<'a>, option<'b>, option<'c>, option<'d>, option<'e>, option<'
   This helper is useful when you want to discard a value (for example, the result of an operation with side effects)
   without having to store or process it further.
 */
+@pure
 external ignore: option<'a> => unit = "%ignore"

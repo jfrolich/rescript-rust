@@ -29,6 +29,7 @@ let getOrThrow = (x, ~message=?) =>
     )
   }
 
+@pure
 external getUnsafe: option<'a> => 'a = "%identity"
 
 let mapOr = (opt, default, f) =>
@@ -134,4 +135,5 @@ let all6 = ((a, b, c, d, e, f)) => {
   }
 }
 
+@pure
 external ignore: option<'a> => unit = "%ignore"

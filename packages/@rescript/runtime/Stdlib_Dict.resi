@@ -22,7 +22,7 @@ let value = dict->Dict.getUnsafe("key1")
 Console.log(value) // value1
 ```
 */
-@get_index
+@get_index @pure
 external getUnsafe: (dict<'a>, string) => 'a = ""
 
 /**
@@ -68,7 +68,7 @@ let decodeImageUrl = (json: JSON.t) => {
 }
 ```
 */
-@get_index
+@get_index @pure
 external get: (dict<'a>, string) => option<'a> = ""
 
 /**
@@ -81,7 +81,7 @@ let dict = Dict.make()
 dict->Dict.set("someKey", "someValue")
 ```
 */
-@set_index
+@set_index @mutates
 external set: (dict<'a>, string, 'a) => unit = ""
 
 /**
@@ -94,6 +94,7 @@ let dict = dict{"someKey": "someValue"}
 dict->Dict.delete("someKey")
 ```
 */
+@mutates
 let delete: (dict<'a>, string) => unit
 
 /**
@@ -107,7 +108,7 @@ let dict2 = Dict.make() // Or you can let ReScript infer it via usage.
 dict2->Dict.set("someKey", 12)
 ```
 */
-@obj
+@obj @pure
 external make: unit => dict<'a> = ""
 
 /**
@@ -118,7 +119,7 @@ external make: unit => dict<'a> = ""
 let dict = Dict.fromArray([("key1", "value1"), ("key2", "value2")])
 ```
 */
-@val
+@val @pure
 external fromArray: array<(string, 'a)> => dict<'a> = "Object.fromEntries"
 
 /**
@@ -133,7 +134,7 @@ iterable
 ->Dict.valuesToArray == [1, 2]
 ```
 */
-@val
+@val @pure
 external fromIterable: Stdlib_Iterable.t<(string, 'a)> => dict<'a> = "Object.fromEntries"
 
 /**
@@ -148,7 +149,7 @@ let asArray = dict->Dict.toArray
 Console.log(asArray) // Logs `[["someKey", 1], ["someKey2", 2]]` to the console
 ```
 */
-@val
+@val @pure
 external toArray: dict<'a> => array<(string, 'a)> = "Object.entries"
 
 /**
@@ -163,7 +164,7 @@ let keys = dict->Dict.keysToArray
 Console.log(keys) // Logs `["someKey", "someKey2"]` to the console
 ```
 */
-@val
+@val @pure
 external keysToArray: dict<'a> => array<string> = "Object.keys"
 
 /**
@@ -183,6 +184,7 @@ dict->Dict.delete("someKey")
 dict->Dict.size->assertEqual(1)
 ```
 */
+@pure
 let size: dict<'a> => int
 
 /**
@@ -202,6 +204,7 @@ dict->Dict.delete("someKey")
 dict->Dict.isEmpty->assertEqual(true)
 ```
 */
+@pure
 let isEmpty: dict<'a> => bool
 
 /**
@@ -216,7 +219,7 @@ let values = dict->Dict.valuesToArray
 Console.log(values) // Logs `[1, 2]` to the console
 ```
 */
-@val
+@val @pure
 external valuesToArray: dict<'a> => array<'a> = "Object.values"
 
 /**
@@ -239,7 +242,7 @@ let dict1 = dict1->Dict.assign(dict2)
 Console.log(dict1->Dict.keysToArray) // Logs `["firstKey", "someKey", "someKey2"]`
 ```
 */
-@val
+@val @mutates
 external assign: (dict<'a>, dict<'a>) => dict<'a> = "Object.assign"
 
 /**
@@ -259,7 +262,7 @@ result == dict{"firstKey": 1, "someKey": 3, "someKey2": 4}
 (result === target) == true
 ```
 */
-@variadic @val
+@variadic @val @mutates
 external assignMany: (dict<'a>, array<dict<'a>>) => dict<'a> = "Object.assign"
 
 /**
@@ -279,7 +282,7 @@ merged == dict{"firstKey": 2, "someKey": 3}
 (merged === dict1) == false
 ```
 */
-@val
+@val @pure
 external concat: (@as(json`{}`) _, dict<'a>, dict<'a>) => dict<'a> = "Object.assign"
 
 /**
@@ -300,7 +303,7 @@ merged == dict{"firstKey": 1, "someKey": 3, "someKey2": 4}
 (merged === target) == false
 ```
 */
-@variadic @val
+@variadic @val @pure
 external concatMany: (@as(json`{}`) _, dict<'a>, array<dict<'a>>) => dict<'a> = "Object.assign"
 
 /**
@@ -321,7 +324,7 @@ merged == dict{"firstKey": 1, "someKey": 3, "someKey2": 4}
 (merged === dict1) == false
 ```
 */
-@variadic @val
+@variadic @val @pure
 external concatAll: (@as(json`{}`) _, array<dict<'a>>) => dict<'a> = "Object.assign"
 
 /**
@@ -336,7 +339,7 @@ let dict2 = dict->Dict.copy
 Console.log2(dict->Dict.keysToArray, dict2->Dict.keysToArray)
 ```
 */
-@val
+@val @pure
 external copy: (@as(json`{}`) _, dict<'a>) => dict<'a> = "Object.assign"
 
 /**
@@ -353,6 +356,7 @@ dict->Dict.forEach(value => {
 })
 ```
 */
+@pure
 let forEach: (dict<'a>, 'a => unit) => unit
 
 /**
@@ -367,6 +371,7 @@ dict->Dict.forEachWithKey((value, key) => {
 })
 ```
 */
+@pure
 let forEachWithKey: (dict<'a>, ('a, string) => unit) => unit
 
 /**
@@ -381,6 +386,7 @@ dict->Dict.mapValues(v => v + 10)->Dict.toArray // [("key1", 11), ("key2", 12)]
 dict->Dict.mapValues(v => Int.toString(v))->Dict.toArray // [("key1", "1"), ("key2", "2")]
 ```
 */
+@pure
 let mapValues: (dict<'a>, 'a => 'b) => dict<'b>
 
 /**
@@ -399,6 +405,7 @@ dict->Dict.has("key3") == false
 dict->Dict.has("toString") == true
 ```
 */
+@pure
 external has: (dict<'a>, string) => bool = "%dict_has"
 
 /**
@@ -407,4 +414,5 @@ external has: (dict<'a>, string) => bool = "%dict_has"
   This helper is useful when you want to discard a value (for example, the result of an operation with side effects)
   without having to store or process it further.
 */
+@pure
 external ignore: dict<'a> => unit = "%ignore"

@@ -10,27 +10,50 @@ type rec t =
 @unboxed
 type replacer = Keys(array<string>) | Replacer((string, t) => t)
 
-@throws @val external parseOrThrow: (string, ~reviver: (string, t) => t=?) => t = "JSON.parse"
+@pure @throws @val external parseOrThrow: (string, ~reviver: (string, t) => t=?) => t = "JSON.parse"
 
-@val external stringify: (t, ~replacer: replacer=?, ~space: int=?) => string = "JSON.stringify"
+@pure @val
+external stringify: (t, ~replacer: replacer=?, ~space: int=?) => string = "JSON.stringify"
 
-@throws @val
+@throws @val @pure
 external stringifyAny: ('a, ~replacer: replacer=?, ~space: int=?) => option<string> =
   "JSON.stringify"
 
 module Encode = {
+  @pure
   external bool: bool => t = "%identity"
+
+  @pure
   external null: t = "#null"
+
+  @pure
   external string: string => t = "%identity"
+
+  @pure
   external int: int => t = "%identity"
+
+  @pure
   external float: float => t = "%identity"
+
+  @pure
   external object: dict<t> => t = "%identity"
+
+  @pure
   external array: array<t> => t = "%identity"
 
+  @pure
   external stringArray: array<string> => t = "%identity"
+
+  @pure
   external floatArray: array<float> => t = "%identity"
+
+  @pure
   external intArray: array<int> => t = "%identity"
+
+  @pure
   external boolArray: array<bool> => t = "%identity"
+
+  @pure
   external objectArray: array<dict<t>> => t = "%identity"
 }
 
@@ -72,4 +95,5 @@ module Decode = {
     }
 }
 
+@pure
 external ignore: t => unit = "%ignore"
