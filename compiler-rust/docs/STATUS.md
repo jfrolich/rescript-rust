@@ -87,7 +87,7 @@ J.2 gives the end state as checks. All of them, run on trunk:
 | Shared between threads | `rg -n 'assert_send_sync::<(World\|ModuleView)>' src/types/world.rs` | 2 lines, as expected |
 | `ModuleView` has no `Rc`, `Cell`, lock | `rg -n 'Rc<\|RefCell<\|Cell<\|OnceCell<\|Mutex<' src/types/module_view.rs` | 0, as expected |
 | `build_module_view(world, scratch, key)` | `rg -n 'fn build_module_view' -A3 src/types/module_view.rs` | `world: &World, scratch: &ViewScratch, key: &ViewKey<'_>`; no `TypeCheckContext`, no `Env` |
-| `ViewTable::get_or_build` | `rg -n 'fn get_or_build' src/types/world.rs` | **0**: there is no view table (see 6.1) |
+| `ViewTable::get_or_build` | `rg -n 'fn get_or_build' src/types/world.rs` | **0**: there is no view table (see 7.1) |
 | `adopt_view` | `rg -n 'fn adopt_view' src/types/context.rs` | 1 |
 | `FrozenWrites` | `rg -n 'struct FrozenWrites' src/types/context.rs` | 1 |
 | `reset_for_module` | `rg -n 'fn reset_for_module' src/types/context.rs` | **0** |
@@ -120,7 +120,7 @@ checked in part (the lookup copy), and ten still match.
 | --- | --- | --- | --- | --- |
 | W1 | `rg -n 'RESCRIPT_WORLD_SHUFFLE' compiler-rust/src scripts` gives the read in `shared_store.rs` and the uses in the script | the read at `shared_store.rs:413`; uses in `scripts/test_worker_determinism.py` and its test | done as designed | #173, #177 (the CI job) |
 | W2 | The "Overlays" and "Type marking" rows of J.2 give 0 | both 0; `struct FrozenWrites` 1 | done as designed. Measured in #180: -1.06% on `tests/tests`, -1.02% on the application (the row estimated 0.3%) | #180 |
-| W3 | `rg -n 'cached_initial_env\|publish_initial_env\|owns_signature\|pool_for' src` gives 0; `rg -n 'build_in_store' src/types/env.rs` gives 0 | 0 and 0; `struct World`, `struct UnitSlot`, `trait FrozenExport`, `fn freeze`, `struct ViewScratch` present in `world.rs` | done as designed, with two differences recorded in 6.1 (the scratch context; units the pool has no room for) | #188 |
+| W3 | `rg -n 'cached_initial_env\|publish_initial_env\|owns_signature\|pool_for' src` gives 0; `rg -n 'build_in_store' src/types/env.rs` gives 0 | 0 and 0; `struct World`, `struct UnitSlot`, `trait FrozenExport`, `fn freeze`, `struct ViewScratch` present in `world.rs` | done as designed, with two differences recorded in 7.1 (the scratch context; units the pool has no room for) | #188 |
 | W4 | `rg -n 'build_shared_persistent_root_components' src` gives 0; the `Rc<...` check on `module_view.rs` gives 0; keys: a unit or a chain of structure-typed children; `ViewTable::get_or_build`; items shared without a copy | 0 and 0. `enum ViewKey` exists. `fn get_or_build` 0. `perf_counters.rs` prints `world_view_nodes copied={} shared=0` as a literal | done in part: unit paths only (children moved to W5), no view table, no sharing without a copy. "W4 as built" in the document says so and the code agrees | #196 |
 | W5 | The registration rows of J.2 give 0; `rg -n 'shared_components\|publish_shared_components' src` gives 0; no store build starts | 16 and 10. `ViewKey::{Unit, Child, Alias}` exist | done in part: views for structure children and aliases of a unit, transitive adoption. None of the row's deletions is made ("W5 as built": 103 distinct store-built views and 20,033 store builds left on the application with one worker) | #208, #205 |
 | W6 | The "Store builds", "Replay", "Poisoning and guards" and "switches" rows of J.2 give 0 | 177, 66, 63, 6 | not started (waits for W5 to finish) | - |
@@ -148,7 +148,7 @@ All seven hold.
 
 | Slice | End state (K.6) | Code today | Status | Pull requests |
 | --- | --- | --- | --- | --- |
-| C1 | Leased first array, one-compare read and write | rows 1 to 4 and 7 above | done as designed. `FIRST_LEN` is `1 << 16`. Measured in #187: -5.24% on `tests/tests`, -5.63% on the application; see 6.1 for the memory gate | #187 |
+| C1 | Leased first array, one-compare read and write | rows 1 to 4 and 7 above | done as designed. `FIRST_LEN` is `1 << 16`. Measured in #187: -5.24% on `tests/tests`, -5.63% on the application; see 7.1 for the memory gate | #187 |
 | C2 | Type lists and parameter lists in the same first array | row 5 above | done as designed, with 8,192 slots. Measured in #199: -0.37% on `tests/tests`, -0.33% on the application | #199 |
 | C3 | `ClashSite` (`Copy`); no `context.clone()`; no `Vec` in `type_application` | row 6 above; `ClashSite::resolve` at `typecore.rs:1043` | done as designed. Measured in #186: -0.39% on the application | #186 |
 | C4 | The other walk families, one pull request per family, each from a profile | no pull request found by title for `type_record`, `let` bindings, constructors, `type_function_nary` or patterns | not started |  - |
@@ -246,7 +246,7 @@ row names and, where one exists, the stage of the ratchet file.
 | S1.4 | Default printer is oxc; instruction count falls by about 2.8% | default is `Legacy` | not started, and its premise did not hold: `PRINTER_INSTRUCTIONS.md` measured the oxc printer on the JS IR at +1.51% whole-build instructions on `tests/tests` against the legacy printer. THREE_TREES T5 and T6 replace this row | #175 (the measurement) |
 | S1.5 | Remove the legacy printer's layout code from release builds | `src/js_ir/printer.rs` 7,265 lines, `program_printer.rs` 897 | not started | - |
 | S2.1 | `Bir`: nodes, pools, views, validator, dump | `src/bir/{mod,node,pools,vars,edit,validate,dump}.rs` exist | done as designed | #117, #123, #144 |
-| S2.2 | Bridges, `BackendMode`, `Unsupported`, the report, the ratchet file, the CI job | `src/bir/bridge.rs`, `enum BackendMode { Legacy (default), New, Check }` in `bir/shadow.rs`; stage `lambda-bridge` 1,438 / 1,438 | done as designed, except what `New` does (6.2) | #129, #184 |
+| S2.2 | Bridges, `BackendMode`, `Unsupported`, the report, the ratchet file, the CI job | `src/bir/bridge.rs`, `enum BackendMode { Legacy (default), New, Check }` in `bir/shadow.rs`; stage `lambda-bridge` 1,438 / 1,438 | done as designed, except what `New` does (7.2) | #129, #184 |
 | S3.1 | Emit reads J-level `Bir`; naming on `VarId` | `bir/bridge_j.rs` has `import_js` and `export_js` (stage `js-bridge`); no emitter reads `Bir` on trunk | done in part (the bridge), then **dropped** as a product path by THREE_TREES section 10: the emitter over J-level `Bir` measured +10.23% whole-build instructions on `tests/tests` (`PRINTER_INSTRUCTIONS.md`) and is not on trunk | #167, #175 |
 | S3.2 | J normalising rules and rounds J1 to J4 in `bir/j/{norm,inline_return,rest,subst,shake}.rs` | `ls src/bir/j`: `equal.rs facts.rs logic.rs mod.rs norm.rs plain.rs` and tests. No `inline_return`, `rest`, `subst`, `shake` | done in part: the rules (#183). The four rounds are not built and change target to T1 and T4 (THREE_TREES section 10) | #183 |
 | S3.3 | Lowering, first set (BACKEND_LOWERING 8.3) | `src/bir/lower/{mod,out,expr,cond,call,args,prim,konst,unit}.rs` exist; stage `lower` | done as designed | #170, #182, #190, #191 |
@@ -357,3 +357,66 @@ The tree count today is the six of the document's summary (seven with the
 oxc printer): the parse tree, the typed tree, raw Lambda, Lambda, the JS IR,
 and the oxc tree when selected. T2 removed the rebuilt parse spine for
 expressions; nothing else of the count has changed.
+
+## 4. DERIVED_CODECS.md
+
+Each slice has an "End state" list of `rg` checks, run from the repository
+root.
+
+| Slice | End state in the document | Result on trunk | Status | Pull requests |
+| --- | --- | --- | --- | --- |
+| (before) | The census and the derived bit (#194) | merged | done | #194 |
+| 1. The plan, the obligations and the oracle, for constructor applications | `rg -n "Pstr_derived" compiler-rust/src \| wc -l` is at least 8; `rg -n "fn discharge" compiler-rust/src/types/derived.rs` matches; `rg -n "spice\|Spice" compiler-rust/src/types compiler-rust/src/raw_lambda` has no new match; `rg -n "RESCRIPT_DERIVED_PATH" compiler-rust/src` matches only `driver.rs`; `rg -l "@spice" tests/build_tests` is non-empty | 31; matches (line 223); 0; **matches four files**: `driver.rs`, `driver/derived_check.rs` (the oracle, a child module of the driver), and doc comments in `types/typecore.rs` and `parse_arena.rs`; 14 fixtures under `tests/build_tests/super_errors_derived` | done in part, by scope: a planned item still has its general form generated in the front end, plans are taken only at the top level of a unit, and the lowering is in `raw_lambda/convert/derived.rs` (7.3). #215 states "this slice saves nothing that matters": 449 of the application's 7,200 derived bindings take a plan (6.2%), -0.137% of its instructions | #215, #221 (the CI step), #222 |
+| 2. Records | `rg -n "some_not_nest\|Psome_not_nest" compiler-rust/src/raw_lambda/derived.rs` has no match; `rg -n "fn compile_matching" compiler-rust/src/raw_lambda` shows one definition; every record without a general reason takes a plan | the file named does not exist (the lowering is `raw_lambda/convert/derived.rs`); `fn compile_matching` 1, with `compile_matching_unresolved` and `compile_matching_with_synced_stamps` beside it; `binary_ast/spice_ppx/plan.rs` asserts `general("@spice type t = {x: int}") == NotYetPlanned` | not started | - |
+| 3. Variants | `rg -n "NotYetPlanned" compiler-rust/src/binary_ast` lists only the shapes the Q5 table keeps general | the same test asserts `general("@spice type t = A \| B(int)") == NotYetPlanned` | not started | - |
+| 4. Remove the switch | `rg -n "RESCRIPT_DERIVED_PATH" .` has no match; `rg -n "DerivedPath" compiler-rust/src` has no match | 27 and 12 | not started (it follows slice 3) | - |
+
+**Derived code, in plain facts.** The plan pools, `Pstr_derived` and
+`Tstr_derived`, the discharge (`types/derived.rs`, 872 lines), the lowering
+and the oracle `RESCRIPT_DERIVED_PATH=check` exist and run in CI on
+`tests/ppx_spice`. One shape of four takes a plan. On `tests/ppx_spice` 78
+of 413 derived bindings take one and 6 of those fall back (#215); records
+(5,988 of the application's 7,200 bindings, by the document's census) and
+variants do not. The document's expected saving of 5.0% to 6.6% of the
+application build belongs to slice 2 and is not measured. The syntax
+generator (`binary_ast/spice_ppx.rs`) stays by design: it is the general
+path and the producer of every diagnostic.
+
+## 5. RUNTIME_SNAPSHOT.md
+
+The stages have gates, not `rg` checks. "Code today" names the function,
+script or CI step that the stage adds.
+
+| Stage | End state in the document (section F) | Code today | Status | Pull requests |
+| --- | --- | --- | --- | --- |
+| S1 | Belt from the snapshot; `RESCRIPT_SNAPSHOT=off\|require`; the equivalence script | `rg -n 'RESCRIPT_SNAPSHOT' rewatch/src/build/snapshot.rs` reads the variable at two sites; `scripts/test_snapshot_equivalence.sh` exists and the validation workflow has a job `snapshot-equivalence` | done as designed. Measured (F.1): a clean build of `tests/belt_tests` 1,667.8 M instructions from source, 635.3 M with the snapshot | #195, #203 |
+| S2 | Runtime: published layout, path rebasing, visible fallback | `fn runtime_config` in `snapshot.rs` (the layout without a configuration file); F.3 reports zero checkout paths in the embedded container | done as designed | #202 |
+| S3 | Index lookup and memoised verification; no code generation on fallback | F.3: "No runtime per-module snapshot-registration loop remains". The "stop before code generation" part was **not** made: the document's own note (D6 inspection) found the lowering computes metadata dependents read | done in part, by the document's finding | #202 |
+| S4 | `rescript snapshot --write/--check`, `make lib` and CI freshness | `rewatch/cli/src/snapshot.rs` parses both flags; `Makefile:171` runs `snapshot --check`; the workflow step "Check embedded snapshot freshness" | done as designed | #213, #214 |
+| S5 | Watch mode and tooling audit | `rewatch/tests/watch/30-snapshot-package-edits.sh` exists; `rg -n 'watch mode is not supported' rewatch/src` gives 0 | done as designed, with a full rebuild on a mismatch in place of dropping one package's entries (7.4). Measured (F.5): -0.05% on `tests/tests`, -0.03% on the application; "the intended one-shot saving is zero" | #220 |
+| (D14) | The runtime project compiled once, not twice | the document's "D14 correction and verification" | done; found by this work, not a stage of F | #219 |
+| S6 | Cache for third-party packages | no code; F.6: "needs the product decision of G.7 first" | not started | - |
+| S7 | Follow the checker redesign (B.8) | waits for "P5 and P10 there", which are now W8 to W10 | not started | - |
+
+**The runtime snapshot, in plain facts.** `rewatch/src/build/snapshot.rs`
+is 1,221 lines. The runtime's and Belt's interfaces and Belt's JavaScript
+are carried in the executable, found through an index, verified against a
+source digest, and checked for freshness and for equivalence with a
+from-source build in CI. This is the one plan of the five whose stages
+replaced the old path as written: the per-module registration loop is
+deleted, and no stage is "beside". What is left (S6, S7) waits on a product
+decision and on the checker's world slices.
+
+## 6. FRONTEND_REWRITES.md
+
+The document is an inventory with measurements; it defines no slice of its
+own. Its "Candidate destination" column is carried out by THREE_TREES T2 and
+T7 (section 3 above).
+
+| Part | What the document says | Code today | Status | Pull requests |
+| --- | --- | --- | --- | --- |
+| Safe subtree skipping | Certificate bits let the mapper and the validation skip subtrees | `ParseArena::expr_needs_no_rewrite` | done | #120, #130 |
+| Expansions | The expression mapper rebuilds nothing; `ParseArena::set_expansion`, readers resolve with `expanded` | `rg -n 'set_expansion' src/binary_ast/ppx.rs` gives 4 call sites; `rg -n 'fn rewrite_child' src/binary_ast/ppx.rs` gives 0 | done for expressions (T2) | #193 |
+| Rows marked "Direct (implemented)" in the inventory | `l` integers (two rows), the single record `let`, the boolean match, `async` functions, `await` | `wrap_with_unsafe_async` 0 matches; `transform_await` has one caller, the awaited-module rewrite | done (T7) | #206 |
+| Every other row of the inventory | "Destinations are proposals, not claims that these moves have been implemented" | the mapper still handles them: externals, `@inline`, the pipe, `let?`, tuple bindings, `@this`, `%raw`, `%ffi`, regexp, `%todo`, `%%private`, `@deriving(accessors)`, JSX | not started; THREE_TREES section 5 assigns each a destination (expansion, direct or declaration table) but only the T2 and T7 slices exist for them |  - |
+| The three validation walks | They stay (`check::Checker`, `NestedExternals`, `UnusedAttributeSweep`) | all three present | kept, as designed | - |
