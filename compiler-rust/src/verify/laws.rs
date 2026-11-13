@@ -39,7 +39,7 @@ fn has_attribute(arena: &ParseArena, attributes: &Attributes, wanted: &str) -> b
 /// A check of a file, as `rescript verify` runs it.
 #[derive(Debug, Clone)]
 pub struct Item {
-    /// `"law"`.
+    /// `"law"` or `"spec"`.
     pub kind: &'static str,
     /// The modules of the file the check is in, then its name: the path of
     /// its export in the file compiled with checks kept.
@@ -62,10 +62,10 @@ impl Item {
     }
 }
 
-struct Collector<'a> {
-    ctx: &'a TypeContext,
-    ta: &'a TypedArena,
-    arena: &'a ParseArena,
+pub(super) struct Collector<'a> {
+    pub(super) ctx: &'a TypeContext,
+    pub(super) ta: &'a TypedArena,
+    pub(super) arena: &'a ParseArena,
     items: Vec<Item>,
     diagnostics: Vec<Diagnostic>,
     /// The expressions of the checks found where a check may be.
@@ -146,7 +146,7 @@ impl Collector<'_> {
         }
     }
 
-    fn report(&mut self, loc: crate::parse_arena::LocIdx, message: String) {
+    pub(super) fn report(&mut self, loc: crate::parse_arena::LocIdx, message: String) {
         self.diagnostics.push(Diagnostic {
             loc: self.arena.to_location(loc),
             message,
@@ -157,6 +157,12 @@ impl Collector<'_> {
         let ta = self.ta;
         let name = match &ta.pattern(binding.vb_pat).pat_desc {
             PatternDesc::Tpat_var(id, _) => id.name(),
+            // `let name: t = ...` is typed as `(_: t) as name`.
+            PatternDesc::Tpat_alias(inner, id, _)
+                if matches!(ta.pattern(*inner).pat_desc, PatternDesc::Tpat_any) =>
+            {
+                id.name()
+            }
             _ => {
                 self.report(
                     ta.pattern(binding.vb_pat).pat_loc,
@@ -177,6 +183,15 @@ impl Collector<'_> {
                     detail,
                 });
             }
+        } else if has_attribute(self.arena, &binding.vb_attributes, super::specs::SPEC)
+            && let Some(detail) = self.spec(name, binding)
+        {
+            self.items.push(Item {
+                kind: "spec",
+                path,
+                line,
+                detail,
+            });
         }
     }
 
