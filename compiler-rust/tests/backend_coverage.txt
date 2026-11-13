@@ -125,12 +125,12 @@
       }
     },
     "tests/tests": {
-      "identical": 579,
+      "identical": 578,
       "shared_catch_only": 1,
       "units": 730,
       "unsupported": {
         "assign": 21,
-        "let rec": 70,
+        "let rec": 71,
         "loop": 32,
         "shared Lambda subtree with binder": 1,
         "try": 27
