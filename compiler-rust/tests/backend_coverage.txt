@@ -11,32 +11,32 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 729,
-      "units": 729,
+      "identical": 730,
+      "units": 730,
       "unsupported": {}
     }
   },
   "lambda-alias": {
     "fixtures": {
-      "identical": 480,
-      "units": 480,
+      "identical": 593,
+      "units": 593,
       "unsupported": {}
     },
     "runtime": {
-      "identical": 113,
-      "units": 113,
+      "identical": 226,
+      "units": 226,
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 729,
-      "units": 729,
+      "identical": 730,
+      "units": 730,
       "unsupported": {}
     }
   },
   "lambda-bridge": {
     "fixtures": {
-      "identical": 480,
-      "units": 480,
+      "identical": 593,
+      "units": 593,
       "unsupported": {}
     },
     "runtime": {
@@ -45,15 +45,15 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 729,
-      "units": 729,
+      "identical": 730,
+      "units": 730,
       "unsupported": {}
     }
   },
   "lambda-exits": {
     "fixtures": {
-      "identical": 480,
-      "units": 480,
+      "identical": 593,
+      "units": 593,
       "unsupported": {}
     },
     "runtime": {
@@ -62,15 +62,15 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 729,
-      "units": 729,
+      "identical": 730,
+      "units": 730,
       "unsupported": {}
     }
   },
   "lambda-flatten": {
     "fixtures": {
-      "identical": 480,
-      "units": 480,
+      "identical": 593,
+      "units": 593,
       "unsupported": {}
     },
     "runtime": {
@@ -79,15 +79,15 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 729,
-      "units": 729,
+      "identical": 730,
+      "units": 730,
       "unsupported": {}
     }
   },
   "lambda-norm": {
     "fixtures": {
-      "identical": 480,
-      "units": 480,
+      "identical": 593,
+      "units": 593,
       "unsupported": {}
     },
     "runtime": {
@@ -96,46 +96,44 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 729,
-      "units": 729,
+      "identical": 730,
+      "units": 730,
       "unsupported": {}
     }
   },
   "lower": {
     "fixtures": {
-      "identical": 336,
+      "identical": 460,
       "shared_catch_only": 0,
-      "units": 480,
+      "units": 593,
       "unsupported": {
-        "assign": 16,
-        "let rec": 16,
-        "loop": 48,
-        "static catch": 40,
-        "try": 24
+        "assign": 17,
+        "let rec": 19,
+        "loop": 55,
+        "try": 42
       }
     },
     "runtime": {
-      "identical": 92,
+      "identical": 184,
       "shared_catch_only": 0,
-      "units": 113,
+      "units": 226,
       "unsupported": {
-        "assign": 1,
-        "let rec": 3,
-        "loop": 7,
-        "try": 10
+        "assign": 2,
+        "let rec": 6,
+        "loop": 14,
+        "try": 20
       }
     },
     "tests/tests": {
-      "identical": 562,
+      "identical": 578,
       "shared_catch_only": 1,
-      "units": 729,
+      "units": 730,
       "unsupported": {
-        "assign": 20,
-        "let rec": 69,
-        "loop": 31,
+        "assign": 21,
+        "let rec": 71,
+        "loop": 32,
         "shared Lambda subtree with binder": 1,
-        "static catch": 22,
-        "try": 24
+        "try": 27
       }
     }
   }
