@@ -68,5 +68,47 @@
     "id": "pure-functor",
     "title": "Module types and functors",
     "summary": "Max can call O.compare because Ord says it is pure, and every argument is held to that."
+  },
+  {
+    "id": "law-first",
+    "title": "A law",
+    "summary": "Run on a thousand generated carts.",
+    "checks": true
+  },
+  {
+    "id": "law-exhaustive",
+    "title": "Few values: all of them",
+    "summary": "Two booleans have four values, a light has three.",
+    "checks": true
+  },
+  {
+    "id": "law-counterexample",
+    "title": "A law that does not hold",
+    "summary": "The smallest values found that break it.",
+    "checks": true,
+    "failing": [
+      "couponNeverRaisesThePrice",
+      "sortTwiceIsSortOnce"
+    ]
+  },
+  {
+    "id": "law-recursive",
+    "title": "Values of your own types",
+    "summary": "Trees of every shape, made from the type declaration.",
+    "checks": true
+  },
+  {
+    "id": "law-abstract",
+    "title": "A type whose values cannot be made",
+    "summary": "Only Email can make an Email.t.",
+    "fails": true,
+    "report": "No value can be made for `email`: `Email.t` is an abstract type",
+    "expected": "The compiler cannot make an Email.t: the type is abstract, and a made-up string might not be an email the module would accept."
+  },
+  {
+    "id": "law-built",
+    "title": "Building the value in the law",
+    "summary": "Take what the value is built from, and a condition as part of the law.",
+    "checks": true
   }
 ]

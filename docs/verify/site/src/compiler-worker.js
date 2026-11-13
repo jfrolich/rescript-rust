@@ -21,7 +21,7 @@ self.onmessage = async (event) => {
       self.postMessage({ type: "ready" });
     } else if (message.type === "build") {
       const started = performance.now();
-      const result = engine.build(message.file);
+      const result = engine.build(message.file, { verify: message.verify });
       self.postMessage({ type: "built", id: message.id, result, ms: performance.now() - started });
     }
   } catch (error) {

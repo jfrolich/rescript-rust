@@ -4,7 +4,14 @@
  * The module is built for WASI. It needs a handful of WASI calls and no file
  * system: the file of an example comes in with each request. This is used by
  * the page's worker and by the script that builds the examples with the page.
+ *
+ * A build with `verify` also runs the checks of the file, with the runner
+ * `rescript verify` uses.
  */
+import { lookup, runItem } from "../../../../rewatch/src/verify/runner.mjs";
+
+/** What the page runs each law with: the same cases on every visit. */
+const RUN = { seed: 1, cases: 1000 };
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -63,8 +70,8 @@ function wasi(memory, stderr) {
 }
 
 /**
- * `module` is the compiled WebAssembly module, `stdlib` the runtime sources
- * by path. A build that crashes leaves the instance unusable: `build` then
+ * `module` is the compiled WebAssembly module, `stdlib` the runtime:
+ * `sources` by path and `javascript` (CommonJS) by module name. A build that crashes leaves the instance unusable: `build` then
  * returns `{crashed}` and the caller makes a new engine.
  */
 export function createEngine(module, stdlib) {
@@ -99,18 +106,66 @@ export function createEngine(module, stdlib) {
     instance = new WebAssembly.Instance(module, imports);
     // A WASI library module: `_initialize` runs its constructors.
     instance.exports._initialize?.();
-    call({ op: "stdlib", files: stdlib });
+    call({ op: "stdlib", files: stdlib.sources });
   }
 
   start();
 
+  /** Loads a CommonJS module compiled from the file, with the runtime. */
+  function load(js) {
+    const loaded = Object.create(null);
+    const require = (specifier) => {
+      const name = specifier.split("/").pop().replace(/\.c?js$/, "");
+      if (loaded[name]) return loaded[name].exports;
+      const source = stdlib.javascript[name];
+      if (source === undefined) throw new Error(`The module ${name} is not part of this page.`);
+      const dependency = { exports: {} };
+      loaded[name] = dependency;
+      new Function("require", "exports", "module", source)(require, dependency.exports, dependency);
+      return dependency.exports;
+    };
+    const main = { exports: {} };
+    new Function("require", "exports", "module", js)(require, main.exports, main);
+    return main.exports;
+  }
+
+  /** Runs the checks of a file compiled with them kept: one result each. */
+  function check({ js, items }) {
+    let exports;
+    try {
+      exports = load(js);
+    } catch (error) {
+      return items.map((item) => ({
+        name: item.path.join("."),
+        line: item.line,
+        ok: false,
+        summary: "was not run",
+        lines: [`the module could not be loaded: ${String(error?.message ?? error)}`],
+      }));
+    }
+    return items.map((item) => {
+      const name = item.path.join(".");
+      const lines = [];
+      const value = lookup(exports, item.path);
+      const outcome =
+        value === undefined
+          ? { ok: false, summary: "is not exported by the compiled module" }
+          : runItem(item, name, value, RUN, lines);
+      return { name, line: item.line, ok: outcome.ok, summary: outcome.summary, lines };
+    });
+  }
+
   return {
-    /** `file` is `{name, source}`: one ReScript file. */
-    build(file) {
+    /**
+     * `file` is `{name, source}`: one ReScript file. With `verify`, the
+     * result of a file that compiles has `checks`.
+     */
+    build(file, { verify = false } = {}) {
       printed = "";
       try {
-        const result = call({ op: "build", name: file.name, source: file.source });
+        const { verify: kept, ...result } = call({ op: "build", name: file.name, source: file.source, verify });
         const warnings = [result.warnings, printed.trim()].filter(Boolean).join("\n");
+        if (kept) result.checks = check(kept);
         return { ...result, warnings };
       } catch (error) {
         const message = printed.trim() || String(error?.message ?? error);

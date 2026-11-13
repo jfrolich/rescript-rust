@@ -10,7 +10,7 @@ const TIME_LIMIT = 20_000;
 let worker = null;
 let ready = false;
 let running = null; // {id, key, resolve, reject, timer}
-const waiting = new Map(); // key -> {file, resolve, reject}
+const waiting = new Map(); // key -> {file, verify, resolve, reject}
 let nextId = 1;
 const listeners = new Set();
 let status = "idle"; // idle | loading | ready | failed
@@ -87,7 +87,7 @@ function next() {
     fail(`The build was stopped after ${TIME_LIMIT / 1000} seconds.`);
   }, TIME_LIMIT);
   running = { id, key, timer, resolve: request.resolve, reject: request.reject };
-  worker.postMessage({ type: "build", id, file: request.file });
+  worker.postMessage({ type: "build", id, file: request.file, verify: request.verify });
 }
 
 /** Start loading the compiler, if it is not loaded or loading. */
@@ -96,16 +96,17 @@ export function warmUp() {
 }
 
 /**
- * Build `file` (`{name, source}`) for the example `key`. Resolves with
+ * Build `file` (`{name, source}`) for the example `key`; `verify` also runs
+ * its checks. Resolves with
  * `{result, ms}`, or with `null` when a newer request of the same example
  * replaced this one.
  */
-export function build(key, file) {
+export function build(key, file, verify = false) {
   warmUp();
   return new Promise((resolve, reject) => {
     const replaced = waiting.get(key);
     if (replaced) replaced.resolve(null);
-    waiting.set(key, { file, resolve, reject });
+    waiting.set(key, { file, verify, resolve, reject });
     next();
   });
 }

@@ -4,7 +4,8 @@
  * pages show before the compiler has loaded in the browser. An example that
  * does not compile fails the build, unless it is marked `"fails": true`; one
  * marked so fails the build when it compiles, or when its report lacks the
- * text of `"report"`.
+ * text of `"report"`. The checks of an example marked `"checks": true` are
+ * run, and the ones that fail must be those of `"failing"`.
  */
 import { readFile, writeFile } from "fs/promises";
 import { join } from "path";
@@ -19,7 +20,7 @@ const prebuilt = {};
 for (const example of JSON.parse(await readFile(join(root, "examples/index.json"), "utf-8"))) {
   const source = await readFile(join(root, "examples", `${example.id}.res`), "utf-8");
   const started = performance.now();
-  const result = engine.build({ name: "Demo.res", source });
+  const result = engine.build({ name: "Demo.res", source }, { verify: Boolean(example.checks) });
   const ms = Math.round(performance.now() - started);
   if (result.crashed || (result.type !== "success") !== Boolean(example.fails)) {
     console.error(`${example.id}: ${result.crashed ?? result.message ?? "compiled, but is marked as failing"}`);
@@ -29,7 +30,18 @@ for (const example of JSON.parse(await readFile(join(root, "examples/index.json"
     console.error(`${example.id}: the report lacks "${example.report}":\n${result.message}`);
     process.exit(1);
   }
-  console.log(`${example.id}: ${result.type} in ${ms} ms`);
+  let ran = "";
+  if (example.checks && result.type === "success") {
+    const failing = result.checks.filter((check) => !check.ok).map((check) => check.name);
+    const expected = example.failing ?? [];
+    if (failing.join() !== expected.join()) {
+      console.error(`${example.id}: the failing checks are [${failing}], expected [${expected}]`);
+      for (const check of result.checks) console.error(`  ${check.ok ? "✓" : "✗"} ${check.name} ${check.summary}\n    ${check.lines.join("\n    ")}`);
+      process.exit(1);
+    }
+    ran = `, ${result.checks.length} checks, ${failing.length} failing`;
+  }
+  console.log(`${example.id}: ${result.type} in ${ms} ms${ran}`);
   prebuilt[example.id] = result;
 }
 await writeFile(join(root, "src/prebuilt.json"), JSON.stringify(prebuilt));
