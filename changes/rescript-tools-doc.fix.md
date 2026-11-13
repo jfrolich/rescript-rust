@@ -1,0 +1,1 @@
+- `rescript-tools doc <file>` works again: builds write no `.cmt` files for it to read, so it runs `rescript doc`, which type-checks the file's project without writing files and prints the same JSON from the Rust typed tree. It now exits with 1 when it fails.
