@@ -1,0 +1,1 @@
+- Compile an exception rebound from a module path (`exception Failed = Target.Failed`): the build failed with "Failed not found, it means either the module does not exist or it is a namespace".
