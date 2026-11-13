@@ -27,3 +27,5 @@ mod tests {
         assert_eq!(std::mem::size_of::<Declined>(), 0);
     }
 }
+
+pub mod graph;

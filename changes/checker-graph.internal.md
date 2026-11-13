@@ -1,0 +1,1 @@
+- Build the new checker’s worker-local type graph without changing the active checker.
