@@ -158,7 +158,9 @@ pub fn main(args: Vec<String>, registry: Option<RegistryProvider>) {
     let handler = builder
         .spawn(|| {
             enable_cli_cleanup_skip();
-            match run(args, registry) {
+            let result = run(args, registry);
+            crate::perf_counters::print_report();
+            match result {
                 Ok(()) => {
                     let _ = std::io::stdout().flush();
                     let _ = std::io::stderr().flush();

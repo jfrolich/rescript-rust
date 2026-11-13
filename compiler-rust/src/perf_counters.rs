@@ -20,6 +20,15 @@ pub(crate) use checker::{
 #[cfg(not(target_arch = "wasm32"))]
 static ENABLED: OnceLock<bool> = OnceLock::new();
 
+static EXPLAIN_RERUNS: AtomicU64 = AtomicU64::new(0);
+
+/// O(1), at most one atomic increment per unit, and only with counters enabled.
+pub(crate) fn record_explain_rerun() {
+    if enabled() {
+        EXPLAIN_RERUNS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 static SNAPSHOT_MODULE_DECODES: AtomicU64 = AtomicU64::new(0);
 
 /// O(1), one optional counter write per decoded module, not per node/lookup.
@@ -856,6 +865,7 @@ pub fn enabled() -> bool {
 
 /// Reset all compiler performance counters.
 pub fn reset() {
+    EXPLAIN_RERUNS.store(0, Ordering::Relaxed);
     SNAPSHOT_MODULE_DECODES.store(0, Ordering::Relaxed);
     if !enabled() {
         return;
@@ -1167,6 +1177,7 @@ pub fn print_report() {
         return;
     }
 
+    eprintln!("[compiler-counter] explain_reruns={}", EXPLAIN_RERUNS.load(Ordering::Relaxed));
     eprintln!("[compiler-counter] snapshot_modules_decoded={}", SNAPSHOT_MODULE_DECODES.load(Ordering::Relaxed));
     eprintln!(
         "[compiler-counter] published_signature_decodes={}",

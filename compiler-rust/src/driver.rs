@@ -331,6 +331,22 @@ impl DerivedPath {
     }
 }
 
+impl crate::types::context::CheckMode {
+    /// O(1) per unit after the first environment read. `explain` disables the
+    /// success attempt for diagnostic comparisons and regression bisection.
+    fn from_env() -> Self {
+        static MODE: std::sync::OnceLock<crate::types::context::CheckMode> = std::sync::OnceLock::new();
+        *MODE.get_or_init(|| match std::env::var("RESCRIPT_CHECK_MODE").as_deref() {
+            Err(_) | Ok("") => Self::Success,
+            Ok("explain") => Self::Explain,
+            Ok(other) => {
+                eprintln!("RESCRIPT_CHECK_MODE is `{other}`; it is unset or `explain`");
+                std::process::exit(2)
+            }
+        })
+    }
+}
+
 /// Compiler options that can be passed to the driver.
 #[derive(Clone)]
 pub struct CompilerOptions {
@@ -10150,7 +10166,7 @@ fn type_structure_two_modes<T, R>(
 ) -> (TypeContext, R) {
     use crate::types::context::CheckMode;
     let CheckUnit { arena, filename, options, derived_plans, .. } = unit;
-    let mut attempt = CheckAttempt { mode: CheckMode::Success, derived_plans };
+    let mut attempt = CheckAttempt { mode: CheckMode::from_env(), derived_plans };
     loop {
         let type_ctx = fresh_type_context();
         type_ctx.set_location_namespace(&options.location_identity(filename));
@@ -10174,6 +10190,7 @@ fn type_structure_two_modes<T, R>(
             drop(typed);
             drop(tctx);
             drop(type_ctx);
+            crate::perf_counters::record_explain_rerun();
             attempt.mode = CheckMode::Explain;
             continue;
         }
