@@ -48,7 +48,18 @@ pub struct LocalPackage {
     /// `.cmt` files.
     pub build_root: String,
     /// The package's modules.
-    pub modules: Vec<String>,
+    pub modules: Vec<LocalModule>,
+}
+
+/// A module of a [`LocalPackage`].
+#[derive(Debug, Clone)]
+pub struct LocalModule {
+    /// The module's name.
+    pub name: String,
+    /// The base name of the artifacts the OCaml compiler writes for the
+    /// module: its source file's, with the package's namespace
+    /// (`foo-Namespace`), not capitalized.
+    pub artifact: String,
 }
 
 /// The project a command runs in: its modules, including those of
@@ -80,7 +91,8 @@ pub trait Project {
     /// Parse a module's interface or implementation with locations, as
     /// [`Project::typecheck`] parses it.
     fn parse_located(&self, module_name: &str, interface: bool) -> Option<Arc<dyn ParsedSource>> {
-        self.typecheck(module_name, interface).map(|source| source.parsed)
+        self.typecheck(module_name, interface)
+            .map(|source| source.parsed)
     }
 }
 

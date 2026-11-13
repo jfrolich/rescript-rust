@@ -407,6 +407,11 @@ impl Run<'_> {
         let Some(source) = self.project.typecheck(module_name, interface) else {
             return;
         };
+        // OCaml writes no `.cmt` for a file compiled with
+        // `-bs-no-bin-annot`, so its tool does not read the file.
+        if !source.typed.binary_annotations {
+            return;
+        }
         let arena = source.parsed.arena();
         let Some(source_file) = self.find_source_file(&source) else {
             return;
@@ -492,23 +497,23 @@ impl Run<'_> {
             // `Reanalyze.collect_cmt_file_paths`: a package's artifacts, in
             // the order of their file names.
             let mut artifacts: Vec<(String, &str, bool, bool)> = Vec::new();
-            for module_name in &package.modules {
-                let Some(paths) = self.project.paths_for_module(module_name) else {
+            for module in &package.modules {
+                let Some(paths) = self.project.paths_for_module(&module.name) else {
                     continue;
                 };
                 let has_interface = paths.interface.is_some();
                 if paths.implementation.is_some() {
                     artifacts.push((
-                        format!("{module_name}.cmt"),
-                        module_name,
+                        format!("{}.cmt", module.artifact),
+                        &module.name,
                         false,
                         has_interface,
                     ));
                 }
                 if has_interface {
                     artifacts.push((
-                        format!("{module_name}.cmti"),
-                        module_name,
+                        format!("{}.cmti", module.artifact),
+                        &module.name,
                         true,
                         has_interface,
                     ));

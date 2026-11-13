@@ -10,7 +10,7 @@ use super::build_types::{BuildCommandState, SourceType, StoredAst, StoredSignatu
 use super::{compile, packages, parse};
 use crate::{config, helpers};
 use anyhow::{Result, anyhow};
-use rescript_compiler::analysis::session::{LocalPackage, Project, SourcePaths, TypedSource};
+use rescript_compiler::analysis::session::{LocalModule, LocalPackage, Project, SourcePaths, TypedSource};
 use rescript_compiler::cmi::persistent_env::ModuleRegistry;
 use rescript_compiler::parse_arena::ParseArena;
 use std::collections::BTreeMap;
@@ -373,18 +373,30 @@ impl Project for WatchProject<'_> {
             .packages
             .values()
             .filter(|package| package.is_local_dep)
+            // OCaml writes no `.cmt` files for a package compiled with
+            // `-bs-no-bin-annot`, so its tool reads none of its modules.
+            .filter(|package| {
+                !config::flatten_flags(&package.config.compiler_flags)
+                    .iter()
+                    .any(|flag| flag == "-bs-no-bin-annot")
+            })
             .map(|package| {
-                let mut modules: Vec<String> = self
+                let modules: Vec<LocalModule> = self
                     .build_state
                     .modules
                     .iter()
-                    .filter(|(_, module)| {
-                        module.package_name == package.name
-                            && matches!(module.source_type, SourceType::SourceFile(_))
+                    .filter(|(_, module)| module.package_name == package.name)
+                    .filter_map(|(name, module)| match &module.source_type {
+                        SourceType::SourceFile(source) => Some(LocalModule {
+                            name: name.clone(),
+                            artifact: helpers::file_path_to_compiler_asset_basename(
+                                &source.implementation.path,
+                                &package.namespace,
+                            ),
+                        }),
+                        SourceType::MlMap(_) => None,
                     })
-                    .map(|(name, _)| name.clone())
                     .collect();
-                modules.sort();
                 LocalPackage {
                     build_root: package.get_build_path().to_string_lossy().into_owned(),
                     modules,
