@@ -41,6 +41,7 @@ impl State {
         self.tail_copies.resize(self.arena.vars.len(), None);
         let mut assignments = std::mem::take(&mut self.tail_assignments);
         for (i, value) in values.into_iter().enumerate() {
+            self.tail_arguments += 1;
             if i == 0 || i > params.len() { self.arena.release(value); continue; }
             let param = VarId(params.start + i as u32 - 1);
             if matches!(self.arena.view(value), View::Var { var } if var == param) {
@@ -70,6 +71,7 @@ impl State {
         let start = self.arena.pools.function_params.len() as u32;
         let mut ordered = std::mem::take(&mut self.tail_order);
         for param in frame.params.iter() {
+            self.tail_parameters += 1;
             let copy = self.tail_copies.get(param.index()).copied().flatten();
             self.arena.pools.function_params.push(copy.unwrap_or(param));
             if copy.is_some() { ordered.push(param); }
@@ -77,6 +79,7 @@ impl State {
         self.arena.pools.funcs[header.index()].params = VarSpan { start, len: frame.params.len };
         self.arena.pools.funcs[header.index()].flags |= FuncHeader::INDIRECT_PARAMS;
         ordered.sort_unstable_by(|&a, &b| {
+            self.tail_sort_comparisons += 1;
             let vars = &self.arena.vars;
             vars.order(b).cmp(&vars.order(a))
                 .then_with(|| vars.name(b).as_str().len().cmp(&vars.name(a).as_str().len()))
@@ -93,6 +96,7 @@ impl State {
         let View::SBlock { statements } = self.arena.view(body) else { unreachable!() };
         let count = statements.len();
         for i in 0..count {
+            self.tail_body_statements += 1;
             let View::SBlock { statements } = self.arena.view(body) else { unreachable!() };
             let statement = statements[i];
             self.arena.detach(statement);
@@ -234,8 +238,7 @@ mod tests {
         let again = call(&mut a, f, &[arg]);
         let condition = a.var(c);
         let body = a.if_raw(condition, branch, again);
-        let mut attr = FunctionAttribute::default();
-        attr.return_unit = true;
+        let attr = FunctionAttribute { return_unit: true, ..FunctionAttribute::default() };
         let function = a.function_(1, &[c], body, attr, LamLoc::NONE);
         let end = a.var(f);
         let root = a.letrec(&[(f, function)], end);
@@ -306,6 +309,43 @@ mod tests {
                     super::super::oracle_tests::compare(a, root);
                 }
             }
+        }
+    }
+
+
+    #[test]
+    fn ten_thousand_switch_self_calls_and_non_tail_function_are_lowered_once() {
+        use crate::lambda::{arena::LamArena, SwitchDispatch, SwitchKey};
+        use crate::lambda::lam_constant::Constant;
+        for tail in [false, true] {
+            let mut a = LamArena::new();
+            let (f, x) = (ident("f", 1), ident("x", 2));
+            let mut actions = Vec::with_capacity(10_000);
+            for i in 0..10_000 {
+                let argument = a.const_(Constant::int(i));
+                let recursive = call(&mut a, f, &[argument]);
+                actions.push(if tail { recursive } else { call(&mut a, ident("consume", 3), &[recursive]) });
+            }
+            let actions = a.add_list(&actions);
+            let info = a.add_switch(true, (0..10_000).map(SwitchKey::Int), false, [], false, SwitchDispatch::Direct);
+            let scrutinee = a.var(x);
+            let body = a.switch_raw(scrutinee, actions, info);
+            let root = wrap(&mut a, f, &[x], body);
+            let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+            let nodes = input.arena.nodes.len();
+            let root = input.root;
+            let mut state = State::new(input);
+            let output = state.probe(Cx::value(), root).unwrap();
+            assert_eq!(state.source_steps, nodes);
+            assert_eq!(state.tail_frames.len(), usize::from(tail));
+            assert_eq!(state.tail_arguments, if tail { 20_000 } else { 0 });
+            assert_eq!(state.tail_parameters, usize::from(tail));
+            assert_eq!(state.tail_sort_comparisons, 0);
+            assert!(state.tail_body_statements <= 2);
+            eprintln!("tail={tail}: source visits={}, tail arguments={}, parameters={}, body statements={}, sort comparisons={}",
+                state.source_steps, state.tail_arguments, state.tail_parameters, state.tail_body_statements, state.tail_sort_comparisons);
+            let lowered = state.complete(Cx::value(), output);
+            lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
         }
     }
 

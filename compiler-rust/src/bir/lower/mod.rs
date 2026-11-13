@@ -324,6 +324,10 @@ enum ModuleConstants {
 }
 
 struct State {
+    tail_arguments: usize,
+    tail_parameters: usize,
+    tail_sort_comparisons: usize,
+    tail_body_statements: usize,
     tail_frames: Vec<tail::Frame>,
     tail_functions: Vec<Option<LoopRef>>,
     tail_copies: Vec<Option<VarId>>,
@@ -412,6 +416,7 @@ impl State {
             .map(|i| input.arena.vars.order(VarId(i as u32)))
             .max().unwrap_or(0).checked_add(1).expect("identifier order capacity");
         Self {
+            tail_arguments: 0, tail_parameters: 0, tail_sort_comparisons: 0, tail_body_statements: 0,
             tail_frames: Vec::new(), tail_functions: Vec::new(), tail_copies: Vec::new(),
             tail_assignments: Vec::new(), tail_order: Vec::new(),
             rec_values: Vec::new(),

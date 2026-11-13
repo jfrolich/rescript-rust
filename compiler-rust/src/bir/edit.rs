@@ -644,14 +644,15 @@ impl Bir {
         (j_pure.unwrap_or(effects.0), effects.1)
     }
     /// L control facts, including R5's TRIVIAL_UNIT, in one immediate-child
-    /// fold. O(arity), stopping when both control bits are set and unit is
-    /// impossible; constant for Fun, Exit, Var, Const and every J operation.
+    /// fold. O(arity); construction visits every child to concatenate tail
+    /// candidates in the same fold. Validation can stop when both control bits
+    /// are set and unit is impossible. Constant for Fun, Exit, Var, Const and J.
     /// Child flags include independently known PURE for unit-spine prefixes.
     /// Fun is a control boundary (compiler/core/lam_exit_code.ml:28).
-    pub(super) fn control_facts(
+    pub(super) fn control_facts<const ALL_CHILDREN: bool>(
         &self,
         node: Node,
-        child_facts: impl Fn(NodeId) -> NodeFlags,
+        mut child_facts: impl FnMut(NodeId) -> NodeFlags,
     ) -> NodeFlags {
         let own = match node.op() {
             Op::Exit => return NodeFlags(NodeFlags::HAS_EXIT | NodeFlags::HAS_STATEMENT),
@@ -677,7 +678,7 @@ impl Bir {
             let flags = child_facts(child);
             facts.0 |= flags.0 & both;
             unit &= flags.contains(if tail == Some(child) { NodeFlags::TRIVIAL_UNIT } else { NodeFlags::PURE });
-            if facts.0 == both && !unit {
+            if !ALL_CHILDREN && facts.0 == both && !unit {
                 break;
             }
         }
@@ -697,15 +698,7 @@ impl Bir {
                 (f.contains(NodeFlags::PURE), f.contains(NodeFlags::NO_ALLOC))
             });
             let old_node = self.node(id);
-            let control = self.control_facts(old_node, |c| {
-                let child = self.node(c);
-                let mut flags = child.flags();
-                // J reuses these bits for unrelated facts and metadata.
-                if child.op() == Op::Var || child.op() as u8 > Op::Continue as u8 {
-                    flags.0 &= !NodeFlags::CONTROL;
-                }
-                flags
-            });
+            let (control, tail_changed) = self.repair_control_facts(id, changed_child);
             let old_flags = old_node.flags();
             let mut flags = old_flags;
             flags.0 &= !(NodeFlags::PURE | NodeFlags::NO_ALLOC);
@@ -731,7 +724,6 @@ impl Bir {
                 }
             }
             self.nodes[id.index()].set_flags(flags);
-            let tail_changed = self.repair_tail_candidates(id, changed_child);
             let facts_changed = self.update_facts(id) || tail_changed;
             if flags == old_flags && !facts_changed {
                 break;

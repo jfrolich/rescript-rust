@@ -228,7 +228,7 @@ impl Bir {
         let mut control = vec![NodeFlags::default(); self.nodes.len()];
         for &id in order.iter().rev() {
             let node = self.node(id);
-            let facts = self.control_facts(node, |c| {
+            let facts = self.control_facts::<false>(node, |c| {
                 NodeFlags(control[c.index()].0 | if effects[c.index()].0 { NodeFlags::PURE } else { 0 })
             });
             control[id.index()] = facts;

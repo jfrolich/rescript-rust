@@ -27,14 +27,29 @@ impl Bir {
         self.self_tail.get(function.index()).copied().unwrap_or(false)
     }
 
-    /// O(1): concatenate two disjoint segments, without allocating or walking
-    /// their members. The last link is deliberately outside the segment.
-    fn append_tail_candidates(&mut self, into: &mut Candidates, child: NodeId) {
-        let part = self.tail_candidates[child.index()];
-        if part.first == NONE { return; }
-        if into.first == NONE { into.first = part.first; }
-        else { self.tail_calls[into.last as usize].next = part.first; }
-        into.last = part.last;
+    /// O(1): whether a direct operand inherits a return continuation. A Fun
+    /// starts its own continuation and is handled at its recursive binding.
+    fn tail_child(&self, node: Node, child: NodeId) -> bool {
+        match node.view(&self.lists) {
+            View::Let { body, .. } | View::LetRec { body, .. } | View::Seq { second: body, .. } => body == child,
+            View::If { then_, else_, .. } => child == then_ || child == else_,
+            View::Catch { .. } => true,
+            View::Try { handler, .. } => child == handler,
+            View::Switch { scrutinee, .. } | View::StrSwitch { scrutinee, .. } => child != scrutinee,
+            View::Prim { primitive, args } => matches!(self.primitive(primitive).primitive,
+                Primitive::Psequand | Primitive::Psequor) && args.get(1) == Some(&child),
+            _ => false,
+        }
+    }
+
+    /// O(1): J operations reuse the L control bits for unrelated metadata.
+    fn child_control_flags(&self, child: NodeId) -> NodeFlags {
+        let child = self.node(child);
+        let mut flags = child.flags();
+        if child.op() == Op::Var || child.op() as u8 > Op::Continue as u8 {
+            flags.0 &= !NodeFlags::CONTROL;
+        }
+        flags
     }
 
     /// O(d + c): d direct tail-position children, c tail-call candidates of
@@ -43,8 +58,10 @@ impl Bir {
     /// No function body is walked. Repair also propagates a changed tail child:
     /// a callee may change while its list segment keeps the same endpoints.
     /// Cells survive node relocation, so collapsing a wrapper changes no fact.
-    pub(super) fn repair_tail_candidates(&mut self, id: NodeId, changed_child: Option<NodeId>) -> bool {
-        if self.js_scope.is_some() { return false; }
+    pub(super) fn repair_control_facts(&mut self, id: NodeId, changed_child: Option<NodeId>) -> (NodeFlags, bool) {
+        if self.js_scope.is_some() {
+            return (self.control_facts::<false>(self.nodes[id.index()], |c| self.child_control_flags(c)), false);
+        }
         self.tail_candidates.resize(self.nodes.len(), Candidates::default());
         self.self_tail.resize(self.nodes.len(), false);
         let old_self = self.self_tail[id.index()];
@@ -54,50 +71,37 @@ impl Bir {
         let mut out = Candidates::default();
         let node = self.nodes[id.index()];
         let mut changed = false;
-        match node.view(&self.lists) {
-            View::Apply { callee, .. } => {
-                if let View::Var { var } = self.nodes[callee.index()].view(&self.lists) {
-                    let cell = if old.first != NONE && old.first == old.last {
-                        let call = &mut self.tail_calls[old.first as usize];
-                        changed = call.var != var;
-                        call.var = var;
-                        old.first
-                    } else {
-                        let cell = self.tail_calls.len() as u32;
-                        self.tail_calls.push(Candidate { var, next: NONE });
-                        cell
-                    };
-                    out = Candidates { first: cell, last: cell };
-                }
-            }
-            View::Let { body, .. } | View::LetRec { body, .. }
-            | View::Seq { second: body, .. } => self.append_tail_candidates(&mut out, body),
-            View::If { then_, else_, .. } => {
-                self.append_tail_candidates(&mut out, then_);
-                self.append_tail_candidates(&mut out, else_);
-            }
-            View::Catch { body, handler, .. } => {
-                self.append_tail_candidates(&mut out, body);
-                self.append_tail_candidates(&mut out, handler);
-            }
-            View::Try { handler, .. } => self.append_tail_candidates(&mut out, handler),
-            View::Prim { primitive, args } if matches!(self.primitive(primitive).primitive,
-                Primitive::Psequand | Primitive::Psequor) && args.len() == 2 => {
-                let right = args[1];
-                self.append_tail_candidates(&mut out, right);
-            }
-            View::Switch { actions, .. } | View::StrSwitch { actions, .. } => {
-                let len = actions.len();
-                for i in 0..len {
-                    let child = match node.view(&self.lists) {
-                        View::Switch { actions, .. } | View::StrSwitch { actions, .. } => actions[i],
-                        _ => unreachable!(),
-                    };
-                    self.append_tail_candidates(&mut out, child);
-                }
-            }
-            _ => {}
+        if let View::Apply { callee, .. } = node.view(&self.lists)
+            && let View::Var { var } = self.nodes[callee.index()].view(&self.lists)
+        {
+            let cell = if old.first != NONE && old.first == old.last {
+                let call = &mut self.tail_calls[old.first as usize];
+                changed = call.var != var;
+                call.var = var;
+                old.first
+            } else {
+                let cell = self.tail_calls.len() as u32;
+                self.tail_calls.push(Candidate { var, next: NONE });
+                cell
+            };
+            out = Candidates { first: cell, last: cell };
         }
+        // The same immediate-child fold records all L control facts. Taking
+        // the pool permits link writes while the immutable tree is borrowed;
+        // it preserves the allocation and does not copy any cells.
+        let mut calls = std::mem::take(&mut self.tail_calls);
+        let control = self.control_facts::<true>(node, |child| {
+            if self.tail_child(node, child) {
+                let part = self.tail_candidates[child.index()];
+                if part.first != NONE {
+                    if out.first == NONE { out.first = part.first; }
+                    else { calls[out.last as usize].next = part.first; }
+                    out.last = part.last;
+                }
+            }
+            self.child_control_flags(child)
+        });
+        self.tail_calls = calls;
         self.tail_candidates[id.index()] = out;
         if let View::LetRec { first, values, .. } = node.view(&self.lists) {
             let count = values.len();
@@ -113,19 +117,10 @@ impl Bir {
             }
         }
         if let Some(child) = changed_child {
-            changed |= match node.view(&self.lists) {
-                View::Fun { body, .. } | View::Let { body, .. } | View::LetRec { body, .. }
-                | View::Seq { second: body, .. } => body == child,
-                View::If { then_, else_, .. } => child == then_ || child == else_,
-                View::Catch { .. } => true,
-                View::Try { handler, .. } => child == handler,
-                View::Switch { scrutinee, .. } | View::StrSwitch { scrutinee, .. } => child != scrutinee,
-                View::Prim { primitive, args } => matches!(self.primitive(primitive).primitive,
-                    Primitive::Psequand | Primitive::Psequor) && args.get(1) == Some(&child),
-                _ => false,
-            };
+            changed |= self.tail_child(node, child)
+                || matches!(node.view(&self.lists), View::Fun { body, .. } if body == child);
         }
-        old != out || changed || (old_self && node.op() != Op::Fun)
+        (control, old != out || changed || (old_self && node.op() != Op::Fun))
     }
 
     /// O(c) for c tail candidates, never the size or depth of the body. Called
