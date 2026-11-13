@@ -382,27 +382,85 @@ impl Project for WatchProject<'_> {
     }
 }
 
-/// Run an editor tooling command (the arguments of `rescript-editor-analysis`,
-/// relative paths resolved against `cwd`) and return what it prints. Typed
-/// trees are not `Send`, so the whole command runs on one thread, with the
-/// stack the build's compile workers get.
-pub fn run_command(build_state: &BuildCommandState, cwd: PathBuf, args: Vec<String>) -> Result<Vec<u8>> {
+/// Run `command` on a thread of its own, with the stack the build's compile
+/// workers get: typed trees are not `Send`, so a tooling command type-checks
+/// and reads its modules on one thread.
+fn on_tooling_thread(command: impl FnOnce() -> Result<Vec<u8>, String> + Send) -> Result<Vec<u8>> {
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .name("rewatch-tooling".to_string())
             .stack_size(256 * 1024 * 1024)
-            .spawn_scoped(scope, || {
-                let project = WatchProject::new(build_state, &cwd, &args);
-                rescript_compiler::analysis::run(
-                    &rescript_compiler::analysis::Request { cwd, args },
-                    &project,
-                )
-            })
+            .spawn_scoped(scope, command)
             .map_err(|err| anyhow!("could not start the tooling thread: {err}"))?
             .join()
             .map_err(|_| anyhow!("the tooling command panicked"))?
             .map_err(|err| anyhow!(err))
     })
+}
+
+/// Run an editor tooling command (the arguments of `rescript-editor-analysis`,
+/// relative paths resolved against `cwd`) and return what it prints.
+pub fn run_command(build_state: &BuildCommandState, cwd: PathBuf, args: Vec<String>) -> Result<Vec<u8>> {
+    on_tooling_thread(|| {
+        let project = WatchProject::new(build_state, &cwd, &args);
+        rescript_compiler::analysis::run(&rescript_compiler::analysis::Request { cwd, args }, &project)
+    })
+}
+
+/// `rescript-tools doc <path>`: the documentation of the module at `path`
+/// (relative to `cwd`) as JSON.
+///
+/// The OCaml tool reads the module's `.cmt`, which builds do not write.
+/// Instead the project of the file is type-checked here, writing no files,
+/// and the module is documented from its Rust typed tree. The docs give the
+/// position of every item, also of those other modules declare, so this
+/// build keeps source locations, as the diagnostic rebuild does.
+pub fn doc(cwd: &Path, path: &str, plain_output: bool) -> Result<Vec<u8>> {
+    let file = cwd.join(path);
+    if !file.is_file() {
+        return Err(anyhow!(
+            "error: failed to generate doc for {path}, there is no such file"
+        ));
+    }
+    let project_root = helpers::get_nearest_config(&file)
+        .ok_or_else(|| anyhow!("error: failed to generate doc for {path}, it is in no ReScript project"))?;
+    let failed = |err: &dyn std::fmt::Display| {
+        anyhow!("error: failed to generate doc for {path}, the project does not build: {err:#}")
+    };
+    // `build::build` in check-only mode (no lock taken, no files written),
+    // keeping locations and printing no warnings.
+    let mut build_state = super::initialize_build_with_mode(
+        /* no_timing */ true,
+        &None,
+        /* show_progress */ false,
+        &project_root,
+        plain_output,
+        /* warn_error */ None,
+        /* prod */ false,
+        /* features */ None,
+        config::SourceMapCommand::Build,
+        /* check_only */ true,
+    )
+    .map_err(|err| failed(&format!("{err:#}")))?;
+    build_state.print_warnings = false;
+    build_state.diagnostic_locations = true;
+    super::incremental_build_without_lock(
+        &mut build_state,
+        /* no_timing */ true,
+        /* initial_build */ true,
+        /* show_progress */ false,
+        /* only_incremental */ false,
+        plain_output,
+        super::CompilerInfoWrite::WithRecord,
+    )
+    .map_err(|err| failed(&err))?;
+    let docs = on_tooling_thread(|| {
+        let project = WatchProject::new(&build_state, cwd, &[path.to_string()]);
+        rescript_compiler::analysis::doc(cwd, path, &project)
+    });
+    // A one-shot command: let the OS reclaim the build graph at exit.
+    std::mem::forget(build_state);
+    docs
 }
 
 #[cfg(test)]
