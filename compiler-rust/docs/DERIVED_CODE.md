@@ -377,3 +377,205 @@ setup remain uninstrumented there and are charged to other work by reconciliatio
 No identifier-table lookup or typechecking algorithm was changed. Instruction
 measurements, rather than a presumed inlining explanation, decide whether this
 removes the reported default-path cost.
+
+
+## Slice 3b census — 2026-11-13
+
+Measured at `5ff9f97de` with a release compiler and one worker. These are single-run census timings, not benchmark speedups. General groups are charged to their first blocking reason; generated body syntax nodes come from the existing shape walk. Failure events report the last obligation and its expected owner shape, not a diagnostic or a resolved actual type. Abandoned attempts are not counted again as completed modules.
+
+### A 3,735-module application
+
+Modules/interfaces: 3760
+
+| Phase | Derived ms | Other ms | Attribution |
+|---|---:|---:|---|
+| parse_other | 0.000 | 640.899 | measured |
+| generation | 90.109 | 2.294 | measured |
+| frontend | 9.938 | 248.014 | node-weighted estimate |
+| environment | 0.000 | 102.813 | measured |
+| typecheck | 422.467 | 4150.779 | measured |
+| signature | 0.000 | 248.595 | measured |
+| conversion | 199.503 | 638.622 | measured |
+| lambda_lowering | 16.480 | 211.805 | node-weighted estimate |
+| lambda_passes | 52.153 | 474.404 | node-weighted estimate |
+| lowering | 77.584 | 854.431 | node-weighted estimate |
+| printing | 26.884 | 303.303 | node-weighted estimate |
+| gentype | 0.000 | 203.757 | measured |
+
+Path timing availability: 3760/3760 records.
+
+| Phase | Bindings on a plan ms | General bindings ms |
+|---|---:|---:|
+| typecheck | 247.055 | 175.412 |
+| conversion | 157.671 | 41.833 |
+
+| Path | Bindings |
+|---|---:|
+| custom_codec | 36 |
+| failed_obligation | 21 |
+| not_yet_planned | 136 |
+| plan | 6392 |
+| recursive_group | 6 |
+| shared_names | 0 |
+| switch | 0 |
+| type_parameters | 9 |
+| unboxed | 0 |
+| unmeasured_shape | 87 |
+| unsupported_variant | 9 |
+| user_expression | 504 |
+
+| Failed obligation / expected type shape | Abandoned attempts |
+|---|---:|
+| constructor / result | 2 |
+
+General cost availability: 3760/3760 records.
+
+| General reason | Bindings | Generated body syntax nodes | Typecheck ms |
+|---|---:|---:|---:|
+| custom_codec | 36 | 5700 | 6.415 |
+| user_expression | 504 | 124796 | 138.336 |
+| type_parameters | 9 | 480 | 0.561 |
+| recursive_group | 6 | 1016 | 1.202 |
+| shared_names | 0 | 0 | 0.000 |
+| unmeasured_shape | 87 | 4335 | 6.991 |
+| unboxed | 0 | 0 | 0.000 |
+| not_yet_planned | 136 | 15248 | 19.415 |
+| unsupported_variant | 9 | 571 | 0.684 |
+| switch | 0 | 0 | 0.000 |
+| failed_obligation | 21 | 1070 | 1.809 |
+
+| First unplanned form | Bindings |
+|---|---:|
+| json_identity | 136 |
+| applied_user_codec | 0 |
+| applied_module_path | 0 |
+| unsupported_type | 0 |
+| constant_fallback | 0 |
+| empty_record | 0 |
+| template_literal | 0 |
+| declaration_shape | 0 |
+
+| Size | Derived | Other |
+|---|---:|---:|
+| bindings | 7200 | 22320 |
+| syntax_nodes | 156442 | 1668982 |
+| js_bytes (estimated split) | 3590189 | 26000666 |
+| js_lines (estimated split) | 92530 | 793278 |
+
+Counter availability: 0/3760 records.
+
+| Shape | Bindings | Min nodes | P50 | P90 | P99 | Max |
+|---|---:|---:|---:|---:|---:|---:|
+| constructor_application | 18 | 20 | 24 | 96 | 98 | 98 |
+| parameterised (overlap) | 9 | 23 | 38 | 132 | 132 | 132 |
+| polymorphic_variant | 57 | 13 | 28 | 81 | 147 | 147 |
+| record | 712 | 21 | 100 | 460 | 1856 | 4584 |
+| recursive group (overlap) | 6 | 39 | 136 | 529 | 529 | 529 |
+| variant | 21 | 5 | 49 | 596 | 2775 | 2775 |
+
+Distinct templates: 481 among 805 supported bindings; duplicate bindings: 324; unsupported templates: 3.
+Distinct-template body nodes: 119396 / 153216 (77.9%); unsupported body nodes: 4846.
+Singleton templates: 219; highest frequencies: [10, 6, 6, 6, 5, 4].
+
+
+### tests/ppx_spice
+
+Modules/interfaces: 37
+
+| Phase | Derived ms | Other ms | Attribution |
+|---|---:|---:|---|
+| parse_other | 0.000 | 3.691 | measured |
+| generation | 3.047 | 0.009 | measured |
+| frontend | 0.793 | 0.417 | node-weighted estimate |
+| environment | 0.000 | 1.671 | measured |
+| typecheck | 27.162 | 9.277 | measured |
+| signature | 0.000 | 1.440 | measured |
+| conversion | 8.934 | 0.704 | measured |
+| lambda_lowering | 1.604 | 0.465 | node-weighted estimate |
+| lambda_passes | 5.800 | 1.712 | node-weighted estimate |
+| lowering | 12.351 | 2.366 | node-weighted estimate |
+| printing | 2.587 | 0.879 | node-weighted estimate |
+| gentype | 0.000 | 0.000 | measured |
+
+Path timing availability: 37/37 records.
+
+| Phase | Bindings on a plan ms | General bindings ms |
+|---|---:|---:|
+| typecheck | 4.618 | 22.543 |
+| conversion | 2.817 | 6.117 |
+
+| Path | Bindings |
+|---|---:|
+| custom_codec | 3 |
+| failed_obligation | 12 |
+| not_yet_planned | 6 |
+| plan | 226 |
+| recursive_group | 27 |
+| shared_names | 0 |
+| switch | 0 |
+| type_parameters | 18 |
+| unboxed | 12 |
+| unmeasured_shape | 136 |
+| unsupported_variant | 0 |
+| user_expression | 9 |
+
+| Failed obligation / expected type shape | Abandoned attempts |
+|---|---:|
+| value / codec_function | 1 |
+
+General cost availability: 37/37 records.
+
+| General reason | Bindings | Generated body syntax nodes | Typecheck ms |
+|---|---:|---:|---:|
+| custom_codec | 3 | 1001 | 0.896 |
+| user_expression | 9 | 387 | 0.605 |
+| type_parameters | 18 | 1721 | 1.607 |
+| recursive_group | 27 | 4614 | 4.044 |
+| shared_names | 0 | 0 | 0.000 |
+| unmeasured_shape | 136 | 14238 | 14.232 |
+| unboxed | 12 | 366 | 0.650 |
+| not_yet_planned | 6 | 361 | 0.365 |
+| unsupported_variant | 0 | 0 | 0.000 |
+| switch | 0 | 0 | 0.000 |
+| failed_obligation | 12 | 84 | 0.143 |
+
+| First unplanned form | Bindings |
+|---|---:|
+| json_identity | 3 |
+| applied_user_codec | 3 |
+| applied_module_path | 0 |
+| unsupported_type | 0 |
+| constant_fallback | 0 |
+| empty_record | 0 |
+| template_literal | 0 |
+| declaration_shape | 0 |
+
+| Size | Derived | Other |
+|---|---:|---:|
+| bindings | 449 | 66 |
+| syntax_nodes | 23148 | 2557 |
+| js_bytes (estimated split) | 364553 | 99681 |
+| js_lines (estimated split) | 13310 | 3442 |
+
+Counter availability: 0/37 records.
+
+| Shape | Bindings | Min nodes | P50 | P90 | P99 | Max |
+|---|---:|---:|---:|---:|---:|---:|
+| constructor_application | 15 | 5 | 7 | 9 | 21 | 21 |
+| parameterised (overlap) | 18 | 25 | 45 | 234 | 595 | 595 |
+| polymorphic_variant | 40 | 14 | 36 | 228 | 405 | 405 |
+| record | 21 | 25 | 44 | 99 | 281 | 281 |
+| recursive group (overlap) | 27 | 21 | 68 | 446 | 1133 | 1133 |
+| tuple | 9 | 18 | 44 | 188 | 188 | 188 |
+| variant | 138 | 13 | 54 | 366 | 799 | 1133 |
+
+Distinct templates: 134 among 223 supported bindings; duplicate bindings: 89; unsupported templates: 0.
+Distinct-template body nodes: 18661 / 22772 (81.9%); unsupported body nodes: 0.
+Singleton templates: 65; highest frequencies: [6, 4, 4, 4, 4, 4].
+
+
+### Measurement order and limits
+
+Planned discharge is the largest actionable typechecking bucket. All 136 application bindings classified `not_yet_planned` stop at the JSON identity codec. Both abandoned application attempts last visited a result-constructor obligation. This orders investigation as planned discharge, JSON identity plans, then upfront classification of constructor conflicts. User expressions remain general under Q5.
+
+An initial census-disabled Cachegrind run at `a4c557d1c` retired 65,265,265,045 instructions. Its exclusive symbol counts include 53,962,454 in the discharge closure, 44,185,701 in skeleton instantiation and 39,410,903 in plan lowering node visits. Shared callees such as unification include ordinary code too: these numbers **do not** establish inclusive costs by obligation kind or per field. The required attributed profile and before/after validation remain outstanding.
