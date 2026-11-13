@@ -165,17 +165,15 @@ impl State {
     /// P: compile_primitive_js PrecordRest. O(k + label bytes) for k excluded
     /// fields; store labels once in the arena's cold rest descriptor.
     pub(super) fn record_rest(&mut self, source: NodeId, excluded: &[String]) -> NodeId {
-        let fields = excluded
-            .iter()
-            .map(|name| {
-                self.primitive_steps += 1;
-                crate::bir::RestField {
-                    name: self.arena.intern_text(name),
-                    binding: None,
-                }
-            })
-            .collect();
-        let info = self.arena.js_info(JsPayload::Rest(fields));
+        let start = self.arena.pools.rest_fields.len() as u32;
+        for name in excluded {
+            self.primitive_steps += 1;
+            let name = self.arena.intern_text(name);
+            self.arena.pools.rest_fields.push(crate::bir::RestField { name, binding: None });
+        }
+        let info = self.arena.js_info(JsPayload::Rest(crate::bir::RestSpan {
+            start, len: excluded.len() as u32,
+        }));
         plain::node(
             &mut self.arena,
             View::JRecordRest {

@@ -461,6 +461,17 @@ impl Bir {
         self.pools.js.push(info);
         id
     }
+    /// Append immutable record-rest metadata without an owning per-node vector.
+    pub fn rest_info(&mut self, fields: impl IntoIterator<Item = RestField>) -> JsId {
+        let start = index(self.pools.rest_fields.len());
+        self.pools.rest_fields.extend(fields);
+        let len = index(self.pools.rest_fields.len()) - start;
+        self.js_info(JsPayload::Rest(RestSpan { start, len }))
+    }
+    /// Borrow a record-rest descriptor's fields.
+    pub fn rest_fields(&self, span: RestSpan) -> &[RestField] {
+        &self.pools.rest_fields[span.start as usize..(span.start + span.len) as usize]
+    }
     /// Intern a module reference in first-use order.
     pub fn import(&mut self, module: Import) -> ImportId {
         let hash = self.pools.hash_builder.hash_one(&module);

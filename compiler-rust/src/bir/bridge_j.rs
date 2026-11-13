@@ -549,7 +549,7 @@ impl Importer {
                 E::Await(_) => View::JAwait { value: c[0] },
                 E::Spread(_) => View::JSpread { value: c[0] },
                 E::RecordRest(id, _) => {
-                    let fields = a
+                    let fields: Vec<_> = a
                         .rest(id)
                         .iter()
                         .map(|f| RestField {
@@ -557,7 +557,7 @@ impl Importer {
                             binding: f.ident.map(|id| self.var(id)),
                         })
                         .collect();
-                    let info = self.b.js_info(JsPayload::Rest(fields));
+                    let info = self.b.rest_info(fields);
                     View::JRecordRest { value: c[0], info }
                 }
             },
@@ -733,7 +733,7 @@ impl Importer {
             };
             self.rest_binders.clear();
             self.rest_binders.insert(var);
-            for v in fields.iter().filter_map(|f| f.binding) {
+            for v in self.b.rest_fields(*fields).iter().filter_map(|f| f.binding) {
                 if self.b.vars.binder(v).is_some() || !self.rest_binders.insert(v) {
                     return Err(Unsupported("multiply bound JS record-rest field"));
                 }
@@ -1277,7 +1277,7 @@ impl Exporter<'_> {
                 let JsPayload::Rest(fields) = b.javascript(info) else {
                     return Err(Unsupported("missing J rest metadata"));
                 };
-                let fields = fields
+                let fields = b.rest_fields(*fields)
                     .iter()
                     .map(|f| {
                         Ok(js::RecordRestField {

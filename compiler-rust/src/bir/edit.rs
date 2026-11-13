@@ -18,6 +18,35 @@ pub(crate) struct CopyScratch {
     nodes: HashMap<NodeId, NodeId>,
 }
 
+#[derive(Clone, Copy)]
+enum BinderRun {
+    Empty,
+    One(Option<VarId>),
+    Vars(VarSpan),
+    Params(VarSpan),
+    Rest(VarId, RestSpan),
+}
+impl BinderRun {
+    fn len(self) -> usize {
+        match self {
+            Self::Empty => 0,
+            Self::One(_) => 1,
+            Self::Vars(s) | Self::Params(s) => s.len(),
+            Self::Rest(_, s) => 1 + s.len as usize,
+        }
+    }
+    fn at(self, b: &Bir, slot: usize) -> Option<VarId> {
+        match self {
+            Self::Empty => None,
+            Self::One(v) => v,
+            Self::Vars(s) => Some(VarId(s.start + index(slot))),
+            Self::Params(s) => Some(b.pools.function_params[s.start as usize + slot]),
+            Self::Rest(v, _) if slot == 0 => Some(v),
+            Self::Rest(_, s) => b.rest_fields(s)[slot - 1].binding,
+        }
+    }
+}
+
 impl Bir {
     /// Construct an operation without rewrite rules. Children must be distinct,
     /// detached live roots. `aux` carries the operation's small enum/arity payload.
@@ -223,7 +252,9 @@ impl Bir {
             // Parameters and loop variables are bound *inside* their own
             // capture boundary, not in the enclosing function's scope.
             let binder_depth = depth + u32::from(boundary.is_some());
-            for var in self.binders(id) {
+            let run = self.binder_run(id);
+            for slot in 0..run.len() {
+                let Some(var) = run.at(self, slot) else { continue };
                 self.bulk_binders[var.index()] = (epoch, binder_depth);
             }
             if let Some(var) = used_var {
@@ -352,34 +383,36 @@ impl Bir {
         }
     }
 
-    pub(super) fn binders(&self, id: NodeId) -> SmallVec<[VarId; 4]> {
-        match self.view(id) {
-            View::Let { var, .. }
-            | View::SDecl { var, .. }
-            | View::For { var, .. }
-            | View::ForOf { var, .. }
-            | View::ForAwaitOf { var, .. }
-            | View::SForRange { var, parts: [_, _, _], .. }
-            | View::SForOf { var, .. }
-            | View::SForAwaitOf { var, .. } => smallvec![var],
+    /// Snapshot handles, not a materialized list of binders. The descriptor
+    /// stays valid while fresh binders and metadata are appended to the arena.
+    fn binder_run(&self, id: NodeId) -> BinderRun {
+        self.binders_in(self.view(id))
+    }
+    fn binders_in(&self, view: View<'_>) -> BinderRun {
+        match view {
+            View::Let { var, .. } | View::SDecl { var, .. } | View::For { var, .. }
+            | View::ForOf { var, .. } | View::ForAwaitOf { var, .. }
+            | View::SForRange { var, parts: [_, _, _], .. } | View::SForOf { var, .. }
+            | View::SForAwaitOf { var, .. } => BinderRun::One(Some(var)),
             View::SRest { var, info, .. } => {
-                let mut binders = smallvec![var];
-                if let JsPayload::Rest(fields) = self.javascript(info) {
-                    binders.extend(fields.iter().filter_map(|field| field.binding));
-                }
-                binders
+                let JsPayload::Rest(fields) = self.javascript(info) else { unreachable!() };
+                BinderRun::Rest(var, *fields)
             }
-            View::Try { exception, .. } => smallvec![exception],
-            View::STry { exception, .. } => exception.into_iter().collect(),
-            View::LetRec { first, values, .. } => (0..index(values.len()))
-                .map(|i| VarId(first.0 + i))
-                .collect(),
+            View::Try { exception, .. } => BinderRun::One(Some(exception)),
+            View::STry { exception, .. } => BinderRun::One(exception),
+            View::LetRec { first, values, .. } => BinderRun::Vars(VarSpan { start: first.0, len: index(values.len()) }),
             View::Fun { header, .. } | View::JFun { header, .. } => {
-                (0..self.function(header).params.len()).map(|i| self.function_parameter(header, i)).collect()
+                let h = self.function(header);
+                if h.flags & FuncHeader::INDIRECT_PARAMS != 0 { BinderRun::Params(h.params) }
+                else { BinderRun::Vars(h.params) }
             }
-            View::Catch { header, .. } => self.catch(header).params.iter().collect(),
-            _ => SmallVec::new(),
+            View::Catch { header, .. } => BinderRun::Vars(self.catch(header).params),
+            _ => BinderRun::Empty,
         }
+    }
+    pub(super) fn binders(&self, id: NodeId) -> SmallVec<[VarId; 4]> {
+        let run = self.binder_run(id);
+        (0..run.len()).filter_map(|slot| run.at(self, slot)).collect()
     }
     fn bind(&mut self, id: NodeId) {
         if let View::Fun { header, .. } | View::JFun { header, .. } = self.view(id) {
@@ -388,7 +421,9 @@ impl Bir {
                 "function header already owned"
             );
         }
-        for var in self.binders(id) {
+        let run = self.binder_run(id);
+            for slot in 0..run.len() {
+                let Some(var) = run.at(self, slot) else { continue };
             assert!(
                 self.vars.binder[var.index()].is_none(),
                 "variable already bound"
@@ -403,7 +438,9 @@ impl Bir {
                 self.func_owners[header.index()] = None;
             }
         }
-        for var in self.binders(id) {
+        let run = self.binder_run(id);
+            for slot in 0..run.len() {
+                let Some(var) = run.at(self, slot) else { continue };
             if self.vars.binder[var.index()] == Some(id) {
                 self.vars.binder[var.index()] = None;
                 self.vars.fact[var.index()] = Fact::Unknown;
@@ -481,7 +518,18 @@ impl Bir {
             changed = self.j_duplicable[id.index()] != duplicable;
             self.j_duplicable[id.index()] = duplicable;
         }
-        for (var, fact) in self.binding_facts(id) {
+        let node = self.node(id);
+        let view = node.view(&self.lists);
+        let run = self.binders_in(view);
+        for slot in 0..run.len() {
+            let Some(var) = run.at(self, slot) else { continue };
+            let fact = match view {
+                View::Let { value, .. } | View::SDecl { value, .. } =>
+                    value.map_or(Fact::Unknown, |v| self.value_fact(v, RecFlag::No)),
+                View::LetRec { values, .. } => self.value_fact(values[slot], RecFlag::Yes),
+                View::Fun { .. } | View::JFun { .. } | View::Catch { .. } => Fact::Param,
+                _ => Fact::Unknown,
+            };
             changed |= self.vars.fact[var.index()] != fact;
             self.vars.fact[var.index()] = fact;
             if matches!(fact, Fact::Module(_)) {
@@ -875,7 +923,9 @@ impl Bir {
         uses.clear();
         stack.push(root);
         while let Some(id) = stack.pop() {
-            for var in self.binders(id) {
+            let run = self.binder_run(id);
+            for slot in 0..run.len() {
+                let Some(var) = run.at(self, slot) else { continue };
                 self.capture_binders[var.index()] = epoch;
             }
             if let View::Var { var } = self.view(id) {
@@ -893,7 +943,9 @@ impl Bir {
             _ => return,
         };
         let epoch = self.next_capture_epoch();
-        for var in self.binders(id) {
+        let run = self.binder_run(id);
+            for slot in 0..run.len() {
+                let Some(var) = run.at(self, slot) else { continue };
             self.capture_binders[var.index()] = epoch;
         }
         self.collect_capture(root, epoch);
@@ -1231,7 +1283,9 @@ impl Bir {
         }
         vars.extend(renaming.iter().copied());
         for &id in order.iter() {
-            for var in self.binders(id) {
+            let run = self.binder_run(id);
+            for slot in 0..run.len() {
+                let Some(var) = run.at(self, slot) else { continue };
                 let fresh = self.new_var_id(self.vars.name(var), index(self.vars.len()));
                 self.vars.flags[fresh.index()].0 =
                     self.vars.flags[var.index()].0 & !VarFlags::EXPORTED;
@@ -1282,14 +1336,16 @@ impl Bir {
         for &id in order.iter() {
             if let View::JRecordRest { info, .. } | View::SRest { info, .. } = self.view(id) {
                 if let JsPayload::Rest(fields) = self.javascript(info) {
-                    let fields = fields
-                        .iter()
-                        .map(|field| RestField {
+                    let fields = *fields;
+                    let start = index(self.pools.rest_fields.len());
+                    for i in 0..fields.len {
+                        let field = self.pools.rest_fields[(fields.start + i) as usize];
+                        self.pools.rest_fields.push(RestField {
                             name: field.name,
                             binding: field.binding.map(|v| vars.get(&v).copied().unwrap_or(v)),
-                        })
-                        .collect();
-                    let copied = self.js_info(JsPayload::Rest(fields));
+                        });
+                    }
+                    let copied = self.js_info(JsPayload::Rest(RestSpan { start, len: fields.len }));
                     js.insert(info, copied);
                 }
             }
@@ -1375,6 +1431,40 @@ mod tests {
         assert_eq!(capacities(&scratch), before);
         assert_eq!(b.vars.uses(free), 1);
         assert_eq!(b.vars.uses(renamed), 0);
+        b.validate(Some(root)).unwrap();
+    }
+
+    #[test]
+    fn wide_rest_copy_uses_flat_fields_without_allocations() {
+        let mut b = Bir::default();
+        let name = b.intern_text("excluded");
+        let info = b.rest_info(std::iter::repeat_n(RestField { name, binding: None }, 10_000));
+        let value = b.new_node(View::JNull, 0);
+        let root = b.new_node(View::JRecordRest { value, info }, 0);
+        let mut scratch = CopyScratch::default();
+        let mut vars = Vec::new();
+        let mut labels = Vec::new();
+        let copy = b.copy_subtree_with_scratch(root, &[], &mut vars, &mut labels, &mut scratch);
+        b.release(copy);
+        b.pools.rest_fields.reserve(10_000);
+        b.pools.js.reserve(1);
+        let before = [b.pools.rest_fields.capacity(), b.pools.js.capacity(),
+            b.nodes.capacity(), b.parents.capacity(), b.free_nodes.capacity(),
+            scratch.order.capacity(), scratch.stack.capacity(), scratch.nodes.capacity(),
+            scratch.js.capacity()];
+        let measured = allocation_counter::measure(|| {
+            let copy = b.copy_subtree_with_scratch(root, &[], &mut vars, &mut labels, &mut scratch);
+            let View::JRecordRest { info, .. } = b.view(copy) else { panic!() };
+            let JsPayload::Rest(fields) = b.javascript(info) else { panic!() };
+            assert_eq!(b.rest_fields(*fields).len(), 10_000);
+            b.release(copy);
+        });
+        assert_eq!(measured.count_total, 0, "{measured:?}");
+        assert_eq!([b.pools.rest_fields.capacity(), b.pools.js.capacity(),
+            b.nodes.capacity(), b.parents.capacity(), b.free_nodes.capacity(),
+            scratch.order.capacity(), scratch.stack.capacity(), scratch.nodes.capacity(),
+            scratch.js.capacity()], before);
+        assert_eq!(std::mem::size_of::<RestSpan>(), 8);
         b.validate(Some(root)).unwrap();
     }
 
@@ -2607,7 +2697,7 @@ mod constructor_tests {
         constructs_jrecordrest,
         |b| {
             let value = leaf(&mut b);
-            let info = b.js_info(JsPayload::Rest(vec![]));
+            let info = b.rest_info([]);
             b.new_node(View::JRecordRest { value, info }, 0)
         },
         JRecordRest
@@ -2809,7 +2899,7 @@ mod constructor_tests {
         |b| {
             let var = b.new_var_id(Name::new("v"), 0);
             let value = leaf(&mut b);
-            let info = b.js_info(JsPayload::Rest(vec![]));
+            let info = b.rest_info([]);
             b.new_node(View::SRest { var, value, info }, 0)
         },
         SRest
@@ -3070,10 +3160,10 @@ mod js_metadata_tests {
         let rest = b.new_var_id(Name::new("rest"), 0);
         let field = b.new_var_id(Name::new("field"), 1);
         let name = b.intern_text("field");
-        let info = b.js_info(JsPayload::Rest(vec![RestField {
+        let info = b.rest_info([RestField {
             name,
             binding: Some(field),
-        }]));
+        }]);
         let value = b.new_node(View::JNull, 0);
         let decl = b.new_node(
             View::SRest {
@@ -3101,7 +3191,7 @@ mod js_metadata_tests {
         let JsPayload::Rest(fields) = b.javascript(info) else {
             panic!()
         };
-        let fresh = fields[0].binding.unwrap();
+        let fresh = b.rest_fields(*fields)[0].binding.unwrap();
         assert_ne!(fresh, field);
         assert_eq!(b.vars.binder(fresh), Some(statements[0]));
         let pair = b.new_node(

@@ -396,6 +396,12 @@ pub struct RestField {
     /// Optional local bound to the removed field by SRest.
     pub binding: Option<VarId>,
 }
+/// A flat run of immutable record-rest field descriptors.
+#[derive(Debug, Clone, Copy)]
+pub struct RestSpan {
+    pub(crate) start: u32,
+    pub(crate) len: u32,
+}
 /// JavaScript metadata without child ownership. All expressions stay in node lists.
 #[derive(Debug, Clone)]
 pub enum JsPayload {
@@ -412,7 +418,7 @@ pub enum JsPayload {
     /// Tagged template raw/cooked quasis.
     Tagged(Vec<TemplatePart>),
     /// Fields excluded from a record-rest expression/destructuring.
-    Rest(Vec<RestField>),
+    Rest(RestSpan),
 }
 /// Imported module identity, retained in encounter order.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -451,6 +457,7 @@ pub(super) struct Pools {
     pub apply: Vec<ApInfo>,
     pub js: Vec<JsPayload>,
     pub property_keys: Vec<PropertyKey>,
+    pub rest_fields: Vec<RestField>,
     pub cold: Vec<Cold>,
     pub imports: Vec<Import>,
     // J imports retain the complete module identity, including dynamic/default
