@@ -941,3 +941,60 @@ legacy-produced snapshot interfaces would bypass the shadow oracle. The
 sources match; source freshness is not the reason for rejection. Accordingly,
 the fixture coverage corpus must remain 593 units (480 fixtures plus 113
 runtime units), not 480. No snapshot eligibility change is warranted.
+
+### D14 correction and verification
+
+Runtime projects now skip runtime precompilation at both build entry points;
+the ordinary dependency scheduler is their only compilation path. This uses
+the existing runtime package identity, not a path-spelling heuristic or a
+new option. `read_folders_and_dirs` normalizes the source directory before
+forming unit paths, reusing its existing directory buffer. Work is linear in
+directory components once per directory, not a pass over compiled nodes.
+No new compile-path function, node representation, hash table, synchronization,
+or per-node allocation is introduced.
+
+The regression test counts the driver's main-signature census (which executes
+for each compiled implementation, not loaded interfaces), independently of
+backend report filenames. On the corrected release build it reports:
+
+```text
+runtime: 113 compile entries, 113 distinct normalized unit paths
+```
+
+The historical binary's clean-build census is 113 exports. The original
+226-path observation is reproduced with a canonical runtime root; alternate
+symlink spellings of the checkout can add further report identities when
+reusing a report directory. All measurements here use fresh report directories.
+
+Final single-worker Cachegrind measurements (same checkout and source inputs):
+
+| Build | Baseline instructions | Corrected instructions | Change |
+| --- | ---: | ---: | ---: |
+| runtime, backend check | 4,155,284,504 | 2,270,400,494 | -45.36% |
+| tests/tests, default backend | 4,059,614,015 | 4,060,289,943 | +0.01665% |
+
+This saves no intended work on the ordinary tests/tests path; the measured
+change is within the requested +0.02% bound. Both builds compile 736 modules.
+These are individual runs, not a claim of a statistically significant speedup
+on ordinary projects.
+
+`python3 scripts/test_backend_coverage.py --record` produces 113 runtime
+units in every stage. Contrary to the initial task's description, the baseline
+has 226 runtime units only in `lambda-alias` and `lower`; the other stages
+already record 113. The alias count becomes 113 identical; lower becomes
+92 identical with assign 1, let rec 3, loop 7, try 10 (exactly half of each
+previous count). All tests/tests entries are byte-for-byte unchanged. Fixture
+entries are also unchanged: 593 units in the Lambda/lower stages, 480 in
+`js-bridge`, which does not report the runtime precompilation's interface-only
+work. No ratchet rule or backend IR code changes.
+
+Local verification: Rewatch debug and release builds pass; its test suites
+report 205 unit tests, one embedded-runtime test and seven snapshot tests
+passing. JavaScript parity reports 730/730 snapshot files and all focused
+fixtures passing. The runtime regression passes separately.
+
+The 3,735-module application benchmark retires 67,522,628,165 instructions
+before and 67,508,249,057 after (-0.0213%); generated outputs are identical.
+The independent checker comparison reports no differences in 3,735
+signatures, diagnostics from 18 files, or 3,980 generated files. These small
+ordinary-project differences are measurement variation, not intended savings.
