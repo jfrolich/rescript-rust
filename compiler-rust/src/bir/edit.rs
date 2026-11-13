@@ -4,6 +4,20 @@ use crate::lambda::lam_primitive::Primitive;
 use smallvec::{SmallVec, smallvec};
 use std::collections::HashMap;
 
+/// Retained traversal and renaming storage for repeated subtree copies.
+/// Clearing a copy preserves every buffer's high-water capacity.
+#[derive(Default)]
+pub(crate) struct CopyScratch {
+    order: Vec<NodeId>,
+    stack: Vec<NodeId>,
+    vars: HashMap<VarId, VarId>,
+    funcs: HashMap<FuncId, FuncId>,
+    catches: HashMap<CatchId, CatchId>,
+    labels: HashMap<u32, u32>,
+    js: HashMap<JsId, JsId>,
+    nodes: HashMap<NodeId, NodeId>,
+}
+
 impl Bir {
     /// Construct an operation without rewrite rules. Children must be distinct,
     /// detached live roots. `aux` carries the operation's small enum/arity payload.
@@ -1187,14 +1201,36 @@ impl Bir {
         fresh_vars: &mut Vec<(VarId, VarId)>,
         fresh_labels: &mut Vec<(u32, u32)>,
     ) -> NodeId {
-        let mut order = Vec::new();
-        let mut stack = vec![root];
+        self.copy_subtree_with_scratch(root, renaming, fresh_vars, fresh_labels,
+            &mut CopyScratch::default())
+    }
+
+    /// Copy with caller-owned traversal storage; binder allocation order and
+    /// free-variable renaming are identical to `copy_subtree_recording`.
+    pub(crate) fn copy_subtree_with_scratch(
+        &mut self,
+        root: NodeId,
+        renaming: &[(VarId, VarId)],
+        fresh_vars: &mut Vec<(VarId, VarId)>,
+        fresh_labels: &mut Vec<(u32, u32)>,
+        scratch: &mut CopyScratch,
+    ) -> NodeId {
+        let CopyScratch { order, stack, vars, funcs, catches, labels, js, nodes } = scratch;
+        order.clear();
+        stack.clear();
+        vars.clear();
+        funcs.clear();
+        catches.clear();
+        labels.clear();
+        js.clear();
+        nodes.clear();
+        stack.push(root);
         while let Some(id) = stack.pop() {
             order.push(id);
             stack.extend(self.view(id).children());
         }
-        let mut vars: HashMap<_, _> = renaming.iter().copied().collect();
-        for &id in &order {
+        vars.extend(renaming.iter().copied());
+        for &id in order.iter() {
             for var in self.binders(id) {
                 let fresh = self.new_var_id(self.vars.name(var), index(self.vars.len()));
                 self.vars.flags[fresh.index()].0 =
@@ -1203,11 +1239,7 @@ impl Bir {
                 vars.insert(var, fresh);
             }
         }
-        let mut funcs = HashMap::new();
-        let mut catches = HashMap::new();
-        let mut labels = HashMap::new();
-        let mut js = HashMap::new();
-        for &id in &order {
+        for &id in order.iter() {
             match self.view(id) {
                 View::Fun { header, .. } | View::JFun { header, .. } => {
                     let old = *self.function(header);
@@ -1224,12 +1256,11 @@ impl Bir {
                             len: old.params.len,
                         }
                     };
-                    let new = self.function_header(
-                        params,
-                        self.function_attributes(header).clone(),
-                        old.loc,
-                    );
-                    self.pools.funcs[new.index()].flags = old.flags;
+                    // Attributes are immutable cold metadata. Only the header
+                    // and its owner/parameters need fresh identities.
+                    let new = FuncId(index(self.pools.funcs.len()));
+                    self.func_owners.push(None);
+                    self.pools.funcs.push(FuncHeader { params, ..old });
                     funcs.insert(header, new);
                 }
                 View::Catch { header, .. } => {
@@ -1248,7 +1279,7 @@ impl Bir {
                 _ => {}
             }
         }
-        for &id in &order {
+        for &id in order.iter() {
             if let View::JRecordRest { info, .. } | View::SRest { info, .. } = self.view(id) {
                 if let JsPayload::Rest(fields) = self.javascript(info) {
                     let fields = fields
@@ -1263,17 +1294,16 @@ impl Bir {
                 }
             }
         }
-        let mut nodes = HashMap::new();
         for &id in order.iter().rev() {
             let packed = self.node(id).remap(
                 &mut self.lists,
                 &super::node::Renaming {
-                    nodes: &nodes,
-                    vars: &vars,
-                    funcs: &funcs,
-                    catches: &catches,
-                    labels: &labels,
-                    js: &js,
+                    nodes,
+                    vars,
+                    funcs,
+                    catches,
+                    labels,
+                    js,
                 },
             );
             let new = self.allocate(packed);
@@ -1314,6 +1344,38 @@ mod tests {
     fn valid(b: &Bir, root: NodeId) {
         b.validate(Some(root))
             .unwrap_or_else(|e| panic!("{e}\n{}", b.dump()));
+    }
+
+    #[test]
+    fn retained_copy_scratch_reuses_buffers_and_clears_renames() {
+        let mut b = Bir::default();
+        let free = b.new_var_id(Name::new("free"), 0);
+        let renamed = b.new_var_id(Name::new("renamed"), 1);
+        let root = b.new_node(View::Var { var: free }, 0);
+        let mut scratch = CopyScratch::default();
+        let mut vars = Vec::new();
+        let mut labels = Vec::new();
+        let copied = b.copy_subtree_with_scratch(root, &[(free, renamed)],
+            &mut vars, &mut labels, &mut scratch);
+        assert!(matches!(b.view(copied), View::Var { var } if var == renamed));
+        b.release(copied);
+        let capacities = |s: &CopyScratch| [s.order.capacity(), s.stack.capacity(),
+            s.vars.capacity(), s.funcs.capacity(), s.catches.capacity(),
+            s.labels.capacity(), s.js.capacity(), s.nodes.capacity()];
+        let before = capacities(&scratch);
+        let measured = allocation_counter::measure(|| {
+            for _ in 0..10_000 {
+                let copied = b.copy_subtree_with_scratch(root, &[],
+                    &mut vars, &mut labels, &mut scratch);
+                assert!(matches!(b.view(copied), View::Var { var } if var == free));
+                b.release(copied);
+            }
+        });
+        assert_eq!(measured.count_total, 0, "{measured:?}");
+        assert_eq!(capacities(&scratch), before);
+        assert_eq!(b.vars.uses(free), 1);
+        assert_eq!(b.vars.uses(renamed), 0);
+        b.validate(Some(root)).unwrap();
     }
 
     #[test]

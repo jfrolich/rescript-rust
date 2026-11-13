@@ -122,6 +122,7 @@ pub(super) struct Storage {
     cache: Vec<[u32; 2]>,
     test_work: Vec<(TestId, bool)>,
     test_values: Vec<NodeId>,
+    copy_scratch: crate::bir::edit::CopyScratch,
     copied_vars: Vec<(VarId, VarId)>,
     copied_labels: Vec<(u32, u32)>,
     program_steps: usize,
@@ -507,7 +508,8 @@ impl State {
         let mut labels = std::mem::take(&mut self.untagged_storage.copied_labels);
         let copied = self
             .arena
-            .copy_subtree_recording(root, &[], &mut vars, &mut labels);
+            .copy_subtree_with_scratch(root, &[], &mut vars, &mut labels,
+                &mut self.untagged_storage.copy_scratch);
         for (new, old) in vars.drain(..) {
             assert_eq!(new.index(), self.idents.len());
             self.idents.push(self.idents[old.index()]);
