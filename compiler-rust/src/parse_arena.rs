@@ -609,6 +609,8 @@ pub struct ParseArena {
     used_attributes: std::sync::Mutex<HashSet<LocIdx>>,
     /// Conservative parser observation; speculative parses may leave this set.
     has_gentype_annotations: bool,
+    /// The parser saw an attribute the checks of `crate::verify` read.
+    has_verify_annotations: bool,
     /// Arena of patterns (returns PatIdx).
     /// Replaces `Box<Pattern>` for recursive AST references.
     patterns: Arena<Pattern, PatIdx>,
@@ -1108,6 +1110,7 @@ impl Default for ParseArena {
             experimental_let_unwrap: false,
             used_attributes: std::sync::Mutex::new(HashSet::new()),
             has_gentype_annotations: false,
+            has_verify_annotations: false,
             patterns: Arena::default(),
             synthetic_patterns: SyntheticVec::default(),
             synthetic_pattern_base: u32::MAX,
@@ -1947,6 +1950,15 @@ impl ParseArena {
             let name = self.get_string(name);
             self.has_gentype_annotations = name.starts_with("genType") || name.starts_with("gentype");
         }
+        if !self.has_verify_annotations {
+            self.has_verify_annotations = crate::verify::is_verify_attribute(self.get_string(name));
+        }
+    }
+
+    /// Any parsed attribute that asks for a check of `crate::verify`
+    /// (`@pure`, `@mutates`), wherever it is written.
+    pub fn has_verify_annotations(&self) -> bool {
+        self.has_verify_annotations
     }
 
     /// Any parsed genType-family attribute, including nested/file attributes.
