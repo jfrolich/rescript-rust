@@ -1,7 +1,7 @@
 //! X: compile_jsx / jsx_callee. JSX policy remains in the shared passes/printer.
 use super::*;
 use crate::bir::j::{norm, plain};
-use crate::bir::{JsPayload, JsxHeader, PropertyKey};
+use crate::bir::{JsxHeader, PropertyKey, PropertySpan};
 use crate::lambda::lam_primitive::{DeclKind, ExternalDecl, JsxElement, ModuleSource};
 
 impl State {
@@ -58,7 +58,7 @@ impl State {
 
     /// X: compile_jsx. O(props + children + spelling bytes), after shared
     /// argument sequencing. Optional undefined props are consumed and omitted.
-    /// One output vector is extended once per operand, never copied per child.
+    /// Operands and property keys go directly into unit pools, without vectors.
     pub(super) fn compile_jsx(
         &mut self,
         jsx: &JsxElement,
@@ -67,19 +67,19 @@ impl State {
         let mut args = args.into_iter();
         let tag = args.next().expect("JSX tag");
         let spread = jsx.jsx_spread.then(|| args.next().expect("JSX spread"));
-        let mut props = Vec::with_capacity(jsx.jsx_props.len());
-        let mut values = Vec::with_capacity(
-            2 + usize::from(jsx.jsx_spread)
-                + jsx.jsx_props.len()
-                + jsx.jsx_children.unwrap_or(0)
-                + usize::from(jsx.jsx_key),
-        );
-        // Reserve the callee slot: its external binding is allocated after the
-        // operands and key, matching the legacy temporary-name order.
-        values.push(tag);
-        values.push(tag);
+        let mut props = PropertySpan {
+            start: crate::bir::pools::index(self.arena.pools.property_keys.len()), len: 0,
+        };
+        // Reserve stable slots before any key/callee construction can append lists.
+        // Optional properties compact this list in place; unused slots stay outside
+        // the final length and never acquire ownership of the placeholder tag.
+        let count = 2 + usize::from(jsx.jsx_spread) + jsx.jsx_props.len()
+            + jsx.jsx_children.unwrap_or(0) + usize::from(jsx.jsx_key);
+        let values = self.arena.lists.push_iter(count, std::iter::repeat_n(tag, count));
+        let mut at = 2;
         if let Some(spread) = spread {
-            values.push(spread);
+            self.arena.lists.set(values, at, spread);
+            at += 1;
         }
         for (name, optional) in &jsx.jsx_props {
             self.primitive_steps += 1;
@@ -87,36 +87,35 @@ impl State {
             if *optional && matches!(self.arena.view(value), View::JUndefined) {
                 self.arena.release(value);
             } else {
-                props.push(PropertyKey::Literal(self.arena.intern_text(name)));
-                values.push(value);
+                let key = PropertyKey::Literal(self.arena.intern_text(name));
+                self.arena.pools.property_keys.push(key);
+                props.len += 1;
+                self.arena.lists.set(values, at, value);
+                at += 1;
             }
         }
         for _ in 0..jsx.jsx_children.unwrap_or(0) {
             self.primitive_steps += 1;
-            values.push(args.next().expect("JSX child"));
+            self.arena.lists.set(values, at, args.next().expect("JSX child"));
+            at += 1;
         }
         if jsx.jsx_key {
             let key = self.jsx_key(args.next().expect("JSX key"));
-            values.push(key);
+            self.arena.lists.set(values, at, key);
+            at += 1;
         }
         assert!(args.next().is_none(), "JSX argument count");
-        values[0] = self.jsx_callee(&jsx.jsx_ffi);
-        let info = self.arena.js_info(JsPayload::Jsx(JsxHeader {
+        let callee = self.jsx_callee(&jsx.jsx_ffi);
+        self.arena.lists.set(values, 0, callee);
+        self.arena.lists.truncate(values, at);
+        self.arena.jsx_from_list(values, JsxHeader {
             spread: jsx.jsx_spread,
             props,
             children: jsx.jsx_children.unwrap_or(0) as u32,
             key: jsx.jsx_key,
             multi: jsx.jsx_multi,
             fragment: jsx.jsx_fragment,
-        }));
-        plain::node(
-            &mut self.arena,
-            View::JJsx {
-                values: &values,
-                info,
-            },
-            u16::from(jsx.jsx_children.is_some()),
-        )
+        }, jsx.jsx_children.is_some())
     }
 
     /// X: external_optional_to_undefined_expr. O(member-spine depth) for a
@@ -156,7 +155,8 @@ impl State {
     /// for a d-deep member spine; one reusable stack, no per-node allocation.
     /// A failed shape leaves the original key untouched and creates no nodes.
     fn duplicate_jsx_key(&mut self, mut key: NodeId) -> Option<NodeId> {
-        let mut spine = smallvec::SmallVec::<[NodeId; 4]>::new();
+        let mut spine = std::mem::take(&mut self.scratch);
+        debug_assert!(spine.is_empty());
         loop {
             self.primitive_steps += 1;
             match self.arena.view(key) {
@@ -181,7 +181,11 @@ impl State {
                 | View::JStr { .. }
                 | View::JNumber { .. } => break,
                 View::JTemplate { .. } if self.arena.node(key).aux() == 1 => break,
-                _ => return None,
+                _ => {
+                    spine.clear();
+                    self.scratch = spine;
+                    return None;
+                }
             }
         }
         let aux = self.arena.node(key).aux();
@@ -196,7 +200,7 @@ impl State {
         };
         let mut copy = plain::node(&mut self.arena, view, aux);
         self.copy_jsx_key_decoration(key, copy);
-        for node in spine.into_iter().rev() {
+        for node in spine.drain(..).rev() {
             let View::JDot {
                 property, position, ..
             } = self.arena.view(node)
@@ -215,6 +219,7 @@ impl State {
             );
             self.copy_jsx_key_decoration(node, copy);
         }
+        self.scratch = spine;
         Some(copy)
     }
 
@@ -413,6 +418,79 @@ mod tests {
                 .validate(Some(lowered.program.root))
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn ten_thousand_jsx_operands_scopes_and_key_fields_lower_without_allocations() {
+        for shape in 0..4 {
+            let (a, root) = if shape < 2 {
+                let jsx = if shape == 0 { element(10_000, None, false, false) }
+                    else { element(0, Some(10_000), false, false) };
+                input(jsx, 0, false)
+            } else {
+                let mut jsx = element(0, None, shape == 3, false);
+                if shape == 2 { jsx.jsx_ffi.scopes = vec!["scope".into(); 10_000]; }
+                let mut a = LamArena::new();
+                let mut args = vec![a.const_(Constant::String("div".into()))];
+                if shape == 3 {
+                    let mut key = a.var(Ident::new("key", 10, IdentFlags::NONE));
+                    for _ in 0..10_000 {
+                        key = a.prim_raw(Primitive::Pfield(0, crate::lambda::FieldDbgInfo::Record {
+                            name: crate::name::Name::new("field"),
+                        }), &[key], LamLoc::NONE);
+                    }
+                    args.push(key);
+                }
+                let root = a.prim_raw(Primitive::Pjsx(Box::new(jsx)), &args, LamLoc::NONE);
+                (a, root)
+            };
+            let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+            let root = input.root;
+            let mut state = State::new(input);
+            let run = |s: &mut State| {
+                let out = s.probe(Cx::value(), root).unwrap();
+                let out = s.realize(Cx::value(), out);
+                for node in s.statements.statements(out.stmts) { s.arena.release(node); }
+                if let Some(value) = out.value { s.arena.release(value); }
+                s.statements.kill(out.stmts);
+            };
+            let lists = state.arena.lists.storage_shape().0;
+            let js = state.arena.pools.js.len();
+            let props = state.arena.pools.property_keys.len();
+            let vars = state.arena.vars.len();
+            run(&mut state);
+            state.arena.lists.reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
+            state.arena.pools.js.reserve(state.arena.pools.js.len() - js);
+            state.arena.pools.property_keys.reserve(state.arena.pools.property_keys.len() - props);
+            let added = state.arena.vars.len() - vars;
+            macro_rules! reserve_vars { ($($field:ident),*) => { $(state.arena.vars.$field.reserve(added);)* }; }
+            reserve_vars!(j_origin, name, order, flags, uses, binder, fact, printed);
+            state.idents.reserve(added);
+            if let Some(scope) = &mut state.arena.js_scope { scope.uses.reserve(added); }
+            state.free.reserve_repeat();
+            state.labels.reserve_repeat();
+            #[cfg(debug_assertions)]
+            state.arena.checked_children.reserve(state.arena.nodes.len() - state.arena.checked_children.len());
+            let capacities = |s: &State| [s.scratch.capacity(), s.tail_name.capacity(),
+                s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
+                s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1,
+                s.arena.pools.js.capacity(), s.arena.pools.property_keys.capacity(),
+                s.arena.vars.j_origin.capacity(), s.arena.vars.name.capacity(), s.arena.vars.order.capacity(),
+                s.arena.vars.flags.capacity(), s.arena.vars.uses.capacity(), s.arena.vars.binder.capacity(),
+                s.arena.vars.fact.capacity(), s.arena.vars.printed.capacity(), s.idents.capacity(),
+                s.traversal.work.capacity(), s.traversal.values.capacity(), s.traversal.children.capacity(),
+                s.argument_outputs.capacity(), s.argument_values.capacity()];
+            let before = (capacities(&state), state.free.capacities(), state.labels.capacities(), state.statements.capacities());
+            let visits = state.source_steps;
+            let steps = state.primitive_steps;
+            let allocations = allocation_counter::measure(|| run(&mut state));
+            println!("JSX shape={shape}: {allocations:?}, source={}, primitive={}", state.source_steps - visits, state.primitive_steps - steps);
+            assert_eq!(allocations.count_total, 0);
+            assert_eq!((capacities(&state), state.free.capacities(), state.labels.capacities(), state.statements.capacities()), before);
+            let expected = [(10_002, 20_002), (20_002, 40_002), (2, 10_001), (10_003, 30_004)][shape];
+            assert_eq!((state.source_steps - visits, state.primitive_steps - steps), expected);
+        }
+        assert_eq!(std::mem::size_of::<PropertySpan>(), 8);
     }
 
     #[test]

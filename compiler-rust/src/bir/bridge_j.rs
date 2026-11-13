@@ -525,11 +525,13 @@ impl Importer {
                         fragment,
                     } = a.jsx(id);
                     aux = u16::from(children.is_some());
-                    let props = a
-                        .props(props)
-                        .iter()
-                        .map(|&(k, _)| self.property(a, k))
-                        .collect::<Vec<_>>();
+                    let start = index(self.b.pools.property_keys.len());
+                    let len = index(a.props(props).len());
+                    for &(key, _) in a.props(props) {
+                        let key = self.property(a, key);
+                        self.b.pools.property_keys.push(key);
+                    }
+                    let props = PropertySpan { start, len };
                     let h = JsxHeader {
                         spread: spread.is_some(),
                         props,
@@ -1248,8 +1250,9 @@ impl Exporter<'_> {
                 } else {
                     None
                 };
-                let props = self.props(&h.props, &c[k..k + h.props.len()])?;
-                k += h.props.len();
+                let keys = b.property_keys(h.props);
+                let props = self.props(keys, &c[k..k + keys.len()])?;
+                k += keys.len();
                 let children = if aux != 0 {
                     Some(self.exprs(&c[k..k + h.children as usize])?)
                 } else {

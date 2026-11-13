@@ -130,6 +130,14 @@ impl Bir {
         id
     }
 
+    /// O(operands): adopt a finalized JSX list without a temporary operand vector.
+    pub(crate) fn jsx_from_list(&mut self, list: ListId, header: JsxHeader, children: bool) -> NodeId {
+        assert_eq!(self.lists.get(list).len(), 2 + usize::from(header.spread)
+            + header.props.len as usize + header.children as usize + usize::from(header.key));
+        let info = self.js_info(JsPayload::Jsx(header));
+        self.attach_list(Node::jsx_list(list, info, u16::from(children)), list)
+    }
+
     /// [`Self::block_from_list`] for an explicit block statement (B:1225).
     pub(crate) fn explicit_block_from_list(&mut self, list: ListId) -> NodeId {
         self.attach_list(Node::explicit_block_list(list), list)
@@ -371,7 +379,7 @@ impl Bir {
                 assert_eq!(
                     values.len(),
                     2 + usize::from(h.spread)
-                        + h.props.len()
+                        + h.props.len as usize
                         + h.children as usize
                         + usize::from(h.key)
                 );

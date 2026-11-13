@@ -371,7 +371,7 @@ pub enum PropertyKey {
     RecordSpread,
 }
 /// A contiguous run of property keys in the unit's cold pool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PropertySpan {
     pub(super) start: u32,
     pub(super) len: u32,
@@ -382,7 +382,7 @@ pub struct JsxHeader {
     /// A spread expression precedes named properties.
     pub spread: bool,
     /// Property keys in source order.
-    pub props: Vec<PropertyKey>,
+    pub props: PropertySpan,
     /// Number of child expressions.
     pub children: u32,
     /// A final key expression is present.

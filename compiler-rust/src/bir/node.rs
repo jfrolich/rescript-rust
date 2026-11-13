@@ -434,6 +434,10 @@ impl Node {
             words: [list.0, info.0, 0],
         }
     }
+    /// O(1): encode JSX over its finalized operand list and cold shape.
+    pub(super) fn jsx_list(list: ListId, info: JsId, aux: u16) -> Self {
+        Self { op: Op::JJsx, aux, ..Self::object_list(list, info) }
+    }
     pub(super) fn block_list(list: ListId) -> Self {
         Self { op: Op::SBlock, flags: NodeFlags::default(), aux: 0, words: [list.0, 0, 0] }
     }

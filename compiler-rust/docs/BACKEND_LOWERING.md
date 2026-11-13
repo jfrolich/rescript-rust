@@ -2732,9 +2732,9 @@ The statement stack and node-list pool must be used end to end.
 | `import.rs:194` `capitalize` | `let mut result = String::with_capacity(s.len());` | per construct | reusable scratch buffer; clear, do not free | pending |
 | `import.rs:218` `external_binding_name` | `let mut result = String::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
 | `import.rs:234` `external_binding_name` | `name.clone()` | per construct | borrow payload or retain typed pool handle | pending |
-| `jsx.rs:70` `compile_jsx` | `let mut props = Vec::with_capacity(jsx.jsx_props.len());` | per visited node | reusable scratch buffer; clear, do not free | pending |
-| `jsx.rs:71` `compile_jsx` | `let mut values = Vec::with_capacity(` | per visited node | reusable scratch buffer; clear, do not free | pending |
-| `jsx.rs:159` `duplicate_jsx_key` | `let mut spine = smallvec::SmallVec::<[NodeId; 4]>::new();` | per visited node | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `jsx.rs:70` `compile_jsx` | `let mut props = Vec::with_capacity(jsx.jsx_props.len());` | per visited node | Converted: JSX property metadata is an eight-byte PropertySpan into the unit property-key pool. | converted |
+| `jsx.rs:71` `compile_jsx` | `let mut values = Vec::with_capacity(` | per visited node | Converted: reserve operand-list slots once, compact omitted props in place, and attach that list directly. | converted |
+| `jsx.rs:159` `duplicate_jsx_key` | `let mut spine = smallvec::SmallVec::<[NodeId; 4]>::new();` | per visited node | Converted: duplicate member spines using retained unit node scratch, cleared on success and rejection. | converted |
 | `konst.rs:55` `Work` | `let mut work = vec![Work::Enter(root)];` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `konst.rs:56` `Work` | `let mut values: Vec<(NodeId, bool)> = Vec::new();` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `konst.rs:60` `Work` | `let constant = self.arena.constant(id).clone();` | per visited node | borrow payload or retain typed pool handle | pending |
@@ -2988,6 +2988,26 @@ the entire Lambda call, arguments, sequencing and jump emission and releases the
 output twice. The measured pass allocates zero times with unchanged capacities,
 10,002 source visits and 10,001 argument visits (including the callee). This
 fixture does not measure wrapping the enclosing function into a loop.
+
+#### JSX slice
+
+JSX cold property metadata now uses a `PropertySpan` (8 bytes). Lowering writes
+operands directly into a reserved list, compacts omitted optional properties,
+and attaches that list without copying. Key duplication reuses the unit node
+scratch, including on rejected spines.
+
+Complete warmed lowering/realization/release has zero allocations and stable
+recorded capacities for each of four 10,000-element fixtures:
+
+| Fixture | Source visits | Primitive steps |
+| --- | ---: | ---: |
+| Properties (half omitted as optional undefined) | 10,002 | 20,002 |
+| Effectful expression children | 20,002 | 40,002 |
+| Callee scopes | 2 | 10,001 |
+| Duplicable key member spine | 10,003 | 30,004 |
+
+These fixtures do not cover external module metadata allocation or the separate
+held-literal argument path; those remain their own inventory responsibilities.
 
 #### Module-field slice
 
