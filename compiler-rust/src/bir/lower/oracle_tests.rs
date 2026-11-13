@@ -833,6 +833,131 @@ fn cross_module_inline_after_lowering_a_closure_with_assignment() {
     compare_oracle(a, root, Some(&resolver), true, &[0,1,2,3,4], None, true);
 }
 
+/// The legacy pipeline on one function bound to an exported `run`, with the
+/// passes `order` names (1 flatten, 3 tail-call inlining, 5 substitution and
+/// dead marks, 6 shake), printed. For the T4 ordering findings below.
+fn legacy_text(build: impl Fn(&mut LamArena) -> Lam, order: &[u8]) -> String {
+    use crate::lambda::js_pass_flatten_and_mark_dead::{apply_js_flatten_and_mark_dead_pass as dead, apply_js_flatten_pass as flatten};
+    use crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass as inline;
+    use crate::lambda::js_shake::apply_js_shake_pass as shake;
+    let mut a = LamArena::new();
+    let root = build(&mut a);
+    let exported = Ident::new("run", 900, IdentFlags::NONE);
+    let mut compiler = LambdaCompiler::new();
+    let compiled = compiler.bir_lower_oracle(&mut a, root, Cont::Declare(LetKind::Strict, VarId(0)), exported);
+    let mut program = JsDepsProgram { program: JsProgram::new_in(compiled.prelude, vec![exported], compiler.j), modules: vec![], side_effect: None };
+    for pass in order {
+        program = match pass {
+            1 => flatten(program),
+            3 => inline(program),
+            5 => dead(program, false),
+            6 => shake(program),
+            _ => unreachable!("pass number"),
+        };
+    }
+    crate::js_ir::print_deps_program_with_directives_and_options(&program, None, &[], false, false, false)
+}
+
+fn call(a: &mut LamArena, callee: Lam, args: &[Lam]) -> Lam {
+    use crate::lambda::{ApInfo, ApplyStatus, LamLoc};
+    a.apply_raw(callee, args, ApInfo { loc: LamLoc::NONE, status: ApplyStatus::InferFull })
+}
+
+#[test]
+fn a_tail_call_site_inside_a_returned_conditional_exists_only_after_the_flatten_pass() {
+    // THREE_TREES.md 11.4, finding 1. `run = c => { let f = p => ext(p, p); return c ? f(1) : 2 }`.
+    use crate::lambda::LamLoc;
+    let build = |a: &mut LamArena| {
+        let (f, p, c) = (Ident::new("f", 10, IdentFlags::NONE), Ident::new("p", 11, IdentFlags::NONE), Ident::new("c", 12, IdentFlags::NONE));
+        let ext = a.var(Ident::new("ext", 13, IdentFlags::NONE));
+        let (p1, p2) = (a.var(p), a.var(p));
+        let body = call(a, ext, &[p1, p2]);
+        let function = a.function_(1, &[p], body, Default::default(), LamLoc::NONE);
+        let one = a.const_(C::Int { i: 1, comment: None });
+        let two = a.const_(C::Int { i: 2, comment: None });
+        let callee = a.var(f);
+        let applied = call(a, callee, &[one]);
+        let test = a.var(c);
+        let branch = a.if_(test, applied, two);
+        let inner = a.let_(LetKind::Strict, f, function, branch);
+        a.function_(1, &[c], inner, Default::default(), LamLoc::NONE)
+    };
+    // The lowering hands over one `return` of a conditional: no block ends
+    // in `return f(1)`.
+    assert!(legacy_text(build, &[]).contains("  return c ? f(1) : 2;\n"));
+    // The flatten pass splits it; the tail-call pass then finds the site.
+    let legacy = legacy_text(build, &[1, 3, 5, 6]);
+    assert!(legacy.contains("  if (c) {\n    return ext(1, 1);\n  } else {\n    return 2;\n  }\n"), "{legacy}");
+    assert!(!legacy.contains("let f"));
+    // Deciding on the shape the lowering wrote keeps the function.
+    let early = legacy_text(build, &[3, 1, 5, 6]);
+    assert!(early.contains("  let f = p => ext(p, p);\n  if (c) {\n    return f(1);\n"), "{early}");
+}
+
+#[test]
+fn inlining_from_an_outer_scope_takes_the_last_use_of_a_variable_of_a_closed_scope() {
+    // THREE_TREES.md 11.4, finding 3 (late zero).
+    // `run = () => { let f = p => 1; return () => { let y = ext(); return f(y) } }`.
+    use crate::lambda::LamLoc;
+    let build = |a: &mut LamArena| {
+        let (f, p, y) = (Ident::new("f", 10, IdentFlags::NONE), Ident::new("p", 11, IdentFlags::NONE), Ident::new("y", 12, IdentFlags::NONE));
+        let one = a.const_(C::Int { i: 1, comment: None });
+        let function = a.function_(1, &[p], one, Default::default(), LamLoc::NONE);
+        let ext = a.var(Ident::new("ext", 13, IdentFlags::NONE));
+        let value = call(a, ext, &[]);
+        let callee = a.var(f);
+        let arg = a.var(y);
+        let applied = call(a, callee, &[arg]);
+        let body = a.let_(LetKind::Strict, y, value, applied);
+        let inner = a.function_(0, &[], body, Default::default(), LamLoc::NONE);
+        let outer = a.let_(LetKind::Strict, f, function, inner);
+        a.function_(0, &[], outer, Default::default(), LamLoc::NONE)
+    };
+    assert!(legacy_text(build, &[]).contains("    let y = ext();\n    return f(y);\n"));
+    // `p` is renamed to `y` and the body never reads it: the dead marks, which
+    // run after every inlining, turn `let y = ext()` into `ext()`.
+    let legacy = legacy_text(build, &[1, 3, 5, 6]);
+    assert!(legacy.contains("  return () => {\n    ext();\n    return 1;\n  };\n"), "{legacy}");
+    // When the inner function's statements are complete, `y` has one use.
+    let mut a = LamArena::new();
+    let root = build(&mut a);
+    let input = bridge::import_lambda(&a, root).unwrap();
+    let source_root = input.root;
+    let mut state = State::new(input);
+    let probed = state.probe(Cx::value(), source_root).unwrap();
+    let lowered = state.complete(Cx::value(), probed);
+    let y = lowered.program.idents.iter().position(|ident| ident.name() == "y").unwrap();
+    let uses = lowered.program.arena.js_scope.as_ref().unwrap().uses[y];
+    assert_eq!((uses.built, uses.remaining), (1, 1));
+}
+
+#[test]
+fn a_declaration_the_tail_call_pass_finds_dead_is_not_materialised() {
+    // THREE_TREES.md 11.4, finding 5. `run = () => { let x = (ext(1), ext(2)); 3 }`.
+    use crate::lambda::{LamLoc, TagInfo};
+    use crate::lambda::lam_primitive::{Primitive, Mutable};
+    let build = |a: &mut LamArena| {
+        let x = Ident::new("x", 10, IdentFlags::NONE);
+        let ext = Ident::new("ext", 13, IdentFlags::NONE);
+        let one = a.const_(C::Int { i: 1, comment: None });
+        let two = a.const_(C::Int { i: 2, comment: None });
+        let (e1, e2) = (a.var(ext), a.var(ext));
+        let first = call(a, e1, &[one]);
+        let second = call(a, e2, &[two]);
+        let block = a.prim_raw(Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable), &[first, second], LamLoc::NONE);
+        let three = a.const_(C::Int { i: 3, comment: None });
+        let body = a.let_(LetKind::Strict, x, block, three);
+        a.function_(0, &[], body, Default::default(), LamLoc::NONE)
+    };
+    // The tail-call pass counts no use of `x` and turns the declaration into
+    // an expression statement before the substitution sees a block binding.
+    let legacy = legacy_text(build, &[1, 3, 5, 6]);
+    assert!(legacy.contains("  [\n    ext(1),\n    ext(2)\n  ];\n  return 3;\n"), "{legacy}");
+    // Materialising where the declaration is lowered hoists the fields.
+    let early = legacy_text(build, &[1, 5, 6]);
+    assert!(early.contains("  let x_0 = ext(1);\n  let x_1 = ext(2);\n  return 3;\n"), "{early}");
+}
+
 #[test]
 fn export_tuple_occurrences_are_not_the_tailcall_pass_input_counts() {
     // T4b count experiment, reduced from Dom_storage.getItem: the output

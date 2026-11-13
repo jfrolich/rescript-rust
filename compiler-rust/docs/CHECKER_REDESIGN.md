@@ -4350,7 +4350,7 @@ deletes the old one is named.
 | W11 | The world outlives a build in watch mode | 800 | W7 | no | 0 on a clean build | 0 |
 
 Merged: W1 (#173), W2 (#180), W3 (#188), W4 for unit paths (#196) and part
-of W5 (#208); see "W4 as built" and "W5 as built" below.
+of W5 (#208); see "W4 as built", "W5 as built" and "W5b as built" below.
 
 #### W1. Determinism gate and world counters
 
@@ -4851,6 +4851,286 @@ the application's 8-worker count is below its own one-worker count on the
 head was not explained (two runs, 0.3% apart). The one-worker cost is
 owed by W6 (the store-build tests on local reads are 0.69% of
 `tests/tests`, J.1) and by sharing view items without a copy.
+
+##### W5b design: a world answer for the three kinds of path that are left
+
+Written before the code of the slice that finishes W5; "W5b as built"
+below records where the code ended up.
+
+**The three kinds are two.** OCaml builds the components of a module path
+from `scrape_alias env mty` (env.ml:1516-1518, 1435-1446):
+
+| Kind | What `scrape_alias` does | So the components are |
+| --- | --- | --- |
+| An alias whose target is not a unit (`module X = Other.Sub`, a sibling alias `module B = A`) | `find_module target`, then `Mtype.strengthen ~aliasable:true` against the target | the target's signature, strengthened against the target's path and prefixed with the alias's path |
+| A structure child `C` of an alias view `A` whose source is `S` | `A`'s signature is `S`'s strengthened with `~aliasable:true`, and that turns a child that is not an alias into `Mty_alias (Mta_present, S.C)` (mtype.ml:93-97). The child is therefore the first kind with target `S.C` | the same, with target `S.C` |
+| A child whose type is a module type name (`module N: S`) | `Mty_ident` is expanded to the module type's signature (env.ml:1437-1439); nothing is strengthened | the expansion of `S`, prefixed like a child declared with that signature |
+
+The first two are one kind: **the view of path `P` is a function of the
+view of its target path `T`**. W5 built that function for a target that is
+a unit (`ViewKey::Alias`, through
+`QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix`
+with the unit's signature and the unit's path as source). The same function
+applied to the signature and access path of any other view is the general
+case: a view's signature already names its own items through its access
+path, which is what the function re-roots and strengthens against.
+
+The store build of these paths reached the target through the compilation
+(`lookup_module_in_resolved_path`, `Env::resolve_module_type` against the
+seed environment, the registry of alias rewrites). Nothing in the result
+needs a compilation: the target of a path a unit's signature declares is,
+after the parent's component substitution, a path rooted in a persistent
+unit, and every such path has a view by induction on the alias chain.
+
+**What the world owns.**
+
+1. *Target resolution.* `ModuleView::alias_targets` already holds the
+   substituted target of every child that is a path. The world resolves a
+   persistent-rooted module path to a view with these steps, none of which
+   reads a compilation: a persistent identifier is its unit's view; `p.name`
+   is the child `name` of the view of `p`, which is a `Child` view when the
+   parent view is not an alias view and declares it with a signature, and
+   otherwise an alias view whose target is the view of (a) the child's
+   substituted target path when it is declared as a path, or (b) `S.name`
+   when the parent is an alias view with source `S`. The chain ends because
+   each step either descends into a declared signature or follows a
+   declared alias, and a cycle of aliases is not typable. A resolution that
+   meets a functor, a module type name it cannot expand, a unit the world
+   does not own or a failed cell has no view; the path is then built for
+   the compilation, like any path the world does not cover, never as a
+   store build.
+2. *Units.* The world does not load units: which unit a name denotes, and
+   whether a compilation may see it, are facts of the compilation's load
+   path. The resolver therefore runs on the adopting compilation's thread
+   and asks it for each unit (`find_pers_struct`, the load the store build
+   made); everything else it reads is world data. The cell of an alias
+   view holds the view built for the target the first compilation
+   resolved; a compilation whose own resolution ends in another view (two
+   packages with a unit of the same name) builds its tables for itself,
+   as W5 does for an alias of a unit.
+3. *Alias sources and flattened backing sources.* The registry answered
+   "which paths is this component path an alias of" from what the
+   compilation had loaded. In the world it is a field of the view: its
+   target's access path, followed by the target's own sources. That is the
+   declared source and every backing path, in chain order, for every
+   compilation. `adopt_view` registers them while the registration tables
+   exist; their readers read the adopted view when the tables are deleted.
+4. *Forced child declarations.* One per cell and build (`ViewCell::decl`),
+   as for the kinds W5 moved. A structure child of an alias view forced the
+   source's child declaration in the adopting compilation; the only
+   consumers of that effect were the tables of other paths looking for a
+   declaration forced "first" (`lookup_qualified_module_shared_inner`), and
+   a world view answers from its own cell. Nothing is owed on adoption.
+5. *Module type expansion* (third kind). The expansion of a module type
+   path is found without a compilation: a local identifier is an item of
+   the parent's declared signature or of an ancestor's (the parent links);
+   a dotted path is the module type table of the view its prefix resolves
+   to. The result is a signature and nothing else; a module type that is
+   abstract or a functor type has no components.
+
+**What a view of each kind contains.** No new table. An alias view of any
+target has what an alias view of a unit has: `signature` (the target's,
+re-rooted and strengthened), the lookup tables and opened items described
+from it, `source` (now the target view and its access path, not a unit)
+and `parent`. A view of the third kind is a `Child` view whose declared
+signature is the expansion instead of the item's own. New fields: the
+chain of sources (point 3) and the target view, which is what `nested`
+means for an alias view (parent and target).
+
+**What adoption does.** `adopt_view(view)`: adopt the parent (as today);
+adopt the target, which loads the units on the target's chain in this
+compilation and so records the imports the store build recorded
+(`PreparePers`); take the signature rename of the unit a chain ends in, as
+W5 does for an alias of a unit; register the view's alias pairs and its
+source chain. Linear in the views adopted, once per compilation and view:
+a view that is held is one probe.
+
+**Keys.** `ViewKey::Alias` carries the target view instead of the unit;
+an alias of a unit passes the unit's view. The cell is the child's cell in
+the parent, as before. A structure child of an alias view and a declared
+alias both arrive there; which one it is, is read from the parent
+(`world_child_kind`).
+
+**The store builds beside views.** When every child kind that has
+components is a view, what a worker keeps per view (`env_lazy::ViewTables`)
+is needed only for the layer tables of `open` and for children without
+components of their own (functors). The scan that seeds child tables with
+an environment is then needed for no world path. The layer tables hold no
+type node and are built outside a store build; a functor child's result is
+instantiated for the compilation.
+
+**Order.** (1) the alias key with a view as target, moving non-unit
+aliases; (2) structure children of alias views; (3) module type names;
+(4) `ViewTables` without store builds; (5) the deletions of the W5 row;
+(6) a link's build proportional to its own declarations; (7) view items
+shared without a copy. If a kind cannot be moved, the slice stops there
+and deletes nothing that kind needs.
+
+##### W5b as built: what is done, what the design got wrong, and what is left
+
+**W5b ends here, on purpose short of the row.** Built: every
+persistent-rooted path with components is a world view on `tests/tests`
+and on the application, and no store build starts. Deleted: what follows
+from that (step 5 below). Three things of the row stay as they are: the
+registration tables, a link's build that copies what is declared below it
+(the chain test stays at depth 500), and the copy of every view item. They
+were dropped from the slice when a design for a rewritten checker arrived
+(`compiler-rust/docs/CHECKER_REWRITE.md`, section 3.6, on the branch
+`checker-rewrite-design` when this was written) that replaces
+`TypeContext`, `types/env_lazy.rs` and `types/module_view.rs` whole: more
+edits to those files are work the rewrite deletes.
+
+| Step of the design's order | State |
+| --- | --- |
+| (1) The alias key with a view as target | Done (`AliasTarget::{Unit, View}`, `resolve_alias_target` in `types/typecore.rs`). `adopt_view` adopts the target as well as the parent |
+| (2) Structure children of alias views | Done: an alias of the source's child, as mtype.ml:93-97 makes it |
+| (3) Module type names | Done for a name the view's own unit binds (`ModuleView::expansions`, `expand_modtype_name`). Not done: a module type declared in another unit (its prefix is another view); such a child, like a functor, has its tables built for the compilation |
+| (4) `ViewTables` without store builds | Done. The scan and the opened layers run outside a store build and create no type node (a debug assertion). A child without a view is marked `StoredModuleComponents::of_view`: its tables and a functor result are built for the compilation that asks and kept in the compilation, never in the worker's shell |
+| (5) The deletions of the W5 row | Part. Deleted: `ThreadTypeStore::{shared_components, publish_shared_components}`, the worker-shared branch of `with_resolved_module_components_for_path_with_cache_mode`, `shared_components_enabled`, `RESCRIPT_NO_SHARED_COMPONENTS`, `StoreEffect::{RegisterComponents, RegisterAliasSource, RegisterQualifiedModuleDecl, TriggerRename, AdoptView}`, `make_private`, the `store_views` view counters. **Not deleted:** `component_alias_sources`, `component_paths_by_alias_source`, `qualified_module_decl_cache` and their `register_*` functions |
+| (6) A link's build proportional to its own declarations | Dropped (the rewrite replaces the file). The depth test is still 500 |
+| (7) View items shared without a copy | Dropped (the rewrite replaces the file). `world_view_nodes` still reports `shared=0`, and the one-worker cost on `tests/tests` (+0.089% for the code) is not repaid |
+
+Why the registration tables stay: the tables of local module paths
+register into them and read them too (`new_with_child_components_arc_and_value_source_prefix_inner`,
+`force_component_module_declaration_thunk`, `build_module_signature_for_path`),
+and `component_paths_for_alias_source` is a reverse lookup (source to
+component paths) that adopted views have no index for. Deleting the fields
+means giving each of the four readers a form that consults the adopted
+views and a table of local registrations; that is a change to every reader
+with its own output gate, and it was not started. `build_private_unit_components`
+stays: a unit loaded from disk, or met when the pool is full, is not the
+world's.
+
+What the design and the checkpoint before it got wrong:
+
+| The text said | The code |
+| --- | --- |
+| "No new table" for the views of the three kinds | Two fields were needed. `item_root`: trunk's alias views put the items of a child module of the scraped signature at the parent's root and the child's name *without* a runtime position (`dotted_from_ident(.., NOPOS)` in `new_with_child_components_arc_and_value_source_prefix_inner`), where OCaml's `prefix_idents` keeps the position. A child of an alias view built as an alias of the source's child put them at its access path, and the canonical signature of `world_alias_use.res` printed `Sub@0.t` where trunk prints `Sub.t`. Nothing compares or emits the position of a type path (`Path::same`), but the comparison gate does, so the view keeps trunk's spelling. And `expansions`, by ordinal, for children declared with a module type name |
+| A module type named by a local identifier is found in the parent's declared signature | A unit's signature names its own module types through the unit's path (`Unit.S`), not by identifier. The expansion matches a dotted name whose prefix is the access path of the view or of an ancestor, by name, latest declaration first, and an identifier by identity |
+| The store builds beside views are scans, opened layers and functor results | On the application most were none of these: 7,851 of 10,881 were lookups of a path that has no components (the build returned nothing, inside a store build that published nothing). They run for the compilation now |
+| `store_views` and `store_replay` lines show the end state | The view counters of `store_views` had no writer left and are deleted; the `store_pieces` and `store_replay` lines print only when a store build ran or a piece was replayed, so "no replay line" is the check |
+| The full `cargo test` failures of the checkpoint come from this branch | Five tests fail on trunk in the same way when the `types::` tests run together in one process and pass alone: four of `types::module_view` (`shared type index refers to an unpublished page`: another test starts a build and replaces the world) and `thread_store::store_lease_is_exclusive_and_reused`. They are a test-isolation defect of trunk, not changed here |
+
+What the review of the checkpoint commit (fdc28d6b7f) kept and redid:
+
+- Kept: `AliasTarget`, `resolve_alias_target`, the classification of a
+  structure child of an alias view and of a declared alias of a path in
+  `world_child_kind`, transitive adoption of the target, re-rooting a
+  value's type through every source of the chain (an alias view's
+  signature keeps its values as the target has them, so a view two aliases
+  away from a unit still names the unit), the two unit tests and the four
+  `world_alias_*` fixtures.
+- Redone: where the items of a child of an alias view are put (`item_root`,
+  above), which was the `Sub.t` against `Sub@0.t` difference.
+- Left as it is and owed: describing a value of an alias view rewrites it
+  once per source in its chain, through a one-item signature slice
+  (`describe_tables`). It was one rewrite per value before; sharing view
+  items without a copy (step 7) removes both.
+
+Measured on x86-64 Linux, 8 cores. Base is trunk 7e1dbc2bd0, head is this
+slice; both built as CI builds them (the release profile: fat LTO, one
+codegen unit). Instruction counts are cachegrind's. The `tests/tests`
+one-worker rows are `scripts/compare_build_instructions.py`, smallest of
+3 runs; the application rows are one run each.
+
+| Quantity | Base | Head |
+| --- | --- | --- |
+| World views built, application, 1 worker / 8 | 4,270 / 4,270 | 4,416 / 4,416 |
+| Store-built views, distinct / builds at 1 worker / at 8 | 103 / 108 / 421 | 0 / 0 / 0 |
+| Store builds, application, 1 worker / 8 | 20,033 / 22,107 | 0 / 0 |
+| Pieces replayed, application, 1 worker / 8 | 4,563 / 3,972 | 0 / 0 (no replay line) |
+| Copied view nodes, application | 377,407 | 410,797 |
+| `tests/tests`: world views / store builds, 1 worker and 8 | 359 / 273 before the slice's last three commits | 360 / 0 |
+| Component views built for `Papply` paths, application / `tests/tests` | 69 / 3 | 69 / 3 |
+| Instructions, `tests/tests`, 1 worker, as CI counts (738 modules against 742: the head has four fixture modules more) | 4,062.8 M | 4,071.9 M (+0.224%) |
+| Instructions, `tests/tests`, 1 worker, the four fixtures on both sides | 4,068.7 M | 4,072.3 M (+0.089%) |
+| Instructions, `tests/tests`, 8 workers, the four fixtures on both sides (smaller of 2) | 4,076.9 M | 4,082.4 M (+0.13%) |
+| Instructions, application, 1 worker | 67,701.4 M | 67,618.8 M (-0.12%) |
+| Instructions, application, 8 workers | 66,978.5 M | 66,877.7 M (-0.15%) |
+| 8 workers minus 1 worker, application | -723.0 M | -741.1 M |
+| Peak memory, application, 8 workers, 6 interleaved runs: mean (smallest to largest) | 1,111.3 MB (1,089.5 to 1,125.6) | 1,110.0 MB (1,082.4 to 1,138.2) |
+| Peak memory, application, 1 worker, 6 interleaved runs: mean (smallest to largest) | 795.3 MB (786.4 to 800.5) | 803.5 MB (795.5 to 814.9) |
+
+On the application the slice executes fewer instructions with one worker
+and with eight; the fall is small (0.12% and 0.15%) because the first half
+had already moved all but 103 views. On `tests/tests` it costs
+instructions with one worker and with eight (+0.09% and +0.13% for the
+code; the rest of CI's +0.224% is the four fixture modules): a project
+with few shared views pays for whole views of the children of alias
+views, 146 more views on the application with every name described, and
+gets nothing back. That cost is the one "sharing without a copy" (step 7)
+removes, and W6 removes the store-build tests on local reads (0.69% of
+`tests/tests`, J.1). The 8-worker count of the application was already
+below its one-worker count on the base (J.1's 1.85 G difference was gone
+after the first half); that is still unexplained. Peak memory with 8
+workers is unchanged in the mean; single runs differ by up to 25 MB on
+either side, so the per-run rule cannot be read from six runs. With one
+worker the mean rises by 8.2 MB. Its source was not measured with a heap
+profile; the counters show 146 more views holding 33,390 more copied
+nodes and 2,719 more signature items.
+
+`RESCRIPT_WORLD_VERIFY=1` passes on `tests/tests` and on the application
+with 8 workers. `scripts/compare_checker_builds.py` between trunk and the
+head reports no difference in signatures, diagnostics or JavaScript on
+both projects, and `scripts/test_worker_determinism.py` exits 0 on both.
+
+Added after the first report of the slice: `super_errors_multi` fixtures
+for the three kinds (`Cross_alias_of_nested_module_type`,
+`Cross_child_of_alias_type`, `Cross_child_of_module_type_name`, expectations
+from the reference compiler). The third one failed on trunk and on the
+branch alike: path normalization took a child declared with a module type
+name for an alias of that name (`find_module_alias_in_components` asked for
+module type paths too), so an error printed `Dep.N.t (defined as Dep.S.t)`.
+Fixed in `TypeContext::find_module_alias_in_components`. And
+`expand_modtype_name` scanned every module type item per child; the
+signature index now maps a module type name to its item
+(`expanding_module_type_names_costs_two_probes_per_child`, 10,000 children).
+`resolve_alias_target` has a step count too
+(`resolving_a_chain_of_aliases_costs_two_steps_per_link`, a chain of
+10,000 aliases: two steps per link, each view built once).
+
+Who reads the registration tables, measured (a probe at each reader, the
+application, 8 workers; not committed):
+
+| Reader | Calls | With an answer |
+| --- | --- | --- |
+| `alias_sources_for_component_path` from `component_alias_sources` (`cmi/persistent_env.rs`) | 37,246 | 8,531 |
+| the same from `typecore.rs` (`rewrite_flattened_alias_child_prefixes`), `typemod.rs` (two sites), `env_lazy.rs` | 563 | 18 |
+| `component_paths_for_alias_source` (`build_module_signature_for_path`, `env_lazy.rs`) | 7,305 | 0 |
+| `has_component_paths_for_alias_source` (`flattened_alias_component_parent`) | 121 | 1 |
+| `find_qualified_module_decl` past its test for a persistent or global head | 0 | 0 |
+
+So on the application the forward table is what is read; the reverse table
+answers once; the declaration table is written for every forced child of a
+view and never read (its readers are the tables a compilation builds for
+itself, and none was built for a persistent path). What a deletion has to
+keep, and why it was not made here: (a) a pair a view registers carries
+"flattened backing sources" computed from the alias rewrites the adopting
+compilation has loaded when it adopts (`flattened_backing_sources_for_alias_source`),
+so the forward answer is not yet a function of the view; (b) the reverse
+question (which component paths are aliases of this source) has no answer
+in a view: it needs an index over the views one compilation adopted, in
+adoption order, which is the table under another name; (c) the tables of a
+persistent path that a compilation builds for itself (a key scoped to an
+environment, a unit the world does not own, a view the pool had no room
+for) read what views registered, and no fixture reaches those paths.
+
+What the next slices start from:
+
+1. The registration tables (above) are the one deletion of the W5 row that
+   is open, and stay until the rewrite removes `TypeContext`. W6's list names `local_stored_components` and
+   `StoredModuleComponents::in_store` for deletion; `local_stored_components`
+   now holds the per-compilation tables of a view's child that has no view
+   (`of_view`) and must stay, keyed by `local_id` (a process-wide counter,
+   so a hash map: there is no dense per-compilation index).
+2. `Piece` and `PreparePers` are the two effect kinds left; nothing records
+   them. Every caller of `build_in_store` that is left sits behind an
+   `in_store` flag that is never set (`store_build_active()` is never
+   true), which is W6's deletion.
+3. Steps (6) and (7) are not owed by a later slice of this plan: the
+   rewrite replaces the files. Until then a chain of child views is
+   quadratic in its depth, a value of an alias view is rewritten once per
+   alias view in its target's chain, and every view item is copied.
 
 #### W6. Delete store builds
 
