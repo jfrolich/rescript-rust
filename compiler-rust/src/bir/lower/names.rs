@@ -5,9 +5,8 @@
 //! compiler/ext/ext_pp_scope.ml: add_ident, merge, sub_scope); that pass
 //! stays the oracle.
 //!
-//! Skeleton: the types, their sizes and the acceptance tests. The bodies
-//! marked `todo!("T5 build")` and the calls from the lowering are the build
-//! (THREE_TREES 11.7). The module is compiled for tests only until then.
+//! The lowering does not call the log yet (THREE_TREES 11.7, step 4); the
+//! module is compiled for tests only until then.
 use crate::bir::{FuncId, NodeId, VarId, VarTable};
 
 /// What an event names. The discriminant is the low three bits of
@@ -59,6 +58,14 @@ impl Event {
     /// Constant.
     pub(crate) fn payload(self) -> u32 {
         self.bits >> 3
+    }
+    /// The variable of a `Declare` or `Binder`. Constant.
+    pub(crate) fn var(self) -> VarId {
+        VarId(self.payload())
+    }
+    /// The function of a `Params`. Constant.
+    pub(crate) fn function(self) -> FuncId {
+        FuncId(self.payload())
     }
 }
 
@@ -293,7 +300,6 @@ mod tests {
     const S: NodeId = NodeId(0);
 
     #[test]
-    #[ignore = "T5 build"]
     fn a_local_takes_the_name_of_an_outer_variable_the_function_does_not_capture() {
         // Section 2, first hard example:
         // `let y = ext(2); let k = a => { let y = ext(a); y + 1 };
@@ -332,7 +338,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5 build"]
     fn a_loop_variable_is_named_before_the_declarations_of_its_body() {
         // `for i ... { let i = ... }`: the loop variable is `i`, the
         // declaration in the body `i$1` (loops continue their scope).
@@ -345,7 +350,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5 build"]
     fn a_removed_declaration_takes_its_event_with_it() {
         // Section 2, second hard example: `let x = ...` removed, then
         // another `x`: the survivor prints as `x`.
@@ -360,7 +364,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5 build"]
     fn two_variables_first_named_by_one_reservation_are_named_in_order() {
         // Section 2, third hard example: `v` (order 2) and `v` (order 1)
         // are both first named by the reservation of `f`, which reads the
@@ -381,7 +384,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5 build"]
     fn ten_thousand_declarations_are_logged_and_replayed_in_one_step_each() {
         let names: Vec<String> = (0..10_000).map(|index| format!("v{index}")).collect();
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
@@ -404,7 +406,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5 build"]
     fn ten_thousand_nested_functions_cost_a_constant_number_of_steps_each() {
         // `f0 = () => { let f1 = () => { ... x ... } }`: every function
         // declares the next and the innermost reads the outermost `x`, so

@@ -656,10 +656,78 @@ pub(crate) struct ProgramNames<'a> {
 }
 
 /// The pass's group and suffix tables, kept between replays so that a
-/// replay with warm tables allocates nothing.
+/// replay with warm tables allocates nothing; with them the reservation of
+/// one function and the stamp-zero bases the program scope reserved (its
+/// stamped names are in its `assigned`), which `Names::reset` empties.
 #[cfg(test)]
 #[derive(Default)]
-pub(crate) struct ReplayTables(Names);
+pub(crate) struct ReplayTables {
+    names: Names,
+    reservation: Vec<Ident>,
+    zero: Vec<Name>,
+}
+
+#[cfg(test)]
+impl Names {
+    /// Empty the tables for another unit without releasing their storage:
+    /// the program scope's groups stay, emptied in place (a group the
+    /// tables own alone is edited without a copy), so a replay that names
+    /// what an earlier one named allocates nothing. Cost: one removal per
+    /// name the previous replay assigned in the program scope.
+    fn reset(&mut self, zero: &mut Vec<Name>, budget: usize) {
+        self.scopes.truncate(1);
+        if self.scopes.is_empty() {
+            self.scopes.push(Scope::default());
+        }
+        let root = &mut self.scopes[0];
+        for id in root.assigned.drain(..) {
+            let (Some(base), Some(name)) = (self.converted.get(&id.name_atom()), self.visible.get(&id)) else { continue };
+            if let Some(group) = root.groups.get_mut(base) {
+                group.stamps.remove(&id.stamp());
+                group.used.remove(name);
+            }
+        }
+        for base in zero.drain(..) {
+            if let Some(group) = root.groups.get_mut(&base)
+                && let Some(name) = group.stamps.remove(&0)
+            {
+                group.used.remove(&name);
+            }
+        }
+        for group in root.groups.values_mut() {
+            group.next = 0;
+        }
+        root.previous_groups.clear();
+        self.printed.clear();
+        self.finishes.clear();
+        self.visible.clear();
+        self.raw.clear();
+        self.free.clear();
+        self.method_this.clear();
+        self.steps = 0;
+        self.budget = budget;
+    }
+
+    /// `add`, returning the name. One hash lookup more.
+    fn add_named(&mut self, id: Ident) -> Result<Name, Unsupported> {
+        self.add(id, false)?;
+        Ok(self.printed[&id])
+    }
+
+    /// `reserve`, remembering the stamp-zero bases the program scope
+    /// reserves for `reset`.
+    fn reserve_replayed(&mut self, ids: &[Ident], zero: &mut Vec<Name>) -> Result<(), Unsupported> {
+        if self.scopes.len() == 1 {
+            for id in ids {
+                if id.stamp() == 0 {
+                    let base = self.base(*id);
+                    zero.push(base);
+                }
+            }
+        }
+        self.reserve(ids)
+    }
+}
 
 /// The names of the replay against the names of the pass, by identifier.
 #[cfg(test)]
@@ -698,8 +766,88 @@ pub(crate) fn replay(
     live: impl Fn(crate::bir::NodeId) -> bool,
     printed: &mut [Option<Name>],
 ) -> Result<usize, Unsupported> {
-    let _ = (&mut tables.0, log, vars, idents, program.imports, program.reservations, program.exports, &live, printed);
-    todo!("T5 build")
+    use crate::bir::lower::names::EventKind;
+    let ReplayTables { names, reservation, zero } = tables;
+    let events = &log.events;
+    let budget = 64 * (events.len() + log.free.len() + program.imports.len() + program.reservations.len() + program.exports.len() + 1);
+    names.reset(zero, budget);
+    let ident = |var: crate::bir::VarId| idents[vars.origin(var).index()];
+    for id in program.imports {
+        names.add(*id, true)?;
+    }
+    names.reserve_replayed(program.reservations, zero)?;
+    let mut steps = 0;
+    // The `Declare` of a function declaration's binder, named at its `Enter`.
+    let mut named_binder = usize::MAX;
+    let mut at = 0;
+    while at < events.len() {
+        let event = events[at];
+        steps += 1;
+        match event.kind() {
+            EventKind::Declare | EventKind::Binder => {
+                if at != named_binder && live(event.statement) {
+                    let var = event.var();
+                    printed[var.index()] = Some(names.add_named(ident(var))?);
+                }
+            }
+            EventKind::Enter if !live(event.statement) => {
+                // The function's events leave with its statement.
+                let mut depth = 0usize;
+                loop {
+                    match events[at].kind() {
+                        EventKind::Enter => depth += 1,
+                        EventKind::Leave => depth -= 1,
+                        _ => {}
+                    }
+                    if depth == 0 {
+                        break;
+                    }
+                    at += 1;
+                    steps += 1;
+                }
+            }
+            EventKind::Enter => {
+                // naming.rs `function`: the free variables and the binder,
+                // in `Ident`'s order, are reserved; the binder is named; the
+                // scope inherits the groups of exactly those bases.
+                let free = log.free_variables(event.payload());
+                steps += free.len();
+                reservation.clear();
+                reservation.extend(free.iter().map(|&var| ident(var)));
+                let binder = events.get(at + 2).filter(|declare| {
+                    declare.kind() == EventKind::Declare && declare.statement == event.statement
+                });
+                let binder = binder.map(|declare| declare.var());
+                if let Some(var) = binder {
+                    let id = ident(var);
+                    if let Err(position) = reservation.binary_search(&id) {
+                        reservation.insert(position, id);
+                    }
+                    named_binder = at + 2;
+                }
+                names.reserve_replayed(reservation, zero)?;
+                for &var in free {
+                    printed[var.index()] = Some(names.printed.get(&ident(var)).copied().unwrap_or_else(|| ident(var).name_atom()));
+                }
+                if let Some(var) = binder {
+                    printed[var.index()] = Some(names.add_named(ident(var))?);
+                }
+                names.enter(reservation)?;
+            }
+            EventKind::Params => {
+                let function = event.function();
+                for var in vars.parameters(function) {
+                    printed[var.index()] = Some(names.add_named(ident(var))?);
+                }
+            }
+            EventKind::Leave => names.leave(),
+        }
+        at += 1;
+    }
+    for id in program.exports {
+        names.add(*id, false)?;
+    }
+    Ok(steps)
 }
 
 /// Check mode: the names of a replay against `Names::collect` on
