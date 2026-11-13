@@ -2024,8 +2024,9 @@ into recursive clusters (`raw_lambda/lambda_scc.rs`, A.2).
    | a `Pmakeblock` of a record, an inline record with one non-constant constructor, or a constructor with one non-constant constructor, whose arguments are each a constant or a variable that is the member itself or not another member of the group (`compile_recursive_self_binding_makeblock` (C:2293)) | `let id = <dummy>` (kind `Variable`), then one field assignment per argument, in order (`compile_set_field` (K:246)) | none |
    | any other `Pmakeblock` | the statements of `V(value)`, then `Primitive_object.updateDummy(id, value)` | `let id = <dummy>` (kind `Variable`) |
 
-   The dummy is `[]` for an array record, a tuple and a module block, `{}`
-   otherwise (`recursive_dummy_object_expr` (C:2345)).
+   The dummy is `[]` for an array record, a tuple and a `ModuleExport` block;
+   it is `{}` for `Module` and the other object-shaped tags
+   (`recursive_dummy_object_expr` (C:2345)).
 4. The placeholders of all members are put in front of the group's
    statements, in group order.
 5. Then the body, in the continuation of the `LetRec` (3.4 for the legacy

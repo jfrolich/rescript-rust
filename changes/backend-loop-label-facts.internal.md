@@ -1,1 +1,1 @@
-- Record loop-label requirements with backend IR control facts, including construction, import, edit repair, and independent validation.
+- Lower loops and mixed recursive value/function groups to the backend IR, with construction-time loop control facts and oracle coverage.

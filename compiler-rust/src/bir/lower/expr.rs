@@ -124,7 +124,7 @@ impl State {
         child: Probed,
     ) -> Probed {
         if let Resume::Loop(frame) = resume { return self.loop_child(cx, *frame, index, child); }
-        if let Resume::Rec(group) = resume { return self.recursive_child(*group, index, child); }
+        if let Resume::Rec(group) = resume { return self.recursive_child(cx, *group, index, child); }
         if let Resume::Try(frame) = resume { return self.try_child(cx, *frame, index, child); }
         if let Resume::If(conditional) = resume {
             return self.conditional_child(cx, conditional, index, child);

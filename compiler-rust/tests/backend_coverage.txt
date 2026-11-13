@@ -103,28 +103,23 @@
   },
   "lower": {
     "fixtures": {
-      "identical": 519,
+      "identical": 593,
       "shared_catch_only": 0,
       "units": 593,
-      "unsupported": {
-        "loop": 74
-      }
+      "unsupported": {}
     },
     "runtime": {
-      "identical": 103,
+      "identical": 113,
       "shared_catch_only": 0,
       "units": 113,
-      "unsupported": {
-        "loop": 10
-      }
+      "unsupported": {}
     },
     "tests/tests": {
-      "identical": 668,
+      "identical": 730,
       "shared_catch_only": 1,
       "units": 732,
       "unsupported": {
-        "let rec": 13,
-        "loop": 50,
+        "loop label under a re-lowered conditional": 1,
         "shared Lambda subtree with binder": 1
       }
     }
