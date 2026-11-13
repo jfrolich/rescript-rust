@@ -1583,10 +1583,122 @@ on: the new side without pass 2 prints what the legacy side prints with
 it); steps at 10,000 references, at 10,000 bindings and at depth 10,000,
 zero allocations on a second decision, sizes (`globals.rs`).
 
-Not done: the instruction counts (check build and default build, before
-and after) were not measured; the hazard of (a) (a module whose last
-reference only P1 drops) has no test; `SForRangeExisting` is covered by
-reading only. These are in the build prompt.
+Not done in part A: the instruction counts, the test of the hazard of (a)
+and a rule test for `SForRangeExisting`; all three are done in "T5 as
+built: part B".
+
+#### T5 as built: part B (stopped at step 4: two design gaps)
+
+Built, at the skeleton's signatures, costs, sizes and tests (11.7 steps 1
+to 3): `Log::declare`, `binder`, `reference`, `enter` and `leave`
+(`bir/lower/names.rs`); `emit::naming::replay` through the pass's `Names`
+tables; `emit::naming::compare_with_pass`. The eight tests of the log and
+the comparison test pass. To meet the signatures of `enter` and `replay`,
+which read a function's parameters from `&VarTable`, the function headers
+and the tail-call rewrite's indirect parameter runs moved from `Pools` to
+`VarTable` (one owner; `Bir::function` reads the same storage). The warm
+replay is allocation-free for declarations: `Names::reset` empties the
+program scope's groups in place (a group is a persistent map, so dropping
+and recreating one allocates).
+
+Not built: step 4 (the lowering logs) and step 5 (check mode), because of
+the two gaps below; the module, `replay` and `compare_with_pass` are still
+compiled for tests only, and no corpus was compared. The printer shape tests
+of step 5 (`prints_declaration`, `omitted_expression`, `else_omitted`,
+`tail_effect`, the eta form) were not placed for the same reason.
+
+**Gap 1: one membership bit and one bound bit per variable do not give the
+free variables of a function nested in a function.** The bits are set by
+the innermost open scope and cleared through its run at its close, so the
+bits an enclosing *function* set are still set while an inner function is
+open. A reference in the inner function to a variable the enclosing
+function referenced or declared finds its membership bit set and is not
+added to the inner run; a reference to a parameter of the enclosing
+function finds the bound bit `enter` set and is read as bound at the inner
+close. Either way the variable is missing from the inner free list, which
+`Names::analyze_fun` has. The program scope is not affected (it keeps no
+run), so every skeleton test passes: they nest functions in the program or
+capture program-level variables only. Reproduction, the events the
+lowering would log for
+
+```rescript
+let f = p => { let v = ext(p); let g = () => { let v = ext(v); ext(v) }; g }
+```
+
+`enter(f)` (bound: `p`), `declare(f)` (the binder), `declare(v)` (member,
+bound), `reference(p)` (member), `enter(g)`, `declare(g)` (the binder),
+`reference(v)` (the outer `v`, in the initialiser: its member bit is set by
+`f`, so it is not recorded), `declare(v')` (member, bound),
+`reference(v')`, `leave(g)`: `free_variables(g)` is empty, the pass gives
+`[v]`. The replay then reserves nothing at `g`'s `Enter`, `g`'s scope does
+not inherit the group of `v`, and the inner declaration is named `v`
+(`let v = ext(v)`, a reference before its own declaration) where the pass
+names it `v$1`. With the costs of the skeleton (`reference`: one bit test
+and one push the first time; `enter`: two pushes and one bit write per
+parameter) there is no way to tell "in the innermost run" from "in an
+enclosing run"; telling them apart in constant time needs, per variable,
+the scope that last recorded it and the scope that binds it (two dense
+`u32` rows by `VarId`, scopes numbered in stack order), which is not "one
+membership bit per variable".
+
+**Gap 2: the lowering has no statement when a function's scope opens.**
+`Log::enter(function, statement, vars)` has to be called before the
+body's references are built, so that `reference` puts them in its run.
+The lowering builds bottom-up: `Resume::Fun` lowers the body as a child,
+`finish_expression` (`bir/lower/expr.rs`) takes the body's list and builds
+the `JFun`, and only then does the continuation write the `SDecl` or the
+expression statement that holds it. No node of that statement exists at
+`enter`. For the same reason the binder's `Declare` cannot be "the event
+two after `Enter`" (the replay's rule and the tests) when it is logged
+where the `SDecl` is written: that is after the body's events. Two more
+facts the log would get wrong where it is filled: `one_unit_arg` replaces
+the function's header after the body (`expr.rs`, `finish_expression`), so
+the `FuncId` logged at `Enter` is not the printed function's and its
+`Params` include the unit argument; and the tail-call rewrite
+(`tail.rs`, `loop_function_body`) declares the aliases `let x = _x` after
+the body was lowered, while they print before it. Closing this needs a
+mechanism the design does not have, for example events logged with a
+provisional statement that the write of the statement fills in, and
+`Params` logged at the close.
+
+Smaller findings, read from the code and not tested: a warm replay of a
+log with functions still allocates (`Names::enter` builds a new `Scope`
+table and an assignment in an inherited group copies its node);
+`ProgramNames` carries no raw JavaScript names, which the pass skips when
+it chooses a suffix (`Names::raw`); the `this` of a method is named by the
+pass only when the body uses it (`method_this_used`), and the log keeps no
+record of that after the close.
+
+Part A leftovers, done: the hazard of (a) is pinned
+(`a_module_whose_only_reference_the_flatten_pass_drops_still_shadows_the_global_of_its_name`
+in `bir/lower/oracle_tests.rs`: the new side prints
+`ext(globalThis.Other)`, the legacy side `ext(Other)`, so the hazard is
+real, not only read), and `SForRangeExisting` has a rule test
+(`a_loop_over_an_existing_variable_binds_nothing_and_the_declaration_of_its_target_covers_it`
+in `globals.rs`; the lowering never builds that statement, only the import
+of JavaScript into `Bir` does, so the test builds `Bir` directly).
+
+Instruction counts of a clean build of `tests/tests` (743 modules), release
+binaries (fat LTO, `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1`), one worker
+thread, cachegrind, the smallest of the runs; each line is one run of
+`scripts/compare_build_instructions.py --base A --head B --runs N`, both
+sides in worktrees at paths of equal length ("this head" is d2da40cff, the
+last commit that changes code):
+
+| Mode | Compared | Runs | First | Second | Change |
+| --- | --- | ---: | ---: | ---: | ---: |
+| default | `be1b3a482e` / this head | 3 | 4,042,502,066 | 4,044,423,272 | +0.048% |
+| default | skeleton head `1da0feb06` / this head | 3 | 4,045,205,646 | 4,045,800,056 | +0.015% |
+| `RESCRIPT_BACKEND=check` | `be1b3a482e` / this head | 2 | 20,614,165,045 | 20,572,095,782 | -0.204% |
+| `RESCRIPT_BACKEND=check` | skeleton head `1da0feb06` / this head | 2 | 20,574,784,559 | 20,570,457,316 | -0.021% |
+
+Runs of one binary spread by up to 5.4 M (0.13%) in the default build, so
+both default differences are noise: nothing part B adds runs by default
+(the log, the replay and the comparison are compiled for tests only, and
+`Bir` is built in check mode only). Part A saves 0.2% of the check build
+(the external-shadow pass and the extra flatten and shadow passes on a copy
+are gone from the new side). The application was not measured: no code it
+runs by default changed.
 
 ### 11.5 Worker prompt for T4b
 
@@ -1910,6 +2022,94 @@ for the builder:
 > is not removed in this slice); an `allow` attribute; an ignored test
 > other than the ones named above before their commit; a number you did
 > not measure.
+
+### 11.8 Worker prompt for T6
+
+To be issued when T5 is complete, not before: the builder prints names from
+the table T5's replay fills, and part B stopped at its step 4 ("T5 as
+built: part B", two design gaps). It follows T4's statements on what the
+new side still runs (the flatten pass stays until this slice, "T4b").
+
+```text
+Task T6: the builder over oxc nodes (docs/THREE_TREES.md section 3): the
+backend lowering writes the JavaScript tree as oxc nodes through a thin
+builder of our own, and RESCRIPT_BACKEND=new prints from it. Repository:
+compiler-rust/. Preconditions, check them first and stop with a report if
+one fails: `rg -n 'cfg\(test\)' src/bir/lower/names.rs` shows the test
+module only and check mode reports name_differences 0 on the runtime,
+tests/tests, the fixtures and the application (T5 is complete); `rg -n
+'apply_external_shadow_pass' src/lambda/lam_compile.rs src/bir/shadow.rs`
+shows the legacy side only.
+
+Read first: docs/THREE_TREES.md sections 2, 3 and 7, all of 11.4 (T4b's
+RESULT B, "T5 design", both "T5 as built" parts); the header of
+src/emit/naming.rs; src/emit/build.rs and src/emit/walk.rs (the printer
+decisions the oxc path takes today, from the JS IR); src/bir/j/ whole (the
+constructors of rows J-E1 to J-E10, J-S1 to J-S5 and J-M0 to J-M13 of
+BACKEND_LOWERING 6); src/bir/bridge_j.rs (deleted by this slice) and the J
+opcodes of src/bir/node.rs; src/bir/lower/out.rs; the gate in
+src/lambda/lam_compile.rs and src/bir/shadow.rs; in oxc 0.158,
+`Expression`, `oxc_allocator::Box`, the `node_id` cell, and
+`Codegen::with_scoping`.
+
+Do exactly this, one commit each, in this order, each pushed when made:
+1. Design, in 11.4 under "T6 design", before any code. Answer: (a) the
+   handle a constructor takes and returns (the oxc `Expression` by value,
+   its flags, a J kind tag; its size, at most 24 bytes, and why) and the
+   facts table indexed by `node_id` (2 bytes a node; the side pool for
+   block shapes, call information and `undefined`); (b) per row of J-E,
+   J-S and J-M, what it reads of a child and how it reads it from the
+   handle or the table; (c) where each printer decision of
+   BACKEND_REDESIGN A.7 is taken: when the node is attached, or when the
+   function's scope closes (unit return, eta form, arrow or `function`);
+   (d) identifiers: the symbol id a binding and a reference carry, how ids
+   are allocated, and how the name table of T5's replay reaches
+   oxc_codegen; (e) each rule of the flatten pass (`Flatten` in
+   js_pass_flatten_and_mark_dead.rs) that the builder now applies where it
+   writes a statement, with the T4b result for the copied-branch reader.
+2. src/emit/builder.rs: the handle and the facts table with size_of
+   pinned; the leaf and expression constructors, each with its cost in its
+   doc comment.
+3. The statement and block constructors, and the flatten rules of 1(e).
+4. bir::j writes through the builder; bir/lower changes types only;
+   RESCRIPT_BACKEND=new prints the builder's program; check mode compares
+   that text with the legacy text on every supported unit.
+5. Delete src/bir/bridge_j.rs, the J opcodes of src/bir/node.rs and the
+   Bir view of src/emit/walk.rs (one path); the new side runs no flatten
+   pass.
+6. Rule tests in the oracle form for every row of 1(b) and every flatten
+   rule of 1(e); step-count tests at 10,000 for a long statement list, a
+   deep expression and a long string concatenation; a zero-allocation test
+   with a warm allocator in the form of src/bir/j/norm_tests.rs.
+7. docs/STATUS.md (row T6), tests/backend_coverage.txt if a count
+   improved, changes/lowering-oxc-builder.internal.md.
+
+End state, to paste in the pull request with the output:
+- `rg 'JSeq|JBlockLit' src/bir/node.rs` is empty; `rg bridge_j src` is
+  empty; `rg -n 'apply_js_flatten_pass' src/lambda/lam_compile.rs` shows
+  the legacy side only.
+- The reformat-and-compare suites pass; RESCRIPT_BACKEND=check: no text
+  difference in any supported unit of the four corpora, with the number
+  of supported units per corpus reported; scripts/test_backend_coverage.py
+  passes with the ratchet unchanged or risen.
+- Instruction counts of a clean build of tests/tests (release binary,
+  RAYON_NUM_THREADS=1, cachegrind as scripts/compare_build_instructions.py
+  does): RESCRIPT_BACKEND=new below the default; the default within the
+  CI threshold.
+
+Shortcuts that count as failure: a JS IR built and converted to oxc
+nodes; a pass over the finished oxc tree for a fact the builder could
+have recorded when it attached the node; a hash map keyed by a node, a
+variable or a symbol; a Vec, Box or String per node outside the oxc
+allocator; an Unsupported reason added to make a unit pass; a weakened or
+ignored test; bridge_j kept as a fallback.
+
+When a unit differs: reduce it to the smallest Lambda and decide only
+between "a builder rule is implemented wrongly" (fix it, add the rule
+test) and "a legacy pass reads what the builder changed" (commit the
+Lambda as a test asserting both texts, write which pass under 11.4,
+stop).
+```
 
 ## 12. Risks and what was not measured
 
