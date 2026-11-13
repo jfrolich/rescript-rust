@@ -136,7 +136,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<ChildTable>(), 8);
         assert_eq!(std::mem::size_of::<TypeDecl>(), 32);
         assert_eq!(std::mem::size_of::<MemberDecl>(), 16);
-        assert_eq!(std::mem::size_of::<Segment>(), 1000);
+        assert_eq!(std::mem::size_of::<Segment>(), 1016);
     }
 
     #[test]
@@ -554,8 +554,9 @@ pub enum ExtraDescriptor {
     /// `Tobject`: slot 0 is the field list.
     Object,
     /// `Tfield`: slot 0 the field's type, slot 1 the rest of the list. The name
-    /// is a string; the mutability is the persistent cell's value.
-    Field { name: u32, mutable: bool },
+    /// is a string; mutability indexes `SignaturePools::mutabilities`, keeping
+    /// shared cells shared and distinct equal-valued cells distinct.
+    Field { name: u32, mutability: u32 },
     /// `Tnil`: no children.
     Nil,
     /// `Tunivar` with its optional name (NONE), no children.
@@ -652,6 +653,8 @@ pub struct SignaturePools {
     pub variance: Box<[u8]>,
     pub locations: Box<[LocationRow]>,
     pub descriptor_extras: Box<[ExtraDescriptor]>,
+    /// Initial values of distinct persistent field cells, by identity.
+    pub mutabilities: Box<[bool]>,
     pub roots: Box<[SchemeRoot]>,
 }
 
@@ -665,7 +668,7 @@ mod schema_tests {
         }
         sizes!(
             DeclarationKind => 1, PositionRow => 16, LocationRow => 40,
-            SignaturePools => 760, ExtraDescriptor => 8, SchemeRoot => 8, Range => 8, UnitRow => 16, IdentRow => 16, PathRow => 16,
+            SignaturePools => 776, ExtraDescriptor => 12, SchemeRoot => 8, Range => 8, UnitRow => 16, IdentRow => 16, PathRow => 16,
             LongidentRow => 12, SignatureKind => 1, RecStatus => 1,
             ExtensionStatus => 1, ItemStatus => 2, SignatureItemRow => 12,
             ValueRow => 24, ModuleRow => 20, ModuleTypeRow => 16,

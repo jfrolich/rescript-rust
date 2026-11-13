@@ -116,7 +116,7 @@ pub struct Input<'a> {
     digest: [u8; 32],
 }
 
-/// O(old nodes + edges + signature metadata + exports·log exports), plus
+/// O(old nodes + edges + signature metadata + exports·log exports + fields·log fields), plus
 /// [`publish`]'s cost. Reads each old node once in one linear pass; the
 /// signature is walked once with an explicit stack; the name table's lock is
 /// taken once. Panics on a handle that is not of the unit's graph, a level
@@ -142,6 +142,7 @@ fn run(input: Input<'_>) -> (Segment, OldVisits) {
         let names = input.names.read().unwrap();
         let mut convert = Convert::new(input.graph, &names);
         convert.nodes();
+        convert.resolve_mutabilities();
         let unit = convert.unit(input.unit, input.deprecated);
         convert.signatures(input.signature);
         convert.resolve_scopes();
@@ -323,7 +324,7 @@ rows!(
     ffi_params: FfiParamRow, ffi: FfiRow, external_declarations: ExternalDeclRow,
     external_modules: ExternalModuleRow, inline_constants: InlineConstantRow,
     variants: VariantRow, row_fields: RowFieldRow, packages: PackageRow, variance: u8,
-    locations: LocationRow, descriptor_extras: ExtraDescriptor,
+    locations: LocationRow, descriptor_extras: ExtraDescriptor, mutabilities: bool,
 );
 
 /// An identifier that binds a name in the signature, for scope resolution.
@@ -374,6 +375,8 @@ struct Convert<'g> {
     lid_results: Vec<u32>,
     /// Layout row by layout offset, NONE before its first reference.
     layout_rows: Vec<u32>,
+    /// (old persistent cell identity, extra-descriptor row), once per field.
+    mutability_work: Vec<(u32, u32)>,
     binders: Vec<Binder>,
     /// Every scheme root, numbered as `SignaturePools::roots`.
     roots: Vec<Ty>,
@@ -418,6 +421,7 @@ impl<'g> Convert<'g> {
             lid_work: Vec::new(),
             lid_results: Vec::new(),
             layout_rows: vec![NONE; graph.layouts().len()],
+            mutability_work: Vec::new(),
             binders: Vec::new(),
             roots: Vec::new(),
             schemes: Vec::new(),
@@ -574,11 +578,13 @@ impl<'g> Convert<'g> {
                     );
                     let extra = ExtraDescriptor::Field {
                         name: self.string(name.as_str()),
-                        mutable: mutability.persistent_value() == MutableFlag::Mutable,
+                        mutability: NONE,
                     };
                     self.slot(typ);
                     self.slot(rest);
-                    self.extended(level, extra, b)
+                    let node = self.extended(level, extra, b);
+                    self.mutability_work.push((mutability.0, node.a));
+                    node
                 }
                 TypeDesc::Tnil => self.extended(level, ExtraDescriptor::Nil, b),
                 TypeDesc::Tsubst(target) => {
@@ -621,6 +627,34 @@ impl<'g> Convert<'g> {
                 }
             };
             self.tc.push(converted);
+        }
+    }
+
+    /// O(fields · log fields): sort cell identities collected during the only
+    /// source-node pass. Cells have process-wide sparse IDs, not graph offsets;
+    /// an identity sort avoids both a hash probe per node and a world-sized
+    /// forwarding array. Only the compact field rows are revisited, not the
+    /// source graph. Equal values never merge different cells.
+    fn resolve_mutabilities(&mut self) {
+        let mut work = std::mem::take(&mut self.mutability_work);
+        work.sort_unstable_by_key(|&(cell, _)| cell);
+        let mut previous = None;
+        let mut index = NONE;
+        for (raw, extra) in work {
+            if previous != Some(raw) {
+                let cell = crate::types::type_expr::MutabilityRef(raw);
+                index = push(
+                    &mut self.rows.mutabilities,
+                    cell.persistent_value() == MutableFlag::Mutable,
+                );
+                previous = Some(raw);
+            }
+            let ExtraDescriptor::Field { mutability, .. } =
+                &mut self.rows.descriptor_extras[extra as usize]
+            else {
+                unreachable!("only field descriptors carry cells")
+            };
+            *mutability = index;
         }
     }
 
@@ -1768,6 +1802,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<Task<'static>>(), 16);
         assert_eq!(std::mem::size_of::<LidStep<'static>>(), 16);
         assert_eq!(std::mem::size_of::<Binder>(), 8);
+        assert_eq!(std::mem::size_of::<(u32, u32)>(), 8);
         assert_eq!(std::mem::size_of::<Export>(), 20);
     }
 
@@ -2115,5 +2150,67 @@ type packed = module(Showable with type t = int)
         assert_eq!(graph.lists[slots], x);
         assert_eq!(graph.lists[slots + 2], x);
         assert_ne!(graph.lists[slots + 1], x);
+    }
+    #[test]
+    fn ten_thousand_fields_keep_shared_and_distinct_equal_cells() {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                use crate::types::type_expr::MutabilityRef;
+                let cells = [
+                    MutabilityRef::new_persistent(MutableFlag::Immutable),
+                    MutabilityRef::new_persistent(MutableFlag::Immutable),
+                ];
+                let mut nodes = vec![
+                    (TypeDesc::Tvar(None), GENERIC_LEVEL),
+                    (TypeDesc::Tnil, GENERIC_LEVEL),
+                ];
+                for i in 0..10000 {
+                    nodes.push((
+                        TypeDesc::Tfield {
+                            name: format!("field{i}").into(),
+                            mutability: cells[i % 2],
+                            typ: TypeExprRef::from_usize(0),
+                            rest: TypeExprRef::from_usize(i + 1),
+                        },
+                        GENERIC_LEVEL,
+                    ));
+                }
+                nodes.push((
+                    TypeDesc::Tobject {
+                        fields: TypeExprRef::from_usize(10001),
+                    },
+                    GENERIC_LEVEL,
+                ));
+                let graph = detached(nodes, Vec::new());
+                let signature = vec![value("object", 1, 10002)];
+                let names = RwLock::new(AHashMap::default());
+                let mut result = None;
+                let count = steps::scope(|| result = Some(run(input(&graph, &signature, &names))));
+                let (segment, visits) = result.unwrap();
+                assert_eq!(visits.count, 10003);
+                assert!(count <= 40009, "{count}");
+                assert_eq!(&*segment.signature.mutabilities, &[false, false]);
+                let mut previous = [NONE; 2];
+                let mut fields = 0;
+                for extra in &segment.signature.descriptor_extras {
+                    if let ExtraDescriptor::Field { mutability, .. } = extra {
+                        let parity = fields % 2;
+                        if previous[parity] != NONE {
+                            assert_eq!(*mutability, previous[parity]);
+                        }
+                        previous[parity] = *mutability;
+                        fields += 1;
+                    }
+                }
+                assert_eq!(fields, 10000);
+                assert_ne!(
+                    previous[0], previous[1],
+                    "equal cell values do not merge identities"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }
