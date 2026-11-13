@@ -56,3 +56,4 @@ tests/js_output_parity/fixtures/callback_boolean_inline.res
 tests/js_output_parity/fixtures/tella_regression_patterns.res	
 tests/js_output_parity/fixtures/match_failure_location.res	
 tests/js_output_parity/fixtures/argument_evaluation_order_patterns.res	
+tests/js_output_parity/fixtures/self_tail_loop_labels.res

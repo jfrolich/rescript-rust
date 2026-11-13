@@ -3956,7 +3956,8 @@ impl LambdaCompiler {
         // to the loop jump there, so it always has a block.
         let no_self_calls = !function_has_self_tailcall(a, &tail_loop.tail_targets, then_)
             && !function_has_self_tailcall(a, &tail_loop.tail_targets, else_);
-        let (then_block, else_block) = if no_self_calls
+        let label_start = self.loop_label_counter;
+        let (mut then_block, mut else_block) = if no_self_calls
             && !Self::lambda_contains_statement_value_form(a, then_)
             && !Self::lambda_contains_statement_value_form(a, else_)
         {
@@ -3993,6 +3994,14 @@ impl LambdaCompiler {
             )
         };
 
+        // compiler/core/lam_compile.ml:1514-1518 first probes with the tail
+        // return context, even when a self call prevents folding. Preserve the
+        // label allocations of that discarded pass. O(branches) only when the
+        // first pass allocated a label; the ordinary self-tail-call path is O(1).
+        if !no_self_calls && self.loop_label_counter != label_start {
+            then_block = self.compile_tail_loop_return_block(a, then_, tail_loop);
+            else_block = self.compile_tail_loop_return_block(a, else_, tail_loop);
+        }
         let mut block = cond_compiled.prelude;
 
         // Mirror OCaml's Lifthenelse compile (lam_compile.ml:1428-1436), which

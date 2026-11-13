@@ -1,0 +1,1 @@
+Match the reference compiler's loop-label numbering when a conditional combines a self-tail call with a switch-controlled loop.
