@@ -14,7 +14,7 @@ entry points. `check::Checker` validates the original tree before mapping;
 just because a node's successful rewrite is the identity.
 
 JSX lowering is a separate parser frontend mapper (`parser/jsx_ppx.rs`);
-`ppx::rewrite_jsx_element` only recursively maps its expressions. Derives enter
+the `Pexp_jsx_element` arm of `ppx::rewrite_expr` only recursively maps its expressions. Derives enter
 through `binary_ast::derive`, which delegates to `spice_ppx` on the current tree.
 External executable PPXs are not part of this pipeline.
 
@@ -58,7 +58,7 @@ claims that these moves have been implemented.
 | `@deriving(accessors)` type group | Type declarations and generated record getters / variant constructors in constrained includes | `handle_deriving_type`, `generate_accessor_include`, `generate_record_accessors_and_sigs`, `generate_variant_accessors_and_sigs` | Whole mutually recursive type group; gentype attributes; structure/signature distinction | Checker type-group entry |
 | Spice derive attributes | Encoder/decoder declarations and signatures | `derive::expand_structure_item_with_mapper`, `derive::expand_signature_item_with_mapper`, `spice_ppx::map_type_decl_structure`, `spice_ppx::generate_sig_decls` | Mapper activation over containing structure/signature; derive configuration, type group | Checker type-group entry; preserve activation semantics |
 | Attributes and extension payloads traversed by the mapper | Recursively rewritten payload AST | `rewrite_attribute`, `rewrite_payload`, `rewrite_attributes` | Payload kind; `PTyp` is retained; unknown expression extensions are retained without descending | Parser payload completion or checker attribute consumer |
-| JSX component annotations on bindings/descriptions | Annotation round-trip through attributes and dedicated component side data | `rewrite_value_binding_without_flattening`, `rewrite_structure_item_no_spice`, `rewrite_signature_item_no_spice`, `ast_jsx_component::take` | Binding/description representation | Checker binding/description entry |
+| JSX component annotations on bindings/descriptions | Annotation round-trip through attributes and dedicated component side data | `rewrite_structure_item_body`, `rewrite_structure_item_no_spice`, `rewrite_signature_item_no_spice`, `ast_jsx_component::take` | Binding/description representation | Checker binding/description entry |
 | JSX elements/fragments and component declarations (separate mapper) | React/JSX runtime calls, props records and component wrappers/signatures | `parser::jsx_ppx::{transform_jsx_element,transform_jsx_fragment,mk_react_jsx,make_props_record_type,make_props_record_type_sig}` | JSX version/module/mode configuration and component scope | Parser completion with explicit configuration, or checker component entry |
 
 Many comments still describe string-delimiter normalization from an older
@@ -116,10 +116,11 @@ is no hashing.
 
 A node gets an expansion in two cases:
 
-- a rewrite of the inventory applies to it (the pipe, `let?`, the record
-  `let`, the boolean match, `async` and `@this` functions, `await`, an awaited
-  local module, raw, ffi, regexp, todo, an `l` integer, braces whose location
-  follows a rewritten operand or that forward `@this`);
+- a rewrite of the inventory applies to it (the pipe, `let?`, `@this`
+  functions, an awaited local module, raw, ffi, regexp, todo, braces whose
+  location follows a rewritten operand or that forward `@this`); the record
+  `let`, the boolean match, `async` functions, `await` and `l` integers got
+  one until T7 and are now typed as written (rows "Direct (implemented)");
 - a child that is not an expression changed its handle: a pattern
   (`rewrite_pat_idx`), a core type (`rewrite_core_type_idx`), a module
   expression, a value binding that was flattened or carries a locally
