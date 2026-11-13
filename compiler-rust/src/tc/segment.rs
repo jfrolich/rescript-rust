@@ -266,7 +266,9 @@ pub enum LongidentRow {
     Ident(u32),
     Dot { parent: u32, name: u32 },
     Apply { functor: u32, argument: u32 },
-    Unresolved,
+    /// Unresolved component's raw diagnostic index (not a graph reference).
+    Unresolved(u32),
+    UnresolvedDot { parent: u32, raw: u32 },
 }
 
 /// Unlike the sorted lookup index, signature rows retain declaration order.

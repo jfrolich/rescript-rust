@@ -60,10 +60,10 @@
 //! - Ranges of strings (`StrTuple`, block-type ancestors, external scopes)
 //!   index `indices`, each a string. `PolyVar` and import attributes index
 //!   `ranges`, a range of `string_pairs`.
-//! - A longident component that the pool's name table does not hold is
-//!   NONE (`Lident` of one is `LongidentRow::Unresolved`), as the canonical
-//!   printer prints `<unresolved>`. A file name the name table does not hold
-//!   (for example `Location::none`'s) is NONE.
+//! - Missing longident component names become explicit unresolved rows with
+//!   the raw diagnostic index: the printed section uses `#index`, while the
+//!   structural section uses `<unresolved>`. A missing file name (for example
+//!   `Location::none`'s) is NONE.
 //!
 //! Not kept, by design: abbreviation memos, `Tlink` levels (publication
 //! follows links), the allocation identities of shapes and class blocks
@@ -114,6 +114,104 @@ pub struct Input<'a> {
     names: &'a RwLock<AHashMap<u32, String>>,
     /// Supplied by the signature's producer; never computed by a graph walk.
     digest: [u8; 32],
+}
+
+/// O(1): borrow a frozen unit; its producer supplies the digest.
+impl<'a> Input<'a> {
+    pub(crate) fn new(
+        graph: &'a SharedGraph,
+        signature: &'a Signature,
+        unit: &'a str,
+        deprecated: Option<&'a str>,
+        names: &'a RwLock<AHashMap<u32, String>>,
+        digest: [u8; 32],
+    ) -> Self {
+        Self {
+            graph,
+            signature,
+            unit,
+            deprecated,
+            names,
+            digest,
+        }
+    }
+}
+
+/// O(unit-name + deprecation bytes), with no graph walk. A versioned
+/// compatibility digest carries the old producer's existing 64-bit signature
+/// fingerprint and separate name/deprecation hashes; it is not cryptographic.
+fn published_digest(unit: &crate::cmi::portable_types::PortablePersStruct) -> [u8; 32] {
+    use std::hash::BuildHasher;
+    let name = crate::fast_hash::FastState.hash_one(&unit.ps_name);
+    let deprecation = crate::fast_hash::FastState.hash_one(&unit.ps_deprecated);
+    let mut digest = [0; 32];
+    digest[..8].copy_from_slice(&unit.fingerprint.to_le_bytes());
+    digest[8..16].copy_from_slice(&name.to_le_bytes());
+    digest[16..24].copy_from_slice(&deprecation.to_le_bytes());
+    digest[24..].copy_from_slice(b"OLD-SIG1");
+    digest
+}
+
+/// O(conversion + both canonical printers). Check mode explicitly requests
+/// this unit's new representation, even when it has no dependent. The normal
+/// old-checker path never calls this function.
+pub(crate) fn check_published(
+    unit: &std::sync::Arc<crate::cmi::portable_types::PortablePersStruct>,
+) -> Result<(), String> {
+    // Reference printing must not fill caches or overlays in the compiling
+    // worker's context. This reader borrows the same immutable world.
+    let ctx = crate::types::context::TypeContext::new(std::sync::Arc::new(
+        crate::context::IdGenerator::new(),
+    ));
+    let old = crate::cmi::portable_types::internalize_pers_struct(unit.clone(), &ctx);
+    let expected = crate::types::canonical_sig::canonical_signature(
+        &ctx,
+        &unit.ps_name,
+        &old.ps_sig,
+        unit.ps_deprecated.as_deref(),
+        None,
+    );
+    unit.with_published_graph(&ctx, |published| {
+        let segment = from_old(Input::new(
+            &published.graph,
+            &published.signature,
+            &unit.ps_name,
+            unit.ps_deprecated.as_deref(),
+            &published.names,
+            published_digest(unit),
+        ));
+        let actual = crate::tc::canonical::canonical_signature(&segment);
+        compare_text(&unit.ps_name, "segment", &expected, &actual)
+    })??;
+    log::debug!(target: "rescript_checker", "tc-segment-canonical {}", unit.ps_name);
+    Ok(())
+}
+
+/// O(the matching prefix in bytes); reports the unit and first differing line.
+fn compare_text(
+    unit: &str,
+    representation: &str,
+    expected: &str,
+    actual: &str,
+) -> Result<(), String> {
+    let mut before = expected.split_inclusive('\n');
+    let mut after = actual.split_inclusive('\n');
+    let mut line = 1;
+    loop {
+        let a = before.next();
+        let b = after.next();
+        if a != b {
+            return Err(format!(
+                "checker signature mismatch in {unit} ({representation}), line {line}:\nold: {:?}\nnew: {:?}",
+                a.unwrap_or("<end>"),
+                b.unwrap_or("<end>"),
+            ));
+        }
+        if a.is_none() {
+            return Ok(());
+        }
+        line += 1;
+    }
 }
 
 /// O(old nodes + edges + signature metadata + exports·log exports + fields·log fields), plus
@@ -752,7 +850,7 @@ impl<'g> Convert<'g> {
                 LidStep::Enter(lid) => match lid {
                     Longident::Lident(name) => match self.component(*name) {
                         Some(name) => LongidentRow::Ident(name),
-                        None => LongidentRow::Unresolved,
+                        None => LongidentRow::Unresolved(name.raw()),
                     },
                     Longident::Ldot(prefix, _) => {
                         self.lid_work.push(LidStep::Exit(lid));
@@ -769,8 +867,10 @@ impl<'g> Convert<'g> {
                 LidStep::Exit(lid) => match lid {
                     Longident::Ldot(_, name) => {
                         let parent = self.lid_results.pop().expect("a prefix row");
-                        let name = self.component(*name).unwrap_or(NONE);
-                        LongidentRow::Dot { parent, name }
+                        match self.component(*name) {
+                            Some(name) => LongidentRow::Dot { parent, name },
+                            None => LongidentRow::UnresolvedDot { parent, raw: name.raw() },
+                        }
                     }
                     Longident::Lapply(..) => {
                         let argument = self.lid_results.pop().expect("an argument row");
@@ -1891,6 +1991,21 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_longident_components_keep_their_diagnostic_indices() {
+        let graph = detached(Vec::new(), Vec::new());
+        let names = AHashMap::default();
+        let mut convert = Convert::new(&graph, &names);
+        let lid = Longident::Ldot(
+            Box::new(Longident::Lident(StrIdx::from_raw(7))),
+            StrIdx::from_raw(9),
+        );
+        let last = convert.longident(&lid);
+        assert_eq!(convert.rows.longidents[0], LongidentRow::Unresolved(7));
+        assert_eq!(convert.rows.longidents[last as usize],
+            LongidentRow::UnresolvedDot { parent: 0, raw: 9 });
+    }
+
+    #[test]
     fn stamped_names_resolve_to_absolute_binders() {
         let graph = detached(Vec::new(), Vec::new());
         let names = AHashMap::default();
@@ -2027,6 +2142,7 @@ type packed = module(Showable with type t = int)
         )
         .expect("compiles");
         let unit = result.pers_struct.expect("the published signature");
+        check_published(&unit).expect("independent canonical parity");
         unit.with_shared_graph(|published| {
             let segment = from_old(Input {
                 graph: &published.graph,

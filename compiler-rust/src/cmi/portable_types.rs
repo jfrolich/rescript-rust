@@ -225,6 +225,27 @@ enum PublishedSignature {
     Shared(super::shared_reader::PublishedGraph),
 }
 
+impl PortablePersStruct {
+    /// Read the old frozen unit for the checker bridge. The common source-built
+    /// case borrows its existing graph. A stored unit materializes its graph
+    /// only when this reader explicitly asks, never at registration.
+    pub(crate) fn with_published_graph<R>(
+        self: &Arc<Self>,
+        ctx: &TypeContext,
+        read: impl FnOnce(&super::shared_reader::PublishedGraph) -> R,
+    ) -> Result<R, String> {
+        let decoded = self.decoded.lock().unwrap();
+        if let Some((PublishedSignature::Shared(graph), _)) = decoded.as_ref() {
+            return Ok(read(graph));
+        }
+        drop(decoded);
+        let ps = internalize_pers_struct(self.clone(), ctx);
+        let (graph, _) = signature_builder::build(&ps, ctx, None, &PublicationStamps::new(ctx))
+            .ok_or_else(|| format!("checker bridge cannot freeze published unit {}", self.ps_name))?;
+        Ok(read(&graph))
+    }
+}
+
 #[cfg(test)]
 impl PortablePersStruct {
     /// O(1) plus `f`: the frozen graph of a unit published as one.

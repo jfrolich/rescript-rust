@@ -35,3 +35,5 @@ pub mod template;
 pub mod segment;
 pub mod publish;
 pub mod bridge;
+
+pub mod canonical;

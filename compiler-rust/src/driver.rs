@@ -295,16 +295,23 @@ fn publish_signature(
     arena: &ParseArena,
     publication: SignaturePublicationMode,
 ) -> Result<Option<std::sync::Arc<PortablePersStruct>>> {
-    let Some(check) = &options.signature_check else {
-        return Ok(env.extract_module_update(module_name, type_ctx, Some(arena), publication));
+    let unit = if let Some(check) = &options.signature_check {
+        match env.extract_module_update_checked(module_name, type_ctx, Some(arena), publication) {
+            Some((unit, comparison)) => {
+                check.report(filename, &comparison)?;
+                Some(unit)
+            }
+            None => None,
+        }
+    } else {
+        env.extract_module_update(module_name, type_ctx, Some(arena), publication)
     };
-    let Some((pers_struct, comparison)) =
-        env.extract_module_update_checked(module_name, type_ctx, Some(arena), publication)
-    else {
-        return Ok(None);
-    };
-    check.report(filename, &comparison)?;
-    Ok(Some(pers_struct))
+    if options.checker == CheckerChoice::Both
+        && let Some(unit) = &unit
+    {
+        crate::tc::bridge::from_old::check_published(unit).map_err(anyhow::Error::msg)?;
+    }
+    Ok(unit)
 }
 
 /// The path derived items take: the switch `RESCRIPT_DERIVED_PATH`
