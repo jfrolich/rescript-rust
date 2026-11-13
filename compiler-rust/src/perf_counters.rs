@@ -4,12 +4,12 @@
 //! report aggregates the behavior of all worker threads.
 //!
 //! A probe a type context reaches counts in that context's
-//! [`AttemptCounters`], with plain writes, and the context adds them to the
+//! `AttemptCounters`, with plain writes, and the context adds them to the
 //! process totals once: a unit attempt when the driver retains it
 //! (`TypeContext::keep_attempt_counters`), never when it discards it, and
 //! any other context when it is flushed or dropped. Probes no compilation
-//! owns (once-per-build world, signature and gentype work, the module
-//! registry, explain reruns) stay process-global atomics.
+//! owns (once-per-build world and importer work, the module registry,
+//! attempt counts and explain reruns) stay process-global.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
