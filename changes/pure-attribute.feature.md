@@ -1,0 +1,1 @@
+- Add `@pure` and `@mutates`: the Rust compiler checks that a binding marked `@pure` reads nothing that can change and changes nothing its caller can see, and the standard library says which of its functions are pure and which change their first argument. See `docs/verify/pure.md`.
