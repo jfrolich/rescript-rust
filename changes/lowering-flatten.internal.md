@@ -1,0 +1,1 @@
+- Pin the copied-branch counterexample that keeps JavaScript flattening after backend lowering.

@@ -71,6 +71,15 @@ pub enum LocationRetry {
     Output,
 }
 
+/// Internal control flow: an obligation of a derived item's plan failed in
+/// the checker, which abandoned the unit before publishing anything. Whoever
+/// holds the unit's source runs the frontend again with
+/// [`DerivedPath::Fallback`], which generates the unit's derived code as
+/// syntax, and compiles that.
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+#[error("a derived item's plan could not be used")]
+pub struct DerivedRetry;
+
 /// A compile failure whose report is already formatted for the user: print
 /// `output` as is and exit with `exit_code`.
 #[derive(Debug)]
@@ -310,6 +319,9 @@ pub enum DerivedPath {
     /// `check`: a unit with a planned item is compiled both ways in the
     /// same process, and a difference between the two fails its compile.
     Check,
+    /// Not a value of the switch: the path of one unit after
+    /// [`DerivedRetry`]. Every item of the unit is on the general path.
+    Fallback,
 }
 
 impl DerivedPath {
@@ -346,6 +358,26 @@ impl crate::types::context::CheckMode {
         })
     }
 }
+
+impl DerivedPath {
+    /// Why the derive seam plans no item of a unit on this path, or `None`
+    /// when it plans. Cost: O(1).
+    pub fn plans_off(self) -> Option<crate::binary_ast::derive::GeneralReason> {
+        use crate::binary_ast::derive::GeneralReason;
+        match self {
+            DerivedPath::Plans | DerivedPath::Check => None,
+            DerivedPath::General => Some(GeneralReason::Switch),
+            DerivedPath::Fallback => Some(GeneralReason::FailedObligation),
+        }
+    }
+}
+
+/// See [`CompilerOptions::derived_reference`].
+pub type DerivedReference =
+    std::sync::Arc<dyn Fn() -> Result<(crate::parse_arena::ParseArena, Structure)> + Send + Sync>;
+
+/// See [`CompilerOptions::derived_differences`].
+pub type DerivedDifferences = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
 
 /// Unit checker selection; the old checker remains the default during construction.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -446,6 +478,17 @@ pub struct CompilerOptions {
     pub derived_census: Option<PathBuf>,
     /// The path derived items take, read once when options are created.
     pub derived_path: DerivedPath,
+    /// For `RESCRIPT_DERIVED_PATH=check`: the frontend's result for the
+    /// unit's source with [`DerivedPath::General`], ready for type checking,
+    /// or why the frontend could not give it (the error names the source it
+    /// read). The reference compile of a check runs on it.
+    pub derived_reference: Option<DerivedReference>,
+    /// For `RESCRIPT_DERIVED_PATH=check`: where a build collects what the
+    /// check found, to report every unit before it fails. With it a unit
+    /// that differs goes on with the result of its plans; without it the
+    /// first difference fails the unit's compile. Locked once per
+    /// difference, never for a unit that passes.
+    pub derived_differences: Option<DerivedDifferences>,
     /// Dormant backend migration mode, selected before compiling modules.
     pub backend: crate::bir::shadow::BackendMode,
     /// Dormant publication equality oracle; configured once, not per unit.
@@ -739,6 +782,8 @@ impl Default for CompilerOptions {
             checker: CheckerChoice::from_env(),
             derived_census: Self::derived_census_from_env(),
             derived_path: DerivedPath::from_env(),
+            derived_reference: None,
+            derived_differences: None,
             backend: crate::bir::shadow::BackendMode::from_env(),
             signature_check: crate::cmi::signature_check::SignatureCheck::from_env(),
             js_printer: crate::emit::PrinterMode::from_env(),
@@ -6198,13 +6243,35 @@ pub fn compile_source_to_js_with_options(
     filename: &str,
     options: &CompilerOptions,
 ) -> Result<String> {
-    compile_source_to_js_with_options_inner(
-        source,
-        filename,
-        options,
-        #[cfg(test)]
-        None,
-    )
+    with_derived_retry(options, |options, frontend_reported| {
+        compile_source_to_js_with_options_inner(
+            source,
+            filename,
+            options,
+            frontend_reported,
+            #[cfg(test)]
+            None,
+        )
+    })
+}
+
+/// Run `compile` on a unit's source, and once more when a plan of the unit
+/// could not be used ([`DerivedRetry`]): with the unit's derived code as
+/// syntax, and `true` to say the frontend's reports were already printed.
+/// Cost: O(1) beyond the compiles; the options are copied only for the
+/// second.
+fn with_derived_retry<T>(
+    options: &CompilerOptions,
+    mut compile: impl FnMut(&CompilerOptions, bool) -> Result<T>,
+) -> Result<T> {
+    match compile(options, false) {
+        Err(error) if error.is::<DerivedRetry>() => {
+            let mut options = options.clone();
+            options.derived_path = DerivedPath::Fallback;
+            compile(&options, true)
+        }
+        result => result,
+    }
 }
 
 #[cfg(test)]
@@ -6217,6 +6284,7 @@ fn compile_source_to_js_with_trace(
         source,
         filename,
         &CompilerOptions::default(),
+        false,
         Some(trace),
     )
 }
@@ -6266,7 +6334,7 @@ pub fn run_implementation_frontend(
     parser.arena_mut().set_builtin_spice(options.builtin_spice());
     parser
         .arena_mut()
-        .set_derived_plans(options.derived_path != DerivedPath::General);
+        .set_derived_plans(options.derived_path.plans_off());
     let frontend_warnings =
         ppx::collect_leading_builtin_warning_attributes(&structure, parser.arena())
             .map_err(|err| ppx_error_to_anyhow(err, parser.arena(), source, filename))?;
@@ -6416,6 +6484,7 @@ fn compile_source_to_js_with_options_inner(
     source: &str,
     filename: &str,
     options: &CompilerOptions,
+    frontend_reported: bool,
     #[cfg(test)] mut discriminator_trace: Option<&mut PreJsDiscriminatorTrace>,
 ) -> Result<String> {
     // Parse
@@ -6430,7 +6499,7 @@ fn compile_source_to_js_with_options_inner(
         options,
         &mut frontend_output,
     );
-    if !options.frontend_already_reported {
+    if !options.frontend_already_reported && !frontend_reported {
         write_stderr(&frontend_output);
     }
     let ImplementationFrontend {
@@ -6471,6 +6540,9 @@ fn compile_source_to_js_with_options_inner(
             type_structure(tctx, env, arena, &structure)
         },
         |type_ctx, mut tctx, typed| {
+    if tctx.derived_fallback {
+        return Err(DerivedRetry.into());
+    }
     let ((typed_structure, final_env), env) = match typed {
         Ok(result) => result,
         Err(e) => {
@@ -9405,6 +9477,9 @@ pub struct InProcessPreJsCompileResult {
     /// general forms of its derived items; the JS backend runs on both and
     /// compares what they produce.
     pub derived_reference: Option<Box<InProcessPreJsCompileResult>>,
+    /// The collector the check of this unit reports to
+    /// ([`CompilerOptions::derived_differences`]).
+    pub derived_differences: Option<DerivedDifferences>,
 }
 
 /// The `.cmj` metadata of an in-process compile, available after the JS
@@ -9680,6 +9755,32 @@ pub fn compile_source_in_process(
     has_interface: bool,
     gentype_interface: Option<crate::gentype::main::InterfaceRead>,
 ) -> Result<InProcessCompileResult> {
+    with_derived_retry(options, |options, frontend_reported| {
+        compile_source_in_process_once(
+            source,
+            filename,
+            module_name,
+            options,
+            registry,
+            has_interface,
+            gentype_interface.clone(),
+            frontend_reported,
+        )
+    })
+}
+
+/// [`compile_source_in_process`] for one path of the unit's derived items.
+#[allow(clippy::too_many_arguments)]
+fn compile_source_in_process_once(
+    source: &str,
+    filename: &str,
+    module_name: &str,
+    options: &CompilerOptions,
+    registry: &ModuleRegistry,
+    has_interface: bool,
+    gentype_interface: Option<crate::gentype::main::InterfaceRead>,
+    frontend_reported: bool,
+) -> Result<InProcessCompileResult> {
     let mut parser = Parser::new(filename, source);
     let structure = module::parse_structure(&mut parser);
     let mut frontend_output = String::new();
@@ -9691,7 +9792,9 @@ pub fn compile_source_in_process(
         options,
         &mut frontend_output,
     );
-    write_stderr(&frontend_output);
+    if !frontend_reported {
+        write_stderr(&frontend_output);
+    }
     let frontend = frontend?;
     let warnings_fatal = frontend.warnings_fatal;
     let experimental_let_unwrap = frontend.experimental_let_unwrap;
@@ -9699,13 +9802,36 @@ pub fn compile_source_in_process(
     let structure = frontend.structure;
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
-    let effective_options = if options.experimental_let_unwrap == experimental_let_unwrap {
+    let mut effective_options = if options.experimental_let_unwrap == experimental_let_unwrap {
         std::borrow::Cow::Borrowed(options)
     } else {
         let mut options = options.clone();
         options.experimental_let_unwrap = experimental_let_unwrap;
         std::borrow::Cow::Owned(options)
     };
+    if options.derived_path == DerivedPath::Check && parser.arena().plans().item_count() > 0 {
+        let source = source.to_owned();
+        let filename = filename.to_owned();
+        let mut general_options = options.clone();
+        general_options.derived_path = DerivedPath::General;
+        general_options.derived_census = None;
+        general_options.derived_reference = None;
+        effective_options.to_mut().derived_reference = Some(std::sync::Arc::new(move || {
+            let mut parser = Parser::new(&filename, &source);
+            let structure = module::parse_structure(&mut parser);
+            let frontend = run_implementation_frontend(
+                &mut parser,
+                structure,
+                &source,
+                &filename,
+                &general_options,
+                &mut String::new(),
+            )
+            .map_err(|error| anyhow::anyhow!("the frontend failed on {filename}: {error}"))?;
+            crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
+            Ok((parser.into_arena(), frontend.structure))
+        }));
+    }
 
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let result = compile_preprocessed_structure_in_process_with_signature_hook(
@@ -10273,8 +10399,7 @@ fn type_structure_two_modes<T, R>(
                 &type_ctx, &unit, attempt.mode,
             )
         });
-        tctx.derived_plans = attempt.derived_plans;
-        if attempt.derived_plans {
+            if attempt.derived_plans {
             tctx.derived_census = arena.derived_census.clone();
         }
         let typed = crate::timing::measure(crate::timing::Phase::Typecheck, || {
@@ -10448,10 +10573,11 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     if options.derived_path == DerivedPath::Check && arena.plans().item_count() > 0 {
         return derived_check::until_js(&unit, options, gentype_interface, signature_ready);
     }
-    compile_until_js(&unit, options, gentype_interface, signature_ready, true)
+    compile_until_js(&unit, options, gentype_interface, signature_ready)
 }
 
 /// The unit an in-process compile works on.
+#[derive(Clone, Copy)]
 struct UntilJs<'a> {
     arena: &'a crate::parse_arena::ParseArena,
     structure: &'a Structure,
@@ -10462,16 +10588,13 @@ struct UntilJs<'a> {
     publication: SignaturePublicationMode,
 }
 
-/// [`compile_preprocessed_structure_in_process_until_js`] for one path of
-/// the unit's derived items: from their plans (`derived_plans`), or, for the
-/// reference compile of `RESCRIPT_DERIVED_PATH=check`, from their general
-/// forms.
+/// [`compile_preprocessed_structure_in_process_until_js`] for one tree of
+/// the unit.
 fn compile_until_js(
     unit: &UntilJs<'_>,
     options: &CompilerOptions,
     gentype_interface: Option<crate::gentype::main::InterfaceRead>,
     mut signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
-    derived_plans: bool,
 ) -> Result<InProcessPreJsCompileResult> {
     let UntilJs {
         arena,
@@ -10524,10 +10647,13 @@ fn compile_until_js(
     type_structure_two_modes(
         CheckUnit { arena, filename, options, registry: Some(registry),
             module_name: Some(module_name), file_config: &checking_config,
-            frontend_warning_specs: &frontend_warning_specs, derived_plans,
+            frontend_warning_specs: &frontend_warning_specs, derived_plans: options.derived_path.plans_off().is_none(),
             mode: crate::types::context::CheckMode::from_env() },
         |tctx, env, arena| type_structure(tctx, env, arena, structure),
         |type_ctx, mut tctx, typed| {
+    if tctx.derived_fallback {
+        return Err(DerivedRetry.into());
+    }
     let ((typed_structure, final_env), env) = match typed {
         Ok(result) => result,
         Err(e) => {
@@ -11267,6 +11393,7 @@ fn compile_until_js(
             .map(PersistentEnv::loaded_units)
             .unwrap_or_default(),
         derived_reference: None,
+        derived_differences: None,
     })
         },
     ).1
@@ -11298,19 +11425,24 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
     let Some(reference) = pre_js.derived_reference.take() else {
         return finish_from_js_boundary(pre_js, options, registry, metadata_ready);
     };
+    let differences = pre_js.derived_differences.take();
+    let differences = differences.as_ref();
     let unit = options.module_name.as_deref().unwrap_or("");
     let reference = finish_from_js_boundary(*reference, options, registry, None)?;
     let result = match metadata_ready {
         // The hook takes the export summary: compare what it is handed.
         Some(forward) => {
             let mut hook = |metadata: InProcessJsMetadataReady| {
-                derived_check::compare_exports(
-                    unit,
-                    metadata.is_pure,
-                    &metadata.cmj_export_constants,
-                    &metadata.cmj_export_arities,
-                    &metadata.cmj_export_lambdas,
-                    &reference,
+                derived_check::settle(
+                    differences,
+                    derived_check::compare_exports(
+                        unit,
+                        metadata.is_pure,
+                        &metadata.cmj_export_constants,
+                        &metadata.cmj_export_arities,
+                        &metadata.cmj_export_lambdas,
+                        &reference,
+                    ),
                 )?;
                 forward(metadata)
             };
@@ -11318,18 +11450,21 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         }
         None => {
             let result = finish_from_js_boundary(pre_js, options, registry, None)?;
-            derived_check::compare_exports(
-                unit,
-                result.is_pure,
-                &result.cmj_export_constants,
-                &result.cmj_export_arities,
-                &result.cmj_export_lambdas,
-                &reference,
+            derived_check::settle(
+                differences,
+                derived_check::compare_exports(
+                    unit,
+                    result.is_pure,
+                    &result.cmj_export_constants,
+                    &result.cmj_export_arities,
+                    &result.cmj_export_lambdas,
+                    &reference,
+                ),
             )?;
             result
         }
     };
-    derived_check::compare_js(unit, &result, &reference)?;
+    derived_check::settle(differences, derived_check::compare_js(unit, &result, &reference))?;
     Ok(result)
 }
 

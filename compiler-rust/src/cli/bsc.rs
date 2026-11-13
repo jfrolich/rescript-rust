@@ -499,6 +499,8 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
         checker: crate::driver::CheckerChoice::from_env(),
         derived_census: CompilerOptions::derived_census_from_env(),
         derived_path: crate::driver::DerivedPath::from_env(),
+        derived_reference: None,
+        derived_differences: None,
         backend: crate::bir::shadow::BackendMode::from_env(),
         signature_check: crate::cmi::signature_check::SignatureCheck::from_env(),
         js_printer: crate::emit::PrinterMode::from_env(),
@@ -821,6 +823,11 @@ fn generate_ast(
         fs::create_dir_all(parent)?;
     }
 
+    // Stored ASTs must contain syntax, not process-local derived plans.
+    let options = &CompilerOptions {
+        derived_path: crate::driver::DerivedPath::General,
+        ..options.clone()
+    };
     let mut parser = Parser::new(&filename, &source);
     let mut frontend_output = String::new();
     let warnings_are_fatal;
