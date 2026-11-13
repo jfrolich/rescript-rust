@@ -81,3 +81,7 @@ debug = "line-tables-only"
 # [[bench]]
 # name = "compile_bench"
 # harness = false
+
+[[bench]]
+name = "tc_kernel"
+harness = false

@@ -15,6 +15,7 @@ pub mod json;
 pub mod process_attributes;
 pub mod process_cmt;
 pub mod process_extra;
+pub mod reanalyze;
 pub mod references;
 pub mod resolve_path;
 pub mod session;
@@ -321,6 +322,23 @@ pub fn run(request: &Request, project: &dyn session::Project) -> Result<Vec<u8>,
     if let Some(failure) = cli.session.failure() {
         return Err(failure);
     }
+    Ok(out.into_bytes())
+}
+
+/// `rescript-tools reanalyze <args>` (tools/bin/main.ml): what it prints,
+/// the reports of the dead code, exception and termination analyses of the
+/// project `cwd` is in. `color` says the output goes to a terminal.
+/// `project` must be built with source locations (see [`mod@reanalyze`]), which
+/// a watcher's builds leave out, so this is no watcher command.
+pub fn reanalyze(
+    cwd: &Path,
+    args: &[String],
+    color: bool,
+    project: &(dyn session::Project + Sync),
+) -> Result<Vec<u8>, String> {
+    let report = reanalyze::run(project, cwd, args, color)?;
+    let mut out = Output::default();
+    out.print(&report);
     Ok(out.into_bytes())
 }
 

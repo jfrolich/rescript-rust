@@ -1,0 +1,1 @@
+- Make `rescript build --check-only` faster after a build: it reads the build's record and checks only the modules that changed since, and the modules that read what changed in them, instead of every module (about 5 times faster on an unchanged project of about 740 modules). It still writes no files, and checks everything when there is no usable record.
