@@ -227,8 +227,8 @@ mod tests {
     }
 
     #[test]
-    fn exporter_shared_positions_remain_shared_in_an_instance() {
-        // checker_identity_08: one exported scheme has repeated positions of
+    fn modeled_exporter_sharing_survives_instantiation() {
+        // A modeled exporter: one scheme has repeated positions of
         // one node, while a different equal occurrence must stay different.
         let mut graph = Graph::default();
         let shared = variable(&mut graph, GENERIC);

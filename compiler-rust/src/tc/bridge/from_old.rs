@@ -1962,6 +1962,165 @@ mod tests {
     }
 
     #[test]
+    fn actual_identity_08_exporter_keeps_its_shared_and_distinct_positions() {
+        use crate::cmi::persistent_env::{InMemoryModuleInfo, ModuleRegistry};
+        use crate::driver::{CompilerOptions, compile_source_in_process};
+        let mut registry = ModuleRegistry::new();
+        let mut options = CompilerOptions {
+            nopervasives: true,
+            ..Default::default()
+        };
+        let prelude = r#"
+external ignore: 'a => unit = "%ignore"
+external \"+": (int, int) => int = "%addint"
+external \"==": ('a, 'a) => bool = "%equal"
+"#;
+        let compiled = compile_source_in_process(
+            prelude,
+            "FixturePrelude.res",
+            "FixturePrelude",
+            &options,
+            &registry,
+            false,
+            None,
+        )
+        .expect("fixture prelude compiles");
+        registry.register_module_arc(
+            "FixturePrelude",
+            compiled.pers_struct.unwrap(),
+            InMemoryModuleInfo::new(
+                "FixturePrelude.res".into(),
+                compiled.is_pure,
+                compiled.cmj_export_constants,
+                false,
+            ),
+        );
+        options.open_modules.push("FixturePrelude".into());
+        // Read the actual exporter, unchanged; only its ordinary prelude is supplied.
+        let source = include_str!(
+            "../../../../tests/build_tests/super_errors_multi/fixtures/checker_identity_08/A.res"
+        );
+        let compiled =
+            compile_source_in_process(source, "A.res", "A", &options, &registry, false, None)
+                .expect("actual fixture exporter compiles");
+        let unit = compiled.pers_struct.unwrap();
+        unit.with_shared_graph(|published| {
+            let old = &published.graph;
+            let value = |name: &str| {
+                published
+                    .signature
+                    .iter()
+                    .find_map(|item| match item {
+                        SignatureItem::SigValue(id, value) if id.name() == name => {
+                            Some(value.val_type)
+                        }
+                        _ => None,
+                    })
+                    .expect("exported value")
+            };
+            let repr = |mut ty| loop {
+                let desc = old.nodes()[old.node_offset(ty).unwrap()].desc;
+                match desc {
+                    TypeDesc::Tlink(next) => ty = next,
+                    _ => break desc,
+                }
+            };
+            let TypeDesc::Tarrow { args, ret } = repr(value("dup")) else {
+                panic!("dup arrow")
+            };
+            let argument = old.args(args)[0].typ;
+            let TypeDesc::Ttuple(elements) = repr(ret) else {
+                panic!("dup tuple")
+            };
+            let repeated = old.list(elements);
+            assert_eq!(repeated[0], repeated[1], "shared already in the exporter");
+            assert_eq!(argument, repeated[0]);
+            let TypeDesc::Ttuple(elements) = repr(value("two")) else {
+                panic!("two tuple")
+            };
+            let distinct = old.list(elements);
+            assert_ne!(
+                distinct[0], distinct[1],
+                "equal int occurrences are distinct"
+            );
+            let segment = from_old(Input {
+                graph: old,
+                signature: &published.signature,
+                unit: "A",
+                deprecated: None,
+                names: &published.names,
+                digest: [0; 32],
+            });
+            let pools = &segment.signature;
+            let root = |name: &str| {
+                let item = pools
+                    .ordered_items
+                    .iter()
+                    .find(|item| {
+                        if item.kind != SignatureKind::Value {
+                            return false;
+                        }
+                        let name_index = pools.identifiers[item.ident as usize].name;
+                        let range = pools.strings[name_index as usize];
+                        &pools.bytes[range.start as usize..(range.start + range.len) as usize]
+                            == name.as_bytes()
+                    })
+                    .expect("segment value");
+                pools.roots[pools.values[item.declaration as usize].ty as usize]
+            };
+            let mut graph = segment.graph();
+            let instance = |graph: &mut Graph, root: SchemeRoot| {
+                let base = graph.instance(segment.templates[root.template as usize]);
+                if root.ty.0 & RELATIVE != 0 {
+                    Ty(base.0 + (root.ty.0 & !RELATIVE))
+                } else {
+                    root.ty
+                }
+            };
+            let dup = instance(&mut graph, root("dup"));
+            let arrow = graph.nodes[dup.0 as usize];
+            assert_eq!(arrow.tag(), ARROW);
+            let tuple = graph.nodes[arrow.a as usize];
+            assert_eq!(tuple.tag(), TUPLE);
+            let at = tuple.b as usize;
+            assert_eq!(graph.lists[at], graph.lists[at + 1]);
+            assert_eq!(graph.params[arrow.b as usize].ty, graph.lists[at]);
+            let two = instance(&mut graph, root("two"));
+            let tuple = graph.nodes[two.0 as usize];
+            assert_eq!(tuple.tag(), TUPLE);
+            let at = tuple.b as usize;
+            assert_ne!(graph.lists[at], graph.lists[at + 1]);
+        })
+        .expect("fixture has a frozen graph");
+        registry.register_module_arc(
+            "A",
+            unit,
+            InMemoryModuleInfo::new(
+                "A.res".into(),
+                compiled.is_pure,
+                compiled.cmj_export_constants,
+                false,
+            ),
+        );
+        let consumer = include_str!(
+            "../../../../tests/build_tests/super_errors_multi/fixtures/checker_identity_08/B.res"
+        );
+        let error = match compile_source_in_process(
+            consumer, "B.res", "B", &options, &registry, false, None,
+        ) {
+            Ok(_) => panic!("the actual fixture consumer must reject its final annotation"),
+            Err(error) => format!("{error:?}"),
+        };
+        for observed in [
+            "A.myint => A.myint",
+            "((A.myint, A.myint)) => (A.myint, A.myint)",
+            "((A.myint, int)) => (A.myint, int)",
+        ] {
+            assert!(error.contains(observed), "missing {observed:?}: {error}");
+        }
+    }
+
+    #[test]
     fn unused_units_run_neither_converter_and_requests_are_shared_across_workers() {
         use crate::context::IdGenerator;
         use crate::driver::{CheckerChoice, CompilerOptions, compile_source_in_process};
