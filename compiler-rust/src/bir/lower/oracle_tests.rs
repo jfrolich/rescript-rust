@@ -828,8 +828,9 @@ fn cross_module_inline_after_lowering_a_closure_with_assignment() {
 }
 
 /// The legacy pipeline on one function bound to an exported `run`, with the
-/// passes `order` names (1 flatten, 3 tail-call inlining, 5 substitution and
-/// dead marks, 6 shake), printed. For the T4 ordering findings below.
+/// passes `order` names (1 flatten, 2 external shadow, 3 tail-call inlining,
+/// 4 record rest, 5 substitution and dead marks, 6 shake), printed. For the T4
+/// ordering findings below.
 fn legacy_text(build: impl Fn(&mut LamArena) -> Lam, order: &[u8]) -> String {
     use crate::lambda::js_pass_flatten_and_mark_dead::{apply_js_flatten_and_mark_dead_pass as dead, apply_js_flatten_pass as flatten};
     use crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass as inline;
@@ -843,7 +844,9 @@ fn legacy_text(build: impl Fn(&mut LamArena) -> Lam, order: &[u8]) -> String {
     for pass in order {
         program = match pass {
             1 => flatten(program),
+            2 => crate::lambda::js_pass_external_shadow::apply_external_shadow_pass(program),
             3 => inline(program),
+            4 => crate::lambda::js_pass_record_rest::apply_js_record_rest_pass(program),
             5 => dead(program, false),
             6 => shake(program),
             _ => unreachable!("pass number"),
@@ -1058,4 +1061,74 @@ fn flattening_a_copied_return_branch_changes_the_simplify_if_head_reader() {
     let print = |p: &JsDepsProgram| crate::js_ir::print_deps_program_with_directives_and_options(p, None, &[], false, false, false);
     assert_eq!(print(&legacy), "\n\n\nfunction run(x, y) {\n  if (x === \"a\") {\n    if (y) {\n      return 1;\n    } else {\n      return 2;\n    }\n  }\n  Primitive_module.init();\n  return 3;\n}\n\nexport {\n  run,\n}\n/* No side effect */\n");
     assert_eq!(print(&moved), "\n\n\nfunction run(x, y) {\n  if (x === \"a\") {\n    if (y) {\n      return 1;\n    } else {\n      return 2;\n    }\n  } else {\n    Primitive_module.init();\n    return 3;\n  }\n}\n\nexport {\n  run,\n}\n/* No side effect */\n");
+}
+
+#[test]
+fn inlining_before_the_external_shadow_pass_hides_the_binding_that_shadows_a_global() {
+    // THREE_TREES.md 11.4, "T4c design" (c), first counterexample.
+    // `run = a => { let g = location => ext(location, <global location>); return g(a) }`.
+    // P2 qualifies a global that a binding of its scope shadows. With P3 after
+    // it, P2 sees the parameter `location` around the reference. With the
+    // splice before it, the parameter was renamed to `a` and is gone.
+    use crate::lambda::LamLoc;
+    let build = |a: &mut LamArena| {
+        let (g, p, arg) = (Ident::new("g", 10, IdentFlags::NONE), Ident::new("location", 11, IdentFlags::NONE), Ident::new("a", 12, IdentFlags::NONE));
+        let ext = a.var(Ident::new("ext", 13, IdentFlags::NONE));
+        let (read, global) = (a.var(p), a.var(Ident::create_js("location")));
+        let body = call(a, ext, &[read, global]);
+        let function = a.function_(1, &[p], body, Default::default(), LamLoc::NONE);
+        let callee = a.var(g);
+        let x = a.var(arg);
+        let applied = call(a, callee, &[x]);
+        let inner = a.let_(LetKind::Strict, g, function, applied);
+        a.function_(1, &[arg], inner, Default::default(), LamLoc::NONE)
+    };
+    let text = |value: &str| format!("\n\n\nfunction run(a) {{\n  return ext(a, {value});\n}}\n\nexport {{\n  run,\n}}\n/* No side effect */\n");
+    // The legacy order.
+    assert_eq!(legacy_text(build, &[1, 2, 3, 4, 5, 6]), text("globalThis.location"));
+    // Step A in the lowering: the inlining decided before P1 and P2 run.
+    assert_eq!(legacy_text(build, &[3, 1, 2, 4, 5, 6]), text("location"));
+}
+
+#[test]
+fn flattening_after_a_site_in_a_returned_conditional_was_spliced_maps_its_predicate() {
+    // THREE_TREES.md 11.4, "T4c design" (c), second counterexample.
+    // `run = c => { let f = p => ext(p, p); return ext(z => z ? 1 : 2) ? f(c) : 3 }`.
+    // The site is inside a returned conditional, so the statement has to
+    // become an `if` before the callee's statements can stand in a branch.
+    // P1's own rule for a returned conditional leaves the predicate as it
+    // is; P1 run on the `if` maps the predicate and flattens the callback.
+    use crate::lambda::LamLoc;
+    let build = |a: &mut LamArena| {
+        let (f, p, c, z) = (Ident::new("f", 10, IdentFlags::NONE), Ident::new("p", 11, IdentFlags::NONE), Ident::new("c", 12, IdentFlags::NONE), Ident::new("z", 14, IdentFlags::NONE));
+        let ext = Ident::new("ext", 13, IdentFlags::NONE);
+        let callee = a.var(ext);
+        let (p1, p2) = (a.var(p), a.var(p));
+        let body = call(a, callee, &[p1, p2]);
+        let function = a.function_(1, &[p], body, Default::default(), LamLoc::NONE);
+        let one = a.const_(C::Int { i: 1, comment: None });
+        let two = a.const_(C::Int { i: 2, comment: None });
+        let three = a.const_(C::Int { i: 3, comment: None });
+        let test = a.var(z);
+        let chosen = a.if_(test, one, two);
+        let callback = a.function_(1, &[z], chosen, Default::default(), LamLoc::NONE);
+        let callee = a.var(ext);
+        let test = call(a, callee, &[callback]);
+        let callee = a.var(f);
+        let arg = a.var(c);
+        let applied = call(a, callee, &[arg]);
+        let branch = a.if_(test, applied, three);
+        let inner = a.let_(LetKind::Strict, f, function, branch);
+        a.function_(1, &[c], inner, Default::default(), LamLoc::NONE)
+    };
+    assert!(legacy_text(build, &[]).contains("  return ext(z => z ? 1 : 2) ? f(c) : 3;\n"));
+    let text = |predicate: &str| format!("\n\n\nfunction run(c) {{\n  if (ext({predicate})) {{\n    return ext(c, c);\n  }} else {{\n    return 3;\n  }}\n}}\n\nexport {{\n  run,\n}}\n/* No side effect */\n");
+    // The legacy order: the callback keeps its returned conditional.
+    assert_eq!(legacy_text(build, &[1, 2, 3, 4, 5, 6]), text("z => z ? 1 : 2"));
+    // The `if` exists before P1 runs: the first flatten stands for the
+    // reshaping of the path to the site, the second is P1 after step A.
+    assert_eq!(
+        legacy_text(build, &[1, 3, 1, 2, 4, 5, 6]),
+        text("z => {\n      if (z) {\n        return 1;\n      } else {\n        return 2;\n      }\n    }"),
+    );
 }
