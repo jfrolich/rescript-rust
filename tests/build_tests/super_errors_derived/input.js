@@ -2,7 +2,7 @@
 
 // Diagnostics and warnings of code the built-in derive generates. Each
 // fixture directory is built as a project that enables the derive
-// (`ppx-flags`) together with lib/Spice.res, the library the generated code
+// (`ppx-flags`) together with support/Spice.res, the library the generated code
 // calls, and the diagnostics the build writes to
 // `lib/rescript/.compiler.log` are compared with the snapshot. A fixture that
 // compiles has an empty snapshot unless it warns.
@@ -13,7 +13,7 @@
 // The OCaml compiler has no built-in derive, so there is no reference build:
 // the snapshots record this compiler's output.
 
-import { readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -22,8 +22,20 @@ import { normalizeNewlines } from "#dev/utils";
 
 const fixturesDir = path.join(import.meta.dirname, "fixtures");
 const expectedDir = path.join(import.meta.dirname, "expected");
-const libDir = path.join(import.meta.dirname, "lib");
+const supportDir = path.join(import.meta.dirname, "support");
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
+
+if (
+  !existsSync(supportDir) ||
+  !readdirSync(supportDir).some(
+    name =>
+      name.endsWith(".res") && statSync(path.join(supportDir, name)).isFile(),
+  )
+) {
+  throw new Error(
+    "Derived diagnostic fixtures require support/*.res (support/Spice.res is missing).",
+  );
+}
 
 const fixtures = readdirSync(fixturesDir)
   .filter(name => statSync(path.join(fixturesDir, name)).isDirectory())
@@ -79,7 +91,7 @@ async function runFixture(fixtureName) {
   );
   try {
     await fs.mkdir(path.join(projectDir, "src"));
-    for (const dir of [libDir, fixtureDir]) {
+    for (const dir of [supportDir, fixtureDir]) {
       for (const name of await fs.readdir(dir)) {
         if (name.endsWith(".res") || name.endsWith(".resi")) {
           await fs.copyFile(
@@ -95,7 +107,10 @@ async function runFixture(fixtureName) {
     );
 
     const { execBuild } = setup(projectDir);
-    const { stdout, stderr } = await execBuild([], { env: buildEnv });
+    const { stdout, stderr } = await execBuild([], {
+      env: buildEnv,
+      timeout: 10000,
+    });
     let log;
     try {
       log = await fs.readFile(
@@ -165,10 +180,14 @@ await Promise.all(
 );
 
 let atLeastOneTaskFailed = false;
-for (const { failure } of results) {
+for (const { fixtureName, failure } of results) {
   if (failure !== null) {
     console.error(failure);
     atLeastOneTaskFailed = true;
+  } else {
+    console.log(
+      `PASS ${fixtureName} (${process.env.RESCRIPT_DERIVED_PATH ?? "default"})`,
+    );
   }
 }
 if (atLeastOneTaskFailed) {

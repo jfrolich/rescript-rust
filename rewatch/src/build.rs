@@ -690,7 +690,9 @@ pub fn incremental_build_without_lock(
     phase_mark("parse-start");
     let timing_parse_start = Instant::now();
     let timing_ast = Instant::now();
-    let result_asts = if fresh_in_process {
+    let result_asts = if fresh_in_process
+        && build_state.build_state.project_context.current_config.name != "@rescript/runtime"
+    {
         // The runtime pre-compilation only needs the registry and the runtime
         // sources, so run it while the project sources are parsed. `compile`
         // later finds the runtime already registered and skips it.

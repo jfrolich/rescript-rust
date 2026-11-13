@@ -697,28 +697,27 @@ pub fn compile(
     crate::build::phase_mark("compile-start");
     prepare_registry_for_runtime_precompile(build_state);
 
-    // Pre-compile all @rescript/runtime modules into the registry.
-    // In in-process mode, the registry is the sole source of truth —
-    // no CMI fallback. Every dependency must be in the registry before
-    // project modules start compiling, even when @rescript/runtime is
-    // also present in the package graph (otherwise implicit Stdlib opens
-    // can require modules that the main build graph hasn't reached yet).
-    let parent_span = compile_parent_span.clone();
-    let pre_compile_result: Result<()> = std::thread::scope(|scope| {
-        spawn_runtime_precompile(scope, || {
-            let _parent = parent_span.enter();
-            pre_compile_runtime_modules_with_mode(
-                &build_state.module_registry,
-                &build_state.build_state.compiler_info.runtime_path,
-                RuntimeStore::of_build(build_state).as_ref(),
-                build_state.check_only,
-                build_state.dump.is_some(),
-                build_state.revoked_snapshots[0],
-            )
-        })
-        .and_then(join_runtime_precompile)
-    });
-    pre_compile_result?;
+    // A runtime project supplies its own modules through the normal dependency
+    // scheduler (-make-runtime disables implicit Stdlib dependencies). Other
+    // projects need runtime interfaces before their modules can compile.
+    if build_state.build_state.project_context.current_config.name != "@rescript/runtime" {
+        let parent_span = compile_parent_span.clone();
+        let pre_compile_result: Result<()> = std::thread::scope(|scope| {
+            spawn_runtime_precompile(scope, || {
+                let _parent = parent_span.enter();
+                pre_compile_runtime_modules_with_mode(
+                    &build_state.module_registry,
+                    &build_state.build_state.compiler_info.runtime_path,
+                    RuntimeStore::of_build(build_state).as_ref(),
+                    build_state.check_only,
+                    build_state.dump.is_some(),
+                    build_state.revoked_snapshots[0],
+                )
+            })
+            .and_then(join_runtime_precompile)
+        });
+        pre_compile_result?;
+    }
     crate::build::phase_mark("runtime-precompile-end");
 
     // Clear source-fallback paths after pre-compilation.

@@ -977,3 +977,125 @@ The manual reproduction used `let value = Belt.Array.length([1, 2])` and
 the recorded watcher PID afterwards. These are baseline observations, not the
 S5 acceptance tests or a claim of completion. No instruction count has yet
 been measured for S5.
+
+## D14: duplicate runtime compilation investigation
+
+At `37ba9b513`, a clean runtime build with `RESCRIPT_BACKEND=check`
+compiles the runtime twice, not merely reports it twice. With
+`RESCRIPT_COMPILER_COUNTERS=1`, the driver signature census reports
+`exported_signatures units=226`; the log reports both
+`Compiled 113 runtime modules from source into registry` and
+`Compiled 113 modules`. Backend statistics contain 226 distinct unit paths,
+113 containing `/./`.
+
+`build::build` starts `pre_compile_runtime_modules_with_mode` concurrently
+with project parsing. `compile::compile` also ensures runtime availability;
+its already-registered guard avoids a third compilation. The first compile
+uses `runtime_source_paths` (directory-entry paths directly under the runtime
+root). The project compile uses `packages::read_folders_and_dirs`, which
+preserves the configured `.` source directory in module paths. The project
+compiler identifies the runtime by `package.name == "@rescript/runtime"`.
+It nevertheless schedules those same modules after the precompile.
+
+For a clean single-worker runtime build, release binaries measured with
+`valgrind --tool=cachegrind`, `RAYON_NUM_THREADS=1`, and
+`RESCRIPT_BACKEND=check` retire:
+
+| Revision | Instructions |
+| --- | ---: |
+| `10227bc20` (parent of `fc46a63933`) | 2,313,762,526 |
+| `37ba9b513` | 4,155,284,504 |
+
+These historical revisions also differ in other compiler changes; this is
+not an isolated measurement of the snapshot commit. Hardware `perf stat`
+was unavailable because the environment prohibits performance counters;
+Cachegrind supplies the instruction measurements instead.
+
+A verbose build of the `core_patterns.res` fixture under the same environment
+prints exactly:
+
+```text
+Not using the prebuilt @rescript/runtime: RESCRIPT_BACKEND is not supported. Compiling it from source.
+```
+
+Its signature census is 114 units (113 runtime plus one fixture). This is
+intentional: `snapshot::alternate_backend_option` rejects `check` and `new`
+so that the selected backend actually processes runtime sources. Reusing
+legacy-produced snapshot interfaces would bypass the shadow oracle. The
+sources match; source freshness is not the reason for rejection. Accordingly,
+the fixture coverage corpus must remain 593 units (480 fixtures plus 113
+runtime units), not 480. No snapshot eligibility change is warranted.
+
+### D14 correction and verification
+
+Runtime projects now skip runtime precompilation at both build entry points;
+the ordinary dependency scheduler is their only compilation path. This uses
+the existing runtime package identity, not a path-spelling heuristic or a
+new option. `read_folders_and_dirs` normalizes the source directory before
+forming unit paths, reusing its existing directory buffer. Work is linear in
+directory components once per directory, not a pass over compiled nodes.
+No new compile-path function, node representation, hash table, synchronization,
+or per-node allocation is introduced.
+
+The regression test counts the driver's main-signature census (which executes
+for each compiled implementation, not loaded interfaces), independently of
+backend report filenames. On the corrected release build it reports:
+
+```text
+runtime: 113 compile entries, 113 distinct normalized unit paths
+```
+
+The historical binary's clean-build census is 113 exports. The original
+226-path observation is reproduced with a canonical runtime root; alternate
+symlink spellings of the checkout can add further report identities when
+reusing a report directory. All measurements here use fresh report directories.
+
+Final single-worker Cachegrind measurements (same checkout and source inputs):
+
+| Build | Baseline instructions | Corrected instructions | Change |
+| --- | ---: | ---: | ---: |
+| runtime, backend check | 4,155,284,504 | 2,270,400,494 | -45.36% |
+| tests/tests, default backend | 4,059,614,015 | 4,060,289,943 | +0.01665% |
+
+This saves no intended work on the ordinary tests/tests path; the measured
+change is within the requested +0.02% bound. Both builds compile 736 modules.
+These are individual runs, not a claim of a statistically significant speedup
+on ordinary projects.
+
+`python3 scripts/test_backend_coverage.py --record` produces 113 runtime
+units in every stage. Contrary to the initial task's description, the baseline
+has 226 runtime units only in `lambda-alias` and `lower`; the other stages
+already record 113. The alias count becomes 113 identical; lower becomes
+92 identical with assign 1, let rec 3, loop 7, try 10 (exactly half of each
+previous count). All tests/tests entries are byte-for-byte unchanged. Fixture
+entries are also unchanged: 593 units in the Lambda/lower stages, 480 in
+`js-bridge`, which does not report the runtime precompilation's interface-only
+work. No ratchet rule or backend IR code changes.
+
+Local verification: Rewatch debug and release builds pass; its test suites
+report 205 unit tests, one embedded-runtime test and seven snapshot tests
+passing. JavaScript parity reports 730/730 snapshot files and all focused
+fixtures passing. The runtime regression passes separately.
+
+The 3,735-module application benchmark retires 67,522,628,165 instructions
+before and 67,508,249,057 after (-0.0213%); generated outputs are identical.
+The independent checker comparison reports no differences in 3,735
+signatures, diagnostics from 18 files, or 3,980 generated files. These small
+ordinary-project differences are measurement variation, not intended savings.
+
+### Integration with assignment/exception lowering
+
+After merging trunk `1878df548`, the baseline was regenerated again with
+`python3 scripts/test_backend_coverage.py --record`, not resolved by choosing
+one side of the conflicting JSON. Runtime lower coverage is now 102 identical
+of 113 units, with let rec 3 and loop 8, exactly half of trunk's 204 of 226
+and its unsupported counts. Every runtime stage has 113 units; all fixtures
+and tests/tests entries equal trunk (lower: fixtures 502/593, tests/tests
+619/730). The assignment and exception lowering improvements are retained.
+
+The instruction measurements above describe the pre-merge candidate against
+`37ba9b513`, not an isolated measurement against the newer trunk. After the
+merge, Rewatch debug/release builds, its 205 unit tests plus eight integration
+snapshot tests, the runtime compile-count regression, and JavaScript parity
+(730/730 plus focused fixtures) pass again. The PR's final Instruction count
+CI comparison measures against the updated base.

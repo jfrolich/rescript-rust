@@ -58,6 +58,8 @@ for package in belt runtime touch; do
       # macOS can deliver delayed metadata events from fixture setup. A second
       # completion alone need not belong to the source edit. Require completion
       # after this package's revocation, in log order.
+      # Bounded condition polling: check immediately, then pause only after a
+      # failed check, for at most 60 retries. This is not a fixed startup delay.
       remaining=60
       until awk '/rest of this watch session/ {revoked=1} revoked && /Finished .*compilation/ {done=1} END {exit !done}' "$work/$package-$mode.log"; do
         if [[ $remaining == 0 ]]; then exit 1; fi
