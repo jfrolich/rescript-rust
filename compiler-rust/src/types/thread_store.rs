@@ -21,7 +21,6 @@
 use super::context::TypeNodes;
 use super::type_expr::{AbbrevMemo, AbbrevMemoRef, RowField, RowFieldRef, TypeDesc, TypeExprRef};
 use super::variant_runtime::{Layout, LayoutRef};
-use crate::fast_hash::AHashMap as HashMap;
 use crate::intern::StrIdx;
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
@@ -66,12 +65,6 @@ pub(crate) fn next_store_stamp() -> i32 {
     STORE_STAMP.fetch_add(1, Ordering::Relaxed) + 1
 }
 
-/// A persistent-rooted component view and the replay record of building it.
-type SharedComponents = (
-    Rc<crate::types::env_lazy::QualifiedModuleComponents>,
-    Rc<crate::types::context::StorePiece>,
-);
-
 /// Shared dependency state for one worker thread.
 pub(crate) struct ThreadTypeStore {
     /// The private store of a view build's scratch context: dropped with
@@ -86,12 +79,6 @@ pub(crate) struct ThreadTypeStore {
     type_lists: super::type_expr::TypePayloadPool,
     variant_layouts: RefCell<Vec<Layout>>,
     next_type_id: Cell<i32>,
-    /// Component views of persistent-rooted module paths built as store
-    /// builds, with the replay record of building them (OCaml builds such a
-    /// view once per process, from `Env.empty`: compiler/ml/env.ml:669-678).
-    shared_components: RefCell<
-        HashMap<crate::types::context::QualifiedModuleComponentsCacheKey, SharedComponents>,
-    >,
     /// The `lbl_all` arrays built during store builds (`LabelArrayRef::store`).
     label_families: RefCell<Vec<Arc<Vec<crate::types::decl::LabelDescription>>>>,
     /// What this worker derived from each world view, by view id.
@@ -131,7 +118,6 @@ impl ThreadTypeStore {
             type_lists,
             variant_layouts: RefCell::new(Vec::new()),
             next_type_id: Cell::new(STORE_TYPE_ID_BASE),
-            shared_components: RefCell::new(HashMap::new()),
             label_families: RefCell::new(Vec::new()),
             view_tables: RefCell::new(Vec::new()),
             generation,
@@ -246,28 +232,6 @@ impl ThreadTypeStore {
         tables[index]
             .get_or_insert_with(|| Rc::new(crate::types::env_lazy::ViewTables::new(view)))
             .clone()
-    }
-
-    pub(crate) fn shared_components(
-        &self,
-        key: &crate::types::context::QualifiedModuleComponentsCacheKey,
-    ) -> Option<(
-        Rc<crate::types::env_lazy::QualifiedModuleComponents>,
-        Rc<crate::types::context::StorePiece>,
-    )> {
-        self.shared_components.borrow().get(key).cloned()
-    }
-
-    pub(crate) fn publish_shared_components(
-        &self,
-        key: crate::types::context::QualifiedModuleComponentsCacheKey,
-        components: Rc<crate::types::env_lazy::QualifiedModuleComponents>,
-        piece: Rc<crate::types::context::StorePiece>,
-    ) {
-        self.shared_components
-            .borrow_mut()
-            .entry(key)
-            .or_insert((components, piece));
     }
 
     /// Store a label array built during a store build; its index for
