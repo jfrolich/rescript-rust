@@ -5671,6 +5671,26 @@ mod tests {
     }
 
     #[test]
+    fn unexplained_failure_is_recorded_only_without_snapshot() {
+        use super::super::ctype::{unify, UnifyState};
+        for mode in [CheckMode::Success, CheckMode::Explain] {
+            for speculative in [false, true] {
+                let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+                ctx.set_explain_mode(mode);
+                let left = ctx.new_constr(super::super::predef::path_bool(), vec![]);
+                let right = ctx.new_constr(super::super::predef::path_string(), vec![]);
+                let snapshot = speculative.then(|| ctx.snapshot_type_state());
+                assert!(unify(&ctx, &mut UnifyState::new(), left, right).is_err());
+                assert_eq!(
+                    ctx.unexplained_unify_failure(),
+                    mode == CheckMode::Success && !speculative,
+                );
+                drop(snapshot);
+            }
+        }
+    }
+
+    #[test]
     fn success_mode_keeps_speculation_journal() {
         use super::super::ctype::{unify, UnifyState};
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
