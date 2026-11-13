@@ -635,6 +635,16 @@ body for the maintainers to add.
 
 ### Slice 2. Records
 
+**Status: done.** A record with at least one field takes a plan. The
+discharge of its labels does not split `type_record`: the labels of the record
+expression hold when each name's first candidate in scope is the label at the
+field's position of one non-private record, all of whose labels are written,
+and anything else fails the obligation. Kept general beyond the table of Q5: an
+empty record, a template literal as a key or default, a `JSON.t` field, and a
+field of a user's type applied to arguments (its codec takes the arguments'
+codecs one at a time, which a plan's skeleton does not describe).
+`check` compared source maps already. Not measured: the application.
+
 - **Files:** `binary_ast/spice_ppx.rs` (plan builder for records),
   `binary_ast/derive/plan.rs` (the remaining body nodes), `types/derived.rs`
   (`Label`, `Constructor`, `Literal`), `raw_lambda/convert/derived.rs`,
