@@ -410,6 +410,34 @@ mod tests {
     }
 
     #[test]
+    fn a_loop_over_an_existing_variable_binds_nothing_and_the_declaration_of_its_target_covers_it() {
+        // `if (null) { let g = null; for (g = ...; ...) { g' } } g'`: the
+        // loop's target is a reference to the local `g`, not a binder; the
+        // declaration's block covers the loop, so the global inside it is
+        // qualified, the one after the `if` is not.
+        let (mut b, mut idents) = arena();
+        let var = local(&mut b, &mut idents, "g");
+        let declaration = declare(&mut b, var);
+        let variable = b.new_node(View::Var { var }, 0);
+        let finish = b.new_node(View::JNull, 0);
+        let inside = read(&mut b);
+        let statement = effect(&mut b, inside);
+        let body = block(&mut b, &[statement]);
+        let looped = b.new_node(View::SForRangeExisting { variable, parts: &[finish, body], label: None }, 0);
+        let covered = block(&mut b, &[declaration, looped]);
+        let condition = b.new_node(View::JNull, 0);
+        let branch = b.new_node(View::SIf { condition, then_: covered, else_: None }, 0);
+        let outside = read(&mut b);
+        let after = effect(&mut b, outside);
+        block(&mut b, &[branch, after]);
+        decide(&mut b, &idents);
+        assert_eq!(b.vars.binder(var), Some(declaration));
+        assert!(qualified(&b, inside));
+        assert!(!qualified(&b, outside) && !qualified(&b, variable));
+        assert_eq!(b.js_scope.as_ref().unwrap().globals.qualified, 1);
+    }
+
+    #[test]
     fn a_second_decision_allocates_nothing() {
         let (mut b, mut idents) = arena();
         let mut statements = Vec::new();
