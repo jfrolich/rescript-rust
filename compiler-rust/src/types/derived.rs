@@ -675,7 +675,6 @@ fn discharge_binding(
             }
             Obligation::Constructor {
                 name,
-                ty: _,
                 skeleton,
                 of,
                 site,

@@ -334,6 +334,8 @@ struct Builder<'a> {
 /// takes the slots from the length it found, and truncates them back.
 #[derive(Default)]
 struct Scratch {
+    /// Reused spelling buffer for generated binders and argument paths.
+    name: String,
     /// The slots of the arguments of the heads being emitted, innermost last.
     slots: Vec<Slot>,
     /// Body nodes gathered for an argument range: the components of an
@@ -350,6 +352,24 @@ struct Scratch {
 }
 
 impl Builder<'_> {
+    /// Intern a generated argument name without allocating a temporary string.
+    /// Cost: O(decimal digits), using the item's one spelling buffer.
+    fn indexed_name(&mut self, prefix: &str, index: usize, suffix: &str) -> StrIdx {
+        use std::fmt::Write;
+        self.scratch.name.clear();
+        write!(self.scratch.name, "{prefix}{index}{suffix}").unwrap();
+        self.arena.intern_string(&self.scratch.name)
+    }
+
+    /// Intern a field binder using the same item-wide spelling buffer.
+    /// Cost: O(field name bytes); no temporary string per field.
+    fn field_name(&mut self, name: StrIdx) -> StrIdx {
+        self.scratch.name.clear();
+        self.scratch.name.push_str("spice_field_");
+        self.scratch.name.push_str(self.arena.get_string(name));
+        self.arena.intern_string(&self.scratch.name)
+    }
+
     fn fresh(&mut self) -> u32 {
         self.vars += 1;
         self.vars - 1
@@ -650,6 +670,26 @@ mod tests {
             .expect("a type declaration");
         let shares_names = group_shares_names(decls, &arena);
         classify(&arena, decls.last().unwrap(), rec_flag, shares_names)
+    }
+
+    #[test]
+    fn a_constructor_can_have_more_than_255_arguments() {
+        let args = vec!["int"; 256].join(", ");
+        let source = format!("@spice type t = C({args})");
+        assert_eq!(classification(&source), Classification::Plan);
+        let (_, arena) = expand(&source);
+        let plans = arena.plans();
+        let mut declared = 0;
+        for binding in plans.bindings(plans.item(DerivedIdx(0))) {
+            for i in binding.obligations.range() {
+                if let Obligation::Constructor { of: Owner::Declared, args, .. } =
+                    plans.obligation(ObligationIdx(i as u32)) {
+                    assert_eq!(args, 256);
+                    declared += 1;
+                }
+            }
+        }
+        assert_eq!(declared, 3);
     }
 
     #[test]

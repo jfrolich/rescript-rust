@@ -214,14 +214,12 @@ impl Builder<'_> {
         &mut self,
         name: LidentIdx,
         of: Owner,
-        ty: ObligationIdx,
         site: Site,
-        args: u8,
+        args: u16,
         skeleton: SkeletonIdx,
     ) -> ObligationIdx {
         self.arena.plans_mut().push_obligation(Obligation::Constructor {
             name,
-            ty,
             skeleton,
             of,
             site,
@@ -336,7 +334,7 @@ impl Builder<'_> {
         let object = lident_path_static(self.arena, &["JSON", "Object"]);
         let skeleton = self.var(dict);
         self.json(json);
-        let object = self.constructor(object, Owner::Type, json, Site::Construct, 1, skeleton);
+        let object = self.constructor(object, Owner::Type, Site::Construct, 1, skeleton);
         let skeleton = self.sk(SkeletonNode::Arrow { params: 1 });
         self.var(filtered);
         self.var(dict);
@@ -370,9 +368,9 @@ impl Builder<'_> {
                 let encoded = self.fresh();
                 let skeleton = self.var(encoded);
                 self.var(entry);
-                let no_type = ObligationIdx(0);
+
                 let some =
-                    self.constructor(some, Owner::Option, no_type, Site::Construct, 1, skeleton);
+                    self.constructor(some, Owner::Option, Site::Construct, 1, skeleton);
                 (Some(some), encoded)
             };
             let codec = self.codec(field.codec, Slot::Applied(value, encoded));
@@ -477,7 +475,7 @@ impl Builder<'_> {
             self.arena.intern_string(" missing"),
             self.arena.intern_string("."),
         );
-        let no_type = ObligationIdx(0);
+
         let (json, dict, result, record) = (flat.json, flat.dict, flat.result, flat.record);
         let fields_local = flat.dict_local + 1;
 
@@ -515,7 +513,7 @@ impl Builder<'_> {
                 let skeleton = self.var(inner);
                 self.var(fallback);
                 let ok =
-                    self.constructor(ok, Owner::Result, no_type, Site::Construct, 1, skeleton);
+                    self.constructor(ok, Owner::Result, Site::Construct, 1, skeleton);
                 let arg = match field.default {
                     Some(default) => {
                         let literal = self.literal(default, Some(inner));
@@ -526,7 +524,6 @@ impl Builder<'_> {
                         let none = self.constructor(
                             none,
                             Owner::Option,
-                            no_type,
                             Site::Construct,
                             0,
                             skeleton,
@@ -566,11 +563,11 @@ impl Builder<'_> {
             let skeleton = self.var(value);
             self.var(scrutinee);
             let ok_pattern =
-                self.constructor(ok, Owner::Result, no_type, Site::Pattern, 1, skeleton);
+                self.constructor(ok, Owner::Result, Site::Pattern, 1, skeleton);
             let skeleton = self.var(failure);
             self.var(scrutinee);
             let error_pattern =
-                self.constructor(error_name, Owner::Result, no_type, Site::Pattern, 1, skeleton);
+                self.constructor(error_name, Owner::Result, Site::Pattern, 1, skeleton);
             self.arena.plans_mut().push_obligation(Obligation::Type {
                 name: decode_error,
                 name_loc: names.none,
@@ -595,12 +592,12 @@ impl Builder<'_> {
         };
         let skeleton = self.var(made);
         self.var(result);
-        let ok = self.constructor(ok, Owner::Result, no_type, Site::Construct, 1, skeleton);
+        let ok = self.constructor(ok, Owner::Result, Site::Construct, 1, skeleton);
         let inline = flat.inline.map(|(name, declared)| {
             let name = self.arena.push_lident_from_idx(name);
             let skeleton = self.var(record);
             self.var(declared);
-            self.constructor(name, Owner::Declared, no_type, Site::ConstructNone, 1, skeleton)
+            self.constructor(name, Owner::Declared, Site::ConstructNone, 1, skeleton)
         });
         let first_label = self.arena.plans().next_obligation();
         for (i, label) in labels.iter().enumerate() {
@@ -680,7 +677,7 @@ impl Builder<'_> {
             let decoded = &self.scratch.decoded[first_decoded + i];
             let (scrutinee, ok_pattern, error_pattern) =
                 (decoded.scrutinee, decoded.ok, decoded.error);
-            let binder = field_var(self.arena, field.name);
+            let binder = self.field_name(field.name);
             let plans = self.arena.plans_mut();
             let cases = plans.push_cases(&[
                 Case {
@@ -727,7 +724,7 @@ impl Builder<'_> {
         let object = lident_path_static(self.arena, &["JSON", "Object"]);
         let skeleton = self.var(dict);
         self.json(json);
-        let object = self.constructor(object, Owner::Type, json, Site::PatternDummy, 1, skeleton);
+        let object = self.constructor(object, Owner::Type, Site::PatternDummy, 1, skeleton);
         let flat = Flat {
             json,
             dict,
@@ -869,4 +866,19 @@ pub(super) fn bindings(
         Side::Encode => builder.record_encoder(labels, &names),
         Side::Decode => builder.record_decoder(labels, &names),
     });
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn record_builder_state_sizes_are_pinned() {
+        assert_eq!(std::mem::size_of::<Field>(), 32);
+        assert_eq!(std::mem::size_of::<Names>(), 8);
+        assert_eq!(std::mem::size_of::<FieldValues>(), 12);
+        assert_eq!(std::mem::size_of::<Decoded>(), 28);
+        assert_eq!(std::mem::size_of::<Flat>(), 36);
+        assert_eq!(std::mem::size_of::<&Flat>(), 8);
+    }
 }

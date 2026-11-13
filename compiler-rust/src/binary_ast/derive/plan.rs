@@ -200,8 +200,6 @@ pub enum Obligation {
     Constructor {
         /// The constructor's name.
         name: LidentIdx,
-        /// The `Type` obligation of an [`Owner::Type`] constructor.
-        ty: ObligationIdx,
         /// The skeletons of the `args` arguments, followed by the result's.
         skeleton: SkeletonIdx,
         /// The type the constructor must belong to.
@@ -210,7 +208,7 @@ pub enum Obligation {
         site: Site,
         /// The number of arguments the body gives it; a constructor of an
         /// inline record takes the record as its one argument.
-        args: u8,
+        args: u16,
     },
     /// A constant of the user's source (`@spice.key("k")`,
     /// `@spice.default(0)`): its type is unified with the skeleton.

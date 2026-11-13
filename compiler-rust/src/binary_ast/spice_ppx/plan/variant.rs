@@ -80,7 +80,7 @@ fn alias_is_string(expr: ExprIdx, arena: &ParseArena) -> bool {
 /// one; none with a return type; no `@spice.*` attribute but `@spice.as`, at
 /// most once; either no constructor has `@spice.as` or every one has it, is
 /// constant, and its payload is a string or float constant (the general path
-/// reports the other cases); at most 255 arguments; and an inline record that
+/// reports the other cases); at most 65,535 arguments; and an inline record that
 /// `record::planned` admits. The types of the arguments are classified by
 /// the caller.
 /// Cost: O(constructors + their attributes and labels' attributes); no
@@ -127,7 +127,7 @@ pub(in crate::binary_ast) fn planned(
             }
         }
         let admitted = match &constructor.pcd_args {
-            ConstructorArguments::Pcstr_tuple(args) => args.len() <= usize::from(u8::MAX),
+            ConstructorArguments::Pcstr_tuple(args) => args.len() <= usize::from(u16::MAX),
             ConstructorArguments::Pcstr_record(labels) => record::planned(labels, arena),
         };
         if !admitted {
@@ -304,7 +304,7 @@ impl Builder<'_> {
             var: NO_VAR,
         });
         let declared = self.fresh();
-        let no_type = ObligationIdx(0);
+
 
         // The patterns of all cases.
         let (first_case, first_var) = (self.scratch.cases.len(), self.scratch.vars.len());
@@ -319,14 +319,13 @@ impl Builder<'_> {
                     let constructor = self.constructor(
                         name,
                         Owner::Declared,
-                        no_type,
                         Site::Pattern,
-                        n as u8,
+                        n as u16,
                         skeleton,
                     );
                     let pattern = self.pattern(PatNode::Construct(constructor));
                     for i in 0..n {
-                        let binder = self.arena.intern_string(&format!("v{i}"));
+                        let binder = self.indexed_name("v", i as usize, "");
                         self.pattern(PatNode::Var(binder));
                     }
                     pattern
@@ -338,7 +337,6 @@ impl Builder<'_> {
                     let constructor = self.constructor(
                         name,
                         Owner::Declared,
-                        no_type,
                         Site::Pattern,
                         1,
                         skeleton,
@@ -354,7 +352,7 @@ impl Builder<'_> {
                     for (i, label) in labels.iter().enumerate() {
                         let name = self.arena.push_lident_from_idx(label.pld_name.txt);
                         self.label(name, LabelUse::Pattern, first + i as u32, record);
-                        let binder = field_var(self.arena, label.pld_name.txt);
+                        let binder = self.field_name(label.pld_name.txt);
                         self.pattern(PatNode::Var(binder));
                     }
                     pattern
@@ -379,7 +377,7 @@ impl Builder<'_> {
                         false => lids.json_number,
                     };
                     let wrap =
-                        self.constructor(name, Owner::Type, json, Site::Construct, 1, skeleton);
+                        self.constructor(name, Owner::Type, Site::Construct, 1, skeleton);
                     let literal = self.literal(expr, Some(literal_var));
                     let arg = self.node(BodyNode::Literal(literal));
                     self.node(BodyNode::Construct {
@@ -399,7 +397,6 @@ impl Builder<'_> {
                     let array = self.constructor(
                         lids.json_array,
                         Owner::Type,
-                        json,
                         Site::Construct,
                         1,
                         skeleton,
@@ -409,7 +406,6 @@ impl Builder<'_> {
                     let string = self.constructor(
                         lids.json_string,
                         Owner::Type,
-                        json,
                         Site::Construct,
                         1,
                         skeleton,
@@ -493,7 +489,6 @@ impl Builder<'_> {
         let empty_array = self.constructor(
             lids.json_array,
             Owner::Type,
-            json,
             Site::PatternDummy,
             1,
             skeleton,
@@ -505,7 +500,6 @@ impl Builder<'_> {
         let array = self.constructor(
             lids.json_array,
             Owner::Type,
-            json,
             Site::PatternDummy,
             1,
             skeleton,
@@ -565,7 +559,6 @@ impl Builder<'_> {
             let string = self.constructor(
                 decoder.lids.json_string,
                 Owner::Type,
-                decoder.json,
                 Site::Pattern,
                 1,
                 skeleton,
@@ -646,13 +639,12 @@ impl Builder<'_> {
         decoder: &Decoder<'_>,
         constructor: &ConstructorDeclaration,
     ) -> BodyIdx {
-        let no_type = ObligationIdx(0);
+
         let skeleton = self.var(decoder.declared);
         self.var(decoder.result);
         let ok = self.constructor(
             decoder.lids.ok,
             Owner::Result,
-            no_type,
             Site::Construct,
             1,
             skeleton,
@@ -662,7 +654,6 @@ impl Builder<'_> {
         let declared = self.constructor(
             name,
             Owner::Declared,
-            no_type,
             Site::ConstructNone,
             0,
             skeleton,
@@ -685,16 +676,15 @@ impl Builder<'_> {
         &mut self,
         decoder: &Decoder<'_>,
         failure: u32,
-        prefix: &str,
+        prefix: StrIdx,
         e: u32,
     ) -> BodyIdx {
-        let no_type = ObligationIdx(0);
+
         let skeleton = self.var(failure);
         self.var(decoder.result);
         let error = self.constructor(
             decoder.lids.error_constructor,
             Owner::Result,
-            no_type,
             Site::Construct,
             1,
             skeleton,
@@ -707,7 +697,6 @@ impl Builder<'_> {
         self.var(previous);
         self.var(path);
         let concat = self.value_named(decoder.lids.concat, skeleton);
-        let prefix = self.arena.intern_string(prefix);
         let prefix = self.node(BodyNode::Str(prefix));
         let record = self.node(BodyNode::Local(e));
         let access = self.label(decoder.lids.path, LabelUse::AccessDummy, previous, failure);
@@ -732,7 +721,6 @@ impl Builder<'_> {
         let error = self.constructor(
             decoder.lids.error_constructor,
             Owner::Result,
-            ObligationIdx(0),
             Site::PatternDummy,
             1,
             skeleton,
@@ -787,7 +775,7 @@ impl Builder<'_> {
         self.scratch.nodes.truncate(first_item);
 
         // `(Ok(v0), Ok(v1), ...)`.
-        let no_type = ObligationIdx(0);
+
         let first_case = self.scratch.cases.len();
         let values = self.fresh_n(n);
         let tuple = (n > 1).then(|| self.pattern(PatNode::Tuple { len: n as u16 }));
@@ -798,14 +786,13 @@ impl Builder<'_> {
             let ok = self.constructor(
                 decoder.lids.ok,
                 Owner::Result,
-                no_type,
                 Site::PatternDummy,
                 1,
                 skeleton,
             );
             let pattern = self.pattern(PatNode::Construct(ok));
             success.get_or_insert(pattern);
-            let binder = self.arena.intern_string(&format!("v{i}"));
+            let binder = self.indexed_name("v", i as usize, "");
             self.pattern(PatNode::Var(binder));
         }
         let success = tuple.or(success).expect("a constructor with arguments");
@@ -838,7 +825,6 @@ impl Builder<'_> {
         let ok = self.constructor(
             decoder.lids.ok,
             Owner::Result,
-            no_type,
             Site::Construct,
             1,
             skeleton,
@@ -848,9 +834,8 @@ impl Builder<'_> {
         let declared = self.constructor(
             name,
             Owner::Declared,
-            no_type,
             Site::ConstructNone,
-            n as u8,
+            n as u16,
             skeleton,
         );
         let made = if n == 1 {
@@ -879,7 +864,8 @@ impl Builder<'_> {
         });
         self.scratch.cases[first_case].body = body;
         for i in 0..n {
-            let body = self.prefixed_error(decoder, failures + i, &format!("[{}]", i + 1), CASE);
+            let prefix = self.indexed_name("[", i as usize + 1, "]");
+            let body = self.prefixed_error(decoder, failures + i, prefix, CASE);
             self.scratch.cases[first_case + 1 + i as usize].body = body;
         }
         self.switch(scrutinee, first_case)
@@ -908,14 +894,12 @@ impl Builder<'_> {
             body: decoded,
         });
 
-        let no_type = ObligationIdx(0);
         let (made, failure) = (self.fresh(), self.fresh());
         let skeleton = self.var(made);
         self.var(inner);
         let ok_pattern = self.constructor(
             decoder.lids.ok,
             Owner::Result,
-            no_type,
             Site::PatternDummy,
             1,
             skeleton,
@@ -927,7 +911,6 @@ impl Builder<'_> {
         let ok = self.constructor(
             decoder.lids.ok,
             Owner::Result,
-            no_type,
             Site::Construct,
             1,
             skeleton,
@@ -937,7 +920,8 @@ impl Builder<'_> {
             constructor: ok,
             arg: local,
         });
-        let failed = self.prefixed_error(decoder, failure, "[1]", CASE);
+        let prefix = self.arena.intern_string("[1]");
+        let failed = self.prefixed_error(decoder, failure, prefix, CASE);
         let plans = self.arena.plans_mut();
         let cases = plans.push_cases(&[
             Case {
@@ -985,7 +969,6 @@ impl Builder<'_> {
         let string_pattern = self.constructor(
             lids.json_string,
             Owner::Type,
-            json,
             Site::PatternDummy,
             1,
             skeleton,
@@ -995,7 +978,6 @@ impl Builder<'_> {
         let number_pattern = self.constructor(
             lids.json_number,
             Owner::Type,
-            json,
             Site::PatternDummy,
             1,
             skeleton,
@@ -1124,4 +1106,17 @@ pub(super) fn bindings(
             (Side::Decode, Mode::Alias) => builder.alias_decoder(constructors, &names),
         }
     });
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn variant_builder_state_sizes_are_pinned() {
+        assert_eq!(std::mem::size_of::<Mode>(), 1);
+        assert_eq!(std::mem::size_of::<Lids>(), 52);
+        assert_eq!(std::mem::size_of::<Decoder<'_>>(), 32);
+        assert_eq!(std::mem::size_of::<&Decoder<'_>>(), 8);
+    }
 }
