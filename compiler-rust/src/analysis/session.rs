@@ -5,7 +5,7 @@ use super::process_cmt::{self, Annots, Ctx};
 use super::process_extra;
 use super::resolve_path::Session;
 use super::shared_types::{
-    Declared, ExportedKind, Extra, File, Loc, Located, Module, ModuleId, ModuleItem,
+    Declared, ExportedKind, Extra, File, Loc, LocFile, Located, Module, ModuleId, ModuleItem,
     ModuleItemKind, ModulePath,
 };
 use crate::driver::{ToolingTyped, ToolingTypedModule};
@@ -290,6 +290,8 @@ fn namespace_file(module_name: &str, id: ModuleId, aliases: &[(String, String)])
     let mut file = File::create(module_name, String::new(), id);
     let mut structure = (*file.structure).clone();
     let mut exported = (*structure.exported).clone();
+    // `Location.none`'s file name.
+    let none_file = LocFile::located("_none_");
     for (stamp, (alias, target)) in (1..).zip(aliases) {
         let item = Module::Ident(crate::types::Path::pident(
             crate::ident::Ident::create_persistent(target.as_str()),
@@ -302,6 +304,7 @@ fn namespace_file(module_name: &str, id: ModuleId, aliases: &[(String, String)])
                     loc: Loc::none(),
                 },
                 extent_loc: Loc::none(),
+                extent_file: none_file.clone(),
                 stamp,
                 module_path: ModulePath::File {
                     uri: file.uri.clone(),
@@ -321,6 +324,7 @@ fn namespace_file(module_name: &str, id: ModuleId, aliases: &[(String, String)])
             },
             name: alias.clone(),
             loc: Loc::none(),
+            file: none_file.clone(),
             docstring: Vec::new(),
             deprecated: None,
         });

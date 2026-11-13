@@ -498,7 +498,7 @@ impl ExtraIterator<'_, '_> {
         &mut self,
         stamp: i32,
         name: Located<String>,
-        extent: Loc,
+        extent: Extent,
         item: TypeExprRef,
         attributes: Attrs<'_>,
     ) {
@@ -530,9 +530,10 @@ impl ExtraIterator<'_, '_> {
         name: &tt::Loc<String>,
     ) {
         let stamp = ident.binding_time();
+        let name_extent = self.ctx.extent(name.loc);
         let name = Located {
             txt: name.txt.clone(),
-            loc: self.loc(name.loc),
+            loc: name_extent.loc,
         };
         let has_unpack = self
             .ctx
@@ -558,10 +559,9 @@ impl ExtraIterator<'_, '_> {
         );
         match unpacked {
             Some(path) => {
-                let extent = name.loc;
                 let declared = attrs::new_declared(
                     Module::Ident(path),
-                    extent,
+                    name_extent,
                     name,
                     stamp,
                     ModulePath::NotVisible,
@@ -571,7 +571,7 @@ impl ExtraIterator<'_, '_> {
                 self.file.stamps.add_module(stamp, declared);
             }
             None => {
-                let extent = self.loc(pattern.pat_loc);
+                let extent = self.ctx.extent(pattern.pat_loc);
                 self.add_for_declared_pattern(stamp, name, extent, pattern.pat_type, attributes);
             }
         }
@@ -616,7 +616,7 @@ impl<'a> TastIterator<'a> for ExtraIterator<'a, '_> {
                         .ta
                         .core_type(self.ctx.ta.value_description(*vd).val_desc)
                         .ctyp_type,
-                    self.loc(self.ctx.ta.value_description(*vd).val_loc),
+                    self.ctx.extent(self.ctx.ta.value_description(*vd).val_loc),
                     name.clone(),
                     stamp,
                     ModulePath::NotVisible,
@@ -664,11 +664,11 @@ impl<'a> TastIterator<'a> for ExtraIterator<'a, '_> {
                     .collect();
                 self.add_for_record(pattern.pat_type, &record_items);
                 if let Some(rest) = rest {
+                    let extent = self.ctx.extent(rest.rest_name.loc);
                     let name = Located {
                         txt: rest.rest_name.txt.clone(),
-                        loc: self.loc(rest.rest_name.loc),
+                        loc: extent.loc,
                     };
-                    let extent = name.loc;
                     let attributes = Attrs::Parsed(
                         self.ctx.ta.pat_attributes(pattern).as_slice(),
                         self.ctx.arena,

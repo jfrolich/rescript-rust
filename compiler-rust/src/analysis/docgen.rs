@@ -9,8 +9,8 @@ use super::json::Json;
 use super::session::ProjectSession;
 use super::shared::{decl_to_string, path_ident_to_string, type_to_string, unwrap_if_option};
 use super::shared_types::{
-    Constructor, ConstructorArgs, Field, File, Loc, Module, ModuleItemKind, QueryEnv, Structure,
-    Type, TypeKind,
+    Constructor, ConstructorArgs, Field, File, Loc, Module, ModuleItem, ModuleItemKind, QueryEnv,
+    Structure, Type, TypeKind,
 };
 use crate::types::printtyp::{OutArgLabel, OutIdent, OutType, Printtyp, print_out_type_doc};
 use crate::types::{TypeContext, TypeDesc, TypeExprRef};
@@ -478,7 +478,7 @@ fn source_filepath(root_path: &str, path: &str) -> String {
     split(DIR_SEP, &relpath(root_path, path)).join("/")
 }
 
-/// `get_source`: where an item of the file at `file_path` starts.
+/// `get_source`: where a location in `file_path` starts.
 fn get_source(root_path: &str, file_path: &str, loc: &Loc) -> Source {
     let (line, col) = loc.start.line_col();
     Source {
@@ -486,6 +486,24 @@ fn get_source(root_path: &str, file_path: &str, loc: &Loc) -> Source {
         line: line + 1,
         col: col + 1,
     }
+}
+
+/// The location of an item. An item imported from another module's
+/// published interface (an `include`, a module alias) has no coordinates
+/// there: builds compile without them. Its location's identity names the
+/// slot of the declaring module's own parse, which the session loads with
+/// locations.
+fn item_loc(session: &ProjectSession<'_>, item: &ModuleItem) -> Loc {
+    let Some(origin) = item.file.origin else {
+        return item.loc;
+    };
+    let path = Path::new(&*item.file.name);
+    let located = session.project().module_for_path(path).and_then(|module_name| {
+        let loaded = session.load(&module_name, item.file.name.ends_with('i'))?;
+        let arena = loaded.source.parsed.arena();
+        (origin.0 < arena.parse_location_slot_count()?).then(|| Loc::of_idx(arena, origin))
+    });
+    located.unwrap_or(item.loc)
 }
 
 /// `string_of_out_ident`.
@@ -729,9 +747,7 @@ impl Extraction<'_, '_, '_> {
             .iter()
             .filter_map(|item| {
                 let name = unwrap_uppercase_exotic(&item.name);
-                // OCaml reads the item location's file name, which is the
-                // file of the structure being documented.
-                let source = get_source(&self.root_path, &file.uri, &item.loc);
+                let source = get_source(&self.root_path, &item.file.name, &item_loc(session, item));
                 match &item.kind {
                     ModuleItemKind::Value(typ) => Some(DocItem::Value {
                         id: make_id(module_path, name),

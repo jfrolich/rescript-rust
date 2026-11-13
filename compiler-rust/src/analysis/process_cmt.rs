@@ -31,6 +31,40 @@ impl Ctx<'_> {
         Loc::of_idx(self.arena, idx)
     }
 
+    /// The location at `idx` of the parsed tree, with its file name.
+    pub(crate) fn extent(&self, idx: LocIdx) -> Extent {
+        let location = self.arena.to_location(idx);
+        Extent {
+            loc: Loc::of_location(&location),
+            file: LocFile::located(self.arena.get_string(location.loc_start.file_name)),
+        }
+    }
+
+    /// A type declaration's location, with its file name. An imported
+    /// declaration's file is in the context's file table, any other one is
+    /// a file of this unit's parse (`Annotation.decl_file` in gentype).
+    fn decl_extent(&self, loc: crate::types::DeclLoc) -> Extent {
+        let location = self.types.resolve_loc(loc);
+        if location.is_none() {
+            return Extent {
+                loc: Loc::none(),
+                file: LocFile::located("_none_"),
+            };
+        }
+        let file_name = location.loc_start.file_name;
+        let name: Arc<str> = match self.types.resolve_cmi_longident_component(file_name) {
+            Some(imported) => imported.into(),
+            None => self.arena.own_file_name(file_name).unwrap_or_default().into(),
+        };
+        let origin = loc
+            .source_location()
+            .map(|_| crate::parse_arena::LocIdx(location.origin.raw()));
+        Extent {
+            loc: Loc::of_location(&location),
+            file: LocFile { name, origin },
+        }
+    }
+
     fn located(&self, l: &tt::Loc<String>) -> Located<String> {
         Located {
             txt: l.txt.clone(),
@@ -65,7 +99,7 @@ fn is_module_type(declared: &Declared<Module>) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn add_declared<T: Clone>(
     name: Located<String>,
-    extent: Loc,
+    extent: Extent,
     stamp: i32,
     env: &ProcessEnv,
     item: T,
@@ -104,6 +138,7 @@ fn module_item(
     docstring: &[String],
     deprecated: &Option<String>,
     loc: Loc,
+    file: &LocFile,
 ) -> ModuleItem {
     ModuleItem {
         kind,
@@ -111,6 +146,7 @@ fn module_item(
         docstring: docstring.to_vec(),
         deprecated: deprecated.clone(),
         loc,
+        file: file.clone(),
     }
 }
 
@@ -121,6 +157,7 @@ fn value_item(declared: &Declared<TypeExprRef>) -> ModuleItem {
         &declared.docstring,
         &declared.deprecated,
         declared.extent_loc,
+        &declared.extent_file,
     )
 }
 
@@ -134,6 +171,7 @@ fn module_item_of(declared: &Declared<Module>) -> ModuleItem {
         &declared.docstring,
         &declared.deprecated,
         declared.extent_loc,
+        &declared.extent_file,
     )
 }
 
@@ -144,6 +182,7 @@ fn type_item(declared: &Declared<Type>, rec_status: RecStatus) -> ModuleItem {
         &declared.docstring,
         &declared.deprecated,
         declared.extent_loc,
+        &declared.extent_file,
     )
 }
 
@@ -180,14 +219,14 @@ impl Processor<'_> {
             SignatureItem::SigValue(ident, vd) => {
                 let stamp = ident.binding_time();
                 let old_declared = self.stamps.find_value(stamp).cloned();
-                let loc = Loc::of_location(&self.ctx.types.resolve_loc(vd.val_loc));
+                let extent = self.ctx.decl_extent(vd.val_loc);
                 let stamps = &mut self.stamps;
                 let declared = add_declared(
                     Located {
                         txt: ident.name().to_string(),
-                        loc,
+                        loc: extent.loc,
                     },
-                    loc,
+                    extent,
                     stamp,
                     env,
                     vd.val_type,
@@ -263,7 +302,7 @@ impl Processor<'_> {
                                 };
                                 let declared = attrs::new_declared(
                                     item.clone(),
-                                    Loc::of_location(&self.ctx.types.resolve_loc(cd.cd_loc)),
+                                    self.ctx.decl_extent(cd.cd_loc),
                                     Located::mknoloc(cname),
                                     stamp,
                                     env.module_path.clone(),
@@ -292,7 +331,7 @@ impl Processor<'_> {
                 let stamps = &mut self.stamps;
                 let declared = add_declared(
                     name,
-                    Loc::of_location(&self.ctx.types.resolve_loc(decl.type_loc)),
+                    self.ctx.decl_extent(decl.type_loc),
                     ident.binding_time(),
                     env,
                     item,
@@ -306,11 +345,14 @@ impl Processor<'_> {
             SignatureItem::SigModule(ident, md, _) => {
                 let name = ident.name().to_string();
                 let item = self.for_type_module(&name, env, &md.md_type);
-                let loc = Loc::of_location(&self.ctx.types.resolve_loc(md.md_loc));
+                let extent = self.ctx.decl_extent(md.md_loc);
                 let stamps = &mut self.stamps;
                 let declared = add_declared(
-                    Located { txt: name, loc },
-                    loc,
+                    Located {
+                        txt: name,
+                        loc: extent.loc,
+                    },
+                    extent,
                     ident.binding_time(),
                     env,
                     item,
@@ -457,7 +499,7 @@ impl Processor<'_> {
                         };
                         let declared = attrs::new_declared(
                             item.clone(),
-                            self.ctx.loc(cd.cd_loc),
+                            self.ctx.extent(cd.cd_loc),
                             cname,
                             stamp,
                             env.module_path.clone(),
@@ -500,7 +542,7 @@ impl Processor<'_> {
         let stamps = &mut self.stamps;
         let declared = add_declared(
             name,
-            Loc::of_idx(self.ctx.arena, td.typ_loc),
+            self.ctx.extent(td.typ_loc),
             stamp,
             env,
             item,
@@ -549,7 +591,7 @@ impl Processor<'_> {
         let stamps = &mut self.stamps;
         let declared = add_declared(
             name,
-            Loc::of_idx(self.ctx.arena, md.md_loc),
+            self.ctx.extent(md.md_loc),
             md.md_id.binding_time(),
             env,
             item,
@@ -579,7 +621,7 @@ impl Processor<'_> {
                             self.ctx.ta.value_description(*vd).val_name.loc,
                         ),
                     },
-                    Loc::of_idx(self.ctx.arena, self.ctx.ta.value_description(*vd).val_loc),
+                    self.ctx.extent(self.ctx.ta.value_description(*vd).val_loc),
                     self.ctx.ta.value_description(*vd).val_id.binding_time(),
                     env,
                     self.ctx
@@ -692,7 +734,7 @@ impl Processor<'_> {
                 if let (Some(unpack_loc), Some(path)) = (unpack_loc, unpacked_path) {
                     let declared = attrs::new_declared(
                         Module::Ident(path),
-                        self.ctx.loc(unpack_loc),
+                        self.ctx.extent(unpack_loc),
                         name,
                         stamp,
                         ModulePath::NotVisible,
@@ -707,7 +749,7 @@ impl Processor<'_> {
                     let stamps = &mut self.stamps;
                     let declared = add_declared(
                         name,
-                        Loc::of_idx(self.ctx.arena, pat.pat_loc),
+                        self.ctx.extent(pat.pat_loc),
                         stamp,
                         env,
                         pat.pat_type,
@@ -740,8 +782,11 @@ impl Processor<'_> {
                     self.handle_pattern(env, exported, items, None, self.ctx.ta.pattern(*p));
                 }
                 if let Some(rest) = rest {
-                    let name = self.ctx.located(&rest.rest_name);
-                    let extent = name.loc;
+                    let extent = self.ctx.extent(rest.rest_name.loc);
+                    let name = Located {
+                        txt: rest.rest_name.txt.clone(),
+                        loc: extent.loc,
+                    };
                     let stamps = &mut self.stamps;
                     let declared = add_declared(
                         name,
@@ -845,7 +890,7 @@ impl Processor<'_> {
                 let stamps = &mut self.stamps;
                 let declared = add_declared(
                     name,
-                    Loc::of_idx(self.ctx.arena, mtd.mtd_loc),
+                    self.ctx.extent(mtd.mtd_loc),
                     mtd.mtd_id.binding_time(),
                     &env,
                     item,
@@ -878,7 +923,7 @@ impl Processor<'_> {
                 let declared = add_declared(
                     self.ctx
                         .located(&self.ctx.ta.value_description(*vd).val_name),
-                    Loc::of_idx(self.ctx.arena, self.ctx.ta.value_description(*vd).val_loc),
+                    self.ctx.extent(self.ctx.ta.value_description(*vd).val_loc),
                     self.ctx.ta.value_description(*vd).val_id.binding_time(),
                     env,
                     self.ctx
@@ -918,7 +963,7 @@ impl Processor<'_> {
         let stamps = &mut self.stamps;
         let declared = add_declared(
             name,
-            Loc::of_idx(self.ctx.arena, mb.mb_loc),
+            self.ctx.extent(mb.mb_loc),
             mb.mb_id.binding_time(),
             env,
             item,
@@ -953,7 +998,7 @@ impl Processor<'_> {
                     let kind =
                         self.for_type_module(&name.txt, env, &self.ctx.ta.module_type(*t).mty_type);
                     let stamp = ident.binding_time();
-                    let extent = name.loc;
+                    let extent = self.ctx.extent(arg_name.loc);
                     let declared = attrs::new_declared(
                         kind,
                         extent,
@@ -995,8 +1040,8 @@ impl Processor<'_> {
                 let stamp = id.binding_time();
                 let item =
                     self.for_module(env, &self.ctx.ta.module_expr(*mexpr).mod_desc, &name.txt);
+                let extent = self.ctx.extent(name.loc);
                 let name = self.ctx.located(name);
-                let extent = name.loc;
                 let declared = attrs::new_declared(
                     item,
                     extent,
