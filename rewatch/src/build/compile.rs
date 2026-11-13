@@ -2960,13 +2960,13 @@ pub fn runtime_registry(runtime_root: &Path) -> Result<ModuleRegistry> {
 pub(crate) struct RuntimeStore {
     pub db: PathBuf,
     pub compiler_hash: String,
+    /// Whether the build may add to the store. A check-only build writes no
+    /// files: it reads what a build stored and stores nothing itself.
+    pub writable: bool,
 }
 
 impl RuntimeStore {
     pub(crate) fn of_build(build_state: &BuildCommandState) -> Option<Self> {
-        if build_state.check_only {
-            return None;
-        }
         let root = build_state
             .packages
             .values()
@@ -2974,6 +2974,7 @@ impl RuntimeStore {
         Some(Self {
             db: super::state_db::path(root),
             compiler_hash: build_state.compiler_info.bsc_hash.to_hex().to_string(),
+            writable: !build_state.check_only,
         })
     }
 
@@ -3039,7 +3040,9 @@ fn store_runtime_interfaces(
     key: &str,
     runtime_modules: &[RuntimeModuleSource],
 ) {
-    if let Some(interfaces) = encode_runtime_interfaces(registry, runtime_modules) {
+    if store.writable
+        && let Some(interfaces) = encode_runtime_interfaces(registry, runtime_modules)
+    {
         super::state_db::write_runtime_interfaces(&store.db, key, &interfaces);
     }
 }
@@ -4420,23 +4423,44 @@ fn finish_in_process_js_inner(
     let compiler_warnings = std::mem::take(&mut pre_js.warnings);
     let warning = visible_compiler_warnings(&compiler_warnings, package.is_local_dep);
     if build_command_state.check_only {
-        let registry_updates = js_metadata_registry_updates_for_package(
-            &module_name,
+        // No code is generated: the module keeps the JS metadata of the last
+        // build that generated its code (see `recorded_js_metadata`).
+        let recorded = super::incremental::recorded_js_metadata(build_command_state, &module_name);
+        let (is_pure, constants, arities, lambdas) = match recorded {
+            Some(info) => (
+                info.is_pure,
+                Arc::unwrap_or_clone(info.cmj_export_constants),
+                Arc::unwrap_or_clone(info.cmj_export_arities),
+                Arc::unwrap_or_clone(info.cmj_export_lambdas),
+            ),
+            None => (false, AHashMap::new(), AHashMap::new(), Default::default()),
+        };
+        let module_info = in_memory_module_info_for_package(
             package,
             build_command_state.get_root_config(),
             source_abs,
-            false,
-            AHashMap::new(),
-            AHashMap::new(),
-            Default::default(),
+            is_pure,
+            constants,
+            arities,
+            lambdas,
             is_runtime,
-            has_interface,
-            interface_registry_update,
-            pre_js.pers_struct,
         );
+        // The signature is registered already when it was published before
+        // this phase; the metadata alone replaces the provisional one.
+        let update = match interface_registry_update.filter(|_| has_interface) {
+            Some(mut update) => {
+                update.module_info = module_info;
+                update
+            }
+            None => PendingRegistryUpdate {
+                module_name: module_name.clone(),
+                pers_struct: pre_js.pers_struct.filter(|_| !has_interface),
+                module_info,
+            },
+        };
         return Ok(InProcessModuleResult {
             warning,
-            registry_updates: send_js_metadata_ready(metadata_tx, module_name, registry_updates),
+            registry_updates: send_js_metadata_ready(metadata_tx, module_name, vec![update]),
         });
     }
 
@@ -4738,6 +4762,7 @@ mod tests {
         let store = |hash: &str| RuntimeStore {
             db: db.clone(),
             compiler_hash: hash.to_string(),
+            writable: true,
         };
         let runtime_root = temp_dir.path().join("runtime");
         fs::create_dir_all(&runtime_root).expect("runtime directory should be created");
