@@ -1,10 +1,10 @@
 # R1 kernel measurements
 
-Measured at `996a0b12a`, after the full-compression and public-API changes.
+Before: `8bf6724487`. After: `3ce75c9b4` (the three changes below).
 The checker is not on the driver path. These are kernel costs, not savings
-in a compiler build. The figures below are **not** within the original
-25% limit for instantiation; they expose the cost of the extra design data
-for review rather than claiming that the original gate passed.
+in a compiler build. R1's gate is the measured attribution table with at
+most 30 extra generic-bookkeeping instructions for `instance7`, replacing
+the original blanket +25% limit against a kernel missing required data.
 
 ## Method
 
@@ -39,7 +39,8 @@ valgrind --tool=cachegrind --cache-sim=no \
 cg_annotate --auto=yes --threshold=0 instance7.full.cg
 ```
 
-The reference script's raw instructions/iteration were:
+The rerun of the reference script reproduces the published figures. Its raw
+instructions/iteration, before empty-loop or node-making subtraction:
 
 ```text
 empty 18
@@ -68,120 +69,142 @@ implemented by R1. The R1 benchmark does not fabricate substitutes for them.
 
 ## Results
 
-All numbers are instructions per operation after subtraction. "Before" is
-`17655d0ad`: already the public production API and full compression, before
-the iterator changes. Differences of less than one instruction include
-amortized arena growth, not an invented per-node charge.
+Instructions per operation after subtraction. The before executable was
+rerun on the same setup; differences below one instruction include
+amortized pool growth and runtime, not an invented per-node charge.
 
-| Operation | Reference | Before | After | After minus reference | Within +25% |
-|---|---:|---:|---:|---:|---|
-| instance1 | 89.00 | 122.06 | 168.09 | +79.09 | No |
-| instance3 | 169.00 | 300.18 | 246.26 | +77.26 | No |
-| instance5 | 221.00 | 466.30 | 346.46 | +125.46 | No |
-| instance7 | 250.00 | 550.40 | 390.49 | +140.49 | No |
-| generalize7 | 404.00 | 841.00 | 488.00 | +84.00 | Yes |
+| Operation | Reference | Before (`8bf6724487`) | After | After minus reference |
+|---|---:|---:|---:|---:|
+| instance1 | 89.00 | 168.09 | 140.06 | +51.06 |
+| instance3 | 169.00 | 246.26 | 220.31 | +51.31 |
+| instance5 | 221.00 | 346.46 | 305.34 | +84.34 |
+| instance7 | 250.00 | 390.49 | 327.27 | +77.27 |
+| generalize7 | 404.00 | 488.00 | 488.00 | +84.00 |
 
-The one-node case regresses: the fixed cost of explicit external/parameter
-pool ranges and bulk forwarding initialization is not paid back on one node.
-That regression is included, not hidden by reporting only larger schemes.
+No operation was substituted or removed to improve this table. Generalization
+is unchanged by the three instantiation changes and remains within 25% of
+its reference. The instance costs are judged by the attribution below.
+
+## The three changes
+
+1. `fdbf557f0`: `Graph::push` and `Graph::instance` do not touch forwarding
+   storage. `copy` and `capture` resize it once at entry for existing source
+   nodes. Each row is initialized at most once per unit; the sum of that
+   initialization is linear in nodes made. A test makes 10,000 instances
+   without growing the forwarding array. The shared-positions copy test
+   starts with 10,000 source nodes and no forwarding rows.
+2. `d41bfabea`: closed and external-bearing instances share one const-generic
+   implementation. The closed specialization has no external lookup case
+   in its per-reference mapping. Both specializations retain the node and
+   slot step bounds, including a 10,000-parameter test for each.
+3. `3ce75c9b4`: capture validates tags; instantiation uses a `b`-field addend
+   table and rewrites `a` only for arrows. In the actual tag order the table
+   is `[0, 0, list_base, list_base, param_base]` (the LINK entry is never
+   captured). This removes the four-way match/panic arm from the node loop.
+   The table is retained because it reduced every required measured case:
+
+| Operation | After step 2 | After step 3 | Difference |
+|---|---:|---:|---:|
+| instance3 | 227.31 | 220.31 | -7.00 |
+| instance5 | 321.33 | 305.34 | -16.00 |
+| instance7 | 352.27 | 327.27 | -25.00 |
+
+The sub-cent rounding difference in `instance5` is from the measured
+startup/growth remainder, not a changed operation.
 
 ## Instruction attribution
 
 These are disjoint **debug-info attribution buckets**, from both programs'
-cachegrind files, not estimates of CPU cycles or independently toggled
+cachegrind files, not estimates of cycles or independently toggled
 counterfactual features. For each bucket: `(full - zero) / 1,000,000`, then
-subtract that bucket's empty-loop run. The table shows **checker minus
-reference**. The buckets sum to the measured difference, including the
-caller and the fractional allocation/runtime remainder.
+subtract that bucket's empty-loop run. The table shows **after minus
+reference**. The buckets sum to the full measured difference.
 
-| Cause / attributed code | instance1 | instance3 | instance5 | instance7 |
+| Attributed code | instance1 | instance3 | instance5 | instance7 |
 |---|---:|---:|---:|---:|
-| Descriptor/reference code and template header | +21.00 | +27.00 | +42.00 | +64.00 |
-| Slice range validation, once per pool | +5.00 | +5.00 | +8.00 | +8.00 |
-| Pool iteration, writes and capacity/length bookkeeping | +40.00 | +34.00 | +64.00 | +56.00 |
-| Dense forwarding zero-fill (`memset`) | +13.00 | +11.00 | +12.00 | +12.00 |
-| Caller/dispatch | 0.00 | 0.00 | -1.00 | 0.00 |
-| Amortized pool growth and runtime | +0.09 | +0.26 | +0.46 | +0.49 |
-| **Total** | **+79.09** | **+77.26** | **+125.46** | **+140.49** |
+| Descriptor/reference code and template header | +25.00 | +27.00 | +30.00 | +29.00 |
+| Slice range/index validation | +2.00 | +2.00 | +6.00 | +6.00 |
+| Pool iteration, writes and capacity/length bookkeeping | +23.00 | +21.00 | +48.00 | +41.00 |
+| Forwarding zero-fill in instance | 0.00 | 0.00 | 0.00 | 0.00 |
+| Caller/dispatch | +1.00 | +1.00 | 0.00 | +1.00 |
+| Amortized pool growth and runtime | +0.06 | +0.31 | +0.34 | +0.27 |
+| **Total** | **+51.06** | **+51.31** | **+84.34** | **+77.27** |
 
-How to read the buckets against section 3.2:
+The classifier is unchanged from the first report: source-attributed
+`Graph::instance` instructions in `template.rs` and its inlined `Node`
+accessors versus the reference's `main.rs`; `slice/index.rs` separately;
+remaining Rust-library instructions attributed to `instance` as pool
+iteration/storage; then `memset`, the benchmark caller, and all remaining
+runtime/growth instructions. Startup and empty-loop subtractions are
+performed independently for each bucket. There is no unreported remainder.
 
-- **Descriptor/reference/header:** the checker has a non-generic-root case,
-  a bounded local-handle space, external-reference ranges and parameter-pool
-  ranges. It preserves the constructor memo sentinel, relocates arrows into
-  the separate parameter pool, and retains each parameter's label/location.
-  The reference has none of those pools and reserves no constructor memo
-  slot. Relative-reference arithmetic itself exists in both. These counts
-  are the source-attributed `Graph::instance` instructions in `template.rs`
-  and its inlined `Node` accessors, versus the reference's `main.rs`.
-- **Range checks:** the checker validates slices for the template-range row and the node, list and parameter storage. The checked ranges are outside the
-  node/slot iteration, not a bounds check at each indexed source read.
-  These are `Graph::instance` instructions attributed to `slice/index.rs`.
-- **Pool iteration/storage:** section 3.2 requires 12-byte parameters instead
-  of the reference's four-byte arrow slots, and a constructor memo slot;
-  section 3.3 requires a dense forwarding array for general copying. Those
-  extra pools need reservation, length updates, iteration and stores. This
-  bucket is the remaining Rust-library code attributed to `Graph::instance`
-  (including exact-size iterator machinery), not an extra arbitrary charge.
-- **Zero fill:** the dense forwarding array must have initialized generation
-  rows before a future generalization/copy can address those nodes. Its bulk
-  initialization now uses `memset`, once per instance; the reference has no
-  forwarding array. The row is eight bytes, pinned by a test.
-- **Growth/runtime:** the reference preallocates large pools; the checker
-  starts with empty pools and grows them. These counts are the fractional
-  residual outside `instance`, `main` and `memset`, after the same startup
-  and empty-loop subtractions. They are not charged once per visited node.
+### Required data versus still generic bookkeeping
 
-This attributes emitted instructions to the required storage mechanisms;
-it is not proof that every compiler-generated instruction in a bucket is
-irreducible. In particular the fixed pool/header overhead warrants review
-before accepting an exception to the original limit.
+The split below assigns the operations implementing the extra section 3.2
+data to required-data cost. It leaves all other differences, including every
+range/index check, root-kind check, handle-limit check, function/loop setup,
+tag relocation, caller and allocation/runtime remainder, in generic
+bookkeeping. It does **not** call all of `instance` design-required merely
+because the function is necessary.
 
-## Costs removed
+At source revision `3ce75c9b4`, the required-data assignment is reproducible
+from these cachegrind source lines and the library bucket:
 
-The first profiles attributed 120 instructions of `instance7` to Vec code,
-including repeated `push` capacity checks, and 208 instructions of
-`generalize7` to non-inlined representative walks. The changes:
+| Required-data operation | Attribution | instance1 | instance3 | instance5 | instance7 |
+|---|---|---:|---:|---:|---:|
+| Pool ranges, external-policy dispatch, parameter-pool presence | `template.rs:369,370,432` | 13 | 13 | 13 | 13 |
+| Memo-sentinel/reference mapping above the reference's relative mapping | `template.rs:417,422` minus reference `main.rs:126` | 3 | 9 | 11 | 4 |
+| Parameter label/location payload construction | `template.rs:435` | 0 | 0 | 4 | 6 |
+| Extra slot/parameter iteration and storage, three pools instead of two | Rust-library `instance` bucket, excluding `slice/index.rs` | 23 | 21 | 48 | 41 |
+| **Required-data difference** | | **39** | **43** | **76** | **64** |
 
-1. Source ranges are slices and destinations use exact-size `extend` calls;
-   each node/list/parameter pool reserves once, without a per-node growth
-   test. The forwarding rows are initialized in bulk.
-2. Capture records external references separately. Instantiation validates
-   those references before extending nodes, allowing safe disjoint borrows
-   and avoiding a mutable whole-graph accessor inside each copy iteration.
-3. Parameter ranges are recorded during capture, not discovered by another
-   tree pass. A 16-byte `Template` indexes a cold 20-byte pool-range row;
-   counts remain u32, avoiding a 65,535-node limit. This is an explicit
-   extension of section 3.2's proposed template/external-range layout.
-4. The representative helper is inlineable and the child-enqueue helper is
-   inlined. There is no per-node `children` call left. Empty external and
-   parameter pools do not run iterator setup.
+The extra library work comes from the memo slot and the 12-byte parameter
+rows plus a separate parameter pool, all copied with the same exact-size
+iterator strategy. It includes reservation/length maintenance for those
+additional pools, not a forwarding-array pass or an additional type walk.
+The source line attribution is an accounting rule, not proof of a minimum
+possible machine-code sequence.
 
-An intermediate split-borrow version left `instance_ref` uninlined and
-cost 653.40 raw instructions for `instance7`; forcing its inline expansion
-reduced that to 543.40, but retained per-node destination checks. It was
-superseded by the bulk-pool implementation, not kept as a second path.
+For the gate's `instance7`, the **generic** 13.27 is independently accounted
+for rather than chosen as a round residual:
+
+| Generic difference | Instructions | Cachegrind attribution |
+|---|---:|---|
+| Source control/relocation not assigned to required data | +6 | root-kind test +4 (`template.rs:361`); handle limit +3 (`:402`); slice-range arithmetic -2 (`:426,434,448` vs reference `:128,132`); tag/field relocation +1 (`graph.rs:29`, `template.rs:446,449,456,457` vs reference `:133,136`); function/unknown-line net 0 |
+| Range/index checks, all retained conservatively as generic | +6 | `slice/index.rs:90,238` |
+| Caller/dispatch | +1 | benchmark `main`, after its own empty loop |
+| Amortized growth/runtime | +0.27 | all remaining functions, after startup and empty-loop subtraction |
+| **Still generic bookkeeping** | **+13.27** | **Below the 30-instruction gate** |
 
 `hyperfine --warmup 2 --runs 10`, one million `instance7` calls per run:
 
 | Version | Mean ± standard deviation | Min–max |
 |---|---|---|
-| Before | 16.6 ± 0.3 ms | 16.3–17.2 ms |
-| After | 13.7 ± 0.8 ms | 12.8–15.4 ms |
+| Before (`8bf6724487`) | 15.2 ± 1.9 ms | 13.7–20.2 ms |
+| After | 13.3 ± 1.2 ms | 12.3–16.6 ms |
 
 These short kernel runs are supporting evidence, not an application speedup.
 
 ## Expansion memo ownership
 
-The general copy currently allocates a distinct memo slot for each copied
-constructor and clears it. It does **not** implement
-`compiler/ml/ctype.ml:779-797`: `proper_abbrevs`, followed by `find_repr` in
-the shared simple-abbreviation memo. In particular a copied nullary
-constructor may need to become a link to an already memoized representative,
-and an `Mcons` memo can require shared invalidation through `Mlink`.
+The general copy creates a distinct cleared memo slot per copied constructor.
+It does not implement `compiler/ml/ctype.ml:779-797`: `proper_abbrevs` then
+`find_repr` in the shared simple-abbreviation memo. A nullary copy may need
+to link to an already memoized representative; an `Mcons` memo can require
+shared invalidation through `Mlink`. That path/declaration and expansion
+memo belongs to R3. Its section 5.3 row explicitly assigns the lookup and
+invalidation in general copies **and** template instantiation. Clearing a
+private slot is not a claim of O11 parity.
 
-That lookup requires the path/declaration and expansion memo owned by R3;
-it is now explicit in R3's section 5.3 row. R3 must apply it to both general
-copies and template instantiation, including memo invalidation. R1 must not
-claim O11 parity merely because its source constructor's private memo slot
-was cleared. No expansion algorithm or substitute fallback is added here.
+## What remains and why
+
+The difference above the kernel splits into **required data / still generic
+bookkeeping** instructions as follows: `instance1` **39.00 / 12.06**,
+`instance3` **43.00 / 8.31**, `instance5` **76.00 / 8.34**, and `instance7`
+**64.00 / 13.27**. The required-data part is the 12-byte parameters with label
+and location, constructor memo slot, external-reference support and three
+pools instead of two; the generic part retains all other control, checks,
+relocation and growth/runtime differences. R1 meets the revised 30-instruction
+bookkeeping gate. Whether the measured instance price matters in a complete
+checker is judged by R5c: covered units at most 60% of the old cost, including
+the bridge, not by assuming an application saving from this kernel.
