@@ -10,8 +10,9 @@ pub(super) struct Group {
 }
 
 impl State {
-    /// O(m) for m bindings: reject value members and reserve pooled outputs.
-    /// Bodies are not examined; SourceProbe lowers each function once.
+    /// O(m + newly indexed source slots) for m bindings: reject value members,
+    /// reserve pooled outputs and register the recorded function facts. The
+    /// dense function table grows once per source slot; no body is examined.
     pub(super) fn recursive_group(&mut self, node: NodeId) -> Result<Group, Unsupported> {
         let View::LetRec { values, .. } = self.source.view(node) else { unreachable!() };
         for &value in values {
@@ -58,7 +59,8 @@ impl State {
         Probed::Out(Out { value: None, ..out })
     }
 
-    /// O(m) to consume the completed member outputs; the declarations precede the body's already contiguous run.
+    /// O(m + deferred realization) to consume the completed member outputs;
+    /// declarations precede the body's already contiguous run.
     pub(super) fn finish_recursive(&mut self, cx: Cx, group: Group, children: impl Iterator<Item = Probed>) -> Probed {
         let body = children.last().expect("recursive body");
         let mut out = self.realize(cx, body);

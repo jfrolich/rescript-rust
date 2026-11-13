@@ -11,8 +11,9 @@ pub(super) struct Frame {
 }
 
 impl State {
-    /// O(1) per recursive member. The source construction fact decides whether
-    /// to install a loop continuation; no body is inspected or lowered twice.
+    /// Amortized O(1) per recursive member, plus O(new source slots) when the
+    /// dense function table first grows. The construction fact selects the
+    /// loop continuation; no body is inspected or lowered twice.
     pub(super) fn register_tail_function(&mut self, function: NodeId, var: VarId) {
         if !self.source.has_self_tail_call(function) { return; }
         let View::Fun { header, .. } = self.source.view(function) else { unreachable!() };
@@ -32,9 +33,10 @@ impl State {
         matches!(self.source.view(callee), View::Var { var } if var == self.tail_frames[frame.0 as usize].var).then_some(frame)
     }
 
-    /// O(a + p): release the sequenced callee, create copies in parameter order,
-    /// and emit assignments in reverse order. Every argument reads the old
-    /// iteration's bindings, not the copies being assigned.
+    /// O(a + newly indexed variables + newly interned name bytes): release
+    /// the callee, create copies in parameter order, then emit assignments in
+    /// reverse order. Table growth and names are paid once per variable/copy.
+    /// Arguments read iteration bindings, not the copies being assigned.
     pub(super) fn finish_self_call(&mut self, frame: LoopRef, statements: Span, values: smallvec::SmallVec<[NodeId; 4]>) -> Probed {
         let params = self.tail_frames[frame.0 as usize].params;
         self.tail_frames[frame.0 as usize].triggered = true;
