@@ -55,7 +55,8 @@ for the symbolic schedule and the six continuation classes it actually needs.
 ## Application measurements
 
 The candidate is the release build at `8737e4d0a`; subsequent changes are tests,
-ratchet data and documentation only. The base executable is the `rescript-base`
+ratchet data, documentation and an equivalent iterator spelling of the fixed-size
+summary loop. The base executable is the `rescript-base`
 artifact from instruction-count run `43359451509`, SHA-256
 `928201e697eef850351f1bd6a56423bca10e7365451d7c3f8a9e01dede21d8bc`.
 It was downloaded, not rebuilt in this measurement run.

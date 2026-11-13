@@ -194,7 +194,7 @@ impl Schedule {
         self.edges.extend(self.values.drain(frame.base as usize..));
         let len = self.edges.len() - start;
         let mut costs = [Cost::EMPTY; 6];
-        for c in 0..6 {
+        for (c, cost) in costs.iter_mut().enumerate() {
             let mut total = Cost::EMPTY;
             if frame.kind == Kind::Request {
                 total.first = 0;
@@ -233,7 +233,7 @@ impl Schedule {
                     total = total.then(cost);
                 }
             }
-            costs[c] = total;
+            *cost = total;
         }
         let step = if costs.iter().all(|c| c.internal == 0 && c.first == NONE) {
             self.edges.truncate(start);
