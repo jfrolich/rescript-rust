@@ -893,3 +893,25 @@ expected default-path saving is zero, not an optimization claim.
 `make lib` checks after both package build stamps. CI should run the same check
 after building runtime and Belt; the exact workflow insertion is supplied in
 the pull request, not a workflow edit here.
+
+### S5 as found
+
+Inventory against `8f6bd7884e` (line numbers refer to that revision).
+
+| Reader or event | Result and evidence |
+| --- | --- |
+| Installed Belt source edit in watch | The premise that Belt starts from the snapshot is false: `rewatch/src/build/snapshot.rs:1057–1059` rejects watch mode. `watcher.rs:134–137` watches only local dependencies; `packages.rs:503–512` excludes installed dependencies outside a monorepo. In a disposable project resolving copied Belt/runtime packages, the initial `-vv watch` log says `Not using the prebuilt @rescript/belt: watch mode is not supported by this snapshot stage`. A comment appended to `Belt_Array.res`, followed by an application edit, produced `Parsed 1 source file` and `Compiled 1 module`, not a dependency rebuild. Installed dependency changes are not watched. |
+| Runtime source edit in watch | Initial log: `Registered 113 embedded runtime interfaces`. Appending invalid syntax (`let = invalid`) to the copied `Stdlib_List.res`, then editing the application, still produced `Finished incremental compilation`, with only the application compiled. Runtime is not among the watched package roots (`watcher.rs:118–174`); `compile.rs:3096–3104` returns immediately when the registry already has its snapshot. Thus runtime state remains stale even when another event triggers a build. |
+| Editor tooling, project/Belt units | Correct by code path: `tooling.rs:159–205` obtains the registry and reparses project source with `parse_for_tooling`, then typechecks against that registry. It does not require a typed tree from the original compilation. `tooling.rs:364–375` dispatches project and runtime sources separately. Snapshot-backed Belt still has project module/source metadata. |
+| Editor tooling, runtime source discovery | Partly incorrect: `tooling.rs:112–124` reads source paths from the runtime root, **not** `lib/ocaml`. However, `packages::read_config(root).ok()?` removes the entire runtime from tooling when the published layout lacks configuration. Snapshot loading accepts this layout through `snapshot::runtime_config` (`snapshot.rs:552`); tooling should use the same configuration semantics. |
+| Editor tooling, runtime typechecking | Correct when discovery succeeds: `tooling.rs:209–264` reads and parses the requested source/interface on demand with `runtime_compiler_options`, then typechecks using the registry. It does not require runtime ASTs from startup. |
+| genType contexts | Correct by code path: `compile.rs:2163–2204` constructs configuration and a resolver from package paths and options, not a previous compile result; `build_types.rs:557–580` caches these per package and clears them between builds. Snapshot production rejects genType declarations in its packages; dependent packages still compile normally. |
+| Build item-digest cache | Correct by code path: `compile.rs:687–688` clears published item digests and prepared interfaces before compilation. `incremental.rs:202–215` recomputes missing digests from `ModuleRegistry::item_digests`; `compiler-rust/src/cmi/persistent_env.rs:835–844` obtains the registered signature and metadata, including lazy snapshot units. No compile-local AST is assumed. Clearing the cache does not revoke stale registered units. |
+
+The manual reproduction used `let value = Belt.Array.length([1, 2])` and
+`let length = List.length(list{1, 2})`, ES-module in-source `.mjs` output,
+`dependencies: ["@rescript/belt"]`, and a copied runtime selected through
+`RESCRIPT_RUNTIME`. It polled compilation completion before editing and stopped
+the recorded watcher PID afterwards. These are baseline observations, not the
+S5 acceptance tests or a claim of completion. No instruction count has yet
+been measured for S5.
