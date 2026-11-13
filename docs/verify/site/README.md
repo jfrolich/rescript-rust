@@ -25,11 +25,11 @@ for the sentence shown above the report. Set `VITE_PULL_REQUEST` to link the
 pages to a pull request.
 
 There is one page per document: `index.html` is `README.md`, `pure.html` is
-`pure.md` and `law.html` is `law.md`. A host that serves `pure.html` as
+`pure.md`, `law.html` is `law.md` and `spec.html` is `spec.md`. A host that serves `pure.html` as
 `/pure` works as well: every URL in the pages is relative.
 
 An example marked `"checks": true` is also verified: the compiler module
-compiles it once more with its laws kept, and the page runs them with the
+compiles it once more with its laws and specs kept, and the page runs them with the
 runner of `rescript verify` (`rewatch/src/verify/runner.mjs`) against the
 runtime's compiled modules, which `public/stdlib.json` carries. `"failing"`
-names the laws that are meant to fail.
+names the checks that are meant to fail.
