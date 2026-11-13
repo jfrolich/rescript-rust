@@ -509,8 +509,8 @@ impl Importer {
                         .props(props)
                         .iter()
                         .map(|&(k, _)| self.property(a, k))
-                        .collect();
-                    let info = self.b.js_info(JsPayload::Object(keys));
+                        .collect::<Vec<_>>();
+                    let info = self.b.object_info(&keys);
                     View::JObject { values: c, info }
                 }
                 E::Jsx(id) => {
@@ -529,7 +529,7 @@ impl Importer {
                         .props(props)
                         .iter()
                         .map(|&(k, _)| self.property(a, k))
-                        .collect();
+                        .collect::<Vec<_>>();
                     let h = JsxHeader {
                         spread: spread.is_some(),
                         props,
@@ -1234,7 +1234,7 @@ impl Exporter<'_> {
                 let JsPayload::Object(keys) = b.javascript(info) else {
                     return Err(Unsupported("missing J object metadata"));
                 };
-                E::Object(self.props(keys, c)?)
+                E::Object(self.props(b.property_keys(*keys), c)?)
             }
             View::JJsx { info, .. } => {
                 let JsPayload::Jsx(h) = b.javascript(info) else {

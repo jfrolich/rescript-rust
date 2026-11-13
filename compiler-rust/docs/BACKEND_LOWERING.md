@@ -2623,7 +2623,8 @@ allocate only on growth; fixed-capacity small vectors are not exempted.
 not once per compilation. Payload clones must be checked through their
 nested fields (e.g. a function attribute owns an optional directive string).
 
-Replacement descriptions are the intended design, **not implemented state**.
+Rows marked `removed` describe implemented changes; `pending` rows remain
+intended design, **not implemented state**.
 In particular, switching a local vector to a pool handle requires changing
 consuming APIs too: `JsPayload::Object` owns a property-key vector, switch
 headers own keys/clauses, and the untagged dispatch planner owns its plan.
@@ -2670,17 +2671,17 @@ The statement stack and node-list pool must be used end to end.
 | `expr.rs:42` `expression_children` | `into: &mut Vec<(Cx, NodeId)>,` | per visited node | reusable scratch buffer; clear, do not free | pending |
 | `expr.rs:278` `finish_expression` | `let attr = attr.clone();` | per visited node | borrow payload or retain typed pool handle | pending |
 | `expr.rs:308` `drop_pure_effect` | `let mut effects = Vec::new();` | per construct/walk | reusable scratch buffer; clear, do not free | pending |
-| `external.rs:8` `module` | `use smallvec::SmallVec;` | declaration | remove after handle conversion | pending |
-| `external.rs:64` `compile_js_object_create` | `args: SmallVec<[NodeId; 4]>,` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `external.rs:68` `compile_js_object_create` | `let mut keys = Vec::new();` | per construct | property-key pool handle (requires J payload API change) | pending |
-| `external.rs:69` `compile_js_object_create` | `let mut values = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `external.rs:70` `compile_js_object_create` | `let mut effects: SmallVec<[NodeId; 4]> = SmallVec::new();` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `external.rs:71` `compile_js_object_create` | `let mut pending: Vec<(u32, NodeId)> = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `external.rs:8` `module` | `use smallvec::SmallVec;` | declaration | removed SmallVec import | removed |
+| `external.rs:64` `compile_js_object_create` | `args: SmallVec<[NodeId; 4]>,` | per construct | list-pool handle; no transient argument collection | removed |
+| `external.rs:68` `compile_js_object_create` | `let mut keys = Vec::new();` | per construct | PropertySpan into the arena property-key pool | removed |
+| `external.rs:69` `compile_js_object_create` | `let mut values = Vec::new();` | per construct | ListId adopted directly by object_from_list | removed |
+| `external.rs:70` `compile_js_object_create` | `let mut effects: SmallVec<[NodeId; 4]> = SmallVec::new();` | per construct | single Option<NodeId>, fused in source order | removed |
+| `external.rs:71` `compile_js_object_create` | `let mut pending: Vec<(u32, NodeId)> = Vec::new();` | per construct | State::external_pending, taken, drained and returned | removed |
 | `external.rs:229` `translate_scoped_global_value` | `let head = scopes.first().map_or(name, String::as_str);` | per construct | stays: borrowed string projection; no allocation | non-allocating |
 | `external.rs:266` `translate_scoped_module_value` | `let head = scopes.first().map_or(name, String::as_str);` | per construct | stays: borrowed string projection; no allocation | non-allocating |
-| `external.rs:287` `external_module_binding` | `bundle: name.to_owned(),` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `external.rs:312` `compile_js_call` | `args: SmallVec<[NodeId; 4]>,` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `external.rs:384` `compile_js_call` | `args.collect(),` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `external.rs:287` `external_module_binding` | `bundle: name.to_owned(),` | per construct | borrowed module spelling; owned import metadata remains in import.rs | removed |
+| `external.rs:312` `compile_js_call` | `args: SmallVec<[NodeId; 4]>,` | per construct | list-pool handle; no transient argument collection | removed |
+| `external.rs:384` `compile_js_call` | `args.collect(),` | per construct | list-pool handle; no transient argument collection | removed |
 | `ffi_args.rs:6` `module` | `use smallvec::SmallVec;` | declaration | remove after handle conversion | pending |
 | `ffi_args.rs:112` `hold_external_args` | `args: SmallVec<[Out; 4]>,` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
 | `ffi_args.rs:113` `hold_external_args` | `) -> SmallVec<[Out; 4]> {` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
@@ -2898,6 +2899,19 @@ The statement stack and node-list pool must be used end to end.
 | `variant.rs:185` `literal_tag` | `Literal::Float(s) => Tag::Float(s.clone()),` | per construct | borrow payload or retain typed pool handle | pending |
 | `variant.rs:186` `literal_tag` | `Literal::BigInt(s) => Tag::BigInt(s.clone()),` | per construct | borrow payload or retain typed pool handle | pending |
 | `variant.rs:255` `variant_children` | `pub(super) fn variant_children(&self, cx: Cx, frame: Variant, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
+
+External construct allocation tests run the construct emitters with already
+sequenced operands; they do not claim the argument-sequencing stage is yet
+allocation-free. After warming and reserving append-only pools for a second
+pass, 10,000 eight-argument calls and one 10,000-field object each allocate
+zero times, with unchanged recorded capacities. They count respectively
+80,000 and 10,000 immediate primitive steps. Property spans are 8 bytes,
+operand-list handles 4 bytes, pending entries 8 bytes, and `JsPayload` 40 bytes.
+Object payloads now retain spans, not owned key vectors. Shared arena effect
+maintenance and release inspect immediate edges by index, without materializing
+a child vector. Module metadata still owns spelling/attributes at the J bridge
+boundary; borrowing the module-itself spelling removes its temporary descriptor,
+not those outstanding import-metadata allocations.
 
 ## 8. The gate and the slices
 

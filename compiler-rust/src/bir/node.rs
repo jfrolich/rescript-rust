@@ -71,7 +71,8 @@ pub(super) struct Renaming<'a> {
 trait Operand<'a>: Sized {
     fn encode(self, lists: &mut Lists) -> u32;
     fn decode(raw: u32, lists: &'a Lists) -> Self;
-    fn children(self, _out: &mut SmallVec<[NodeId; 4]>) {}
+    fn child_count(self) -> usize { 0 }
+    fn child_at(self, _at: usize) -> NodeId { unreachable!("metadata has no children") }
     fn remap(raw: u32, _lists: &mut Lists, _map: &Renaming<'_>) -> u32 {
         raw
     }
@@ -122,9 +123,8 @@ impl Operand<'_> for NodeId {
     fn decode(raw: u32, _lists: &Lists) -> Self {
         Self(raw)
     }
-    fn children(self, out: &mut SmallVec<[NodeId; 4]>) {
-        out.push(self);
-    }
+    fn child_count(self) -> usize { 1 }
+    fn child_at(self, at: usize) -> NodeId { assert_eq!(at, 0); self }
     fn remap(raw: u32, _lists: &mut Lists, map: &Renaming<'_>) -> u32 {
         map.nodes[&Self(raw)].0
     }
@@ -136,9 +136,8 @@ impl Operand<'_> for Option<NodeId> {
     fn decode(raw: u32, _lists: &Lists) -> Self {
         (raw != u32::MAX).then_some(NodeId(raw))
     }
-    fn children(self, out: &mut SmallVec<[NodeId; 4]>) {
-        out.extend(self);
-    }
+    fn child_count(self) -> usize { usize::from(self.is_some()) }
+    fn child_at(self, at: usize) -> NodeId { assert_eq!(at, 0); self.expect("optional child") }
     fn remap(raw: u32, _lists: &mut Lists, map: &Renaming<'_>) -> u32 {
         if raw == u32::MAX {
             raw
@@ -183,9 +182,8 @@ impl<'a> Operand<'a> for &'a [NodeId] {
     fn decode(raw: u32, lists: &'a Lists) -> Self {
         lists.get(ListId(raw))
     }
-    fn children(self, out: &mut SmallVec<[NodeId; 4]>) {
-        out.extend_from_slice(self);
-    }
+    fn child_count(self) -> usize { self.len() }
+    fn child_at(self, at: usize) -> NodeId { self[at] }
     fn remap(raw: u32, lists: &mut Lists, map: &Renaming<'_>) -> u32 {
         let values: Vec<_> = lists
             .get(ListId(raw))
@@ -242,10 +240,21 @@ macro_rules! nodes {
             }
         }
         impl View<'_> {
+            /// O(1): at most three immediate operand lengths, without copying a list.
+            pub(super) fn child_count(self) -> usize {
+                match self { $(Self::$op $({ $($field),* })? => 0 $($(+ $field.child_count())*)? ),* }
+            }
+            /// O(1): select an edge among at most three immediate operands.
+            pub(super) fn child_at(self, mut at: usize) -> NodeId {
+                match self { $(Self::$op $({ $($field),* })? => { $($(
+                    let count = $field.child_count();
+                    if at < count { return $field.child_at(at); }
+                    at -= count;
+                )*)? }),* }
+                panic!("child index out of bounds: {at}")
+            }
             pub(super) fn children(self) -> SmallVec<[NodeId; 4]> {
-                let mut result = SmallVec::new();
-                match self { $(Self::$op $({ $($field),* })? => { $($($field.children(&mut result);)*)? }),* }
-                result
+                (0..self.child_count()).map(|at| self.child_at(at)).collect()
             }
         }
     };
@@ -392,6 +401,24 @@ impl Node {
     /// O(1): borrow an SBlock's list identity without copying its elements.
     pub(super) fn block_list_id(self) -> Option<ListId> {
         (self.op == Op::SBlock).then_some(ListId(self.words[0]))
+    }
+    /// O(1): encode a call or construction over a finalized argument list.
+    pub(super) fn call_list(callee: NodeId, args: ListId, info: Option<JsId>) -> Self {
+        Self {
+            op: if info.is_some() { Op::JCall } else { Op::JNew },
+            flags: NodeFlags::default(),
+            aux: u16::from(info.is_none()),
+            words: [callee.0, args.0, info.map_or(0, |id| id.0)],
+        }
+    }
+    /// O(1): encode an object over finalized operand and metadata pools.
+    pub(super) fn object_list(list: ListId, info: JsId) -> Self {
+        Self {
+            op: Op::JObject,
+            flags: NodeFlags::default(),
+            aux: 0,
+            words: [list.0, info.0, 0],
+        }
     }
     pub(super) fn block_list(list: ListId) -> Self {
         Self { op: Op::SBlock, flags: NodeFlags::default(), aux: 0, words: [list.0, 0, 0] }

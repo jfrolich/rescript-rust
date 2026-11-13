@@ -499,30 +499,38 @@ impl State {
         &mut self,
         cx: Cx,
         specs: &[Param],
-        args: SmallVec<[NodeId; 4]>,
-    ) -> (SmallVec<[NodeId; 4]>, Option<NodeId>) {
-        let mut args = args.into_iter();
-        let mut values = SmallVec::with_capacity(specs.len());
-        let mut effects: SmallVec<[NodeId; 4]> = SmallVec::new();
+        args: crate::bir::ListId,
+    ) -> (crate::bir::ListId, Option<NodeId>) {
+        let argc = self.arena.lists.get(args).len();
+        let mut at = 0;
+        let mut values = std::mem::take(&mut self.external_values);
+        debug_assert!(values.is_empty());
+        let mut effect = None;
         for spec in specs {
             self.primitive_steps += 1;
             if let Attr::ArgCst(cst) = &spec.arg_type {
                 values.push(self.compile_external_arg_const(cx, cst));
             } else {
-                let arg = args
-                    .next()
-                    .unwrap_or_else(|| plain::node(&mut self.arena, View::JUndefined, 0));
-                let (converted, effect) = self.lower_external_arg_values_and_effect(
+                let arg = if at < argc {
+                    let value = self.arena.lists.get(args)[at];
+                    at += 1;
+                    value
+                } else {
+                    plain::node(&mut self.arena, View::JUndefined, 0)
+                };
+                let (converted, next_effect) = self.lower_external_arg_values_and_effect(
                     cx,
                     arg,
                     spec.arg_label,
                     &spec.arg_type,
                 );
                 values.extend(converted);
-                effects.extend(effect);
+                if let Some(next) = next_effect {
+                    effect = Some(self.add_external_effect(cx, effect, next));
+                }
             }
         }
-        debug_assert!(args.next().is_none());
+        debug_assert_eq!(at, argc);
         let trim = specs
             .iter()
             .rev()
@@ -536,7 +544,10 @@ impl State {
         for value in values.drain(values.len() - trim..) {
             self.arena.release(value);
         }
-        (values, self.fuse_external_effects(cx, effects))
+        let result = self.arena.lists.push(&values);
+        values.clear();
+        self.external_values = values;
+        (result, effect)
     }
 
     /// X:894 assemble_external_args_with_splice. O(specs + array elements +
@@ -545,11 +556,13 @@ impl State {
         &mut self,
         cx: Cx,
         specs: &[Param],
-        args: SmallVec<[NodeId; 4]>,
-    ) -> (SmallVec<[NodeId; 4]>, Option<NodeId>) {
-        let mut args = args.into_iter().peekable();
-        let mut values = SmallVec::with_capacity(specs.len());
-        let mut effects: SmallVec<[NodeId; 4]> = SmallVec::new();
+        args: crate::bir::ListId,
+    ) -> (crate::bir::ListId, Option<NodeId>) {
+        let argc = self.arena.lists.get(args).len();
+        let mut at = 0;
+        let mut values = std::mem::take(&mut self.external_values);
+        debug_assert!(values.is_empty());
+        let mut effect = None;
         let mut spread = false;
         for spec in specs {
             self.primitive_steps += 1;
@@ -557,10 +570,14 @@ impl State {
                 values.push(self.compile_external_arg_const(cx, cst));
                 continue;
             }
-            let arg = args
-                .next()
-                .unwrap_or_else(|| plain::node(&mut self.arena, View::JUndefined, 0));
-            if args.peek().is_none() {
+            let arg = if at < argc {
+                let value = self.arena.lists.get(args)[at];
+                at += 1;
+                value
+            } else {
+                plain::node(&mut self.arena, View::JUndefined, 0)
+            };
+            if at == argc {
                 if let View::JArray { values: elements } = self.arena.view(arg) {
                     let start = values.len();
                     values.extend_from_slice(elements);
@@ -573,18 +590,23 @@ impl State {
                 }
                 spread = true;
             }
-            let (converted, effect) =
+            let (converted, next_effect) =
                 self.lower_external_arg_values_and_effect(cx, arg, spec.arg_label, &spec.arg_type);
             values.extend(converted);
-            effects.extend(effect);
+            if let Some(next) = next_effect {
+                effect = Some(self.add_external_effect(cx, effect, next));
+            }
         }
-        debug_assert!(args.next().is_none());
+        debug_assert_eq!(at, argc);
         if spread {
             if let Some(value) = values.pop() {
                 values.push(plain::node(&mut self.arena, View::JSpread { value }, 0));
             }
         }
-        (values, self.fuse_external_effects(cx, effects))
+        let result = self.arena.lists.push(&values);
+        values.clear();
+        self.external_values = values;
+        (result, effect)
     }
 
     /// X:959 assemble_external_args. O(specs + selected assembly work).
@@ -592,9 +614,9 @@ impl State {
         &mut self,
         cx: Cx,
         specs: &[Param],
-        args: SmallVec<[NodeId; 4]>,
+        args: crate::bir::ListId,
         splice: bool,
-    ) -> (SmallVec<[NodeId; 4]>, Option<NodeId>) {
+    ) -> (crate::bir::ListId, Option<NodeId>) {
         if splice {
             self.assemble_external_args_with_splice(cx, specs, args)
         } else {
@@ -610,19 +632,6 @@ impl State {
         } else {
             Some(arg)
         }
-    }
-
-    /// X:749 fuse_external_effects. O(effects + J-M1 normalisation work).
-    pub(super) fn fuse_external_effects(
-        &mut self,
-        cx: Cx,
-        effects: impl IntoIterator<Item = NodeId>,
-    ) -> Option<NodeId> {
-        let mut effects = effects.into_iter();
-        let first = effects.next()?;
-        Some(effects.fold(first, |first, next| {
-            self.add_external_effect(cx, Some(first), next)
-        }))
     }
 
     /// X:755 add_external_effect. The cost is that of J-M1 on the two operands.
@@ -680,7 +689,9 @@ mod tests {
         }
         let held = state.hold_external_args(Cx::value(), specs, outputs);
         let (stmts, args) = state.sequence_arguments(false, held);
+        let args = state.arena.lists.push(&args);
         let (args, effect) = state.assemble_external_args_no_splice(Cx::value(), specs, args);
+        let args = state.arena.lists.get(args).to_vec();
         let value = plain::node(&mut state.arena, View::JArray { values: &args }, 0);
         let value = state.add_external_effect(Cx::value(), effect, value);
         let lowered = state.complete(

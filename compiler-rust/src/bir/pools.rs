@@ -53,6 +53,14 @@ pub(super) struct Lists {
     pub(super) pushes: usize,
 }
 impl Lists {
+    #[cfg(test)]
+    pub(super) fn reserve_test_growth(&mut self, extra: usize) {
+        self.items.reserve(extra);
+    }
+    #[cfg(test)]
+    pub(super) fn storage_shape(&self) -> (usize, usize) {
+        (self.items.len(), self.items.capacity())
+    }
     pub(super) fn push(&mut self, items: &[NodeId]) -> ListId {
         #[cfg(test)] { self.pushes += 1; }
         let id = ListId(index(self.items.len()));
@@ -77,6 +85,19 @@ impl Lists {
         self.items.push(NodeId(index(len + 1)));
         self.items.push(head);
         self.items.extend_from_within(tail.index() + 1..tail.index() + 1 + len);
+        id
+    }
+    /// O(len): copy a sublist inside the existing pool without a temporary vector.
+    pub(super) fn slice(&mut self, source: ListId, start: usize, len: usize) -> ListId {
+        assert!(start + len <= self.get(source).len());
+        #[cfg(test)]
+        {
+            self.pushes += 1;
+        }
+        let id = ListId(index(self.items.len()));
+        self.items.push(NodeId(index(len)));
+        let begin = source.index() + 1 + start;
+        self.items.extend_from_within(begin..begin + len);
         id
     }
     /// O(1), for compaction of an exclusively owned detached statement list.
@@ -298,6 +319,12 @@ pub enum PropertyKey {
     /// Plain record spread.
     RecordSpread,
 }
+/// A contiguous run of property keys in the unit's cold pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PropertySpan {
+    pub(super) start: u32,
+    pub(super) len: u32,
+}
 /// Cold JSX shape. Values are ordered callee, tag, spread, props, children, key.
 #[derive(Debug, Clone, Default)]
 pub struct JsxHeader {
@@ -336,7 +363,7 @@ pub enum JsPayload {
     /// Call kind, arity and method/JSX markers.
     Call(crate::js_ir::CallInfo),
     /// One key per object value, including spreads.
-    Object(Vec<PropertyKey>),
+    Object(PropertySpan),
     /// Fixed runtime block shape.
     Block(crate::lambda::lam_tag_info::TagInfo),
     /// JSX positional shape.
@@ -380,6 +407,7 @@ pub(super) struct Pools {
     pub catches: Vec<CatchHeader>,
     pub apply: Vec<ApInfo>,
     pub js: Vec<JsPayload>,
+    pub property_keys: Vec<PropertyKey>,
     pub cold: Vec<Cold>,
     pub imports: Vec<Import>,
     // J imports retain the complete module identity, including dynamic/default

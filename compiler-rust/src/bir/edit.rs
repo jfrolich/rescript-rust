@@ -19,6 +19,43 @@ impl Bir {
         self.attach_list(Node::block_list(list), list)
     }
 
+    /// O(arguments): adopt the callee and a pooled argument list exactly once.
+    /// `None` selects construction; `Some` carries ordinary call metadata.
+    pub(crate) fn call_from_list(
+        &mut self,
+        callee: NodeId,
+        args: ListId,
+        info: Option<JsId>,
+    ) -> NodeId {
+        assert!(
+            self.parents[callee.index()].is_none(),
+            "callee already attached"
+        );
+        if !self.bulk {
+            let weight = self.weight(callee);
+            if weight != 1 {
+                self.adjust_counts(callee, 1 - i64::from(weight));
+            }
+        }
+        let id = self.attach_list(Node::call_list(callee, args, info), args);
+        self.parents[callee.index()] = Some(id);
+        id
+    }
+
+    /// O(fields): adopt an object's pooled operands without a temporary vector.
+    /// Each operand is adopted once; cached J facts inspect immediate children.
+    pub(crate) fn object_from_list(&mut self, list: ListId, keys: PropertySpan) -> NodeId {
+        assert_eq!(self.lists.get(list).len(), keys.len as usize);
+        let info = self.js_info(JsPayload::Object(keys));
+        let id = self.attach_list(Node::object_list(list, info), list);
+        if j::facts::delay_safe(self, id) {
+            let mut flags = self.node(id).flags();
+            flags.0 |= NodeFlags::DELAY_SAFE;
+            self.nodes[id.index()].set_flags(flags);
+        }
+        id
+    }
+
     /// [`Self::block_from_list`] for an explicit block statement (B:1225).
     pub(crate) fn explicit_block_from_list(&mut self, list: ListId) -> NodeId {
         self.attach_list(Node::explicit_block_list(list), list)
@@ -241,7 +278,7 @@ impl Bir {
                 let JsPayload::Object(keys) = &self.pools.js[info.index()] else {
                     panic!("object needs property keys")
                 };
-                assert_eq!(values.len(), keys.len());
+                assert_eq!(values.len(), self.property_keys(*keys).len());
             }
             View::JBlockLit { info, .. } => {
                 assert!(matches!(self.pools.js[info.index()], JsPayload::Block(_)))
@@ -575,10 +612,9 @@ impl Bir {
         child_effects: impl Fn(NodeId) -> (bool, bool),
     ) -> (bool, bool) {
         let view = self.view(id);
-        let children = view.children();
         let j_pure = j::facts::purity(self, id, false, |c| child_effects(c).0);
-        let all_pure = children.iter().all(|&c| child_effects(c).0);
-        let no_alloc = children.iter().all(|&c| child_effects(c).1);
+        let all_pure = (0..view.child_count()).all(|i| child_effects(view.child_at(i)).0);
+        let no_alloc = (0..view.child_count()).all(|i| child_effects(view.child_at(i)).1);
         let effects = match view {
             View::Var { .. }
             | View::Global { .. }
@@ -1025,7 +1061,8 @@ impl Bir {
             if Some(id) == keep {
                 continue;
             }
-            for child in self.view(id).children() {
+            for i in 0..self.view(id).child_count() {
+                let child = self.view(id).child_at(i);
                 // A child detached from this node, or adopted by another,
                 // is no longer part of what is released (`detach`).
                 if self.parents[child.index()] != Some(id) {
@@ -2197,7 +2234,7 @@ mod constructor_tests {
         |b| {
             let values = [leaf(&mut b), leaf(&mut b)];
             let key = b.intern_text("key");
-            let info = b.js_info(JsPayload::Object(vec![PropertyKey::Literal(key); 2]));
+            let info = b.object_info(&vec![PropertyKey::Literal(key); 2]);
             b.new_node(
                 View::JObject {
                     values: &values,

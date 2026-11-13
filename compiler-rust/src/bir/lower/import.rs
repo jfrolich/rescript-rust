@@ -90,16 +90,36 @@ impl State {
         default: bool,
         dynamic: bool,
     ) -> ImportId {
-        let bundle = self.arena.intern_text(&external.bundle);
-        if self.external_bindings.len() <= bundle.index() {
-            self.external_bindings.resize(bundle.index() + 1, [None; 2]);
+        self.external_module_parts(
+            &external.bundle,
+            &external.module_bind_name,
+            external.import_attributes.as_deref(),
+            default,
+            dynamic,
+        )
+    }
+
+    /// O(bundle/hint/attribute bytes) for new module metadata; spelling is borrowed.
+    pub(super) fn external_module_parts(
+        &mut self,
+        bundle: &str,
+        hint: &ModuleBindName,
+        attributes: Option<&[(String, String)]>,
+        default: bool,
+        dynamic: bool,
+    ) -> ImportId {
+        let bundle_id = self.arena.intern_text(bundle);
+
+        if self.external_bindings.len() <= bundle_id.index() {
+            self.external_bindings
+                .resize(bundle_id.index() + 1, [None; 2]);
         }
-        let var = match self.external_bindings[bundle.index()][usize::from(default)] {
+        let var = match self.external_bindings[bundle_id.index()][usize::from(default)] {
             Some(var) => var,
             None => {
-                let name = external_binding_name(external);
+                let name = external_binding_name(bundle, hint);
                 let var = self.fresh_variable(&name);
-                self.external_bindings[bundle.index()][usize::from(default)] = Some(var);
+                self.external_bindings[bundle_id.index()][usize::from(default)] = Some(var);
                 var
             }
         };
@@ -107,12 +127,11 @@ impl State {
         let module = crate::js_ir::ModuleId {
             id,
             kind: crate::js_ir::Kind::External {
-                name: external.bundle.clone(),
+                name: bundle.to_owned(),
                 default,
-                import_attributes: external
-                    .import_attributes
-                    .clone()
-                    .map(|entries| crate::js_ir::op::ImportAttributes { entries }),
+                import_attributes: attributes.map(|entries| crate::js_ir::op::ImportAttributes {
+                    entries: entries.to_vec(),
+                }),
             },
             dynamic_import: dynamic,
         };
@@ -187,7 +206,7 @@ impl State {
 
 /// X: external_module_ident_name / js_id_name_of_hint_name / collect_start /
 /// collect_next. O(hint bytes); one output string per distinct module binding.
-fn external_binding_name(module: &ExternalModuleName) -> String {
+fn external_binding_name(name: &str, hint: &ModuleBindName) -> String {
     /// O(s.len()), copy and uppercase the first ASCII character.
     fn capitalize(s: &str) -> String {
         let mut chars = s.chars();
@@ -198,10 +217,9 @@ fn external_binding_name(module: &ExternalModuleName) -> String {
         }
         result
     }
-    if let ModuleBindName::PhintName(hint) = &module.module_bind_name {
+    if let ModuleBindName::PhintName(hint) = hint {
         return capitalize(hint);
     }
-    let name = &module.bundle;
     let offset = name.rfind('/').map_or(0, |i| i + 1);
     let suffix = &name[offset..];
     if suffix
@@ -231,7 +249,7 @@ fn external_binding_name(module: &ExternalModuleName) -> String {
     }
     if result.is_empty() {
         if offset == 0 {
-            name.clone()
+            name.to_owned()
         } else {
             capitalize(name)
         }

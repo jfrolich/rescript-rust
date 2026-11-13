@@ -79,7 +79,7 @@ impl State {
                             else {
                                 unreachable!("object payload")
                             };
-                            keys.iter().all(|key| {
+                            self.arena.property_keys(*keys).iter().all(|key| {
                                 matches!(
                                     key,
                                     crate::bir::PropertyKey::Literal(_)
@@ -324,9 +324,9 @@ mod tests {
                     }
                     4 => {
                         let key = state.arena.intern_text("field");
-                        let info = state.arena.js_info(JsPayload::Object(vec![
+                        let info = state.arena.object_info(&vec![
                             crate::bir::PropertyKey::Literal(key),
-                        ]));
+                        ]);
                         let key = legacy.j.str("field");
                         let props = legacy.j.prop_list(&[(PropName::Lit(key), old_value)]);
                         (

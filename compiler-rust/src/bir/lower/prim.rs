@@ -174,7 +174,7 @@ impl State {
                     for &value in &kept {
                         self.arena.detach(value);
                     }
-                    let info = self.arena.js_info(crate::bir::JsPayload::Object(keys));
+                    let info = self.arena.object_info(&keys);
                     plain::node(
                         &mut self.arena,
                         View::JObject {
@@ -202,6 +202,7 @@ impl State {
                         else {
                             unreachable!()
                         };
+                        let props = self.arena.property_keys(*props);
                         let literal = props.iter().all(|p| {
                             matches!(
                                 p,
@@ -227,7 +228,7 @@ impl State {
                         kept.push(arg);
                     }
                 }
-                let info = self.arena.js_info(crate::bir::JsPayload::Object(keys));
+                let info = self.arena.object_info(&keys);
                 plain::node(
                     &mut self.arena,
                     View::JObject {
@@ -742,12 +743,18 @@ impl State {
             Primitive::Parraylength => {
                 norm::je2_length(&mut self.arena, values[0], LengthObject::Array)
             }
-            Primitive::PjsCall(call) => self.compile_js_call(cx, prim.primitive, call, values),
+            Primitive::PjsCall(call) => {
+                let values = self.arena.lists.push(&values);
+                self.compile_js_call(cx, prim.primitive, call, values)
+            },
             Primitive::PjsApply => match values.split_first() {
                 Some((&callee, args)) => self.call_node(callee, args, Default::default()),
                 None => plain::node(&mut self.arena, View::JUndefined, 0),
             },
-            Primitive::PjsObjectCreate(specs) => self.compile_js_object_create(cx, specs, values),
+            Primitive::PjsObjectCreate(specs) => {
+                let values = self.arena.lists.push(&values);
+                self.compile_js_object_create(cx, specs, values)
+            },
             Primitive::PjsFnMethod => {
                 let mut values = values.into_iter();
                 let value = values.next().unwrap_or_else(|| plain::node(&mut self.arena, View::JUndefined, 0));

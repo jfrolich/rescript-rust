@@ -299,6 +299,19 @@ impl Bir {
     pub fn javascript(&self, id: JsId) -> &JsPayload {
         &self.pools.js[id.index()]
     }
+    /// O(1): borrow a property-key run without copying metadata.
+    pub fn property_keys(&self, span: PropertySpan) -> &[PropertyKey] {
+        &self.pools.property_keys[span.start as usize..(span.start + span.len) as usize]
+    }
+    /// O(keys.len()): append object keys to the unit pool, not a per-object vector.
+    pub fn object_info(&mut self, keys: &[PropertyKey]) -> JsId {
+        let span = PropertySpan {
+            start: index(self.pools.property_keys.len()),
+            len: index(keys.len()),
+        };
+        self.pools.property_keys.extend_from_slice(keys);
+        self.js_info(JsPayload::Object(span))
+    }
     /// Read a compound constant's fields.
     pub fn constant_fields(&self, span: ConstSpan) -> &[ConstId] {
         &self.pools.const_fields[span.start as usize..(span.start + span.len) as usize]

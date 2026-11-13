@@ -70,7 +70,7 @@ impl State {
             }
         }
         keys[1..].reverse();
-        let info = self.arena.js_info(JsPayload::Object(keys));
+        let info = self.arena.object_info(&keys);
         let operands = self.source.lists.push(&operands);
         Some(Record {
             operands,
@@ -151,7 +151,7 @@ impl State {
     pub(super) fn duplicate_record(&mut self, source: NodeId) -> NodeId {
         let info = self
             .arena
-            .js_info(JsPayload::Object(vec![PropertyKey::RecordSpread]));
+            .object_info(&vec![PropertyKey::RecordSpread]);
         plain::node(
             &mut self.arena,
             View::JObject {

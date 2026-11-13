@@ -5,7 +5,6 @@ use crate::bir::{ImportId, PrimId};
 use crate::lambda::lam_primitive::{
     DeclKind, ExternalModuleName, JsCall, ModuleBindName, ModuleSource,
 };
-use smallvec::SmallVec;
 
 impl State {
     /// P:84 compile_js_object_get. O(receiver field spine), holding only
@@ -61,91 +60,118 @@ impl State {
         &mut self,
         cx: Cx,
         specs: &[crate::lambda::lam_primitive::ObjParam],
-        args: SmallVec<[NodeId; 4]>,
+        args: crate::bir::ListId,
     ) -> NodeId {
         use crate::lambda::lam_primitive::{Attr, Label, LabelNoname};
-        let mut args = args.into_iter();
-        let mut keys = Vec::new();
-        let mut values = Vec::new();
-        let mut effects: SmallVec<[NodeId; 4]> = SmallVec::new();
-        let mut pending: Vec<(u32, NodeId)> = Vec::new();
+        let argc = self.arena.lists.get(args).len();
+        let mut at = 0;
+        let mut keys = crate::bir::PropertySpan {
+            start: u32::try_from(self.arena.pools.property_keys.len())
+                .expect("property pool capacity"),
+            len: 0,
+        };
+        self.arena.pools.property_keys.resize(
+            keys.start as usize + specs.len(),
+            crate::bir::PropertyKey::Symbol,
+        );
+        let values = self.arena.lists.push_iter(
+            specs.len(),
+            std::iter::repeat_n(NodeId(u32::MAX), specs.len()),
+        );
+        let mut effect = None;
+        let mut pending = std::mem::take(&mut self.external_pending);
+        debug_assert!(pending.is_empty());
         for (i, spec) in specs.iter().enumerate() {
             self.primitive_steps += 1;
             match &spec.obj_arg_label {
                 Label::ObjEmpty => {
                     if !matches!(spec.obj_arg_type, Attr::ArgCst(_)) {
-                        let arg = args
-                            .next()
-                            .unwrap_or_else(|| plain::node(&mut self.arena, View::JUndefined, 0));
-                        effects.extend(self.external_arg_effect(cx, arg));
+                        let arg = if at < argc {
+                            let value = self.arena.lists.get(args)[at];
+                            at += 1;
+                            value
+                        } else {
+                            plain::node(&mut self.arena, View::JUndefined, 0)
+                        };
+                        let next = self.external_arg_effect(cx, arg);
+                        if let Some(next) = next {
+                            effect = Some(self.add_external_effect(cx, effect, next));
+                        }
                     }
                 }
                 Label::ObjLabel { name } => {
                     let value = if let Attr::ArgCst(cst) = &spec.obj_arg_type {
                         self.compile_external_arg_const(cx, cst)
                     } else {
-                        let arg = args
-                            .next()
-                            .unwrap_or_else(|| plain::node(&mut self.arena, View::JUndefined, 0));
-                        let (value, effect) = self.lower_object_external_arg_value_and_effect(
+                        let arg = if at < argc {
+                            let value = self.arena.lists.get(args)[at];
+                            at += 1;
+                            value
+                        } else {
+                            plain::node(&mut self.arena, View::JUndefined, 0)
+                        };
+                        let (value, next_effect) = self.lower_object_external_arg_value_and_effect(
                             cx,
                             arg,
                             LabelNoname::ArgLabel,
                             &spec.obj_arg_type,
                         );
-                        effects.extend(effect);
+                        if let Some(next) = next_effect {
+                            effect = Some(self.add_external_effect(cx, effect, next));
+                        }
                         value
                     };
-                    keys.push(crate::bir::PropertyKey::Literal(
-                        self.arena.intern_text(name),
-                    ));
-                    values.push(value);
+                    let key = crate::bir::PropertyKey::Literal(self.arena.intern_text(name));
+                    self.arena.pools.property_keys[(keys.start + keys.len) as usize] = key;
+                    self.arena.lists.set(values, keys.len as usize, value);
+                    keys.len += 1;
                 }
                 Label::ObjOptional { name, .. } => {
-                    let arg = args
-                        .next()
-                        .unwrap_or_else(|| plain::node(&mut self.arena, View::JUndefined, 0));
+                    let arg = if at < argc {
+                        let value = self.arena.lists.get(args)[at];
+                        at += 1;
+                        value
+                    } else {
+                        plain::node(&mut self.arena, View::JUndefined, 0)
+                    };
                     match self.arena.view(arg) {
                         View::JUndefined => self.arena.release(arg),
                         View::JOptional { value } => {
                             self.arena.detach(value);
                             self.arena.release(arg);
-                            let (value, effect) = self.lower_object_external_arg_value_and_effect(
-                                cx,
-                                value,
-                                LabelNoname::ArgLabel,
-                                &spec.obj_arg_type,
-                            );
-                            effects.extend(effect);
-                            keys.push(crate::bir::PropertyKey::Literal(
-                                self.arena.intern_text(name),
-                            ));
-                            values.push(value);
+                            let (value, next_effect) = self
+                                .lower_object_external_arg_value_and_effect(
+                                    cx,
+                                    value,
+                                    LabelNoname::ArgLabel,
+                                    &spec.obj_arg_type,
+                                );
+                            if let Some(next) = next_effect {
+                                effect = Some(self.add_external_effect(cx, effect, next));
+                            }
+                            let key =
+                                crate::bir::PropertyKey::Literal(self.arena.intern_text(name));
+                            self.arena.pools.property_keys[(keys.start + keys.len) as usize] = key;
+                            self.arena.lists.set(values, keys.len as usize, value);
+                            keys.len += 1;
                         }
                         _ => pending.push((u32::try_from(i).expect("object spec capacity"), arg)),
                     }
                 }
             }
         }
-        debug_assert!(args.next().is_none());
-        let effect = self.fuse_external_effects(cx, effects);
-        let info = self.arena.js_info(crate::bir::JsPayload::Object(keys));
-        let object = plain::node(
-            &mut self.arena,
-            View::JObject {
-                values: &values,
-                info,
-            },
-            0,
-        );
+        debug_assert_eq!(at, argc);
+        self.arena.lists.truncate(values, keys.len as usize);
+        let object = self.arena.object_from_list(values, keys);
         let object = self.add_external_effect(cx, effect, object);
         if pending.is_empty() {
+            self.external_pending = pending;
             return object;
         }
         let obj = self.fresh_variable("tmp");
         let declaration = crate::bir::j::declare(&mut self.arena, LetKind::Variable, obj, object);
         self.statements.push(declaration);
-        for (i, mut arg) in pending {
+        for (i, mut arg) in pending.drain(..) {
             self.primitive_steps += 1;
             let spec = &specs[i as usize];
             let Label::ObjOptional {
@@ -168,7 +194,7 @@ impl State {
             } else {
                 self.primitive_runtime("Primitive_option", "valFromOption", &[arg])
             };
-            let (value, effect) = self.lower_object_external_arg_value_and_effect(
+            let (value, next_effect) = self.lower_object_external_arg_value_and_effect(
                 cx,
                 value_arg,
                 LabelNoname::ArgEmpty,
@@ -183,7 +209,7 @@ impl State {
             );
             let receiver = self.pure_expression(View::Var { var: obj }, 0);
             let target = self.static_member(receiver, name);
-            let value = self.add_external_effect(cx, effect, value);
+            let value = self.add_external_effect(cx, next_effect, value);
             let assign = plain::bin(&mut self.arena, crate::js_ir::BinOp::Eq, target, value);
             let statement = crate::bir::j::norm::js1_exp(&mut self.arena, assign);
             let yes = self.arena.lists.push(&[statement]);
@@ -191,6 +217,7 @@ impl State {
             let branch = crate::bir::j::norm::js3_simplify_if(&mut self.arena, test, yes, no);
             self.statements.push(branch);
         }
+        self.external_pending = pending;
         self.pure_expression(View::Var { var: obj }, 0)
     }
 
@@ -276,21 +303,17 @@ impl State {
     }
 
     /// X:609 external_module_binding. O(1) after first primitive registration.
-    fn external_module_binding(&mut self, cx: Cx, primitive: PrimId, name: &str) -> NodeId {
+    fn external_module_binding(&mut self, _cx: Cx, primitive: PrimId, name: &str) -> NodeId {
         let module = if let Some(Some(module)) = self.external_references.get(primitive.index()) {
             *module
         } else {
-            self.external_module_cached(
-                cx,
-                primitive,
-                &ExternalModuleName {
-                    bundle: name.to_owned(),
-                    module_bind_name: ModuleBindName::PhintNothing,
-                    import_attributes: None,
-                },
-                false,
-                false,
-            )
+            let module =
+                self.external_module_parts(name, &ModuleBindName::PhintNothing, None, false, false);
+            if self.external_references.len() <= primitive.index() {
+                self.external_references.resize(primitive.index() + 1, None);
+            }
+            self.external_references[primitive.index()] = Some(module);
+            module
         };
         plain::node(
             &mut self.arena,
@@ -302,6 +325,14 @@ impl State {
         )
     }
 
+    /// O(arguments): consume a pooled call argument list without a transient vector.
+    fn external_call_from_list(&mut self, callee: NodeId, args: crate::bir::ListId) -> NodeId {
+        let info = self
+            .arena
+            .js_info(crate::bir::JsPayload::Call(Default::default()));
+        self.arena.call_from_list(callee, args, Some(info))
+    }
+
     /// X:1202 compile_js_call. O(arguments + conversions + scope spelling).
     /// All operands are already held and sequenced; this consumes their roots.
     pub(super) fn compile_js_call(
@@ -309,7 +340,7 @@ impl State {
         cx: Cx,
         primitive: PrimId,
         call: &JsCall,
-        args: SmallVec<[NodeId; 4]>,
+        args: crate::bir::ListId,
     ) -> NodeId {
         let decl = &call.ffi;
         let specs = &call.arg_types;
@@ -320,7 +351,8 @@ impl State {
         };
         match &decl.kind {
             DeclKind::DeclVal { .. } if itself && decl.effective_arity == 0 => {
-                for value in args {
+                for i in 0..self.arena.lists.get(args).len() {
+                    let value = self.arena.lists.get(args)[i];
                     self.arena.release(value);
                 }
                 self.external_module_binding(cx, primitive, &call.prim_name)
@@ -328,96 +360,92 @@ impl State {
             DeclKind::DeclVal { .. } if itself => {
                 let target = self.external_module_binding(cx, primitive, &call.prim_name);
                 let (args, effect) = self.assemble_external_args(cx, specs, args, decl.variadic);
-                let value = self.call_node(target, &args, Default::default());
+                let value = self.external_call_from_list(target, args);
                 self.add_external_effect(cx, effect, value)
             }
             DeclKind::DeclNew { .. } if itself => {
                 let target = self.external_module_binding(cx, primitive, &call.prim_name);
                 let (args, effect) = self.assemble_external_args_no_splice(cx, specs, args);
-                let value = plain::node(
-                    &mut self.arena,
-                    View::JNew {
-                        callee: target,
-                        args: &args,
-                    },
-                    1,
-                );
+                let value = self.arena.call_from_list(target, args, None);
                 self.add_external_effect(cx, effect, value)
             }
             _ if itself => unreachable!("invalid module-itself declaration"),
             DeclKind::DeclVal { name } if decl.effective_arity == 0 => {
                 let target =
                     self.translate_scoped_module_value(cx, primitive, module, name, &decl.scopes);
-                if args.is_empty() {
+                if self.arena.lists.get(args).is_empty() {
                     target
                 } else {
-                    self.call_node(target, &args, Default::default())
+                    self.external_call_from_list(target, args)
                 }
             }
             DeclKind::DeclVal { name } => {
                 let target =
                     self.translate_scoped_module_value(cx, primitive, module, name, &decl.scopes);
                 let (args, effect) = self.assemble_external_args(cx, specs, args, decl.variadic);
-                let value = self.call_node(target, &args, Default::default());
+                let value = self.external_call_from_list(target, args);
                 self.add_external_effect(cx, effect, value)
             }
             DeclKind::DeclNew { name } => {
                 let (args, effect) = self.assemble_external_args(cx, specs, args, decl.variadic);
                 let target =
                     self.translate_scoped_module_value(cx, primitive, module, name, &decl.scopes);
-                let value = plain::node(
-                    &mut self.arena,
-                    View::JNew {
-                        callee: target,
-                        args: &args,
-                    },
-                    1,
-                );
+                let value = self.arena.call_from_list(target, args, None);
                 self.add_external_effect(cx, effect, value)
             }
             DeclKind::DeclSend { name } => {
-                let mut args = args.into_iter();
-                let receiver = args.next().expect("send receiver");
+                let receiver = self.arena.lists.get(args)[0];
+                let len = self.arena.lists.get(args).len();
+                let args = self.arena.lists.slice(args, 1, len - 1);
                 let (args, effect) = self.assemble_external_args(
                     cx,
                     specs.get(1..).unwrap_or(&[]),
-                    args.collect(),
+                    args,
                     decl.variadic,
                 );
                 let receiver = self.apply_scoped_access(cx, receiver, &decl.scopes);
                 let target = self.static_member(receiver, name);
-                let value = self.call_node(target, &args, Default::default());
+                let value = self.external_call_from_list(target, args);
                 self.add_external_effect(cx, effect, value)
             }
             DeclKind::DeclGet { name } | DeclKind::DeclSet { name } => {
                 let (args, effect) = self.assemble_external_args_no_splice(cx, specs, args);
-                let receiver = self.apply_scoped_access(cx, args[0], &decl.scopes);
+                let receiver = self.arena.lists.get(args)[0];
+                let receiver = self.apply_scoped_access(cx, receiver, &decl.scopes);
                 let target = self.static_member(receiver, name);
                 let value = if matches!(decl.kind, DeclKind::DeclSet { .. }) {
-                    assert_eq!(args.len(), 2);
-                    plain::bin(&mut self.arena, crate::js_ir::BinOp::Eq, target, args[1])
+                    assert_eq!(self.arena.lists.get(args).len(), 2);
+                    {
+                        let value = self.arena.lists.get(args)[1];
+                        plain::bin(&mut self.arena, crate::js_ir::BinOp::Eq, target, value)
+                    }
                 } else {
-                    assert_eq!(args.len(), 1);
+                    assert_eq!(self.arena.lists.get(args).len(), 1);
                     target
                 };
                 self.add_external_effect(cx, effect, value)
             }
             DeclKind::DeclGetIndex | DeclKind::DeclSetIndex => {
                 let (args, effect) = self.assemble_external_args_no_splice(cx, specs, args);
-                let receiver = self.apply_scoped_access(cx, args[0], &decl.scopes);
+                let receiver = self.arena.lists.get(args)[0];
+                let receiver = self.apply_scoped_access(cx, receiver, &decl.scopes);
+                let index = self.arena.lists.get(args)[1];
                 let target = plain::node(
                     &mut self.arena,
                     View::JIndex {
                         object: receiver,
-                        index: args[1],
+                        index,
                     },
                     0,
                 );
                 let value = if matches!(decl.kind, DeclKind::DeclSetIndex) {
-                    assert_eq!(args.len(), 3);
-                    plain::bin(&mut self.arena, crate::js_ir::BinOp::Eq, target, args[2])
+                    assert_eq!(self.arena.lists.get(args).len(), 3);
+                    {
+                        let value = self.arena.lists.get(args)[2];
+                        plain::bin(&mut self.arena, crate::js_ir::BinOp::Eq, target, value)
+                    }
                 } else {
-                    assert_eq!(args.len(), 2);
+                    assert_eq!(self.arena.lists.get(args).len(), 2);
                     target
                 };
                 self.add_external_effect(cx, effect, value)
@@ -435,6 +463,113 @@ mod tests {
         lam_constant::Constant,
         lam_primitive::{ExternalDecl, Param, Primitive},
     };
+
+    #[test]
+    fn pooled_external_payload_sizes() {
+        assert_eq!(std::mem::size_of::<crate::bir::PropertySpan>(), 8);
+        assert_eq!(std::mem::size_of::<crate::bir::ListId>(), 4);
+        assert_eq!(std::mem::size_of::<(u32, NodeId)>(), 8);
+        assert_eq!(std::mem::size_of::<crate::bir::JsPayload>(), 40);
+    }
+
+    /// Exercise the external construct lowering, with its already-sequenced
+    /// operands. Source import/argument sequencing are separate lowering stages.
+    fn allocation_fixture(object: bool) {
+        use crate::lambda::lam_primitive::{Attr, Label, ObjParam};
+        let mut source = LamArena::new();
+        let root = source.const_(Constant::JsUndefined { is_unit: false });
+        let mut state = State::new(crate::bir::bridge::import_lambda(&source, root).unwrap());
+        let count = if object { 1 } else { 10_000 };
+        let width = if object { 10_000 } else { 8 };
+        let specs: Vec<_> = (0..width)
+            .map(|i| ObjParam {
+                obj_arg_type: Attr::Nothing,
+                obj_arg_label: Label::ObjLabel {
+                    name: format!("field{i}"),
+                },
+            })
+            .collect();
+        let call = JsCall {
+            prim_name: "invoke".into(),
+            arg_types: vec![Param::dummy(); width],
+            ffi: ExternalDecl {
+                kind: DeclKind::DeclVal {
+                    name: "invoke".into(),
+                },
+                module_: None,
+                scopes: vec![],
+                variadic: false,
+                effective_arity: width as i64,
+            },
+        };
+        let batches: Vec<Vec<_>> = (0..2)
+            .map(|_| {
+                (0..count)
+                    .map(|_| {
+                        let values: Vec<_> = (0..width)
+                            .map(|_| plain::node(&mut state.arena, View::JUndefined, 0))
+                            .collect();
+                        state.arena.lists.push(&values)
+                    })
+                    .collect()
+            })
+            .collect();
+        let run = |state: &mut State, args: &[crate::bir::ListId]| {
+            for &args in args {
+                let value = if object {
+                    state.compile_js_object_create(Cx::value(), &specs, args)
+                } else {
+                    state.compile_js_call(Cx::value(), PrimId(0), &call, args)
+                };
+                state.arena.release(value);
+            }
+        };
+        let initial_lists = state.arena.lists.storage_shape().0;
+        run(&mut state, &batches[0]);
+        // Append-only pools retain output from the warm pass. Reserve exactly
+        // another pass's growth, as measured by that pass, before counting.
+        state
+            .arena
+            .lists
+            .reserve_test_growth(state.arena.lists.storage_shape().0 - initial_lists);
+        state.arena.pools.js.reserve(count);
+        state
+            .arena
+            .pools
+            .property_keys
+            .reserve(if object { width } else { 0 });
+        state.arena.free_nodes.reserve(count * (width + 1));
+        let capacities = |s: &State| {
+            [
+                s.arena.nodes.capacity(),
+                s.arena.parents.capacity(),
+                s.arena.free_nodes.capacity(),
+                s.arena.release_stack.capacity(),
+                s.arena.lists.storage_shape().1,
+                s.arena.pools.js.capacity(),
+                s.arena.pools.property_keys.capacity(),
+                s.external_values.capacity(),
+                s.external_pending.capacity(),
+            ]
+        };
+        let before = capacities(&state);
+        let steps = state.primitive_steps;
+        let allocations = allocation_counter::measure(|| run(&mut state, &batches[1]));
+        println!("external object={object}: {allocations:?}");
+        assert_eq!(allocations.count_total, 0);
+        assert_eq!(capacities(&state), before);
+        assert_eq!(state.primitive_steps - steps, count * width);
+    }
+
+    #[test]
+    fn ten_thousand_external_calls_do_not_allocate() {
+        allocation_fixture(false);
+    }
+
+    #[test]
+    fn ten_thousand_external_object_fields_do_not_allocate() {
+        allocation_fixture(true);
+    }
 
     #[test]
     fn constant_polyvariant_test_inside_external_argument() {
