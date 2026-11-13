@@ -18,7 +18,9 @@ def summarize(rows):
     result = {key: {"derived": 0, "other": 0, "estimated": False}
               for key in (*PHASES, "js_bytes", "js_lines")}
     result.update(modules=0, bindings=[0, 0], syntax_nodes=[0, 0],
-                  checker_counters=[[0] * 4, [0] * 4], counter_modules=0)
+                  checker_counters=[[0] * 4, [0] * 4], counter_modules=0, paths={}, path_timing_records=0,
+                  planned_typecheck_ns=0, planned_conversion_ns=0,
+                  general_typecheck_ns=0, general_conversion_ns=0)
     shapes = collections.defaultdict(list)
     templates = []
     template_sizes = []
@@ -26,6 +28,20 @@ def summarize(rows):
         if row.get("version") != 1:
             raise ValueError(f"Unsupported census version: {row.get('version')!r}")
         result["modules"] += 1
+        for reason, count in row.get("paths", {}).items():
+            if type(count) is not int or count < 0:
+                raise ValueError(f"Invalid path count {reason}: {count!r}")
+            result["paths"][reason] = result["paths"].get(reason, 0) + count
+        timing_keys = ("planned_typecheck_ns", "planned_conversion_ns")
+        if any(key in row for key in timing_keys):
+            result["path_timing_records"] += 1
+            for phase, key in zip(("typecheck", "conversion"), timing_keys):
+                planned = row[key]
+                total = row[phase]["derived"]
+                if type(planned) is not int or not 0 <= planned <= total:
+                    raise ValueError(f"Invalid {key}: {planned!r}")
+                result[key] += planned
+                result[f"general_{phase}_ns"] += total - planned
         for key in (*PHASES, "js_bytes", "js_lines"):
             for side in ("derived", "other"):
                 value = row[key][side]
@@ -91,6 +107,16 @@ def markdown(summary):
         pair = summary[phase]
         label = "node-weighted estimate" if pair["estimated"] else "measured"
         lines.append(f"| {phase} | {pair['derived'] / 1e6:.3f} | {pair['other'] / 1e6:.3f} | {label} |")
+    lines += ["", f"Path timing availability: {summary['path_timing_records']}/{summary['modules']} records."]
+    if summary["path_timing_records"]:
+        lines += ["", "| Phase | Bindings on a plan ms | General bindings ms |",
+                  "|---|---:|---:|"]
+        for phase in ("typecheck", "conversion"):
+            lines.append(f"| {phase} | {summary[f'planned_{phase}_ns'] / 1e6:.3f} | {summary[f'general_{phase}_ns'] / 1e6:.3f} |")
+    if summary["paths"]:
+        lines += ["", "| Path | Bindings |", "|---|---:|"]
+        for reason, count in sorted(summary["paths"].items()):
+            lines.append(f"| {reason} | {count} |")
     lines += ["", "| Size | Derived | Other |", "|---|---:|---:|"]
     for key in ("bindings", "syntax_nodes"):
         lines.append(f"| {key} | {summary[key][0]} | {summary[key][1]} |")

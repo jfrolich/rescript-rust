@@ -4972,9 +4972,9 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                 let census_start = crate::derived_census::start(self.derived_census.is_some());
                 let result = derived::lower(self, *idx, body, &mut ());
                 if let (Some(census), Some(start)) = (&mut self.derived_census, census_start) {
-                    census
-                        .conversion
-                        .add(true, crate::derived_census::nanos(start.elapsed()));
+                    let elapsed = crate::derived_census::nanos(start.elapsed());
+                    census.conversion.add(true, elapsed);
+                    census.planned_conversion_ns += elapsed;
                 }
                 result
             }

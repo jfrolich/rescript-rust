@@ -48,6 +48,35 @@ class DerivedCensusSummaryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             summarize([item])
 
+    def test_path_timing_preserves_totals_and_counts(self):
+        item = row()
+        item.update(planned_typecheck_ns=7, planned_conversion_ns=3,
+                    paths={"plan": 2, "not_yet_planned": 1})
+        result = summarize(item for _ in range(10_000))
+        self.assertEqual(result["planned_typecheck_ns"], 70_000)
+        self.assertEqual(result["general_typecheck_ns"], 40_000)
+        self.assertEqual(result["planned_conversion_ns"], 30_000)
+        self.assertEqual(result["general_conversion_ns"], 80_000)
+        self.assertEqual(result["paths"], {"plan": 20_000, "not_yet_planned": 10_000})
+        self.assertIn("Bindings on a plan ms", markdown(result))
+
+    def test_legacy_records_do_not_claim_general_timing(self):
+        result = summarize([row()])
+        self.assertEqual(result["path_timing_records"], 0)
+        self.assertEqual(result["general_typecheck_ns"], 0)
+        self.assertIn("Path timing availability: 0/1", markdown(result))
+
+    def test_invalid_path_timing_and_counts(self):
+        for value in (-1, 12, 1.5, True):
+            item = row()
+            item.update(planned_typecheck_ns=value, planned_conversion_ns=0)
+            with self.assertRaises(ValueError):
+                summarize([item])
+        item = row()
+        item["paths"] = {"plan": -1}
+        with self.assertRaises(ValueError):
+            summarize([item])
+
     def test_counter_sides(self):
         item = row()
         item["checker_counters"] = [[1, 2, 3, 4], [10, 20, 30, 40]]

@@ -52,6 +52,10 @@ pub struct Census {
     pub frontend: Pair,
     /// Item-exclusive type checking; residual module overhead is charged to other.
     pub typecheck: Pair,
+    /// Subset of derived type checking charged to bindings on a plan.
+    pub planned_typecheck_ns: u64,
+    /// Subset of derived conversion charged to bindings on a plan.
+    pub planned_conversion_ns: u64,
     /// Translation of value groups to raw Lambda.
     pub conversion: Pair,
     /// Remaining Lambda lowering, including conversion overhead outside value groups.
@@ -104,7 +108,8 @@ impl Census {
             source_kind: if std::path::Path::new(module).extension().is_some_and(|s| s == "resi") { "interface" } else { "implementation" },
             output: path.into(), bindings: [0; 2],
             syntax_nodes: [0; 2], parse_other: Pair::default(), generation: Pair::default(), frontend: Pair::default(),
-            typecheck: Pair::default(), conversion: Pair::default(), lambda_lowering: Pair::default(),
+            typecheck: Pair::default(), conversion: Pair::default(),
+            planned_typecheck_ns: 0, planned_conversion_ns: 0, lambda_lowering: Pair::default(),
             lambda_passes: Pair::default(), lowering: Pair::default(), printing: Pair::default(),
             environment: Pair::default(), signature: Pair::default(), gentype: Pair::default(),
             js_bytes: Pair::default(), js_lines: Pair::default(), checker_counters: (crate::perf_counters::enabled()

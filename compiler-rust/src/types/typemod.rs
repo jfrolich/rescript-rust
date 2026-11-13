@@ -16244,10 +16244,11 @@ fn type_structure_item_with_census<'a>(
         let derived = crate::binary_ast::derive::is_derived_item(item, arena);
         census.account_counters(derived, counter_before);
         let children = census.typecheck.total() - census_before;
-        census.typecheck.add(
-            derived,
-            crate::derived_census::nanos(start.elapsed()).saturating_sub(children),
-        );
+        let elapsed = crate::derived_census::nanos(start.elapsed()).saturating_sub(children);
+        census.typecheck.add(derived, elapsed);
+        if matches!(typed_item.str_desc, StructureItemDesc::Tstr_derived(_)) {
+            census.planned_typecheck_ns += elapsed;
+        }
         if derived && let StructureItemDesc::Tstr_value(_, group) = typed_item.str_desc {
             census.mark_typed_group(group.start());
         }

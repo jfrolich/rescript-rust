@@ -868,6 +868,8 @@ codecs, asserting no unused-constructor warning in either mode.
 
 ### Slice 4. Remove the switch
 
+**Status: held until the new checker handles derived items.**
+
 - **Files:** `driver.rs`, a test under `compiler-rust/tests/` or the existing
   Spice test module.
 - **Deletes:** `RESCRIPT_DERIVED_PATH`, the dual compilation and its
