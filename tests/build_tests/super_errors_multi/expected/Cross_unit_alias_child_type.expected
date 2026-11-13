@@ -1,0 +1,8 @@
+We've found a bug for you!
+  /.../fixtures/Cross_unit_alias_child_type/User.res:1:14-27
+
+  1 │ let _: int = Lib.Sub.make()
+  2 │ 
+
+  This has type: Lib.Sub.t
+  But it's expected to have type: int

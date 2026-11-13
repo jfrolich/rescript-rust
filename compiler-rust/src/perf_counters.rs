@@ -733,6 +733,15 @@ pub(crate) mod world {
         VIEWS_ADOPTED.fetch_add(1, Ordering::Relaxed);
     }
 
+    static PAPPLY_VIEWS: AtomicU64 = AtomicU64::new(0);
+
+    /// A compilation built the component tables of a path with a functor
+    /// application on it (`F(X).t`): such a path has no world view, so each
+    /// compilation that uses it builds them. The caller tests the flag.
+    pub(crate) fn record_papply_view_build() {
+        PAPPLY_VIEWS.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// A child module declaration of a view was forced into `nodes` nodes.
     pub(crate) fn record_forced_child(nodes: usize) {
         if super::enabled() {
@@ -753,6 +762,7 @@ pub(crate) mod world {
         VIEW_NODES_COPIED.store(0, Ordering::Relaxed);
         CHILDREN_FORCED.store(0, Ordering::Relaxed);
         CHILD_NODES.store(0, Ordering::Relaxed);
+        PAPPLY_VIEWS.store(0, Ordering::Relaxed);
     }
 
     pub(super) fn print_report() {
@@ -767,6 +777,10 @@ pub(crate) mod world {
             VIEWS_ADOPTED.load(Ordering::Relaxed),
             VIEWS_FAILED.load(Ordering::Relaxed),
             CHILDREN_FORCED.load(Ordering::Relaxed),
+        );
+        eprintln!(
+            "[compiler-counter] papply_views built={}",
+            PAPPLY_VIEWS.load(Ordering::Relaxed),
         );
         let items = |index: usize| VIEW_ITEMS[index].load(Ordering::Relaxed);
         eprintln!(

@@ -4474,7 +4474,8 @@ deletes the old one is named.
   the five `StoreEffect` kinds), each with its world replacement.
 - **Old path still present.** Store builds, for keys with an alias or a
   functor application on the path, and (as built) for the children of a
-  unit. W5 moves the child and alias keys; W6 deletes the mechanism.
+  unit. W5 moves the child and alias keys (as built: structure children
+  and aliases of a unit; see "W5 as built"); W6 deletes the mechanism.
 - **Grep.** `rg -n 'build_shared_persistent_root_components' src` gives 0.
   `rg -n 'Rc<|RefCell<|Cell<|OnceCell<|Mutex<' src/types/module_view.rs`
   gives 0.
@@ -4747,6 +4748,104 @@ Two more, found by the step-count tests:
   the measured 2.4% that workers repeat.
 - **Less capable model.** No: G.3's judgement (what of a lazily renamed
   signature is observable) and the alias strengthening rules.
+
+##### W5 as built: what is done, what the plan got wrong, and what is left
+
+**W5 is not complete.** Views exist for three kinds of key and adoption is
+transitive; the registration tables, the store-build branch and the four
+effect kinds are still there, and store builds still start for the kinds
+of path listed under "What is left". Nothing was deleted, because every
+deletion the row lists needs every persistent-rooted path to be a world
+view first.
+
+| Step of the row | State |
+| --- | --- |
+| A unit path is classified by the world, not by the asking compilation | Done. A persistent identifier is a unit key (`module_view::unit_key_name`), also for a lookup without a persistent environment |
+| `ViewCell::decl`; forcing a child does not rebuild the parent's substitution | Done. One cell per child module, by ordinal; the substitution is the view's, built once |
+| Views for chains of structure-typed children of a unit | Done (`ViewKey::Child`) |
+| Views for paths that cross a module alias | Part. Done for an alias of a unit, which covers the modules of a namespace and library aliases such as `Stdlib.Array` (`ViewKey::Alias`). Not done: a structure child of an alias view, an alias whose target is not a unit, a child that is a module type name |
+| `alias_sources`, `units`, `nested` in the view, applied by `adopt_view` | Part. `alias_sources` are in the view and registered on adoption, into tables given room first. `nested` is the parent link: `adopt_view` adopts it, so adoption is transitive. `units` is not a field: the one unit an alias view needs is loaded by the adopter, which needs it to name the key |
+| The deletions | Not done, none of them |
+| Counter for `Papply` paths | Done: `papply_views built=N` |
+
+What the plan and "What W5 starts from" got wrong:
+
+| The text said | The code |
+| --- | --- |
+| Finding 1: a unit is a unit key in one compilation and a namespace's backing unit in another, and the private builds come from that | The classification did depend on the compilation, but the two builds agree: a unit's signature names its own items by local identifier and cannot name itself through a module that depends on it, so rewriting the alias path back to the unit found nothing. Dropping the test changed no output. The builds that stayed private were lookups that carry no persistent environment (type expansion): they never reached the view and read the compilation's raw-signature cache |
+| A view build "replays" what a store build did | The tables a compilation builds for an alias path are not a function of the path. `lookup_qualified_module_shared_inner` returns the declaration forced for the alias source when that was forced first in the compilation and its own otherwise, and the alias sources of a path are read from a registry the compilation fills as it goes. A world view picks one answer (its own forced declaration; the alias sources of its own chain, registered on its scratch context). No output differs on `tests/tests` or the application |
+| `strengthen_view_types` and `lookup_qualified_module_shared_inner` are the alias work | The work is `QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix`: it re-roots and strengthens the unit's signature. The view build calls it on a scratch context and describes the result, so the two cannot drift apart |
+| Building whole views costs more with one worker, to be repaid by W6 | It does, and it is not repaid inside the slice: +0.49% on `tests/tests` with one worker, built as CI builds (see the table). Two costs that were not inherent were removed. `substitute_type_paths_in_value_with_maps` walks a value's type once per type and module of the signature when the path has an alias source: quadratic for a whole view. The view build re-roots the whole prefix once and applies the substitution alone. And `adopt_view` (W4) registered alias pairs into two tables that start empty in every compilation: growing them was 0.27% of the build; they are given room first. What is left is the copy and substitution of every value of a view, used or not (3,878 values described on `tests/tests`, 1,704 before): W4's "sharing without a copy" is the remedy and is still not built |
+| Two thin-LTO executables can be compared to 0.1% | They cannot. Between two thin-LTO builds, 11 M instructions of the difference on `tests/tests` were in parser accessors neither side changed (inlined on one side, called on the other), and the pair measured -0.04% where the fat-LTO pair measures +0.49%. Only the CI configuration (fat LTO, one codegen unit, `scripts/compare_build_instructions.py`) decides the gate |
+| Alias pairs could be registered on first use | Built and measured: no saving, nearly every compilation reads the tables. Removed |
+| "A view of a chain costs one build per link" | One build per link holds. A link's build copies the signature declared below it, so the items copied by a chain grow with the square of its depth, as when OCaml forces each level. The recursive copy overflows a 2 MB stack at a depth of 1,000 in a debug build |
+| No scan state is needed once children are views | A worker's tables for the children that have no view (`env_lazy::ViewTables`) must start from what its scan of the parent had installed when it reached the child, so a child view names its parent (a weak reference) and the scan of a child view is seeded from it. This goes when every child kind has a view |
+
+What is left, for the slice that finishes W5 (counts on the application):
+
+- **103 distinct store-built views** (1,435 before the slice), each still
+  built once per worker. They are: structure children of an alias view
+  (`Stdlib.JSON.Decode`); aliases whose target is not a unit
+  (`module X = Other.Sub`, 28 counted before the slice, and a sibling
+  alias, 1); children that are a module type name (none on the
+  application).
+- A **structure child of an alias view** has its items strengthened
+  against the unit's child, and building it forces the unit's child
+  declaration in the adopting compilation
+  (`build_local_module_components`, the `source_prefix` branch). The view
+  needs that as an effect of adoption.
+- An **alias of a path that is not a unit** is resolved through the seed
+  environment (`Env::resolve_module_type`) and gets "flattened backing
+  sources" (`flattened_backing_sources_for_alias_source`) from the alias
+  rewrites the compilation has collected. The second is the same defect as
+  finding 1 one level down and needs the same answer: a fact of the world.
+- The **registration tables** are read by the tables of local paths too
+  (`alias_sources_for_component_path` from `component_alias_sources` in
+  `cmi/persistent_env.rs` and from `env_lazy.rs`;
+  `component_paths_for_alias_source` from `build_module_signature_for_path`),
+  so "their readers read adopted views" means a reader that consults the
+  adopted views and the local registrations.
+- **Store builds that still start** beside those views: the scans and the
+  opened layers of `ViewTables`, the entries of store-resident tables
+  (`force_entry`), functor results. 20,033 store builds with one worker
+  (102,929 before the slice).
+
+Measured on x86-64 Linux, 8 cores. The application rows and the counters
+compare base 88ca1bd532 with the head before trunk was merged in, both
+thin LTO. The `tests/tests` instruction rows compare trunk fc46a6393b with
+the merged head, both built as CI builds them (fat LTO, one codegen unit),
+with `scripts/compare_build_instructions.py`, smallest of 3 runs:
+
+| Quantity | Base | Head |
+| --- | --- | --- |
+| World views built, application | 2,580 | 4,270 at 1 and at 8 workers |
+| Store-built views, distinct / builds at 1 worker / at 8 | 1,515 / 1,520 / 4,325 | 103 / 108 / 420 |
+| Store builds, 1 worker / 8 | 106,239 / 112,700 | 20,033 / 22,082 |
+| Pieces replayed, 1 worker / 8 | 32,846 / 28,616 | 4,563 / 3,984 |
+| Store builds kept private, 1 worker / 8 | 4 / 14 | 4 / 4 |
+| Type nodes in store builds, 1 worker / 8 | 218,716 / 734,439 | 22,113 / 58,287 |
+| `tests/tests`: world views / distinct store views / store builds (8 workers) | 83 / 177 / 2,618 | 261 / 5 / 303 |
+| Component views built for `Papply` paths, application / `tests/tests` | not counted | 69 / 3 |
+| Instructions, `tests/tests`, 1 worker | 4,015.0 M | 4,034.5 M (+0.49%) |
+| Instructions, `tests/tests`, 8 workers | 4,051.2 M | 4,043.9 M (-0.18%) |
+| 8 workers minus 1 worker, `tests/tests` | +36.2 M | +9.3 M |
+| Instructions, application, 1 worker (one run) | 70,607.3 M | 70,858.5 M (+0.36%) |
+| Instructions, application, 8 workers (two runs each) | 71,632.4 M, 71,484.2 M | 70,350.4 M, 70,152.7 M (-1.86% between the smallest) |
+| 8 workers minus 1 worker, application | +876.9 M to +1,025.1 M | -705.8 M to -508.0 M |
+| Peak memory, application, 8 workers (mean of 6 interleaved runs) | 1,188.4 MB | 1,142.6 MB |
+| Peak memory, application, 1 worker (mean of 6) | 823.6 MB | 818.8 MB |
+
+With one worker the slice costs instructions: +0.49% on `tests/tests` and
++0.36% on the application. 1,690 more paths of the application have a
+whole view, each with every name described, where the store build
+described the names a compilation used. With 8 workers the application
+executes 1.86% fewer instructions than the base, and the work the workers
+repeated (1.85 G in J.1, about 1 G on the base after W4) is gone; on
+`tests/tests`, a project with few shared views, the fall is 0.18%. That
+the application's 8-worker count is below its own one-worker count on the
+head was not explained (two runs, 0.3% apart). The one-worker cost is
+owed by W6 (the store-build tests on local reads are 0.69% of
+`tests/tests`, J.1) and by sharing view items without a copy.
 
 #### W6. Delete store builds
 
