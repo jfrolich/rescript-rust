@@ -114,26 +114,36 @@ impl State {
         payload: &crate::bir::PrimPayload,
         children: impl Iterator<Item = Probed>,
     ) -> Result<Probed, Unsupported> {
-        let outputs = children
-            .map(|child| match child {
-                Probed::Out(out) => out,
-                Probed::Free(_) => unreachable!("argument realized before its next sibling"),
-            })
-            .collect();
-        let outputs = match &payload.primitive {
-            Primitive::PjsCall(call) => self.hold_external_args(cx, &call.arg_types, outputs),
-            Primitive::PjsObjectCreate(specs) => self.hold_external_obj_args(cx, specs, outputs),
-            Primitive::PjsObjectGet(_) => {
-                let mut outputs: smallvec::SmallVec<[Out; 4]> = outputs;
-                if outputs.len() == 1 {
-                    let arg = outputs.pop().unwrap();
-                    outputs.push(self.hold_external_receiver(cx, arg));
-                }
-                outputs
+        let mut outputs = std::mem::take(&mut self.argument_outputs);
+        outputs.extend(children.map(|child| match child {
+            Probed::Out(out) => out,
+            Probed::Free(_) => unreachable!("argument realized before its next sibling"),
+        }));
+        match &payload.primitive {
+            Primitive::PjsCall(call) => self.hold_external_args(cx, &call.arg_types, &mut outputs),
+            Primitive::PjsObjectCreate(specs) => self.hold_external_obj_args(cx, specs, &mut outputs),
+            Primitive::PjsObjectGet(_) if outputs.len() == 1 => {
+                let arg = outputs.pop().unwrap();
+                outputs.push(self.hold_external_receiver(cx, arg));
             }
-            _ => outputs,
-        };
-        let (statements, values) = self.sequence_arguments(false, outputs);
+            _ => {}
+        }
+        let mut values = std::mem::take(&mut self.argument_values);
+        let statements = self.sequence_arguments(false, &outputs, &mut values);
+        outputs.clear();
+        self.argument_outputs = outputs;
+        let result = self.finish_primitive_values(cx, prim, payload, statements, &mut values);
+        values.clear();
+        self.argument_values = values;
+        result
+    }
+
+    /// O(arguments + emitted metadata + J-rule work): consume sequenced roots
+    /// from the caller's reusable buffer, without taking its backing allocation.
+    fn finish_primitive_values(
+        &mut self, cx: Cx, prim: Prim, payload: &crate::bir::PrimPayload,
+        statements: Span, values: &mut Vec<NodeId>,
+    ) -> Result<Probed, Unsupported> {
         self.primitive_steps += values.len() + 1;
         let primitive = &payload.primitive;
         let value = match primitive {
@@ -186,7 +196,7 @@ impl State {
                 } else {
                     plain::node(&mut self.arena, View::JUndefined, 0)
                 };
-                for value in values {
+                for value in values.drain(..) {
                     self.arena.release(value);
                 }
                 result
@@ -194,7 +204,7 @@ impl State {
             Primitive::PdictSpread => {
                 let mut keys = Vec::new();
                 let mut kept = Vec::new();
-                for arg in values {
+                for arg in values.drain(..) {
                     self.primitive_steps += 1;
                     let start = kept.len();
                     let flatten = if let View::JObject { info, values } = self.arena.view(arg) {
@@ -249,24 +259,24 @@ impl State {
                         0,
                     )
                 } else {
-                    for value in values {
+                    for value in values.drain(..) {
                         self.arena.release(value);
                     }
                     plain::node(&mut self.arena, View::JUndefined, 0)
                 }
             }
-            Primitive::ParraySpread => self.primitive_runtime("Primitive_array", "spread", &values),
-            Primitive::PlistSpread => self.primitive_runtime("Primitive_list", "spread", &values),
+            Primitive::ParraySpread => self.primitive_runtime("Primitive_array", "spread", values),
+            Primitive::PlistSpread => self.primitive_runtime("Primitive_list", "spread", values),
             // P: compile_primitive_js, hashing runtime entry points.
-            Primitive::Phash => self.primitive_runtime("Primitive_hash", "hash", &values),
+            Primitive::Phash => self.primitive_runtime("Primitive_hash", "hash", values),
             Primitive::PhashMixint => {
-                self.primitive_runtime("Primitive_hash", "hash_mix_int", &values)
+                self.primitive_runtime("Primitive_hash", "hash_mix_int", values)
             }
             Primitive::PhashMixstring => {
-                self.primitive_runtime("Primitive_hash", "hash_mix_string", &values)
+                self.primitive_runtime("Primitive_hash", "hash_mix_string", values)
             }
             Primitive::PhashFinalmix => {
-                self.primitive_runtime("Primitive_hash", "hash_final_mix", &values)
+                self.primitive_runtime("Primitive_hash", "hash_final_mix", values)
             }
             // P: compile_primitive_js, blocks and fields (K: compile_field_access).
             Primitive::Pmakeblock(tag, mutable) => {
@@ -274,7 +284,7 @@ impl State {
                 plain::node(
                     &mut self.arena,
                     View::JBlockLit {
-                        values: &values,
+                        values,
                         info,
                     },
                     if matches!(mutable, crate::lambda::lam_primitive::Mutable::Mutable) {
@@ -291,14 +301,14 @@ impl State {
                 plain::node(
                     &mut self.arena,
                     View::JBlockLit {
-                        values: &values,
+                        values,
                         info,
                     },
                     1,
                 )
             }
             Primitive::Pmakearray => {
-                plain::node(&mut self.arena, View::JArray { values: &values }, 1)
+                plain::node(&mut self.arena, View::JArray { values }, 1)
             }
             Primitive::Pfield(idx, info) => self.primitive_field(*idx, info, values[0]),
             Primitive::Psetfield(idx, info) => {
@@ -328,9 +338,9 @@ impl State {
             }
             // P: compile_primitive_js, indexing. Both string forms are checked.
             Primitive::Pstringrefs | Primitive::Pstringrefu => {
-                self.primitive_runtime("Primitive_string", "getChar", &values)
+                self.primitive_runtime("Primitive_string", "getChar", values)
             }
-            Primitive::Parrayrefs => self.primitive_runtime("Primitive_array", "get", &values),
+            Primitive::Parrayrefs => self.primitive_runtime("Primitive_array", "get", values),
             Primitive::Parrayrefu => {
                 if let [object, index] = values.as_slice() {
                     plain::node(
@@ -342,7 +352,7 @@ impl State {
                         0,
                     )
                 } else {
-                    for v in values {
+                    for v in values.drain(..) {
                         self.arena.release(v);
                     }
                     plain::node(&mut self.arena, View::JUndefined, 0)
@@ -362,7 +372,7 @@ impl State {
                     let unit = plain::node(&mut self.arena, View::JUndefined, 0);
                     plain::seq(&mut self.arena, assignment, unit)
                 } else {
-                    for v in values {
+                    for v in values.drain(..) {
                         self.arena.release(v);
                     }
                     plain::node(&mut self.arena, View::JUndefined, 0)
@@ -370,7 +380,7 @@ impl State {
             }
             // P: compile_primitive_js, template arms; J-M12 preserves raw spelling.
             Primitive::Ptemplate(segments) => {
-                norm::jm12_interpolated_template(&mut self.arena, segments.clone(), values.into_vec())
+                norm::jm12_interpolated_template(&mut self.arena, segments.clone(), values.drain(..))
             }
             Primitive::PtaggedTemplate(segments) => {
                 let parts = segments
@@ -419,7 +429,7 @@ impl State {
                     self.arena.release(values[0]);
                     value
                 } else {
-                    self.primitive_runtime("Primitive_option", "valFromOption", &values)
+                    self.primitive_runtime("Primitive_option", "valFromOption", values)
                 }
             }
             Primitive::PvalFromOptionNotNest => values[0],
@@ -485,7 +495,7 @@ impl State {
                     self.primitive_runtime(
                         "Primitive_option",
                         if nullable { "fromNullable" } else { "fromNull" },
-                        &values,
+                        values,
                     )
                 }
             }
@@ -509,7 +519,7 @@ impl State {
                 values[0],
                 values[1],
             ),
-            Primitive::Pobjorder => self.primitive_runtime("Primitive_object", "compare", &values),
+            Primitive::Pobjorder => self.primitive_runtime("Primitive_object", "compare", values),
             Primitive::Pobjmin => self.primitive_min_max("object", false, values[0], values[1]),
             Primitive::Pobjmax => self.primitive_min_max("object", true, values[0], values[1]),
             Primitive::Pboolorder => {
@@ -521,24 +531,24 @@ impl State {
                     self.arena.release(values[1]);
                     plain::int(&mut self.arena, l.cmp(&r) as i32)
                 } else {
-                    self.primitive_runtime("Primitive_bool", "compare", &values)
+                    self.primitive_runtime("Primitive_bool", "compare", values)
                 }
             }
             Primitive::Pboolmin => self.primitive_min_max("bool", false, values[0], values[1]),
             Primitive::Pboolmax => self.primitive_min_max("bool", true, values[0], values[1]),
-            Primitive::Pintorder => self.primitive_runtime("Primitive_int", "compare", &values),
+            Primitive::Pintorder => self.primitive_runtime("Primitive_int", "compare", values),
             Primitive::Pintmin => self.primitive_min_max("int", false, values[0], values[1]),
             Primitive::Pintmax => self.primitive_min_max("int", true, values[0], values[1]),
-            Primitive::Pfloatorder => self.primitive_runtime("Primitive_float", "compare", &values),
+            Primitive::Pfloatorder => self.primitive_runtime("Primitive_float", "compare", values),
             Primitive::Pfloatmin => self.primitive_min_max("float", false, values[0], values[1]),
             Primitive::Pfloatmax => self.primitive_min_max("float", true, values[0], values[1]),
             Primitive::Pbigintorder => {
-                self.primitive_runtime("Primitive_bigint", "compare", &values)
+                self.primitive_runtime("Primitive_bigint", "compare", values)
             }
             Primitive::Pbigintmin => self.primitive_min_max("bigint", false, values[0], values[1]),
             Primitive::Pbigintmax => self.primitive_min_max("bigint", true, values[0], values[1]),
             Primitive::Pstringorder => {
-                self.primitive_runtime("Primitive_string", "compare", &values)
+                self.primitive_runtime("Primitive_string", "compare", values)
             }
             Primitive::Pstringmin => self.primitive_min_max("string", false, values[0], values[1]),
             Primitive::Pstringmax => self.primitive_min_max("string", true, values[0], values[1]),
@@ -642,14 +652,14 @@ impl State {
             }
             Primitive::Pdivbigint => {
                 if self.check_div_by_zero {
-                    self.primitive_runtime("Primitive_bigint", "div", &values)
+                    self.primitive_runtime("Primitive_bigint", "div", values)
                 } else {
                     norm::je4_bin(&mut self.arena, BinOp::Div, values[0], values[1])
                 }
             }
             Primitive::Pmodbigint => {
                 if self.check_div_by_zero {
-                    self.primitive_runtime("Primitive_bigint", "mod_", &values)
+                    self.primitive_runtime("Primitive_bigint", "mod_", values)
                 } else {
                     norm::je4_bin(&mut self.arena, BinOp::Mod, values[0], values[1])
                 }
@@ -697,11 +707,11 @@ impl State {
                 );
                 call
             }
-            Primitive::PinitMod => self.primitive_runtime("Primitive_module", "init", &values),
-            Primitive::PupdateMod => self.primitive_runtime("Primitive_module", "update", &values),
+            Primitive::PinitMod => self.primitive_runtime("Primitive_module", "init", values),
+            Primitive::PupdateMod => self.primitive_runtime("Primitive_module", "update", values),
             // P: compile_debugger lowers each argument for effects before debugger.
             Primitive::Pdebugger => {
-                for value in values {
+                for value in values.drain(..) {
                     self.arena.release(value);
                 }
                 let statement = plain::node(&mut self.arena, View::SDebugger, 0);
@@ -731,7 +741,7 @@ impl State {
                     finished: Finished::True,
                 }));
             }
-            Primitive::Pjsx(jsx) => self.compile_jsx(jsx, values),
+            Primitive::Pjsx(jsx) => self.compile_jsx(jsx, values.drain(..)),
             Primitive::Pimport(source) => self.compile_import(source),
             Primitive::Pduprecord => self.duplicate_record(values[0]),
             Primitive::PrecordRest(excluded) => self.record_rest(values[0], excluded),
@@ -744,7 +754,7 @@ impl State {
                 norm::je2_length(&mut self.arena, values[0], LengthObject::Array)
             }
             Primitive::PjsCall(call) => {
-                let values = self.arena.lists.push(&values);
+                let values = self.arena.lists.push(values);
                 self.compile_js_call(cx, prim.primitive, call, values)
             },
             Primitive::PjsApply => match values.split_first() {
@@ -752,11 +762,11 @@ impl State {
                 None => plain::node(&mut self.arena, View::JUndefined, 0),
             },
             Primitive::PjsObjectCreate(specs) => {
-                let values = self.arena.lists.push(&values);
+                let values = self.arena.lists.push(values);
                 self.compile_js_object_create(cx, specs, values)
             },
             Primitive::PjsFnMethod => {
-                let mut values = values.into_iter();
+                let mut values = values.drain(..);
                 let value = values.next().unwrap_or_else(|| plain::node(&mut self.arena, View::JUndefined, 0));
                 for unused in values { self.arena.release(unused); }
                 if let View::JFun { header, .. } = self.arena.view(value) {
@@ -774,7 +784,7 @@ impl State {
                         plain::seq(&mut self.arena, assign, unit)
                     }
                     _ => {
-                        for value in values { self.arena.release(value); }
+                        for value in values.drain(..) { self.arena.release(value); }
                         plain::node(&mut self.arena, View::JUndefined, 0)
                     }
                 }

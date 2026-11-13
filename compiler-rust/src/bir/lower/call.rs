@@ -167,14 +167,17 @@ impl State {
         call: Call,
         children: impl Iterator<Item = Probed>,
     ) -> Probed {
-        let outputs = children
-            .map(|child| match child {
-                Probed::Out(out) => out,
-                Probed::Free(_) => unreachable!("argument realized before its next sibling"),
-            })
-            .collect();
-        let (statements, values) = self.sequence_arguments(false, outputs);
-        if let Some(frame) = call.tail { return self.finish_self_call(frame, statements, values); }
+        let mut outputs = std::mem::take(&mut self.argument_outputs);
+        outputs.extend(children.map(|child| match child {
+            Probed::Out(out) => out,
+            Probed::Free(_) => unreachable!("argument realized before its next sibling"),
+        }));
+        let mut values = std::mem::take(&mut self.argument_values);
+        let statements = self.sequence_arguments(false, &outputs, &mut values);
+        outputs.clear();
+        self.argument_outputs = outputs;
+        let result = (|| {
+        if let Some(frame) = call.tail { return self.finish_self_call(frame, statements, &values); }
         if call.inline {
             return self.primitive_result(cx, statements, values[0]);
         }
@@ -194,7 +197,7 @@ impl State {
                 ),
                 ApplyStatus::Na => {
                     if let Some(arity) = arity.filter(|arity| !arity.is_na()) {
-                        self.apply_with_arity(callee, arity, values.into_vec())
+                        self.apply_with_arity(callee, arity, &values)
                     } else {
                         self.call_node(callee, &values, crate::js_ir::CallInfo::default())
                     }
@@ -229,6 +232,10 @@ impl State {
                 ..out
             })
         }
+        })();
+        values.clear();
+        self.argument_values = values;
+        result
     }
     /// C:1243 module_field_apply_target: only named module exports of globals.
     fn module_field_apply_target(
@@ -286,7 +293,7 @@ impl State {
         &mut self,
         mut callee: NodeId,
         arity: crate::lambda::lam_arity::Arity,
-        args: Vec<NodeId>,
+        args: &[NodeId],
     ) -> NodeId {
         let mut offset = 0;
         let full = Self::call_info_of_apply_status(ApplyStatus::InferFull);
@@ -376,7 +383,7 @@ mod tests {
                         }
                     }
                     let arity = Arity::info(groups.clone(), false);
-                    let value = state.apply_with_arity(func, arity.clone(), args);
+                    let value = state.apply_with_arity(func, arity.clone(), &args);
                     let lowered = state.complete(
                         Cx::value(),
                         Probed::Out(Out {

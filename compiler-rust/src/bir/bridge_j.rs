@@ -667,7 +667,7 @@ impl Importer {
                         .iter()
                         .map(|&(_, c)| self.clause(a, c))
                         .collect::<Result<_, _>>()?;
-                    let header = self.b.switch_header(SwitchHeader {
+                    let header = self.b.switch_header(SwitchInput {
                         keys,
                         clauses,
                         constants: index(h.clauses.len()),
@@ -695,7 +695,7 @@ impl Importer {
                         .iter()
                         .map(|cl| self.clause(a, cl.clause))
                         .collect::<Result<_, _>>()?;
-                    let header = self.b.switch_header(SwitchHeader {
+                    let header = self.b.switch_header(SwitchInput {
                         keys,
                         clauses,
                         constants: index(h.clauses.len()),
@@ -1454,11 +1454,13 @@ impl Exporter<'_> {
                 } else {
                     let mut clauses = Vec::with_capacity(h.keys.len());
                     for (i, key) in h.keys.iter().enumerate() {
-                        let CaseKey::JavaScript(tag) = key else {
-                            return Err(Unsupported("non-JS string switch key"));
+                        let tag = match key {
+                            CaseKey::JavaScript(tag) => tag.clone(),
+                            CaseKey::String(text) => crate::lambda::SwitchCaseTag::String(b.text(*text).to_owned()),
+                            CaseKey::Lambda(_) => return Err(Unsupported("non-JS string switch key")),
                         };
                         clauses.push(j::StringClauseInfo {
-                            tag_type: tag.clone(),
+                            tag_type: tag,
                             clause: self.clause(h.clauses[i], c[i + 1].block()?),
                         });
                     }

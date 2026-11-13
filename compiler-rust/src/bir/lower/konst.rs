@@ -5,6 +5,11 @@ use crate::lambda::LamLoc;
 use crate::lambda::lam_constant::{ConstructorRuntimeTag, PointerInfo};
 use crate::types::VariantLiteralTag;
 
+pub(super) enum Work {
+    Enter(ConstId),
+    Block(crate::lambda::lam_tag_info::TagInfo, usize),
+    Some,
+}
 impl State {
     /// H12: K:48 compile_runtime_int. Large constructor integers print as floats.
     fn runtime_int(&mut self, n: i64) -> NodeId {
@@ -47,13 +52,9 @@ impl State {
     /// H12: K:60 compile_constant. An explicit stack also handles deeply nested
     /// constant blocks and options; each constant occurrence is visited once.
     pub(super) fn constant(&mut self, root: ConstId) -> NodeId {
-        enum Work {
-            Enter(ConstId),
-            Block(crate::lambda::lam_tag_info::TagInfo, usize),
-            Some,
-        }
-        let mut work = vec![Work::Enter(root)];
-        let mut values: Vec<(NodeId, bool)> = Vec::new();
+        let mut work = std::mem::take(&mut self.constant_work);
+        let mut values = std::mem::take(&mut self.constant_values);
+        work.push(Work::Enter(root));
         while let Some(task) = work.pop() {
             match task {
                 Work::Enter(id) => {
@@ -197,6 +198,9 @@ impl State {
             }
         }
         assert_eq!(values.len(), 1);
-        values.pop().expect("constant result").0
+        let result = values.pop().expect("constant result").0;
+        self.constant_work = work;
+        self.constant_values = values;
+        result
     }
 }

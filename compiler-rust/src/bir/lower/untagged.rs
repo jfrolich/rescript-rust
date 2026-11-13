@@ -550,7 +550,7 @@ impl State {
         if typeof_ {
             scrutinee = plain::node(&mut self.arena, View::JTypeof { value: scrutinee }, 0);
         }
-        let header = self.arena.switch_header(crate::bir::SwitchHeader {
+        let header = self.arena.switch_header(crate::bir::SwitchInput {
             constants: keys.len() as u32,
             keys,
             clauses,

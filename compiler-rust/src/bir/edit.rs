@@ -19,6 +19,29 @@ impl Bir {
         self.attach_list(Node::block_list(list), list)
     }
 
+    /// O(actions): adopt a scrutinee and a finalized pooled action list once.
+    pub(crate) fn switch_from_list(
+        &mut self,
+        scrutinee: NodeId,
+        actions: ListId,
+        header: SwitchId,
+        aux: u16,
+    ) -> NodeId {
+        assert!(
+            self.parents[scrutinee.index()].is_none(),
+            "scrutinee already attached"
+        );
+        if !self.bulk {
+            let weight = self.weight(scrutinee);
+            if weight != 1 {
+                self.adjust_counts(scrutinee, 1 - i64::from(weight));
+            }
+        }
+        let id = self.attach_list(Node::switch_list(scrutinee, actions, header, aux), actions);
+        self.parents[scrutinee.index()] = Some(id);
+        id
+    }
+
     /// O(arguments): adopt the callee and a pooled argument list exactly once.
     /// `None` selects construction; `Some` carries ordinary call metadata.
     pub(crate) fn call_from_list(
@@ -93,27 +116,31 @@ impl Bir {
                 "cannot reference a released dead binding"
             );
         }
-        let children = view.children();
         #[cfg(debug_assertions)]
-        let mut bulk_children = crate::fast_hash::AHashSet::default();
-        for (_i, &child) in children.iter().enumerate() {
-            self.node(child);
-            #[cfg(debug_assertions)]
-            if self.bulk {
-                assert!(bulk_children.insert(child), "shared child");
-            } else {
-                assert!(!children[.._i].contains(&child), "shared child");
+        {
+            if self.child_epoch == u32::MAX {
+                self.checked_children.fill(0);
+                self.child_epoch = 0;
             }
-            debug_assert!(
-                self.parents[child.index()].is_none(),
-                "child already attached"
-            );
+            self.child_epoch += 1;
+            self.checked_children.resize(self.nodes.len(), 0);
+        }
+        for i in 0..view.child_count() {
+            let child = view.child_at(i);
+            #[cfg(debug_assertions)]
+            {
+                assert_ne!(self.checked_children[child.index()], self.child_epoch, "shared child");
+                self.checked_children[child.index()] = self.child_epoch;
+            }
+            self.node(child);
+            debug_assert!(self.parents[child.index()].is_none(), "child already attached");
         }
         let packed = Node::pack(view, aux, &mut self.lists);
         let id = self.allocate(packed);
         self.check_shape(id);
         self.bind(id);
-        for child in children {
+        for i in 0..view.child_count() {
+            let child = view.child_at(i);
             debug_assert!(self.parents[child.index()].is_none(), "shared child");
             if !self.bulk {
                 // Read before linking: a detached root reports the weight it carries.
@@ -1421,7 +1448,7 @@ mod tests {
         let v = b.new_var_id(Name::new("free"), 0);
         let condition = lit(&mut b);
         let use_ = var(&mut b, v);
-        let h = b.switch_header(SwitchHeader {
+        let h = b.switch_header(SwitchInput {
             keys: vec![],
             clauses: vec![],
             constants: 0,
@@ -1593,7 +1620,7 @@ mod tests {
     fn seeded_random_edits_validate_after_every_edit() {
         fn with_weighted_default(b: &mut Bir, body: NodeId) -> NodeId {
             let scrutinee = lit(b);
-            let header = b.switch_header(SwitchHeader {
+            let header = b.switch_header(SwitchInput {
                 keys: vec![],
                 clauses: vec![],
                 constants: 0,
@@ -1678,7 +1705,7 @@ mod tests {
                 }
                 6 => {
                     let scrutinee = lit(&mut b);
-                    let header = b.switch_header(SwitchHeader {
+                    let header = b.switch_header(SwitchInput {
                         keys: vec![],
                         clauses: vec![],
                         constants: 0,
@@ -1868,7 +1895,7 @@ mod constructor_tests {
         |b| {
             let scrutinee = leaf(&mut b);
             let actions = [leaf(&mut b)];
-            let header = b.switch_header(SwitchHeader {
+            let header = b.switch_header(SwitchInput {
                 keys: vec![],
                 clauses: vec![],
                 constants: 0,
@@ -1893,7 +1920,7 @@ mod constructor_tests {
         |b| {
             let scrutinee = leaf(&mut b);
             let actions = [leaf(&mut b)];
-            let header = b.switch_header(SwitchHeader {
+            let header = b.switch_header(SwitchInput {
                 keys: vec![],
                 clauses: vec![],
                 constants: 0,
@@ -2542,7 +2569,7 @@ mod constructor_tests {
         |b| {
             let scrutinee = leaf(&mut b);
             let actions = [leaf(&mut b)];
-            let header = b.switch_header(SwitchHeader {
+            let header = b.switch_header(SwitchInput {
                 keys: vec![],
                 clauses: vec![],
                 constants: 0,
@@ -2645,7 +2672,7 @@ mod boundary_tests {
             let mut root = b.new_node(View::Var { var }, 0);
             for _ in 0..2 {
                 let scrutinee = b.new_node(View::JNull, 0);
-                let header = b.switch_header(SwitchHeader {
+                let header = b.switch_header(SwitchInput {
                     keys: vec![],
                     clauses: vec![],
                     constants: 0,
@@ -3059,7 +3086,7 @@ mod incremental_cost_tests {
         };
         let scrutinee = b.new_node(View::JNull, 0);
         let default = b.new_node(View::JNull, 0);
-        let header = b.switch_header(SwitchHeader {
+        let header = b.switch_header(SwitchInput {
             keys: vec![],
             clauses: vec![],
             constants: 0,
@@ -3184,7 +3211,7 @@ mod incremental_cost_tests {
         b.validate(None).unwrap();
         let (body, leaf) = chain(&mut b, 1000);
         let scrutinee = b.new_node(View::JNull, 0);
-        let header = b.switch_header(SwitchHeader {
+        let header = b.switch_header(SwitchInput {
             keys: vec![],
             clauses: vec![],
             constants: 0,
@@ -3286,7 +3313,7 @@ mod local_weight_tests {
 
     fn weighted(b: &mut Bir, default: NodeId) -> NodeId {
         let scrutinee = b.new_node(View::JNull, 0);
-        let header = b.switch_header(SwitchHeader {
+        let header = b.switch_header(SwitchInput {
             keys: vec![],
             clauses: vec![],
             constants: 0,

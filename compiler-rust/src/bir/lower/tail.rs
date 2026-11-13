@@ -37,12 +37,12 @@ impl State {
     /// the callee, create copies in parameter order, then emit assignments in
     /// reverse order. Table growth and names are paid once per variable/copy.
     /// Arguments read iteration bindings, not the copies being assigned.
-    pub(super) fn finish_self_call(&mut self, frame: LoopRef, statements: Span, values: smallvec::SmallVec<[NodeId; 4]>) -> Probed {
+    pub(super) fn finish_self_call(&mut self, frame: LoopRef, statements: Span, values: &[NodeId]) -> Probed {
         let params = self.tail_frames[frame.0 as usize].params;
         self.tail_frames[frame.0 as usize].triggered = true;
         self.tail_copies.resize(self.arena.vars.len(), None);
         let mut assignments = std::mem::take(&mut self.tail_assignments);
-        for (i, value) in values.into_iter().enumerate() {
+        for (i, &value) in values.iter().enumerate() {
             self.tail_arguments += 1;
             if i == 0 || i > params.len() { self.arena.release(value); continue; }
             let param = VarId(params.start + i as u32 - 1);

@@ -156,12 +156,13 @@ impl State {
     /// A:191 sequence_arguments: allocate holds right to left after all operands
     /// have been lowered. Reserved slots keep their execution left to right.
     /// O(arguments + statement slots + held literal nodes), proven by the
-    /// 10,000-wide call/block tests. Up to four outputs/values stay inline.
+    /// 10,000-wide call/block tests. The caller retains both buffers.
     pub(super) fn sequence_arguments(
         &mut self,
         method_callee: bool,
-        args: smallvec::SmallVec<[Out; 4]>,
-    ) -> (Span, smallvec::SmallVec<[NodeId; 4]>) {
+        args: &[Out],
+        values: &mut Vec<NodeId>,
+    ) -> Span {
         let start = args.first().map_or_else(
             || self.statements.mark(),
             |arg| Span {
@@ -175,8 +176,8 @@ impl State {
             .any(|arg| self.statements.has_statements(arg.stmts));
         let mut has_code = false;
         let mut later_defines_pure = true;
-        let mut values = smallvec::SmallVec::with_capacity(args.len());
-        for (i, arg) in args.into_iter().enumerate().rev() {
+        debug_assert!(values.is_empty());
+        for (i, arg) in args.iter().enumerate().rev() {
             self.sequence_steps += 1;
             let value = arg.value.expect("argument value");
             let (held, value) =
@@ -227,7 +228,7 @@ impl State {
             values.push(value);
         }
         values.reverse();
-        (self.statements.since(start), values)
+        self.statements.since(start)
     }
 }
 
@@ -386,7 +387,8 @@ mod tests {
             let statement = legacy.j.stmt(StmtKind::Exp(effect));
             let value = exp::string("v", &mut legacy.j);
             expected_args.push((vec![statement], value));
-            let (span, values) = state.sequence_arguments(method, args.into());
+            let mut values = Vec::new();
+            let span = state.sequence_arguments(method, &args, &mut values);
             if method || shape != 0 {
                 assert!(state.arena.node(values[0]).flags().contains(NodeFlags::JS_LOC_PRESENT));
             }

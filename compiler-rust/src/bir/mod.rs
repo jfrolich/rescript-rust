@@ -63,6 +63,11 @@ pub struct Bir {
     weight_path: Vec<(NodeId, u32)>,
     count_stack: Vec<(NodeId, i64)>,
     release_stack: Vec<(NodeId, u32)>,
+    effect_work: Vec<NodeId>,
+    #[cfg(debug_assertions)]
+    checked_children: Vec<u32>,
+    #[cfg(debug_assertions)]
+    child_epoch: u32,
     capture_epoch: u64,
     capture_binders: Vec<u64>,
     capture_chain: Vec<(u64, bool)>,
@@ -366,16 +371,49 @@ impl Bir {
     pub fn function_attributes(&self, id: FuncId) -> &FunctionAttribute {
         &self.pools.attrs[self.function(id).attr as usize]
     }
-    /// Allocate switch metadata.
-    pub fn switch_header(&mut self, header: SwitchHeader) -> SwitchId {
-        assert!(header.constants as usize <= header.keys.len());
+    /// O(keys + clauses): transfer import metadata into the unit's flat pools.
+    pub fn switch_header(&mut self, header: SwitchInput) -> SwitchId {
+        let keys = KeySpan {
+            start: index(self.pools.switch_keys.len()),
+            len: index(header.keys.len()),
+        };
+        let clauses = ClauseSpan {
+            start: index(self.pools.switch_clauses.len()),
+            len: index(header.clauses.len()),
+        };
+        self.pools.switch_keys.extend(header.keys);
+        self.pools.switch_clauses.extend(header.clauses);
+        self.switch_record(SwitchRecord {
+            keys,
+            clauses,
+            constants: header.constants,
+            consts_full: header.consts_full,
+            blocks_full: header.blocks_full,
+            has_default: header.has_default,
+            dispatch: header.dispatch,
+        })
+    }
+    /// O(1) amortized: store a header whose keys and clauses are already pooled.
+    pub(in crate::bir) fn switch_record(&mut self, header: SwitchRecord) -> SwitchId {
+        assert!(header.constants <= header.keys.len);
         let id = SwitchId(index(self.pools.switches.len()));
         self.pools.switches.push(header);
         id
     }
-    /// Read switch metadata.
-    pub fn switch(&self, id: SwitchId) -> &SwitchHeader {
-        &self.pools.switches[id.index()]
+    /// O(1): borrow the two pooled runs and the dispatch facts.
+    pub fn switch(&self, id: SwitchId) -> SwitchHeader<'_> {
+        let h = &self.pools.switches[id.index()];
+        SwitchHeader {
+            keys: &self.pools.switch_keys
+                [h.keys.start as usize..(h.keys.start + h.keys.len) as usize],
+            clauses: &self.pools.switch_clauses
+                [h.clauses.start as usize..(h.clauses.start + h.clauses.len) as usize],
+            constants: h.constants,
+            consts_full: h.consts_full,
+            blocks_full: h.blocks_full,
+            has_default: h.has_default,
+            dispatch: &h.dispatch,
+        }
     }
     /// Allocate a static catch header.
     pub fn catch_header(&mut self, label: u32, params: VarSpan) -> CatchId {

@@ -77,7 +77,7 @@ impl State {
                 actions.push(all[h.keys.len()]);
             }
             let operands = self.source.lists.push(&actions);
-            let header = self.arena.switch_header(crate::bir::SwitchHeader {
+            let header = self.arena.switch_header(crate::bir::SwitchInput {
                 keys,
                 clauses: Vec::new(),
                 constants: n as u32,
@@ -313,7 +313,7 @@ impl State {
                 View::StrSwitch { header, .. } => {
                     let h = self.arena.switch(header);
                     h.has_default.hash(&mut hash);
-                    for key in &h.keys {
+                    for key in h.keys {
                         let CaseKey::String(key) = key else {
                             unreachable!()
                         };
@@ -502,7 +502,7 @@ impl State {
                     work.push((a, b));
                     let (a, b) = (self.arena.switch(ah), self.arena.switch(bh));
                     aa.len() == bb.len() && a.has_default == b.has_default && a.keys.len() == b.keys.len()
-                        && a.keys.iter().zip(&b.keys).all(|(a,b)| matches!((a,b), (CaseKey::String(a), CaseKey::String(b)) if a == b))
+                        && a.keys.iter().zip(b.keys).all(|(a,b)| matches!((a,b), (CaseKey::String(a), CaseKey::String(b)) if a == b))
                 }
                 (View::Break, View::Break) | (View::Continue, View::Continue) => true,
                 _ => false,
@@ -724,7 +724,7 @@ impl State {
                     clauses.push(*plan.clauses.last().unwrap());
                 }
             }
-            let header = self.arena.switch_header(crate::bir::SwitchHeader {
+            let header = self.arena.switch_header(crate::bir::SwitchInput {
                 constants: keys.len() as u32,
                 keys,
                 clauses,

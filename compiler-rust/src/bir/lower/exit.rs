@@ -451,7 +451,7 @@ impl State {
                 case = plan.next[case];
             }
         }
-        let header = self.arena.switch_header(crate::bir::SwitchHeader {
+        let header = self.arena.switch_header(crate::bir::SwitchInput {
             constants: keys.len() as u32,
             keys,
             clauses,

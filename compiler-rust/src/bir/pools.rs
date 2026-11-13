@@ -283,7 +283,7 @@ pub struct ClauseMeta {
 }
 /// Switch keys in their action order. Default, if present, is the final action.
 #[derive(Debug, Clone)]
-pub struct SwitchHeader {
+pub struct SwitchInput {
     /// Integer/constructor keys followed by block keys.
     pub keys: Vec<CaseKey>,
     /// Optional lowered per-case metadata, including a final default entry.
@@ -297,6 +297,41 @@ pub struct SwitchHeader {
     /// A default action follows the keyed actions.
     pub has_default: bool,
     /// Runtime dispatch representation.
+    pub dispatch: SwitchDispatch,
+}
+/// Borrowed switch metadata; variable-width storage belongs to the arena.
+#[derive(Debug, Clone, Copy)]
+pub struct SwitchHeader<'a> {
+    /// Keys in action order.
+    pub keys: &'a [CaseKey],
+    /// Lowered clause metadata.
+    pub clauses: &'a [ClauseMeta],
+    /// Constant-key prefix length.
+    pub constants: u32,
+    /// Exhaustive constants.
+    pub consts_full: bool,
+    /// Exhaustive blocks.
+    pub blocks_full: bool,
+    /// Final action is the default.
+    pub has_default: bool,
+    /// Dispatch facts imported with the source.
+    pub dispatch: &'a SwitchDispatch,
+}
+/// A run in the switch-key pool.
+#[derive(Debug, Clone, Copy)]
+pub struct KeySpan { pub(super) start: u32, pub(super) len: u32 }
+/// A run in the clause-metadata pool.
+#[derive(Debug, Clone, Copy)]
+pub struct ClauseSpan { pub(super) start: u32, pub(super) len: u32 }
+/// Stored switch header: variable-width keys and clauses are pool runs.
+#[derive(Debug)]
+pub(super) struct SwitchRecord {
+    pub keys: KeySpan,
+    pub clauses: ClauseSpan,
+    pub constants: u32,
+    pub consts_full: bool,
+    pub blocks_full: bool,
+    pub has_default: bool,
     pub dispatch: SwitchDispatch,
 }
 /// Source metadata; the node-parallel index is allocated only on demand.
@@ -403,7 +438,9 @@ pub(super) struct Pools {
     pub funcs: Vec<FuncHeader>,
     pub function_params: Vec<VarId>,
     pub attrs: Vec<FunctionAttribute>,
-    pub switches: Vec<SwitchHeader>,
+    pub switches: Vec<SwitchRecord>,
+    pub switch_keys: Vec<CaseKey>,
+    pub switch_clauses: Vec<ClauseMeta>,
     pub catches: Vec<CatchHeader>,
     pub apply: Vec<ApInfo>,
     pub js: Vec<JsPayload>,

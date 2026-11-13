@@ -402,6 +402,20 @@ impl Node {
     pub(super) fn block_list_id(self) -> Option<ListId> {
         (self.op == Op::SBlock).then_some(ListId(self.words[0]))
     }
+    /// O(1): encode a switch over a finalized action list and pooled header.
+    pub(super) fn switch_list(
+        scrutinee: NodeId,
+        actions: ListId,
+        header: SwitchId,
+        aux: u16,
+    ) -> Self {
+        Self {
+            op: Op::SSwitch,
+            flags: NodeFlags::default(),
+            aux,
+            words: [scrutinee.0, actions.0, header.0],
+        }
+    }
     /// O(1): encode a call or construction over a finalized argument list.
     pub(super) fn call_list(callee: NodeId, args: ListId, info: Option<JsId>) -> Self {
         Self {

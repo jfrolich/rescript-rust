@@ -305,10 +305,11 @@ impl State {
     /// K2: O:339 push_effect_expression. Calls may have effects; pure values
     /// are removed and comma values are split before statements are emitted.
     pub(super) fn drop_pure_effect(&mut self, value: NodeId) {
-        let mut effects = Vec::new();
+        let mut effects = std::mem::take(&mut self.scratch);
         crate::bir::j::norm::jm14_push_effect_expression(&mut self.arena, value, &mut effects);
-        for statement in effects {
+        for statement in effects.drain(..) {
             self.statements.push(statement);
         }
+        self.scratch = effects;
     }
 }

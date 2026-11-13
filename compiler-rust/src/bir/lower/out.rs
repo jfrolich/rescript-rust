@@ -376,12 +376,33 @@ pub enum Probed {
 #[derive(Default)]
 pub struct FreePool {
     nodes: Vec<Option<Free>>,
+    work: Vec<RealizeWork>,
+    outputs: Vec<Out>,
     /// Combinations probed.
     pub probes: usize,
     /// Deferred nodes consumed.
     pub realized: usize,
 }
+enum RealizeWork {
+    Enter(FreeId, Cx),
+    Seq(NodeId, Cx),
+    After(Span),
+    Cond(NodeId, Cx),
+}
 impl FreePool {
+    #[cfg(test)]
+    pub(super) fn reserve_repeat(&mut self) {
+        self.nodes.reserve(self.nodes.len());
+    }
+    #[cfg(test)]
+    pub(super) fn capacities(&self) -> [usize; 3] {
+        [
+            self.nodes.capacity(),
+            self.work.capacity(),
+            self.outputs.capacity(),
+        ]
+    }
+
     /// K1/K6: C:1529 compile_expr / C:5144 compile_if_return_output; preserve
     /// the first pass's operands rather than recompiling the source subtree.
     pub(super) fn push(&mut self, free: Free) -> FreeId {
@@ -422,21 +443,16 @@ impl FreePool {
     /// K2/K6: C:4715 append_effect_output / C:5144 compile_if_return_output.
     /// Explicit postorder stack: each Free is consumed once, even at depth 10k.
     pub fn realize(&mut self, cx: Cx, probed: Probed, emit: &mut impl Realizer) -> Out {
-        enum Work {
-            Enter(FreeId, Cx),
-            Seq(NodeId, Cx),
-            After(Span),
-            Cond(NodeId, Cx),
-        }
         let root = match probed {
             Probed::Out(out) => return out,
             Probed::Free(root) => root,
         };
-        let mut work = vec![Work::Enter(root, cx)];
-        let mut outputs = Vec::new();
+        let work = &mut self.work;
+        let outputs = &mut self.outputs;
+        work.push(RealizeWork::Enter(root, cx));
         while let Some(task) = work.pop() {
             match task {
-                Work::Enter(id, cx) => {
+                RealizeWork::Enter(id, cx) => {
                     self.realized += 1;
                     match self.nodes[id.0 as usize]
                         .take()
@@ -450,30 +466,30 @@ impl FreePool {
                                 cx.cont,
                                 super::Cont::Value(_) | super::Cont::Effect(super::Tail::No)
                             ) {
-                                work.push(Work::Seq(first, cx));
+                                work.push(RealizeWork::Seq(first, cx));
                             } else {
-                                work.push(Work::After(emit.effect(first)));
+                                work.push(RealizeWork::After(emit.effect(first)));
                             }
-                            work.push(Work::Enter(second, cx));
+                            work.push(RealizeWork::Enter(second, cx));
                         }
                         Free::Cond { test, then_, else_ } => {
-                            work.push(Work::Cond(test, cx));
+                            work.push(RealizeWork::Cond(test, cx));
                             // 3.6: row R3 reads the branches as assignments;
                             // every other row reads their values.
                             let branch = match cx.cont {
                                 super::Cont::Assign(_) => cx,
                                 _ => Cx { cont: super::Cont::Value(super::Tail::No), ..cx },
                             };
-                            work.push(Work::Enter(else_, branch));
-                            work.push(Work::Enter(then_, branch));
+                            work.push(RealizeWork::Enter(else_, branch));
+                            work.push(RealizeWork::Enter(then_, branch));
                         }
                     }
                 }
-                Work::Seq(first, cx) => {
+                RealizeWork::Seq(first, cx) => {
                     let second = outputs.pop().expect("sequence child");
                     outputs.push(emit.seq(cx, first, second));
                 }
-                Work::After(head) => {
+                RealizeWork::After(head) => {
                     let mut second = outputs.pop().expect("sequence child");
                     assert_eq!(head.end(), second.stmts.start as usize);
                     second.stmts = Span {
@@ -482,7 +498,7 @@ impl FreePool {
                     };
                     outputs.push(second);
                 }
-                Work::Cond(test, cx) => {
+                RealizeWork::Cond(test, cx) => {
                     let else_ = outputs.pop().expect("else child");
                     let then_ = outputs.pop().expect("then child");
                     outputs.push(emit.cond(cx, test, then_, else_));
@@ -537,7 +553,7 @@ mod tests {
         assert_eq!(size_of::<Probed>(), 20);
         assert_eq!(size_of::<StatementStack>(), 96);
         assert_eq!(size_of::<Option<Slot>>(), 12);
-        assert_eq!(size_of::<FreePool>(), 40);
+        assert_eq!(size_of::<FreePool>(), 88);
     }
     #[test]
     fn a_statement_is_copied_once() {

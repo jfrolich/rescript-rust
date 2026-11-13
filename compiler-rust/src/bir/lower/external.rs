@@ -46,12 +46,10 @@ impl State {
         attr: &crate::lambda::lam_primitive::Attr,
     ) -> (NodeId, Option<NodeId>) {
         let (values, effect) = self.lower_external_arg_values_and_effect(cx, arg, label, attr);
-        assert_eq!(
-            values.len(),
-            1,
-            "object argument must produce exactly one value"
-        );
-        (values[0], effect)
+        let [Some(value), None] = values else {
+            panic!("object argument must produce exactly one value")
+        };
+        (value, effect)
     }
 
     /// X:972 compile_js_object_create. O(specs + argument conversion work).
@@ -472,75 +470,84 @@ mod tests {
         assert_eq!(std::mem::size_of::<crate::bir::JsPayload>(), 40);
     }
 
-    /// Exercise the external construct lowering, with its already-sequenced
-    /// operands. Source import/argument sequencing are separate lowering stages.
+    /// Import once, then lower the complete source node twice. The measured
+    /// pass includes source traversal, constant lowering, holding, sequencing,
+    /// conversion, emission, realization and release of the resulting J tree.
     fn allocation_fixture(object: bool) {
         use crate::lambda::lam_primitive::{Attr, Label, ObjParam};
         let mut source = LamArena::new();
-        let root = source.const_(Constant::JsUndefined { is_unit: false });
-        let mut state = State::new(crate::bir::bridge::import_lambda(&source, root).unwrap());
         let count = if object { 1 } else { 10_000 };
         let width = if object { 10_000 } else { 8 };
-        let specs: Vec<_> = (0..width)
-            .map(|i| ObjParam {
-                obj_arg_type: Attr::Nothing,
-                obj_arg_label: Label::ObjLabel {
-                    name: format!("field{i}"),
-                },
-            })
-            .collect();
-        let call = JsCall {
-            prim_name: "invoke".into(),
-            arg_types: vec![Param::dummy(); width],
-            ffi: ExternalDecl {
-                kind: DeclKind::DeclVal {
-                    name: "invoke".into(),
-                },
-                module_: None,
-                scopes: vec![],
-                variadic: false,
-                effective_arity: width as i64,
-            },
-        };
-        let batches: Vec<Vec<_>> = (0..2)
-            .map(|_| {
-                (0..count)
-                    .map(|_| {
-                        let values: Vec<_> = (0..width)
-                            .map(|_| plain::node(&mut state.arena, View::JUndefined, 0))
-                            .collect();
-                        state.arena.lists.push(&values)
+        let primitive = if object {
+            Primitive::PjsObjectCreate(
+                (0..width)
+                    .map(|i| ObjParam {
+                        obj_arg_type: Attr::Nothing,
+                        obj_arg_label: Label::ObjLabel {
+                            name: format!("field{i}"),
+                        },
                     })
-                    .collect()
-            })
-            .collect();
-        let run = |state: &mut State, args: &[crate::bir::ListId]| {
-            for &args in args {
-                let value = if object {
-                    state.compile_js_object_create(Cx::value(), &specs, args)
-                } else {
-                    state.compile_js_call(Cx::value(), PrimId(0), &call, args)
-                };
+                    .collect(),
+            )
+        } else {
+            Primitive::PjsCall(Box::new(JsCall {
+                prim_name: "invoke".into(),
+                arg_types: vec![Param::dummy(); width],
+                ffi: ExternalDecl {
+                    kind: DeclKind::DeclVal {
+                        name: "invoke".into(),
+                    },
+                    module_: None,
+                    scopes: vec![],
+                    variadic: false,
+                    effective_arity: width as i64,
+                },
+            }))
+        };
+        let mut root = None;
+        for _ in 0..count {
+            let args: Vec<_> = (0..width)
+                .map(|_| source.const_(Constant::JsUndefined { is_unit: false }))
+                .collect();
+            let call = source.prim_raw(primitive.clone(), &args, LamLoc::NONE);
+            root = Some(root.map_or(call, |previous| source.seq(previous, call)));
+        }
+        let input = crate::bir::bridge::import_lambda(&source, root.unwrap()).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let run = |state: &mut State| {
+            let result = state.probe(Cx::value(), root).unwrap();
+            let result = state.realize(Cx::value(), result);
+            for statement in state.statements.statements(result.stmts) {
+                state.arena.release(statement);
+            }
+            if let Some(value) = result.value {
                 state.arena.release(value);
             }
+            state.statements.kill(result.stmts);
         };
         let initial_lists = state.arena.lists.storage_shape().0;
-        run(&mut state, &batches[0]);
-        // Append-only pools retain output from the warm pass. Reserve exactly
-        // another pass's growth, as measured by that pass, before counting.
+        let initial_js = state.arena.pools.js.len();
+        run(&mut state);
+        // Append-only output pools retain the warm pass. Reserve the measured
+        // growth of that pass again; stack/scratch buffers already retain theirs.
         state
             .arena
             .lists
             .reserve_test_growth(state.arena.lists.storage_shape().0 - initial_lists);
-        state.arena.pools.js.reserve(count);
+        state
+            .arena
+            .pools
+            .js
+            .reserve(state.arena.pools.js.len() - initial_js);
         state
             .arena
             .pools
             .property_keys
-            .reserve(if object { width } else { 0 });
-        state.arena.free_nodes.reserve(count * (width + 1));
+            .reserve(state.arena.pools.property_keys.len());
+        state.free.reserve_repeat();
         let capacities = |s: &State| {
-            [
+            vec![
                 s.arena.nodes.capacity(),
                 s.arena.parents.capacity(),
                 s.arena.free_nodes.capacity(),
@@ -550,15 +557,31 @@ mod tests {
                 s.arena.pools.property_keys.capacity(),
                 s.external_values.capacity(),
                 s.external_pending.capacity(),
+                s.traversal.work.capacity(),
+                s.traversal.values.capacity(),
+                s.traversal.children.capacity(),
+                s.constant_work.capacity(),
+                s.constant_values.capacity(),
+                s.argument_outputs.capacity(),
+                s.argument_values.capacity(),
+                s.ffi_params.capacity(),
+                s.ffi_suffix.capacity(),
             ]
         };
         let before = capacities(&state);
+        let free_before = state.free.capacities();
+        let visits = state.source_steps;
         let steps = state.primitive_steps;
-        let allocations = allocation_counter::measure(|| run(&mut state, &batches[1]));
-        println!("external object={object}: {allocations:?}");
+        let allocations = allocation_counter::measure(|| run(&mut state));
+        println!("whole external object={object}: {allocations:?}");
         assert_eq!(allocations.count_total, 0);
         assert_eq!(capacities(&state), before);
-        assert_eq!(state.primitive_steps - steps, count * width);
+        assert_eq!(state.free.capacities(), free_before);
+        assert_eq!(state.source_steps - visits, count * (width + 2) - 1);
+        assert_eq!(
+            state.primitive_steps - steps,
+            count * (width * if object { 4 } else { 3 } + 1)
+        );
     }
 
     #[test]

@@ -1384,9 +1384,10 @@ pub fn jm11_poly_var_access(b: &mut Bir, target: NodeId, payload: bool) -> NodeI
 pub fn jm12_interpolated_template(
     b: &mut Bir,
     segments: Vec<crate::string_literal::TemplateSegment>,
-    values: Vec<NodeId>,
+    values: impl IntoIterator<Item = NodeId, IntoIter: ExactSizeIterator>,
 ) -> NodeId {
     use crate::string_literal::{StringLiteral, concat_template, template_from_semantic};
+    let values = values.into_iter();
     assert_eq!(segments.len(), values.len() + 1);
     let mut segments = segments.into_iter();
     let mut parts = vec![segments.next().unwrap()];
@@ -1519,7 +1520,8 @@ pub fn jm13_int32_mod(b: &mut Bir, check_zero: bool, left: NodeId, right: NodeId
 /// J-M14, O:339 push_effect_expression. Split sequences left-to-right, drop
 /// strictly pure values, and preserve assignment locations carried by unit pairs.
 pub fn jm14_push_effect_expression(b: &mut Bir, value: NodeId, statements: &mut Vec<NodeId>) {
-    let mut work = vec![value];
+    let mut work = std::mem::take(&mut b.effect_work);
+    work.push(value);
     while let Some(value) = work.pop() {
         if let View::JSeq { first, second } = b.view(value) {
             if p::undefined(b, second)
@@ -1550,6 +1552,7 @@ pub fn jm14_push_effect_expression(b: &mut Bir, value: NodeId, statements: &mut 
             statements.push(js1_exp(b, value));
         }
     }
+    b.effect_work = work;
 }
 /// J-M14, O:368 push_s_exp: only numbers/undefined and trivial comma arms drop.
 pub fn jm14_push_s_exp(b: &mut Bir, mut value: NodeId, statements: &mut Vec<NodeId>) {

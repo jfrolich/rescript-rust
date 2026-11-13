@@ -2639,9 +2639,9 @@ The statement stack and node-list pool must be used end to end.
 | `args.rs:52` `Work` | `let mut values = Vec::new();` | per visited node | reusable scratch buffer; clear, do not free | pending |
 | `args.rs:53` `Work` | `let mut statements = Vec::new();` | per visited node | reusable scratch buffer; clear, do not free | pending |
 | `args.rs:111` `Work` | `let children: Vec<_> = values.drain(values.len() - count..).collect();` | per visited node | reusable scratch buffer; clear, do not free | pending |
-| `args.rs:163` `sequence_arguments` | `args: smallvec::SmallVec<[Out; 4]>,` | per visited node | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `args.rs:164` `sequence_arguments` | `) -> (Span, smallvec::SmallVec<[NodeId; 4]>) {` | per visited node | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `args.rs:178` `sequence_arguments` | `let mut values = smallvec::SmallVec::with_capacity(args.len());` | per visited node | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `args.rs:163` `sequence_arguments` | `args: smallvec::SmallVec<[Out; 4]>,` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
+| `args.rs:164` `sequence_arguments` | `) -> (Span, smallvec::SmallVec<[NodeId; 4]>) {` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
+| `args.rs:178` `sequence_arguments` | `let mut values = smallvec::SmallVec::with_capacity(args.len());` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `args.rs:184` `sequence_arguments` | `(Vec::new(), value)` | per visited node | reusable scratch buffer; clear, do not free | pending |
 | `call.rs:9` `Call` | `pub operands: Vec<NodeId>,` | per construct | reusable scratch buffer; clear, do not free | pending |
 | `call.rs:32` `application` | `let mut reversed: Vec<_> = args.iter().rev().copied().collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
@@ -2649,7 +2649,7 @@ The statement stack and node-list pool must be used end to end.
 | `call.rs:66` `application` | `return Ok(Call { tail: None, operands: vec![reduced], inline: true, status, loc, external: None });` | per construct | reusable scratch buffer; clear, do not free | pending |
 | `call.rs:94` `inline_external_function` | `let root = lambda.function_(function.arity, &function.params, body, function.attr.clone(), function.loc);` | per construct | borrow payload or retain typed pool handle | pending |
 | `call.rs:104` `inline_external_function` | `let mut foreign = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `call.rs:175` `finish_application` | `.collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `call.rs:175` `finish_application` | `.collect();` | per construct | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `call.rs:197` `finish_application` | `self.apply_with_arity(callee, arity, values.into_vec())` | per construct | reusable scratch buffer; clear, do not free | pending |
 | `call.rs:267` `resolve_cmj_module_field_arity` | `crate::cmi::persistent_env::CmjExportArity::Single(arity) => Some(arity.clone()),` | per construct | borrow payload or retain typed pool handle | pending |
 | `call.rs:289` `apply_with_arity` | `args: Vec<NodeId>,` | per construct | reusable scratch buffer; clear, do not free | pending |
@@ -2671,7 +2671,7 @@ The statement stack and node-list pool must be used end to end.
 | `exit.rs:509` `exit_children` | `pub(super) fn exit_children(&self, cx: Cx, exit: &Exit, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
 | `expr.rs:42` `expression_children` | `into: &mut Vec<(Cx, NodeId)>,` | per visited node | reusable scratch buffer; clear, do not free | pending |
 | `expr.rs:278` `finish_expression` | `let attr = attr.clone();` | per visited node | borrow payload or retain typed pool handle | pending |
-| `expr.rs:308` `drop_pure_effect` | `let mut effects = Vec::new();` | per construct/walk | reusable scratch buffer; clear, do not free | pending |
+| `expr.rs:308` `drop_pure_effect` | `let mut effects = Vec::new();` | per construct/walk | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `external.rs:8` `module` | `use smallvec::SmallVec;` | declaration | removed SmallVec import | removed |
 | `external.rs:64` `compile_js_object_create` | `args: SmallVec<[NodeId; 4]>,` | per construct | list-pool handle; no transient argument collection | removed |
 | `external.rs:68` `compile_js_object_create` | `let mut keys = Vec::new();` | per construct | PropertySpan into the arena property-key pool | removed |
@@ -2683,44 +2683,44 @@ The statement stack and node-list pool must be used end to end.
 | `external.rs:287` `external_module_binding` | `bundle: name.to_owned(),` | per construct | borrowed module spelling; owned import metadata remains in import.rs | removed |
 | `external.rs:312` `compile_js_call` | `args: SmallVec<[NodeId; 4]>,` | per construct | list-pool handle; no transient argument collection | removed |
 | `external.rs:384` `compile_js_call` | `args.collect(),` | per construct | list-pool handle; no transient argument collection | removed |
-| `ffi_args.rs:6` `module` | `use smallvec::SmallVec;` | declaration | remove after handle conversion | pending |
-| `ffi_args.rs:112` `hold_external_args` | `args: SmallVec<[Out; 4]>,` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:113` `hold_external_args` | `) -> SmallVec<[Out; 4]> {` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:115` `hold_external_args` | `let mut held = SmallVec::with_capacity(args.len());` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:136` `hold_external_obj_args` | `args: SmallVec<[Out; 4]>,` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:137` `hold_external_obj_args` | `) -> SmallVec<[Out; 4]> {` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:138` `hold_external_obj_args` | `let params: SmallVec<[&ObjParam; 4]> = specs` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:146` `hold_external_obj_args` | `.collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `ffi_args.rs:147` `hold_external_obj_args` | `let mut suffix: SmallVec<[LaterLiteral; 4]> = SmallVec::with_capacity(args.len());` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:200` `hold_external_obj_args` | `.collect()` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `ffi_args.rs:299` `external_dispatch` | `let mut keys = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `ffi_args.rs:300` `external_dispatch` | `let mut actions = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `ffi_args.rs:301` `external_dispatch` | `let mut clauses = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `ffi_args.rs:363` `external_polyvar_string_expr` | `let cases: Vec<_> = cases` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `ffi_args.rs:365` `external_polyvar_string_expr` | `.map(&#124;(key, value)&#124; (key.clone(), plain::string(&mut self.arena, value)))` | per construct | borrow payload or retain typed pool handle | pending |
-| `ffi_args.rs:366` `external_polyvar_string_expr` | `.collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `ffi_args.rs:389` `external_polyvar_int_expr` | `let cases: Vec<_> = cases` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `ffi_args.rs:391` `external_polyvar_int_expr` | `.map(&#124;(key, value)&#124; (key.clone(), plain::int(&mut self.arena, *value as i32)))` | per construct | borrow payload or retain typed pool handle | pending |
-| `ffi_args.rs:392` `external_polyvar_int_expr` | `.collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `ffi_args.rs:403` `external_polyvar_event_exprs` | `) -> SmallVec<[NodeId; 2]> {` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:427` `external_polyvar_event_exprs` | `smallvec::smallvec![tag, value]` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:438` `lower_external_arg_values_and_effect` | `) -> (SmallVec<[NodeId; 2]>, Option<NodeId>) {` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:441` `lower_external_arg_values_and_effect` | `smallvec::smallvec![self.external_option_unwrap_expr(cx, raw)],` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:454` `lower_external_arg_values_and_effect` | `return (SmallVec::new(), None);` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:456` `lower_external_arg_values_and_effect` | `Attr::Ignore => return (SmallVec::new(), self.external_arg_effect(cx, arg)),` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:460` `lower_external_arg_values_and_effect` | `SmallVec::new()` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:462` `lower_external_arg_values_and_effect` | `smallvec::smallvec![plain::node(&mut self.arena, View::JUndefined, 1)]` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:476` `lower_external_arg_values_and_effect` | `(smallvec::smallvec![value], None)` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:502` `assemble_external_args_no_splice` | `args: SmallVec<[NodeId; 4]>,` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:503` `assemble_external_args_no_splice` | `) -> (SmallVec<[NodeId; 4]>, Option<NodeId>) {` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:505` `assemble_external_args_no_splice` | `let mut values = SmallVec::with_capacity(specs.len());` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:506` `assemble_external_args_no_splice` | `let mut effects: SmallVec<[NodeId; 4]> = SmallVec::new();` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:548` `assemble_external_args_with_splice` | `args: SmallVec<[NodeId; 4]>,` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:549` `assemble_external_args_with_splice` | `) -> (SmallVec<[NodeId; 4]>, Option<NodeId>) {` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:551` `assemble_external_args_with_splice` | `let mut values = SmallVec::with_capacity(specs.len());` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:552` `assemble_external_args_with_splice` | `let mut effects: SmallVec<[NodeId; 4]> = SmallVec::new();` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:595` `assemble_external_args` | `args: SmallVec<[NodeId; 4]>,` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `ffi_args.rs:597` `assemble_external_args` | `) -> (SmallVec<[NodeId; 4]>, Option<NodeId>) {` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `ffi_args.rs:6` `module` | `use smallvec::SmallVec;` | declaration | SmallVec import moved into test module only | removed |
+| `ffi_args.rs:112` `hold_external_args` | `args: SmallVec<[Out; 4]>,` | per construct | borrowed output slice and reusable suffix/spec-index buffers | removed |
+| `ffi_args.rs:113` `hold_external_args` | `) -> SmallVec<[Out; 4]> {` | per construct | borrowed output slice and reusable suffix/spec-index buffers | removed |
+| `ffi_args.rs:115` `hold_external_args` | `let mut held = SmallVec::with_capacity(args.len());` | per construct | borrowed output slice and reusable suffix/spec-index buffers | removed |
+| `ffi_args.rs:136` `hold_external_obj_args` | `args: SmallVec<[Out; 4]>,` | per construct | borrowed output slice and reusable suffix/spec-index buffers | removed |
+| `ffi_args.rs:137` `hold_external_obj_args` | `) -> SmallVec<[Out; 4]> {` | per construct | borrowed output slice and reusable suffix/spec-index buffers | removed |
+| `ffi_args.rs:138` `hold_external_obj_args` | `let params: SmallVec<[&ObjParam; 4]> = specs` | per construct | borrowed output slice and reusable suffix/spec-index buffers | removed |
+| `ffi_args.rs:146` `hold_external_obj_args` | `.collect();` | per construct | borrowed output slice and reusable suffix/spec-index buffers | removed |
+| `ffi_args.rs:147` `hold_external_obj_args` | `let mut suffix: SmallVec<[LaterLiteral; 4]> = SmallVec::with_capacity(args.len());` | per construct | borrowed output slice and reusable suffix/spec-index buffers | removed |
+| `ffi_args.rs:200` `hold_external_obj_args` | `.collect()` | per construct | borrowed output slice and reusable suffix/spec-index buffers | removed |
+| `ffi_args.rs:299` `external_dispatch` | `let mut keys = Vec::new();` | per construct | pooled keys, clauses and action lists; borrowed case strings | removed |
+| `ffi_args.rs:300` `external_dispatch` | `let mut actions = Vec::new();` | per construct | pooled keys, clauses and action lists; borrowed case strings | removed |
+| `ffi_args.rs:301` `external_dispatch` | `let mut clauses = Vec::new();` | per construct | pooled keys, clauses and action lists; borrowed case strings | removed |
+| `ffi_args.rs:363` `external_polyvar_string_expr` | `let cases: Vec<_> = cases` | per construct | pooled keys, clauses and action lists; borrowed case strings | removed |
+| `ffi_args.rs:365` `external_polyvar_string_expr` | `.map(&#124;(key, value)&#124; (key.clone(), plain::string(&mut self.arena, value)))` | per construct | pooled keys, clauses and action lists; borrowed case strings | removed |
+| `ffi_args.rs:366` `external_polyvar_string_expr` | `.collect();` | per construct | pooled keys, clauses and action lists; borrowed case strings | removed |
+| `ffi_args.rs:389` `external_polyvar_int_expr` | `let cases: Vec<_> = cases` | per construct | pooled keys, clauses and action lists; borrowed case strings | removed |
+| `ffi_args.rs:391` `external_polyvar_int_expr` | `.map(&#124;(key, value)&#124; (key.clone(), plain::int(&mut self.arena, *value as i32)))` | per construct | pooled keys, clauses and action lists; borrowed case strings | removed |
+| `ffi_args.rs:392` `external_polyvar_int_expr` | `.collect();` | per construct | pooled keys, clauses and action lists; borrowed case strings | removed |
+| `ffi_args.rs:403` `external_polyvar_event_exprs` | `) -> SmallVec<[NodeId; 2]> {` | per construct | fixed [Option<NodeId>; 2], 16 bytes; no spill path | removed |
+| `ffi_args.rs:427` `external_polyvar_event_exprs` | `smallvec::smallvec![tag, value]` | per construct | fixed [Option<NodeId>; 2], 16 bytes; no spill path | removed |
+| `ffi_args.rs:438` `lower_external_arg_values_and_effect` | `) -> (SmallVec<[NodeId; 2]>, Option<NodeId>) {` | per construct | fixed [Option<NodeId>; 2], 16 bytes; no spill path | removed |
+| `ffi_args.rs:441` `lower_external_arg_values_and_effect` | `smallvec::smallvec![self.external_option_unwrap_expr(cx, raw)],` | per construct | fixed [Option<NodeId>; 2], 16 bytes; no spill path | removed |
+| `ffi_args.rs:454` `lower_external_arg_values_and_effect` | `return (SmallVec::new(), None);` | per construct | fixed [Option<NodeId>; 2], 16 bytes; no spill path | removed |
+| `ffi_args.rs:456` `lower_external_arg_values_and_effect` | `Attr::Ignore => return (SmallVec::new(), self.external_arg_effect(cx, arg)),` | per construct | fixed [Option<NodeId>; 2], 16 bytes; no spill path | removed |
+| `ffi_args.rs:460` `lower_external_arg_values_and_effect` | `SmallVec::new()` | per construct | fixed [Option<NodeId>; 2], 16 bytes; no spill path | removed |
+| `ffi_args.rs:462` `lower_external_arg_values_and_effect` | `smallvec::smallvec![plain::node(&mut self.arena, View::JUndefined, 1)]` | per construct | fixed [Option<NodeId>; 2], 16 bytes; no spill path | removed |
+| `ffi_args.rs:476` `lower_external_arg_values_and_effect` | `(smallvec::smallvec![value], None)` | per construct | fixed [Option<NodeId>; 2], 16 bytes; no spill path | removed |
+| `ffi_args.rs:502` `assemble_external_args_no_splice` | `args: SmallVec<[NodeId; 4]>,` | per construct | ListId input/output and reusable argument assembly buffer | removed |
+| `ffi_args.rs:503` `assemble_external_args_no_splice` | `) -> (SmallVec<[NodeId; 4]>, Option<NodeId>) {` | per construct | ListId input/output and reusable argument assembly buffer | removed |
+| `ffi_args.rs:505` `assemble_external_args_no_splice` | `let mut values = SmallVec::with_capacity(specs.len());` | per construct | ListId input/output and reusable argument assembly buffer | removed |
+| `ffi_args.rs:506` `assemble_external_args_no_splice` | `let mut effects: SmallVec<[NodeId; 4]> = SmallVec::new();` | per construct | ListId input/output and reusable argument assembly buffer | removed |
+| `ffi_args.rs:548` `assemble_external_args_with_splice` | `args: SmallVec<[NodeId; 4]>,` | per construct | ListId input/output and reusable argument assembly buffer | removed |
+| `ffi_args.rs:549` `assemble_external_args_with_splice` | `) -> (SmallVec<[NodeId; 4]>, Option<NodeId>) {` | per construct | ListId input/output and reusable argument assembly buffer | removed |
+| `ffi_args.rs:551` `assemble_external_args_with_splice` | `let mut values = SmallVec::with_capacity(specs.len());` | per construct | ListId input/output and reusable argument assembly buffer | removed |
+| `ffi_args.rs:552` `assemble_external_args_with_splice` | `let mut effects: SmallVec<[NodeId; 4]> = SmallVec::new();` | per construct | ListId input/output and reusable argument assembly buffer | removed |
+| `ffi_args.rs:595` `assemble_external_args` | `args: SmallVec<[NodeId; 4]>,` | per construct | ListId input/output and reusable argument assembly buffer | removed |
+| `ffi_args.rs:597` `assemble_external_args` | `) -> (SmallVec<[NodeId; 4]>, Option<NodeId>) {` | per construct | ListId input/output and reusable argument assembly buffer | removed |
 | `import.rs:110` `external_module` | `name: external.bundle.clone(),` | per construct | borrow payload or retain typed pool handle | pending |
 | `import.rs:114` `external_module` | `.clone()` | per construct | borrow payload or retain typed pool handle | pending |
 | `import.rs:176` `compile_import` | `.push(self.arena.pools.j_modules[module.index()].clone());` | per construct | borrow payload or retain typed pool handle | pending |
@@ -2730,14 +2730,14 @@ The statement stack and node-list pool must be used end to end.
 | `jsx.rs:70` `compile_jsx` | `let mut props = Vec::with_capacity(jsx.jsx_props.len());` | per visited node | reusable scratch buffer; clear, do not free | pending |
 | `jsx.rs:71` `compile_jsx` | `let mut values = Vec::with_capacity(` | per visited node | reusable scratch buffer; clear, do not free | pending |
 | `jsx.rs:159` `duplicate_jsx_key` | `let mut spine = smallvec::SmallVec::<[NodeId; 4]>::new();` | per visited node | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `konst.rs:55` `Work` | `let mut work = vec![Work::Enter(root)];` | per visited node | reusable scratch buffer; clear, do not free | pending |
-| `konst.rs:56` `Work` | `let mut values: Vec<(NodeId, bool)> = Vec::new();` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `konst.rs:55` `Work` | `let mut work = vec![Work::Enter(root)];` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
+| `konst.rs:56` `Work` | `let mut values: Vec<(NodeId, bool)> = Vec::new();` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `konst.rs:60` `Work` | `let constant = self.arena.constant(id).clone();` | per visited node | borrow payload or retain typed pool handle | pending |
 | `konst.rs:177` `Work` | `let children: Vec<_> = values.drain(start..).map(&#124;(node, _)&#124; node).collect();` | per visited node | reusable scratch buffer; clear, do not free | pending |
 | `mod.rs:190` `children` | `fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>);` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `mod.rs:230` `Work` | `let mut work = vec![Work::Enter(cx, node)];` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `mod.rs:231` `Work` | `let mut values = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `mod.rs:232` `Work` | `let mut children = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `mod.rs:230` `Work` | `let mut work = vec![Work::Enter(cx, node)];` | per construct | reusable traversal/output/argument buffer retained in lowering state | removed |
+| `mod.rs:231` `Work` | `let mut values = Vec::new();` | per construct | reusable traversal/output/argument buffer retained in lowering state | removed |
+| `mod.rs:232` `Work` | `let mut children = Vec::new();` | per construct | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `mod.rs:295` `Lowered` | `pub dynamic_imports: Vec<crate::js_ir::ModuleId>,` | per construct | reusable scratch buffer; clear, do not free | pending |
 | `mod.rs:333` `State` | `tail_frames: Vec<tail::Frame>,` | once per unit | stays: reusable lowering-state storage | retained |
 | `mod.rs:334` `State` | `tail_functions: Vec<Option<LoopRef>>,` | once per unit | stays: reusable lowering-state storage | retained |
@@ -2800,10 +2800,10 @@ The statement stack and node-list pool must be used end to end.
 | `out.rs:53` `StatementStack` | `held: Vec<NodeId>,` | once per unit | stays: reusable statement-stack storage | retained |
 | `out.rs:62` `StatementStack` | `empties: Vec<(u32, NodeId)>,` | once per unit | stays: reusable statement-stack storage | retained |
 | `out.rs:378` `FreePool` | `nodes: Vec<Option<Free>>,` | per visited node | reusable scratch buffer; clear, do not free | pending |
-| `out.rs:435` `Work` | `let mut work = vec![Work::Enter(root, cx)];` | per visited node | reusable scratch buffer; clear, do not free | pending |
-| `out.rs:436` `Work` | `let mut outputs = Vec::new();` | per visited node | reusable scratch buffer; clear, do not free | pending |
-| `prim.rs:122` `finish_primitive_payload` | `.collect();` | per visited node | reusable scratch buffer; clear, do not free | pending |
-| `prim.rs:127` `finish_primitive_payload` | `let mut outputs: smallvec::SmallVec<[Out; 4]> = outputs;` | per visited node | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `out.rs:435` `Work` | `let mut work = vec![Work::Enter(root, cx)];` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
+| `out.rs:436` `Work` | `let mut outputs = Vec::new();` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
+| `prim.rs:122` `finish_primitive_payload` | `.collect();` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
+| `prim.rs:127` `finish_primitive_payload` | `let mut outputs: smallvec::SmallVec<[Out; 4]> = outputs;` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `prim.rs:164` `finish_primitive_payload` | `.collect::<Vec<_>>(),` | per visited node | reusable scratch buffer; clear, do not free | pending |
 | `prim.rs:173` `finish_primitive_payload` | `let (keys, kept): (Vec<_>, Vec<_>) = entries.into_iter().unzip();` | per visited node | property-key pool handle (requires J payload API change) | pending |
 | `prim.rs:195` `finish_primitive_payload` | `let mut keys = Vec::new();` | per visited node | property-key pool handle (requires J payload API change) | pending |
@@ -2850,7 +2850,7 @@ The statement stack and node-list pool must be used end to end.
 | `switch.rs:831` `prepare_switch_hashes` | `let mut bytes = Vec::new();` | once per unit | stays: once per unit | retained |
 | `switch.rs:892` `switch_constants_equal` | `let mut work = smallvec::SmallVec::<[(crate::bir::ConstId, crate::bir::ConstId); 8]>::new();` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
 | `switch.rs:962` `finish_small_switch` | `let key = self.arena.switch(plan.header).keys[0].clone();` | per construct | borrow payload or retain typed pool handle | pending |
-| `tail.rs:40` `finish_self_call` | `pub(super) fn finish_self_call(&mut self, frame: LoopRef, statements: Span, values: smallvec::SmallVec<[NodeId; 4]>) -> Probed {` | per construct | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `tail.rs:40` `finish_self_call` | `pub(super) fn finish_self_call(&mut self, frame: LoopRef, statements: Span, values: smallvec::SmallVec<[NodeId; 4]>) -> Probed {` | per construct | borrowed node slice supplied by reusable sequencing buffer | removed |
 | `try_.rs:65` `try_children` | `pub(super) fn try_children(&self, cx: Cx, frame: Try, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
 | `unit.rs:33` `lower` | `.collect();` | once per unit | stays: once per unit | retained |
 | `untagged.rs:53` `Plan` | `program: Vec<Op>,` | per construct | reusable scratch buffer; clear, do not free | pending |
@@ -2901,18 +2901,32 @@ The statement stack and node-list pool must be used end to end.
 | `variant.rs:186` `literal_tag` | `Literal::BigInt(s) => Tag::BigInt(s.clone()),` | per construct | borrow payload or retain typed pool handle | pending |
 | `variant.rs:255` `variant_children` | `pub(super) fn variant_children(&self, cx: Cx, frame: Variant, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
 
-External construct allocation tests run the construct emitters with already
-sequenced operands; they do not claim the argument-sequencing stage is yet
-allocation-free. After warming and reserving append-only pools for a second
-pass, 10,000 eight-argument calls and one 10,000-field object each allocate
-zero times, with unchanged recorded capacities. They count respectively
-80,000 and 10,000 immediate primitive steps. Property spans are 8 bytes,
-operand-list handles 4 bytes, pending entries 8 bytes, and `JsPayload` 40 bytes.
-Object payloads now retain spans, not owned key vectors. Shared arena effect
-maintenance and release inspect immediate edges by index, without materializing
-a child vector. Module metadata still owns spelling/attributes at the J bridge
-boundary; borrowing the module-itself spelling removes its temporary descriptor,
-not those outstanding import-metadata allocations.
+The external allocation tests now start from their Lambda source nodes, after
+one-time import, and include source traversal, constant lowering, FFI holding,
+argument sequencing, emission, deferred realization and release of the J output.
+After warming and reserving another pass's append-only pool growth, 10,000
+eight-argument calls and one 10,000-field object allocate zero times. Source
+visits are 99,999 and 10,001; primitive steps are 250,000 and 40,001.
+A separate whole-Lambda FFI test lowers 10,000 string-dispatch cases with zero
+allocations, two source visits and 10,004 primitive steps. All three tests assert
+unchanged recorded buffer capacities. Import and final unit export are outside
+these scopes; no claim is made that their once-per-unit allocations disappear.
+
+Property spans are 8 bytes, operand-list handles 4 bytes, pending entries 8
+bytes, and `JsPayload` 40 bytes. Bounded FFI argument conversion uses a fixed
+16-byte pair of optional handles, with no spill path. Switch keys and clauses
+are stored in typed pools, referenced by 8-byte spans; the cold stored switch
+record is 96 bytes. Existing import builders transfer their owned input into
+these pools; the FFI emitter writes directly into the pools without an owned
+intermediate switch header. Other switch emitters' transient input vectors
+remain pending in their inventory rows.
+
+Source traversal, deferred realization, constant traversal, argument holding
+and sequencing retain their work buffers between probes. Debug child-sharing
+validation uses a reusable dense epoch table rather than a per-node hash set;
+the sharing check still happens before mutation. Module metadata still owns
+spelling/attributes at the J bridge boundary; borrowing the module-itself
+spelling removes its temporary descriptor, not those outstanding allocations.
 
 ## 8. The gate and the slices
 

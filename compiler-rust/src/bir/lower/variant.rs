@@ -3,7 +3,7 @@
 use super::switch::{Form, Kind, Switch};
 use super::*;
 use crate::bir::j::{norm, plain};
-use crate::bir::{CaseKey, SwitchHeader, SwitchId};
+use crate::bir::{CaseKey, SwitchHeader, SwitchInput, SwitchId};
 use crate::lambda::{SwitchCaseTag as Tag, SwitchDispatch, SwitchKey};
 use crate::types::{VariantConstructorCase as Case, VariantLiteralTag as Literal};
 
@@ -35,7 +35,7 @@ pub(super) struct Plan {
 }
 
 /// V: untagged_switch precondition. O(keys), borrowed metadata only.
-pub(super) fn is_untagged(h: &SwitchHeader) -> bool {
+pub(super) fn is_untagged(h: &SwitchHeader<'_>) -> bool {
     let SwitchDispatch::Variant(facts) = &h.dispatch else {
         return false;
     };
@@ -142,7 +142,7 @@ impl State {
                 .chain(fallback)
                 .collect();
             let actions = self.source.lists.push(&actions);
-            let side_header = self.arena.switch_header(SwitchHeader {
+            let side_header = self.arena.switch_header(SwitchInput {
                 keys: std::mem::take(&mut keys[usize::from(block)]),
                 clauses: Vec::new(),
                 constants: if block { (total - n) as u32 } else { n as u32 },

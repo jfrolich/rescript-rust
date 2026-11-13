@@ -206,64 +206,76 @@ pub trait ProbeRules {
 }
 
 /// Explicit source traversal, separate from realization of deferred J operands.
-#[derive(Default)]
-pub struct SourceProbe {
+pub struct SourceProbe<R> {
+    work: Vec<ProbeWork<R>>,
+    values: Vec<Probed>,
+    children: Vec<(Cx, NodeId)>,
     /// Source occurrences offered to dispatch (one per incoming tree edge).
     pub steps: usize,
 }
-impl SourceProbe {
+enum ProbeWork<R> {
+    Enter(Cx, NodeId),
+    EnterChild(Cx, NodeId, usize, usize),
+    Finish(Cx, R, usize),
+    Child(Cx, usize, usize),
+}
+impl<R> Default for SourceProbe<R> {
+    /// O(1): initialize empty reusable storage; backing buffers grow on demand.
+    fn default() -> Self {
+        Self { work: Vec::new(), values: Vec::new(), children: Vec::new(), steps: 0 }
+    }
+}
+impl<R> SourceProbe<R> {
     /// K1/K6: C:1529 compile_expr / C:5144 compile_if_return_output.
     /// A source node is entered once. Finish frames receive the saved operands
     /// and child outputs, never a request to compile the same child again.
     pub fn probe(
         &mut self,
-        rules: &mut impl ProbeRules,
+        rules: &mut impl ProbeRules<Resume = R>,
         cx: Cx,
         node: NodeId,
     ) -> Result<Probed, super::bridge::Unsupported> {
-        enum Work<R> {
-            Enter(Cx, NodeId),
-            EnterChild(Cx, NodeId, usize, usize),
-            Finish(Cx, R, usize),
-            Child(Cx, usize, usize),
-        }
-        let mut work = vec![Work::Enter(cx, node)];
-        let mut values = Vec::new();
-        let mut children = Vec::new();
+        self.work.clear();
+        self.values.clear();
+        self.children.clear();
+        let work = &mut self.work;
+        let values = &mut self.values;
+        let children = &mut self.children;
+        work.push(ProbeWork::Enter(cx, node));
         while let Some(task) = work.pop() {
             let task = match task {
-                Work::EnterChild(cx, node, parent, index) => {
-                    let Work::Finish(_, resume, _) = &work[parent] else { unreachable!("parent resume") };
-                    Work::Enter(rules.child_context(cx, resume, index), node)
+                ProbeWork::EnterChild(cx, node, parent, index) => {
+                    let ProbeWork::Finish(_, resume, _) = &work[parent] else { unreachable!("parent resume") };
+                    ProbeWork::Enter(rules.child_context(cx, resume, index), node)
                 }
                 task => task,
             };
             match task {
-                Work::EnterChild(..) => unreachable!("resolved child context"),
-                Work::Enter(cx, node) => {
+                ProbeWork::EnterChild(..) => unreachable!("resolved child context"),
+                ProbeWork::Enter(cx, node) => {
                     self.steps += 1;
                     match rules.enter(cx, node)? {
                         ProbePlan::Ready(value) => values.push(value),
                         ProbePlan::Children(resume) => {
-                            rules.children(cx, &resume, &mut children);
+                            rules.children(cx, &resume, children);
                             let parent = work.len();
-                            work.push(Work::Finish(cx, resume, children.len()));
+                            work.push(ProbeWork::Finish(cx, resume, children.len()));
                             for (index, (cx, node)) in children.drain(..).enumerate().rev() {
-                                work.push(Work::Child(cx, parent, index));
-                                work.push(Work::EnterChild(cx, node, parent, index));
+                                work.push(ProbeWork::Child(cx, parent, index));
+                                work.push(ProbeWork::EnterChild(cx, node, parent, index));
                             }
                         }
                     }
                 }
-                Work::Child(cx, parent, index) => {
-                    let Work::Finish(_, resume, _) = &work[parent] else {
+                ProbeWork::Child(cx, parent, index) => {
+                    let ProbeWork::Finish(_, resume, _) = &work[parent] else {
                         unreachable!("parent resume frame")
                     };
                     let child = values.pop().expect("completed source child");
                     let cx = rules.child_context(cx, resume, index);
                     values.push(rules.child(cx, resume, index, child));
                 }
-                Work::Finish(cx, resume, count) => {
+                ProbeWork::Finish(cx, resume, count) => {
                     let start = values
                         .len()
                         .checked_sub(count)
@@ -352,6 +364,13 @@ struct State {
     idents: Vec<Ident>,
     statements: StatementStack,
     free: FreePool,
+    traversal: SourceProbe<expr::Resume>,
+    constant_work: Vec<konst::Work>,
+    constant_values: Vec<(NodeId, bool)>,
+    argument_outputs: Vec<Out>,
+    argument_values: Vec<NodeId>,
+    ffi_suffix: Vec<ffi_args::LaterLiteral>,
+    ffi_params: Vec<usize>,
     source_steps: usize,
     invalid_module_paths: Vec<bool>,
     awaited_units: Vec<bool>,
@@ -446,6 +465,10 @@ impl State {
             idents: input.idents,
             statements: StatementStack::default(),
             free: FreePool::default(),
+            traversal: SourceProbe::default(),
+            constant_work: Vec::new(), constant_values: Vec::new(),
+            argument_outputs: Vec::new(), argument_values: Vec::new(),
+            ffi_suffix: Vec::new(), ffi_params: Vec::new(),
             source_steps: 0,
             direct: false,
             located_functions: Vec::new(),
@@ -486,9 +509,11 @@ impl State {
     }
     /// K1: C:1529 compile_expr. SourceProbe owns the depth-independent traversal.
     fn probe(&mut self, cx: Cx, node: NodeId) -> Result<Probed, Unsupported> {
-        let mut traversal = SourceProbe::default();
+        let mut traversal = std::mem::take(&mut self.traversal);
+        let before = traversal.steps;
         let output = traversal.probe(self, cx, node);
-        self.source_steps += traversal.steps;
+        self.source_steps += traversal.steps - before;
+        self.traversal = traversal;
         output
     }
     /// K2/K6: C:4715 append_effect_output / C:5144 compile_if_return_output.
@@ -632,7 +657,7 @@ impl ProbeRules for State {
             View::Switch { scrutinee, header, .. } => {
                 let operands = self.source.node(node).switch_actions();
                 if matches!(self.arena.switch(header).dispatch, crate::lambda::SwitchDispatch::Variant(_)) {
-                    if variant::is_untagged(self.arena.switch(header)) {
+                    if variant::is_untagged(&self.arena.switch(header)) {
                         return Ok(ProbePlan::Children(expr::Resume::Untagged(self.untagged_switch(cx, scrutinee, operands, header)?)));
                     }
                     return Ok(ProbePlan::Children(expr::Resume::Variant(self.named_variant(cx, scrutinee, operands, header)?)));
@@ -901,7 +926,7 @@ mod tests {
             assert_eq!(probe.steps, 20_001);
             assert!(rules.seen.iter().all(|&visits| visits == 1));
         }
-        assert_eq!(std::mem::size_of::<SourceProbe>(), 8);
+        assert_eq!(std::mem::size_of::<SourceProbe<()>>(), 80);
         assert_eq!(std::mem::size_of::<ProbePlan<()>>(), 20);
     }
 }
