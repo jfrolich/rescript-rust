@@ -176,6 +176,43 @@ fn split_commas(s: &str) -> Vec<String> {
     s.split(',').map(str::to_string).collect()
 }
 
+/// The options that take a value.
+const VALUED_OPTIONS: &[&str] = &[
+    "-exclude-paths",
+    "-live-names",
+    "-live-paths",
+    "-suppress",
+    "-unsuppress",
+    "-runs",
+    "-churn",
+];
+
+/// What a command line that asks for the version or the options prints,
+/// which needs no project: `Arg.parse_argv` stops at `-version` and `-help`
+/// when it reaches them, after printing the arguments before them that are
+/// no options.
+pub fn output_without_project(args: &[String]) -> Option<String> {
+    let mut printed = String::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-version" | "--version" => {
+                return Some(format!("{printed}reanalyze version {VERSION}\n"));
+            }
+            "-help" | "--help" => return Some(format!("{printed}{}", usage())),
+            option if VALUED_OPTIONS.contains(&option) => {
+                args.next();
+            }
+            other if !other.starts_with('-') => {
+                printed.push_str(other);
+                printed.push('\n');
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// `Reanalyze.parse_argv`.
 fn parse_argv(cwd: &Path, args: &[String]) -> Result<Command, String> {
     let project_root = find_project_root(cwd)
@@ -589,6 +626,23 @@ mod tests {
         assert_eq!(module_name_of_source("/p/src/Foo.res"), "Foo");
         assert_eq!(module_name_of_source("/p/src/Foo.resi"), "Foo");
         assert_eq!(module_name_of_source("Foo-Ns.res"), "Foo");
+    }
+
+    #[test]
+    fn the_version_and_the_options_print_without_a_project() {
+        let args = |line: &str| -> Vec<String> { line.split(' ').map(str::to_string).collect() };
+        assert_eq!(
+            output_without_project(&args("-version")).as_deref(),
+            Some("reanalyze version 2.22.0\n")
+        );
+        // Arguments that are no options are printed first; an option's
+        // value is not one of them.
+        assert_eq!(
+            output_without_project(&args("foo -suppress src --version")).as_deref(),
+            Some("foo\nreanalyze version 2.22.0\n")
+        );
+        assert!(output_without_project(&args("-dce -help")).is_some_and(|text| text == usage()));
+        assert_eq!(output_without_project(&args("-dce -json")), None);
     }
 
     #[test]

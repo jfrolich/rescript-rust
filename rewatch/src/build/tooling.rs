@@ -577,6 +577,10 @@ pub fn doc(cwd: &Path, path: &str, plain_output: bool) -> Result<Vec<u8>> {
 /// is type-checked first, without writing files, and the analyses read the
 /// Rust typed trees. `color` says standard output is a terminal.
 pub fn reanalyze(cwd: &Path, args: &[String], plain_output: bool, color: bool) -> Result<Vec<u8>> {
+    // The version and the list of options need no project.
+    if let Some(text) = rescript_compiler::analysis::reanalyze::output_without_project(args) {
+        return Ok(text.into_bytes());
+    }
     let project_root = helpers::get_nearest_config(cwd)
         .ok_or_else(|| anyhow!("Error: cannot find project root containing rescript.json."))?;
     let failed = |err: &dyn std::fmt::Display| anyhow!("error: the project does not build: {err:#}");
