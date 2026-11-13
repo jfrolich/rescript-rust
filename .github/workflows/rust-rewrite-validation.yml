@@ -454,6 +454,26 @@ jobs:
           python3 -m unittest discover -s scripts -p test_signature_equality_test.py
           python3 scripts/test_signature_equality.py
 
+  # A derived declaration compiled from its plan must give what its general
+  # form gives: diagnostics, warnings, signature, JavaScript and exports.
+  derived-check:
+    name: Derived code check
+    needs: [build, ocaml]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-node
+      - uses: ./.github/actions/prepare-parity
+      - name: Compile derived items both ways and compare
+        run: |
+          export RESCRIPT_RUNTIME="$PWD/packages/@rescript/runtime"
+          rewatch/target/release/rescript clean tests/ppx_spice
+          RESCRIPT_DERIVED_PATH=check \
+            rewatch/target/release/rescript build tests/ppx_spice
+      - name: Diagnostics of derived code
+        run: node tests/build_tests/super_errors_derived/input.js
+
   # A dependency served from the prebuilt snapshot must give the JavaScript,
   # diagnostics and stored records that compiling it from source gives.
   snapshot-equivalence:
