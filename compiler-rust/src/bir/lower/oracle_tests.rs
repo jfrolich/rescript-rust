@@ -832,3 +832,40 @@ fn cross_module_inline_after_lowering_a_closure_with_assignment() {
     let root = a.seq_raw(closure, call);
     compare_oracle(a, root, Some(&resolver), true, &[0,1,2,3,4], None, true);
 }
+
+#[test]
+fn export_tuple_occurrences_are_not_the_tailcall_pass_input_counts() {
+    // T4b count experiment, reduced from Dom_storage.getItem: the output
+    // tuple carries one reference which export coercion consumes before P1/P2.
+    // No statement-list reader or flattening rule is involved in this drift.
+    use crate::lambda::{LamLoc, TagInfo};
+    use crate::lambda::lam_primitive::{Mutable, Primitive};
+    use crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_pass;
+    use crate::lambda::js_pass_external_shadow::apply_external_shadow_pass;
+    use crate::lambda::js_pass_tailcall_inline::UseCounts;
+    use crate::bir::shadow::LowerCheck;
+    let mut a = LamArena::new();
+    let f = Ident::new("f", 10, IdentFlags::NONE);
+    let one = a.const_(C::Int { i: 1, comment: None });
+    let function = a.function_(0, &[], one, Default::default(), LamLoc::NONE);
+    let reference = a.var(f);
+    let exports = a.prim_raw(Primitive::Pmakeblock(TagInfo::ModuleExport(vec![f]), Mutable::Immutable), &[reference], LamLoc::NONE);
+    let root = a.let_(LetKind::Strict, f, function, exports);
+    let input = bridge::import_lambda(&a, root).unwrap();
+    let lowered = lower(input, None, false).unwrap();
+    let var = lowered.program.idents.iter().position(|&id| id == f).unwrap();
+    let built = lowered.program.arena.js_scope.as_ref().unwrap().uses[var].built;
+    assert_eq!(built, 1);
+
+    let mut compiler = LambdaCompiler::new();
+    let (_, check) = compiler.compile_deps_program_with_lower_check::<true>(a, root, Default::default());
+    let Some(LowerCheck::Supported(pair)) = check else { panic!("supported export tuple") };
+    let legacy = apply_external_shadow_pass(apply_js_flatten_pass(pair.before[0].clone()));
+    let mut counts = UseCounts::default();
+    crate::js_ir::walk::walk_block(&mut counts, &legacy.program.arena, &legacy.program.block);
+    assert_eq!(counts.counts.get(&f).copied().unwrap_or(0), 0);
+    let print = |p: &JsDepsProgram| crate::js_ir::print_deps_program_with_directives_and_options(p, None, &[], false, false, false);
+    let expected = "\n\n\nfunction f() {\n  return 1;\n}\n\nexport {\n  f,\n}\n/* No side effect */\n";
+    assert_eq!(print(&pair.after[0]), expected);
+    assert_eq!(print(&pair.after[1]), expected);
+}
