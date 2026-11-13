@@ -1,0 +1,1 @@
+- `rescript-tools doc` takes several files: it type-checks their project once and prints a JSON list of their documentation, in the order given.

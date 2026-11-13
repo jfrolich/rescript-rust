@@ -320,11 +320,13 @@ mod tests {
     }
 
     #[test]
-    fn doc_takes_one_source_file() {
+    fn doc_takes_source_files() {
         let cli = parse(&["rescript", "doc", "src/A.res"]).unwrap();
-        assert!(matches!(cli.command, Command::Doc { path } if path == "src/A.res"));
+        assert!(matches!(cli.command, Command::Doc { paths } if paths == ["src/A.res"]));
+        let cli = parse(&["rescript", "doc", "src/A.res", "src/B.resi"]).unwrap();
+        assert!(matches!(cli.command, Command::Doc { paths } if paths == ["src/A.res", "src/B.resi"]));
         assert!(parse(&["rescript", "doc"]).is_err());
-        assert!(parse(&["rescript", "doc", "rescript.json"]).is_err());
+        assert!(parse(&["rescript", "doc", "src/A.res", "rescript.json"]).is_err());
     }
 
     // Default command behaviour.
@@ -672,13 +674,13 @@ pub enum Command {
         path: String,
     },
     /// Print the documentation of a ReScript module as JSON (what
-    /// `rescript-tools doc` prints). Type-checks the project without writing
-    /// files first.
+    /// `rescript-tools doc` prints), or of several modules as a JSON list.
+    /// Type-checks each file's package first, once, without writing files.
     #[command(hide = true)]
     Doc {
-        /// Path to a ReScript source file (.res or .resi)
-        #[arg(value_parser = parse_source_path)]
-        path: String,
+        /// Paths to ReScript source files (.res or .resi)
+        #[arg(value_parser = parse_source_path, required = true)]
+        paths: Vec<String>,
     },
     /// Run an editor tooling command in the project's running `rescript watch`.
     ///
