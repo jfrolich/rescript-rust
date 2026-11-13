@@ -473,7 +473,10 @@ the compiler options are created (where `RESCRIPT_DERIVED_CENSUS` is read in
   process and the following are compared; a difference fails the build naming
   the unit and the first differing binding:
   - the JavaScript bytes, and the source map when enabled;
-  - the signature (`types/canonical_sig.rs`) and the stored interface bytes;
+  - the signature in canonical form (`types/canonical_sig.rs`). The stored
+    interface bytes and their fingerprint are not compared: they record which
+    type nodes two values share, and a discharge instantiates each binding's
+    codec on its own where typing a group shares the nodes of one annotation;
   - the export summary: arities, constants, inlinable bodies, purity;
   - the unit reads, as sets;
   - the warnings, as text in order.

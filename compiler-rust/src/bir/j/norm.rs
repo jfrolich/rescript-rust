@@ -663,182 +663,268 @@ fn same_assignment_target(b: &Bir, left: NodeId, right: NodeId) -> bool {
 fn equal_statements(b: &Bir, left: &[NodeId], right: &[NodeId]) -> bool {
     left.len() == right.len() && left.iter().zip(right).all(|(&l, &r)| p::equal(b, l, r))
 }
-fn nested_if(b: &Bir, statements: &[NodeId]) -> Option<(NodeId, Vec<NodeId>, Vec<NodeId>)> {
-    let [statement] = statements else {
-        return None;
-    };
-    let View::SIf {
-        condition,
-        then_,
-        else_,
-    } = b.view(*statement)
-    else {
-        return None;
-    };
-    let View::SBlock { statements: yes } = b.view(then_) else {
-        panic!("if body list");
-    };
-    let no = else_.map_or(&[][..], |no| match b.view(no) {
-        View::SBlock { statements } => statements,
-        _ => panic!("if body list"),
-    });
-    Some((condition, yes.to_vec(), no.to_vec()))
-}
-fn raw_if(b: &mut Bir, condition: NodeId, yes: Vec<NodeId>, no: Vec<NodeId>) -> NodeId {
-    let then_ = p::list(b, &yes);
-    let else_ = p::list(b, &no);
-    p::node(
-        b,
-        View::SIf {
-            condition,
-            then_,
-            else_: Some(else_),
-        },
-        0,
-    )
-}
-fn release_list(b: &mut Bir, statements: &[NodeId]) {
-    for &s in statements {
-        b.release(s);
-    }
-}
-fn remove_empty(b: &mut Bir, statements: &mut Vec<NodeId>) {
-    statements.retain(|&s| {
-        if matches!(b.view(s), View::SBlock { statements } if statements.is_empty()) {
-            b.release(s);
-            false
-        } else {
-            true
-        }
-    });
+/// Branch handles for J-S3. A finalized branch is a ListId; the lowering's
+/// statement stack supplies Span handles so a surviving tail stays in place.
+/// Queries are O(1) on trimmed runs; release/take cost the consumed statements.
+pub(crate) trait IfLists {
+    type Handle: Copy;
+    /// O(consumed statements), dropping explicit empty blocks.
+    fn trim(&mut self, b: &mut Bir, list: Self::Handle);
+    /// O(1) amortized: append an empty list header.
+    fn empty(&mut self, b: &mut Bir) -> Self::Handle;
+    /// O(1): read the last pool slot.
+    fn last(&mut self, b: &Bir, list: Self::Handle) -> Option<NodeId>;
+    /// O(1): inspect the list length and first slot.
+    fn only(&mut self, b: &Bir, list: Self::Handle) -> Option<NodeId>;
+    /// O(released nodes): reuse the arena release stack.
+    fn release(&mut self, b: &mut Bir, list: Self::Handle);
+    /// O(1): transfer the list handle without copying.
+    fn take(&mut self, b: &mut Bir, list: Self::Handle) -> crate::bir::ListId;
 }
 
-/// J-S3, B:1575 simplify_if, rules 0..10 in order. Each loop removes a test
-/// negation, swaps an empty then branch once, or removes a nested if. The other
-/// rules return immediately. Statement lists are moved, not re-lowered.
+/// A rewritten head and the untouched tail, at most 16 bytes for either handle.
+pub(crate) struct IfHead<H> {
+    pub statement: Option<NodeId>,
+    pub tail: H,
+}
+
+/// J-S3 rules 0..6, the sole implementation for pooled and in-place branches.
+/// O(consumed statements + stripped test negations), plus J-E7/J-E8 costs.
+/// A retained tail is returned by handle and is never scanned or copied here.
+pub(crate) fn simplify_if_head<L: IfLists>(
+    b: &mut Bir,
+    lists: &mut L,
+    test: &mut NodeId,
+    yes: &mut L::Handle,
+    no: &mut L::Handle,
+) -> Option<IfHead<L::Handle>> {
+    lists.trim(b, *yes);
+    lists.trim(b, *no);
+    loop {
+        if let Some(value) = p::bool_of(b, *test) {
+            b.release(*test);
+            let (kept, dropped) = if value { (*yes, *no) } else { (*no, *yes) };
+            lists.release(b, dropped);
+            let statement = lists.last(b, kept).is_none()
+                .then(|| p::node(b, View::SBlock { statements: &[] }, 1));
+            return Some(IfHead { statement, tail: kept });
+        }
+        let no_empty = lists.last(b, *no).is_none();
+        if !no_empty && let View::JNot { value } = b.view(*test) {
+            p::retain(b, &[*test], &[value]);
+            *test = value;
+            std::mem::swap(yes, no);
+            continue;
+        }
+        let Some(last) = lists.last(b, *yes) else {
+            if no_empty {
+                let statement = if p::pure(b, *test) {
+                    b.release(*test);
+                    p::node(b, View::SBlock { statements: &[] }, 1)
+                } else {
+                    js1_exp(b, *test)
+                };
+                return Some(IfHead { statement: Some(statement), tail: lists.empty(b) });
+            }
+            *test = je8_not(b, *test);
+            std::mem::swap(yes, no);
+            continue;
+        };
+        let returned = |b: &Bir, statement: Option<NodeId>| {
+            statement.and_then(|s| match b.view(s) {
+                View::SReturn { value } => Some(value),
+                _ => None,
+            })
+        };
+        let no_only = lists.only(b, *no);
+        if let Some(n) = returned(b, no_only) {
+            b.detach(n);
+            lists.release(b, *no);
+            let yes_only = lists.only(b, *yes);
+            if let Some(y) = returned(b, yes_only) {
+                b.detach(y);
+                lists.release(b, *yes);
+                let value = je7_cond(b, *test, y, n);
+                let statement = p::node(b, View::SReturn { value }, 0);
+                return Some(IfHead { statement: Some(statement), tail: lists.empty(b) });
+            }
+            let test = je8_not(b, *test);
+            let ret = p::node(b, View::SReturn { value: n }, 0);
+            let then_ = b.lists.push(&[ret]);
+            let else_ = b.lists.push(&[]);
+            let statement = raw_if(b, test, then_, else_);
+            return Some(IfHead { statement: Some(statement), tail: *yes });
+        }
+        if matches!(b.view(last), View::SReturn { .. } | View::SThrow { .. }
+            | View::SContinue { .. } | View::SBreak { .. })
+        {
+            let then_ = lists.take(b, *yes);
+            let else_ = b.lists.push(&[]);
+            let statement = raw_if(b, *test, then_, else_);
+            return Some(IfHead { statement: Some(statement), tail: *no });
+        }
+        return None;
+    }
+}
+
+struct PoolLists;
+impl IfLists for PoolLists {
+    type Handle = crate::bir::ListId;
+    /// O(list length), compacting exclusively owned pool slots in place.
+    fn trim(&mut self, b: &mut Bir, list: Self::Handle) {
+        let mut kept = 0;
+        for i in 0..b.lists.get(list).len() {
+            let statement = b.lists.get(list)[i];
+            if matches!(b.view(statement), View::SBlock { statements } if statements.is_empty()) {
+                b.release(statement);
+            } else {
+                b.lists.set(list, kept, statement);
+                kept += 1;
+            }
+        }
+        b.lists.truncate(list, kept);
+    }
+    /// O(1) amortized: append an empty list header.
+    fn empty(&mut self, b: &mut Bir) -> Self::Handle { b.lists.push(&[]) }
+    /// O(1): read the last pool slot.
+    fn last(&mut self, b: &Bir, list: Self::Handle) -> Option<NodeId> {
+        b.lists.get(list).last().copied()
+    }
+    /// O(1): inspect the list length and first slot.
+    fn only(&mut self, b: &Bir, list: Self::Handle) -> Option<NodeId> {
+        match b.lists.get(list) { [s] => Some(*s), _ => None }
+    }
+    /// O(released nodes): reuse the arena release stack.
+    fn release(&mut self, b: &mut Bir, list: Self::Handle) { release_list(b, list); }
+    /// O(1): transfer the list handle without copying.
+    fn take(&mut self, _: &mut Bir, list: Self::Handle) -> Self::Handle { list }
+}
+
+/// O(1): read a nested if's children by their existing list handles.
+fn nested_if(b: &mut Bir, list: crate::bir::ListId) -> Option<(NodeId, crate::bir::ListId, crate::bir::ListId)> {
+    let [statement] = *b.lists.get(list) else { return None; };
+    let View::SIf { condition, then_, else_ } = b.view(statement) else { return None; };
+    let yes = b.node(then_).block_list_id().expect("if body list");
+    let no = else_.map(|s| b.node(s).block_list_id().expect("if body list"))
+        .unwrap_or_else(|| b.lists.push(&[]));
+    Some((condition, yes, no))
+}
+
+/// O(branch statements), attaching pool handles without copying the lists.
+fn raw_if(b: &mut Bir, condition: NodeId, yes: crate::bir::ListId, no: crate::bir::ListId) -> NodeId {
+    let then_ = b.block_from_list(yes);
+    let else_ = b.block_from_list(no);
+    p::node(b, View::SIf { condition, then_, else_: Some(else_) }, 0)
+}
+/// O(released nodes), using Bir's reusable release stack.
+fn release_list(b: &mut Bir, list: crate::bir::ListId) {
+    for i in 0..b.lists.get(list).len() {
+        b.release(b.lists.get(list)[i]);
+    }
+}
+/// O(statements), detaching immediate children, never walking their subtrees.
+fn detach_list(b: &mut Bir, list: crate::bir::ListId) {
+    for i in 0..b.lists.get(list).len() {
+        let node = b.lists.get(list)[i];
+        if b.parents[node.index()].is_some() { b.detach(node); }
+    }
+}
+/// O(released nodes + kept operands), without a per-branch scratch vector.
+fn retain_list(b: &mut Bir, list: crate::bir::ListId, kept: &[NodeId]) {
+    for &node in kept {
+        if b.parents[node.index()].is_some() { b.detach(node); }
+    }
+    for i in 0..b.lists.get(list).len() {
+        let node = b.lists.get(list)[i];
+        if !kept.contains(&node) { b.release(node); }
+    }
+}
+/// J-S2 on an owned list handle. O(consumed block shells + their statements).
+fn block_list(b: &mut Bir, mut list: crate::bir::ListId) -> NodeId {
+    loop {
+        if let [statement] = *b.lists.get(list) {
+            if let Some(inner) = b.node(statement).block_list_id() {
+                detach_list(b, inner);
+                b.release(statement);
+                list = inner;
+                continue;
+            }
+            return statement;
+        }
+        return b.explicit_block_from_list(list);
+    }
+}
+
+/// J-S3, B:1575 simplify_if, rules 0..10 in order. Branches are arena handles.
+/// O(consumed statements + removed shells), plus structural comparisons and
+/// J expression rules. No branch vector is constructed by this implementation.
 pub fn js3_simplify_if(
     b: &mut Bir,
     mut test: NodeId,
-    mut yes: Vec<NodeId>,
-    mut no: Vec<NodeId>,
+    mut yes: crate::bir::ListId,
+    mut no: crate::bir::ListId,
 ) -> NodeId {
     loop {
-        remove_empty(b, &mut yes);
-        remove_empty(b, &mut no);
-        if let Some(value) = p::bool_of(b, test) {
-            b.release(test);
-            if value {
-                release_list(b, &no);
-                return js2_block(b, yes);
-            }
-            release_list(b, &yes);
-            return js2_block(b, no);
+        if let Some(result) = simplify_if_head(b, &mut PoolLists, &mut test, &mut yes, &mut no) {
+            return match result.statement {
+                Some(statement) if b.lists.get(result.tail).is_empty() => statement,
+                Some(statement) => {
+                    let list = b.lists.prepend(statement, result.tail);
+                    block_list(b, list)
+                }
+                None => block_list(b, result.tail),
+            };
         }
-        if let View::JNot { value } = b.view(test) {
-            if !no.is_empty() {
-                p::retain(b, &[test], &[value]);
-                test = value;
-                std::mem::swap(&mut yes, &mut no);
-                continue;
-            }
-        }
-        if yes.is_empty() {
-            if no.is_empty() {
-                return if p::pure(b, test) {
-                    b.release(test);
-                    js2_block(b, vec![])
-                } else {
-                    js1_exp(b, test)
-                };
-            }
-            test = je8_not(b, test);
-            std::mem::swap(&mut yes, &mut no);
-            continue;
-        }
-        let (yr, nr) = (single_value(b, &yes, true), single_value(b, &no, true));
-        if let (Some(y), Some(n)) = (yr, nr) {
-            p::retain(b, &yes, &[y]);
-            p::retain(b, &no, &[n]);
-            let value = je7_cond(b, test, y, n);
-            return p::node(b, View::SReturn { value }, 0);
-        }
-        if let Some(n) = nr {
-            p::retain(b, &no, &[n]);
-            let test = je8_not(b, test);
-            let ret = p::node(b, View::SReturn { value: n }, 0);
-            let guard = raw_if(b, test, vec![ret], vec![]);
-            yes.insert(0, guard);
-            return js2_block(b, yes);
-        }
-        if yes.last().is_some_and(|&s| {
-            matches!(
-                b.view(s),
-                View::SReturn { .. }
-                    | View::SThrow { .. }
-                    | View::SContinue { .. }
-                    | View::SBreak { .. }
-            )
-        }) {
-            let guard = raw_if(b, test, yes, vec![]);
-            no.insert(0, guard);
-            return js2_block(b, no);
-        }
-        if let (Some(y), Some(n)) = (single_value(b, &yes, false), single_value(b, &no, false)) {
+        if let (Some(y), Some(n)) = (
+            single_value(b, b.lists.get(yes), false), single_value(b, b.lists.get(no), false))
+        {
             if let (Some((yl, yr)), Some((nl, nr))) =
                 (p::binary(b, y, BinOp::Eq), p::binary(b, n, BinOp::Eq))
             {
                 if same_assignment_target(b, yl, nl) {
-                    p::retain(b, &yes, &[yl, yr]);
-                    p::retain(b, &no, &[nr]);
+                    retain_list(b, yes, &[yl, yr]);
+                    retain_list(b, no, &[nr]);
                     let value = je7_cond(b, test, yr, nr);
                     let value = je4_bin(b, BinOp::Eq, yl, value);
                     return js1_exp(b, value);
                 }
             }
-            p::retain(b, &yes, &[y]);
-            p::retain(b, &no, &[n]);
+            retain_list(b, yes, &[y]);
+            retain_list(b, no, &[n]);
             let value = je7_cond(b, test, y, n);
             return js1_exp(b, value);
         }
-        if let Some((c, y, n)) = nested_if(b, &yes) {
-            let merge = if equal_statements(b, &n, &no) {
+        if let Some((c, y, n)) = nested_if(b, yes) {
+            let merge = if equal_statements(b, b.lists.get(n), b.lists.get(no)) {
                 Some(false)
-            } else if !y.is_empty() && equal_statements(b, &y, &no) {
+            } else if !b.lists.get(y).is_empty() && equal_statements(b, b.lists.get(y), b.lists.get(no)) {
                 Some(true)
-            } else {
-                None
-            };
+            } else { None };
             if let Some(negate) = merge {
-                let mut kept = vec![c];
-                kept.extend_from_slice(&y);
-                kept.extend_from_slice(&n);
-                p::retain(b, &yes, &kept);
-                release_list(b, &no);
+                b.detach(c);
+                detach_list(b, y);
+                detach_list(b, n);
+                release_list(b, yes);
+                release_list(b, no);
                 let c = if negate { je8_not(b, c) } else { c };
                 test = je5_js_and(b, test, c);
-                if negate {
-                    yes = n;
-                    no = y;
-                } else {
-                    yes = y;
-                    no = n;
-                }
+                (yes, no) = if negate { (n, y) } else { (y, n) };
                 continue;
             }
         }
-        if let Some((c, y, n)) = nested_if(b, &no) {
-            let merge = if !yes.is_empty() && !y.is_empty() && equal_statements(b, &yes, &y) {
+        if let Some((c, y, n)) = nested_if(b, no) {
+            let merge = if !b.lists.get(yes).is_empty() && !b.lists.get(y).is_empty()
+                && equal_statements(b, b.lists.get(yes), b.lists.get(y)) {
                 Some(false)
-            } else if !yes.is_empty() && !n.is_empty() && equal_statements(b, &yes, &n) {
+            } else if !b.lists.get(yes).is_empty() && !b.lists.get(n).is_empty()
+                && equal_statements(b, b.lists.get(yes), b.lists.get(n)) {
                 Some(true)
-            } else {
-                None
-            };
+            } else { None };
             if let Some(negate) = merge {
                 let other = if negate { y } else { n };
-                let mut kept = vec![c];
-                kept.extend_from_slice(&other);
-                p::retain(b, &no, &kept);
+                b.detach(c);
+                detach_list(b, other);
+                release_list(b, no);
                 let c = if negate { je8_not(b, c) } else { c };
                 test = je6_js_or(b, test, c);
                 no = other;
@@ -1611,5 +1697,13 @@ mod application_tests {
             let print = |p: &JsDepsProgram| crate::js_ir::print_deps_program_with_directives_and_options(p, None, &[], false, false, false);
             assert_eq!(print(&actual), print(&expected), "shape {shape}");
         }
+    }
+}
+
+#[cfg(test)]
+mod if_handle_sizes {
+    #[test]
+    fn pool_adapter_has_no_state() {
+        assert_eq!(std::mem::size_of::<super::PoolLists>(), 0);
     }
 }

@@ -1,0 +1,1 @@
+- Cache trivial-unit branch facts for constant-time backend conditional lowering.

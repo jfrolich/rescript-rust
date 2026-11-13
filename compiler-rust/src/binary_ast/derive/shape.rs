@@ -305,7 +305,7 @@ mod tests {
         let mut arena = parser.into_arena();
         arena.derived_census = Some(Box::new(super::super::census::Census::new(std::path::Path::new("unused"), "shape.res")));
         for item in &items {
-            super::super::expand_structure_item_with_mapper(item, &mut arena, true).unwrap();
+            super::super::expand_structure_item_with_mapper(item, &mut arena, true, super::super::Scope::TopLevel).unwrap();
         }
         arena.derived_census.unwrap().templates
     }

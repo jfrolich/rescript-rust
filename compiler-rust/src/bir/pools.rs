@@ -47,25 +47,50 @@ impl VarSpan {
 }
 
 #[derive(Default)]
-pub(super) struct Lists(Vec<NodeId>);
+pub(super) struct Lists {
+    items: Vec<NodeId>,
+    #[cfg(test)]
+    pub(super) pushes: usize,
+}
 impl Lists {
     pub(super) fn push(&mut self, items: &[NodeId]) -> ListId {
-        let id = ListId(index(self.0.len()));
-        self.0.push(NodeId(index(items.len())));
-        self.0.extend_from_slice(items);
+        #[cfg(test)] { self.pushes += 1; }
+        let id = ListId(index(self.items.len()));
+        self.items.push(NodeId(index(items.len())));
+        self.items.extend_from_slice(items);
         id
     }
     /// Consume a statement-stack run directly, without an intermediate vector.
     pub(super) fn push_iter(&mut self, len: usize, items: impl Iterator<Item = NodeId>) -> ListId {
-        let id = ListId(index(self.0.len()));
-        self.0.push(NodeId(index(len)));
-        self.0.extend(items);
-        assert_eq!(self.0.len(), id.index() + 1 + len);
+        #[cfg(test)] { self.pushes += 1; }
+        let id = ListId(index(self.items.len()));
+        self.items.push(NodeId(index(len)));
+        self.items.extend(items);
+        assert_eq!(self.items.len(), id.index() + 1 + len);
         id
+    }
+    /// O(tail length), copying directly within the arena pool, without a vector.
+    pub(super) fn prepend(&mut self, head: NodeId, tail: ListId) -> ListId {
+        let len = self.get(tail).len();
+        #[cfg(test)] { self.pushes += 1; }
+        let id = ListId(index(self.items.len()));
+        self.items.push(NodeId(index(len + 1)));
+        self.items.push(head);
+        self.items.extend_from_within(tail.index() + 1..tail.index() + 1 + len);
+        id
+    }
+    /// O(1), for compaction of an exclusively owned detached statement list.
+    pub(super) fn set(&mut self, id: ListId, at: usize, value: NodeId) {
+        self.items[id.index() + 1 + at] = value;
+    }
+    /// O(1), leaving unused trailing pool slots unreachable.
+    pub(super) fn truncate(&mut self, id: ListId, len: usize) {
+        assert!(len <= self.get(id).len());
+        self.items[id.index()] = NodeId(index(len));
     }
     pub(super) fn get(&self, id: ListId) -> &[NodeId] {
         let start = id.index();
-        &self.0[start + 1..start + 1 + self.0[start].index()]
+        &self.items[start + 1..start + 1 + self.items[start].index()]
     }
 }
 

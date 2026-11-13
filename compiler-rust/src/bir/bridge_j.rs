@@ -987,7 +987,7 @@ struct Exporter<'a> {
 }
 impl Exporter<'_> {
     fn ident(&self, v: VarId) -> Result<Ident, Unsupported> {
-        let v = self.p.arena.vars.j_origin.get(&v).copied().unwrap_or(v);
+        let v = self.p.arena.vars.j_origin[v.index()];
         self.p
             .idents
             .get(v.index())

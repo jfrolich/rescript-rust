@@ -791,6 +791,37 @@ impl Processor<'_> {
                 }
                 items
             }
+            // The bindings of a derived item, as the variables they bind.
+            tt::StructureItemDesc::Tstr_derived(idx) => {
+                let arena = self.ctx.arena;
+                let plans = arena.plans();
+                let item = plans.item(*idx);
+                let mut items = Vec::new();
+                for (binding, bound) in
+                    plans.bindings(item).iter().zip(self.ctx.ta.derived.bound(*idx))
+                {
+                    let pattern = tt::Pattern::new(
+                        tt::PatternDesc::Tpat_var(
+                            bound.ident,
+                            tt::Loc {
+                                txt: bound.ident.name().to_string(),
+                                loc: arena.none_loc(),
+                            },
+                        ),
+                        arena.none_loc(),
+                        bound.ty,
+                        bound.env,
+                    );
+                    self.handle_pattern(
+                        env,
+                        exported,
+                        &mut items,
+                        Some(&binding.attributes),
+                        &pattern,
+                    );
+                }
+                items
+            }
             // %%private generates a dummy module called local_...
             tt::StructureItemDesc::Tstr_module(mb) if !is_private_module(mb) => {
                 vec![self.for_module_binding(env, exported, mb)]
