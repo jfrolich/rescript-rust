@@ -397,6 +397,17 @@ fn declared_class(ctx: &TypeContext, env: &Env, path: &Path) -> Option<Instance>
     }
 }
 
+/// The class the declaration of `t`'s own type constructor states with
+/// `@instanceOf`. A type that only abbreviates a class type states none: its
+/// values are instances of that class, but not every instance is one of its
+/// values.
+pub(crate) fn own_class(ctx: &TypeContext, env: &Env, t: TypeExprRef) -> Option<Instance> {
+    match &*ctx.get_desc(ctx.repr(t)) {
+        TypeDesc::Tconstr { path, .. } => declared_class(ctx, env, path),
+        _ => None,
+    }
+}
+
 /// `Env.find_type`.
 fn find_type<'a>(
     ctx: &'a TypeContext,
@@ -1082,13 +1093,19 @@ fn check_extends(
     }
     // Both at their most general instance: the fields are then compared up
     // to the parameters of the two types.
-    let instance = |path: &Path| {
-        let arity = find_type(ctx, env, path).map_or(0, |decl| decl.type_params.len());
-        ctx.new_constr(*path, (0..arity).map(|_| ctx.new_var(None)).collect())
-    };
+    let arity = |path: &Path| find_type(ctx, env, path).map_or(0, |decl| decl.type_params.len());
+    let instance =
+        |path: &Path| ctx.new_constr(*path, (0..arity(path)).map(|_| ctx.new_var(None)).collect());
     let own_type = instance(own);
     let parent_type = instance(superclass);
-    match crate::types::ctype::subtype_now(ctx, env, own_type, parent_type) {
+    // `:>` between two types without parameters accepts a declared subclass
+    // without looking at its fields, so the fields are compared directly.
+    let coerces = if arity(own) == 0 && arity(superclass) == 0 {
+        crate::types::ctype::subtype_declarations_now(ctx, env, own_type, parent_type)
+    } else {
+        crate::types::ctype::subtype_now(ctx, env, own_type, parent_type)
+    };
+    match coerces {
         Ok(()) => Ok(()),
         Err(_) => error(AstUntaggedVariantError::ExtendsFieldsMismatch(parent)),
     }
