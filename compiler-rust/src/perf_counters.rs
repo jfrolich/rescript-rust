@@ -32,6 +32,7 @@ static CHECK_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 
 /// The CLI has finished preparing dependencies; subsequent attempts belong to
 /// its selected source unit. Build commands retain the process-wide totals.
+#[cfg(feature = "native")]
 pub(crate) fn begin_cli_unit() {
     if enabled() {
         CHECK_ATTEMPTS.store(0, Ordering::Relaxed);
