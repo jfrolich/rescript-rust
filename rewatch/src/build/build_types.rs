@@ -256,6 +256,10 @@ impl Module {
 #[derive(Debug)]
 pub struct BuildState {
     pub check_only: bool,
+    /// Whether a build prints the warnings of a successful compilation (a
+    /// failed one prints them with its errors). `rescript doc` builds only
+    /// to type-check, so it prints none.
+    pub print_warnings: bool,
     pub project_context: ProjectContext,
     pub modules: AHashMap<String, Module>,
     pub packages: AHashMap<String, Package>,
@@ -481,6 +485,7 @@ impl BuildState {
         Self {
             project_context,
             check_only: false,
+            print_warnings: true,
             module_names: AHashSet::new(),
             modules: AHashMap::new(),
             packages,

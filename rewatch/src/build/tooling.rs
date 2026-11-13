@@ -413,21 +413,35 @@ pub fn doc(cwd: &Path, path: &str, plain_output: bool) -> Result<Vec<u8>> {
     let file = cwd.join(path);
     let project_root = helpers::get_nearest_config(&file)
         .ok_or_else(|| anyhow!("error: failed to generate doc for {path}, it is in no ReScript project"))?;
-    let build_state = super::build(
-        &None,
-        &project_root,
-        /* show_progress */ false,
+    let failed = |err: &dyn std::fmt::Display| {
+        anyhow!("error: failed to generate doc for {path}, the project does not build: {err:#}")
+    };
+    // `build::build` in check-only mode, which takes no lock and writes no
+    // files, but printing no warnings.
+    let mut build_state = super::initialize_build_with_mode(
         /* no_timing */ true,
+        &None,
+        /* show_progress */ false,
+        &project_root,
         plain_output,
         /* warn_error */ None,
         /* prod */ false,
         /* features */ None,
-        /* dump */ None,
+        config::SourceMapCommand::Build,
         /* check_only */ true,
     )
-    .map_err(|err| {
-        anyhow!("error: failed to generate doc for {path}, the project does not build: {err:#}")
-    })?;
+    .map_err(|err| failed(&format!("{err:#}")))?;
+    build_state.print_warnings = false;
+    super::incremental_build_without_lock(
+        &mut build_state,
+        /* no_timing */ true,
+        /* initial_build */ true,
+        /* show_progress */ false,
+        /* only_incremental */ false,
+        plain_output,
+        super::CompilerInfoWrite::WithRecord,
+    )
+    .map_err(|err| failed(&err))?;
     let docs = run_command(
         &build_state,
         cwd.to_path_buf(),
