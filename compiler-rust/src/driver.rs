@@ -6745,7 +6745,7 @@ fn compile_source_to_js_with_options_inner(
             type_ctx.register_gentype_raw_module_sig(&module_name, current_raw_sig.clone());
             type_ctx.register_raw_module_sig(&module_name, current_raw_sig);
         }
-        let gentype = process_gentype_typed_artifact_if_enabled(
+        process_gentype_typed_artifact_if_enabled(
             options,
             has_resi.then(|| interface_source_gentype_read(source_file_for_interface)),
             GentypeUnit {
@@ -6757,8 +6757,7 @@ fn compile_source_to_js_with_options_inner(
                 filename: source_file_for_interface,
                 module_name: &module_name,
             },
-        );
-        gentype
+        )
     } else { None };
 
     let lambda_start_stamp = synchronize_lambda_start_stamp(type_ctx);
