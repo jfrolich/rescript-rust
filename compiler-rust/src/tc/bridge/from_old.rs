@@ -1,5 +1,5 @@
 //! An old published unit (the world's frozen `SharedGraph` with its
-//! signature) as a [`Segment`], published through [`tc::publish`].
+//! signature) as a [`Segment`], published through [`crate::tc::publish::publish`].
 //!
 //! # Encoding
 //!
