@@ -249,7 +249,11 @@ pub(in crate::binary_ast) fn classify(
         TypeKind::Ptype_open => false,
     };
     if !planned_shape || has_fallback || facts.unplanned {
-        return general(NotYetPlanned);
+        return general(if matches!(decl.ptype_kind, TypeKind::Ptype_variant(_)) {
+            UnsupportedVariant
+        } else {
+            NotYetPlanned
+        });
     }
     // A declaration that could take a plan, in a tree that is not planned.
     if let Some(reason) = arena.derived_plans_off() {
@@ -677,6 +681,9 @@ mod tests {
         assert_eq!(general("@spice @unboxed type t = {x: int}"), Unboxed);
         assert_eq!(general("@spice type rec t = {x: array<t>}"), RecursiveGroup);
         assert_eq!(classification("@spice type t = A | B(int)"), Classification::Plan);
+        assert_eq!(general("@spice type t = @spice.as(\"A\") A(int)"), UnsupportedVariant);
+        assert_eq!(general("@spice type t = A(pair<string, int>)"), UnsupportedVariant);
+        assert_eq!(general("@spice type t = A(JSON.t)"), UnsupportedVariant);
         assert_eq!(general("@spice type t = JSON.t"), NotYetPlanned);
         assert_eq!(general("@spice type t = array<Js.Json.t>"), NotYetPlanned);
         assert_eq!(general("@spice @spice.fallback(\"x\") type t = string"), NotYetPlanned);
