@@ -1760,15 +1760,19 @@ impl TypeContext {
 
     /// Use the world view `view` in this compilation, under `key`: the one
     /// way a compilation comes to read a view. Registers the view in the
-    /// component cache and, for each child of the view that is a path, the
-    /// (component path, alias source) pair the tables of other paths read
+    /// component cache, adopts the view it is a child of (so adoption is
+    /// transitive whatever the caller did first) and registers, for each
+    /// child of the view that is a path, the (component path, alias source)
+    /// pair the tables of other paths read
     /// (`alias_sources_for_component_path`). A store build that adopts a
     /// view records it, so a compilation reusing the build's result adopts
     /// the view as well.
     ///
     /// Cost: one probe of the component cache when the view is adopted
-    /// already; else one insert and one registration per child that is a
-    /// path.
+    /// already; else one insert, one probe for its parent, and one
+    /// registration per child that is a path, into tables given room for
+    /// them first (they are empty when a compilation starts, and growing
+    /// them pair by pair rehashed them again and again).
     pub(crate) fn adopt_view(
         &self,
         key: QualifiedModuleComponentsCacheKey,
@@ -1777,10 +1781,7 @@ impl TypeContext {
         if self.in_store_build() {
             self.record_store_effect(StoreEffect::AdoptView(key.clone(), view.clone()));
         }
-        if matches!(
-            self.qualified_module_components_cache.borrow().get(&key),
-            Some(super::env_lazy::HeldComponents::World(held)) if Arc::ptr_eq(held, &view)
-        ) {
+        if self.holds_view(&key, &view) {
             return;
         }
         if self.compiler_counters_enabled {
@@ -1788,14 +1789,42 @@ impl TypeContext {
         }
         #[cfg(test)]
         self.view_adoptions.set(self.view_adoptions.get() + 1);
-        self.suspend_store_build(|| {
-            for (component, source) in view.alias_sources() {
-                self.register_component_alias_source(*component, *source);
-            }
-        });
+        if let Some(parent) = view.parent_view() {
+            self.adopt_view(
+                QualifiedModuleComponentsCacheKey::new(*parent.access_path(), None),
+                parent,
+            );
+        }
+        let pairs = view.alias_sources();
+        if !pairs.is_empty() {
+            self.component_alias_sources
+                .borrow_mut()
+                .reserve(pairs.len());
+            self.component_paths_by_alias_source
+                .borrow_mut()
+                .reserve(pairs.len());
+            self.suspend_store_build(|| {
+                for (component, source) in pairs {
+                    self.register_component_alias_source(*component, *source);
+                }
+            });
+        }
         self.qualified_module_components_cache
             .borrow_mut()
             .insert(key, super::env_lazy::HeldComponents::World(view));
+    }
+
+    /// Whether this compilation has adopted `view` under `key`. One probe
+    /// of the component cache.
+    pub(crate) fn holds_view(
+        &self,
+        key: &QualifiedModuleComponentsCacheKey,
+        view: &Arc<super::module_view::ModuleView>,
+    ) -> bool {
+        matches!(
+            self.qualified_module_components_cache.borrow().get(key),
+            Some(super::env_lazy::HeldComponents::World(held)) if Arc::ptr_eq(held, view)
+        )
     }
 
     /// The forced declaration of child `name` (signature item `item`) of
