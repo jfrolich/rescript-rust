@@ -344,6 +344,29 @@ pub(crate) struct ModuleView {
     nodes: usize,
 }
 
+/// An alias view owns its target, so a chain of aliases is a chain of
+/// owners: free it link by link, not by recursion over its length (a chain
+/// of 10,000 overflowed a 2 MB stack). One step per link this view is the
+/// last owner of; one test for a view that is not an alias view.
+impl Drop for ModuleView {
+    fn drop(&mut self) {
+        let mut next = match self.source.take() {
+            Some((_, AliasTarget::View(target))) => Some(target),
+            _ => None,
+        };
+        while let Some(target) = next {
+            next = match Arc::into_inner(target) {
+                Some(mut owned) => match owned.source.take() {
+                    Some((_, AliasTarget::View(target))) => Some(target),
+                    _ => None,
+                },
+                // Another owner (the cell of the target's parent) frees it.
+                None => None,
+            };
+        }
+    }
+}
+
 /// Rewrites every handle the view's tables hold, each once. A unit's
 /// signature is frozen already; a child's was created by its build.
 impl FrozenExport for ModuleView {
