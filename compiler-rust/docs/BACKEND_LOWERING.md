@@ -2648,10 +2648,10 @@ The statement stack and node-list pool must be used end to end.
 | `args.rs:164` `sequence_arguments` | `) -> (Span, smallvec::SmallVec<[NodeId; 4]>) {` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `args.rs:178` `sequence_arguments` | `let mut values = smallvec::SmallVec::with_capacity(args.len());` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
 | `args.rs:184` `sequence_arguments` | `(Vec::new(), value)` | per visited node | reusable scratch buffer; clear, do not free | pending |
-| `call.rs:9` `Call` | `pub operands: Vec<NodeId>,` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `call.rs:32` `application` | `let mut reversed: Vec<_> = args.iter().rev().copied().collect();` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `call.rs:48` `application` | `let mut operands = Vec::with_capacity(1 + reversed.len());` | per construct | reusable scratch buffer; clear, do not free | pending |
-| `call.rs:66` `application` | `return Ok(Call { tail: None, operands: vec![reduced], inline: true, status, loc, external: None });` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `call.rs:9` `Call` | `pub operands: Vec<NodeId>,` | per construct | pooled source operand lists and retained spine scratch; four-byte call frame | removed |
+| `call.rs:32` `application` | `let mut reversed: Vec<_> = args.iter().rev().copied().collect();` | per construct | pooled source operand lists and retained spine scratch; four-byte call frame | removed |
+| `call.rs:48` `application` | `let mut operands = Vec::with_capacity(1 + reversed.len());` | per construct | pooled source operand lists and retained spine scratch; four-byte call frame | removed |
+| `call.rs:66` `application` | `return Ok(Call { tail: None, operands: vec![reduced], inline: true, status, loc, external: None });` | per construct | pooled source operand lists and retained spine scratch; four-byte call frame | removed |
 | `call.rs:94` `inline_external_function` | `let root = lambda.function_(function.arity, &function.params, body, function.attr.clone(), function.loc);` | per construct | borrow payload or retain typed pool handle | pending |
 | `call.rs:104` `inline_external_function` | `let mut foreign = Vec::new();` | per construct | reusable scratch buffer; clear, do not free | pending |
 | `call.rs:175` `finish_application` | `.collect();` | per construct | reusable traversal/output/argument buffer retained in lowering state | removed |
@@ -2799,7 +2799,7 @@ The statement stack and node-list pool must be used end to end.
 | `mod.rs:460` `new` | `catches: Vec::new(),` | once per unit | stays: once per unit | retained |
 | `mod.rs:461` `new` | `tries: Vec::new(),` | once per unit | stays: once per unit | retained |
 | `mod.rs:463` `new` | `catch_work: Vec::new(),` | once per unit | stays: once per unit | retained |
-| `mod.rs:560` `enter` | `let args = args.to_vec();` | per construct | reusable scratch buffer; clear, do not free | pending |
+| `mod.rs:560` `enter` | `let args = args.to_vec();` | per construct | pooled source operand lists and retained spine scratch; four-byte call frame | removed |
 | `mod.rs:713` `children` | `fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
 | `out.rs:52` `StatementStack` | `slots: Vec<Option<Slot>>,` | once per unit | stays: reusable statement-stack storage | retained |
 | `out.rs:53` `StatementStack` | `held: Vec<NodeId>,` | once per unit | stays: reusable statement-stack storage | retained |
@@ -2977,6 +2977,17 @@ warmed second pass, with unchanged recorded capacities, 20,001 source visits,
 interning's temporary serialized-key vector: constant keys now use an 8-byte
 byte-pool span and retained encoding scratch, rather than one owned vector per
 constant. Compound constant contents and canonical encodings are unchanged.
+
+The tail-call argument consumer already borrows the sequencing buffer. Its
+whole-Lambda call test exposed three earlier copies (source args, reversed spine,
+and call operands): those are now source list handles and retained spine scratch.
+A call's 64-byte cold metadata record lives in a unit pool; the walk carries a
+4-byte handle. Copied-parameter name formatting also uses retained string scratch.
+The 10,000-argument test establishes an enclosing function context, then lowers
+the entire Lambda call, arguments, sequencing and jump emission and releases the
+output twice. The measured pass allocates zero times with unchanged capacities,
+10,002 source visits and 10,001 argument visits (including the callee). This
+fixture does not measure wrapping the enclosing function into a loop.
 
 ### 7.5.1 Concurrent loop, label and recursive-value additions
 

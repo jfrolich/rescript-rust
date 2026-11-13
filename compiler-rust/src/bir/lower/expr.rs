@@ -65,7 +65,8 @@ impl State {
             return;
         }
         if let Resume::Call(call) = resume {
-            into.extend(call.operands.iter().map(|&node| (Cx { cont: Cont::Value(Tail::No), ..cx }, node)));
+            let call = self.call_plan(*call);
+            into.extend(self.source.lists.get(call.operands).iter().map(|&node| (Cx { cont: Cont::Value(Tail::No), ..cx }, node)));
             return;
         }
         if let Resume::If(conditional) = resume {

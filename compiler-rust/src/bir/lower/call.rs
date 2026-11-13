@@ -4,9 +4,13 @@ use crate::bir::ApplyId;
 use crate::lambda::ApplyStatus;
 
 /// C:1144 compile_apply_call_inner: operands saved before their single visit.
-pub(super) struct Call {
+#[derive(Clone, Copy)]
+pub(super) struct Call(pub u32);
+
+/// Cold call metadata; the source walk carries only its four-byte handle.
+pub(super) struct Plan {
     pub tail: Option<LoopRef>,
-    pub operands: Vec<NodeId>,
+    pub operands: crate::bir::ListId,
     pub inline: bool,
     pub status: ApplyStatus,
     pub loc: crate::lambda::LamLoc,
@@ -18,18 +22,29 @@ pub(super) struct Call {
 }
 
 impl State {
+    /// O(1): inspect cold call metadata without copying it down the walk.
+    pub(super) fn call_plan(&self, call: Call) -> &Plan {
+        self.calls[call.0 as usize].as_ref().expect("live call plan")
+    }
+    /// Amortized O(1): append a call plan to the retained unit pool.
+    fn save_call(&mut self, plan: Plan) -> Call {
+        let call = Call(u32::try_from(self.calls.len()).expect("call plan capacity"));
+        self.calls.push(Some(plan));
+        call
+    }
     /// C:1144 compile_apply_call_inner: flatten Na spines without repeatedly
     /// copying the growing argument prefix. Arguments retain left-to-right order.
     pub(super) fn application(
         &mut self,
         cx: Cx,
         mut callee: NodeId,
-        args: &[NodeId],
+        args: crate::bir::ListId,
         info: ApplyId,
     ) -> Result<Call, Unsupported> {
         let loc = self.arena.pools.apply[info.index()].loc;
         let status = self.arena.pools.apply[info.index()].status;
-        let mut reversed: Vec<_> = args.iter().rev().copied().collect();
+        let mut reversed = std::mem::take(&mut self.call_reversed);
+        reversed.extend(self.source.lists.get(args).iter().rev().copied());
         if status == ApplyStatus::Na {
             while let View::Apply {
                 callee: inner,
@@ -45,9 +60,9 @@ impl State {
                 callee = inner;
             }
         }
-        let mut operands = Vec::with_capacity(1 + reversed.len());
-        operands.push(callee);
-        operands.extend(reversed.into_iter().rev());
+        let mut operands = self.source.lists.push_iter(1 + reversed.len(),
+            std::iter::once(callee).chain(reversed.drain(..).rev()));
+        self.call_reversed = reversed;
         let external = self.module_field_apply_target(callee);
         let external = if let Some((module, member)) = external {
             let name = self.arena.text(member);
@@ -59,30 +74,36 @@ impl State {
                     .and_then(|r| r.module_cmj_export_lambdas(module_name))
                 {
                     if let Some(crate::lambda::Lambda::Lfunction(function)) = exports.get(name) {
-                        if function.params.len() == operands.len() - 1
+                        if function.params.len() == self.source.lists.get(operands).len() - 1
                             && crate::lambda::lam_analysis::attr_can_be_inlined(&function.attr)
                         {
-                            let reduced = self.inline_external_function(cx, function, &operands[1..])?;
-                            return Ok(Call { tail: None, operands: vec![reduced], inline: true, status, loc, external: None });
+                            let mut args = std::mem::take(&mut self.call_reversed);
+                            args.extend_from_slice(&self.source.lists.get(operands)[1..]);
+                            let reduced = self.inline_external_function(cx, function, &args);
+                            args.clear();
+                            self.call_reversed = args;
+                            let reduced = reduced?;
+                            let operands = self.source.lists.push(&[reduced]);
+                            return Ok(self.save_call(Plan { tail: None, operands, inline: true, status, loc, external: None }));
                         }
                     }
                 }
             }
             let arity = self.resolve_cmj_module_field_arity(module, name);
-            operands.remove(0);
+            operands = self.source.lists.slice(operands, 1, self.source.lists.get(operands).len() - 1);
             self.source_steps += 2; // recognized field and global callee
             Some((module, member, arity))
         } else {
             None
         };
-        Ok(Call {
+        Ok(self.save_call(Plan {
             tail: None,
             operands,
             inline: false,
             status,
             loc,
             external,
-        })
+        }))
     }
 
     /// C:1377 compile_external_field_apply. O(imported function + beta work
@@ -167,6 +188,8 @@ impl State {
         call: Call,
         children: impl Iterator<Item = Probed>,
     ) -> Probed {
+        let call = self.calls[call.0 as usize].take().expect("live call plan");
+        while self.calls.last().is_some_and(Option::is_none) { self.calls.pop(); }
         let mut outputs = std::mem::take(&mut self.argument_outputs);
         outputs.extend(children.map(|child| match child {
             Probed::Out(out) => out,
@@ -174,7 +197,7 @@ impl State {
         }));
         let mut values = std::mem::take(&mut self.argument_values);
         let method_callee = !call.inline && call.external.is_none()
-            && matches!(self.source.view(call.operands[0]), View::Prim { primitive, .. }
+            && matches!(self.source.view(self.source.lists.get(call.operands)[0]), View::Prim { primitive, .. }
                 if matches!(self.arena.primitive(primitive).primitive, crate::lambda::lam_primitive::Primitive::PjsObjectGet(_)));
         let statements = self.sequence_arguments(method_callee, &outputs, &mut values);
         outputs.clear();

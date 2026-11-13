@@ -354,6 +354,9 @@ struct State {
     tail_functions: Vec<Option<LoopRef>>,
     tail_copies: Vec<Option<VarId>>,
     tail_assignments: Vec<NodeId>,
+    tail_name: String,
+    call_reversed: Vec<NodeId>,
+    calls: Vec<Option<call::Plan>>,
     tail_order: Vec<VarId>,
     rec_members: Vec<rec::Member>,
     rec_steps: usize,
@@ -467,7 +470,7 @@ impl State {
         Self {
             tail_arguments: 0, tail_parameters: 0, tail_sort_comparisons: 0, tail_body_statements: 0,
             tail_frames: Vec::new(), tail_functions: Vec::new(), tail_copies: Vec::new(),
-            tail_assignments: Vec::new(), tail_order: Vec::new(),
+            tail_assignments: Vec::new(), tail_name: String::new(), call_reversed: Vec::new(), calls: Vec::new(), tail_order: Vec::new(),
             rec_members: Vec::new(), rec_steps: 0,
             switch_facts: vec![switch::Facts::default(); input.arena.nodes.len()],
             switches: Vec::new(), variants: Vec::new(), untagged: Vec::new(), untagged_storage: untagged::Storage::default(), untagged_dispatch: Default::default(), switch_work: Vec::new(), switch_pairs: Vec::new(),
@@ -619,11 +622,11 @@ impl ProbeRules for State {
                 0,
             ),
             View::Const { value } => self.constant(value),
-            View::Apply { callee, args, info } => {
-                let args = args.to_vec();
+            View::Apply { callee, info, .. } => {
+                let args = self.source.node(node).apply_args();
                 let tail = self.self_call(cx, callee);
-                let mut call = self.application(cx, callee, &args, info)?;
-                call.tail = tail;
+                let call = self.application(cx, callee, args, info)?;
+                self.calls[call.0 as usize].as_mut().unwrap().tail = tail;
                 return Ok(ProbePlan::Children(expr::Resume::Call(call)));
             }
             View::Fun { body, header } => {

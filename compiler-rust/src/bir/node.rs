@@ -398,6 +398,11 @@ impl Node {
         self.flags.0 |= NodeFlags::JS_CHAR_PRESENT;
         self.words[1] = code as u32;
     }
+    /// O(1): retain a source application's argument-list identity.
+    pub(super) fn apply_args(self) -> ListId {
+        assert_eq!(self.op, Op::Apply);
+        ListId(self.words[1])
+    }
     /// O(1): borrow an SBlock's list identity without copying its elements.
     pub(super) fn block_list_id(self) -> Option<ListId> {
         (self.op == Op::SBlock).then_some(ListId(self.words[0]))
