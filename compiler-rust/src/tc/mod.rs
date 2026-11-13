@@ -30,3 +30,4 @@ mod tests {
 
 pub mod graph;
 pub mod level;
+pub mod template;

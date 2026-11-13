@@ -58,12 +58,14 @@ pub struct Graph {
     pub trail: Vec<Change>,
     speculation_depth: usize,
     pub(crate) work: Vec<Ty>,
+    pub(crate) forward: Vec<super::template::Forward>,
+    pub(crate) copy_generation: u32,
 }
 
 impl Default for Graph {
     /// O(1), empty pools allocate nothing.
     fn default() -> Self {
-        Self { nodes: Vec::new(), lists: Vec::new(), params: Vec::new(), level: 1, mode: Mode::Success, trail: Vec::new(), speculation_depth: 0, work: Vec::new() }
+        Self { nodes: Vec::new(), lists: Vec::new(), params: Vec::new(), level: 1, mode: Mode::Success, trail: Vec::new(), speculation_depth: 0, work: Vec::new(), forward: Vec::new(), copy_generation: 0 }
     }
 }
 
@@ -73,6 +75,7 @@ impl Graph {
         assert!(self.nodes.len() < (1 << 30));
         let ty = Ty(self.nodes.len() as u32);
         self.nodes.push(node);
+        self.forward.push(super::template::Forward::default());
         ty
     }
 
