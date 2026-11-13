@@ -65,6 +65,7 @@ pub(super) fn string_of(b: &Bir, id: NodeId) -> Option<&str> {
             let crate::bir::JsPayload::Template(parts) = b.javascript(info) else {
                 unreachable!()
             };
+            let parts = b.template_parts(*parts);
             Some(parts[0].cooked.map_or("", |text| b.text(text)))
         }
         _ => None,

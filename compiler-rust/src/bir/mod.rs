@@ -41,6 +41,7 @@ pub struct Bir {
     // Equality is a read-only arena query. Its non-reentrant traversal borrows
     // this unit-owned scratch only for the duration of that query.
     j_equal_work: std::cell::RefCell<Vec<(NodeId, NodeId)>>,
+    j_template_scratch: j::norm::TemplateScratch,
     nodes: Vec<Node>,
     parents: Vec<Option<NodeId>>,
     cold: Vec<Option<ColdId>>,
@@ -331,6 +332,16 @@ impl Bir {
             }
             _ => panic!("block shape metadata"),
         }
+    }
+    /// Borrow immutable template quasis by their unit-pool span.
+    pub fn template_parts(&self, span: TemplateSpan) -> &[TemplatePart] {
+        &self.pools.template_parts[span.start as usize..(span.start + span.len) as usize]
+    }
+    /// Append template quasis without an owning per-template vector.
+    pub fn template_info(&mut self, parts: &[TemplatePart], tagged: bool) -> JsId {
+        let span = TemplateSpan { start: index(self.pools.template_parts.len()), len: index(parts.len()) };
+        self.pools.template_parts.extend_from_slice(parts);
+        self.js_info(if tagged { JsPayload::Tagged(span) } else { JsPayload::Template(span) })
     }
     /// O(1): borrow a property-key run without copying metadata.
     pub fn property_keys(&self, span: PropertySpan) -> &[PropertyKey] {

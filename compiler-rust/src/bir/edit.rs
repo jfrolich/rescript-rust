@@ -390,7 +390,7 @@ impl Bir {
                 else {
                     panic!("template needs segments")
                 };
-                assert_eq!(parts.len(), values.len() + 1);
+                assert_eq!(self.template_parts(*parts).len(), values.len() + 1);
             }
             View::JRecordRest { info, .. } | View::SRest { info, .. } => {
                 assert!(matches!(self.pools.js[info.index()], JsPayload::Rest(_)))
@@ -2596,13 +2596,13 @@ mod constructor_tests {
         |b| {
             let values = [leaf(&mut b), leaf(&mut b)];
             let text = b.intern_text("");
-            let info = b.js_info(JsPayload::Template(vec![
+            let info = b.template_info(&[
                 TemplatePart {
                     raw: text,
                     cooked: Some(text)
                 };
                 3
-            ]));
+            ], false);
             b.new_node(
                 View::JTemplate {
                     values: &values,
@@ -2619,13 +2619,13 @@ mod constructor_tests {
             let tag = leaf(&mut b);
             let values = [leaf(&mut b), leaf(&mut b)];
             let text = b.intern_text("");
-            let info = b.js_info(JsPayload::Tagged(vec![
+            let info = b.template_info(&[
                 TemplatePart {
                     raw: text,
                     cooked: Some(text)
                 };
                 3
-            ]));
+            ], true);
             b.new_node(
                 View::JTagged {
                     tag,

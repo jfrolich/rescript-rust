@@ -451,30 +451,31 @@ impl Importer {
                 E::TemplateLiteral(id) => {
                     aux = 1;
                     let part = self.segment(a.template(id));
-                    let info = self.b.js_info(JsPayload::Template(vec![part]));
+                    let info = self.b.template_info(&[part], false);
                     View::JTemplate { values: c, info }
                 }
                 E::InterpolatedTemplate(id, _) => {
                     if a.segments(id).len() != c.len() + 1 {
                         return Err(Unsupported("JS template segment count"));
                     }
-                    let parts = a.segments(id).iter().map(|s| self.segment(s)).collect();
-                    let info = self.b.js_info(JsPayload::Template(parts));
+                    let start = self.b.pools.template_parts.len() as u32;
+                    for segment in a.segments(id) {
+                        let part = self.segment(segment);
+                        self.b.pools.template_parts.push(part);
+                    }
+                    let info = self.b.js_info(JsPayload::Template(crate::bir::TemplateSpan { start, len: a.segments(id).len() as u32 }));
                     View::JTemplate { values: c, info }
                 }
                 E::TaggedTemplate(_, id, _) => {
                     if a.tagged(id).len() != c.len() {
                         return Err(Unsupported("JS tagged template segment count"));
                     }
-                    let parts = a
-                        .tagged(id)
-                        .iter()
-                        .map(|s| TemplatePart {
-                            raw: self.b.intern_text(s),
-                            cooked: None,
-                        })
-                        .collect();
-                    let info = self.b.js_info(JsPayload::Tagged(parts));
+                    let start = self.b.pools.template_parts.len() as u32;
+                    for s in a.tagged(id) {
+                        let raw = self.b.intern_text(s);
+                        self.b.pools.template_parts.push(TemplatePart { raw, cooked: None });
+                    }
+                    let info = self.b.js_info(JsPayload::Tagged(crate::bir::TemplateSpan { start, len: a.tagged(id).len() as u32 }));
                     View::JTagged {
                         tag: c[0],
                         values: &c[1..],
@@ -1189,6 +1190,7 @@ impl Exporter<'_> {
                 let JsPayload::Template(parts) = b.javascript(info) else {
                     return Err(Unsupported("missing J template metadata"));
                 };
+                let parts = b.template_parts(*parts);
                 if aux == 1 {
                     if parts.len() != 1 || !c.is_empty() {
                         return Err(Unsupported("invalid J literal template"));
@@ -1205,6 +1207,7 @@ impl Exporter<'_> {
                 let JsPayload::Tagged(parts) = b.javascript(info) else {
                     return Err(Unsupported("missing J tagged metadata"));
                 };
+                let parts = b.template_parts(*parts);
                 let ss = parts.iter().map(|s| b.text(s.raw).to_owned()).collect();
                 let ss = self.a.tagged_id(ss);
                 E::TaggedTemplate(c[0].expr()?, ss, self.exprs(&c[1..])?)

@@ -375,17 +375,15 @@ impl State {
             }
             // P: compile_primitive_js, template arms; J-M12 preserves raw spelling.
             Primitive::Ptemplate(segments) => {
-                norm::jm12_interpolated_template(&mut self.arena, segments.clone(), values.drain(..))
+                norm::jm12_interpolated_template(&mut self.arena, segments, values.drain(..))
             }
             Primitive::PtaggedTemplate(segments) => {
-                let parts = segments
-                    .iter()
-                    .map(|s| crate::bir::TemplatePart {
-                        raw: self.arena.intern_text(s),
-                        cooked: None,
-                    })
-                    .collect();
-                let info = self.arena.js_info(crate::bir::JsPayload::Tagged(parts));
+                let start = self.arena.pools.template_parts.len() as u32;
+                for s in segments {
+                    let raw = self.arena.intern_text(s);
+                    self.arena.pools.template_parts.push(crate::bir::TemplatePart { raw, cooked: None });
+                }
+                let info = self.arena.js_info(crate::bir::JsPayload::Tagged(crate::bir::TemplateSpan { start, len: segments.len() as u32 }));
                 plain::node(
                     &mut self.arena,
                     View::JTagged {
@@ -1350,5 +1348,63 @@ mod dictionary_allocations {
             assert_eq!(state.source_steps - visits, if spread { 50_001 } else { 30_002 });
             assert_eq!(state.primitive_steps - steps, if spread { 100_001 } else { 50_003 });
         }
+    }
+}
+
+#[cfg(test)]
+mod template_allocations {
+    use super::*;
+    use crate::lambda::{LamLoc, arena::LamArena, lam_constant::Constant as C};
+    use crate::string_literal::template_from_source;
+
+    #[test]
+    fn ten_thousand_template_operands_lower_without_allocations() {
+        for mode in 0..3 {
+            let mut a = LamArena::new();
+            let mut args: Vec<_> = (0..10_000).map(|i| {
+                if mode == 0 || i % 3 == 0 { a.const_(C::String(format!("{{literal{i}}}"))) }
+                else if i % 3 == 1 { a.prim_raw(Primitive::Ptemplate(vec![template_from_source("nested\\n").unwrap()]), &[], LamLoc::NONE) }
+                else { a.var(Ident::new("dynamic", i + 1, crate::ident::IdentFlags::NONE)) }
+            }).collect();
+            let primitive = if mode == 2 {
+                let tag = a.var(Ident::new("tag", 20_000, crate::ident::IdentFlags::NONE));
+                args.insert(0, tag);
+                Primitive::PtaggedTemplate(vec!["$".to_owned(); 10_001])
+            } else { Primitive::Ptemplate(vec![template_from_source("$").unwrap(); 10_001]) };
+            let root = a.prim_raw(primitive, &args, LamLoc::NONE);
+            let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+            let root = input.root; let mut state = State::new(input);
+            let run = |s: &mut State| {
+                let out = s.probe(Cx::returning(), root).unwrap(); let out = s.realize(Cx::returning(), out);
+                for node in s.statements.statements(out.stmts) { s.arena.release(node); }
+                if let Some(value) = out.value { s.arena.release(value); }
+                s.statements.kill(out.stmts);
+            };
+            let lists = state.arena.lists.storage_shape().0;
+            let parts = state.arena.pools.template_parts.len(); let infos = state.arena.pools.js.len();
+            run(&mut state);
+            state.arena.lists.reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
+            state.arena.pools.template_parts.reserve(state.arena.pools.template_parts.len() - parts);
+            state.arena.pools.js.reserve(state.arena.pools.js.len() - infos);
+            state.free.reserve_repeat();
+            let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
+                s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1, s.arena.pools.template_parts.capacity(),
+                s.arena.pools.js.capacity(), s.arena.pools.text.capacity(), s.arena.pools.strings.capacity(),
+                s.arena.pools.text_index.capacity(), s.arena.j_template_scratch.kept.capacity(),
+                s.argument_outputs.capacity(), s.argument_values.capacity(), s.traversal.work.capacity(),
+                s.traversal.values.capacity(), s.traversal.children.capacity()];
+            let before = capacities(&state); let text_before = state.arena.j_template_scratch.text.capacities();
+            let free_before = state.free.capacities(); let stmts = state.statements.capacities();
+            let visits = state.source_steps; let primitives = state.primitive_steps; let steps = state.arena.j_template_scratch.steps;
+            let allocations = allocation_counter::measure(|| run(&mut state));
+            println!("template mode={mode}: {allocations:?}; source={}, primitive={}, normalization={}", state.source_steps-visits, state.primitive_steps-primitives, state.arena.j_template_scratch.steps-steps);
+            assert_eq!(allocations.count_total, 0);
+            assert_eq!(capacities(&state), before); assert_eq!(state.arena.j_template_scratch.text.capacities(), text_before);
+            assert_eq!(state.free.capacities(), free_before); assert_eq!(state.statements.capacities(), stmts);
+            assert!(state.arena.j_template_scratch.kept.is_empty());
+            let expected = [(10_001, 10_001, 10_000), (10_001, 13_334, 10_000), (10_002, 13_335, 0)][mode];
+            assert_eq!((state.source_steps - visits, state.primitive_steps - primitives, state.arena.j_template_scratch.steps - steps), expected);
+        }
+        assert_eq!(std::mem::size_of::<crate::bir::TemplateSpan>(), 8);
     }
 }

@@ -1383,72 +1383,56 @@ pub fn jm11_poly_var_access(b: &mut Bir, target: NodeId, payload: bool) -> NodeI
 
 /// J-M12, E:844 interpolated_template. Segment utilities operate on literal
 /// text only; no legacy expression builder is called. Comments inhibit merging.
+#[derive(Default)]
+pub(crate) struct TemplateScratch {
+    pub(crate) text: crate::string_literal::TemplateBuffer,
+    pub(crate) kept: Vec<NodeId>,
+    pub(crate) steps: usize,
+}
+fn template_part(b: &mut Bir, text: &mut crate::string_literal::TemplateBuffer) {
+    let (source, semantic) = text.finish();
+    let raw = b.intern_text(source);
+    let cooked = Some(b.intern_text(semantic));
+    b.pools.template_parts.push(crate::bir::TemplatePart { raw, cooked });
+    text.clear();
+}
+/// J-M12: merge literal interpolations with retained spelling/operand storage.
 pub fn jm12_interpolated_template(
     b: &mut Bir,
-    segments: Vec<crate::string_literal::TemplateSegment>,
+    segments: impl AsRef<[crate::string_literal::TemplateSegment]>,
     values: impl IntoIterator<Item = NodeId, IntoIter: ExactSizeIterator>,
 ) -> NodeId {
-    use crate::string_literal::{StringLiteral, concat_template, template_from_semantic};
+    let segments = segments.as_ref();
     let values = values.into_iter();
     assert_eq!(segments.len(), values.len() + 1);
-    let mut segments = segments.into_iter();
-    let mut parts = vec![segments.next().unwrap()];
-    let mut merged = vec![];
-    let mut kept = vec![];
-    for (next, value) in segments.zip(values) {
-        let literal = if b.cold(value).and_then(|c| c.comment).is_some() {
-            None
-        } else {
+    let mut scratch = std::mem::take(&mut b.j_template_scratch);
+    debug_assert!(scratch.kept.is_empty());
+    let start = b.pools.template_parts.len() as u32;
+    scratch.text.push(segments[0].source(), segments[0].semantic());
+    for (next, value) in segments[1..].iter().zip(values) {
+        scratch.steps += 1;
+        let literal = if b.cold(value).and_then(|c| c.comment).is_some() { false } else {
             match b.view(value) {
-                View::JStr { text } => Some(template_from_semantic(b.text(text))),
+                View::JStr { text } => { scratch.text.push_semantic(b.text(text)); true }
                 View::JTemplate { info, .. } if b.node(value).aux() == 1 => {
-                    let crate::bir::JsPayload::Template(p) = b.javascript(info) else {
-                        unreachable!()
-                    };
-                    Some(match p[0].cooked {
-                        Some(s) => StringLiteral::Valid {
-                            source: b.text(p[0].raw).to_owned().into(),
-                            semantic: b.text(s).to_owned().into(),
-                        },
-                        None => StringLiteral::InvalidSource(b.text(p[0].raw).to_owned().into()),
-                    })
+                    let crate::bir::JsPayload::Template(span) = b.javascript(info) else { unreachable!() };
+                    let part = b.template_parts(*span)[0];
+                    scratch.text.push(b.text(part.raw), part.cooked.map_or("", |s| b.text(s)));
+                    true
                 }
-                _ => None,
+                _ => false,
             }
         };
-        if let Some(literal) = literal {
-            parts.push(literal);
-            parts.push(next);
-            b.release(value);
-        } else {
-            merged.push(concat_template(&parts));
-            kept.push(value);
-            parts = vec![next];
-        }
+        if literal { b.release(value); }
+        else { template_part(b, &mut scratch.text); scratch.kept.push(value); }
+        scratch.text.push(next.source(), next.semantic());
     }
-    merged.push(concat_template(&parts));
-    let parts = merged
-        .into_iter()
-        .map(|part| match part {
-            StringLiteral::Valid { source, semantic } => crate::bir::TemplatePart {
-                raw: b.intern_text(&source),
-                cooked: Some(b.intern_text(&semantic)),
-            },
-            StringLiteral::InvalidSource(source) => crate::bir::TemplatePart {
-                raw: b.intern_text(&source),
-                cooked: None,
-            },
-        })
-        .collect();
-    let info = b.js_info(crate::bir::JsPayload::Template(parts));
-    p::node(
-        b,
-        View::JTemplate {
-            values: &kept,
-            info,
-        },
-        u16::from(kept.is_empty()),
-    )
+    template_part(b, &mut scratch.text);
+    let span = crate::bir::TemplateSpan { start, len: b.pools.template_parts.len() as u32 - start };
+    let info = b.js_info(crate::bir::JsPayload::Template(span));
+    let result = p::node(b, View::JTemplate { values: &scratch.kept, info }, u16::from(scratch.kept.is_empty()));
+    scratch.kept.clear(); b.j_template_scratch = scratch;
+    result
 }
 
 fn integer_runtime_call(b: &mut Bir, modulo: bool, left: NodeId, right: NodeId) -> NodeId {

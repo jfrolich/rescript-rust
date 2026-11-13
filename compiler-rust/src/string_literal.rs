@@ -163,23 +163,23 @@ pub fn normalize_semantic(semantic: &str) -> Cow<'_, str> {
         return Cow::Borrowed(semantic);
     }
     let mut buf = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        let (valid, _, len) = get_utf_8_uchar(&bytes, index);
-        if valid {
-            buf.extend_from_slice(&bytes[index..index + len]);
-            index += len;
-        } else {
-            add_utf_8_uchar(&mut buf, bytes[index] as u32);
-            index += 1;
-        }
-    }
+    normalize_semantic_bytes_into(&bytes, &mut buf);
     Cow::Owned(string_of_bytes(buf))
 }
 
-fn decode_js_escapes_with(normalize_template_line_endings: bool, s: &[u8]) -> Option<Vec<u8>> {
+fn normalize_semantic_bytes_into(bytes: &[u8], buf: &mut Vec<u8>) {
+    buf.clear();
+    let mut index = 0;
+    while index < bytes.len() {
+        let (valid, _, len) = get_utf_8_uchar(bytes, index);
+        if valid { buf.extend_from_slice(&bytes[index..index + len]); index += len; }
+        else { add_utf_8_uchar(buf, bytes[index] as u32); index += 1; }
+    }
+}
+
+fn decode_js_escapes_into(normalize_template_line_endings: bool, s: &[u8], buf: &mut Vec<u8>) -> Option<()> {
     let len = s.len();
-    let mut buf = Vec::with_capacity(len);
+    buf.clear();
     let decode_fixed_hex = |start: usize, count: usize| -> Option<u32> {
         let mut value = 0u32;
         for &byte in s.get(start..start.checked_add(count)?)? {
@@ -287,12 +287,12 @@ fn decode_js_escapes_with(normalize_template_line_endings: bool, s: &[u8]) -> Op
                     }
                 }
                 b'x' => match decode_fixed_hex(index + 2, 2) {
-                    Some(codepoint) if add_codepoint(&mut buf, codepoint) => index += 4,
+                    Some(codepoint) if add_codepoint(buf, codepoint) => index += 4,
                     _ => return None,
                 },
                 b'u' if index + 2 < len && s[index + 2] == b'{' => {
                     match decode_braced_hex(index + 3) {
-                        Some((codepoint, next)) if add_codepoint(&mut buf, codepoint) => {
+                        Some((codepoint, next)) if add_codepoint(buf, codepoint) => {
                             index = next
                         }
                         _ => return None,
@@ -304,7 +304,7 @@ fn decode_js_escapes_with(normalize_template_line_endings: bool, s: &[u8]) -> Op
                             match decode_fixed_hex(index + 8, 4) {
                                 Some(low) if is_low_surrogate(low) => {
                                     let codepoint = combine_surrogate_pair(high, low);
-                                    if add_codepoint(&mut buf, codepoint) {
+                                    if add_codepoint(buf, codepoint) {
                                         index += 12;
                                     } else {
                                         return None;
@@ -316,12 +316,12 @@ fn decode_js_escapes_with(normalize_template_line_endings: bool, s: &[u8]) -> Op
                             return None;
                         }
                     }
-                    Some(codepoint) if add_codepoint(&mut buf, codepoint) => index += 6,
+                    Some(codepoint) if add_codepoint(buf, codepoint) => index += 6,
                     _ => return None,
                 },
                 // JavaScript non-escape characters evaluate to the character
                 // following the backslash.
-                _ => index = copy_utf8(&mut buf, index + 1)?,
+                _ => index = copy_utf8(buf, index + 1)?,
             },
             b'\r' if normalize_template_line_endings => {
                 // Template values normalize literal CR and CRLF to LF.
@@ -337,9 +337,15 @@ fn decode_js_escapes_with(normalize_template_line_endings: bool, s: &[u8]) -> Op
             b'$' if normalize_template_line_endings && index + 1 < len && s[index + 1] == b'{' => {
                 return None;
             }
-            _ => index = copy_utf8(&mut buf, index)?,
+            _ => index = copy_utf8(buf, index)?,
         }
     }
+    Some(())
+}
+
+fn decode_js_escapes_with(normalize_template_line_endings: bool, s: &[u8]) -> Option<Vec<u8>> {
+    let mut buf = Vec::with_capacity(s.len());
+    decode_js_escapes_into(normalize_template_line_endings, s, &mut buf)?;
     Some(buf)
 }
 
@@ -359,9 +365,8 @@ enum EncodeJsMode {
     Template,
 }
 
-fn encode_js(mode: EncodeJsMode, s: &str) -> String {
-    let bytes = bytes_of(s);
-    let mut buf = Vec::with_capacity(bytes.len());
+fn encode_js_into(mode: EncodeJsMode, bytes: &[u8], buf: &mut Vec<u8>) {
+    buf.clear();
     for &byte in bytes.iter() {
         match byte {
             0x08 => buf.extend_from_slice(b"\\b"),
@@ -391,6 +396,12 @@ fn encode_js(mode: EncodeJsMode, s: &str) -> String {
             _ => buf.push(byte),
         }
     }
+}
+
+fn encode_js(mode: EncodeJsMode, s: &str) -> String {
+    let bytes = bytes_of(s);
+    let mut buf = Vec::with_capacity(bytes.len());
+    encode_js_into(mode, &bytes, &mut buf);
     string_of_bytes(buf)
 }
 
@@ -537,6 +548,66 @@ pub fn concat_template(segments: &[TemplateSegment]) -> TemplateSegment {
     }
 }
 
+/// Retained storage for the same template concatenation/encoding algorithms.
+#[derive(Default)]
+pub(crate) struct TemplateBuffer {
+    source: String,
+    semantic: String,
+    normalized: String,
+    input: Vec<u8>,
+    output: Vec<u8>,
+}
+fn bytes_into(s: &str, into: &mut Vec<u8>) {
+    into.clear();
+    if s.is_ascii() || s.chars().any(|ch| ch as u32 > 0xff) { into.extend_from_slice(s.as_bytes()); }
+    else { into.extend(s.chars().map(|ch| ch as u8)); }
+}
+impl TemplateBuffer {
+    pub(crate) fn push(&mut self, source: &str, semantic: &str) {
+        self.source.push_str(source); self.semantic.push_str(semantic);
+    }
+    fn normalize(&mut self, semantic: &str) {
+        self.normalized.clear();
+        bytes_into(semantic, &mut self.input);
+        if is_valid_utf8_bytes(&self.input) { self.normalized.push_str(semantic); }
+        else {
+            normalize_semantic_bytes_into(&self.input, &mut self.output);
+            self.normalized.extend(self.output.iter().copied().map(char::from));
+        }
+    }
+    pub(crate) fn push_semantic(&mut self, semantic: &str) {
+        self.normalize(semantic);
+        bytes_into(&self.normalized, &mut self.input);
+        encode_js_into(EncodeJsMode::Template, &self.input, &mut self.output);
+        self.source.extend(self.output.iter().copied().map(char::from));
+        self.semantic.push_str(&self.normalized);
+    }
+    pub(crate) fn finish(&mut self) -> (&str, &str) {
+        bytes_into(&self.source, &mut self.input);
+        let same = decode_js_escapes_into(true, &self.input, &mut self.output).is_some()
+            && self.output.iter().copied().map(char::from).eq(self.semantic.chars());
+        if !same {
+            // concat_template falls back to template_from_semantic, including
+            // normalization of invalid byte sequences across segment boundaries.
+            let mut semantic = std::mem::take(&mut self.semantic);
+            self.normalize(&semantic);
+            semantic.clear(); semantic.push_str(&self.normalized);
+            self.semantic = semantic;
+            bytes_into(&self.semantic, &mut self.input);
+            encode_js_into(EncodeJsMode::Template, &self.input, &mut self.output);
+            self.source.clear(); self.source.extend(self.output.iter().copied().map(char::from));
+        }
+        (&self.source, &self.semantic)
+    }
+    pub(crate) fn clear(&mut self) {
+        self.source.clear(); self.semantic.clear(); self.normalized.clear(); self.input.clear(); self.output.clear();
+    }
+    #[cfg(test)]
+    pub(crate) fn capacities(&self) -> [usize; 5] {
+        [self.source.capacity(), self.semantic.capacity(), self.normalized.capacity(), self.input.capacity(), self.output.capacity()]
+    }
+}
+
 /// OCaml `String_literal.encode_char_source`: a canonical character-literal
 /// body for a code point.
 pub fn encode_char_source(codepoint: i32) -> String {
@@ -628,6 +699,32 @@ pub fn ocaml_escaped(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_template_concatenation_matches_owned_boundary_rules() {
+        let segments = [
+            template_from_semantic(""), template_from_semantic("\n"),
+            template_from_source("$").unwrap(), template_from_source("{").unwrap(),
+            template_from_source("\\x32").unwrap(), template_from_source("0").unwrap(),
+            template_from_semantic("λ"), template_from_semantic("ÿ"),
+            invalid_string_for_recovery("\\"), invalid_string_for_recovery("${"),
+        ];
+        let mut scratch = TemplateBuffer::default();
+        for a in &segments { for b in &segments { for c in &segments {
+            let expected = concat_template(&[a.clone(), b.clone(), c.clone()]);
+            for part in [a, b, c] { scratch.push(part.source(), part.semantic()); }
+            let (raw, cooked) = scratch.finish();
+            assert_eq!((raw, cooked), (expected.source(), expected.semantic()));
+            scratch.clear();
+        } } }
+        for semantic in ["", "${", "\\n", "λ", "ÿ", "Î»", "\r\n"] {
+            let expected = concat_template(&[template_from_semantic(semantic)]);
+            scratch.push_semantic(semantic);
+            let (raw, cooked) = scratch.finish();
+            assert_eq!((raw, cooked), (expected.source(), expected.semantic()));
+            scratch.clear();
+        }
+    }
 
     #[test]
     fn decodes_escapes_and_surrogate_pairs() {

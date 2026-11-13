@@ -59,6 +59,7 @@ pub fn equal(b: &Bir, left: NodeId, right: NodeId, steps: &mut usize) -> bool {
             {
                 match (b.javascript(x), b.javascript(y)) {
                     (JsPayload::Template(x), JsPayload::Template(y)) => {
+                        let (x, y) = (b.template_parts(*x), b.template_parts(*y));
                         x.len() == y.len()
                             && x.iter()
                                 .zip(y)

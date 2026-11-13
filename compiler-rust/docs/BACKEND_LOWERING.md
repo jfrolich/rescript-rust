@@ -2814,8 +2814,8 @@ The statement stack and node-list pool must be used end to end.
 | `prim.rs:195` `finish_primitive_payload` | `let mut keys = Vec::new();` | per visited node | Dictionary extraction and spread share retained cleared object key/value buffers with record lowering; final keys append to the unit property pool. | removed |
 | `prim.rs:196` `finish_primitive_payload` | `let mut kept = Vec::new();` | per visited node | Dictionary extraction and spread share retained cleared object key/value buffers with record lowering; final keys append to the unit property pool. | removed |
 | `prim.rs:272` `finish_primitive_payload` | `let info = self.arena.js_info(crate::bir::JsPayload::Block(tag.clone()));` | per visited node | A unit shape interner returns a shared JsId; only the first distinct metadata key owns a tag clone, never each block occurrence. | removed |
-| `prim.rs:372` `finish_primitive_payload` | `norm::jm12_interpolated_template(&mut self.arena, segments.clone(), values.into_vec())` | per visited node | borrow payload or retain typed pool handle | pending |
-| `prim.rs:381` `finish_primitive_payload` | `.collect();` | per visited node | reusable scratch buffer; clear, do not free | pending |
+| `prim.rs:372` `finish_primitive_payload` | `norm::jm12_interpolated_template(&mut self.arena, segments.clone(), values.into_vec())` | per visited node | Borrow source segments; output quasis append directly to the unit TemplatePart pool and interpolation uses retained normalization storage. | removed |
+| `prim.rs:381` `finish_primitive_payload` | `.collect();` | per visited node | Borrow source segments; output quasis append directly to the unit TemplatePart pool and interpolation uses retained normalization storage. | removed |
 | `prim_block.rs:13` `flat_make_field` | `let mut segments = smallvec::SmallVec::<[&str; 4]>::new();` | per visited node | Converted: spell segments from retained node scratch into retained string storage without a segment vector. | converted |
 | `prim_block.rs:14` `flat_make_field` | `let mut visited = smallvec::SmallVec::<[NodeId; 4]>::new();` | per visited node | Converted: borrow and clear the unit node scratch on both successful and failed module-path probes. | converted |
 | `record.rs:38` `record_copy` | `let mut operands = vec![*init];` | per construct | Candidate operands use State-owned scratch, cleared on both successful recognition and early rejection. | removed |
@@ -3145,6 +3145,28 @@ nominal undefined (an option-none marker) and decorated constructor undefined.
 | `konst` nominal bigint normalization | parser result and formatted string | removed: caller-owned normalization buffer |
 | `konst` runtime bigint prefix | formatted string | removed: retained encoding string |
 | `konst` constructor/pointer comments | deep constant payload clone | removed: borrowed decoding and retained spelling spans |
+
+Templates now address unit-owned quasi runs with 8-byte TemplateSpans; neither
+plain nor tagged template metadata owns a vector. Primitive lowering borrows the
+source segments, and J-M12 retains its kept operands and source/semantic/encoding
+buffers. The owned and retained APIs share byte normalization, escape decoding
+and encoding cores; boundary tests compare 1,000 segment triples, invalid recovery
+sources and native/byte-model Unicode. Concatenation still checks the joined raw
+spelling against joined semantics and canonicalizes only when that check fails.
+
+Three whole-Lambda 10,000-operand fixtures measure zero warmed allocations with
+unchanged recorded capacities: all-literal interpolation (including an actual
+`${` boundary requiring canonicalization), mixed literal/template/dynamic
+interpolation, and tagged templates. Exact source/primitive/normalization counts
+are 10,001/10,001/10,000, 10,001/13,334/10,000 and 10,002/13,335/0. Comments still
+inhibit literal merging; nested tagged/ordinary templates retain separate shapes.
+
+| Newly found site | Previous ownership | Disposition |
+| --- | --- | --- |
+| `JsPayload::Template` / `Tagged` | per-template quasi Vec | removed: unit TemplateSpan |
+| `jm12_interpolated_template` parts / merged / kept | temporary vectors per normalization | removed: streaming pooled quasis and retained kept buffer |
+| `jm12_interpolated_template` literal reconstruction | cloned source/cooked strings | removed: borrowed strings appended to retained buffers |
+| template concatenation/encoding helpers | temporary decoded/encoded vectors and strings | removed from lowering path: shared cores accept retained storage |
 
 ### 7.5.1 Concurrent loop, label and recursive-value additions
 

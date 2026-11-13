@@ -425,6 +425,9 @@ pub struct RestSpan {
     pub(crate) start: u32,
     pub(crate) len: u32,
 }
+/// A flat immutable run of template quasis in the unit pool.
+#[derive(Debug, Clone, Copy)]
+pub struct TemplateSpan { pub(crate) start: u32, pub(crate) len: u32 }
 /// JavaScript metadata without child ownership. All expressions stay in node lists.
 #[derive(Debug, Clone)]
 pub enum JsPayload {
@@ -439,9 +442,9 @@ pub enum JsPayload {
     /// JSX positional shape.
     Jsx(JsxHeader),
     /// Untagged template quasis; one more than interpolations.
-    Template(Vec<TemplatePart>),
+    Template(TemplateSpan),
     /// Tagged template raw/cooked quasis.
-    Tagged(Vec<TemplatePart>),
+    Tagged(TemplateSpan),
     /// Fields excluded from a record-rest expression/destructuring.
     Rest(RestSpan),
 }
@@ -481,6 +484,7 @@ pub(super) struct Pools {
     pub catches: Vec<CatchHeader>,
     pub apply: Vec<ApInfo>,
     pub js: Vec<JsPayload>,
+    pub template_parts: Vec<TemplatePart>,
     pub block_index: hashbrown::HashTable<(u64, JsId, u32, u32)>,
     pub block_key_bytes: Vec<u8>,
     pub block_key_scratch: Vec<u8>,
