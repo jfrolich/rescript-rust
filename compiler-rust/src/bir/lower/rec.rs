@@ -20,7 +20,14 @@ impl State {
             }
         }
         let base = self.rec_values.len() as u32;
-        self.rec_values.resize(self.rec_values.len() + values.len(), None);
+        let count = values.len();
+        self.rec_values.resize(self.rec_values.len() + count, None);
+        for i in 0..count {
+            let View::LetRec { values, first, .. } = self.source.view(node) else { unreachable!() };
+            let value = values[i];
+            let var = VarId(first.0 + i as u32);
+            self.register_tail_function(value, var);
+        }
         Ok(Group { node, base, start: self.statements.mark() })
     }
 

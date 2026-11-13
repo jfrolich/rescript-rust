@@ -27,6 +27,7 @@ pub(super) enum Resume {
     Fun {
         body: NodeId,
         header: FuncId,
+        loop_: Option<LoopRef>,
     },
 }
 impl State {
@@ -98,9 +99,10 @@ impl State {
                 ));
                 into.push((cx, second));
             }
-            Resume::Fun { body, header } => {
+            Resume::Fun { body, header, loop_ } => {
                 let mut function = Cx::returning();
                 function.return_unit = self.arena.function_attributes(header).return_unit;
+                function.cont = Cont::Effect(Tail::Return(Ret::Named { loop_, in_catch: false }));
                 into.push((function, body));
             }
         }
@@ -249,13 +251,14 @@ impl State {
                     self.probe_leaf(cx, value)
                 } else { Probed::Out(out) }
             }
-            Resume::Fun { header, .. } => {
+            Resume::Fun { header, loop_, .. } => {
                 let Probed::Out(body) = children.next().expect("function body") else {
                     unreachable!("return was realized")
                 };
                 assert!(body.value.is_none());
                 let list = self.statements.take_list(&mut self.arena, body.stmts);
                 let body = self.arena.block_from_list(list);
+                let body = if let Some(frame) = loop_ { self.loop_function_body(frame, header, body) } else { body };
                 let source_loc = self
                     .located_functions
                     .get(header.index())

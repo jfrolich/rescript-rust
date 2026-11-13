@@ -556,7 +556,7 @@ fn application_width_and_na_spines_have_linear_step_counts() {
 }
 
 #[test]
-fn unsupported_arguments_keep_their_own_reason_and_loops_wait_for_rec() {
+fn unsupported_arguments_keep_their_own_reason() {
     use crate::lambda::{ApInfo, ApplyStatus, LamLoc};
     let mut source = LamArena::new();
     let f = source.var(Ident::new("f", 1, IdentFlags::NONE));
@@ -568,8 +568,6 @@ fn unsupported_arguments_keep_their_own_reason_and_loops_wait_for_rec() {
     let root = input.root;
     let mut state = State::new(input);
     assert!(matches!(state.probe(Cx::value(), root), Err(Unsupported("loop"))));
-    let cx = Cx::new(Cont::Effect(Tail::Return(Ret::Named { loop_: Some(LoopRef(0)), in_catch: false })));
-    assert!(matches!(state.probe(cx, root), Err(Unsupported("let rec"))));
 }
 
 #[test]

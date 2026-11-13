@@ -75,14 +75,6 @@ impl State {
         then_: NodeId,
         else_: NodeId,
     ) -> Result<Conditional, Unsupported> {
-        if matches!(
-            cx.cont,
-            Cont::Effect(Tail::Return(Ret::Named { loop_: Some(_), .. }))
-                | Cont::Value(Tail::Return(Ret::Named { loop_: Some(_), .. }))
-        ) {
-            // R6 needs the tail-loop record owned by the let-rec slice.
-            return Err(Unsupported("let rec"));
-        }
         let returns = matches!(cx.cont, Cont::Effect(Tail::Return(_)));
         // R5 step 0, C:3691 compile_if_unit_return_tail_block: decided before
         // the branches are lowered, so nothing is lowered and discarded.
@@ -1454,7 +1446,7 @@ mod tests {
         });
     }
     #[test]
-    fn r6_tail_loop_is_unsupported_until_let_rec() {
+    fn r6_free_conditionals_accept_a_tail_continuation() {
         let mut a = LamArena::new();
         let (yes, no) = (int(&mut a, 1), int(&mut a, 2));
         let conditional = if_(&mut a, 1, yes, no);
@@ -1472,10 +1464,9 @@ mod tests {
                 Cont::Effect(Tail::Return(named)),
                 Cont::Value(Tail::Return(named)),
             ] {
-                assert!(matches!(
-                    state.probe(Cx::new(cont), node),
-                    Err(Unsupported("let rec"))
-                ));
+                let output = state.probe(Cx::new(cont), node).unwrap();
+                let out = state.realize(Cx::new(cont), output);
+                assert_eq!(out.finished, if matches!(cont, Cont::Effect(_)) { Finished::True } else { Finished::False });
             }
         }
     }
@@ -1592,7 +1583,7 @@ mod tests {
     }
 
     #[test]
-    fn q5_nested_rec_keeps_the_let_rec_boundary() {
+    fn q5_nested_rec_in_a_conditional_matches_legacy() {
         let mut a = LamArena::new();
         let id = Ident::new("nested", 2, IdentFlags::NONE);
         let body = a.const_(Constant::JsTrue);
@@ -1601,13 +1592,7 @@ mod tests {
         let yes = a.letrec(&[(id, function)], yes);
         let no = a.const_(Constant::JsFalse);
         let root = if_(&mut a, 1, yes, no);
-        let input = bridge::import_lambda(&a, root).unwrap();
-        let root = input.root;
-        let mut state = State::new(input);
-        assert!(matches!(
-            state.probe(Cx::returning(), root),
-            Err(Unsupported("let rec"))
-        ));
+        super::super::oracle_tests::compare(a, root);
     }
 
     // Level-J rule tests. The lowering cannot yet produce a constant test,

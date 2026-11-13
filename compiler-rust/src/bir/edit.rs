@@ -290,7 +290,7 @@ impl Bir {
                 .map(|i| VarId(first.0 + i))
                 .collect(),
             View::Fun { header, .. } | View::JFun { header, .. } => {
-                self.function(header).params.iter().collect()
+                (0..self.function(header).params.len()).map(|i| self.function_parameter(header, i)).collect()
             }
             View::Catch { header, .. } => self.catch(header).params.iter().collect(),
             _ => SmallVec::new(),
@@ -1122,9 +1122,18 @@ impl Bir {
             match self.view(id) {
                 View::Fun { header, .. } | View::JFun { header, .. } => {
                     let old = *self.function(header);
-                    let params = VarSpan {
-                        start: old.params.iter().next().map_or(0, |v| vars[&v].0),
-                        len: old.params.len,
+                    let params = if old.flags & FuncHeader::INDIRECT_PARAMS != 0 {
+                        let start = index(self.pools.function_params.len());
+                        for i in 0..old.params.len() {
+                            let original = self.function_parameter(header, i);
+                            self.pools.function_params.push(vars[&original]);
+                        }
+                        VarSpan { start, len: old.params.len }
+                    } else {
+                        VarSpan {
+                            start: old.params.iter().next().map_or(0, |v| vars[&v].0),
+                            len: old.params.len,
+                        }
                     };
                     let new = self.function_header(
                         params,

@@ -339,6 +339,14 @@ impl Bir {
     pub fn function(&self, id: FuncId) -> &FuncHeader {
         &self.pools.funcs[id.index()]
     }
+    /// O(1): read a parameter, including a lowered loop's noncontiguous copies.
+    pub fn function_parameter(&self, id: FuncId, index: usize) -> VarId {
+        let h = self.function(id);
+        assert!(index < h.params.len());
+        if h.flags & FuncHeader::INDIRECT_PARAMS != 0 {
+            self.pools.function_params[h.params.start as usize + index]
+        } else { VarId(h.params.start + index as u32) }
+    }
     /// Read a function's cold attributes.
     pub fn function_attributes(&self, id: FuncId) -> &FunctionAttribute {
         &self.pools.attrs[self.function(id).attr as usize]

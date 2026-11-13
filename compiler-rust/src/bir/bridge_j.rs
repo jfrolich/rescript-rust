@@ -1166,8 +1166,8 @@ impl Exporter<'_> {
                 let h = b.function(header);
                 let attr = b.function_attributes(header);
                 self.ids.clear();
-                for v in h.params.iter() {
-                    self.ids.push(self.ident(v)?);
+                for i in 0..h.params.len() {
+                    self.ids.push(self.ident(b.function_parameter(header, i))?);
                 }
                 let params = self.a.ident_list(&self.ids);
                 let directive = attr.directive.as_deref().map(|s| self.a.str(s));
