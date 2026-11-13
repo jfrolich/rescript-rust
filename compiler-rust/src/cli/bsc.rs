@@ -494,6 +494,7 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
         .and_then(|spec| parse_package_output(spec));
 
     let compiler_opts = CompilerOptions {
+        checker: crate::driver::CheckerChoice::from_env(),
         derived_census: CompilerOptions::derived_census_from_env(),
         derived_path: crate::driver::DerivedPath::from_env(),
         backend: crate::bir::shadow::BackendMode::from_env(),
