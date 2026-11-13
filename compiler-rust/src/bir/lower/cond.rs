@@ -79,6 +79,7 @@ impl State {
         // R5 step 0, C:3691 compile_if_unit_return_tail_block: decided before
         // the branches are lowered, so nothing is lowered and discarded.
         let unit = returns
+            && !matches!(cx.cont, Cont::Effect(Tail::Return(Ret::Named { loop_: Some(_), .. })))
             && cx.return_unit
             && kind == Kind::If
             && self.trivial_unit(then_)
@@ -841,6 +842,9 @@ impl State {
     ) -> Probed {
         let yes = self.run(cx, yes);
         let no = self.run(cx, no);
+        if matches!(cx.cont, Cont::Effect(Tail::Return(Ret::Named { loop_: Some(_), .. }))) {
+            return self.tail_return_conditional(parts, test, yes, no);
+        }
         // Step 1, C:5241 try_fold_effect_only_return_tail, behind the legacy
         // gate lambda_contains_statement_value_form (C:5139): `folds`.
         if parts.folds && self.returns_after_effects(yes) && self.returns_after_effects(no) {
@@ -872,6 +876,54 @@ impl State {
             self.unnest(parts.start);
         }
         Probed::Out(self.output(parts.start, None, Finished::False))
+    }
+
+    /// R6: O(consumed statements), with the fallthrough run kept in place.
+    /// Unlike R5, do not discard unit returns or fold non-free return tails.
+    /// A unit return exits the loop; falling through repeats it.
+    fn tail_return_conditional(&mut self, parts: Parts, test: NodeId, yes: Span, no: Span) -> Probed {
+        let conjunction = matches!(self.arena.view(test), View::JBin { .. })
+            && self.arena.node(test).aux() == crate::js_ir::BinOp::And as u16;
+        let continues = self.statements.last(yes).is_some_and(|s| matches!(self.arena.view(s), View::SContinue { .. }));
+        let terminal = self.statements.last(no).is_some_and(|s| matches!(self.arena.view(s), View::SReturn { .. } | View::SThrow { .. } | View::SBreak { .. }));
+        if conjunction && continues && terminal {
+            let then_ = self.merge_tail_guard(no);
+            let else_ = self.arena.new_node(View::SBlock { statements: &[] }, 0);
+            let condition = norm::je8_not(&mut self.arena, test);
+            let statement = self.arena.new_node(View::SIf { condition, then_, else_: Some(else_) }, 0);
+            self.place(parts.head, statement);
+        } else {
+            self.if_in_place(parts.head, test, yes, no);
+            let prelude = Span { start: parts.start, len: parts.head - parts.start };
+            if self.statements.first(prelude).is_some() { self.block_statement(parts.head); }
+        }
+        self.unnest(parts.start);
+        Probed::Out(self.output(parts.start, None, Finished::False))
+    }
+
+    /// R6 guard merge (legacy merge_terminal_guard_fallthrough_else): O(s)
+    /// consumed statements; inspect the leading guard and terminal endpoints.
+    fn merge_tail_guard(&mut self, run: Span) -> NodeId {
+        let merge = self.statements.first_single_slot(run).and_then(|(slot, statement)| {
+            let View::SIf { condition, then_, else_ } = self.arena.view(statement) else { return None };
+            let empty = else_.is_none_or(|b| matches!(self.arena.view(b), View::SBlock { statements } if statements.is_empty()));
+            let View::SBlock { statements } = self.arena.view(then_) else { return None };
+            let terminal = statements.last().is_some_and(|&s| self.terminal(s));
+            (empty && terminal && self.statements.last(run) != Some(statement)).then_some((slot, statement, condition, then_))
+        });
+        if let Some((slot, statement, condition, then_)) = merge {
+            self.statements.clear(slot);
+            self.arena.detach(condition);
+            self.arena.detach(then_);
+            self.arena.release(statement);
+            let rest = self.statements.take_list(&mut self.arena, run);
+            let else_ = self.arena.block_from_list(rest);
+            let statement = self.arena.new_node(View::SIf { condition, then_, else_: Some(else_) }, 0);
+            self.arena.new_node(View::SBlock { statements: &[statement] }, 0)
+        } else {
+            let list = self.statements.take_list(&mut self.arena, run);
+            self.arena.block_from_list(list)
+        }
     }
 
     /// C:5241: the run is expression statements followed by one `return`.

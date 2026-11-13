@@ -7492,3 +7492,37 @@ impl StrSw {
         p.has_default.then(|| a.list(self.actions)[p.n_cases()])
     }
 }
+
+#[cfg(test)]
+mod tail_conditional_oracle_tests {
+    use super::*;
+
+    #[test]
+    fn q3_unit_conditional_distinguishes_return_rows() {
+        let mut a = LamArena::new();
+        let c = a.var(Ident::new("c", 1, crate::ident::IdentFlags::NONE));
+        let t = a.unit();
+        let e = a.unit();
+        let root = a.if_raw(c, t, e);
+        let mut ordinary = LambdaCompiler::new();
+        let r5 = ordinary.with_return_unit_context(true, |compiler| {
+            compiler.compile_return_output(&mut a, root)
+        });
+        let mut looping = LambdaCompiler::new();
+        let mut frame = TailLoopState::new(vec![], vec![]);
+        let r6 = looping.with_return_unit_context(true, |compiler| {
+            compiler.compile_tail_loop_if_return_output(&mut a, c, t, e, &mut frame)
+        });
+        assert!(r5.block.is_empty());
+        assert_eq!(r6.block.len(), 1);
+        assert!(matches!(looping.j.sk(r6.block[0]), StmtKind::Return(_)));
+        let print = |compiler: LambdaCompiler, output: BlockOutput| {
+            let program = DepsProgram { program: Program::new_in(output.block, vec![], compiler.j), modules: vec![], side_effect: None };
+            crate::js_ir::print_deps_program_with_directives_and_options(&program, None, &[], false, false, false)
+        };
+        let r5 = print(ordinary, r5);
+        let r6 = print(looping, r6);
+        eprintln!("R5: {r5:?}\nR6: {r6:?}");
+        assert_ne!(r5, r6);
+    }
+}

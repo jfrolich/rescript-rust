@@ -220,4 +220,93 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn q3_unit_branch_must_return_from_the_loop() {
+        use crate::lambda::{arena::LamArena, FunctionAttribute, LamLoc};
+        let mut a = LamArena::new();
+        let (f, c) = (ident("f", 1), ident("c", 2));
+        let t = a.unit();
+        let e = a.unit();
+        let condition = a.var(c);
+        let branch = a.if_raw(condition, t, e);
+        let arg = a.var(c);
+        let again = call(&mut a, f, &[arg]);
+        let condition = a.var(c);
+        let body = a.if_raw(condition, branch, again);
+        let mut attr = FunctionAttribute::default();
+        attr.return_unit = true;
+        let function = a.function_(1, &[c], body, attr, LamLoc::NONE);
+        let end = a.var(f);
+        let root = a.letrec(&[(f, function)], end);
+        super::super::oracle_tests::compare(a, root);
+    }
+
+
+    fn conditional_shape(a: &mut crate::lambda::arena::LamArena, shape: usize, stamp: i32) -> crate::lambda::arena::Lam {
+        use crate::lambda::{LamLoc, SwitchDispatch, SwitchKey};
+        use crate::lambda::lam_primitive::Primitive as P;
+        let x = ident("x", 2);
+        let value = a.var(x);
+        match shape {
+            0 => value,
+            1 | 2 => {
+                let effect = call(a, ident("effect", 10), &[value]);
+                let result = a.var(x);
+                if shape == 1 { a.seq_raw(effect, result) }
+                else { a.let_(LetKind::Strict, ident("bound", stamp), effect, result) }
+            }
+            3 => {
+                let test = a.var(x);
+                let other = a.unit();
+                a.if_raw(test, value, other)
+            }
+            4 => {
+                let other = a.var(ident("y", 3));
+                a.prim_raw(P::Psequand, &[value, other], LamLoc::NONE)
+            }
+            5 => call(a, ident("f", 1), &[value]),
+            6 => {
+                let exit = a.static_raise(stamp, &[]);
+                a.static_catch(exit, stamp, &[], value)
+            }
+            _ => {
+                let other = a.unit();
+                let actions = a.add_list(&[value, other]);
+                let info = a.add_switch(true, [SwitchKey::Int(0), SwitchKey::Int(1)], false, [], false, SwitchDispatch::Direct);
+                let test = a.var(x);
+                a.switch_raw(test, actions, info)
+            }
+        }
+    }
+
+    #[test]
+    fn r6_generated_conditionals_match_legacy_in_loop_functions() {
+        use crate::lambda::{arena::LamArena, LamLoc};
+        use crate::lambda::lam_primitive::Primitive as P;
+        for condition in 0..3 {
+            for yes in 0..8 {
+                for no in 0..8 {
+                    let mut a = LamArena::new();
+                    let test = a.var(ident("x", 2));
+                    let test = match condition {
+                        0 => test,
+                        1 => { let y = a.var(ident("y", 3)); a.prim_raw(P::Psequand, &[test, y], LamLoc::NONE) },
+                        _ => { let effect = call(&mut a, ident("effect", 10), &[]); a.let_(LetKind::Strict, ident("test", 11), effect, test) },
+                    };
+                    let then_ = conditional_shape(&mut a, yes, 20);
+                    let else_ = conditional_shape(&mut a, no, 30);
+                    let branch = a.if_raw(test, then_, else_);
+                    let arg = a.var(ident("x", 2));
+                    let again = call(&mut a, ident("f", 1), &[arg]);
+                    let test = a.var(ident("x", 2));
+                    let body = a.if_raw(test, branch, again);
+                    let root = wrap(&mut a, ident("f", 1), &[ident("x", 2)], body);
+                    eprintln!("R6 shape condition={condition} yes={yes} no={no}");
+                    super::super::oracle_tests::compare(a, root);
+                }
+            }
+        }
+    }
+
 }
