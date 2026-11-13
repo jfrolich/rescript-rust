@@ -3954,25 +3954,44 @@ impl LambdaCompiler {
         // `NeedValue should_return` first and emit `return e ? a : b` when
         // neither needs statements. A branch with a self tail call compiles
         // to the loop jump there, so it always has a block.
-        if !function_has_self_tailcall(a, &tail_loop.tail_targets, then_)
-            && !function_has_self_tailcall(a, &tail_loop.tail_targets, else_)
+        let no_self_calls = !function_has_self_tailcall(a, &tail_loop.tail_targets, then_)
+            && !function_has_self_tailcall(a, &tail_loop.tail_targets, else_);
+        let (then_block, else_block) = if no_self_calls
+            && !Self::lambda_contains_statement_value_form(a, then_)
+            && !Self::lambda_contains_statement_value_form(a, else_)
         {
-            let then_value = self.compile_expr(a, then_);
-            let else_value = self.compile_expr(a, else_);
-            if then_value.prelude.is_empty() && else_value.prelude.is_empty() {
+            // compiler/core/lam_compile.ml:1258-1259,1636-1712 probes in
+            // NeedValue should_return: short circuits stay conditionals in
+            // that context, not the &&/|| produced by compile_expr. Reuse the
+            // return blocks when they cannot fold rather than compiling again.
+            let then_block = self.compile_tail_loop_return_block(a, then_, tail_loop);
+            let else_block = self.compile_tail_loop_return_block(a, else_, tail_loop);
+            if let (Some(then_value), Some(else_value)) = (
+                self.try_fold_effect_only_return_tail(&then_block),
+                self.try_fold_effect_only_return_tail(&else_block),
+            ) {
                 let mut block = cond_compiled.prelude;
-                let expr = JE::cond(
-                    cond_compiled.expr,
-                    then_value.expr,
-                    else_value.expr,
-                    &mut self.j,
-                );
+                let expr = JE::cond(cond_compiled.expr, then_value, else_value, &mut self.j);
                 block.push(JS::return_(expr, &mut self.j));
                 return BlockOutput::finished(block);
             }
-        }
-        let then_block = self.compile_tail_loop_return_block(a, then_, tail_loop);
-        let else_block = self.compile_tail_loop_return_block(a, else_, tail_loop);
+            (then_block, else_block)
+        } else {
+            if no_self_calls {
+                let then_value = self.compile_expr(a, then_);
+                let else_value = self.compile_expr(a, else_);
+                if then_value.prelude.is_empty() && else_value.prelude.is_empty() {
+                    let mut block = cond_compiled.prelude;
+                    let expr = JE::cond(cond_compiled.expr, then_value.expr, else_value.expr, &mut self.j);
+                    block.push(JS::return_(expr, &mut self.j));
+                    return BlockOutput::finished(block);
+                }
+            }
+            (
+                self.compile_tail_loop_return_block(a, then_, tail_loop),
+                self.compile_tail_loop_return_block(a, else_, tail_loop),
+            )
+        };
 
         let mut block = cond_compiled.prelude;
 
