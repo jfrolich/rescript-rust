@@ -2601,9 +2601,6 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
     ) -> RawLambda {
         let rb = self.b;
         if cstr.cstr_inlined.is_some() {
-            let crate::types::ConstructorKind::Ordinary(reference) = cstr.cstr_kind else {
-                unreachable!("inline records belong to ordinary constructors")
-            };
             let elem = match args {
                 [arg] => match &arg.exp_desc {
                     ExpressionDesc::Texp_record { fields, extended_expression, .. } => {
@@ -2616,10 +2613,10 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                     }
                     _ => self.convert_expr_raw(arg),
                 },
-                [] => return self.construct_of(loc, cstr, reference, &[], None),
+                [] => return self.construct_inline_of(cstr, &[]),
                 _ => unreachable!("inline record constructors have one argument"),
             };
-            return self.construct_of(loc, cstr, reference, &[elem], None);
+            return self.construct_inline_of(cstr, &[elem]);
         }
 
         match cstr.cstr_kind {
@@ -2652,6 +2649,21 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         }
     }
 
+    /// An inline record already carries its constructor representation,
+    /// including extension identity for extensible variants and exceptions.
+    /// Cost: O(1); no wrapper block is allocated.
+    fn construct_inline_of(
+        &self,
+        cstr: &crate::types::ConstructorDescription,
+        elems: &[RawLambda],
+    ) -> RawLambda {
+        match elems {
+            [arg] => *arg,
+            [] => self.b.const_(raw_constructor_constant(self.type_ctx, cstr, 0)),
+            _ => unreachable!("inline record constructors have one argument"),
+        }
+    }
+
     /// translcore.ml `Texp_construct` of an ordinary constructor: the value `cstr` makes of its lowered arguments
     /// `elems`. `payload` is the type of the argument, and the environment
     /// that was typed in, when there is exactly one.
@@ -2666,13 +2678,8 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         payload: Option<(TypeExprRef, EnvRef)>,
     ) -> RawLambda {
         let rb = self.b;
-        // An inline record already carries the constructor's representation.
         if cstr.cstr_inlined.is_some() {
-            return match elems {
-                [arg] => *arg,
-                [] => rb.const_(raw_constructor_constant(self.type_ctx, cstr, 0)),
-                _ => unreachable!("inline record constructors have one argument"),
-            };
+            return self.construct_inline_of(cstr, elems);
         }
         match reference.representation(self.type_ctx) {
             crate::types::VariantConstructorCase::Constant(_) => match cstr.cstr_name.as_str() {
@@ -7231,6 +7238,24 @@ mod tests {
     use crate::parser::ast::Attributes;
 
     use crate::types::env::initial_env;
+
+    #[test]
+    fn inline_extension_records_keep_their_representation() {
+        let js = crate::driver::compile_source_to_js_with_options(
+            r#"
+                type t = ..
+                type t += Point({@as("x-coord") x: int, y: int})
+                exception Failed({code: int})
+                let point = Point({x: 1, y: 2})
+                let failure = Failed({code: 3})
+            "#,
+            "InlineExtension.res",
+            &crate::driver::CompilerOptions::default(),
+        ).unwrap();
+        assert!(js.contains("\"x-coord\": 1"), "{js}");
+        assert!(js.contains("code: 3"), "{js}");
+        assert_eq!(js.matches("RE_EXN_ID:").count(), 2, "{js}");
+    }
 
     #[test]
     fn nullary_unboxed_constructor_keeps_constructor_metadata_in_raw_lambda() {
