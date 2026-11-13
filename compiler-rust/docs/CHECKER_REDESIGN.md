@@ -1,7 +1,8 @@
 # The shared world and the type checker core: design and staged plan
 
 Status: design. This document is the spec for the stages in section F. Stage
-P0 has landed and the sound part of P1 is in pull request #124.
+P0 has landed and the sound part of P1 is in pull request #124. What has
+merged since, checked against the code, is in [STATUS.md](STATUS.md).
 
 **Amended after stage P1.** P1 found that the premise of the new checker core
 is false: sharing variable-free types between uses is observable, down to the
@@ -1604,9 +1605,9 @@ stated reason). Only additions are listed per stage.
 |---|---|---|---|---|---|
 | P0 | Differential tooling and counters | - | 600 | 0 | ~~yes~~ landed (#122) |
 | P1 | ~~Ground flag and fast paths~~ Level updates of plain types without a snapshot | P0 | ~~900~~ 400 | ~~4-6%~~ 1.4% measured | ~~yes~~ done in #124; the rest of the original stage is withdrawn. Do not hand out any "skip ground types" task |
-| P1b | `instance` returns a non-generic root at once (new, I.5) | P1; the fixtures of I.2.3 | 30 plus tests | 0.9% measured | yes: one function. Add the fixtures first; gate is no difference in `compare_checker_builds.py` on both projects |
-| P2 | Infer instead of unifying with a fresh variable | P0 | 700 | 1.5-2.5% | application: yes; other constructs: one at a time, yes. The level update is never skipped (C.9, amended) |
-| P3 | Publish into the shared pool; encode later | P0 | 1,200 | 2.5-3.5% | P3a (encode and summarise after dependents are released): yes, from H.1. P3b (build the graph and the digests without the portable form): yes, once the equality test of H.1.7 is in CI |
+| P1b | `instance` returns a non-generic root at once (new, I.5) | P1; the fixtures of I.2.3 | 30 plus tests | 0.9% measured | yes: one function. Add the fixtures first; gate is no difference in `compare_checker_builds.py` on both projects. Landed (#137) |
+| P2 | Infer instead of unifying with a fresh variable | P0 | 700 | 1.5-2.5% | application: yes; other constructs: one at a time, yes. The level update is never skipped (C.9, amended). Constants, identifiers, fields and the application landed (#132) |
+| P3 | Publish into the shared pool; encode later | P0 | 1,200 | 2.5-3.5% | P3a (encode and summarise after dependents are released): yes, from H.1. P3b (build the graph and the digests without the portable form): yes, once the equality test of H.1.7 is in CI. Both landed (#119; #140, #154); the save copies are W8 |
 | P4 | Process-wide views; delete stamp replay | P3 | 2,500, mostly deletions | 2.5-3.5% | no |
 | P5 | Absolute paths in exports; no lookup copies | P4 | 2,000 | 3-4% | no |
 | P6 | Environment as a binding log | P0 | 2,500 | none; switch predicts 2-4% more instructions | steps 6 onward dropped after the real-build measurement (H.2.11); the log stays test-only |
@@ -3806,7 +3807,7 @@ either.
 Sections B, F.6, F.7 and F.12 describe a world that was not built. What
 merged for those stages are parts on the existing structures: signatures
 published on the checking worker (#119), the graph hash (#140), store binders
-out of the stamp counter and the stamp replay deleted (#166). #154 (open)
+out of the stamp counter and the stamp replay deleted (#166). #154 (merged)
 publishes from the shared graph. This section is the plan for the rest: what
 the code looks like when it is done, the pool the shared data lives in, the
 slices in order, the prompt for every slice a less capable model can build,
@@ -4348,6 +4349,9 @@ deletes the old one is named.
 | W10 | The opened initial environment once per worker | 500 | W9 | no | 0.3% (est.) | same |
 | W11 | The world outlives a build in watch mode | 800 | W7 | no | 0 on a clean build | 0 |
 
+Merged: W1 (#173), W2 (#180), W3 (#188), W4 for unit paths (#196) and part
+of W5 (#208); see "W4 as built" and "W5 as built" below.
+
 #### W1. Determinism gate and world counters
 
 - **Files.** `scripts/test_worker_determinism.py` (new),
@@ -4700,7 +4704,8 @@ Two more, found by the step-count tests:
   bucket. Building the maps for a signature of 10,000 types takes 0.4 s in
   a debug build where a default-seeded map takes 1 ms. Every component
   substitution pays it, in views and outside them. Not changed here: the
-  fix is a different seed, with its own output and instruction-count gate.
+  fix is a different seed, with its own output and instruction-count gate
+  (merged since as #205).
   Whether the AES hasher of arm64 has the same result was not checked.
 - **A child's own tables** are still `StoredModuleComponents` kept per
   worker and view (`env_lazy::ViewTables`), built in a store build with an
@@ -6023,6 +6028,7 @@ I.2.3 where they exist.
 | C4 | The other walk families: no per-node `Vec`, `String`, `Arc` or attribute copy | 1,500 in 5 pull requests | C3 | no: the first of each kind by the stronger model, then yes | 0-1.5% (extrapolated) |
 | C5 | Snapshots without journal bookkeeping per unification; borrow flags off the node paths | 600 | C1, and J's W2 for the frozen writes | no | 0-1.5% (extrapolated) |
 
+C1 (#187), C2 (#199) and C3 (#186) have merged.
 With C1 and C2 the measured 6.3% is in; with C3, 6.7%. C4 and C5 are worth
 starting only with a probe first: each has an upper bound, not a
 measurement, and each first pull request is its own measurement.
