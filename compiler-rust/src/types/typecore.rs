@@ -16182,7 +16182,7 @@ fn wrong_record_field_name_error(
 }
 
 /// Create a ConstructorDescription for the `Some` constructor.
-fn make_some_constructor(ctx: &TypeContext) -> crate::types::ConstructorDescription {
+pub(crate) fn make_some_constructor(ctx: &TypeContext) -> crate::types::ConstructorDescription {
     let (inner_ty, option_ty) = ctx.predef_option_scheme();
     crate::types::ConstructorDescription {
         cstr_name: "Some".to_string(),
@@ -16203,7 +16203,7 @@ fn make_some_constructor(ctx: &TypeContext) -> crate::types::ConstructorDescript
 }
 
 /// Create a ConstructorDescription for the `None` constructor.
-fn make_none_constructor(ctx: &TypeContext) -> crate::types::ConstructorDescription {
+pub(crate) fn make_none_constructor(ctx: &TypeContext) -> crate::types::ConstructorDescription {
     let (_, option_ty) = ctx.predef_option_scheme();
     crate::types::ConstructorDescription {
         cstr_name: "None".to_string(),

@@ -63,7 +63,6 @@ fn constant_payload(label: &LabelDeclaration, name: &str, arena: &ParseArena) ->
 /// template without interpolation is a constant to the derive, but not one
 /// expression node).
 /// Cost: O(attributes of the labels); no allocation.
-#[cfg(test)]
 pub(super) fn planned(labels: &[LabelDeclaration], arena: &ParseArena) -> bool {
     !labels.is_empty()
         && labels.iter().all(|label| {

@@ -9,10 +9,16 @@
 
 use smallvec::SmallVec;
 
-use super::{ArgLowering, RawLambdaConverter, SrcLoc};
+use super::{ArgLowering, FieldLowering, PrimitiveArgs, RawLambdaConverter, SrcLoc};
 use crate::binary_ast::derive::plan::{
-    Binding, BodyIdx, BodyNode, DerivedIdx, ExprLoc, Obligation, Plans,
+    Binding, BodyIdx, BodyNode, CasePattern, DerivedIdx, ExprLoc, Obligation, ObligationIdx,
+    OptionalArg, Plans,
 };
+use crate::lambda::{Constant, Primitive, TagInfo};
+use crate::parse_arena::{Located, LocIdx};
+use crate::raw_lambda::matching::{CaseAction, PatArena, PatStore};
+use crate::types::decl::{ConstructorDescription, ConstructorKind, LabelDescription, ValueKind};
+use crate::types::typedtree::{EnvRef, Partial, Pattern, PatternDesc};
 use crate::ident::Ident;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::{FunctionAttribute, InlineAttribute, LamLoc};
@@ -40,22 +46,49 @@ struct Lowering<'a, S> {
     table: &'a DerivedTable,
     /// The environment the item was checked in.
     env: &'a Env,
+    /// The same environment, as the typed tree names it.
+    env_ref: EnvRef,
+    /// The patterns of the item's matches.
+    pa: &'a PatArena<'a>,
     /// The location the generator gives every function and application.
     loc: LamLoc,
-    /// The parameters of the enclosing functions, outermost first.
-    locals: SmallVec<[Ident; 4]>,
+    /// Whether the functions of the binding being lowered return `unit`.
+    return_unit: bool,
+    /// The predefined `Some` and `None`, which wrap and stand for an
+    /// optional argument (typecore.ml `option_some`, `option_none`): made
+    /// at the first application that has one.
+    option: Option<Box<(ConstructorDescription, ConstructorDescription)>>,
+    /// The parameters of the enclosing functions and the variables of the
+    /// enclosing cases, outermost first.
+    locals: SmallVec<[Ident; 8]>,
     steps: &'a mut S,
+}
+
+/// An argument of an application that has an optional parameter.
+#[derive(Clone, Copy)]
+enum Arg {
+    /// A supplied unlabelled argument.
+    Plain(BodyIdx),
+    /// The optional argument, supplied: `Some` of it, whose type is the
+    /// second component.
+    Optional(BodyIdx, TypeExprRef),
+    /// The optional argument, omitted: `None`.
+    Omitted,
 }
 
 /// Lower the bindings of a discharged item around `body`, the term of the
 /// items that follow it: `let b_1 = e_1 in ... let b_n = e_n in body`
 /// (translcore.ml `transl_let`, a non-recursive group of variables).
-/// Cost: O(body nodes of the item): each node is visited once and makes a
-/// fixed number of terms (a local one, a free value its path, a function
-/// one, an application one, or, when it is partial, one per parameter it
-/// leaves and per term it protects). No heap allocation per node: the
-/// arguments of an application and the values of the item are gathered
-/// inline, up to four.
+/// Cost: O(body nodes of the item) besides its matches: each node is
+/// visited once and makes a fixed number of terms (a local one, a free
+/// value its path, a function one, an application one, or, when it is
+/// partial, one per parameter it leaves and per term it protects; a field,
+/// a construction, a tuple, an array and a constant one; a record one and
+/// the buffers of `record_of`). A match costs what `compile_matching` costs
+/// on its cases, each a constructor of one variable or a wildcard: a fixed
+/// amount per case. No heap allocation per node: arguments, components and
+/// the values of the item are gathered inline, up to eight; a match
+/// allocates its patterns in the item's one pattern store.
 pub(super) fn lower<B: RawLambdaBuilder>(
     conv: &mut RawLambdaConverter<'_, B>,
     idx: DerivedIdx,
@@ -75,11 +108,17 @@ pub(super) fn lower<B: RawLambdaBuilder>(
         .get_typed_env(first.env)
         .expect("the environment of a discharged item is stored");
     let dummy = arena.dummy_loc();
+    let store = PatStore::default();
+    let pa = PatArena::new(conv.ta, &store);
     let mut lowering = Lowering {
         plans,
         table,
         env: &env,
+        env_ref: first.env,
+        pa: &pa,
         loc: conv.lam_loc(dummy),
+        return_unit: false,
+        option: None,
         locals: SmallVec::new(),
         steps,
     };
@@ -117,8 +156,21 @@ impl<S: Steps> Lowering<'_, S> {
             _ => unreachable!("a discharged binding has a function type"),
         };
         // `transl_function` tests the result type before it translates the
-        // body (translcore.ml:1395-1409).
-        let return_unit = conv.is_base_type_with_env(result, "unit", self.env);
+        // body (translcore.ml:1395-1409). A function the body applies to
+        // the binding's parameter (`v => (v => e)(v)`) has the binding's
+        // result type.
+        self.return_unit = conv.is_base_type_with_env(result, "unit", self.env);
+        self.function(conv, param, body)
+    }
+
+    /// translcore.ml `transl_function` of a function of one variable.
+    /// Cost: O(nodes of its body).
+    fn function<B: RawLambdaBuilder>(
+        &mut self,
+        conv: &mut RawLambdaConverter<'_, B>,
+        param: crate::parse_arena::StrIdx,
+        body: BodyIdx,
+    ) -> RawLambda {
         let param = conv.fresh_ident(conv.arena.get_string(param));
         self.locals.push(param);
         let (body, _) = self.node(conv, body);
@@ -128,7 +180,7 @@ impl<S: Steps> Lowering<'_, S> {
             &[param],
             body,
             FunctionAttribute {
-                return_unit,
+                return_unit: self.return_unit,
                 async_: false,
                 directive: None,
                 inline: InlineAttribute::Default,
@@ -140,15 +192,44 @@ impl<S: Steps> Lowering<'_, S> {
         )
     }
 
+    /// The type of parameter `i` of the function type `ty`, or the null
+    /// type. Cost: one head expansion.
+    fn parameter<B: RawLambdaBuilder>(
+        &self,
+        conv: &RawLambdaConverter<'_, B>,
+        ty: TypeExprRef,
+        i: usize,
+    ) -> TypeExprRef {
+        let ctx = conv.type_ctx;
+        let head = ctx.repr(crate::types::ctype::expand_head(ctx, self.env, ty));
+        match &*ctx.get_desc(head) {
+            TypeDesc::Tarrow { args, .. } => {
+                ctx.type_args(args).get(i).map_or_else(TypeExprRef::null, |arg| arg.typ)
+            }
+            _ => TypeExprRef::null(),
+        }
+    }
+
+    /// The lowered nodes `args`, in order. Cost: O(nodes under them).
+    fn nodes<B: RawLambdaBuilder>(
+        &mut self,
+        conv: &mut RawLambdaConverter<'_, B>,
+        args: &[BodyIdx],
+    ) -> SmallVec<[RawLambda; 8]> {
+        args.iter().map(|arg| self.node(conv, *arg).0).collect()
+    }
+
     /// Lower a body node: its term, and, for a partial application, the
     /// number of parameters its result still takes.
-    /// Cost: O(nodes under `idx`); recursion depth is the body's depth.
+    /// Cost: O(nodes under `idx`) besides its matches; recursion depth is
+    /// the body's depth.
     fn node<B: RawLambdaBuilder>(
         &mut self,
         conv: &mut RawLambdaConverter<'_, B>,
         idx: BodyIdx,
     ) -> (RawLambda, Option<i32>) {
         self.steps.node();
+        let dummy = conv.arena.dummy_loc();
         match self.plans.body(idx) {
             BodyNode::Local(level) => (conv.b.var(self.locals[level as usize]), None),
             BodyNode::Free(obligation) => {
@@ -160,10 +241,25 @@ impl<S: Steps> Lowering<'_, S> {
                 };
                 let loc = match expr_loc {
                     ExprLoc::OfName => name_loc,
-                    ExprLoc::Dummy => conv.arena.dummy_loc(),
+                    ExprLoc::Dummy => dummy,
                 };
-                let path = self.table.resolved(obligation).path();
-                let lam = conv.translate_value_path_raw_in_env(self.env, &path, SrcLoc::from(loc));
+                let lam = match self.table.primitive(obligation).map(|desc| (&desc.val_kind, desc))
+                {
+                    // translcore.ml `Texp_ident` of a primitive: the
+                    // function that applies it.
+                    Some((ValueKind::ValPrim(prim), desc)) => conv.translate_primitive_raw_in_env(
+                        SrcLoc::from(loc),
+                        prim,
+                        self.table.resolved(obligation).instance(),
+                        self.env,
+                        desc.val_type,
+                        Some(loc),
+                    ),
+                    _ => {
+                        let path = self.table.resolved(obligation).path();
+                        conv.translate_value_path_raw_in_env(self.env, &path, SrcLoc::from(loc))
+                    }
+                };
                 (lam, None)
             }
             BodyNode::Apply {
@@ -171,8 +267,56 @@ impl<S: Steps> Lowering<'_, S> {
                 args,
                 len,
                 partial,
-                optional: _,
+                optional,
             } => {
+                let args = self.plans.apply_args(args, len);
+                let loc = self.loc;
+                // translcore.ml `Texp_apply` of a primitive to all the
+                // arguments it takes.
+                if let BodyNode::Free(obligation) = self.plans.body(funct)
+                    && let Some(desc) = self.table.primitive(obligation)
+                    && let ValueKind::ValPrim(prim) = &desc.val_kind
+                    && args.len() >= prim.prim_arity.max(0) as usize
+                {
+                    // The callee is a node, though it makes no term.
+                    self.steps.node();
+                    let (applied, rest) = args.split_at(prim.prim_arity.max(0) as usize);
+                    let arg_lams = self.nodes(conv, applied).into_vec();
+                    let instance = self.table.resolved(obligation).instance();
+                    let first = match applied {
+                        [] => TypeExprRef::null(),
+                        _ => self.parameter(conv, instance, 0),
+                    };
+                    let (plans, table) = (self.plans, self.table);
+                    let base = conv.primitive_application_of(
+                        dummy,
+                        SrcLoc::from(dummy),
+                        prim,
+                        (instance, desc.val_type),
+                        self.env_ref,
+                        PrimitiveArgs {
+                            first: (first, self.env_ref),
+                            count: applied.len() as u16,
+                        },
+                        || {
+                            applied.iter().any(|arg| match plans.body(*arg) {
+                                BodyNode::Construct { constructor, .. } => {
+                                    let (cstr, _, _) = table.constructor(constructor);
+                                    cstr.cstr_args.is_empty()
+                                        && matches!(cstr.cstr_kind, ConstructorKind::Ordinary(_))
+                                }
+                                _ => false,
+                            })
+                        },
+                        arg_lams,
+                    );
+                    let lam = if rest.is_empty() {
+                        base
+                    } else {
+                        conv.transl_apply_of(base, rest, loc, None, self)
+                    };
+                    return (lam, None);
+                }
                 let (funct_lam, remaining) = self.node(conv, funct);
                 // translcore.ml `Texp_apply`: a partial application of a
                 // function that takes more parameters makes a function of
@@ -191,23 +335,152 @@ impl<S: Steps> Lowering<'_, S> {
                 } else {
                     None
                 };
-                let args = self.plans.apply_args(args, len);
-                let loc = self.loc;
-                let lam = conv.transl_apply_of(funct_lam, args, loc, arity, self);
+                let lam = match optional {
+                    OptionalArg::Absent => conv.transl_apply_of(funct_lam, args, loc, arity, self),
+                    // The optional parameter is the callee's first
+                    // (typecore.ml `type_application`): the supplied
+                    // argument is wrapped in `Some`, an omitted one is
+                    // `None`.
+                    OptionalArg::Supplied | OptionalArg::Omitted => {
+                        let BodyNode::Free(obligation) = self.plans.body(funct) else {
+                            unreachable!("an optional argument is one of a named function")
+                        };
+                        let mut with_optional: SmallVec<[Arg; 4]> = SmallVec::new();
+                        let plain = if optional == OptionalArg::Supplied {
+                            let option = self.parameter(
+                                conv,
+                                self.table.resolved(obligation).instance(),
+                                0,
+                            );
+                            let ctx = conv.type_ctx;
+                            let payload = match &*ctx.get_desc(ctx.repr(option)) {
+                                TypeDesc::Tconstr { args, .. } => ctx.type_list(*args).first().expect("an option has an argument"),
+                                _ => unreachable!("an optional parameter holds an option"),
+                            };
+                            with_optional.push(Arg::Optional(args[0], payload));
+                            &args[1..]
+                        } else {
+                            with_optional.push(Arg::Omitted);
+                            args
+                        };
+                        with_optional.extend(plain.iter().map(|arg| Arg::Plain(*arg)));
+                        conv.transl_apply_of(funct_lam, &with_optional, loc, arity, self)
+                    }
+                };
                 (lam, arity.map(|arity| arity - i32::from(len)))
             }
-            BodyNode::Function { .. } => {
-                unreachable!("a plan's only function is the root of a binding's body")
+            BodyNode::Function { param, body } => (self.function(conv, param, body), None),
+            BodyNode::Field { record, label } => {
+                let (record, _) = self.node(conv, record);
+                let label = self.table.label(label);
+                (conv.field_of(label, record, SrcLoc::from(dummy)), None)
             }
-            BodyNode::Field { .. }
-            | BodyNode::Record { .. }
-            | BodyNode::Construct { .. }
-            | BodyNode::Tuple { .. }
-            | BodyNode::Array { .. }
-            | BodyNode::Str(_)
-            | BodyNode::Literal(_)
-            | BodyNode::Switch { .. } => {
-                unreachable!("a node of a record plan, which no discharged item has yet")
+            BodyNode::Record { labels, fields, len } => {
+                let fields: SmallVec<[(ObligationIdx, BodyIdx); 8]> = self
+                    .plans
+                    .args(fields, len)
+                    .iter()
+                    .enumerate()
+                    .map(|(i, value)| (ObligationIdx(labels.0 + i as u32), *value))
+                    .collect();
+                (conv.record_of(SrcLoc::from(dummy), &fields, None, None, self), None)
+            }
+            BodyNode::Construct { constructor, arg } => {
+                let Obligation::Constructor { has_arg, .. } = self.plans.obligation(constructor)
+                else {
+                    unreachable!("a construction names a constructor obligation")
+                };
+                let (cstr, payload, _) = self.table.constructor(constructor);
+                let ConstructorKind::Ordinary(reference) = cstr.cstr_kind else {
+                    unreachable!("a discharged constructor is an ordinary one")
+                };
+                let loc = SrcLoc::from(dummy);
+                let lam = if has_arg {
+                    let (elem, _) = self.node(conv, arg);
+                    let payload = Some((payload, self.env_ref));
+                    conv.construct_of(loc, cstr, reference, &[elem], payload)
+                } else {
+                    conv.construct_of(loc, cstr, reference, &[], None)
+                };
+                (lam, None)
+            }
+            // translcore.ml `Texp_tuple`.
+            BodyNode::Tuple { args, len } => {
+                let elems = self.nodes(conv, self.plans.args(args, len));
+                (conv.raw_block_or_prim_of(TagInfo::Tuple, &elems, SrcLoc::from(dummy)), None)
+            }
+            // translcore.ml `Texp_array`.
+            BodyNode::Array { args, len } => {
+                let elems = self.nodes(conv, self.plans.args(args, len));
+                (conv.b.prim(Primitive::Pmakearray, &elems, self.loc), None)
+            }
+            // lambda.ml `const_of_typed` of the string the derive made.
+            BodyNode::Str(string) => {
+                let string = conv.arena.get_string(string).to_string();
+                (conv.b.const_(Constant::String(string)), None)
+            }
+            BodyNode::Literal(literal) => {
+                let constant = conv.convert_constant(self.table.constant(literal));
+                (conv.b.const_(constant), None)
+            }
+            // translcore.ml `Texp_match`: the cases are translated before
+            // the scrutinee.
+            BodyNode::Switch {
+                scrutinee,
+                cases,
+                len,
+            } => {
+                let pa = self.pa;
+                let none = LocIdx::none();
+                let mut pat_act_list = Vec::with_capacity(len as usize);
+                let mut scrutinee_type = None;
+                for case in self.plans.cases(cases, len) {
+                    let (pattern, body) = match case.pattern {
+                        CasePattern::Any => {
+                            let ty = scrutinee_type.expect("a wildcard follows a constructor");
+                            let any = Pattern::new(PatternDesc::Tpat_any, none, ty, self.env_ref);
+                            (pa.alloc(any), self.node(conv, case.body).0)
+                        }
+                        CasePattern::Construct {
+                            constructor,
+                            binder,
+                        } => {
+                            let Obligation::Constructor { name, .. } =
+                                self.plans.obligation(constructor)
+                            else {
+                                unreachable!("a case names a constructor obligation")
+                            };
+                            let (cstr, arg, res) = self.table.constructor(constructor);
+                            scrutinee_type = Some(res);
+                            let binder = conv.fresh_ident(conv.arena.get_string(binder));
+                            // The matcher reads a variable's identifier,
+                            // never its name.
+                            let variable = pa.push(Pattern::new(
+                                PatternDesc::Tpat_var(binder, Located::new(String::new(), none)),
+                                none,
+                                arg,
+                                self.env_ref,
+                            ));
+                            let pattern = pa.alloc(Pattern::new(
+                                PatternDesc::Tpat_construct(
+                                    Located::new(name, none),
+                                    cstr.clone(),
+                                    pa.push_list([variable]),
+                                ),
+                                none,
+                                res,
+                                self.env_ref,
+                            ));
+                            self.locals.push(binder);
+                            let (body, _) = self.node(conv, case.body);
+                            self.locals.pop();
+                            (pattern, body)
+                        }
+                    };
+                    pat_act_list.push((pattern, CaseAction::unguarded(body)));
+                }
+                let (scrutinee, _) = self.node(conv, scrutinee);
+                (conv.matching_of(pa, dummy, scrutinee, pat_act_list, Partial::Total), None)
             }
         }
     }
@@ -230,6 +503,77 @@ impl<B: RawLambdaBuilder, S: Steps> ArgLowering<B, BodyIdx> for Lowering<'_, S> 
     }
 }
 
+impl<B: RawLambdaBuilder, S: Steps> ArgLowering<B, Arg> for Lowering<'_, S> {
+    #[inline(always)]
+    fn supplied(&self, _: &Arg) -> bool {
+        true
+    }
+
+    #[inline(always)]
+    fn optional(&self, arg: &Arg) -> bool {
+        !matches!(arg, Arg::Plain(_))
+    }
+
+    fn lower(&mut self, conv: &mut RawLambdaConverter<'_, B>, arg: &Arg) -> RawLambda {
+        let loc = SrcLoc::from(conv.arena.dummy_loc());
+        let reference = |cstr: &ConstructorDescription| match cstr.cstr_kind {
+            ConstructorKind::Ordinary(reference) => reference,
+            ConstructorKind::Extension(_) => unreachable!("a predefined constructor"),
+        };
+        let (value, payload) = match *arg {
+            Arg::Plain(arg) => return self.node(conv, arg).0,
+            Arg::Optional(arg, payload) => (Some(self.node(conv, arg).0), payload),
+            Arg::Omitted => (None, TypeExprRef::null()),
+        };
+        let ctx = conv.type_ctx;
+        let (some, none) = &**self.option.get_or_insert_with(|| {
+            Box::new((
+                crate::types::typecore::make_some_constructor(ctx),
+                crate::types::typecore::make_none_constructor(ctx),
+            ))
+        });
+        match value {
+            Some(value) => {
+                let payload = Some((payload, self.env_ref));
+                conv.construct_of(loc, some, reference(some), &[value], payload)
+            }
+            None => conv.construct_of(loc, none, reference(none), &[], None),
+        }
+    }
+}
+
+impl<B: RawLambdaBuilder, S: Steps> FieldLowering<B, (ObligationIdx, BodyIdx)>
+    for Lowering<'_, S>
+{
+    #[inline(always)]
+    fn label<'f, 'c: 'f>(
+        &self,
+        conv: &RawLambdaConverter<'c, B>,
+        field: &'f (ObligationIdx, BodyIdx),
+    ) -> &'f LabelDescription {
+        conv.ta.derived.label(field.0)
+    }
+
+    /// The fields of a plan's record are variables.
+    #[inline(always)]
+    fn static_optional_none(
+        &self,
+        _: &RawLambdaConverter<'_, B>,
+        _: &(ObligationIdx, BodyIdx),
+    ) -> bool {
+        false
+    }
+
+    #[inline(always)]
+    fn lower(
+        &mut self,
+        conv: &mut RawLambdaConverter<'_, B>,
+        field: &(ObligationIdx, BodyIdx),
+    ) -> RawLambda {
+        self.node(conv, field.1).0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,7 +591,18 @@ mod tests {
     /// or syntax, with its stamps renumbered in order of first appearance,
     /// and the number of items lowered from plans.
     fn raw_lambda(source: &str, plans: bool) -> (String, usize) {
-        let (parser, structure) = derive_source(source, plans);
+        raw_lambda_of(derive_source(source, plans))
+    }
+
+    /// [`raw_lambda`] of a program after the record library, through the
+    /// whole front end.
+    fn record_lambda(source: &str, plans: bool) -> (String, usize) {
+        raw_lambda_of(crate::binary_ast::derive::fixtures::frontend_source(source, plans))
+    }
+
+    fn raw_lambda_of(
+        (parser, structure): (Parser<'static>, Vec<crate::parser::ast::StructureItem>),
+    ) -> (String, usize) {
         let arena = parser.arena();
         let type_ctx = type_context();
         let mut tctx = TypeCheckContext::new(&type_ctx, arena);
@@ -293,6 +648,29 @@ mod tests {
             assert_eq!(items, source.matches("type ").count());
             assert_eq!(none, 0);
             assert!(planned.contains("_decode") || planned.contains("_encode"), "{planned}");
+            assert_eq!(planned, general, "{source}");
+        }
+    }
+
+    /// A record's plan lowers to the raw Lambda of its general form, up to
+    /// the numbering of identifiers and of static exits.
+    #[test]
+    fn a_record_plan_lowers_to_the_lambda_of_the_general_form() {
+        for (source, items) in [
+            ("@spice type t = {x: int}", 1),
+            ("@spice type t = {label: string, value: array<option<int>>}", 1),
+            ("@spice type t = {a: option<string>, b?: int, c: Null.t<float>}", 1),
+            (
+                "@spice type t = {@spice.key(\"k\") a: int, @spice.default(0) b: int, @spice.default(1.5) c: float, d?: bool}",
+                1,
+            ),
+            ("@spice type inner = {value: int}\n@spice.decode type outer = {one: inner}", 2),
+            ("@spice type a = {x: int}\n@spice.encode type b = {x: int, y: string}", 2),
+        ] {
+            let (planned, lowered) = record_lambda(source, true);
+            let (general, none) = record_lambda(source, false);
+            assert_eq!(lowered, items, "{source}");
+            assert_eq!(none, 0);
             assert_eq!(planned, general, "{source}");
         }
     }

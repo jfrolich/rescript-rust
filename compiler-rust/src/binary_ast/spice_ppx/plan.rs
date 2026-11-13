@@ -154,13 +154,6 @@ pub(in crate::binary_ast) fn group_shares_names(group: &[TypeDeclaration], arena
         .any(|pair| pair[0].0 == pair[1].0 && pair[0].1 == pair[1].1 && pair[0].2 != pair[1].2)
 }
 
-#[cfg(test)]
-thread_local! {
-    /// Whether the classifier admits records: set by the tests of the
-    /// checker while the backend does not lower a record's plan yet.
-    pub(crate) static PLAN_RECORDS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
 /// Classify one declaration that derives codecs: the plan path, or the
 /// general path with the first reason of the Q5 table that applies. Total:
 /// every declaration gets one of the two.
@@ -233,25 +226,17 @@ pub(in crate::binary_ast) fn classify(
     {
         return general(UnmeasuredShape);
     }
-    // A record takes a plan once the backend lowers one (the next commit);
-    // until then only the tests of the checker ask for it.
-    #[cfg(test)]
-    if PLAN_RECORDS.get()
-        && let TypeKind::Ptype_record(labels) = &decl.ptype_kind
-        && record::planned(labels, arena)
-        && decl.ptype_manifest.is_none()
-        && !has_fallback
-        && !facts.unplanned
-    {
-        return Classification::Plan;
-    }
-    // Records and variants are slices 2 and 3; a constant fallback and the
-    // identity codec of `JSON.t` need body nodes this slice does not lower.
-    if !matches!(decl.ptype_kind, TypeKind::Ptype_abstract)
-        || !manifest_is_application
-        || has_fallback
-        || facts.unplanned
-    {
+    // Variants are slice 3; a constant fallback and the identity codec of
+    // `JSON.t` need body nodes no slice lowers yet. A record takes a plan
+    // when it has a field and its keys and defaults are literal constants.
+    let planned_shape = match &decl.ptype_kind {
+        TypeKind::Ptype_abstract => manifest_is_application,
+        TypeKind::Ptype_record(labels) => {
+            decl.ptype_manifest.is_none() && record::planned(labels, arena)
+        }
+        TypeKind::Ptype_variant(_) | TypeKind::Ptype_open => false,
+    };
+    if !planned_shape || has_fallback || facts.unplanned {
         return general(NotYetPlanned);
     }
     // A declaration that could take a plan, in a tree that is not planned.
@@ -646,8 +631,12 @@ mod tests {
         assert_eq!(general("@spice type t = [#a | #b]"), UnmeasuredShape);
         assert_eq!(general("@spice.serde type t = A | B"), UnmeasuredShape);
         assert_eq!(general("@spice @unboxed type t = A(int)"), Unboxed);
-        assert_eq!(general("@spice type t = {x: int}"), NotYetPlanned);
-        assert_eq!(general("@spice type t = {@spice.default(0) x: int}"), NotYetPlanned);
+        assert_eq!(general("@spice type t = {}"), NotYetPlanned);
+        assert_eq!(general("@spice type t = {@spice.key(`k`) x: int}"), NotYetPlanned);
+        assert_eq!(general("@spice type t = {x: JSON.t}"), NotYetPlanned);
+        assert_eq!(general("@spice type t = {x: (int, string)}"), UnmeasuredShape);
+        assert_eq!(general("@spice @unboxed type t = {x: int}"), Unboxed);
+        assert_eq!(general("@spice type rec t = {x: array<t>}"), RecursiveGroup);
         assert_eq!(general("@spice type t = A | B(int)"), NotYetPlanned);
         assert_eq!(general("@spice type t = JSON.t"), NotYetPlanned);
         assert_eq!(general("@spice type t = array<Js.Json.t>"), NotYetPlanned);
@@ -659,6 +648,10 @@ mod tests {
             "@spice.decode type t = result<a, B.c>",
             "@spice type t = dict<option<array<int>>>",
             "@spice type a = string @spice and b = array<a>",
+            "@spice type t = {x: int}",
+            "@spice type t = {@spice.default(0) x: int, @spice.key(\"k\") y?: string}",
+            "@spice.decode type t = {x: option<array<A.t>>}",
+            "@spice type a = {x: int} @spice and b = {y: int}",
         ] {
             assert_eq!(classification(planned), Classification::Plan, "{planned}");
         }
@@ -674,7 +667,8 @@ mod tests {
         };
         assert!(derived("@spice type a = string @spice and b = array<a>"));
         assert!(derived("type a = {x: int} @spice and b = array<int>"));
-        assert!(!derived("@spice type a = {x: int} @spice and b = array<a>"));
+        assert!(derived("@spice type a = {x: int} @spice and b = array<a>"));
+        assert!(!derived("@spice type a = A | B(int) @spice and b = array<a>"));
     }
 
     /// With plans off, which a tree is unless the driver says it is compiled

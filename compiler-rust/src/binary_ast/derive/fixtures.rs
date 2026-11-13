@@ -261,7 +261,6 @@ pub(crate) fn frontend_source(source: &str, plans: bool) -> (Parser<'static>, Ve
         ..Default::default()
     };
     let mut out = String::new();
-    crate::binary_ast::spice_ppx::plan::PLAN_RECORDS.set(plans);
     let frontend = crate::driver::run_implementation_frontend(
         &mut parser,
         structure,
@@ -271,7 +270,6 @@ pub(crate) fn frontend_source(source: &str, plans: bool) -> (Parser<'static>, Ve
         &mut out,
     )
     .unwrap_or_else(|error| panic!("{error}\n{source}"));
-    crate::binary_ast::spice_ppx::plan::PLAN_RECORDS.set(false);
     assert!(out.is_empty(), "{out}");
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     (parser, frontend.structure)
