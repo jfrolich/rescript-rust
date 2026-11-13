@@ -1,8 +1,8 @@
 # Derived codecs without the whole pipeline
 
-Status: design. Slice 1 is implemented (#215); slices 2 to 4 are not
-([STATUS.md](STATUS.md)). No production code accompanied this document. The measurement
-patch and script it used are in `prototypes/derived-codecs/`.
+Status: slices 1–3 are implemented; slice 4 remains. The original design and
+its estimates are retained below, followed by implementation results in each
+slice. The original measurement patch is in `prototypes/derived-codecs/`.
 
 `@spice` on a type declaration derives `<name>_encode`, `<name>_encodeJson` and
 `<name>_decode`. Today the derive appends syntax to the `ParseArena`, and that
@@ -726,6 +726,94 @@ not round it into a claim about another project).
 ```
 
 ### Slice 3. Variants
+
+#### Implementation and measurements
+
+`binary_ast/spice_ppx/plan/variant.rs` builds ordinary constructors, tuple
+payloads, inline records and string/float aliases. Inline records reuse the
+record encoder and decoder builders. Every declared constructor is an ordered
+`Constructor` obligation in pattern position in each encoder and construction
+position in the decoder. The five-variant order test compares those obligations
+with a walk of the general syntax.
+
+The generic plan adds prefix-pooled patterns, conditionals, lets, integer
+constants, multi-argument construction, record updates and application
+locations. The existing converter builds the terms; its match compiler handles
+constructor and string switches and decomposes tuple scrutinees. No variant
+selection switch remains. `General(NotYetPlanned)` no longer classifies a
+variant; `unsupported_variant` identifies unsupported payload codecs,
+attributes, generalized constructors or pool-capacity limits before discharge.
+`Aliased_variant_payload` pins one impossible form: a scalar alias with a payload
+has an unbound `json_arr` in the general decoder. The original private-declaration
+fixture confirms constructors used only by codecs do not warn in either path.
+
+Body nodes, obligations and cases remain 16 bytes; pattern nodes are 8 bytes.
+Generated names reuse one spelling buffer per item. Per-constructor variable,
+node and case lists use item-wide scratch pools, not one `Vec` per constructor.
+The constructor obligation no longer stores an unused type-obligation handle;
+its result skeleton already states that type. Arity uses `u16`, with checked
+capacity boundaries including the extra failure/wildcard cases.
+
+The tests at 10,000 one-argument constructors pin:
+
+| Work | Fixed part | Per constructor | Total |
+|---|---:|---:|---:|
+| Builder obligations | 10 | 23 | 230,010 |
+| Builder body nodes / lowering body visits | 38 | 45 | 450,038 |
+| Pattern nodes / lowering pattern visits | 2 | 10 | 100,002 |
+| Discharge lookups | 10 | 23 | 230,010 |
+| Discharge instances | 7 | 20 | 200,007 |
+| Discharge counted unifications | 7 | 23 | 230,007 |
+| Emitted raw Lambda terms | 68 | 58 | 580,068 |
+
+These counts are for one argument per constructor. The general decoder's
+multiple-argument error matrix has quadratic size in a constructor's arity;
+the plan preserves that matrix rather than changing its match semantics.
+The full `Variants.res` raw Lambda is equal after stamp and exit renumbering.
+The source-map oracle exposed missing constructor-application locations; an
+explicit `At` node fixes them without changing child locations. An external-codec
+regression test fails without that node; the complete Spice fixture also passes
+with linked maps enabled.
+
+Release measurements at `40a0c61d1`, compared with the pre-slice compiler at
+`b91b359ba` (one worker; the candidate also incorporates intervening trunk):
+
+| Application census | Before | After |
+|---|---:|---:|
+| Planned bindings | 5,776 | 6,392 |
+| General variant bindings | 637 | 21 |
+| `not_yet_planned` bindings | 764 | 136 |
+| `unsupported_variant` bindings | 0 | 9 |
+| `failed_obligation` bindings | 18 | 21 |
+| Units retried | 2 | 2 |
+
+The same two units retry; counting the newly eligible bindings in those units
+increases the fallback binding count, not the number of retries. Other census
+reasons are unchanged: user expressions 504, unmeasured shapes 87, custom codecs
+36, type parameters 9 and recursive groups 6.
+
+`bench_project.sh` on the 3,735-module application produced identical 3,980
+outputs and counted 65,447,816,693 instructions before and 65,092,842,723 after
+(**−0.5424%**). `compare_checker_builds.py` found no difference in 3,735 signatures,
+18 diagnostic logs or 3,980 JavaScript/related outputs. Hyperfine (five measured
+runs, one warmup) measured the candidate at 9.095 ± 0.363 s, range 8.789–9.559 s;
+the earlier baseline was 10.155 ± 0.319 s, range 9.652–10.532 s. These timings were
+not interleaved; the instruction comparison is the stronger performance result.
+
+On `tests/ppx_spice`, the candidate's default path retired 1,934,170,258
+instructions versus 1,997,544,344 with `general` (about **−3.17%**). This comparison
+includes the earlier plan slices; it is not the incremental saving of variants.
+`tests/tests` derives no codecs, so this change saves nothing there; CI's
+instruction-count gate protects that path.
+
+Local gates pass: compiler build, 33 focused derived tests and 15 plan tests;
+rewatch build and tests (209 unit, one integration and eight runtime-snapshot
+tests); check-mode builds of both Spice projects and the application; all 15
+diagnostic fixtures in unset/general/check modes; and the linked-map Spice build.
+The full compiler suite and OCaml output parity are CI gates, not local runs.
+
+The original slice specification follows.
+
 
 - **Files:** `binary_ast/spice_ppx.rs` (plan builder for
   `variants_generate_codecs` without `@spice.serde`),

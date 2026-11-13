@@ -1,7 +1,7 @@
 //! JavaScript occurrence counts, maintained by the arena's existing mutation
 //! paths, including normalisation, argument sequencing and statement removal.
 //! These are unweighted JS occurrences, not level-L switch-default use weights.
-use crate::bir::{NodeId, VarId};
+use crate::bir::{Bir, NodeId, VarId, View};
 
 /// Two counts per variable; indexed by VarId, never by identifier or node.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -23,6 +23,61 @@ pub(crate) struct Site {
     pub(crate) next: u32,
 }
 
+/// What the close of a run reads about one variable besides its counts
+/// (THREE_TREES 11.4, "T4c design"). Dense by VarId. The declaration's node
+/// and the head of the read sites join it with the decisions that use them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct VarFacts {
+    /// The call that is the variable's tail-call site: the last one a
+    /// copied run showed with the variable as callee. `NO_SITE` for none.
+    pub(crate) site: NodeId,
+    /// `EXPORTED`.
+    pub(crate) state: u32,
+}
+impl VarFacts {
+    pub(crate) const NO_SITE: NodeId = NodeId(u32::MAX);
+    /// The unit exports the variable (written once per export, after the
+    /// coercion; read through the variable's origin).
+    pub(crate) const EXPORTED: u32 = 1;
+}
+impl Default for VarFacts {
+    fn default() -> Self {
+        Self { site: Self::NO_SITE, state: 0 }
+    }
+}
+
+/// What step A decides for one declaration where its run is copied: the
+/// status the legacy tail-call pass would give it, read from `built`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Decision {
+    pub(crate) var: VarId,
+    /// The status in bits 0..3 (`js_ir::op::UsedStats`), `INLINE` in bit 3,
+    /// `built` in the bits above, saturating.
+    pub(crate) bits: u32,
+}
+impl Decision {
+    /// An inline candidate with a recorded site.
+    pub(crate) const INLINE: u32 = 8;
+    const COUNT_SHIFT: u32 = 4;
+    /// Constant.
+    pub(crate) fn new(var: VarId, status: crate::js_ir::op::UsedStats, inline: bool, built: u32) -> Self {
+        let count = built.min(u32::MAX >> Self::COUNT_SHIFT);
+        Self { var, bits: status as u32 | if inline { Self::INLINE } else { 0 } | (count << Self::COUNT_SHIFT) }
+    }
+    /// Constant.
+    pub(crate) fn status(self) -> u32 {
+        self.bits & 7
+    }
+    /// Constant.
+    pub(crate) fn inline(self) -> bool {
+        self.bits & Self::INLINE != 0
+    }
+    /// Constant.
+    pub(crate) fn built(self) -> u32 {
+        self.bits >> Self::COUNT_SHIFT
+    }
+}
+
 /// Enabled only on the lowering's J arena. Source L arenas need no rows.
 #[derive(Default)]
 pub(crate) struct Scope {
@@ -31,6 +86,15 @@ pub(crate) struct Scope {
     pub(crate) sites: Vec<Site>,
     /// The last site of each variable plus one, zero for none. Dense by VarId.
     pub(crate) site_heads: Vec<u32>,
+    /// Dense by VarId.
+    pub(crate) facts: Vec<VarFacts>,
+    /// One per declaration of every copied run, last slot first within a run.
+    pub(crate) decisions: Vec<Decision>,
+    /// Pending operands of the returned expression `return_sites` reads: the
+    /// node, and whether a call found there is a site.
+    spine: Vec<(NodeId, bool)>,
+    /// Steps of `close::decide` and `return_sites`.
+    pub(crate) close_steps: usize,
     #[cfg(test)]
     pub(crate) updates: usize,
 }
@@ -41,6 +105,10 @@ impl Scope {
             uses: vec![Uses::default(); variables],
             sites: Vec::new(),
             site_heads: vec![0; variables],
+            facts: vec![VarFacts::default(); variables],
+            decisions: Vec::new(),
+            spine: Vec::new(),
+            close_steps: 0,
             #[cfg(test)]
             updates: 0,
         }
@@ -50,6 +118,7 @@ impl Scope {
     pub(crate) fn push(&mut self) {
         self.uses.push(Uses::default());
         self.site_heads.push(0);
+        self.facts.push(VarFacts::default());
     }
 
     /// Record the reference `node` of `var` where it is built. Returns the
@@ -79,6 +148,44 @@ impl Scope {
     }
 }
 
+/// The sites of `return value`, read through the flatten pass ("T4c design"
+/// (a)): both branches of a conditional, the last operand of a sequence, a
+/// call of a variable. `last` says whether the `return` is the last
+/// statement of its list; below a conditional every call is a site, because
+/// the flatten pass gives each branch a list of its own.
+///
+/// Cost: one step per conditional and sequence between `value` and its
+/// calls, and one per call; a predicate, the head of a sequence and the
+/// arguments of a call are not read. Nothing is allocated once the spine
+/// has its capacity; nothing is done on an arena without counts.
+pub(crate) fn return_sites(bir: &mut Bir, value: NodeId, last: bool) {
+    let Some(scope) = &mut bir.js_scope else { return };
+    let mut spine = std::mem::take(&mut scope.spine);
+    debug_assert!(spine.is_empty());
+    spine.push((value, last));
+    let mut steps = 0;
+    while let Some((node, site)) = spine.pop() {
+        steps += 1;
+        match bir.view(node) {
+            View::JCond { then_, else_, .. } => {
+                spine.push((else_, true));
+                spine.push((then_, true));
+            }
+            View::JSeq { second, .. } => spine.push((second, site)),
+            View::JCall { callee, .. } if site => {
+                if let View::Var { var } = bir.view(callee) {
+                    let scope = bir.js_scope.as_mut().expect("lowering scope");
+                    scope.facts[var.index()].site = node;
+                }
+            }
+            _ => {}
+        }
+    }
+    let scope = bir.js_scope.as_mut().expect("lowering scope");
+    scope.close_steps += steps;
+    scope.spine = spine;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,6 +196,8 @@ mod tests {
     fn count_row_size() {
         assert_eq!(std::mem::size_of::<Uses>(), 8);
         assert_eq!(std::mem::size_of::<Site>(), 8);
+        assert_eq!(std::mem::size_of::<VarFacts>(), 8);
+        assert_eq!(std::mem::size_of::<Decision>(), 8);
     }
 
     #[test]
