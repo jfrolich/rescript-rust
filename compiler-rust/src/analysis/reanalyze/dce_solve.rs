@@ -745,7 +745,10 @@ mod tests {
         let issues = solve(&config, &files, vec![data]);
         let names: Vec<(&str, i32)> = issues.iter().map(|i| (i.name, i.loc.start.cnum)).collect();
         // The module has a live value, `c`, so it is not a dead module.
-        assert_eq!(names, [("Warning Dead Value", 0), ("Warning Dead Value", 10)]);
+        assert_eq!(
+            names,
+            [("Warning Dead Value", 0), ("Warning Dead Value", 10)]
+        );
     }
 
     #[test]
