@@ -890,6 +890,37 @@ rows and deletes the bridge.
   equations: ported. They are the `false` branches of the kernel.
 - The exhaustiveness algorithm: ported onto pattern handles.
 
+### 3.9 Derived items
+
+Trunk types a derived item (`Pstr_derived`, DERIVED_CODECS.md) without
+typing a body: `types/derived.rs::discharge` establishes the obligations
+of the item's plan in order, and when one fails it undoes what it did and
+the item's general form is typed as ordinary syntax, so every diagnostic
+comes from the code that types syntax. The new checker keeps exactly that
+shape. A value obligation is one name lookup at the current scope (3.3:
+one table load and the open layers), one `instance` of the value's
+template, and one unification with the obligation's skeleton, which is
+built as nodes of the unit's graph; a type obligation resolves a path to a
+`TypeDecl` row and reads its members (`MemberDecl` rows: the labels of a
+record, the constructors of a variant) by index, with no copy of the
+declaration. The item is discharged under one speculation (3.3), in both
+modes: a failed obligation restores it, takes back the warnings and usage
+marks recorded since the item began, and the item's general form goes
+through the walk of 3.4 like a hand-written `let`. That fallback is local
+to the item and is not a failure of the unit; the unit is checked again in
+the explaining mode only if the general form then fails. A discharged item
+writes no `ExprRow`, because it has no expression nodes: it writes one
+binder per binding (type, name, location, as any `let`) and two dense
+tables indexed by the plan's handles, one row per binding (binder index,
+4 bytes) and one per obligation (`resolved: u32`, the same reference an
+`ExprRow` carries: a binder, an export item or a member declaration).
+These are today's tables of `types/derived.rs` with handles of the new
+checker; `raw_lambda/convert/derived.rs` reads them through
+`tc::bridge::to_old` until R9a and directly after. Unit reads are logged
+at the obligation's lookup. The cost of a discharge is O(obligations +
+skeleton nodes), as today. Slice R6g carries it; until then a unit with a
+plan is declined.
+
 ## 4. Proof by prototype
 
 The two items with the largest predicted saving that a patch on trunk can
@@ -901,7 +932,11 @@ measures.
 
 Both patches apply to trunk 7e1dbc2bd4 (`git apply`), build, and compile
 both projects with no difference in signatures, diagnostics or generated
-files. They are measurement prototypes, not reviewed code.
+files. They are measurement prototypes, not reviewed code. The
+unification patch applies at 7e1dbc2bd4 and not after trunk commit
+5471bf8060, which changed the part of `driver.rs` it edits (checked with
+`git apply --check` on trunk 5fc812e1ac: the `driver.rs` hunk is
+rejected). The instantiation patch still applies there.
 
 ### 4.1 Instantiation from templates
 
@@ -1186,7 +1221,8 @@ prompt in section 6.
 | R5b | `tc/walk/`: the core expression language on the success path, patterns, `tc/exhaust.rs`, `tc/rows.rs`; structures, aliases and opens in `tc/module.rs` | Nothing yet | 9,000 | step counts at 10,000 for sequences, applications, record fields, match cases | - | R5a | no |
 | R5c | The driver takes the new road for units that are not declined; `to_old` for rows (typed tree for the backend); `RESCRIPT_CHECKER=new` works | The ratchet entries of every unit now covered | 2,500 | the oracle, first time on real units | type checking of the covered units of the test project at most 60% of the old checker's instructions for the same units, the bridge included | R5b | no |
 | R6a..R6f | One family each, each with its `Declined` reasons: (a) labelled and optional arguments, JSX; (b) polymorphic variants, objects, rows; (c) GADTs, existentials, locally abstract types; (d) functors, module types, `include`, first-class and recursive modules; (e) exceptions, `async`, dicts, unboxed and untagged variants, coercions; (f) interface files and signature inclusion (`tc/include.rs`) | The `Declined` variants of the family and their ratchet rows | 2,000 to 5,000 each | the oracle; the family's `super_errors` fixtures still fail (through the old checker) | the declined count of the family goes to 0 on both corpora; instructions per line of type checking reported | R5c | first of each kind no, then yes |
-| R7 | `new` is the default. The old checker runs only for a unit with an error and for tooling | `Declined`, `tc_coverage.txt`, `tc/bridge/from_old.rs` | 600 | every project under `tests/` builds with zero declined units | **type checking at most 24,000 instructions per line on the application** (surroundings included, bridge included), and the CI instruction count of the test project down by at least 12% | all R6 | yes |
+| R6g | Derived items (3.9): `tc/derived.rs`, a port of `types/derived.rs::discharge` onto templates, member declarations and scopes, with the per-item fallback to the general form; the binding and obligation tables; `to_old` for them | `Declined::DerivedItem` and its ratchet rows | 1,200 | `RESCRIPT_DERIVED_PATH=check` builds `tests/ppx_spice` with no difference under `RESCRIPT_CHECKER=new`; the 14 fixtures of `tests/build_tests/super_errors_derived` give their expected files; the oracle | declined units with a plan go to 0 on every corpus; a discharge is at most 3 steps an obligation and 2 a skeleton node at 10,000 | R5c, and R6a for labelled arguments in skeletons | yes |
+| R7 | `new` is the default. The old checker runs only for a unit with an error and for tooling | `Declined`, `tc_coverage.txt`, `tc/bridge/from_old.rs` | 600 | every project under `tests/` builds with zero declined units, `tests/ppx_spice` included | **type checking at most 24,000 instructions per line on the application** (surroundings included, bridge included), and the CI instruction count of the test project down by at least 12% | all R6, R6g included | yes |
 | R8a..R8c | The explaining mode: `tc/explain.rs`, `tc/print.rs`. (a) type clashes and the type printer; (b) every other expression and pattern error; (c) declaration, module and inclusion errors. Tooling entry points check with the new checker and get their typed tree from `to_old` | (c) deletes `types/typecore.rs`, `types/typemod.rs`, `types/includemod.rs`, `types/includecore.rs`, `types/parmatch.rs`, `types/printtyp.rs`, and every function of `types/ctype.rs` the backend does not call | 3,000 each | `scripts/test_error_output_parity.sh`, the `super_errors` and `super_errors_multi` suites, with `RESCRIPT_CHECKER=old` no longer accepted after (c) | a failing unit costs at most 2.2 times a passing one | R7 | (a) no, (b) and (c) yes, one error at a time |
 | R9a..R9c | Readers on rows and `TypeFacts`: (a) `raw_lambda/typeopt.rs` and `convert.rs`; (b) `matching.rs` and the pattern pool; (c) genType and unit reads (THREE_TREES T9, T10, T11, T3) | (c) deletes the batch build's use of `to_old`, the rest of `types/ctype.rs`, `types/context.rs`, `types/type_expr.rs`, `types/env.rs`, `types/env_lazy.rs`, `types/thread_store.rs`, `types/shared_store.rs`, `types/module_view.rs`, `types/world.rs`, `types/btype.rs`, `types/type_marks.rs` | 3,000 each | JavaScript, stdlib and genType parity | **type checking at most 20,000 instructions per line on the application** | R8 | (a) and (b) no, (c) yes |
 | R10 | Editor analysis on rows (THREE_TREES T12) | `types/{typedtree,tast_arena,tast_iterator,sexp_typedtree}.rs`, `tc/bridge/`, the switch | 3,000 | analysis tests | - | R9 | yes, arm by arm |
@@ -1204,7 +1240,7 @@ may land without lowering a count from R5c on), the two hard measurement
 gates (R7, R9), and the rule that the bridge's converters are lazy and
 therefore visible in a profile whenever something still needs them.
 
-**The order is forced** except for two freedoms: R6a to R6f can be built in
+**The order is forced** except for two freedoms: R6a to R6g can be built in
 parallel by different workers once R5c has landed, and R9a to R9c can
 start after R7 on the old checker's side of `TypeFacts` if workers are
 free (they then land before R8 and R8c deletes less).
@@ -1631,7 +1667,69 @@ family's error fixtures under RESCRIPT_CHECKER=both: the new checker must
 fail each of them, at any point).
 ```
 
-### 6.10 R7: the default flips
+### 6.10 R6g: derived items
+
+```text
+Task R6g: derived items in the new checker. Read
+compiler-rust/docs/DERIVED_CODECS.md ("The cheapest sound path", "The
+oracle"), CHECKER_REWRITE.md 3.9, and compiler-rust/src/types/derived.rs,
+which is the reference function by function.
+
+Until this slice a unit whose parse arena has a plan
+(arena.plans().item_count() > 0) is declined with Declined::DerivedItem by
+the pre-scan. If the derived work on trunk has added item kinds since
+(records, variants), cover every kind trunk discharges; do not decline by
+kind.
+
+End state:
+- src/tc/derived.rs: discharge(item) -> Result<(), Fallback>. Per value
+  obligation: one lookup by name at the current scope (tc/names.rs, with
+  its usage mark, deprecation warning and unit read), one instance of the
+  value's template, one unify with the obligation's skeleton built in the
+  unit's graph. Per type obligation: the path resolved to a TypeDecl row,
+  its members read by index. Per binding: one function type, one binder.
+- The whole item runs under one speculation, in Mode::Success and
+  Mode::Explain alike. On Fallback the speculation is restored, the
+  warnings and usage marks recorded since the item began are taken back,
+  and the item's general form is typed by the walk; nothing of the failed
+  discharge is observable.
+- Two dense tables indexed by the plan's BindingIdx and ObligationIdx: the
+  binder of each binding (4 bytes) and what each obligation resolved to
+  (4 bytes, the reference an ExprRow carries). size_of tests for both. No
+  ExprRow is written for a discharged item.
+- tc/bridge/to_old.rs fills the old typed arena's derived tables from
+  them, so raw_lambda/convert/derived.rs is untouched.
+- rg -n 'DerivedItem' src gives 0; its rows are gone from tc_coverage.txt.
+- rg -n 'HashMap|Vec<' src/tc/derived.rs shows only the two tables and the
+  reused skeleton-variable buffer.
+
+Commits: the tables; value obligations; type obligations; bindings and
+generalisation (begin_def, end_def, generalize where typecore.ml's
+type_let has them); the fallback; to_old; delete the Declined variant.
+
+Tests:
+- step counts at 10,000: an item with 10,000 value obligations is at most
+  3 steps an obligation; a skeleton of 10,000 nodes is at most 2 steps a
+  node; a failing last obligation restores in one step per write made;
+- a unit test per fixture shape that the fallback leaves no warning, no
+  usage mark and no link behind;
+- RESCRIPT_DERIVED_PATH=check RESCRIPT_CHECKER=new rescript build
+  tests/ppx_spice: no difference reported; the same under
+  RESCRIPT_CHECKER=both: no mismatch;
+- the 14 fixtures of tests/build_tests/super_errors_derived produce their
+  expected files with RESCRIPT_CHECKER=new, with RESCRIPT_DERIVED_PATH
+  unset and with general, byte for byte.
+
+Measurement: declined units with a plan before and after on every corpus;
+instructions of type checking of tests/ppx_spice under old and under new.
+
+Failure: typing a derived body when its obligations discharge; reporting
+a diagnostic from the discharge instead of from the general form;
+treating a Fallback as a failure of the unit; knowing anything about
+Spice in tc/.
+```
+
+### 6.11 R7: the default flips
 
 ```text
 Task R7: RESCRIPT_CHECKER defaults to new.
@@ -1656,7 +1754,7 @@ with docs/prototypes/checker-attribution, report the top three items, stop.
 Failure: flipping with a unit still declined in any project under tests/.
 ```
 
-### 6.11 R8a to R8c: the explaining mode
+### 6.12 R8a to R8c: the explaining mode
 
 ```text
 Task R8<x>: diagnostics from the new checker.
@@ -1690,7 +1788,7 @@ Failure: an error text assembled on the success path; a fixture's
 expected file changed.
 ```
 
-### 6.12 R9a to R9c: readers on rows
+### 6.13 R9a to R9c: readers on rows
 
 ```text
 Task R9<x>: a reader of the checker's results reads rows and TypeFacts.
@@ -1717,7 +1815,7 @@ Failure: a TypeFacts method that walks a type; a reader that looks a name
 up again.
 ```
 
-### 6.13 R10: tooling, and the last deletions
+### 6.14 R10: tooling, and the last deletions
 
 ```text
 Task R10: editor analysis reads rows; the bridge and the switch go.
