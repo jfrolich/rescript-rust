@@ -6351,7 +6351,7 @@ fn compile_source_to_js_with_options_inner(
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
     // Type check
-    let type_ctx = fresh_type_context();
+    let type_ctx = fresh_type_context(crate::types::context::CheckMode::Explain);
     type_ctx.set_location_namespace(&options.location_identity(filename));
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
@@ -7600,7 +7600,7 @@ pub fn typecheck_interface_source(
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
     // Type check
-    let type_ctx = fresh_type_context();
+    let type_ctx = fresh_type_context(crate::types::context::CheckMode::Explain);
     type_ctx.set_location_namespace(&options.location_identity(filename));
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
@@ -10103,13 +10103,16 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
 }
 
 /// A fresh type context with the stamp counter where OCaml's starts.
-fn fresh_type_context() -> TypeContext {
+/// Cost: one context allocation/setup per unit attempt; fixes its check mode.
+fn fresh_type_context(mode: crate::types::context::CheckMode) -> TypeContext {
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     // Match OCaml's Parmatch.extra_pat which eagerly calls Ident.create "+"
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
-    TypeContext::new(std::sync::Arc::new(id_gen))
+    let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    ctx.set_explain_mode(mode);
+    ctx
 }
 
 /// The type-checking context and initial environment an in-process
@@ -10199,7 +10202,7 @@ pub fn typecheck_structure_for_tooling(
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_attribute_specs(structure, arena)
             .expect("the frontend read these attributes");
-    let type_ctx = fresh_type_context();
+    let type_ctx = fresh_type_context(crate::types::context::CheckMode::Explain);
     type_ctx.set_location_namespace(&options.location_identity(filename));
     let (typed, typed_arena) = {
         let (mut tctx, env) = in_process_type_check_context(
@@ -10250,7 +10253,7 @@ pub fn typecheck_signature_for_tooling(
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena)
             .expect("the frontend read these attributes");
-    let type_ctx = fresh_type_context();
+    let type_ctx = fresh_type_context(crate::types::context::CheckMode::Explain);
     type_ctx.set_location_namespace(&options.location_identity(filename));
     let (typed, typed_arena) = {
         let (mut tctx, env) = in_process_type_check_context(
@@ -10390,7 +10393,7 @@ fn compile_until_js(
     );
     let env_setup_span = info_span!("compiler.env_setup").entered();
     let env_setup_start = crate::timing::enabled().then(std::time::Instant::now);
-    let type_ctx = fresh_type_context();
+    let type_ctx = fresh_type_context(crate::types::context::CheckMode::Explain);
     type_ctx.set_location_namespace(&options.location_identity(filename));
     let (mut tctx, env) = in_process_type_check_context(
         &type_ctx,
@@ -11500,7 +11503,7 @@ pub fn typecheck_preprocessed_signature_in_process(
         ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena)
             .expect("the frontend read these attributes");
 
-    let type_ctx = fresh_type_context();
+    let type_ctx = fresh_type_context(crate::types::context::CheckMode::Explain);
     type_ctx.set_location_namespace(&options.location_identity(filename));
     let (mut tctx, env) = in_process_type_check_context(
         &type_ctx,

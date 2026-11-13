@@ -540,9 +540,18 @@ struct TypeMutationJournal {
     entries: Vec<TypeMutation>,
     active: Vec<ActiveTypeSnapshot>,
     next_id: u64,
+    #[cfg(test)]
+    logged_writes: usize,
 }
 
 impl TypeMutationJournal {
+    /// Amortized O(1): append one mutation to the existing journal buffer.
+    fn push(&mut self, mutation: TypeMutation) {
+        #[cfg(test)]
+        { self.logged_writes += 1; }
+        self.entries.push(mutation);
+    }
+
     fn finish(&mut self, id: u64) {
         if let Some(index) = self.active.iter().position(|snapshot| snapshot.id == id) {
             self.active.remove(index);
@@ -735,6 +744,14 @@ pub(crate) struct ReifiedNames {
     used: crate::fast_hash::AHashSet<String>,
 }
 
+/// Diagnostic preparation policy, fixed for one whole-unit check attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum CheckMode {
+    Success,
+    Explain,
+}
+
 /// Type checking context.
 ///
 /// This context is created for each type checking session (typically one
@@ -841,6 +858,11 @@ pub struct TypeContext {
     /// OCaml-shaped mutation trail. Logging is dormant unless a snapshot lives.
     mutation_journal: RefCell<TypeMutationJournal>,
     mutation_logging: TrailLogging,
+    /// The diagnostic policy fixed when preparing this unit.
+    explain_mode: Cell<CheckMode>,
+    /// A unification failed on the success path without its snapshot: the
+    /// unit must be checked again in the explaining mode.
+    unexplained_unify_failure: Cell<bool>,
 
     /// Cached value of `RESCRIPT_COMPILER_COUNTERS` for hot-path probes.
     compiler_counters_enabled: bool,
@@ -1372,6 +1394,8 @@ impl TypeContext {
             local_stored_components: RefCell::new(crate::fast_hash::AHashMap::new()),
             mutation_journal: RefCell::new(TypeMutationJournal::default()),
             mutation_logging: TrailLogging::default(),
+            explain_mode: Cell::new(CheckMode::Explain),
+            unexplained_unify_failure: Cell::new(false),
             compiler_counters_enabled: crate::perf_counters::enabled(),
             // Index 0 is reserved as canonical Mnil; index 1 is the dedicated
             // simple_abbrevs memo ref.
@@ -1560,6 +1584,31 @@ impl TypeContext {
     /// Resolve a typedtree environment reference.
     pub fn get_typed_env(&self, env_ref: EnvRef) -> Option<Rc<Env>> {
         self.typed_envs.borrow().get(env_ref.index()).cloned()
+    }
+
+    /// Whether a top-level unification needs its undo-compress snapshot:
+    /// always in the explaining mode, and under any live snapshot (a
+    /// speculation), never on the success path. Cost: two loads, no writes.
+    /// The snapshot preserves diagnostics (compiler/ml/ctype.ml:2589-2594).
+    #[inline]
+    pub(crate) fn unify_takes_snapshot(&self) -> bool {
+        self.explain_mode.get() == CheckMode::Explain || self.mutation_logging.compress()
+    }
+
+    /// Cost: one `Cell` write.
+    pub(crate) fn set_explain_mode(&self, on: CheckMode) {
+        self.explain_mode.set(on);
+    }
+
+    /// Cost: one `Cell` write; called on a failure path only.
+    #[cold]
+    pub(crate) fn note_unexplained_unify_failure(&self) {
+        self.unexplained_unify_failure.set(true);
+    }
+
+    /// Cost: one `Cell` read.
+    pub(crate) fn unexplained_unify_failure(&self) -> bool {
+        self.unexplained_unify_failure.get()
     }
 
     #[inline]
@@ -3041,7 +3090,7 @@ impl TypeContext {
         }
         let mut journal = self.mutation_journal.borrow_mut();
         if journal.records_type(ty) {
-            journal.entries.push(self.frozen_mutation(mutation()));
+            journal.push(self.frozen_mutation(mutation()));
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_type_mutation(kind);
             }
@@ -3057,7 +3106,7 @@ impl TypeContext {
         if !self.mutation_logging.full() {
             return;
         }
-        self.mutation_journal.borrow_mut().entries.push(self.frozen_mutation(mutation()));
+        self.mutation_journal.borrow_mut().push(self.frozen_mutation(mutation()));
         if self.compiler_counters_enabled {
             crate::perf_counters::record_type_mutation(kind);
         }
@@ -3070,7 +3119,7 @@ impl TypeContext {
         }
         let mut journal = self.mutation_journal.borrow_mut();
         if journal.records_row_field(row) {
-            journal.entries.push(self.frozen_mutation(mutation()));
+            journal.push(self.frozen_mutation(mutation()));
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_type_mutation(
                     crate::perf_counters::TypeMutationKind::Row,
@@ -5579,7 +5628,6 @@ impl TypeContext {
                         let old = self.get_desc(node).0;
                         self.mutation_journal
                             .borrow_mut()
-                            .entries
                             .push(TypeMutation::Compress(node, old, current));
                     }
                     self.write_desc_raw(node, TypeDesc::Tlink(current));
@@ -5595,6 +5643,41 @@ impl TypeContext {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn check_mode_snapshot_cost_at_ten_thousand_unifications() {
+        use super::super::ctype::{unify, UnifyState};
+        assert_eq!(std::mem::size_of::<CheckMode>(), 1);
+        for mode in [CheckMode::Success, CheckMode::Explain] {
+            let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+            ctx.set_explain_mode(mode);
+            for _ in 0..10_000 {
+                let left = ctx.new_type(TypeDesc::Tvar(None));
+                let right = ctx.new_type(TypeDesc::Tvar(None));
+                unify(&ctx, &mut UnifyState::new(), left, right).unwrap();
+            }
+            let journal = ctx.mutation_journal.borrow();
+            assert_eq!(journal.next_id, if mode == CheckMode::Explain { 10_000 } else { 0 });
+            assert_eq!(journal.logged_writes, 0);
+            assert!(!ctx.unexplained_unify_failure());
+        }
+    }
+
+    #[test]
+    fn success_mode_keeps_speculation_journal() {
+        use super::super::ctype::{unify, UnifyState};
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        ctx.set_explain_mode(CheckMode::Success);
+        let left = ctx.new_type(TypeDesc::Tvar(None));
+        let right = ctx.new_type(TypeDesc::Tvar(None));
+        let snapshot = ctx.snapshot_type_state();
+        assert!(ctx.unify_takes_snapshot());
+        unify(&ctx, &mut UnifyState::new(), left, right).unwrap();
+        assert_eq!(ctx.mutation_journal.borrow().next_id, 2);
+        assert!(ctx.mutation_journal.borrow().logged_writes > 0);
+        drop(snapshot);
+        assert!(!ctx.unify_takes_snapshot());
+    }
 
     fn frozen_arrows(ctx: &TypeContext) -> [TypeExprRef; 4] {
         use super::super::shared_store::{SharedGraphParts, SharedGraphPayloads, SharedGraphSizes, shared_ref};

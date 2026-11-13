@@ -7565,12 +7565,15 @@ pub fn unify(
     }
     // OCaml's outer `unify` (ctype.ml:2589-2594) takes a snapshot so a
     // failure can `undo_compress` before expanding the trace.
-    let top_snapshot = (state.recursion_depth == 1).then(|| {
-        if ctx.compiler_counters_enabled() {
-            crate::perf_counters::census_unify(ctx, t1, t2);
-        }
-        ctx.snapshot_type_state_for_undo_compress()
-    });
+    if state.recursion_depth == 1 && ctx.compiler_counters_enabled() {
+        crate::perf_counters::census_unify(ctx, t1, t2);
+    }
+    // On the success path a top-level
+    // unification takes no snapshot; its failure is recorded and the unit is
+    // checked again in the explaining mode, which takes it.
+    let top_snapshot = (state.recursion_depth == 1 && ctx.unify_takes_snapshot())
+        .then(|| ctx.snapshot_type_state_for_undo_compress());
+    let unexplained = state.recursion_depth == 1 && top_snapshot.is_none();
 
     // Fast path: same reference
     let t1 = ctx.repr(t1);
@@ -7620,6 +7623,9 @@ pub fn unify(
         }
     }
     drop(top_snapshot);
+    if unexplained && result.is_err() {
+        ctx.note_unexplained_unify_failure();
+    }
     result
 }
 
