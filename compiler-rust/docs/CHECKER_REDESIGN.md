@@ -4847,6 +4847,120 @@ head was not explained (two runs, 0.3% apart). The one-worker cost is
 owed by W6 (the store-build tests on local reads are 0.69% of
 `tests/tests`, J.1) and by sharing view items without a copy.
 
+##### W5b design: a world answer for the three kinds of path that are left
+
+Written before the code of the slice that finishes W5; "W5b as built"
+below records where the code ended up.
+
+**The three kinds are two.** OCaml builds the components of a module path
+from `scrape_alias env mty` (env.ml:1516-1518, 1435-1446):
+
+| Kind | What `scrape_alias` does | So the components are |
+| --- | --- | --- |
+| An alias whose target is not a unit (`module X = Other.Sub`, a sibling alias `module B = A`) | `find_module target`, then `Mtype.strengthen ~aliasable:true` against the target | the target's signature, strengthened against the target's path and prefixed with the alias's path |
+| A structure child `C` of an alias view `A` whose source is `S` | `A`'s signature is `S`'s strengthened with `~aliasable:true`, and that turns a child that is not an alias into `Mty_alias (Mta_present, S.C)` (mtype.ml:93-97). The child is therefore the first kind with target `S.C` | the same, with target `S.C` |
+| A child whose type is a module type name (`module N: S`) | `Mty_ident` is expanded to the module type's signature (env.ml:1437-1439); nothing is strengthened | the expansion of `S`, prefixed like a child declared with that signature |
+
+The first two are one kind: **the view of path `P` is a function of the
+view of its target path `T`**. W5 built that function for a target that is
+a unit (`ViewKey::Alias`, through
+`QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix`
+with the unit's signature and the unit's path as source). The same function
+applied to the signature and access path of any other view is the general
+case: a view's signature already names its own items through its access
+path, which is what the function re-roots and strengthens against.
+
+The store build of these paths reached the target through the compilation
+(`lookup_module_in_resolved_path`, `Env::resolve_module_type` against the
+seed environment, the registry of alias rewrites). Nothing in the result
+needs a compilation: the target of a path a unit's signature declares is,
+after the parent's component substitution, a path rooted in a persistent
+unit, and every such path has a view by induction on the alias chain.
+
+**What the world owns.**
+
+1. *Target resolution.* `ModuleView::alias_targets` already holds the
+   substituted target of every child that is a path. The world resolves a
+   persistent-rooted module path to a view with these steps, none of which
+   reads a compilation: a persistent identifier is its unit's view; `p.name`
+   is the child `name` of the view of `p`, which is a `Child` view when the
+   parent view is not an alias view and declares it with a signature, and
+   otherwise an alias view whose target is the view of (a) the child's
+   substituted target path when it is declared as a path, or (b) `S.name`
+   when the parent is an alias view with source `S`. The chain ends because
+   each step either descends into a declared signature or follows a
+   declared alias, and a cycle of aliases is not typable. A resolution that
+   meets a functor, a module type name it cannot expand, a unit the world
+   does not own or a failed cell has no view; the path is then built for
+   the compilation, like any path the world does not cover, never as a
+   store build.
+2. *Units.* The world does not load units: which unit a name denotes, and
+   whether a compilation may see it, are facts of the compilation's load
+   path. The resolver therefore runs on the adopting compilation's thread
+   and asks it for each unit (`find_pers_struct`, the load the store build
+   made); everything else it reads is world data. The cell of an alias
+   view holds the view built for the target the first compilation
+   resolved; a compilation whose own resolution ends in another view (two
+   packages with a unit of the same name) builds its tables for itself,
+   as W5 does for an alias of a unit.
+3. *Alias sources and flattened backing sources.* The registry answered
+   "which paths is this component path an alias of" from what the
+   compilation had loaded. In the world it is a field of the view: its
+   target's access path, followed by the target's own sources. That is the
+   declared source and every backing path, in chain order, for every
+   compilation. `adopt_view` registers them while the registration tables
+   exist; their readers read the adopted view when the tables are deleted.
+4. *Forced child declarations.* One per cell and build (`ViewCell::decl`),
+   as for the kinds W5 moved. A structure child of an alias view forced the
+   source's child declaration in the adopting compilation; the only
+   consumers of that effect were the tables of other paths looking for a
+   declaration forced "first" (`lookup_qualified_module_shared_inner`), and
+   a world view answers from its own cell. Nothing is owed on adoption.
+5. *Module type expansion* (third kind). The expansion of a module type
+   path is found without a compilation: a local identifier is an item of
+   the parent's declared signature or of an ancestor's (the parent links);
+   a dotted path is the module type table of the view its prefix resolves
+   to. The result is a signature and nothing else; a module type that is
+   abstract or a functor type has no components.
+
+**What a view of each kind contains.** No new table. An alias view of any
+target has what an alias view of a unit has: `signature` (the target's,
+re-rooted and strengthened), the lookup tables and opened items described
+from it, `source` (now the target view and its access path, not a unit)
+and `parent`. A view of the third kind is a `Child` view whose declared
+signature is the expansion instead of the item's own. New fields: the
+chain of sources (point 3) and the target view, which is what `nested`
+means for an alias view (parent and target).
+
+**What adoption does.** `adopt_view(view)`: adopt the parent (as today);
+adopt the target, which loads the units on the target's chain in this
+compilation and so records the imports the store build recorded
+(`PreparePers`); take the signature rename of the unit a chain ends in, as
+W5 does for an alias of a unit; register the view's alias pairs and its
+source chain. Linear in the views adopted, once per compilation and view:
+a view that is held is one probe.
+
+**Keys.** `ViewKey::Alias` carries the target view instead of the unit;
+an alias of a unit passes the unit's view. The cell is the child's cell in
+the parent, as before. A structure child of an alias view and a declared
+alias both arrive there; which one it is, is read from the parent
+(`world_child_kind`).
+
+**The store builds beside views.** When every child kind that has
+components is a view, what a worker keeps per view (`env_lazy::ViewTables`)
+is needed only for the layer tables of `open` and for children without
+components of their own (functors). The scan that seeds child tables with
+an environment is then needed for no world path. The layer tables hold no
+type node and are built outside a store build; a functor child's result is
+instantiated for the compilation.
+
+**Order.** (1) the alias key with a view as target, moving non-unit
+aliases; (2) structure children of alias views; (3) module type names;
+(4) `ViewTables` without store builds; (5) the deletions of the W5 row;
+(6) a link's build proportional to its own declarations; (7) view items
+shared without a copy. If a kind cannot be moved, the slice stops there
+and deletes nothing that kind needs.
+
 #### W6. Delete store builds
 
 - **Files.** `types/context.rs`, `types/env_lazy.rs`, `types/thread_store.rs`,
