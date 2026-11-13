@@ -505,6 +505,7 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
         signature_check: crate::cmi::signature_check::SignatureCheck::from_env(),
         js_printer: crate::emit::PrinterMode::from_env(),
         check_only: false,
+        typed_trees: None,
         dump_lambda: opts.dump_lambda,
         dump_typed_sexp: opts.dump_typed_sexp,
         dump_typed_sexp_locs: opts.dump_typed_sexp_locs,

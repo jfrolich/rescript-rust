@@ -398,6 +398,41 @@ pub struct GeneralSyntax<S> {
 /// O(1) to pass; no ownership or allocation on the successful first attempt.
 pub type DerivedFallback<'a> = &'a dyn Fn() -> Result<GeneralSyntax<Structure>>;
 
+/// A module a check-only build type-checked, shown to
+/// [`CompilerOptions::typed_trees`] while its typed tree is alive: the
+/// build drops the tree when the module's check returns.
+pub struct TypedModule<'a> {
+    /// The module's name, as the build system names it.
+    pub module_name: &'a str,
+    /// The parsed tree the typed tree was checked from.
+    pub arena: &'a crate::parse_arena::ParseArena,
+    /// The type graph the typed tree refers to.
+    pub type_ctx: &'a TypeContext,
+    /// Node storage of `typed`.
+    pub typed_arena: &'a crate::types::typedtree::TypedArena,
+    /// The typed tree.
+    pub typed: TypedTree<'a>,
+    /// Whether the file's `@@config` leaves binary annotations on: with
+    /// `-bs-no-bin-annot` OCaml writes no `.cmt` or `.cmti` for it.
+    pub binary_annotations: bool,
+}
+
+/// The typed tree of a [`TypedModule`].
+#[derive(Clone, Copy)]
+pub enum TypedTree<'a> {
+    /// The typed structure of an implementation.
+    Implementation(&'a crate::types::typedtree::Structure),
+    /// The typed signature of an interface.
+    Interface(&'a crate::types::typedtree::TypedSignature),
+}
+
+/// What reads the typed trees of a check-only build
+/// ([`CompilerOptions::typed_trees`]), on the threads that check them.
+pub trait TypedTreeReader: Send + Sync {
+    /// Read a module that type-checks, once its checks have passed.
+    fn read(&self, module: &TypedModule<'_>);
+}
+
 /// See [`CompilerOptions::derived_differences`].
 pub type DerivedDifferences = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
 
@@ -519,6 +554,12 @@ pub struct CompilerOptions {
     pub js_printer: crate::emit::PrinterMode,
     /// Stop after typing and publish the interface without generating code.
     pub check_only: bool,
+    /// For a check-only build: what reads each module's typed tree when its
+    /// checks have passed (`reanalyze`). A typed tree is not `Send` and the
+    /// build keeps none, so the reader runs on the thread that checked the
+    /// module. The modules must be parsed with [`DerivedPath::General`] for
+    /// derived code to be in their trees.
+    pub typed_trees: Option<std::sync::Arc<dyn TypedTreeReader>>,
     /// Print the Lambda IR to stderr (like OCaml's -drawlambda)
     pub dump_lambda: bool,
     /// Print the typed tree as sexp to stderr (like OCaml's -dtyped-sexp)
@@ -810,6 +851,7 @@ impl Default for CompilerOptions {
             signature_check: crate::cmi::signature_check::SignatureCheck::from_env(),
             js_printer: crate::emit::PrinterMode::from_env(),
             check_only: false,
+            typed_trees: None,
             dump_lambda: false,
             dump_typed_sexp: false,
             dump_typed_sexp_locs: false,
@@ -11245,6 +11287,16 @@ fn compile_until_js(
         if type_warnings_have_errors(&tctx.warnings) {
             return Err(UserDiagnostic::new(warnings, 2).into());
         }
+        if let Some(reader) = &options.typed_trees {
+            reader.read(&TypedModule {
+                module_name,
+                arena,
+                type_ctx,
+                typed_arena: &tctx.typed,
+                typed: TypedTree::Implementation(&typed_structure),
+                binary_annotations: !file_config.no_bin_annot,
+            });
+        }
         let pers_struct = publish_checked()?;
         return Ok(InProcessPreJsCompileResult {
             signature: published_signature,
@@ -12096,6 +12148,16 @@ pub fn typecheck_preprocessed_signature_in_process(
     );
     if gentype.as_ref().is_some_and(crate::gentype::main::InterfaceRead::needs_locations) {
         return Err(LocationRetry::Warning.into());
+    }
+    if let Some(reader) = &options.typed_trees {
+        reader.read(&TypedModule {
+            module_name,
+            arena,
+            type_ctx,
+            typed_arena: &tctx.typed,
+            typed: TypedTree::Interface(&typed_signature),
+            binary_annotations: !file_config.no_bin_annot,
+        });
     }
     let decl_signature = crate::types::typemod::decl_signature_from_typed_signature(
         &tctx.typed,
