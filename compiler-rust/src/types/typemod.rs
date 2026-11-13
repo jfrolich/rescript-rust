@@ -414,6 +414,80 @@ fn open_direct_persistent_module(
     }
 }
 
+/// Open a `-open M` module (command line or `@@config` flags) into the
+/// initial environment `env`.
+///
+/// OCaml `Res_compmisc.open_implicit_module` (compiler/core/res_compmisc.ml:42-46)
+/// runs `Typemod.type_open_ Override` on `Longident.parse m` located at
+/// `Location.in_file "command line"`, so a module that is not found stops the
+/// compile with the usual unbound-module error reported at "command line".
+pub(crate) fn type_command_line_open(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &mut Env,
+    name: &str,
+) -> TypeModResult<()> {
+    let ctx = tctx.type_ctx;
+    if !name.contains('.')
+        && let Some(pers) = tctx.persistent_env.as_mut()
+        && pers.open_module(
+            name,
+            Path::pident(Ident::create_persistent(name)),
+            env,
+            ctx,
+            None,
+        )
+    {
+        // Env.open_signature (env.ml:1874-1877) exposes the opened components
+        // without a root module binding; keep the raw signature registered for
+        // descriptor lookup.
+        pers.register_opened_raw_sig(ctx, name);
+        return Ok(());
+    }
+    // A dotted name, or one the environment binds (such as a module of the
+    // implicitly opened Stdlib): look it up like a source `open`.
+    let arena = tctx.arena;
+    let lid = command_line_longident(arena, name);
+    let lookup_env = env.clone();
+    if lookup_module_path_by_lid(&lid, arena, &lookup_env, &mut tctx.persistent_env, ctx).is_none()
+    {
+        let loc = arena.push_typecheck_command_line_loc();
+        return Err(TypeModError::CoreError(
+            crate::types::typecore::unbound_module_lookup_error(tctx, &lookup_env, loc, &lid),
+        ));
+    }
+    if crate::types::typecore::open_module_lid_components_into_env(
+        &lid,
+        arena,
+        &lookup_env,
+        env,
+        &mut tctx.persistent_env,
+        ctx,
+        None,
+    )
+    .is_none()
+    {
+        let loc = arena.push_typecheck_command_line_loc();
+        if let Some(err) = structure_expected_error_for_open(tctx, &lookup_env, arena, &lid, loc) {
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+/// `Longident.parse` (compiler/ml/longident.ml): split a dotted module path.
+fn command_line_longident(arena: &ParseArena, name: &str) -> Longident {
+    let mut components = name.split('.');
+    let head = components.next().unwrap_or_default();
+    let mut lid = Longident::Lident(arena.push_shared_string(head.to_string()));
+    for component in components {
+        lid = Longident::Ldot(
+            Box::new(lid),
+            arena.push_shared_string(component.to_string()),
+        );
+    }
+    lid
+}
+
 fn flattened_persistent_alias_path(
     path: &Path,
     pers_env: Option<&crate::cmi::persistent_env::PersistentEnv>,

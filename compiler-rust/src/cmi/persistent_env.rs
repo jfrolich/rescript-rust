@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::cmi::marshal_reader::{MarshalReader, OcamlValue};
 use crate::driver::{
-    CompilerOptions, experimental_let_unwrap_for_structure, jsx_module_name,
-    jsx_version_for_structure, load_pervasives, normalize_signature,
+    CompilerOptions, experimental_let_unwrap_for_structure, initial_type_env, jsx_module_name,
+    jsx_version_for_structure, normalize_signature,
 };
 use crate::ident::Ident;
 use crate::lambda::lam_arity::Arity;
@@ -39,7 +39,7 @@ use crate::types::decl::{
     AliasPresence, ConstructorDescription, ConstructorKind, ModtypeDeclaration,
     ModuleDeclaration, ModuleType, RecStatus, Signature, SignatureItem, TypeKind,
 };
-use crate::types::env::{Env, initial_env};
+use crate::types::env::Env;
 use crate::types::path::Path;
 use crate::types::type_expr::{TypeDesc, TypeExprRef};
 use crate::types::type_marks::{TypeVisitSet, visit_set};
@@ -2512,7 +2512,7 @@ impl PersistentEnv {
             .filter(|(_, v)| v.is_none())
             .map(|(k, _)| (k.clone(), None))
             .collect();
-        let mut fallback_pers = PersistentEnv {
+        let fallback_pers = PersistentEnv {
             cache: Arc::new(Mutex::new(placeholders)),
             load_path: self.load_path.clone(),
             load_path_display: self.load_path_display.clone(),
@@ -2543,18 +2543,9 @@ impl PersistentEnv {
                 prepared_cached_alias_rewrites: HashSet::new(),
             }),
         };
-        let mut env = initial_env(ctx);
         let open_modules = fallback_pers.open_modules.clone();
         let nopervasives = fallback_pers.nopervasives;
         let compiling_module = fallback_pers.view.compiling_module.clone();
-        load_pervasives(
-            &mut fallback_pers,
-            &mut env,
-            ctx,
-            &open_modules,
-            nopervasives,
-            compiling_module.as_deref(),
-        );
 
         if source_path
             .extension()
@@ -2584,6 +2575,15 @@ impl PersistentEnv {
             crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
             let mut tctx = TypeCheckContext::new(ctx, parser.arena());
             tctx.set_persistent_env(fallback_pers);
+            // Like a type error below, an `-open` that is not found leaves
+            // nothing to load.
+            let env = initial_type_env(
+                &mut tctx,
+                &open_modules,
+                nopervasives,
+                compiling_module.as_deref(),
+            )
+            .ok()?;
             let typed_signature =
                 transl_signature(&mut tctx, &env, parser.arena(), &signature).ok()?;
             let fallback_pers = tctx.persistent_env.take()?;
@@ -2654,6 +2654,13 @@ impl PersistentEnv {
         let mut tctx = TypeCheckContext::new(ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
         tctx.set_persistent_env(fallback_pers);
+        let env = initial_type_env(
+            &mut tctx,
+            &open_modules,
+            nopervasives,
+            compiling_module.as_deref(),
+        )
+        .ok()?;
         let (typed_structure, final_env) =
             type_structure(&mut tctx, &env, parser.arena(), &structure).ok()?;
 
@@ -3231,6 +3238,19 @@ impl PersistentEnv {
     /// Whether in-process mode is active.
     pub fn is_in_process_mode(&self) -> bool {
         self.in_process_mode
+    }
+
+    /// Keep an opened module's raw signature registered for ps_comps-style
+    /// descriptor lookup (disk mode only).
+    pub fn register_opened_raw_sig(&mut self, ctx: &TypeContext, name: &str) {
+        if self.in_process_mode {
+            return;
+        }
+        if let Some(md) = self.get_module_declaration(name, ctx)
+            && let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type
+        {
+            ctx.register_raw_module_sig(name, sig.clone());
+        }
     }
 
     /// Whether module `name` belongs to `@rescript/runtime` (in-memory

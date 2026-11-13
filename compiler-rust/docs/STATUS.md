@@ -1,13 +1,15 @@
 # Status of the design documents against the code
 
 An audit of plan against code. Trunk `ocaml-to-rust-rewrite` at `e5ada1df9`
-(2026-11-13). It answers one question with evidence: have the design
+(2026-11-13), with the backend-lowering coverage and S3.7 row updated by
+S3.7b (see [measurements](LOWERING_LOOPS_RECURSIVE_RESULTS.md)). It answers one question with evidence: have the design
 documents been followed as rewrites of the structures they name, or as
 changes in front of the old structures?
 
 How to read it.
 
-- Every status below comes from a command run on that commit, not from a
+- Statuses outside the updated backend-lowering rows come from commands run
+  on that commit, not from a
   document's prose. Commands are run from `compiler-rust/` unless a path
   starts with another top-level directory. "0" means no match.
 - A status is one of: **done as designed**; **done in part** (what is missing
@@ -30,7 +32,7 @@ How to read it.
   W4 whole or nearly, W5 in part). The old mechanisms J.2 lists as "gone" are
   still there in 10 of 13 rows.
 - **The backend's new structures exist beside the old ones and none is on the
-  default path.** The new lowering handles 1,290 of 1,438 units of the three
+  default path.** The new lowering handles 1,453 of 1,454 units of the three
   in-repository corpora completely in check mode; every build still runs the
   legacy lowering, the six JS passes and the legacy printer.
 - **Two front-end slices replaced what they named and deleted it** (T2, T7),
@@ -212,23 +214,22 @@ over its three corpora (the parity fixtures, the runtime library,
 
 | Stage | Units identical / units | Reasons left |
 | --- | --- | --- |
-| `lambda-bridge` (S2.2) | 1,438 / 1,438 | none |
-| `lambda-norm` (S4.1) | 1,438 / 1,438 | none |
-| `lambda-flatten` (S4.2) | 1,438 / 1,438 | none |
-| `lambda-exits` (S4.3) | 1,438 / 1,438 | none |
-| `lambda-alias` (S4.4) | 1,438 / 1,438 | none |
-| `js-bridge` (S3.1a) | 1,325 / 1,325 | none |
-| `lower` (S3.3 to S3.9) | 1,290 / 1,438 | `loop` 134, `let rec` 13, `shared Lambda subtree with binder` 1 |
+| `lambda-bridge` (S2.2) | 1,454 / 1,454 | none |
+| `lambda-norm` (S4.1) | 1,454 / 1,454 | none |
+| `lambda-flatten` (S4.2) | 1,454 / 1,454 | none |
+| `lambda-exits` (S4.3) | 1,454 / 1,454 | none |
+| `lambda-alias` (S4.4) | 1,454 / 1,454 | none |
+| `js-bridge` (S3.1a) | 1,341 / 1,341 | none |
+| `lower` (S3.3 to S3.9) | 1,453 / 1,454 | `shared Lambda subtree with binder` 1 |
 
-`lower` by corpus: fixtures 519 of 593 (`loop` 74); runtime 103 of 113
-(`loop` 10); `tests/tests` 668 of 732 (`loop` 50, `let rec` 13, shared
-binder 1). The application is not in the file; #218 reports 3,709 of 3,848
-units lowered completely, with `loop` 136 and `let rec` 3 left.
+`lower` by corpus: fixtures 609 of 609; runtime 113 of 113;
+`tests/tests` 731 of 732 (one shared Lambda subtree with a binder, catch-only).
+The 3,735-module application lowers 3,848 of 3,848 units including its runtime.
+Its previous baseline was 3,709 of 3,848, with `loop` 136 and `let rec` 3.
 
 ```
-$ rg -U -o 'Unsupported\(\s*"[^"]*"' src/bir/lower --glob '!*tests*'   # distinct reasons
-"let rec"   (1 site, rec.rs)
-"loop"      (3 sites)
+$ rg -U -o 'Unsupported\(\s*"[^"]*"' src/bir/lower --glob '!*tests*'
+# no matches; the remaining shared-binder fallback is in the import boundary
 ```
 
 ### 2.2 Stages S0 to S7 (BACKEND_REDESIGN H.1)
@@ -246,14 +247,14 @@ row names and, where one exists, the stage of the ratchet file.
 | S1.4 | Default printer is oxc; instruction count falls by about 2.8% | default is `Legacy` | not started, and its premise did not hold: `PRINTER_INSTRUCTIONS.md` measured the oxc printer on the JS IR at +1.51% whole-build instructions on `tests/tests` against the legacy printer. THREE_TREES T5 and T6 replace this row | #175 (the measurement) |
 | S1.5 | Remove the legacy printer's layout code from release builds | `src/js_ir/printer.rs` 7,265 lines, `program_printer.rs` 897 | not started | - |
 | S2.1 | `Bir`: nodes, pools, views, validator, dump | `src/bir/{mod,node,pools,vars,edit,validate,dump}.rs` exist | done as designed | #117, #123, #144 |
-| S2.2 | Bridges, `BackendMode`, `Unsupported`, the report, the ratchet file, the CI job | `src/bir/bridge.rs`, `enum BackendMode { Legacy (default), New, Check }` in `bir/shadow.rs`; stage `lambda-bridge` 1,438 / 1,438 | done as designed, except what `New` does (7.2) | #129, #184 |
+| S2.2 | Bridges, `BackendMode`, `Unsupported`, the report, the ratchet file, the CI job | `src/bir/bridge.rs`, `enum BackendMode { Legacy (default), New, Check }` in `bir/shadow.rs`; stage `lambda-bridge` 1,454 / 1,454 | done as designed, except what `New` does (7.2) | #129, #184 |
 | S3.1 | Emit reads J-level `Bir`; naming on `VarId` | `bir/bridge_j.rs` has `import_js` and `export_js` (stage `js-bridge`); no emitter reads `Bir` on trunk | done in part (the bridge), then **dropped** as a product path by THREE_TREES section 10: the emitter over J-level `Bir` measured +10.23% whole-build instructions on `tests/tests` (`PRINTER_INSTRUCTIONS.md`) and is not on trunk | #167, #175 |
 | S3.2 | J normalising rules and rounds J1 to J4 in `bir/j/{norm,inline_return,rest,subst,shake}.rs` | `ls src/bir/j`: `equal.rs facts.rs logic.rs mod.rs norm.rs plain.rs` and tests. No `inline_return`, `rest`, `subst`, `shake` | done in part: the rules (#183). The four rounds are not built and change target to T1 and T4 (THREE_TREES section 10) | #183 |
 | S3.3 | Lowering, first set (BACKEND_LOWERING 8.3) | `src/bir/lower/{mod,out,expr,cond,call,args,prim,konst,unit}.rs` exist; stage `lower` | done as designed | #170, #182, #190, #191 |
 | S3.4 | `Switch`, `StrSwitch`; removes `"switch"`, `"string switch"` | `switch.rs`, `variant.rs`, `untagged.rs` exist; neither reason is in the code | done as designed | #197 |
 | S3.5 | `Catch`, `Exit`; removes `"static catch"` | `exit.rs`; the reason is not in the code | done as designed | #210 |
 | S3.6 | `LetRec` of functions; self tail calls | `rec.rs`, `tail.rs` | done as designed | #218, #169 |
-| S3.7 | Loops, `Break`, `Continue`, loop labels; `Assign`; `Try`; `LetRec` with value members; removes `"loop"`, `"try"`, `"assign"`, the rest of `"let rec"` | `assign.rs`, `try_.rs` exist; `loops.rs` and `label.rs` do not; `"loop"` at 3 sites, `"let rec"` at 1 | done in part: `Assign`, `Try`, `TryFinally` (#216). Missing: loops and their labels, `LetRec` with value members | #216 |
+| S3.7 | Loops, `Break`, `Continue`, loop labels; `Assign`; `Try`; `LetRec` with value members; removes `"loop"`, `"try"`, `"assign"`, the rest of `"let rec"` | `assign.rs`, `try_.rs`, `loops.rs`, `label.rs`, `rec.rs`; no loop/recursive-value Unsupported arms; 512 label shapes and 10,000-element stress tests | implemented in check mode; publication/CI status is separate from the local measurements | #216, #227 |
 | S3.8 | Externals; removes `"external"`, `"cross-module inline"` | `external.rs`, `ffi_args.rs`; neither reason is in the code | done as designed | #207 |
 | S3.9 | `Pjsx`, `Pimport`, `Pawait`, record copy and rest | `jsx.rs`, `import.rs`, `record.rs`; none of the five reasons is in the code | done as designed | #204 |
 | S3.9b | Export extraction and coercion on J-level `Bir`, in `export.rs` | `src/bir/lower/export.rs` does not exist | not started; target changed to the lowering's top-level rows (T4) | - |

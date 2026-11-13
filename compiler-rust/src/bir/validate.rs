@@ -226,11 +226,16 @@ impl Bir {
         // Only the nearest boundary matters: a binder inside it is also inside
         // every enclosing boundary, even when the binder followed the use.
         let mut control = vec![NodeFlags::default(); self.nodes.len()];
+        let mut loops = vec![super::tail_facts::LoopFacts::default(); self.nodes.len()];
         for &id in order.iter().rev() {
             let node = self.node(id);
-            let facts = self.control_facts::<false>(node, |c| {
-                NodeFlags(control[c.index()].0 | if effects[c.index()].0 { NodeFlags::PURE } else { 0 })
+            let (facts, loop_facts) = self.control_facts(node, |c| {
+                (NodeFlags(control[c.index()].0 | if effects[c.index()].0 { NodeFlags::PURE } else { 0 }), loops[c.index()])
             });
+            loops[id.index()] = loop_facts;
+            if self.js_scope.is_none() && self.loop_facts.get(id.index()).copied().unwrap_or_default() != loop_facts {
+                return fail("stale loop-label fact");
+            }
             control[id.index()] = facts;
             if node.op() != Op::Var && node.op() as u8 <= Op::Continue as u8 {
                 if node.flags().contains(NodeFlags::HAS_EXIT) != facts.contains(NodeFlags::HAS_EXIT) {
