@@ -2816,8 +2816,8 @@ The statement stack and node-list pool must be used end to end.
 | `prim.rs:272` `finish_primitive_payload` | `let info = self.arena.js_info(crate::bir::JsPayload::Block(tag.clone()));` | per visited node | borrow payload or retain typed pool handle | pending |
 | `prim.rs:372` `finish_primitive_payload` | `norm::jm12_interpolated_template(&mut self.arena, segments.clone(), values.into_vec())` | per visited node | borrow payload or retain typed pool handle | pending |
 | `prim.rs:381` `finish_primitive_payload` | `.collect();` | per visited node | reusable scratch buffer; clear, do not free | pending |
-| `prim_block.rs:13` `flat_make_field` | `let mut segments = smallvec::SmallVec::<[&str; 4]>::new();` | per visited node | list-pool handle (outputs: reusable output-buffer span) | pending |
-| `prim_block.rs:14` `flat_make_field` | `let mut visited = smallvec::SmallVec::<[NodeId; 4]>::new();` | per visited node | list-pool handle (outputs: reusable output-buffer span) | pending |
+| `prim_block.rs:13` `flat_make_field` | `let mut segments = smallvec::SmallVec::<[&str; 4]>::new();` | per visited node | Converted: spell segments from retained node scratch into retained string storage without a segment vector. | converted |
+| `prim_block.rs:14` `flat_make_field` | `let mut visited = smallvec::SmallVec::<[NodeId; 4]>::new();` | per visited node | Converted: borrow and clear the unit node scratch on both successful and failed module-path probes. | converted |
 | `record.rs:38` `record_copy` | `let mut operands = vec![*init];` | per construct | reusable scratch buffer; clear, do not free | pending |
 | `record.rs:39` `record_copy` | `let mut keys = vec![PropertyKey::RecordSpread];` | per construct | property-key pool handle (requires J payload API change) | pending |
 | `record.rs:83` `record_children` | `pub(super) fn record_children(&self, cx: Cx, record: &Record, into: &mut Vec<(Cx, NodeId)>) {` | per construct | reusable scratch buffer; clear, do not free | pending |
@@ -2988,6 +2988,23 @@ the entire Lambda call, arguments, sequencing and jump emission and releases the
 output twice. The measured pass allocates zero times with unchanged capacities,
 10,002 source visits and 10,001 argument visits (including the callee). This
 fixture does not measure wrapping the enclosing function into a loop.
+
+#### Module-field slice
+
+`flat_make_field` retains source-node scratch and name storage across probes;
+flat export spelling no longer constructs a temporary segment vector.
+`primitive_field` borrows record names and formats module/positional names into
+the same synchronous name scratch instead of allocating strings per field.
+
+The whole-Lambda `ten_thousand_module_fields_lower_without_allocations` fixture
+lowers and releases 10,000 module fields twice. Both successful global paths and
+failed local paths have zero warmed allocations and unchanged recorded
+capacities. The failure cache is cleared on each pass, so the second pass still
+exercises the complete failed-spine walk. Successful paths take one source visit
+and 10,001 primitive steps; failed paths take 10,001 visits and 40,000 primitive
+steps. The debug child-validation table is reserved to the warm run's node
+high-water mark before measurement (a one-node success otherwise first grows
+that table on its second construction).
 
 ### 7.5.1 Concurrent loop, label and recursive-value additions
 

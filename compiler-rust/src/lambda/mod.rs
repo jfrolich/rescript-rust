@@ -89,17 +89,23 @@ pub type FlatMakePath = Vec<FlatMakeStep>;
 /// `Translmod.flat_export_name`: the segments, each unwrapped from `\"..."`,
 /// joined with `$`.
 pub fn flat_export_name<S: AsRef<str>>(path: &[S]) -> String {
-    path.iter()
-        .map(|part| {
-            let part = part.as_ref();
-            if part.len() >= 3 && part.starts_with("\\\"") && part.ends_with('"') {
-                &part[2..part.len() - 1]
-            } else {
-                part
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("$")
+    let mut name = String::new();
+    flat_export_name_into(path.iter().map(AsRef::as_ref), &mut name);
+    name
+}
+
+/// Append a flat export spelling into retained storage, without a segment vector.
+/// O(segments + spelling bytes); callers clear the destination before reuse.
+pub(crate) fn flat_export_name_into<'a>(path: impl Iterator<Item = &'a str>, out: &mut String) {
+    for (i, part) in path.enumerate() {
+        if i != 0 { out.push('$'); }
+        let part = if part.len() >= 3 && part.starts_with("\\\"") && part.ends_with('"') {
+            &part[2..part.len() - 1]
+        } else {
+            part
+        };
+        out.push_str(part);
+    }
 }
 
 /// `Translmod.flat_make_name`: the flat export a read of this source path
