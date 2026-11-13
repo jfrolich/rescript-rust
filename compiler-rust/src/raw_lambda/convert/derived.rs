@@ -761,6 +761,95 @@ mod tests {
         }
     }
 
+    /// Characterise the general converter before variant plans replace it.
+    /// Test-only cost: linear in the source and printed Lambda size.
+    #[test]
+    fn the_forms_of_a_variant_body() {
+        for (name, source) in [
+            ("encoder", r#"type t = C | A(int) | R({x: int})
+let probe = (v: t) => switch v {
+| C => JSON.Array([JSON.String("C")])
+| A(v0) => JSON.Array([JSON.String("A"), Spice.intToJson(v0)])
+| R({x}) => JSON.Array([JSON.String("R"), JSON.Object(Dict.fromArray([("x", Spice.intToJson(x))]))])
+}"#),
+            ("array", r#"let probe = (v, empty, head, other) => switch (v: JSON.t) {
+| JSON.Array([]) => empty(v)
+| JSON.Array(json_arr) => head(json_arr)
+| _ => other(v)
+}"#),
+            ("head", r#"let probe = (v, c, a, other) => switch (v: JSON.t) {
+| JSON.String("C") => c
+| JSON.String("A") => a
+| _ => other
+}"#),
+            ("arity", r#"external \"!=": ('a, 'a) => bool = "%notequal"
+external length: array<'a> => int = "%array_length"
+let probe = (json_arr, bad, decoded) => if length(json_arr) != 2 {bad} else {decoded}"#),
+            ("argument", r#"type t = A(int)
+let probe = r => switch r {
+| Ok(v0) => Ok(A(v0))
+| Error(e: Spice.decodeError) => Spice.error(~path="[1]" ++ e.path, e.message, e.value)
+}"#),
+        ] {
+        let expected = match name {
+            "encoder" => r#"probe/0 =
+     (function v/1
+       (switch* v/1
+        case constructor "C": (makearray "C")
+        case constructor "A":
+         (let (v0/2 =a (field:var/3 v/1))
+           (makearray "A" (apply (field:intToJson/4 Spice/5) v0/2)))
+        case constructor "R":
+         (let (x/6 =a (field:x/3 v/1))
+           (makearray "R"
+             (Object.fromEntries
+               (makearray
+                 (makeblock tuple "x"
+                   (apply (field:intToJson/4 Spice/5) x/6))))))))"#,
+            "array" => r#"probe/0 =
+     (function v/1 empty/2 head/3 other/4
+       (catch
+         (switch v/1
+          case constructor "Array":
+           (catch
+             (let (len/5 =a (array.length v/1))
+               (if (!= len/5 0) (exit 2) (apply empty/2 v/1)))
+            with (2)
+             (let (json_arr/6 =a v/1) (apply head/3 json_arr/6)))
+          default: (exit 1))
+        with (1) (apply other/4 v/1)))"#,
+            "head" => r#"probe/0 =
+     (function v/1 c/2 a/3 other/4
+       (catch
+         (switch v/1
+          case constructor "String":
+           (stringswitch v/1
+            case "A": a/3
+            case "C": c/2
+            default: (exit 1))
+          default: (exit 1))
+        with (1) other/4))"#,
+            "arity" => r#"probe/0 =
+     (function json_arr/1 bad/2 decoded/3
+       (if (!= (array.length json_arr/1) 2) bad/2 decoded/3))"#,
+            "argument" => r#"probe/0 =
+     (function r/1
+       (switch* r/1
+        case constructor "Ok":
+         (let (v0/2 =a (field:var/3 r/1))
+           (makeblock Ok/4 (makeblock A/5 v0/2)))
+        case constructor "Error":
+         (let (e/6 =a (field:var/3 r/1))
+           (apply (field:error/3 Spice/7)
+             (makeblock some_not_nested
+               (string.concat "[1]" (field:path/3 e/6)))
+             (field:message/5 e/6) (field:value/4 e/6)))))"#,
+            _ => unreachable!(),
+        };
+        assert_eq!(probe(source), expected, "{name}");
+        }
+    }
+
     const JSON_MATCH: &str = "let probe = (v, e1, e2) =>
   switch (v: JSON.t) {
   | JSON.Object(dict) => e1(dict)
