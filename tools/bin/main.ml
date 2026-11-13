@@ -3,7 +3,9 @@ let doc_help =
 
 Output documentation to standard output
 
-Usage: rescript-tools doc <FILE>
+Usage: rescript-tools doc <FILE>...
+
+Several files print a JSON list of their documentation.
 
 Example: rescript-tools doc ./path/to/EntryPointLib.res|}
 
@@ -55,11 +57,31 @@ let log_and_exit = function
 
 let version = Version.version
 
+(* The build system's executable, which ships next to this one. Builds write
+   no [.cmt] files for [doc] to read, so [rescript doc] documents modules
+   instead, from its own type check of their project. A build of this tool
+   from source has no such sibling (dune's install directory); its [doc]
+   reads the [.cmt] files of a build by the OCaml compiler. *)
+let build_system_exe =
+  Filename.concat (Filename.dirname Sys.executable_name) "rescript.exe"
+
+let run_build_system args =
+  let pid =
+    Unix.create_process build_system_exe
+      (Array.of_list (build_system_exe :: args))
+      Unix.stdin Unix.stdout Unix.stderr
+  in
+  match snd (Unix.waitpid [] pid) with
+  | Unix.WEXITED status -> exit status
+  | Unix.WSIGNALED _ | Unix.WSTOPPED _ -> exit 1
+
 let main () =
   match Sys.argv |> Array.to_list |> List.tl with
   | "doc" :: rest -> (
     match rest with
     | ["-h"] | ["--help"] -> log_and_exit (Ok doc_help)
+    | _ :: _ when Sys.file_exists build_system_exe ->
+      run_build_system ("doc" :: rest)
     | [path] ->
       (* NOTE: Internal use to generate docs from compiler *)
       let () =
