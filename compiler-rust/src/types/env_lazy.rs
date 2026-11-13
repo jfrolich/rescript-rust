@@ -41,6 +41,8 @@ pub(crate) struct SignatureIndex {
     alias_modules: Vec<(usize, usize)>,
     /// Module type items, in order.
     modtypes: Vec<usize>,
+    /// By name: the module type item a lookup of the name reaches.
+    modtype_names: HashMap<smol_str::SmolStr, usize>,
 }
 
 impl SignatureIndex {
@@ -89,10 +91,11 @@ impl SignatureIndex {
         (idx as usize, runtime_pos as usize)
     }
 
-    /// Item indices of the module type items, in signature order.
+    /// Item index of the module type a lookup of `name` reaches. One hash
+    /// probe.
     #[inline]
-    pub(crate) fn modtype_items(&self) -> &[usize] {
-        &self.modtypes
+    pub(crate) fn modtype_item(&self, name: &str) -> Option<usize> {
+        self.modtype_names.get(name).copied()
     }
 
     /// Number of child modules whose type is a path.
@@ -153,7 +156,12 @@ impl SignatureIndex {
                     index.module_items.push((idx as u32, runtime_pos as u32));
                     runtime_pos += 1;
                 }
-                SignatureItem::SigModtype(_, _) => index.modtypes.push(idx),
+                SignatureItem::SigModtype(id, _) => {
+                    index.modtypes.push(idx);
+                    index
+                        .modtype_names
+                        .insert(smol_str::SmolStr::new_static(id.name()), idx);
+                }
                 SignatureItem::SigClassType => {}
             }
         }

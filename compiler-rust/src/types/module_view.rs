@@ -409,6 +409,18 @@ thread_local! {
     static BUILD_STEPS: std::sync::atomic::AtomicU64 = const { std::sync::atomic::AtomicU64::new(0) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Name probes of [`expand_modtype_name`] on this thread.
+    static EXPAND_STEPS: std::sync::atomic::AtomicU64 = const { std::sync::atomic::AtomicU64::new(0) };
+}
+
+#[inline]
+fn count_expand_step() {
+    #[cfg(test)]
+    EXPAND_STEPS.with(|steps| steps.fetch_add(1, Ordering::Relaxed));
+}
+
 #[inline]
 fn count_build_step() {
     #[cfg(test)]
@@ -612,9 +624,9 @@ fn describe_view(world: &World, scratch: &ViewScratch, key: &ViewKey<'_>) -> Opt
 /// prefix is another module's view, which this build does not resolve), an
 /// abstract module type and a functor type: such a child has no world view.
 ///
-/// Cost: one step per module type item of each enclosing signature, up to
-/// the one that binds the name, and one step per name in a chain of module
-/// types that are names themselves. Runs in a view's build only.
+/// Cost: one probe of a name index per name in a chain of module types
+/// that are names themselves, and one per enclosing view up to the one
+/// that binds the name. Runs in a view's build only.
 fn expand_modtype_name(
     raw: &Signature,
     index: &SignatureIndex,
@@ -622,26 +634,30 @@ fn expand_modtype_name(
     parent: Option<&(std::sync::Weak<ModuleView>, u32)>,
     name: &Path,
 ) -> Option<Arc<Signature>> {
-    let binds = |bound: &Ident| match name.view() {
-        super::path::PathView::Pident(id) => !id.is_persistent() && bound.same(id),
-        super::path::PathView::Pdot(prefix, last, _) => {
-            prefix.same(access_path) && bound.name() == last.as_str()
-        }
-        super::path::PathView::Papply(..) => false,
-    };
-    // Latest first: a later module type of the same name hides an earlier
-    // one from a lookup by name.
-    for &idx in index.modtype_items().iter().rev() {
-        if let SignatureItem::SigModtype(bound, mtd) = &raw[idx]
-            && binds(bound)
-        {
-            return match mtd.mtd_type.as_ref()? {
-                ModuleType::MtySignature(signature) => Some(signature.clone()),
-                ModuleType::MtyIdent(next) => {
-                    expand_modtype_name(raw, index, access_path, parent, next)
-                }
-                _ => None,
-            };
+    let mut name = *name;
+    loop {
+        count_expand_step();
+        // The item of this signature that binds `name`: by identity for an
+        // identifier, by name for a path through this module.
+        let bound = match name.view() {
+            super::path::PathView::Pident(id) if !id.is_persistent() => {
+                index.modtype_item(id.name()).filter(|&idx| {
+                    matches!(&raw[idx], SignatureItem::SigModtype(bound, _) if bound.same(id))
+                })
+            }
+            super::path::PathView::Pdot(prefix, last, _) if prefix.same(access_path) => {
+                index.modtype_item(last.as_str())
+            }
+            _ => None,
+        };
+        let Some(idx) = bound else { break };
+        let SignatureItem::SigModtype(_, mtd) = &raw[idx] else {
+            return None;
+        };
+        match mtd.mtd_type.as_ref()? {
+            ModuleType::MtySignature(signature) => return Some(signature.clone()),
+            ModuleType::MtyIdent(next) => name = *next,
+            _ => return None,
         }
     }
     let (enclosing, _) = parent?;
@@ -654,7 +670,7 @@ fn expand_modtype_name(
         &enclosing.index,
         &enclosing.access_path,
         enclosing.parent.as_ref(),
-        name,
+        &name,
     )
 }
 
@@ -1322,6 +1338,8 @@ mod tests {
         /// (named through the unit's path), and children `Named: Same` and
         /// `Opaque: S` (`S` is abstract).
         named: bool,
+        /// With `named`: further children `Named<n>: Same`.
+        named_children: usize,
         /// Leave out the module type `S` and the modules `Alias` and
         /// `Inner`: no item of the unit then needs the component
         /// substitution when the view is built.
@@ -1537,6 +1555,12 @@ mod tests {
                     "Named",
                     ModuleType::MtyIdent(Path::pdot(unit_path, "Same")),
                 ));
+                for n in 0..shape.named_children {
+                    signature.push(module(
+                        &format!("Named{n}"),
+                        ModuleType::MtyIdent(Path::pdot(unit_path, "Same")),
+                    ));
+                }
                 signature.push(module(
                     "Opaque",
                     ModuleType::MtyIdent(Path::pdot(unit_path, "S")),
@@ -1944,6 +1968,7 @@ mod tests {
             alias_of: None,
             alias_path: None,
             named: false,
+            named_children: 0,
         };
         let unit = unit_of("Opened", shape);
         let view = view_of(&unit);
@@ -2354,6 +2379,34 @@ mod tests {
         // An abstract module type has no components (env.ml:1437-1439
         // finds no manifest): no view.
         assert!(parent.world_child("Opaque").is_none());
+    }
+
+    #[test]
+    fn expanding_module_type_names_costs_two_probes_per_child() {
+        // 10,000 children `Named<n>: Same` with `Same = Sig`: each child's
+        // expansion probes the name index for `Same` and for `Sig`,
+        // whatever the number of module types and children.
+        let steps = EXPAND_STEPS.with(|steps| steps.load(Ordering::Relaxed));
+        let unit = unit_of(
+            "Many_named",
+            Shape {
+                named: true,
+                named_children: 10_000,
+                ..Shape::default()
+            },
+        );
+        let parent = view_of(&unit);
+        let steps = EXPAND_STEPS.with(|steps| steps.load(Ordering::Relaxed)) - steps;
+        // `Named` and `Named<n>`: two probes; `Opaque: S`: one, and one of
+        // the unit's missing parent is not made.
+        assert_eq!(steps, 2 * 10_001 + 1);
+        assert_eq!(parent.expansions.iter().flatten().count(), 10_001);
+        let (ordinal, kind) = parent.world_child("Named9999").expect("a view key");
+        assert!(matches!(kind, WorldChild::Structure));
+        let view =
+            crate::types::typecore::adopt_child_view(&parent, ordinal, &mut None, &compilation())
+                .expect("the expansion has a view");
+        assert!(view.lookup_value_for_access("own").is_some());
     }
 
     #[test]
