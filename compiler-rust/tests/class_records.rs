@@ -219,13 +219,19 @@ fn a_subclass_record_has_its_superclass_fields() {
 
 #[test]
 fn only_a_declared_subclass_coerces_to_a_class_record() {
-    for other in ["type other = {size: float}", "@instanceOf(\"Other\") type other = private {size: float}"] {
+    for (other, reason) in [
+        ("type other = {size: float}", "another type cannot be coerced to it"),
+        (
+            "@instanceOf(\"Other\") type other = private {size: float}",
+            "is the class Other and declares no superclass",
+        ),
+    ] {
         let message = error(&format!(
             r#"@instanceOf("Blob") type blob = private {{size: float}}
 {other}
 let fake = (p: other) => (p :> blob)"#
         ));
-        assert!(message.contains("another type cannot be coerced to it"), "{message}");
+        assert!(message.contains(reason), "{message}");
     }
 }
 

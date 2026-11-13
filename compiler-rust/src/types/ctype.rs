@@ -86,6 +86,21 @@ pub enum TypeError {
     },
 }
 
+/// Two class types whose classes do not let the first coerce to the second.
+#[derive(Debug, Clone)]
+pub struct UnrelatedClasses {
+    /// The type coerced from.
+    pub source: Path,
+    /// Its class.
+    pub source_class: String,
+    /// The ancestors its declarations name, nearest first.
+    pub ancestors: Vec<String>,
+    /// The type coerced to.
+    pub target: Path,
+    /// Its class.
+    pub target_class: String,
+}
+
 /// Context for subtype errors.
 #[derive(Debug, Clone)]
 pub enum SubtypeContext {
@@ -157,6 +172,11 @@ pub enum SubtypeContext {
         /// The private type.
         typename: Path,
     },
+
+    /// Both types are class types (`@instanceOf`), and the target's class is
+    /// neither the source's class nor one of its declared ancestors. Boxed:
+    /// it is rare, and the errors that carry a context stay small.
+    ClassNotAnAncestor(Box<UnrelatedClasses>),
 
     /// One record is represented as a JavaScript array, the other as an
     /// object.
@@ -5393,6 +5413,30 @@ enum SubtypeSteps {
     SameClass,
 }
 
+/// For two class types without a [`class_step`] from `t1` to `t2`: the class
+/// of `t1`, its declared ancestors, and the class of `t2`.
+fn unrelated_classes(
+    ctx: &TypeContext,
+    env: &Env,
+    t1: TypeExprRef,
+    t2: TypeExprRef,
+) -> Option<(String, Vec<String>, String)> {
+    use crate::types::variant_runtime::{BlockType, Instance};
+    let Some(Instance::Class { name: target, .. }) =
+        crate::types::variant_layout::own_class(ctx, env, t2)
+    else {
+        return None;
+    };
+    match crate::types::variant_layout::recognized_as(ctx, env, t1) {
+        Some(BlockType::Instance(Instance::Class { name, ancestors, .. }))
+            if class_step(ctx, env, t1, t2).is_none() =>
+        {
+            Some((name, ancestors, target))
+        }
+        _ => None,
+    }
+}
+
 /// How a class type gets to another one by the classes the two declare.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClassStep {
@@ -6283,6 +6327,34 @@ fn subtype_rec(
         }
         _ if cstrs.steps == SubtypeSteps::SameClass => {
             push_subtype_cstr(cstrs, trace, t1, t2, None);
+            Ok(())
+        }
+        (
+            TypeDesc::Tconstr {
+                path: p1, args: a1, ..
+            },
+            TypeDesc::Tconstr {
+                path: p2, args: a2, ..
+            },
+        ) if a1.is_empty() && a2.is_empty() && unrelated_classes(ctx, env, t1, t2).is_some() => {
+            // Nothing else gets from one class type to another: an abstract
+            // class type is reached through its abbreviations, which are its
+            // subclasses, and a class record is private.
+            let (source_class, ancestors, target_class) =
+                unrelated_classes(ctx, env, t1, t2).expect("checked by the guard");
+            push_subtype_cstr(
+                cstrs,
+                trace,
+                t1,
+                t2,
+                Some(SubtypeContext::ClassNotAnAncestor(Box::new(UnrelatedClasses {
+                    source: *p1,
+                    source_class,
+                    ancestors,
+                    target: *p2,
+                    target_class,
+                }))),
+            );
             Ok(())
         }
         (TypeDesc::Tconstr { path: p1, .. }, _) if generic_private_abbrev(ctx, env, p1) => {

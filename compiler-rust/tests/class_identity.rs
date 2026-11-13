@@ -586,3 +586,36 @@ let b = (el: WebAPI.element, node: WebAPI.node) => <Portal container={{el}} befo
     let js = compile_with(&source, options).unwrap();
     assert!(js.contains("container: input"), "{js}");
 }
+
+#[test]
+fn a_refused_coercion_names_the_classes() {
+    let message =
+        with_packages("let f = (x: ReactDOM.element) => (x :> WebAPI.input)").unwrap_err();
+    assert!(
+        message.contains(
+            "ReactDOM.element is the class Element, a subclass of Node and EventTarget. WebAPI.input is the class HTMLInputElement. A class type coerces to its own class and to the superclasses it declares."
+        ),
+        "{message}"
+    );
+    let message = with_packages("let f = (x: Forms.input) => (x :> ReactDOM.element)").unwrap_err();
+    assert!(
+        message.contains(
+            "Forms.input is the class HTMLInputElement and declares no superclass. ReactDOM.element is the class Element."
+        ),
+        "{message}"
+    );
+    let message = compile(
+        r#"
+module A = { @module("a") @instanceOf("Client") type client }
+module B = { @module("b") @instanceOf("Client") type client }
+let f = (x: A.client) => (x :> B.client)
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        message.contains(
+            "A.client is the class Client of \"a\" and declares no superclass. B.client is the class Client of \"b\"."
+        ),
+        "{message}"
+    );
+}
