@@ -308,6 +308,13 @@ pub enum OptionalArg {
 /// Children precede their parents in the pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyNode {
+    /// Preserve the source location of this application, not its children.
+    At {
+        /// The location used by the general converter for this application.
+        loc: LocIdx,
+        /// The application whose children retain their own locations.
+        body: BodyIdx,
+    },
     /// The parameter of an enclosing function, counted from the outermost.
     Local(u32),
     /// The value a `Value` obligation resolved.

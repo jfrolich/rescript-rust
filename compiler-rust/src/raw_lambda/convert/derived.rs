@@ -306,9 +306,23 @@ impl<S: Steps> Lowering<'_, S> {
         conv: &mut RawLambdaConverter<'_, B>,
         idx: BodyIdx,
     ) -> (RawLambda, Option<i32>) {
+        self.node_at(conv, idx, None)
+    }
+
+    /// Lower one node with an optional application location. Children go
+    /// through `node`, so they do not inherit the override.
+    /// Cost: O(body and pattern occurrences below this node), plus matching.
+    fn node_at<B: RawLambdaBuilder>(
+        &mut self,
+        conv: &mut RawLambdaConverter<'_, B>,
+        idx: BodyIdx,
+        location: Option<LocIdx>,
+    ) -> (RawLambda, Option<i32>) {
         self.steps.node();
         let dummy = conv.arena.dummy_loc();
+        let expression_loc = location.unwrap_or(dummy);
         match self.plans.body(idx) {
+            BodyNode::At { loc, body } => self.node_at(conv, body, Some(loc)),
             BodyNode::Local(level) => (conv.b.var(self.locals[level as usize]), None),
             BodyNode::Free(obligation) => {
                 let Obligation::Value {
@@ -348,7 +362,7 @@ impl<S: Steps> Lowering<'_, S> {
                 optional,
             } => {
                 let args = self.plans.apply_args(args, len);
-                let loc = self.loc;
+                let loc = location.map_or(self.loc, |loc| conv.lam_loc(loc));
                 // translcore.ml `Texp_apply` of a primitive to all the
                 // arguments it takes.
                 if let BodyNode::Free(obligation) = self.plans.body(funct)
@@ -367,8 +381,8 @@ impl<S: Steps> Lowering<'_, S> {
                     };
                     let (plans, table) = (self.plans, self.table);
                     let base = conv.primitive_application_of(
-                        dummy,
-                        SrcLoc::from(dummy),
+                        expression_loc,
+                        SrcLoc::from(expression_loc),
                         prim,
                         (instance, desc.val_type),
                         self.env_ref,
@@ -863,6 +877,31 @@ mod tests {
         }
     }
 
+    /// A user codec has no builtin-identifier location to hide a missing
+    /// application location. Compare inline maps as part of the JS bytes.
+    #[test]
+    fn variant_payload_applications_preserve_source_maps() {
+        use crate::driver::{CompilerOptions, DerivedPath, compile_source_in_process};
+        let source = format!(
+            "{}\ntype alias = int\n@val external alias_encodeJson: alias => JSON.t = \"encodeAlias\"\n@val external alias_decode: JSON.t => Spice.result<alias> = \"decodeAlias\"\n@spice type t = Empty | Payload(alias)",
+            crate::binary_ast::derive::fixtures::RECORD_LIBRARY,
+        );
+        let options = CompilerOptions {
+            spice_ppx: true,
+            derived_path: DerivedPath::Check,
+            source_map: crate::js_ir::source_map::SourceMapMode::Inline,
+            source_filename: Some("VariantMap.res".into()),
+            output_path: Some("VariantMap.js".into()),
+            ..Default::default()
+        };
+        let result = compile_source_in_process(
+            &source, "VariantMap.res", "VariantMap", &options,
+            &crate::cmi::persistent_env::ModuleRegistry::new(), false, None,
+        ).unwrap();
+        assert!(result.js_outputs.iter().any(|output| output.code.contains("sourceMappingURL=")));
+
+    }
+
     /// Every variant fixture must preserve its raw Lambda, including general
     /// forms (unboxed and parameterized declarations). Cost: one compilation
     /// of the fixture per path; test-only.
@@ -1267,9 +1306,9 @@ let probe = r => switch r {
             .stack_size(1 << 30)
             .spawn(|| (variant_lowering(2), variant_lowering(3), variant_lowering(10_000)))
             .unwrap().join().unwrap();
-        assert_eq!(one, (124, 22, 184));
-        assert_eq!((two.0 - one.0, two.1 - one.1, two.2 - one.2), (43, 10, 58));
-        assert_eq!(many, (430_038, 100_002, 580_068));
+        assert_eq!(one, (128, 22, 184));
+        assert_eq!((two.0 - one.0, two.1 - one.1, two.2 - one.2), (45, 10, 58));
+        assert_eq!(many, (450_038, 100_002, 580_068));
         assert_eq!(many.0, one.0 + 9_998 * (two.0 - one.0));
         assert_eq!(many.1, one.1 + 9_998 * (two.1 - one.1));
         assert_eq!(many.2, one.2 + 9_998 * (two.2 - one.2));

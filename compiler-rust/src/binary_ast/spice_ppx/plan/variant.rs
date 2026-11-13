@@ -424,7 +424,11 @@ impl Builder<'_> {
                                 let codec =
                                     self.codec(spec, Slot::Applied(first + i as u32, element));
                                 let local = self.node(BodyNode::Local(ENCODED + i as u32));
-                                let encoded = self.apply(codec, &[local]);
+                                let applied = self.apply(codec, &[local]);
+                                let encoded = self.node(BodyNode::At {
+                                    loc: constructor.pcd_loc,
+                                    body: applied,
+                                });
                                 self.scratch.nodes.push(encoded);
                             }
                         }

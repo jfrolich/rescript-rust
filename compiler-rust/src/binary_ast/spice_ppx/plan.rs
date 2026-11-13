@@ -1340,7 +1340,7 @@ mod tests {
         let n = 10_000;
         let (obligations, body, patterns) = variant_counts(n, |i| format!("C{i}(int)"));
         assert_eq!(obligations, [1 + 4 * n, 1 + 4 * n, 8 + 15 * n]);
-        assert_eq!(body, 2 * (6 + 7 * n) + 26 + 29 * n);
+        assert_eq!(body, 2 * (6 + 8 * n) + 26 + 29 * n);
         assert_eq!(patterns, 2 * 2 * n + 2 + 6 * n);
         // Constant constructors: no argument and no match on one.
         let (obligations, body, patterns) = variant_counts(n, |i| format!("C{i}"));
