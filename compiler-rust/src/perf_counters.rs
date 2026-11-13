@@ -314,24 +314,63 @@ pub(crate) enum TypeMutationKind {
     State,
 }
 
-pub(crate) fn record_type_mutation(kind: TypeMutationKind) {
-    let counter = match kind {
-        TypeMutationKind::Desc => &TYPE_MUTATION_DESC,
-        TypeMutationKind::Level => &TYPE_MUTATION_LEVEL,
-        TypeMutationKind::Row => &TYPE_MUTATION_ROW,
-        TypeMutationKind::State => &TYPE_MUTATION_STATE,
-    };
-    counter.fetch_add(1, Ordering::Relaxed);
+/// Attempt-local journal counters. Dense fields, no atomic or TLS operations.
+/// One instance per speculative unit, never per node.
+#[derive(Default)]
+pub(crate) struct AttemptCounters {
+    mutations: [u64; 4],
+    snapshots: u64,
+    backtracks: u64,
+    restores: u64,
+    peak_depth: u64,
 }
 
-pub(crate) fn record_type_mutation_snapshot(depth: usize) {
-    TYPE_MUTATION_SNAPSHOTS.fetch_add(1, Ordering::Relaxed);
-    TYPE_MUTATION_PEAK_DEPTH.fetch_max(depth as u64, Ordering::Relaxed);
+impl AttemptCounters {
+    /// O(1): add one write to the counter indexed by its mutation kind.
+    pub(crate) fn mutation(&mut self, kind: TypeMutationKind) {
+        self.mutations[kind as usize] += 1;
+    }
+
+    /// O(1): count one snapshot, retaining the maximum live depth.
+    pub(crate) fn snapshot(&mut self, depth: usize) {
+        self.snapshots += 1;
+        self.peak_depth = self.peak_depth.max(depth as u64);
+    }
+
+    /// O(1): count one rollback and its already-known number of restorations.
+    pub(crate) fn backtrack(&mut self, restores: usize) {
+        self.backtracks += 1;
+        self.restores += restores as u64;
+    }
+
+    /// O(1), eight atomic updates once per retained attempt, not per mutation.
+    pub(crate) fn publish(self) {
+        for (counter, count) in [
+            &TYPE_MUTATION_DESC, &TYPE_MUTATION_LEVEL,
+            &TYPE_MUTATION_ROW, &TYPE_MUTATION_STATE,
+        ].into_iter().zip(self.mutations) {
+            counter.fetch_add(count, Ordering::Relaxed);
+        }
+        TYPE_MUTATION_SNAPSHOTS.fetch_add(self.snapshots, Ordering::Relaxed);
+        TYPE_MUTATION_BACKTRACKS.fetch_add(self.backtracks, Ordering::Relaxed);
+        TYPE_MUTATION_RESTORES.fetch_add(self.restores, Ordering::Relaxed);
+        TYPE_MUTATION_PEAK_DEPTH.fetch_max(self.peak_depth, Ordering::Relaxed);
+    }
 }
 
-pub(crate) fn record_type_mutation_backtrack(restores: usize) {
-    TYPE_MUTATION_BACKTRACKS.fetch_add(1, Ordering::Relaxed);
-    TYPE_MUTATION_RESTORES.fetch_add(restores as u64, Ordering::Relaxed);
+/// O(1): update the unit's plain fields, or publish for non-attempt callers.
+pub(crate) fn record_type_mutation(ctx: &crate::types::TypeContext, kind: TypeMutationKind) {
+    ctx.record_attempt_counter(|c| c.mutation(kind));
+}
+
+/// O(1): count one snapshot in the active unit attempt.
+pub(crate) fn record_type_mutation_snapshot(ctx: &crate::types::TypeContext, depth: usize) {
+    ctx.record_attempt_counter(|c| c.snapshot(depth));
+}
+
+/// O(1): count one backtrack in the active unit attempt.
+pub(crate) fn record_type_mutation_backtrack(ctx: &crate::types::TypeContext, restores: usize) {
+    ctx.record_attempt_counter(|c| c.backtrack(restores));
 }
 
 /// Lazy lookup buckets tracked by `RESCRIPT_COMPILER_COUNTERS`.

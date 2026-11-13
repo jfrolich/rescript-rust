@@ -292,7 +292,7 @@ impl TypeNodes {
 
 /// A compilation's own type nodes. With the compiler counters on, their
 /// number is reported when the compilation is dropped.
-struct OwnTypeNodes(TypeNodes);
+struct OwnTypeNodes(TypeNodes, Cell<bool>);
 
 impl Deref for OwnTypeNodes {
     type Target = TypeNodes;
@@ -303,7 +303,7 @@ impl Deref for OwnTypeNodes {
 
 impl Drop for OwnTypeNodes {
     fn drop(&mut self) {
-        if crate::perf_counters::enabled() {
+        if self.1.get() && crate::perf_counters::enabled() {
             crate::perf_counters::record_local_type_nodes(self.0.count());
         }
     }
@@ -871,6 +871,7 @@ pub struct TypeContext {
 
     /// Cached value of `RESCRIPT_COMPILER_COUNTERS` for hot-path probes.
     compiler_counters_enabled: bool,
+    attempt_counters: RefCell<Option<crate::perf_counters::AttemptCounters>>,
 
     /// Abbreviation memo storage
     abbrevs: RefCell<Vec<RefCell<AbbrevMemo>>>,
@@ -1383,7 +1384,7 @@ impl TypeContext {
             existential_constructors: RefCell::new(crate::fast_hash::AHashMap::new()),
             previous_env_id: Cell::new(None),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
-            types: OwnTypeNodes(types),
+            types: OwnTypeNodes(types, Cell::new(true)),
             frozen_writes: FrozenWrites::default(),
             store,
             type_lists,
@@ -1402,6 +1403,7 @@ impl TypeContext {
             explain_mode: Cell::new(CheckMode::Explain),
             unexplained_unify_failure: Cell::new(false),
             compiler_counters_enabled: crate::perf_counters::enabled(),
+            attempt_counters: RefCell::new(None),
             // Index 0 is reserved as canonical Mnil; index 1 is the dedicated
             // simple_abbrevs memo ref.
             abbrevs: RefCell::new(vec![
@@ -1616,6 +1618,38 @@ impl TypeContext {
     /// Cost: one `Cell` read.
     pub fn unexplained_unify_failure(&self) -> bool {
         self.unexplained_unify_failure.get()
+    }
+
+    /// O(1) per unit: retain counters locally until the attempt is accepted.
+    pub(crate) fn defer_attempt_counters(&self) {
+        self.types.1.set(false);
+        if self.compiler_counters_enabled {
+            *self.attempt_counters.borrow_mut() = Some(Default::default());
+        }
+    }
+
+    /// O(1) per retained unit: publish its counters exactly once.
+    pub(crate) fn keep_attempt_counters(&self) {
+        self.types.1.set(true);
+        if let Some(counters) = self.attempt_counters.borrow_mut().take() {
+            counters.publish();
+        }
+    }
+
+    /// O(1), called only with instrumentation enabled; no TLS acquisition.
+    /// Non-attempt clients publish immediately, retaining the existing API.
+    pub(crate) fn record_attempt_counter(
+        &self,
+        record: impl FnOnce(&mut crate::perf_counters::AttemptCounters),
+    ) {
+        let mut pending = self.attempt_counters.borrow_mut();
+        if let Some(counters) = pending.as_mut() {
+            record(counters);
+        } else {
+            let mut counters = crate::perf_counters::AttemptCounters::default();
+            record(&mut counters);
+            counters.publish();
+        }
     }
 
     #[inline]
@@ -3099,7 +3133,7 @@ impl TypeContext {
         if journal.records_type(ty) {
             journal.push(self.frozen_mutation(mutation()));
             if self.compiler_counters_enabled {
-                crate::perf_counters::record_type_mutation(kind);
+                crate::perf_counters::record_type_mutation(self, kind);
             }
         }
     }
@@ -3115,7 +3149,7 @@ impl TypeContext {
         }
         self.mutation_journal.borrow_mut().push(self.frozen_mutation(mutation()));
         if self.compiler_counters_enabled {
-            crate::perf_counters::record_type_mutation(kind);
+            crate::perf_counters::record_type_mutation(self, kind);
         }
     }
 
@@ -3129,6 +3163,7 @@ impl TypeContext {
             journal.push(self.frozen_mutation(mutation()));
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_type_mutation(
+                    self,
                     crate::perf_counters::TypeMutationKind::Row,
                 );
             }
@@ -3165,6 +3200,7 @@ impl TypeContext {
                 .push(TypeMutation::TypeLevel(r, self.types.level(r.index())));
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_type_mutation(
+                    self,
                     crate::perf_counters::TypeMutationKind::Level,
                 );
             }
@@ -3484,7 +3520,7 @@ impl TypeContext {
         let depth = journal.active.len();
         self.mutation_logging.update(&journal);
         if self.compiler_counters_enabled {
-            crate::perf_counters::record_type_mutation_snapshot(depth);
+            crate::perf_counters::record_type_mutation_snapshot(self, depth);
         }
         TypeMutationSnapshot {
             journal: &self.mutation_journal,
@@ -3614,7 +3650,7 @@ impl TypeContext {
         }
         snapshot.restored = true;
         if self.compiler_counters_enabled {
-            crate::perf_counters::record_type_mutation_backtrack(restored);
+            crate::perf_counters::record_type_mutation_backtrack(self, restored);
         }
     }
 
