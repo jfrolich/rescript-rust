@@ -3881,6 +3881,7 @@ fn compile_with_location_retry<T>(
             let (source, locations) = (source.clone(), tree.arena().stores_locations());
             options.derived_reference =
                 Some(Arc::new(move || super::parse::general_form(&source, locations)));
+            options.derived_differences = Some(build.derived_differences.clone());
         }
     };
     let mut attempt = |ast: &StoredAst| {

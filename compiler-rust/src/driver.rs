@@ -360,6 +360,9 @@ impl DerivedPath {
 pub type DerivedReference =
     std::sync::Arc<dyn Fn() -> Result<(crate::parse_arena::ParseArena, Structure)> + Send + Sync>;
 
+/// See [`CompilerOptions::derived_differences`].
+pub type DerivedDifferences = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
 /// Compiler options that can be passed to the driver.
 #[derive(Clone)]
 pub struct CompilerOptions {
@@ -372,6 +375,12 @@ pub struct CompilerOptions {
     /// or why the frontend could not give it (the error names the source it
     /// read). The reference compile of a check runs on it.
     pub derived_reference: Option<DerivedReference>,
+    /// For `RESCRIPT_DERIVED_PATH=check`: where a build collects what the
+    /// check found, to report every unit before it fails. With it a unit
+    /// that differs goes on with the result of its plans; without it the
+    /// first difference fails the unit's compile. Locked once per
+    /// difference, never for a unit that passes.
+    pub derived_differences: Option<DerivedDifferences>,
     /// Dormant backend migration mode, selected before compiling modules.
     pub backend: crate::bir::shadow::BackendMode,
     /// Dormant publication equality oracle; configured once, not per unit.
@@ -665,6 +674,7 @@ impl Default for CompilerOptions {
             derived_census: Self::derived_census_from_env(),
             derived_path: DerivedPath::from_env(),
             derived_reference: None,
+            derived_differences: None,
             backend: crate::bir::shadow::BackendMode::from_env(),
             signature_check: crate::cmi::signature_check::SignatureCheck::from_env(),
             js_printer: crate::emit::PrinterMode::from_env(),
@@ -9401,6 +9411,9 @@ pub struct InProcessPreJsCompileResult {
     /// general forms of its derived items; the JS backend runs on both and
     /// compares what they produce.
     pub derived_reference: Option<Box<InProcessPreJsCompileResult>>,
+    /// The collector the check of this unit reports to
+    /// ([`CompilerOptions::derived_differences`]).
+    pub derived_differences: Option<DerivedDifferences>,
 }
 
 /// The `.cmj` metadata of an in-process compile, available after the JS
@@ -11273,6 +11286,7 @@ fn compile_until_js(
             .map(PersistentEnv::loaded_units)
             .unwrap_or_default(),
         derived_reference: None,
+        derived_differences: None,
     })
 }
 
@@ -11302,19 +11316,24 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
     let Some(reference) = pre_js.derived_reference.take() else {
         return finish_from_js_boundary(pre_js, options, registry, metadata_ready);
     };
+    let differences = pre_js.derived_differences.take();
+    let differences = differences.as_ref();
     let unit = options.module_name.as_deref().unwrap_or("");
     let reference = finish_from_js_boundary(*reference, options, registry, None)?;
     let result = match metadata_ready {
         // The hook takes the export summary: compare what it is handed.
         Some(forward) => {
             let mut hook = |metadata: InProcessJsMetadataReady| {
-                derived_check::compare_exports(
-                    unit,
-                    metadata.is_pure,
-                    &metadata.cmj_export_constants,
-                    &metadata.cmj_export_arities,
-                    &metadata.cmj_export_lambdas,
-                    &reference,
+                derived_check::settle(
+                    differences,
+                    derived_check::compare_exports(
+                        unit,
+                        metadata.is_pure,
+                        &metadata.cmj_export_constants,
+                        &metadata.cmj_export_arities,
+                        &metadata.cmj_export_lambdas,
+                        &reference,
+                    ),
                 )?;
                 forward(metadata)
             };
@@ -11322,18 +11341,21 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         }
         None => {
             let result = finish_from_js_boundary(pre_js, options, registry, None)?;
-            derived_check::compare_exports(
-                unit,
-                result.is_pure,
-                &result.cmj_export_constants,
-                &result.cmj_export_arities,
-                &result.cmj_export_lambdas,
-                &reference,
+            derived_check::settle(
+                differences,
+                derived_check::compare_exports(
+                    unit,
+                    result.is_pure,
+                    &result.cmj_export_constants,
+                    &result.cmj_export_arities,
+                    &result.cmj_export_lambdas,
+                    &reference,
+                ),
             )?;
             result
         }
     };
-    derived_check::compare_js(unit, &result, &reference)?;
+    derived_check::settle(differences, derived_check::compare_js(unit, &result, &reference))?;
     Ok(result)
 }
 

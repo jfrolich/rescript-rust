@@ -17,7 +17,7 @@
 use anyhow::Result;
 
 use super::{
-    CompilerOptions, DerivedRetry, DumpKind, InProcessCompileResult, InProcessPreJsCompileResult,
+    CompilerOptions, DerivedDifferences, DerivedRetry, DumpKind, InProcessCompileResult, InProcessPreJsCompileResult,
     InProcessSignatureReadyHook, LocationRetry, UntilJs, UserDiagnostic, compile_until_js,
 };
 
@@ -41,6 +41,19 @@ fn no_general_form(unit: &str, error: &anyhow::Error) -> anyhow::Error {
         2,
     )
     .into()
+}
+
+/// What a comparison found goes to the build's collector when there is one,
+/// and the unit goes on; else it fails the unit.
+/// Cost: O(1) for a unit that passes; one lock per difference.
+pub(super) fn settle(differences: Option<&DerivedDifferences>, found: Result<()>) -> Result<()> {
+    match (found, differences) {
+        (Err(difference), Some(differences)) => {
+            differences.lock().unwrap().push(difference.to_string());
+            Ok(())
+        }
+        (found, _) => found,
+    }
 }
 
 /// The first line at which two texts differ: its number from 1, and the
@@ -152,13 +165,17 @@ pub(super) fn until_js(
     // The general form of the unit is what the frontend makes of its source
     // with plans off.
     // Not having it is a failure of the check itself, never a difference.
+    let differences = options.derived_differences.as_ref();
     let general_form = match &options.derived_reference {
         Some(frontend) => frontend(),
         None => Err(anyhow::anyhow!("the build gave no source to make it from")),
     };
     let (general_arena, general_structure) = match general_form {
         Ok(general_form) => general_form,
-        Err(error) => return Err(no_general_form(name, &error)),
+        Err(error) => {
+            settle(differences, Err(no_general_form(name, &error)))?;
+            return compile_until_js(unit, options, gentype_interface, signature_ready);
+        }
     };
     let general = UntilJs {
         arena: &general_arena,
@@ -170,6 +187,14 @@ pub(super) fn until_js(
     let reference = compile_until_js(&general, &reference_options, gentype_interface.clone(), None);
     let result = compile_until_js(unit, &both, gentype_interface, signature_ready);
 
+    let restore = |result: &mut InProcessPreJsCompileResult| {
+        if !wants_signature {
+            result.dumps.retain(|(kind, _)| *kind != DumpKind::Sig);
+        }
+        if !options.collect_unit_reads {
+            result.unit_reads.clear();
+        }
+    };
     let (mut result, reference) = match (result, reference) {
         (Ok(result), Ok(reference)) => (result, reference),
         // A compile that needs locations is retried with them, and checked
@@ -180,23 +205,41 @@ pub(super) fn until_js(
         }
         (_, Err(error)) if error.is::<LocationRetry>() => return Err(error),
         (Err(error), Err(reference)) => {
-            same_text(name, "the diagnostics", &error.to_string(), &reference.to_string())?;
+            settle(
+                differences,
+                same_text(name, "the diagnostics", &error.to_string(), &reference.to_string()),
+            )?;
             return Err(error);
         }
         (Err(error), Ok(_)) => {
-            return Err(differs(name, "the diagnostics", format!("  plans:   {error}\n  general: (none)")));
+            let difference =
+                differs(name, "the diagnostics", format!("  plans:   {error}\n  general: (none)"));
+            settle(differences, Err(difference))?;
+            return Err(error);
         }
-        (Ok(_), Err(reference)) => {
-            return Err(differs(name, "the diagnostics", format!("  plans:   (none)\n  general: {reference}")));
+        // The unit goes on with what its plans gave, with nothing more to
+        // compare.
+        (Ok(mut result), Err(reference)) => {
+            let difference = differs(
+                name,
+                "the diagnostics",
+                format!("  plans:   (none)\n  general: {reference}"),
+            );
+            settle(differences, Err(difference))?;
+            restore(&mut result);
+            return Ok(result);
         }
     };
 
-    same_text(name, "the warnings", &result.warnings, &reference.warnings)?;
-    same_text(
-        name,
-        "the signature",
-        signature_dump(&result.dumps),
-        signature_dump(&reference.dumps),
+    settle(differences, same_text(name, "the warnings", &result.warnings, &reference.warnings))?;
+    settle(
+        differences,
+        same_text(
+            name,
+            "the signature",
+            signature_dump(&result.dumps),
+            signature_dump(&reference.dumps),
+        ),
     )?;
     let reads = |result: &InProcessPreJsCompileResult| {
         let mut reads: Vec<String> = result
@@ -208,15 +251,11 @@ pub(super) fn until_js(
         reads.dedup();
         reads.join("\n")
     };
-    same_text(name, "the unit reads", &reads(&result), &reads(&reference))?;
+    settle(differences, same_text(name, "the unit reads", &reads(&result), &reads(&reference)))?;
 
-    if !wants_signature {
-        result.dumps.retain(|(kind, _)| *kind != DumpKind::Sig);
-    }
-    if !options.collect_unit_reads {
-        result.unit_reads.clear();
-    }
+    restore(&mut result);
     result.derived_reference = Some(Box::new(reference));
+    result.derived_differences = differences.cloned();
     Ok(result)
 }
 
@@ -313,6 +352,32 @@ pub(super) fn compare_exports(
 mod tests {
     use super::*;
     use crate::driver::JsOutput;
+
+    /// With a collector a difference is kept and the unit goes on; without
+    /// one it fails the unit. A unit that passes adds nothing.
+    #[test]
+    fn a_collector_keeps_every_difference() {
+        let differences = DerivedDifferences::default();
+        let difference = |unit: &str| Err(differs(unit, "the JavaScript", "  line 1".to_string()));
+        assert!(settle(Some(&differences), difference("A")).is_ok());
+        assert!(settle(Some(&differences), Ok(())).is_ok());
+        assert!(settle(Some(&differences), difference("B")).is_ok());
+        let kept = differences.lock().unwrap();
+        assert_eq!(kept.len(), 2);
+        assert!(kept[0].contains("in A,") && kept[1].contains("in B,"));
+        assert!(settle(None, difference("C")).is_err());
+    }
+
+    /// A general form that could not be made is an internal error of the
+    /// check that names the cause, not a difference.
+    #[test]
+    fn a_missing_general_form_is_an_internal_error() {
+        let error = no_general_form("Unit", &anyhow::anyhow!("parsing src/Unit.res again failed"));
+        let message = error.to_string();
+        assert!(message.contains("internal error: Unit was not checked"), "{message}");
+        assert!(message.contains("parsing src/Unit.res again failed"));
+        assert!(!message.contains("differ"));
+    }
 
     fn output(code: &str) -> InProcessCompileResult {
         InProcessCompileResult {

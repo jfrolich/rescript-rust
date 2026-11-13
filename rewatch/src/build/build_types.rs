@@ -350,6 +350,9 @@ pub struct BuildCommandState {
     /// cross-module errors can quote the dependency's declaration site.
     pub diagnostic_locations: bool,
     pub diagnostic_retry: std::sync::atomic::AtomicBool,
+    /// What `RESCRIPT_DERIVED_PATH=check` found in this build: reported
+    /// together when the compile phase ends, and then the build fails.
+    pub derived_differences: rescript_compiler::driver::DerivedDifferences,
     // In-memory published interfaces, keyed by module name. Only used in --in-process mode.
     // Maps module_name -> InMemoryModuleState.
     pub in_memory_interfaces: Mutex<AHashMap<String, InMemoryModuleState>>,
@@ -529,6 +532,7 @@ impl BuildCommandState {
             stored_asts: Mutex::new(AHashMap::new()),
             diagnostic_locations: false,
             diagnostic_retry: std::sync::atomic::AtomicBool::new(false),
+            derived_differences: Default::default(),
             in_memory_interfaces: Mutex::new(AHashMap::new()),
             published_item_digests: Mutex::new(AHashMap::new()),
             prepared_interfaces: Mutex::new(AHashMap::new()),
