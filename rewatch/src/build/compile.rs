@@ -2960,13 +2960,13 @@ pub fn runtime_registry(runtime_root: &Path) -> Result<ModuleRegistry> {
 pub(crate) struct RuntimeStore {
     pub db: PathBuf,
     pub compiler_hash: String,
+    /// Whether the build may add to the store. A check-only build writes no
+    /// files: it reads what a build stored and stores nothing itself.
+    pub writable: bool,
 }
 
 impl RuntimeStore {
     pub(crate) fn of_build(build_state: &BuildCommandState) -> Option<Self> {
-        if build_state.check_only {
-            return None;
-        }
         let root = build_state
             .packages
             .values()
@@ -2974,6 +2974,7 @@ impl RuntimeStore {
         Some(Self {
             db: super::state_db::path(root),
             compiler_hash: build_state.compiler_info.bsc_hash.to_hex().to_string(),
+            writable: !build_state.check_only,
         })
     }
 
@@ -3039,7 +3040,9 @@ fn store_runtime_interfaces(
     key: &str,
     runtime_modules: &[RuntimeModuleSource],
 ) {
-    if let Some(interfaces) = encode_runtime_interfaces(registry, runtime_modules) {
+    if store.writable
+        && let Some(interfaces) = encode_runtime_interfaces(registry, runtime_modules)
+    {
         super::state_db::write_runtime_interfaces(&store.db, key, &interfaces);
     }
 }
@@ -4759,6 +4762,7 @@ mod tests {
         let store = |hash: &str| RuntimeStore {
             db: db.clone(),
             compiler_hash: hash.to_string(),
+            writable: true,
         };
         let runtime_root = temp_dir.path().join("runtime");
         fs::create_dir_all(&runtime_root).expect("runtime directory should be created");
