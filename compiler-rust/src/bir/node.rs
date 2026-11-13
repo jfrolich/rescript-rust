@@ -402,6 +402,17 @@ impl Node {
     pub(super) fn set_flags(&mut self, flags: NodeFlags) {
         self.flags = flags;
     }
+    /// The site of a `Var` in the lowering arena (`lower::scope::Site`), kept
+    /// in the leaf's unused second word so that it moves with the node's
+    /// content. O(1).
+    pub(super) fn var_site(self) -> u32 {
+        assert_eq!(self.op, Op::Var);
+        self.words[1]
+    }
+    pub(super) fn set_var_site(&mut self, site: u32) {
+        assert_eq!(self.op, Op::Var);
+        self.words[1] = site;
+    }
     pub(super) fn kill_value(&mut self) {
         assert_eq!(self.op, Op::Let);
         self.words[1] = u32::MAX;

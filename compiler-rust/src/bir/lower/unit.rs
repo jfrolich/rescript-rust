@@ -83,7 +83,7 @@ pub(super) fn lower(
                     let value = out.value;
                     out = state.append_outputs(first, out, value);
                 }
-                return Ok(state.complete(Cx::value(), Probed::Out(out)));
+                return Ok(state.complete_unit(Probed::Out(out)));
             }
         }
         let value = out.value;
@@ -95,7 +95,7 @@ pub(super) fn lower(
             accumulated = Some(out);
             node = next;
         } else {
-            return Ok(state.complete(Cx::value(), Probed::Out(out)));
+            return Ok(state.complete_unit(Probed::Out(out)));
         }
     }
 }
@@ -162,7 +162,7 @@ mod tests {
         let root = input.root;
         let mut state = State::new(input);
         let probed = state.probe(Cx::value(), root).unwrap();
-        let whole = state.complete(Cx::value(), probed);
+        let whole = state.complete_unit(probed);
         let print = |lowered: Lowered| {
             let p = crate::bir::bridge_j::export_js(&lowered.program).unwrap();
             crate::js_ir::print_deps_program_with_directives_and_options(

@@ -171,6 +171,18 @@ impl Bir {
     }
 
     fn allocate(&mut self, node: Node) -> NodeId {
+        let id = self.allocate_slot(node);
+        // The lowering's arena records where each reference is (T4a).
+        if node.op() == Op::Var {
+            if let Some(scope) = &mut self.js_scope {
+                let View::Var { var } = node.view(&self.lists) else { unreachable!() };
+                let site = scope.site(var, id);
+                self.nodes[id.index()].set_var_site(site);
+            }
+        }
+        id
+    }
+    fn allocate_slot(&mut self, node: Node) -> NodeId {
         self.visit();
         self.register_kind(node, true);
         if let Some(id) = self.free_nodes.pop() {
@@ -464,6 +476,9 @@ impl Bir {
             if let Some(scope) = &mut self.js_scope {
                 let View::Var { var } = node.view(&self.lists) else { unreachable!() };
                 scope.occurrence(var, add);
+                if !add {
+                    scope.sites[node.var_site() as usize].node = NodeId(u32::MAX);
+                }
             }
         }
         if self.is_weighted_switch(node) {
@@ -934,6 +949,12 @@ impl Bir {
                 || parent.is_some_and(|parent| matches!(self.view(parent), View::Apply { callee, .. } if callee == target))
         } else { false };
         self.nodes[target.index()] = content;
+        // A reference that moves into the slot takes its site with it.
+        if content.op() == Op::Var {
+            if let Some(scope) = &mut self.js_scope {
+                scope.sites[content.var_site() as usize].node = target;
+            }
+        }
         self.parents[target.index()] = parent;
         for child in self.view(target).children() {
             self.parents[child.index()] = Some(target);
@@ -1105,6 +1126,23 @@ impl Bir {
                 }
             }
         }
+    }
+
+    /// Copy one childless node with its payload words, flags and source
+    /// metadata, as a detached root. Constant: no map and no vector, unlike
+    /// [`Self::copy_subtree`]. A copied reference gets its own site.
+    pub(crate) fn copy_leaf(&mut self, id: NodeId) -> NodeId {
+        let node = self.node(id);
+        assert!(self.view(id).children().is_empty(), "copy_leaf needs a leaf");
+        let new = self.allocate(node);
+        self.bind(new);
+        if !self.bulk {
+            self.adjust_direct(new, 1);
+        }
+        if let Some(cold) = self.cold(id) {
+            self.set_cold(new, cold);
+        }
+        new
     }
 
     /// Copy a subtree, freshening every internal binder and static label. Explicit
