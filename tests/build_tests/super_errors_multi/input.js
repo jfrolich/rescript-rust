@@ -112,9 +112,18 @@ async function runFixture(fixtureName) {
         );
       }
     }
+    // A fixture may add fields to the project's configuration (a
+    // namespace, say) in a `config.json` of its own.
+    const configPath = path.join(fixtureDir, "config.json");
+    const config = existsSync(configPath)
+      ? {
+          ...projectConfig,
+          ...JSON.parse(await fs.readFile(configPath, "utf-8")),
+        }
+      : projectConfig;
     await fs.writeFile(
       path.join(projectDir, "rescript.json"),
-      `${JSON.stringify(projectConfig, null, 2)}\n`,
+      `${JSON.stringify(config, null, 2)}\n`,
     );
 
     const { execBuild, execBin } = setup(projectDir);
