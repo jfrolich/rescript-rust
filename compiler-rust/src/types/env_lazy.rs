@@ -89,6 +89,12 @@ impl SignatureIndex {
         (idx as usize, runtime_pos as usize)
     }
 
+    /// Item indices of the module type items, in signature order.
+    #[inline]
+    pub(crate) fn modtype_items(&self) -> &[usize] {
+        &self.modtypes
+    }
+
     /// Number of child modules whose type is a path.
     #[inline]
     pub(crate) fn alias_module_count(&self) -> usize {

@@ -19,7 +19,9 @@
 //! signature (`ViewKey::Child`); the path of a child that is an alias of a
 //! module the world has a view of, or of a unit it owns (`ViewKey::Alias`):
 //! a declared alias, or a child of an alias view, which is an alias of the
-//! source's child (mtype.ml:93-97). A child that is a module type name and
+//! source's child (mtype.ml:93-97). A child declared with a module type
+//! name its own unit binds is a `ViewKey::Child` of the name's expansion.
+//! A child whose module type is declared in another unit, a functor, and
 //! any path with a functor application on it are built by
 //! `types/env_lazy.rs` (see `Components::Local`).
 
@@ -147,7 +149,8 @@ impl AliasTarget {
 
 /// What kind of key the path of a child module of a view is.
 pub(crate) enum WorldChild {
-    /// Declared with a signature: [`ViewKey::Child`].
+    /// Declared with a signature, or with a module type name that expands
+    /// to one: [`ViewKey::Child`].
     Structure,
     /// An alias of the module at this path, which is rooted in a unit:
     /// [`ViewKey::Alias`] once the path is resolved to a unit or a view.
@@ -320,6 +323,10 @@ pub(crate) struct ModuleView {
     /// The substituted target of each child whose type is a path, and
     /// whether it is an alias (`Mty_alias`) or a module type (`Mty_ident`).
     alias_targets: AHashMap<SmolStr, (bool, Arc<Path>)>,
+    /// By ordinal among the module items: the signature a child declared
+    /// with a module type name expands to (`scrape_alias`,
+    /// env.ml:1437-1439). Empty when the view has no such child.
+    expansions: Box<[Option<Arc<Signature>>]>,
     /// The cell of each child module, by its ordinal among the module
     /// items (`SignatureIndex::module_cell`).
     children: Box<[ViewCell]>,
@@ -549,8 +556,11 @@ fn describe_view(world: &World, scratch: &ViewScratch, key: &ViewKey<'_>) -> Opt
             let SignatureItem::SigModule(id, md, _) = &parent.raw[idx] else {
                 return None;
             };
-            let ModuleType::MtySignature(raw) = &md.md_type else {
-                return None;
+            // The declared signature, or the one the declared module type
+            // name expands to (env.ml:1437-1439).
+            let raw = match &md.md_type {
+                ModuleType::MtySignature(raw) => raw,
+                _ => parent.expansions.get(*ordinal as usize)?.as_ref()?,
             };
             // env.ml:1573-1578: the child's component thunk holds its
             // declared signature and the parent's substitution;
@@ -591,6 +601,63 @@ fn describe_view(world: &World, scratch: &ViewScratch, key: &ViewKey<'_>) -> Opt
     }
 }
 
+/// The signature the module type named `name` expands to, for a name a
+/// declared signature binds: an item of `raw` (the declared signature of
+/// the view under construction at `access_path`, indexed by `index`) or of
+/// an ancestor's (`parent`). `scrape_alias` expands `Mty_ident` through
+/// `find_modtype` (env.ml:1437-1439). A unit's signature names a module
+/// type of its own by identifier or through the path of the module that
+/// declares it, so the binder is found in the view's own chain and no
+/// compilation is read. `None` for a name declared outside the chain (its
+/// prefix is another module's view, which this build does not resolve), an
+/// abstract module type and a functor type: such a child has no world view.
+///
+/// Cost: one step per module type item of each enclosing signature, up to
+/// the one that binds the name, and one step per name in a chain of module
+/// types that are names themselves. Runs in a view's build only.
+fn expand_modtype_name(
+    raw: &Signature,
+    index: &SignatureIndex,
+    access_path: &Path,
+    parent: Option<&(std::sync::Weak<ModuleView>, u32)>,
+    name: &Path,
+) -> Option<Arc<Signature>> {
+    let binds = |bound: &Ident| match name.view() {
+        super::path::PathView::Pident(id) => !id.is_persistent() && bound.same(id),
+        super::path::PathView::Pdot(prefix, last, _) => {
+            prefix.same(access_path) && bound.name() == last.as_str()
+        }
+        super::path::PathView::Papply(..) => false,
+    };
+    // Latest first: a later module type of the same name hides an earlier
+    // one from a lookup by name.
+    for &idx in index.modtype_items().iter().rev() {
+        if let SignatureItem::SigModtype(bound, mtd) = &raw[idx]
+            && binds(bound)
+        {
+            return match mtd.mtd_type.as_ref()? {
+                ModuleType::MtySignature(signature) => Some(signature.clone()),
+                ModuleType::MtyIdent(next) => {
+                    expand_modtype_name(raw, index, access_path, parent, next)
+                }
+                _ => None,
+            };
+        }
+    }
+    let (enclosing, _) = parent?;
+    let enclosing = enclosing.upgrade()?;
+    if enclosing.source.is_some() {
+        return None;
+    }
+    expand_modtype_name(
+        &enclosing.raw,
+        &enclosing.index,
+        &enclosing.access_path,
+        enclosing.parent.as_ref(),
+        name,
+    )
+}
+
 /// The tables of the view of the module with `signature` at `access_path`.
 ///
 /// What OCaml does when it forces a module's components (env.ml:1513-1588),
@@ -625,6 +692,9 @@ fn describe_tables(
     let mut value_maps = None;
     let mut subst = None;
     let mut runtime_pos = 0usize;
+    let mut module_ordinal = 0usize;
+    let is_alias_view = source.is_some();
+    let mut expansions: Vec<Option<Arc<Signature>>> = Vec::new();
     for (idx, item) in signature.iter().enumerate() {
         count_build_step();
         let mut value = None;
@@ -728,8 +798,22 @@ fn describe_tables(
                     {
                         alias_targets.insert(SmolStr::new_static(id.name()), target);
                     }
+                    // A child of an alias view is an alias of the source's
+                    // child whatever its type (mtype.ml:93-97).
+                    if !is_alias_view
+                        && let SignatureItem::SigModule(_, declared, _) = &raw[idx]
+                        && let ModuleType::MtyIdent(name) = &declared.md_type
+                        && let Some(expansion) =
+                            expand_modtype_name(&raw, &index, &access_path, parent.as_ref(), name)
+                    {
+                        if expansions.is_empty() {
+                            expansions.resize(index.module_count(), None);
+                        }
+                        expansions[module_ordinal] = Some(expansion);
+                    }
                 }
                 runtime_pos += 1;
+                module_ordinal += 1;
             }
             SignatureItem::SigModtype(id, mtd) => {
                 // env.ml:1581-1585 `Subst.modtype_declaration sub decl`.
@@ -768,6 +852,7 @@ fn describe_tables(
             .map(|_| ViewCell::default())
             .collect(),
         subst: subst.map(OnceLock::from).unwrap_or_default(),
+        expansions: expansions.into_boxed_slice(),
         signature,
         raw,
         parent,
@@ -924,6 +1009,11 @@ impl ModuleView {
                     && target.is_persistent()
                 {
                     return Some(WorldChild::Alias(Path::pident(*target)));
+                }
+                // A module type name that expands to a signature
+                // (env.ml:1437-1439): the child has that signature.
+                if let Some(Some(_)) = self.expansions.get(ordinal as usize) {
+                    return Some(WorldChild::Structure);
                 }
                 // The target under the view's substitution, which the
                 // table holds for the declaration a name lookup reaches.
@@ -1228,6 +1318,10 @@ mod tests {
         alias_of: Option<&'static str>,
         /// A dotted alias target, in place of `alias_of`.
         alias_path: Option<Path>,
+        /// Module types `Sig = { type u; let own: u }` and `Same = Sig`
+        /// (named through the unit's path), and children `Named: Same` and
+        /// `Opaque: S` (`S` is abstract).
+        named: bool,
         /// Leave out the module type `S` and the modules `Alias` and
         /// `Inner`: no item of the unit then needs the component
         /// substitution when the view is built.
@@ -1411,6 +1505,43 @@ mod tests {
                     mtd_loc: crate::types::DeclLoc::none(),
                 },
             ));
+            if shape.named {
+                let modtype = |name: &str, mtd_type| {
+                    let id = Ident::create_local(name.to_string());
+                    let item = SignatureItem::SigModtype(
+                        id,
+                        ModtypeDeclaration {
+                            mtd_type: Some(mtd_type),
+                            mtd_attributes: vec![],
+                            mtd_loc: crate::types::DeclLoc::none(),
+                        },
+                    );
+                    (id, item)
+                };
+                let u = Ident::create_local("u");
+                let (sig, sig_item) = modtype(
+                    "Sig",
+                    ModuleType::MtySignature(Arc::new(vec![
+                        SignatureItem::SigType(u, Arc::new(abstract_decl()), RecStatus::TrecNot),
+                        value("own", ctx.new_generic_constr(Path::pident(u), vec![])),
+                    ])),
+                );
+                signature.push(sig_item);
+                let (same, same_item) = modtype("Same", ModuleType::MtyIdent(Path::pident(sig)));
+                signature.push(same_item);
+                let _ = same;
+                // A unit's signature names its own module types through
+                // its path.
+                let unit_path = Path::pident(Ident::create_persistent(&name));
+                signature.push(module(
+                    "Named",
+                    ModuleType::MtyIdent(Path::pdot(unit_path, "Same")),
+                ));
+                signature.push(module(
+                    "Opaque",
+                    ModuleType::MtyIdent(Path::pdot(unit_path, "S")),
+                ));
+            }
             signature.push(module(
                 "Alias",
                 ModuleType::MtyAlias(
@@ -1812,6 +1943,7 @@ mod tests {
             chain: 0,
             alias_of: None,
             alias_path: None,
+            named: false,
         };
         let unit = unit_of("Opened", shape);
         let view = view_of(&unit);
@@ -2187,6 +2319,41 @@ mod tests {
             assert_eq!(components.len(), 1);
             assert!(components[0].same(&component));
         }
+    }
+
+    #[test]
+    fn a_child_typed_by_a_module_type_name_has_a_view_of_the_expansion() {
+        let unit = unit_of(
+            "Named_unit",
+            Shape {
+                named: true,
+                ..Shape::default()
+            },
+        );
+        let parent = view_of(&unit);
+        // `Named: Same`, `Same = Sig`, `Sig = { type u; let own: u }`.
+        let (ordinal, kind) = parent.world_child("Named").expect("a view key");
+        assert!(matches!(kind, WorldChild::Structure));
+        let ctx = compilation();
+        let view = crate::types::typecore::adopt_child_view(&parent, ordinal, &mut None, &ctx)
+            .expect("the expansion has a view");
+        assert_eq!(view.access_path().name(), format!("{}.Named", unit.ps_name));
+        let (_, _, own) = view.lookup_value_for_access("own").expect("the value");
+        match ctx.get_desc(own.val_type).into_desc() {
+            crate::types::type_expr::TypeDesc::Tconstr { path, .. } => {
+                assert_eq!(path.name(), format!("{}.Named.u", unit.ps_name));
+            }
+            _ => panic!("a constructor type"),
+        }
+        // Built once: the cell is the parent's.
+        let again =
+            crate::types::typecore::adopt_child_view(&parent, ordinal, &mut None, &compilation())
+                .unwrap();
+        assert!(Arc::ptr_eq(&view, &again));
+        assert_eq!(parent.children[ordinal as usize].builds.load(Ordering::Relaxed), 1);
+        // An abstract module type has no components (env.ml:1437-1439
+        // finds no manifest): no view.
+        assert!(parent.world_child("Opaque").is_none());
     }
 
     #[test]
