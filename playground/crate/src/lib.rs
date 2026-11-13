@@ -301,10 +301,55 @@ fn parse_tree_sexp(source: &str, filename: &str) -> Option<String> {
 /// of `@rescript/runtime` itself. Returns JSON with the JavaScript, the
 /// macro-expanded source when the file uses macros, the warnings and the
 /// intermediate representations:
-/// `{ type: "success", js, expanded, expanded_raw, formatted, warnings, parse_tree, typed_tree, raw_lambda, lambda }`
+/// `{ type: "success", js, expanded, expanded_raw, formatted, warnings, signature, parse_tree, typed_tree, raw_lambda, lambda }`
 /// or `{ type: "error", message, parse_tree }`.
 #[wasm_bindgen]
 pub fn compile_file(source: &str, filename: &str, is_runtime: bool) -> String {
+    compile(source, filename, is_runtime, Vec::new(), Vec::new())
+}
+
+/// Compile one input of a read-eval-print loop: a file of its own, with the
+/// modules `open_modules` (the earlier inputs) opened. The result is the one
+/// of [`compile_file`]; its `signature` is what the loop prints.
+#[wasm_bindgen]
+pub fn compile_input(source: &str, filename: &str, open_modules: Vec<String>) -> String {
+    // An `open` is for the inputs after it: it is not unused (warning 33)
+    // when its own input does not use it.
+    compile(source, filename, false, open_modules, vec!["-33".to_string()])
+}
+
+/// What a read-eval-print loop compiles for an input. Returns JSON:
+/// `{ type: "success", source, result_at, binding, opens }`: `source` has
+/// `binding` (`let it = `) before a last expression, at the line and column
+/// `result_at` (counted from one, null without such an expression), and
+/// `opens` is the text of each top-level `open`. Or `{ type: "error" }` when
+/// the input does not parse (compiling it gives the message).
+#[wasm_bindgen]
+pub fn prepare_input(source: &str, filename: &str) -> String {
+    match rescript_compiler::repl::prepare(&to_compiler_text(source), filename) {
+        Some(prepared) => serde_json::json!({
+            "type": "success",
+            "source": from_compiler_text(&prepared.source),
+            "result_at": prepared.result_at.map(|(line, column)| [line, column]),
+            "binding": rescript_compiler::repl::BINDING,
+            "opens": prepared
+                .opens
+                .iter()
+                .map(|open| from_compiler_text(open))
+                .collect::<Vec<_>>(),
+        })
+        .to_string(),
+        None => serde_json::json!({ "type": "error" }).to_string(),
+    }
+}
+
+fn compile(
+    source: &str,
+    filename: &str,
+    is_runtime: bool,
+    open_modules: Vec<String>,
+    warning_specs: Vec<String>,
+) -> String {
     let source = to_compiler_text(source);
     // Diagnostics show a frame of the source file.
     wasm_vfs::write_file(filename, source.clone());
@@ -322,6 +367,8 @@ pub fn compile_file(source: &str, filename: &str, is_runtime: bool) -> String {
         capture_loaded_modules: true,
         output_module_format: Some(ModuleFormat::EsModule),
         macro_host: Some(host),
+        open_modules,
+        warning_specs,
         ..Default::default()
     };
 
@@ -371,6 +418,11 @@ pub fn compile_file(source: &str, filename: &str, is_runtime: bool) -> String {
                 "typed_tree": compiled.typed_tree_sexp,
                 "raw_lambda": compiled.raw_lambda_sexp,
                 "lambda": compiled.lambda_sexp,
+                // What the file defines (`repl::describe_signature`).
+                "signature": serde_json::from_str::<serde_json::Value>(
+                    &from_compiler_text(&compiled.signature_description),
+                )
+                .unwrap_or(serde_json::Value::Null),
             })
             .to_string()
         }

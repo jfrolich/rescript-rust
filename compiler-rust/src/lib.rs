@@ -54,6 +54,7 @@ pub mod parser;
 pub mod perf_counters;
 pub mod process_cwd;
 pub mod raw_lambda;
+pub mod repl;
 /// Source text decoding helpers.
 pub mod source_text;
 pub mod string_literal;

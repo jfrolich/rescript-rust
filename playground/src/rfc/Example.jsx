@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import TreeView from "../TreeView.jsx";
 import { isSourceFile } from "../engine.js";
 import { encodeProject } from "../share.js";
-import { build as buildProject, compilerStatus, onCompilerStatus, warmUp } from "./compiler.js";
+import { build as buildProject, compilerStatus, complete as completeProject, onCompilerStatus, warmUp } from "./compiler.js";
 import { CodeEditor, selectRange } from "./CodeEditor.jsx";
 import { addedLines, Code, languageOf } from "./highlight.jsx";
 
@@ -165,6 +165,14 @@ export function Example({ example, prebuilt }) {
               onChange={edit}
               onCursor={setCursor}
               onFocus={warmUp}
+              complete={(source, offset, explicit) =>
+                completeProject(
+                  filesRef.current.map((file) => (file.name === activeFile.name ? { ...file, source } : file)),
+                  activeFile.name,
+                  offset,
+                  explicit,
+                )
+              }
               viewRef={editorView}
             />
           </div>

@@ -41,6 +41,18 @@ fn expression_macro() {
     assert!(js.contains("\"age + 1 =\""), "{js}");
 }
 
+/// A macro runs from the file that defines it, also when it is named
+/// through an alias of that file's module.
+#[test]
+fn macro_named_through_a_module_alias() {
+    let mut project = Project::new();
+    project.compile("Debug.res", DEBUG).unwrap();
+    let js = project
+        .compile("Main.res", "module D = Debug\nlet age = 41\nlet next = %D.dbg(age + 1)\n")
+        .unwrap();
+    assert!(js.contains("\"age + 1 =\""), "{js}");
+}
+
 const JSON: &str = r#"
 open Macro
 

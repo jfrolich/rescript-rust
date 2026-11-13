@@ -28,6 +28,10 @@ pub struct Project {
     pub expanded: Option<String>,
     /// The warnings of the last compiled file.
     pub warnings: String,
+    /// The modules that are opened in the files compiled from here on.
+    pub open_modules: Vec<String>,
+    /// What the last compiled file defines (`repl::describe_signature`).
+    pub signature: serde_json::Value,
 }
 
 impl Project {
@@ -71,6 +75,8 @@ impl Project {
             host,
             expanded: None,
             warnings: String::new(),
+            open_modules: Vec::new(),
+            signature: serde_json::Value::Null,
         };
         // The macro API, compiled from source like the rest of the project.
         let macro_source = std::fs::read_to_string(runtime_dir().join("Macro.res")).unwrap();
@@ -91,6 +97,8 @@ impl Project {
             source_filename: Some(filename.to_string()),
             module_name: Some(module_name.clone()),
             macro_host: Some(host),
+            open_modules: self.open_modules.clone(),
+            capture_intermediates: true,
             ..Default::default()
         };
         // As the compiler reads a file: one `char` per byte.
@@ -128,6 +136,8 @@ impl Project {
                 self.host.invalidate();
                 self.expanded = compiled.expanded_source.as_deref().map(text);
                 self.warnings = text(&compiled.warnings);
+                self.signature = serde_json::from_str(&compiled.signature_description)
+                    .unwrap_or(serde_json::Value::Null);
                 Ok(js)
             }
             Err(e) => Err(

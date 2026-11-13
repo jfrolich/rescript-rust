@@ -1,0 +1,80 @@
+{
+  "intro": [
+    "let price = 12.5 and quantity = 3",
+    "%Debug.log(price *. Int.toFloat(quantity))",
+    "type user = {name: string, age: int, email?: string}",
+    "Json.encode({name: \"Ada\", age: 36})"
+  ],
+  "tries": [
+    {
+      "label": "the last value",
+      "source": "it"
+    },
+    {
+      "label": "a derive",
+      "source": "@Enum.derive\ntype size = Small | Medium | Large"
+    },
+    {
+      "label": "use the derive",
+      "source": "sizeValues->Array.map(sizeToString)"
+    },
+    {
+      "label": "a staged power",
+      "source": "let cube = x => Power.pow(x, 3)\ncube(1.5)"
+    },
+    {
+      "label": "%Macro.eval",
+      "source": "%Macro.eval(Sieve.primesBelow(40))"
+    },
+    {
+      "label": "write a macro",
+      "source": "module Twice = {\n  open Macro\n\n  @macro\n  let run = (e: code<'a>): code<('a, 'a)> => %code((${e}, ${e}))\n}"
+    },
+    {
+      "label": "use the macro",
+      "source": "%Twice.run(Math.sqrt(price))"
+    },
+    {
+      "label": "a query checked against schema.sql",
+      "source": "module Vips = %Sql.query(\"select name, city from customers where vip = :vip\")"
+    }
+  ],
+  "completions": [
+    [
+      "price->",
+      "Float.toFixed"
+    ],
+    [
+      "Json.",
+      "encode"
+    ],
+    [
+      "%Debug.",
+      "log"
+    ],
+    [
+      "@Enum.",
+      "derive"
+    ],
+    [
+      "[1, 2]->Array.map(n => n + 1)->",
+      "Array.length"
+    ],
+    [
+      "sizeValues->Array.map(size => size->",
+      "sizeToString"
+    ],
+    [
+      "let ada: user = {name: \"Ada\", age: 36}\n[ada]->Array.map(u => u.",
+      "email"
+    ],
+    [
+      "Vips.",
+      "run"
+    ],
+    [
+      "pri",
+      "price"
+    ]
+  ]
+}

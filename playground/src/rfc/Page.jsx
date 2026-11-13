@@ -1,12 +1,18 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { examples } from "../examples.js";
 import prebuilt from "./prebuilt.json";
+import session from "../../examples/repl.json";
+import { sessionLibraries } from "../repl-transcript.js";
 import { Example } from "./Example.jsx";
+import { Repl } from "./Repl.jsx";
 import { CostChart } from "./Diagrams.jsx";
 import { headings, lex, Markdown, segments } from "./Markdown.jsx";
 import { warmUp } from "./compiler.js";
 
 const REPOSITORY = "https://github.com/jfrolich/rescript-rust";
+
+// The modules a session of the read-eval-print loop starts with.
+const libraries = sessionLibraries(examples);
 
 function useTheme() {
   const [theme, setTheme] = useState(() => localStorage.getItem("theme") ?? "auto");
@@ -57,6 +63,12 @@ export function Page({ markdown, title, lede, pages, current }) {
   const active = useActiveHeading(ids);
   const activeSection = toc.find((entry) => entry.id === active)?.section;
 
+  // A link to a heading from another page: the heading is there only now.
+  useEffect(() => {
+    const id = decodeURIComponent(window.location.hash.slice(1));
+    if (id) document.getElementById(id)?.scrollIntoView();
+  }, []);
+
   // Load the compiler once the page has settled, so the first edit is quick.
   useEffect(() => {
     if (!parts.some((part) => part.type === "example")) return undefined;
@@ -84,11 +96,12 @@ export function Page({ markdown, title, lede, pages, current }) {
           <a className={current === "rfc" ? "on" : ""} href="./">
             RFC
           </a>
+          <a href="./#try-it">REPL</a>
           <a className={current === "implementation" ? "on" : ""} href="implementation.html">
             Implementation
           </a>
           <a href="playground.html">Playground</a>
-          <a href={`${REPOSITORY}/pull/90`} target="_blank" rel="noreferrer">
+          <a className="away" href={`${REPOSITORY}/pull/90`} target="_blank" rel="noreferrer">
             GitHub ↗
           </a>
           <button type="button" className="theme" onClick={toggleTheme} aria-label="Switch between light and dark">
@@ -109,6 +122,9 @@ export function Page({ markdown, title, lede, pages, current }) {
           <span className="chip">Implemented on a branch</span>
           <a className="chip" href={`${REPOSITORY}/pull/90`} target="_blank" rel="noreferrer">
             Pull request #90 ↗
+          </a>
+          <a className="chip lime" href="./#try-it">
+            Try it in the REPL ↓
           </a>
           <a className="chip" href="playground.html">
             Open the playground →
@@ -138,6 +154,9 @@ export function Page({ markdown, title, lede, pages, current }) {
           {parts.map((part, index) => {
             if (part.type === "markdown") return <Markdown key={index} tokens={part.tokens} links={links} />;
             if (part.type === "chart") return <CostChart key={index} />;
+            if (part.type === "repl") {
+              return <Repl key={index} libraries={libraries} intro={prebuilt.$repl ?? []} tries={session.tries} />;
+            }
             const example = examples.find((candidate) => candidate.id === part.id);
             if (!example) return null;
             return <Example key={index} example={example} prebuilt={prebuilt[example.id]} />;

@@ -21,6 +21,26 @@ self.onmessage = async (event) => {
       const started = performance.now();
       const result = engine.build(message.files);
       self.postMessage({ type: "built", id: message.id, result, ms: performance.now() - started });
+    } else if (message.type === "complete") {
+      // What can be written at a place: see engine.complete.
+      let result = null;
+      try {
+        if (engine) result = engine.complete(message.request);
+      } catch (error) {
+        // No completion is better than a compiler that is started again.
+        console.error(error);
+      }
+      self.postMessage({ type: "completed", id: message.id, result });
+    } else if (message.type === "repl-start") {
+      // A session of the read-eval-print loop: `libraries` are the modules
+      // it starts with, `replay` inputs that are evaluated without a word.
+      const started = engine.replStart(message.libraries, (line) => self.postMessage({ type: "repl-log", line }));
+      for (const source of message.replay ?? []) await engine.replEval(source);
+      self.postMessage({ type: "repl-started", id: message.id, ...started });
+    } else if (message.type === "repl-eval") {
+      const started = performance.now();
+      const result = await engine.replEval(message.source);
+      self.postMessage({ type: "repl-result", id: message.id, result, ms: performance.now() - started });
     }
   } catch (error) {
     self.postMessage({ type: "failed", id: message.id, message: String(error?.message ?? error) });

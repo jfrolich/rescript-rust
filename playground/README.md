@@ -7,7 +7,7 @@ compiled program is run.
 
 | Page | What |
 | --- | --- |
-| `index.html` | The RFC, rendered from [docs/comptime/README.md](../docs/comptime/README.md). Each `<!-- example: id -->` block in it becomes a live example: the project on the left, and on the right the source after expansion with the generated lines marked, the JavaScript, the compiler's trees, and the program's output. |
+| `index.html` | The RFC, rendered from [docs/comptime/README.md](../docs/comptime/README.md). Each `<!-- example: id -->` block in it becomes a live example: the project on the left, and on the right the source after expansion with the generated lines marked, the JavaScript, the compiler's trees, and the program's output. The `<!-- repl -->` block becomes a read-eval-print loop. |
 | `implementation.html` | [docs/comptime/IMPLEMENTATION.md](../docs/comptime/IMPLEMENTATION.md). |
 | `playground.html` | The full playground: any number of files, share links. |
 
@@ -42,10 +42,40 @@ and the compiled program import. `npm run build` bundles both into
 | --- | --- |
 | `crate/` | The wasm-bindgen entry points: `compile_file`, the virtual file system, and the macro host that calls into the page. |
 | `src/engine.js` | The build: file order, compiling, running macros and the program. No dependency on the page; `scripts/smoke.mjs` runs it in Node. |
-| `src/rfc/` | The RFC pages: the Markdown renderer, the live example, the diagrams. `scripts/prebuild-examples.mjs` writes the results they start from. |
+| `src/rfc/` | The RFC pages: the Markdown renderer, the live example, the read-eval-print loop, the diagrams. `scripts/prebuild-examples.mjs` writes the results they start from. |
+| `src/repl-format.js`, `src/repl-transcript.js` | A JavaScript value as ReScript, by the shape of its type; a session as text. |
+| `src/complete.js` | Completion: what can be written at a place in a file, asked of the compiler. |
 | `src/compiler-worker.js`, `src/compiler-client.js` | The worker the compiler runs in, and the page's side: a build that takes more than 20 seconds is stopped by replacing the worker. |
 | `src/App.jsx` | The page. |
 | `examples/` | The example projects, listed in `examples/index.json`. `compiler-rust/tests/macros.rs` compiles all of them; the RFC page and the playground both show them. |
+
+## The read-eval-print loop
+
+`engine.replStart` and `engine.replEval` are the loop. An input is compiled
+as a file `Repl<n>.res` with the files of the earlier inputs opened
+(`compile_input` of the crate), and its JavaScript is run once. Before that,
+`prepare_input` binds a last expression to `it`; after it, the compilation's
+`signature` says what the input defined and what shape each value has, and
+`src/repl-format.js` writes the JavaScript values as ReScript with it. The
+loop has a compiler worker of its own (`src/rfc/repl-session.js`).
+
+`examples/repl.json` has the session the loop opens with (`intro`) and the
+inputs it offers after that (`tries`), and completions that have to be
+offered after those (`completions`: an input and a label). The opening session is also in the RFC
+as text: `npm run smoke -- --write-transcript` writes it there, and
+`npm run smoke` fails when the two differ.
+
+## Completion
+
+The compiler has no completion of its own. `src/complete.js` gets the
+answers by compiling small files with it: `include Path` for the members of
+a module, the file up to the item being written for the names in scope, and
+the expression before a `.` or a `->` with a type it cannot have, in its
+place, for its type (the error says which type it has). `engine.complete`
+is the entry point; the worker answers a `complete` message with it. The
+editors of the RFC page use it through `src/rfc/completion.js`, the
+playground through a Monaco completion provider in `src/App.jsx`.
+`npm run smoke` asks for the completions listed in `examples/repl.json`.
 
 ## Adding an example
 

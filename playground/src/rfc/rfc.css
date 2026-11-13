@@ -154,6 +154,7 @@ select {
 
 .topbar nav a {
   text-decoration: none;
+  white-space: nowrap;
   padding: 4px 0;
   border-bottom: 1px solid transparent;
 }
@@ -239,6 +240,12 @@ select {
   font-weight: 600;
   text-decoration: none;
   white-space: nowrap;
+}
+
+.chip.lime {
+  background: var(--lime);
+  color: #18201d;
+  border-color: transparent;
 }
 
 .chip.solid {
@@ -825,6 +832,233 @@ td:first-child {
   }
 }
 
+/* The read-eval-print loop */
+.repl-screen {
+  max-height: 520px;
+  min-height: 220px;
+  overflow: auto;
+  padding: 14px 0 6px;
+  background: var(--sunken);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.6;
+  cursor: text;
+}
+
+.repl-entry {
+  padding: 0 18px 12px;
+}
+
+.repl-entry.fresh {
+  animation: repl-in 0.18s ease-out;
+}
+
+@keyframes repl-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+}
+
+.repl-source,
+.repl-out,
+.repl-detail {
+  margin: 0;
+  font: inherit;
+  tab-size: 2;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.prose .repl-screen code {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+}
+
+.repl-row {
+  display: block;
+}
+
+.repl-mark {
+  display: inline-block;
+  width: 18px;
+  flex-shrink: 0;
+  color: var(--accent);
+  font-weight: 700;
+  user-select: none;
+}
+
+.repl-out {
+  padding-left: 18px;
+}
+
+.repl-out.value {
+  color: var(--ink);
+}
+
+.repl-out.log,
+.repl-out.warn,
+.repl-out.error,
+.repl-out.problem,
+.repl-out.note {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.repl-out.log {
+  color: var(--muted);
+}
+
+.repl-out.warn {
+  color: var(--warn);
+}
+
+.repl-out.error,
+.repl-out.problem {
+  color: var(--error);
+}
+
+.repl-out.note {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.repl-wait {
+  padding-left: 18px;
+  color: var(--muted);
+  animation: pulse 0.9s ease-in-out infinite;
+}
+
+.repl-more {
+  display: flex;
+  gap: 12px;
+  padding: 2px 0 0 18px;
+}
+
+.repl-more button {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0.75;
+}
+
+.repl-more button:hover,
+.repl-more button.on {
+  color: var(--accent);
+  opacity: 1;
+}
+
+.repl-more button::before {
+  content: "+ ";
+}
+
+.repl-more button.on::before {
+  content: "− ";
+}
+
+.repl-detail {
+  margin: 6px 0 2px 18px;
+  padding: 10px 14px;
+  border-left: 3px solid var(--generated-edge);
+  background: var(--generated);
+  font-size: 12.5px;
+}
+
+.repl-input {
+  display: flex;
+  align-items: flex-start;
+  padding: 0 18px 10px;
+}
+
+.repl-editor {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.editor.repl-editor .cm-content {
+  padding: 0;
+}
+
+.editor.repl-editor .cm-line {
+  padding: 0;
+}
+
+.repl-editor .cm-placeholder {
+  color: var(--muted);
+  opacity: 0.7;
+}
+
+.repl-run {
+  display: none;
+  flex-shrink: 0;
+  margin-left: 10px;
+  padding: 3px 9px;
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.repl-tries {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+}
+
+.repl-tries-label {
+  flex-shrink: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 9.5px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.repl-modules {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.repl-try {
+  flex-shrink: 0;
+  background: var(--lime);
+  border-color: transparent;
+  color: #18201d;
+}
+
+.repl-keys {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.repl-keys kbd {
+  padding: 0 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  font-family: var(--sans);
+  font-size: 10px;
+}
+
 /* The editor */
 .editor .cm-editor {
   background: transparent;
@@ -861,6 +1095,68 @@ td:first-child {
 .editor .cm-matchingBracket {
   background: var(--hole);
   outline: 1px solid var(--line-strong);
+}
+
+/* Completions */
+.editor .cm-editor .cm-tooltip {
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 14px 34px -18px rgba(24, 32, 29, 0.55);
+}
+
+.editor .cm-editor .cm-tooltip.cm-tooltip-autocomplete > ul {
+  max-height: 15.5em;
+  min-width: 220px;
+  max-width: min(620px, 92vw);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.editor .cm-editor .cm-tooltip.cm-tooltip-autocomplete > ul > li {
+  display: flex;
+  align-items: baseline;
+  margin: 0;
+  padding: 2px 10px 2px 6px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.editor .cm-editor .cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] {
+  background: var(--lime);
+  color: #18201d;
+}
+
+.editor .cm-editor .cm-completionIcon {
+  flex-shrink: 0;
+  width: 1.2em;
+  padding-right: 0.5em;
+  opacity: 0.55;
+  font-size: 90%;
+}
+
+.editor .cm-editor .cm-completionLabel {
+  flex-shrink: 0;
+}
+
+.editor .cm-editor .cm-completionMatchedText {
+  text-decoration: none;
+  font-weight: 700;
+}
+
+.editor .cm-editor .cm-completionDetail {
+  min-width: 0;
+  margin-left: 1.4em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-style: normal;
+  color: var(--muted);
+}
+
+.editor .cm-editor li[aria-selected] .cm-completionDetail {
+  color: rgba(24, 32, 29, 0.7);
 }
 
 /* Internals: the trees */
@@ -1237,6 +1533,11 @@ td:first-child {
     font-size: 12px;
   }
 
+  /* The pull request is linked below the title too. */
+  .topbar nav a.away {
+    display: none;
+  }
+
   .brand span {
     display: none;
   }
@@ -1269,6 +1570,27 @@ td:first-child {
   .example-head {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .repl-screen {
+    max-height: 440px;
+    font-size: 12px;
+  }
+
+  .repl-run {
+    display: block;
+  }
+
+  .repl-keys {
+    display: none;
+  }
+
+  .repl-tries {
+    flex-wrap: wrap;
+  }
+
+  .repl-modules {
+    flex-basis: 60%;
   }
 
   .flow,
