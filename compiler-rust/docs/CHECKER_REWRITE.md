@@ -1130,16 +1130,20 @@ tested here. Slice R8 tests it.
 The implementation is on a review branch, **not yet landed**. Its one
 `driver::type_structure_two_modes` attempt owner serves batch builds,
 single-file compilation, interfaces and tooling; the playground reaches the
-batch path. The mode is fixed during context preparation. A retained-attempt
+batch path. The mode is fixed during context preparation. A validating
 continuation keeps the type context alive without a self-referential owner.
+Its diagnostics and dumps remain buffered until the publication boundary;
+post-structure validation failures also cause an Explain retry.
 A discarded attempt's typed result, environment and context are dropped before
 the Explain context is constructed. Settings contain both the mode and the
 derived-plan choice so another retry reason can share the loop.
 
 `RESCRIPT_CHECK_MODE=explain`, read once alongside `RESCRIPT_DERIVED_PATH`,
 selects the original snapshot policy for comparisons and bisection.
-`RESCRIPT_COMPILER_COUNTERS=1` includes `explain_reruns`; the CLI prints the
-counter report as well as the in-process build. These are diagnostic controls,
+`RESCRIPT_COMPILER_COUNTERS=1` includes `check_attempts` and `explain_reruns`;
+the CLI prints the counter report as well as the in-process build. The CLI
+resets these two observation counters after dependency preparation, before
+checking its selected source; a frontend failure then has zero attempts. These are diagnostic controls,
 not changes to generated JavaScript.
 
 The journal's mutation/snapshot/backtrack counters are plain attempt-local
@@ -1160,22 +1164,37 @@ Measured evidence, not a replacement for the remaining gates:
 - The subsequent candidate reported `explain_reruns=0` on both the test project
   and the 3,735-module application.
 - The diagnostic parity script passed 2,137 cases after integrating trunk.
-- `scripts/test_check_modes.py` compared 747 fixture outputs byte-for-byte
-  against forced Explain: no output differences, 584 rechecked fixtures.
-  Its stronger assertion **fails for 75 expected-error fixtures**. Some fail
-  before typing; others fail in validation after `type_structure` returns.
-  For example, `ModuleAwait.res` fails before the unit checker, while
-  `non_generalizable.res` fails in `check_nongen_schemes` after the retained
-  continuation has begun. Both report `explain_reruns=0` when run with
-  counters enabled. The retry boundary must cover the latter validation
-  before this candidate meets the complete error-recheck contract. No
-  expected diagnostic was rewritten and the failing assertion remains.
+- `scripts/test_check_modes.py` passes all 747 fixtures: 597 rechecked,
+  zero byte differences against forced Explain. It requires an Explain
+  rerun when the expected report contains an error and `check_attempts > 0`.
+  Frontend failures are excluded by observed attempts, not by fixture names.
+  `non_generalizable.res` now reports one Explain rerun and the identical
+  diagnostic. A unit test exercises that post-structure validation boundary.
 - Tests compare a warning before a type error, and a warning after a caught
   failed unification, with forced Explain; both reports match byte-for-byte.
 - A comparison against an older downloaded base had identical JavaScript
   and diagnostics on both projects, but different canonical signature
   formatting after trunk changed that formatter. That run is **not** a
   passing current-trunk signature comparison.
+
+Attempt order (each row starts with fresh context and initial environment):
+
+| Entry point | Validation before retaining the attempt | Publication boundary |
+| --- | --- | --- |
+| `compile_source_to_js_with_options_inner` | `type_structure`; inferred/interface coercion; `check_nongen_schemes`; signature normalization; delayed warnings; raw conversion and its diagnostics; lowering and JS diagnostics; fatal warnings | Buffered reports, gentype output and source map writes, then returned JS |
+| `compile_until_js` (batch/playground) | `type_structure`; inferred/interface inclusion; `check_js_names`; `check_nongen_schemes`; normalization; delayed checks; deprecation payload; raw conversion; late warnings and fatal-warning check | `signature_ready` callback and returned pre-JS result; check-only validates inclusion warnings before its callback |
+| `typecheck_interface_source` | `transl_signature`; persistent-environment error; `check_js_names`; self-inclusion through `includemod::escaped`; delayed checks; fatal warnings | Buffered warnings/dumps and returned result |
+| `typecheck_preprocessed_signature_in_process` | `transl_signature`; persistent-environment error; JS-name and self-inclusion checks; delayed/fatal warnings; gentype read; saved-signature and deprecation payload processing | Signature extraction and returned interface result |
+| `typecheck_structure_for_tooling` | `type_structure` and error conversion | Returned typed arena, context and result |
+| `typecheck_signature_for_tooling` | `transl_signature` and error conversion | Returned typed arena, context and result |
+
+The batch path must freeze its private inferred signature before raw translation
+mutates type nodes; moving that freeze after translation fails the Belt snapshot
+proof. The frozen value is now kept private until validation completes, but its
+freeze/publication instrumentation still needs an isolation audit. Derived-plan
+fallback abandons the context before the Explain decision, without publishing
+its counters. The source owner still reparses general syntax outside this loop;
+composing that frontend transition into shared attempt settings remains open.
 
 Still unmeasured: the final candidate's application instruction count, the
 failing-unit/passing-unit instruction ratio, and wall-time distributions.

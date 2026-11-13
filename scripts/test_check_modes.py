@@ -35,8 +35,12 @@ def check(binary, fixture):
     reruns = int(found[1]) if found else None
     expected = (fixture.parent.parent / 'expected' / (fixture.name + '.expected')).read_text()
     has_error = "We've found a bug for you!" in expected or 'Syntax error!' in expected
-    if has_error and reruns != 1:
-        errors.append(f'expected error was not rechecked (explain_reruns={reruns})')
+    found_attempts = re.search(rb'\[compiler-counter\] check_attempts=(\d+)', counted.stderr)
+    attempts = int(found_attempts[1]) if found_attempts else None
+    if attempts is None or reruns is None:
+        errors.append('missing attempt counters')
+    elif has_error and attempts > 0 and reruns < 1:
+        errors.append(f'expected error was not rechecked (check_attempts={attempts}, explain_reruns={reruns})')
     return fixture.name, reruns, errors
 
 

@@ -4926,19 +4926,6 @@ fn format_compiler_warning_report(
     output
 }
 
-fn emit_type_warnings(
-    arena: &ParseArena,
-    source: &str,
-    filename: &str,
-    warnings: &[TypeCoreWarning],
-) {
-    if warnings.is_empty() {
-        return;
-    }
-
-    write_stderr_raw(&format_type_warnings(arena, source, filename, warnings));
-}
-
 /// [`format_type_warnings`], reading the source only when there is a
 /// warning to report.
 fn format_type_warnings_lazy<'s>(
@@ -4953,7 +4940,7 @@ fn format_type_warnings_lazy<'s>(
     format_type_warnings(arena, source(), filename, warnings)
 }
 
-/// The reports [`emit_type_warnings`] prints, as one string.
+/// Type warnings rendered as one string for attempt-local buffering.
 fn format_type_warnings(
     arena: &ParseArena,
     source: &str,
@@ -6539,10 +6526,7 @@ fn compile_source_to_js_with_options_inner(
             tctx.experimental_let_unwrap = experimental_let_unwrap;
             type_structure(tctx, env, arena, &structure)
         },
-        |type_ctx, mut tctx, typed| {
-    if tctx.derived_fallback {
-        return Err(DerivedRetry.into());
-    }
+        |type_ctx, mut tctx, typed, attempt_output| {
     let ((typed_structure, final_env), env) = match typed {
         Ok(result) => result,
         Err(e) => {
@@ -6554,7 +6538,7 @@ fn compile_source_to_js_with_options_inner(
             tctx.drain_open_slot_uses();
             let suppress_info_style =
                 !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
-            emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+            attempt_output.warnings(parser.arena(), source, filename, &tctx.warnings);
             if let Some(error) = tctx
                 .persistent_env
                 .as_ref()
@@ -6580,7 +6564,7 @@ fn compile_source_to_js_with_options_inner(
         return Err(persistent_env_error_to_anyhow(error, filename));
     }
     tctx.drain_open_slot_uses();
-    emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+    attempt_output.warnings(parser.arena(), source, filename, &tctx.warnings);
     // js_implementation.ml:158-163: `Warnings.check_fatal` runs only after
     // `Typemod.type_implementation_more`, whose delayed checks
     // (typemod.ml:1769-1776) still report their warnings.
@@ -6664,7 +6648,7 @@ fn compile_source_to_js_with_options_inner(
             match crate::types::includemod::escaped(type_ctx, implementation_coercion) {
                 Ok(coercion) => coercion,
                 Err(e) => {
-                    emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+                    attempt_output.warnings(parser.arena(), source, filename, &tctx.warnings);
                     return Err(type_mod_error_to_anyhow(
                         e.into(),
                         type_ctx,
@@ -6703,7 +6687,7 @@ fn compile_source_to_js_with_options_inner(
     // typedtree-only runs must therefore flush value-usage checks before the dump.
     tctx.flush_value_usage_checks();
     let delayed_warnings = &tctx.warnings[delayed_type_warning_start..];
-    emit_type_warnings(parser.arena(), source, filename, delayed_warnings);
+    attempt_output.warnings(parser.arena(), source, filename, delayed_warnings);
     // `Warnings.check_fatal` only runs at lam_compile_main.ml:420 (or right
     // after typing for typedtree/cmi-only runs, js_implementation.ml:158-159),
     // so a fatal typing warning still lets Translmod report its warnings.
@@ -6713,23 +6697,23 @@ fn compile_source_to_js_with_options_inner(
 
     // Print typed tree if requested
     if options.dump_typed_sexp {
-        let mut stderr = std::io::stderr();
+        let stderr = &mut attempt_output.stderr;
         let _ = print_typed_structure(
             parser.arena(),
             type_ctx,
             &tctx.typed,
             &typed_structure,
-            &mut stderr,
+            stderr,
         );
     }
     if options.dump_typed_sexp_locs {
-        let mut stderr = std::io::stderr();
+        let stderr = &mut attempt_output.stderr;
         let _ = print_typed_structure_with_locs(
             parser.arena(),
             type_ctx,
             &tctx.typed,
             &typed_structure,
-            &mut stderr,
+            stderr,
         );
     }
 
@@ -6743,7 +6727,7 @@ fn compile_source_to_js_with_options_inner(
 
     // `process_with_gentype` runs after the JS is emitted
     // (js_implementation.ml:164), which a fatal warning prevents.
-    if options.gentype_config.is_some() && !typing_warnings_fatal {
+    let pending_gentype = if options.gentype_config.is_some() && !typing_warnings_fatal {
         let module_name = current_unit_name
             .clone()
             .unwrap_or_else(|| module_name_from_source_filename(source_file_for_interface));
@@ -6774,8 +6758,8 @@ fn compile_source_to_js_with_options_inner(
                 module_name: &module_name,
             },
         );
-        print!("{}", apply_gentype_outcome(gentype, "", source_file_for_interface)?);
-    }
+        gentype
+    } else { None };
 
     let lambda_start_stamp = synchronize_lambda_start_stamp(type_ctx);
 
@@ -6838,7 +6822,7 @@ fn compile_source_to_js_with_options_inner(
     let lam_locs = raw_converter.take_lam_locs();
     if let Some(diagnostic) = raw_converter.take_diagnostic() {
         // A Translmod error escapes before `Warnings.check_fatal`.
-        emit_type_warnings(parser.arena(), source, filename, &raw_warnings);
+        attempt_output.warnings(parser.arena(), source, filename, &raw_warnings);
         return Err(UserDiagnostic::new(
             format_compiler_error_report_from_location(
                 source,
@@ -6851,8 +6835,8 @@ fn compile_source_to_js_with_options_inner(
         .into());
     }
     let late_type_warnings = &tctx.warnings[post_type_warning_start..];
-    emit_type_warnings(parser.arena(), source, filename, late_type_warnings);
-    emit_type_warnings(parser.arena(), source, filename, &raw_warnings);
+    attempt_output.warnings(parser.arena(), source, filename, late_type_warnings);
+    attempt_output.warnings(parser.arena(), source, filename, &raw_warnings);
     // lam_compile_main.ml:420 `Warnings.check_fatal ()` runs after the
     // lambda and JS passes (checked below, after `lam_compile`).
     let warnings_fatal = typing_warnings_fatal
@@ -6870,11 +6854,9 @@ fn compile_source_to_js_with_options_inner(
                 .to_string();
     }
 
-    if SKIP_CLI_CLEANUP.load(Ordering::Relaxed) {
-        std::mem::forget(raw_converter);
-    } else {
-        drop(raw_converter);
-    }
+    // This attempt can still fail during lowering: release its checker borrows
+    // normally rather than leaking the discarded graph on the CLI fast path.
+    drop(raw_converter);
     let (mut lowered_arena, lowered_root, export_idents) =
         crate::raw_lambda::lower::lower_to_translmod_lambda(raw_arena.into_inner(), raw_lambda);
     // js_implementation.ml:165 prints `-drawlambda` on Translmod's result.
@@ -6883,10 +6865,11 @@ fn compile_source_to_js_with_options_inner(
         let mut buf = Vec::new();
         crate::lambda::printlambda::print_lambda(&lowered_arena.export(lowered_root), &mut buf);
         buf.push(b'\n');
-        let mut stderr = std::io::stderr();
+        let stderr = &mut attempt_output.stderr;
         let _ = stderr.write_all(&buf);
-        let _ = stderr.flush();
+
         if std::env::var_os("RUST_RAWLAMBDA_ONLY").is_some() {
+            attempt_output.publish(type_ctx)?;
             std::process::exit(0);
         }
     }
@@ -6910,17 +6893,15 @@ fn compile_source_to_js_with_options_inner(
     if options.dump_lambda_sexp || options.dump_lambda_sexp_locs {
         let lowered_lambda = lowered_arena.export(lowered_root);
         if options.dump_lambda_sexp {
-            use std::io::Write;
-            let mut stderr = std::io::stderr();
-            let _ = crate::lambda::sexp_lambda::print_lambda(&lowered_lambda, &mut stderr);
-            let _ = stderr.flush();
+            let stderr = &mut attempt_output.stderr;
+            let _ = crate::lambda::sexp_lambda::print_lambda(&lowered_lambda, stderr);
+
         }
         if options.dump_lambda_sexp_locs {
-            use std::io::Write;
-            let mut stderr = std::io::stderr();
+            let stderr = &mut attempt_output.stderr;
             let _ =
-                crate::lambda::sexp_lambda::print_lambda_with_locs(&lowered_lambda, &mut stderr);
-            let _ = stderr.flush();
+                crate::lambda::sexp_lambda::print_lambda_with_locs(&lowered_lambda, stderr);
+
         }
     }
 
@@ -6969,7 +6950,7 @@ fn compile_source_to_js_with_options_inner(
         all_possible_required_modules, options, options.jsx_preserve, filename,
     )?;
     #[cfg(test)]
-    if let Some(trace) = discriminator_trace {
+    if let Some(trace) = discriminator_trace.as_deref_mut() {
         trace.js_program = format!("{program:#?}");
     }
     if let Some(error) = compiler.take_shadow_error() {
@@ -7023,6 +7004,8 @@ fn compile_source_to_js_with_options_inner(
         options.output_path.as_deref(),
         std::sync::Arc::new(compiler.take_lam_locs()),
     );
+    attempt_output.publish(type_ctx)?;
+    print!("{}", apply_gentype_outcome(pending_gentype, "", source_file_for_interface)?);
     if let Some(output_path) = options.output_path.as_deref() {
         let map_path = PathBuf::from(format!("{}.map", output_path.display()));
         if let Some(source_map) = source_map {
@@ -7771,7 +7754,7 @@ pub fn typecheck_interface_source(
             tctx.experimental_let_unwrap = experimental_let_unwrap;
             transl_signature(tctx, env, arena, &signature)
         },
-        |type_ctx, mut tctx, typed| {
+        |type_ctx, mut tctx, typed, attempt_output| {
     let (typed_signature, env) = match typed {
         Ok(typed) => typed,
         Err(e) => {
@@ -7779,7 +7762,7 @@ pub fn typecheck_interface_source(
             tctx.drain_open_slot_uses();
             let suppress_info_style =
                 !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
-            emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+            attempt_output.warnings(parser.arena(), source, filename, &tctx.warnings);
             if let Some(error) = tctx
                 .persistent_env
                 .as_ref()
@@ -7817,7 +7800,7 @@ pub fn typecheck_interface_source(
     if let Err(e) = crate::types::typemod::check_js_names(type_ctx, true, &sig_type) {
         let suppress_info_style =
             !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
-        emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+        attempt_output.warnings(parser.arena(), source, filename, &tctx.warnings);
         return Err(type_mod_error_to_anyhow(
             e,
             type_ctx,
@@ -7835,7 +7818,7 @@ pub fn typecheck_interface_source(
     if let Err(e) = crate::types::includemod::escaped(type_ctx, self_inclusion) {
         let suppress_info_style =
             !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
-        emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+        attempt_output.warnings(parser.arena(), source, filename, &tctx.warnings);
         return Err(type_mod_error_to_anyhow(
             e.into(),
             type_ctx,
@@ -7847,30 +7830,30 @@ pub fn typecheck_interface_source(
     }
     // js_implementation.ml:64 `Delayed_checks.force_delayed_checks ()`.
     tctx.flush_value_usage_checks();
-    emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+    attempt_output.warnings(parser.arena(), source, filename, &tctx.warnings);
     if ppx_warnings_have_errors || type_warnings_have_errors(&tctx.warnings) {
         return Err(UserDiagnostic::new(String::new(), 2).into());
     }
 
     // Print typed tree if requested
     if options.dump_typed_sexp {
-        let mut stderr = std::io::stderr();
+        let stderr = &mut attempt_output.stderr;
         let _ = print_typed_signature(
             parser.arena(),
             type_ctx,
             &tctx.typed,
             &typed_signature,
-            &mut stderr,
+            stderr,
         );
     }
     if options.dump_typed_sexp_locs {
-        let mut stderr = std::io::stderr();
+        let stderr = &mut attempt_output.stderr;
         let _ = print_typed_signature_with_locs(
             parser.arena(),
             type_ctx,
             &tctx.typed,
             &typed_signature,
-            &mut stderr,
+            stderr,
         );
     }
 
@@ -10373,24 +10356,72 @@ struct CheckAttempt {
     derived_plans: bool,
 }
 
+/// Output is private until the attempt crosses its publication boundary.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum AttemptPublication { Pending, Committed }
+
+/// One byte buffer per unit, allocated only when there are reports to print.
+/// This is not stored per node or passed down a checker walk.
+struct AttemptOutput {
+    stderr: Vec<u8>,
+    publication: AttemptPublication,
+    mode: crate::types::context::CheckMode,
+}
+
+impl AttemptOutput {
+    /// O(1), no allocation until the first diagnostic or requested dump.
+    fn new(mode: crate::types::context::CheckMode) -> Self {
+        Self { stderr: Vec::new(), publication: AttemptPublication::Pending, mode }
+    }
+
+    /// O(report bytes), only on a diagnostic path. Discarded reports are never emitted.
+    fn warnings(&mut self, arena: &ParseArena, source: &str, filename: &str, warnings: &[TypeCoreWarning]) {
+        if !warnings.is_empty() {
+            self.stderr.extend_from_slice(format_type_warnings(arena, source, filename, warnings).as_bytes());
+        }
+    }
+
+    /// O(1) without diagnostics; otherwise O(report bytes). Called before the
+    /// first externally visible artifact/signature, after every fallible check.
+    fn publish(&mut self, ctx: &TypeContext) -> Result<()> {
+        if self.publication == AttemptPublication::Pending {
+            if self.mode == crate::types::context::CheckMode::Success && ctx.unexplained_unify_failure() {
+                return Err(anyhow!("unit requires an explanatory check"));
+            }
+            ctx.keep_attempt_counters();
+            self.publication = AttemptPublication::Committed;
+        }
+        if !self.stderr.is_empty() {
+            let mut stderr = std::io::stderr();
+            let _ = std::io::Write::write_all(&mut stderr, &self.stderr);
+            let _ = std::io::Write::flush(&mut stderr);
+            self.stderr.clear();
+        }
+        Ok(())
+    }
+}
+
 /// Check a unit with diagnostic-only snapshots elided, then explain it if needed.
 /// Cost: one check on success, at most two checks on failure; O(1) dispatch.
-/// The continuation runs only for the retained attempt, so no warning, signature,
-/// unit-read set or derived census from a discarded attempt can be published.
+/// The continuation validates the checked unit while its output stays private.
+/// Its publication boundary commits the attempt before external artifacts or
+/// callbacks become observable; all errors before that boundary get Explain.
 /// Returning the owned context separately keeps tooling's typed handles valid
 /// without a self-referential context or retaining the discarded type graph.
 fn type_structure_two_modes<T, R>(
     unit: CheckUnit<'_>,
     check: impl for<'a> Fn(&mut TypeCheckContext<'a>, &Env, &'a crate::parse_arena::ParseArena)
         -> crate::types::typemod::TypeModResult<T>,
-    finish: impl for<'a> FnOnce(&'a TypeContext, TypeCheckContext<'a>,
-        crate::types::typemod::TypeModResult<(T, Env)>) -> R,
-) -> (TypeContext, R) {
+    mut finish: impl for<'a> FnMut(&'a TypeContext, TypeCheckContext<'a>,
+        crate::types::typemod::TypeModResult<(T, Env)>, &mut AttemptOutput) -> Result<R>,
+) -> (TypeContext, Result<R>) {
     use crate::types::context::CheckMode;
     let CheckUnit { arena, filename, options, derived_plans, .. } = unit;
     offer_unit_to_checker(options.checker, filename);
     let mut attempt = CheckAttempt { mode: unit.mode, derived_plans };
     loop {
+        crate::perf_counters::record_check_attempt();
         let type_ctx = fresh_type_context();
         type_ctx.set_location_namespace(&options.location_identity(filename));
         type_ctx.defer_attempt_counters();
@@ -10399,12 +10430,17 @@ fn type_structure_two_modes<T, R>(
                 &type_ctx, &unit, attempt.mode,
             )
         });
-            if attempt.derived_plans {
+        if attempt.derived_plans {
             tctx.derived_census = arena.derived_census.clone();
         }
         let typed = crate::timing::measure(crate::timing::Phase::Typecheck, || {
             env.and_then(|env| check(&mut tctx, &env, arena).map(|typed| (typed, env)))
         });
+        if tctx.derived_fallback {
+            drop(typed);
+            drop(tctx);
+            return (type_ctx, Err(DerivedRetry.into()));
+        }
         if attempt.mode == CheckMode::Success
             && (typed.is_err() || type_ctx.unexplained_unify_failure())
         {
@@ -10416,8 +10452,18 @@ fn type_structure_two_modes<T, R>(
             attempt.mode = CheckMode::Explain;
             continue;
         }
-        type_ctx.keep_attempt_counters();
-        let output = finish(&type_ctx, tctx, typed);
+        let mut reports = AttemptOutput::new(attempt.mode);
+        let output = finish(&type_ctx, tctx, typed, &mut reports);
+        if reports.publication == AttemptPublication::Pending && attempt.mode == CheckMode::Success
+            && (output.is_err() || type_ctx.unexplained_unify_failure())
+        {
+            drop(output);
+            drop(type_ctx);
+            crate::perf_counters::record_explain_rerun();
+            attempt.mode = CheckMode::Explain;
+            continue;
+        }
+        let output = reports.publish(&type_ctx).and(output);
         return (type_ctx, output);
     }
 }
@@ -10459,13 +10505,13 @@ pub fn typecheck_structure_for_tooling(
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_attribute_specs(structure, arena)
             .expect("the frontend read these attributes");
-    let (type_ctx, (typed, typed_arena)) = type_structure_two_modes(
+    let (type_ctx, output) = type_structure_two_modes(
         CheckUnit { arena, filename, options, registry: Some(registry),
             module_name: Some(module_name), file_config: &file_config,
             frontend_warning_specs: &frontend_warning_specs, derived_plans: true,
             mode: crate::types::context::CheckMode::from_env() },
         |tctx, env, arena| type_structure(tctx, env, arena, structure),
-        |type_ctx, mut tctx, result| {
+        |type_ctx, mut tctx, result, _attempt_output| {
         let typed = match result {
 
             Ok(((typed_structure, _final_env), _env)) => ToolingTyped::Implementation(typed_structure),
@@ -10482,9 +10528,10 @@ pub fn typecheck_structure_for_tooling(
                 ToolingTyped::Failed(format!("{report:#}"))
             }
         };
-        (typed, tctx.take_typed_arena())
+        Ok((typed, tctx.take_typed_arena()))
         },
     );
+    let (typed, typed_arena) = output.expect("tooling represents errors as ToolingTyped::Failed");
     ToolingTypedModule {
         type_ctx,
         typed,
@@ -10507,13 +10554,13 @@ pub fn typecheck_signature_for_tooling(
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena)
             .expect("the frontend read these attributes");
-    let (type_ctx, (typed, typed_arena)) = type_structure_two_modes(
+    let (type_ctx, output) = type_structure_two_modes(
         CheckUnit { arena, filename, options, registry: Some(registry),
             module_name: Some(module_name), file_config: &file_config,
             frontend_warning_specs: &frontend_warning_specs, derived_plans: true,
             mode: crate::types::context::CheckMode::from_env() },
         |tctx, env, arena| transl_signature(tctx, env, arena, signature),
-        |type_ctx, mut tctx, result| {
+        |type_ctx, mut tctx, result, _attempt_output| {
         let typed = match result {
 
             Ok((typed_signature, _env)) => ToolingTyped::Interface(typed_signature),
@@ -10530,9 +10577,10 @@ pub fn typecheck_signature_for_tooling(
                 ToolingTyped::Failed(format!("{report:#}"))
             }
         };
-        (typed, tctx.take_typed_arena())
+        Ok((typed, tctx.take_typed_arena()))
         },
     );
+    let (typed, typed_arena) = output.expect("tooling represents errors as ToolingTyped::Failed");
     ToolingTypedModule {
         type_ctx,
         typed,
@@ -10647,13 +10695,11 @@ fn compile_until_js(
     type_structure_two_modes(
         CheckUnit { arena, filename, options, registry: Some(registry),
             module_name: Some(module_name), file_config: &checking_config,
-            frontend_warning_specs: &frontend_warning_specs, derived_plans: options.derived_path.plans_off().is_none(),
+            frontend_warning_specs: &frontend_warning_specs,
+            derived_plans: options.derived_path.plans_off().is_none(),
             mode: crate::types::context::CheckMode::from_env() },
         |tctx, env, arena| type_structure(tctx, env, arena, structure),
-        |type_ctx, mut tctx, typed| {
-    if tctx.derived_fallback {
-        return Err(DerivedRetry.into());
-    }
+        |type_ctx, mut tctx, typed, attempt_output| {
     let ((typed_structure, final_env), env) = match typed {
         Ok(result) => result,
         Err(e) => {
@@ -10700,7 +10746,7 @@ fn compile_until_js(
             type_ctx,
             &tctx.typed,
             &typed_structure,
-            &mut std::io::stderr(),
+            &mut attempt_output.stderr,
         );
     }
 
@@ -10880,15 +10926,8 @@ fn compile_until_js(
     // the already-published interface remains the target signature for
     // `Translmod.transl_implementation`; do not replace it with the
     // implementation signature or the export coercion becomes identity.
-    let mut publication_guard =
-        (!has_interface).then(crate::perf_counters::SignaturePublication::begin);
     let (mut pers_struct, persistent_env_after_signature) = if has_interface {
-        (
-            None,
-            tctx.persistent_env
-                .take()
-                .unwrap_or_else(PersistentEnv::new),
-        )
+        (None, tctx.persistent_env.take().unwrap_or_else(PersistentEnv::new))
     } else {
         let _phase = info_span!("compiler.signature_extract").entered();
         let signature_publish_start = crate::timing::enabled().then(std::time::Instant::now);
@@ -10971,44 +11010,28 @@ fn compile_until_js(
         type_ctx.register_gentype_raw_module_sig(module_name, current_raw_sig.clone());
         type_ctx.register_raw_module_sig(module_name, current_raw_sig);
 
+        // Freeze the inferred signature before raw translation mutates type
+        // nodes, but keep the result private until all validation has passed.
         let pers_struct = if options.publish_in_process_signature {
-            publish_signature(
-                &internal_env,
-                options,
-                module_name,
-                filename,
-                type_ctx,
-                arena,
-                publication,
-            )?
-        } else {
-            None
-        };
-        // Keep the just-saved current unit visible through raw-lambda
-        // conversion. OCaml saves the inferred signature in the no-interface
-        // branch before translation (compiler/ml/typemod.ml:1779-1788), and
-        // optional-pattern lowering can still expand current-unit aliases via
-        // Env.find_type while choosing Pval_from_option_not_nest
-        // (compiler/ml/typeopt.ml:40-88; compiler/ml/matching.ml:1259-1267).
-        // `finish_preprocessed_structure_in_process_from_js_boundary` hides it
-        // again before JS module-path probing.
+            let _publication_guard = crate::perf_counters::SignaturePublication::begin();
+            publish_signature(&internal_env, options, module_name, filename, type_ctx, arena, publication)?
+        } else { None };
         if let Some(start) = signature_publish_start {
             crate::timing::record(crate::timing::Phase::SignaturePublish, start.elapsed());
         }
         (pers_struct, internal_env)
     };
-    // A location-free attempt must not publish a signature before Lambda
-    // translation has ruled out a diagnostic or a location-valued constant.
-    if !has_interface
-        && arena.stores_locations()
-        && let Some(hook) = signature_ready.take()
-    {
-        drop(publication_guard.take());
-        let _ = hook(InProcessSignatureReady {
-            pers_struct: pers_struct.take(),
-        })?;
-    }
     tctx.persistent_env = Some(persistent_env_after_signature);
+
+    // Neither a frozen signature nor a unit result is handed to another worker
+    // until every validation that uses the checker context has completed.
+    let mut publish_checked = || -> Result<_> {
+        attempt_output.publish(type_ctx)?;
+        if !has_interface && let Some(hook) = signature_ready.as_deref_mut() {
+            hook(InProcessSignatureReady { pers_struct: pers_struct.take() })?;
+        }
+        Ok(pers_struct.take())
+    };
 
     if options.check_only {
         if let Some(inclusion) = interface_inclusion {
@@ -11031,12 +11054,7 @@ fn compile_until_js(
         if type_warnings_have_errors(&tctx.warnings) {
             return Err(UserDiagnostic::new(warnings, 2).into());
         }
-        if !has_interface && let Some(hook) = signature_ready {
-            drop(publication_guard.take());
-            let _ = hook(InProcessSignatureReady {
-                pers_struct: pers_struct.take(),
-            })?;
-        }
+        let pers_struct = publish_checked()?;
         return Ok(InProcessPreJsCompileResult {
             signature: published_signature,
             pers_struct,
@@ -11074,7 +11092,7 @@ fn compile_until_js(
     let gentype = if !has_interface || gentype_interface.is_some() {
         process_gentype_typed_artifact_if_enabled(
             options,
-            gentype_interface,
+            gentype_interface.clone(),
             GentypeUnit {
                 annots: crate::gentype::main::TypedArtifactAnnots::Implementation(&typed_structure),
                 arena,
@@ -11357,12 +11375,7 @@ fn compile_until_js(
         String::new()
     };
 
-    if !has_interface && let Some(hook) = signature_ready {
-        drop(publication_guard.take());
-        let _ = hook(InProcessSignatureReady {
-            pers_struct: pers_struct.take(),
-        })?;
-    }
+    let pers_struct = publish_checked()?;
     if let (Some(census), Some(timing)) = (&mut tctx.derived_census, &census_timing) {
         census.account_pre_js(timing.snapshot());
         if let Some(warnings) = located_warnings.as_ref().and_then(|a| a.derived_census.as_ref()) {
@@ -11375,8 +11388,8 @@ fn compile_until_js(
         possible_required_modules,
         flat_make_paths,
         ident_stamp_at_js_boundary,
-        file_directives,
-        file_config,
+        file_directives: file_directives.clone(),
+        file_config: file_config.clone(),
         signature: published_signature,
         pers_struct,
         lam_locs,
@@ -11751,7 +11764,7 @@ pub fn typecheck_preprocessed_signature_in_process(
             frontend_warning_specs: &frontend_warning_specs, derived_plans: true,
             mode: crate::types::context::CheckMode::from_env() },
         |tctx, env, arena| transl_signature(tctx, env, arena, signature),
-        |type_ctx, mut tctx, typed| {
+        |type_ctx, mut tctx, typed, attempt_output| {
     let (typed_signature, env) = match typed {
         Ok(typed_signature) => typed_signature,
         Err(e) => {
@@ -11960,6 +11973,7 @@ pub fn typecheck_preprocessed_signature_in_process(
                 &tctx.warnings,
             )
         })?;
+    attempt_output.publish(type_ctx)?;
     if type_ctx.compiler_counters_enabled() {
         crate::perf_counters::census_exported_signature(type_ctx, module_name, &raw_signature);
     }
@@ -12018,6 +12032,7 @@ mod tests {
     #[test]
     fn two_mode_attempts_keep_only_the_final_check() {
         assert_eq!(std::mem::size_of::<super::CheckAttempt>(), 2);
+        assert_eq!(std::mem::size_of::<super::AttemptOutput>(), 4 * std::mem::size_of::<usize>());
         assert_eq!(std::mem::size_of::<super::CheckUnit<'_>>(), 11 * std::mem::size_of::<usize>());
         for (source, attempts) in [("let x = 1", 1), ("let x: bool = 1", 2)] {
             let mut parser = super::Parser::new("Attempt.res", source);
@@ -12026,7 +12041,7 @@ mod tests {
             let options = super::CompilerOptions { nopervasives: true, ..Default::default() };
             let calls = std::cell::Cell::new(0);
             let finishes = std::cell::Cell::new(0);
-            super::type_structure_two_modes(
+            let (_, result) = super::type_structure_two_modes(
                 super::CheckUnit { arena: parser.arena(), filename: "Attempt.res", options: &options,
                     registry: Some(&super::ModuleRegistry::new()), module_name: Some("Attempt"),
                     file_config: &Default::default(), frontend_warning_specs: &[], derived_plans: true,
@@ -12035,15 +12050,54 @@ mod tests {
                     calls.set(calls.get() + 1);
                     super::type_structure(tctx, env, arena, &structure)
                 },
-                |_, _, result| {
+                |_, _, result, _reports| {
                     finishes.set(finishes.get() + 1);
                     assert_eq!(result.is_ok(), attempts == 1);
+                    Ok(())
                 },
             );
+            result.unwrap();
             assert_eq!(calls.get(), attempts);
             assert_eq!(finishes.get(), 1);
         }
     }
+    #[test]
+    fn post_structure_validation_is_rechecked_before_publication() {
+        use crate::types::context::CheckMode;
+        let source = "let identity = x => x\nlet applied = identity(identity)";
+        let mut reports = Vec::new();
+        for mode in [CheckMode::Success, CheckMode::Explain] {
+            let mut parser = super::Parser::new("NonGeneralizable.res", source);
+            let structure = super::module::parse_structure(&mut parser);
+            crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
+            let options = super::CompilerOptions { nopervasives: true, ..Default::default() };
+            let attempts = std::cell::Cell::new(0);
+            let (_, result) = super::type_structure_two_modes(
+                super::CheckUnit {
+                    arena: parser.arena(), filename: "NonGeneralizable.res", options: &options,
+                    registry: None, module_name: None, file_config: &Default::default(),
+                    frontend_warning_specs: &[], derived_plans: true, mode,
+                },
+                |tctx, env, arena| super::type_structure(tctx, env, arena, &structure),
+                |ctx, _, typed, output| -> super::Result<()> {
+                    attempts.set(attempts.get() + 1);
+                    assert!(output.stderr.is_empty(), "discarded reports must not enter the retry");
+                    let ((structure, env), _) = typed.expect("structure typing succeeds");
+                    let signature = crate::types::includemod::simplify_signature(&structure.str_type);
+                    let error = crate::types::typemod::check_nongen_schemes(ctx, &env, &signature)
+                        .expect_err("validation, not structure typing, rejects this unit");
+                    Err(super::type_mod_error_to_anyhow(
+                        error, ctx, parser.arena(), source, "NonGeneralizable.res", false,
+                    ))
+                },
+            );
+            assert_eq!(attempts.get(), if mode == CheckMode::Success { 2 } else { 1 });
+            reports.push(format!("{:#}", result.unwrap_err()));
+        }
+        assert_eq!(reports[0], reports[1]);
+        assert!(reports[0].contains("cannot be generalized"));
+    }
+
     #[test]
     fn discarded_attempt_warnings_match_explain() {
         use crate::types::context::CheckMode;
@@ -12078,7 +12132,7 @@ mod tests {
                         tctx.flush_value_usage_checks();
                         result
                     },
-                    |ctx, tctx, typed| {
+                    |ctx, tctx, typed, _reports| {
                         assert!(!tctx.warnings.is_empty(), "fixture must exercise a warning");
                         let mut report = super::format_type_warnings(parser.arena(), source, "Warnings.res", &tctx.warnings);
                         if let Err(error) = typed {
@@ -12086,10 +12140,10 @@ mod tests {
                                 error, ctx, parser.arena(), source, "Warnings.res", false,
                             )));
                         }
-                        report
+                        Ok(report)
                     },
                 );
-                reports.push(report);
+                reports.push(report.unwrap());
             }
             assert_eq!(reports[0], reports[1]);
         }
