@@ -709,9 +709,23 @@ fn type_detail(session: &ProjectSession<'_>, env: &QueryEnv, typ: &Type) -> Opti
 struct Extraction<'a, 's, 'p> {
     session: &'s ProjectSession<'p>,
     /// The entry point's file.
-    file: &'a File,
+    entry: &'a File,
     /// The root of the entry point's package.
     root_path: String,
+}
+
+/// A file being documented: the entry point, or a file a module alias of
+/// the file `through` names.
+struct Documented<'a> {
+    file: &'a File,
+    through: Option<&'a Documented<'a>>,
+}
+
+impl Documented<'_> {
+    /// Whether `file` is this file or one of those it was reached through.
+    fn contains(&self, file: &File) -> bool {
+        self.file.module == file.module || self.through.is_some_and(|d| d.contains(file))
+    }
 }
 
 fn trimmed(docstrings: &[String]) -> Vec<String> {
@@ -723,13 +737,24 @@ fn concat(a: &[String], b: &[String]) -> Vec<String> {
 }
 
 impl Extraction<'_, '_, '_> {
-    /// `extract_docs_for_module`: the module `structure` of `file`, at
-    /// `module_path` (innermost first).
-    fn module(&self, file: &File, module_path: &[String], structure: &Structure) -> DocsForModule {
+    /// `extract_docs_for_module`: the module `structure` of the file `at`,
+    /// at `module_path` (innermost first).
+    fn module(
+        &self,
+        at: &Documented<'_>,
+        module_path: &[String],
+        structure: &Structure,
+    ) -> DocsForModule {
         let session = self.session;
-        let types = session.types(file.module);
+        let file = at.file;
+        // Only a type-checked file has values and types; the file of a
+        // namespace module, which has no type context, has aliases only.
+        let types = || session.types(file.module);
+        // OCaml keeps the entry point's environment for the types of an
+        // aliased file (tools.ml:442), so a type there whose manifest is a
+        // type of that file is looked up in the entry point and gets no
+        // detail, or another type's. Here it is looked up in its own file.
         let env = QueryEnv::from_file(file);
-        let entry_path = self.file.uri.as_str();
         let items: Vec<DocItem> = structure
             .items
             .iter()
@@ -740,17 +765,17 @@ impl Extraction<'_, '_, '_> {
                     ModuleItemKind::Value(typ) => Some(DocItem::Value {
                         id: make_id(module_path, name),
                         docstring: trimmed(&item.docstring),
-                        signature: format!("let {name}: {}", type_to_string(types, *typ, 60)),
+                        signature: format!("let {name}: {}", type_to_string(types(), *typ, 60)),
                         name: name.to_string(),
                         deprecated: item.deprecated.clone(),
-                        detail: value_detail(types, *typ),
+                        detail: value_detail(types(), *typ),
                         source,
                     }),
                     ModuleItemKind::Type(typ, _) => Some(DocItem::Type {
                         id: make_id(module_path, name),
                         docstring: trimmed(&item.docstring),
                         signature: decl_to_string(
-                            types,
+                            types(),
                             name,
                             &typ.decl,
                             crate::types::decl::RecStatus::TrecNot,
@@ -774,15 +799,22 @@ impl Extraction<'_, '_, '_> {
                                 session,
                                 &alias_to_module,
                             ) {
-                                None => (Vec::new(), Vec::new()),
-                                Some(alias_file) => {
+                                // A namespace module aliases every module of
+                                // its package, so an alias of it in one of
+                                // them leads back to that module (OCaml does
+                                // not return). Its items are not repeated.
+                                Some(alias_file) if !at.contains(alias_file) => {
                                     let docs = self.module(
-                                        alias_file,
+                                        &Documented {
+                                            file: alias_file,
+                                            through: Some(at),
+                                        },
                                         std::slice::from_ref(&id),
                                         &alias_file.structure,
                                     );
                                     (docs.items, docs.docstring)
                                 }
+                                Some(_) | None => (Vec::new(), Vec::new()),
                             };
                         Some(DocItem::ModuleAlias {
                             id,
@@ -798,7 +830,7 @@ impl Extraction<'_, '_, '_> {
                     } => {
                         // `module Whatever = {}` or `module type Whatever = {}`.
                         let module_path = prepend(&m.name, module_path);
-                        let docs = self.module(file, &module_path, m);
+                        let docs = self.module(at, &module_path, m);
                         let id = module_path_id(&module_path);
                         let docstring = concat(&item.docstring, &m.docstring);
                         Some(if *is_module_type {
@@ -830,24 +862,26 @@ impl Extraction<'_, '_, '_> {
                         // the interface.
                         (Module::Structure(_), Module::Structure(interface)) => {
                             Some(DocItem::Module(self.module(
-                                file,
+                                at,
                                 &prepend(&interface.name, module_path),
                                 interface,
                             )))
                         }
                         // `module M: T = { <impl> }`.
                         (Module::Structure(m), Module::Ident(p)) => {
-                            let docs = self.module(file, &prepend(&m.name, module_path), m);
-                            let ident_module_path = p.head().name();
-                            let root = module_path.last().cloned().unwrap_or_default();
-                            let module_type_id_path =
-                                match super::resolve_path::Session::file_for_module(
-                                    session,
-                                    ident_module_path,
-                                ) {
-                                    Some(_) => Vec::new(),
-                                    None => vec![root],
-                                };
+                            let docs = self.module(at, &prepend(&m.name, module_path), m);
+                            // `T` is `File.T` when its first name is a
+                            // file's module, and a module type of the entry
+                            // point otherwise.
+                            let in_another_file = p.head_opt().is_some_and(|head| {
+                                super::resolve_path::Session::file_for_module(session, head.name())
+                                    .is_some()
+                            });
+                            let module_type_id_path = if in_another_file {
+                                Vec::new()
+                            } else {
+                                module_path.last().cloned().into_iter().collect()
+                            };
                             Some(DocItem::Module(DocsForModule {
                                 moduletypeid: Some(make_id(&module_type_id_path, &p.name())),
                                 ..docs
@@ -877,11 +911,13 @@ impl Extraction<'_, '_, '_> {
             name: structure.name.clone(),
             moduletypeid: None,
             deprecated: structure.deprecated.clone(),
+            // OCaml places every module it documents this way at the start
+            // of the entry point.
             source: Source {
                 filepath: if self.root_path == "." {
-                    entry_path.to_string()
+                    self.entry.uri.clone()
                 } else {
-                    source_filepath(&self.root_path, entry_path)
+                    source_filepath(&self.root_path, &self.entry.uri)
                 },
                 line: 1,
                 col: 1,
@@ -963,11 +999,17 @@ pub fn extract_docs(
     let root_path = package_root(Path::new(&path)).ok_or_else(failed)?;
     let extraction = Extraction {
         session,
-        file: &full.file,
+        entry: &full.file,
         root_path: root_path.to_string_lossy().into_owned(),
     };
-    let module_path = [full.file.module_name.clone()];
-    let docs = extraction.module(&full.file, &module_path, &full.file.structure);
+    let docs = extraction.module(
+        &Documented {
+            file: &full.file,
+            through: None,
+        },
+        std::slice::from_ref(&full.file.module_name),
+        &full.file.structure,
+    );
     Ok(docs_for_module_json(&docs).pretty())
 }
 
