@@ -140,4 +140,84 @@ mod tests {
         }
     }
 
+
+    fn ident(name: &str, stamp: i32) -> Ident {
+        Ident::new(name, stamp, crate::ident::IdentFlags::NONE)
+    }
+    fn call(a: &mut crate::lambda::arena::LamArena, f: Ident, args: &[crate::lambda::arena::Lam]) -> crate::lambda::arena::Lam {
+        let f = a.var(f);
+        a.apply_raw(f, args, crate::lambda::ApInfo { status: crate::lambda::ApplyStatus::InferFull, loc: crate::lambda::LamLoc::NONE })
+    }
+    fn wrap(a: &mut crate::lambda::arena::LamArena, f: Ident, params: &[Ident], body: crate::lambda::arena::Lam) -> crate::lambda::arena::Lam {
+        let function = a.function_(params.len() as i32, params, body, Default::default(), crate::lambda::LamLoc::NONE);
+        let end = a.var(f);
+        a.letrec(&[(f, function)], end)
+    }
+
+    #[test]
+    fn captured_iteration_parameters_and_nested_recursive_groups() {
+        use crate::lambda::{arena::LamArena, LamLoc, FunctionAttribute};
+        use crate::lambda::lam_primitive::Primitive as P;
+        for nested in [false, true] {
+            let mut a = LamArena::new();
+            let (f, i, acc, fs, later, inner, n) = (ident("loop", 1), ident("i", 2), ident("acc", 3), ident("fs", 4), ident("later", 5), ident("inner", 6), ident("n", 7));
+            let left = a.var(i);
+            let right = a.var(acc);
+            let captured = a.prim_raw(P::Paddint, &[left, right], LamLoc::NONE);
+            let closure = a.function_(0, &[], captured, FunctionAttribute::default(), LamLoc::NONE);
+            let effect = call(&mut a, later, &[closure]);
+            let one = a.const_(crate::lambda::lam_constant::Constant::int(1));
+            let old_i = a.var(i);
+            let next_i = a.prim_raw(P::Psubint, &[old_i, one], LamLoc::NONE);
+            let old_acc = a.var(acc);
+            let old_i = a.var(i);
+            let next_acc = a.prim_raw(P::Paddint, &[old_acc, old_i], LamLoc::NONE);
+            let fs_arg = a.var(fs);
+            let again = call(&mut a, f, &[next_i, next_acc, fs_arg]);
+            let again = a.seq_raw(effect, again);
+            let test = a.var(i);
+            let result = a.var(acc);
+            let mut body = a.if_raw(test, again, result);
+            if nested {
+                let arg = a.var(n);
+                let self_call = call(&mut a, inner, &[arg]);
+                let captured = a.var(i);
+                let test = a.var(n);
+                let inner_body = a.if_raw(test, self_call, captured);
+                let function = a.function_(1, &[n], inner_body, Default::default(), LamLoc::NONE);
+                body = a.letrec(&[(inner, function)], body);
+            }
+            let root = wrap(&mut a, f, &[i, acc, fs], body);
+            super::super::oracle_tests::compare(a, root);
+        }
+    }
+
+    #[test]
+    fn self_tail_calls_in_switch_cases_and_static_catch_handlers() {
+        use crate::lambda::{arena::LamArena, SwitchDispatch, SwitchKey};
+        for shape in 0..3 {
+            let mut a = LamArena::new();
+            let (f, x) = (ident("f", 1), ident("x", 2));
+            let arg = a.const_(crate::lambda::lam_constant::Constant::int(1));
+            let again = call(&mut a, f, &[arg]);
+            let value = a.var(x);
+            let test = a.var(x);
+            let body = if shape == 0 {
+                let actions = a.add_list(&[again, value]);
+                let info = a.add_switch(true, [SwitchKey::Int(0), SwitchKey::Int(1)], false, [], false, SwitchDispatch::Direct);
+                a.switch_raw(test, actions, info)
+            } else {
+                let exit = a.static_raise(1, &[]);
+                let body = if shape == 1 { a.if_raw(test, exit, value) } else {
+                    let actions = a.add_list(&[exit, value]);
+                    let info = a.add_switch(true, [SwitchKey::Int(0), SwitchKey::Int(1)], false, [], false, SwitchDispatch::Direct);
+                    a.switch_raw(test, actions, info)
+                };
+                a.static_catch(body, 1, &[], again)
+            };
+            let root = wrap(&mut a, f, &[x], body);
+            super::super::oracle_tests::compare(a, root);
+        }
+    }
+
 }
