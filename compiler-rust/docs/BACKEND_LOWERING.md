@@ -3021,6 +3021,12 @@ and performs 30,007 scheduling steps. The second pass assigns a fresh label
 number rather than reusing the first result. Scheduler vectors remain justified
 unit-owned pools, not per-construct collections.
 
+The recursive-value fixture lowers and releases a 10,000-member Lambda group
+twice: zero warmed allocations, unchanged recorded capacities, 10,002 source
+visits and 50,000 member steps. This exercises integer constants and declarations;
+the recursive dummy-object constructor was already converted to property-pool
+metadata during integration. Remaining production storage is unit-owned.
+
 The integration keeps method-callee evaluation order and default-first string
 switch traversal from trunk. Group outputs still write their stable pooled slots,
 so no vector rotation is needed. Label finalization runs after each successful

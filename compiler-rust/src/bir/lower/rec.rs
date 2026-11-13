@@ -297,6 +297,47 @@ mod tests {
     }
 
     #[test]
+    fn ten_thousand_value_members_lower_without_allocations() {
+        let mut a = LamArena::new();
+        let mut bindings = Vec::with_capacity(10_000);
+        for i in 0..10_000 {
+            let id = Ident::new("member", i + 1, IdentFlags::NONE);
+            let value = a.const_(Constant::int(i));
+            bindings.push((id, value));
+        }
+        let body = a.const_(Constant::JsNull);
+        let root = a.letrec(&bindings, body);
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let run = |s: &mut State| {
+            let output = s.probe(Cx::value(), root).unwrap();
+            let output = s.realize(Cx::value(), output);
+            for node in s.statements.statements(output.stmts) { s.arena.release(node); }
+            if let Some(value) = output.value { s.arena.release(value); }
+            s.statements.kill(output.stmts);
+        };
+        let lists = state.arena.lists.storage_shape().0;
+        run(&mut state);
+        state.arena.lists.reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
+        state.free.reserve_repeat();
+        let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(),
+            s.arena.free_nodes.capacity(), s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1,
+            s.traversal.work.capacity(), s.traversal.values.capacity(), s.traversal.children.capacity(),
+            s.rec_members.capacity(), s.constant_work.capacity(), s.constant_values.capacity(),
+            s.arena.pools.const_key_bytes.capacity(), s.arena.pools.const_key_scratch.capacity()];
+        let before = capacities(&state);
+        let visits = state.source_steps;
+        let members = state.rec_steps;
+        let allocations = allocation_counter::measure(|| run(&mut state));
+        println!("whole recursive values: {allocations:?}");
+        assert_eq!(allocations.count_total, 0);
+        assert_eq!(capacities(&state), before);
+        assert_eq!(state.source_steps - visits, 10_002);
+        assert_eq!(state.rec_steps - members, 50_000);
+    }
+
+    #[test]
     fn ten_thousand_members_are_lowered_once() {
         let mut a = LamArena::new();
         let mut bindings = Vec::with_capacity(10_000);
