@@ -167,11 +167,11 @@ impl Segment {
 fn copy_pool<T: Copy>(source: &[T]) -> Vec<T> {
     source
         .iter()
-        .map(|&item| {
+        .inspect(|_| {
             #[cfg(test)]
             super::steps::tick();
-            item
         })
+        .copied()
         .collect()
 }
 
