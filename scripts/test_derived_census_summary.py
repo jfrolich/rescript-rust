@@ -88,6 +88,18 @@ class DerivedCensusSummaryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             summarize([item])
 
+    def test_general_costs(self):
+        item = row()
+        item.update(general_syntax_nodes=[2] + [0] * 10,
+                    general_typecheck_ns=[7] + [0] * 10, paths={"custom_codec": 1})
+        result = summarize([item, item])
+        self.assertEqual(result["general_costs"]["custom_codec"],
+                         {"general_syntax_nodes": 4, "general_typecheck_ns": 14})
+        self.assertIn("Generated body syntax nodes", markdown(result))
+        item["general_typecheck_ns"].pop()
+        with self.assertRaises(ValueError):
+            summarize([item])
+
     def test_counter_sides(self):
         item = row()
         item["checker_counters"] = [[1, 2, 3, 4], [10, 20, 30, 40]]

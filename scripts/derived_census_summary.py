@@ -7,6 +7,10 @@ import collections
 import math
 from pathlib import Path
 
+GENERAL_REASONS = ("custom_codec", "user_expression", "type_parameters", "recursive_group",
+                   "shared_names", "unmeasured_shape", "unboxed", "not_yet_planned",
+                   "unsupported_variant", "switch", "failed_obligation")
+
 UNPLANNED_FORMS = ("json_identity", "applied_user_codec", "applied_module_path",
                    "unsupported_type", "constant_fallback", "empty_record",
                    "template_literal", "declaration_shape")
@@ -24,7 +28,7 @@ def summarize(rows):
     result.update(modules=0, bindings=[0, 0], syntax_nodes=[0, 0],
                   checker_counters=[[0] * 4, [0] * 4], counter_modules=0, paths={}, path_timing_records=0,
                   planned_typecheck_ns=0, planned_conversion_ns=0, unplanned_forms={},
-                  general_typecheck_ns=0, general_conversion_ns=0)
+                  general_typecheck_ns=0, general_conversion_ns=0, general_costs={}, general_cost_records=0)
     shapes = collections.defaultdict(list)
     templates = []
     template_sizes = []
@@ -44,6 +48,15 @@ def summarize(rows):
             if type(count) is not int or count < 0:
                 raise ValueError(f"Invalid path count {reason}: {count!r}")
             result["paths"][reason] = result["paths"].get(reason, 0) + count
+        if "general_syntax_nodes" in row or "general_typecheck_ns" in row:
+            result["general_cost_records"] += 1
+            for key in ("general_syntax_nodes", "general_typecheck_ns"):
+                values = row[key]
+                if len(values) != len(GENERAL_REASONS) or any(type(n) is not int or n < 0 for n in values):
+                    raise ValueError(f"Invalid {key}")
+                for reason, n in zip(GENERAL_REASONS, values):
+                    cost = result["general_costs"].setdefault(reason, {"general_syntax_nodes": 0, "general_typecheck_ns": 0})
+                    cost[key] += n
         timing_keys = ("planned_typecheck_ns", "planned_conversion_ns")
         if any(key in row for key in timing_keys):
             result["path_timing_records"] += 1
@@ -129,6 +142,11 @@ def markdown(summary):
         lines += ["", "| Path | Bindings |", "|---|---:|"]
         for reason, count in sorted(summary["paths"].items()):
             lines.append(f"| {reason} | {count} |")
+    if summary["general_cost_records"]:
+        lines += ["", f"General cost availability: {summary['general_cost_records']}/{summary['modules']} records.",
+                  "", "| General reason | Bindings | Generated body syntax nodes | Typecheck ms |", "|---|---:|---:|---:|"]
+        for reason, cost in summary["general_costs"].items():
+            lines.append(f"| {reason} | {summary['paths'].get(reason, 0)} | {cost['general_syntax_nodes']} | {cost['general_typecheck_ns'] / 1e6:.3f} |")
     if summary["unplanned_forms"]:
         lines += ["", "| First unplanned form | Bindings |", "|---|---:|"]
         for form, count in summary["unplanned_forms"].items():

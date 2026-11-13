@@ -19,13 +19,21 @@ use plan::DerivedIdx;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum UnplannedForm {
+    /// Identity codec of JSON.t.
     JsonIdentity,
+    /// User codec with type arguments.
     AppliedUserCodec,
+    /// A functor application in a type path.
     AppliedModulePath,
+    /// A type form without a codec plan.
     UnsupportedType,
+    /// A constant fallback on the declaration.
     ConstantFallback,
+    /// A record with no fields.
     EmptyRecord,
+    /// A template key or default rather than a literal node.
     TemplateLiteral,
+    /// A manifest record or another unsupported declaration shape.
     DeclarationShape,
 }
 
@@ -61,6 +69,25 @@ pub enum GeneralReason {
     /// An obligation of a plan of the unit failed in the checker, and the
     /// unit is compiled again with every declaration on the general path.
     FailedObligation,
+}
+
+impl GeneralReason {
+    /// Dense census bucket, shared by counts and timing. Cost: O(1).
+    pub(crate) fn census_index(self) -> usize {
+        match self {
+            Self::CustomCodec => 0,
+            Self::UserExpression => 1,
+            Self::TypeParameters => 2,
+            Self::RecursiveGroup => 3,
+            Self::SharedNames => 4,
+            Self::UnmeasuredShape => 5,
+            Self::Unboxed => 6,
+            Self::NotYetPlanned(_) => 7,
+            Self::UnsupportedVariant => 8,
+            Self::Switch => 9,
+            Self::FailedObligation => 10,
+        }
+    }
 }
 
 /// The path a derived declaration takes.

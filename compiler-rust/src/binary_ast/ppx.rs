@@ -10391,10 +10391,16 @@ fn rewrite_structure_item_no_spice(
     arena: &mut ParseArena,
 ) -> Vec<StructureItem> {
     let derived = derive::is_derived_item(item, arena);
+    let reason = arena.derived_census.as_ref().and_then(|c| c.general_group(item));
     let rewritten = rewrite_structure_item_body(item, arena);
     if derived {
         for item in &rewritten {
             derive::mark_generated_item(item, arena);
+            if let (Some(census), Some(reason), StructureItemDesc::Pstr_value((_, group))) =
+                (&mut arena.derived_census, reason, &item.pstr_desc)
+            {
+                census.set_general_group(group.start(), reason);
+            }
         }
     }
     rewritten

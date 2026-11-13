@@ -5403,10 +5403,16 @@ impl<'a> LocCloner<'a> {
 
     fn structure_item(&mut self, item: &mut StructureItem) {
         let derived = super::derive::is_derived_item(item, self.arena);
+        let reason = self.arena.derived_census.as_ref().and_then(|c| c.general_group(item));
         self.loc(&mut item.pstr_loc);
         self.structure_item_desc(&mut item.pstr_desc);
         if derived {
             super::derive::mark_generated_item(item, self.arena);
+        }
+        if let (Some(census), Some(reason), StructureItemDesc::Pstr_value((_, group))) =
+            (&mut self.arena.derived_census, reason, &item.pstr_desc)
+        {
+            census.set_general_group(group.start(), reason);
         }
     }
 
@@ -5531,9 +5537,8 @@ fn binding_count(settings: Option<GeneratorSettings>) -> usize {
 
 /// The path of a group of type declarations: a plan when every declaration
 /// that derives classifies `Plan`, otherwise the first reason met. With the
-/// census on, the bindings of each declaration are counted under its own
-/// classification, or under the group's reason when the declaration alone
-/// could take a plan.
+/// census on, every binding is charged to the group's effective reason:
+/// the checker types this indivisible value group in one interval.
 /// Cost: O(type nodes and attributes of the group); no allocation unless two
 /// declarations of the group derive.
 fn classify_group(
@@ -5546,17 +5551,16 @@ fn classify_group(
     let deriving = settings.iter().filter(|settings| settings.is_some()).count();
     let shares_names = deriving > 1 && plan::group_shares_names(decls, arena);
     let mut group = Classification::Plan;
-    let mut counts = super::derive::PathCounts::default();
-    let mut plannable = 0;
+    let mut bindings = 0;
     for (decl, settings) in decls.iter().zip(settings) {
         let count = binding_count(*settings) as u64;
         if count == 0 {
             continue;
         }
+        bindings += count;
         match plan::classify(arena, decl, rec_flag, shares_names) {
-            Classification::Plan => plannable += count,
+            Classification::Plan => {},
             general @ Classification::General(_) => {
-                counts.add(general, count);
                 if group == Classification::Plan {
                     group = general;
                 }
@@ -5564,8 +5568,7 @@ fn classify_group(
         }
     }
     if let Some(census) = arena.derived_census.as_mut() {
-        counts.add(group, plannable);
-        census.paths.merge(counts);
+        census.paths.add(group, bindings);
     }
     group
 }
@@ -5586,14 +5589,17 @@ fn map_structure_item_spice(
                 .collect();
             // A group that takes a plan generates no syntax: it is classified
             // from its declarations alone, before anything is generated.
-            if let Ok(settings) = settings
+            let classification = if let Ok(settings) = settings
                 .iter()
                 .cloned()
                 .collect::<SpiceResult<smallvec::SmallVec<[Option<GeneratorSettings>; 4]>>>()
                 && settings.iter().any(|settings| settings.is_some())
-                && classify_group(arena, *rec_flag, decls, &settings)
-                    == super::derive::Classification::Plan
             {
+                Some((classify_group(arena, *rec_flag, decls, &settings), settings))
+            } else {
+                None
+            };
+            if let Some((super::derive::Classification::Plan, ref settings)) = classification {
                 let mapped_item = clone_mapped_structure_item(item, arena)?;
                 let value_item = StructureItem {
                     pstr_desc: StructureItemDesc::Pstr_derived(plan::build(arena, decls, &settings)),
@@ -5601,11 +5607,21 @@ fn map_structure_item_spice(
                 };
                 return Ok(vec![mapped_item, value_item]);
             }
+            let reason = classification.as_ref().and_then(|(classification, _)| match classification {
+                super::derive::Classification::General(reason) => Some(*reason),
+                super::derive::Classification::Plan => None,
+            });
             let mut vbs = Vec::new();
             for (decl, settings) in decls.iter().zip(settings) {
                 let generated = map_type_decl_structure(decl, settings?, arena)?;
                 if arena.derived_census.is_some() {
+                    let before = arena.derived_census.as_ref().unwrap().shape_nodes.len();
                     super::derive::record_shapes(decl, decls, *rec_flag == RecFlag::Recursive, &generated, arena);
+                    if let Some(reason) = reason {
+                        let census = arena.derived_census.as_mut().unwrap();
+                        census.general_syntax_nodes[reason.census_index()] +=
+                            census.shape_nodes[before..].iter().sum::<u64>();
+                    }
                 }
                 vbs.extend(generated);
             }
@@ -5620,6 +5636,9 @@ fn map_structure_item_spice(
                 let mapped_item = clone_mapped_structure_item(item, arena)?;
 
                 let general = arena.push_vb_list(&vbs);
+                if let (Some(census), Some(reason)) = (&mut arena.derived_census, reason) {
+                    census.set_general_group(general.start(), reason);
+                }
                 let value_item = StructureItem {
                     pstr_desc: StructureItemDesc::Pstr_value((*rec_flag, general)),
                     pstr_loc: arena.dummy_loc(),

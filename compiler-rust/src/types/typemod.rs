@@ -16246,6 +16246,9 @@ fn type_structure_item_with_census<'a>(
         let children = census.typecheck.total() - census_before;
         let elapsed = crate::derived_census::nanos(start.elapsed()).saturating_sub(children);
         census.typecheck.add(derived, elapsed);
+        if let Some(reason) = census.general_group(item) {
+            census.general_typecheck_ns[reason.census_index()] += elapsed;
+        }
         if matches!(typed_item.str_desc, StructureItemDesc::Tstr_derived(_)) {
             census.planned_typecheck_ns += elapsed;
         }

@@ -93,6 +93,13 @@ pub struct Census {
     /// Derived bindings per path: plans, each reason of the general path,
     /// and plans the checker fell back from.
     pub paths: super::PathCounts,
+    /// General-path generated body nodes by `GeneralReason::census_index`.
+    pub general_syntax_nodes: [u64; 11],
+    /// General-path item-exclusive typecheck time by the same reason index.
+    pub general_typecheck_ns: [u64; 11],
+    /// Census-only reason table indexed by parse value-list start.
+    #[serde(skip)]
+    pub(crate) general_groups: Vec<Option<super::GeneralReason>>,
     #[serde(skip)]
     pub(crate) observer_ns: u64,
     #[serde(skip)]
@@ -117,7 +124,22 @@ impl Census {
                 .then_some([[0; 4]; 2]),
             typed_groups: Vec::new(), shape_classes: Vec::new(), shape_nodes: Vec::new(),
             shape_parameterised: Vec::new(), shape_recursive: Vec::new(), templates: Vec::new(),
-            paths: super::PathCounts::default(), observer_ns: 0 }
+            paths: super::PathCounts::default(), general_syntax_nodes: [0; 11],
+            general_typecheck_ns: [0; 11], general_groups: Vec::new(), observer_ns: 0 }
+    }
+    /// O(new slots) on growth, O(1) otherwise. Each slot is initialized once
+    /// across monotonic value-pool growth; one byte per slot, census only.
+    pub(crate) fn set_general_group(&mut self, start: u32, reason: super::GeneralReason) {
+        self.general_groups.resize(self.general_groups.len().max(start as usize + 1), None);
+        self.general_groups[start as usize] = Some(reason);
+    }
+    /// O(1): read a reason using the value-list handle, no hashing.
+    pub(crate) fn general_group(&self, item: &StructureItem) -> Option<super::GeneralReason> {
+        if let StructureItemDesc::Pstr_value((_, group)) = item.pstr_desc {
+            self.general_groups.get(group.start() as usize).copied().flatten()
+        } else {
+            None
+        }
     }
     /// O(new words) on growth, O(1) otherwise; one bit per typed binding-pool slot.
     pub fn mark_typed_group(&mut self, start: u32) {
@@ -244,6 +266,19 @@ impl SyntaxCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reason_table_growth_initializes_ten_thousand_slots_once() {
+        assert_eq!(std::mem::size_of::<Option<super::super::GeneralReason>>(), 1);
+        let mut census = Census::new(std::path::Path::new("unused"), "test.res");
+        let mut initialized = 0;
+        for slot in 0..10_000 {
+            let before = census.general_groups.len();
+            census.set_general_group(slot, super::super::GeneralReason::UserExpression);
+            initialized += census.general_groups.len() - before;
+        }
+        assert_eq!(initialized, 10_000);
+        assert!(census.general_groups.iter().all(|r| *r == Some(super::super::GeneralReason::UserExpression)));
+    }
     #[test]
     fn splits_preserve_totals_at_ten_thousand_sizes() {
         for n in 0..10_000 {
