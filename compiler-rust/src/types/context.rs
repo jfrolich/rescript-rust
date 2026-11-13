@@ -546,9 +546,12 @@ struct TypeMutationJournal {
 
 impl TypeMutationJournal {
     /// Amortized O(1): append one mutation to the existing journal buffer.
+    #[inline]
     fn push(&mut self, mutation: TypeMutation) {
         #[cfg(test)]
-        { self.logged_writes += 1; }
+        {
+            self.logged_writes += 1;
+        }
         self.entries.push(mutation);
     }
 
@@ -747,8 +750,10 @@ pub(crate) struct ReifiedNames {
 /// Diagnostic preparation policy, fixed for one whole-unit check attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
-pub(crate) enum CheckMode {
+pub enum CheckMode {
+    /// Skip diagnostic-only snapshots outside live speculation.
     Success,
+    /// Preserve the original diagnostic preparation for every unification.
     Explain,
 }
 
@@ -1606,8 +1611,10 @@ impl TypeContext {
         self.unexplained_unify_failure.set(true);
     }
 
+    /// Whether this attempt encountered a failure without a diagnostic snapshot.
+    /// A unit-checking caller must discard such an attempt and explain it again.
     /// Cost: one `Cell` read.
-    pub(crate) fn unexplained_unify_failure(&self) -> bool {
+    pub fn unexplained_unify_failure(&self) -> bool {
         self.unexplained_unify_failure.get()
     }
 
