@@ -506,9 +506,8 @@ pub(crate) mod store_views {
     static PIECES_POISONED: AtomicU64 = AtomicU64::new(0);
     static BINDERS: AtomicU64 = AtomicU64::new(0);
     static PIECES_REPLAYED: AtomicU64 = AtomicU64::new(0);
-    /// Replayed effects: components, prepare, rename,
-    /// alias source, module declaration.
-    static EFFECTS_REPLAYED: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+    /// Replayed effects: unit preparations.
+    static EFFECTS_REPLAYED: [AtomicU64; 1] = [const { AtomicU64::new(0) }; 1];
 
     /// A store build ended: with effects or guards, with none, or poisoned.
     pub(crate) fn record_piece(poisoned: bool, empty: bool) {
@@ -569,13 +568,9 @@ pub(crate) mod store_views {
             load(&BINDERS),
         );
         eprintln!(
-            "[compiler-counter] store_replay pieces={} components={} prepare_pers={} trigger_rename={} alias_source={} module_decl={}",
+            "[compiler-counter] store_replay pieces={} prepare_pers={}",
             load(&PIECES_REPLAYED),
             load(&EFFECTS_REPLAYED[0]),
-            load(&EFFECTS_REPLAYED[1]),
-            load(&EFFECTS_REPLAYED[2]),
-            load(&EFFECTS_REPLAYED[3]),
-            load(&EFFECTS_REPLAYED[4]),
         );
     }
 }
