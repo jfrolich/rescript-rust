@@ -2407,53 +2407,28 @@ fn parse_int_literal(s: &str) -> Option<i64> {
 /// - remove leading zeros only when followed by decimal digits
 /// - preserve non-decimal heads like `00x1` (after `_` removal)
 pub(crate) fn parse_bigint_literal(s: &str) -> (bool, String) {
-    fn remove_leading_sign(s: &str) -> (bool, &str) {
-        if s.is_empty() {
-            (false, s)
-        } else if let Some(rest) = s.strip_prefix('-') {
-            (false, rest)
-        } else if let Some(rest) = s.strip_prefix('+') {
-            (true, rest)
-        } else {
-            (true, s)
-        }
-    }
+    let mut digits = String::new();
+    let positive = parse_bigint_literal_into(s, &mut digits);
+    (positive, digits)
+}
 
-    fn remove_leading_zeros(s: &str) -> String {
-        // OCaml removes separators before any zero/sign logic.
-        let without_underscores: String = s.chars().filter(|c| *c != '_').collect();
-        let starts_with_minus = without_underscores.starts_with('-');
-        let without_sign = without_underscores
-            .strip_prefix('-')
-            .or_else(|| without_underscores.strip_prefix('+'))
-            .unwrap_or(&without_underscores);
-
-        let processed = if without_sign.is_empty() {
-            String::new()
-        } else {
-            let bytes = without_sign.as_bytes();
-            let mut idx = 0usize;
-            while idx < bytes.len() && bytes[idx] == b'0' {
-                idx += 1;
-            }
-            if idx >= bytes.len() {
-                "0".to_string()
-            } else if bytes[idx].is_ascii_digit() {
-                without_sign[idx..].to_string()
-            } else {
-                without_sign.to_string()
-            }
-        };
-
-        if starts_with_minus {
-            format!("-{processed}")
-        } else {
-            processed
-        }
-    }
-
-    let (sign, digits) = remove_leading_sign(s);
-    (sign, remove_leading_zeros(digits))
+/// The same normalization into caller-owned scratch; no per-literal strings.
+pub(crate) fn parse_bigint_literal_into(s: &str, out: &mut String) -> bool {
+    let (positive, digits) = if let Some(rest) = s.strip_prefix('-') { (false, rest) }
+        else if let Some(rest) = s.strip_prefix('+') { (true, rest) }
+        else { (!s.is_empty(), s) };
+    out.clear();
+    out.extend(digits.chars().filter(|c| *c != '_'));
+    let negative = out.starts_with('-');
+    let start = usize::from(negative || out.starts_with('+'));
+    let mut end = start;
+    while out.as_bytes().get(end) == Some(&b'0') { end += 1; }
+    let trim = if end == out.len() && end > start { end - 1 }
+        else if out.as_bytes().get(end).is_some_and(u8::is_ascii_digit) { end }
+        else { start };
+    out.drain(start..trim);
+    if start == 1 && !negative { out.remove(0); }
+    positive
 }
 
 /// Wrap an i64 value to simulate OCaml's native int (63-bit on 64-bit systems).

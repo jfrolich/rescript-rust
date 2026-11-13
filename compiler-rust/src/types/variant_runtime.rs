@@ -498,45 +498,76 @@ pub enum LiteralTag {
 
 /// variant_runtime.ml `number_key`: `-0.` and `0.` are equal for `===`;
 /// `%h` is exact for every other number.
-fn number_key(x: f64) -> String {
-    if x == 0.0 {
-        "number:0".to_string()
-    } else {
-        format!("number:{}", ocaml_hex_float(x))
-    }
+fn number_key_into(x: f64, out: &mut String) {
+    out.push_str("number:");
+    if x == 0.0 { out.push('0'); } else { hex_float_into(x, out); }
 }
 
 /// OCaml's `Printf.sprintf "%h"` (`caml_hexstring_of_float`): `0x1p+0`,
 /// `-0x1.8p-1`, `0x0.0000000000001p-1022` for a subnormal, `infinity`,
 /// `nan`, and `-nan` for a NaN with its sign bit set.
+#[cfg(test)]
 pub(crate) fn ocaml_hex_float(x: f64) -> String {
-    if x.is_nan() {
-        return if x.is_sign_negative() { "-nan" } else { "nan" }.to_string();
-    }
-    if x.is_infinite() {
-        return if x > 0.0 { "infinity" } else { "-infinity" }.to_string();
-    }
+    let mut out = String::new();
+    hex_float_into(x, &mut out);
+    out
+}
+
+fn hex_float_into(x: f64, out: &mut String) {
+    use std::fmt::Write;
+    if x.is_sign_negative() { out.push('-'); }
+    if x.is_nan() { out.push_str("nan"); return; }
+    if x.is_infinite() { out.push_str("infinity"); return; }
     let bits = x.to_bits();
-    let sign = if bits >> 63 == 1 { "-" } else { "" };
     let biased_exp = ((bits >> 52) & 0x7ff) as i64;
     let mantissa = bits & ((1u64 << 52) - 1);
-    let (lead, exp) = if biased_exp == 0 {
-        // Zero or subnormal.
-        (0, if mantissa == 0 { 0 } else { -1022 })
-    } else {
-        (1, biased_exp - 1023)
-    };
-    let mut frac = format!("{mantissa:013x}");
-    while frac.ends_with('0') {
-        frac.pop();
+    let (lead, exp) = if biased_exp == 0 { (0, if mantissa == 0 { 0 } else { -1022 }) }
+        else { (1, biased_exp - 1023) };
+    write!(out, "0x{lead}").unwrap();
+    if mantissa != 0 {
+        out.push('.');
+        let nibbles = 13 - (mantissa.trailing_zeros() / 4) as usize;
+        for i in 0..nibbles {
+            let digit = ((mantissa >> (4 * (12 - i))) & 15) as usize;
+            out.push(b"0123456789abcdef"[digit] as char);
+        }
     }
-    let frac = if frac.is_empty() {
-        String::new()
-    } else {
-        format!(".{frac}")
-    };
-    let exp_sign = if exp < 0 { "-" } else { "+" };
-    format!("{sign}0x{lead}{frac}p{exp_sign}{}", exp.abs())
+    write!(out, "p{}{exp_abs}", if exp < 0 { '-' } else { '+' }, exp_abs = exp.abs()).unwrap();
+}
+
+/// Reusable canonical-key encoding buffers for immutable literal metadata.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LiteralKeyScratch {
+    pub(crate) output: String,
+    digits: String,
+    float: Vec<u8>,
+}
+impl LiteralKeyScratch {
+    pub(crate) fn encode(&mut self, tag: &LiteralTag) -> &str {
+        self.output.clear();
+        match tag {
+            LiteralTag::Int(i) => number_key_into(f64::from(*i as i32), &mut self.output),
+            LiteralTag::Float(f) => match crate::ocaml_float::float_of_string_in(f, &mut self.float) {
+                Some(x) => number_key_into(x, &mut self.output),
+                None => { self.output.push_str("number:"); self.output.push_str(f); }
+            },
+            LiteralTag::BigInt(i) => {
+                let positive = crate::types::typecore::parse_bigint_literal_into(i, &mut self.digits);
+                self.output.push_str("bigint:");
+                if !positive && self.digits != "0" { self.output.push('-'); }
+                self.output.push_str(&self.digits);
+            }
+            LiteralTag::String(s) => { self.output.push_str("string:"); self.output.push_str(s); }
+            LiteralTag::Bool(b) => self.output.push_str(if *b { "true" } else { "false" }),
+            LiteralTag::Null => self.output.push_str("null"),
+            LiteralTag::Undefined => self.output.push_str("undefined"),
+        }
+        &self.output
+    }
+    #[cfg(test)]
+    pub(crate) fn capacities(&self) -> [usize; 3] {
+        [self.output.capacity(), self.digits.capacity(), self.float.capacity()]
+    }
 }
 
 impl LiteralTag {
@@ -545,23 +576,9 @@ impl LiteralTag {
     /// them. Ints are emitted as 32-bit numbers, so `1`, `1.0` and
     /// `4294967297` share one, while `1n` is a bigint.
     pub fn value_key(&self) -> String {
-        match self {
-            Self::Int(i) => number_key(f64::from(*i as i32)),
-            Self::Float(f) => match crate::ocaml_float::float_of_string(f) {
-                Some(x) => number_key(x),
-                None => format!("number:{f}"),
-            },
-            Self::BigInt(i) => {
-                let (positive, digits) = crate::types::typecore::parse_bigint_literal(i);
-                // Bigint_utils.to_string
-                let sign = if positive || digits == "0" { "" } else { "-" };
-                format!("bigint:{sign}{digits}")
-            }
-            Self::Bool(b) => if *b { "true" } else { "false" }.to_string(),
-            Self::Null => "null".to_string(),
-            Self::Undefined => "undefined".to_string(),
-            Self::String(s) => format!("string:{s}"),
-        }
+        let mut scratch = LiteralKeyScratch::default();
+        scratch.encode(self);
+        scratch.output
     }
 }
 

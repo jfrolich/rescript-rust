@@ -2866,10 +2866,10 @@ The statement stack and node-list pool must be used end to end.
 | `untagged.rs:59` `Plan` | `marks: Vec<Span>,` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
 | `untagged.rs:60` `Plan` | `outputs: Vec<Output>,` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
 | `untagged.rs:82` `untagged_switch` | `let facts = facts.clone();` | per construct | borrow source matching facts while appending to the unit graph | removed |
-| `untagged.rs:83` `untagged_switch` | `let mut literal_arms = Vec::with_capacity(n);` | per construct | input buffer retained; mixed/literal planner still copies it via Cow::into_owned | pending |
-| `untagged.rs:84` `untagged_switch` | `let mut payload_arms = Vec::with_capacity(h.keys.len() - n);` | per construct | retained payload-arm buffer; owned tag clones tracked separately | removed |
-| `untagged.rs:88` `untagged_switch` | `literal_arms.push((tag.literal.clone(), i as u32))` | per construct | borrow payload or retain typed pool handle | pending |
-| `untagged.rs:91` `untagged_switch` | `block.block_type().expect("untagged payload").clone(),` | per construct | borrow payload or retain typed pool handle | pending |
+| `untagged.rs:83` `untagged_switch` | `let mut literal_arms = Vec::with_capacity(n);` | per construct | Literal arms are imported into a unit-owned typed pool and each switch retains an 8-byte span. | removed |
+| `untagged.rs:84` `untagged_switch` | `let mut payload_arms = Vec::with_capacity(h.keys.len() - n);` | per construct | Payload arms are imported into a unit-owned typed pool and each switch retains an 8-byte span. | removed |
+| `untagged.rs:88` `untagged_switch` | `literal_arms.push((tag.literal.clone(), i as u32))` | per construct | LiteralId handles borrow immutable spelling and precomputed emission descriptors; no arm owns a cloned tag. | removed |
+| `untagged.rs:91` `untagged_switch` | `block.block_type().expect("untagged payload").clone(),` | per construct | Kind and InstanceId handles reference the immutable metadata bank instead of cloning class names or ancestors. | removed |
 | `untagged.rs:97` `untagged_switch` | `let sources = self.source.lists.get(operands).to_vec();` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
 | `untagged.rs:135` `untagged_switch` | `let remaining = actions.iter().map(&#124;a&#124; a.uses).collect();` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
 | `untagged.rs:136` `untagged_switch` | `let cached = vec![None; actions.len()];` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
@@ -2957,17 +2957,39 @@ twice with **zero allocations** in the measured second pass and unchanged
 recorded capacities: 20,001 source visits, 10,000 emission-program steps and
 20,000 grouping steps. It includes planning, traversal, emission, realization
 and release. Import is outside measurement; append-only growth is pre-reserved
-after warming. This does **not** prove the mixed/literal 10,000-case fixture:
-its shared planner still uses temporary vectors and clones owned tag metadata.
-Subtree copying and literal-test conversion also remain outstanding.
+after warming. The subsequent mixed/literal proof covers 9,998 explicit literal cases and two
+payload cases, plus a default reused through an unnamed numeric literal. Its
+warmed whole-Lambda probe/realize/release pass allocates zero times, with stable
+recorded capacities: 10,003 source visits, 20,002 source-grouping steps, 20,008
+program steps, 10,003 planner-grouping steps and one actual output copy. That
+copied default is binder-free; binder freshening has separate copier regressions.
+Small string, float and bigint Equals fixtures each allocate zero times, with
+6 source visits, 8 source-grouping steps, 14 program steps, 4 planner-grouping
+steps and one output copy. Import and final export are excluded from those
+lowering measurements, not relabelled as allocation-free.
+
+Import itself now stores switch facts and arms in unit pools, rather than
+relocating per-switch vectors. A separate 10,000-run fact-import test, after
+warming and reserving append-only growth, allocates zero times and keeps all
+recorded fact/metadata capacities unchanged. A 10,000-literal canonical-key
+encoding test likewise reuses its warmed output, bigint and float buffers with
+zero allocations. ImportedPlan is 32 bytes, each typed arm span is 8 bytes, and
+Facts is 16 bytes. Unique metadata still grows the unit pools during import;
+these proofs do not claim that the initial unit allocation disappears.
 
 | Additional owning API/site | Frequency | Disposition |
 | --- | --- | --- |
 | `untagged.rs` former `Plan.dispatch` | per construct | converted: four graph pools owned by `State::untagged_dispatch` |
-| `untagged_dispatch.rs` `PlanInput.literal_arms.into_owned()` | per mixed/literal plan | pending: borrowed input still copied by the general planner; not counted as an allocation removal |
-| `untagged_dispatch.rs` grouping, payload partitioning and simplification vectors | per general plan | pending: replace with typed runs and retained scratch |
-| `untagged.rs` literal and instance arm metadata clones | per arm | pending: replace owned tag payloads with metadata handles |
-| `edit.rs` `copy_subtree_recording` temporary maps and vectors | per copied action | pending: reusable indexed copy state required |
+| `untagged_dispatch.rs` `PlanInput.literal_arms.into_owned()` | per mixed/literal plan | converted: append copies only Copy handles into retained effective-arm scratch; there is no Cow ownership conversion |
+| `untagged_dispatch.rs` grouping, payload partitioning and simplification vectors | per general plan | converted: unit-owned linked groups, partition/entry buffers and iterative postorder/equality/selector stacks retain their capacities |
+| `untagged.rs` literal and instance arm metadata clones | per arm | converted: typed literal/instance handles reference a flat immutable spelling/ancestor bank |
+| `edit.rs` `copy_subtree_recording` temporary maps and vectors | per copied action | converted: caller-owned CopyScratch retains traversal/maps; operand and rest-field remapping append directly to unit pools |
+| `untagged.rs` imported literal/payload vectors | per imported switch | converted: two typed 8-byte spans address shared unit arm pools; no per-switch vector is moved across the measurement boundary |
+| `untagged_dispatch.rs` imported fact vectors | per imported switch | converted: a 16-byte Facts record references literal/kind spans in a unit FactPool |
+| `metadata.rs` canonical literal-key encoding | per imported literal | converted: reusable string/digit/float buffers encode keys directly into the metadata text pool |
+| `untagged.rs` bigint descriptor formatting | per imported bigint | converted: one import-pass spelling buffer is cleared and reused, retaining original key spelling separately from canonical ConstId |
+| `ocaml_float.rs` separator removal and case folding | per canonical float parse | converted: callers can supply retained byte scratch; special-value recognition compares ASCII without allocating lowercase copies |
+
 
 Catch plans now own no vectors and occupy 80 bytes (120 before the output
 conversion, 168 before grouping was pooled). The 10,000-catch whole-Lambda

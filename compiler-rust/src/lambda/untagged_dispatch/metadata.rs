@@ -63,6 +63,7 @@ struct InstanceRecord {
 }
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Metadata {
+    encoding: crate::types::variant_runtime::LiteralKeyScratch,
     text: String,
     texts: Vec<(u32, u32)>,
     literals: Vec<(Literal, TextId)>,
@@ -75,7 +76,7 @@ pub(crate) struct Metadata {
 }
 impl Metadata {
     #[cfg(test)]
-    pub(crate) fn capacities(&self) -> [usize; 8] {
+    pub(crate) fn capacities(&self) -> [usize; 11] {
         [
             self.text.capacity(),
             self.texts.capacity(),
@@ -85,6 +86,9 @@ impl Metadata {
             self.text_index.capacity(),
             self.literal_index.capacity(),
             self.instance_index.capacity(),
+            self.encoding.capacities()[0],
+            self.encoding.capacities()[1],
+            self.encoding.capacities()[2],
         ]
     }
     pub(crate) fn text(&self, id: TextId) -> &str {
@@ -131,7 +135,10 @@ impl Metadata {
         }
         // Runtime equality and structural tag equality are intentionally separate.
         // Canonicalization belongs to import, never to planning/selection.
-        let runtime = self.intern(&tag.value_key());
+        let mut encoding = std::mem::take(&mut self.encoding);
+        let runtime = self.intern(encoding.encode(tag));
+        encoding.output.clear();
+        self.encoding = encoding;
         let id = LiteralId(self.literals.len() as u32);
         self.literals.push((literal, runtime));
         let Self {
@@ -257,6 +264,34 @@ impl Metadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn canonical_encoding_reuses_buffers_for_ten_thousand_literals() {
+        use crate::types::variant_runtime::LiteralKeyScratch;
+        let cases = [
+            (LiteralTag::Float("0x1.f_8p+3".into()), "number:0x1.f8p+3"),
+            (LiteralTag::Float("-0.0".into()), "number:0"),
+            (LiteralTag::Float("-NaN".into()), "number:-nan"),
+            (LiteralTag::BigInt("-00_123".into()), "bigint:-123"),
+            (LiteralTag::BigInt("-000".into()), "bigint:0"),
+            (LiteralTag::BigInt("00x1".into()), "bigint:00x1"),
+            (LiteralTag::Int(4_294_967_297), "number:0x1p+0"),
+            (LiteralTag::String("text".into()), "string:text"),
+        ];
+        let mut scratch = LiteralKeyScratch::default();
+        for (tag, expected) in &cases {
+            assert_eq!(scratch.encode(tag), *expected);
+        }
+        let before = scratch.capacities();
+        let measured = allocation_counter::measure(|| {
+            for i in 0..10_000 {
+                let (tag, expected) = &cases[i % cases.len()];
+                assert_eq!(scratch.encode(tag), *expected);
+            }
+        });
+        assert_eq!(measured.count_total, 0, "{measured:?}");
+        assert_eq!(scratch.capacities(), before);
+    }
+
     #[test]
     fn handles_preserve_structural_tags_separately_from_runtime_equality() {
         let mut m = Metadata::default();

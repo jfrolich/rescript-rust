@@ -14,16 +14,22 @@
 
 /// OCaml `float_of_string_opt`.
 pub fn float_of_string(s: &str) -> Option<f64> {
-    let buf: Vec<u8> = s.bytes().filter(|&c| c != b'_').collect();
+    float_of_string_in(s, &mut Vec::new())
+}
+
+/// Parse using retained separator-removal storage.
+pub(crate) fn float_of_string_in(s: &str, buf: &mut Vec<u8>) -> Option<f64> {
+    buf.clear();
+    buf.extend(s.bytes().filter(|&c| c != b'_'));
     if buf.is_empty() {
         return None;
     }
-    let (negative, rest) = split_sign(&buf);
+    let (negative, rest) = split_sign(buf);
     if let Some(digits) = strip_hex_prefix(rest) {
         let d = caml_float_of_hex(digits)?;
         return Some(if negative { -d } else { d });
     }
-    strtod(&buf)
+    strtod(buf)
 }
 
 fn split_sign(s: &[u8]) -> (bool, &[u8]) {
@@ -259,11 +265,11 @@ fn strtod(buf: &[u8]) -> Option<f64> {
     }
     let (negative, rest) = split_sign(&buf[i..]);
     let apply = |d: f64| if negative { -d } else { d };
-    let lower = rest.to_ascii_lowercase();
-    if lower == b"inf" || lower == b"infinity" {
+    if rest.eq_ignore_ascii_case(b"inf") || rest.eq_ignore_ascii_case(b"infinity") {
         return Some(apply(f64::INFINITY));
     }
-    if let Some(after) = lower.strip_prefix(b"nan") {
+    if rest.get(..3).is_some_and(|head| head.eq_ignore_ascii_case(b"nan")) {
+        let after = &rest[3..];
         let valid = after.is_empty()
             || (after.first() == Some(&b'(')
                 && after.last() == Some(&b')')

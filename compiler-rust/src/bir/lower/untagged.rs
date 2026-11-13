@@ -128,14 +128,35 @@ pub(super) struct Storage {
     program_steps: usize,
     copied_outputs: usize,
     imported: Vec<Option<ImportedPlan>>,
+    facts: dispatch::FactPool,
+    imported_literals: Pool<(dispatch::LiteralId, u32)>,
+    imported_payloads: Pool<(dispatch::Kind, u32)>,
     literals: Vec<LiteralEmission>,
     aliases: Vec<Option<u32>>,
 }
 
+#[derive(Clone, Copy)]
+struct ImportedSpan<T> {
+    start: u32,
+    len: u32,
+    marker: std::marker::PhantomData<T>,
+}
+impl<T> ImportedSpan<T> {
+    fn new(start: usize, end: usize) -> Self {
+        Self {
+            start: u32::try_from(start).unwrap(),
+            len: u32::try_from(end - start).unwrap(),
+            marker: std::marker::PhantomData,
+        }
+    }
+    fn range(&self) -> std::ops::Range<usize> {
+        self.start as usize..(self.start + self.len) as usize
+    }
+}
 struct ImportedPlan {
     facts: dispatch::Facts,
-    literals: Vec<(dispatch::LiteralId, u32)>,
-    payloads: Vec<(dispatch::Kind, u32)>,
+    literals: ImportedSpan<(dispatch::LiteralId, u32)>,
+    payloads: ImportedSpan<(dispatch::Kind, u32)>,
 }
 #[derive(Clone, Copy)]
 enum LiteralValue {
@@ -160,17 +181,21 @@ pub(super) fn prepare(arena: &mut Bir) -> (Storage, dispatch::Plan<u32>) {
             storage.imported.push(None);
             continue;
         };
-        let facts = graph.metadata.import_facts(facts);
-        let mut literals = Vec::new();
-        let mut payloads = Vec::new();
+        let facts = storage.facts.import(&mut graph.metadata, facts);
+        let literal_start = storage.imported_literals.values.len();
+        let payload_start = storage.imported_payloads.values.len();
         for (i, key) in h.keys.iter().enumerate() {
             match key {
-                CaseKey::Lambda(SwitchKey::Constructor(Case::Constant(tag))) => {
-                    literals.push((graph.metadata.import_literal(&tag.literal), i as u32))
-                }
+                CaseKey::Lambda(SwitchKey::Constructor(Case::Constant(tag))) => storage
+                    .imported_literals
+                    .values
+                    .push((graph.metadata.import_literal(&tag.literal), i as u32)),
                 CaseKey::Lambda(SwitchKey::Constructor(Case::Block(block))) => {
                     if let Some(kind) = block.block_type() {
-                        payloads.push((graph.metadata.import_kind(kind), i as u32));
+                        storage
+                            .imported_payloads
+                            .values
+                            .push((graph.metadata.import_kind(kind), i as u32));
                     }
                 }
                 _ => {}
@@ -178,10 +203,11 @@ pub(super) fn prepare(arena: &mut Bir) -> (Storage, dispatch::Plan<u32>) {
         }
         storage.imported.push(Some(ImportedPlan {
             facts,
-            literals,
-            payloads,
+            literals: ImportedSpan::new(literal_start, storage.imported_literals.values.len()),
+            payloads: ImportedSpan::new(payload_start, storage.imported_payloads.values.len()),
         }));
     }
+    let mut bigint_spelling = String::new();
     for i in 0..graph.metadata.literal_count() {
         use dispatch::Literal as L;
         let (key, value) = match graph.metadata.literal(dispatch::LiteralId(i as u32)) {
@@ -198,9 +224,13 @@ pub(super) fn prepare(arena: &mut Bir) -> (Storage, dispatch::Plan<u32>) {
             L::BigInt(s) => {
                 let spelling = graph.metadata.text(s);
                 let text = arena.intern_text(spelling);
-                let (positive, digits) = crate::types::typecore::parse_bigint_literal(spelling);
-                let canonical =
-                    arena.intern_text(&format!("{}{digits}", if positive { '+' } else { '-' }));
+                let positive = crate::types::typecore::parse_bigint_literal_into(
+                    spelling,
+                    &mut bigint_spelling,
+                );
+                bigint_spelling.insert(0, if positive { '+' } else { '-' });
+                let canonical = arena.intern_text(&bigint_spelling);
+                bigint_spelling.clear();
                 let value = arena.intern_const(crate::bir::Constant::BigInt(canonical));
                 (CaseKey::BigInt(text), LiteralValue::Number(value))
             }
@@ -292,9 +322,11 @@ impl State {
                     .map_or(source_count + *body as usize, |alias| alias as usize)
             },
             dispatch::BorrowedInput {
-                facts: &imported.facts,
-                literal_arms: &imported.literals,
-                payload_arms: &imported.payloads,
+                facts: self.untagged_storage.facts.view(imported.facts),
+                literal_arms: &self.untagged_storage.imported_literals.values
+                    [imported.literals.range()],
+                payload_arms: &self.untagged_storage.imported_payloads.values
+                    [imported.payloads.range()],
                 literals_complete: full.0,
                 payloads_complete: full.1,
                 fallback,
@@ -1618,6 +1650,11 @@ mod tests {
         };
         let before = capacities(&state);
         let statements_before = state.statements.capacities();
+        let imported_before = (
+            state.untagged_storage.facts.capacities(),
+            state.untagged_storage.imported_literals.values.capacity(),
+            state.untagged_storage.imported_payloads.values.capacity(),
+        );
         let graph_before = state.untagged_dispatch.capacities();
         let free_before = state.free.capacities();
         let metadata_before = state.untagged_dispatch.metadata.capacities();
@@ -1641,6 +1678,14 @@ mod tests {
         assert_eq!(allocations.count_total, 0);
         assert_eq!(capacities(&state), before);
         assert_eq!(state.statements.capacities(), statements_before);
+        assert_eq!(
+            (
+                state.untagged_storage.facts.capacities(),
+                state.untagged_storage.imported_literals.values.capacity(),
+                state.untagged_storage.imported_payloads.values.capacity()
+            ),
+            imported_before
+        );
         assert_eq!(state.untagged_dispatch.capacities(), graph_before);
         assert_eq!(state.free.capacities(), free_before);
         assert_eq!(
@@ -1703,6 +1748,11 @@ mod tests {
 
     #[test]
     fn program_element_sizes() {
+        assert_eq!(
+            std::mem::size_of::<ImportedSpan<(dispatch::LiteralId, u32)>>(),
+            8
+        );
+        assert_eq!(std::mem::size_of::<ImportedPlan>(), 32);
         assert_eq!(std::mem::size_of::<Plan>(), 120);
         assert_eq!(std::mem::size_of::<Run<Op>>(), 12);
         assert_eq!(std::mem::size_of::<Run<Action>>(), 12);

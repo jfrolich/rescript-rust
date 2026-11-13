@@ -17,25 +17,67 @@ mod metadata;
 use crate::types::variant_runtime::{BlockType, LiteralTag, MatchingFacts};
 pub(crate) use metadata::{InstanceId, Kind, Literal, LiteralId, Metadata};
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct Facts {
-    pub literal_tags: Vec<LiteralId>,
-    pub block_types: Vec<Kind>,
+#[derive(Debug, Clone, Copy)]
+struct LiteralSpan {
+    start: u32,
+    len: u32,
 }
-impl Metadata {
-    pub(crate) fn import_facts(&mut self, facts: &MatchingFacts) -> Facts {
-        Facts {
-            literal_tags: facts
+#[derive(Debug, Clone, Copy)]
+struct KindSpan {
+    start: u32,
+    len: u32,
+}
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Facts {
+    literals: LiteralSpan,
+    kinds: KindSpan,
+}
+#[derive(Clone, Copy)]
+pub(crate) struct FactView<'a> {
+    literal_tags: &'a [LiteralId],
+    block_types: &'a [Kind],
+}
+/// Unit-owned fact runs. Each switch stores only two typed spans, not vectors.
+#[derive(Default)]
+pub(crate) struct FactPool {
+    literals: Vec<LiteralId>,
+    kinds: Vec<Kind>,
+}
+impl FactPool {
+    pub(crate) fn import(&mut self, metadata: &mut Metadata, facts: &MatchingFacts) -> Facts {
+        let literals = LiteralSpan {
+            start: self.literals.len() as u32,
+            len: facts.literal_tags.len() as u32,
+        };
+        self.literals.extend(
+            facts
                 .literal_tags
                 .iter()
-                .map(|tag| self.import_literal(tag))
-                .collect(),
-            block_types: facts
+                .map(|tag| metadata.import_literal(tag)),
+        );
+        let kinds = KindSpan {
+            start: self.kinds.len() as u32,
+            len: facts.block_types.len() as u32,
+        };
+        self.kinds.extend(
+            facts
                 .block_types
                 .iter()
-                .map(|kind| self.import_kind(kind))
-                .collect(),
+                .map(|kind| metadata.import_kind(kind)),
+        );
+        Facts { literals, kinds }
+    }
+    pub(crate) fn view(&self, facts: Facts) -> FactView<'_> {
+        FactView {
+            literal_tags: &self.literals[facts.literals.start as usize
+                ..(facts.literals.start + facts.literals.len) as usize],
+            block_types: &self.kinds
+                [facts.kinds.start as usize..(facts.kinds.start + facts.kinds.len) as usize],
         }
+    }
+    #[cfg(test)]
+    pub(crate) fn capacities(&self) -> [usize; 2] {
+        [self.literals.capacity(), self.kinds.capacity()]
     }
 }
 
@@ -345,7 +387,7 @@ pub(crate) struct Input<'f, A> {
 /// Borrowed inputs for appending a plan to a unit-owned graph pool.
 /// Metadata and arm storage need only live for the planning call.
 pub(crate) struct BorrowedInput<'f, A> {
-    pub facts: &'f Facts,
+    pub facts: FactView<'f>,
     pub literal_arms: &'f [(LiteralId, A)],
     pub payload_arms: &'f [(Kind, A)],
     pub literals_complete: bool,
@@ -1017,7 +1059,8 @@ fn simplify<A: Copy>(p: &mut Plan<A>, same: &impl Fn(&A, &A) -> bool, root: Tree
 /// apart. Cost is emitted tests/clauses plus source-body equality work.
 pub(crate) fn plan<A: Copy>(same: impl Fn(&A, &A) -> bool, input: Input<'_, A>) -> Plan<A> {
     let mut p = Plan::new();
-    let facts = p.metadata.import_facts(input.facts);
+    let mut fact_pool = FactPool::default();
+    let facts = fact_pool.import(&mut p.metadata, input.facts);
     let literal_arms: Vec<_> = input
         .literal_arms
         .into_iter()
@@ -1032,7 +1075,7 @@ pub(crate) fn plan<A: Copy>(same: impl Fn(&A, &A) -> bool, input: Input<'_, A>) 
         &mut p,
         same,
         BorrowedInput {
-            facts: &facts,
+            facts: fact_pool.view(facts),
             literal_arms: &literal_arms,
             payload_arms: &payload_arms,
             literals_complete: input.literals_complete,
@@ -1118,8 +1161,8 @@ fn plan_tree<A: Copy>(
         payloads_complete,
         fallback,
     } = input;
-    let block_cases = &facts.block_types[..];
-    let literal_cases = &facts.literal_tags[..];
+    let block_cases = facts.block_types;
+    let literal_cases = facts.literal_tags;
     let literal_default = if literals_complete {
         None
     } else {
@@ -1287,6 +1330,39 @@ mod tests {
     use crate::types::variant_runtime::{Instance, same_literal_value};
 
     #[test]
+    fn ten_thousand_imported_fact_runs_use_only_reserved_unit_pools() {
+        let source = MatchingFacts {
+            tag_name: None,
+            literal_tags: vec![
+                LiteralTag::String("tag".into()),
+                LiteralTag::Float("1.5".into()),
+            ],
+            block_types: vec![BlockType::Number, BlockType::Object],
+        };
+        let mut metadata = Metadata::default();
+        let mut facts = FactPool::default();
+        for _ in 0..10_000 {
+            facts.import(&mut metadata, &source);
+        }
+        facts.literals.reserve(facts.literals.len());
+        facts.kinds.reserve(facts.kinds.len());
+        let before = facts.capacities();
+        let metadata_before = metadata.capacities();
+        let measured = allocation_counter::measure(|| {
+            for _ in 0..10_000 {
+                let id = facts.import(&mut metadata, &source);
+                let view = facts.view(id);
+                assert_eq!(view.literal_tags.len(), 2);
+                assert_eq!(view.block_types, [Kind::Number, Kind::Object]);
+            }
+        });
+        assert_eq!(measured.count_total, 0, "{measured:?}");
+        assert_eq!(facts.capacities(), before);
+        assert_eq!(metadata.capacities(), metadata_before);
+        assert_eq!(std::mem::size_of::<Facts>(), 16);
+    }
+
+    #[test]
     fn grouping_updates_representatives_and_preserves_first_created_priority() {
         let arms = [((), 0u32), ((), 1), ((), 2), ((), 8)];
         let mut groups = Groups::default();
@@ -1352,12 +1428,13 @@ mod tests {
             block_types: vec![BlockType::Unknown],
         };
         let mut pool = Plan::default();
-        let facts = pool.metadata.import_facts(&facts);
+        let mut fact_pool = FactPool::default();
+        let facts = fact_pool.import(&mut pool.metadata, &facts);
         append(
             &mut pool,
             |a: &u32, b: &u32| a == b,
             BorrowedInput {
-                facts: &facts,
+                facts: fact_pool.view(facts),
                 literal_arms: &[],
                 payload_arms: &[(Kind::Unknown, 7)],
                 literals_complete: true,
@@ -1370,7 +1447,7 @@ mod tests {
             &mut pool,
             |a: &u32, b: &u32| a == b,
             BorrowedInput {
-                facts: &facts,
+                facts: fact_pool.view(facts),
                 literal_arms: &[],
                 payload_arms: &[(Kind::Unknown, 8)],
                 literals_complete: true,
