@@ -1169,6 +1169,44 @@ and the splice is not performed. T4d and T4e read the tree P3 wrote (finding
 leave the new side is the shake (T4f needs the dead marks of P5, so it waits
 too) or, in legacy order from the other end, P1 at T6.
 
+**As built and measured** (`bir/lower/close.rs`, `scope::return_sites`,
+`shadow::compare_decisions`). Where a run is copied, last statement first:
+a `return` records the calls `sites` gives as the site of their callee
+(`VarFacts`, 8 bytes, dense by variable: the site and the exported bit), and
+a declaration gets a `Decision` (8 bytes: the status from `built`, whether it
+is an inline candidate with a site, `built`). The top level is decided after
+the coercion, with the export set marked through each export's origin. One
+step per statement and per operand on the way to a call; 3 steps per
+declaration at 10,000 (`ten_thousand_declarations_close_in_three_steps_
+each`). Check mode runs P1 and P2 on a copy of the new side's program and
+compares, per declared identifier, with `js_pass_tailcall_inline::decisions`.
+
+| Corpus | Units | Declarations | Inline candidates (lowering / P3) | Count, status, site differences | Extra, missing, copied | Decisions replaced |
+| --- | --- | --- | --- | --- | --- | --- |
+| runtime | 113 | 878 | 22 / 22 | 0, 0, 0 | 0, 0, 0 | 116 |
+| tests/tests | 854 | 8,429 | 109 / 109 | 0, 0, 0 | 0, 0, 0 | 960 |
+| the application | 3,848 | 144,584 | 2,279 / 2,279 | 0, 0, 0 | 0, 0, 0 | 31,158 |
+
+(The fixtures corpus was not run: it needs the reference compiler's
+executable.) So on these corpora neither hazard of (b) occurs: no variable is
+read in a branch P1 drops, and no declaration is inside a function the
+lowering copies. They remain possible by reading. The counter 11.4 asked for
+(sites spliced) is the inline-candidate column: nothing is spliced.
+
+Two places where the code is not what "The design" says:
+
+- *A run is not closed once.* A statement the lowering moves out of a copied
+  list (`simplify_if_head` moving a branch after its guard, a held run) is
+  copied again, and its declaration is decided again: about one decision in
+  five on the application. The last decision is the one that stands; a
+  splice at the first close would be done on a list that is read again.
+- *`take_list` is not the only place a statement list is made.*
+  `simplify_if_head` (`bir/j/norm.rs`) builds `if (!c) { return n }` with a
+  list of its own, and `n` can come from a run that was never copied. Its
+  site was missed until `return_sites` was called there (one declaration in
+  tests/tests). `cond.rs` and `external.rs` build lists directly as well;
+  none of them holds a `return`.
+
 #### Re-cut: one legacy step leaves the new side per slice
 
 The commit order of the T4 prompt (block facts, dead declarations, record
