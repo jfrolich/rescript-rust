@@ -515,7 +515,13 @@ impl Processor<'_> {
                 fields
                     .iter()
                     .map(|f| {
-                        let f_attributes = self.ctx.parsed(&f.ld_attributes);
+                        // A label a record spread copies keeps the copied
+                        // declaration's attributes (`Record_type_spread.mk_lbl`,
+                        // compiler/ml/record_type_spread.ml:121).
+                        let f_attributes = match &f.ld_types_attributes {
+                            Some(attributes) => Attrs::Decl(attributes),
+                            None => self.ctx.parsed(&f.ld_attributes),
+                        };
                         Field {
                             stamp: f.ld_id.binding_time(),
                             fname: self.ctx.located(&f.ld_name),
