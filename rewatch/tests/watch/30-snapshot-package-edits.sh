@@ -4,6 +4,12 @@ here=$(cd "$(dirname "$0")" && pwd)
 source "$here/../utils.sh"
 repo=$(cd "$here/../../.." && pwd)
 export REWATCH_EXECUTABLE=${REWATCH_EXECUTABLE:-$repo/rewatch/target/debug/rescript}
+case "$REWATCH_EXECUTABLE" in
+  *rescript-ocaml.exe|*rescript-ocaml.js)
+    echo 'Runtime snapshots are a Rust build-system feature; not applicable to the OCaml executable.'
+    exit 0
+    ;;
+esac
 work=$(mktemp -d)
 mkdir -p "$work/project/src" "$work/project/node_modules/@rescript"
 cd "$work/project"

@@ -111,6 +111,7 @@ fi
 ./gentype/04-file-inventory.sh watch &&
 
 # Watch tests
+./watch/30-snapshot-package-edits.sh &&
 ./watch/11-gentype-declaration-closure.sh &&
 ./watch/01-watch-recompile.sh &&
 ./watch/02-watch-warnings-persist.sh &&
