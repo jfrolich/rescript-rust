@@ -1010,7 +1010,7 @@ texts stay equal.
 
 | Slice | Moves into the lowering | New side stops running | Needs |
 | --- | --- | --- | --- |
-| T4a | Export extraction and coercion on top-level rows (`bir/lower/export.rs`, S3.9b), with the position facts of finding 2 | `coerce_lowered_output` | - |
+| T4a (done) | Export extraction and coercion on top-level rows (`bir/lower/export.rs`, S3.9b), with the position facts of finding 2 as sites ("T4a as built") | `extract_toplevel_exports`, `coerce_lowered_output` | - |
 | T4b | P1 as rules applied where a run is copied; or the proof that sites can be read through P1's reshaping and that P1 commutes with T4c to T4e | `apply_js_flatten_pass`, or nothing | - |
 | T4c | Step A, late marks, late zero, graves, the counter | `apply_js_tailcall_inline_pass` | T4a, T4b |
 | T4d | Step B | `apply_js_record_rest_pass` | T4c |
@@ -1024,61 +1024,63 @@ remove; it stays until the names are decided in the lowering (T5).
 
 #### T4a as built
 
-Three steps, each its own commit, each keeping the gate byte-exact. After the
-third the new side runs neither `extract_toplevel_exports` nor
-`coerce_lowered_output`; the legacy side and the default build keep both.
-Code: `bir/lower/export.rs`.
+Done. The new side of the `lower` gate runs neither `extract_toplevel_exports`
+nor `coerce_lowered_output`: it goes from `bridge_j::export_js` to the six
+passes. The legacy side and the default build keep both. Code:
+`bir/lower/export.rs`, entered from `State::complete_unit`.
 
 **What a row is.** `Row`, 8 bytes: the node of one top-level statement and a
 word of bits (declaration; has an initialiser; the initialiser is a function
-literal; the statement has a top-level effect; it stands inside a top-level
-block statement; removed). The rows are the top-level run of the statement
-stack in output order, written once when the unit's last value is complete
-(`State::complete`), one step per statement of the run and per statement
-directly inside a top-level block. A row's bits come from the statement node
-and its initialiser's flags; no statement body is read. Rows keep their index
-for the whole fold: a moved declaration is marked removed, an inserted one is
-linked after its predecessor, so "before" and "after" are comparisons of
-indices.
+literal; a top-level block statement; a statement directly inside one;
+moved to the export tail; a rebound export was inserted before it; inserted;
+declared after the top level). The rows are the top-level run of the
+statement stack in output order, written when the unit's last value is
+complete (`build_rows`): one step per statement of the run and per statement
+directly inside a top-level block. The bits come from the statement node and
+the operation of its initialiser; no statement body is read. A row keeps its
+index for the whole fold: a moved declaration is marked, a declaration the
+fold adds is a new row with a bit that says where it is written, so "before"
+and "after" are comparisons of indices. `coerced_list` writes the final list
+from the rows, one step per row.
 
-**What an export is.** `Export`, 8 bytes: the variable the export names and
-its value node, detached. The importer gives every identifier of the export
-block a `VarId` where it imports the block (one lookup per export in the
-identifier table it already has), so the fold compares variables, never
-identifiers. A variable copied by the lowering compares through its origin
-(`vars.j_origin`), which is the identity the legacy identifiers have.
+**What an export is.** No record: the values of the exports, detached, in a
+vector by export index, and the variable each export names. The importer
+gives every identifier of an export block a `VarId` where it imports the
+block (one lookup per export in the identifier table it already has, for the
+lowering only), so the fold compares variables, never identifiers. A
+variable the lowering copied compares through its origin (`vars.j_origin`),
+which is the identity the legacy identifiers have.
 
-**Step 1, extraction.** `State::complete` no longer pushes the sentinel
-statement that carried `Out::value`. It reads the value as
-`extract_toplevel_exports` does: an export block gives the exports and their
-values; a comma whose right spine ends in an export block gives its heads as
-effect statements (`jm14_push_effect_expression`) and then the block;
-`undefined` gives nothing; anything else is one effect. A finished unit
-replaces every value by `undefined`. The result leaves the lowering as
-`Lowered::exports` next to the statements, and `bridge_j::export_js` exports
-the value nodes after the block. Until step 3 the new side passes them to the
-legacy fold.
+**Step 1, extraction** (`extract_exports`). The unit no longer ends in a
+sentinel statement that carries `Out::value`. The value is read as
+`extract_toplevel_exports` reads it: an export block gives the exports and
+their values; a comma whose right spine ends in an export block gives its
+heads as effect statements (`jm14_push_effect_expression`) and then the
+block; `undefined` gives nothing; anything else is one effect. A finished
+unit replaces every value by `undefined`. The sentinel remains in a
+test-only `State::complete`, for the rule tests of single constructs.
 
-**Step 2, the fold** (`coerce_toplevel_exports_with_name_reservations`), one
-export at a time in export order, the arms in the legacy order. What each arm
-reads:
+**Step 2, the fold** (`coerce_exports`), one export at a time in export
+order, the arms in the legacy order. What each arm reads:
 
 | Legacy helper | Reads on rows |
 | --- | --- |
-| `collect_declared_idents` | the declaration node of the variable (`vars.binder`) and its parents up to the top level: declared when only `SIf` and `SBlock` lie between |
-| `find_declaration`, `same_name_export_alias_binding`, `block_declares_*` | `vars.binder` and the row of that node |
-| `resolve_tail_move_replacement_expression`, `tail_move_materialized_root_ident`, `resolve_tail_move_initializer_kind` | the initialiser of each declaration on the alias chain; a chain visits a variable once (a mark dense by variable, cleared by walking the chain again) |
-| `statement_mentions_ident_anywhere` (uses before, uses after), `later_toplevel_initializer_mentions_ident`, `later_toplevel_function_mentions_ident`, `tail_move_uses_are_safe_to_inline`, `replacement_resolves_to_recursive_function` | the sites of the variable, one pass (below) |
-| `has_later_toplevel_function_binding`, `later_toplevel_effect_allows_tail_move` | the index of the last row with the function bit and of the last row with the effect bit; neither changes during the fold, because a moved declaration has a literal, a module member or a variable as initialiser |
+| `collect_declared_idents` | the first declaration row of the variable (dense by variable); for a declaration below the top level, the parents of its node up to the top level: declared when only `SIf` and `SBlock` lie between |
+| `find_declaration`, `same_name_export_alias_binding`, `block_declares_*` | the first declaration row of the variable |
+| `resolve_tail_move_replacement_expression`, `tail_move_materialized_root_ident`, `resolve_tail_move_initializer_kind` | the initialiser of each declaration on the alias chain; a chain visits a variable once (a mark dense by variable, cleared from a trail) |
+| `statement_mentions_ident_anywhere` (uses before, uses after), `later_toplevel_initializer_mentions_ident`, `later_toplevel_function_mentions_ident`, `tail_move_uses_are_safe_to_inline`, `replacement_resolves_to_recursive_function` | the sites of the variable, one pass (`mentions`, below) |
+| `has_later_toplevel_function_binding`, `later_toplevel_effect_allows_tail_move`, `can_reuse_existing_undefined_export_binding` | the index of the last row with the function bit, of the last row that is no declaration, and of the last row with a top-level effect (read once per unit, from the last row backwards, from the strict-purity flag of each row's expression); none changes during the fold, because a moved declaration and its replacement are strictly pure |
 | `direct_reused_same_name_export_alias_binding`, `reusable_same_name_export_binding`, `count_materialized_same_name_binding_roots` | the declaration rows that carry the export's name, chained in row order |
-| `insert_rebound_export_before_equivalent_later_binding` | the rows from the last one backwards |
-| `substitute_after` | the sites of the moved variable: each reference in a later row is replaced by a copy of the replacement |
+| `insert_rebound_export_before_equivalent_later_binding` | the rows from the last one backwards while they are such bindings |
+| `substitute_after` | the references the `mentions` pass kept: each is replaced by a copy of the replacement |
 
-**The position fact.** `Site`, 8 bytes: the node of one reference and the
-next site of the same variable; the head is dense by `VarId`. A site is
-written where the reference is lowered: the one place a `Var` node is built
-(`Bir::register_kind`, which already counts the occurrence), and cleared
-there when the node is released.
+**The position fact.** `Site`, 8 bytes (`bir/lower/scope.rs`): the node of
+one reference and the next site of the same variable; the head is dense by
+`VarId`. A site is written where the reference is lowered, in the one place
+a node is allocated (`Bir::allocate`); the `Var` leaf keeps its site index
+in its unused second word, so the site follows the node when a replacement
+moves the node's content into another slot, and is cleared where the node is
+released.
 
 11.4 asked for two facts per reference at that point: the statement it is in
 and whether its position is safe for a moved alias. Neither exists there. A
@@ -1091,35 +1093,48 @@ are therefore read from the site's node when the top level is complete:
 - safe position: the parent's operation and the operand the reference
   fills (callee of a call, of a flat call or of a tagged template; target of
   `new`), one read;
-- the statement, and whether a function literal lies between: the root
-  reached through the parent links. A table dense by node remembers the row
-  and the function bit of every ancestor a walk has passed, so a walk stops
-  at the first ancestor another walk reached, and each node above a queried
-  reference is entered once per unit. A reference whose root is no row (an
-  export value) is in no statement.
+- the statement, and whether a function literal lies between: the row
+  reached through the parent links (`row_of`). A table dense by node
+  remembers the row and the function bit of every ancestor a walk has
+  passed, so a walk stops at the first ancestor another walk reached, and
+  each node above a queried reference is entered once per unit. A reference
+  whose root is no row (an export value) is in no statement.
 
 A variable is asked about by at most one export: every arm that reads sites
 reads those of a variable carrying the export's name, and export names are
 distinct. One pass over the variable's sites answers all the questions of
-that export, so a reference is visited once.
+that export and keeps the references in later rows for the substitution, so
+a reference is read from its chain once. The chain holds one site per `Var`
+node ever built for the variable, released ones included.
 
 **Names.** The rows that declare a variable with an export's name are found
 by name: one table from the export names to the export index, one lookup per
-top-level declaration. A name is a process-wide interned string, not a
-handle of the unit, so no dense index exists for it.
+top-level declaration with an initialiser. A name is a process-wide interned
+string, not a handle of the unit, so no dense index exists for it. It is the
+only hash table of the slice.
 
-**Step 3.** `resolve_export_aliases` (its four arms in order: a kept
-function alias, the self-alias target, a reusable same-name binding, the
-alias chain) and the declaration of exports a finished top level left
-undeclared, on the same rows. The lowering then returns the final statement
-list with the rebound declarations after it, the export variables and the
-reserved names; the new side of the gate goes from `export_js` straight to
-the six passes.
+**Step 3** (`resolve_exports`). The declaration of exports a finished top
+level left undeclared, then `resolve_export_aliases` (its four arms in
+order: a kept function alias, the self-alias target, a reusable same-name
+binding, the alias chain), on the rows of the final block: the declarations
+the fold added are statements of it. The lowering returns the final
+statement list, the exported identifiers and the reserved names
+(`Lowered::coerced`).
 
-**Cost.** One step per row, per export, per visited site and per ancestor
-entered: linear in rows plus references plus the nodes between a visited
-reference and its statement. No allocation per row, export or site once the
-tables have their capacity.
+**Cost**, asserted at 10,000 in `export.rs`: 2 steps per row and 8 per
+export for 10,000 exports of their own declarations (100,000 steps, no site
+read); 10,000 references to one moved alias are read once each, in at most 3
+steps per reference and 3 per row; rows and references are read again
+without a heap allocation once the tables have their capacity.
+
+**Read in the legacy code, not changed.** In
+`move_same_name_export_alias_to_export_tail` a binding whose initialiser
+resolves to a literal never moves: `blocked_by_literal_binding` (the kind is
+not `Alias`) and `blocked_by_literal_alias_preserved_in_block` (the kind is
+`Alias`) cover every kind. `blocked_by_direct_literal_reuse`,
+`blocked_by_literal_alias_without_materialized_root` and the literal arm of
+`later_toplevel_effect_allows_tail_move` are unreachable from it. The rows
+implement the reachable behaviour: a literal stays.
 
 ### 11.5 Worker prompt for T4b
 
@@ -1309,3 +1324,6 @@ Risks:
 | Section 1.1 | the site is a final `return f(args)` of a statement-stack run | the pass finds sites on the tree the flatten pass wrote: inside a returned conditional the lowering writes no such statement (11.4, finding 1, tested) |
 | Section 1.3, 1.5 | a declaration with no remaining use is removed at scope close | inlining from an outer scope can take the last use later (11.4, finding 3, tested) |
 | Row T4 and the T4 prompt | export coercion on rows is the sixth step, after the scope-close decisions | every top-level status reads the export set and counts taken after coercion (11.4, finding 2); it is the first step |
+| 11.4, finding 2 and "The design" | per reference, the statement it is in and whether its position is safe are recorded where the reference is lowered | a reference is built before its parent and before its statement has a slot (reserved slots and held runs are filled later), so only the site (node, next) is recorded there; the row and the position are read through the parent links at the end of the top level ("T4a as built") |
+| BACKEND_LOWERING 8.1 step 4 and 8.2 | export extraction and coercion are in the shared tail; the unit's last value is the export block, carried for `extract_toplevel_exports` | the lowering extracts, coerces and resolves the exports itself; the shared tail is the six passes; S3.9b is done as T4a, first of the T4 slices, not last |
+| `move_same_name_export_alias_to_export_tail` (`js_shake.rs`) | several conditions block a literal binding in particular cases | two of them together block every literal binding, so the others are unreachable ("T4a as built") |
