@@ -161,7 +161,7 @@ export function Example({ example, prebuilt }) {
 /** The report of `rescript verify` for the file. */
 function Checks({ checks }) {
   if (checks.length === 0) {
-    return <div className="empty">This file has no checks: mark a property with @law.</div>;
+    return <div className="empty">This file has no checks: mark a property with @law, or a state machine with @spec.</div>;
   }
   const broken = checks.filter((check) => !check.ok).length;
   return (

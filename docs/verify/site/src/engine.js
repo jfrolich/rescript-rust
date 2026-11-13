@@ -10,8 +10,11 @@
  */
 import { lookup, runItem } from "../../../../rewatch/src/verify/runner.mjs";
 
-/** What the page runs each law with: the same cases on every visit. */
-const RUN = { seed: 1, cases: 1000 };
+/**
+ * What the page runs each check with: the same cases of a law on every
+ * visit, and a bound on a spec's states that a page can afford.
+ */
+const RUN = { seed: 1, cases: 1000, states: 20000 };
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
