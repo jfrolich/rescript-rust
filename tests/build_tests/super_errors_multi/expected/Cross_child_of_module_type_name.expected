@@ -1,0 +1,9 @@
+We've found a bug for you!
+  /.../fixtures/Cross_child_of_module_type_name/User.res:1:14-25
+
+  1 │ let _: int = Dep.N.make()
+  2 │ let _: Dep.N.t = 1
+  3 │ 
+
+  This has type: Dep.N.t
+  But it's expected to have type: int
