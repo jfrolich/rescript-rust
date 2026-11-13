@@ -48,13 +48,15 @@ pub enum Resolved {
     /// A label: its description, in [`DerivedTable::label`].
     Label(u32),
     /// A constructor: its description, in [`DerivedTable::constructor`], and
-    /// the instances of its argument (null when it has none) and result that
-    /// were unified with its skeletons.
+    /// the instances of its arguments and result that were unified with its
+    /// skeletons.
     Constructor {
         /// Slot of the description.
         desc: u32,
-        /// The instance of the argument's type.
-        arg: TypeExprRef,
+        /// The first slot of the instances of its arguments' types in
+        /// [`DerivedTable::constructor_args`]; there are as many as the
+        /// obligation's `args`.
+        args: u32,
         /// The instance of the result type.
         res: TypeExprRef,
     },
@@ -132,6 +134,9 @@ pub struct DerivedTable {
     constructors: Vec<Arc<ConstructorDescription>>,
     /// The constants `Resolved::Literal` names.
     constants: Vec<crate::types::typedtree::Constant>,
+    /// The instances of the argument types of the constructors
+    /// `Resolved::Constructor` names, consecutive per constructor.
+    constructor_args: Vec<TypeExprRef>,
 }
 
 impl DerivedTable {
@@ -203,15 +208,34 @@ impl DerivedTable {
     }
 
     /// The constructor a constructor obligation resolved to, with the
-    /// instances of its argument and result. Cost: O(1).
+    /// instances of its first argument (null when it has none) and result.
+    /// Cost: O(1).
     #[inline]
     pub fn constructor(
         &self,
         idx: ObligationIdx,
     ) -> (&Arc<ConstructorDescription>, TypeExprRef, TypeExprRef) {
         match self.resolved(idx) {
-            Resolved::Constructor { desc, arg, res } => {
-                (&self.constructors[desc as usize], arg, res)
+            Resolved::Constructor { desc, args, res } => {
+                let desc = &self.constructors[desc as usize];
+                let arg = match desc.cstr_args.is_empty() {
+                    true => TypeExprRef::null(),
+                    false => self.constructor_args[args as usize],
+                };
+                (desc, arg, res)
+            }
+            _ => unreachable!("a construction or a case names a constructor obligation"),
+        }
+    }
+
+    /// The instances of the argument types of the constructor a constructor
+    /// obligation resolved to, in order. Cost: O(1).
+    #[inline]
+    pub fn constructor_args(&self, idx: ObligationIdx) -> &[TypeExprRef] {
+        match self.resolved(idx) {
+            Resolved::Constructor { desc, args, .. } => {
+                let len = self.constructors[desc as usize].cstr_args.len();
+                &self.constructor_args[args as usize..args as usize + len]
             }
             _ => unreachable!("a construction or a case names a constructor obligation"),
         }
@@ -441,11 +465,20 @@ fn discharge_binding(
     let ctx = tctx.type_ctx;
     vars.clear();
     vars.resize(binding.vars as usize, None);
-    // The record expression whose labels are being discharged: its labels,
-    // the position of the next one, and how many it has.
+    // The record expression or pattern whose labels are being discharged:
+    // its labels, the position of the next one, and how many it has.
     let mut record_expression: Option<(crate::types::decl::LabelArrayRef, u32, u32)> = None;
     for slot in binding.obligations.range() {
         let obligation = ObligationIdx(slot as u32);
+        // Whether the obligation is a label of the record expression or
+        // pattern being discharged.
+        let grouped = matches!(
+            plans.obligation(obligation),
+            Obligation::Label {
+                usage: LabelUse::Construct | LabelUse::Pattern | LabelUse::ConstructInline,
+                ..
+            }
+        );
         let resolved = match plans.obligation(obligation) {
             Obligation::Value {
                 name,
@@ -534,14 +567,53 @@ fn discharge_binding(
                 steps.lookup();
                 let (label, ty_arg, ty_res) = match usage {
                     // A field access: the checker's own lookup, by the
-                    // record's type when it is known, else by name.
-                    LabelUse::Access | LabelUse::AccessDummy => {
+                    // record's type when it is known, else by name. The
+                    // field a record update writes is found by the type of
+                    // its base (typecore.ml `type_expect_`, `Pexp_record`
+                    // with a base, types the base first).
+                    LabelUse::Access | LabelUse::AccessDummy | LabelUse::Update => {
                         let loc = match usage {
                             LabelUse::Access => arena.none_loc(),
                             _ => arena.dummy_loc(),
                         };
                         crate::types::typecore::label_access(tctx, env, record, longident, loc)
                             .map_err(|_| Fallback)?
+                    }
+                    // A field of a pattern or an expression of an inline
+                    // record: its labels are not in the environment, and
+                    // inference finds them by the expected type, which the
+                    // constructor obligation before them fixed. The plan
+                    // holds when they are the record's, all of them, in
+                    // order.
+                    LabelUse::Pattern | LabelUse::ConstructInline => {
+                        let (label, ty_arg, ty_res) = crate::types::typecore::label_access(
+                            tctx,
+                            env,
+                            record,
+                            longident,
+                            arena.none_loc(),
+                        )
+                        .map_err(|_| Fallback)?;
+                        // Each lookup of an inline record makes its labels
+                        // anew, so they are told apart by position only:
+                        // the unification of each label's record with the
+                        // one type below makes them one record's.
+                        let position = match record_expression {
+                            Some((_, position, _)) => position,
+                            None => {
+                                let len =
+                                    ctx.label_family(label.lbl_all).map_or(0, |all| all.len());
+                                record_expression = Some((label.lbl_all, 0, len as u32));
+                                0
+                            }
+                        };
+                        if label.lbl_pos as u32 != position {
+                            return Err(Fallback);
+                        }
+                        if let Some((_, position, _)) = &mut record_expression {
+                            *position += 1;
+                        }
+                        (label, ty_arg, ty_res)
                     }
                     // A field of the record expression the body makes of the
                     // declaration being derived. typecore.ml
@@ -607,15 +679,17 @@ fn discharge_binding(
                 skeleton,
                 of,
                 site,
-                has_arg,
+                args: arity,
             } => {
                 let nodes = plans.skeleton_from(skeleton);
-                let (arg, used) = if has_arg {
-                    let (arg, used) = instantiate(ctx, arena, &tctx.typed.derived, nodes, vars);
-                    (Some(arg), used)
-                } else {
-                    (None, 0)
-                };
+                let mut expected: SmallVec<[TypeExprRef; 4]> = SmallVec::new();
+                let mut used = 0;
+                for _ in 0..arity {
+                    let (arg, span) =
+                        instantiate(ctx, arena, &tctx.typed.derived, &nodes[used..], vars);
+                    expected.push(arg);
+                    used += span;
+                }
                 let (result, _) =
                     instantiate(ctx, arena, &tctx.typed.derived, &nodes[used..], vars);
                 let longident = arena.get_longident(name);
@@ -623,6 +697,10 @@ fn discharge_binding(
                 let (loc, usage) = match site {
                     Site::Construct => (
                         arena.dummy_loc(),
+                        crate::types::usage::ConstructorUsage::Positive,
+                    ),
+                    Site::ConstructNone => (
+                        arena.none_loc(),
                         crate::types::usage::ConstructorUsage::Positive,
                     ),
                     Site::Pattern => (arena.none_loc(), crate::types::usage::ConstructorUsage::Pattern),
@@ -653,6 +731,23 @@ fn discharge_binding(
                         }
                         desc.clone()
                     }
+                    // A constructor of the declaration being derived, which
+                    // the item follows: an unqualified name whose first
+                    // candidate in scope is the declaration's
+                    // (typecore.ml `type_construct`, `Constructor.disambiguate`
+                    // without an expected type). The skeletons of the
+                    // declaration's constructors share their result, so a
+                    // candidate of another type fails a unification below.
+                    Owner::Declared => {
+                        // With several candidates inference may report the
+                        // choice (warning 41).
+                        if crate::types::typecore::ambiguous_name_warning_is_active(tctx)
+                            && env.find_all_constructors(last).len() > 1
+                        {
+                            return Err(Fallback);
+                        }
+                        env.find_constructor(last).map_err(|_| Fallback)?.clone()
+                    }
                     // A qualified name: the lookup of typecore.ml
                     // `type_construct`, in the module that qualifies it. That
                     // it is a constructor of the stated type is the
@@ -679,14 +774,16 @@ fn discharge_binding(
                     }
                 };
                 // A plan describes an ordinary constructor of a regular
-                // variant, applied to what it takes; typecore.ml
+                // variant, applied to what it takes; only the declaration's
+                // own may take an inline record. typecore.ml
                 // `type_construct` rejects the construction of a private
                 // one.
                 if desc.cstr_generalized
-                    || desc.cstr_inlined.is_some()
-                    || desc.cstr_arity != i32::from(has_arg)
+                    || (desc.cstr_inlined.is_some() && of != Owner::Declared)
+                    || desc.cstr_arity != i32::from(arity)
+                    || desc.cstr_args.len() != usize::from(arity)
                     || !matches!(desc.cstr_kind, crate::types::ConstructorKind::Ordinary(_))
-                    || (site == Site::Construct
+                    || (matches!(site, Site::Construct | Site::ConstructNone)
                         && desc.cstr_private == crate::types::PrivateFlag::Private)
                 {
                     return Err(Fallback);
@@ -699,15 +796,17 @@ fn discharge_binding(
                 steps.unification();
                 crate::types::ctype::unify(ctx, &mut tctx.unify_state, res, result)
                     .map_err(|_| Fallback)?;
-                if let Some(arg) = arg {
-                    crate::types::ctype::unify(ctx, &mut tctx.unify_state, args[0], arg)
+                for (instance, expected) in args.iter().zip(&expected) {
+                    crate::types::ctype::unify(ctx, &mut tctx.unify_state, *instance, *expected)
                         .map_err(|_| Fallback)?;
                 }
                 let table = &mut tctx.typed.derived;
                 table.constructors.push(Arc::new(desc));
+                let first_arg = table.constructor_args.len() as u32;
+                table.constructor_args.extend_from_slice(&args);
                 Resolved::Constructor {
                     desc: table.constructors.len() as u32 - 1,
-                    arg: args.first().copied().unwrap_or_else(TypeExprRef::null),
+                    args: first_arg,
                     res,
                 }
             }
@@ -778,9 +877,9 @@ fn discharge_binding(
                 Resolved::Type(path)
             }
         };
-        // The labels of a record expression are consecutive, and all of
-        // the record's.
-        if !matches!(resolved, Resolved::Label(_))
+        // The labels of a record expression or pattern are consecutive, and
+        // all of the record's.
+        if !grouped
             && let Some((_, position, len)) = record_expression.take()
             && position != len
         {
@@ -917,6 +1016,8 @@ fn instantiate(
                 Predef::Result => {
                     ctx.new_predef_constr(crate::types::predef::path_result(), types.into_vec())
                 }
+                Predef::Int => crate::types::ctype::instance(ctx, ctx.predef_int()),
+                Predef::Bool => crate::types::ctype::instance(ctx, ctx.predef_bool()),
             };
             (ty, used)
         }
