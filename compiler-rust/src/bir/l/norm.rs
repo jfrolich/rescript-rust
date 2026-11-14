@@ -742,7 +742,7 @@ pub(crate) fn decide_switch_on(
                 .collect()
         };
         let (consts, blocks) = (pair(const_keys, consts), pair(block_keys, blocks));
-        let plan = crate::lambda::untagged_plan_with(
+        let plan = crate::bir::untagged_plan::untagged_plan_with(
             h.consts_full,
             &consts,
             h.blocks_full,
@@ -751,13 +751,13 @@ pub(crate) fn decide_switch_on(
             h.dispatch,
             |x: &NodeId, y: &NodeId| eq_approx(b, *x, *y, compared),
         );
-        let value = shallow_legacy_const(b, cst).and_then(|c| crate::lambda::untagged_value(&c));
+        let value = shallow_legacy_const(b, cst).and_then(|c| crate::bir::untagged_plan::untagged_value(&c));
         return match (plan, value) {
             (Some(mut plan), Some(value)) => {
-                match crate::lambda::untagged_dispatch::select(&mut plan, &value, &mut |_| ()) {
-                    crate::lambda::untagged_dispatch::Outcome::Arm(action) => Some(action),
-                    crate::lambda::untagged_dispatch::Outcome::Default => fail,
-                    crate::lambda::untagged_dispatch::Outcome::Nothing => None,
+                match crate::bir::untagged_plan::select(&mut plan, &value, &mut |_| ()) {
+                    crate::bir::untagged_plan::Outcome::Arm(action) => Some(action),
+                    crate::bir::untagged_plan::Outcome::Default => fail,
+                    crate::bir::untagged_plan::Outcome::Nothing => None,
                 }
             }
             _ => None,

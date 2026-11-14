@@ -822,7 +822,7 @@ impl Layout {
             },
         };
         #[cfg(test)]
-        crate::lambda::untagged_dispatch::differential::record(&layout);
+        crate::bir::untagged_plan::differential::record(&layout);
         layout
     }
 

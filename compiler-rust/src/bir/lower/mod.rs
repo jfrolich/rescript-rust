@@ -430,7 +430,7 @@ struct State {
     switch_spelling: String,
     untagged: Vec<Option<untagged::Plan>>,
     untagged_storage: untagged::Storage,
-    untagged_dispatch: crate::lambda::untagged_dispatch::Plan<u32>,
+    untagged_dispatch: crate::bir::untagged_plan::Plan<u32>,
     switch_facts: Vec<switch::Facts>,
     switch_work: Vec<(NodeId, bool)>,
     group_indices: Vec<usize>,
@@ -1185,3 +1185,17 @@ mod tests {
         assert_eq!(std::mem::size_of::<ProbePlan<()>>(), 20);
     }
 }
+
+/// Cost: O(path segments and emitted bytes), reusing the destination.
+pub(crate) fn flat_export_name_into<'a>(path: impl Iterator<Item = &'a str>, out: &mut String) {
+    for (i, part) in path.enumerate() {
+        if i != 0 { out.push('$'); }
+        let part = if part.len() >= 3 && part.starts_with("\\\"") && part.ends_with('"') {
+            &part[2..part.len() - 1]
+        } else {
+            part
+        };
+        out.push_str(part);
+    }
+}
+

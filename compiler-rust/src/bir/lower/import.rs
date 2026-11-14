@@ -199,7 +199,7 @@ impl State {
                 let name = match path.as_slice() {
                     [name] => Some(name.as_str()),
                     [_, _, ..] if path.last().is_some_and(|last| last == "make") => {
-                        crate::lambda::flat_export_name_into(path.iter().map(String::as_str), &mut flat);
+                        super::flat_export_name_into(path.iter().map(String::as_str), &mut flat);
                         Some(flat.as_str())
                     }
                     _ => None,

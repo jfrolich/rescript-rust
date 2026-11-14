@@ -1632,8 +1632,8 @@ impl LamArena {
                 |a: &Lam, b: &Lam| self.eq_approx(*a, *b),
             );
             return match (plan, crate::lambda::untagged_value(cst)) {
-                (Some(mut plan), Some(value)) => {
-                    match crate::lambda::untagged_dispatch::select(&mut plan, &value, &mut |_| ()) {
+                (Some(plan), Some(value)) => {
+                    match crate::lambda::untagged_dispatch::select(&plan, &value, &mut |_| ()) {
                         crate::lambda::untagged_dispatch::Outcome::Arm(action) => Some(action),
                         // lambda.ml `action_or_switch None`.
                         crate::lambda::untagged_dispatch::Outcome::Default => acts.fail,

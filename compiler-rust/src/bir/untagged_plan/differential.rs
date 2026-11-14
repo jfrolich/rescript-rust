@@ -60,8 +60,8 @@ macro_rules! snapshot {
         }
     };
 }
-snapshot!(current, crate::lambda::untagged_dispatch);
-snapshot!(legacy, crate::lambda::untagged_dispatch::legacy_planner);
+snapshot!(current, crate::bir::untagged_plan);
+snapshot!(legacy, crate::lambda::untagged_dispatch);
 
 /// Compare full, omitted, partitioned, singleton and reordered arm lists.
 /// Cost: sixteen plan pairs per subset, plus reachable-tree serialization.
@@ -91,7 +91,7 @@ fn compare(facts: &MatchingFacts) -> usize {
                     let payloads: Vec<_> = subset.iter().copied().filter(|&i| i >= literals_len)
                         .map(|i| (facts.block_types[i - literals_len].clone(), if shared { 0 } else { i as u32 })).collect();
                     let a = plan(|a,b| a==b,Input { facts, literal_arms:literals.clone(),payload_arms:payloads.clone(),literals_complete:complete&1!=0,payloads_complete:complete&2!=0,fallback });
-                    let b = super::legacy_planner::plan(|a,b| a==b,super::legacy_planner::Input { facts,literal_arms:literals,payload_arms:payloads,literals_complete:complete&1!=0,payloads_complete:complete&2!=0,fallback });
+                    let b = crate::lambda::untagged_dispatch::plan(|a,b| a==b,crate::lambda::untagged_dispatch::Input { facts,literal_arms:literals,payload_arms:payloads,literals_complete:complete&1!=0,payloads_complete:complete&2!=0,fallback });
                     assert_eq!(current::tree(&a,a.root()),legacy::tree(&b,b.root()),"facts={facts:?}, subset={subset:?}, shared={shared}, complete={complete}, fallback={fallback:?}");
                     plan_pairs += 1;
                 }

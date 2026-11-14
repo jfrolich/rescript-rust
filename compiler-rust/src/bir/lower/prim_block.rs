@@ -39,7 +39,7 @@ impl State {
                     if visited.len() < 2 || field(visited[0]) != "make" {
                         break (None, false);
                     }
-                    crate::lambda::flat_export_name_into(visited.iter().rev().map(|&node| field(node)), &mut name);
+                    super::flat_export_name_into(visited.iter().rev().map(|&node| field(node)), &mut name);
                     let value = match base {
                         View::Global { module } => {
                             let member = Some(self.arena.intern_text(&name));

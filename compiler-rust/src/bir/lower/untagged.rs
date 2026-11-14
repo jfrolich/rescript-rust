@@ -4,7 +4,7 @@
 use super::*;
 use crate::bir::j::{norm, plain};
 use crate::bir::{CaseKey, ClauseMeta};
-use crate::lambda::untagged_dispatch::{self as dispatch, Clause, StoredTest as Test, TestId, Tree, TreeId};
+use crate::bir::untagged_plan::{self as dispatch, Clause, StoredTest as Test, TestId, Tree, TreeId};
 use crate::lambda::{SwitchCaseTag, SwitchDispatch, SwitchKey};
 use crate::types::VariantConstructorCase as Case;
 

@@ -16,6 +16,7 @@ pub mod engine;
 pub mod l;
 pub mod j;
 pub mod lower;
+pub(crate) mod untagged_plan;
 pub mod replay;
 pub mod shadow;
 mod dump;

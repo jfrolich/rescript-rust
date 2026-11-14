@@ -88,26 +88,18 @@ pub type FlatMakePath = Vec<FlatMakeStep>;
 
 /// `Translmod.flat_export_name`: the segments, each unwrapped from `\"..."`,
 /// joined with `$`.
-/// Cost: O(path segments and emitted spelling bytes).
 pub fn flat_export_name<S: AsRef<str>>(path: &[S]) -> String {
-    let mut name = String::new();
-    flat_export_name_into(path.iter().map(AsRef::as_ref), &mut name);
-    name
-}
-
-/// Append a flat export spelling into retained storage, without a segment vector.
-/// O(segments + spelling bytes); callers clear the destination before reuse.
-/// Cost: O(path segments and emitted spelling bytes), reusing capacity.
-pub(crate) fn flat_export_name_into<'a>(path: impl Iterator<Item = &'a str>, out: &mut String) {
-    for (i, part) in path.enumerate() {
-        if i != 0 { out.push('$'); }
-        let part = if part.len() >= 3 && part.starts_with("\\\"") && part.ends_with('"') {
-            &part[2..part.len() - 1]
-        } else {
-            part
-        };
-        out.push_str(part);
-    }
+    path.iter()
+        .map(|part| {
+            let part = part.as_ref();
+            if part.len() >= 3 && part.starts_with("\\\"") && part.ends_with('"') {
+                &part[2..part.len() - 1]
+            } else {
+                part
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("$")
 }
 
 /// `Translmod.flat_make_name`: the flat export a read of this source path
@@ -253,8 +245,7 @@ pub(crate) fn literal_denotes_same(
 /// variant, which the code generator prints and constant folding evaluates.
 /// A switch with literal arms and no payload arm left is a plain switch on
 /// the literals. `arm` names an arm's action as the plan's body.
-/// Cost: O(arm metadata bytes plus shared planner work).
-pub(crate) fn untagged_plan_with<'s, A: Copy>(
+pub(crate) fn untagged_plan_with<'s, A: Clone>(
     sw_consts_full: bool,
     sw_consts: &'s [(SwitchKey, A)],
     sw_blocks_full: bool,
@@ -275,7 +266,7 @@ pub(crate) fn untagged_plan_with<'s, A: Copy>(
         .iter()
         .map(|(key, action)| match key {
             SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(tag)) => {
-                Some((tag.literal.clone(), *action))
+                Some((tag.literal.clone(), action.clone()))
             }
             SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(_))
             | SwitchKey::Int(_) => None,
@@ -286,7 +277,7 @@ pub(crate) fn untagged_plan_with<'s, A: Copy>(
         .map(|(key, action)| match key {
             SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
                 crate::types::VariantBlock::Untagged { block_type, .. },
-            )) => Some((block_type.clone(), *action)),
+            )) => Some((block_type.clone(), action.clone())),
             _ => None,
         })
         .collect::<Option<Vec<_>>>()?;
@@ -763,8 +754,8 @@ impl Lambda {
             && !facts.block_types.is_empty()
         {
             let outcome = match (untagged_plan(&switch), untagged_value(cst)) {
-                (Some(mut plan), Some(value)) => Some(
-                    match untagged_dispatch::select(&mut plan, &value, &mut |_| ()) {
+                (Some(plan), Some(value)) => Some(
+                    match untagged_dispatch::select(&plan, &value, &mut |_| ()) {
                         untagged_dispatch::Outcome::Arm(action) => Some(Some(action.clone())),
                         untagged_dispatch::Outcome::Default => Some(None),
                         untagged_dispatch::Outcome::Nothing => None,
