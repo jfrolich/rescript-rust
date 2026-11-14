@@ -654,7 +654,17 @@ impl Scopes {
     /// member table of `(key, binder)` pairs. The sort is stable: members
     /// of one key keep the order given, which must be candidate order.
     pub fn table_from(&mut self, members: &[(Key, Binder)]) -> TableId {
-        todo!("R4c")
+        let first = self.members.len() as u32;
+        for &(key, binder) in members {
+            #[cfg(test)]
+            super::steps::tick();
+            self.members.push(Member {
+                key: key.0,
+                target: binder.0,
+                origin: LOCAL,
+            });
+        }
+        self.close_table(first)
     }
 
     /// O(n log n) comparisons, n steps for the n log entries since `from`:
@@ -666,7 +676,28 @@ impl Scopes {
     /// (`comp_constrs` and `comp_labels` are lists, compiler/ml/env.ml:
     /// 1480-1500). Must be called before the structure's scopes are left.
     pub fn seal(&mut self, from: u32) -> TableId {
-        todo!("R4c")
+        let first = self.members.len() as u32;
+        // Younger first, so that the stable sort leaves the rows of one
+        // constructor or label key in candidate order.
+        for &binder in self.log[from as usize..].iter().rev() {
+            #[cfg(test)]
+            super::steps::tick();
+            let key = self.binders.key[binder as usize];
+            let ns = Key(key).namespace();
+            // A value, type, module or module type is a member unless a
+            // later binding of its name in the structure replaced it.
+            let member = ns == Namespace::Constructor as u32
+                || ns == Namespace::Label as u32
+                || self.heads[key as usize] == binder;
+            if member {
+                self.members.push(Member {
+                    key,
+                    target: binder,
+                    origin: LOCAL,
+                });
+            }
+        }
+        self.close_table(first)
     }
 
     /// O(1), no step: open `table` in the current scope. Pushes one
@@ -675,20 +706,128 @@ impl Scopes {
     /// Returns that index
     /// (compiler/ml/env.ml:1874-1911).
     pub fn open(&mut self, table: TableId, loc: u32, root: u32, flags: u32) -> u32 {
-        todo!("R4c")
+        debug_assert!(self.current != NONE, "open with no scope entered");
+        debug_assert_eq!(self.layers.len(), self.opens.len());
+        let index = self.layers.len() as u32;
+        let scope = &mut self.scopes[self.current as usize];
+        self.layers.push(Layer {
+            table,
+            mark: self.binders.len(),
+            older: scope.opens,
+        });
+        scope.opens = index;
+        self.opens.push(Open {
+            loc,
+            root,
+            shadowed: NONE,
+            flags,
+        });
+        index
     }
 
     /// At most floor(log2 n) + 1 steps (one a comparison) for a table of n
     /// members, no allocation: the first row of `key` in `table`, as an
     /// index into `members` or `imported_members`, or `None`.
     pub fn search(&self, table: TableId, key: Key) -> Option<u32> {
-        todo!("R4c")
+        let (pool, first) = self.rows(table);
+        let rows = &pool[first..];
+        // The lower bound of `key`: `hi` is always a row whose key is at
+        // least `key` (or the end), and `hit` says whether the comparison
+        // that last moved `hi` saw `key` itself, so the bound is known to
+        // hold the key without one more comparison.
+        let (mut lo, mut hi, mut hit) = (0usize, rows.len(), false);
+        while lo < hi {
+            #[cfg(test)]
+            super::steps::tick();
+            let mid = lo + (hi - lo) / 2;
+            match rows[mid].key.cmp(&key.0) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                order => {
+                    hi = mid;
+                    hit = order == std::cmp::Ordering::Equal;
+                }
+            }
+        }
+        hit.then_some((first + lo) as u32)
     }
 
     /// O(1): the row `search` or a [`Resolved`] names, from the pool
     /// `table` selects.
     pub fn member(&self, table: TableId, row: u32) -> Member {
-        todo!("R4c")
+        if table.0 & IMPORTED != 0 {
+            self.imported_members[row as usize]
+        } else {
+            self.members[row as usize]
+        }
+    }
+
+    /// The lookup of `key` among the binder `head` (or [`NONE`]) and the
+    /// layers from `layer` through `older`: one [`Scopes::search`] per
+    /// layer whose mark is above `head` (every layer when `head` is
+    /// [`NONE`]), innermost first, stopping at the first that has the key;
+    /// no other step, no write. A layer's mark is never above a younger
+    /// layer's, so the first layer not above `head` ends the walk
+    /// (compiler/ml/env.ml:272-289: `current` before `components` before
+    /// `next`).
+    fn find_from(&self, key: Key, head: u32, mut layer: u32) -> Option<Found> {
+        while layer != NONE {
+            let row = self.layers[layer as usize];
+            if head != NONE && row.mark <= head {
+                break;
+            }
+            if let Some(member) = self.search(row.table, key) {
+                return Some(Found {
+                    item: self.resolved(row.table, member),
+                    layer,
+                });
+            }
+            layer = row.older;
+        }
+        (head != NONE).then_some(Found {
+            item: Resolved::binder(Binder(head)),
+            layer: NONE,
+        })
+    }
+
+    /// O(1), no step: what row `row` of `table` names: its binder for a
+    /// local table, the row itself for an imported one.
+    fn resolved(&self, table: TableId, row: u32) -> Resolved {
+        if table.0 & IMPORTED != 0 {
+            Resolved::import(row)
+        } else {
+            Resolved::binder(Binder(self.members[row as usize].target))
+        }
+    }
+
+    /// O(n log n) comparisons for the n rows of `members` from `first` on,
+    /// no step: sort that run by key with a stable sort (rows of one key
+    /// keep the order they were appended in) and push it as a local
+    /// [`Table`].
+    fn close_table(&mut self, first: u32) -> TableId {
+        self.members[first as usize..].sort_by_key(|member| member.key);
+        let id = self.tables.len() as u32;
+        debug_assert!(id < IMPORTED, "more than 2^31 local tables");
+        self.tables.push(Table {
+            first,
+            len: self.members.len() as u32 - first,
+            unit: NONE,
+        });
+        TableId(id)
+    }
+
+    /// O(1), no step: the pool `table` lives in, cut at the table's last
+    /// row, and the index of the table's first row in it.
+    fn rows(&self, table: TableId) -> (&[Member], usize) {
+        let (pool, row) = if table.0 & IMPORTED != 0 {
+            (
+                &self.imported_members,
+                self.imported_tables[(table.0 & !IMPORTED) as usize],
+            )
+        } else {
+            (&self.members, self.tables[table.0 as usize])
+        };
+        let first = row.first as usize;
+        (&pool[..first + row.len as usize], first)
     }
 
     /// The binding a lookup of `key` finds (`IdTbl.find_name`,
@@ -698,7 +837,8 @@ impl Scopes {
     /// first, stopping at the first that has the key. With no head binder
     /// every visible layer is probed. No allocation, no write.
     pub fn find(&self, key: Key) -> Option<Found> {
-        todo!("R4c")
+        let head = self.head(key);
+        self.find_from(key, head, self.scopes[self.current as usize].opens)
     }
 
     /// What `layer`'s member hides: the lookup of `key` restricted to
@@ -708,7 +848,16 @@ impl Scopes {
     /// layer's mark (else its `previous` chain is followed, 1 step a
     /// binder).
     pub fn find_below(&self, key: Key, layer: u32) -> Option<Found> {
-        todo!("R4c")
+        let row = self.layers[layer as usize];
+        let mut head = self.head(key);
+        // The bindings made after the open are `current` of the opened
+        // table, not part of `next`.
+        while head != NONE && head >= row.mark {
+            #[cfg(test)]
+            super::steps::tick();
+            head = self.binders.previous[head as usize];
+        }
+        self.find_from(key, head, row.older)
     }
 
     /// Every candidate of `key`, innermost first, appended to `out`
@@ -718,7 +867,47 @@ impl Scopes {
     /// step a candidate, plus one [`Scopes::search`] per visible layer. No
     /// allocation when `out` has capacity.
     pub fn candidates(&self, key: Key, out: &mut Vec<Found>) {
-        todo!("R4c")
+        // No head step: every binder of the chain is a candidate and counted
+        // as one.
+        let mut binder = self.heads.get(key.0 as usize).copied().unwrap_or(NONE);
+        let mut layer = self.scopes[self.current as usize].opens;
+        while binder != NONE || layer != NONE {
+            let row = match layer {
+                NONE => None,
+                layer => Some(self.layers[layer as usize]),
+            };
+            match row {
+                // The layer is younger than the binder: its members first
+                // (`components` before `next`, compiler/ml/env.ml:207-213).
+                Some(row) if binder == NONE || row.mark > binder => {
+                    if let Some(first) = self.search(row.table, key) {
+                        let (pool, _) = self.rows(row.table);
+                        for member in first..pool.len() as u32 {
+                            if pool[member as usize].key != key.0 {
+                                break;
+                            }
+                            #[cfg(test)]
+                            super::steps::tick();
+                            out.push(Found {
+                                item: self.resolved(row.table, member),
+                                layer,
+                            });
+                        }
+                    }
+                    layer = row.older;
+                }
+                // `current` before the opened layer: the binder is younger.
+                _ => {
+                    #[cfg(test)]
+                    super::steps::tick();
+                    out.push(Found {
+                        item: Resolved::binder(Binder(binder)),
+                        layer: NONE,
+                    });
+                    binder = self.binders.previous[binder as usize];
+                }
+            }
+        }
     }
 
     // ----- R4d: dependencies as member tables -----
