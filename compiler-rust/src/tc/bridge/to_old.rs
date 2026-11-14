@@ -4086,6 +4086,7 @@ mod round_trip {
                 .collect::<Vec<_>>()
         };
         assert_eq!(templates(a), templates(b));
+        assert_eq!(a.template_pools, b.template_pools);
         let (a, b) = (&a.signature, &b.signature);
         same!(a, b; unit, bytes, strings, ranges, indices, identifiers, paths, longidents,
             ordered_items, signatures, values, modules, module_types, type_details,
@@ -4096,6 +4097,26 @@ mod round_trip {
             constant_arguments, ffi_attributes, ffi_params, ffi, external_declarations,
             external_modules, inline_constants, variants, row_fields, packages, variance,
             locations, descriptor_extras, mutabilities, roots);
+    }
+
+    #[test]
+    fn shared_and_stored_publications_have_identical_segment_pools() {
+        let options = crate::driver::CompilerOptions {
+            nopervasives: true,
+            ..Default::default()
+        };
+        let result = crate::driver::compile_source_in_process(
+            SAMPLE, "Sample.res", "Sample", &options,
+            &crate::cmi::persistent_env::ModuleRegistry::new(), false, None,
+        ).expect("compiles");
+        let shared = result.pers_struct.expect("published signature");
+        let stored = std::sync::Arc::new(shared.as_ref().clone());
+        assert!(shared.with_shared_graph(|_| ()).is_some());
+        assert!(stored.with_shared_graph(|_| ()).is_none());
+        let ctx = crate::types::context::TypeContext::new(std::sync::Arc::new(crate::context::IdGenerator::new()));
+        let direct = shared.with_published_graph(&ctx, segment_of).unwrap();
+        let restored = stored.with_published_graph(&ctx, segment_of).unwrap();
+        assert_same(&direct, &restored);
     }
 
     #[test]
