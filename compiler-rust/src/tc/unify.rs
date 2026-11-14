@@ -8,7 +8,9 @@
 //! recursive calls would run.
 
 use super::expand::{Memo, TypeTable};
-use super::graph::{ARROW, CONSTR, GENERIC, Graph, Mode, NONE, Node, Speculation, TUPLE, Ty, VAR};
+use super::graph::{
+    ARROW, CONSTR, Change, GENERIC, Graph, LINK, Mode, NONE, Node, Speculation, TUPLE, Ty, VAR,
+};
 use super::rows::Extras;
 use super::segment::{EXTENDED, ExtraDescriptor};
 
@@ -241,11 +243,25 @@ impl Checker {
         // levels before `update_level` (compiler/ml/btype.ml:727,
         // ctype.ml:2221-2222): link first, then lower the one node. A
         // variable cannot hold another, so the occurrence walk is skipped.
+        //
+        // Decision 6 of "R3 as designed": in `Mode::Explain`, outside a
+        // speculation whose owner restores, a failed binding must leave the
+        // levels as they were, because a failed top-level unification there
+        // undoes path compression only. So the occurrence check runs before
+        // any level is written (`occur`, `link_type`, `update_level`:
+        // ctype.ml:2216-2225), in two walks. The speculation this
+        // unification opened in `Mode::Explain` is not an owner's.
+        let own = usize::from(self.g.mode == Mode::Explain && self.depth > 0);
+        let occur_first = self.g.mode == Mode::Explain && self.g.speculation_depth <= own;
         if !target_is_var {
-            self.binding_walk(var, ty)?;
+            if occur_first {
+                self.occur(var, ty)?;
+            } else {
+                self.binding_walk(var, ty)?;
+            }
         }
         self.g.link(var, ty);
-        if (target_is_var || self.types.scoped != 0)
+        if (target_is_var || occur_first || self.types.scoped != 0)
             && let Err(clash) = self.lower_to(ty, before.level)
         {
             // `t1.desc <- d1` (ctype.ml:2224).
@@ -445,7 +461,30 @@ impl Checker {
     /// rewrote one link into another, then close the speculation without
     /// restoring anything else. O(writes since the mark). (R3a)
     pub fn undo_compress(&mut self, token: Speculation) {
-        todo!("R3a")
+        // Newest first, as OCaml's `List.iter` over the reversed log. A link
+        // is written only on a representative (`Graph::link`), so an entry
+        // whose old descriptor is a link was written by path compression;
+        // it is put back only while the node is still a link, the
+        // `ty.desc == d` test of btype.ml:800 (a link a failure later
+        // overwrote with a restored descriptor stays as it is).
+        let nested = self.g.speculation_depth > 1;
+        for index in (token.mark..self.g.trail.len()).rev() {
+            let change = self.g.trail[index];
+            let now = self.g.nodes[change.ty.0 as usize];
+            if change.before.tag() == LINK && now.tag() == LINK {
+                #[cfg(test)]
+                super::steps::tick();
+                if nested {
+                    // An enclosing owner may still restore past this point.
+                    self.g.trail.push(Change {
+                        ty: change.ty,
+                        before: now,
+                    });
+                }
+                self.g.nodes[change.ty.0 as usize] = change.before;
+            }
+        }
+        self.g.keep(token);
     }
 
     /// Restore a speculation and run the cleanup OCaml's `backtrack` runs
@@ -583,7 +622,8 @@ impl Checker {
     /// `update_level` of `ty` to `level`: [`Graph::lower`] when no type has a
     /// scope (what [`Checker::lower`] reduces to then), else
     /// [`Checker::lower`]. O(1) for the generic level, which nothing is
-    /// above; otherwise the callee's cost.
+    /// above; otherwise the callee's cost. R3d folds the unscoped branch
+    /// into [`Checker::lower`], whose own fast path it is.
     #[inline]
     fn lower_to(&mut self, ty: Ty, level: u32) -> Result<(), Clash> {
         if level == GENERIC {

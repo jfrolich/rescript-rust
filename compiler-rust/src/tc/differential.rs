@@ -907,7 +907,6 @@ mod tests {
 
     /// 10,000 cases of unification on programs without abbreviations.
     #[test]
-    #[ignore = "R3a build"]
     fn structural_tier_agrees_on_generated_cases() {
         let coverage = run_cases(Tier::Structural, 1, 100, 100);
         assert_eq!(coverage.cases, 10_000);

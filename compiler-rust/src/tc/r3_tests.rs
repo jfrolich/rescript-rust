@@ -487,7 +487,6 @@ fn binding_finds_the_variable_under_a_lower_root() {
 
 /// Links are written in OCaml's direction (O2, CHECKER_REDESIGN I.2.1).
 #[test]
-#[ignore = "R3a build"]
 fn link_directions() {
     let mut c = checker(Mode::Success);
     // A variable becomes the other node, whichever side it is on.
@@ -566,7 +565,6 @@ fn success_mode_keeps_nothing_for_a_failure() {
 /// failure undoes path compression only, restores the linked structure's
 /// descriptor (`t1'.desc <- d1`), keeps the trace and is not unexplained.
 #[test]
-#[ignore = "R3a build"]
 fn explain_mode_keeps_the_trace_and_undoes_compression() {
     let mut c = checker(Mode::Explain);
     let (l, r) = (var(&mut c), var(&mut c));
@@ -600,6 +598,34 @@ fn explain_mode_keeps_the_trace_and_undoes_compression() {
     assert_eq!(c.g.nodes[l.0 as usize].tag(), TUPLE);
     assert!(c.g.trail.is_empty());
     assert_eq!(c.g.speculation_depth, 0);
+}
+
+/// Decision 6 of section 8.6: in `Mode::Explain`, outside a speculation
+/// whose owner restores, a binding checks occurrence before it writes a
+/// level (`occur`, then `link_type`, then `update_level`;
+/// compiler/ml/ctype.ml:2216-2225). A failed top-level unification there
+/// undoes path compression only, so this pins that a binding that fails on
+/// occurrence leaves every level of the type as it was, although the type
+/// has nodes above the variable's level that the combined walk of
+/// `Mode::Success` would have lowered before it met the variable.
+#[test]
+fn explain_mode_binding_fails_before_it_lowers() {
+    let mut c = checker(Mode::Explain);
+    let v = var(&mut c);
+    c.g.begin_def();
+    let int = constr(&mut c, INT, &[]);
+    let inner = tuple(&mut c, &[int]);
+    let holder = tuple(&mut c, &[v, inner]);
+    c.g.end_def();
+    let levels: Vec<u32> = c.g.nodes.iter().map(|node| node.level).collect();
+    assert!(levels[holder.0 as usize] > levels[v.0 as usize]);
+    assert!(c.unify(v, holder).is_err());
+    let after: Vec<u32> = c.g.nodes.iter().map(|node| node.level).collect();
+    assert_eq!(after, levels, "no level was written");
+    assert_eq!(c.g.nodes[v.0 as usize].tag(), VAR);
+    assert!(c.g.trail.is_empty());
+    assert_eq!(c.g.speculation_depth, 0);
+    assert!(!c.unexplained_failure);
 }
 
 // ---------------------------------------------------------------------------
