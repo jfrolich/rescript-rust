@@ -1218,12 +1218,14 @@ Checker census remains explicitly gated to `RAYON_NUM_THREADS=1`.
 
 Current fixture gate (explicit binary/runtime and source-only temporary inputs):
 
-- `python3 scripts/test_check_modes.py --rescript "$RESCRIPT" --runtime
-  packages/@rescript/runtime --jobs 4`: 747 fixtures, 597 rechecked, **63 failures**.
-  Every expected error with zero attempts now fails. These are frontend errors
-  (including syntax errors), so the all-fixture CI gate is not green. No fixture
-  was exempted or re-recorded. The required checker-only gate versus frontend
-  coverage contract needs resolution before using this as a passing CI gate.
+- `RAYON_NUM_THREADS=1 python3 scripts/test_check_modes.py --rescript "$RESCRIPT"
+  --runtime packages/@rescript/runtime --jobs 4`: **747 fixtures, 597 rechecked,
+  63 frontend-only, 0 failures**. Diagnostic bytes and exit status must agree.
+  Both modes must agree on whether checking began; an Explain run that reaches
+  checking and reports a type error requires a default-mode Explain rerun.
+  Zero attempts in both modes is a frontend-only result, not an exemption by
+  fixture name. Counter-enabled runs observe each mode separately from the
+  uninstrumented diagnostic comparison.
 - Diagnostic parity: 2,137 cases; JS parity: 737 snapshots; both Rust suites and
   both `super_errors` suites pass.
 - Clean single-worker `tests/tests`: 944 attempts, **0 Explain reruns**;

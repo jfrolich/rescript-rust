@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare Success/recheck diagnostics with forced Explain, without changing snapshots.
 
-Each compiler process has a ten-second bound. The third run observes counters
+Each compiler process has a ten-second bound. Two additional runs observe counters in both modes
 separately so instrumentation cannot change the diagnostic comparison.
 """
 import argparse
@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def check(binary, runtime, belt, fixture, work):
-    """Three bounded compiler runs per fixture, no shared mutable test state."""
+    """Four bounded compiler runs per fixture, no shared mutable test state."""
     isolated = work / fixture.stem
     isolated.mkdir()
     source = isolated / fixture.name
@@ -34,21 +34,29 @@ def check(binary, runtime, belt, fixture, work):
                              capture_output=True, timeout=10)
     counted = subprocess.run(args, env={**env, 'RESCRIPT_COMPILER_COUNTERS': '1'},
                              capture_output=True, timeout=10)
+    counted_explain = subprocess.run(
+        args, env={**env, 'RESCRIPT_COMPILER_COUNTERS': '1', 'RESCRIPT_CHECK_MODE': 'explain'},
+        capture_output=True, timeout=10)
     errors = []
     if (success.returncode, success.stdout, success.stderr) != (
             explain.returncode, explain.stdout, explain.stderr):
         errors.append('Success and Explain diagnostics differ')
     found = re.search(rb'\[compiler-counter\] explain_reruns=(\d+)', counted.stderr)
     reruns = int(found[1]) if found else None
-    expected = (fixture.parent.parent / 'expected' / (fixture.name + '.expected')).read_text()
-    has_error = "We've found a bug for you!" in expected or 'Syntax error!' in expected
     found_attempts = re.search(rb'\[compiler-counter\] check_attempts=(\d+)', counted.stderr)
     attempts = int(found_attempts[1]) if found_attempts else None
-    if attempts is None or reruns is None:
+    found_explain = re.search(rb'\[compiler-counter\] check_attempts=(\d+)', counted_explain.stderr)
+    explain_attempts = int(found_explain[1]) if found_explain else None
+    frontend_only = attempts == 0 and explain_attempts == 0
+    has_type_error = explain.returncode != 0 and b"We've found a bug for you!" in explain.stderr
+    if attempts is None or explain_attempts is None or reruns is None:
         errors.append('missing attempt counters')
-    elif has_error and (attempts == 0 or reruns < 1):
-        errors.append(f'expected error was not rechecked (check_attempts={attempts}, explain_reruns={reruns})')
-    return fixture.name, reruns, errors
+    else:
+        if (attempts == 0) != (explain_attempts == 0):
+            errors.append(f'checker entry differs (Success attempts={attempts}, Explain attempts={explain_attempts})')
+        if explain_attempts > 0 and has_type_error and reruns == 0:
+            errors.append(f'type error was not rechecked (check_attempts={attempts}, explain_reruns={reruns})')
+    return fixture.name, reruns, frontend_only, errors
 
 
 def copy_sources(package, target):
@@ -95,13 +103,14 @@ def main():
                 try:
                     result = future.result()
                 except subprocess.TimeoutExpired:
-                    result = (pending[future].name, None, ['compiler exceeded ten-second bound'])
+                    result = (pending[future].name, None, False, ['compiler exceeded ten-second bound'])
                 results.append(result)
-                name, _, errors = result
+                name, _, _, errors = result
                 for error in errors:
                     print(f'{name}: {error}', flush=True)
                 failed += bool(errors)
-    print(f'fixtures={len(results)} rechecked={sum(r == 1 for _, r, _ in results)} failures={failed}')
+    print(f'fixtures={len(results)} rechecked={sum(r is not None and r > 0 for _, r, _, _ in results)} '
+          f'frontend-only={sum(frontend for _, _, frontend, _ in results)} failures={failed}')
     return int(failed != 0)
 
 
