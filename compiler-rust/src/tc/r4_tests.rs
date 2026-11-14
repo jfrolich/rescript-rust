@@ -571,7 +571,6 @@ fn wide_segment(n: u32) -> Arc<Segment> {
 
 /// Reaches: R4a.
 #[test]
-#[ignore = "R4a build"]
 fn names_are_interned_once_and_dense() {
     let mut s = Scopes::new();
     let a = s.names.intern("alpha");
