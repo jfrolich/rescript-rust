@@ -297,7 +297,10 @@ impl Bir {
 
     fn mark_captures(&mut self, root: NodeId) -> Result<(), bridge::Unsupported> {
         let epoch = self.next_capture_epoch();
-        let mut stack = vec![(root, 0u32, 1u32)];
+        // The completed arena already supplies a bound on pending children.
+        // Reserve once rather than reallocating on wide completed units.
+        let mut stack = Vec::with_capacity(self.nodes.len());
+        stack.push((root, 0u32, 1u32));
         while let Some((id, depth, weight)) = stack.pop() {
             let view = self.view(id);
             let children = view.children();
