@@ -9665,13 +9665,14 @@ fn moregen_occur(ctx: &TypeContext, env: &Env, level: i32, ty: TypeExprRef) -> T
         Ok(())
     }
 
-    // OCaml compiler/ml/ctype.ml:2934-2952 checks that subject-side generic
-    // variables are not captured before lowering the candidate with
-    // `update_level`.
+    // OCaml compiler/ml/ctype.ml:2901-2919 checks that subject-side generic
+    // variables are not captured before lowering the candidate with the
+    // raising `update_level`: a constructor that would escape the variable's
+    // level fails `moregen`, which `moregeneral` (ctype.ml:3104-3124) turns
+    // into `false`, before the variable is linked.
     let mut seen = TypeExprRefSet::new();
     occur(ctx, level, ty, &mut seen)?;
-    update_level_expand(ctx, env, level, ty);
-    Ok(())
+    update_level_checked(ctx, env, level, ty)
 }
 
 fn moregen_list(
