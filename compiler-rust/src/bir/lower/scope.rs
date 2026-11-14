@@ -13,13 +13,18 @@ pub(crate) struct Uses {
 /// The position fact of one reference (THREE_TREES 11.4, "T4a as built"):
 /// its node and the next site of the same variable. The statement the
 /// reference is in and its parent are read from the node when the top level
-/// is complete (`lower::export`).
+/// is complete (`lower::export`). A reference to an imported module has a
+/// site too (THREE_TREES 11.4, "T5 part B as built"): the naming log reads
+/// the sites of a function scope at its close, and a release clears the
+/// site of a module reference as it clears a variable's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Site {
-    /// The `Var` node, or `NodeId(u32::MAX)` once it was released.
+    /// The `Var` or `JQualified` node, or `NodeId(u32::MAX)` once it was
+    /// released.
     pub(crate) node: NodeId,
     /// The site of the same variable recorded before this one, plus one;
-    /// zero ends the chain.
+    /// zero ends the chain. Zero for a module reference: no chain is kept
+    /// per import (nothing reads the references of one import).
     pub(crate) next: u32,
 }
 
@@ -82,7 +87,7 @@ impl Decision {
 #[derive(Default)]
 pub(crate) struct Scope {
     pub(crate) uses: Vec<Uses>,
-    /// One per `Var` node ever built, in creation order.
+    /// One per `Var` and per `JQualified` node ever built, in creation order.
     pub(crate) sites: Vec<Site>,
     /// The last site of each variable plus one, zero for none. Dense by VarId.
     pub(crate) site_heads: Vec<u32>,
@@ -100,9 +105,8 @@ pub(crate) struct Scope {
     pub(crate) import_uses: Vec<u32>,
     /// The tables of the external-shadow decision (`globals::decide`).
     pub(crate) globals: super::globals::Globals,
-    /// The naming log (`names.rs`). For tests only until the lowering
-    /// feeds it (THREE_TREES 11.4, "T5 part B as redesigned").
-    #[cfg(test)]
+    /// The naming log (`names.rs`, THREE_TREES 11.4, "T5 part B as
+    /// redesigned").
     pub(crate) names: super::names::Log,
     #[cfg(test)]
     pub(crate) updates: usize,
@@ -115,6 +119,7 @@ impl Scope {
         self.uses.reserve(self.uses.len());
         self.facts.reserve(self.facts.len());
         self.decisions.reserve(self.decisions.len());
+        self.names.reserve_repeat();
     }
     #[cfg(test)]
     pub(super) fn capacities(&self) -> [usize; 6] {
@@ -125,13 +130,14 @@ impl Scope {
     /// Allocate zeroed rows once at lowering entry. Cost: O(variables).
     #[cfg(test)]
     pub(crate) fn new(variables: usize) -> Self {
-        Self::with_capacity(variables, variables)
+        Self::with_capacity(variables, variables, 0)
     }
 
     /// Initialize source rows with reserved room for known generated bindings.
-    /// Cost: O(V): initializes V variable rows in each of three columns, with reserved
-    /// capacity C >= V; no source nodes or use sites are walked.
-    pub(super) fn with_capacity(variables: usize, capacity: usize) -> Self {
+    /// Cost: O(V): initializes V variable rows in each of four columns (the
+    /// fourth is the naming log's), with reserved capacity C >= V; no source
+    /// nodes or use sites are walked. `functions` sizes the naming log's rows.
+    pub(super) fn with_capacity(variables: usize, capacity: usize, functions: usize) -> Self {
         assert!(variables <= capacity);
         let mut uses = Vec::with_capacity(capacity);
         let mut site_heads = Vec::with_capacity(capacity);
@@ -139,7 +145,13 @@ impl Scope {
         uses.resize(variables, Uses::default());
         site_heads.resize(variables, 0);
         facts.resize(variables, VarFacts::default());
-        Self { uses, site_heads, facts, ..Self::default() }
+        Self {
+            uses,
+            site_heads,
+            facts,
+            names: super::names::Log::with_capacity(variables, capacity, functions),
+            ..Self::default()
+        }
     }
 
     /// Account for one constructed or released reference to an imported
@@ -166,6 +178,14 @@ impl Scope {
         let head = &mut self.site_heads[var.index()];
         self.sites.push(Site { node, next: *head });
         *head = index + 1;
+        index
+    }
+
+    /// Record the reference `node` to an imported module where it is built.
+    /// Returns the site's index, which the node keeps. Cost: one push.
+    pub(crate) fn import_site(&mut self, node: NodeId) -> u32 {
+        let index = u32::try_from(self.sites.len()).expect("site capacity");
+        self.sites.push(Site { node, next: 0 });
         index
     }
 

@@ -3040,7 +3040,7 @@ fn transform_float_literal(float_str: &str) -> String {
     out
 }
 
-fn unwrap_uppercase_exotic(name: &str) -> &str {
+pub(crate) fn unwrap_uppercase_exotic(name: &str) -> &str {
     let bytes = name.as_bytes();
     if bytes.len() >= 3 && bytes[0] == b'\\' && bytes[1] == b'"' && bytes[bytes.len() - 1] == b'"' {
         &name[2..name.len() - 1]
@@ -3517,7 +3517,7 @@ pub(crate) fn is_valid_js_ident(s: &str) -> bool {
     !is_reserved_word(s)
 }
 
-fn property_access_uses_dot(s: &str) -> bool {
+pub(crate) fn property_access_uses_dot(s: &str) -> bool {
     let s = unwrap_uppercase_exotic(s);
     if s.is_empty() {
         return false;
@@ -3759,7 +3759,7 @@ fn is_printable_jsx(a: &JsArena, e: Expr, jsx_preserve: bool) -> bool {
 
 /// `is_jsx_value_name`: an element name that JSX reads as a value rather
 /// than an intrinsic element: one not starting with a lowercase letter.
-fn is_jsx_value_name(name: &str) -> bool {
+pub(crate) fn is_jsx_value_name(name: &str) -> bool {
     match name.as_bytes() {
         [first, rest @ ..] => {
             (first.is_ascii_uppercase() || matches!(first, b'_' | b'$'))
@@ -3771,7 +3771,7 @@ fn is_jsx_value_name(name: &str) -> bool {
 
 /// `is_jsx_attribute_name`: a JSX identifier, which may contain `-`.
 /// `__proto__` would set the prototype of the props object.
-fn is_jsx_attribute_name(name: &str) -> bool {
+pub(crate) fn is_jsx_attribute_name(name: &str) -> bool {
     match name.as_bytes() {
         [] => false,
         _ if name == "key" || name == "__proto__" => false,
@@ -3782,7 +3782,7 @@ fn is_jsx_attribute_name(name: &str) -> bool {
     }
 }
 
-fn is_jsx_name_char(c: u8, dash: bool) -> bool {
+pub(crate) fn is_jsx_name_char(c: u8, dash: bool) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, b'_' | b'$') || (dash && c == b'-')
 }
 

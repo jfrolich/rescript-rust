@@ -13,7 +13,6 @@ mod cond;
 mod exit;
 mod export;
 mod globals;
-#[cfg(test)]
 pub(crate) mod names;
 mod expr;
 mod konst;
@@ -330,6 +329,24 @@ pub(crate) struct SwitchStats {
     /// zero until check mode compares.
     #[serde(flatten)]
     pub decisions: DecisionStats,
+    /// The naming log's replay against the naming pass on the lowering's
+    /// program (THREE_TREES 11.4, "T5 part B as redesigned" (d)), zero
+    /// until check mode compares.
+    #[serde(flatten)]
+    pub names: crate::emit::NameStats,
+    /// What the replay did.
+    #[serde(flatten)]
+    pub replayed: names::Replayed,
+    /// Nodes `names::adopt` read (`Log::adopted_nodes`).
+    pub adopted_nodes: usize,
+    /// The steps of the naming log (`Log::steps`) and of its replay
+    /// (`Replayed::steps`), without those of the tables.
+    pub name_log_steps: usize,
+    pub name_replay_steps: usize,
+    /// One when check mode compared the names, one in `names_uncompared`
+    /// when the pass does not support the unit.
+    pub names_compared: usize,
+    pub names_uncompared: usize,
 }
 
 /// The decisions of step A (`close::decide`) compared with those of the
@@ -374,6 +391,13 @@ pub(crate) struct Lowered {
     pub coerced: export::Coerced,
     pub dynamic_imports: Vec<crate::js_ir::ModuleId>,
     pub switch_stats: SwitchStats,
+    /// The names of the naming log's replay (`names::replay`) by import
+    /// and the cached bounds; the names by variable are the arena's
+    /// `Vars::printed`. Compared with the pass in check mode, not printed.
+    /// What the replay did is in `SwitchStats::replayed`.
+    pub printed: crate::emit::Printed,
+    /// The imports the replay named in the program, in its order.
+    pub name_imports: Vec<crate::bir::ImportId>,
 }
 
 /// N1: C:663 compile_deps_program_in_arena; one fresh J arena for this migration cut.
@@ -383,7 +407,7 @@ pub(crate) fn lower(
     locations: Option<&crate::lambda::LamLocTable>,
     direct: bool,
 ) -> Result<Lowered, Unsupported> {
-    unit::lower(input, locations, direct, None, false, true)
+    unit::lower(input, locations, direct, None, false, true, false)
 }
 
 /// H2: C:1266 compile_external_field_apply; summaries are read-only inputs.
@@ -394,8 +418,9 @@ pub(crate) fn lower_with_resolver(
     resolver: Option<&crate::js_ir::ModulePathResolver>,
     cross_module_inline: bool,
     check_div_by_zero: bool,
+    jsx_preserve: bool,
 ) -> Result<Lowered, Unsupported> {
-    unit::lower(input, locations, direct, resolver, cross_module_inline, check_div_by_zero)
+    unit::lower(input, locations, direct, resolver, cross_module_inline, check_div_by_zero, jsx_preserve)
 }
 
 /// One immutable summary acquisition per imported module; indexed by ImportId.
@@ -420,6 +445,8 @@ struct State {
     /// A module/member pair has no canonical dense handle; individual component handles do not index their sparse Cartesian product.
     call_arity_index: std::collections::HashMap<(crate::bir::ImportId, crate::bir::StrId), Option<call::AritySpan>>,
     eta_arguments: Vec<NodeId>,
+    /// The storage of the naming log's replay (`replay_names`).
+    names: names::Storage,
     calls: Vec<Option<call::Plan>>,
     tail_order: Vec<VarId>,
     rec_members: Vec<rec::Member>,
@@ -582,7 +609,7 @@ impl State {
             assert_eq!(made, var);
             arena.vars.flags[i] = input.arena.vars.flags[i];
         }
-        let mut scope = scope::Scope::with_capacity(arena.vars.len(), output_vars);
+        let mut scope = scope::Scope::with_capacity(arena.vars.len(), output_vars, arena.vars.funcs.len());
         scope.decisions.reserve_exact(output_vars);
         // Reference sites are indexed by emitted nodes, not by source binders.
         scope.sites.reserve_exact(output_nodes);
@@ -674,6 +701,7 @@ impl State {
             catch_walk_steps: 0,
             export_vars: input.export_vars,
             coercion: Default::default(),
+            names: names::Storage::default(),
         }
     }
     /// K1: C:1529 compile_expr. Direct mode is the bounded P1 oracle: convert
@@ -799,6 +827,10 @@ impl State {
         // THREE_TREES 11.4, "T5 design": every list is the one the flatten
         // pass receives, so the bindings around a reference are final.
         globals::decide(&mut self.arena, &self.idents);
+        let mut printed = crate::emit::Printed::default();
+        let (replayed, name_imports) = self.replay_names(root, &mut printed);
+        let (adopted_nodes, name_log_steps) = self.arena.js_scope.as_ref()
+            .map_or((0, 0), |scope| (scope.names.adopted_nodes, scope.names.steps));
         let (close_steps, globals_qualified, global_steps) = self.arena.js_scope.as_ref()
             .map_or((0, 0, 0), |scope| (scope.close_steps, scope.globals.qualified, scope.globals.steps));
         Lowered {
@@ -818,8 +850,63 @@ impl State {
                 globals_qualified,
                 global_steps,
                 decisions: DecisionStats::default(),
+                names: crate::emit::NameStats::default(),
+                replayed,
+                adopted_nodes,
+                name_log_steps,
+                name_replay_steps: replayed.steps(),
+                names_compared: 0,
+                names_uncompared: 0,
             },
+            printed,
+            name_imports,
         }
+    }
+
+    /// The names of the finished unit whose root block is `root`
+    /// (`names::replay`, after `globals::decide`): the variables' in the
+    /// arena's `Vars::printed`, the modules' and the cached bounds in
+    /// `printed`; what the replay did and the imports it named in the
+    /// program. The
+    /// program's imports are those with a live reference that are neither
+    /// dynamic nor unresolved, in the order of the module list
+    /// (`lam_compile::module_sort_cmp`). The replay's storage is the
+    /// state's (`names::Storage`), sized here once per unit
+    /// (`names::Storage::reserve`). Cost: one step per import and a sort of
+    /// the named ones, one per reservation, and `names::replay`.
+    fn replay_names(&mut self, root: NodeId, printed: &mut crate::emit::Printed) -> (names::Replayed, Vec<crate::bir::ImportId>) {
+        let mut storage = std::mem::take(&mut self.names);
+        let scope = self.arena.js_scope.as_ref().expect("lowering scope");
+        let modules = &self.arena.pools.j_modules;
+        storage.reserve(&self.arena);
+        storage.imports.clear();
+        storage.imports.extend((0..modules.len())
+            .filter(|&index| {
+                let module = &modules[index];
+                scope.import_uses.get(index).is_some_and(|&uses| uses > 0)
+                    && !module.dynamic_import
+                    && self.resolver.as_ref().is_none_or(|resolver| resolver.resolve_module_path(module).is_some())
+            })
+            .map(|index| crate::bir::ImportId(index as u32)));
+        storage.imports.sort_by(|a, b| crate::lambda::lam_compile::module_sort_cmp(&modules[a.index()], &modules[b.index()]));
+        let names::Storage { tables, scratch, imports, reservations } = &mut storage;
+        let program = names::Program {
+            imports,
+            reservations,
+            exports: &self.coercion.selected,
+            raw: &scope.globals.raw,
+        };
+        // The names of the variables are written in the arena's own
+        // column (`Vars::printed`, one entry per variable, unused until
+        // now): the replay borrows it and gives it back.
+        printed.names = std::mem::take(&mut self.arena.vars.printed);
+        let replayed = names::replay(&self.arena, root, &self.idents, &program, tables, scratch, printed);
+        self.arena.vars.printed = std::mem::take(&mut printed.names);
+        // The named imports leave with the unit; the rest of the storage
+        // stays the state's.
+        let imports = std::mem::take(&mut storage.imports);
+        self.names = storage;
+        (replayed, imports)
     }
 }
 
@@ -851,6 +938,8 @@ impl ProbeRules for State {
                 return Ok(ProbePlan::Children(expr::Resume::Call(call)));
             }
             View::Fun { body, header } => {
+                // The body is lowered next, inside the function's scope.
+                names::open(&mut self.arena);
                 return Ok(ProbePlan::Children(expr::Resume::Fun { body, header, loop_: self.tail_functions.get(node.index()).copied().flatten() }));
             }
             View::Let { var, value, body } => {

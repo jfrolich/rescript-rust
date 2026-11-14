@@ -921,6 +921,19 @@ pub(crate) struct LowerPair {
     pub locations: Option<std::sync::Arc<crate::lambda::LamLocTable>>,
 }
 
+/// The naming log's replay of one unit, for `emit::compare_with_pass`.
+pub(crate) struct NameInput {
+    pub printed: crate::emit::Printed,
+    /// The identifier of each variable (through its origin) and of each
+    /// import.
+    pub idents: Vec<crate::ident::Ident>,
+    pub modules: Vec<crate::ident::Ident>,
+    pub free: crate::emit::FreeLists,
+    /// The program's imports as the replay named them: the module list of
+    /// the lowering's program.
+    pub imports: Vec<crate::js_ir::ModuleId>,
+}
+
 /// What the new lowering hands to the shared tail of the gate.
 pub(crate) struct LowerCandidate {
     pub arena: crate::js_ir::arena::JsArena,
@@ -937,6 +950,8 @@ pub(crate) struct LowerCandidate {
     /// The references of `arena` the lowering decided to print as
     /// `globalThis.name` (`lower::globals`, `bridge_j::qualify`).
     pub qualified: Vec<crate::js_ir::arena::Expr>,
+    /// What check mode compares with the naming pass.
+    pub names: NameInput,
 }
 
 /// Step A's decisions (`lower::close`) against the legacy tail-call pass's
@@ -992,13 +1007,14 @@ pub(crate) fn prepare_lower(
     resolver: Option<&crate::js_ir::ModulePathResolver>,
     cross_module_inline: bool,
     check_div_by_zero: bool,
+    jsx_preserve: bool,
 ) -> Result<LowerCandidate, LowerFailure> {
     let (input, catch_only) = super::bridge::import_for_lowering(arena, root);
     let input = input.map_err(|reason| match reason.0 {
         "shared Lambda subtree with binder" | "shared Lambda expansion" => LowerFailure::Unsupported(reason, catch_only),
         _ => LowerFailure::Error(anyhow::anyhow!("lower input import: {reason}")),
     })?;
-    let lowered = super::lower::lower_with_resolver(input, locations, false, resolver, cross_module_inline, check_div_by_zero).map_err(|reason| LowerFailure::Unsupported(reason, false))?;
+    let lowered = super::lower::lower_with_resolver(input, locations, false, resolver, cross_module_inline, check_div_by_zero, jsx_preserve).map_err(|reason| LowerFailure::Unsupported(reason, false))?;
     lowered
         .program
         .arena
@@ -1014,7 +1030,7 @@ pub(crate) fn prepare_lower(
     if arena.node_count() <= 128 {
         let (direct, _) = super::bridge::import_for_lowering(arena, root);
         let direct = direct.map_err(|e| LowerFailure::Error(anyhow::anyhow!("direct import: {e}")))?;
-        let direct = super::lower::lower_with_resolver(direct, locations, true, resolver, cross_module_inline, check_div_by_zero)
+        let direct = super::lower::lower_with_resolver(direct, locations, true, resolver, cross_module_inline, check_div_by_zero, jsx_preserve)
             .map_err(|e| LowerFailure::Error(anyhow::anyhow!("direct lower: {e}")))?;
         let direct = super::bridge_j::export_js(&direct.program)
             .map_err(|e| LowerFailure::Error(anyhow::anyhow!("direct export: {e}")))?;
@@ -1041,6 +1057,17 @@ pub(crate) fn prepare_lower(
         .collect();
     let mut stats = lowered.switch_stats;
     stats.decisions.decision_reclosed = scope.decisions.len() - decisions.len();
+    let bir = &lowered.program.arena;
+    let names = NameInput {
+        idents: (0..bir.vars.len())
+            .map(|var| lowered.program.idents[bir.vars.j_origin[var].index()])
+            .collect(),
+        modules: bir.pools.j_modules.iter().map(|module| module.id).collect(),
+        free: super::lower::names::free_lists(bir, &lowered.program.idents),
+        imports: lowered.name_imports.iter().map(|import| bir.pools.j_modules[import.index()].clone()).collect(),
+        // The variables' names are in the arena's column.
+        printed: crate::emit::Printed { names: bir.vars.printed.clone(), ..lowered.printed },
+    };
     Ok(LowerCandidate {
         decisions,
         qualified,
@@ -1050,6 +1077,7 @@ pub(crate) fn prepare_lower(
         reservations: lowered.coerced.reservations,
         dynamic_imports: lowered.dynamic_imports,
         stats,
+        names,
     })
 }
 
@@ -1155,7 +1183,7 @@ mod lower_tests {
         let body = arena.var(id);
         let binding = arena.let_(crate::lambda::lam_compat::LetKind::Strict, id, constant, body);
         let root = arena.seq_raw(binding, binding);
-        let result = prepare_lower(&arena, root, None, None, false, true);
+        let result = prepare_lower(&arena, root, None, None, false, true, false);
         assert!(matches!(result, Err(LowerFailure::Unsupported(
             super::super::bridge::Unsupported("shared Lambda subtree with binder"), false
         ))));

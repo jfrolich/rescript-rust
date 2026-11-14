@@ -283,6 +283,7 @@ impl State {
         cases: &[(String, T)],
         value: impl Fn(&mut Bir, &T) -> NodeId,
     ) -> NodeId {
+        super::names::open(&mut self.arena);
         let keys = crate::bir::KeySpan {
             start: u32::try_from(self.arena.pools.switch_keys.len()).expect("key pool capacity"),
             len: u32::try_from(cases.len()).expect("switch capacity"),
@@ -316,6 +317,9 @@ impl State {
                     loc: None,
                 });
         }
+        // The scrutinee was built before the function's scope opened and
+        // moves into it (G10).
+        super::names::adopt(&mut self.arena, &self.idents, arg);
         let header = self.arena.switch_record(crate::bir::SwitchRecord {
             constants: keys.len,
             keys,
@@ -333,6 +337,7 @@ impl State {
             crate::lambda::LamLoc::NONE,
         );
         let callee = self.pure_expression(View::JFun { body, header }, 0);
+        super::names::close(&mut self.arena, &self.idents, header);
         self.call_node(callee, &[], Default::default())
     }
 

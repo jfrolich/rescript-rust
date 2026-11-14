@@ -1239,7 +1239,7 @@ texts stay equal.
 | T4a (done) | Export extraction and coercion on top-level rows (`bir/lower/export.rs`, S3.9b), with the position facts of finding 2 as sites ("T4a as built") | `extract_toplevel_exports`, `coerce_lowered_output` | - |
 | T4b (done, RESULT B) | Counterexample: R5 changes the `simplify_if_head` reader of a copied branch; read sites through P1 instead | Nothing; P1 stays until T6 | - |
 | T4c (done, counterexamples) | The statuses and the site of step A, computed and compared in check mode; no splice ("T4c design") | Nothing; P3 stays until P1 (T6) and P2 (T5) have left | T4a, T4b |
-| T5b (redesigned; slices T5b-1 to T5b-3 not built) | The naming log: scope rows and free lists recorded by the lowering, replayed over the final statement lists ("T5 part B as redesigned") | Nothing yet; the naming pass stays the oracle | T1 |
+| T5b (done; check mode only) | The naming log: scope rows and free lists recorded by the lowering, replayed over the final statement lists ("T5 part B as redesigned", "T5 part B as built") | Nothing yet; the naming pass stays the oracle until T6 prints the replay's names | T1 |
 | T4g | The splice of step A, late marks, late zero, graves, the counter (11.6) | `apply_js_tailcall_inline_pass` | T5, T6 |
 | T4d | Step B | `apply_js_record_rest_pass` | T4g |
 | T4e | Steps C and D | `apply_js_flatten_and_mark_dead_pass` | T4d |
@@ -1724,11 +1724,12 @@ runs by default changed.
 
 #### T5 part B as redesigned
 
-Status: design and skeleton (`bir/lower/names.rs`, the tables in
-`emit/naming.rs`, 44 ignored acceptance tests); nothing is built. Reviewed
-once: see "Decided in review" at the end of this section. "Verified"
-below means read in the code at the cited place or pinned by a test that
-runs today; "read" means read only. The three gaps of "T5 as built: part B"
+Status: built ("T5 part B as built", after this section). This section is
+the design the three slices were built from; where the build changed it, the
+statement here is corrected and the reason is in "as built". Reviewed once:
+see "Decided in review" at the end of this section. "Verified" below means
+read in the code at the cited place or pinned by a test; "read" means read
+only. The three gaps of "T5 as built: part B"
 were checked against the code and are as described:
 
 - G1 (a): `Log::reference` joined a run only when the variable's one
@@ -1801,33 +1802,36 @@ function literal its header. The replay reads it there.
 | Name | What it is | Bytes | Written where |
 | --- | --- | ---: | --- |
 | naming event | Not stored. `Declare`, `Binder`, the cached bound: read from the statement the replay reaches. `Enter`, `Params`, `Leave`: a scope row | 0 | - |
-| `ScopeRow` | One function literal: the printed header, its free list as a run of `Log::free`, flags (`CLOSED`, `ETA`, `THIS_USED`, `COPY`) | 16 | `names::open` pushes it (`State::enter`, `View::Fun`; the three sites of G9); `names::close` fills it (`finish_expression`, after the `JFun` is built) |
+| `ScopeRow` | One function literal: the printed header, its free list as a run of `Log::free`, flags (`CLOSED`, `ETA`, `FIRST_READ`, `COPY`) | 16 | `names::open` pushes it (`State::enter`, `View::Fun`; the three sites of G9); `names::close` fills it (`finish_expression`, after the `JFun` is built) |
 | `FreeRef` | One entry of a free list: a variable or an import | 4 | `names::close` |
-| home, per variable | The row whose scope was innermost when the binder was written; for a parameter the row that closed with it | 4 | `Log::bind` from `Bir::bind`; parameters in `names::close` |
-| seen, per variable and per import | The row that last put it in its run (deduplication) | 4 | `names::close`; `Log::import_reference` from `Bir::register_kind` |
+| `Place`, per variable | Home: the row whose scope was innermost when the binder was written, for a parameter the row that closed with it. Seen: the row that last put the variable in its run (deduplication) | 8 | `Log::bind` from `Bir::bind`; parameters and seen in `names::close` |
+| seen, per import | The row that last put the import in its run | 4 | `names::close`, `names::adopt` |
+| `Child` | A closed direct child of an open scope: its site range and its row | 12 | `names::close` |
 | row of a header | Dense by `FuncId` | 4 | `names::close`, `Log::copied` |
 | `Open` | An open scope: its row and where its sites, run and children start | 16 | `names::open` |
-| reference | Nothing new: the site `Scope::site` already records (T4a) | 0 | `Bir::allocate`, unchanged |
+| reference | To a variable: the site `Scope::site` already records (T4a). To an imported module: a site of the same kind (`Scope::import_site`), 8 bytes a reference | 0 and 8 | `Bir::allocate` |
 | adopted expression | Nothing stored: `names::adopt` puts what a moved expression reads in the open scope's run; `Log::adopted_nodes` counts the nodes read | 0 | `names::adopt`, at the two sites of G10 |
 | `Subject` | An identifier handed to the tables: slot, stamp, name | 16 | built by the replay per call |
-| `GroupRow`, `Saved`, `Level` | The suffix table of a base, a saved row, a scope's undo marks | 16, 24, 12 | `emit::naming::Tables` |
+| `GroupRow`, `Saved`, `Level` | The suffix table of a base, a saved row (with the `born` mark of its group), a scope's undo marks | 16, 24, 12 | `emit::naming::Tables` |
 | `Frame` | One level of the replay's walk over statement lists | 12 | `names::replay` |
 
 Every size is pinned (`row_sizes`, `replay_sizes`). The value passed down
 the replay's walk is a `Frame` (12 bytes); the value passed to a table call
 is a `Subject` (16).
 
-*No body is walked for a name.* The free variables of a function are read
-from the sites built while its scope was open: at the close, the sites
-since the scope opened, without the ranges of its closed children, one step
-each. A site is read at one close. Nothing is done where a reference is
-built, with one exception: an expression that was built before its
+*No body is walked for a name.* The free variables and imports of a
+function are read from the sites built while its scope was open: at the
+close, the sites since the scope opened, without the ranges of its closed
+children, one step each; a closed child that is still live gives its free
+list. A site is read at one close. Where a reference is built, its site is
+pushed and nothing else is done, with one exception: an expression that was built before its
 function's scope opened is read once where it moves in (`names::adopt`,
 G10). The first pass cannot record that fact: when the argument is lowered
 nobody knows it will end inside a function, and a site range over it would
-include the statements hoisted out of it. This is the only place where an
-expression is read for a reference, and `adopted_nodes` reports what it
-costs. The replay reads statement lists and scope rows, never an
+include the statements hoisted out of it. This is one of two places where
+an expression is read for a reference, and `adopted_nodes` reports what it
+costs; the second is the JSX rule of "T5 part B as built", item 4 (in a
+unit that preserves JSX only). The replay reads statement lists and scope rows, never an
 expression: a function literal inside an expression is reached from its
 row, by reading the ancestors of its node up to its statement (the form of
 `globals::decide`: from a recorded place towards the root, a node read at
@@ -1868,21 +1872,21 @@ not touched: it is the oracle.
 | G2 statement after its events | No event: the replay reads the final lists | `a_statement_is_named_where_it_stands_at_the_end` | one step per final statement |
 | G3 warm replay | `Tables` (above) | `a_warm_replay_of_a_unit_with_functions_allocates_nothing`, `warm_tables_allocate_nothing` | an undo push per assignment |
 | G3 raw names | `Program::raw`, filled where `globals::decide` already reads every variable once (its step 1) | `a_suffix_skips_a_raw_javascript_name_of_the_program`, `the_tables_skip_other_bases_and_raw_names`. Today: the test of the first name in `emit/naming.rs` | one read per variable, already paid |
-| G3 `this` | `THIS_USED`: at the close, the first parameter of a method is in the run | `the_this_of_a_method_is_recorded_as_read_only_when_the_body_reads_it`, `..._is_named_only_when_the_body_reads_it`. Today: the test of the second name in `emit/naming.rs` | one comparison per run entry |
-| G5 | `FreeRef` holds an import; `Log::import_reference` | `an_imported_module_is_free_in_every_function_around_its_reference` | one read per module reference |
+| G3 `this` | `FIRST_READ`: at the close, the first parameter of the function is in the run (recorded for every function: one becomes a method after its close) | `the_this_of_a_method_is_recorded_as_read_only_when_the_body_reads_it`, `..._is_named_only_when_the_body_reads_it`. Today: the test of the second name in `emit/naming.rs` | one comparison per run entry |
+| G5 | `FreeRef` holds an import; a module reference has a site, read at the close like a variable's | `an_imported_module_is_free_in_every_function_around_its_reference`, `a_module_reference_released_before_the_close_is_not_free` | one push per module reference built, one write per release, one step at the close |
 | G6 | `Tables::synthetic`, called by the replay at a range loop whose bound is cached | `a_synthetic_name_takes_a_suffix_in_its_scope`. Today: the pass test of G6 | as a new name |
 | G7 | A released site has no node; `close` skips it | `a_reference_released_before_the_close_is_not_free` | none |
 | G8 | The replay reads the literals of a statement in closing order and counts every reservation that first names a variable in a statement with more than one literal (`ambiguous_orders`); the gate requires zero | `two_function_literals_of_one_statement_are_replayed_in_closing_order_and_counted` | one counter |
 | G9 | `open` and `close` at the three sites | the oracle tests, through `names_agree` | - |
 | G10 | `names::adopt(bir, node)`, once per moved expression between `open` and `close`: the subtree is read once; a `Var` or a module reference joins the open scope's run; a closed function literal is not entered, the free entries of its row join the run | `an_expression_built_before_the_scope_opened_is_adopted`, `the_fresh_parameter_of_a_partial_application_does_not_take_the_name_of_an_adopted_local`, `an_adopted_function_literal_gives_its_free_entries_and_is_not_entered`, `a_function_literal_inside_an_adopted_expression_is_replayed_where_it_stands`, `the_scrutinee_of_a_dispatch_function_is_adopted`, `a_module_reference_in_an_adopted_expression_is_free_in_the_function`, `ten_thousand_adopted_nodes_cost_one_step_each_and_a_literal_its_free_entries`; through the lowering: `the_naming_log_agrees_on_a_partial_application_whose_argument_reads_a_local`, `..._on_a_dispatch_function_whose_scrutinee_reads_a_local`. Today: the pass test of G10 | one step per node of the moved expression outside function literals, one per literal and per free entry of it; adopted nodes <= nodes of the moved expressions; the corpus total is reported, not bounded |
 
-Limits, stated and counted, not solved:
+Limits, stated and counted, not solved ("as built" has the list that holds
+now):
 
-- An import released before the close stays in the free list (imports have
-  a count, no sites). Visible as `free_differences`.
 - A reference or a statement released inside a function after its close
   leaves the free list as it was. Nothing in the lowering does that today
-  (read); the splice of T4g will. Visible as `free_differences`.
+  (the four corpora are at zero); the splice of T4g will. Visible as
+  `free_differences`.
 - A use names nothing in the replay. The pass names a variable at a use
   when it is not visible yet; that is a use before the declaration in the
   same scope outside a closure, which the lowering does not write (read).
@@ -1896,9 +1900,11 @@ Limits, stated and counted, not solved:
   (`take_list`, `hold_run`, `simplify_if_head`): nothing. The log holds
   nothing per statement.
 - *A statement dropped*: nothing; it is in no final list. A function
-  literal released with it has no owner node, and its row is skipped. Its
-  free variables stay in the lists of the functions around it: wrong only
-  when that was the last capture (a limit above).
+  literal released with it has no owner node, and its row is skipped. When
+  it is released before the function around it closes, it gives that
+  function nothing (a closed child gives its free list at the enclosing
+  close, and only when it is live). Released after that close, its free
+  variables stay in the lists of the functions around it (the limit above).
 - *A closed function copied* (`copy_j` through `Bir::copy_subtree`): the
   copy has a new header; `Log::copied` gives it a row that shares the
   source's free run. The copy's binders print as their origins, so the
@@ -1925,8 +1931,8 @@ Limits, stated and counted, not solved:
   - the new function: the moved references in its run, so free unless it
     binds them (it binds only its fresh parameters);
   - the enclosing scope: nothing more. It reads the moved references as its
-    own sites at its close, and the new function's close hands its free
-    entries up; both put the same variables in its run, which is what the
+    own sites at its close, and takes the new function's free entries
+    there; both put the same variables in its run, which is what the
     pass computes (`analyze_expr`, `ExprKind::Fun`:
     `used.extend(free[f])`). A variable put in a run twice is written once:
     the free list is written without duplicates after the sort;
@@ -1950,7 +1956,7 @@ binder and reference, in order" is equal exactly when, per unit:
 3. `ambiguous_orders` and `unnamed_references` are zero.
 
 `free_differences` (the free lists as multisets of identifier sequences,
-copies left out) is required to be zero as well: a wrong free list changes a
+live copies included on both sides) is required to be zero as well: a wrong free list changes a
 name only when a local of the same base exists, so the names alone would
 hide it. A unit the pass does not support is not compared and is counted.
 
@@ -1981,7 +1987,9 @@ T5b-1 and the `Tables` half of T5b-2 run in parallel (different files:
 `bir/lower/names.rs` and `bir/edit.rs` against `emit/naming.rs`). The
 replay half of T5b-2 follows T5b-1. T5b-3 is last.
 
-**(f) Build prompts.** Each is issued verbatim.
+**(f) Build prompts.** Each was issued verbatim and is kept as issued; the
+names in them (`Log::import_reference`, `THIS_USED`, `Log::new`) are those
+of the skeleton.
 
 Common to the three (part of each prompt):
 
@@ -2140,7 +2148,8 @@ first cut):
 2. Two function literals in one statement: closing order, with
    `ambiguous_orders` gated at zero; gone at T6.
 3. An import released before the close stays in the free list: a counted
-   limit (`free_differences`).
+   limit (`free_differences`). Superseded: the gate requires zero, so a
+   module reference has a site ("as built", change 1).
 4. The functions the lowering builds itself were not as assumed: two of the
    three move pre-built expressions into the function. G10 and
    `names::adopt` are the answer. What was searched for further sites, on
@@ -2154,8 +2163,8 @@ first cut):
 5. A use names nothing in the replay: accepted as the counter
    `unnamed_references`, gated at zero.
 
-Known holes in the acceptance tests, which the builders report against and
-do not work around:
+Known holes in the acceptance tests when the slices were issued (all closed:
+"as built", the tests of the replay's arms):
 
 - no tree-level test names a loop variable, a catch variable or a rest
   field through the replay; they are first exercised when T5b-3 calls
@@ -2168,6 +2177,256 @@ do not work around:
   derived on paper and have never run. A builder that finds one off by a
   fixed amount reports the measured relation and stops (the common part of
   the prompts).
+
+#### T5 part B as built
+
+Built in three slices and one finishing pass; check mode only. The lowering
+records the log in every mode in which it runs (it runs in check mode only);
+the replay runs at `State::finish`; check mode compares its names with the
+naming pass and drops them. No output changes.
+
+**The log** (`bir/lower/names.rs`, on the arena's `Scope`).
+
+- One `ScopeRow` per function literal (16 bytes), pushed by `names::open`
+  and written by `names::close` once the `JFun` exists: the printed header,
+  the free list as a run of `Log::free`, and `CLOSED`, `ETA`, `FIRST_READ`,
+  `COPY`.
+- One `Place` per variable (8 bytes): its home and the row that last put it
+  in a run.
+- One site per reference, to a variable or to an imported module, pushed
+  where the node is built, cleared where it is released, moved with the
+  content by `Bir::replace`.
+- `names::close`: the parameters get the row as home; the scope's own sites
+  (outside its closed children) are read, one step each; each closed direct
+  child that is still live gives its free list; the entries whose home is
+  not the row are sorted by `Ident::cmp` and written, one per identifier.
+- `names::adopt`: the first of two named reads of an expression (G10), at
+  `apply_with_arity` and `external_dispatch`; the second is the JSX rule
+  (item 4 below).
+- `Log::copied` and `Log::bind` from `Bir::copy_subtree` and `Bir::bind`.
+
+**The tables** (`emit::naming::Tables`): the pass's rule on dense rows with
+an undo stack, as designed. `Saved` holds the `born` mark of its group (in
+its padding); `Tables::size` gives every vector its length once per unit.
+
+**The replay** (`names::replay`, `names::Storage` in the lowering state): a
+prelude that attaches each live row to the statement its literal stands in
+(the literal's ancestors, each read at most twice), then one walk over the
+final statement lists: the program's imports, the reservations, the
+statements, the exports. A declaration is read as the printer writes it
+(omitted, as its value, or with its binder). The names of the variables are
+written in the arena's `Vars::printed`; the names of the modules and the
+cached bounds in `emit::naming::Printed`.
+
+**Changes to the design, each with its reason.** The numbers are those of
+the comparison with the pass before the change.
+
+1. *A module reference is a site* (was: a count, with the import pushed in
+   the open scope's run where the reference is built, and a released
+   reference left in the free list as a counted limit). A reference built
+   in an open function and released before its close
+   (`(l, r) => Primitive_int.compare(l, r) == 0` prints `l === r`) stayed
+   free; the gate does not allow it, and a wrongly free import changes a
+   name when a local has the module's base. Considered: decrementing a
+   per-scope count of the import at the release (needs the scope the
+   reference was built in: a word per reference, and a search for the open
+   scope that owns it), and removing the entry from the run at the release
+   (a search of the run). Chosen: the mechanism variables already have. A
+   `JQualified` keeps the index of its site in its unused third word;
+   `Bir::allocate` pushes the site, `Bir::register_kind` clears it at a
+   release, `Bir::replace` moves it, and the close reads it with the
+   variable sites. So the free list of a closed scope holds exactly the
+   imports a live node of the function references when it closes. Cost: one
+   push (8 bytes) per module reference built, one write per reference
+   released, one step per reference at the one close that reads it; nothing
+   is read below a node. `Log::import_reference` and its hook are deleted.
+   Runtime library: `free_differences` 32 to 0.
+2. *The free list is sorted by the identifiers, one entry per identifier*
+   (was: by `vars.order` of the origin, one entry per variable or import).
+   A variable's order is not its identifier's stamp for a variable the
+   lowering makes for a JavaScript name (stamp zero) or a hidden identifier
+   (stamp -1), and the pass sorts and deduplicates identifiers: a module
+   the unit reads and the runtime module of that name are two imports with
+   one identifier. `names::close` takes the identifier table. Cost
+   unchanged.
+3. *`FIRST_READ` for every function; the method flag is read by the replay*
+   (was: `THIS_USED`, computed at the close for a method). `PjsFnMethod`
+   makes a function a method after its close. The comparison of the run
+   entries with the first parameter is paid for every function (one
+   comparison per entry, already a step); the replay reads the header's
+   flag for the parameter and for the eta form (a method is not
+   eta-reduced). tests/tests: `name_differences` 11 and
+   `unnamed_references` 11 to 0.
+4. *An operand the printer does not print is not a reference.* In a unit
+   that preserves JSX (`-bs-jsx-preserve`) the printer writes an element as
+   `<tag ...>`: the runtime callee is not printed, nor the tag of an empty
+   fragment, and the pass does not count them. The lowering takes the
+   option (`lower_with_resolver`, `Log::jsx_preserve`); at the close and in
+   `adopt`, a live reference whose chain of members ends as the callee or
+   the fragment tag of a JSX node is skipped when `jsx::printed_form` (the
+   printer's `jsx_printable`, read from the finished node) says element or
+   fragment. This is the second named place where an expression is read
+   for a reference, beside `adopt`: `Log::unprinted` reads up from a
+   reference through member nodes to a JSX node, and `jsx::printed_form` /
+   `jsx_tag` then read the element's property keys and down the tag's
+   chain of members, to decide whether the reference is printed. Cost,
+   only in such a unit: one step per member above the reference, one per
+   property key, one per member of the tag's chain (and its base), counted
+   in `Log::steps`; `printed_form` runs once per reference that is the
+   callee or the tag of an element. A tag that is a chain of n members
+   costs 3n + 13 steps for the element with two keys (the tag's reference
+   walks up n members, and `printed_form` reads the chain down for the
+   callee's site and for the tag's): 3,013 steps at n = 1,000 and 30,013
+   at n = 10,000
+   (`a_jsx_tag_chain_of_ten_thousand_members_costs_three_steps_a_member`).
+   The application:
+   `free_differences` 4,889 in 988 units to 4.
+5. *A closed child gives its free list at the enclosing close, when it is
+   live* (was: at its own close, into the enclosing run). A closure in a
+   statement the lowering drops afterwards (a pure effect, a dropped
+   branch) left its captures in the function around it. The steps are the
+   same, at a later time; `Child` (12 bytes) keeps the row beside the site
+   range. The application: `free_differences` 4 to 0.
+6. *The replay reads a declaration as the printer writes it*
+   (`walk::prints_declaration`): a dead and pure declaration names nothing
+   and its function is not entered; a dead declaration with an effect names
+   no binder. The lowering writes every declaration as used, so no corpus
+   reaches this; the tree-level tests do, and T4g will.
+7. *The replay's storage is the lowering's.* `names::Storage` is a field of
+   the lowering state; `Storage::reserve`, `Tables::size` and
+   `Log::with_capacity` give every vector whose length the unit bounds that
+   length once. A unit costs 17 allocations for the log and the replay,
+   the same at width 1,000 and 10,000 (pins 85, 102, 85, 155; each vector
+   is named in LOWERING_ALLOCATION_SCALING.md); a second replay with the
+   same storage allocates none. Shared instead of added: `Vars::printed`
+   for the names, the export selection for the exported variables, one
+   reservation list, `born` in `Saved`, one per-variable column.
+8. *The comparison* (`compare_with_pass`) compares the free lists as
+   multisets of identifier sequences, live copies included on both sides
+   (was: sorted and deduplicated sets, with the copies left out on the
+   replay's side only, so two equal lists counted as one and two swapped
+   lists cancelled). `free_lists` gives the list of every closed row whose
+   literal is live, a copy's included, as the pass keeps one list per
+   function literal, a copy included. Zero on all four corpora in this
+   form (the gate below). `compare_oracle` compares each rule test in both ways of
+   printing JSX.
+
+**Kept from the wiring slice, with the reason.**
+
+- A rule-test root is closed over its free variables (`unit_of`): a unit
+  binds every variable it reads, and the pass names an unbound variable
+  where it is used, which no unit has.
+- Every module of a test unit gets a path: a built unit resolves every
+  module it reads; the pass names an unresolved module where it is used.
+- A unit the pass does not support is not compared and is counted
+  (`names_uncompared`): there is no oracle for it.
+- The parameters of a function the printer eta-reduces are not unnamed
+  references (neither side names them).
+- Only `ApplyStatus::Na` reaches `apply_with_arity`; the other two build
+  the call directly, so only `Na` reaches the adoption (pinned by
+  `a_partial_application_whose_argument_reads_a_local_reaches_the_adoption`).
+- `Log::reserve_repeat` stays as a test helper, as every pool of the
+  lowering has one for the warmed tests; production sizing is
+  `Log::with_capacity`.
+
+**The gate.** `name_differences`, `finish_differences`, `free_differences`,
+`ambiguous_orders` and `unnamed_references`, summed per corpus:
+
+| Corpus | Units compared | Not compared | `adopted_nodes` | Names (pass = replay) | Sum |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Runtime library | 112 | 1 | 0 | 1,570 | 0 |
+| tests/tests | 735 | 1 | 52 | 12,525 | 0 |
+| Fixtures | 608 | 1 | 0 | 13,821 | 0 |
+| A 3,735-module application (with the runtime, Belt and its dependencies: 3,848 units) | 3,847 | 1 | 0 | 249,300 | 0 |
+
+`scripts/test_backend_coverage.py` prints the first three lines and fails
+when a sum is not zero (the `Backend bridge coverage` job). The uncompared
+units are those the naming pass rejects, for its own reasons; their number
+per corpus is recorded in `compiler-rust/tests/backend_coverage.txt`
+(`names-uncompared`) and the script fails when it rises (`--record`
+writes the current numbers). One per corpus, found by printing the pass's
+`Unsupported` reason in a check build of each corpus:
+
+- runtime library: `Stdlib_Dict.res`, "delete call syntax";
+- tests/tests: `src/jsx_preserve_cases.res`, "JSX sequence container";
+- fixtures: the runtime's `Stdlib_Dict.res` again (the fixtures script
+  builds the runtime with the fixtures), "delete call syntax";
+- the application: the runtime's `Stdlib_Dict.res` (its stats name the
+  unit; the reason is that of the same source in the runtime library).
+
+**What the replay costs**, from the counters of the same builds (steps are
+unit operations of `names.rs`; the calls into `Tables` come on top):
+
+| Corpus | Statements | Function rows | Replay steps per statement | Ancestors per literal | Reserved per literal | Log steps per literal |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Runtime library | 1,934 | 336 | 1.65 | 1.03 | 1.74 | 12.2 |
+| tests/tests | 20,698 | 4,253 | 1.98 | 1.85 | 1.91 | 10.3 |
+| Fixtures | 16,284 | 3,544 | 1.86 | 1.38 | 1.59 | 8.5 |
+| The application | 317,336 | 67,617 | 2.40 | 2.67 | 2.90 | 24.1 |
+
+A statement costs one step. A function literal costs one step for its row,
+the ancestors between it and its statement (each read at most twice) and
+one step per entry of its reservation; these three are the "replay steps"
+beyond one per statement. The log's steps are those of `close` and `adopt`:
+the sites, the run entries, the comparisons of the sort.
+
+**Measurements.** Fat LTO, one codegen unit, one worker, cachegrind
+(`scripts/compare_build_instructions.py`, sequential, one checkout for both
+sides), a clean build of tests/tests (743 modules), this head against trunk
+`8ca6c42db`:
+
+| Mode | Trunk | Head | Change |
+| --- | ---: | ---: | ---: |
+| Default (5 runs each, the smallest) | 4,023,215,553 | 4,023,088,119 | -127,434 (-0.003%) |
+| `RESCRIPT_BACKEND=check` (3 runs each, the smallest) | 20,019,716,959 | 20,191,557,982 | +171,841,023 (+0.858%) |
+
+The default build saves nothing and costs nothing: the lowering does not
+run in it. Of the check build's 20,191,557,982 instructions, by the
+function cachegrind attributes them to: `bir::lower::names` 5,998,607
+(0.030%: `close` 2.4 M, `read_sites` 1.4 M, `Replay::reserve` 0.7 M),
+`emit::naming::Tables` 5,065,311 (0.025%), and the rest of `emit::naming`
+51,017,442 (0.253%), which is the naming pass and the comparison, run as
+the oracle and gone with check mode. The replay's walk is inlined in
+`State::finish` (+8,932,469 against trunk). `Bir::bind` (+5.0 M, the home
+of a binder) and `Bir::allocate` (+2.4 M, the site of a module reference)
+are the log's cost where nodes are built. The remaining increase is the
+oracle's maps and the copies check mode makes for the comparison. Taken
+together the log and the replay are about 27 M instructions of the check
+build (0.14%) for 20,698 statements and 4,253 function rows in 736 units:
+about 37,000 a unit, which includes sizing and clearing the per-node marks
+and 17 allocations.
+
+**What T6 takes over.** The replay's names become the printer's:
+
+1. `Vars::printed` and `Printed::modules` are the table `oxc_codegen` reads
+   (a symbol per variable index; a symbol per cached bound). The naming
+   pass is then called by the legacy side and by check mode only.
+2. The prelude and `Scratch::marks` go: a statement constructor knows the
+   literals of its expressions, in print order, so `ambiguous_orders` goes
+   too.
+3. The module list. The program names the imports with a live reference;
+   in a unit that preserves JSX, a module whose only references are
+   unprinted callees is still imported by the legacy passes. T6 decides the
+   module list from the same facts the free lists use.
+4. Each slice that removes or moves a statement before the replay (T4g's
+   splice, T4d, T4e, the shake) says what it does to the free lists: see
+   the limit below.
+
+**Still a limit**, each counted by the gate:
+
+- A reference, a statement or a function literal released inside a function
+  after that function closed leaves its free list as it was
+  (`free_differences`). Zero on the four corpora; T4g's splice is the
+  first edit of that kind.
+- Two function literals of one statement are replayed in closing order
+  (`ambiguous_orders`, G8). Zero on the four corpora; gone at T6.
+- A use names nothing in the replay (`unnamed_references`). Zero on the
+  four corpora.
+- The tag of an empty fragment is skipped when it is a variable, a module
+  or a chain of members over one (what an external gives). Another
+  expression as the tag would be counted as read (`free_differences`).
+- A module that does not resolve is named by the pass where it is used and
+  by the replay never (`name_differences`). No built unit has one.
 
 ### 11.5 Worker prompt for T4b
 

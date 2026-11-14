@@ -415,9 +415,16 @@ impl State {
                 let mut full_args = std::mem::take(&mut self.eta_arguments);
                 debug_assert!(full_args.is_empty());
                 full_args.extend_from_slice(remaining);
+                super::names::open(&mut self.arena);
                 for _ in 0..missing {
                     let var = self.fresh_variable("param");
                     full_args.push(self.pure_expression(View::Var { var }, 0));
+                }
+                // The callee and the arguments were built before the
+                // function's scope opened and move into it (G10).
+                super::names::adopt(&mut self.arena, &self.idents, callee);
+                for &node in remaining {
+                    super::names::adopt(&mut self.arena, &self.idents, node);
                 }
                 let call = self.call_node(callee, &full_args, full);
                 full_args.clear(); self.eta_arguments = full_args;
@@ -428,7 +435,9 @@ impl State {
                     Default::default(),
                     crate::lambda::LamLoc::NONE,
                 );
-                return self.pure_expression(View::JFun { body, header }, 0);
+                let function = self.pure_expression(View::JFun { body, header }, 0);
+                super::names::close(&mut self.arena, &self.idents, header);
+                return function;
             } else {
                 return self.call_node(callee, remaining, crate::js_ir::CallInfo::default());
             }

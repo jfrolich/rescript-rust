@@ -1,0 +1,1 @@
+- The backend coverage gate records the units the naming pass does not compare, per corpus, and fails when their number rises.
