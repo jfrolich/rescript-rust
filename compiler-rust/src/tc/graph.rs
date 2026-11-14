@@ -131,39 +131,58 @@ impl Graph {
         ty
     }
 
-    /// Amortized O(1). Only speculative writes append a 20-byte undo entry.
+    /// Amortized O(1). One bounds check and one node store; outside a
+    /// speculation one untaken branch. Only speculative writes load the old
+    /// node and append a 20-byte undo entry.
     pub fn write(&mut self, ty: Ty, node: Node) {
+        let slot = &mut self.nodes[ty.0 as usize];
         if self.speculation_depth != 0 {
-            self.trail.push(Change {
-                ty,
-                before: self.nodes[ty.0 as usize],
-            });
+            self.trail.push(Change { ty, before: *slot });
         }
-        self.nodes[ty.0 as usize] = node;
+        *slot = node;
     }
 
     /// O(1). Link representatives in the caller's direction. The lower-level
-    /// variable's supplied name wins (compiler/ml/btype.ml:713-731).
+    /// variable's supplied name wins (compiler/ml/btype.ml:713-731). One
+    /// bounds check, one node load, one node store and one untaken branch:
+    /// only inside a speculation or for a named variable source does
+    /// [`Graph::link_logged`] run, which logs the write and applies the name
+    /// rule.
     pub fn link(&mut self, from: Ty, to: Ty) {
         if from == to {
             return;
         }
-        let source = self.nodes[from.0 as usize];
+        let slot = &mut self.nodes[from.0 as usize];
+        let source = *slot;
+        *slot = Node {
+            head: LINK,
+            a: to.0,
+            b: 0,
+            ..source
+        };
+        if self.speculation_depth != 0 || (source.tag() == VAR && source.a != NONE) {
+            self.link_logged(from, source, to);
+        }
+    }
+
+    /// O(1), out of line so that [`Graph::link`] saves no register: the
+    /// undo entry of the link inside a speculation (20 bytes, amortized), and
+    /// the name rule (compiler/ml/btype.ml:727): a variable target of a named
+    /// variable takes the name when it has none or a higher level. One node
+    /// load and at most one write.
+    #[inline(never)]
+    fn link_logged(&mut self, from: Ty, source: Node, to: Ty) {
+        if self.speculation_depth != 0 {
+            self.trail.push(Change {
+                ty: from,
+                before: source,
+            });
+        }
+        if source.tag() != VAR || source.a == NONE {
+            return;
+        }
         let target = self.nodes[to.0 as usize];
-        self.write(
-            from,
-            Node {
-                head: LINK,
-                a: to.0,
-                b: 0,
-                ..source
-            },
-        );
-        if source.tag() == VAR
-            && target.tag() == VAR
-            && source.a != NONE
-            && (target.a == NONE || source.level < target.level)
-        {
+        if target.tag() == VAR && (target.a == NONE || source.level < target.level) {
             self.write(
                 to,
                 Node {
