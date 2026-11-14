@@ -949,16 +949,26 @@ impl Scopes {
         self.grow_unit_heads(name);
         match self.unit_heads[name.0 as usize] {
             NONE => match source.segment(self.names.text(name)) {
-                Some(segment) => Some(self.add_unit(name, segment)),
+                Some(segment) => {
+                    let unit = self.add_unit(name, segment);
+                    self.read_unit(unit, super::names::READ);
+                    Some(unit)
+                }
                 None => {
                     self.unit_heads[name.0 as usize] = MISSING;
                     None
                 }
             },
+            MISSING => {
+                #[cfg(test)]
+                super::steps::tick();
+                None
+            }
             known => {
                 #[cfg(test)]
                 super::steps::tick();
-                (known != MISSING).then_some(known)
+                self.read_unit(known, super::names::READ);
+                Some(known)
             }
         }
     }

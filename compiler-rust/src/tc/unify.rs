@@ -62,6 +62,21 @@ pub enum FrameKind {
     /// After the children: the `create_recursion` repair of
     /// compiler/ml/ctype.ml:2428-2436 for the pair (R3c).
     Recursion,
+    /// Below everything one [`Checker::unify_fields`] pushed,
+    /// `Mode::Explain` only: `left` and `right` are the two rests and
+    /// `extra` indexes [`Checker::saved`]: their two descriptors, put back
+    /// when a frame above fails (`rest1.desc <- d1; rest2.desc <- d2`,
+    /// compiler/ml/ctype.ml:2513-2517). Popped: nothing to undo. (R3e)
+    Fields,
+    /// One common field of two rows: `left` and `right` are the two field
+    /// nodes, `extra` bit 0 is `open1` and bit 1 `open2`
+    /// ([`Checker::unify_field`]). (R3e)
+    Field,
+    /// Below the frames of a common field's types, `Mode::Explain` only:
+    /// `left` and `right` are the two field nodes, whose pair goes into the
+    /// trace when a frame above fails (compiler/ml/ctype.ml:2493-2510).
+    /// Popped: nothing. (R3e)
+    FieldEnd,
 }
 
 /// Bit 31 of a [`FrameKind::Linked`] frame's `extra`: `unify2` ran `unify3`
@@ -744,8 +759,25 @@ impl Checker {
         // `create_recursion` is computed before anything is linked
         // (ctype.ml:2308); the variable cases above do not read it.
         let create_recursion = t2 != t2x && self.deep_occur(t1x, t2);
-        if d1.head & d2.head & EXTENDED != 0 {
-            self.extended_pair(d1, d2);
+        let extended = d1.head & d2.head & EXTENDED != 0;
+        // `Tfield _, Tfield _ -> unify_fields env t1' t2'` (ctype.ml:
+        // 2322-2324): an arm of its own, before the link and without the
+        // recursion repair. In `Mode::Explain` the pair is recorded as a
+        // `Linked` frame whose descriptor is the one the node still has.
+        if extended && self.both_fields(d1, d2) {
+            if self.g.mode == Mode::Explain {
+                let extra = self.saved.len() as u32;
+                self.saved.push(d1);
+                self.saved.push(link_node(d1, t1x));
+                let [left, right] = pair;
+                self.frames.push(Frame {
+                    left,
+                    right,
+                    kind: FrameKind::Linked,
+                    extra: if swapped { extra | SWAPPED } else { extra },
+                });
+            }
+            return self.unify_fields(t1x, t2x);
         }
         if self.umode == UnifyMode::Pattern {
             // `add_type_equality` in place of the link (ctype.ml:2329).
@@ -782,7 +814,11 @@ impl Checker {
                 extra: 0,
             });
         }
-        let pushed = self.push_children(d1, d2);
+        let pushed = if extended {
+            self.extended_children([t1x, t2x], d1, d2)
+        } else {
+            self.push_children(d1, d2)
+        };
         if pushed.is_err() {
             // `push_children` pushes nothing when it fails.
             if create_recursion {
@@ -1033,6 +1069,11 @@ impl Checker {
                 self.trace
                     .push(if swapped { [entry[1], entry[0]] } else { entry });
                 swapped ^= frame.extra & SWAPPED != 0;
+            } else if frame.kind == FrameKind::FieldEnd {
+                // `(Tfield f1, Tfield f2) :: trace` (ctype.ml:2493-2510).
+                let entry = self.field_trace_pair(frame.left, frame.right);
+                self.trace
+                    .push(if swapped { [entry[1], entry[0]] } else { entry });
             }
         }
         if left.0 != NONE {
@@ -1050,6 +1091,12 @@ impl Checker {
                 let descriptor = self.saved[slot];
                 let target = Ty(self.saved[slot + 1].a);
                 self.g.write(target, descriptor);
+            } else if frame.kind == FrameKind::Fields {
+                // `rest1.desc <- d1; rest2.desc <- d2` (ctype.ml:2513-2517).
+                let slot = frame.extra as usize;
+                let (d1, d2) = (self.saved[slot], self.saved[slot + 1]);
+                self.g.write(frame.left, d1);
+                self.g.write(frame.right, d2);
             }
         }
     }
@@ -1083,23 +1130,47 @@ impl Checker {
         left == right || (self.umode == UnifyMode::Pattern && !optional(left) && !optional(right))
     }
 
-    /// Two extended descriptors of one kind: the cases of unify3 that the
-    /// row slices build (compiler/ml/ctype.ml:2316-2328, 2400-2421). Two of
-    /// different kinds fall through to the clash of `push_children`. O(1).
-    fn extended_pair(&self, left: Node, right: Node) {
-        let kind = |node: Node| std::mem::discriminant(&self.extras.descriptors[node.a as usize]);
-        if kind(left) != kind(right) {
-            return;
-        }
-        match self.extras.descriptors[left.a as usize] {
-            ExtraDescriptor::Object | ExtraDescriptor::Field { .. } | ExtraDescriptor::Nil => {
+    /// O(1): whether two extended descriptors are both fields.
+    #[inline]
+    fn both_fields(&self, left: Node, right: Node) -> bool {
+        let field = |node: Node| {
+            matches!(self.extras.descriptors[node.a as usize], ExtraDescriptor::Field { .. })
+        };
+        field(left) && field(right)
+    }
+
+    /// The children of two extended descriptors, after the link of unify3
+    /// (compiler/ml/ctype.ml:2400-2424): `[t1x, t2x]` are the two nodes,
+    /// `left` and `right` the descriptors they had. Two objects:
+    /// [`Checker::unify_fields`] of their slot 0 (ctype.ml:2400). Two
+    /// `Tnil`: nothing (ctype.ml:2412). Two polymorphic types without
+    /// variables (arity 1): the pair of their bodies (ctype.ml:2413;
+    /// decision 22 of 8.6). Two variants: [`Checker::unify_row`]. Two
+    /// polymorphic types with variables, two packages: R3g. Anything else
+    /// is a clash (`_, _ -> raise (Unify [])`, ctype.ml:2424). Like
+    /// [`Checker::push_children`], it pushes nothing when it fails. O(1)
+    /// plus the callee.
+    fn extended_children(&mut self, [t1x, t2x]: [Ty; 2], left: Node, right: Node) -> Result<(), Clash> {
+        let (l, r) = (
+            self.extras.descriptors[left.a as usize],
+            self.extras.descriptors[right.a as usize],
+        );
+        match (l, r) {
+            (ExtraDescriptor::Object, ExtraDescriptor::Object) => {
+                let (fields1, fields2) = (self.g.lists[left.b as usize], self.g.lists[right.b as usize]);
+                self.unify_fields(fields1, fields2)
+            }
+            (ExtraDescriptor::Nil, ExtraDescriptor::Nil) => Ok(()),
+            // `Tpoly (t1, []), Tpoly (t2, []) -> unify env t1 t2`: push the
+            // pair of the two slots 0 and return `Ok(())`.
+            (ExtraDescriptor::Poly, ExtraDescriptor::Poly) if left.arity() == 1 && right.arity() == 1 => {
                 todo!("R3e")
             }
-            ExtraDescriptor::Variant(_) => todo!("R3f"),
-            ExtraDescriptor::Univar(_) | ExtraDescriptor::Poly | ExtraDescriptor::Package(_) => {
-                todo!("R3g")
-            }
-            ExtraDescriptor::Substitution => unreachable!("Tsubst outside a copy"),
+            (ExtraDescriptor::Poly, ExtraDescriptor::Poly) => self.enter_poly(t1x, t2x),
+            (ExtraDescriptor::Variant(_), ExtraDescriptor::Variant(_)) => self.unify_row(t1x, t2x),
+            (ExtraDescriptor::Package(_), ExtraDescriptor::Package(_)) => self.unify_package(t1x, t2x),
+            (ExtraDescriptor::Univar(_), ExtraDescriptor::Univar(_)) => todo!("R3g"),
+            _ => Err(Clash),
         }
     }
 
@@ -1136,6 +1207,9 @@ impl Checker {
                     }
                     FrameKind::Linked => self.saved.truncate((frame.extra & !SWAPPED) as usize),
                     FrameKind::LeavePoly => todo!("R3g"),
+                    FrameKind::Fields => self.saved.truncate(frame.extra as usize),
+                    FrameKind::Field => self.unify_field(frame)?,
+                    FrameKind::FieldEnd => {}
                     FrameKind::Recursion => {
                         // A clash here is the enclosing pair's: it adds no
                         // pair of its own to the trace (`Unify []`).

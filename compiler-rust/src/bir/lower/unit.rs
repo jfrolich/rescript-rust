@@ -4,6 +4,14 @@ use super::*;
 /// N1/K11: C:663 compile_deps_program_in_arena / C:1513 continues_toplevel_spine.
 /// Consume top-level groups iteratively. No group in this slice creates loop
 /// labels; loop-bearing groups remain Unsupported before label allocation.
+/// Cost: `State::new` (O(N + V + F + G), stated there); copies of
+/// `resolver` and of `locations` (all rows and index entries of the table)
+/// and, with `locations`, one flag per function header, each allocating;
+/// then one iteration per `Let` or `Seq` on the right spine of the unit
+/// (one step each), which probes and realizes one top-level group
+/// (`State::probe`, `State::realize`; the groups are disjoint subtrees)
+/// and appends it (`append_outputs`); a finished declaration adds one
+/// probe and realization of its body. Last, `complete_unit`.
 pub(super) fn lower(
     input: super::super::bridge::ForLowering,
     locations: Option<&crate::lambda::LamLocTable>,

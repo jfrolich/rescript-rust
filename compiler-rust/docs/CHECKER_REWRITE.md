@@ -2172,8 +2172,8 @@ it stops and reports a reproduction.
 | R3d | The level walk with scopes and the expanding retry, `lower_args` | `expand.rs` | R3b | R3a | 300 |
 | R3c | Abbreviations in unification: `unify2`, `unify3`, the relink to the original node, the recursion repair, `unify_var` | `unify.rs` | R3a, R3b, R3d | nothing | 450 |
 | R3k | In the explaining mode a lowering whose retry clashes keeps its levels and adds the escaping pair to the trace (8.6, decision 14) | `expand.rs` | R3d | R3m | 60 |
-| R3m | Inherited memo entries: a constructor with arguments copied by an expansion links to the expanding node of the same type (8.6, decision 16) | `expand.rs` | R3b | R3k | 150 |
-| R3e | Worker-local descriptor pools; objects and fields | `rows.rs` | R3c, R3m | nothing | 500 |
+| R3m | Inherited memo entries: a constructor with arguments copied by an expansion links to the expanding node of the same type, through a pool of rows found by slot 0 (8.6, decisions 16 and 26) | `expand.rs` | R3b | R3k | 150 |
+| R3e | Objects and fields; mutability cells as nodes and their duplicate at an instance; two polymorphic types without variables (8.6, decision 27) | `rows.rs`, `unify.rs`, `expand.rs` | R3c, R3m | nothing | 600 |
 | R3f | Polymorphic variant rows | `rows.rs` | R3e | R3g | 600 |
 | R3g | Universal variables, polymorphic types, packages | `rows.rs` | R3e | R3f | 500 |
 | R3h | Pattern mode, equations, `reify`, `mcomp` | `rows.rs`, `unify.rs` | R3f, R3g | R3i, R3j | 600 |
@@ -2181,7 +2181,8 @@ it stops and reports a reproduction.
 | R3j | Subtyping without the declaration-directed coercions | `relate.rs` | R3f, R3g | R3h, R3i | 600 |
 | K2 | The hot paths of unification, no behaviour change (8.7) | `unify.rs` | R3c | every slice above | 150 |
 
-State after the second skeleton turn. Merged: R3a, R3b, R3d, R3c, and K1
+State after the second skeleton turn (kept for the record; the third
+turn's state follows it). Merged: R3a, R3b, R3d, R3c, and K1
 (the kernel's hot paths, TC_KERNEL_R3.md). Designed in the second turn, with
 acceptance tests that are ignored until the slice is built: R3k (with its
 prompt in 8.4), R3m (its rule and test; its layout is still open, 8.6,
@@ -2196,6 +2197,32 @@ now depend on R3f: `matches` unifies, and a generated program for them has
 variants. `differential::tests::ignored_tests_name_the_slices_they_reach`
 checks, from the text of every ignored test, that it says which slices it
 reaches and reaches none that is built after its own.
+
+State after the third skeleton turn. Merged: R3a, R3b, R3d, R3c, K1.
+Building beside this turn: R3k and K2. Designed in this turn, with
+acceptance tests that are ignored until the slice is built and a prompt in
+8.4:
+
+| Slice | Decision | Tests | Run in this turn |
+|---|---|---|---|
+| R3m | 26 | five ignored (three hand-built, two against the old checker), two that run today | every ignored test passed with a prototype of the five bodies, which is not on trunk |
+| R3e | 27 | eleven ignored (nine hand-built, two against the old checker), three that run today | the old checker's side of every fact it can show; the hand-built tests were not run |
+
+R3m's line count is 150 and its file `expand.rs`. R3e grew to 600 lines:
+it owns the duplicate of mutability cells at an instance and at a copy
+(`rows.rs`, the pass of `expand.rs`), the three frames of `unify_fields`
+and two edits of the binding walk in `unify.rs`, and the arm of two
+polymorphic types without variables (decision 22). R3f is not designed
+(decision 28): its row in the table stands, its generated-case test
+exists, and it has no prompt. R3g to R3j are not started.
+
+The ignored tests are checked mechanically
+(`differential::tests::ignored_tests_name_the_slices_they_reach`): each
+names the slices it reaches, reaches its own, and reaches none that is
+built after its own; what a test reaches is read from its text (a plan
+bit with a tier, a hand-built object, a type marked `INHERITS`, a call of
+a method whose body is `todo!`). It counts the `#[ignore` lines and pins
+no number.
 
 Each slice is one pull request that removes the `ignore` of its own tests
 and the `#[allow(...)]` of a module once the module has no `todo!` left.
@@ -2434,7 +2461,34 @@ the expansion to the original, the recursion repair; (3) `unify_var`.
 Failure: linking the abbreviation node instead of its expansion; linking
 after the children; a pair set.
 
-**R3e to R3j.** Functions: every signature of `rows.rs` and `relate.rs`
+**R3m.** Functions: `TypeTable::mark_manifests`, `Checker::{chain_entry,
+inherit, inherited_expansion, cut_chain}`. End state:
+`rg -n 'todo!\("R3m"\)' src/tc` is empty; tests
+`the_table_marks_the_types_whose_expansions_inherit`,
+`an_inherited_entry_is_found_past_a_forgotten_one`,
+`expanding_the_heads_down_nested_recursive_nodes_is_linear`,
+`an_abbreviation_that_inherits_nothing_reads_no_row` (runs before and
+after), `differential::tests::{expand_tier_agrees_on_recursive_
+abbreviations, a_chain_of_inherited_entries_agrees}`. Commits: (1) the
+marks; (2) the entry and the copy's place in the chain; (3) the cleanup's
+cut and the lookup through the chain. Failure: a row for a type without
+`INHERITS`; a pool cleared by a cleanup; a second pass over an instance.
+
+**R3e.** Functions: `rows::template_has_open_row`, `Checker::{flatten_
+fields, unify_fields, make_rowvar, build_field, unify_field,
+unify_mutability, field_trace_pair, instance_open, dup_cell,
+end_cell_session}`, the arm of two polymorphic types without variables,
+`OPEN_ROW` in `mark_manifests`, the two edits of `binding_occurrence` and
+`binding_scan`, and `Checker::copy`'s pass. End state: no
+`todo!("R3e")`; the nine tests of `r3_tests.rs` under "R3e",
+`differential::tests::{cells_agree_on_fixed_cases, object_plan_agrees_on_
+generated_cases}`. Commits: (1) flatten, row variable, built fields, the
+frames; (2) a common field, mutability, the trace pair, the polymorphic
+arm; (3) the route crosses rows; (4) the duplicate of an instance and of
+a copy. Failure: recursion; a descriptor row written in place; a pass
+over an instance nobody asked for.
+
+**R3f to R3j.** Functions: every signature of `rows.rs` and `relate.rs`
 carrying the slice's name. End state for each: no `todo!` with its name;
 its generator extension and old-side vacuity test (first commit); the
 `Full` tier at 10,000 cases with the extension on. R3e: fields in OCaml's
@@ -2563,8 +2617,104 @@ differential::tests::a_failed_retry_keeps_its_levels_in_the_explaining_
 mode and of no other test.
 ```
 
-R3m has no prompt yet: its rule, evidence and acceptance test are fixed
-(8.6, decision 16) and its layout is not.
+```text
+R3m. Read section 8.6, decisions 16, 19 and 26; compiler/ml/ctype.ml
+720-724, 778-799, 1100-1130; compiler/ml/btype.ml 606-647; in
+src/tc/expand.rs the types ChainRow and Chains and the five functions
+whose body is todo!("R3m"). Everything else is wired: subst, expand_once,
+link_memorized and cleanup_abbrev already call them, behind the INHERITS
+bit or a non-empty pool.
+
+First edit: the body of TypeTable::mark_manifests, then its call as the
+last statement before `table` is returned in TypeTable::from_segment, and
+in the same commit the count of expand::tests::table_from_ten_thousand_
+declarations_is_one_pass from `2 * n + 1` to `5 * n + 1` (the pass reads
+the three template nodes of each manifest; this is the one test line you
+change, decision 26). Remove the `#[allow(dead_code, ...)]` above
+mark_manifests. r3_tests::the_table_marks_the_types_whose_expansions_
+inherit passes after this commit.
+
+Commits, in order: (1) the marks; (2) chain_entry and inherit: the two
+tests of r3_tests.rs and differential::tests::expand_tier_agrees_on_
+recursive_abbreviations pass; (3) cut_chain and inherited_expansion:
+differential::tests::a_chain_of_inherited_entries_agrees passes. Remove
+each `#[allow(unused_variables)]` with its todo!, and the five
+`#[ignore = "R3m build"]`.
+
+Each body is what its doc comment says, step for step. One
+`#[cfg(test)] super::steps::tick()` per row visited in a walk, one in
+chain_entry, one per template node read in mark_manifests, one at the
+top of inherited_expansion.
+
+Relations to hold: r3_tests::an_abbreviation_that_inherits_nothing_reads_
+no_row passes unchanged (it runs today); every other tc:: test passes
+unchanged, with the same pinned seeds; the steps of expanding the heads
+down 10,000 nested nodes are at most 11 times those of 1,000.
+Shortcuts that count as failure: a row or a table entry for a node of a
+type without INHERITS; a hash map; a row keyed by a node handle; clearing
+or truncating the pool in cleanup_abbrev or in restore; a second pass
+over an instance's nodes; reading a node's head to learn whether its
+entry is private (the node may have been linked since: the bit is in the
+row); a change in graph.rs, level.rs or template.rs. At most 150 lines.
+```
+
+```text
+R3e. Read section 8.6, decisions 17, 18, 22 and 27; compiler/ml/ctype.ml
+314-342, 1380-1408, 1725-1778, 2305-2332, 2400-2424, 2445-2539;
+compiler/ml/btype.ml 404-412, 449-532, 745-747; src/tc/rows.rs whole; in
+src/tc/unify.rs unify3, extended_children, run_frames, explain_failure,
+binding_occurrence and binding_scan; in src/tc/expand.rs link_memorized,
+Checker::copy and mark_manifests. R3m is merged before you start.
+
+First edit: rows::flatten_fields, then Checker::unify_fields with
+make_rowvar and build_field, then unify_field and unify_mutability: after
+them r3_tests::fields_a_side_lacks_are_built_on_one_row_variable and
+a_closed_row_takes_no_field pass. Each body is what its doc comment
+says, step for step, in that order.
+
+Commits, in order:
+(1) flatten_fields, make_rowvar, build_field, unify_fields;
+(2) unify_field, unify_mutability, field_trace_pair, and the arm of two
+    polymorphic types without variables in extended_children;
+(3) the route of a variable against a constructor crosses rows: in
+    binding_occurrence the test with `occur_first` becomes
+    `self.reaches(var, ty, routed)`, and binding_scan takes `deep: bool`
+    (true when routed) and, for a node at which stops_occurrence holds,
+    pushes its children as it does for any other node when `deep`
+    (`LOWERS` when it lowered the node, no flag otherwise) in place of
+    `LEVEL_ONLY`. Nothing else in the two functions changes;
+(4) template_has_open_row, OPEN_ROW in mark_manifests, dup_cell,
+    end_cell_session, instance_open; and Checker::copy: its fast path
+    becomes `self.memo.live == 0 && self.extras.descriptors.is_empty()`
+    and its pass `self.link_memorized(first, NONE,
+    !self.extras.descriptors.is_empty())`.
+Remove the `#[ignore = "R3e build"]` lines and no other.
+
+Steps: one `#[cfg(test)] super::steps::tick()` per field flattened, per
+step of the merge, per field built, per node a terminator walk passes or
+marks in dup_cell. Name comparisons of the sort are not steps.
+
+Relations to hold: every tc:: test that passed before passes unchanged,
+with the same pinned seeds; r3_tests::objects_of_ten_thousand_fields_are_
+linear; an instance of a template without an open row through
+Checker::instance takes the steps of Graph::instance; no descriptor,
+variant or row-field row that existed before an operation differs after
+it (run_new asserts it on every generated case).
+
+If a generated case of differential::tests::object_plan_agrees_on_
+generated_cases differs, read the OCaml arm first. If your code does what
+the arm says, stop and report the seed with the arm's lines: do not copy
+the old checker, and do not pin the seed yourself.
+
+Shortcuts that count as failure: a recursive call of unify, unify_fields
+or flatten_fields; a descriptor row written in place, or a new one for a
+built field; a cell in a pool of its own or as a child of a field; a hash
+map from a class to its duplicate; walking a row to its end once per
+field; a pass over an instance's nodes when the caller did not ask for
+one; sorting by name index; an allocation per field (the scratch vectors
+of Extras keep their capacity); a change in graph.rs, level.rs or
+template.rs. At most 600 lines.
+```
 
 The prompt of K2 is in section 8.7. The last prompt below is superseded by
 decision 5 of 8.6: no builder starts R3e to R3j from it, and the second
@@ -2943,6 +3093,343 @@ additions are `differential::Plan` bits; every number below is one run of
     - *The old checker is not the judge everywhere.* Decisions 12 and 13
       list seeds where it departs from ctype.ml. A slice whose differential
       test differs must read the OCaml arm before it follows either side.
+
+Decided in the review of the second skeleton turn (trunk `0b175b7d0d`).
+They bind the builders and the third skeleton turn.
+
+19. **R3m's layout is the pool** (the first of the two layouts of decision
+    16). Rows of 16 bytes, found from a constructor through a dense table;
+    slot 0 holds a node and nothing else, the kernel (`graph.rs`,
+    `level.rs`, `template.rs`) is not changed, and a generalization pays
+    nothing for it. Left to the third turn and fixed there (decision 26):
+    the key of the dense table, the memory per unit as a formula, and the
+    step relation of decision 16 as a test. A manifest whose body has no
+    constructor with arguments pays nothing.
+20. **The three places where the old checker departs from `ctype.ml` are a
+    task of their own**, not part of a slice: the nullary shortcut lowers
+    without the environment (decision 13, seed 16000145); a binding lowers
+    before its occurrence check fails (decision 12, the seven `BUILD`
+    seeds); the retry of a lowering does not forget the memos (decision 13,
+    seeds 49000200, 49000205, 49000183). The old checker is changed for one
+    of them only after a source program is found on which the OCaml
+    compiler and this one differ in a diagnostic or in acceptance; a
+    departure for which no such program is found is recorded and left as it
+    is. When one is fixed its seeds leave the pinned lists of
+    `run_cases_except`. A pinned list only ever shrinks.
+21. **Seeds 35000137 and 81000306 stay pinned and unclassified.** Telling
+    which side OCaml agrees with needs the harness's operations run on the
+    OCaml compiler, which is a second harness; it is not built now. Both
+    are read again when `both` mode runs on real programs (R5c) and shows
+    whether either pattern occurs in one.
+22. **Two polymorphic types without variables are R3e's**
+    (`Tpoly (t1, []), Tpoly (t2, [])`, ctype.ml:2413): the type of every
+    object field is one (decision 18), so R3e cannot pass its own tests
+    without the arm. R3g keeps the arm with variables (`enter_poly`,
+    ctype.ml:2414-2415).
+23. **K2b is designed and not built** (8.7, "The deferred occurrence
+    check"): one acyclicity check per top-level unification. It waits for a
+    profile of real units at R5c that shows the occurrence walk above 2% of
+    checking. This closes decision 1.
+24. **Step counts under K2.** A step test whose pinned count goes *down*
+    because item (a) or (d) of 8.7 removed work is lowered to the count
+    observed, in the commit of that item; the pull request lists the test,
+    the old count, the new count and the item. A count that goes up, a
+    relation between two sizes that changes, or any other assertion that
+    fails: the builder stops and reports.
+
+Decided in the review of R3k.
+
+25. **Whoever ignores a clash cuts the trace back to its length before
+    the call.** OCaml carries the trace in the exception, so a `try ...
+    with Unify _` drops it with the exception. Here the trace is a vector
+    (`Checker::trace`), so every site that swallows a `Clash` in the
+    explaining mode truncates the vector to the length it had before the
+    call it swallowed. R3k does so where the lowering of a memorized
+    expansion is ignored (ctype.ml:1196-1201). One site is known and not
+    covered: in `Checker::subst`, the lowering of an argument to the
+    node's level and the unification of a constrained parameter, when a
+    safe expansion fails and the clash is turned into "does not expand"
+    (`try_expand_safe`, ctype.ml:1251-1256; `expand_head_opt`,
+    ctype.ml:1330-1335). It needs a type with a constrained parameter to
+    reach, and no generated program declares one. The slice that first
+    generates constrained parameters adds the truncation there with a
+    test; the design of R3m (decision 26), which changes `subst`, changes
+    nothing on that path and states the rule in `subst`'s doc comment.
+
+Decided in the third skeleton turn (trunk `0b175b7d0d`), each with what
+was run. "Prototype" means bodies written to try a design against its
+tests and taken out again before the commit: no slice body is on trunk
+from this turn.
+
+26. **R3m as designed** (`expand::Chains`; decisions 16 and 19).
+    - *What a row is.* One memo reference of a constructor with arguments
+      (OCaml's `abbrev_memo ref`), reduced to what a copy reads: the one
+      entry slot 0 holds (`node`, `type_index` with a bit for a private
+      expansion) and the reference the list continues with (`parent`, the
+      `Mlink` of ctype.ml:796-798), plus its own `slot`. 16 bytes
+      (`expand::tests::sizes`).
+    - *The key of the dense table is the list index of slot 0, not the
+      node handle.* Slot 0 *is* the reference: two nodes that share a list
+      share it. A node of a type written through a module alias and the
+      node it expands to share one list (`expand_alias`; `newty2 level
+      (Tconstr (path', args, abbrev))`, ctype.ml:1214). Keyed by node, the
+      target node would have no row: expanding it would start a new chain,
+      and a constructor of an outer type copied by that expansion would not
+      link to the outer node, where OCaml, reading the shared `abbrev`,
+      links it. `Memo::memorized` holds slot indices for the same reason.
+    - *The flag.* `expand::INHERITS` in `TypeInfo::flags`: the manifest's
+      template has a constructor with arguments whose type expands
+      (`ABBREV`, `PRIVATE` or `ALIAS`). Only such a copy can be linked (an
+      entry exists for an expanded node only) or be expanded later (and
+      read its chain). It is narrower than "a constructor with arguments"
+      of decision 19: `type t<'a> = array<'a>` pays nothing either. The
+      test of the bit is on the row `expand_once` has already loaded. It
+      is set by `TypeTable::mark_manifests` when every row exists (a
+      manifest names later declarations of its recursive group), one pass
+      over the manifests' template nodes.
+    - *When a row is made.* By `subst` for the node of an `INHERITS` type
+      that has none (`chain_entry`, which also writes the entry); and in
+      the pass over the instance's nodes for each constructor with
+      arguments of a type that expands and that no chain entry links
+      (`inherit`), with `parent` the expanding node's row. Nowhere else:
+      an instance or a copy outside an expansion starts no chain
+      (`abbreviations = ref Mnil`, ctype.ml:1128).
+    - *When the chain ends.* An entry is live while its slot 0 holds a
+      node. `forget_abbrev` empties the slot and nothing else: the walk
+      passes the row and goes on (`forget_abbrev_rec` returns the tail,
+      btype.ml:636-644). A cleanup empties the slot *and* sets the row's
+      `parent` to none (`abbr := Mnil`, btype.ml:626: the whole list of
+      that reference is gone). The row itself stays, because a copy names
+      the reference, not its content: when the node is expanded again, the
+      copies of its first expansion see the new entry. Observed on the old
+      checker with three abbreviations through objects
+      (`old_checker_inherits_entries_along_the_chain`): with every entry
+      in place the `m3` node's expansion links `m1<'a>` and `m2<'a>` to the
+      two nodes above it; after a cleanup and a second expansion of the
+      `m2` node it links `m2<'a>` and makes a new `m1` node.
+    - *What a restore does.* Nothing of its own. `Graph::restore` puts
+      descriptors back and truncates no pool, so every row still names a
+      node and a slot that exist; `Checker::restore` then runs the cleanup
+      above, as `backtrack` does (btype.ml:779). Rows are not logged in the
+      trail.
+    - *A lookup of an expansion reads the chain too* (`find_expans` goes
+      through `Mlink`, btype.ml:618), which decision 16 did not say. It
+      can only find something for a node whose own slot is empty and whose
+      chain has a live entry of its own type: a private entry (which
+      `find_repr` skips, so the copy was not linked), or an entry written
+      after the copy was made (the revival above). `expand_once` asks
+      `inherited_expansion` only on a miss, for an `INHERITS` type.
+    - *Memory per unit*: `16 * rows + 4 * (S + 1)` bytes, `S` the highest
+      slot-0 list index that has a row; `rows` = the expanded nodes of
+      `INHERITS` types that had none + the constructors with arguments of
+      expanding types that those expansions copied and did not link. Zero,
+      with no allocation, for a unit that expands no `INHERITS` type. Rows
+      are freed when the worker resets the checker, not by a cleanup.
+    - *Cost.* A type without the flag: nothing beyond the bit test. With
+      it, per expansion: one row write, one pass over the instance's nodes
+      (the pass the nullary memo already makes when it is live; the two
+      share one loop, `link_memorized`), one `TypeInfo` load per copied
+      constructor with arguments, and for each of those that expands a
+      walk of the chain. A chain is as long as the number of expansions
+      above the copy that did not link it, which is at most the number of
+      `INHERITS` types on that path while entries are live; OCaml's
+      `find_repr` walks the same list. The regular recursive case is one
+      row: `expanding_the_heads_down_nested_recursive_nodes_is_linear`.
+    - *Changes to the skeleton, all in `expand.rs`.* `Memo::chains`;
+      `subst` takes the `TypeInfo` row in place of the manifest index and
+      calls `Graph::instance` and the pass itself; `link_memorized` takes
+      the chain; `expand_once` loads the row before the memo-hit branch on
+      a miss; `cleanup_abbrev` indexes its loop to call `cut_chain`. Every
+      new call is behind `INHERITS` or a non-empty pool, neither of which
+      exists until R3m is built: `an_abbreviation_that_inherits_nothing_
+      reads_no_row` (runs today) pins the steps of an expansion at the
+      count observed before the change.
+    - *One test of the skeleton changes when R3m is built*:
+      `expand::tests::table_from_ten_thousand_declarations_is_one_pass`
+      pins `2n + 1` steps for `from_segment`; the marking pass reads the
+      three template nodes of each of its n manifests, so the count becomes
+      `5n + 1`. Its hand-built segment had no template nodes; it has them
+      now.
+    - *Run.* With a prototype of the five bodies: the two hand-written
+      chain cases, `expand_tier_agrees_on_recursive_abbreviations` (10,000
+      cases; 248 differed before), the three hand-built tests of
+      `r3_tests.rs`, and every other `tc::` test unchanged (the full tier
+      and the five plans with their pinned seeds).
+27. **R3e as designed: objects, fields, mutability cells.**
+    - *(a) A cell is a node of the graph that no node has as a child*
+      (`rows::cell_node`: a variable with no name, `b` 1 when mutable; a
+      link when its class was merged). A field's descriptor row holds the
+      cell's handle. So a promotion is `Graph::write` and a merge is
+      `Graph::link`: logged in the trail inside a speculation and undone
+      by its restore, as `set_mutability` logs `Cmutability`
+      (btype.ml:745-747), with no log of its own and no change in the
+      kernel; and no walk of a type (lower, generalize, occur, instance)
+      meets a cell or pays for one. The two layouts not taken: cells in a
+      pool of their own need an undo log tied to `Graph::speculate`, which
+      has no hook; cells as a list slot of the field make every walk load
+      one more node per field, and tie "duplicate or share" to the cell's
+      level, where OCaml ties it to the row's last node
+      (`row_terminator_generic`, btype.ml:478-506).
+    - *Where the duplicate is made.* In the pass over the nodes a copy
+      session made (`Checker::link_memorized` with `cells`), per field
+      node: `Checker::dup_cell`. A field whose row ends in a variable the
+      session made (handle at or above the session's first node: the copy
+      of a generic variable) gets a new descriptor row and the duplicate
+      of its cell's class, one duplicate per class per session (the source
+      class links to its duplicate until `end_cell_session`, as
+      `dup_mutability` does, btype.ml:462-472). Any other field keeps its
+      descriptor row and so its cell. The terminator of a row is found
+      once per session (marks), not once per field.
+    - *What a template without such a field pays: nothing.* The caller of
+      an instance holds one bit per template: `Checker::instance_open`
+      runs the pass, `Checker::instance` is unchanged (its test of
+      `Memo::live` is the only one). The bit is `rows::template_has_open_
+      row`: some field of the template has a variable of the template as
+      its rest (the last field of an open row), one pass over the
+      template's nodes, computed once by whoever makes the caller's row.
+      R3 has two callers: an expansion (`TypeInfo` flag `OPEN_ROW`, set in
+      the pass of `mark_manifests`) and the harness (per value). R5a's
+      binders and imported values compute it where they are made. The
+      general copy (`Checker::copy`) has no template: it runs the pass
+      when the graph has any descriptor row.
+    - *The harness prints cell classes* (`Plan` bit `CELLS`): `name^k`,
+      `k` numbering classes at first visit across the operands, and
+      generates `@set` fields. Observed on the old checker
+      (`old_checker_duplicates_the_cells_of_an_open_row`): two instances
+      of an open row have classes `0 1` and `2 3`, two of a closed row
+      `4 5` and `4 5`; a copy of a generalized open row duplicates once
+      per copy. With classes printed the kernel tier (no duplicate on the
+      new side) differs on 2,877 of 10,000 cases: the classes are
+      compared.
+    - *(b) The surface syntax of a mutable field* is the attribute `@set`
+      on a field of an object type (typetexp.ml:609-616). The parser takes
+      it on a field that is not the first of an inline object type and on
+      any field of a declared one; `{..@set "x": int}`, which is how the
+      printer writes an open row whose first field is mutable, does not
+      parse (observed: a syntax error; reported, not fixed). A promotion
+      is reached by a write to a field of an open row (`o["x"] = 1`:
+      fixture `object_open_write_readonly_caller.res`, whose parameter
+      prints as `{..@set "x": int}`) and by unifying an open row with a
+      row that has the field `@set`. R3e needs `unify_mutability`: the
+      generated cases with `CELLS` reach both clashes and both promotions.
+    - *(c) Unification never writes a descriptor row in place.* Rows are
+      shared by every instance of a scheme. A built field
+      (`build_field`) reuses the descriptor index of the field it copies;
+      a duplicate is a new row; the trace pair of a failed field makes one
+      `Nil` row, on the failure path. Tested by hand
+      (`fields_a_side_lacks_are_built_on_one_row_variable`,
+      `mutability_is_promoted_...`) and on every generated case: `run_new`
+      compares the descriptor, variant and row-field rows the case started
+      with after every operation.
+    - *(d) Two polymorphic types without variables are R3e's* (decision
+      22): `Checker::extended_children`.
+    - *The order of work of `unify_fields` on the explicit stack*
+      (ctype.ml:2467-2518). It links nothing and cannot fail itself: it
+      flattens and sorts both lists, makes `va`, builds the two lists of
+      missing fields in one backward merge, and pushes frames so that they
+      are popped as OCaml recurses: the pair `(built1, rest2)`, the pair
+      `(rest1, built2)`, then one `Field` frame per common field in name
+      order. A `Field` frame runs `unify_mutability` with the openness
+      read before the rests were unified, then the pair of the two types.
+      In the explaining mode a `Fields` frame below them restores the two
+      rests on a failure and a `FieldEnd` frame below a field's types puts
+      the pair of two one-field lists into the trace.
+    - *Names are ordered by text* in `flatten_fields` only; everywhere
+      else a name is its index. `Extras::names` holds the text; for a
+      graph made from a segment it is a copy of the segment's strings.
+      R5a decides whether a unit being checked fills it from the worker's
+      name table or `Extras` borrows that table; nothing in R3 depends on
+      which.
+    - *The occurrence tests.* `occur_rec` does not enter an object
+      (ctype.ml:1403) and `deep_occur` does (ctype.ml:1735). R3c let the
+      binding walk stand for `deep_occur` in the route of a variable
+      against a constructor (decision 11); with objects the two differ,
+      and R3e makes the route's test cross rows:
+      `the_route_of_a_variable_crosses_an_object_and_the_occurrence_test_
+      does_not` (the constructor ends at level 1, not 2).
+    - *Changes to the skeleton.* `rows::Extras`: `mutabilities` is gone,
+      `names`, `fields`, `session` are new, `from_segment` takes the graph
+      and pushes the cell nodes; `flatten_fields` sorts; new signatures
+      `make_rowvar`, `build_field`, `unify_field`, `unify_mutability`,
+      `field_trace_pair`, `instance_open`, `dup_cell`, `end_cell_session`,
+      `template_has_open_row`. `unify.rs`: `FrameKind::{Fields, Field,
+      FieldEnd}` with their arms in `run_frames` and `explain_failure`;
+      `unify3` takes two field nodes before the link and sends two other
+      extended descriptors to `extended_children` (which replaces
+      `extended_pair`). `expand.rs`: `OPEN_ROW`; `link_memorized` takes
+      `cells` and no longer visits nodes the pass itself makes;
+      `mark_inheriting` is `mark_manifests`.
+    - *Not run.* The hand-built tests of R3e call bodies that are
+      `todo!`: their expectations are read from the OCaml lines each one
+      quotes, and where the old checker can show the same fact it does, in
+      a test that runs today. No prototype of R3e was built.
+28. **R3f is not designed in this turn.** The turn ended at R3e; R3f has
+    its generated-case test and no hand-built tests, step relations or
+    prompt, and no builder starts it. What its designer needs, read from
+    the source and not run:
+    - *The arms, in OCaml's order* (ctype.ml:2541-2641). `unify_row`:
+      `row_repr` of both; nothing when the two `row_more` are one node;
+      `merge_row_fields` (sorted by tag text unless one side has one tag
+      the other lacks, ctype.ml:380-386); `more` is `rm1` when row 1 is
+      fixed, else `rm2` when row 2 is, else a new variable at the lower of
+      the two levels; `closed` is either row closed; the empty-type clash
+      (ctype.ml:2565-2573); the name (ctype.ml:2574-2586); `set_more row2
+      r1` then `set_more row1 r2`, each of which filters the other side's
+      fields when `closed`, clashes when a closed or fixed row would gain
+      a field, and links the row's `more` to a **new generic variant
+      node** holding the fields it lacked (ctype.ml:2596-2616); then
+      `unify_row_field` per common tag in merged order; then a static row
+      1 gets `Tnil` as its `more`. On any failure `rm1` and `rm2` get
+      their descriptors back.
+    - *What a changed row allocates* (decision 18): one node at the
+      generic level, one descriptor row (12 bytes), one `variants` row (28
+      bytes), one `row_fields` row (20 bytes) and the list slots of its
+      types for each field the other side had and this one lacked, plus
+      the slot of `more` and of the name's arguments. Nothing when the
+      other side had no such field and the row is fixed.
+    - *The fact that blocks the layout.* A field `Reither (c, tl, m, e)`
+      holds a reference `e` that is **shared**: by the two fields
+      `unify_row_field` makes for one tag (`let e = ref None`,
+      ctype.ml:2700-2704; the one `f` of PR#7496, ctype.ml:2659-2662), and
+      by a copy of a row whose row variable is not generic (`let e = if
+      keep then e else ref None`, btype.ml:374, with `keep = more.level <>
+      generic_level`, ctype.ml:806), which is every instance of an
+      annotation's type (`generalize_structure` leaves the variables at
+      their level, O10). And `row_field_repr` reads through it: the
+      children of a variant node are those of the *resolved* field, with
+      the types met on the way (`row_field_repr_aux`, btype.ml:112-119).
+      So: (1) a resolution cannot be a write to a `row_fields` row
+      (`RowFieldRow::link`), because rows are shared by every instance of
+      a scheme and a generic row's instance must have references of its
+      own; (2) it cannot be a cell that no node has as a child, as a
+      mutability cell is, because resolving `Reither (false, [], _, e)`
+      with `Rpresent (Some t)` (ctype.ml:2710-2716) or with another
+      `Reither` gives every variant node that shares `e` a child that is
+      not among its list slots, and the level walk, generalization and
+      `deep_occur` must reach it; (3) a field resolved to `Rabsent` stops
+      being a parent of its types, which the slots of the node still
+      name.
+    - *The two layouts that remain*, neither tried. (a) The reference is
+      a node the variant node has as a slot: unresolved, it has no child;
+      a resolution writes it (a link to the reference it now equals, or a
+      descriptor with the resolved types as its slots). Walks then reach
+      what OCaml reaches, sharing is node identity, the trail undoes it,
+      and an instance copies it when it is generic. What must be shown:
+      that "generic" for such a node coincides with `keep` (the level of
+      `more`), in particular under `generalize_structure`, which must
+      treat it as a variable. (b) References in a side pool with the
+      resolution's types, and the variant node rewritten (`Graph::write`:
+      new slots, new descriptor) at every resolution, with the sharers of
+      a reference found through a list kept in the pool. Recommended
+      first step of the next turn: print reference classes in the
+      harness's variant form (as `CELLS` does for cells), generate an
+      annotation instantiated twice, and observe on the old checker
+      whether two instances share a resolution; then choose.
+    - *The duplicate at an instance* follows from it and uses R3e's pass
+      (`link_memorized` with `cells`): a variant node with an `Reither`
+      field whose `more` the session made needs references of its own
+      (`copy_row`, btype.ml:366-392), exactly as a field of an open row
+      needs a cell of its own. `template_has_open_row` grows that case.
 
 ### 8.7 The hot paths of unification (K2)
 
@@ -3818,3 +4305,16 @@ These bind the builders of R4 and the designers of R5.
    is then not `Missing`. A reason that is an error when read counts as
    deprecated, so that the use reports it. R4f reads the text and the
    migration templates from the same attribute when it warns.
+10. **What the read logs hold** (review of R4g). `read_units` holds every
+    unit whose name was asked and found, in the order first asked;
+    `read_items` holds every imported member the walk chose with
+    `use_found`, in the order first chosen, and reading an item reads its
+    unit. A module on a path is not logged as an item: `use_modules` marks
+    and warns, and the unit of each such module is in `read_units` through
+    `unit_by_name` or through the item at the end of the path. Whether a
+    module on a path needs an entry of its own (its shallow identity: an
+    alias target, or which table it has) is decided by the designer of
+    the first reader of `read_items` (R9), who then adds it in
+    `use_modules` with a test; nothing reads `read_items` before that.
+    A use of an imported member costs two steps, the use and the read it
+    logs; a name that is asked again costs two as well.
