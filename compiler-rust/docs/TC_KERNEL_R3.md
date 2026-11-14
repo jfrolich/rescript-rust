@@ -1820,3 +1820,46 @@ An initial bench build tried to read the private forwarding table and failed
 with E0616; it was replaced by public setup instantiation. No visibility or
 compiler-source change was made. The full compiler suite is left to CI;
 only the requested `tc::` slice ran locally.
+
+### 5. Ranked removals to investigate (not implemented)
+
+**Measured charge is not measured saving.** Each number below is the
+executed instruction charge of the listed OVERHEAD groups, from the tables
+above. It is the gross work a removal targets, not a promise that the
+whole operation gets that much cheaper: replacement checks, register
+allocation and inlining can offset it. A realized saving requires building
+and measuring the proposed source edit; that would violate this task's
+no-compiler-source-change constraint. No such figure is invented here.
+The ranking is by measured target charge, with risk stated separately.
+
+| Rank | OVERHEAD groups / smallest candidate edit | Ground3 | Ground1 | Vars | Bind ground1 | Datatype2 | Abbrev2 | What could go wrong / gate |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| 1 | `unify.rs:1280–1290,1302,1311`: generation/storage check + visited test + mark store. Replace marking for a bounded occurrence probe with an explicit remaining-node budget as in `ctype.ml:1432–1465`; preserve the marked walk for an undecided/cyclic/shared case. No removal of the actual occurrence test. Charges split as **7+6+3** in ground3/datatype2 and **14+14+6** in abbrev2. | 16 | 0 | 0 | 0 | 16 | 34 | Simply deleting marks can loop or revisit a shared DAG exponentially. A budget needs an undecided result, not false. Check `expand_tier_agrees_on_recursive_abbreviations`, `kernel_tier_agrees_on_generated_cases`, `structural_tier_agrees_on_generated_cases`, and deep/wide step bounds; include a cyclic non-occurring graph and heavily shared DAG. Budget tests cost instructions; **net saving unknown**. |
+| 2 | `unify.rs:1200`: tagged continuation dispatch. Have the child-pair producer (`push_lists:1116–1122`) hand its first pair directly to `run_frames:1186–1223`, leaving the remaining work in order on the stack; only residual/general continuations use the kind switch. Removing both child dispatches in these flat cases targets the shown 6; forwarding only the first targets a subset, not all 6. | 6 | 0 | 0 | 0 | 6 | 6 | This is representation overhead compared with recursive `unify_list` (`ctype.ml:2347–2350,2440–2445`), but ordinary recursion has its own costs. Do not reorder children or bypass Linked/Recursion/Field frames. Check `unify_of_equal_deep_types_fits_the_stack`, `unify_of_equal_wide_types_is_linear`, `explain_plan_agrees_on_generated_cases`, `explain_reaches_the_reversed_trace_below_a_swapped_unify3`, and `explain_reaches_a_clash_with_the_recursion_repair_pending`. New pair-return plumbing costs instructions; **net saving unknown**. |
+| 3 | `graph.rs:154`: repeated `from == to` guard. Factor `link`'s distinct-node body (`:157–167`) into a private helper; keep the public guard, but use the helper where the caller already proves distinctness. Start at the nullary shortcut (`unify.rs:268–278`), then prove the structure/substitution call sites separately. | 3 | 1 | 0 | 0 | 3 | 7 | `ctype.ml:2233` already rejects identical heads before `:2257`; `unify3` and substitution need stronger proofs because originals and expanded heads differ. A self-link never terminates. Check `link_directions`, `representative_chain_cost`, `expansion_is_memorized_per_node_and_per_nullary_type`, expansion/scoped/explain differential plans and the existing same-node case. Ground3's 3 and abbrev2's 7 include sites beyond the simplest nullary edit; **net saving and eligible subset unknown until those proofs and a build**. |
+
+These rows cover **every** group classified OVERHEAD. Their gross sums
+are 25, 1, 0, 0, 25 and 47 instructions respectively, not projected whole-
+operation savings. In particular, the absence of a line-154 charge for
+variables does not prove the guard is absent from assembly: optimized
+instructions can be attributed to other lines. No hidden savings are
+assigned to those lines.
+
+The larger, explicitly UNSURE opportunities are:
+
+- `unify_expanded`'s representative calls (`graph.rs:234–252`, 25 source-
+  attributed instructions in ground3, 76 in abbrev2): some are after a
+  potentially mutating expansion, so `ctype.ml:2278–2288` requires them.
+  Separate entry calls on already-known representatives from post-mutation
+  calls before proposing an edit. Do not remove all of this bucket.
+- Out-of-line `expand_once` entry/return and `unify3` call plumbing: source
+  line attribution includes spills and return/result work. OCaml also calls
+  functions here; neither a blanket overhead label nor an inline attribute
+  guarantees a saving. K2's own experiments show inlining can cost more.
+- Bounds checks and Vec traffic: preserving safe Rust, frame order and
+  linear step bounds is part of the contract. A load charged to a shared
+  standard-library line cannot be called a second row load without following
+  its instruction addresses and the optimizer's dataflow.
+
+No source under `compiler-rust/src` was edited. These are kernel costs;
+no application speedup is inferred, and no optimization is submitted.
