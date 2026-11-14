@@ -906,7 +906,6 @@ fn a_lookup_under_ten_opened_modules() {
 /// and `LATER_OPEN_WINS` on the new structure, with the answers the old
 /// checker is pinned to.
 #[test]
-#[ignore = "R4c build"]
 fn an_open_shadows_a_local_and_a_local_shadows_an_open() {
     // let x = 1; module M = { let x = "s" }; open M; let y = x
     let mut s = unit_scopes();
@@ -1027,7 +1026,6 @@ fn seal_lists_what_a_structure_exports() {
 /// older binding (`TycompTbl.find_all`; the old checker's order is checked
 /// on real traces by the oracle).
 #[test]
-#[ignore = "R4c build"]
 fn candidates_are_innermost_first() {
     let mut s = unit_scopes();
     let older = bind(&mut s, "A", Namespace::Constructor, 0);
@@ -1157,7 +1155,6 @@ impl Resolver for OnScopes {
 /// every lookup by name the old environment made while it checked the
 /// pinned programs, replayed on `Scopes`, finds the same item.
 #[test]
-#[ignore = "R4c build"]
 fn scopes_answer_what_the_old_environment_answered() {
     for program in PROGRAMS {
         let old = old_checker(program);

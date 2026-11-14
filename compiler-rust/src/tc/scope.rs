@@ -848,7 +848,16 @@ impl Scopes {
     /// layer's mark (else its `previous` chain is followed, 1 step a
     /// binder).
     pub fn find_below(&self, key: Key, layer: u32) -> Option<Found> {
-        todo!("R4c")
+        let row = self.layers[layer as usize];
+        let mut head = self.head(key);
+        // The bindings made after the open are `current` of the opened
+        // table, not part of `next`.
+        while head != NONE && head >= row.mark {
+            #[cfg(test)]
+            super::steps::tick();
+            head = self.binders.previous[head as usize];
+        }
+        self.find_from(key, head, row.older)
     }
 
     /// Every candidate of `key`, innermost first, appended to `out`
@@ -858,7 +867,47 @@ impl Scopes {
     /// step a candidate, plus one [`Scopes::search`] per visible layer. No
     /// allocation when `out` has capacity.
     pub fn candidates(&self, key: Key, out: &mut Vec<Found>) {
-        todo!("R4c")
+        // No head step: every binder of the chain is a candidate and counted
+        // as one.
+        let mut binder = self.heads.get(key.0 as usize).copied().unwrap_or(NONE);
+        let mut layer = self.scopes[self.current as usize].opens;
+        while binder != NONE || layer != NONE {
+            let row = match layer {
+                NONE => None,
+                layer => Some(self.layers[layer as usize]),
+            };
+            match row {
+                // The layer is younger than the binder: its members first
+                // (`components` before `next`, compiler/ml/env.ml:207-213).
+                Some(row) if binder == NONE || row.mark > binder => {
+                    if let Some(first) = self.search(row.table, key) {
+                        let (pool, _) = self.rows(row.table);
+                        for member in first..pool.len() as u32 {
+                            if pool[member as usize].key != key.0 {
+                                break;
+                            }
+                            #[cfg(test)]
+                            super::steps::tick();
+                            out.push(Found {
+                                item: self.resolved(row.table, member),
+                                layer,
+                            });
+                        }
+                    }
+                    layer = row.older;
+                }
+                // `current` before the opened layer: the binder is younger.
+                _ => {
+                    #[cfg(test)]
+                    super::steps::tick();
+                    out.push(Found {
+                        item: Resolved::binder(Binder(binder)),
+                        layer: NONE,
+                    });
+                    binder = self.binders.previous[binder as usize];
+                }
+            }
+        }
     }
 
     // ----- R4d: dependencies as member tables -----
