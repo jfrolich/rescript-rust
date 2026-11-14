@@ -595,3 +595,66 @@ printer conversion, purity, allocator, memory operations, Rust allocation
 plumbing, compile_expr, then residual. Summing own costs reproduces each summary.
 The unexplained residual within this pair is below the requested tolerance;
 it is not concealed by summing overlapping inclusive entries.
+
+### Measured correction: reserve owned-plan output, acquire work pools on demand
+
+The cold owned-plan entry reserved all 26 graph/work columns even for a Run
+leaf. It now reserves the four output columns (tests, trees, value clauses,
+typeof clauses); work columns grow from the spans they actually process. The
+unit-owned BIR reservations are untouched. A new leaf test asserts that all 22
+work columns retain zero capacity; all existing tests are unchanged.
+
+A temporary test-only experiment in the archived head disabled only
+`reserve_layout` and printed `Plan::capacities()` after each u32 corpus plan.
+Across the 68,352 plan pairs, the equality-test stack was never populated;
+instance-ordering, missing-kind, selector and grouping work pools were absent
+in many plans. The experiment was removed after measurement, not retained as
+an assertion or changed planner. The corrected code retains the existing
+8N-test/16N-tree reservation assertions.
+
+Same release profile and five alternating pairs, before binary `head`, after
+binary `demand`, with the same `base`/`head` corpus paths and 743 modules:
+
+```sh
+env -u RESCRIPT_BACKEND python3 scripts/compare_build_instructions.py \
+  --base temp/default-audit/bin/head temp/default-audit/base \
+  --head temp/default-audit/bin/demand temp/default-audit/head \
+  --runs 5 --sequential --threshold 0.02 --work-dir temp/default-audit/demand-before-after
+```
+
+```text
+run 1: base 4,038,757,860  head 4,036,720,775
+run 2: base 4,038,134,877  head 4,035,662,102
+run 3: base 4,036,734,966  head 4,035,707,790
+run 4: base 4,038,906,886  head 4,036,140,766
+run 5: base 4,038,058,560  head 4,038,806,578
+minimum: 4,036,734,966 -> 4,035,662,102; -1,072,864 (-0.027%)
+```
+
+This improvement is **not acceptance of the branch**. A separate five-pair
+comparison of trunk binary `base` against `demand` still fails the +0.02% gate:
+
+```text
+run 1: base 4,034,154,165  head 4,038,264,312
+run 2: base 4,034,812,261  head 4,036,974,568
+run 3: base 4,033,414,717  head 4,036,463,380
+run 4: base 4,032,722,722  head 4,036,371,197
+run 5: base 4,034,684,684  head 4,036,673,470
+minimum: 4,032,722,722 -> 4,036,371,197; +3,648,475 (+0.090%)
+```
+
+Validation: compiler build and serial full suite (2,604 unit, 1+3 integration,
+5 doctests passed; existing 26+7 ignores); rewatch build and 210+9 tests;
+JS parity 737/737, stdlib 113/113, GenType 2/2. The first parallel full test
+run hit three shared-store unpublished-page failures in module_view tests;
+all 30 module_view tests and the complete suite passed serially. A focused
+corpus retry first lacked reference artifacts after JS parity cleanup;
+rebuilding the runtime, React dependency and tests reference artifacts fixed
+the setup. No tests were ignored or changed to accommodate either issue.
+
+```text
+untagged differential: recorded layouts=453; distinct printed layouts=192; plan pairs=68352; source files=850
+planner: 29 passed; 0 failed
+full_unit_allocation_boundary: 4 passed; 0 failed
+warmed string select: calls=10000; allocations=0; instances materialized before emission=0
+```

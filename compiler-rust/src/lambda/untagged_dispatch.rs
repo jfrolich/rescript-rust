@@ -349,33 +349,17 @@ impl<A> Default for Plan<A> {
 }
 
 impl<A> Plan<A> {
-    /// Cost: O(existing pool rows) on relocation; reserves O(L + K) slots per
-    /// pool from L literal and K payload occurrences in the source layout/arms.
-    /// Bounds cover construction plus simplification copies, not rejection limits.
+    /// Cost: O(existing output rows) on relocation; reserves O(L + K) graph and
+    /// clause slots from the source layout/arms. Work pools grow from the spans
+    /// they actually process: a leaf needs none of the grouping, equality,
+    /// payload-ordering or simplification scratch. Unit-owned append reservations
+    /// remain separate from this cold owned-plan entry.
     fn reserve_layout(&mut self, literals: usize, payloads: usize) {
         let cases = literals + payloads + 1;
-        let graph = 16 * cases;
         self.tests.reserve_exact(8 * cases);
-        self.reserve_trees(graph);
-        self.reserve_simplification(graph);
-        self.reserve_groups(cases);
-        self.reserve_literal_clauses(literals);
+        self.reserve_trees(16 * cases);
+        self.value_clauses.reserve_exact(literals);
         self.typeof_clauses.reserve_exact(payloads);
-        self.equal_trees.reserve_exact(graph);
-        self.equal_tests.reserve_exact(8 * cases);
-        self.selector_work.reserve_exact(8 * cases);
-        self.scratch.arms.reserve_exact(payloads);
-        self.scratch.all.reserve_exact(cases);
-        self.scratch.primitive.reserve_exact(cases);
-        self.scratch.other.reserve_exact(cases);
-        self.scratch.instances.reserve_exact(payloads);
-        self.scratch.ordered.reserve_exact(payloads);
-        self.scratch.entries.reserve_exact(cases);
-        self.scratch.merged.reserve_exact(cases);
-        self.scratch.missing.reserve_exact(payloads);
-        self.scratch.literals.reserve_exact(literals);
-        self.scratch.unnamed.reserve_exact(literals);
-        self.scratch.membership.reserve_exact(literals);
     }
 
     /// Cost: O(existing memo/work rows) if relocated; reserves the requested tree-domain
@@ -1619,6 +1603,14 @@ mod tests {
             &|_| 0,
         );
         assert_eq!(groups.heads, [0, 1]); // joins first-created body 3, not body 2
+    }
+
+    #[test]
+    fn owned_leaf_plan_leaves_unused_work_pools_empty() {
+        let p = plan_of(vec![], vec![BlockType::Unknown], None,
+            vec![], vec![(BlockType::Unknown, "body")]);
+        assert!(matches!(p.tree(p.root()), Tree::Run("body")));
+        assert!(p.capacities()[4..].iter().all(|capacity| *capacity == 0));
     }
 
     #[test]
