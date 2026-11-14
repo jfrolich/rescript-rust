@@ -1,0 +1,1 @@
+- Type checker rewrite R4d: a dependency's export table becomes a member table of the worker's names, imported once per worker, with deprecation bits.

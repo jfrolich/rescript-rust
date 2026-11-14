@@ -1280,7 +1280,6 @@ fn an_import_lists_the_members_of_the_old_layer() {
 /// Reaches: R4a, R4c, R4d. `@deprecated` on a declaration of a dependency
 /// is a bit of its imported member.
 #[test]
-#[ignore = "R4d build"]
 fn an_import_knows_what_is_deprecated() {
     let segment = compiled_segment(
         "Old",
