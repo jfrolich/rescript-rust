@@ -1,0 +1,1 @@
+- Make the checker rewrite's type-graph kernel cheaper on its hot paths: instances copy nameless template variables, links load and store one node, and a representative is found with one compare.
