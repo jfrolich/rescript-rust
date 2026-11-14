@@ -270,15 +270,16 @@ impl Log {
         let end = index(sites.len());
         let mut at = open.sites;
         let children = open.children as usize;
-        for child in children..self.children.len() {
-            let [start, stop] = self.children[child];
+        let mut child = children;
+        while let Some(&[start, stop]) = self.children.get(child) {
             self.steps += 1;
             self.read_sites(bir, row, at, start);
             at = stop;
+            child += 1;
         }
         self.read_sites(bir, row, at, end);
         // 3. The free entries of the run, compacted in place.
-        let method_this = (header.flags & crate::bir::FuncHeader::METHOD != 0 && header.params.len() > 0)
+        let method_this = (header.flags & crate::bir::FuncHeader::METHOD != 0 && !header.params.is_empty())
             .then(|| FreeRef::var(bir.function_parameter(function, 0)));
         let mut flags = ScopeRow::CLOSED;
         let start = open.run as usize;
@@ -303,9 +304,8 @@ impl Log {
         });
         self.steps += comparisons;
         let free_start = index(self.free.len());
-        for i in start..kept {
-            let entry = self.run[i];
-            if self.free.len() as u32 == free_start || self.free.last() != Some(&entry) {
+        for &entry in &self.run[start..kept] {
+            if index(self.free.len()) == free_start || self.free.last() != Some(&entry) {
                 self.free.push(entry);
             }
         }
@@ -379,7 +379,7 @@ fn ident_order(bir: &Bir, a: FreeRef, b: FreeRef) -> std::cmp::Ordering {
     let key = |entry: FreeRef| match (entry.as_var(), entry.as_import()) {
         (Some(var), _) => {
             let origin = bir.vars.j_origin[var.index()];
-            (bir.vars.order(origin) as i64, bir.vars.name(origin))
+            (i64::from(bir.vars.order(origin)), bir.vars.name(origin))
         }
         (None, Some(import)) => {
             let module = &bir.pools.j_modules[import.index()].id;

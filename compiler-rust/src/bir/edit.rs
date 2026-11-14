@@ -332,10 +332,8 @@ impl Bir {
             );
             self.vars.binder[var.index()] = Some(id);
             #[cfg(test)]
-            if !literal {
-                if let Some(scope) = &mut self.js_scope {
-                    scope.names.bind(var);
-                }
+            if !literal && let Some(scope) = &mut self.js_scope {
+                scope.names.bind(var);
             }
         }
         self.update_facts(id);
