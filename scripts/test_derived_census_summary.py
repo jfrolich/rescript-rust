@@ -121,6 +121,15 @@ class DerivedCensusSummaryTest(unittest.TestCase):
         self.assertEqual(result["failed_obligations"], {"constructor / result": 1})
         self.assertIn("constructor / result", markdown(result))
 
+    def test_not_json_identity_failure_is_named_without_double_counting(self):
+        event = dict(version=1, event="failed_obligation", module="AliasUser",
+                     obligation="not_json_identity", type_shape="manifest_argument")
+        result = summarize([event, row()])
+        self.assertEqual(result["bindings"], [3, 2])
+        self.assertEqual(result["failed_obligations"],
+                         {"not_json_identity / manifest_argument": 1})
+        self.assertIn("not_json_identity / manifest_argument", markdown(result))
+
     def test_counter_sides(self):
         item = row()
         item["checker_counters"] = [[1, 2, 3, 4], [10, 20, 30, 40]]
