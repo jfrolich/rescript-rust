@@ -195,7 +195,7 @@ pub(super) fn prepare(arena: &mut Bir) -> (Storage, dispatch::Plan<u32>) {
     // These are capacities, not a rejection bound on larger expansions.
     let graph_nodes = 4 * (literals + payloads) + 16 * variants;
     graph.reserve_trees(graph_nodes);
-    graph.reserve_simplify_work(graph_nodes);
+    graph.reserve_simplification(graph_nodes);
     storage.work.reserve_exact(graph_nodes);
     storage.program.values.reserve_exact(graph_nodes);
     // An arm may have a cached action inside and outside a switch.
