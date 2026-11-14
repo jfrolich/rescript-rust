@@ -17,6 +17,13 @@
 //! signature itself prints a published unit, without levels and with links
 //! followed, and cannot print an operand that is not generic.
 //!
+//! Variable names are part of the form in every tier but `Kernel`: the old
+//! checker's `instance` drops a variable's name (`copy_type_desc`,
+//! compiler/ml/btype.ml:510) and R1's `Graph::instance` and `Graph::copy`
+//! keep it. The harness found that; slice R3b corrects it, and until then
+//! the kernel tier prints no names (`r3_tests::instance_drops_variable_names`
+//! is the test that compares them).
+//!
 //! A failed unification ends the case: what a failed unification leaves in
 //! the graph is not observable (CHECKER_REWRITE "R3 as designed", decision
 //! 5), so nothing after it is compared except the index of the failure.
@@ -32,7 +39,7 @@ use super::graph::{ARROW, CONSTR, GENERIC, NONE, TUPLE, Ty, VAR};
 use super::rows::Extras;
 use super::unify::Checker;
 use super::segment::{PathRow, SchemeRoot, Segment, SignatureKind};
-use crate::cmi::persistent_env::ModuleRegistry;
+use crate::cmi::persistent_env::{InMemoryModuleInfo, ModuleRegistry, PersistentEnv};
 use crate::cmi::portable_types::{PortablePersStruct, internalize_pers_struct};
 use crate::context::IdGenerator;
 use crate::driver::{CompilerOptions, compile_source_in_process};
@@ -82,6 +89,11 @@ impl Tier {
     /// O(1): whether generated programs declare abbreviations.
     fn abbreviations(self) -> bool {
         self != Tier::Structural
+    }
+
+    /// O(1): whether the form prints variable names (see the module text).
+    fn names(self) -> bool {
+        self != Tier::Kernel
     }
 }
 
@@ -310,8 +322,19 @@ pub(crate) fn operations(rng: &mut Rng, tier: Tier, values: usize) -> Vec<Op> {
 }
 
 /// O(operations + printed nodes²): the old checker's side of a case.
-pub(crate) fn run_old(program: &Program, ops: &[Op]) -> Outcome {
+pub(crate) fn run_old(program: &Program, tier: Tier, ops: &[Op]) -> Outcome {
     let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+    // The unit's own types are named through the unit (`Case.a0`): they
+    // resolve through the persistent environment, as for a dependent.
+    let mut registry = ModuleRegistry::new();
+    registry.register_module_arc(
+        "Case",
+        program.unit.clone(),
+        InMemoryModuleInfo::new("Case.res".into(), true, Default::default(), false),
+    );
+    let mut persistent = PersistentEnv::from_registry(&registry);
+    persistent.set_nopervasives(true);
+    ctx.set_persistent_env(persistent);
     let unit = internalize_pers_struct(program.unit.clone(), &ctx);
     let mut env: Env = initial_env(&ctx);
     let mut values = Vec::new();
@@ -362,7 +385,7 @@ pub(crate) fn run_old(program: &Program, ops: &[Op]) -> Outcome {
     let mut seen = Vec::new();
     for (index, &operand) in operands.iter().enumerate() {
         let _ = write!(form, "{index} = ");
-        old_form(&ctx, base, operand, &mut seen, &mut form);
+        old_form(&ctx, base, tier.names(), operand, &mut seen, &mut form);
         form.push('\n');
     }
     Outcome { failed: None, form }
@@ -372,6 +395,7 @@ pub(crate) fn run_old(program: &Program, ops: &[Op]) -> Outcome {
 fn old_form(
     ctx: &TypeContext,
     base: i32,
+    names: bool,
     ty: TypeExprRef,
     seen: &mut Vec<TypeExprRef>,
     out: &mut String,
@@ -393,7 +417,7 @@ fn old_form(
     match desc {
         TypeDesc::Tvar(name) => {
             out.push('\'');
-            if let Some(name) = name {
+            if let (true, Some(name)) = (names, name) {
                 out.push_str(name.as_str());
             }
         }
@@ -406,7 +430,7 @@ fn old_form(
                     if index != 0 {
                         out.push_str(", ");
                     }
-                    old_form(ctx, base, arg, seen, out);
+                    old_form(ctx, base, names, arg, seen, out);
                 }
                 out.push('>');
             }
@@ -418,7 +442,7 @@ fn old_form(
                 if index != 0 {
                     out.push_str(", ");
                 }
-                old_form(ctx, base, element, seen, out);
+                old_form(ctx, base, names, element, seen, out);
             }
             out.push(')');
         }
@@ -436,10 +460,10 @@ fn old_form(
                 if let Some(label) = label {
                     let _ = write!(out, "~{label}{}: ", if optional { "?" } else { "" });
                 }
-                old_form(ctx, base, typ, seen, out);
+                old_form(ctx, base, names, typ, seen, out);
             }
             out.push_str(") => ");
-            old_form(ctx, base, ret, seen, out);
+            old_form(ctx, base, names, ret, seen, out);
         }
         _ => out.push_str("?unsupported"),
     }
@@ -621,7 +645,7 @@ impl New {
         match node.tag() {
             VAR => {
                 out.push('\'');
-                if node.a != NONE {
+                if self.tier.names() && node.a != NONE {
                     out.push_str(self.string(node.a));
                 }
             }
@@ -706,7 +730,7 @@ pub(crate) fn compare(
     ops: &[Op],
     fault: Fault,
 ) -> Result<Outcome, String> {
-    let old = run_old(program, ops);
+    let old = run_old(program, tier, ops);
     let new = run_new(program, tier, ops, fault);
     if old == new {
         return Ok(old);
@@ -906,7 +930,7 @@ mod tests {
                 if !ops.iter().any(|op| matches!(op, Op::Unify(..))) {
                     continue;
                 }
-                let outcome = run_old(&program, &ops);
+                let outcome = run_old(&program, Tier::Full, &ops);
                 if outcome.failed.is_some() {
                     failed += 1;
                 } else {
@@ -926,10 +950,10 @@ mod tests {
         // v1 is `(a0, t1<(int, string)>)` and v3 the same with `int` for
         // `a0`: they unify only through the declaration `type a0 = int`.
         let ops = [Op::Instance(1), Op::Instance(3), Op::Unify(0, 1)];
-        let outcome = run_old(&program, &ops);
+        let outcome = run_old(&program, Tier::Full, &ops);
         assert_eq!(outcome.failed, None, "{}", outcome.form);
         // dup's instance is an arrow: no declaration makes it a tuple.
         let ops = [Op::Instance(1), Op::Instance(4), Op::Unify(0, 1)];
-        assert_eq!(run_old(&program, &ops).failed, Some(2));
+        assert_eq!(run_old(&program, Tier::Full, &ops).failed, Some(2));
     }
 }

@@ -2337,6 +2337,14 @@ the trace. Tests: `success_mode_keeps_nothing_for_a_failure`,
   variables, polymorphic types and packages keep the layout R2 publishes
   (`TUPLE | EXTENDED`, children in list slots, a descriptor row), with
   worker-local pools (`rows::Extras`), so R1's walks need no new case.
+- *Variable names in an instance (found by the harness, not in the task
+  text).* The old checker's `instance` gives every copied variable no name
+  (`copy_type_desc`, compiler/ml/btype.ml:510); R1's `Graph::instance` and
+  `Graph::copy` keep the scheme's name. That is O17. The kernel tier of the
+  harness reported it on its first run; it prints no names until R3b, whose
+  first commit makes the two R1 functions write no name
+  (`instance_drops_variable_names`). A `keep_names` instance
+  (ctype.ml:982) is added by the slice that first needs it (R5a).
 - *A type written through a module alias.* OCaml expands it to a node of
   the target path and does not memorize that (ctype.ml:1211-1214). The old
   checker memorizes it: the probe of decision 3 shows `N.t` shared. The new
@@ -2371,13 +2379,16 @@ variables, of two ground 1-node types and of two 3-node types in
 **R3b.** Functions: `TypeTable::{from_segment, info}`,
 `Checker::{set_env, cleanup_abbrev, find_expansion, find_repr, memorize,
 forget_abbrev, expand_once, expand_head, instance, copy, restore}`,
-`link_node`. End state: `rg -n 'todo!\("R3b"\)' src/tc` is empty; tests
+`link_node`; in R1's code, `Graph::instance` and `Graph::copy` write no
+variable name. End state: `rg -n 'todo!\("R3b"\)' src/tc` is empty; tests
+`instance_drops_variable_names`,
 `expansion_is_memorized_per_node_and_per_nullary_type`,
 `a_copy_of_a_nullary_constructor_links_to_the_memorized_node`,
 `instance_with_an_empty_memo_costs_what_r1_costs`,
 `memo_aware_instance_shares_what_the_old_instance_shares`,
-`differential::expand_tier_agrees_on_generated_cases`. Commits: (1) the
-table from a segment; (2) expansion and the two memos; (3) the memo-aware
+`differential::expand_tier_agrees_on_generated_cases`. Commits: (0)
+instances drop variable names, and `Tier::names` returns true for every
+tier; (1) the table from a segment; (2) expansion and the two memos; (3) the memo-aware
 instance and copy; (4) `restore` with its cleanup. Failure: a memo lookup
 per node when `live == 0`; a hash map by type index; clearing the nullary
 memo by a pass; an expansion that links the abbreviation node. Numbers:
@@ -2472,8 +2483,12 @@ section 2.2. Say plainly if a figure is above the kernel's.
 ```
 
 ```text
-R3b. First edit: TypeTable::info and TypeTable::from_segment in
-src/tc/expand.rs; run differential's Expand tier old side to see what a
+R3b. Commit 0, before anything else: in src/tc/template.rs make
+Graph::instance and Graph::copy give a copied variable no name (a = NONE;
+compiler/ml/btype.ml:510), make differential::Tier::names return true for
+every tier, and see the kernel tier still pass; this is the one change to
+R1's code and the one change to the harness you make. Then: TypeTable::info
+and TypeTable::from_segment in src/tc/expand.rs; run differential's Expand tier old side to see what a
 generated declaration looks like. Then expand_once (a memo miss
 instantiates the manifest's template at the node's level and memorizes
 before the body is linked, as `subst` does), then the memos, then

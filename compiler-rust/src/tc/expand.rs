@@ -239,7 +239,10 @@ impl Checker {
         todo!("R3b")
     }
 
-    /// An instance of a template, with the copy-time lookup of O11: when
+    /// An instance of a template that drops variable names, as the old
+    /// checker's does (`copy_type_desc`, compiler/ml/btype.ml:510; R3b makes
+    /// `Graph::instance` and `Graph::copy` write no name), with the
+    /// copy-time lookup of O11: when
     /// `memo.live` is 0 this is `Graph::instance` and costs it plus one load
     /// and one untaken branch; otherwise one more pass over the new nodes,
     /// one `find_repr` per nullary constructor, each hit rewriting the new

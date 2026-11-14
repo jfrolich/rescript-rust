@@ -327,9 +327,25 @@ fn instance_from_a_segment_shares_what_the_old_instance_shares() {
         let outcome = compare(u64::from(value), &program, Tier::Kernel, &ops, Fault::None)
             .unwrap_or_else(|report| panic!("{report}"));
         let shares = outcome.form.contains('@');
-        // `two` has no node at two positions; every other value has.
-        assert_eq!(shares, value != 1, "{}", outcome.form);
+        // `dup` and `both` have a node at two positions. `two` has two equal
+        // nodes, and each use of the annotated `x` of `pair` is a copy (O10).
+        assert_eq!(shares, value == 0 || value == 3, "{}", outcome.form);
     }
+}
+
+/// The harness's kernel tier found that R1's instance keeps a variable's
+/// name where the old checker's drops it (`copy_type_desc`,
+/// compiler/ml/btype.ml:510: `Tvar _ as ty -> if keep_names then ty else
+/// Tvar None`). Above the kernel tier the form prints names, so this
+/// compares them: an instance and a copy of a scheme with named variables.
+#[test]
+#[ignore = "R3b build"]
+fn instance_drops_variable_names() {
+    let program = compile(SHARING.to_string());
+    let ops = [Op::BeginDef, Op::Instance(3), Op::EndDef, Op::Generalize(0), Op::Copy(0)];
+    let outcome = compare(0, &program, Tier::Expand, &ops, Fault::None)
+        .unwrap_or_else(|report| panic!("{report}"));
+    assert!(!outcome.form.contains("'a"), "{}", outcome.form);
 }
 
 /// The same with the memo-aware instance of R3b.
