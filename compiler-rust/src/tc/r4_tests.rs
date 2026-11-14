@@ -593,7 +593,6 @@ fn names_are_interned_once_and_dense() {
 /// Reaches: R4a. Pushing 10,000 binders is 10,000 steps, and every array
 /// has the row.
 #[test]
-#[ignore = "R4a build"]
 fn ten_thousand_binders_are_one_step_each() {
     let mut s = Scopes::new();
     let key = key(&mut s, "x", Namespace::Value);

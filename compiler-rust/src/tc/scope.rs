@@ -165,7 +165,17 @@ impl Binders {
     /// scope until [`Scopes::bind`]. `previous` starts at [`NONE`] and
     /// `used` at 0. Panics at 2^30 binders.
     pub fn push(&mut self, key: Key, payload: u32, loc: u32, kind: BinderKind) -> Binder {
-        todo!("R4a")
+        #[cfg(test)]
+        super::steps::tick();
+        let binder = self.len();
+        assert!(binder < 1 << 30, "more than 2^30 binders");
+        self.key.push(key.0);
+        self.payload.push(payload);
+        self.loc.push(loc);
+        self.previous.push(NONE);
+        self.kind.push(kind);
+        self.used.push(0);
+        Binder(binder)
     }
 
     /// O(1): how many binders exist; the age a layer is compared with.
