@@ -24,6 +24,7 @@ See [`null`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/O
 Console.log(Nullable.null) // Logs `null` to the console.
 ```
 */
+@pure
 external null: t<'a> = "#null"
 
 /**
@@ -36,6 +37,7 @@ See [`undefined`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Refere
 Console.log(undefined) // Logs `undefined` to the console.
 ```
 */
+@pure
 external undefined: t<'a> = "#undefined"
 
 /**
@@ -57,6 +59,7 @@ switch asNullable->Nullable.isNullable {
 }
 ```
 */
+@pure
 external isNullable: t<'a> => bool = "#is_nullable"
 
 /**
@@ -78,10 +81,13 @@ switch asNullable->Nullable.toOption {
 }
 ```
 */
+@pure
 external make: 'a => t<'a> = "%identity"
 
+@pure
 let equal: (t<'a>, t<'b>, ('a, 'b) => bool) => bool
 
+@pure
 let compare: (t<'a>, t<'b>, ('a, 'b) => Stdlib_Ordering.t) => Stdlib_Ordering.t
 
 /**
@@ -98,6 +104,7 @@ switch nullableString->Nullable.toOption {
 }
 ```
 */
+@pure
 external toOption: t<'a> => option<'a> = "#nullable_to_opt"
 
 /**
@@ -110,6 +117,7 @@ let optString = Some("Hello")
 let asNullable = optString->Nullable.fromOption // Nullable.t<string>
 ```
 */
+@pure
 let fromOption: option<'a> => t<'a>
 
 /**
@@ -128,6 +136,7 @@ Nullable.make("Jane")->Nullable.toOption->greet // "Greetings Jane"
 Nullable.null->Nullable.toOption->greet // "Greetings Anonymous"
 ```
 */
+@pure
 let getOr: (t<'a>, 'a) => 'a
 
 /**
@@ -154,6 +163,7 @@ switch Nullable.getOrThrow(%raw("undefined")) {
 
 - Throws `Invalid_argument` if `value` is `null` or `undefined`
 */
+@pure
 let getOrThrow: t<'a> => 'a
 
 /**
@@ -170,6 +180,7 @@ Nullable.getUnsafe(Nullable.null) // Throws an error
 
 - This is an unsafe operation, it assumes `value` is not `null` or `undefined`.
 */
+@pure
 external getUnsafe: t<'a> => 'a = "%identity"
 
 /**
@@ -184,6 +195,7 @@ Nullable.forEach(Nullable.null, x => Console.log(x)) // returns ()
 Nullable.forEach(undefined, x => Console.log(x)) // returns ()
 ```
 */
+@pure
 let forEach: (t<'a>, 'a => unit) => unit
 
 /**
@@ -197,6 +209,7 @@ Nullable.map(Nullable.make(3), x => x * x) // Nullable.make(9)
 Nullable.map(undefined, x => x * x) // undefined
 ```
 */
+@pure
 let map: (t<'a>, 'a => 'b) => t<'b>
 
 /**
@@ -213,6 +226,7 @@ let noneValue = Nullable.null
 noneValue->Nullable.mapOr(0, x => x + 5) // 0
 ```
 */
+@pure
 let mapOr: (t<'a>, 'b, 'a => 'b) => 'b
 
 /**
@@ -234,6 +248,7 @@ Nullable.flatMap(Nullable.make(-4), addIfAboveOne) // undefined
 Nullable.flatMap(Nullable.null, addIfAboveOne) // undefined
 ```
 */
+@pure
 let flatMap: (t<'a>, 'a => t<'b>) => t<'b>
 
 /**
@@ -242,4 +257,5 @@ let flatMap: (t<'a>, 'a => t<'b>) => t<'b>
   This helper is useful when you want to discard a value (for example, the result of an operation with side effects)
   without having to store or process it further.
 */
+@pure
 external ignore: t<'a> => unit = "%ignore"

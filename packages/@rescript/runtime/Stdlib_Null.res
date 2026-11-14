@@ -3,12 +3,16 @@ type t<+'a> = Primitive_js_extern.null<'a> =
   | Value('a)
   | @as(null) Null
 
+@pure
 external asNullable: t<'a> => Stdlib_Nullable.t<'a> = "%identity"
 
+@pure
 external null: t<'a> = "#null"
 
+@pure
 external make: 'a => t<'a> = "%identity"
 
+@pure
 external toOption: t<'a> => option<'a> = "#null_to_opt"
 
 let fromOption: option<'a> => t<'a> = option =>
@@ -33,6 +37,7 @@ let getOrThrow: t<'a> => 'a = value =>
   | None => throw(Invalid_argument("Null.getOrThrow: value is null"))
   }
 
+@pure
 external getUnsafe: t<'a> => 'a = "%identity"
 
 let forEach = (value, f) =>
@@ -59,4 +64,5 @@ let flatMap = (value, f) =>
   | None => null
   }
 
+@pure
 external ignore: t<'a> => unit = "%ignore"

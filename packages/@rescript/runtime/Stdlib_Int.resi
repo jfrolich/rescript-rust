@@ -26,7 +26,7 @@ on MDN.
   Console.log(Int.Constants.minValue)
   ```
   */
-  @inline
+  @inline @pure
   let minValue: int
 
   /**
@@ -40,12 +40,14 @@ on MDN.
   Console.log(Int.Constants.maxValue)
   ```
   */
-  @inline
+  @inline @pure
   let maxValue: int
 }
 
+@pure
 external equal: (int, int) => bool = "%equal"
 
+@pure
 external compare: (int, int) => Stdlib_Ordering.t = "%compare"
 
 /**
@@ -66,7 +68,7 @@ Int.toExponential(5678, ~digits=2) // "5.68e+3"
 
 - `RangeError`: If `digits` less than 0 or greater than 10.
 */
-@send
+@send @pure
 external toExponential: (int, ~digits: int=?) => string = "toExponential"
 
 /**
@@ -88,7 +90,7 @@ Int.toFixed(300, ~digits=1) // "300.0"
 
 - `RangeError`: If `digits` is less than 0 or larger than 100.
 */
-@send
+@send @pure
 external toFixed: (int, ~digits: int=?) => string = "toFixed"
 
 /**
@@ -110,7 +112,7 @@ Int.toPrecision(1, ~digits=2) // "1.0"
   Implementations are allowed to support larger and smaller values as well.
   ECMA-262 only requires a precision of up to 21 significant digits.
 */
-@send
+@send @pure
 external toPrecision: (int, ~digits: int=?) => string = "toPrecision"
 
 /**
@@ -133,7 +135,7 @@ Int.toString(123456, ~radix=36) // "2n9c"
 
 `RangeError`: if `radix` is less than 2 or greater than 36.
 */
-@send
+@send @pure
 external toString: (int, ~radix: int=?) => string = "toString"
 
 /**
@@ -150,7 +152,7 @@ Int.toLocaleString(1000) // "1,000"
 Int.toLocaleString(1000) // "1.000"
 ```
 */
-@send
+@send @pure
 external toLocaleString: int => string = "toLocaleString"
 
 /**
@@ -163,6 +165,7 @@ Int.toFloat(100) == 100.0
 Int.toFloat(2) == 2.0
 ```
 */
+@pure
 external toFloat: int => float = "%identity"
 
 /**
@@ -178,6 +181,7 @@ Int.fromFloat(1.5) == 1
 Int.fromFloat(0.9999) == 0
 ```
 */
+@pure
 external fromFloat: float => int = "%intoffloat"
 
 /**
@@ -194,6 +198,7 @@ Int.fromString("NaN") == None
 Int.fromString("0b6") == None
 ```
 */
+@pure
 let fromString: string => option<int>
 
 /**
@@ -205,6 +210,7 @@ let fromString: string => option<int>
 Int.mod(7, 4) == 3
 ```
 */
+@pure
 external mod: (int, int) => int = "%modint"
 
 /**
@@ -245,6 +251,7 @@ Int.range(3, 6, ~options={step: -2}) // RangeError
 
 - Raises `RangeError` if `step == 0 && start != end`.
 */
+@pure
 let range: (int, int, ~options: rangeOptions=?) => array<int>
 
 /**
@@ -261,6 +268,7 @@ Int.clamp(42, ~max=40) == 40
 Int.clamp(42, ~min=50, ~max=40) == 50
 ```
 */
+@pure
 let clamp: (~min: int=?, ~max: int=?, int) => int
 
 /**
@@ -272,6 +280,7 @@ let clamp: (~min: int=?, ~max: int=?, int) => int
 Int.bitwiseAnd(7, 4) == 4
 ```
 */
+@pure
 external bitwiseAnd: (int, int) => int = "%andint"
 
 /**
@@ -283,6 +292,7 @@ external bitwiseAnd: (int, int) => int = "%andint"
 Int.bitwiseOr(7, 4) == 7
 ```
 */
+@pure
 external bitwiseOr: (int, int) => int = "%orint"
 
 /**
@@ -294,6 +304,7 @@ external bitwiseOr: (int, int) => int = "%orint"
 Int.bitwiseXor(7, 4) == 3
 ```
 */
+@pure
 external bitwiseXor: (int, int) => int = "%xorint"
 
 /**
@@ -305,6 +316,7 @@ external bitwiseXor: (int, int) => int = "%xorint"
 Int.bitwiseNot(2) == -3
 ```
 */
+@pure
 external bitwiseNot: int => int = "%bitnot_int"
 
 /**
@@ -316,6 +328,7 @@ external bitwiseNot: int => int = "%bitnot_int"
 Int.shiftLeft(4, 1) == 8
 ```
 */
+@pure
 external shiftLeft: (int, int) => int = "%lslint"
 
 /**
@@ -329,6 +342,7 @@ Also known as "arithmetic right shift" operation.
 Int.shiftRight(8, 1) == 4
 ```
 */
+@pure
 external shiftRight: (int, int) => int = "%asrint"
 
 /**
@@ -343,6 +357,7 @@ Also known as "zero-filling right shift" operation.
 Int.shiftRightUnsigned(4, 1) == 2
 ```
 */
+@pure
 external shiftRightUnsigned: (int, int) => int = "%lsrint"
 
 /**
@@ -351,4 +366,5 @@ external shiftRightUnsigned: (int, int) => int = "%lsrint"
   This helper is useful when you want to discard a value (for example, the result of an operation with side effects)
   without having to store or process it further.
 */
+@pure
 external ignore: int => unit = "%ignore"

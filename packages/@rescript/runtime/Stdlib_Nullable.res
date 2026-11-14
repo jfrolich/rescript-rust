@@ -4,14 +4,19 @@ type t<'a> = Primitive_js_extern.nullable<'a> =
   | @as(null) Null
   | @as(undefined) Undefined
 
+@pure
 external null: t<'a> = "#null"
 
+@pure
 external undefined: t<'a> = "#undefined"
 
+@pure
 external isNullable: t<'a> => bool = "#is_nullable"
 
+@pure
 external make: 'a => t<'a> = "%identity"
 
+@pure
 external toOption: t<'a> => option<'a> = "#nullable_to_opt"
 
 let fromOption: option<'a> => t<'a> = option =>
@@ -36,6 +41,7 @@ let getOrThrow: t<'a> => 'a = value =>
   | None => throw(Invalid_argument("Nullable.getOrThrow: value is null or undefined"))
   }
 
+@pure
 external getUnsafe: t<'a> => 'a = "%identity"
 
 let forEach = (value, f) =>
@@ -62,4 +68,5 @@ let flatMap = (value, f) =>
   | None => Obj.magic(value)
   }
 
+@pure
 external ignore: t<'a> => unit = "%ignore"

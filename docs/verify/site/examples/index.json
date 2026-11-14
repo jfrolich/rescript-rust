@@ -1,0 +1,72 @@
+[
+  {
+    "id": "pure-compute",
+    "title": "Functions that only compute",
+    "summary": "The JavaScript is what it is without the attribute."
+  },
+  {
+    "id": "pure-local",
+    "title": "Changing what the function created",
+    "summary": "A local array and a local ref: nobody else can see them."
+  },
+  {
+    "id": "pure-argument",
+    "title": "Changing an argument",
+    "summary": "The caller's array is not the function's to change.",
+    "fails": true,
+    "report": "This changes `items`, and `addItem` did not create it.",
+    "expected": "Array.push changes its first argument, and items belongs to the caller."
+  },
+  {
+    "id": "pure-state",
+    "title": "State outside the function",
+    "summary": "A ref of the module, and the clock.",
+    "fails": true,
+    "report": "The external `Date.now` is not marked @pure",
+    "expected": "Two calls of next can read different values of counter, and Date.now answers differently each time."
+  },
+  {
+    "id": "pure-closure",
+    "title": "A function that keeps state",
+    "summary": "The returned function changes n each time it is called.",
+    "fails": true,
+    "report": "This function changes `n`, which was created outside it",
+    "expected": "Each call of counter() is pure, but what it returns is not: the ref outlives the call."
+  },
+  {
+    "id": "pure-helpers",
+    "title": "Functions of the same file",
+    "summary": "double passes, trace does not, and the report says where.",
+    "fails": true,
+    "report": "`trace` is not pure, and `f` is @pure.",
+    "expected": "Neither helper has an annotation. The compiler looks into both."
+  },
+  {
+    "id": "pure-arguments",
+    "title": "Function arguments",
+    "summary": "A pure function may call a function it is given."
+  },
+  {
+    "id": "pure-mutates",
+    "title": "@mutates",
+    "summary": "add changes its first argument; fromArray calls it on a buffer it created."
+  },
+  {
+    "id": "pure-externals",
+    "title": "JavaScript taken on trust",
+    "summary": "Externals and a %raw binding, marked by their author."
+  },
+  {
+    "id": "pure-interface",
+    "title": "A signature that requires purity",
+    "summary": "The implementation has no annotation; the signature's is enforced on it.",
+    "fails": true,
+    "report": "This changes `calls`",
+    "expected": "The signature declares next @pure, so the implementation is checked as if it said so."
+  },
+  {
+    "id": "pure-functor",
+    "title": "Module types and functors",
+    "summary": "Max can call O.compare because Ord says it is pure, and every argument is held to that."
+  }
+]

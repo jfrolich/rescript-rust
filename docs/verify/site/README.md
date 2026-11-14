@@ -1,0 +1,29 @@
+# The pages of docs/verify
+
+Renders the documents of `docs/verify` with their examples live: each
+`<!-- example: id -->` block of a document is replaced by the example
+`examples/<id>.res`, compiled in the browser.
+
+The compiler is `crate/`: the Rust compiler built for `wasm32-wasip1`.
+`src/engine.js` supplies the few WASI calls it needs; it has no file system,
+the file of an example comes in with each request, and the standard library
+is type checked from its sources (`public/stdlib.json`).
+
+```sh
+npm ci
+npm run build:wasm   # public/compiler.wasm, about 10 MB
+npm run build        # dist/, with relative URLs: serve it from any path
+npm run dev
+```
+
+`npm run build` first compiles every example with the WebAssembly module
+(`scripts/prebuild-examples.mjs`), so that a page shows results before the
+compiler has loaded, and fails when an example does not behave as
+`examples/index.json` says: `"fails": true` for one the compiler is meant to
+reject, `"report"` for a sentence its report must contain, and `"expected"`
+for the sentence shown above the report. Set `VITE_PULL_REQUEST` to link the
+pages to a pull request.
+
+There is one page per document: `index.html` is `README.md` and `pure.html`
+is `pure.md`. A host that serves `pure.html` as `/pure` works as well: every
+URL in the pages is relative.

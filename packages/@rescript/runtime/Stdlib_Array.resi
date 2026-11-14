@@ -16,6 +16,7 @@ type arrayLike<+'a>
 This is useful when passing an array to APIs that consume iterables, such as
 `Array.from` or `for...of` in JavaScript.
 */
+@pure
 external asIterable: array<'a> => Stdlib_Iterable.t<'a> = "%identity"
 
 /**
@@ -30,7 +31,7 @@ Map.fromArray([("foo", 1), ("bar", 2)])
 ->Array.fromIterable == [1, 2]
 ```
 */
-@val
+@val @pure
 external fromIterable: Stdlib_Iterable.t<'a> => array<'a> = "Array.from"
 
 /**
@@ -45,7 +46,7 @@ let source: Array.arrayLike<int> = %raw(`{0: 10, 1: 20, length: 2}`)
 Array.fromArrayLike(source) == [10, 20]
 ```
 */
-@val external fromArrayLike: arrayLike<'a> => array<'a> = "Array.from"
+@pure @val external fromArrayLike: arrayLike<'a> => array<'a> = "Array.from"
 
 /**
 `fromArrayLikeWithMap(source, map)` converts an array-like value into an array and applies `map` to every element.
@@ -59,7 +60,7 @@ let source: Array.arrayLike<int> = %raw(`{0: 1, 1: 2, length: 2}`)
 Array.fromArrayLikeWithMap(source, x => x * 10) == [10, 20]
 ```
 */
-@val
+@val @pure
 external fromArrayLikeWithMap: (arrayLike<'a>, 'a => 'b) => array<'b> = "Array.from"
 
 /**
@@ -71,7 +72,7 @@ external fromArrayLikeWithMap: (arrayLike<'a>, 'a => 'b) => array<'b> = "Array.f
 Array.fromString("abcde") == ["a", "b", "c", "d", "e"]
 ```
 */
-@val external fromString: string => array<string> = "Array.from"
+@pure @val external fromString: string => array<string> = "Array.from"
 
 /**
 `make(~length, init)` creates an array of length `length` initialized with the value of `init`.
@@ -83,6 +84,7 @@ Array.make(~length=3, #apple) == [#apple, #apple, #apple]
 Array.make(~length=6, 7) == [7, 7, 7, 7, 7, 7]
 ```
 */
+@pure
 let make: (~length: int, 'a) => array<'a>
 
 /**
@@ -98,6 +100,7 @@ Array.fromInitializer(~length=3, i => i + 3) == [3, 4, 5]
 Array.fromInitializer(~length=7, i => i + 3) == [3, 4, 5, 6, 7, 8, 9]
 ```
 */
+@pure
 let fromInitializer: (~length: int, int => 'a) => array<'a>
 
 /**
@@ -110,6 +113,7 @@ Array.equal([1, 2, 3], [1, 2, 3], Int.equal) == true
 Array.equal([1, 2, 3], [1, 3, 2], Int.equal) == false
 ```
 */
+@pure
 let equal: (array<'a>, array<'a>, ('a, 'a) => bool) => bool
 
 /**
@@ -122,6 +126,7 @@ Array.compare([1, 3], [1, 2], Int.compare) == Ordering.greater
 Array.compare([1, 2], [1, 2], Int.compare) == Ordering.equal
 ```
 */
+@pure
 let compare: (array<'a>, array<'a>, ('a, 'a) => Stdlib_Ordering.t) => Stdlib_Ordering.t
 
 /**
@@ -136,7 +141,7 @@ Array.isArray([1, 2, 3]) == true
 Array.isArray("not an array") == false
 ```
 */
-@val external isArray: 'a => bool = "Array.isArray"
+@pure @val external isArray: 'a => bool = "Array.isArray"
 
 /**
 `length(array)` returns the length of (i.e. number of items in) the array.
@@ -151,6 +156,7 @@ let someArray = ["hi", "hello"]
 someArray->Array.length == 2
 ```
 */
+@pure
 external length: array<'a> => int = "%array_length"
 
 /**
@@ -169,6 +175,7 @@ let nonEmptyArray = ["hello"]
 nonEmptyArray->Array.isEmpty->assertEqual(false)
 ```
 */
+@pure
 let isEmpty: array<'a> => bool
 
 /**
@@ -186,7 +193,7 @@ arr->Array.copyWithin(~target=1, ~start=2, ~end=5) == [100, 102, 103, 104, 104, 
 arr == [100, 102, 103, 104, 104, 105]
 ```
 */
-@send
+@send @mutates
 external copyWithin: (array<'a>, ~target: int, ~start: int, ~end: int=?) => array<'a> = "copyWithin"
 
 /**
@@ -211,7 +218,7 @@ myArray->Array.fill(5, ~start=1, ~end=3)
 myArray == [9, 5, 5, 0]
 ```
 */
-@send
+@send @mutates
 external fill: (array<'a>, 'a, ~start: int=?, ~end: int=?) => unit = "fill"
 
 /**
@@ -231,7 +238,7 @@ someArray->Array.pop == Some("hello")
 someArray == ["hi"] // Notice last item is gone.
 ```
 */
-@send
+@send @mutates
 external pop: array<'a> => option<'a> = "pop"
 
 /**
@@ -251,7 +258,7 @@ someArray->Array.push("yay")
 someArray == ["hi", "hello", "yay"]
 ```
 */
-@send
+@send @mutates
 external push: (array<'a>, 'a) => unit = "push"
 
 /**
@@ -270,7 +277,7 @@ someArray->Array.pushMany(["yay", "wehoo"])
 someArray == ["hi", "hello", "yay", "wehoo"]
 ```
 */
-@variadic @send
+@variadic @send @mutates
 external pushMany: (array<'a>, array<'a>) => unit = "push"
 
 /**
@@ -289,7 +296,7 @@ someArray->Array.reverse
 someArray == ["hello", "hi"]
 ```
 */
-@send
+@send @mutates
 external reverse: array<'a> => unit = "reverse"
 
 /**
@@ -309,7 +316,7 @@ someArray->Array.shift == Some("hi")
 someArray == ["hello"] // Notice first item is gone.
 ```
 */
-@send
+@send @mutates
 external shift: array<'a> => option<'a> = "shift"
 
 /**
@@ -327,7 +334,7 @@ someArray->Array.toSorted(Int.compare) == [1, 2, 3]
 someArray == [3, 2, 1] // Original unchanged
 ```
 */
-@send
+@send @pure
 external toSorted: (array<'a>, ('a, 'a) => Stdlib_Ordering.t) => array<'a> = "toSorted"
 
 /**
@@ -345,7 +352,7 @@ array->Array.sort((a, b) => Int.toFloat(a - b))
 array == [1, 2, 3]
 ```
 */
-@send
+@send @mutates
 external sort: (array<'a>, ('a, 'a) => Stdlib_Ordering.t) => unit = "sort"
 
 /**
@@ -363,7 +370,7 @@ items->Array.splice(~start=1, ~remove=1, ~insert=["x"])
 items == ["a", "x", "c"]
 ```
 */
-@variadic @send
+@variadic @send @mutates
 external splice: (array<'a>, ~start: int, ~remove: int, ~insert: array<'a>) => unit = "splice"
 
 /**
@@ -380,7 +387,7 @@ updated == [1, 10, 3]
 original == [1, 2, 3]
 ```
 */
-@variadic @send
+@variadic @send @pure
 external toSpliced: (array<'a>, ~start: int, ~remove: int, ~insert: array<'a>) => array<'a> =
   "toSpliced"
 
@@ -401,7 +408,7 @@ array2->Array.removeInPlace(1)
 array2 == ["Hello", "Good bye"] // Removes the item at index 1
 ```
  */
-@send
+@send @mutates
 external removeInPlace: (array<'a>, int, @as(1) _) => unit = "splice"
 
 /**
@@ -418,7 +425,7 @@ replaced == ["a", "x", "c"]
 original == ["a", "b", "c"]
 ```
 */
-@send external with: (array<'a>, int, 'a) => array<'a> = "with"
+@pure @send external with: (array<'a>, int, 'a) => array<'a> = "with"
 
 /**
 `unshift(array, item)` inserts a new item at the start of the array.
@@ -435,7 +442,7 @@ someArray->Array.unshift("yay")
 someArray == ["yay", "hi", "hello"]
 ```
 */
-@send
+@send @mutates
 external unshift: (array<'a>, 'a) => unit = "unshift"
 
 /**
@@ -453,7 +460,7 @@ someArray->Array.unshiftMany(["yay", "wehoo"])
 someArray == ["yay", "wehoo", "hi", "hello"]
 ```
 */
-@variadic @send
+@variadic @send @mutates
 external unshiftMany: (array<'a>, array<'a>) => unit = "unshift"
 
 /**
@@ -472,7 +479,7 @@ let someArray = array1->Array.concat(array2)
 someArray == ["hi", "hello", "yay", "wehoo"]
 ```
 */
-@send
+@send @pure
 external concat: (array<'a>, array<'a>) => array<'a> = "concat"
 
 /**
@@ -491,7 +498,7 @@ let someArray = array1->Array.concatMany([array2, array3])
 Console.log(someArray) // ["hi", "hello", "yay", "wehoo"]
 ```
 */
-@variadic @send
+@variadic @send @pure
 external concatMany: (array<'a>, array<array<'a>>) => array<'a> = "concat"
 
 /**
@@ -509,6 +516,7 @@ arrays == [["hi", "hello"], ["yay"], ["wehoo"]]
 result == ["hi", "hello", "yay", "wehoo"]
 ```
 */
+@pure
 let concatAll: array<array<'a>> => array<'a>
 
 /**
@@ -522,7 +530,7 @@ See [`Array.flat`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Refer
 [[1], [2], [3, 4]]->Array.flat == [1, 2, 3, 4]
 ```
 */
-@send
+@send @pure
 external flat: array<array<'a>> => array<'a> = "flat"
 
 /**
@@ -541,7 +549,7 @@ See [`Array.includes`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/R
 [{"language": "ReScript"}]->Array.includes({"language": "ReScript"}) == false // false, because objects compare by reference
 ```
 */
-@send
+@send @pure
 external includes: (array<'a>, 'a) => bool = "includes"
 
 /**
@@ -561,7 +569,7 @@ See [`Array.indexOf`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Re
 [{"language": "ReScript"}]->Array.indexOf({"language": "ReScript"}) == -1 // -1, because of strict equality
 ```
 */
-@send
+@send @pure
 external indexOf: (array<'a>, 'a, ~from: int=?) => int = "indexOf"
 
 /**
@@ -577,6 +585,7 @@ See [`Array.indexOf`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Re
 [{"language": "ReScript"}]->Array.indexOfOpt({"language": "ReScript"}) == None // None, because of strict equality
 ```
 */
+@pure
 let indexOfOpt: (array<'a>, 'a) => option<int>
 
 /**
@@ -590,7 +599,7 @@ See [Array.join](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Referen
 ["One", "Two", "Three"]->Array.join(" -- ") == "One -- Two -- Three"
 ```
 */
-@send
+@send @pure
 external join: (array<string>, string) => string = "join"
 
 /**
@@ -604,7 +613,7 @@ See [Array.join](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Referen
 [1, 2, 3]->Array.joinUnsafe(" -- ") == "1 -- 2 -- 3"
 ```
 */
-@send
+@send @pure
 external joinUnsafe: (array<'a>, string) => string = "join"
 
 /**
@@ -624,8 +633,9 @@ See [`Array.lastIndexOf`](https://developer.mozilla.org/en-US/docs/Web/JavaScrip
 [{"language": "ReScript"}]->Array.lastIndexOf({"language": "ReScript"}) == -1 // -1, because of strict equality
 ```
 */
-@send external lastIndexOf: (array<'a>, 'a, ~from: int=?) => int = "lastIndexOf"
+@pure @send external lastIndexOf: (array<'a>, 'a, ~from: int=?) => int = "lastIndexOf"
 
+@pure
 let lastIndexOfOpt: (array<'a>, 'a) => option<int>
 
 /**
@@ -641,7 +651,7 @@ See [`Array.slice`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Refe
 [1, 2, 3, 4]->Array.slice == [1, 2, 3, 4]
 ```
 */
-@send
+@send @pure
 external slice: (array<'a>, ~start: int=?, ~end: int=?) => array<'a> = "slice"
 
 /**
@@ -657,7 +667,7 @@ copyOfMyArray == [1, 2, 3]
 (myArray === copyOfMyArray) == false
 ```
 */
-@send
+@send @pure
 external copy: array<'a> => array<'a> = "slice"
 
 /**
@@ -671,7 +681,7 @@ See [`Array.toString`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/R
 [1, 2, 3, 4]->Array.toString == "1,2,3,4"
 ```
 */
-@send
+@send @pure
 external toString: array<'a> => string = "toString"
 
 /**
@@ -685,7 +695,7 @@ See [`Array.toLocaleString`](https://developer.mozilla.org/en-US/docs/Web/JavaSc
 ["apple", "banana"]->Array.toLocaleString == "apple,banana"
 ```
 */
-@send external toLocaleString: array<'a> => string = "toLocaleString"
+@pure @send external toLocaleString: array<'a> => string = "toLocaleString"
 
 /**
 `every(array, predicate)` returns true if `predicate` returns true for all items in `array`.
@@ -702,7 +712,7 @@ array->Array.every(num => num <= 4) == true
 array->Array.every(num => num === 1) == false
 ```
 */
-@send
+@send @pure
 external every: (array<'a>, 'a => bool) => bool = "every"
 
 /**
@@ -720,7 +730,7 @@ array->Array.everyWithIndex((num, index) => index < 5 && num <= 4) == true
 array->Array.everyWithIndex((num, index) => index < 2 && num >= 2) == false
 ```
 */
-@send
+@send @pure
 external everyWithIndex: (array<'a>, ('a, int) => bool) => bool = "every"
 
 /**
@@ -734,7 +744,7 @@ See [`Array.filter`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Ref
 [1, 2, 3, 4]->Array.filter(num => num > 2) == [3, 4]
 ```
 */
-@send
+@send @pure
 external filter: (array<'a>, 'a => bool) => array<'a> = "filter"
 
 /**
@@ -748,7 +758,7 @@ See [`Array.filter`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Ref
 [1, 2, 3, 4]->Array.filterWithIndex((num, index) => index === 0 || num === 2) == [1, 2]
 ```
 */
-@send
+@send @pure
 external filterWithIndex: (array<'a>, ('a, int) => bool) => array<'a> = "filter"
 
 /**
@@ -766,7 +776,7 @@ let array = [ReScript, TypeScript, JavaScript]
 array->Array.find(item => item == ReScript) == Some(ReScript)
 ```
 */
-@send
+@send @pure
 external find: (array<'a>, 'a => bool) => option<'a> = "find"
 
 /**
@@ -784,7 +794,7 @@ let array = [TypeScript, JavaScript, ReScript]
 array->Array.findWithIndex((item, index) => index > 1 && item == ReScript) == Some(ReScript)
 ```
 */
-@send
+@send @pure
 external findWithIndex: (array<'a>, ('a, int) => bool) => option<'a> = "find"
 
 /**
@@ -800,7 +810,7 @@ let array = [1, 2, 3]
 array->Array.findLast(item => item > 0) == Some(3)
 ```
 */
-@send
+@send @pure
 external findLast: (array<'a>, 'a => bool) => option<'a> = "findLast"
 
 /**
@@ -816,7 +826,7 @@ let array = [1, 2, 3]
 array->Array.findLastWithIndex((item, index) => index < 2 && item > 0) == Some(2)
 ```
 */
-@send
+@send @pure
 external findLastWithIndex: (array<'a>, ('a, int) => bool) => option<'a> = "findLast"
 
 /**
@@ -838,7 +848,7 @@ array->Array.findIndex(item => item == ReScript) == 0
 array->Array.findIndex(item => item == TypeScript) == -1
 ```
 */
-@send
+@send @pure
 external findIndex: (array<'a>, 'a => bool) => int = "findIndex"
 
 /**
@@ -864,7 +874,7 @@ isReScriptFirst == 0
 isTypeScriptFirst == -1
 ```
 */
-@send
+@send @pure
 external findIndexWithIndex: (array<'a>, ('a, int) => bool) => int = "findIndex"
 
 /**
@@ -886,7 +896,7 @@ array->Array.findLastIndex(item => item == ReScript) == 2
 array->Array.findLastIndex(item => item == TypeScript) == -1
 ```
 */
-@send
+@send @pure
 external findLastIndex: (array<'a>, 'a => bool) => int = "findLastIndex"
 
 /**
@@ -912,7 +922,7 @@ isReScriptLast == 3
 isTypeScriptLast == -1
 ```
 */
-@send
+@send @pure
 external findLastIndexWithIndex: (array<'a>, ('a, int) => bool) => int = "findLastIndex"
 
 /**
@@ -929,7 +939,7 @@ array->Array.forEach(item => {
 })
 ```
 */
-@send
+@send @pure
 external forEach: (array<'a>, 'a => unit) => unit = "forEach"
 
 /**
@@ -947,7 +957,7 @@ array->Array.forEachWithIndex((item, index) => {
 })
 ```
 */
-@send
+@send @pure
 external forEachWithIndex: (array<'a>, ('a, int) => unit) => unit = "forEach"
 
 /**
@@ -964,7 +974,7 @@ let mappedArray = array->Array.map(greeting => greeting ++ " to you")
 mappedArray == ["Hello to you", "Hi to you", "Good bye to you"]
 ```
 */
-@send
+@send @pure
 external map: (array<'a>, 'a => 'b) => array<'b> = "map"
 
 /**
@@ -982,7 +992,7 @@ let mappedArray =
 mappedArray == ["Hello at position 0", "Hi at position 1", "Good bye at position 2"]
 ```
 */
-@send
+@send @pure
 external mapWithIndex: (array<'a>, ('a, int) => 'b) => array<'b> = "map"
 
 /**
@@ -1002,6 +1012,7 @@ Array.reduce(["a", "b", "c", "d"], "", (a, b) => a ++ b) == "abcd"
 Array.reduce([], list{}, List.add) == list{}
 ```
 */
+@pure
 let reduce: (array<'a>, 'b, ('b, 'a) => 'b) => 'b
 
 /**
@@ -1019,6 +1030,7 @@ Array.reduceWithIndex([1, 2, 3], list{}, (acc, v, i) => list{v + i, ...acc}) == 
 Array.reduceWithIndex([], list{}, (acc, v, i) => list{v + i, ...acc}) == list{}
 ```
 */
+@pure
 let reduceWithIndex: (array<'a>, 'b, ('b, 'a, int) => 'b) => 'b
 
 /**
@@ -1036,6 +1048,7 @@ Array.reduceRight([1, 2, 3], list{}, List.add) == list{1, 2, 3}
 Array.reduceRight([], list{}, List.add) == list{}
 ```
 */
+@pure
 let reduceRight: (array<'a>, 'b, ('b, 'a) => 'b) => 'b
 
 /**
@@ -1051,6 +1064,7 @@ Array.reduceRightWithIndex([1, 2, 3, 4], 0, (acc, x, i) => acc + x + i) == 16
 Array.reduceRightWithIndex([], list{}, (acc, v, i) => list{v + i, ...acc}) == list{}
 ```
 */
+@pure
 let reduceRightWithIndex: (array<'a>, 'b, ('b, 'a, int) => 'b) => 'b
 
 /**
@@ -1066,7 +1080,7 @@ let array = ["Hello", "Hi", "Good bye"]
 array->Array.some(greeting => greeting === "Hello") == true
 ```
 */
-@send
+@send @pure
 external some: (array<'a>, 'a => bool) => bool = "some"
 
 /**
@@ -1082,7 +1096,7 @@ let array = ["Hello", "Hi", "Good bye"]
 array->Array.someWithIndex((greeting, index) => greeting === "Hello" && index === 0) == true
 ```
 */
-@send
+@send @pure
 external someWithIndex: (array<'a>, ('a, int) => bool) => bool = "some"
 
 /**
@@ -1100,7 +1114,7 @@ array->Array.get(0) == Some("Hello")
 array->Array.get(3) == None
 ```
 */
-@get_index
+@get_index @pure
 external get: (array<'a>, int) => option<'a> = ""
 
 /**
@@ -1117,7 +1131,7 @@ array->Array.set(1, "Hello")
 array[1] == Some("Hello")
 ```
 */
-@set_index
+@set_index @mutates
 external set: (array<'a>, int, 'a) => unit = ""
 
 /**
@@ -1134,7 +1148,7 @@ items->Array.setSymbol(key, "hello")
 Array.getSymbol(items, key) == Some("hello")
 ```
 */
-@get_index external getSymbol: (array<'a>, Stdlib_Symbol.t) => option<'b> = ""
+@pure @get_index external getSymbol: (array<'a>, Stdlib_Symbol.t) => option<'b> = ""
 
 /**
 `getSymbolUnsafe(array, key)` retrieves the value stored under the symbol `key` without any safety checks.
@@ -1150,7 +1164,7 @@ items->Array.setSymbol(key, "hello")
 Array.getSymbolUnsafe(items, key) == "hello"
 ```
 */
-@get_index external getSymbolUnsafe: (array<'a>, Stdlib_Symbol.t) => 'b = ""
+@pure @get_index external getSymbolUnsafe: (array<'a>, Stdlib_Symbol.t) => 'b = ""
 
 /**
 `setSymbol(array, key, value)` stores `value` under the symbol `key` on `array`.
@@ -1168,7 +1182,7 @@ items->Array.setSymbol(key, 5)
 Array.getSymbol(items, key) == Some(5)
 ```
 */
-@set_index external setSymbol: (array<'a>, Stdlib_Symbol.t, 'b) => unit = ""
+@mutates @set_index external setSymbol: (array<'a>, Stdlib_Symbol.t, 'b) => unit = ""
 
 /**
 `getUnsafe(array, index)` returns the element at `index` of `array`.
@@ -1186,6 +1200,7 @@ for index in 0 to array->Array.length - 1 {
 }
 ```
 */
+@pure
 external getUnsafe: (array<'a>, int) => 'a = "%array_unsafe_get"
 
 /**
@@ -1202,6 +1217,7 @@ array->Array.setUnsafe(1, "Hello")
 array[1] == Some("Hello")
 ```
 */
+@mutates
 external setUnsafe: (array<'a>, int, 'a) => unit = "%array_unsafe_set"
 
 /**
@@ -1221,6 +1237,7 @@ let array = [ReScript, TypeScript, JavaScript]
 array->Array.findIndexOpt(item => item == ReScript) == Some(0)
 ```
 */
+@pure
 let findIndexOpt: (array<'a>, 'a => bool) => option<int>
 
 /**
@@ -1238,6 +1255,7 @@ let array = ["hello", "world", "!"]
 array->Array.findLastIndexOpt(item => item->String.includes("o")) == Some(1)
 ```
 */
+@pure
 let findLastIndexOpt: (array<'a>, 'a => bool) => option<int>
 
 /**
@@ -1255,7 +1273,7 @@ reversed == ["hello", "hi"]
 someArray == ["hi", "hello"] // Original unchanged
 ```
 */
-@send
+@send @pure
 external toReversed: array<'a> => array<'a> = "toReversed"
 
 /**
@@ -1280,6 +1298,7 @@ Array.filterMap([1, 2, 3, 4, 5, 6], _ => None) == []
 Array.filterMap([], n => mod(n, 2) == 0 ? Some(n * n) : None) == []
 ```
 */
+@pure
 let filterMap: (array<'a>, 'a => option<'b>) => array<'b>
 
 /**
@@ -1298,6 +1317,7 @@ Calls `fn` for each element and returns a new array containing results of the `f
 ) == [0]
 ```
 */
+@pure
 let filterMapWithIndex: (array<'a>, ('a, int) => option<'b>) => array<'b>
 
 /**
@@ -1318,6 +1338,7 @@ Array.keepSome([None, None, None]) == []
 Array.keepSome([]) == []
 ```
 */
+@pure
 let keepSome: array<option<'a>> => array<'a>
 
 /**
@@ -1374,7 +1395,7 @@ array->Array.flatMap(item =>
 ) == [1, 2, 3, 4, 5, 6, 7, 8, 9]
 ```
 */
-@send
+@send @pure
 external flatMap: (array<'a>, 'a => array<'b>) => array<'b> = "flatMap"
 
 /**
@@ -1396,7 +1417,7 @@ array->Array.flatMapWithIndex((item, index) =>
 ) == [0, 1, 2, 2, 3, 4]
 ```
 */
-@send
+@send @pure
 external flatMapWithIndex: (array<'a>, ('a, int) => array<'b>) => array<'b> = "flatMap"
 
 /**
@@ -1417,6 +1438,7 @@ Array.findMap([1, 2, 3, 4, 5, 6], _ => None) == None
 Array.findMap([], n => mod(n, 2) == 0 ? Some(n * n) : None) == None
 ```
 */
+@pure
 let findMap: (array<'a>, 'a => option<'b>) => option<'b>
 
 /**
@@ -1429,6 +1451,7 @@ Stop with the shorter array.
 Array.zip([1, 2], [3, 4, 5]) == [(1, 3), (2, 4)]
 ```
 */
+@pure
 let zip: (t<'a>, array<'b>) => array<('a, 'b)>
 
 /**
@@ -1443,6 +1466,7 @@ Equivalent to `map(zip(xs, ys), ((a, b)) => f(a, b))`
 Array.zipBy([1, 2, 3], [4, 5], (a, b) => 2 * a + b) == [6, 9]
 ```
 */
+@pure
 let zipBy: (t<'a>, array<'b>, ('a, 'b) => 'c) => array<'c>
 
 /**
@@ -1457,6 +1481,7 @@ Array.partition([1, 2, 3, 4, 5], x => mod(x, 2) == 0) == ([2, 4], [1, 3, 5])
 Array.partition([1, 2, 3, 4, 5], x => mod(x, 2) != 0) == ([1, 3, 5], [2, 4])
 ```
 */
+@pure
 let partition: (t<'a>, 'a => bool) => (t<'a>, t<'a>)
 
 /**
@@ -1472,6 +1497,7 @@ Array.unzip([(1, 2), (3, 4)]) == ([1, 3], [2, 4])
 Array.unzip([(1, 2), (3, 4), (5, 6), (7, 8)]) == ([1, 3, 5, 7], [2, 4, 6, 8])
 ```
 */
+@pure
 let unzip: array<('a, 'b)> => (t<'a>, array<'b>)
 
 /**
@@ -1490,7 +1516,7 @@ Get an element by its index. Negative indices count backwards from the last item
 ["a", "b", "c"]->Array.at(-4) == None
 ```
 */
-@send
+@send @pure
 external at: (array<'a>, int) => option<'a> = "at"
 
 /**
@@ -1506,6 +1532,7 @@ Returns `None` if the array is empty.
 []->Array.last == None
 ```
 */
+@pure
 let last: array<'a> => option<'a>
 
 /**
@@ -1514,6 +1541,7 @@ let last: array<'a> => option<'a>
   This helper is useful when you want to discard a value (for example, the result of an operation with side effects)
   without having to store or process it further.
 */
+@pure
 external ignore: array<'a> => unit = "%ignore"
 
 /**
@@ -1529,7 +1557,7 @@ let iterator: IteratorObject.t<(int, int), unit, unknown> = array->Array.entries
 iterator->IteratorObject.asIterable->Array.fromIterable == [(0, 5), (1, 6), (2, 7)]
 ```
 */
-@send
+@send @pure
 external entries: array<'a> => Stdlib_IteratorObject.t<(int, 'a), unit, unknown> = "entries"
 
 /**
@@ -1545,5 +1573,5 @@ let iterator: IteratorObject.t<int, unit, unknown> = array->Array.values
 iterator->IteratorObject.asIterable->Array.fromIterable == [5, 6, 7]
 ```
  */
-@send
+@send @pure
 external values: array<'a> => Stdlib_IteratorObject.t<'a, unit, unknown> = "values"

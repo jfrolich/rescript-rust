@@ -1,24 +1,29 @@
 type t<'a> = array<'a>
 type arrayLike<+'a>
 
-@new external makeUninitializedUnsafe: int => array<'a> = "Array"
-@set external truncateToLengthUnsafe: (array<'a>, int) => unit = "length"
+@pure @new external makeUninitializedUnsafe: int => array<'a> = "Array"
+@pure @set external truncateToLengthUnsafe: (array<'a>, int) => unit = "length"
+
+@pure
 external getUnsafe: (array<'a>, int) => 'a = "%array_unsafe_get"
+
+@mutates
 external setUnsafe: (array<'a>, int, 'a) => unit = "%array_unsafe_set"
 
+@pure
 external asIterable: array<'a> => Stdlib_Iterable.t<'a> = "%identity"
 
-@val
+@val @pure
 external fromIterable: Stdlib_Iterable.t<'a> => array<'a> = "Array.from"
 
-@val external fromArrayLike: arrayLike<'a> => array<'a> = "Array.from"
+@pure @val external fromArrayLike: arrayLike<'a> => array<'a> = "Array.from"
 
-@val
+@val @pure
 external fromArrayLikeWithMap: (arrayLike<'a>, 'a => 'b) => array<'b> = "Array.from"
 
-@val external fromString: string => array<string> = "Array.from"
+@pure @val external fromString: string => array<string> = "Array.from"
 
-@send external fill: (array<'a>, 'a, ~start: int=?, ~end: int=?) => unit = "fill"
+@mutates @send external fill: (array<'a>, 'a, ~start: int=?, ~end: int=?) => unit = "fill"
 
 let make = (~length, x) =>
   if length <= 0 {
@@ -40,8 +45,9 @@ let fromInitializer = (~length, f) =>
     arr
   }
 
-@val external isArray: 'a => bool = "Array.isArray"
+@pure @val external isArray: 'a => bool = "Array.isArray"
 
+@pure
 external length: array<'a> => int = "%array_length"
 
 let isEmpty = arr => arr->length === 0
@@ -86,45 +92,45 @@ let compare = (a, b, cmp) => {
     : compareFromIndex(a, b, 0, cmp, lenA)
 }
 
-@send
+@send @mutates
 external copyWithin: (array<'a>, ~target: int, ~start: int, ~end: int=?) => array<'a> = "copyWithin"
 
-@send external pop: array<'a> => option<'a> = "pop"
+@mutates @send external pop: array<'a> => option<'a> = "pop"
 
-@send external push: (array<'a>, 'a) => unit = "push"
+@mutates @send external push: (array<'a>, 'a) => unit = "push"
 
-@variadic @send external pushMany: (array<'a>, array<'a>) => unit = "push"
+@mutates @variadic @send external pushMany: (array<'a>, array<'a>) => unit = "push"
 
-@send external reverse: array<'a> => unit = "reverse"
-@send external toReversed: array<'a> => array<'a> = "toReversed"
+@mutates @send external reverse: array<'a> => unit = "reverse"
+@pure @send external toReversed: array<'a> => array<'a> = "toReversed"
 
-@send external shift: array<'a> => option<'a> = "shift"
+@mutates @send external shift: array<'a> => option<'a> = "shift"
 
-@variadic @send
+@variadic @send @mutates
 external splice: (array<'a>, ~start: int, ~remove: int, ~insert: array<'a>) => unit = "splice"
 
-@variadic @send
+@variadic @send @pure
 external toSpliced: (array<'a>, ~start: int, ~remove: int, ~insert: array<'a>) => array<'a> =
   "toSpliced"
 
-@send
+@send @mutates
 external removeInPlace: (array<'a>, int, @as(1) _) => unit = "splice"
 
-@send external with: (array<'a>, int, 'a) => array<'a> = "with"
+@pure @send external with: (array<'a>, int, 'a) => array<'a> = "with"
 
-@send external unshift: (array<'a>, 'a) => unit = "unshift"
+@mutates @send external unshift: (array<'a>, 'a) => unit = "unshift"
 
-@variadic @send external unshiftMany: (array<'a>, array<'a>) => unit = "unshift"
+@mutates @variadic @send external unshiftMany: (array<'a>, array<'a>) => unit = "unshift"
 
-@send external concat: (array<'a>, array<'a>) => array<'a> = "concat"
-@variadic @send external concatMany: (array<'a>, array<array<'a>>) => array<'a> = "concat"
+@pure @send external concat: (array<'a>, array<'a>) => array<'a> = "concat"
+@pure @variadic @send external concatMany: (array<'a>, array<array<'a>>) => array<'a> = "concat"
 let concatAll = arrays => concatMany([], arrays)
 
-@send external flat: array<array<'a>> => array<'a> = "flat"
+@pure @send external flat: array<array<'a>> => array<'a> = "flat"
 
-@send external includes: (array<'a>, 'a) => bool = "includes"
+@pure @send external includes: (array<'a>, 'a) => bool = "includes"
 
-@send external indexOf: (array<'a>, 'a, ~from: int=?) => int = "indexOf"
+@pure @send external indexOf: (array<'a>, 'a, ~from: int=?) => int = "indexOf"
 
 let indexOfOpt = (arr, item) =>
   switch arr->indexOf(item) {
@@ -132,11 +138,11 @@ let indexOfOpt = (arr, item) =>
   | index => Some(index)
   }
 
-@send external join: (array<string>, string) => string = "join"
+@pure @send external join: (array<string>, string) => string = "join"
 
-@send external joinUnsafe: (array<'a>, string) => string = "join"
+@pure @send external joinUnsafe: (array<'a>, string) => string = "join"
 
-@send external lastIndexOf: (array<'a>, 'a, ~from: int=?) => int = "lastIndexOf"
+@pure @send external lastIndexOf: (array<'a>, 'a, ~from: int=?) => int = "lastIndexOf"
 
 let lastIndexOfOpt = (arr, item) =>
   switch arr->lastIndexOf(item) {
@@ -144,64 +150,64 @@ let lastIndexOfOpt = (arr, item) =>
   | index => Some(index)
   }
 
-@send external slice: (array<'a>, ~start: int=?, ~end: int=?) => array<'a> = "slice"
+@pure @send external slice: (array<'a>, ~start: int=?, ~end: int=?) => array<'a> = "slice"
 
-@send external copy: array<'a> => array<'a> = "slice"
+@pure @send external copy: array<'a> => array<'a> = "slice"
 
-@send external sort: (array<'a>, ('a, 'a) => Stdlib_Ordering.t) => unit = "sort"
-@send external toSorted: (array<'a>, ('a, 'a) => Stdlib_Ordering.t) => array<'a> = "toSorted"
+@mutates @send external sort: (array<'a>, ('a, 'a) => Stdlib_Ordering.t) => unit = "sort"
+@pure @send external toSorted: (array<'a>, ('a, 'a) => Stdlib_Ordering.t) => array<'a> = "toSorted"
 
-@send external toString: array<'a> => string = "toString"
-@send external toLocaleString: array<'a> => string = "toLocaleString"
+@pure @send external toString: array<'a> => string = "toString"
+@pure @send external toLocaleString: array<'a> => string = "toLocaleString"
 
-@send external every: (array<'a>, 'a => bool) => bool = "every"
-@send external everyWithIndex: (array<'a>, ('a, int) => bool) => bool = "every"
+@pure @send external every: (array<'a>, 'a => bool) => bool = "every"
+@pure @send external everyWithIndex: (array<'a>, ('a, int) => bool) => bool = "every"
 
-@send external filter: (array<'a>, 'a => bool) => array<'a> = "filter"
-@send external filterWithIndex: (array<'a>, ('a, int) => bool) => array<'a> = "filter"
+@pure @send external filter: (array<'a>, 'a => bool) => array<'a> = "filter"
+@pure @send external filterWithIndex: (array<'a>, ('a, int) => bool) => array<'a> = "filter"
 
-@send external find: (array<'a>, 'a => bool) => option<'a> = "find"
-@send external findWithIndex: (array<'a>, ('a, int) => bool) => option<'a> = "find"
+@pure @send external find: (array<'a>, 'a => bool) => option<'a> = "find"
+@pure @send external findWithIndex: (array<'a>, ('a, int) => bool) => option<'a> = "find"
 
-@send external findLast: (t<'a>, 'a => bool) => option<'a> = "findLast"
-@send external findLastWithIndex: (t<'a>, ('a, int) => bool) => option<'a> = "findLast"
+@pure @send external findLast: (t<'a>, 'a => bool) => option<'a> = "findLast"
+@pure @send external findLastWithIndex: (t<'a>, ('a, int) => bool) => option<'a> = "findLast"
 
-@send external findIndex: (array<'a>, 'a => bool) => int = "findIndex"
-@send external findIndexWithIndex: (array<'a>, ('a, int) => bool) => int = "findIndex"
+@pure @send external findIndex: (array<'a>, 'a => bool) => int = "findIndex"
+@pure @send external findIndexWithIndex: (array<'a>, ('a, int) => bool) => int = "findIndex"
 
-@send external findLastIndex: (t<'a>, 'a => bool) => int = "findLastIndex"
-@send external findLastIndexWithIndex: (t<'a>, ('a, int) => bool) => int = "findLastIndex"
+@pure @send external findLastIndex: (t<'a>, 'a => bool) => int = "findLastIndex"
+@pure @send external findLastIndexWithIndex: (t<'a>, ('a, int) => bool) => int = "findLastIndex"
 
-@send external forEach: (array<'a>, 'a => unit) => unit = "forEach"
-@send external forEachWithIndex: (array<'a>, ('a, int) => unit) => unit = "forEach"
+@pure @send external forEach: (array<'a>, 'a => unit) => unit = "forEach"
+@pure @send external forEachWithIndex: (array<'a>, ('a, int) => unit) => unit = "forEach"
 
-@send external map: (array<'a>, 'a => 'b) => array<'b> = "map"
-@send external mapWithIndex: (array<'a>, ('a, int) => 'b) => array<'b> = "map"
+@pure @send external map: (array<'a>, 'a => 'b) => array<'b> = "map"
+@pure @send external mapWithIndex: (array<'a>, ('a, int) => 'b) => array<'b> = "map"
 
-@send external reduce: (array<'b>, ('a, 'b) => 'a, 'a) => 'a = "reduce"
+@pure @send external reduce: (array<'b>, ('a, 'b) => 'a, 'a) => 'a = "reduce"
 let reduce = (arr, init, f) => reduce(arr, f, init)
-@send external reduceWithIndex: (array<'b>, ('a, 'b, int) => 'a, 'a) => 'a = "reduce"
+@pure @send external reduceWithIndex: (array<'b>, ('a, 'b, int) => 'a, 'a) => 'a = "reduce"
 let reduceWithIndex = (arr, init, f) => reduceWithIndex(arr, f, init)
 
-@send
+@send @pure
 external reduceRight: (array<'b>, ('a, 'b) => 'a, 'a) => 'a = "reduceRight"
 
 let reduceRight = (arr, init, f) => reduceRight(arr, f, init)
 
-@send
+@send @pure
 external reduceRightWithIndex: (array<'b>, ('a, 'b, int) => 'a, 'a) => 'a = "reduceRight"
 
 let reduceRightWithIndex = (arr, init, f) => reduceRightWithIndex(arr, f, init)
 
-@send external some: (array<'a>, 'a => bool) => bool = "some"
-@send external someWithIndex: (array<'a>, ('a, int) => bool) => bool = "some"
+@pure @send external some: (array<'a>, 'a => bool) => bool = "some"
+@pure @send external someWithIndex: (array<'a>, ('a, int) => bool) => bool = "some"
 
-@get_index external get: (array<'a>, int) => option<'a> = ""
-@set_index external set: (array<'a>, int, 'a) => unit = ""
+@pure @get_index external get: (array<'a>, int) => option<'a> = ""
+@mutates @set_index external set: (array<'a>, int, 'a) => unit = ""
 
-@get_index external getSymbol: (array<'a>, Stdlib_Symbol.t) => option<'b> = ""
-@get_index external getSymbolUnsafe: (array<'a>, Stdlib_Symbol.t) => 'b = ""
-@set_index external setSymbol: (array<'a>, Stdlib_Symbol.t, 'b) => unit = ""
+@pure @get_index external getSymbol: (array<'a>, Stdlib_Symbol.t) => option<'b> = ""
+@pure @get_index external getSymbolUnsafe: (array<'a>, Stdlib_Symbol.t) => 'b = ""
+@mutates @set_index external setSymbol: (array<'a>, Stdlib_Symbol.t, 'b) => unit = ""
 
 let findIndexOpt = (array: array<'a>, finder: 'a => bool): option<int> =>
   switch findIndex(array, finder) {
@@ -222,9 +228,13 @@ let swapUnsafe = (xs, i, j) => {
 }
 
 module M = {
-  @val external floor: float => float = "Math.floor"
-  @val external random: unit => float = "Math.random"
+  @pure @val external floor: float => float = "Math.floor"
+  @pure @val external random: unit => float = "Math.random"
+
+  @pure
   external fromFloat: float => int = "%intoffloat"
+
+  @pure
   external toFloat: int => float = "%identity"
 
   let random_int: (int, int) => int = (min, max) =>
@@ -280,8 +290,8 @@ let filterMapWithIndex = (a, f) => {
   r
 }
 
-@send external flatMap: (array<'a>, 'a => array<'b>) => array<'b> = "flatMap"
-@send external flatMapWithIndex: (array<'a>, ('a, int) => array<'b>) => array<'b> = "flatMap"
+@pure @send external flatMap: (array<'a>, 'a => array<'b>) => array<'b> = "flatMap"
+@pure @send external flatMapWithIndex: (array<'a>, ('a, int) => array<'b>) => array<'b> = "flatMap"
 
 let findMap = (arr, f) => {
   let rec loop = i =>
@@ -350,14 +360,15 @@ let unzip = a => {
   (a1, a2)
 }
 
-@send external at: (array<'a>, int) => option<'a> = "at"
+@pure @send external at: (array<'a>, int) => option<'a> = "at"
 
 let last = a => a->get(a->length - 1)
 
+@pure
 external ignore: array<'a> => unit = "%ignore"
 
-@send
+@send @pure
 external entries: array<'a> => Stdlib_IteratorObject.t<(int, 'a), unit, unknown> = "entries"
 
-@send
+@send @pure
 external values: array<'a> => Stdlib_IteratorObject.t<'a, unit, unknown> = "values"

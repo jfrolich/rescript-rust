@@ -46,6 +46,7 @@ type t<'res, 'err> = result<'res, 'err> = Ok('res) | Error('err)
   } == true
   ```
 */
+@pure
 let getOrThrow: (result<'a, 'b>, ~message: string=?) => 'a
 
 /**
@@ -61,6 +62,7 @@ let error = Error("Invalid data")
 Result.mapOr(error, 0, x => x / 2) == 0
 ```
 */
+@pure
 let mapOr: (result<'a, 'c>, 'b, 'a => 'b) => 'b
 
 /**
@@ -78,6 +80,7 @@ Result.map(Ok(64), f) == Ok(8.0)
 Result.map(Error("Invalid data"), f) == Error("Invalid data")
 ```
 */
+@pure
 let map: (result<'a, 'c>, 'a => 'b) => result<'b, 'c>
 
 /**
@@ -102,6 +105,7 @@ Result.flatMap(Ok(0.0), recip) == Error("Divide by zero")
 Result.flatMap(Error("Already bad"), recip) == Error("Already bad")
 ```
 */
+@pure
 let flatMap: (result<'a, 'c>, 'a => result<'b, 'c>) => result<'b, 'c>
 
 /**
@@ -115,16 +119,19 @@ Result.getOr(Ok(42), 0) == 42
 Result.getOr(Error("Invalid Data"), 0) == 0
 ```
 */
+@pure
 let getOr: (result<'a, 'b>, 'a) => 'a
 
 /**
 `isOk(res)`: Returns `true` if `res` is of the form `Ok(n)`, `false` if it is the `Error(e)` variant.
 */
+@pure
 let isOk: result<'a, 'b> => bool
 
 /**
 `isError(res)`: Returns `true` if `res` is of the form `Error(e)`, `false` if it is the `Ok(n)` variant.
 */
+@pure
 let isError: result<'a, 'b> => bool
 
 /**
@@ -156,6 +163,7 @@ Result.equal(bad2, good2, mod10equal, String.equal) == false
 Result.equal(bad1, bad2, mod10equal, String.equal) == false
 ```
 */
+@pure
 let equal: (result<'a, 'c>, result<'b, 'd>, ('a, 'b) => bool, ('c, 'd) => bool) => bool
 
 /**
@@ -194,6 +202,7 @@ Result.compare(Error("x"), Ok(57), mod10cmp, String.compare) == -1.
 Result.compare(Error("x"), Error("y"), mod10cmp, String.compare) == -1.
 ```
 */
+@pure
 let compare: (
   result<'a, 'c>,
   result<'b, 'd>,
@@ -211,6 +220,7 @@ Result.forEach(Ok(3), Console.log) // Logs "3", returns ()
 Result.forEach(Error("x"), Console.log) // Does nothing, returns ()
 ```
 */
+@pure
 let forEach: (result<'a, 'b>, 'a => unit) => unit
 
 /**
@@ -224,6 +234,7 @@ Result.mapError(Error(14), format) == Error("Error code: 14")
 Result.mapError(Ok("abc"), format) == Ok("abc")
 ```
 */
+@pure
 let mapError: (result<'a, 'b>, 'b => 'c) => result<'a, 'c>
 
 /**
@@ -234,21 +245,25 @@ Result.all([Ok(1), Ok(2), Ok(3)]) == Ok([1, 2, 3])
 Result.all([Ok(1), Error(1)]) == Error(1)
 ```
 */
+@pure
 let all: array<result<'a, 'b>> => result<array<'a>, 'b>
 
 /**
 `all2((r1, r2))`. Like `all()`, but with a fixed size tuple of 2
 */
+@pure
 let all2: ((result<'r1, 'e>, result<'r2, 'e>)) => result<('r1, 'r2), 'e>
 
 /**
 `all3((r1, r2, r3))`. Like `all()`, but with a fixed size tuple of 2
 */
+@pure
 let all3: ((result<'r1, 'e>, result<'r2, 'e>, result<'r3, 'e>)) => result<('r1, 'r2, 'r3), 'e>
 
 /**
 `all4((r1, r2, r3, r4))`. Like `all()`, but with a fixed size tuple of 2
 */
+@pure
 let all4: ((result<'r1, 'e>, result<'r2, 'e>, result<'r3, 'e>, result<'r4, 'e>)) => result<
   ('r1, 'r2, 'r3, 'r4),
   'e,
@@ -257,6 +272,7 @@ let all4: ((result<'r1, 'e>, result<'r2, 'e>, result<'r3, 'e>, result<'r4, 'e>))
 /**
 `all5((r1, r2, r3, r4, r5))`. Like `all()`, but with a fixed size tuple of 2
 */
+@pure
 let all5: (
   (result<'r1, 'e>, result<'r2, 'e>, result<'r3, 'e>, result<'r4, 'e>, result<'r5, 'e>)
 ) => result<('r1, 'r2, 'r3, 'r4, 'r5), 'e>
@@ -264,6 +280,7 @@ let all5: (
 /**
 `all6((r1, r2, r3, r4, r5, r6))`. Like `all()`, but with a fixed size tuple of 2
 */
+@pure
 let all6: (
   (
     result<'r1, 'e>,
@@ -281,6 +298,7 @@ let all6: (
   This helper is useful when you want to discard a value (for example, the result of an operation with side effects)
   without having to store or process it further.
 */
+@pure
 external ignore: result<'res, 'err> => unit = "%ignore"
 
 /**

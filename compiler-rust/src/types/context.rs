@@ -926,6 +926,11 @@ pub struct TypeContext {
     /// OCaml `Env`'s usage tables (env.ml:27-53).
     usage: RefCell<super::usage::UsageTables>,
 
+    /// Effects that signatures of this compilation require of the values
+    /// matched against them (`crate::verify::purity`). Empty unless a
+    /// signature declares `@pure` or `@mutates`.
+    effect_obligations: RefCell<Vec<crate::verify::purity::Obligation>>,
+
     /// Locations of declarations and type labels this compilation built with
     /// coordinates (`DeclLocKind::Local` handles; see `types::decl_loc`).
     /// Empty for a location-free compilation, whose locations fit in their
@@ -1423,6 +1428,7 @@ impl TypeContext {
             open_slots: RefCell::new(Vec::new()),
             open_slot_events: RefCell::new(Vec::new()),
             usage: RefCell::new(super::usage::UsageTables::default()),
+            effect_obligations: RefCell::new(Vec::new()),
             decl_locs: Default::default(),
             decl_loc_owner: super::decl_loc::next_table_owner(),
             next_identity_scope: Cell::new(1),
@@ -3490,6 +3496,22 @@ impl TypeContext {
     /// The usage tables of OCaml `Env` (env.ml:27-53).
     pub(crate) fn usage(&self) -> std::cell::RefMut<'_, super::usage::UsageTables> {
         self.usage.borrow_mut()
+    }
+
+    /// Record that a signature requires an effect of the value matched
+    /// against one of its declarations.
+    pub(crate) fn require_effect(&self, obligation: crate::verify::purity::Obligation) {
+        self.effect_obligations.borrow_mut().push(obligation);
+    }
+
+    /// The effects signatures required so far, leaving none.
+    pub(crate) fn take_effect_obligations(&self) -> Vec<crate::verify::purity::Obligation> {
+        std::mem::take(&mut *self.effect_obligations.borrow_mut())
+    }
+
+    /// Whether a signature required an effect of a value.
+    pub(crate) fn has_effect_obligations(&self) -> bool {
+        !self.effect_obligations.borrow().is_empty()
     }
 
     pub(crate) fn take_open_slot_events(&self) -> Vec<LookupEvent> {

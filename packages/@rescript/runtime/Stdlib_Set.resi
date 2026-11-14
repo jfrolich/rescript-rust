@@ -13,6 +13,7 @@ type t<'a>
 /**
 `asIterable(set)` views `set` as an `Iterable.t`.
 */
+@pure
 external asIterable: t<'a> => Stdlib_Iterable.t<'a> = "%identity"
 
 /**
@@ -36,7 +37,7 @@ set->Set.add("Fine name") // Inferred as Set.t<string>
 A JavaScript `Set` is mutable. For an immutable alternative, install the separate
 `@rescript/belt` package and check out `Belt.Set`.
 */
-@new
+@new @pure
 external make: unit => t<'a> = "Set"
 
 /**
@@ -55,7 +56,7 @@ switch set->Set.has(ReScript) {
 }
 ```
 */
-@new
+@new @pure
 external fromArray: array<'a> => t<'a> = "Set"
 
 /**
@@ -71,7 +72,7 @@ iterable
 ->Set.size == 3
 ```
 */
-@new
+@new @pure
 external fromIterable: Stdlib_Iterable.t<'a> => t<'a> = "Set"
 
 /**
@@ -90,7 +91,7 @@ set->Set.add("someValue2")
 let size = set->Set.size // 2
 ```
 */
-@get
+@get @pure
 external size: t<'a> => int = "size"
 
 /**
@@ -110,6 +111,7 @@ set->Set.clear
 set->Set.isEmpty->assertEqual(true)
 ```
 */
+@pure
 let isEmpty: t<'a> => bool
 
 /**
@@ -128,7 +130,7 @@ set->Set.clear
 set->Set.size // 0
 ```
 */
-@send
+@send @mutates
 external clear: t<'a> => unit = "clear"
 
 /**
@@ -142,7 +144,7 @@ let set = Set.make()
 set->Set.add("someValue")
 ```
 */
-@send
+@send @mutates
 external add: (t<'a>, 'a) => unit = "add"
 
 /**
@@ -161,7 +163,7 @@ let didDeleteValue = set->Set.delete("someNonExistantKey")
 Console.log(didDeleteValue) // Logs `false` to the console, becuase the value did not exist in the set
 ```
 */
-@send
+@send @mutates
 external delete: (t<'a>, 'a) => bool = "delete"
 
 /**
@@ -180,7 +182,7 @@ switch set->Set.has("someValue") {
 }
 ```
 */
-@send
+@send @pure
 external has: (t<'a>, 'a) => bool = "has"
 
 /**
@@ -199,7 +201,7 @@ set->Set.forEach(value => {
 })
 ```
 */
-@send
+@send @pure
 external forEach: (t<'a>, 'a => unit) => unit = "forEach"
 
 /**
@@ -240,7 +242,7 @@ let set2 = Set.fromArray(["apple", "banana", "pear"])
 set1->Set.difference(set2) // Set.fromArray(["orange"])
 ```
 */
-@send
+@send @pure
 external difference: (t<'a>, t<'a>) => t<'a> = "difference"
 
 /**
@@ -256,7 +258,7 @@ set1->Set.symmetricDifference(set2) // Set.fromArray(["orange", "pear"])
 ```
 
 */
-@send
+@send @pure
 external symmetricDifference: (t<'a>, t<'a>) => t<'a> = "symmetricDifference"
 
 /**
@@ -271,7 +273,7 @@ let set2 = Set.fromArray(["apple", "banana", "pear"])
 set1->Set.intersection(set2) // Set.fromArray(["apple", "banana"])
 ```
 */
-@send
+@send @pure
 external intersection: (t<'a>, t<'a>) => t<'a> = "intersection"
 
 /**
@@ -286,7 +288,7 @@ let set2 = Set.fromArray(["kiwi", "melon", "pear"])
 set1->Set.isDisjointFrom(set2) // true
 ```
 */
-@send
+@send @pure
 external isDisjointFrom: (t<'a>, t<'a>) => bool = "isDisjointFrom"
 
 /**
@@ -301,7 +303,7 @@ let set2 = Set.fromArray(["apple", "banana", "pear"])
 set1->Set.isSubsetOf(set2) // true
 ```
  */
-@send
+@send @pure
 external isSubsetOf: (t<'a>, t<'a>) => bool = "isSubsetOf"
 
 /**
@@ -316,7 +318,7 @@ let set2 = Set.fromArray(["apple", "banana"])
 set1->Set.isSupersetOf(set2) // true
 ```
 */
-@send
+@send @pure
 external isSupersetOf: (t<'a>, t<'a>) => bool = "isSupersetOf"
 
 /**
@@ -331,7 +333,7 @@ let set2 = Set.fromArray(["apple", "banana", "pear"])
 set1->Set.union(set2) // Set.fromArray(["apple", "orange", "banana", "pear"])
 ```
 */
-@send
+@send @pure
 external union: (t<'a>, t<'a>) => t<'a> = "union"
 
 /**
@@ -345,6 +347,7 @@ let set = Set.fromArray(["apple", "orange", "apple", "banana"])
 set->Set.toArray // ["apple", "orange", "banana"]
 ```
 */
+@pure
 external toArray: t<'a> => array<'a> = "Array.from"
 
 /**
@@ -353,4 +356,5 @@ external toArray: t<'a> => array<'a> = "Array.from"
   This helper is useful when you want to discard a value (for example, the result of an operation with side effects)
   without having to store or process it further.
 */
+@pure
 external ignore: t<'a> => unit = "%ignore"

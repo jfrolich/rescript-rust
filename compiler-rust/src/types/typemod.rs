@@ -16873,7 +16873,8 @@ fn type_structure_item<'a>(
             // typemod.ml type_structure: the environment keeps let-bound
             // values without attributes, so uses in this module do not warn.
             // The signature carries their `deprecated` attributes, so uses
-            // from other modules do.
+            // from other modules do, and the effects they declare (`@pure`,
+            // `@mutates`), which other modules' pure bindings rely on.
             let mut sig_items = Vec::new();
             for vb in &typed_bindings {
                 let start = sig_items.len();
@@ -16886,7 +16887,10 @@ fn type_structure_item<'a>(
                 let deprecated: Attributes = vb
                     .vb_attributes
                     .iter()
-                    .filter(|(name, _)| arena.get_string(name.txt) == "deprecated")
+                    .filter(|(name, _)| {
+                        let name = arena.get_string(name.txt);
+                        name == "deprecated" || crate::verify::purity::is_effect_attribute(name)
+                    })
                     .cloned()
                     .collect();
                 if deprecated.is_empty() {

@@ -13,6 +13,7 @@ type t<'a, 'b> = ('a, 'b)
 Pair.first((1, 2)) == 1
 ```
 */
+@pure
 external first: (('a, 'b)) => 'a = "%field0"
 
 /**
@@ -24,6 +25,7 @@ external first: (('a, 'b)) => 'a = "%field0"
 Pair.second((1, 2)) == 2
 ```
 */
+@pure
 external second: (('a, 'b)) => 'b = "%field1"
 
 /**
@@ -32,6 +34,7 @@ external second: (('a, 'b)) => 'b = "%field1"
   This helper is useful when you want to discard a value (for example, the result of an operation with side effects)
   without having to store or process it further.
 */
+@pure
 external ignore: ('a, 'b) => unit = "%ignore"
 
 /**
@@ -46,6 +49,7 @@ Pair.equal((1, "test"), (1, "test"), Int.equal, String.equal) == true
 Pair.equal((1, "test"), (2, "test"), Int.equal, String.equal) == false
 ```
 */
+@pure
 let equal = ((a1, a2), (b1, b2), eq1, eq2) => eq1(a1, b1) && eq2(a2, b2)
 
 /**
@@ -61,6 +65,7 @@ Pair.compare((1, "a"), (1, "b"), Int.compare, String.compare) == Ordering.less
 Pair.compare((2, "a"), (1, "b"), Int.compare, String.compare) == Ordering.greater
 ```
 */
+@pure
 let compare = ((a1, a2), (b1, b2), cmp1, cmp2) =>
   switch cmp1(a1, b1) {
   | 0. => cmp2(a2, b2)

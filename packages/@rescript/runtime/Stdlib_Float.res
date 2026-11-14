@@ -1,32 +1,34 @@
 type t = float
 
 module Constants = {
-  @val external nan: float = "NaN"
-  @val external epsilon: float = "Number.EPSILON"
-  @val external positiveInfinity: float = "Number.POSITIVE_INFINITY"
-  @val external negativeInfinity: float = "Number.NEGATIVE_INFINITY"
-  @val external minValue: float = "Number.MIN_VALUE"
-  @val external maxValue: float = "Number.MAX_VALUE"
+  @pure @val external nan: float = "NaN"
+  @pure @val external epsilon: float = "Number.EPSILON"
+  @pure @val external positiveInfinity: float = "Number.POSITIVE_INFINITY"
+  @pure @val external negativeInfinity: float = "Number.NEGATIVE_INFINITY"
+  @pure @val external minValue: float = "Number.MIN_VALUE"
+  @pure @val external maxValue: float = "Number.MAX_VALUE"
 }
 
+@pure
 external equal: (float, float) => bool = "%equal"
 
+@pure
 external compare: (float, float) => Stdlib_Ordering.t = "%compare"
 
-@val @scope("Number") external isNaN: float => bool = "isNaN"
-@val external isFinite: float => bool = "isFinite"
-@val external parseFloat: 'a => float = "parseFloat"
+@pure @val @scope("Number") external isNaN: float => bool = "isNaN"
+@pure @val external isFinite: float => bool = "isFinite"
+@pure @val external parseFloat: 'a => float = "parseFloat"
 // parseInt's return type is a float because it can be NaN
-@val external parseInt: ('a, ~radix: int=?) => float = "parseInt"
+@pure @val external parseInt: ('a, ~radix: int=?) => float = "parseInt"
 
-@send external toExponential: (float, ~digits: int=?) => string = "toExponential"
+@pure @send external toExponential: (float, ~digits: int=?) => string = "toExponential"
 
-@send external toFixed: (float, ~digits: int=?) => string = "toFixed"
+@pure @send external toFixed: (float, ~digits: int=?) => string = "toFixed"
 
-@send external toPrecision: (float, ~digits: int=?) => string = "toPrecision"
+@pure @send external toPrecision: (float, ~digits: int=?) => string = "toPrecision"
 
-@send external toString: (float, ~radix: int=?) => string = "toString"
-@send external toLocaleString: float => string = "toLocaleString"
+@pure @send external toString: (float, ~radix: int=?) => string = "toString"
+@pure @send external toLocaleString: float => string = "toLocaleString"
 
 let fromString: string => option<float> = %raw(`str => {
   if (!str || !str.trim()) return;
@@ -34,9 +36,13 @@ let fromString: string => option<float> = %raw(`str => {
   return isNaN(num) ? undefined : num;
 }`)
 
+@pure
 external toInt: float => int = "%intoffloat"
+
+@pure
 external fromInt: int => float = "%identity"
 
+@pure
 external mod: (float, float) => float = "%modfloat"
 
 let clamp = (~min=?, ~max=?, value): float => {
@@ -50,4 +56,5 @@ let clamp = (~min=?, ~max=?, value): float => {
   }
 }
 
+@pure
 external ignore: float => unit = "%ignore"

@@ -5,20 +5,25 @@ module Constants = {
   @inline let maxValue = 2147483647
 }
 
+@pure
 external equal: (int, int) => bool = "%equal"
 
+@pure
 external compare: (int, int) => Stdlib_Ordering.t = "%compare"
 
-@send external toExponential: (int, ~digits: int=?) => string = "toExponential"
+@pure @send external toExponential: (int, ~digits: int=?) => string = "toExponential"
 
-@send external toFixed: (int, ~digits: int=?) => string = "toFixed"
+@pure @send external toFixed: (int, ~digits: int=?) => string = "toFixed"
 
-@send external toPrecision: (int, ~digits: int=?) => string = "toPrecision"
+@pure @send external toPrecision: (int, ~digits: int=?) => string = "toPrecision"
 
-@send external toString: (int, ~radix: int=?) => string = "toString"
-@send external toLocaleString: int => string = "toLocaleString"
+@pure @send external toString: (int, ~radix: int=?) => string = "toString"
+@pure @send external toLocaleString: int => string = "toLocaleString"
 
+@pure
 external toFloat: int => float = "%identity"
+
+@pure
 external fromFloat: float => int = "%intoffloat"
 
 let fromString: string => option<int> = str => {
@@ -26,6 +31,7 @@ let fromString: string => option<int> = str => {
   num === num->fromFloat->toFloat && Stdlib_Float.isFinite(num) ? Some(num->fromFloat) : None
 }
 
+@pure
 external mod: (int, int) => int = "%modint"
 
 type rangeOptions = {step?: int, inclusive?: bool}
@@ -37,7 +43,7 @@ let abs = x =>
     -x
   }
 
-@val external ceil: float => float = "Math.ceil"
+@pure @val external ceil: float => float = "Math.ceil"
 
 let range = (start, end, ~options: rangeOptions={}) => {
   let isInverted = start > end
@@ -73,14 +79,26 @@ let clamp = (~min=?, ~max=?, value): int => {
   }
 }
 
+@pure
 external bitwiseAnd: (int, int) => int = "%andint"
+
+@pure
 external bitwiseOr: (int, int) => int = "%orint"
+
+@pure
 external bitwiseXor: (int, int) => int = "%xorint"
 
+@pure
 external bitwiseNot: int => int = "%bitnot_int"
 
+@pure
 external shiftLeft: (int, int) => int = "%lslint"
+
+@pure
 external shiftRight: (int, int) => int = "%asrint"
+
+@pure
 external shiftRightUnsigned: (int, int) => int = "%lsrint"
 
+@pure
 external ignore: int => unit = "%ignore"

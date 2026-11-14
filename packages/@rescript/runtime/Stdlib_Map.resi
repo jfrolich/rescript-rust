@@ -13,6 +13,7 @@ type t<'k, 'v>
 /**
 `asIterable(map)` views `map` as an `Iterable.t` of key/value pairs.
 */
+@pure
 external asIterable: t<'k, 'v> => Stdlib_Iterable.t<('k, 'v)> = "%identity"
 
 /**
@@ -37,7 +38,7 @@ map->Map.set("lang", "ReScript") // Inferred as Map.t<string, string>
 A JavaScript `Map` is mutable. For an immutable alternative, install the separate
 `@rescript/belt` package and check out `Belt.Map`.
 */
-@new
+@new @pure
 external make: unit => t<'k, 'v> = "Map"
 
 /**
@@ -56,7 +57,7 @@ switch map->Map.get(ReScript) {
 }
 ```
 */
-@new
+@new @pure
 external fromArray: array<('k, 'v)> => t<'k, 'v> = "Map"
 
 /**
@@ -72,7 +73,7 @@ iterable
 ->Map.size == 2
 ```
 */
-@new
+@new @pure
 external fromIterable: Stdlib_Iterable.t<('k, 'v)> => t<'k, 'v> = "Map"
 
 /**
@@ -87,7 +88,7 @@ map->Map.set("someKey", "someValue")
 let size = map->Map.size // 1
 ```
 */
-@get
+@get @pure
 external size: t<'k, 'v> => int = "size"
 
 /**
@@ -107,6 +108,7 @@ map->Map.clear
 map->Map.isEmpty->assertEqual(true)
 ```
 */
+@pure
 let isEmpty: t<'k, 'v> => bool
 
 /**
@@ -123,7 +125,7 @@ map->Map.clear
 map->Map.size // 0
 ```
 */
-@send
+@send @mutates
 external clear: t<'k, 'v> => unit = "clear"
 
 /**
@@ -142,7 +144,7 @@ map->Map.forEach(value => {
 })
 ```
 */
-@send
+@send @pure
 external forEach: (t<'k, 'v>, 'v => unit) => unit = "forEach"
 
 /**
@@ -159,7 +161,7 @@ map->Map.forEachWithKey((value, key) => {
 })
 ```
 */
-@send
+@send @pure
 external forEachWithKey: (t<'k, 'v>, ('v, 'k) => unit) => unit = "forEach"
 
 /**
@@ -176,7 +178,7 @@ switch map->Map.get("someKey") {
 }
 ```
 */
-@send
+@send @pure
 external get: (t<'k, 'v>, 'k) => option<'v> = "get"
 
 /**
@@ -193,7 +195,7 @@ switch map->Map.has("someKey") {
 }
 ```
 */
-@send
+@send @pure
 external has: (t<'k, 'v>, 'k) => bool = "has"
 
 /**
@@ -205,7 +207,7 @@ let map = Map.make()
 map->Map.set("someKey", "someValue")
 ```
 */
-@send
+@send @mutates
 external set: (t<'k, 'v>, 'k, 'v) => unit = "set"
 
 /**
@@ -222,7 +224,7 @@ let didDeleteKey = map->Map.delete("someNonExistantKey")
 Console.log(didDeleteKey) // Logs `false` to the console, becuase the key did not exist
 ```
 */
-@send
+@send @mutates
 external delete: (t<'k, 'v>, 'k) => bool = "delete"
 
 /**
@@ -304,4 +306,5 @@ external entries: t<'k, 'v> => Stdlib_IteratorObject.t<('k, 'v), unit, unknown> 
   This helper is useful when you want to discard a value (for example, the result of an operation with side effects)
   without having to store or process it further.
 */
+@pure
 external ignore: t<'k, 'v> => unit = "%ignore"
