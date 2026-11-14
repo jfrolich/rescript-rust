@@ -175,6 +175,7 @@ mod tests {
             // owns fresh state; process warmup cannot retain that state's pools.
             let warm = crate::bir::bridge::import_for_lowering(&a, root).0.unwrap();
             let input = crate::bir::bridge::import_for_lowering(&a, root).0.unwrap();
+            let source_counts = input.storage_counts();
             let warm = super::super::lower_with_resolver(warm, None, true, None, false, true).unwrap();
             let visits = warm.switch_stats.source_visits;
             drop(warm);
@@ -189,7 +190,7 @@ mod tests {
             assert!(visits >= width as usize);
             assert_eq!(result.coerced.exports.len(), 1);
             result.program.arena.validate(Some(result.program.root)).unwrap();
-            println!("full-unit {shape} width={width}: visits={visits}, {allocations:?}");
+            println!("full-unit {shape} width={width}: source={source_counts:?}, output_nodes={}, visits={visits}, {allocations:?}", result.program.arena.nodes.len());
             }
         }
     }

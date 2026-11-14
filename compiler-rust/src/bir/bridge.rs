@@ -491,6 +491,11 @@ fn sharing_facts(arena: &LamArena, root: Lam) -> (Vec<u8>, usize, u8) {
 /// cannot reach the export coercion.
 pub(crate) struct ForLowering(Imported);
 impl ForLowering {
+    #[cfg(test)]
+    pub(crate) fn storage_counts(&self) -> (usize, usize) {
+        (self.0.arena.nodes.len(), self.0.arena.lists.slot_count())
+    }
+
     /// The import, for the lowering's state. Constant.
     pub(crate) fn into_imported(self) -> Imported {
         self.0
