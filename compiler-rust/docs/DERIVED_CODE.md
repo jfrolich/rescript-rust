@@ -765,7 +765,16 @@ This is attribution evidence, not a production instruction-gate measurement.
 | Total | 2,152,047,321 | 100% |
 
 Within Value, inclusive unification accounts for 604,966,456 instructions,
-instantiation for 333,003,351, and skeleton construction for 100,341,035. These
+instantiation for 333,003,351, and skeleton construction for 100,341,035.
+A census-only observation immediately before each Value instance counts the
+looked-up scheme's representative level: on the application **0 non-generic**
+and **86,633 generic** Value obligations, with zero failed obligations. Command:
+`RESCRIPT_FULL_BUILD=1 RESCRIPT_DERIVED_CENSUS=<file> rescript build`, run from the
+application with its runtime; sum the JSONL `value_schemes` pair in
+`[non_generic, generic]` order. Thus this corpus offers no root-level
+non-generic instance-copy shortcut. The observation belongs to the census
+observer only, is erased for `Steps = ()`, and changes no inference operation.
+ These
 are children of the Value total, not additional costs. The first two perform
 required inference work; no lookup, instance, usage mark or unification was
 removed to improve a measurement.

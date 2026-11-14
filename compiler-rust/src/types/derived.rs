@@ -331,6 +331,9 @@ pub struct Discharged {
 pub trait Steps {
     /// O(1): observe the current obligation; the normal path erases this call.
     fn obligation(&mut self, _obligation: Obligation) {}
+    /// Census-only scheme level before instantiation. The normal path erases
+    /// this call without even reading the level. Cost: O(1).
+    fn value_scheme(&mut self, _ctx: &crate::types::context::TypeContext, _ty: TypeExprRef) {}
     /// An environment lookup.
     fn lookup(&mut self);
     /// An instance of a looked-up value's type.
@@ -352,9 +355,14 @@ impl Steps for () {
 #[derive(Default)]
 struct CensusSteps {
     last: Option<Obligation>,
+    value_schemes: [u64; 2],
 }
 
 impl Steps for CensusSteps {
+    fn value_scheme(&mut self, ctx: &crate::types::context::TypeContext, ty: TypeExprRef) {
+        let generic = ctx.get_level(ctx.repr(ty)) == crate::types::type_expr::GENERIC_LEVEL;
+        self.value_schemes[usize::from(generic)] += 1;
+    }
     /// O(1): overwrite the inline observation without allocating.
     fn obligation(&mut self, obligation: Obligation) { self.last = Some(obligation); }
     /// O(1): no additional operation counters in this observer.
@@ -386,6 +394,9 @@ pub fn discharge(
     }
     let mut steps = CensusSteps::default();
     let result = discharge_counting(tctx, env, item, &mut steps);
+    for (total, count) in tctx.derived_census.as_mut().unwrap().value_schemes.iter_mut().zip(steps.value_schemes) {
+        *total += count;
+    }
     if result.is_err() {
         let (kind, shape) = match steps.last {
             Some(Obligation::Equal { .. }) => ("equation", "body_shape"),
@@ -591,6 +602,7 @@ fn discharge_binding(
                     RecArg::Rejected,
                 )
                 .map_err(|_| Fallback)?;
+                steps.value_scheme(ctx, desc.val_type);
                 steps.instance();
                 let instance = crate::types::ctype::instance(ctx, desc.val_type);
                 let nodes = plans.skeleton_from(skeleton);
@@ -1123,6 +1135,21 @@ pub(crate) mod tests {
     use crate::types::context::TypeContext;
     use crate::types::decl::SignatureItem;
     use crate::types::initial_env;
+
+    #[test]
+    fn census_counts_value_scheme_levels_without_changing_them() {
+        let ctx = type_context();
+        let local = ctx.new_var(None);
+        let generic = ctx.new_generic_type(TypeDesc::Tvar(None));
+        let mut steps = CensusSteps::default();
+        for _ in 0..10_000 {
+            steps.value_scheme(&ctx, local);
+            steps.value_scheme(&ctx, generic);
+        }
+        assert_eq!(steps.value_schemes, [10_000, 10_000]);
+        assert_ne!(ctx.get_level(local), crate::types::type_expr::GENERIC_LEVEL);
+        assert_eq!(ctx.get_level(generic), crate::types::type_expr::GENERIC_LEVEL);
+    }
 
     #[test]
     fn sizes_are_pinned() {
@@ -1686,8 +1713,8 @@ pub(crate) mod tests {
 
 #[cfg(test)]
 #[test]
-fn census_observer_has_one_inline_obligation() {
-    assert_eq!(std::mem::size_of::<CensusSteps>(), 16);
+fn census_observer_has_one_inline_obligation_and_two_counts() {
+    assert_eq!(std::mem::size_of::<CensusSteps>(), 32);
     let mut observer = CensusSteps::default();
     for _ in 0..10_000 {
         observer.obligation(Obligation::Type {
