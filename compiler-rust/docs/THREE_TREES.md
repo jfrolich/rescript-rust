@@ -2321,7 +2321,10 @@ the comparison with the pass before the change.
 
 `scripts/test_backend_coverage.py` prints the first three lines and fails
 when a sum is not zero (the `Backend bridge coverage` job). The uncompared
-units are those the naming pass rejects.
+units are those the naming pass rejects, for its own reasons. Two were
+seen on these corpora: the runtime's `Stdlib_Dict.res` ("delete call
+syntax") and `jsx_preserve_cases.res` of tests/tests ("JSX sequence
+container").
 
 **What the replay costs**, from the counters of the same builds (steps are
 unit operations of `names.rs`; the calls into `Tables` come on top):
