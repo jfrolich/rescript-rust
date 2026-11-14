@@ -1666,7 +1666,6 @@ fn marking_ten_thousand_uses_is_ten_thousand_steps() {
 /// open nothing went through is unused at the end of the unit; a lookup
 /// that is not used raises nothing.
 #[test]
-#[ignore = "R4f build"]
 fn an_open_is_used_or_unused_and_reports_shadowing_once() {
     // let x = 1; module M = { let x = "s"; type t = A }; open M; type u = A; let y = x
     let mut s = unit_scopes();
@@ -1755,7 +1754,6 @@ fn an_open_is_used_or_unused_and_reports_shadowing_once() {
 /// types (`old_checker_open_of_the_same_type_reports_no_shadowing`). The
 /// walk's verdict is `shadows`, once per name and open. A value never asks.
 #[test]
-#[ignore = "R4f build"]
 fn the_walk_decides_whether_an_opened_constructor_shadows() {
     // type t = A; let x = 1; module M = { type u = A; let x = 2 }; open M
     let mut s = unit_scopes();

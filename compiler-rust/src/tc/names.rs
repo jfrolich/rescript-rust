@@ -22,8 +22,8 @@
 use super::name_table::Name;
 use super::scope::{
     ARMED_OPEN, Binder, BinderKind, Found, IMPORTED, Key, NONE, Namespace, OPEN_OVERRIDE,
-    OPEN_USED, PATTERN, POSITIVE, PRIVATIZE, Resolved, ResolvedKind, Scopes, TableId, UNIT_MASK,
-    USED, UnitSource, Warning, WarningKind,
+    OPEN_USED, PATTERN, POSITIVE, PRIVATIZE, Resolved, ResolvedKind, Scopes, ShadowNote, TableId,
+    UNIT_MASK, USED, UnitSource, Warning, WarningKind,
 };
 use super::segment::{FUNCTOR_SCOPE, ModuleTypeRow, PathRow, Segment, SignatureKind};
 
@@ -579,7 +579,53 @@ impl Scopes {
     /// an open that can still report shadowing of `key` and hides `hidden`;
     /// `None` in every other case.
     pub fn use_found(&mut self, found: Found, key: Key, loc: u32) -> Option<Found> {
-        todo!("R4f")
+        #[cfg(test)]
+        super::steps::tick();
+        match found.layer {
+            NONE => None,
+            layer => self.use_open(layer, key),
+        }
+    }
+
+    /// A use of `key` went through open `layer`: set `OPEN_USED`, and
+    /// unless the open is `OPEN_OVERRIDE` or already has a note for `key`,
+    /// one [`Scopes::find_below`]. O(names this open was reported to
+    /// shadow) for the scan of its notes, plus that `find_below`; no step
+    /// of its own, no allocation. The `slot` of `open_signature`
+    /// (compiler/ml/env.ml:1895-1908) with `check_shadowing`
+    /// (env.ml:415-427): a value, type, module or module type that hides
+    /// something is noted and reported here; a constructor or label returns
+    /// what it hides and is reported by [`Scopes::shadows`] on the walk's
+    /// verdict.
+    fn use_open(&mut self, layer: u32, key: Key) -> Option<Found> {
+        let open = &mut self.opens[layer as usize];
+        open.flags |= OPEN_USED;
+        if open.flags & OPEN_OVERRIDE != 0 || self.noted(layer, key) {
+            return None;
+        }
+        let hidden = self.find_below(key, layer)?;
+        let ns = key.namespace();
+        if ns == Namespace::Constructor as u32 || ns == Namespace::Label as u32 {
+            return Some(hidden);
+        }
+        self.shadows(layer, key);
+        None
+    }
+
+    /// O(names open `layer` was reported to shadow), no step, no
+    /// allocation: whether the open has a [`ShadowNote`] for `key`
+    /// (`List.mem (kind, s) !shadowed`, compiler/ml/env.ml:1897). The kind
+    /// of OCaml's pair is the key's namespace.
+    fn noted(&self, layer: u32, key: Key) -> bool {
+        let mut note = self.opens[layer as usize].shadowed;
+        while note != NONE {
+            let row = self.notes[note as usize];
+            if row.key == key.0 {
+                return true;
+            }
+            note = row.next;
+        }
+        false
     }
 
     /// O(1), no step: the walk found that the constructor or label `key`
@@ -590,7 +636,19 @@ impl Scopes {
     /// for which [`Scopes::use_found`] just returned `Some`: the note list
     /// is not scanned again.
     pub fn shadows(&mut self, layer: u32, key: Key) {
-        todo!("R4f")
+        let open = &mut self.opens[layer as usize];
+        let note = self.notes.len() as u32;
+        self.notes.push(ShadowNote {
+            key: key.0,
+            next: open.shadowed,
+        });
+        open.shadowed = note;
+        self.warnings.push(Warning {
+            kind: WarningKind::OpenShadows,
+            loc: open.loc,
+            a: key.0,
+            b: layer,
+        });
     }
 
     /// The modules a path went through are used at `loc`
