@@ -227,6 +227,10 @@ impl Checker {
         // constructor goes to `unify2` with the pair as it is
         // (ctype.ml:2240-2241); the binding walk finds that occurrence.
         if l.tag() == VAR {
+            if r.tag() == VAR {
+                self.bind_var(left, l, right);
+                return Ok(());
+            }
             let route = r.tag() == CONSTR;
             return self.bind_routed(left, right, route.then_some([left, right]));
         }
@@ -273,25 +277,7 @@ impl Checker {
     fn bind_routed(&mut self, var: Ty, ty: Ty, route: Option<[Ty; 2]>) -> Result<(), Clash> {
         let before = self.g.nodes[var.0 as usize];
         if self.g.nodes[ty.0 as usize].tag() == VAR {
-            // Of two variables, `link_type` picks the surviving name by the
-            // levels before `update_level` (compiler/ml/btype.ml:727,
-            // ctype.ml:2221-2222): link first, then lower the one node,
-            // which has no child and no scope: `if ty.level > level`
-            // (ctype.ml:586), one write. A variable cannot hold another, so
-            // there is no occurrence walk, and lowering a variable cannot
-            // fail. The node is read after the link, whose name rule may
-            // have named it.
-            self.g.link(var, ty);
-            let target = self.g.nodes[ty.0 as usize];
-            if target.level > before.level {
-                self.g.write(
-                    ty,
-                    Node {
-                        level: before.level,
-                        ..target
-                    },
-                );
-            }
+            self.bind_var(var, before, ty);
             return Ok(());
         }
         // Decision 6 of "R3 as designed": in `Mode::Explain`, outside a
@@ -315,6 +301,32 @@ impl Checker {
             return Err(clash);
         }
         Ok(())
+    }
+
+    /// O(1): the binding of variable `var`, whose descriptor is `before`, to
+    /// the distinct variable `ty`, both representatives. Of two variables,
+    /// `link_type` picks the surviving name by the levels before
+    /// `update_level` (compiler/ml/btype.ml:727, ctype.ml:2221-2222): link
+    /// first, then lower the one node, which has no child and no scope:
+    /// `if ty.level > level` (ctype.ml:586), one write. A variable cannot
+    /// hold another, so there is no occurrence walk, and lowering a variable
+    /// cannot fail. The node is read after the link, whose name rule may
+    /// have named it. Always inline (out of line, saving registers costs
+    /// more than the body): one link, one node load, one compare and at
+    /// most one write.
+    #[inline(always)]
+    fn bind_var(&mut self, var: Ty, before: Node, ty: Ty) {
+        self.g.link(var, ty);
+        let target = self.g.nodes[ty.0 as usize];
+        if target.level > before.level {
+            self.g.write(
+                ty,
+                Node {
+                    level: before.level,
+                    ..target
+                },
+            );
+        }
     }
 
     /// O(1): whether a binding tests occurrence in a walk of its own before
