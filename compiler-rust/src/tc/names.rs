@@ -21,8 +21,9 @@
 
 use super::name_table::Name;
 use super::scope::{
-    Binder, BinderKind, Found, IMPORTED, Key, NONE, Namespace, Resolved, ResolvedKind, Scopes,
-    TableId, UNIT_MASK, UnitSource,
+    ARMED_OPEN, Binder, BinderKind, DEPRECATED, Found, IMPORTED, Key, MEMBER_DEPRECATED, NONE,
+    Namespace, OPEN_OVERRIDE, OPEN_USED, PATTERN, POSITIVE, PRIVATIZE, Resolved, ResolvedKind,
+    Scopes, ShadowNote, TableId, UNIT_MASK, USED, UnitSource, Warning, WarningKind,
 };
 use super::segment::{FUNCTOR_SCOPE, ModuleTypeRow, PathRow, Segment, SignatureKind};
 
@@ -514,13 +515,16 @@ impl Scopes {
     /// delayed check when the declaration enters the environment). The
     /// order of the calls is the order of the warnings.
     pub fn arm(&mut self, binder: Binder) {
-        todo!("R4f")
+        self.armed.push(binder.0);
     }
 
     /// O(1): the same for an open (`Unused_open`,
     /// compiler/ml/env.ml:1890-1894).
     pub fn arm_open(&mut self, open: u32) {
-        todo!("R4f")
+        // `open!` has no slot (compiler/ml/env.ml:1884, CHECKER_REWRITE 9.7
+        // decision 7).
+        debug_assert_eq!(self.opens[open as usize].flags & OPEN_OVERRIDE, 0);
+        self.armed.push(open | ARMED_OPEN);
     }
 
     /// O(1): the length of `armed`, for [`Scopes::disarm`].
@@ -531,7 +535,7 @@ impl Scopes {
     /// O(1): forget what was armed since `mark` (a speculative typing that
     /// was undone drops its delayed checks).
     pub fn disarm(&mut self, mark: u32) {
-        todo!("R4f")
+        self.armed.truncate(mark as usize);
     }
 
     /// 1 step, one load and one store: set used bits of a binder
@@ -539,7 +543,9 @@ impl Scopes {
     /// compiler/ml/env.ml:1080-1093). `bits` is `USED` or a constructor's
     /// usage.
     pub fn mark(&mut self, binder: Binder, bits: u8) {
-        todo!("R4f")
+        #[cfg(test)]
+        super::steps::tick();
+        self.binders.used[binder.0 as usize] |= bits;
     }
 
     /// The walk chose `found` for a use of `key` at `loc`
@@ -573,7 +579,87 @@ impl Scopes {
     /// an open that can still report shadowing of `key` and hides `hidden`;
     /// `None` in every other case.
     pub fn use_found(&mut self, found: Found, key: Key, loc: u32) -> Option<Found> {
-        todo!("R4f")
+        #[cfg(test)]
+        super::steps::tick();
+        // The open's slot runs inside the lookup (compiler/ml/env.ml:
+        // 279-288), the deprecation check after it (typetexp.ml:98-123).
+        let hidden = match found.layer {
+            NONE => None,
+            layer => self.use_open(layer, key),
+        };
+        self.deprecated(found.item, loc);
+        hidden
+    }
+
+    /// O(1), no step: push `Deprecated` at `loc` when `item` is deprecated:
+    /// a binder with `DEPRECATED`, an imported member with
+    /// `MEMBER_DEPRECATED` (both set by the first attribute named
+    /// `deprecated`, CHECKER_REWRITE 9.7 decision 9), a unit whose
+    /// interface carries `@@deprecated` (`ps_comps.deprecated`,
+    /// compiler/ml/env.ml:1003, kept as `UnitRow::deprecated`). The text
+    /// and the migration templates are read from that attribute by the
+    /// reporter.
+    fn deprecated(&mut self, item: Resolved, loc: u32) {
+        let deprecated = match item.kind() {
+            ResolvedKind::Binder(binder) => self.binders.used[binder.0 as usize] & DEPRECATED != 0,
+            ResolvedKind::Import(row) => {
+                self.imported_members[row as usize].origin & MEMBER_DEPRECATED != 0
+            }
+            ResolvedKind::Unit(unit) => self.units[unit as usize]
+                .segment
+                .signature
+                .unit
+                .is_some_and(|row| row.deprecated != NONE),
+        };
+        if deprecated {
+            self.warnings.push(Warning {
+                kind: WarningKind::Deprecated,
+                loc,
+                a: item.0,
+                b: 0,
+            });
+        }
+    }
+
+    /// A use of `key` went through open `layer`: set `OPEN_USED`, and
+    /// unless the open is `OPEN_OVERRIDE` or already has a note for `key`,
+    /// one [`Scopes::find_below`]. O(names this open was reported to
+    /// shadow) for the scan of its notes, plus that `find_below`; no step
+    /// of its own, no allocation. The `slot` of `open_signature`
+    /// (compiler/ml/env.ml:1895-1908) with `check_shadowing`
+    /// (env.ml:415-427): a value, type, module or module type that hides
+    /// something is noted and reported here; a constructor or label returns
+    /// what it hides and is reported by [`Scopes::shadows`] on the walk's
+    /// verdict.
+    fn use_open(&mut self, layer: u32, key: Key) -> Option<Found> {
+        let open = &mut self.opens[layer as usize];
+        open.flags |= OPEN_USED;
+        if open.flags & OPEN_OVERRIDE != 0 || self.noted(layer, key) {
+            return None;
+        }
+        let hidden = self.find_below(key, layer)?;
+        let ns = key.namespace();
+        if ns == Namespace::Constructor as u32 || ns == Namespace::Label as u32 {
+            return Some(hidden);
+        }
+        self.shadows(layer, key);
+        None
+    }
+
+    /// O(names open `layer` was reported to shadow), no step, no
+    /// allocation: whether the open has a [`ShadowNote`] for `key`
+    /// (`List.mem (kind, s) !shadowed`, compiler/ml/env.ml:1897). The kind
+    /// of OCaml's pair is the key's namespace.
+    fn noted(&self, layer: u32, key: Key) -> bool {
+        let mut note = self.opens[layer as usize].shadowed;
+        while note != NONE {
+            let row = self.notes[note as usize];
+            if row.key == key.0 {
+                return true;
+            }
+            note = row.next;
+        }
+        false
     }
 
     /// O(1), no step: the walk found that the constructor or label `key`
@@ -584,7 +670,19 @@ impl Scopes {
     /// for which [`Scopes::use_found`] just returned `Some`: the note list
     /// is not scanned again.
     pub fn shadows(&mut self, layer: u32, key: Key) {
-        todo!("R4f")
+        let open = &mut self.opens[layer as usize];
+        let note = self.notes.len() as u32;
+        self.notes.push(ShadowNote {
+            key: key.0,
+            next: open.shadowed,
+        });
+        open.shadowed = note;
+        self.warnings.push(Warning {
+            kind: WarningKind::OpenShadows,
+            loc: open.loc,
+            a: key.0,
+            b: layer,
+        });
     }
 
     /// The modules a path went through are used at `loc`
@@ -592,9 +690,27 @@ impl Scopes {
     /// for every prefix, compiler/ml/env.ml:968-972): for each, in order,
     /// `USED` on a binder, `OPEN_USED` and the shadowing check for the
     /// first one's layer, `Deprecated` for a deprecated module. 1 step a
-    /// module. `names` are the path's components, parallel to `modules`.
+    /// module; a module found through an open also costs that open's
+    /// shadowing check, as in [`Scopes::use_found`] (a scan of the open's
+    /// notes and one [`Scopes::find_below`]). `names` are the path's
+    /// components, parallel to `modules`.
     pub fn use_modules(&mut self, modules: &[Found], names: &[Name], loc: u32) {
-        todo!("R4f")
+        debug_assert_eq!(modules.len(), names.len());
+        for (&module, &name) in modules.iter().zip(names) {
+            #[cfg(test)]
+            super::steps::tick();
+            // `find_name ~mark:true` runs the open's slot, then
+            // `mark_module_used`, then `report_deprecated`
+            // (compiler/ml/env.ml:968-972). A module hides only modules:
+            // `use_open` reports it itself and returns `None`.
+            if module.layer != NONE {
+                self.use_open(module.layer, Key::new(name, Namespace::Module));
+            }
+            if let ResolvedKind::Binder(binder) = module.item.kind() {
+                self.binders.used[binder.0 as usize] |= USED;
+            }
+            self.deprecated(module.item, loc);
+        }
     }
 
     /// End of the unit: 1 step per armed entry, in the order armed. A
@@ -604,7 +720,39 @@ impl Scopes {
     /// unit has an error: the warnings of a failing unit are those raised
     /// before the error (CHECKER_REWRITE 2.1, O15).
     pub fn finish(&mut self) {
-        todo!("R4f")
+        let Scopes {
+            binders,
+            opens,
+            armed,
+            warnings,
+            ..
+        } = self;
+        for &entry in armed.iter() {
+            #[cfg(test)]
+            super::steps::tick();
+            let warning = if entry & ARMED_OPEN != 0 {
+                let index = entry & !ARMED_OPEN;
+                let open = opens[index as usize];
+                (open.flags & OPEN_USED == 0).then_some(Warning {
+                    kind: WarningKind::UnusedOpen,
+                    loc: open.loc,
+                    a: index,
+                    b: 0,
+                })
+            } else {
+                // A constructor is used by any of its three usages
+                // (`constructor_usages`, compiler/ml/env.ml:38-47); every
+                // other binder has only `USED`.
+                (binders.used[entry as usize] & (USED | POSITIVE | PATTERN | PRIVATIZE) == 0)
+                    .then_some(Warning {
+                        kind: WarningKind::Unused,
+                        loc: binders.loc[entry as usize],
+                        a: entry,
+                        b: 0,
+                    })
+            };
+            warnings.extend(warning);
+        }
     }
 
     // ----- R4g: reads of other units -----
@@ -863,6 +1011,81 @@ mod tests {
         let k17 = Key::new(s.names.find("K17").unwrap(), Namespace::Module);
         assert!(s.search(k16, k17).is_some());
         assert_eq!(shape(&mut s, "Deep"), Err(UNSUPPORTED));
+    }
+
+    /// `use_modules` of a path through 10,000 local modules is one step a
+    /// module, marks each used and warns for the deprecated ones only.
+    #[test]
+    fn using_ten_thousand_modules_is_one_step_each() {
+        let mut s = Scopes::new();
+        s.enter();
+        let mut modules = Vec::with_capacity(10_000);
+        let mut names = Vec::with_capacity(10_000);
+        for i in 0..10_000 {
+            let name = s.names.intern(&format!("M{i}"));
+            let binder = s.binders.push(
+                Key::new(name, Namespace::Module),
+                NONE,
+                i,
+                BinderKind::Module,
+            );
+            if i % 2 == 0 {
+                s.binders.used[binder.0 as usize] |= DEPRECATED;
+            }
+            s.bind(binder);
+            modules.push(Found {
+                item: Resolved::binder(binder),
+                layer: NONE,
+            });
+            names.push(name);
+        }
+        let count = super::super::steps::scope(|| s.use_modules(&modules, &names, 7));
+        assert_eq!(count, 10_000);
+        assert!(s.binders.used.iter().all(|used| used & USED == USED));
+        assert_eq!(s.warnings.len(), 5_000);
+        assert!(
+            s.warnings
+                .iter()
+                .all(|w| w.kind == WarningKind::Deprecated && w.loc == 7)
+        );
+    }
+
+    /// An open that shadowed 10,000 values: each first use is one step and
+    /// one `find_below`, reports once, and a second use of every name adds
+    /// one step and no warning (the note scan has no step of its own).
+    #[test]
+    fn an_open_that_shadows_ten_thousand_names_reports_each_once() {
+        let mut s = Scopes::new();
+        s.enter();
+        let mut members = Vec::with_capacity(10_000);
+        let mut keys = Vec::with_capacity(10_000);
+        for i in 0..10_000 {
+            let key = Key::new(s.names.intern(&format!("v{i}")), Namespace::Value);
+            let older = s.binders.push(key, 0, 0, BinderKind::Let);
+            s.bind(older);
+            members.push((key, s.binders.push(key, 0, 0, BinderKind::Let)));
+            keys.push(key);
+        }
+        let table = s.table_from(&members);
+        let open = s.open(table, 77, 0, 0);
+        s.arm_open(open);
+        let found: Vec<Found> = keys.iter().map(|&key| s.find(key).unwrap()).collect();
+        assert!(found.iter().all(|found| found.layer == open));
+        let count = super::super::steps::scope(|| {
+            for (&found, &key) in found.iter().zip(&keys) {
+                assert_eq!(s.use_found(found, key, 1), None);
+            }
+        });
+        // `use_found`, and `find_below`'s head load: 2 steps a use.
+        assert_eq!(count, 2 * 10_000);
+        assert_eq!(s.warnings.len(), 10_000);
+        let count = super::super::steps::scope(|| {
+            assert_eq!(s.use_found(found[0], keys[0], 2), None);
+        });
+        assert_eq!(count, 1);
+        assert_eq!(s.warnings.len(), 10_000);
+        s.finish();
+        assert_eq!(s.warnings.len(), 10_000, "the open was used");
     }
 
     /// `candidates_in` of a key with 10,000 members, in a table that has

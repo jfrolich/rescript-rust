@@ -1576,7 +1576,6 @@ fn long_paths_and_alias_chains_are_linear() {
 /// Reaches: R4a, R4b, R4f. The task text's bound: marking 10,000 uses is
 /// 10,000 steps.
 #[test]
-#[ignore = "R4f build"]
 fn marking_ten_thousand_uses_is_ten_thousand_steps() {
     let mut s = unit_scopes();
     let binders: Vec<Binder> = (0..100)
@@ -1603,7 +1602,6 @@ fn marking_ten_thousand_uses_is_ten_thousand_steps() {
 /// open nothing went through is unused at the end of the unit; a lookup
 /// that is not used raises nothing.
 #[test]
-#[ignore = "R4f build"]
 fn an_open_is_used_or_unused_and_reports_shadowing_once() {
     // let x = 1; module M = { let x = "s"; type t = A }; open M; type u = A; let y = x
     let mut s = unit_scopes();
@@ -1692,7 +1690,6 @@ fn an_open_is_used_or_unused_and_reports_shadowing_once() {
 /// types (`old_checker_open_of_the_same_type_reports_no_shadowing`). The
 /// walk's verdict is `shadows`, once per name and open. A value never asks.
 #[test]
-#[ignore = "R4f build"]
 fn the_walk_decides_whether_an_opened_constructor_shadows() {
     // type t = A; let x = 1; module M = { type u = A; let x = 2 }; open M
     let mut s = unit_scopes();
@@ -1756,7 +1753,6 @@ fn the_walk_decides_whether_an_opened_constructor_shadows() {
 /// under an undone speculation is forgotten; a unit with an error never
 /// calls `finish` and so has only the warnings its lookups raised.
 #[test]
-#[ignore = "R4f build"]
 fn unused_binders_are_reported_in_the_order_armed() {
     let mut s = unit_scopes();
     let t = bind(&mut s, "t", Namespace::Type, 0);
@@ -1809,7 +1805,6 @@ fn unused_binders_are_reported_in_the_order_armed() {
 /// per use, at the use, for a local declaration and for an imported one,
 /// and for a module a path goes through.
 #[test]
-#[ignore = "R4f build"]
 fn a_deprecated_item_warns_at_each_use() {
     let segment = compiled_segment("Old", "@deprecated(\"gone\") let v = 1\nlet w = 2\n");
     let mut s = unit_scopes();

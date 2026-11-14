@@ -1,0 +1,1 @@
+- Type checker rewrite R4f: uses mark binders and opens, report open shadowing and deprecation, and the end of a unit reports unused declarations and opens in the order armed.
