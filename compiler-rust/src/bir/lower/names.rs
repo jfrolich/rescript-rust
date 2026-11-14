@@ -1460,6 +1460,41 @@ mod tests {
         assert_eq!(finishes, ["i_finish"]);
     }
 
+    /// `let xs = []; for (let x of [xs]) { let x = [x] } let x = []` as a
+    /// `for…of` (`awaited` false) or a `for await…of`, compared with the
+    /// pass: the loop variable is named before the body's statements.
+    fn names_of_an_of_loop(awaited: bool) -> [Option<String>; 3] {
+        let mut u = Unit::new();
+        let (xs, x, inner, later) = (u.local("xs"), u.local("x"), u.local("x"), u.local("x"));
+        let declare_xs = u.declare_read(xs, &[]);
+        let iterable = u.read(&[xs]);
+        let declare_inner = u.declare_read(inner, &[x]);
+        let body = u.block(&[declare_inner]);
+        let parts = [iterable, body];
+        let view = if awaited {
+            View::SForAwaitOf { var: x, parts: &parts, label: None }
+        } else {
+            View::SForOf { var: x, parts: &parts, label: None }
+        };
+        let of = u.b.new_node(view, 0);
+        let declare_later = u.declare_read(later, &[]);
+        let (names, finishes) = u.agrees(&[declare_xs, of, declare_later], &[], &[], &[xs, later]);
+        assert!(finishes.is_empty());
+        [x, inner, later].map(|var| names[var.index()].clone())
+    }
+
+    #[test]
+    fn the_replay_names_a_for_of_loop_variable_as_the_pass_does() {
+        let names = names_of_an_of_loop(false);
+        assert_eq!(names.each_ref().map(|name| name.as_deref()), [Some("x"), Some("x$1"), Some("x$2")]);
+    }
+
+    #[test]
+    fn the_replay_names_a_for_await_of_loop_variable_as_the_pass_does() {
+        let names = names_of_an_of_loop(true);
+        assert_eq!(names.each_ref().map(|name| name.as_deref()), [Some("x"), Some("x$1"), Some("x$2")]);
+    }
+
     #[test]
     fn the_replay_names_the_cached_bound_of_a_range_loop_over_an_existing_variable() {
         // `let i = []; let n = []; for (i_finish = [n]; i <= i_finish; ++i) {}`
@@ -2162,6 +2197,45 @@ mod tests {
         assert_eq!(large - small, 3 * 9_000);
         println!("jsx tag chain steps: 1,000 members {small}, 10,000 members {large}");
         assert!(small <= 3 * 1_000 + 2 * 2 + 16, "{small}");
+    }
+
+    /// The steps of the log for one function in which `references` reads of
+    /// one imported module are built and then released before the close.
+    /// Asserts that each reference pushed one site and that each release
+    /// cleared its site, and that the close joins nothing.
+    fn steps_of_released_module_references(references: usize) -> usize {
+        let mut u = Unit::new();
+        let header = u.header(None, 0);
+        open(&mut u.b);
+        let before = u.b.js_scope.as_ref().unwrap().sites.len();
+        let values: Vec<NodeId> = (0..references)
+            .map(|_| u.b.new_node(View::JQualified { module: ImportId(0), member: None }, 0))
+            .collect();
+        let sites = &u.b.js_scope.as_ref().unwrap().sites[before..];
+        assert_eq!(sites.len(), references);
+        assert!(sites.iter().zip(&values).all(|(site, &node)| site.node == node));
+        let gone = u.b.new_node(View::JArray { values: &values }, 0);
+        u.b.release(gone);
+        let sites = &u.b.js_scope.as_ref().unwrap().sites[before..];
+        assert_eq!(sites.len(), references);
+        assert!(sites.iter().all(|site| site.node == NodeId(u32::MAX)));
+        let null = u.b.new_node(View::JNull, 0);
+        let body = u.ret(null);
+        let (_, scope) = u.function(header, &[body]);
+        assert_eq!(u.free(scope), []);
+        u.log().steps
+    }
+
+    #[test]
+    fn ten_thousand_module_references_built_and_released_cost_one_step_each_at_the_close() {
+        // A reference built pushes one site; its release writes that site
+        // (cleared above, and no step); the close reads every site of its
+        // range once, a cleared one included, and joins nothing: one step
+        // a reference, as for references that stay
+        // (`ten_thousand_module_references_cost_one_step_each`).
+        let (small, large) = (steps_of_released_module_references(1_000), steps_of_released_module_references(10_000));
+        println!("released module references, steps: 1,000 {small}, 10,000 {large}");
+        assert_eq!(large - small, 9_000);
     }
 
     /// The steps of the log for one function with `references` reads of one
