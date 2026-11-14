@@ -494,7 +494,19 @@ impl Scopes {
     /// O(1), no step: enter a scope inside the current one and make it
     /// current. Its `opens` is the parent's. Returns its index.
     pub fn enter(&mut self) -> u32 {
-        todo!("R4b")
+        let index = self.scopes.len() as u32;
+        let opens = match self.current {
+            NONE => NONE,
+            parent => self.scopes[parent as usize].opens,
+        };
+        self.scopes.push(Scope {
+            parent: self.current,
+            first_binder: self.binders.len(),
+            opens,
+        });
+        self.entered.push(self.log.len() as u32);
+        self.current = index;
+        index
     }
 
     /// O(bindings made in the scope), 1 step a binding: restore the head of
@@ -513,13 +525,32 @@ impl Scopes {
     /// the binder (a binder is pushed after every open that is to hide
     /// nothing of it), checked by a debug assertion on the innermost layer.
     pub fn bind(&mut self, binder: Binder) {
-        todo!("R4b")
+        #[cfg(test)]
+        super::steps::tick();
+        debug_assert!(self.current != NONE, "bind with no scope entered");
+        debug_assert!(
+            match self.scopes[self.current as usize].opens {
+                NONE => true,
+                layer => self.layers[layer as usize].mark <= binder.0,
+            },
+            "a binder older than a visible layer is bound"
+        );
+        let key = self.binders.key[binder.0 as usize] as usize;
+        if key >= self.heads.len() {
+            // Every key of a name below `names.len()` is below this.
+            self.heads.resize(8 * self.names.len() as usize, NONE);
+        }
+        self.binders.previous[binder.0 as usize] = self.heads[key];
+        self.heads[key] = binder.0;
+        self.log.push(binder.0);
     }
 
     /// 1 step, one load: the innermost binder of `key`, ignoring opened
     /// layers; [`NONE`] when the key has none or is beyond the table.
     pub fn head(&self, key: Key) -> u32 {
-        todo!("R4b")
+        #[cfg(test)]
+        super::steps::tick();
+        self.heads.get(key.0 as usize).copied().unwrap_or(NONE)
     }
 
     /// O(1): the length of the log now. Taken when a structure is entered
