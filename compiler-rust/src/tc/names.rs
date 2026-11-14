@@ -102,8 +102,10 @@ impl Scopes {
 
     /// Resolve a path of one or more names whose last component is in
     /// namespace `ns` (`Env.lookup` and `lookup_module`,
-    /// compiler/ml/env.ml:952-1026). Nothing is marked and nothing is read
-    /// into the logs.
+    /// compiler/ml/env.ml:952-1026). No usage is marked and no warning is
+    /// raised; the one log written is the unit read of
+    /// [`Scopes::unit_by_name`] (from R4g on), because loading an interface
+    /// is a read whether or not the lookup is used.
     ///
     /// One component: [`Scopes::find`]; for `Namespace::Module`, a name with
     /// no binding is a unit ([`Scopes::unit_by_name`]). More: the first
@@ -214,7 +216,9 @@ impl Scopes {
 
     /// 1 step: this unit read `unit`'s interface (`READ`) or named it
     /// without loading (`READ_WEAK`). The first read of a unit appends it
-    /// to `read_units`; later ones are one load and one compare.
+    /// to `read_units`; later ones are one load and one compare. R4g calls
+    /// it from [`Scopes::unit_by_name`] on every answer that is a unit,
+    /// also when the worker knew the unit from an earlier compilation.
     pub fn read_unit(&mut self, unit: u32, bits: u8) {
         todo!("R4g")
     }

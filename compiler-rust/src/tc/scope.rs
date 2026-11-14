@@ -34,16 +34,18 @@ use super::segment::{ExportItem, Segment};
 pub use super::graph::NONE;
 
 /// The table a name is looked up in (compiler/ml/env.ml:416-431). A unit is
-/// not a namespace: units are looked up in `Scopes::unit_heads`.
+/// not a namespace: units are looked up in `Scopes::unit_heads`. The
+/// discriminants are `segment::ExportKind`'s, so an export item's kind is
+/// its namespace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Namespace {
     Value = 0,
     Type = 1,
-    Module = 2,
-    ModuleType = 3,
-    Constructor = 4,
-    Label = 5,
+    Constructor = 2,
+    Label = 3,
+    Module = 4,
+    ModuleType = 5,
 }
 
 /// An interned name with its namespace: `name << 3 | namespace`. Indexes the
@@ -230,8 +232,9 @@ pub struct Member {
     pub origin: u32,
 }
 
-/// One opened layer: 16 bytes. Layers of a scope chain are a list through
-/// `older`, innermost first.
+/// One opened layer: 12 bytes. Layers of a scope chain are a list through
+/// `older`, innermost first. Layer `i` belongs to `Scopes::opens[i]`: an
+/// open makes one of each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct Layer {
@@ -241,8 +244,6 @@ pub struct Layer {
     pub mark: u32,
     /// The next older visible layer, or [`NONE`].
     pub older: u32,
-    /// The layer's row in `Scopes::opens`.
-    pub open: u32,
 }
 
 /// `Open::flags` bit: a lookup went through the layer (the `used_slot` of
@@ -325,7 +326,8 @@ impl Resolved {
 #[repr(C)]
 pub struct Found {
     pub item: Resolved,
-    /// The opened layer the item was found through, or [`NONE`].
+    /// The opened layer the item was found through (also the index of its
+    /// open), or [`NONE`].
     pub layer: u32,
 }
 
@@ -491,8 +493,9 @@ impl Scopes {
     /// Amortized O(1), 1 step: put a binder in scope. Writes
     /// `previous[binder] = heads[key]`, `heads[key] = binder` and one log
     /// entry; grows `heads` to the name table's size when the key is beyond
-    /// it. The binder must be the youngest (`Binders::len() - 1` or pushed
-    /// since the last bind in order), so that ages compare by index.
+    /// it. Ages compare by index: no layer visible now may have a mark above
+    /// the binder (a binder is pushed after every open that is to hide
+    /// nothing of it), checked by a debug assertion on the innermost layer.
     pub fn bind(&mut self, binder: Binder) {
         todo!("R4b")
     }
@@ -547,8 +550,9 @@ impl Scopes {
     }
 
     /// O(1), no step: open `table` in the current scope. Pushes one
-    /// [`Open`] and one [`Layer`] with `mark = Binders::len()` and makes it
-    /// the scope's innermost layer. Returns the open's index
+    /// [`Open`] and one [`Layer`] (at the same index) with
+    /// `mark = Binders::len()` and makes it the scope's innermost layer.
+    /// Returns that index
     /// (compiler/ml/env.ml:1874-1911).
     pub fn open(&mut self, table: TableId, loc: u32, root: u32, flags: u32) -> u32 {
         todo!("R4c")
@@ -645,7 +649,7 @@ mod tests {
         }
         sizes!(
             Namespace => 1, Key => 4, Binder => 4, BinderKind => 1, Scope => 12,
-            TableId => 4, Table => 12, Member => 12, Layer => 16, Open => 16,
+            TableId => 4, Table => 12, Member => 12, Layer => 12, Open => 16,
             ShadowNote => 8, Resolved => 4, Found => 8, UnitSlot => 16,
             Warning => 16, WarningKind => 1, Frozen => 28,
         );
@@ -662,6 +666,17 @@ mod tests {
             (Name(12345), Namespace::Label as u32)
         );
         assert!(Key::new(Name(1), Namespace::Value) < Key::new(Name(1), Namespace::Type));
+        use crate::tc::segment::ExportKind;
+        for (ns, kind) in [
+            (Namespace::Value, ExportKind::Value),
+            (Namespace::Type, ExportKind::Type),
+            (Namespace::Constructor, ExportKind::Constructor),
+            (Namespace::Label, ExportKind::Label),
+            (Namespace::Module, ExportKind::Module),
+            (Namespace::ModuleType, ExportKind::ModuleType),
+        ] {
+            assert_eq!(ns as u8, kind as u8);
+        }
         assert!(Key::new(Name(1), Namespace::Label) < Key::new(Name(2), Namespace::Value));
         assert_eq!(
             Resolved::binder(Binder(7)).kind(),
