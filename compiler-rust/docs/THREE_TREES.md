@@ -1828,9 +1828,10 @@ pushed and nothing else is done, with one exception: an expression that was buil
 function's scope opened is read once where it moves in (`names::adopt`,
 G10). The first pass cannot record that fact: when the argument is lowered
 nobody knows it will end inside a function, and a site range over it would
-include the statements hoisted out of it. This is the only place where an
-expression is read for a reference, and `adopted_nodes` reports what it
-costs. The replay reads statement lists and scope rows, never an
+include the statements hoisted out of it. This is one of two places where
+an expression is read for a reference, and `adopted_nodes` reports what it
+costs; the second is the JSX rule of "T5 part B as built", item 4 (in a
+unit that preserves JSX only). The replay reads statement lists and scope rows, never an
 expression: a function literal inside an expression is reached from its
 row, by reading the ancestors of its node up to its statement (the form of
 `globals::decide`: from a recorded place towards the root, a node read at
@@ -2199,8 +2200,9 @@ naming pass and drops them. No output changes.
   (outside its closed children) are read, one step each; each closed direct
   child that is still live gives its free list; the entries whose home is
   not the row are sorted by `Ident::cmp` and written, one per identifier.
-- `names::adopt`: the one read of an expression (G10), at `apply_with_arity`
-  and `external_dispatch`.
+- `names::adopt`: the first of two named reads of an expression (G10), at
+  `apply_with_arity` and `external_dispatch`; the second is the JSX rule
+  (item 4 below).
 - `Log::copied` and `Log::bind` from `Bir::copy_subtree` and `Bir::bind`.
 
 **The tables** (`emit::naming::Tables`): the pass's rule on dense rows with
@@ -2263,10 +2265,21 @@ the comparison with the pass before the change.
    `adopt`, a live reference whose chain of members ends as the callee or
    the fragment tag of a JSX node is skipped when `jsx::printed_form` (the
    printer's `jsx_printable`, read from the finished node) says element or
-   fragment. Cost, only in such a unit: one read of the parent per
-   reference, one step per member above it, and per JSX element one step
-   per property key (twice for a fragment). Not a walk below a node: the
-   reference's ancestors and the element's own keys. The application:
+   fragment. This is the second named place where an expression is read
+   for a reference, beside `adopt`: `Log::unprinted` reads up from a
+   reference through member nodes to a JSX node, and `jsx::printed_form` /
+   `jsx_tag` then read the element's property keys and down the tag's
+   chain of members, to decide whether the reference is printed. Cost,
+   only in such a unit: one step per member above the reference, one per
+   property key, one per member of the tag's chain (and its base), counted
+   in `Log::steps`; `printed_form` runs once per reference that is the
+   callee or the tag of an element. A tag that is a chain of n members
+   costs 3n + 13 steps for the element with two keys (the tag's reference
+   walks up n members, and `printed_form` reads the chain down for the
+   callee's site and for the tag's): 3,013 steps at n = 1,000 and 30,013
+   at n = 10,000
+   (`a_jsx_tag_chain_of_ten_thousand_members_costs_three_steps_a_member`).
+   The application:
    `free_differences` 4,889 in 988 units to 4.
 5. *A closed child gives its free list at the enclosing close, when it is
    live* (was: at its own close, into the enclosing run). A closure in a

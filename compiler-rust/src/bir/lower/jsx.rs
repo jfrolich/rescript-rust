@@ -21,19 +21,22 @@ pub(super) enum PrintedForm {
 /// property key is a JSX attribute name and the children agree with the
 /// element's arity; a fragment when it is an empty fragment besides.
 /// Cost: one step per property key and per member of the tag's chain, and
-/// the bytes of their names; nothing is allocated once `spelling` has its
-/// capacity.
-pub(super) fn printed_form(bir: &Bir, idents: &[Ident], jsx: NodeId, spelling: &mut String) -> PrintedForm {
+/// the bytes of their names, added to `steps`; nothing is allocated once
+/// `spelling` has its capacity.
+pub(super) fn printed_form(bir: &Bir, idents: &[Ident], jsx: NodeId, spelling: &mut String, steps: &mut usize) -> PrintedForm {
     use crate::js_ir::printer::{is_jsx_attribute_name, unwrap_uppercase_exotic};
     let View::JJsx { values, info } = bir.view(jsx) else { unreachable!("a JSX node") };
     let crate::bir::JsPayload::Jsx(header) = bir.javascript(info) else { unreachable!("JSX metadata") };
     let keys = bir.property_keys(header.props);
     let fragment = header.fragment && !header.spread && keys.is_empty() && !header.key;
     let has_children = bir.nodes[jsx.index()].aux() != 0;
-    let printable = (fragment || jsx_tag(bir, idents, values[1], spelling))
-        && keys.iter().all(|key| match key {
-            crate::bir::PropertyKey::Literal(name) => is_jsx_attribute_name(unwrap_uppercase_exotic(bir.text(*name))),
-            _ => false,
+    let printable = (fragment || jsx_tag(bir, idents, values[1], spelling, steps))
+        && keys.iter().all(|key| {
+            *steps += 1;
+            match key {
+                crate::bir::PropertyKey::Literal(name) => is_jsx_attribute_name(unwrap_uppercase_exotic(bir.text(*name))),
+                _ => false,
+            }
         })
         && (!has_children || (header.children >= 2) == header.multi);
     match (printable, fragment) {
@@ -46,8 +49,8 @@ pub(super) fn printed_form(bir: &Bir, idents: &[Ident], jsx: NodeId, spelling: &
 /// Whether JSX can name `tag` (`js_ir::printer::is_jsx_tag`): an intrinsic
 /// element name, a variable or module whose printed name starts as a
 /// component's does, or a chain of dotted members over one. Cost: one step
-/// per member of the chain and the bytes of the names.
-fn jsx_tag(bir: &Bir, idents: &[Ident], tag: NodeId, spelling: &mut String) -> bool {
+/// per member of the chain, added to `steps`, and the bytes of the names.
+fn jsx_tag(bir: &Bir, idents: &[Ident], tag: NodeId, spelling: &mut String, steps: &mut usize) -> bool {
     use crate::js_ir::printer::{convert_ident_into, is_jsx_name_char, is_jsx_value_name, property_access_uses_dot};
     use crate::js_ir::Kind;
     // `printed_ident_name`: a JavaScript binding prints as it is spelled.
@@ -81,6 +84,7 @@ fn jsx_tag(bir: &Bir, idents: &[Ident], tag: NodeId, spelling: &mut String) -> b
             // variable or a module.
             let mut at = tag;
             loop {
+                *steps += 1;
                 match bir.view(at) {
                     View::Var { .. } | View::JQualified { .. } => return true,
                     View::JDot { object, property, .. } if bir.nodes[at.index()].aux() == 0 && property_access_uses_dot(bir.text(property)) => at = object,

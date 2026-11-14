@@ -416,11 +416,15 @@ impl Log {
     /// element or a fragment, or the tag of one printed as a fragment (the
     /// reference itself or the object of a chain of members,
     /// `State::jsx_callee`). The pass does not count such an operand as a
-    /// use (naming.rs `children`, `ExprKind::Jsx`). Only the reference's
-    /// ancestors up to the JSX node are read, never an expression below a
-    /// node. Cost: one step per member above the reference, and
-    /// `jsx::printed_form` when the chain's parent is a JSX node (once per
-    /// element for its callee, once more for a fragment's tag).
+    /// use (naming.rs `children`, `ExprKind::Jsx`). The second named place
+    /// where an expression is read for a reference, beside `adopt`: up from
+    /// the reference through member nodes to the JSX node, then
+    /// `jsx::printed_form` reads the element's property keys and down the
+    /// tag's chain of members (`jsx_tag`). Cost: one step per member above
+    /// the reference, and, when the chain is the callee or the tag of a JSX
+    /// node, `jsx::printed_form`: one step per property key and one per
+    /// member of the tag's chain and its base (pinned by
+    /// `a_jsx_tag_chain_of_ten_thousand_members_costs_three_steps_a_member`).
     fn unprinted(&mut self, bir: &Bir, idents: &[crate::ident::Ident], reference: NodeId) -> bool {
         use crate::bir::View;
         let mut top = reference;
@@ -440,7 +444,7 @@ impl Log {
         if !callee && !tag {
             return false;
         }
-        let form = super::jsx::printed_form(bir, idents, jsx, &mut self.spelling);
+        let form = super::jsx::printed_form(bir, idents, jsx, &mut self.spelling, &mut self.steps);
         match form {
             super::jsx::PrintedForm::Runtime => false,
             super::jsx::PrintedForm::Element => callee,
@@ -573,8 +577,13 @@ pub(crate) fn close(bir: &mut Bir, idents: &[crate::ident::Ident], function: Fun
 /// moved references as its own sites, and takes this scope's free entries
 /// at its own close, as it takes those of any function.
 ///
-/// This is the one place where an expression is read for a reference.
-/// Cost: one step per node of the subtree outside function literals, one
+/// This is one of two places where an expression is read for a reference.
+/// The second is the JSX rule (`Log::unprinted`, in a unit that preserves
+/// JSX only): from a reference up through member nodes to a JSX node, then
+/// `jsx::printed_form` and `jsx_tag` read the element's property keys and
+/// down the tag's chain of members, to decide whether the reference is
+/// printed; one step per member above the reference, one per property key,
+/// one per member of the tag's chain. Cost of `adopt`: one step per node of the subtree outside function literals, one
 /// per function literal and one per free entry of each; `adopted_nodes`
 /// grows by the nodes read. Nothing is allocated once `pending` has its
 /// capacity. Asserts that a function scope is open.
@@ -2108,6 +2117,51 @@ mod tests {
         let (small, large) = (steps_of_module_references(1_000), steps_of_module_references(10_000));
         assert_eq!(large - small, 9_000);
         assert_eq!(steps_of_module_references(10_000), steps_of_references(10_000));
+    }
+
+    /// The steps of the log for one function, in a unit that preserves JSX,
+    /// that returns `<M1.a.a...a className={x} id={x} />`: a JSX element
+    /// whose runtime callee is module `M0` and whose tag is a chain of
+    /// `members` members over module `M1`, with two property keys. The
+    /// printer writes it as an element: the callee is not printed, the tag
+    /// is.
+    fn steps_of_a_jsx_tag_chain(members: usize) -> usize {
+        let mut u = Unit::new();
+        u.b.js_scope.as_mut().unwrap().names.jsx_preserve = true;
+        let x = u.local("x");
+        let header = u.header(None, 0);
+        open(&mut u.b);
+        let callee = u.b.new_node(View::JQualified { module: ImportId(0), member: None }, 0);
+        let mut tag = u.b.new_node(View::JQualified { module: ImportId(1), member: None }, 0);
+        let property = u.b.intern_text("a");
+        for _ in 0..members {
+            tag = u.b.new_node(View::JDot { object: tag, property, position: crate::js_ir::arena::FieldPos::NONE }, 0);
+        }
+        let keys = [crate::bir::PropertyKey::Literal(u.b.intern_text("className")), crate::bir::PropertyKey::Literal(u.b.intern_text("id"))];
+        let start = index(u.b.pools.property_keys.len());
+        u.b.pools.property_keys.extend_from_slice(&keys);
+        let props = crate::bir::PropertySpan { start, len: 2 };
+        let info = u.b.js_info(crate::bir::JsPayload::Jsx(crate::bir::JsxHeader { props, ..Default::default() }));
+        let values = [callee, tag, u.b.new_node(View::Var { var: x }, 0), u.b.new_node(View::Var { var: x }, 0)];
+        let element = u.b.new_node(View::JJsx { values: &values, info }, 0);
+        let body = u.ret(element);
+        let (_, scope) = u.function(header, &[body]);
+        assert_eq!(u.free(scope), [FreeRef::import(ImportId(1)), FreeRef::var(x)]);
+        u.log().steps
+    }
+
+    #[test]
+    fn a_jsx_tag_chain_of_ten_thousand_members_costs_three_steps_a_member() {
+        // `unprinted` is the second place an expression is read (beside
+        // `adopt`): from the tag's module reference up its members to the
+        // JSX node (one step a member), then `jsx::printed_form` reads the
+        // element's keys and down the tag's chain (one step a key, one a
+        // member). It runs once for the callee's site and once for the
+        // tag's: three steps a member, two a key.
+        let (small, large) = (steps_of_a_jsx_tag_chain(1_000), steps_of_a_jsx_tag_chain(10_000));
+        assert_eq!(large - small, 3 * 9_000);
+        println!("jsx tag chain steps: 1,000 members {small}, 10,000 members {large}");
+        assert!(small <= 3 * 1_000 + 2 * 2 + 16, "{small}");
     }
 
     /// The steps of the log for one function with `references` reads of one
