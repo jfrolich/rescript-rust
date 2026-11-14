@@ -201,6 +201,7 @@ pub(super) fn prepare(arena: &mut Bir) -> (Storage, dispatch::Plan<u32>) {
     // An arm may have a cached action inside and outside a switch.
     let actions = 2 * (literals + payloads + variants);
     storage.actions.values.reserve_exact(actions);
+    storage.states.values.reserve_exact(actions);
     let fact_literals = arena.pools.switches.iter().filter_map(|header| {
         if let SwitchDispatch::Variant(facts) = &header.dispatch { Some(facts.literal_tags.iter()) }
         else { None }
