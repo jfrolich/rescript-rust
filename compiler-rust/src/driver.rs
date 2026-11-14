@@ -10435,12 +10435,18 @@ struct AttemptOutput {
     publication: AttemptPublication,
     mode: crate::types::context::CheckMode,
     signature_report: Option<Box<crate::cmi::signature_check::PreparedReport>>,
+    #[cfg(feature = "test-hooks")]
+    force_unexplained_failure: bool,
 }
 
 impl AttemptOutput {
     /// O(1), no allocation until the first diagnostic or requested dump.
     fn new(mode: crate::types::context::CheckMode) -> Self {
-        Self { stderr: Vec::new(), publication: AttemptPublication::Pending, mode, signature_report: None }
+        Self {
+            stderr: Vec::new(), publication: AttemptPublication::Pending, mode, signature_report: None,
+            #[cfg(feature = "test-hooks")]
+            force_unexplained_failure: false,
+        }
     }
 
     /// No allocation on the default path. Check mode retains report bytes until
@@ -10466,6 +10472,13 @@ impl AttemptOutput {
     /// first externally visible artifact/signature, after every fallible check.
     fn publish(&mut self, ctx: &TypeContext) -> Result<()> {
         if self.publication == AttemptPublication::Pending {
+            // Test-only: fail after private freezing and continuation work,
+            // before anything can escape. Explain then checks the same unit.
+            #[cfg(feature = "test-hooks")]
+            if self.force_unexplained_failure {
+                ctx.note_unexplained_unify_failure();
+                self.force_unexplained_failure = false;
+            }
             if self.mode == crate::types::context::CheckMode::Success && ctx.unexplained_unify_failure() {
                 return Err(anyhow!("unit requires an explanatory check"));
             }
@@ -10567,6 +10580,13 @@ fn type_structure_two_modes<S, T, R>(
             continue;
         }
         let mut reports = AttemptOutput::new(attempt.mode);
+        #[cfg(feature = "test-hooks")]
+        {
+            reports.force_unexplained_failure = attempt.mode == CheckMode::Success
+                && std::env::var("RESCRIPT_TEST_DISCARD_UNIT").ok().is_some_and(|unit| {
+                    FsPath::new(filename).file_stem().and_then(|s| s.to_str()) == Some(unit.as_str())
+                });
+        }
         let output = finish(&type_ctx, tctx, typed, syntax, &mut reports);
         // Location retries request another parse, not an explanation of this
         // check. Leave its reports and counters private; the located compile
