@@ -165,5 +165,47 @@
     "fails": true,
     "report": "This changes a value that `update` did not create itself",
     "expected": "update pushes onto the cart it was given. Going through the states of such a reducer would mean nothing: each step would change the states before it."
+  },
+  {
+    "id": "proof-first",
+    "title": "A proof",
+    "summary": "For every list, not for a thousand of them.",
+    "checks": true
+  },
+  {
+    "id": "proof-lemmas",
+    "title": "Laws that build on laws",
+    "summary": "Each law proved is a fact the next may use.",
+    "checks": true
+  },
+  {
+    "id": "proof-cases",
+    "title": "Cases, arithmetic and order",
+    "summary": "No induction: every case of the coupon, and what follows from the comparisons.",
+    "checks": true
+  },
+  {
+    "id": "proof-tree",
+    "title": "Your own recursive types",
+    "summary": "Induction on a tree, and on two numbers at once.",
+    "checks": true
+  },
+  {
+    "id": "proof-false",
+    "title": "What is not proved",
+    "summary": "A false law is found by the run; a true one may still have no proof.",
+    "checks": true,
+    "failing": [
+      "successorIsLarger"
+    ]
+  },
+  {
+    "id": "proof-required",
+    "title": "Asking for a proof",
+    "summary": "@law(proved): a run is not enough.",
+    "checks": true,
+    "failing": [
+      "reverseKeepsSum"
+    ]
   }
 ]
