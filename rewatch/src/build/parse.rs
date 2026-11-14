@@ -511,10 +511,11 @@ pub(crate) fn reparse_with_locations(ast: &StoredAst) -> anyhow::Result<StoredAs
 }
 
 /// Parse the source of `ast` again with its derived code as syntax, for a
-/// unit whose plan could not be used. The result keeps a source that parses
-/// the same way, for a later location retry.
+/// unit whose plan could not be used, with location tables when
+/// `locations`. The result keeps a source that parses the same way, for
+/// placing its warnings.
 /// Cost: one frontend run of the unit, and one copy of its source.
-pub(crate) fn reparse_without_plans(ast: &StoredAst) -> anyhow::Result<StoredAst> {
+pub(crate) fn reparse_without_plans(ast: &StoredAst, locations: bool) -> anyhow::Result<StoredAst> {
     let source = ast
         .retry_source()
         .ok_or_else(|| anyhow!("missing source for a parse without plans"))?;
@@ -528,7 +529,7 @@ pub(crate) fn reparse_without_plans(ast: &StoredAst) -> anyhow::Result<StoredAst
             ..source.options.clone()
         },
     });
-    let (_, mut general, _) = parse_saved_source(&source, ast.arena().stores_locations())?;
+    let (_, mut general, _) = parse_saved_source(&source, locations)?;
     if let (Some(prior), Some(census)) = (ast.arena().derived_census.as_ref(), census_mut(&mut general)) {
         census.add_parse_work(prior.parse_work());
     }

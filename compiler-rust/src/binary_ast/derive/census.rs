@@ -80,7 +80,7 @@ pub struct Census {
     pub js_lines: Pair,
     /// Derived/other deltas: fresh variables, top-level unifications, instance
     /// copied nodes, lazy environment hits+misses. Null unless counters are
-    /// enabled and RAYON_NUM_THREADS=1; counters are process-global.
+    /// enabled; counts belong to this attempt, independently of worker count.
     pub checker_counters: Option<[[u64; 4]; 2]>,
     /// Base shape class per generated binding, in generation order.
     pub shape_classes: Vec<&'static str>,
@@ -160,15 +160,17 @@ impl Census {
         let i = start as usize;
         self.typed_groups.get(i / 64).is_some_and(|w| w & (1 << (i % 64)) != 0)
     }
-    /// O(1): snapshot only the already enabled, single-worker counters.
-    pub fn counter_snapshot(&self) -> Option<([u64; 4], [u64; 4])> {
-        self.checker_counters.map(|counts| (crate::perf_counters::derived_snapshot(),
+    /// O(1): snapshot the enabled attempt-local counters before retention.
+    pub fn counter_snapshot(&self, ctx: &crate::types::TypeContext)
+        -> Option<([u64; 4], [u64; 4])> {
+        self.checker_counters.map(|counts| (crate::perf_counters::derived_snapshot(ctx),
             std::array::from_fn(|i| counts[0][i] + counts[1][i])))
     }
     /// O(1): subtract nested items so every counter increment is charged once.
-    pub fn account_counters(&mut self, derived: bool, before: Option<([u64; 4], [u64; 4])>) {
+    pub fn account_counters(&mut self, ctx: &crate::types::TypeContext, derived: bool,
+        before: Option<([u64; 4], [u64; 4])>) {
         if let (Some(counts), Some((before, charged))) = (&mut self.checker_counters, before) {
-            let now = crate::perf_counters::derived_snapshot();
+            let now = crate::perf_counters::derived_snapshot(ctx);
             for i in 0..4 {
                 let children = counts[0][i] + counts[1][i] - charged[i];
                 counts[usize::from(!derived)][i] += now[i].saturating_sub(before[i]).saturating_sub(children);

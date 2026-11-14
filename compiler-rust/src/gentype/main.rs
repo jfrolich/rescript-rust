@@ -885,6 +885,7 @@ fn register_type_declarations(
             )
             .unwrap_or(true);
             crate::perf_counters::record_gentype_translation(
+                artifact.ctx,
                 annotated,
                 translation.type_declarations.len(),
             );

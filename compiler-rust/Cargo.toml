@@ -59,6 +59,8 @@ tempfile = "3"
 default = ["native"]
 native = ["clap"]
 wasm = []
+# Explicit opt-in for end-to-end tests; absent from shipping builds.
+test-hooks = []
 
 [profile.release]
 # As in rewatch/Cargo.toml, whose profile applies when rewatch builds this

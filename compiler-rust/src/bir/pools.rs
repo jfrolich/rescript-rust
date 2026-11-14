@@ -373,8 +373,6 @@ pub(super) struct Pools {
     pub const_fields: Vec<ConstId>,
     pub const_fields_index: hashbrown::HashTable<(u64, ConstSpan)>,
     pub prims: Vec<PrimPayload>,
-    pub funcs: Vec<FuncHeader>,
-    pub function_params: Vec<VarId>,
     pub attrs: Vec<FunctionAttribute>,
     pub switches: Vec<SwitchHeader>,
     pub catches: Vec<CatchHeader>,
