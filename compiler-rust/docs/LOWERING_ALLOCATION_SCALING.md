@@ -1,5 +1,8 @@
 # Complete-unit lowering allocation scaling
 
+**Default-path gate remains blocked at `44ac9d4de`: +0.048%, above +0.02%.**
+The final reproduction and remaining-cost decision are at the end of this report.
+
 The criterion is a constant number of allocation calls per unit, **not zero
 allocations or constant bytes**. The four tests warm the real entry once at each
 size, then measure a fresh imported input through `lower_with_resolver`, state
@@ -545,7 +548,7 @@ instructions and reconciles the callgrind difference exactly.
 | `Metadata::import_literal` | absent | 340,273 | Includes interning/key encoding |
 | `Metadata::import_kind` | absent | 134,122 | Includes name interning |
 | `Metadata::intern` | absent | 216,850 | Includes AVL insertion |
-| AVL insert and rotate entries | absent | 142,157 | Nested entries, not additive |
+| AVL insert (includes rotate) | absent | 124,314 | Rotation child costs 17,843; do not add it again |
 | Payload graph construction | 1,101,081 | 395,859 | -705,222 |
 | Simplification entries | 476,705 | 207,509 | -269,196 |
 | `select` / `select_tree` emitted entries | 547,418 | inlined into callers | Not separately comparable |
@@ -694,3 +697,143 @@ rewatch build and 210+9 passed; JS737/737, stdlib113/113, GenType2/2. Existing
 allocation and differential tests were not edited. The first full run lacked
 React reference artifacts removed by earlier parity cleanup; rebuilding all
 three reference projects before the full retry produced the passing result.
+
+## Final candidate and remaining-cost decision
+
+Production candidate `44ac9d4de` retains the two measured corrections, compared
+against merge-base `7ba19b2a63916ae28741c1ccb7f3720edc68e81a`. All results below
+use the same fat-LTO, single-codegen-unit binaries and 743-module corpora.
+
+| Binary | SHA-256 |
+| --- | --- |
+| base | `658b0bd56373c729d167ed3cb2fc1d5842c1da2508f5ae61766990a70f145f21` |
+| original head a42524ae0e | `efcc8051eb13497f68ac2c768d5011b150c1239754e5fb613b6e0228dd46de6e` |
+| demand-driven work pools | `2c2514121654c806727890c3aca7043f30570e623b90cf0d906d41d6327a5ce7` |
+| final string-loop candidate | `dc31da6e21ac3f4d6fb4456fb4492adad28dd042327a67d71ed3b5c27a30b18c` |
+
+### Default path: failed acceptance gate
+
+```sh
+env -u RESCRIPT_BACKEND python3 scripts/compare_build_instructions.py \
+  --base temp/default-audit/bin/base temp/default-audit/base \
+  --head temp/default-audit/bin/inline temp/default-audit/head \
+  --runs 5 --sequential --threshold 0.02 --work-dir temp/default-audit/inline-final
+```
+
+```text
+run 1: base 4,035,189,413  head 4,037,043,275
+run 2: base 4,035,253,123  head 4,035,283,157
+run 3: base 4,036,680,742  head 4,035,701,033
+run 4: base 4,033,343,332  head 4,036,933,220
+run 5: base 4,036,293,069  head 4,036,610,209
+minimum: 4,033,343,332 -> 4,035,283,157
+change: +1,939,825 (+0.048%)
+```
+
+The +0.02% allowance is about 806,669 instructions: approximately **1,133,156**
+instructions remain above budget. No threshold override or increase trailer is
+being used to present this as a pass.
+
+### Check mode: current result, not the historical figure
+
+Use the same command with `RESCRIPT_BACKEND=check` (without `env -u`). The
+600-second command deadline interrupted the fifth pair; the first four complete
+pairs were retained, the interrupted pair discarded, and one fresh sequential
+base/head pair completed with `--runs 1` in `inline-check-fifth`. These are the
+five complete pairs, not a selection of their fastest members:
+
+```text
+run 1: base 20,562,560,859  head 20,035,030,997
+run 2: base 20,560,313,563  head 20,037,513,690
+run 3: base 20,550,397,553  head 20,022,815,002
+run 4: base 20,568,043,457  head 20,035,929,767
+run 5: base 20,555,534,227  head 20,037,666,193
+minimum: 20,550,397,553 -> 20,022,815,002
+change: -527,582,551 (-2.567262%)
+```
+
+### Remaining costs for the coordinator's storage-design decision
+
+The final callgrind run is compared with the original base callgrind run.
+**Exclusive**, non-overlapping differences still reconcile exactly:
+
+| Bucket | Base | Final candidate | Difference |
+| --- | ---: | ---: | ---: |
+| Planner symbols | 1,074,694 | 1,813,872 | +739,178 |
+| Rust allocation plumbing | 70,076,535 | 70,725,995 | +649,460 |
+| Allocator internals | 350,247,213 | 352,556,095 | +2,308,882 |
+| compile_expr symbols, including inlined work | 10,436,996 | 10,802,996 | +366,000 |
+| string_literal symbols | 11,014,336 | 11,014,336 | 0 |
+| Memory operations | 208,933,552 | 209,199,361 | +265,809 |
+| Literal keys | 122,600 | 178,232 | +55,632 |
+| Primitive purity | 99,924 | 99,567 | -357 |
+| Float/hex helpers | 37,890 | 35,602 | -2,288 |
+| Bigint parser | 49,147 | 46,164 | -2,983 |
+| Identifier conversion helpers | 9,803,872 | 9,117,594 | -686,278 |
+| Other/unexplained | 3,368,714,929 | 3,368,606,005 | -108,924 |
+| **Total** | **4,030,611,688** | **4,034,195,819** | **+3,584,131** |
+
+The difference between this callgrind delta and the final cachegrind-minimum
+delta is **-1,644,306** instructions. It remains a measurement/tool/run
+discrepancy, not an attributed optimization. Allocator costs varied materially
+between runs; there is no claim that all allocator differences come from the
+planner, or that the residual compile_expr cost is understood.
+
+Useful **inclusive** entry points, not additional ledger rows:
+
+| Entry | Base | Final candidate | Interpretation |
+| --- | ---: | ---: | --- |
+| Emitter `Sw::untagged_plan` | 2,621,287 | 3,219,727 | +598,440 including descendants |
+| Constant `LamArena::decide_switch` | 1,311,537 | 1,693,389 | +381,852 including descendants |
+| `FactPool::import` | absent | 425,031 | Includes metadata import |
+| `FactPool::reserve` | absent | 77,679 | Cold imported-domain storage |
+| `Metadata::import_literal` | absent | 340,192 | Includes keys/interning |
+| `Metadata::import_kind` | absent | 134,168 | Includes class/name interning |
+| `Metadata::intern` | absent | 216,815 | Includes AVL and string operations |
+| All `Index::insert` calls | absent | 124,314 | Includes 17,843 in rotate; not 142,157 |
+| memcpy directly called by intern | absent | 10,357 | 732 calls; included in intern |
+| memcmp directly called by intern | absent | 22,477 | 1,211 calls; included in intern |
+| `Plan::test` | inlined | 27,804 | Includes 14,505 in lazy instance initialization |
+
+Even eliminating *all* measured AVL insertion and direct interning memcpy work
+would not close the remaining 1.13 M budget gap. A small-plan linear index could
+only remove a subset of that insertion work and would add comparisons; these
+measurements do not justify retaining an unmeasured replacement. Likewise,
+removing the source-text copy alone cannot close the gap.
+
+The remaining shared-planner import, graph, scratch and compatibility views are
+part of the audited owned/unit storage design. Reintroducing the old owned
+planner as a second production path, reverting that storage, or changing the
+untouched variant emitter is not an authorized correction here. **Stop for the
+coordinator's decision with the gate failed**, rather than claiming these
+figures prove the cost is irreducible or waiving the budget. The measurements
+do not prove that further optimization is impossible; a wider ownership/API
+change would need its own scope and review.
+
+### Wall-time context and final checks
+
+Hyperfine used `--warmup 1 --runs 5`, one worker, the same binaries/corpora,
+and a `--prepare` command cleaning both projects with their respective binaries.
+Each command sets `RESCRIPT_RUNTIME` to its own archive's runtime and runs
+`build` on its `tests/tests`; the default run unsets `RESCRIPT_BACKEND`, and the
+check run sets it to `check`. Raw results are `temp/default-audit/wall-default.json`
+and `wall-check.json`. No wall-time speedup or RSS reduction is claimed.
+
+| Mode / binary | Mean seconds | Standard deviation | Min | Max |
+| --- | ---: | ---: | ---: | ---: |
+| default base | 0.696808 | 0.029463 | 0.655739 | 0.729725 |
+| default candidate | 0.667182 | 0.012223 | 0.648360 | 0.682585 |
+| check base | 1.997421 | 0.052220 | 1.965121 | 2.088066 |
+| check candidate | 2.001201 | 0.048236 | 1.938536 | 2.051147 |
+
+Compiler/rewatch builds and tests, JS/stdlib/GenType parity passed for the
+production candidate as recorded above. Final strict all-target compiler clippy
+passed; the cost scanner reports 500 production functions, 188 changed/new,
+zero missing/generic notes. The coverage ratchet passed unchanged (initial
+setup lacked OCAML_BSC, then a 300-second attempt timed out; the explicit
+OCAML_BSC run completed under a 600-second bound). Four complete-unit debug
+allocation tests remain **68/85/68/138 at both widths**. No current-candidate
+release allocation count or application benchmark is claimed.
+
+`bir/lower/export.rs` and `lambda/lam_compile_variant.rs` remain identical to
+the pinned base; existing allocation/differential assertions are unchanged.
