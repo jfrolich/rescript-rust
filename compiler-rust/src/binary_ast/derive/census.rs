@@ -107,7 +107,8 @@ impl Census {
             typecheck: Pair::default(), conversion: Pair::default(), lambda_lowering: Pair::default(),
             lambda_passes: Pair::default(), lowering: Pair::default(), printing: Pair::default(),
             environment: Pair::default(), signature: Pair::default(), gentype: Pair::default(),
-            js_bytes: Pair::default(), js_lines: Pair::default(), checker_counters: crate::perf_counters::enabled()
+            js_bytes: Pair::default(), js_lines: Pair::default(), checker_counters: (crate::perf_counters::enabled()
+                && std::env::var("RAYON_NUM_THREADS").as_deref() == Ok("1"))
                 .then_some([[0; 4]; 2]),
             typed_groups: Vec::new(), shape_classes: Vec::new(), shape_nodes: Vec::new(),
             shape_parameterised: Vec::new(), shape_recursive: Vec::new(), templates: Vec::new(),
