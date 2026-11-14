@@ -2653,3 +2653,12 @@ skeleton; all three were the skeleton's, not the builder's.
    `binding_lowers_only_what_update_level_reaches` pins it in both modes.
    The generator of the harness does not reach such a type today; the
    second skeleton turn adds an operation that does.
+9. **The binding walk's stack entries carry their kind in bits 30 and 31
+   of the handle.** Section 3.2 reserves bit 31 of `Ty` for a frozen node.
+   No local graph holds a frozen handle yet (a segment's nodes are copied
+   in), so the two do not meet today, and a debug assertion in
+   `push_flagged` says so. The slice that first puts frozen handles into
+   child lists keeps them off this stack (a frozen node holds no local
+   variable and has no level to lower: it is skipped at the push, one
+   compare a child) or widens the entry, with a test of a binding to a
+   type that holds a frozen child.

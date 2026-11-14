@@ -671,9 +671,21 @@ impl Checker {
 
     /// O(arity): push the children of `node` on the walk's stack, each
     /// entry carrying `flag` ([`LEVEL_ONLY`], [`LOWERS`] or none).
+    ///
+    /// The flags use bits 30 and 31 of a handle. Bit 31 is reserved for a
+    /// frozen node (CHECKER_REWRITE 3.2), which no local graph holds yet:
+    /// the slice that puts frozen handles into child lists must keep them
+    /// off this stack (a frozen node holds no local variable and has no
+    /// level to lower) or widen the entry. The assertion pins that.
     fn push_flagged(&mut self, node: Node, flag: u32) {
         let start = self.g.work.len();
         self.g.children(node, false);
+        debug_assert!(
+            self.g.work[start..]
+                .iter()
+                .all(|entry| entry.0 & (LEVEL_ONLY | LOWERS) == 0),
+            "a handle with bit 30 or 31 set on the binding walk's stack"
+        );
         if flag != 0 {
             for entry in &mut self.g.work[start..] {
                 entry.0 |= flag;
