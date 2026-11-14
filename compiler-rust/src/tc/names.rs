@@ -1157,6 +1157,43 @@ mod tests {
         assert!(units.iter().all(|&unit| s.unit_read[unit as usize] == READ));
     }
 
+    /// `find_below` of a name bound n times after an open walks the n
+    /// later bindings through `previous`, one step each, after its head
+    /// load. The opened table's member is not a candidate: `find_below` is
+    /// what the layer hides (compiler/ml/env.ml:284-287, `next`), and with
+    /// no older binding or layer that is nothing.
+    #[test]
+    fn find_below_walks_the_later_bindings_one_step_each() {
+        let below = |n: u32| {
+            let mut s = Scopes::new();
+            s.enter();
+            let x = Key::new(s.names.intern("x"), Namespace::Value);
+            let member = s.binders.push(x, 0, 0, BinderKind::Let);
+            let table = s.table_from(&[(x, member)]);
+            let layer = s.open(table, 0, 0, 0);
+            assert_eq!(
+                s.search(table, x).map(|row| s.member(table, row).target),
+                Some(member.0)
+            );
+            for _ in 0..n {
+                let binder = s.binders.push(x, 0, 0, BinderKind::Let);
+                s.bind(binder);
+            }
+            let mut found = Some(Found {
+                item: Resolved(0),
+                layer: 0,
+            });
+            let count = super::super::steps::scope(|| found = s.find_below(x, layer));
+            (found, count)
+        };
+        let (found, many) = below(10_000);
+        let (few_found, few) = below(1_000);
+        assert_eq!((found, few_found), (None, None));
+        // One step a later binding, and the head load.
+        assert_eq!(many - few, 9_000);
+        assert_eq!(many, 10_001);
+    }
+
     /// `candidates_in` of a key with 10,000 members, in a table that has
     /// 10,000 more of other keys: one search (at most 15 comparisons) and
     /// one step a candidate, in table order.
