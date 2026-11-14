@@ -77,19 +77,24 @@ pub(crate) struct ScopeRow {
     pub(crate) function: FuncId,
     pub(crate) free_start: u32,
     pub(crate) free_len: u32,
-    /// `CLOSED`, `ETA`, `THIS_USED`, `COPY`.
+    /// `CLOSED`, `ETA`, `FIRST_READ`, `COPY`.
     pub(crate) flags: u32,
 }
 impl ScopeRow {
     /// `close` has written the row.
     pub(crate) const CLOSED: u32 = 1;
-    /// The printer eta-reduces the function (`walk::eta_target`): its
-    /// binder is named before the reservation and its parameters get no
-    /// name.
+    /// The function has the shape the printer eta-reduces
+    /// (`walk::eta_target`, `eta_shape`). Unless it is a method, its binder
+    /// is named before the reservation and its parameters get no name.
+    /// Whether it is a method is read from the header when the replay
+    /// reaches it: the lowering makes a function a method after its close
+    /// (`prim.rs`, `PjsFnMethod`).
     pub(crate) const ETA: u32 = 2;
-    /// A method whose body reads its first parameter (naming.rs
-    /// `analyze_fun`, `method_this`): only then is that parameter named.
-    pub(crate) const THIS_USED: u32 = 4;
+    /// The body reads the function's first parameter. Recorded for every
+    /// function, because a function becomes a method after its close; the
+    /// first parameter of a method is named only when it is read
+    /// (naming.rs `analyze_fun`, `method_this`).
+    pub(crate) const FIRST_READ: u32 = 4;
     /// The row of a copy (`Log::copied`): it shares the free run of its
     /// source. The pass has one function for both.
     pub(crate) const COPY: u32 = 8;
@@ -220,7 +225,8 @@ impl Log {
     }
 
     /// The free list of a closed scope: sorted by `Ident`'s order (stamp,
-    /// then name; an import by its module identifier), without duplicates.
+    /// then name; an import by its module identifier), one entry per
+    /// identifier.
     /// Constant.
     pub(crate) fn free(&self, scope: ScopeId) -> &[FreeRef] {
         let row = self.rows[scope.0 as usize];
@@ -269,16 +275,15 @@ impl Log {
         }
         self.read_sites(bir, row, at, end);
         // 3. The free entries of the run, compacted in place.
-        let method_this = (header.flags & crate::bir::FuncHeader::METHOD != 0 && !header.params.is_empty())
-            .then(|| FreeRef::var(bir.function_parameter(function, 0)));
+        let first = (!header.params.is_empty()).then(|| FreeRef::var(bir.function_parameter(function, 0)));
         let mut flags = ScopeRow::CLOSED;
         let start = open.run as usize;
         let mut kept = start;
         for i in start..self.run.len() {
             self.steps += 1;
             let entry = self.run[i];
-            if Some(entry) == method_this {
-                flags |= ScopeRow::THIS_USED;
+            if Some(entry) == first {
+                flags |= ScopeRow::FIRST_READ;
             }
             if entry.as_var().is_none_or(|var| self.home(var) != ScopeId(row)) {
                 self.run[kept] = entry;
@@ -293,11 +298,23 @@ impl Log {
             ident_order(bir, idents, a, b)
         });
         self.steps += comparisons;
+        // Two entries of one identifier are one entry: two imports of one
+        // module identifier (a module the source reads and the runtime
+        // module of that name), or two variables the lowering made for one
+        // JavaScript name. The pass keeps a set of identifiers.
         let free_start = index(self.free.len());
+        let mut last = None;
         for &entry in &self.run[start..kept] {
-            if index(self.free.len()) == free_start || self.free.last() != Some(&entry) {
+            let ident = ident_of(bir, idents, entry);
+            let repeated = index(self.free.len()) != free_start
+                && match (ident, last) {
+                    (Some(ident), Some(last)) => ident == last,
+                    _ => self.free.last() == Some(&entry),
+                };
+            if !repeated {
                 self.free.push(entry);
             }
+            last = ident;
         }
         self.run.truncate(start);
         let free_len = index(self.free.len()) - free_start;
@@ -376,12 +393,17 @@ fn ident_order(bir: &Bir, idents: &[crate::ident::Ident], a: FreeRef, b: FreeRef
     }
     // A variable without an identifier is never reserved
     // (`Replay::subject`); it sorts before the others.
-    let key = |entry: FreeRef| match (entry.as_var(), entry.as_import()) {
+    ident_of(bir, idents, a).cmp(&ident_of(bir, idents, b)).then(a.cmp(&b))
+}
+
+/// The identifier a free entry prints as: a variable's through its origin,
+/// an import's module identifier. Constant.
+fn ident_of(bir: &Bir, idents: &[crate::ident::Ident], entry: FreeRef) -> Option<crate::ident::Ident> {
+    match (entry.as_var(), entry.as_import()) {
         (Some(var), _) => idents.get(bir.vars.j_origin[var.index()].index()).copied(),
         (None, Some(import)) => Some(bir.pools.j_modules[import.index()].id),
         (None, None) => unreachable!("a free entry is a variable or an import"),
-    };
-    key(a).cmp(&key(b)).then(a.cmp(&b))
+    }
 }
 
 /// A `u32` index. Constant.
@@ -413,10 +435,10 @@ pub(crate) fn open(bir: &mut Bir) -> ScopeId {
 /// 2. The sites recorded since the scope opened, outside the ranges of its
 ///    closed direct children, are read once each: a live site (its node is
 ///    not released) whose variable this scope did not see yet joins the run.
-/// 3. Each entry of the run whose home is not this row is free. For a
-///    method, the first parameter in the run sets `THIS_USED`.
-/// 4. The free entries are sorted by `Ident`'s order and written, without
-///    duplicates, as the row's run of `Log::free`; `ETA` is `eta_shape` of
+/// 3. Each entry of the run whose home is not this row is free. The first
+///    parameter in the run sets `FIRST_READ`.
+/// 4. The free entries are sorted by `Ident`'s order and written, one per
+///    identifier, as the row's run of `Log::free`; `ETA` is `eta_shape` of
 ///    the node.
 /// 5. Each free entry joins the enclosing open scope's run (naming.rs
 ///    `analyze_expr`, `ExprKind::Fun`: `used.extend(free[f])`), and this
@@ -585,7 +607,7 @@ impl Replayed {
 /// list with the binder of its declaration merged in, in `Ident`'s order;
 /// for `ETA` the binder is named before the reservation; `Tables::reserve`
 /// each, the binder named, `Tables::enter`; unless `ETA`, the parameters
-/// (not the first one of a method without `THIS_USED`) and the body's list;
+/// (not the first one of a method without `FIRST_READ`) and the body's list;
 /// `Tables::leave`.
 ///
 /// No expression is read: a function literal is reached through its row.
@@ -813,7 +835,15 @@ impl Replay<'_, '_> {
             return false;
         }
         let crate::bir::View::JFun { header, .. } = self.bir.view(binder) else { return false };
-        self.log.scope(header).is_some_and(|scope| self.log.rows[scope.0 as usize].flags & ScopeRow::ETA != 0)
+        self.log.scope(header).is_some_and(|scope| self.eta(self.log.rows[scope.0 as usize]))
+    }
+
+    /// Whether the printer eta-reduces the function of `row`: it had the
+    /// shape at its close and is no method now (a function made a method
+    /// after its close keeps `ETA`; `walk::eta_target` refuses a method).
+    /// Constant.
+    fn eta(&self, row: ScopeRow) -> bool {
+        row.flags & ScopeRow::ETA != 0 && self.bir.function(row.function).flags & crate::bir::FuncHeader::METHOD == 0
     }
 
     /// Whether `node` is a function literal with a closed row.
@@ -849,7 +879,7 @@ impl Replay<'_, '_> {
             View::SDecl { var, value: Some(value) } if value == node => Some(var),
             _ => None,
         };
-        let eta = info.flags & ScopeRow::ETA != 0;
+        let eta = self.eta(info);
         if eta && let Some(binder) = binder {
             self.name(binder);
         }
@@ -887,7 +917,7 @@ impl Replay<'_, '_> {
         let header = bir.function(info.function);
         let method = header.flags & crate::bir::FuncHeader::METHOD != 0;
         for i in 0..header.params.len() {
-            if i == 0 && method && info.flags & ScopeRow::THIS_USED == 0 {
+            if i == 0 && method && info.flags & ScopeRow::FIRST_READ == 0 {
                 continue;
             }
             self.name(bir.function_parameter(info.function, i));
@@ -1088,6 +1118,15 @@ mod tests {
             let mut b = Bir::default();
             b.begin_bulk();
             b.js_scope = Some(Scope::new(0));
+            // Four imported modules, `M0` to `M3`: a free entry is read
+            // through its identifier.
+            for name in ["M0", "M1", "M2", "M3"] {
+                b.pools.j_modules.push(crate::js_ir::ModuleId {
+                    id: Ident::create_persistent(name),
+                    kind: crate::js_ir::Kind::Ml,
+                    dynamic_import: false,
+                });
+            }
             Self { b, idents: Vec::new() }
         }
         /// A variable with order and stamp `index + 1`.
@@ -1286,7 +1325,7 @@ mod tests {
             let result = u.read(&[if used { this } else { x }]);
             let result = u.ret(result);
             let (_, scope) = u.function(header, &[result]);
-            assert_eq!(u.flags(scope) & ScopeRow::THIS_USED != 0, used);
+            assert_eq!(u.flags(scope) & ScopeRow::FIRST_READ != 0, used);
             assert_eq!(u.free(scope), []);
         }
     }

@@ -2233,3 +2233,80 @@ fn the_naming_log_agrees_on_the_order_of_a_free_list_with_a_javascript_name() {
     let root = a.let_(LetKind::Strict, f, function, end);
     names_agree(a, root, None, false);
 }
+
+#[test]
+fn the_naming_log_agrees_on_a_function_made_a_method_after_its_close() {
+    // `let m = function (o, x) { return o + x }` as a method (`@this`):
+    // the lowering closes the function and then makes it a method
+    // (`prim.rs`, `PjsFnMethod`), which prints `let o = this;` when the
+    // body reads `o`. Whether the body reads the first parameter is so
+    // recorded for every function (`ScopeRow::FIRST_READ`); a method that
+    // does not read it names no `this`. Reduced from
+    // tests/tests/src/test_bs_this.res (`name_differences: 6`,
+    // `unnamed_references: 6`).
+    use crate::lambda::lam_primitive::Primitive as P;
+    use crate::lambda::LamLoc;
+    for reads_this in [true, false] {
+        let mut a = LamArena::new();
+        let ident = |name: &str, stamp: i32| Ident::new(name, stamp, IdentFlags::NONE);
+        let (m, o, x) = (ident("m", 1), ident("o", 2), ident("x", 3));
+        let (left, right) = (a.var(if reads_this { o } else { x }), a.var(x));
+        let sum = a.prim_raw(P::Paddint, &[left, right], LamLoc::NONE);
+        let function = a.function_(2, &[o, x], sum, Default::default(), LamLoc::NONE);
+        let method = a.prim_raw(P::PjsFnMethod, &[function], LamLoc::NONE);
+        let end = a.var(m);
+        let root = a.let_(LetKind::Strict, m, method, end);
+        let stats = names_agree(a, root, None, false);
+        assert_eq!(stats.names_pass, if reads_this { 3 } else { 2 });
+    }
+}
+
+#[test]
+fn the_naming_log_agrees_on_a_method_with_the_shape_the_printer_eta_reduces() {
+    // `let m = function (o, x) { return g(o, x) }` as a method: at its
+    // close the function has the eta shape and is no method yet. The
+    // printer does not eta-reduce a method (`walk::eta_target`), so the
+    // replay reads the header's method flag when it reaches the literal
+    // and names the parameters.
+    use crate::lambda::lam_primitive::Primitive as P;
+    use crate::lambda::LamLoc;
+    let mut a = LamArena::new();
+    let ident = |name: &str, stamp: i32| Ident::new(name, stamp, IdentFlags::NONE);
+    let (m, o, x) = (ident("m", 1), ident("o", 2), ident("x", 3));
+    let callee = js_global(&mut a, "g");
+    let (first, second) = (a.var(o), a.var(x));
+    let applied = call(&mut a, callee, &[first, second]);
+    let function = a.function_(2, &[o, x], applied, Default::default(), LamLoc::NONE);
+    let method = a.prim_raw(P::PjsFnMethod, &[function], LamLoc::NONE);
+    let end = a.var(m);
+    let root = a.let_(LetKind::Strict, m, method, end);
+    let stats = names_agree(a, root, None, false);
+    assert_eq!(stats.names_pass, 3);
+}
+
+#[test]
+fn the_naming_log_agrees_on_a_function_that_reads_one_module_through_two_imports() {
+    // `let f = value => ext(Primitive_module.run, Primitive_module.init(value))`:
+    // the unit reads the module `Primitive_module` (an import of kind
+    // `Ml`) and the lowering reads the runtime module of that name (an
+    // import of its own, kind `Runtime`). Both have one identifier; the
+    // pass keeps a set of identifiers, so the free list of `f` has one
+    // entry for it. Reduced from tests/tests/src/exception_raise_test.res
+    // (`[Primitive_exceptions, Primitive_exceptions]`, `free_differences: 2`).
+    use crate::cmi::persistent_env::CmjExportArity;
+    use crate::js_ir::ModulePathResolver;
+    use crate::lambda::{FieldDbgInfo, LamLoc, lam_arity::Arity, lam_primitive::Primitive as P};
+    let resolver = ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+    resolver.set_bir_test_export("Primitive_module", "run", CmjExportArity::Single(Arity::info(vec![1], false)), None);
+    let mut a = LamArena::new();
+    let (f, value) = (Ident::new("f", 1, IdentFlags::NONE), Ident::new("value", 2, IdentFlags::NONE));
+    let module = a.global_module(Ident::create_persistent("Primitive_module"));
+    let field = a.prim_raw(P::Pfield(0, FieldDbgInfo::Module { name: crate::name::Name::new("run") }), &[module], LamLoc::NONE);
+    let read = a.var(value);
+    let made = a.prim_raw(P::PinitMod, &[read], LamLoc::NONE);
+    let applied = ext_call(&mut a, &[field, made]);
+    let function = a.function_(1, &[value], applied, Default::default(), LamLoc::NONE);
+    let end = a.var(f);
+    let root = a.let_(LetKind::Strict, f, function, end);
+    names_agree(a, root, Some(&resolver), false);
+}
