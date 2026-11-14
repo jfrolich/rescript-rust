@@ -36,9 +36,19 @@ pub struct FieldRef {
 }
 
 impl Extras {
-    /// O(rows of the segment): one bulk copy per pool. (R3e)
+    /// O(rows of the segment): one bulk copy per pool; a frozen mutability
+    /// cell holds its value and links to nothing. The indices of a
+    /// segment's rows are the indices here, so the nodes of an instance
+    /// name their descriptors without translation.
     pub fn from_segment(segment: &Segment) -> Extras {
-        todo!("R3e")
+        let pools = &segment.signature;
+        Extras {
+            descriptors: pools.descriptor_extras.to_vec(),
+            variants: pools.variants.to_vec(),
+            row_fields: pools.row_fields.to_vec(),
+            packages: pools.packages.to_vec(),
+            mutabilities: pools.mutabilities.iter().map(|&mutable| u32::from(mutable)).collect(),
+        }
     }
 }
 

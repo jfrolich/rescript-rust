@@ -136,6 +136,15 @@ pub(crate) const SCOPED: u16 = 1 << 1;
 /// [`Plan::with`]: `Op::Var`, `Op::Tuple` and `Op::Child`.
 pub(crate) const BUILD: u16 = 1 << 2;
 
+/// [`Plan::with`]: object types, closed and open, and a recursive
+/// abbreviation through an object, nullary (`ro`) and with a parameter
+/// (`po<'a>`). Unifying two of them is slice R3e's.
+pub(crate) const OBJECTS: u16 = 1 << 4;
+/// [`Plan::with`]: polymorphic variant types, closed, open and bounded, and
+/// a recursive abbreviation through a variant (`rv`, `pv<'a>`). Unifying
+/// two of them is slice R3f's.
+pub(crate) const VARIANTS: u16 = 1 << 5;
+
 /// A tier and what a case adds to it. 4 bytes, passed by value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Plan {
@@ -268,6 +277,57 @@ fn type_text(
     unary: &[String],
     out: &mut String,
 ) {
+    type_text_with(rng, 0, depth, vars, nullary, unary, out)
+}
+
+/// [`type_text`] with the object and variant types of `with`
+/// ([`OBJECTS`], [`VARIANTS`]): one position in four that is not a leaf.
+/// Field names are drawn from `x`, `y`, `z` and tags from `A`, `B`, `C`,
+/// each at most once and in that order.
+fn type_text_with(
+    rng: &mut Rng,
+    with: u16,
+    depth: u32,
+    vars: &[&str],
+    nullary: &[String],
+    unary: &[String],
+    out: &mut String,
+) {
+    let rows = with & (OBJECTS | VARIANTS);
+    if rows != 0 && depth != 0 && rng.below(4) == 0 {
+        let object = rows == OBJECTS || (rows != VARIANTS && rng.below(2) == 0);
+        let members: Vec<usize> = (0..3).filter(|_| rng.below(2) == 0).collect();
+        let members = if members.is_empty() { vec![0] } else { members };
+        if object {
+            out.push('{');
+            if rng.below(3) == 0 {
+                out.push_str("..");
+            }
+            for (index, member) in members.into_iter().enumerate() {
+                if index != 0 {
+                    out.push_str(", ");
+                }
+                let _ = write!(out, "\"{}\": ", ["x", "y", "z"][member]);
+                type_text_with(rng, with, depth - 1, vars, nullary, unary, out);
+            }
+            out.push('}');
+        } else {
+            out.push_str(["[", "[> ", "[< "][rng.below(3)]);
+            for (index, member) in members.into_iter().enumerate() {
+                if index != 0 {
+                    out.push_str(" | ");
+                }
+                let _ = write!(out, "#{}", ["A", "B", "C"][member]);
+                if rng.below(2) == 0 {
+                    out.push('(');
+                    type_text_with(rng, with, depth - 1, vars, nullary, unary, out);
+                    out.push(')');
+                }
+            }
+            out.push(']');
+        }
+        return;
+    }
     let leaf = depth == 0 || rng.below(3) == 0;
     if leaf {
         let choices = 2 + vars.len() + nullary.len();
@@ -287,7 +347,7 @@ fn type_text(
         0 if !unary.is_empty() => {
             out.push_str(&unary[rng.below(unary.len())]);
             out.push('<');
-            type_text(rng, depth - 1, vars, nullary, unary, out);
+            type_text_with(rng, with, depth - 1, vars, nullary, unary, out);
             out.push('>');
         }
         1 => {
@@ -296,7 +356,7 @@ fn type_text(
                 if i != 0 {
                     out.push_str(", ");
                 }
-                type_text(rng, depth - 1, vars, nullary, unary, out);
+                type_text_with(rng, with, depth - 1, vars, nullary, unary, out);
             }
             out.push(')');
         }
@@ -311,10 +371,10 @@ fn type_text(
                 if labelled && i == 0 {
                     out.push_str("~x: ");
                 }
-                type_text(rng, depth - 1, vars, nullary, unary, out);
+                type_text_with(rng, with, depth - 1, vars, nullary, unary, out);
             }
             out.push_str(") => ");
-            type_text(rng, depth - 1, vars, nullary, unary, out);
+            type_text_with(rng, with, depth - 1, vars, nullary, unary, out);
             out.push(')');
         }
     }
@@ -363,9 +423,23 @@ pub(crate) fn program_source(rng: &mut Rng, plan: impl Into<Plan>) -> String {
         nullary.push("s1".to_string());
         unary.push("s2".to_string());
     }
+    // Recursive abbreviations: decision 3 of 8.6 (inherited memo entries,
+    // compiler/ml/ctype.ml:788-797).
+    if plan.has(OBJECTS) {
+        source.push_str("type rec ro = {\"hd\": int, \"tl\": ro}\n");
+        source.push_str("type rec po<'a> = {\"hd\": 'a, \"tl\": po<'a>}\n");
+        nullary.push("ro".to_string());
+        unary.push("po".to_string());
+    }
+    if plan.has(VARIANTS) {
+        source.push_str("type rec rv = [#Nil | #Cons(int, rv)]\n");
+        source.push_str("type rec pv<'a> = [#Nil | #Cons('a, pv<'a>)]\n");
+        nullary.push("rv".to_string());
+        unary.push("pv".to_string());
+    }
     for index in 0..3 + rng.below(4) {
         let mut body = String::new();
-        type_text(rng, 3, &["'a", "'b"], &nullary, &unary, &mut body);
+        type_text_with(rng, plan.with, 3, &["'a", "'b"], &nullary, &unary, &mut body);
         let _ = writeln!(source, "external v{index}: {body} = \"v{index}\"");
     }
     source.push_str("let dup = x => (x, x)\n");
@@ -794,6 +868,88 @@ fn old_form(
             out.push_str(") => ");
             old_form(ctx, base, names, ret, seen, out);
         }
+        TypeDesc::Tobject { fields } => {
+            out.push_str("obj{");
+            old_form(ctx, base, names, fields, seen, out);
+            out.push('}');
+        }
+        TypeDesc::Tfield { name, mutability, typ, rest } => {
+            let mutable = ctx.mutability_repr(mutability)
+                == crate::types::asttypes::MutableFlag::Mutable;
+            let _ = write!(out, "{}{}: ", name.as_str(), if mutable { "!" } else { "" });
+            old_form(ctx, base, names, typ, seen, out);
+            out.push_str("; ");
+            old_form(ctx, base, names, rest, seen, out);
+        }
+        TypeDesc::Tnil => out.push_str("nil"),
+        TypeDesc::Tvariant(row) => {
+            use crate::types::type_expr::RowField;
+            // `row_repr` (compiler/ml/btype.ml:126-135): the fields of a chain
+            // of rows, outermost first, with the innermost row's flags.
+            let row = crate::types::btype::row_repr(ctx, &ctx.row_desc(row));
+            let _ = write!(
+                out,
+                "[{}{}",
+                if row.row_closed { "closed " } else { "" },
+                if row.row_fixed { "fixed " } else { "" }
+            );
+            for (label, field) in row.row_fields.iter() {
+                let _ = write!(out, "#{label}");
+                match crate::types::btype::row_field_repr(ctx, field) {
+                    RowField::Rpresent(None) => {}
+                    RowField::Rpresent(Some(ty)) => {
+                        out.push('(');
+                        old_form(ctx, base, names, ty, seen, out);
+                        out.push(')');
+                    }
+                    RowField::Reither { constant, types, matched, .. } => {
+                        let _ = write!(
+                            out,
+                            "?{}{}(",
+                            if constant { "c" } else { "" },
+                            if matched { "m" } else { "" }
+                        );
+                        for ty in types {
+                            old_form(ctx, base, names, ty, seen, out);
+                            out.push(' ');
+                        }
+                        out.push(')');
+                    }
+                    RowField::Rabsent => out.push('-'),
+                }
+                out.push(' ');
+            }
+            out.push_str("| ");
+            old_form(ctx, base, names, crate::types::btype::row_more(ctx, &row), seen, out);
+            if let Some((path, arguments)) = &row.row_name {
+                let _ = write!(out, " as {}<", path.last());
+                for &argument in arguments {
+                    old_form(ctx, base, names, argument, seen, out);
+                    out.push(' ');
+                }
+                out.push('>');
+            }
+            out.push(']');
+        }
+        TypeDesc::Tunivar(name) => {
+            out.push('!');
+            if let Some(name) = name {
+                out.push_str(name.as_str());
+            }
+        }
+        // The body first, then the bound variables: the slots of the
+        // published node (tc/segment.rs, `ExtraDescriptor::Poly`).
+        TypeDesc::Tpoly { body, vars } => {
+            let vars: Vec<TypeExprRef> = ctx.type_list(vars).iter().collect();
+            out.push_str("poly(");
+            old_form(ctx, base, names, body, seen, out);
+            out.push(';');
+            for var in vars {
+                out.push(' ');
+                old_form(ctx, base, names, var, seen, out);
+            }
+            out.push(')');
+        }
         _ => out.push_str("?unsupported"),
     }
 }
@@ -840,9 +996,12 @@ impl New {
             .collect();
         assert_eq!(roots.len(), program.values.len(), "{}", program.source);
         let mut checker = Checker::new(segment.graph(), TypeTable::default());
-        // No generated program has an object, a variant row, a universal
-        // variable or a package, so the descriptor pools stay empty; the
-        // tiers of R3e to R3j fill them with `Extras::from_segment`.
+        // Without a plan bit no generated program has an object, a variant
+        // row, a universal variable or a package, and the descriptor pools
+        // stay empty.
+        if plan.with & (OBJECTS | VARIANTS) != 0 {
+            checker.extras = super::rows::Extras::from_segment(&segment);
+        }
         if tier.memo_aware() {
             checker.types = TypeTable::from_segment(&segment);
         }
@@ -1186,6 +1345,135 @@ impl New {
                 }
                 out.push_str(") => ");
                 self.node_form(Ty(node.a), seen, count, out);
+            }
+            TUPLE => self.extended_form(node, seen, count, out),
+            _ => out.push_str("?unsupported"),
+        }
+    }
+
+    /// O(1): the last component of a path row.
+    fn path_name(&self, path: u32) -> &str {
+        match self.segment.signature.paths[path as usize] {
+            PathRow::Ident(ident) => {
+                self.string(self.segment.signature.identifiers[ident as usize].name)
+            }
+            PathRow::Dot { name, .. } => self.string(name),
+            PathRow::Apply { .. } => "?apply",
+        }
+    }
+
+    /// O(nodes reachable): print one extended node (`TUPLE | EXTENDED`) as
+    /// `old_form` prints the old descriptor: an object, a field, the end of
+    /// a field list, or a variant. A chain of rows (a row whose `more` is a
+    /// row) prints as one, the fields outermost first with the innermost
+    /// row's flags (`row_repr`, compiler/ml/btype.ml:126-135).
+    fn extended_form(&mut self, node: Node, seen: &mut [u32], count: &mut u32, out: &mut String) {
+        use super::segment::{ExtraDescriptor, RowFieldKind};
+        let slot = |new: &New, node: Node, index: u32| new.checker.g.lists[(node.b + index) as usize];
+        match self.checker.extras.descriptors[node.a as usize] {
+            ExtraDescriptor::Object => {
+                out.push_str("obj{");
+                self.node_form(slot(self, node, 0), seen, count, out);
+                out.push('}');
+            }
+            ExtraDescriptor::Field { name, mutability } => {
+                // A cell with its high bit set is a link to another cell.
+                let mut cell = self.checker.extras.mutabilities[mutability as usize];
+                while cell & 1 << 31 != 0 {
+                    cell = self.checker.extras.mutabilities[(cell & !(1 << 31)) as usize];
+                }
+                let _ = write!(out, "{}{}: ", self.string(name), if cell != 0 { "!" } else { "" });
+                self.node_form(slot(self, node, 0), seen, count, out);
+                out.push_str("; ");
+                self.node_form(slot(self, node, 1), seen, count, out);
+            }
+            ExtraDescriptor::Nil => out.push_str("nil"),
+            ExtraDescriptor::Variant(first) => {
+                // Collect the chain first: the flags are the innermost row's.
+                let mut chain = vec![(node, first)];
+                let more = loop {
+                    let (owner, row) = *chain.last().expect("chain");
+                    let more = slot(self, owner, self.checker.extras.variants[row as usize].more);
+                    let more = self.checker.g.repr(more);
+                    let inner = self.checker.g.nodes[more.0 as usize];
+                    match inner.head & super::segment::EXTENDED != 0 {
+                        true => match self.checker.extras.descriptors[inner.a as usize] {
+                            ExtraDescriptor::Variant(row) => chain.push((inner, row)),
+                            _ => break more,
+                        },
+                        false => break more,
+                    }
+                };
+                let last = self.checker.extras.variants[chain.last().expect("chain").1 as usize];
+                let _ = write!(
+                    out,
+                    "[{}{}",
+                    if last.closed { "closed " } else { "" },
+                    if last.fixed { "fixed " } else { "" }
+                );
+                for &(owner, row) in &chain {
+                    let fields = self.checker.extras.variants[row as usize].fields;
+                    for index in fields.start..fields.start + fields.len {
+                        let mut field = self.checker.extras.row_fields[index as usize];
+                        while field.link != NONE {
+                            field = self.checker.extras.row_fields[field.link as usize];
+                        }
+                        let _ = write!(out, "#{}", self.string(field.name));
+                        let types = field.types;
+                        match field.kind {
+                            RowFieldKind::Present if types.len == 0 => {}
+                            RowFieldKind::Present => {
+                                out.push('(');
+                                self.node_form(slot(self, owner, types.start), seen, count, out);
+                                out.push(')');
+                            }
+                            RowFieldKind::Either { constant, matched } => {
+                                let _ = write!(
+                                    out,
+                                    "?{}{}(",
+                                    if constant { "c" } else { "" },
+                                    if matched { "m" } else { "" }
+                                );
+                                for index in types.start..types.start + types.len {
+                                    self.node_form(slot(self, owner, index), seen, count, out);
+                                    out.push(' ');
+                                }
+                                out.push(')');
+                            }
+                            RowFieldKind::Absent => out.push('-'),
+                        }
+                        out.push(' ');
+                    }
+                }
+                out.push_str("| ");
+                self.node_form(more, seen, count, out);
+                if last.name != NONE {
+                    let (owner, _) = *chain.last().expect("chain");
+                    let _ = write!(out, " as {}<", self.path_name(last.name));
+                    let arguments = last.name_arguments;
+                    for index in arguments.start..arguments.start + arguments.len {
+                        self.node_form(slot(self, owner, index), seen, count, out);
+                        out.push(' ');
+                    }
+                    out.push('>');
+                }
+                out.push(']');
+            }
+            ExtraDescriptor::Univar(name) => {
+                out.push('!');
+                if name != NONE {
+                    out.push_str(self.string(name));
+                }
+            }
+            ExtraDescriptor::Poly => {
+                out.push_str("poly(");
+                self.node_form(slot(self, node, 0), seen, count, out);
+                out.push(';');
+                for index in 1..node.arity() {
+                    out.push(' ');
+                    self.node_form(slot(self, node, index), seen, count, out);
+                }
+                out.push(')');
             }
             _ => out.push_str("?unsupported"),
         }
@@ -1856,5 +2144,242 @@ mod tests {
         let plan = Plan::new(Tier::Full, EXPLAIN | SCOPED | BUILD);
         let (program, ops) = case(plan, 1_000_039);
         compare(1_000_039, &program, plan, &ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Recursive abbreviations through an object and through a variant,
+    /// nullary and with a parameter (decision 3 of 8.6).
+    const RECURSIVE: &str = "type rec ro = {\"hd\": int, \"tl\": ro}\n\
+        type rec po<'a> = {\"hd\": 'a, \"tl\": po<'a>}\n\
+        type rec rv = [#Nil | #Cons(int, rv)]\n\
+        type rec pv<'a> = [#Nil | #Cons('a, pv<'a>)]\n\
+        external v0: ro = \"v0\"\n\
+        external v1: po<string> = \"v1\"\n\
+        external v2: rv = \"v2\"\n\
+        external v3: pv<string> = \"v3\"\n";
+
+    /// What the old checker shows for a recursive abbreviation today
+    /// (observed). The copy an expansion makes of the abbreviation's own
+    /// constructor is a link to the node being expanded: for a nullary one
+    /// through the memo all nullary constructors share, and for one with a
+    /// parameter through the memo entry the expanding node wrote before its
+    /// body was copied (`find_repr p !abbrevs`, `Some ty when repr ty != t
+    /// -> Tlink ty`, compiler/ml/ctype.ml:780-782, with `abbreviations :=
+    /// abbrev` set by `subst`, ctype.ml:1126). The new side agrees on the
+    /// nullary ones today.
+    #[test]
+    fn old_checker_links_a_recursive_occurrence_to_the_node_being_expanded() {
+        let program = compile(RECURSIVE.to_string());
+        let plan = Plan::new(Tier::Expand, OBJECTS | VARIANTS);
+        let expected = [
+            "0 = &0[0]ro\n\
+             1 = &1[0]obj{&2[0]hd: &3[0]poly(&4[0]int;); &5[0]tl: &6[0]poly(@0;); &7[0]nil}\n\
+             2 = @0\n",
+            "0 = &0[0]po<&1[0]string>\n\
+             1 = &2[0]obj{&3[0]hd: &4[0]poly(@1;); &5[0]tl: &6[0]poly(@0;); &7[0]nil}\n\
+             2 = &8[0]po<&9[0]string>\n",
+            "0 = &0[0]rv\n\
+             1 = &1[0][closed #Nil #Cons(&2[0](&3[0]int, @0)) | &4[0]nil]\n\
+             2 = @0\n",
+            "0 = &0[0]pv<&1[0]string>\n\
+             1 = &2[0][closed #Nil #Cons(&3[0](@1, @0)) | &4[0]nil]\n\
+             2 = &5[0]pv<&6[0]string>\n",
+        ];
+        for (value, expected) in expected.into_iter().enumerate() {
+            let ops = [Op::Instance(value as u16), Op::Expand(0), Op::Instance(value as u16)];
+            assert_eq!(run_old(&program, plan, &ops).form, expected);
+            if value % 2 == 0 {
+                compare(0, &program, plan, &ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
+            }
+        }
+    }
+
+    /// Instance, copy, generalize and lower on programs with objects and
+    /// variants: 10,000 cases, on what exists on both sides today.
+    #[test]
+    fn kernel_tier_agrees_on_objects_and_variants() {
+        let coverage = run_cases(Plan::new(Tier::Kernel, OBJECTS | VARIANTS), 1, 100, 100);
+        assert_eq!(coverage.cases, 10_000);
+        assert!(coverage.sharing * 4 > coverage.cases * 3, "{coverage:?}");
+    }
+
+    /// The old side of the object and variant plans runs today: generated
+    /// unifications of such programs succeed and fail (observed: 883 and
+    /// 317 of 1,200 with objects, 917 and 283 with variants).
+    #[test]
+    fn old_side_of_the_object_and_variant_plans_is_not_vacuous() {
+        for with in [OBJECTS, VARIANTS] {
+            let plan = Plan::new(Tier::Full, with);
+            let (mut ok, mut failed, mut rows) = (0, 0, 0);
+            for seed in 1..=12u64 {
+                for sequence in 0..100u64 {
+                    let (program, ops) = case(plan, seed * 1_000_003 + sequence);
+                    let outcome = run_old(&program, plan, &ops);
+                    match outcome.failed {
+                        Some(_) => failed += 1,
+                        None => ok += 1,
+                    }
+                    rows += usize::from(outcome.form.contains("obj{") || outcome.form.contains("#"));
+                }
+            }
+            assert!(ok >= 600 && failed >= 200 && rows >= 600, "{with}: {ok} {failed} {rows}");
+        }
+    }
+
+    /// The correction of R3b (slice R3m, section 8.6, decision 16): a
+    /// constructor with arguments that an expansion copies is a link to the
+    /// expanding node, or to a node whose expansion made that one, when it
+    /// names the same type. Reaches: R3m. Today 89 of 10,000 cases differ
+    /// with objects, 159 with variants.
+    #[test]
+    #[ignore = "R3m build"]
+    fn expand_tier_agrees_on_recursive_abbreviations() {
+        let program = compile(RECURSIVE.to_string());
+        let plan = Plan::new(Tier::Expand, OBJECTS | VARIANTS);
+        for value in [1, 3] {
+            let ops = [Op::Instance(value), Op::Expand(0), Op::Instance(value)];
+            compare(0, &program, plan, &ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
+        }
+        let coverage = run_cases(plan, 1, 100, 100);
+        assert_eq!(coverage.cases, 10_000);
+    }
+
+    /// 10,000 cases of everything on programs with objects, in both modes:
+    /// the acceptance test of R3e. Reaches: R3m, R3e.
+    #[test]
+    #[ignore = "R3e build"]
+    fn object_plan_agrees_on_generated_cases() {
+        let coverage = run_cases(Plan::new(Tier::Full, OBJECTS), 1, 100, 100);
+        assert_eq!(coverage.cases, 10_000);
+        assert!(coverage.failures * 10 > coverage.cases, "{coverage:?}");
+        run_cases(Plan::new(Tier::Full, OBJECTS | BUILD), 1, 100, 100);
+    }
+
+    /// 10,000 cases of everything on programs with variants, and with both:
+    /// the acceptance test of R3f. Reaches: R3m, R3e, R3f.
+    #[test]
+    #[ignore = "R3f build"]
+    fn variant_plan_agrees_on_generated_cases() {
+        let coverage = run_cases(Plan::new(Tier::Full, VARIANTS), 1, 100, 100);
+        assert_eq!(coverage.cases, 10_000);
+        assert!(coverage.failures * 10 > coverage.cases, "{coverage:?}");
+        run_cases(Plan::new(Tier::Full, OBJECTS | VARIANTS | BUILD), 1, 100, 100);
+    }
+
+    /// The mechanical check of the first skeleton turn's second lesson:
+    /// every ignored test of R3 says which slices it reaches (`Reaches:` in
+    /// its doc comment), reaches its own slice, and reaches no slice that is
+    /// not built before it (section 8.1). What a test reaches is read from
+    /// its text: a plan bit with the full tier reaches the slice that
+    /// unifies those types, a recursive abbreviation reaches R3m from the
+    /// tier that expands, a failed lowering in the explaining mode reaches
+    /// R3k, and a call of a method whose body is `todo!("R3x")` reaches
+    /// R3x.
+    #[test]
+    fn ignored_tests_name_the_slices_they_reach() {
+        let before: [(&str, &[&str]); 8] = [
+            ("R3k", &[]),
+            ("R3m", &[]),
+            ("R3e", &["R3m"]),
+            ("R3f", &["R3m", "R3e"]),
+            ("R3g", &["R3m", "R3e"]),
+            ("R3h", &["R3m", "R3e", "R3f", "R3g"]),
+            ("R3i", &["R3m", "R3e", "R3f", "R3g"]),
+            ("R3j", &["R3m", "R3e", "R3f", "R3g"]),
+        ];
+        // Method name -> slice, from the bodies that are still `todo!`.
+        let mut methods: Vec<(String, String)> = Vec::new();
+        for source in [
+            include_str!("rows.rs"),
+            include_str!("relate.rs"),
+            include_str!("unify.rs"),
+        ] {
+            let mut name = String::new();
+            for line in source.lines() {
+                let line = line.trim_start();
+                if let Some(rest) = line.strip_prefix("pub fn ").or(line.strip_prefix("fn ")) {
+                    name = rest.split(['(', '<']).next().unwrap_or("").to_string();
+                }
+                if let Some(at) = line.find("todo!(\"R3") {
+                    methods.push((name.clone(), line[at + 7..at + 10].to_string()));
+                }
+            }
+        }
+        assert!(methods.iter().any(|(name, slice)| name == "unify_fields" && slice == "R3e"));
+        let mut checked = 0;
+        for source in [include_str!("differential.rs"), include_str!("r3_tests.rs")] {
+            let lines: Vec<&str> = source.lines().collect();
+            for (at, line) in lines.iter().enumerate() {
+                let Some(slice) = line
+                    .trim_start()
+                    .strip_prefix("#[ignore = \"")
+                    .and_then(|rest| rest.strip_suffix(" build\"]"))
+                else {
+                    continue;
+                };
+                let Some((_, allowed)) = before.iter().find(|(name, _)| *name == slice) else {
+                    panic!("line {}: unknown slice {slice}", at + 1);
+                };
+                // The doc comment above, and the body down to the closing
+                // brace in column one.
+                let mut doc: Vec<&str> = lines[..at]
+                    .iter()
+                    .rev()
+                    .take_while(|line| !line.trim_start().starts_with('}') && !line.is_empty())
+                    .copied()
+                    .collect();
+                doc.reverse();
+                let doc = doc.join(" ");
+                let body: String = lines[at..]
+                    .iter()
+                    .take_while(|line| **line != "}" && **line != "    }")
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let name = body.lines().find(|line| line.contains("fn ")).unwrap_or("");
+                let listed = doc
+                    .split("Reaches:")
+                    .nth(1)
+                    .unwrap_or_else(|| panic!("no `Reaches:` above {name}"));
+                // The list ends at the first full stop.
+                let listed: Vec<&str> = listed
+                    .split('.')
+                    .next()
+                    .unwrap_or("")
+                    .split(|c: char| !c.is_alphanumeric())
+                    .filter(|word| word.starts_with("R3") && word.len() == 3)
+                    .collect();
+                assert!(listed.contains(&slice), "{name} does not reach its own slice");
+                for reached in &listed {
+                    assert!(
+                        *reached == slice || allowed.contains(reached),
+                        "{name} ({slice}) reaches {reached}, which is not built before it"
+                    );
+                }
+                let mut reaches: Vec<&str> = Vec::new();
+                let full = body.contains("Tier::Full");
+                let rows = body.contains("OBJECTS") || body.contains("VARIANTS");
+                for (needle, reached) in [("OBJECTS", "R3e"), ("VARIANTS", "R3f")] {
+                    if full && body.contains(needle) {
+                        reaches.push(reached);
+                    }
+                }
+                if rows && (full || body.contains("Tier::Expand")) {
+                    reaches.push("R3m");
+                }
+                if body.contains("EXPLAIN") && body.contains("SCOPED") {
+                    reaches.push("R3k");
+                }
+                for (method, reached) in &methods {
+                    if body.contains(&format!(".{method}(")) {
+                        reaches.push(reached);
+                    }
+                }
+                for reached in reaches {
+                    assert!(listed.contains(&reached), "{name} reaches {reached} and does not say so");
+                }
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 4, "ignored R3 tests checked");
     }
 }
