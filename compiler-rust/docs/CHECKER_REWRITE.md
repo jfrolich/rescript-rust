@@ -2619,6 +2619,12 @@ skeleton; all three were the skeleton's, not the builder's.
   pools. Names are compared from `Expand` up until R3b's first commit, which
   turns them on for every tier; the slice of R3a and R3b that merges second
   merges trunk first, so its structural tier runs with names.
+- The old side of the harness starts where a compilation starts: stamps
+  above the predefined types' and the first level at the current stamp
+  (`Ctype.init_def (Ident.current_time ())`). It started at level 0, below
+  the binding time of `int`, so the scope test of `update_level` refused a
+  binding of `int` to a variable of the starting level, which no
+  compilation refuses (found by R3a's structural tier, seed 1000064).
 - `link_directions`: the test's checker is one definition deep, so the two
   nullary constructors are at levels 2 and 3 and the survivor ends at 2.
   The review's own correction above had the levels wrong.
@@ -2637,6 +2643,28 @@ skeleton; all three were the skeleton's, not the builder's.
    right node, which is the trace pair only while the left head is its own
    expansion. With expansion the frame records the original pair, and the
    swapped side of ctype.ml:2299.
+
+8. **The combined binding walk lowers what `update_level` lowers, no
+   more** (review of R3a). `update_level` does not look below a node that
+   is not above the target (ctype.ml:586); the occurrence test looks
+   everywhere. The first build lowered every node above the target that
+   the occurrence walk met, also below a node `update_level` stops at, so
+   `Mode::Success` and `Mode::Explain` left different levels on a type
+   whose inner node is above a node that holds it (a node made after
+   `end_def` around nodes of the definition). The walk carries, per stack
+   entry, whether it came from a lowered node.
+   `binding_lowers_only_what_update_level_reaches` pins it in both modes.
+   The generator of the harness does not reach such a type today; the
+   second skeleton turn adds an operation that does.
+9. **The binding walk's stack entries carry their kind in bits 30 and 31
+   of the handle.** Section 3.2 reserves bit 31 of `Ty` for a frozen node.
+   No local graph holds a frozen handle yet (a segment's nodes are copied
+   in), so the two do not meet today, and a debug assertion in
+   `push_flagged` says so. The slice that first puts frozen handles into
+   child lists keeps them off this stack (a frozen node holds no local
+   variable and has no level to lower: it is skipped at the push, one
+   compare a child) or widens the entry, with a test of a binding to a
+   type that holds a frozen child.
 
 ## 9. R4 as designed
 

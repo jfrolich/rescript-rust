@@ -135,6 +135,16 @@ fn class(cont: Cont) -> usize {
     }
 }
 impl Schedule {
+    /// Initial traversal capacity from the imported occurrence count. Event
+    /// tables stay lazy: units without labels do not need those rows.
+    /// Cost: Reserves O(N) slots in each of three scheduling spines for N imported
+    /// occurrences; initializes only their headers, with allocator-dependent capacity
+    /// provision and no source walk.
+    pub(super) fn with_source_capacity(nodes: usize) -> Self {
+        Self { frames: Vec::with_capacity(nodes), values: Vec::with_capacity(nodes),
+            edges: Vec::with_capacity(nodes), ..Self::default() }
+    }
+
     /// O(1): a missing event subtree has no label effects.
     fn cost(&self, edge: Edge, class: usize) -> Cost {
         if edge.step == NONE {
@@ -445,6 +455,21 @@ impl State {
 }
 
 #[cfg(test)]
+impl Schedule {
+    /// Reserve another warmed pass's append-only event and loop-number storage.
+    pub(super) fn reserve_repeat(&mut self) {
+        self.edges.reserve(self.edges.len());
+        self.steps.reserve(self.steps.len());
+        self.costs.reserve(self.costs.len());
+        self.numbers.reserve(self.numbers.len());
+    }
+    pub(super) fn capacities(&self) -> [usize; 7] {
+        [self.frames.capacity(), self.values.capacity(), self.edges.capacity(), self.steps.capacity(),
+         self.costs.capacity(), self.numbers.capacity(), self.work.capacity()]
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::ident::IdentFlags;
@@ -604,6 +629,61 @@ mod tests {
             };
             super::super::oracle_tests::compare(a, root);
         }
+    }
+
+    #[test]
+    fn ten_thousand_nested_labelled_loops_lower_without_allocations() {
+        let mut a = LamArena::new();
+        let mut root = labelled(&mut a);
+        let condition = a.const_(Constant::JsTrue);
+        for _ in 1..10_000 { root = a.while_(condition, root); }
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let run = |s: &mut State| {
+            let output = s.probe(Cx::effect(), root).unwrap();
+            let output = s.realize(Cx::effect(), output);
+            for node in s.statements.statements(output.stmts) { s.arena.release(node); }
+            if let Some(value) = output.value { s.arena.release(value); }
+            s.statements.kill(output.stmts);
+        };
+        let lists = state.arena.lists.storage_shape().0;
+        run(&mut state);
+        state.arena.lists.reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
+        state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
+        state.loops.reserve(state.loops.len());
+        state.labels.reserve_repeat();
+        state.group_indices.reserve(state.group_indices.len());
+        state.group_nodes.reserve(state.group_nodes.len());
+        state.switch_output_nodes.reserve(state.switch_output_nodes.len());
+        state.switch_output_clauses.reserve(state.switch_output_clauses.len());
+        state.arena.pools.switch_keys.reserve(state.arena.pools.switch_keys.len());
+        state.arena.pools.switch_clauses.reserve(state.arena.pools.switch_clauses.len());
+        state.arena.pools.switches.reserve(1);
+        state.arena.pools.strings.reserve(2);
+        state.arena.pools.text.reserve(24);
+        state.arena.pools.text_index.reserve(1, |&(hash, _)| hash);
+        let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(),
+            s.arena.free_nodes.capacity(), s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1,
+            s.loops.capacity(), s.arena.pools.strings.capacity(), s.arena.pools.text.capacity(),
+            s.arena.pools.text_index.capacity(), s.group_indices.capacity(), s.group_nodes.capacity(),
+            s.switch_output_nodes.capacity(), s.switch_output_clauses.capacity(), s.arena.pools.switch_keys.capacity(),
+            s.arena.pools.switch_clauses.capacity(), s.arena.pools.switches.capacity()];
+        let before = capacities(&state);
+        let labels = state.labels.capacities();
+        let visits = state.source_steps;
+        let scheduled = state.labels.visits;
+        let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
+        let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
+        println!("whole labelled loops: {allocations:?}");
+        assert_eq!(allocations.count_total, 0);
+        assert_eq!(capacities(&state), before);
+        assert_eq!(state.labels.capacities(), labels);
+        assert_eq!(state.source_steps - visits, 20_005);
+        assert_eq!(state.labels.visits - scheduled, 30_007);
+        assert_eq!(state.next_loop_label, 2);
     }
 
     #[test]

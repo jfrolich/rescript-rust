@@ -108,23 +108,38 @@ pub(crate) struct Scope {
     pub(crate) updates: usize,
 }
 impl Scope {
+    #[cfg(test)]
+    pub(super) fn reserve_repeat(&mut self) {
+        self.sites.reserve(self.sites.len());
+        self.site_heads.reserve(self.site_heads.len());
+        self.uses.reserve(self.uses.len());
+        self.facts.reserve(self.facts.len());
+        self.decisions.reserve(self.decisions.len());
+    }
+    #[cfg(test)]
+    pub(super) fn capacities(&self) -> [usize; 6] {
+        [self.sites.capacity(), self.site_heads.capacity(), self.uses.capacity(),
+         self.facts.capacity(), self.decisions.capacity(), self.spine.capacity()]
+    }
+
     /// Allocate zeroed rows once at lowering entry. Cost: O(variables).
+    #[cfg(test)]
     pub(crate) fn new(variables: usize) -> Self {
-        Self {
-            uses: vec![Uses::default(); variables],
-            sites: Vec::new(),
-            site_heads: vec![0; variables],
-            facts: vec![VarFacts::default(); variables],
-            decisions: Vec::new(),
-            spine: Vec::new(),
-            close_steps: 0,
-            import_uses: Vec::new(),
-            globals: Default::default(),
-            #[cfg(test)]
-            names: Default::default(),
-            #[cfg(test)]
-            updates: 0,
-        }
+        Self::with_capacity(variables, variables)
+    }
+
+    /// Initialize source rows with reserved room for known generated bindings.
+    /// Cost: O(V): initializes V variable rows in each of three columns, with reserved
+    /// capacity C >= V; no source nodes or use sites are walked.
+    pub(super) fn with_capacity(variables: usize, capacity: usize) -> Self {
+        assert!(variables <= capacity);
+        let mut uses = Vec::with_capacity(capacity);
+        let mut site_heads = Vec::with_capacity(capacity);
+        let mut facts = Vec::with_capacity(capacity);
+        uses.resize(variables, Uses::default());
+        site_heads.resize(variables, 0);
+        facts.resize(variables, VarFacts::default());
+        Self { uses, site_heads, facts, ..Self::default() }
     }
 
     /// Account for one constructed or released reference to an imported

@@ -7,7 +7,37 @@ use crate::bir::{Bir, Constant, JsPayload, NodeId, View};
 /// literal bytes), bounded by the smaller input tree; stack is O(tree width +
 /// depth). `steps` counts inspected pairs, including the mismatching pair.
 pub fn equal(b: &Bir, left: NodeId, right: NodeId, steps: &mut usize) -> bool {
-    let mut work = vec![(left, right)];
+    equal_with_work(b, left, right, steps, &mut Vec::new())
+}
+
+/// O(1) for variable identities, or O(module-name bytes) for qualified identities.
+/// Returns None when the left operand is not an identity leaf.
+pub(super) fn identity_equal(b: &Bir, left: NodeId, right: NodeId) -> Option<bool> {
+    match b.view(left) {
+        View::Var { var: x } => Some(matches!(b.view(right), View::Var { var: y }
+            if b.vars.j_origin[x.index()] == b.vars.j_origin[y.index()])),
+        View::JQualified { module: x, member: xm } => {
+            let View::JQualified { module: y, member: ym } = b.view(right) else { return Some(false) };
+            let (x,y)=(&b.pools.j_modules[x.index()],&b.pools.j_modules[y.index()]);
+            let kind=match (&x.kind,&y.kind) {
+                (crate::js_ir::Kind::Ml,crate::js_ir::Kind::Ml) | (crate::js_ir::Kind::Runtime,crate::js_ir::Kind::Runtime)=>true,
+                (crate::js_ir::Kind::External { name:x,.. },crate::js_ir::Kind::External { name:y,.. })=>x==y,
+                _=>false,
+            };
+            Some(x.id.same(&y.id) && kind && xm==ym)
+        }
+        _=>None,
+    }
+}
+
+/// O(paired nodes + compared literal bytes); borrows explicit caller-owned scratch.
+/// Every normal and mismatching exit leaves the worklist empty.
+pub(crate) fn equal_with_work(b: &Bir, left: NodeId, right: NodeId, steps: &mut usize,
+    work: &mut Vec<(NodeId,NodeId)>) -> bool {
+    work.clear();
+    if let Some(result)=identity_equal(b,left,right) { *steps+=1; return result; }
+    work.clear();
+    work.push((left, right));
     while let Some((l, r)) = work.pop() {
         *steps += 1;
         let (la, ra) = (b.node(l).aux(), b.node(r).aux());
@@ -16,30 +46,8 @@ pub fn equal(b: &Bir, left: NodeId, right: NodeId, steps: &mut usize) -> bool {
             (View::JUndefined, View::JUndefined) | (View::JBool, View::JBool) => {
                 (la != 0) == (ra != 0)
             }
-            (View::Var { var: x }, View::Var { var: y }) => {
-                b.vars.j_origin[x.index()] == b.vars.j_origin[y.index()]
-            },
-            (
-                View::JQualified {
-                    module: x,
-                    member: xm,
-                },
-                View::JQualified {
-                    module: y,
-                    member: ym,
-                },
-            ) => {
-                let (x, y) = (&b.pools.j_modules[x.index()], &b.pools.j_modules[y.index()]);
-                let kind = match (&x.kind, &y.kind) {
-                    (crate::js_ir::Kind::Ml, crate::js_ir::Kind::Ml)
-                    | (crate::js_ir::Kind::Runtime, crate::js_ir::Kind::Runtime) => true,
-                    (
-                        crate::js_ir::Kind::External { name: x, .. },
-                        crate::js_ir::Kind::External { name: y, .. },
-                    ) => x == y,
-                    _ => false,
-                };
-                x.id.same(&y.id) && kind && xm == ym
+            (View::Var { .. } | View::JQualified { .. }, _) => {
+                identity_equal(b, l, r).expect("identity leaf")
             }
             (View::JNumber { value: x }, View::JNumber { value: y }) => {
                 match (b.constant(x), b.constant(y)) {
@@ -57,6 +65,7 @@ pub fn equal(b: &Bir, left: NodeId, right: NodeId, steps: &mut usize) -> bool {
             {
                 match (b.javascript(x), b.javascript(y)) {
                     (JsPayload::Template(x), JsPayload::Template(y)) => {
+                        let (x, y) = (b.template_parts(*x), b.template_parts(*y));
                         x.len() == y.len()
                             && x.iter()
                                 .zip(y)
@@ -146,10 +155,7 @@ pub fn equal(b: &Bir, left: NodeId, right: NodeId, steps: &mut usize) -> bool {
                 work.extend(xs.iter().copied().zip(ys.iter().copied()).rev());
                 la == ra
                     && xs.len() == ys.len()
-                    && match (b.javascript(x), b.javascript(y)) {
-                        (JsPayload::Block(x), JsPayload::Block(y)) => x == y,
-                        _ => false,
-                    }
+                    && b.block_tag(x) == b.block_tag(y)
             }
             (View::SExp { value: x }, View::SExp { value: y })
             | (View::SReturn { value: x }, View::SReturn { value: y }) => {
@@ -164,6 +170,7 @@ pub fn equal(b: &Bir, left: NodeId, right: NodeId, steps: &mut usize) -> bool {
             _ => false,
         };
         if !same {
+            work.clear();
             return false;
         }
     }

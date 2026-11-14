@@ -53,11 +53,36 @@ pub(super) struct Lists {
     pub(super) pushes: usize,
 }
 impl Lists {
+    /// Allocated operand slots known after source import, including headers.
+    pub(super) fn slot_count(&self) -> usize { self.items.len() }
+    /// Reserve once from a caller's already known operand-domain size.
+    pub(super) fn reserve_slots(&mut self, slots: usize) { self.items.reserve_exact(slots); }
+
+    #[cfg(test)]
+    pub(super) fn reserve_test_growth(&mut self, extra: usize) {
+        self.items.reserve(extra);
+    }
+    #[cfg(test)]
+    pub(super) fn storage_shape(&self) -> (usize, usize) {
+        (self.items.len(), self.items.capacity())
+    }
     pub(super) fn push(&mut self, items: &[NodeId]) -> ListId {
         #[cfg(test)] { self.pushes += 1; }
         let id = ListId(index(self.items.len()));
         self.items.push(NodeId(index(items.len())));
         self.items.extend_from_slice(items);
+        id
+    }
+    /// Append a remapped list directly; the source run stays valid during growth.
+    pub(super) fn mapped(&mut self, source: ListId, map: impl Fn(NodeId) -> NodeId) -> ListId {
+        let len = self.get(source).len();
+        #[cfg(test)] { self.pushes += 1; }
+        let id = ListId(index(self.items.len()));
+        self.items.push(NodeId(index(len)));
+        for i in 0..len {
+            let value = map(self.items[source.index() + 1 + i]);
+            self.items.push(value);
+        }
         id
     }
     /// Consume a statement-stack run directly, without an intermediate vector.
@@ -77,6 +102,30 @@ impl Lists {
         self.items.push(NodeId(index(len + 1)));
         self.items.push(head);
         self.items.extend_from_within(tail.index() + 1..tail.index() + 1 + len);
+        id
+    }
+    /// Copy an immutable source run and optional fallback directly into the pool.
+    pub(super) fn slice_append(&mut self, source: ListId, start: usize, len: usize, tail: Option<NodeId>) -> ListId {
+        assert!(start + len <= self.get(source).len());
+        #[cfg(test)] { self.pushes += 1; }
+        let id = ListId(index(self.items.len()));
+        self.items.push(NodeId(index(len + usize::from(tail.is_some()))));
+        let begin = source.index() + 1 + start;
+        self.items.extend_from_within(begin..begin + len);
+        self.items.extend(tail);
+        id
+    }
+    /// O(len): copy a sublist inside the existing pool without a temporary vector.
+    pub(super) fn slice(&mut self, source: ListId, start: usize, len: usize) -> ListId {
+        assert!(start + len <= self.get(source).len());
+        #[cfg(test)]
+        {
+            self.pushes += 1;
+        }
+        let id = ListId(index(self.items.len()));
+        self.items.push(NodeId(index(len)));
+        let begin = source.index() + 1 + start;
+        self.items.extend_from_within(begin..begin + len);
         id
     }
     /// O(1), for compaction of an exclusively owned detached statement list.
@@ -247,6 +296,10 @@ pub enum CaseKey {
     Lambda(crate::lambda::SwitchKey),
     /// String switch case.
     String(StrId),
+    /// Lowered floating-point case spelling, owned by the unit text pool.
+    Float(StrId),
+    /// Lowered big-integer case spelling, owned by the unit text pool.
+    BigInt(StrId),
     /// Lowered JavaScript literal case.
     JavaScript(crate::lambda::SwitchCaseTag),
 }
@@ -262,7 +315,7 @@ pub struct ClauseMeta {
 }
 /// Switch keys in their action order. Default, if present, is the final action.
 #[derive(Debug, Clone)]
-pub struct SwitchHeader {
+pub struct SwitchInput {
     /// Integer/constructor keys followed by block keys.
     pub keys: Vec<CaseKey>,
     /// Optional lowered per-case metadata, including a final default entry.
@@ -276,6 +329,41 @@ pub struct SwitchHeader {
     /// A default action follows the keyed actions.
     pub has_default: bool,
     /// Runtime dispatch representation.
+    pub dispatch: SwitchDispatch,
+}
+/// Borrowed switch metadata; variable-width storage belongs to the arena.
+#[derive(Debug, Clone, Copy)]
+pub struct SwitchHeader<'a> {
+    /// Keys in action order.
+    pub keys: &'a [CaseKey],
+    /// Lowered clause metadata.
+    pub clauses: &'a [ClauseMeta],
+    /// Constant-key prefix length.
+    pub constants: u32,
+    /// Exhaustive constants.
+    pub consts_full: bool,
+    /// Exhaustive blocks.
+    pub blocks_full: bool,
+    /// Final action is the default.
+    pub has_default: bool,
+    /// Dispatch facts imported with the source.
+    pub dispatch: &'a SwitchDispatch,
+}
+/// A run in the switch-key pool.
+#[derive(Debug, Clone, Copy)]
+pub struct KeySpan { pub(super) start: u32, pub(super) len: u32 }
+/// A run in the clause-metadata pool.
+#[derive(Debug, Clone, Copy)]
+pub struct ClauseSpan { pub(super) start: u32, pub(super) len: u32 }
+/// Stored switch header: variable-width keys and clauses are pool runs.
+#[derive(Debug)]
+pub(super) struct SwitchRecord {
+    pub keys: KeySpan,
+    pub clauses: ClauseSpan,
+    pub constants: u32,
+    pub consts_full: bool,
+    pub blocks_full: bool,
+    pub has_default: bool,
     pub dispatch: SwitchDispatch,
 }
 /// Source metadata; the node-parallel index is allocated only on demand.
@@ -298,13 +386,19 @@ pub enum PropertyKey {
     /// Plain record spread.
     RecordSpread,
 }
+/// A contiguous run of property keys in the unit's cold pool.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PropertySpan {
+    pub(super) start: u32,
+    pub(super) len: u32,
+}
 /// Cold JSX shape. Values are ordered callee, tag, spread, props, children, key.
 #[derive(Debug, Clone, Default)]
 pub struct JsxHeader {
     /// A spread expression precedes named properties.
     pub spread: bool,
     /// Property keys in source order.
-    pub props: Vec<PropertyKey>,
+    pub props: PropertySpan,
     /// Number of child expressions.
     pub children: u32,
     /// A final key expression is present.
@@ -330,23 +424,34 @@ pub struct RestField {
     /// Optional local bound to the removed field by SRest.
     pub binding: Option<VarId>,
 }
+/// A flat run of immutable record-rest field descriptors.
+#[derive(Debug, Clone, Copy)]
+pub struct RestSpan {
+    pub(crate) start: u32,
+    pub(crate) len: u32,
+}
+/// A flat immutable run of template quasis in the unit pool.
+#[derive(Debug, Clone, Copy)]
+pub struct TemplateSpan { pub(crate) start: u32, pub(crate) len: u32 }
 /// JavaScript metadata without child ownership. All expressions stay in node lists.
 #[derive(Debug, Clone)]
 pub enum JsPayload {
     /// Call kind, arity and method/JSX markers.
     Call(crate::js_ir::CallInfo),
     /// One key per object value, including spreads.
-    Object(Vec<PropertyKey>),
+    Object(PropertySpan),
     /// Fixed runtime block shape.
     Block(crate::lambda::lam_tag_info::TagInfo),
+    /// Borrow immutable shape metadata from a source constant.
+    ConstantBlock(ConstId),
     /// JSX positional shape.
     Jsx(JsxHeader),
     /// Untagged template quasis; one more than interpolations.
-    Template(Vec<TemplatePart>),
+    Template(TemplateSpan),
     /// Tagged template raw/cooked quasis.
-    Tagged(Vec<TemplatePart>),
+    Tagged(TemplateSpan),
     /// Fields excluded from a record-rest expression/destructuring.
-    Rest(Vec<RestField>),
+    Rest(RestSpan),
 }
 /// Imported module identity, retained in encounter order.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -360,24 +465,41 @@ pub struct Import {
 #[derive(Default)]
 pub(super) struct Pools {
     pub hash_builder: ahash::RandomState,
+    /// Raw spelling has no StrId until interning assigns its canonical handle.
     pub text_index: hashbrown::HashTable<(u64, StrId)>,
+    /// A structural constant value has no ConstId until interning canonicalizes it.
     pub const_index: hashbrown::HashTable<(u64, ConstId)>,
-    pub const_keys: Vec<Vec<u8>>,
+    pub const_keys: Vec<(u32, u32)>,
+    pub const_key_bytes: Vec<u8>,
+    pub const_key_scratch: Vec<u8>,
+    /// Primitive payload contents have no PrimId before interning, even when their operands already have handles.
     pub prim_index: hashbrown::HashTable<(u64, PrimId)>,
     pub prim_keys: Vec<Vec<u8>>,
+    /// Full import identity has no ImportId until its contents are interned.
     pub import_index: hashbrown::HashTable<(u64, ImportId)>,
+    /// Source labels are sparse imported numbers, not positions in the catch pool.
     pub catch_labels: hashbrown::HashMap<u32, CatchId, ahash::RandomState>,
     pub next_label: u64,
     pub consts: Vec<Constant>,
     pub floats: Vec<Option<ConstId>>,
     pub const_fields: Vec<ConstId>,
+    /// Equal sequences may occupy different spans; no existing list handle identifies their canonical contents.
     pub const_fields_index: hashbrown::HashTable<(u64, ConstSpan)>,
     pub prims: Vec<PrimPayload>,
     pub attrs: Vec<FunctionAttribute>,
-    pub switches: Vec<SwitchHeader>,
+    pub switches: Vec<SwitchRecord>,
+    pub switch_keys: Vec<CaseKey>,
+    pub switch_clauses: Vec<ClauseMeta>,
     pub catches: Vec<CatchHeader>,
     pub apply: Vec<ApInfo>,
     pub js: Vec<JsPayload>,
+    pub template_parts: Vec<TemplatePart>,
+    /// Serialized block metadata has no canonical JsId before interning.
+    pub block_index: hashbrown::HashTable<(u64, JsId, u32, u32)>,
+    pub block_key_bytes: Vec<u8>,
+    pub block_key_scratch: Vec<u8>,
+    pub property_keys: Vec<PropertyKey>,
+    pub rest_fields: Vec<RestField>,
     pub cold: Vec<Cold>,
     pub imports: Vec<Import>,
     // J imports retain the complete module identity, including dynamic/default
