@@ -234,8 +234,8 @@ fn compare_text(
 /// taken once. Panics on a handle that is not of the unit's graph, a level
 /// below zero, or a row-field link, none of which a frozen graph holds.
 /// A 10,000-node singleton-tuple chain takes exactly 10,000 old-source visits;
-/// with publication the test counter is at most 30,001 (10,000 old visits,
-/// 10,000 captures, 9,999 slots and two item steps). Metadata work is described
+/// with publication the test counter is 40,001 (10,000 old visits,
+/// 10,000 captures, 9,999 slots, 10,000 publication identities and two item steps). Metadata work is described
 /// separately by the helpers below; it is not another old-node visit.
 pub fn from_old(input: Input<'_>) -> Segment {
     run(input).0
@@ -2229,8 +2229,9 @@ external \"==": ('a, 'a) => bool = "%equal"
                 let (segment, visits) = result.unwrap();
                 assert_eq!(visits.count, 10000);
                 // 10,000 old reads, then publication: 10,000 captured nodes,
-                // 9,999 list slots and two steps for the item.
-                assert!(count <= 30001, "{count}");
+                // 9,999 list slots, 10,000 identity entries and two item steps.
+                assert_eq!(count, 40001);
+                assert!(count <= visits.count + 4 * visits.count);
                 assert_eq!(segment.templates.len(), 1);
                 assert_eq!(segment.template_nodes.len(), 10000);
                 assert!(segment.nodes.is_empty());
@@ -2386,6 +2387,34 @@ module MakeShow = (S: Showable) => {
 }
 type packed = module(Showable with type t = int)
 "#;
+
+    #[test]
+    fn named_variant_constraint_keeps_parameter_names() {
+        let source = r#"
+type root = [#Root]
+type channel<'a> = [root | #Value('a)]
+type handle<'kind> constraint 'kind = [> root]
+module Nested = {
+  type accepted<'a, 'kind> = handle<[< channel<'a>] as 'kind>
+}
+"#;
+        let options = crate::driver::CompilerOptions {
+            nopervasives: true,
+            ..Default::default()
+        };
+        let result = crate::driver::compile_source_in_process(
+            source,
+            "Constraint.res",
+            "Constraint",
+            &options,
+            &crate::cmi::persistent_env::ModuleRegistry::new(),
+            false,
+            None,
+        )
+        .expect("compiles");
+        check_published(&result.pers_struct.expect("published signature"))
+            .expect("constraint parameter names match");
+    }
 
     #[test]
     fn a_compiled_unit_converts_every_kind_of_item() {
@@ -2567,7 +2596,8 @@ type packed = module(Showable with type t = int)
                 let count = steps::scope(|| result = Some(run(input(&graph, &signature, &names))));
                 let (segment, visits) = result.unwrap();
                 assert_eq!(visits.count, 10003);
-                assert!(count <= 40009, "{count}");
+                assert_eq!(count, 50012);
+                assert!(count <= visits.count + 4 * visits.count);
                 assert_eq!(&*segment.signature.mutabilities, &[false, false]);
                 let mut previous = [NONE; 2];
                 let mut fields = 0;

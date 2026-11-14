@@ -26,10 +26,17 @@ pub fn publish(mut graph: Graph, roots: &[Ty], mut items: Segment) -> Segment {
     graph.template_externals.clear();
 
     let mut templates = Vec::with_capacity(roots.len());
+    let mut origins = Vec::new();
     for &root in roots {
         #[cfg(test)]
         super::steps::tick();
-        templates.push(graph.capture(root));
+        let template = graph.capture(root);
+        if template.node_len != 0 {
+            // Capture's existing encounter queue is in template-node order;
+            // copy handles, never revisit the old source or change R1 capture.
+            origins.extend_from_slice(&graph.work);
+        }
+        templates.push(template);
     }
     let mut shared = Shared::new(graph.nodes.len());
     for template in &mut templates {
@@ -47,6 +54,17 @@ pub fn publish(mut graph: Graph, roots: &[Ty], mut items: Segment) -> Segment {
         graph.template_externals[i] = shared.reference(&mut graph, source);
     }
     shared.finish(&mut graph);
+    let shared_len = shared.nodes.len() as u32;
+    for (index, source) in origins.iter_mut().enumerate() {
+        #[cfg(test)]
+        super::steps::tick();
+        let first = &mut shared.forward[source.0 as usize];
+        if first.0 == NONE {
+            *first = Ty(shared_len + index as u32);
+        }
+        *source = *first;
+    }
+    items.template_origins = origins.into_boxed_slice();
     items.nodes = shared.nodes.into_boxed_slice();
     items.lists = shared.lists.into_boxed_slice();
     items.params = shared.params.into_boxed_slice();

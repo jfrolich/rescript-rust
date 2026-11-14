@@ -82,6 +82,11 @@ pub struct Segment {
     pub(crate) template_params: Box<[Param]>,
     pub(crate) template_pools: Box<[super::template::TemplatePools]>,
     pub(crate) template_externals: Box<[Ty]>,
+    /// Publication identity of each template node, in the combined shared /
+    /// template numbering. Instantiation still copies each item's template;
+    /// printing and inverse conversion use these identities to preserve aliases
+    /// that cross a non-generic boundary. Empty means each stored node is unique.
+    pub(crate) template_origins: Box<[Ty]>,
     pub type_declarations: Box<[TypeDecl]>,
     pub members: Box<[MemberDecl]>,
     pub items: Box<[ExportItem]>,
@@ -91,6 +96,16 @@ pub struct Segment {
 }
 
 impl Segment {
+    /// O(1): source identity, without changing the instantiation representation.
+    pub(crate) fn publication_node(&self, node: u32) -> u32 {
+        let shared = self.nodes.len() as u32;
+        if node < shared || self.template_origins.is_empty() {
+            node
+        } else {
+            self.template_origins[(node - shared) as usize].0
+        }
+    }
+
     /// O(log n) probes, O(1) stack and no allocation, for n root exports.
     /// Returns None for an empty segment. Names use the publisher's interner.
     pub fn lookup(&self, name: u32) -> Option<&ExportItem> {
@@ -136,7 +151,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<ChildTable>(), 8);
         assert_eq!(std::mem::size_of::<TypeDecl>(), 32);
         assert_eq!(std::mem::size_of::<MemberDecl>(), 16);
-        assert_eq!(std::mem::size_of::<Segment>(), 1016);
+        assert_eq!(std::mem::size_of::<Segment>(), 1032);
     }
 
     #[test]

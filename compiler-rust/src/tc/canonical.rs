@@ -18,7 +18,9 @@
 //! second section reads the changed graph; `view::Graph` keeps those
 //! changes as an overlay, so the segment stays immutable.
 //!
-//! Identity. A node is one handle of the segment: generic nodes of an item
+//! Identity. Publication identities retain sharing across generic/shared
+//! boundaries; instantiation still uses the unchanged per-item templates.
+//! Generic nodes of an item
 //! are its template's, shared positions stay one node and equal nodes stay
 //! two; non-generic nodes are the segment's shared nodes. Identifiers are
 //! compared as `Ident.same` compares them (equal nonzero stamps, or equal

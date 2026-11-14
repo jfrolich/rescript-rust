@@ -323,7 +323,9 @@ impl<'s> View<'s> {
     pub fn root(&self, root: SchemeRoot) -> N {
         if root.ty.0 & RELATIVE != 0 {
             let template = self.seg.templates[root.template as usize];
-            N(self.shared + template.nodes + (root.ty.0 & !RELATIVE))
+            N(self.seg.publication_node(
+                self.shared + template.nodes + (root.ty.0 & !RELATIVE),
+            ))
         } else {
             N(root.ty.0)
         }
@@ -352,7 +354,9 @@ impl<'s> View<'s> {
             N(reference)
         } else if reference & RELATIVE != 0 {
             let template = self.seg.templates[owner as usize];
-            N(self.shared + template.nodes + (reference & !RELATIVE))
+            N(self.seg.publication_node(
+                self.shared + template.nodes + (reference & !RELATIVE),
+            ))
         } else {
             N(self.seg.template_externals[reference as usize].0)
         }

@@ -16,10 +16,11 @@
 //! # Type nodes
 //!
 //! Old nodes are numbered densely: first the segment's shared nodes, `Ty(i)`
-//! becoming old node `i`, then each template's nodes in template order, one
-//! old node per template node. The forwarding map is the per-template
-//! `Frame` (an old base per template), so no node is looked up in a hash
-//! table and no equal nodes are merged: each source occurrence is exactly one
+//! becoming old node `i`, then unique publication identities in template order.
+//! Dense `old_offsets` maps template nodes to old nodes, using the publisher's
+//! identity rows, not structural equality. In particular a generic parameter
+//! also reached through a non-generic row remains the same old node. No node
+//! is looked up in a hash table: each source occurrence is exactly one
 //! old node, repeated positions of one node stay one old node, and every
 //! non-generic node is one old node shared by every item that names it.
 //! A multi-root item's synthetic tuple (`from_old::scheme_roots`, named by no
@@ -300,9 +301,9 @@ fn run(segment: &Segment) -> (Output, Visits) {
     (output, visits)
 }
 
-/// A template's place in the old node numbering: template offset `k` (with
-/// `first <= k < len`) is old node `start + k - first`. A shared frame
-/// (`relative` false) names segment nodes directly. 16 bytes, passed by value.
+/// A template's place in combined segment numbering: offset `k` (with
+/// `first <= k < len`) is publication node `start + k`; dense `old_offsets`
+/// gives its old node. A shared frame names shared nodes directly. 16 bytes.
 #[derive(Clone, Copy, Debug)]
 struct Frame {
     start: u32,
@@ -359,6 +360,8 @@ struct Rebuild<'s> {
     roots: Vec<TypeExprRef>,
     /// The frame of each template; `SHARED` for a zero-node template.
     bases: Vec<Frame>,
+    /// Template-node offsets to old nodes; publication aliases share one entry.
+    old_offsets: Vec<u32>,
     /// The component index of a segment string, NONE before its first use.
     component_of: Vec<u32>,
     components: Vec<String>,
@@ -426,6 +429,7 @@ impl<'s> Rebuild<'s> {
             layouts: Vec::with_capacity(pools.layouts.len()),
             roots: Vec::with_capacity(pools.roots.len()),
             bases: Vec::with_capacity(seg.templates.len()),
+            old_offsets: vec![NONE; seg.template_nodes.len()],
             component_of: Vec::new(),
             components: Vec::new(),
             component_keys: Vec::new(),
@@ -684,19 +688,49 @@ impl<'s> Rebuild<'s> {
         }
     }
 
-    /// One step per segment node (each makes exactly one old node, except a
-    /// synthetic tuple, which makes none) and one per list or parameter slot.
-    /// One linear pass over the shared nodes, then over each template; the
-    /// frames are the forwarding map. No queue, no recursion.
+    /// O(stored nodes + slots): first assign dense offsets by publication
+    /// identity, then convert each unique node and its slots once. Synthetic
+    /// tuples and repeated identities produce no old node. No recursion or
+    /// hash lookup. The counter counts converted nodes and copied slots.
     fn types(&mut self) {
         let seg = self.seg;
-        for &node in seg.nodes.iter() {
-            let converted = self.node(node, SHARED, &seg.lists, &seg.params);
-            self.nodes.push(converted);
-        }
         let mut counts = vec![0u32; seg.templates.len()];
         for root in self.seg.signature.roots.iter() {
             counts[root.template as usize] += 1;
+        }
+        let shared = seg.nodes.len() as u32;
+        let mut next = shared;
+        for (index, template) in seg.templates.iter().enumerate() {
+            if template.node_len == 0 {
+                self.bases.push(SHARED);
+                continue;
+            }
+            let first = u32::from(counts[index] > 1);
+            self.bases.push(Frame {
+                start: shared + template.nodes,
+                first,
+                len: template.node_len,
+                relative: true,
+            });
+            for offset in first..template.node_len {
+                let physical = shared + template.nodes + offset;
+                let origin = seg.publication_node(physical);
+                let old = if origin == physical {
+                    let old = next;
+                    next += 1;
+                    old
+                } else if origin < shared {
+                    origin
+                } else {
+                    self.old_offsets[(origin - shared) as usize]
+                };
+                assert_ne!(old, NONE, "publication identity precedes its aliases");
+                self.old_offsets[(physical - shared) as usize] = old;
+            }
+        }
+        for &node in seg.nodes.iter() {
+            let converted = self.node(node, SHARED, &seg.lists, &seg.params);
+            self.nodes.push(converted);
         }
         let mut list_base = 0usize;
         let mut param_base = 0usize;
@@ -704,20 +738,12 @@ impl<'s> Rebuild<'s> {
         for (index, template) in seg.templates.iter().enumerate() {
             if template.node_len == 0 {
                 assert_eq!(template.list_len, 0, "an external template has no lists");
-                self.bases.push(SHARED);
                 continue;
             }
             let count = counts[index];
             assert_ne!(count, 0, "a template belongs to an item with roots");
             let first = u32::from(count > 1);
-            let start = u32::try_from(self.nodes.len()).expect("old node limit");
-            let frame = Frame {
-                start,
-                first,
-                len: template.node_len,
-                relative: true,
-            };
-            self.bases.push(frame);
+            let frame = self.bases[index];
             let nodes = &seg.template_nodes
                 [template.nodes as usize..(template.nodes + template.node_len) as usize];
             let lists = &seg.template_lists[list_base..list_base + template.list_len as usize];
@@ -732,12 +758,15 @@ impl<'s> Rebuild<'s> {
                     "a multi-root template starts with its synthetic tuple"
                 );
             }
-            for &node in &nodes[first as usize..] {
+            for (offset, &node) in nodes.iter().enumerate().skip(first as usize) {
                 if node.tag() == ARROW {
                     param_base += node.arity() as usize;
                 }
-                let converted = self.node(node, frame, lists, params);
-                self.nodes.push(converted);
+                let physical = frame.start + offset as u32;
+                if seg.publication_node(physical) == physical {
+                    let converted = self.node(node, frame, lists, params);
+                    self.nodes.push(converted);
+                }
             }
             list_base += template.list_len as usize;
             pools += 1;
@@ -771,7 +800,7 @@ impl<'s> Rebuild<'s> {
                 (frame.first..frame.len).contains(&offset),
                 "a template reference names a node of its own template"
             );
-            frame.start + (offset - frame.first)
+            self.old_offsets[(frame.start - shared + offset) as usize]
         } else {
             let target = self.seg.template_externals[ty.0 as usize].0;
             assert!(target < shared, "an external reference names a shared node");
@@ -2102,7 +2131,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<SigTask>(), 8);
         assert_eq!(std::mem::size_of::<Output>(), 104);
         assert_eq!(std::mem::size_of::<Visits>(), 8);
-        assert_eq!(std::mem::size_of::<Rebuild<'static>>(), 560);
+        assert_eq!(std::mem::size_of::<Rebuild<'static>>(), 584);
     }
 
     #[test]
@@ -4048,7 +4077,7 @@ mod round_trip {
     /// O(pools): every pool of two segments is equal.
     fn assert_same(a: &Segment, b: &Segment) {
         same!(a, b; nodes, lists, params, template_nodes, template_lists, template_params,
-            template_externals, type_declarations, members, items, children, digest);
+            template_externals, template_origins, type_declarations, members, items, children, digest);
         let templates = |segment: &Segment| {
             segment
                 .templates
