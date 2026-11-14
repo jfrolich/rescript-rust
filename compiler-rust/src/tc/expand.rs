@@ -15,10 +15,10 @@
 //! (`simple_abbrevs`, compiler/ml/ctype.ml:197-202), and slot 0 of a nullary
 //! node stays `NONE`.
 
-use super::graph::{CONSTR, GENERIC, LINK, NONE, Node, Ty, VAR};
+use super::graph::{ARROW, CONSTR, GENERIC, LINK, NONE, Node, TUPLE, Ty, VAR};
 use super::segment::{DeclarationKind, PathRow, Segment, SignatureKind, UNIT_SCOPE};
 use super::template::Template;
-use super::unify::{Checker, Clash};
+use super::unify::{Checker, Clash, Frame, FrameKind};
 
 /// [`TypeInfo::flags`]: the type has a manifest that expands publicly.
 pub const ABBREV: u8 = 1;
@@ -498,7 +498,7 @@ impl Checker {
             // of the level is update_level's own first one (ctype.ml:586).
             let expansion = self.g.repr(memorized);
             if node.level != GENERIC && self.g.nodes[expansion.0 as usize].level > node.level {
-                match self.update_level(expansion, node.level) {
+                match self.lower(expansion, node.level) {
                     Ok(()) | Err(Clash) => {}
                 }
             }
@@ -537,19 +537,6 @@ impl Checker {
             self.memorize(ty, expansion, false);
         }
         expansion
-    }
-
-    /// `update_level` as expansion runs it: [`Checker::lower`] when a type
-    /// has a scope, otherwise `Graph::lower`, which is the whole of
-    /// `Checker::lower` then (CHECKER_REWRITE 8.2, decision 4: with
-    /// `scoped == 0` the walk is R1's). Called directly so that expansion
-    /// and the `Expand` tier do not depend on R3d. One compare plus the walk.
-    fn update_level(&mut self, root: Ty, level: u32) -> Result<(), Clash> {
-        if self.types.scoped == 0 {
-            self.g.lower(root, level);
-            return Ok(());
-        }
-        self.lower(root, level)
     }
 
     /// `subst` (compiler/ml/ctype.ml:1100-1123) for constructor node `ty`
@@ -591,7 +578,7 @@ impl Checker {
             if fresh {
                 self.g.link(param, argument);
                 if self.g.nodes[argument.0 as usize].level > node.level {
-                    result = self.update_level(argument, node.level);
+                    result = self.lower(argument, node.level);
                 }
             } else {
                 if mode != ExpandMode::Unif && speculation.is_none() {
@@ -718,8 +705,144 @@ impl Checker {
     /// The walk is tried without expanding constructors that have arguments,
     /// and, after a clash, restored and run again expanding them: the
     /// speculation for that is opened only on this path. Explicit stack. (R3d)
+    #[inline]
     pub fn lower(&mut self, root: Ty, level: u32) -> Result<(), Clash> {
-        todo!("R3d")
+        if self.types.scoped == 0 {
+            self.g.lower(root, level);
+            return Ok(());
+        }
+        // The outer `update_level` (compiler/ml/ctype.ml:633-640): nothing
+        // to do, and no snapshot, when the root is not above `level`.
+        let root = self.g.repr(root);
+        if self.g.nodes[root.0 as usize].level <= level {
+            return Ok(());
+        }
+        // First without expanding constructors that have arguments; after a
+        // clash, `backtrack snap` (a restore with its memo cleanup) and once
+        // more expanding them.
+        let token = self.g.speculate();
+        if self.lower_scoped(root, level, false).is_ok() {
+            self.g.keep(token);
+            return Ok(());
+        }
+        self.restore(token);
+        // OCaml runs the second pass outside the snapshot and leaves what a
+        // failed one wrote ("Levels should be restored", ctype.ml:599). Here
+        // a clash leaves the graph as it was before the call: the writes are
+        // undone, the memos are kept as OCaml keeps them (no `backtrack`).
+        let token = self.g.speculate();
+        let result = self.lower_scoped(root, level, true);
+        match result {
+            Ok(()) => self.g.keep(token),
+            Err(Clash) => self.g.restore(token),
+        }
+        result
+    }
+
+    /// One pass of the inner `update_level env level expand`
+    /// (compiler/ml/ctype.ml:584-630) from representative `root`, on
+    /// [`Checker::frames`] above the length it finds (an expansion inside
+    /// the walk may lower or unify, and those use the stack above it).
+    /// Cost: one step and one node load per popped entry, one `TypeInfo`
+    /// load per constructor above `level`, one push per child; each
+    /// expansion is one [`Checker::expand_once`] and one link. Nodes are
+    /// visited in OCaml's order (children pushed last first). On a clash the
+    /// stack is cut back to where it was; the caller undoes the writes.
+    fn lower_scoped(&mut self, root: Ty, level: u32, expand: bool) -> Result<(), Clash> {
+        let base = self.frames.len();
+        self.push_lowering(root);
+        let result = self.lower_scoped_loop(base, level, expand);
+        self.frames.truncate(base);
+        result
+    }
+
+    /// The loop of [`Checker::lower_scoped`]: pops entries above `base`.
+    /// Its cost is the caller's.
+    fn lower_scoped_loop(&mut self, base: usize, level: u32, expand: bool) -> Result<(), Clash> {
+        while self.frames.len() > base {
+            let ty = self.frames.pop().expect("entry above base").left;
+            let ty = self.g.repr(ty);
+            #[cfg(test)]
+            super::steps::tick();
+            let node = self.g.nodes[ty.0 as usize];
+            if node.level <= level {
+                continue;
+            }
+            if node.tag() == CONSTR {
+                // `level < get_level env p` (ctype.ml:590).
+                let escapes = level < self.types.info(node.a).scope;
+                if escapes || (expand && node.arity() != 0) {
+                    // `link_type ty (try_expand_once env ty)`, then the walk
+                    // goes on from `ty`, now a link to the expansion
+                    // (ctype.ml:593-594, 603-604). A `Unify` raised by the
+                    // expansion is not caught there: it is this pass's clash.
+                    let expansion = self.expand_once(ty, ExpandMode::Unif)?;
+                    let expansion = if expansion.0 == NONE {
+                        expansion
+                    } else {
+                        self.g.repr(expansion)
+                    };
+                    // A memo naming the node itself (PR#7324,
+                    // ctype.ml:1202) is no expansion here: linking a node to
+                    // itself would make a cycle.
+                    if expansion.0 != NONE && expansion != ty {
+                        self.g.link(ty, expansion);
+                        self.push_lowering(expansion);
+                        continue;
+                    }
+                    // `Cannot_expand`: a constructor below its scope is a
+                    // clash (ctype.ml:596-599).
+                    if escapes {
+                        return Err(Clash);
+                    }
+                }
+            }
+            self.g.write(ty, Node { level, ..node });
+            self.push_lowering_children(node);
+        }
+        Ok(())
+    }
+
+    /// O(1) amortized: push one node of a lowering walk on [`Checker::frames`].
+    #[inline]
+    fn push_lowering(&mut self, ty: Ty) {
+        self.frames.push(Frame {
+            left: ty,
+            right: Ty(NONE),
+            kind: FrameKind::Pair,
+            extra: 0,
+        });
+    }
+
+    /// O(arity): push the children of `node` last first, so that they are
+    /// popped in `iter_type_expr`'s order (compiler/ml/btype.ml:250-257:
+    /// an arrow's parameters, then its result). The memo of a constructor
+    /// is not a child. An extended node (`TUPLE | EXTENDED`) keeps its
+    /// children in its list slots, as a tuple does.
+    fn push_lowering_children(&mut self, node: Node) {
+        match node.tag() {
+            ARROW => {
+                self.push_lowering(Ty(node.a));
+                for index in (0..node.arity()).rev() {
+                    let ty = self.g.params[(node.b + index) as usize].ty;
+                    self.push_lowering(ty);
+                }
+            }
+            CONSTR => {
+                for index in (0..node.arity()).rev() {
+                    let ty = self.g.lists[(node.b + 1 + index) as usize];
+                    self.push_lowering(ty);
+                }
+            }
+            TUPLE => {
+                for index in (0..node.arity()).rev() {
+                    let ty = self.g.lists[(node.b + index) as usize];
+                    self.push_lowering(ty);
+                }
+            }
+            VAR => {}
+            _ => panic!("expected representative descriptor"),
+        }
     }
 
     /// `lower_args` of the old checker (types/ctype.rs:11682; OCaml
@@ -731,7 +854,41 @@ impl Checker {
     /// that is a nullary abbreviation is what makes that node the nullary
     /// memo's representative (O11). (R3d)
     pub fn lower_args(&mut self, root: Ty) {
-        todo!("R3d")
+        // `seen` (typecore.ml:2505) as marks of this call's generation: one
+        // load and one store per arrow, no list.
+        let generation = self.fresh_marks();
+        let mut ty = root;
+        loop {
+            #[cfg(test)]
+            super::steps::tick();
+            let head = match self.expand_head(ty, ExpandMode::Safe) {
+                Ok(head) => head,
+                Err(Clash) => unreachable!("a safe expansion does not clash"),
+            };
+            let index = head.0 as usize;
+            if index >= self.marks.len() {
+                self.marks.resize(self.g.nodes.len(), 0);
+            }
+            if self.marks[index] == generation {
+                return;
+            }
+            self.marks[index] = generation;
+            let node = self.g.nodes[index];
+            if node.tag() != ARROW {
+                return;
+            }
+            // `unify_var env (newvar ()) typ` (typecore.ml:2511): the
+            // variable is new, so what remains is the parameter lowered to
+            // the current level; OCaml asserts that it cannot fail.
+            let level = self.g.level;
+            for index in 0..node.arity() {
+                let param = self.g.params[(node.b + index) as usize].ty;
+                if self.lower(param, level).is_err() {
+                    unreachable!("lower_args failed to lower a parameter");
+                }
+            }
+            ty = Ty(node.a);
+        }
     }
 }
 
@@ -899,6 +1056,153 @@ mod tests {
         for (index, &arg) in args.iter().enumerate() {
             assert_eq!(c.g.repr(Ty(first + index as u32)), arg);
         }
+    }
+
+    /// A chain of `n` one-element tuples around a constructor of type `ty`,
+    /// every node at `level`.
+    fn tuple_chain(c: &mut Checker, n: u32, level: u32, ty: u32) -> Ty {
+        let mut node = constr(c, level, ty, &[]);
+        for _ in 1..n {
+            let b = c.g.lists.len() as u32;
+            c.g.lists.push(node);
+            node = c.g.push(Node {
+                head: TUPLE | 1 << 8,
+                level,
+                a: 0,
+                b,
+            });
+        }
+        node
+    }
+
+    /// The scoped walk over a 10,000-deep type on a 2 MB stack: one step a
+    /// node when nothing escapes, one speculation, closed. When the bottom
+    /// node escapes, two passes and two restores, at most 4 steps a node,
+    /// and the graph is as it was before the call.
+    #[test]
+    fn scoped_lowering_of_ten_thousand_nodes() {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let n = 10_000u32;
+                let mut c = checker(2);
+                c.types.rows[1].scope = 2;
+                c.types.scoped = 1;
+                let root = tuple_chain(&mut c, n, 3, 0);
+                assert_eq!(steps::scope(|| c.lower(root, 1).unwrap()), u64::from(n));
+                assert!(c.g.nodes.iter().all(|node| node.level == 1));
+                assert!(c.g.trail.is_empty());
+                assert_eq!(c.g.speculation_depth, 0);
+
+                let first = c.g.nodes.len();
+                let root = tuple_chain(&mut c, n, 3, 1);
+                let before = c.g.nodes.clone();
+                let count = steps::scope(|| assert!(c.lower(root, 1).is_err()));
+                assert!(count <= 4 * u64::from(n), "{count}");
+                assert_eq!(c.g.nodes, before);
+                assert!(c.g.nodes[first..].iter().all(|node| node.level == 3));
+                assert!(c.g.trail.is_empty());
+                assert_eq!(c.g.speculation_depth, 0);
+                assert!(c.frames.is_empty());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// 10,000 nodes below their scope, each an abbreviation of the next
+    /// (`type t{i} = t{i-1}`, all scoped): the walk expands each once, one
+    /// loop step and one instance per abbreviation, and ends on type 0.
+    #[test]
+    fn scoped_lowering_expands_ten_thousand_abbreviations() {
+        let n = 10_000u32;
+        let mut c = checker(n as usize + 1);
+        for ty in 1..=n {
+            let body = constr(&mut c, GENERIC, ty - 1, &[]);
+            abbreviation(&mut c, ty, &[], body);
+            c.types.rows[ty as usize].scope = 2;
+        }
+        c.types.scoped = n;
+        let last = constr(&mut c, 3, n, &[]);
+        let count = steps::scope(|| c.lower(last, 1).unwrap());
+        assert!(count <= 8 * u64::from(n) + 1, "{count}");
+        let head = c.g.repr(last);
+        assert_eq!(c.g.nodes[head.0 as usize].a, 0);
+        assert_eq!(c.g.nodes[head.0 as usize].level, 1);
+        assert!(c.g.trail.is_empty());
+    }
+
+    /// The expanding retry: a constructor with an argument whose argument
+    /// escapes is a clash without expanding, and is replaced by its
+    /// expansion on the second pass (`type phantom<'a> = int`).
+    #[test]
+    fn the_retry_expands_a_constructor_with_arguments() {
+        let mut c = checker(3);
+        let param = var(&mut c, GENERIC);
+        let body = constr(&mut c, GENERIC, 0, &[]);
+        abbreviation(&mut c, 1, &[param], body);
+        c.types.rows[2].scope = 2;
+        c.types.scoped = 1;
+        let escaping = constr(&mut c, 3, 2, &[]);
+        let phantom = constr(&mut c, 3, 1, &[escaping]);
+        c.lower(phantom, 1).unwrap();
+        let head = c.g.repr(phantom);
+        assert_eq!(c.g.nodes[head.0 as usize].a, 0);
+        assert_eq!(c.g.nodes[head.0 as usize].level, 1);
+        // The escaping argument is not reached through the expansion.
+        assert_eq!(c.g.nodes[escaping.0 as usize].level, 3);
+        assert!(c.g.trail.is_empty());
+    }
+
+    /// `lower_args` over a chain of 10,000 arrows: one loop step, one
+    /// expansion step and one lowering of the parameter (one step: a
+    /// variable one level up) per arrow, at most 4 steps an arrow; a chain
+    /// whose result is the arrow itself stops at the second visit.
+    #[test]
+    fn lower_args_over_ten_thousand_arrows() {
+        let n = 10_000u32;
+        let mut c = checker(1);
+        c.g.begin_def();
+        let mut ty = var(&mut c, 2);
+        for _ in 0..n {
+            let param = var(&mut c, 3);
+            let b = c.g.params.len() as u32;
+            c.g.params.push(super::super::graph::Param {
+                ty: param,
+                label: NONE,
+                loc: NONE,
+            });
+            ty = c.g.push(Node {
+                head: super::super::graph::ARROW | 1 << 8,
+                level: 2,
+                a: ty.0,
+                b,
+            });
+        }
+        let count = steps::scope(|| c.lower_args(ty));
+        assert!(count <= 4 * u64::from(n) + 2, "{count}");
+        assert!(
+            c.g.nodes
+                .iter()
+                .filter(|node| node.tag() == VAR)
+                .all(|node| node.level == 2)
+        );
+        // `f: 'a => f`: the result is the arrow itself.
+        let param = var(&mut c, 2);
+        let b = c.g.params.len() as u32;
+        c.g.params.push(super::super::graph::Param {
+            ty: param,
+            label: NONE,
+            loc: NONE,
+        });
+        let cyclic = Ty(c.g.nodes.len() as u32);
+        c.g.push(Node {
+            head: super::super::graph::ARROW | 1 << 8,
+            level: 2,
+            a: cyclic.0,
+            b,
+        });
+        assert!(steps::scope(|| c.lower_args(cyclic)) <= 8);
     }
 
     /// A restore of 10,000 writes is one step a write plus the cleanup, which
