@@ -1131,7 +1131,7 @@ tested here. Slice R8 tests it.
 
 ### 4.2 as landed
 
-Implementation record for `913faa5ed`; this describes the review candidate,
+Implementation record for `65fdcaa71`; this describes the review candidate,
 not a claim that its branch has already merged.
 
 **One attempt owner.** `driver::type_structure_two_modes` serves all six
@@ -1186,6 +1186,9 @@ The batch path freezes its **private** inferred signature before raw translation
 mutates type nodes; moving that freeze later breaks the Belt snapshot proof.
 The frozen result does not escape via `signature_ready` until validation succeeds.
 Its freeze/hash/publication counters belong to the attempt, not process totals.
+Signature-check report bytes are prepared privately and written only on retention.
+The shared final context use of all six entry points asserts that a published
+Success attempt has no unexplained unification failure, including after hooks.
 
 **Post-structure failures are included.** `non_generalizable.res` gets through
 structure checking and fails validation of its inferred signature. Its first
@@ -1208,10 +1211,19 @@ inventory, commit/drop sites, exceptions and personally rerun tests.
 two counters after dependency preparation. Frontend failures then have zero
 attempts. The fixture gate excludes them by observation, not fixture names.
 
-**Final implementation evidence**, candidate `913faa5ed` versus `be1b3a482`:
+**Evidence by revision.** Whole-project measurements below compare `913faa5ed`
+with `be1b3a482`; they predate the review corrections. The corrected-head
+late-failure measurement and its command are in the measurement record.
+Checker census remains explicitly gated to `RAYON_NUM_THREADS=1`.
 
-- `scripts/test_check_modes.py`: 747 fixtures, 597 rechecked, zero differences
-  or failures; non-generalizable errors require a rerun, without exemptions.
+Current fixture gate (explicit binary/runtime and source-only temporary inputs):
+
+- `python3 scripts/test_check_modes.py --rescript "$RESCRIPT" --runtime
+  packages/@rescript/runtime --jobs 4`: 747 fixtures, 597 rechecked, **63 failures**.
+  Every expected error with zero attempts now fails. These are frontend errors
+  (including syntax errors), so the all-fixture CI gate is not green. No fixture
+  was exempted or re-recorded. The required checker-only gate versus frontend
+  coverage contract needs resolution before using this as a passing CI gate.
 - Diagnostic parity: 2,137 cases; JS parity: 737 snapshots; both Rust suites and
   both `super_errors` suites pass.
 - Clean single-worker `tests/tests`: 944 attempts, **0 Explain reruns**;

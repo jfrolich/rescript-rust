@@ -1,9 +1,9 @@
-# Snapshot-elision final implementation measurements
+# Snapshot-elision measurements by revision
 
-Candidate `913faa5ed` (including composed retries and the location-retry fix)
+The earlier candidate `913faa5ed` (including composed retries and the location-retry fix)
 versus base `be1b3a482`, on the same Linux machine. Both used release fat LTO
-and one codegen unit. Later documentation-only commits do not change these
-binaries. The earlier measurements below remain revision-pinned history.
+and one codegen unit. Subsequent review corrections change compiler code; these whole-project
+numbers are not measurements of that corrected head. The earlier measurements below remain revision-pinned history.
 
 ## Commands
 
@@ -261,3 +261,51 @@ Minimum-of-five: passing **15,354,558,787**, failing **553,589,777** instruction
 Fail/pass = **0.036054×**, below 2.2×. This is the requested full-compilation
 comparison, not isolated type-checker overhead: only the passing twin runs the
 backend. It does not establish a bound for other unit shapes.
+
+## Corrected-head late-failure cost
+
+Implementation `65fdcaa71`, including the exit assertion, deferred reports and
+borrowed fallback provider. The harness and source generator are checked in or
+shown here; measurements exclude compiler counters and forced Explain.
+
+```sh
+python3 - <<'PYTHON'
+from pathlib import Path
+source = ''.join(f'let x{n} = {n}\n' for n in range(10_000))
+Path('/tmp/pass.res').write_text(source)
+Path('/tmp/fail.res').write_text(source + 'let bad: bool = 1\n')
+PYTHON
+CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
+  cargo build --locked --release --manifest-path compiler-rust/Cargo.toml \
+  --example check_retry_cost
+for case in pass fail; do
+  for n in 1 2 3 4 5; do
+    env -u RESCRIPT_CHECK_MODE -u RESCRIPT_COMPILER_COUNTERS \
+      valgrind --tool=cachegrind --cache-sim=no --branch-sim=no \
+      --cachegrind-out-file="/tmp/$case-$n.cachegrind" \
+      compiler-rust/target/release/examples/check_retry_cost \
+      "/tmp/$case.res" "$case"
+  done
+done
+```
+
+Raw cachegrind lines (process-ID prefixes omitted), in run order:
+
+```text
+pass:
+I refs: 15,353,396,137
+I refs: 15,355,830,286
+I refs: 15,353,907,148
+I refs: 15,355,966,855
+I refs: 15,354,655,840
+fail:
+I refs: 553,459,027
+I refs: 553,852,590
+I refs: 553,627,491
+I refs: 553,353,422
+I refs: 553,398,729
+```
+
+Minimum-of-five: passing **15,353,396,137**, failing **553,353,422** instructions.
+Fail/pass = **0.036041×**, below 2.2×. This requested full-compilation ratio is
+not isolated checker overhead: only the passing twin runs the backend.
