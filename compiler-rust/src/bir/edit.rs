@@ -322,12 +322,21 @@ impl Bir {
                 "function header already owned"
             );
         }
+        // A function's parameters get their home where its scope closes.
+        #[cfg(test)]
+        let literal = matches!(self.view(id), View::Fun { .. } | View::JFun { .. });
         for var in self.binders(id) {
             assert!(
                 self.vars.binder[var.index()].is_none(),
                 "variable already bound"
             );
             self.vars.binder[var.index()] = Some(id);
+            #[cfg(test)]
+            if !literal {
+                if let Some(scope) = &mut self.js_scope {
+                    scope.names.bind(var);
+                }
+            }
         }
         self.update_facts(id);
     }
@@ -485,6 +494,10 @@ impl Bir {
             if let Some(scope) = &mut self.js_scope {
                 let View::JQualified { module, .. } = node.view(&self.lists) else { unreachable!() };
                 scope.import_reference(module, add);
+                #[cfg(test)]
+                if add {
+                    scope.names.import_reference(module);
+                }
             }
         }
         if self.is_weighted_switch(node) {
@@ -1210,6 +1223,10 @@ impl Bir {
                         old.loc,
                     );
                     self.vars.funcs[new.index()].flags = old.flags;
+                    #[cfg(test)]
+                    if let Some(scope) = &mut self.js_scope {
+                        scope.names.copied(header, new);
+                    }
                     funcs.insert(header, new);
                 }
                 View::Catch { header, .. } => {
