@@ -963,7 +963,6 @@ fn an_application_memorizes_the_result_node() {
 /// `myint => myint`. A plain node becomes the unexpanded abbreviation node,
 /// whichever side it is on (compiler/ml/ctype.ml:2299-2303, 2331).
 #[test]
-#[ignore = "R3c build"]
 fn fixture_1_plain_node_takes_the_abbreviation() {
     for swapped in [false, true] {
         let mut c = checker(Mode::Success);
@@ -986,7 +985,6 @@ fn fixture_1_plain_node_takes_the_abbreviation() {
 /// `myint => r`. `a` is the node of one instance of the label; another
 /// instance of the label is not renamed.
 #[test]
-#[ignore = "R3c build"]
 fn fixture_6b_one_label_instance_is_renamed() {
     let mut c = checker(Mode::Success);
     // The label `n`: its type and the record's.
@@ -1013,7 +1011,6 @@ fn fixture_6b_one_label_instance_is_renamed() {
 /// `h: ((myint, int)) => (myint, int)`, `pairConst: (int, int)`. The link
 /// lands on a node inside `q`'s type (O6).
 #[test]
-#[ignore = "R3c build"]
 fn fixture_7_link_inside_another_bindings_type() {
     let mut c = checker(Mode::Success);
     let pair_const = scheme(&mut c, |c| {
@@ -1043,7 +1040,6 @@ fn fixture_7_link_inside_another_bindings_type() {
 /// `takesP: (phantom<'a>, 'a) => unit`: `(phantom<'a>, 'a) => phantom<'a>`.
 /// A ground node gains a variable (O9).
 #[test]
-#[ignore = "R3c build"]
 fn fixture_9_ground_node_gains_a_variable() {
     let mut c = checker(Mode::Success);
     let (a, w) = (var(&mut c), var(&mut c));
@@ -1073,7 +1069,6 @@ fn fixture_9_ground_node_gains_a_variable() {
 /// node (compiler/ml/ctype.ml:2299, 2331: `link_type t1' t2`), so the two
 /// nodes stay two nodes.
 #[test]
-#[ignore = "R3c build"]
 fn fixture_10_two_abbreviations_stay_two_nodes() {
     for (first, second) in [(A, B), (B, A)] {
         let mut c = checker(Mode::Success);
@@ -1104,23 +1099,32 @@ fn fixture_10_two_abbreviations_stay_two_nodes() {
     assert_eq!(c.g.repr(expansion), y);
     // `'x := string` on both sides, then the tuples' first components met.
     assert_eq!(c.g.repr(s1), c.g.repr(s2));
-    // Two nodes of ONE parameterised abbreviation unify their arguments and
-    // link node to node, left to right, with no expansion made.
+    // Two nodes of ONE parameterised abbreviation are expanded as well: only
+    // two nullary constructors of one path link node to node
+    // (compiler/ml/ctype.ml:2248-2257); every other pair of constructors
+    // goes to unify2, which expands both heads ("abbreviations with at
+    // least one parameter are systematically expanded",
+    // ctype.ml:1785-1790). So again the left node's expansion is linked to
+    // the right node, the two nodes stay two, and the expansions'
+    // components meet.
     let mut c = checker(Mode::Success);
     let (s1, s2) = (constr(&mut c, STRING, &[]), constr(&mut c, STRING, &[]));
     let (x, y) = (constr(&mut c, PA, &[s1]), constr(&mut c, PA, &[s2]));
     let nodes = c.g.nodes.len();
     c.unify(x, y).unwrap();
-    assert_eq!(c.g.repr(x), y);
-    assert_eq!(c.g.repr(s1), s2);
-    assert_eq!(c.g.nodes.len(), nodes, "same path: no expansion");
+    assert_eq!(path(&mut c, x), PA);
+    assert_ne!(c.g.repr(x), c.g.repr(y));
+    let expansion = c.find_expansion(x, false);
+    assert_ne!(expansion.0, NONE);
+    assert_eq!(c.g.repr(expansion), y);
+    assert_eq!(c.g.repr(s1), c.g.repr(s2));
+    assert!(c.g.nodes.len() > nodes, "same path, one parameter: both expand");
 }
 
 /// Fixture 11: `type cb = int => unit`,
 /// `let g = f => { plainF(f); takesCb(f); f }`: `cb => cb`. A node that is
 /// not a constructor is linked to the abbreviation.
 #[test]
-#[ignore = "R3c build"]
 fn fixture_11_arrow_takes_the_abbreviation() {
     let mut c = checker(Mode::Success);
     let f = var(&mut c);
@@ -1138,7 +1142,6 @@ fn fixture_11_arrow_takes_the_abbreviation() {
 /// `myint => (myint, box<string>)`: the variable links to the *copy* of
 /// the label's `myint`, which survives as the representative.
 #[test]
-#[ignore = "R3c build"]
 fn idea_1_the_label_copy_survives() {
     let mut c = checker(Mode::Success);
     let count = scheme(&mut c, |c| {
@@ -1162,7 +1165,6 @@ fn idea_1_the_label_copy_survives() {
 /// variable that occurs only in a phantom argument is bound to the
 /// constructor; one that occurs in a real argument is a clash (O13).
 #[test]
-#[ignore = "R3c build"]
 fn occurrence_through_an_abbreviation() {
     let mut c = checker(Mode::Success);
     let v = var(&mut c);
@@ -1172,4 +1174,141 @@ fn occurrence_through_an_abbreviation() {
     let v = var(&mut c);
     let p = constr(&mut c, PA, &[v]);
     assert!(c.unify(v, p).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// R3c: the cost of the expanding occurrence test and of the recursion repair.
+// ---------------------------------------------------------------------------
+
+/// `v` against a tuple of 10,000 `phantom<v>`: the binding walk reaches `v`
+/// under every element, and `occur_rec`'s retry expands each `phantom<v>`
+/// once (compiler/ml/ctype.ml:1396-1402). Linear, on a 2 MB stack.
+#[test]
+fn occurrence_retry_through_ten_thousand_phantoms_is_linear() {
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            let n = 10_000u64;
+            let mut c = checker(Mode::Success);
+            let v = var(&mut c);
+            let elements: Vec<Ty> = (0..n).map(|_| constr(&mut c, PHANTOM, &[v])).collect();
+            let wide = tuple(&mut c, &elements);
+            // Measured: 13 steps an element, most of them the expansion
+            // (two loop steps, one parameter, the 3-node template).
+            let count = steps::scope(|| c.unify(v, wide).unwrap());
+            assert!(count <= 14 * n, "{count}");
+            assert_eq!(c.g.repr(v), wide);
+            for &element in &elements {
+                assert_ne!(c.find_expansion(element, false).0, NONE);
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// `v` against `phantom<phantom<...<v>>>`, 10,000 deep: a variable in a
+/// constructor goes to `unify2` (ctype.ml:2240), whose `occur` finds `v`
+/// and expands only the innermost constructor. Linear, on a 2 MB stack.
+#[test]
+fn occurrence_retry_down_ten_thousand_constructors_fits_the_stack() {
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            let n = 10_000u64;
+            let mut c = checker(Mode::Success);
+            let v = var(&mut c);
+            let mut chain = v;
+            for _ in 0..n {
+                chain = constr(&mut c, PHANTOM, &[chain]);
+            }
+            let count = steps::scope(|| c.unify(v, chain).unwrap());
+            assert!(count <= 6 * n, "{count}");
+            assert_eq!(c.g.repr(v), chain);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// A tuple of 10,000 variables against `wide<t>`, an abbreviation of a
+/// 10,000-element tuple of `int` whose argument is that tuple: the right
+/// side was expanded and the left head occurs in it, so after the children
+/// the recursion repair forgets the memo, expands again and tests that the
+/// expansion is closed over the arguments (ctype.ml:2428-2436). Linear.
+#[test]
+fn recursion_repair_over_ten_thousand_elements_is_linear() {
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            let n = 10_000u64;
+            let mut c = checker(Mode::Success);
+            let wide_type = c.types.rows.len() as u32;
+            c.types.rows.push(c.types.rows[PHANTOM as usize]);
+            let param = var_at(&mut c, GENERIC);
+            let ints: Vec<Ty> = (0..n)
+                .map(|_| constr_at(&mut c, GENERIC, INT, &[]))
+                .collect();
+            let body = tuple_at(&mut c, GENERIC, &ints);
+            abbreviation(&mut c, wide_type, &[param], body);
+            let vars: Vec<Ty> = (0..n).map(|_| var(&mut c)).collect();
+            let left = tuple(&mut c, &vars);
+            let right = constr(&mut c, wide_type, &[left]);
+            let before = c.g.nodes.len() as u64;
+            let count = steps::scope(|| c.unify(left, right).unwrap());
+            assert!(count <= 12 * n, "{count}");
+            assert_eq!(c.g.repr(left), right);
+            assert_eq!(path(&mut c, vars[0]), INT);
+            // Two expansions: the first, and the repair's.
+            assert!(c.g.nodes.len() as u64 - before >= 2 * (n + 1));
+            let expansion = c.find_expansion(right, false);
+            assert!(
+                u64::from(expansion.0) > before + n,
+                "the repair's expansion"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// `unify_var` (compiler/ml/ctype.ml:2752-2771) writes the level before the
+/// link, so of two named variables the name is chosen by the levels after
+/// it (btype.ml:727): the target keeps its own, where `unify1_var`, which
+/// links first, gives it the lower variable's. A variable in a constructor
+/// goes to `unify` (ctype.ml:2755); a failure starts the trace with the
+/// pair.
+#[test]
+fn unify_var_lowers_before_it_links() {
+    let named = |c: &mut Checker, level: u32, name: u32| {
+        let v = var_at(c, level);
+        c.g.nodes[v.0 as usize].a = name;
+        v
+    };
+    let mut c = checker(Mode::Success);
+    let (v, w) = (named(&mut c, 2, 10), named(&mut c, 3, 20));
+    c.unify_var(v, w).unwrap();
+    assert_eq!(c.g.repr(v), w);
+    assert_eq!(c.g.nodes[w.0 as usize].a, 20);
+    assert_eq!(c.g.nodes[w.0 as usize].level, 2);
+    let mut c = checker(Mode::Success);
+    let (v, w) = (named(&mut c, 2, 10), named(&mut c, 3, 20));
+    c.unify(v, w).unwrap();
+    assert_eq!(c.g.nodes[w.0 as usize].a, 10, "unify1_var links first");
+
+    let mut c = checker(Mode::Success);
+    let v = var(&mut c);
+    let ph = constr(&mut c, PHANTOM, &[v]);
+    c.unify_var(v, ph).unwrap();
+    assert_eq!(c.g.repr(v), ph);
+
+    let mut c = checker(Mode::Explain);
+    let v = var(&mut c);
+    let p = constr(&mut c, PA, &[v]);
+    let tuple_of_v = tuple(&mut c, &[v, v]);
+    assert!(c.unify_var(v, tuple_of_v).is_err());
+    assert_eq!(c.trace, [[v, tuple_of_v]]);
+    assert_eq!(c.g.repr(v), v);
+    assert!(c.unify_var(v, p).is_err());
+    assert_eq!(c.g.repr(v), v);
 }
