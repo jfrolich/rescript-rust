@@ -1,5 +1,6 @@
 //! The naming log (THREE_TREES section 2 and 11.4, "T5 part B as
-//! redesigned"): what the lowering records so that printed names are
+//! redesigned" and "T5 part B as built"): what the lowering records so that
+//! printed names are
 //! assigned once, when the unit's root exists, without reading an
 //! expression. The rule is the header of `emit/naming.rs` (legacy
 //! `JsPrinter`, compiler/ext/ext_pp_scope.ml: add_ident, merge, sub_scope);
@@ -14,9 +15,12 @@
 //! - per variable its home: the row of the function whose scope was the
 //!   innermost open one when the variable's binder was written (`Log::bind`,
 //!   from `Bir::bind`), or the row that closed with it as a parameter;
-//! - nothing per reference: the references of a scope are the sites the
-//!   arena recorded while the scope was open (`scope::Scope::sites`), read
-//!   once, at the close of the innermost scope that was open.
+//! - nothing per reference besides its site: the references of a scope, to
+//!   variables and to imported modules, are the sites the arena recorded
+//!   while the scope was open (`scope::Scope::sites`), read once, at the
+//!   close of the innermost scope that was open. A released reference has
+//!   no site, so a free list holds what a live node of the function
+//!   references when it closes.
 //!
 //! A naming event is not stored. `Declare`, `Binder` and the cached bound of
 //! a range loop are read from the statement when `replay` reaches it;
