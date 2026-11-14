@@ -134,9 +134,10 @@ fn verify_exports_laws() {
     assert_eq!(paths, ["doubleIsEven", "Inner.nested"]);
     assert_eq!(items[0].kind, "law");
     assert_eq!(items[0].line, 4);
+    assert_eq!(items[0].detail["defs"], serde_json::json!({}));
     assert_eq!(
-        items[0].detail,
-        serde_json::json!({ "defs": {}, "params": [{ "name": "n", "shape": { "k": "int" } }] })
+        items[0].detail["params"],
+        serde_json::json!([{ "name": "n", "shape": { "k": "int" } }])
     );
 }
 
