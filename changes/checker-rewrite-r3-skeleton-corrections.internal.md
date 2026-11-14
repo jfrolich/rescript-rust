@@ -1,0 +1,1 @@
+- Correct three gaps of the R3 checker skeleton found by its first builder: trail fields readable inside the new checker, harness tiers that call only what their slice's dependencies built, and one test's levels.

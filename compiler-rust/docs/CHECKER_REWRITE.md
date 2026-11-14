@@ -1599,6 +1599,9 @@ a lock or a cell; a converter that runs for a unit nobody asked for.
 
 ### 6.4 R3: unification and expansion
 
+**Replaced by section 8 ("R3 as designed"): ten build slices, a skeleton
+and acceptance tests. The text below is kept for the record.**
+
 ```text
 Task R3: unification on the new graph. The reference is
 compiler-rust/src/types/ctype.rs function by function, and
@@ -2147,3 +2150,487 @@ what dropping it would buy; the design does not assume any of them.
    to port the readers and the diagnostics before the default flips, which
    moves the first measured saving on the default path from R7 to R9.
 6. **May O11 be dropped if R0 finds no program that shows it?**
+
+## 8. R3 as designed
+
+Section 6.4 gave R3 as one slice of eight commits. It is replaced by this
+section: ten build slices, a skeleton (`src/tc/{unify,expand,rows,relate}.rs`,
+every body `todo!("R3x")`), a differential harness (`src/tc/differential.rs`)
+and acceptance tests (`src/tc/r3_tests.rs`). A builder fills bodies in. It
+does not change a signature, a stated cost or a test; when one cannot be met
+it stops and reports a reproduction.
+
+### 8.1 The slices
+
+| Slice | Builds | File | Depends on | Can be built beside | Lines |
+|---|---|---|---|---|---:|
+| R3a | The unification entry, the two modes, the binding walk, the occurrence checks, arrows, tuples, constructors of one type, `undo_compress` | `unify.rs` | R1, R2 | R3b | 600 |
+| R3b | Declaration facts by type index, expansion, both memos and their cleanup, the memo-aware `instance` and `copy`, `restore` | `expand.rs` | R1, R2 | R3a | 600 |
+| R3d | The level walk with scopes and the expanding retry, `lower_args` | `expand.rs` | R3b | R3a | 300 |
+| R3c | Abbreviations in unification: `unify2`, `unify3`, the relink to the original node, the recursion repair, `unify_var` | `unify.rs` | R3a, R3b, R3d | nothing | 450 |
+| R3e | Worker-local descriptor pools; objects and fields | `rows.rs` | R3c | nothing | 500 |
+| R3f | Polymorphic variant rows | `rows.rs` | R3e | R3g | 600 |
+| R3g | Universal variables, polymorphic types, packages | `rows.rs` | R3e | R3f | 500 |
+| R3h | Pattern mode, equations, `reify`, `mcomp` | `rows.rs`, `unify.rs` | R3f, R3g | R3i, R3j | 600 |
+| R3i | `moregeneral`, `equal`, `matches` | `relate.rs` | R3g | R3h, R3j | 600 |
+| R3j | Subtyping without the declaration-directed coercions | `relate.rs` | R3g | R3h, R3i | 600 |
+
+Each slice is one pull request that removes the `ignore` of its own tests
+and the `#[allow(...)]` of a module once the module has no `todo!` left.
+R3a to R3d have their acceptance tests in full in this pull request. R3e to
+R3j have signatures and prompts; their tests are the first commit of the
+slice (an extension of the harness's program generator, proven not vacuous
+on the old side as `old_side_of_the_full_tier_is_not_vacuous` does) and are
+reviewed before the implementation commit is opened: question 5 of 8.5.
+
+### 8.2 Decisions
+
+Each is settled by a test that runs on the old checker today, by a probe
+with a release build of trunk (`--dump sig`), or by the OCaml source.
+
+**1. Instance sharing.** Publication identity (R2) certifies the exporter's
+sharing in the canonical text. That an *instance* built from a segment
+shares exactly what the old checker's instance shares is proven by
+`r3_tests::instance_from_a_segment_shares_what_the_old_instance_shares`
+(runs today) and by the kernel tier of the harness
+(`differential::kernel_tier_agrees_on_generated_cases`, 2,400 generated
+cases, runs today): the old checker instantiates a value of the
+internalized unit, the new graph instantiates the same value's template of
+the converted segment, and the two are compared in a form that numbers
+every node at its first visit across all operands of the case. R3b owns
+keeping it true for the memo-aware instance
+(`memo_aware_instance_shares_what_the_old_instance_shares`, the `Expand`
+tier).
+
+**2. Two abbreviations (the abbreviation case of O5).** `unify2` expands
+both heads; `unify3` then links the *expansion* of the chosen side to the
+*original* node of the other (`link_type t1' t2`,
+compiler/ml/ctype.ml:2299 and 2331). The abbreviation node of the chosen
+side is not linked: two nodes, two names. Probe (old checker, canonical
+signature, `same = (x, y) => if true { x } else { y }`):
+
+```text
+nullary     (x: a, y: b) => (same(x, y), x, y)   tuple(&4(a), @4, &5(b))
+nullary_rev (x: a, y: b) => (same(y, x), x, y)   tuple(&4(b), &5(a), @4)
+param       pa<string>, pb<string>               tuple(&6(pa<..>), &8(pa<..>), &10(pb<..>))
+plain       (x: a, y: int), both orders          tuple(&4(a), @4, &5(int))
+```
+
+The fixture is `r3_tests::old_checker_abbreviation_pair_keeps_two_nodes`
+(runs today); on the new graph it is
+`fixture_10_two_abbreviations_stay_two_nodes` (R3c), which also covers
+abbreviations with an argument, where the existing fixture had predefined
+types only.
+
+**3. O11 is observable.** R0 found no program; this is one. After one
+application of `f`, a later instance of `f` in the same definition has both
+its nullary nodes linked to the result node of the first instance:
+
+```text
+let f = (x: N.t) => x            (module N = M, or `type a = int` for N.t)
+let twice = j => (f(j), f)       &0((&1(N.t)) => &2(tuple(&3(N.t), &4((@3) => @3))))
+let noapp = (f, f)               nothing shared
+let twoapps = (j, k) => ...      &0((&1(N.t), &2(N.t)) => &3(tuple(@2, @2)))
+type p<'x> = ('x, int): twicep   nothing shared
+```
+
+The chain: the application runs `lower_args` on the callee's instance
+(types/ctype.rs:11682), which expands the head of the result type; the
+expansion of a nullary constructor is memorized in the memo all nullary
+constructors share (`simple_abbrevs`, compiler/ml/ctype.ml:197-202) with
+that node as the abbreviated type; a later copy of a nullary constructor of
+the same type finds it (`find_repr`, ctype.ml:720) and becomes a link to it
+(ctype.ml:782). The memo lives until the next `cleanup_abbrev`. It is not
+specific to module aliases: a plain nullary abbreviation shows it. A
+constructor with an argument never shows it, because its memo is the
+node's own. Test on the old checker:
+`old_checker_nullary_memo_shows_in_the_canonical_signature` (runs today).
+Acceptance on the new graph:
+`a_copy_of_a_nullary_constructor_links_to_the_memorized_node` (R3b) and
+`an_application_memorizes_the_result_node` (R3d).
+
+**4. What R1 left.** The copy-time lookup is R3b: `Checker::instance` and
+`Checker::copy` in `expand.rs`. The memo of nullary constructors is one
+16-byte row per type index, live by a generation number; `Memo::live`
+counts live rows. With `live == 0` the instance is R1's and costs R1's
+instructions plus one load and one untaken branch: the gate is
+instance1/3/5/7 through `Checker::instance` at most 143/223/308/330
+instructions (R1: 140/220/305/327), measured with the `tc_kernel` bench as
+TC_KERNEL_R1.md describes, and in steps
+`instance_with_an_empty_memo_costs_what_r1_costs` (equal to R1's count).
+With a live memo it costs one row load and one compare more per nullary
+constructor copied; that number is reported, not gated. The scope checks
+are R3d: `Checker::lower`. `TypeTable::scoped` counts the types that have a
+scope; with 0 the walk is R1's `lower` plus one compare
+(`lower_without_scopes_costs_what_r1_costs`: the same step count).
+
+**5. Modes.** `Mode::Success` and `Mode::Explain` of the graph are the old
+checker's `CheckMode::Success` and `CheckMode::Explain`
+(types/context.rs:783), with the same rule as `unify_takes_snapshot`
+(types/context.rs:1609): a top-level unification opens a speculation in
+`Explain`, and none in `Success` unless a speculation is already open. In
+`Success` a failed top-level unification outside a speculation sets
+`Checker::unexplained_failure` (the old `note_unexplained_unify_failure`)
+and leaves no trail, no trace and no saved descriptor. What it wrote into
+the graph stays written, and that is not observable: nothing is published
+and no diagnostic is printed from that run; the unit is checked again from
+its first item in `Explain` (3.4). Inside a speculation the trail is live
+and the owner restores. In `Explain` a failure undoes path compression only
+(`Btype.undo_compress`, compiler/ml/btype.ml:792), restores the descriptor
+of each linked structure node (`t1'.desc <- d1`, ctype.ml:2437) and keeps
+the trace. Tests: `success_mode_keeps_nothing_for_a_failure`,
+`explain_mode_keeps_the_trace_and_undoes_compression` (R3a).
+
+**6. Corrections to the task text of 6.4.**
+
+- *One slice of 6,000 lines.* Ten slices of at most 600.
+- *"Is-abbreviation as one bit of `TypeDecl`."* A constructor node's `a`
+  is a `paths` row (bridge/from_old.rs), not a `TypeDecl` index, and
+  `TypeDecl` rows exist only for the unit's own declarations. Unification
+  reads `expand::TypeTable`, a dense table by type index (16 bytes a row).
+  R3b fills it from a segment for the harness; R4 and R5a fill it for a
+  unit being checked.
+- *"The memo as slot 0 of a constructor's list."* True for a constructor
+  with arguments. A nullary constructor's memo is shared by all nodes of
+  its type (ctype.ml:200), which is what makes O11 observable, so it is a
+  row of `Memo::simple` and slot 0 of a nullary node stays empty.
+- *"The pair set exists only on the paths that do not link: abbreviation,
+  row and object cases."* OCaml's `unify` has no pair set in expression
+  mode at all: every case links before it recurses (ctype.ml:2227-2440),
+  and `unify_eq_set` is read only in pattern mode (ctype.ml:2205-2214).
+  The old Rust checker's `already_unified` set exists because it links
+  after the children in one case (types/ctype.rs:8005-8022), which the
+  failure list forbids. The criterion becomes: `rg -n 'pairs'
+  src/tc/unify.rs src/tc/rows.rs` shows the pair set in `unify_gadt`,
+  `mcomp` and the pattern-mode branch only. If the differential test then
+  differs from the old checker, the builder stops with the seed.
+- *"Unify of two 10,000-node equal types is at most 4 steps a pair."*
+  OCaml runs `occur` on every structure pair before it links
+  (ctype.ml:2330), a walk of the right-hand subtree with no level cut
+  (ctype.ml:1384-1408, 1488), and the old checker does the same
+  (types/ctype.rs:8210, 8242). The cost is therefore the pairs plus the sum
+  of the right-hand subtree sizes: linear for a wide type, quadratic for a
+  chain. The bounds are: at most 8 steps a pair on a wide type of 10,001
+  pairs; on a 10,000-deep chain at most `n(n+1)/2 + 260n` steps and no
+  stack overflow on 2 MB. This is derived from the two sources; it was not
+  measured by running the old checker (question 1 of 8.5).
+- *"Binding a variable ... 1 step in total when the type's root is below
+  the variable's level."* Impossible: a node made after `end_def` around a
+  variable of the definition is below the variable's level and holds it,
+  and binding must fail (O13); `unify1_var` calls `occur` with no level
+  test (ctype.ml:2216-2218). The bound is one walk, at most 2 steps a node,
+  whatever the levels (`binding_finds_the_variable_under_a_lower_root`).
+- *"A second unify of the same pair is 0 steps."* At most 1: the link the
+  first one wrote.
+- *"A snapshot in `Mode::Success`" is a failure.* Kept for the top-level
+  unification. Two places need an undo by OCaml's own definition and open a
+  speculation in either mode: the level walk when a clash triggers the
+  expanding retry (ctype.ml:631-640), opened only when
+  `TypeTable::scoped != 0`; and `matches`, `moregeneral` and the safe
+  expansion of a type with constrained parameters.
+- *Subtyping.* The coercions ReScript adds read a declaration's labels and
+  constructors (types/ctype.rs:6648, `subtype_concrete_typedecls`; 5222,
+  variant to primitive). Member tables do not exist before R5a. R3j builds
+  `subtype_rec` without them; they move to R6e, whose row in 5.3 already
+  lists coercions.
+- *Node kinds.* R1's graph has five tags. Objects, fields, rows, universal
+  variables, polymorphic types and packages keep the layout R2 publishes
+  (`TUPLE | EXTENDED`, children in list slots, a descriptor row), with
+  worker-local pools (`rows::Extras`), so R1's walks need no new case.
+- *Variable names in an instance (found by the harness, not in the task
+  text).* The old checker's `instance` gives every copied variable no name
+  (`copy_type_desc`, compiler/ml/btype.ml:510); R1's `Graph::instance` and
+  `Graph::copy` keep the scheme's name. That is O17. The kernel tier of the
+  harness reported it on its first run; it prints no names until R3b, whose
+  first commit makes the two R1 functions write no name
+  (`instance_drops_variable_names`). A `keep_names` instance
+  (ctype.ml:982) is added by the slice that first needs it (R5a).
+- *A type written through a module alias.* OCaml expands it to a node of
+  the target path and does not memorize that (ctype.ml:1211-1214). The old
+  checker memorizes it: the probe of decision 3 shows `N.t` shared. The new
+  checker follows the old checker (`expand::ALIAS`), because that is what
+  `both` mode compares (question 2).
+
+### 8.3 Per slice: functions, end state, commits, failure, gates
+
+The gates of 5.3 apply to every slice. "Tests" are in
+`src/tc/r3_tests.rs` unless a module is named; a slice is done when they
+pass without `ignore`.
+
+**R3a.** Functions: `Checker::{unify, unify_distinct, unify_pair, bind,
+binding_walk, occur, deep_occur, unify_expanded, push_children,
+undo_compress}`, with `unify_expanded` treating every head as its own
+expansion. End state: `rg -n 'todo!\("R3a"\)' src/tc` is empty; tests
+`unify_of_equal_wide_types_is_linear`,
+`unify_of_equal_deep_types_fits_the_stack`,
+`binding_a_variable_is_one_walk_of_the_type`,
+`binding_finds_the_variable_under_a_lower_root`, `link_directions`,
+`success_mode_keeps_nothing_for_a_failure`,
+`explain_mode_keeps_the_trace_and_undoes_compression`,
+`differential::structural_tier_agrees_on_generated_cases` (10,000 cases).
+Commits: (1) variables and the binding walk; (2) arrows, tuples,
+constructors and the explicit stack; (3) the two modes and
+`undo_compress`. Failure: a recursive `unify`; a link after the children;
+a level cut in an occurrence test; a trail entry in `Mode::Success`
+outside a speculation. Numbers: the step bounds in the tests; unify of two
+variables, of two ground 1-node types and of two 3-node types in
+`tc_kernel`, reported beside the kernel's 2.2 figures.
+
+**R3b.** Functions: `TypeTable::{from_segment, info}`,
+`Checker::{set_env, cleanup_abbrev, find_expansion, find_repr, memorize,
+forget_abbrev, expand_once, expand_head, instance, copy, restore}`,
+`link_node`; in R1's code, `Graph::instance` and `Graph::copy` write no
+variable name. End state: `rg -n 'todo!\("R3b"\)' src/tc` is empty; tests
+`instance_drops_variable_names`,
+`expansion_is_memorized_per_node_and_per_nullary_type`,
+`a_copy_of_a_nullary_constructor_links_to_the_memorized_node`,
+`instance_with_an_empty_memo_costs_what_r1_costs`,
+`memo_aware_instance_shares_what_the_old_instance_shares`,
+`differential::expand_tier_agrees_on_generated_cases`. Commits: (0)
+instances drop variable names, and `Tier::names` returns true for every
+tier; (1) the table from a segment; (2) expansion and the two memos; (3) the memo-aware
+instance and copy; (4) `restore` with its cleanup. Failure: a memo lookup
+per node when `live == 0`; a hash map by type index; clearing the nullary
+memo by a pass; an expansion that links the abbreviation node. Numbers:
+instance1/3/5/7 at most 143/223/308/330 with an empty memo.
+
+**R3d.** Functions: `Checker::{lower, lower_args}`. End state:
+`rg -n 'todo!\("R3d"\)' src/tc` is empty; tests
+`lower_without_scopes_costs_what_r1_costs`,
+`lower_checks_scopes_and_expands_to_escape`,
+`an_application_memorizes_the_result_node`. Commits: (1) the scoped walk;
+(2) the expanding retry; (3) `lower_args`. Failure: a `TypeInfo` load per
+node when `scoped == 0`; a speculation opened when `scoped == 0`.
+
+**R3c.** Functions: the expansion in `unify_expanded`, the expansion retry
+of `binding_walk`, `FrameKind::Recursion`, `Checker::unify_var`. End state:
+`rg -n 'todo!\("R3c"\)' src/tc` is empty; the six fixture tests,
+`idea_1_the_label_copy_survives`, `occurrence_through_an_abbreviation`,
+`differential::full_tier_agrees_on_generated_cases` (10,000 cases).
+Commits: (1) `unify2`: expand, lower, choose the side; (2) `unify3`: link
+the expansion to the original, the recursion repair; (3) `unify_var`.
+Failure: linking the abbreviation node instead of its expansion; linking
+after the children; a pair set.
+
+**R3e to R3j.** Functions: every signature of `rows.rs` and `relate.rs`
+carrying the slice's name. End state for each: no `todo!` with its name;
+its generator extension and old-side vacuity test (first commit); the
+`Full` tier at 10,000 cases with the extension on. R3e: fields in OCaml's
+order, the mutability cells. R3f: the fresh row for the missing tags is
+made once; closedness and the row name as ctype.ml:2560-2600. R3g: scopes
+of universal variables are a stack, not a map. R3h: the pair set only
+here; an equation writes one `TypeTable` row and cleans the memos. R3i:
+every relation restores its speculation. R3j: the constraints are
+returned, not unified inside the walk.
+
+### 8.4 The build prompts
+
+The common part of 6.0 is prepended to each. Then, verbatim:
+
+```text
+You build slice R3x of the type checker rewrite. Read, in this order:
+AGENTS.md; compiler-rust/docs/CHECKER_REWRITE.md sections 2.1, 3.3 and 8;
+the files of your slice in compiler-rust/src/tc/. The skeleton is fixed:
+you fill in every body that says todo!("R3x") with your slice's name, and
+nothing else. You do not change a signature, a doc comment's stated cost,
+a size test, or a test. You do not add `#[ignore]`, and you remove the
+`#[ignore = "R3x build"]` of your slice only. If a signature, a cost or a
+test cannot be met, stop: write the smallest reproduction (for a
+differential failure: the seed and the report it prints) in the pull
+request and end your turn. Do not work around it.
+
+The behaviour is OCaml's, at the location each doc comment cites; read
+that code before you write the body. Where compiler-rust/src/types/ctype.rs
+does the same thing in another form, OCaml's order of work wins, and the
+differential test (src/tc/differential.rs) is the judge: it runs the same
+operations on the old checker and on your code and compares which
+operation failed and every node's sharing, level and name.
+
+The intent, not a layout: how you split a body into private helpers is
+yours to decide; say what you did in the commit message. A private helper
+has a doc comment that states its cost. No recursion over types: use
+Checker::frames or Graph::work. No allocation per visited node. No hash
+map keyed by a node, a type index or a pair, except unify::PairSet.
+
+When a module has no todo! left, remove its #[allow(...)] line in
+src/tc/mod.rs and fix what the compiler then reports.
+
+Done means, all on your last commit:
+  cargo test --manifest-path compiler-rust/Cargo.toml tc::   passes, and
+    the tests named for your slice in section 8.3 are not ignored;
+  rg -n 'todo!\("R3x"\)' compiler-rust/src/tc                prints nothing;
+  cargo clippy --locked --manifest-path compiler-rust/Cargo.toml
+    --all-targets --all-features -- -D warnings              passes;
+  the gates of section 5.3.
+Paste the output of each in the pull request.
+```
+
+Then one of these, in place of "R3x" and after the text above:
+
+```text
+R3a. First edit: Checker::unify in src/tc/unify.rs (two repr and a
+compare, then unify_distinct). Then unify_distinct's loop over
+Checker::frames, then bind and binding_walk. In this slice a head is its
+own expansion: unify_expanded does not call expand_head. Commits: (1)
+variables and the binding walk, with link_directions' first three blocks
+passing; (2) arrows, tuples, constructors; (3) the two modes and
+undo_compress. Relations to hold: unify of two equal types makes no node;
+a second unify of the same pair costs at most 1 step; the step count of
+unify_of_equal_wide_types_is_linear is at most 8 a pair. Report from the
+tc_kernel bench: unification of two variables, of two 1-node ground types
+and of two 3-node types, in instructions, beside the kernel's figures of
+section 2.2. Say plainly if a figure is above the kernel's.
+```
+
+```text
+R3b. Commit 0, before anything else: in src/tc/template.rs make
+Graph::instance and Graph::copy give a copied variable no name (a = NONE;
+compiler/ml/btype.ml:510), make differential::Tier::names return true for
+every tier, and see the kernel tier still pass; this is the one change to
+R1's code and the one change to the harness you make. Then: TypeTable::info
+and TypeTable::from_segment in src/tc/expand.rs; run differential's Expand tier old side to see what a
+generated declaration looks like. Then expand_once (a memo miss
+instantiates the manifest's template at the node's level and memorizes
+before the body is linked, as `subst` does), then the memos, then
+Checker::instance and Checker::copy. Commits as in section 8.3. Relations
+to hold: with Memo::live == 0, Checker::instance makes the nodes and takes
+the steps Graph::instance takes for the same template, and instance1/3/5/7
+in the tc_kernel bench cost at most 143/223/308/330 instructions (measure
+as TC_KERNEL_R1.md does; paste the table). An expansion never links the
+abbreviation node. cleanup_abbrev is one store for the nullary memo.
+```
+
+```text
+R3d. First edit: Checker::lower in src/tc/expand.rs: when
+self.types.scoped == 0 call Graph::lower and return. Then the scoped walk
+(ctype.ml:584-630), then the retry (ctype.ml:631-640), then lower_args.
+Relations to hold: with scoped == 0 the step count equals Graph::lower's
+on the same graph and no speculation is opened; with a scoped type, a
+clash leaves the graph as it was before the call.
+```
+
+```text
+R3c. First edit: Checker::unify_expanded in src/tc/unify.rs: call
+expand_head(ExpandMode::Unif) on both sides as unify2 does
+(ctype.ml:2276-2303). The link of unify3 is from the expanded head of the
+chosen side to the ORIGINAL node of the other side (ctype.ml:2331), written
+before the children are pushed. Commits as in section 8.3. Relations to
+hold: fixture_10's assertions; unifying two nodes of one abbreviation
+makes no node; the Full tier of the differential test passes at 10,000
+cases. If a seed fails and OCaml's source supports your code, stop and
+report the seed: do not copy the old checker's order.
+```
+
+The last prompt is superseded by decision 5 of 8.6: no builder starts R3e
+to R3j from it.
+
+```text
+R3e..R3j. First commit, before any body: extend
+differential::program_source and differential::type_text with your
+slice's types behind a new Tier (R3e: object types; R3f: polymorphic
+variants; R3g: records with a polymorphic field, first-class module
+types; R3h: a GADT and Op::UnifyPattern; R3i: Op::Moregeneral, Op::Equal,
+Op::Matches; R3j: Op::Subtype), with old_form and node_form printing them,
+and a test like old_side_of_the_full_tier_is_not_vacuous that runs today.
+Push it and wait for review of that commit. Then the bodies, one function
+family a commit, in the order of the signatures in the file.
+```
+
+### 8.5 Open questions
+
+1. **The occurrence walk per structure pair makes unification of deep
+   equal types quadratic, as in OCaml and the old checker.** A deferred
+   check (one acyclicity walk at the end of a top-level unification in
+   `Mode::Success`) would make it linear. Recommended: not in R3; decide at
+   R5c, when the profile of real units shows what `Checker::occur` costs.
+2. **The memo of a module-alias expansion follows the old checker, not
+   OCaml's source.** Recommended: keep it, since `both` mode compares with
+   the old checker; revisit when the old checker is deleted (R8c).
+3. **Memo entries a constructor inherits from the node whose expansion made
+   it (`ref !abbrevs`, `Mlink`; ctype.ml:788-797) are not modelled.** They
+   matter for recursive abbreviations through objects and variants.
+   Recommended: R3f's generator extension includes a recursive variant
+   abbreviation; if the `Full` tier then differs, slot 0 becomes an index
+   into a small memo-list pool, in R3f.
+4. **`check_abbrev_env` cleans the memos whenever the environment of an
+   expansion differs from the previous one (ctype.ml:1163).** The skeleton
+   takes a scope index (`Checker::set_env`); which scope changes count is
+   R4's and R5b's to match. Recommended: R5b's `both` mode decides; the
+   harness uses one environment.
+5. **R3e to R3j have no acceptance tests in this pull request.**
+   Recommended: accept, with the first-commit rule of 8.4; or run a second
+   skeleton turn for them once R3c's `Full` tier runs.
+
+### 8.6 The open questions as decided
+
+Decided in review, before this section was merged.
+
+1. **The occurrence walk per structure pair stays in R3, as OCaml has
+   it.** The candidate to measure at R5c is named now, so that it is not
+   rediscovered: in `Mode::Success` a failure only has to be detected, not
+   located, because the unit is checked again in `Mode::Explain`. One
+   acyclicity walk at the end of a top-level unification could therefore
+   replace the walks per pair in that mode. Before it is built it needs a
+   proof that unification terminates on the graph an omitted check leaves
+   behind, the same expansion rule as `occur_rec` (a constructor that holds
+   the node is expanded before the check gives up, ctype.ml:1396-1402), and
+   the share of `Checker::occur` in the profile of real units. Until then
+   the bounds of decision 6 hold and `Mode::Explain` never changes.
+2. **The memo of a module-alias expansion follows the current checker**
+   until R8c deletes it, because `both` mode compares shared nodes with it.
+   The `ALIAS` flag's doc comment cites both sources. Whether the
+   difference from OCaml's source is visible in a diagnostic is not known:
+   a search for a program that shows it is a task of its own, and if one is
+   found the current checker is corrected first and this rule follows it.
+3. **Inherited memo entries are decided by a test, in R3f**: its generator
+   includes a recursive abbreviation through a variant and one through an
+   object. If the `Full` tier differs, slot 0 becomes an index into a pool
+   of memo lists in that slice.
+4. **Which scope changes clean the memos is R5b's**, judged by `both`
+   mode. The harness keeps one environment.
+5. **R3e to R3j get a second skeleton turn**, not a generator written by
+   their builder: the tests of a slice are written by the designer. It runs
+   when R3c's `Full` tier passes, extends the generator and the two forms
+   tier by tier, proves each extension not vacuous on the current checker's
+   side, and writes one prompt per slice.
+
+Two notes for that turn. The forms of the harness print a constructor by
+the last component of its path, which is enough while a generated program
+is one unit; a tier that generates a second module prints the whole path.
+And the ignored acceptance tests of R3a to R3d have not run: where one
+contradicts the OCaml lines its doc comment cites, the builder reports the
+test with those lines and the test is corrected, as `link_directions` was
+in review (the survivor of two nullary constructors ends at the left
+node's level, ctype.ml:2256).
+
+Corrections after the first builder (R3a) stopped at three gaps of the
+skeleton; all three were the skeleton's, not the builder's.
+
+- `Checker::undo_compress` reads the trail: `graph::Change` and
+  `graph::Speculation` have their fields readable inside `tc`.
+- The tiers of the harness call only what their slice's dependencies
+  have built. Below `Expand` the new side uses R1's `Graph::instance`,
+  `Graph::copy` and `Graph::lower` and an empty declaration table (a
+  structural program has no abbreviation); only the full tier calls the
+  scoped `Checker::lower`; no tier of R3a to R3d fills the descriptor
+  pools. Names are compared from `Expand` up until R3b's first commit, which
+  turns them on for every tier; the slice of R3a and R3b that merges second
+  merges trunk first, so its structural tier runs with names.
+- `link_directions`: the test's checker is one definition deep, so the two
+  nullary constructors are at levels 2 and 3 and the survivor ends at 2.
+  The review's own correction above had the levels wrong.
+
+6. **In `Mode::Explain` a binding checks occurrence before it writes a
+   level**, as `unify1_var` does (`occur` first, then `link_type`, then
+   `update_level`, ctype.ml:2216-2225): two walks. The combined walk of
+   `Checker::binding_walk` is for `Mode::Success` and for a binding inside
+   a speculation whose owner restores, where what a failed walk lowered is
+   either never observed or undone. In `Explain` a failed top-level
+   unification undoes path compression only, so a level lowered before the
+   variable was found would stay and could reach a printed type or a later
+   generalization. `Explain` runs on failing units only; its cost is not
+   gated.
+7. **For R3c**: a `Linked` frame records the expanded left head and the
+   right node, which is the trace pair only while the left head is its own
+   expansion. With expansion the frame records the original pair, and the
+   swapped side of ctype.ml:2299.

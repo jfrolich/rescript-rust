@@ -1,5 +1,9 @@
 # Complete-unit lowering allocation scaling
 
+The instruction measurements below describe `d227e543f`, before the subsequent
+merge of `e53bfb10a`; they have not been rerun for that merge. See the merge
+validation note at the end.
+
 **The split-planner candidate passes the default-path gate: +0.000768%, within +0.02%.**
 Check mode is -2.561383%. Final raw counts and source-boundary checks are at the end;
 all earlier performance results are historical.
@@ -846,3 +850,24 @@ Default unsets `RESCRIPT_BACKEND`; check sets it to `check`. Raw JSON:
 
 No wall-time speedup, RSS reduction or current application benchmark is claimed.
 The PR remains draft for coordinator review.
+
+## Merge validation: upstream e53bfb10a
+
+The merge preserves upstream's naming-log and checker R3 skeletons. The scope
+constructor conflict keeps source-domain preallocation while `Scope::default`
+also initializes the new test-only naming log. One new naming test constructs
+`SwitchInput`, adapting to this branch's owned-input/borrowed-header API without
+changing its assertions. The five legacy planner/caller files remain identical
+to upstream.
+
+Merged-candidate validation: compiler build and all-target check; full serial
+compiler suite 2,620 passed with 95 upstream-existing ignores, integration1+3,
+doctests5 (7 existing ignores); rewatch build and 210+9 tests; strict all-target
+compiler clippy; JS737/737, stdlib113/113, GenType2/2; unchanged coverage ratchet;
+four whole-unit allocation tests still 68/85/68/138 at both widths. The cost
+scanner reports 495 production functions, 187 changed/new, zero missing/generic
+notes. The three Python test suites newly wired into CI also pass.
+
+The larger ignore count comes from the merged upstream skeleton tests; no test
+is ignored or relaxed by this conflict resolution. Instruction and wall-time
+benchmarks were not rerun, so the d227e543f figures above remain pre-merge evidence.
