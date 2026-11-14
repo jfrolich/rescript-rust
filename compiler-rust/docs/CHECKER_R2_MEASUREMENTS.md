@@ -14,12 +14,11 @@ For each side: `env -u RESCRIPT_CHECKER RESCRIPT_RUNTIME="$RUNTIME" RAYON_NUM_TH
 
 **Instruction delta: −0.234847%, within the +0.02% limit.** This is not a wall-clock speedup claim. Hyperfine (5 runs, one warmup, clean before each build): baseline **8.876 ± 0.169 s**, range **8.727–9.090 s**; candidate **9.927 ± 0.191 s**, range **9.712–10.132 s**, about **11.8% slower**. These timings need separate scrutiny despite the instruction gate passing.
 
-Baseline inclusive `driver::publish_signature` cost: **906,128,693 instructions**, **1.390223%** of the minimum baseline build. Measured by `valgrind --tool=callgrind --collect-atstart=no '--toggle-collect=*driver*publish_signature' ... "$BASE" build .`, after cleaning, checker unset, one worker. The prompt's 1.34% reference budget corresponds to **873,393,977 instructions** on this baseline. Candidate inclusive `from_old::run` cost is **pending**, not inferred from a partial profile.
+Baseline inclusive `driver::publish_signature` cost: **906,128,693 instructions**, **1.390223%** of the minimum baseline build. Measured by `valgrind --tool=callgrind --collect-atstart=no '--toggle-collect=*driver*publish_signature' ... "$BASE" build .`, after cleaning, checker unset, one worker. The prompt's 1.34% reference budget corresponds to **873,393,977 instructions** on this baseline. Application inclusive `from_old::run` cost was **not measured**; the bounded same-corpus evidence below replaces that attempted measurement.
 
 
-The complete converter profile is outstanding. A partial run terminated by a
-ten-minute command timeout is excluded. The PR remains draft until that
-measurement and the final acceptance record are complete.
+The application profile was terminated by a ten-minute command timeout and is
+excluded. The scoped tests/tests profile below is complete.
 
 ## Alternating remeasurement and default-path audit
 
@@ -101,4 +100,54 @@ Four files, 204 insertions / 22 deletions; no rewatch hunk:
 
 OnceLock sizes were checked with `std::mem::size_of` on this x86_64 toolchain.
 No performance code change is justified by the non-reproducing block timing.
-The inclusive converter profile remains outstanding.
+The scoped inclusive converter profile is recorded below.
+
+## Bounded inclusive converter measurement (tests/tests)
+
+The **application converter instruction figure was not measured**: its
+Callgrind run exceeded the command limit. Its partial count is discarded.
+The accepted scope for this informational measurement is instead `tests/tests`,
+from its own directory, one worker, checker Both, clean before each run.
+No application converter count or percentage is extrapolated from this corpus.
+
+| Inclusive region | Executable source | Instructions | Calls |
+|---|---|---:|---:|
+| `tc::bridge::from_old::run` (including its publisher and callees) | candidate `0f1fa2def` | 52,032,132 | 748 |
+| Old `driver::publish_signature` (including callees) | baseline `be1b3a482e` | 127,992,448 | 748 |
+
+Both runs exited 0 and compiled **743 source modules**. Publication/conversion
+calls are 748, not an old-source-node count. The ratio is
+**0.406525× (40.652502%)**. This same-corpus ratio is the measured evidence
+R3/R5c start from, not an application performance gate.
+
+The denominator deliberately uses the old baseline publication function,
+as did the 906,128,693-instruction application reference: the candidate's
+Both-mode `driver::publish_signature` additionally contains conversion and
+canonical comparison, which would not be the old publication cost.
+Both executions below use `RESCRIPT_CHECKER=both`.
+
+With absolute `BASE`, `CANDIDATE`, `RUNTIME`, and `OUT` paths prepared:
+
+```sh
+cd tests/tests
+export RESCRIPT_RUNTIME="$RUNTIME" RAYON_NUM_THREADS=1 RESCRIPT_CHECKER=both
+"$CANDIDATE" clean .
+timeout 85 valgrind --tool=callgrind --collect-atstart=no \
+  '--toggle-collect=*from_old*run' \
+  --callgrind-out-file="$OUT/tests-from-old.callgrind" "$CANDIDATE" build .
+"$BASE" clean .
+timeout 85 valgrind --tool=callgrind --collect-atstart=no \
+  '--toggle-collect=*driver*publish_signature' \
+  --callgrind-out-file="$OUT/tests-publisher.callgrind" "$BASE" build .
+grep -E '^(summary|totals):' "$OUT/tests-from-old.callgrind" "$OUT/tests-publisher.callgrind"
+callgrind_annotate --auto=no --inclusive=yes --tree=both --threshold=100 \
+  "$OUT/tests-from-old.callgrind"
+callgrind_annotate --auto=no --inclusive=yes --tree=both --threshold=100 \
+  "$OUT/tests-publisher.callgrind"
+```
+
+The collected `summary` and `totals` match the inclusive region counts above;
+annotation confirms 748 calls each. No instructions-per-old-source-node figure
+is reported: the release artifact does not emit the test-only source counter.
+No separate instrumented binary was built.
+
