@@ -150,4 +150,3 @@ The collected `summary` and `totals` match the inclusive region counts above;
 annotation confirms 748 calls each. No instructions-per-old-source-node figure
 is reported: the release artifact does not emit the test-only source counter.
 No separate instrumented binary was built.
-
