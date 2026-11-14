@@ -1192,7 +1192,8 @@ is claimed; the CI `Instruction count` check reports the build's figures.
 
 ### 1. Now: trunk `c4e9326eb`
 
-Measured on x86-64 Linux with Valgrind 3.22.0 and the pinned
+Measured on x86-64 Linux (AMD Ryzen 9 9950X, eight virtual CPUs) with
+Valgrind 3.22.0 and the pinned
 `rustc 1.102.0-nightly (ac8310ba6 2026-11-09)`. R1 method: fat LTO,
 one codegen unit, line tables, 1,000,000 iterations minus zero, then
 subtract the operation's own build-only twin. No compiler source changed.
@@ -1648,7 +1649,7 @@ All citations below are `compiler/ml/ctype.ml` unless explicitly marked.
 | `expand_once` / `expand.rs:747–784` | subst: parameter binding and result | REQUIRED; 2279–2282; 1100–1123 | 0.000000 | 50.000000 |
 | `expand_once` / `graph.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 0.000000 | 4.000000 |
 | `expand_once` / `graph.rs:13` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 0.000000 | 4.000000 |
-| `expand_once` / `graph.rs:154–156` | Graph::link: repeated identity guard | OVERHEAD; 2233; 2257; 2331 (distinct pair already established) | 0.000000 | 4.000000 |
+| `expand_once` / `graph.rs:154–156` | Graph::link: repeated identity guard | OVERHEAD; 1100–1123; 2216–2222 (fresh parameter distinct from argument) | 0.000000 | 4.000000 |
 | `expand_once` / `graph.rs:157–164` | Graph::link: load source, write link | REQUIRED; 2221; 2257; 2331 | 0.000000 | 28.000000 |
 | `expand_once` / `graph.rs:165–167` | Graph::link: speculation/name-rule guard | REQUIRED; 2221; 2257; 2331 (btype.ml:713–731) | 0.000000 | 24.000000 |
 | `expand_once` / `graph.rs:234–252` | Graph::repr: representative loads/tests (inlined) | UNSURE; 2231–2233; 2278–2288 | 0.000000 | 100.000000 |
@@ -1863,3 +1864,44 @@ The larger, explicitly UNSURE opportunities are:
 
 No source under `compiler-rust/src` was edited. These are kernel costs;
 no application speedup is inferred, and no optimization is submitted.
+
+### Final application repeatability check
+
+A 3,735-module application was checked with **two copies of the same
+release executable**, because this change touches no production compiler
+code. This is an output/repeatability sanity check, not independently built
+before/after binaries and not evidence of an optimization. Both executable
+SHA-256 hashes were
+`504d39684aeba51cb754f4b1955ec1a3c95d249d8a850775d759792c231ea3d1`.
+
+```sh
+cargo build --release --manifest-path rewatch/Cargo.toml
+# Finished `release` profile [optimized] target(s) in 4m 57s
+# BASE and CANDIDATE are copies of that executable; APP is outside the checkout.
+scripts/bench_project.sh "$APP" "$BASE" "$CANDIDATE" --runtime-from "$PWD"
+RESCRIPT_RUNTIME="$PWD/packages/@rescript/runtime" \
+  python3 scripts/compare_checker_builds.py "$APP" "$BASE" "$CANDIDATE"
+```
+
+Sanitized output (both scripts exited 0):
+
+```text
+base: instructions=63919897203 source_lines=656677 instructions_per_line=97338.413
+candidate: instructions=63913772174 source_lines=656677 instructions_per_line=97329.086
+Outputs identical
+Instructions difference: -0.0096%
+base: exit code 0, 3735 signatures, 32 diagnostics in 18 files, 3980 generated files
+candidate: exit code 0, 3735 signatures, 32 diagnostics in 18 files, 3980 generated files
+outcome: both exit with 0
+signatures: no difference (3735 compared)
+diagnostics: no difference (18 compared)
+javascript: no difference (3980 compared)
+no differences
+```
+
+All 23 PR checks passed at `f270e0b60`, including output parity and instruction
+count. This final update only records validation and clarifies the machine
+and the fresh-parameter link citation; it changes no benchmark or compiler
+code. The source-group totals were independently resummed from the Markdown:
+916.953969, 122, 119, 124.000058, 960.954414 and 2826.268888, matching their
+operation measurements within 0.0001 instruction.
