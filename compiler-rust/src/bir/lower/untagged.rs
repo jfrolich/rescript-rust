@@ -191,6 +191,10 @@ pub(super) fn prepare(arena: &mut Bir) -> (Storage, dispatch::Plan<u32>) {
     storage.facts.reserve(fact_count, kind_count);
     graph.reserve_groups(literals + payloads + variants);
     graph.reserve_literal_clauses(literals + fact_count);
+    // Initial room for run/branch nodes and fixed kind-dispatch scaffolding.
+    // These are capacities, not a rejection bound on larger expansions.
+    let graph_nodes = 4 * (literals + payloads) + 16 * variants;
+    graph.reserve_trees(graph_nodes);
     let fact_literals = arena.pools.switches.iter().filter_map(|header| {
         if let SwitchDispatch::Variant(facts) = &header.dispatch { Some(facts.literal_tags.iter()) }
         else { None }

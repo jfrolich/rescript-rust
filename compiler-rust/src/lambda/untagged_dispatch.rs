@@ -346,6 +346,11 @@ impl<A> Default for Plan<A> {
 }
 
 impl<A> Plan<A> {
+    /// O(1): initial tree capacity supplied by the unit's imported arm domain.
+    pub(crate) fn reserve_trees(&mut self, trees: usize) {
+        self.trees.reserve_exact(trees);
+    }
+
     /// O(1) reservations for emitted and temporary literal clauses.
     pub(crate) fn reserve_literal_clauses(&mut self, literals: usize) {
         self.value_clauses.reserve_exact(literals);
