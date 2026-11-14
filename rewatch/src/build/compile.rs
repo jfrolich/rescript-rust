@@ -3954,6 +3954,10 @@ fn compile_with_location_retry<T>(
 
 /// The located parse of `source`, in which a location-free compile of it
 /// places its warnings (`CompilerOptions::warning_locations`).
+/// Cost now: one Arc reference-count increment and one closure allocation.
+/// Cost when called: a source parse/frontend run with location tables. The
+/// owned `WarningLocations` API requires the closure to retain `ParseSource`;
+/// it cannot borrow the temporary options assembly's reference to that Arc.
 fn warning_locations(
     source: &Arc<super::build_types::ParseSource>,
 ) -> rescript_compiler::driver::WarningLocations {

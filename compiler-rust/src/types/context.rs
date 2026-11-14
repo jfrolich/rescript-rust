@@ -1643,7 +1643,8 @@ impl TypeContext {
         self.attempt_counters.deferred.set(true);
     }
 
-    /// O(1) per retained unit: publish its counters exactly once. Probes
+    /// Publish retained counters once: O(held map/vector entries) to merge,
+    /// with process-total locks per publication, not per probe. Probes
     /// after this call count locally again and are published once, when the
     /// context is flushed or dropped.
     pub(crate) fn keep_attempt_counters(&self) {
@@ -1655,6 +1656,8 @@ impl TypeContext {
     /// Publish the counts of a context that is not a deferred attempt now,
     /// rather than when it is dropped: for a long-lived context, such as a
     /// worker's view scratch, whose drop may come after the report.
+    /// Cost: O(1) if deferred or empty; otherwise O(held map/vector entries)
+    /// and process-total locks once per publication, with possible map growth.
     pub(crate) fn flush_counters(&self) {
         if !self.attempt_counters.deferred.get() {
             self.attempt_counters.publish();
@@ -1675,7 +1678,8 @@ impl TypeContext {
     }
 
     /// Read the counts this context holds and has not published (all zero
-    /// when it holds none).
+    /// when it holds none). Cost: O(1) borrow/default construction plus the
+    /// supplied reader's cost; no heap allocation, TLS or global-total lock.
     pub(crate) fn attempt_counter<R>(
         &self,
         read: impl FnOnce(&crate::perf_counters::AttemptCounters) -> R,

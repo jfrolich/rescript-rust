@@ -544,6 +544,10 @@ impl PortablePersStruct {
         self.decode_signature(self.encoded(), None)
     }
 
+    /// Decode an owned signature for this attempt. Cost: O(encoded bytes +
+    /// rebased names), with allocations for the decoded graph. The first
+    /// `encoded()` access can also serialize the retained signature graph.
+    /// Counter attribution is one local increment per signature, not per node.
     fn signature_for_attempt(&self, ctx: &TypeContext) -> PortableSignature {
         self.decode_signature(self.encoded(), Some(ctx))
     }
@@ -1948,6 +1952,11 @@ pub(crate) fn publish_signature(
     })
 }
 
+/// Cost: build the exported graph, then fingerprint and per-item hash walks
+/// over its reachable types; allocate the frozen graph and one publication.
+/// Fallback serializes a portable graph instead. Check mode additionally
+/// builds the portable oracle and both byte encodings. These are whole-unit
+/// walks, not constant-time publication or per-lookup instrumentation.
 fn publish_signature_attributed(
     ps: &PersStruct, ctx: &TypeContext, arena: Option<&ParseArena>,
     mode: SignaturePublicationMode, checked: bool,
