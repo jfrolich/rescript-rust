@@ -1,0 +1,1 @@
+- Redesign the naming log of the backend lowering (scope rows and free lists, a replay over statement lists) as a skeleton with acceptance tests; nothing a build runs changes.
