@@ -175,6 +175,16 @@ struct LiteralEmission {
 pub(super) fn prepare(arena: &mut Bir) -> (Storage, dispatch::Plan<u32>) {
     let mut storage = Storage::default();
     let mut graph = dispatch::Plan::default();
+    let fact_literals = arena.pools.switches.iter().filter_map(|header| {
+        if let SwitchDispatch::Variant(facts) = &header.dispatch { Some(facts.literal_tags.iter()) }
+        else { None }
+    }).flatten();
+    let arm_literals = arena.pools.switch_keys.iter().filter_map(|key| {
+        if let CaseKey::Lambda(SwitchKey::Constructor(Case::Constant(tag))) = key {
+            Some(&tag.literal)
+        } else { None }
+    });
+    graph.metadata.reserve_literals(fact_literals.chain(arm_literals));
     for i in 0..arena.pools.switches.len() {
         let h = arena.switch(crate::bir::SwitchId(i as u32));
         let SwitchDispatch::Variant(facts) = h.dispatch else {

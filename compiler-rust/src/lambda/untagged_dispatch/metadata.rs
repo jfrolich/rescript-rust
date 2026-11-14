@@ -76,6 +76,33 @@ pub(crate) struct Metadata {
     instance_index: Vec<InstanceId>,
 }
 impl Metadata {
+    /// O(source literal bytes/counts), no interning: reserve the known import
+    /// domain before visiting its literals. Bounds include both source spelling
+    /// and canonical equality spelling; float hex keys fit in forty bytes.
+    pub(crate) fn reserve_literals<'a>(&mut self, tags: impl Iterator<Item = &'a LiteralTag>) {
+        let (mut count, mut bytes, mut encoding) = (0, 0, 0);
+        for tag in tags {
+            let (source, key) = match tag {
+                LiteralTag::String(s) => (s.len(), s.len() + 7),
+                LiteralTag::BigInt(s) => (s.len(), s.len() + 8),
+                LiteralTag::Float(s) => (s.len(), (s.len() + 7).max(40)),
+                LiteralTag::Int(_) => (0, 40),
+                LiteralTag::Bool(_) => (0, 5),
+                LiteralTag::Null => (0, 4),
+                LiteralTag::Undefined => (0, 9),
+            };
+            count += 1;
+            bytes += source + key;
+            encoding = encoding.max(key);
+        }
+        self.text.reserve_exact(bytes);
+        self.texts.reserve_exact(2 * count);
+        self.text_index.reserve_exact(2 * count);
+        self.literals.reserve_exact(count);
+        self.literal_index.reserve_exact(count);
+        self.encoding.output.reserve_exact(encoding);
+    }
+
     #[cfg(test)]
     /// Cost: O(1); reads a scalar or borrowed pool range.
     pub(crate) fn capacities(&self) -> [usize; 11] {
