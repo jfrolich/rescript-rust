@@ -522,7 +522,7 @@ impl<'a> Engine<'a> {
                 let h = *self.bir.function(header);
                 let attrs = self.bir.function_attributes(header).clone();
                 let fresh = self.bir.function_header(h.params, attrs, h.loc);
-                self.bir.pools.funcs[fresh.index()].flags = h.flags;
+                self.bir.vars.funcs[fresh.index()].flags = h.flags;
                 funcs.insert(header, fresh);
             }
             let packed = Node::pack(self.bir.view(n), self.bir.node(n).aux(), &mut lists).remap(
@@ -799,7 +799,7 @@ impl<'a> Engine<'a> {
         let old = *self.bir.function(like);
         let attrs = self.bir.function_attributes(like).clone();
         let new = self.bir.function_header(params, attrs, old.loc);
-        self.bir.pools.funcs[new.index()].flags = old.flags;
+        self.bir.vars.funcs[new.index()].flags = old.flags;
         new
     }
 

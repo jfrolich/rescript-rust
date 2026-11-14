@@ -85,6 +85,17 @@ impl State {
         })
     }
 
+    /// Exchange, between the source and the lowering's arena, the tables an
+    /// imported fragment appends to: the cold pools, and the function headers
+    /// with their parameter runs (they live in the variable table). A header
+    /// made while a fragment is imported or reduced must get the next
+    /// identity of the arena the lowering reads headers from. O(1).
+    fn swap_fragment_tables(&mut self) {
+        std::mem::swap(&mut self.source.pools, &mut self.arena.pools);
+        std::mem::swap(&mut self.source.vars.funcs, &mut self.arena.vars.funcs);
+        std::mem::swap(&mut self.source.vars.function_params, &mut self.arena.vars.function_params);
+    }
+
     /// C:1377 compile_external_field_apply. O(imported function + beta work
     /// + newly allocated variables), using the existing L beta reducer.
     fn inline_external_function(&mut self, _cx: Cx, function: &crate::lambda::LFunction, args: &[NodeId]) -> Result<NodeId, Unsupported> {
@@ -102,10 +113,10 @@ impl State {
         self.inline_globals.extend(self.arena.pools.j_modules[self.inline_globals.len()..].iter().map(|module| module.id));
         let mut globals = std::mem::take(&mut self.inline_globals);
         let mut foreign = Vec::new();
-        std::mem::swap(&mut self.source.pools, &mut self.arena.pools);
+        self.swap_fragment_tables();
         // J lowering can append function headers before another L fragment is
         // imported. Its dense owner table must cover those header identities.
-        self.source.func_owners.resize(self.source.pools.funcs.len(), None);
+        self.source.func_owners.resize(self.source.vars.funcs.len(), None);
         let result = (|| {
             let function = bridge::import_fragment(&mut self.source, &mut globals, &mut foreign, &lambda, root)?;
             let View::Fun { body, header } = self.source.view(function) else { unreachable!("imported external function") };
@@ -118,7 +129,7 @@ impl State {
             self.next_order = engine.current_stamp() + 1;
             Ok((reduced, std::mem::take(&mut engine.stats.renames)))
         })();
-        std::mem::swap(&mut self.source.pools, &mut self.arena.pools);
+        self.swap_fragment_tables();
         let (reduced, renames) = result?;
         self.idents.extend(foreign);
         for (var, origin) in renames {
@@ -137,7 +148,7 @@ impl State {
             self.module_constants.push(ModuleConstants::Unread);
         }
         self.inline_globals = globals;
-        self.arena.func_owners.resize(self.arena.pools.funcs.len(), None);
+        self.arena.func_owners.resize(self.arena.vars.funcs.len(), None);
         self.awaited_units.resize(self.arena.vars.len(), false);
         self.invalid_module_paths.resize(self.source.nodes.len(), false);
         self.switch_facts.resize(self.source.nodes.len(), super::switch::Facts::default());

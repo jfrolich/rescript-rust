@@ -481,6 +481,12 @@ impl Bir {
                 }
             }
         }
+        if node.op() == Op::JQualified {
+            if let Some(scope) = &mut self.js_scope {
+                let View::JQualified { module, .. } = node.view(&self.lists) else { unreachable!() };
+                scope.import_reference(module, add);
+            }
+        }
         if self.is_weighted_switch(node) {
             if add {
                 self.weighted_switches += 1;
@@ -1186,10 +1192,10 @@ impl Bir {
                 View::Fun { header, .. } | View::JFun { header, .. } => {
                     let old = *self.function(header);
                     let params = if old.flags & FuncHeader::INDIRECT_PARAMS != 0 {
-                        let start = index(self.pools.function_params.len());
+                        let start = index(self.vars.function_params.len());
                         for i in 0..old.params.len() {
                             let original = self.function_parameter(header, i);
-                            self.pools.function_params.push(vars[&original]);
+                            self.vars.function_params.push(vars[&original]);
                         }
                         VarSpan { start, len: old.params.len }
                     } else {
@@ -1203,7 +1209,7 @@ impl Bir {
                         self.function_attributes(header).clone(),
                         old.loc,
                     );
-                    self.pools.funcs[new.index()].flags = old.flags;
+                    self.vars.funcs[new.index()].flags = old.flags;
                     funcs.insert(header, new);
                 }
                 View::Catch { header, .. } => {

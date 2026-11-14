@@ -1034,7 +1034,12 @@ impl ViewScratch {
                 *slot = None;
                 *slot = Some(ViewScratch::new());
             }
-            build(slot.as_ref().expect("scratch context"))
+            let scratch = slot.as_ref().expect("scratch context");
+            let result = build(scratch);
+            // The scratch outlives the build and may outlive the report:
+            // publish what this build counted on it.
+            scratch.ctx.flush_counters();
+            result
         })
     }
 }

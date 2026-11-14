@@ -7371,7 +7371,7 @@ fn lookup_module_paths_by_lid(
                 ctx,
                 |components| {
                     components
-                        .lookup_module(submod_name)
+                        .lookup_module(submod_name, ctx)
                         .map(|(runtime_pos, _, _md)| {
                             (
                                 Path::pdot_pos(
@@ -7714,7 +7714,7 @@ fn lookup_module_alias_by_lid(
                 ctx,
                 |components| {
                     components
-                        .lookup_module(submod_name)
+                        .lookup_module(submod_name, ctx)
                         .and_then(|(_, _, md)| alias_of_module_type(&md.md_type))
                 },
             )
@@ -16238,11 +16238,11 @@ fn type_structure_item_with_census<'a>(
     let counter_before = tctx
         .derived_census
         .as_ref()
-        .and_then(|c| c.counter_snapshot());
+        .and_then(|c| c.counter_snapshot(tctx.type_ctx));
     let (typed_item, item_sig, new_env) = type_structure_item(tctx, env, arena, item)?;
     if let (Some(census), Some(start)) = (&mut tctx.derived_census, census_start) {
         let derived = crate::binary_ast::derive::is_derived_item(item, arena);
-        census.account_counters(derived, counter_before);
+        census.account_counters(tctx.type_ctx, derived, counter_before);
         let children = census.typecheck.total() - census_before;
         census.typecheck.add(
             derived,

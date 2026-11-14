@@ -292,7 +292,7 @@ impl TypeNodes {
 
 /// A compilation's own type nodes. With the compiler counters on, their
 /// number is reported when the compilation is dropped.
-struct OwnTypeNodes(TypeNodes);
+struct OwnTypeNodes(TypeNodes, Cell<bool>);
 
 impl Deref for OwnTypeNodes {
     type Target = TypeNodes;
@@ -303,8 +303,38 @@ impl Deref for OwnTypeNodes {
 
 impl Drop for OwnTypeNodes {
     fn drop(&mut self) {
-        if crate::perf_counters::enabled() {
+        if self.1.get() && crate::perf_counters::enabled() {
             crate::perf_counters::record_local_type_nodes(self.0.count());
+        }
+    }
+}
+
+/// The compiler counters of a context's probes (see
+/// [`crate::perf_counters::AttemptCounters`]): allocated on the first probe
+/// with the counters enabled, never otherwise. A context that is not a
+/// deferred unit attempt publishes them when flushed or dropped; a deferred
+/// one publishes them only when kept, so a discarded attempt publishes
+/// nothing.
+#[derive(Default)]
+struct ContextCounters {
+    local: RefCell<Option<Box<crate::perf_counters::AttemptCounters>>>,
+    deferred: Cell<bool>,
+}
+
+impl ContextCounters {
+    /// Add the held counts to the process totals and start again from
+    /// zero. O(size of the counts' maps); nothing when no probe ran.
+    fn publish(&self) {
+        if let Some(counts) = self.local.borrow_mut().take() {
+            counts.publish();
+        }
+    }
+}
+
+impl Drop for ContextCounters {
+    fn drop(&mut self) {
+        if !self.deferred.get() {
+            self.publish();
         }
     }
 }
@@ -540,9 +570,21 @@ struct TypeMutationJournal {
     entries: Vec<TypeMutation>,
     active: Vec<ActiveTypeSnapshot>,
     next_id: u64,
+    #[cfg(test)]
+    logged_writes: usize,
 }
 
 impl TypeMutationJournal {
+    /// Amortized O(1): append one mutation to the existing journal buffer.
+    #[inline]
+    fn push(&mut self, mutation: TypeMutation) {
+        #[cfg(test)]
+        {
+            self.logged_writes += 1;
+        }
+        self.entries.push(mutation);
+    }
+
     fn finish(&mut self, id: u64) {
         if let Some(index) = self.active.iter().position(|snapshot| snapshot.id == id) {
             self.active.remove(index);
@@ -735,6 +777,16 @@ pub(crate) struct ReifiedNames {
     used: crate::fast_hash::AHashSet<String>,
 }
 
+/// Diagnostic preparation policy, fixed for one whole-unit check attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CheckMode {
+    /// Skip diagnostic-only snapshots outside live speculation.
+    Success,
+    /// Preserve the original diagnostic preparation for every unification.
+    Explain,
+}
+
 /// Type checking context.
 ///
 /// This context is created for each type checking session (typically one
@@ -841,9 +893,15 @@ pub struct TypeContext {
     /// OCaml-shaped mutation trail. Logging is dormant unless a snapshot lives.
     mutation_journal: RefCell<TypeMutationJournal>,
     mutation_logging: TrailLogging,
+    /// The diagnostic policy fixed when preparing this unit.
+    explain_mode: Cell<CheckMode>,
+    /// A unification failed on the success path without its snapshot: the
+    /// unit must be checked again in the explaining mode.
+    unexplained_unify_failure: Cell<bool>,
 
     /// Cached value of `RESCRIPT_COMPILER_COUNTERS` for hot-path probes.
     compiler_counters_enabled: bool,
+    attempt_counters: ContextCounters,
 
     /// Abbreviation memo storage
     abbrevs: RefCell<Vec<RefCell<AbbrevMemo>>>,
@@ -1334,7 +1392,7 @@ impl TypeContext {
             existential_constructors: RefCell::new(crate::fast_hash::AHashMap::new()),
             previous_env_id: Cell::new(None),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
-            types: OwnTypeNodes(types),
+            types: OwnTypeNodes(types, Cell::new(true)),
             frozen_writes: FrozenWrites::default(),
             store,
             type_lists,
@@ -1350,7 +1408,10 @@ impl TypeContext {
             local_stored_components: RefCell::new(crate::fast_hash::AHashMap::new()),
             mutation_journal: RefCell::new(TypeMutationJournal::default()),
             mutation_logging: TrailLogging::default(),
-            compiler_counters_enabled: crate::perf_counters::enabled(),
+            explain_mode: Cell::new(CheckMode::Explain),
+            unexplained_unify_failure: Cell::new(false),
+            compiler_counters_enabled: crate::perf_counters::context_enabled(),
+            attempt_counters: ContextCounters::default(),
             // Index 0 is reserved as canonical Mnil; index 1 is the dedicated
             // simple_abbrevs memo ref.
             abbrevs: RefCell::new(vec![
@@ -1540,6 +1601,101 @@ impl TypeContext {
         self.typed_envs.borrow().get(env_ref.index()).cloned()
     }
 
+    /// Whether a top-level unification needs its undo-compress snapshot:
+    /// always in the explaining mode, and under any live snapshot (a
+    /// speculation), never on the success path. Cost: two loads, no writes.
+    /// The snapshot preserves diagnostics (compiler/ml/ctype.ml:2589-2594).
+    #[inline]
+    pub(crate) fn unify_takes_snapshot(&self) -> bool {
+        self.explain_mode.get() == CheckMode::Explain || self.mutation_logging.compress()
+    }
+
+    /// Cost: one `Cell` write.
+    pub(crate) fn set_explain_mode(&self, on: CheckMode) {
+        self.explain_mode.set(on);
+    }
+
+    /// Cost: one `Cell` write; called on a failure path only.
+    #[cold]
+    pub(crate) fn note_unexplained_unify_failure(&self) {
+        self.unexplained_unify_failure.set(true);
+    }
+
+    /// Test observation only: the live journal entries owned by this context.
+    #[cfg(test)]
+    pub(crate) fn journal_entries_for_test(&self) -> usize {
+        self.mutation_journal.borrow().entries.len()
+    }
+
+    /// Whether this attempt encountered a failure without a diagnostic snapshot.
+    /// A unit-checking caller must discard such an attempt and explain it again.
+    /// Cost: one `Cell` read.
+    pub fn unexplained_unify_failure(&self) -> bool {
+        self.unexplained_unify_failure.get()
+    }
+
+    /// O(1) per unit: retain counters locally until the attempt is accepted.
+    /// Counts made before this call are published first; from here on the
+    /// context publishes nothing unless [`Self::keep_attempt_counters`] runs.
+    pub(crate) fn defer_attempt_counters(&self) {
+        self.types.1.set(false);
+        self.attempt_counters.publish();
+        self.attempt_counters.deferred.set(true);
+    }
+
+    /// Publish retained counters once: O(held map/vector entries) to merge,
+    /// with process-total locks per publication, not per probe. Probes
+    /// after this call count locally again and are published once, when the
+    /// context is flushed or dropped.
+    pub(crate) fn keep_attempt_counters(&self) {
+        self.types.1.set(true);
+        self.attempt_counters.deferred.set(false);
+        self.attempt_counters.publish();
+    }
+
+    /// Publish the counts of a context that is not a deferred attempt now,
+    /// rather than when it is dropped: for a long-lived context, such as a
+    /// worker's view scratch, whose drop may come after the report.
+    /// Cost: O(1) if deferred or empty; otherwise O(held map/vector entries)
+    /// and process-total locks once per publication, with possible map growth.
+    pub(crate) fn flush_counters(&self) {
+        if !self.attempt_counters.deferred.get() {
+            self.attempt_counters.publish();
+        }
+    }
+
+    /// O(1) plain writes into this context's counts, allocated on the first
+    /// probe; no atomic or TLS operation. Callers test the counters flag.
+    pub(crate) fn record_attempt_counter(
+        &self,
+        record: impl FnOnce(&mut crate::perf_counters::AttemptCounters),
+    ) {
+        if !self.compiler_counters_enabled {
+            return;
+        }
+        let mut local = self.attempt_counters.local.borrow_mut();
+        record(local.get_or_insert_with(Default::default));
+    }
+
+    /// Read the counts this context holds and has not published (all zero
+    /// when it holds none). Cost: O(1) borrow/default construction plus the
+    /// supplied reader's cost; no heap allocation, TLS or global-total lock.
+    pub(crate) fn attempt_counter<R>(
+        &self,
+        read: impl FnOnce(&crate::perf_counters::AttemptCounters) -> R,
+    ) -> R {
+        match self.attempt_counters.local.borrow().as_deref() {
+            Some(counts) => read(counts),
+            None => read(&Default::default()),
+        }
+    }
+
+    /// Turn this context's counters on without `RESCRIPT_COMPILER_COUNTERS`.
+    #[cfg(test)]
+    pub(crate) fn enable_compiler_counters_for_test(&mut self) {
+        self.compiler_counters_enabled = true;
+    }
+
     #[inline]
     pub(crate) fn compiler_counters_enabled(&self) -> bool {
         self.compiler_counters_enabled
@@ -1723,7 +1879,7 @@ impl TypeContext {
         components: Rc<super::env_lazy::QualifiedModuleComponents>,
     ) {
         if self.compiler_counters_enabled {
-            crate::perf_counters::record_qualified_component_registered();
+            crate::perf_counters::record_qualified_component_registered(self);
         }
         self.qualified_module_components_cache
             .borrow_mut()
@@ -1754,7 +1910,7 @@ impl TypeContext {
             return;
         }
         if self.compiler_counters_enabled {
-            crate::perf_counters::world::record_view_adoption();
+            crate::perf_counters::world::record_view_adoption(self);
         }
         #[cfg(test)]
         self.view_adoptions.set(self.view_adoptions.get() + 1);
@@ -1844,7 +2000,7 @@ impl TypeContext {
     ) {
         self.poison_store_build_for("register_qualified_module_components");
         if self.compiler_counters_enabled {
-            crate::perf_counters::record_qualified_component_registered();
+            crate::perf_counters::record_qualified_component_registered(self);
         }
         self.qualified_module_components_cache
             .borrow_mut()
@@ -1865,12 +2021,12 @@ impl TypeContext {
         let cache = self.qualified_module_components_cache.borrow();
         let Some(components) = cache.get(key) else {
             if self.compiler_counters_enabled {
-                crate::perf_counters::record_qualified_component_miss();
+                crate::perf_counters::record_qualified_component_miss(self);
             }
             return None;
         };
         if self.compiler_counters_enabled {
-            crate::perf_counters::record_qualified_component_hit();
+            crate::perf_counters::record_qualified_component_hit(self);
         }
         Some(f(components.components()))
     }
@@ -2638,7 +2794,7 @@ impl TypeContext {
     #[inline(never)]
     fn count_fresh_var(&self, location: &'static std::panic::Location<'static>) {
         if self.copy_sessions.borrow().is_empty() {
-            crate::perf_counters::record_fresh_var(location);
+            crate::perf_counters::record_fresh_var(self, location);
         }
     }
 
@@ -2862,11 +3018,14 @@ impl TypeContext {
     #[inline(never)]
     fn store_desc(&self, r: TypeExprRef) -> TypeDesc {
         if self.compiler_counters_enabled && !self.store_build_owns(r) {
-            crate::perf_counters::frozen::record(if r.is_shared() {
-                crate::perf_counters::frozen::Kind::DescReadShared
-            } else {
-                crate::perf_counters::frozen::Kind::DescReadWorker
-            });
+            crate::perf_counters::frozen::record(
+                self,
+                if r.is_shared() {
+                    crate::perf_counters::frozen::Kind::DescReadShared
+                } else {
+                    crate::perf_counters::frozen::Kind::DescReadWorker
+                },
+            );
         }
         if self.frozen_writes.any.get() {
             self.frozen_writes.probe();
@@ -2947,11 +3106,14 @@ impl TypeContext {
     #[inline(never)]
     fn store_level(&self, r: TypeExprRef) -> i32 {
         if self.compiler_counters_enabled && !self.store_build_owns(r) {
-            crate::perf_counters::frozen::record(if r.is_shared() {
-                crate::perf_counters::frozen::Kind::LevelReadShared
-            } else {
-                crate::perf_counters::frozen::Kind::LevelReadWorker
-            });
+            crate::perf_counters::frozen::record(
+                self,
+                if r.is_shared() {
+                    crate::perf_counters::frozen::Kind::LevelReadShared
+                } else {
+                    crate::perf_counters::frozen::Kind::LevelReadWorker
+                },
+            );
         }
         if self.frozen_writes.any.get() {
             self.frozen_writes.probe();
@@ -2998,9 +3160,9 @@ impl TypeContext {
         }
         let mut journal = self.mutation_journal.borrow_mut();
         if journal.records_type(ty) {
-            journal.entries.push(self.frozen_mutation(mutation()));
+            journal.push(self.frozen_mutation(mutation()));
             if self.compiler_counters_enabled {
-                crate::perf_counters::record_type_mutation(kind);
+                crate::perf_counters::record_type_mutation(self, kind);
             }
         }
     }
@@ -3014,9 +3176,9 @@ impl TypeContext {
         if !self.mutation_logging.full() {
             return;
         }
-        self.mutation_journal.borrow_mut().entries.push(self.frozen_mutation(mutation()));
+        self.mutation_journal.borrow_mut().push(self.frozen_mutation(mutation()));
         if self.compiler_counters_enabled {
-            crate::perf_counters::record_type_mutation(kind);
+            crate::perf_counters::record_type_mutation(self, kind);
         }
     }
 
@@ -3027,9 +3189,10 @@ impl TypeContext {
         }
         let mut journal = self.mutation_journal.borrow_mut();
         if journal.records_row_field(row) {
-            journal.entries.push(self.frozen_mutation(mutation()));
+            journal.push(self.frozen_mutation(mutation()));
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_type_mutation(
+                    self,
                     crate::perf_counters::TypeMutationKind::Row,
                 );
             }
@@ -3066,6 +3229,7 @@ impl TypeContext {
                 .push(TypeMutation::TypeLevel(r, self.types.level(r.index())));
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_type_mutation(
+                    self,
                     crate::perf_counters::TypeMutationKind::Level,
                 );
             }
@@ -3093,6 +3257,7 @@ impl TypeContext {
             if r.is_shared() {
                 if self.compiler_counters_enabled {
                     crate::perf_counters::frozen::record(
+                        self,
                         crate::perf_counters::frozen::Kind::LevelWriteShared,
                     );
                 }
@@ -3106,6 +3271,7 @@ impl TypeContext {
             }
             if self.compiler_counters_enabled {
                 crate::perf_counters::frozen::record(
+                    self,
                     crate::perf_counters::frozen::Kind::LevelWriteWorker,
                 );
             }
@@ -3147,11 +3313,14 @@ impl TypeContext {
         if r.is_store() {
             if r.is_shared() {
                 if self.compiler_counters_enabled {
-                    crate::perf_counters::frozen::record(if matches!(desc, TypeDesc::Tlink(_)) {
-                        crate::perf_counters::frozen::Kind::LinkShared
-                    } else {
-                        crate::perf_counters::frozen::Kind::DescWriteShared
-                    });
+                    crate::perf_counters::frozen::record(
+                        self,
+                        if matches!(desc, TypeDesc::Tlink(_)) {
+                            crate::perf_counters::frozen::Kind::LinkShared
+                        } else {
+                            crate::perf_counters::frozen::Kind::DescWriteShared
+                        },
+                    );
                 }
                 self.frozen_writes.descs.borrow_mut().insert(r, desc);
                 self.frozen_writes.any.set(true);
@@ -3164,7 +3333,10 @@ impl TypeContext {
                 return;
             }
             if self.compiler_counters_enabled && matches!(desc, TypeDesc::Tlink(_)) {
-                crate::perf_counters::frozen::record(crate::perf_counters::frozen::Kind::LinkWorker);
+                crate::perf_counters::frozen::record(
+                    self,
+                    crate::perf_counters::frozen::Kind::LinkWorker,
+                );
             }
             self.frozen_writes.descs.borrow_mut().insert(r, desc);
             self.frozen_writes.any.set(true);
@@ -3374,7 +3546,7 @@ impl TypeContext {
         let depth = journal.active.len();
         self.mutation_logging.update(&journal);
         if self.compiler_counters_enabled {
-            crate::perf_counters::record_type_mutation_snapshot(depth);
+            crate::perf_counters::record_type_mutation_snapshot(self, depth);
         }
         TypeMutationSnapshot {
             journal: &self.mutation_journal,
@@ -3504,7 +3676,7 @@ impl TypeContext {
         }
         snapshot.restored = true;
         if self.compiler_counters_enabled {
-            crate::perf_counters::record_type_mutation_backtrack(restored);
+            crate::perf_counters::record_type_mutation_backtrack(self, restored);
         }
     }
 
@@ -3687,7 +3859,10 @@ impl TypeContext {
                 || !self.in_store_build()
                 || memo.store_index() < self.store_build_abbrev_start.get())
         {
-            crate::perf_counters::frozen::record(crate::perf_counters::frozen::Kind::MemoWrite);
+            crate::perf_counters::frozen::record(
+                self,
+                crate::perf_counters::frozen::Kind::MemoWrite,
+            );
         }
         if memo.is_store() {
             if !memo.is_shared() && self.in_store_build()
@@ -3980,6 +4155,7 @@ impl TypeContext {
             }
             if self.compiler_counters_enabled {
                 crate::perf_counters::frozen::record(
+                    self,
                     crate::perf_counters::frozen::Kind::RowFieldWrite,
                 );
             }
@@ -4069,6 +4245,7 @@ impl TypeContext {
         if r.is_persistent() {
             if self.compiler_counters_enabled {
                 crate::perf_counters::frozen::record(
+                    self,
                     crate::perf_counters::frozen::Kind::MutabilityWrite,
                 );
             }
@@ -4135,7 +4312,7 @@ impl TypeContext {
         let nested = self.counted_copy_nodes.get() - counted;
         let own = self.allocated_type_nodes() - allocated - nested;
         self.counted_copy_nodes.set(counted + nested + own);
-        crate::perf_counters::record_copy(cause, own);
+        crate::perf_counters::record_copy(self, cause, own);
         result
     }
 
@@ -4474,6 +4651,7 @@ impl TypeContext {
                 .or_insert_with(|| sig.clone());
             if self.compiler_counters_enabled() {
                 crate::perf_counters::record_signature_freshen_name(
+                    self,
                     "type_context_lazy_rename",
                     module_name,
                     sig.len(),
@@ -4596,7 +4774,7 @@ impl TypeContext {
     /// store data it built and which it found built. One atomic increment.
     fn store_binder(&self, id: &Ident) -> Ident {
         if self.compiler_counters_enabled {
-            crate::perf_counters::store_views::record_binder();
+            crate::perf_counters::store_views::record_binder(self);
         }
         let stamp = super::thread_store::next_store_stamp();
         let mut fresh = id.with_stamp(stamp);
@@ -5076,6 +5254,7 @@ impl TypeContext {
         super::thread_store::set_store_build_depth(depth);
         if depth == 0 && self.compiler_counters_enabled {
             crate::perf_counters::record_store_build_nodes(
+                self,
                 self.store.type_count() - self.store_build_type_start.get(),
             );
         }
@@ -5090,6 +5269,7 @@ impl TypeContext {
         }
         if self.compiler_counters_enabled {
             crate::perf_counters::store_views::record_piece(
+                self,
                 poisoned,
                 effects.is_empty() && guards.is_empty(),
             );
@@ -5156,11 +5336,11 @@ impl TypeContext {
         }
         if self.compiler_counters_enabled {
             use crate::perf_counters::store_views as counters;
-            counters::record_piece_replay();
+            counters::record_piece_replay(self);
             for effect in &piece.effects {
                 match effect {
                     StoreEffect::Piece(_) => {}
-                    StoreEffect::PreparePers(_) => counters::record_effect_replayed(0),
+                    StoreEffect::PreparePers(_) => counters::record_effect_replayed(self, 0),
                 }
             }
         }
@@ -5495,7 +5675,6 @@ impl TypeContext {
                         let old = self.get_desc(node).0;
                         self.mutation_journal
                             .borrow_mut()
-                            .entries
                             .push(TypeMutation::Compress(node, old, current));
                     }
                     self.write_desc_raw(node, TypeDesc::Tlink(current));
@@ -5511,6 +5690,61 @@ impl TypeContext {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn check_mode_snapshot_cost_at_ten_thousand_unifications() {
+        use super::super::ctype::{unify, UnifyState};
+        assert_eq!(std::mem::size_of::<CheckMode>(), 1);
+        for mode in [CheckMode::Success, CheckMode::Explain] {
+            let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+            ctx.set_explain_mode(mode);
+            for _ in 0..10_000 {
+                let left = ctx.new_type(TypeDesc::Tvar(None));
+                let right = ctx.new_type(TypeDesc::Tvar(None));
+                unify(&ctx, &mut UnifyState::new(), left, right).unwrap();
+            }
+            let journal = ctx.mutation_journal.borrow();
+            assert_eq!(journal.next_id, if mode == CheckMode::Explain { 10_000 } else { 0 });
+            assert_eq!(journal.logged_writes, 0);
+            assert!(!ctx.unexplained_unify_failure());
+        }
+    }
+
+    #[test]
+    fn unexplained_failure_is_recorded_only_without_snapshot() {
+        use super::super::ctype::{unify, UnifyState};
+        for mode in [CheckMode::Success, CheckMode::Explain] {
+            for speculative in [false, true] {
+                let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+                ctx.set_explain_mode(mode);
+                let left = ctx.new_constr(super::super::predef::path_bool(), vec![]);
+                let right = ctx.new_constr(super::super::predef::path_string(), vec![]);
+                let snapshot = speculative.then(|| ctx.snapshot_type_state());
+                assert!(unify(&ctx, &mut UnifyState::new(), left, right).is_err());
+                assert_eq!(
+                    ctx.unexplained_unify_failure(),
+                    mode == CheckMode::Success && !speculative,
+                );
+                drop(snapshot);
+            }
+        }
+    }
+
+    #[test]
+    fn success_mode_keeps_speculation_journal() {
+        use super::super::ctype::{unify, UnifyState};
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        ctx.set_explain_mode(CheckMode::Success);
+        let left = ctx.new_type(TypeDesc::Tvar(None));
+        let right = ctx.new_type(TypeDesc::Tvar(None));
+        let snapshot = ctx.snapshot_type_state();
+        assert!(ctx.unify_takes_snapshot());
+        unify(&ctx, &mut UnifyState::new(), left, right).unwrap();
+        assert_eq!(ctx.mutation_journal.borrow().next_id, 2);
+        assert!(ctx.mutation_journal.borrow().logged_writes > 0);
+        drop(snapshot);
+        assert!(!ctx.unify_takes_snapshot());
+    }
 
     fn frozen_arrows(ctx: &TypeContext) -> [TypeExprRef; 4] {
         use super::super::shared_store::{SharedGraphParts, SharedGraphPayloads, SharedGraphSizes, shared_ref};
@@ -6165,19 +6399,19 @@ mod tests {
         let mut ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let stored = ctx.store.alloc_type(TypeDesc::Tnil, GENERIC_LEVEL);
         let memo = ctx.store.alloc_abbrev(AbbrevMemo::Mnil);
-        let read_before = count(Kind::DescReadWorker);
-        let level_before = count(Kind::LevelReadWorker);
-        let write_before = count(Kind::LinkWorker);
-        let memo_before = count(Kind::MemoWrite);
+        let read_before = count(&ctx, Kind::DescReadWorker);
+        let level_before = count(&ctx, Kind::LevelReadWorker);
+        let write_before = count(&ctx, Kind::LinkWorker);
+        let memo_before = count(&ctx, Kind::MemoWrite);
         ctx.compiler_counters_enabled = false;
         ctx.get_desc(stored);
         ctx.get_level(stored);
         ctx.write_desc_raw(stored, TypeDesc::Tlink(stored));
         ctx.write_abbrev(memo, AbbrevMemo::Mnil);
-        assert_eq!(count(Kind::DescReadWorker), read_before);
-        assert_eq!(count(Kind::LevelReadWorker), level_before);
-        assert_eq!(count(Kind::LinkWorker), write_before);
-        assert_eq!(count(Kind::MemoWrite), memo_before);
+        assert_eq!(count(&ctx, Kind::DescReadWorker), read_before);
+        assert_eq!(count(&ctx, Kind::LevelReadWorker), level_before);
+        assert_eq!(count(&ctx, Kind::LinkWorker), write_before);
+        assert_eq!(count(&ctx, Kind::MemoWrite), memo_before);
         ctx.compiler_counters_enabled = true;
         let local = ctx.new_var(None);
         ctx.get_desc(local);
@@ -6191,18 +6425,18 @@ mod tests {
             let owned_memo = ctx.alloc_abbrev_nil();
             ctx.write_abbrev(owned_memo, AbbrevMemo::Mnil);
         });
-        assert_eq!(count(Kind::DescReadWorker), read_before);
-        assert_eq!(count(Kind::LevelReadWorker), level_before);
-        assert_eq!(count(Kind::LinkWorker), write_before);
-        assert_eq!(count(Kind::MemoWrite), memo_before);
+        assert_eq!(count(&ctx, Kind::DescReadWorker), read_before);
+        assert_eq!(count(&ctx, Kind::LevelReadWorker), level_before);
+        assert_eq!(count(&ctx, Kind::LinkWorker), write_before);
+        assert_eq!(count(&ctx, Kind::MemoWrite), memo_before);
         ctx.get_desc(stored);
         ctx.get_level(stored);
         ctx.write_desc_raw(stored, TypeDesc::Tlink(local));
         ctx.write_abbrev(memo, AbbrevMemo::Mnil);
-        assert_eq!(count(Kind::DescReadWorker), read_before + 1);
-        assert_eq!(count(Kind::LevelReadWorker), level_before + 1);
-        assert_eq!(count(Kind::LinkWorker), write_before + 1);
-        assert_eq!(count(Kind::MemoWrite), memo_before + 1);
+        assert_eq!(count(&ctx, Kind::DescReadWorker), read_before + 1);
+        assert_eq!(count(&ctx, Kind::LevelReadWorker), level_before + 1);
+        assert_eq!(count(&ctx, Kind::LinkWorker), write_before + 1);
+        assert_eq!(count(&ctx, Kind::MemoWrite), memo_before + 1);
 
         let base = ctx
             .store
@@ -6222,17 +6456,17 @@ mod tests {
             )
             .unwrap();
         let shared = super::super::shared_store::shared_ref(base, 0);
-        let links = count(Kind::LinkShared);
-        let descriptors = count(Kind::DescWriteShared);
-        let levels = count(Kind::LevelWriteShared);
+        let links = count(&ctx, Kind::LinkShared);
+        let descriptors = count(&ctx, Kind::DescWriteShared);
+        let levels = count(&ctx, Kind::LevelWriteShared);
         let snapshot = ctx.snapshot_type_state();
         ctx.set_desc(shared, TypeDesc::Tlink(local));
         ctx.set_level(shared, 1);
         ctx.restore_type_state(snapshot);
-        assert_eq!(count(Kind::LinkShared), links + 1);
+        assert_eq!(count(&ctx, Kind::LinkShared), links + 1);
         // Restoring absence removes the exception without writing a value.
-        assert_eq!(count(Kind::DescWriteShared), descriptors);
-        assert_eq!(count(Kind::LevelWriteShared), levels + 1);
+        assert_eq!(count(&ctx, Kind::DescWriteShared), descriptors);
+        assert_eq!(count(&ctx, Kind::LevelWriteShared), levels + 1);
     }
 
     #[test]
