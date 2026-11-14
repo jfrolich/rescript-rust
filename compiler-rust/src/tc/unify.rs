@@ -249,8 +249,14 @@ impl Checker {
         // tracing the node's own memo is used (R3h).
         if l.tag() == CONSTR && r.tag() == CONSTR && l.a == r.a && l.arity() == 0 && r.arity() == 0
         {
-            // `update_level !env t1.level t2; link_type t1 t2`.
-            self.lower_to(right, l.level)?;
+            // `update_level !env t1.level t2; link_type t1 t2`. `right` is a
+            // representative and `r` its descriptor: the outer test of
+            // `update_level` (`if ty.level > level`, ctype.ml:635) reads `r`
+            // with no second `repr`. Nothing is above the generic level, so
+            // a generic `l` never lowers.
+            if r.level > l.level {
+                self.lower(right, l.level)?;
+            }
             self.g.link(left, right);
             return Ok(());
         }
@@ -635,25 +641,45 @@ impl Checker {
         // nodes, so it is made only after an expansion.
         let mut expanded_left = self.expand_head(left, ExpandMode::Unif)?;
         let mut expanded_right = self.expand_head(right, ExpandMode::Unif)?;
-        if expanded_left != self.g.repr(left) || expanded_right != self.g.repr(right) {
+        let unexpanded =
+            expanded_left == self.g.repr(left) && expanded_right == self.g.repr(right);
+        if !unexpanded {
             expanded_left = self.expand_head(left, ExpandMode::Unif)?;
             expanded_right = self.expand_head(right, ExpandMode::Unif)?;
         }
-        let level = self.g.nodes[expanded_left.0 as usize]
-            .level
-            .min(self.g.nodes[expanded_right.0 as usize].level);
-        self.lower_to(right, level)?;
-        self.lower_to(left, level)?;
-        // `unify_eq t1' t2'` (ctype.ml:2286). The heads are taken again as
-        // representatives: only a scoped lowering links a node, and then
-        // OCaml would read a link's descriptor in unify3.
-        let expanded_left = self.g.repr(expanded_left);
-        let expanded_right = self.g.repr(expanded_right);
-        if expanded_left == expanded_right {
-            return Ok(());
-        }
-        let t1 = self.g.repr(left);
-        let t2 = self.g.repr(right);
+        let left_level = self.g.nodes[expanded_left.0 as usize].level;
+        let right_level = self.g.nodes[expanded_right.0 as usize].level;
+        let level = left_level.min(right_level);
+        let (t1, t2) = if unexpanded && self.types.scoped == 0 {
+            // The heads are the representatives of `left` and `right`, whose
+            // levels were just read: the outer test of `update_level`
+            // (`if ty.level > level`, ctype.ml:635) reads them with no
+            // second `repr`. `level` is the lower of the two, so at most one
+            // is above it. Without scoped types `Graph::lower` links nothing,
+            // so lowering one side does not raise the other and every head
+            // stays its side's representative: `t1 = t1'`, `t2 = t2'`.
+            if right_level > level {
+                self.lower(expanded_right, level)?;
+            } else if left_level > level {
+                self.lower(expanded_left, level)?;
+            }
+            if expanded_left == expanded_right {
+                return Ok(());
+            }
+            (expanded_left, expanded_right)
+        } else {
+            self.lower_to(right, level)?;
+            self.lower_to(left, level)?;
+            // `unify_eq t1' t2'` (ctype.ml:2286). The heads are taken again
+            // as representatives: only a scoped lowering links a node, and
+            // then OCaml would read a link's descriptor in unify3.
+            expanded_left = self.g.repr(expanded_left);
+            expanded_right = self.g.repr(expanded_right);
+            if expanded_left == expanded_right {
+                return Ok(());
+            }
+            (self.g.repr(left), self.g.repr(right))
+        };
         // `if unify_eq t1 t1' || not (unify_eq t2 t2') then unify3 env t1
         // t1' t2 t2' else unify3 env t2 t2' t1 t1'` (ctype.ml:2299-2303).
         if t1 == expanded_left || t2 != expanded_right {
