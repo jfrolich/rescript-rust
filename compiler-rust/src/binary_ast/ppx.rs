@@ -9747,6 +9747,17 @@ fn rewrite_structure_impl(
         }
     }
 
+    // Mapping runs partly backwards; constructor scope follows source order.
+    // O(items + constructors), one dense prefix bit per item, no name map.
+    let mut result_shadowed = false;
+    let result_prefix: Vec<bool> = if spice_mapper_active {
+        structure.iter().map(|item| {
+            result_shadowed |= derive::shadows_result(item, arena);
+            result_shadowed
+        }).collect()
+    } else {
+        Vec::new()
+    };
     let mut slots: Vec<Vec<StructureItem>> = (0..units.len()).map(|_| Vec::new()).collect();
     for event in order {
         match event {
@@ -9765,6 +9776,7 @@ fn rewrite_structure_impl(
                     arena,
                     apply_spice,
                     spice_mapper_active,
+                    result_prefix.get(index).copied().unwrap_or(false),
                     &mut await_context,
                 )?;
             }
@@ -9781,6 +9793,7 @@ fn rewrite_structure_impl(
                     result?;
                 }
                 let mut mapped = Vec::new();
+                let mut private_shadow = result_prefix.get(start).copied().unwrap_or(false);
                 for item in &structure[start..end] {
                     let StructureItemDesc::Pstr_extension(inner) = &item.pstr_desc else {
                         unreachable!("%%private run holds extensions")
@@ -9791,6 +9804,7 @@ fn rewrite_structure_impl(
                     // here they stay extensions (and `Typemod_hide.check`
                     // rejects them).
                     for work in private_extension_structure_items(payload, ext_name.loc)? {
+                        private_shadow |= derive::shadows_result(work, arena);
                         if is_structure_mapper_extension(work, arena) {
                             mapped.push(work.clone());
                         } else if apply_spice {
@@ -9799,6 +9813,7 @@ fn rewrite_structure_impl(
                                 work,
                                 arena,
                                 spice_mapper_active,
+                                private_shadow,
                             )?);
                         } else {
                             mapped.extend(rewrite_structure_item_no_spice(work, arena));
@@ -9831,6 +9846,7 @@ fn rewrite_structure_unit(
     arena: &mut ParseArena,
     apply_spice: bool,
     spice_mapper_active: bool,
+    result_shadowed: bool,
     await_context: &mut std::collections::HashSet<String>,
 ) -> PpxResult<Vec<StructureItem>> {
     let mut result = Vec::new();
@@ -9845,6 +9861,7 @@ fn rewrite_structure_unit(
                     item,
                     arena,
                     spice_mapper_active,
+                    result_shadowed,
                 )?);
             } else {
                 result.extend(rewrite_structure_item_no_spice(item, arena));
@@ -9870,6 +9887,7 @@ fn rewrite_structure_unit(
                     item,
                     arena,
                     spice_mapper_active,
+                    result_shadowed,
                 )?);
             } else {
                 result.extend(rewrite_structure_item_no_spice(item, arena));
@@ -9882,6 +9900,7 @@ fn rewrite_structure_unit(
                     item,
                     arena,
                     spice_mapper_active,
+                    result_shadowed,
                 )?);
             } else {
                 result.extend(rewrite_structure_item_no_spice(item, arena));
@@ -10357,10 +10376,11 @@ fn try_rewrite_structure_item(
     item: &StructureItem,
     arena: &mut ParseArena,
     spice_mapper_active: bool,
+    result_shadowed: bool,
 ) -> PpxResult<Vec<StructureItem>> {
     let mut result = Vec::new();
     for expanded in
-        derive::expand_structure_item_with_mapper(item, arena, spice_mapper_active)
+        derive::expand_structure_item_in_scope(item, arena, spice_mapper_active, result_shadowed)
         .map_err(PpxError::message)?
     {
         if let StructureItemDesc::Pstr_primitive(vd) = &expanded.pstr_desc {
@@ -10376,7 +10396,7 @@ fn try_rewrite_structure_item(
 fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<StructureItem> {
     let spice_mapper_active =
         derive::structure_uses_spice_mapper(std::slice::from_ref(item), arena);
-    try_rewrite_structure_item(item, arena, spice_mapper_active)
+    try_rewrite_structure_item(item, arena, spice_mapper_active, false)
         .unwrap_or_else(|error| {
         arena.defer_ppx_error(error);
         rewrite_structure_item_no_spice(item, arena)
@@ -11551,6 +11571,28 @@ let e = () =>
             "{message}"
         );
         assert_eq!((line, start, end), (1, 10, 18));
+    }
+
+    #[test]
+    fn result_shadow_scope_follows_source_order_not_mapping_order() {
+        let (mut arena, source) = parse_structure(
+            "@spice type before = {x: int}\ntype mine = Error\n@spice type after = {y: int}\n@spice.encode type encoder = {z: int}",
+        );
+        arena.set_derived_plans(None);
+        let rewritten = rewrite_structure_with_warnings(&source, &mut arena, false).0.unwrap();
+        assert_eq!(rewritten.iter().filter(|item| matches!(item.pstr_desc, StructureItemDesc::Pstr_derived(_))).count(), 2);
+    }
+
+    #[test]
+    fn result_shadow_is_inherited_by_nested_modules() {
+        let (mut arena, source) = parse_structure(
+            "type mine = Error\nmodule M = { @spice type t = {x: int} }",
+        );
+        arena.set_derived_plans(None);
+        let rewritten = rewrite_structure_with_warnings(&source, &mut arena, false).0.unwrap();
+        let StructureItemDesc::Pstr_module(module) = &rewritten[1].pstr_desc else { panic!("module") };
+        let ModuleExprDesc::Pmod_structure(items) = &arena.get_mod_expr(module.pmb_expr).pmod_desc else { panic!("structure") };
+        assert!(!items.iter().any(|item| matches!(item.pstr_desc, StructureItemDesc::Pstr_derived(_))));
     }
 
     #[test]

@@ -798,3 +798,22 @@ retain the local helper: base 12.415 ± 0.342 s (12.089–12.914), candidate
 18.909 ± 0.316 s (18.538–19.363). The candidate's five runs were restarted after
 the combined benchmark timed out; these timings do not establish a speedup.
 The retained production code is unchanged by these experiments.
+
+#### Local result-constructor scope
+
+`shadowed_result_constructor` is selected before building a decoder-bearing
+plan when the source-order scope contains a local `Ok` or `Error` constructor.
+The frontend computes dense prefix flags before its reverse mapping schedule;
+nested modules inherit the flag and keep their local additions within their
+own scope. Encoder-only groups remain eligible for plans. This handles direct
+local variant declarations, not arbitrary constructor exports from an `open`
+or an external module; any obligation failure outside the covered form remains
+visible rather than being guessed away.
+
+Application census (`RESCRIPT_FULL_BUILD=1 RESCRIPT_DERIVED_CENSUS=<file>
+rescript build`, run from the application with its runtime): 6,534 plans,
+21 `shadowed_result_constructor`, **zero `failed_obligation`**. These replace
+the 21 retry bindings in two units; no binding remains to name as a retry.
+Spice and application check-mode builds finish successfully. The original
+constructor-shadow diagnostic and a new nested-scope diagnostic agree in all
+three modes; all 17 diagnostic fixtures pass without changing old expectations.

@@ -65,6 +65,8 @@ pub enum GeneralReason {
     UnsupportedVariant,
     /// An exposed JSON identity argument needs application abbreviation inference.
     JsonIdentityArgument,
+    /// A preceding local constructor shadows Ok or Error used by the decoder.
+    ShadowedResultConstructor,
     /// Plans are off for the tree: the switch `RESCRIPT_DERIVED_PATH=general`,
     /// or a tree that is stored or printed instead of compiled.
     Switch,
@@ -89,6 +91,7 @@ impl GeneralReason {
             Self::Switch => 9,
             Self::FailedObligation => 10,
             Self::JsonIdentityArgument => 11,
+            Self::ShadowedResultConstructor => 12,
         }
     }
 }
@@ -129,6 +132,8 @@ pub struct PathCounts {
     pub unsupported_variant: u64,
     /// See [`GeneralReason::JsonIdentityArgument`].
     pub json_identity_argument: u64,
+    /// See [`GeneralReason::ShadowedResultConstructor`].
+    pub shadowed_result_constructor: u64,
     /// See [`GeneralReason::Switch`].
     pub switch: u64,
     /// See [`GeneralReason::FailedObligation`].
@@ -152,6 +157,7 @@ impl PathCounts {
         }
         self.unsupported_variant += other.unsupported_variant;
         self.json_identity_argument += other.json_identity_argument;
+        self.shadowed_result_constructor += other.shadowed_result_constructor;
         self.switch += other.switch;
         self.failed_obligation += other.failed_obligation;
     }
@@ -174,6 +180,7 @@ impl PathCounts {
                 },
                 GeneralReason::UnsupportedVariant => &mut self.unsupported_variant,
                 GeneralReason::JsonIdentityArgument => &mut self.json_identity_argument,
+                GeneralReason::ShadowedResultConstructor => &mut self.shadowed_result_constructor,
                 GeneralReason::Switch => &mut self.switch,
                 GeneralReason::FailedObligation => &mut self.failed_obligation,
             },
@@ -262,17 +269,38 @@ pub fn signature_uses_spice_mapper(items: &[SignatureItem], arena: &ParseArena) 
 
 /// Expand built-in derives on a structure item. O(generated syntax plus mapper
 /// work), with O(1) timing overhead only when the census is enabled.
-pub fn expand_structure_item_with_mapper(
+pub fn expand_structure_item_with_mapper(item: &StructureItem, arena: &mut ParseArena, active: bool) -> Result<Vec<StructureItem>, String> {
+    expand_structure_item_in_scope(item, arena, active, false)
+}
+
+/// Whether this item introduces a local result-constructor name.
+/// Cost: O(constructors), borrowed name comparisons and no allocation.
+pub(crate) fn shadows_result(item: &StructureItem, arena: &ParseArena) -> bool {
+    let crate::parser::ast::StructureItemDesc::Pstr_type(group) = &item.pstr_desc else {
+        return false;
+    };
+    group.1.iter().any(|decl| match &decl.ptype_kind {
+        crate::parser::ast::TypeKind::Ptype_variant(constructors) => constructors.iter().any(|c| {
+            matches!(arena.get_string(c.pcd_name.txt), "Ok" | "Error")
+        }),
+        _ => false,
+    })
+}
+
+/// Expand with the constructor scope determined in source order.
+/// Cost: the same mapper work as the unscoped entry point.
+pub fn expand_structure_item_in_scope(
     item: &StructureItem,
     arena: &mut ParseArena,
     active: bool,
+    result_shadowed: bool,
 ) -> Result<Vec<StructureItem>, String> {
     // O(1) disabled probe: retain the direct call without saving profiling state
     // across a mapper that mutably borrows the arena.
     if arena.derived_census.is_none() {
-        return super::spice_ppx::expand_structure_item_with_mapper(item, arena, active);
+        return super::spice_ppx::expand_structure_item_in_scope(item, arena, active, result_shadowed);
     }
-    expand_with_census(item, arena, active)
+    expand_with_census(item, arena, active, result_shadowed)
 }
 
 /// O(1) census bookkeeping plus the existing expansion and optional key encoder.
@@ -283,10 +311,11 @@ fn expand_with_census(
     item: &StructureItem,
     arena: &mut ParseArena,
     active: bool,
+    result_shadowed: bool,
 ) -> Result<Vec<StructureItem>, String> {
     let start = census::start(true);
     let observer_before = arena.derived_census.as_ref().map_or(0, |c| c.observer_ns);
-    let result = super::spice_ppx::expand_structure_item_with_mapper(item, arena, active);
+    let result = super::spice_ppx::expand_structure_item_in_scope(item, arena, active, result_shadowed);
     if let (Some(start), Some(census)) = (start, arena.derived_census.as_mut()) {
         census.generation.add(active, census::nanos(start.elapsed()).saturating_sub(census.observer_ns - observer_before));
     }

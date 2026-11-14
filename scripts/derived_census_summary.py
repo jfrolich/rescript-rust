@@ -9,7 +9,7 @@ from pathlib import Path
 
 GENERAL_REASONS = ("custom_codec", "user_expression", "type_parameters", "recursive_group",
                    "shared_names", "unmeasured_shape", "unboxed", "not_yet_planned",
-                   "unsupported_variant", "switch", "failed_obligation", "json_identity_argument")
+                   "unsupported_variant", "switch", "failed_obligation", "json_identity_argument", "shadowed_result_constructor")
 
 UNPLANNED_FORMS = ("json_identity", "applied_user_codec", "applied_module_path",
                    "unsupported_type", "constant_fallback", "empty_record",
@@ -56,7 +56,7 @@ def summarize(rows):
             result["general_cost_records"] += 1
             for key in ("general_syntax_nodes", "general_typecheck_ns"):
                 values = row[key]
-                if len(values) not in (11, len(GENERAL_REASONS)) or any(type(n) is not int or n < 0 for n in values):
+                if len(values) not in (11, 12, len(GENERAL_REASONS)) or any(type(n) is not int or n < 0 for n in values):
                     raise ValueError(f"Invalid {key}")
                 for reason, n in zip(GENERAL_REASONS, values):
                     cost = result["general_costs"].setdefault(reason, {"general_syntax_nodes": 0, "general_typecheck_ns": 0})

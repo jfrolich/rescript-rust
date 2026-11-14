@@ -96,9 +96,9 @@ pub struct Census {
     /// and plans the checker fell back from.
     pub paths: super::PathCounts,
     /// General-path generated body nodes by `GeneralReason::census_index`.
-    pub general_syntax_nodes: [u64; 12],
+    pub general_syntax_nodes: [u64; 13],
     /// General-path item-exclusive typecheck time by the same reason index.
-    pub general_typecheck_ns: [u64; 12],
+    pub general_typecheck_ns: [u64; 13],
     /// Census-only reason table indexed by parse value-list start.
     #[serde(skip)]
     pub(crate) general_groups: Vec<Option<super::GeneralReason>>,
@@ -126,8 +126,8 @@ impl Census {
                 .then_some([[0; 4]; 2]),
             typed_groups: Vec::new(), shape_classes: Vec::new(), shape_nodes: Vec::new(),
             shape_parameterised: Vec::new(), shape_recursive: Vec::new(), templates: Vec::new(),
-            paths: super::PathCounts::default(), general_syntax_nodes: [0; 12],
-            general_typecheck_ns: [0; 12], general_groups: Vec::new(), observer_ns: 0 }
+            paths: super::PathCounts::default(), general_syntax_nodes: [0; 13],
+            general_typecheck_ns: [0; 13], general_groups: Vec::new(), observer_ns: 0 }
     }
     /// O(new slots) on growth, O(1) otherwise. Each slot is initialized once
     /// across monotonic value-pool growth; one byte per slot, census only.
