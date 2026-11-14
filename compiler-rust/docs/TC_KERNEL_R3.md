@@ -154,35 +154,44 @@ added-bench unify_ground3 327925 1081726653
 
 ## Results after harness subtraction
 
-All values below are measured on the added benchmark, not copied from R1.
+The original column is measured at `ac3416c1f`; the local-level bench column
+is measured at `2d93b31cf`. Neither is copied from R1. All gate/comparison
+verdicts are the same for both columns. The Attribution section uses the
+original executable only, not the later local-level executable.
 Section 2.2 values and gates are quoted, not new measurements. N/A means
 no comparable published figure/gate. A benchmark-only change can shift
 machine-code layout and dispatch: the before raw counts above must not be
 silently substituted for the after counts.
 
-| Operation | Instructions | Section 2.2 | Gate | Above kernel figure? | Above gate? |
-|---|---:|---:|---:|---|---|
-| `instance1` | 149.06 | 89 | — | Yes | N/A |
-| `instance3` | 237.31 | 169 | — | Yes | N/A |
-| `instance5` | 331.34 | 221 | — | Yes | N/A |
-| `instance7` | 355.27 | 250 | — | Yes | N/A |
-| `generalize7` | 489.00 | 404 | — | Yes | N/A |
-| `empty` | 18.00 | — | — | N/A | N/A |
-| `lower7` | 459.00 | — | — | N/A | N/A |
-| `copy7` | 1808.58 | — | — | N/A | N/A |
-| `repr` | 11.00 | — | — | N/A | N/A |
-| `restore` | 67.00 | — | — | N/A | N/A |
-| `keep` | 49.00 | — | — | N/A | N/A |
-| `checker_instance1` | 141.06 | 89 | 143 | Yes | No |
-| `checker_instance3` | 229.31 | 169 | 223 | Yes | Yes |
-| `checker_instance5` | 324.34 | 221 | 308 | Yes | Yes |
-| `checker_instance7` | 347.27 | 250 | 330 | Yes | Yes |
-| `build_vars` | 79.07 | — | — | N/A | N/A |
-| `unify_vars` | 225.00 | — | — | N/A | N/A |
-| `build_ground1` | 99.08 | — | — | N/A | N/A |
-| `unify_ground1` | 203.00 | 118 | — | Yes | N/A |
-| `build_ground3` | 203.44 | — | — | N/A | N/A |
-| `unify_ground3` | 877.96 | 386 | — | Yes (different shape) | N/A |
+| Operation | Original instructions | Local-level bench instructions | Section 2.2 | Gate | Above kernel figure? | Above gate? |
+|---|---:|---:|---:|---:|---|---|
+| `instance1` | 149.06 | 150.06 | 89 | — | Yes | N/A |
+| `instance3` | 237.31 | 238.31 | 169 | — | Yes | N/A |
+| `instance5` | 331.34 | 332.34 | 221 | — | Yes | N/A |
+| `instance7` | 355.27 | 356.27 | 250 | — | Yes | N/A |
+| `generalize7` | 489.00 | 489.00 | 404 | — | Yes | N/A |
+| `empty` | 18.00 | 19.00 | — | — | N/A | N/A |
+| `lower7` | 459.00 | 459.00 | — | — | N/A | N/A |
+| `copy7` | 1808.58 | 1803.58 | — | — | N/A | N/A |
+| `repr` | 11.00 | 12.00 | — | — | N/A | N/A |
+| `restore` | 67.00 | 70.00 | — | — | N/A | N/A |
+| `keep` | 49.00 | 49.00 | — | — | N/A | N/A |
+| `checker_instance1` | 141.06 | 140.06 | 89 | 143 | Yes | No |
+| `checker_instance3` | 229.31 | 228.31 | 169 | 223 | Yes | Yes |
+| `checker_instance5` | 324.34 | 323.34 | 221 | 308 | Yes | Yes |
+| `checker_instance7` | 347.27 | 346.27 | 250 | 330 | Yes | Yes |
+| `build_vars` | 79.07 | 101.07 | — | — | N/A | N/A |
+| `unify_vars` | 225.00 | 225.00 | — | — | N/A | N/A |
+| `build_ground1` | 99.08 | 121.08 | — | — | N/A | N/A |
+| `unify_ground1` | 203.00 | 203.00 | 118 | — | Yes | N/A |
+| `build_ground3` | 203.44 | 231.44 | — | — | N/A | N/A |
+| `unify_ground3` | 877.96 | 878.96 | 386 | — | Yes (different shape) | N/A |
+| `build_vars_local` | — | 101.07 | — | — | N/A | N/A |
+| `unify_vars_local` | — | 285.00 | — | — | N/A | N/A |
+| `build_ground1_local` | — | 121.08 | — | — | N/A | N/A |
+| `unify_ground1_local` | — | 263.00 | 118 | — | Yes | N/A |
+| `build_ground3_local` | — | 231.44 | — | — | N/A | N/A |
+| `unify_ground3_local` | — | 1120.96 | 386 | — | Yes (different shape) | N/A |
 
 **R3b gate verdict:** instance1 passes; instance3, instance5 and instance7
 exceed their gates. Ground1 unification exceeds the kernel's figure;
@@ -632,3 +641,81 @@ their totals is in the benchmark caller (22.002030 vs 14.002024), not a faster
 Graph implementation. Thus their net figures depend on the specified common
 empty-loop subtraction; they should not be read as an isolated eight-instruction
 saving from Checker::instance's memo test.
+
+## Local-level unification measurements
+
+Revision `2d93b31cf`, same machine, Rust toolchain, fat-LTO bench profile,
+codegen units, debug information and zero/full subtraction method. The six
+new operations are the three requested unifications and their three controls.
+Each local case calls `c.g.begin_def()` exactly once before the loop, taking
+Graph's initial level 1 to level 2; `clear_instances` does not change that
+level. `var_at` and `constr_at` build **every** operand node at that level
+(including the two nullary children), without GENERIC nodes or a second walk.
+The generic cases still explicitly construct all their nodes at GENERIC.
+The benchmark-only helpers state their construction cost; no compiler-path
+function or data structure was added or changed.
+
+The whole bench was rebuilt and all 27 operations were run, including
+build-only controls, at both 0 and 1,000,000 iterations. The setup-level choice
+and any extra operand construction overhead appear on both sides of each
+unification/control subtraction. `begin_def` is outside both loops and is
+also removed by the zero-iteration subtraction.
+
+```sh
+CARGO_PROFILE_BENCH_CODEGEN_UNITS=1 CARGO_PROFILE_BENCH_DEBUG=line-tables-only \
+  cargo bench --manifest-path compiler-rust/Cargo.toml --bench tc_kernel --no-run
+# Finished `bench` profile [optimized + debuginfo] target(s) in 3m 04s
+# Run the zero/full valgrind and cg_annotate commands above for every operation.
+```
+
+Raw output (exact I refs and raw instructions/iteration):
+
+```text
+operation zero full raw
+instance1 327852 169388439 169.060587
+instance3 327886 257636773 257.308887
+instance5 327920 351665228 351.337308
+instance7 327954 375599541 375.271587
+generalize7 327886 864599501 864.271615
+empty 327832 19330074 19.002242
+lower7 327850 834599451 834.271601
+copy7 327872 1822907875 1822.580003
+repr 327838 181388439 181.060601
+restore 327866 239388853 239.060987
+keep 327878 218388851 218.060973
+checker_instance1 328009 159388617 159.060608
+checker_instance3 328043 247636951 247.308908
+checker_instance5 328077 342665406 342.337329
+checker_instance7 328111 365599719 365.271608
+build_vars 328121 101398449 101.070328
+unify_vars 328155 326398677 326.070522
+build_ground1 328169 121405846 121.077677
+unify_ground1 328203 324406074 324.077871
+build_ground3 328237 231768995 231.440758
+unify_ground3 328271 1110726939 1110.398668
+build_vars_local 328062 101398390 101.070328
+unify_vars_local 328096 386398618 386.070522
+build_ground1_local 328096 121405824 121.077728
+unify_ground1_local 328130 384406052 384.077922
+build_ground3_local 328170 231768979 231.440809
+unify_ground3_local 328199 1352726918 1352.398719
+```
+
+| Local operation | Full-minus-zero raw | Build-only twin | Net instructions | Generic net in same executable | Local minus generic |
+|---|---:|---:|---:|---:|---:|
+| `unify_vars_local` | 386.070522 | 101.070328 | 285.000194 | 225.000194 | 60.000000 |
+| `unify_ground1_local` | 384.077922 | 121.077728 | 263.000194 | 203.000194 | 60.000000 |
+| `unify_ground3_local` | 1352.398719 | 231.440809 | 1120.957910 | 878.957910 | 242.000000 |
+
+The local cases are more expensive, not faster: +60, +60 and +242
+instructions respectively versus their generic counterparts in this executable.
+No attribution of that difference to individual checker mechanisms is claimed
+without a local-case profile analysis. The old executable's generic three-node
+net was 877.96; the new one is 878.96. This one-instruction dispatch/layout
+change is reported, not hidden by reusing the previous executable's baseline.
+Similarly, the empty loop is now 19.002242, not 18.002246; the results table
+uses each executable's own empty loop. The three failing R3b gates still fail.
+
+No full compiler test suite was run locally. No files under
+`compiler-rust/src` changed. The earlier application sanity check was not
+repeated: this addition still changes only bench code and documentation.
