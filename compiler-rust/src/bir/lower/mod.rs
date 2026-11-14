@@ -563,6 +563,7 @@ impl State {
             .max().unwrap_or(0).checked_add(1).expect("identifier order capacity");
         let (untagged_storage, untagged_dispatch) = untagged::prepare(&mut arena);
         let named_metadata = variant::prepare(&mut arena);
+        let needs_hashes = switch_arms != 0 || !arena.pools.catches.is_empty();
         Self {
             evaluation: args::Evaluation::default(),
             object_scratch: record::Scratch::default(),
@@ -578,7 +579,8 @@ impl State {
             group_order: Vec::with_capacity(switch_arms), group_heads: Vec::with_capacity(switch_arms),
             switch_output_nodes: Vec::new(), switch_output_clauses: Vec::new(), switch_group_steps: 0,
             switch_hash_bytes: Vec::new(), switch_constant_work: Vec::new(),
-            switch_primitive_hashes: Vec::new(), switch_constant_hashes: Vec::new(),
+            switch_primitive_hashes: Vec::with_capacity(if needs_hashes { arena.pools.prims.len() } else { 0 }),
+            switch_constant_hashes: Vec::with_capacity(if needs_hashes { arena.pools.consts.len() } else { 0 }),
             switch_comparisons: 0, switch_compared: 0, switch_visits: 0,
             invalid_module_paths: vec![false; input.arena.nodes.len()],
             awaited_units: vec![false; input.arena.vars.len()],
