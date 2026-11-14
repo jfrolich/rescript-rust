@@ -11622,13 +11622,30 @@ let e = () =>
         let source = (0..10_000).map(|i| format!("type t{i} = C{i}\n")).collect::<String>();
         let (mut arena, items) = parse_structure(&source);
         assert!(!derive::structure_uses_spice_mapper(&items, &arena));
+        let mapped = rewrite_structure_impl(&items, &mut arena, true, None).unwrap();
+        assert_eq!(mapped.len(), 10_000);
+        assert_eq!(arena.derived_scope_steps.get(), derive::ScopeSteps::default());
+    }
+
+    #[test]
+    fn ten_thousand_derived_items_visit_each_prefix_slot_once() {
+        let source = (0..10_000).map(|i| format!("@spice type t{i} = int\n")).collect::<String>();
+        let (mut arena, items) = parse_structure(&source);
         let mut prefix = None;
         let mut steps = 0;
-        for index in 0..items.len() {
-            assert!(!result_shadow_for::<false>(&items, index, &mut arena, &mut prefix, || steps += 1).result_shadowed);
+        for index in (0..items.len()).rev() {
+            result_shadow_for::<true>(&items, index, &mut arena, &mut prefix, || steps += 1);
         }
-        assert_eq!(steps, 0);
-        assert!(prefix.is_none());
+        assert_eq!(steps, items.len());
+        assert_eq!(arena.derived_scope_steps.get().prefix_items, items.len());
+    }
+
+    #[test]
+    fn ten_thousand_variant_constructors_take_ten_thousand_scope_steps() {
+        let constructors = (0..10_000).map(|i| format!("C{i}")).collect::<Vec<_>>().join(" | ");
+        let (arena, items) = parse_structure(&format!("type t = {constructors}"));
+        assert!(!derive::shadows_result(&items[0], &arena));
+        assert_eq!(arena.derived_scope_steps.get().constructors, 10_000);
     }
 
     #[test]

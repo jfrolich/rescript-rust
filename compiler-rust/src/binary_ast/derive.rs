@@ -273,6 +273,16 @@ pub fn expand_structure_item_with_mapper(item: &StructureItem, arena: &mut Parse
     expand_structure_item_in_scope(item, arena, active, Scope { result_shadowed: active && shadows_result(item, arena), ..Scope::default() })
 }
 
+/// Per-arena test instrumentation, erased entirely from production builds.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ScopeSteps {
+    pub prefix_items: usize,
+    pub shadow_items: usize,
+    pub constructors: usize,
+    pub nested_items: usize,
+}
+
 /// Borrowed source-order facts. A position is necessary because the frontend
 /// may map items backwards after collecting a later prefix.
 #[derive(Clone, Copy, Default)]
@@ -335,9 +345,16 @@ impl<'a> PrefixScope<'a> {
     /// O(constructors + declarations + newly allocated name slots). Each
     /// declaration appends one version; only its immediate manifest is read.
     pub(crate) fn push(&mut self, item: &StructureItem, arena: &mut ParseArena) {
+        #[cfg(test)]
+        {
+            let mut steps = arena.derived_scope_steps.get();
+            steps.prefix_items += 1;
+            arena.derived_scope_steps.set(steps);
+        }
         let position = self.len();
+        let own_shadow = shadows_result(item, arena);
         let shadowed = self.shadows.last().copied().unwrap_or(self.parent.result_shadowed)
-            || shadows_result(item, arena);
+            || own_shadow;
         self.shadows.push(shadowed);
         if let StructureItemDesc::Pstr_type(group) = &item.pstr_desc {
             self.names.resize(self.names.len().max(arena.string_count()), 0);
@@ -359,7 +376,21 @@ impl<'a> PrefixScope<'a> {
 /// Whether this item introduces a local result-constructor name.
 /// Cost: O(constructors), borrowed name comparisons and no allocation.
 pub(crate) fn shadows_result(item: &StructureItem, arena: &ParseArena) -> bool {
-    let is_result = |name| matches!(arena.get_string(name), "Ok" | "Error");
+    #[cfg(test)]
+    {
+        let mut steps = arena.derived_scope_steps.get();
+        steps.shadow_items += 1;
+        arena.derived_scope_steps.set(steps);
+    }
+    let is_result = |name| {
+        #[cfg(test)]
+        {
+            let mut steps = arena.derived_scope_steps.get();
+            steps.constructors += 1;
+            arena.derived_scope_steps.set(steps);
+        }
+        matches!(arena.get_string(name), "Ok" | "Error")
+    };
     match &item.pstr_desc {
         StructureItemDesc::Pstr_type(group) => group.1.iter().any(|decl| match &decl.ptype_kind {
             crate::parser::ast::TypeKind::Ptype_variant(constructors) =>

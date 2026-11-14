@@ -933,3 +933,14 @@ A `DerivedTable` belongs to a fresh typed arena per unit: `driver.rs:10360`
 constructs `TypeCheckContext::new`, `types/typecore.rs:1669` initializes
 `typed: TypedArena::new()`, and `types/tast_arena.rs:455` returns `Self::default()`.
 It is not reset and reused across units; no cache-clearing convention is needed.
+
+Scope step tests now use a test-only per-arena observer (no production fields,
+locks or TLS). Run each with `cargo test --manifest-path compiler-rust/Cargo.toml
+<test-name>`:
+
+| Test name | Observed work |
+|---|---|
+| `ten_thousand_items_without_derives_do_no_result_scope_work` | real `rewrite_structure_impl` dispatch, zero prefix/constructor/nested steps |
+| `ten_thousand_derived_items_visit_each_prefix_slot_once` | one 10,000-derived-item structure, 10,000 prefix steps in reverse query order |
+| `ten_thousand_variant_constructors_take_ten_thousand_scope_steps` | one variant, 10,000 constructor-name checks |
+| `ten_thousand_nested_items_take_one_scope_visit_each` | nested module mapper, 10,000 items and exactly 10,000 `shadows_result` visits |

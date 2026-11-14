@@ -490,6 +490,8 @@ struct ExprOverrides {
 pub struct ParseArena {
     /// Optional module-owned census, absent on the default compilation path.
     pub derived_census: Option<Box<crate::derived_census::Census>>,
+    #[cfg(test)]
+    pub(crate) derived_scope_steps: std::cell::Cell<crate::binary_ast::derive::ScopeSteps>,
     /// Location-free builds retain node identity and generated/source provenance,
     /// but allocate no position or location records. Full locations are populated
     /// only by a fresh diagnostic compilation.
@@ -1085,6 +1087,8 @@ impl Default for ParseArena {
             derived_value_groups: Vec::new(),
             plans: Default::default(),
             derived_census: None,
+            #[cfg(test)]
+            derived_scope_steps: Default::default(),
             expr_field_lists: ListPool::default(),
             pat_field_lists: ListPool::default(),
             case_lists: ListPool::default(),

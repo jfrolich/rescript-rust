@@ -5903,6 +5903,12 @@ fn map_structure_items_with_mapper(
     let mut expanded = Vec::new();
     let mut prefix = super::derive::PrefixScope::new(scope);
     for item in structure {
+        #[cfg(test)]
+        {
+            let mut steps = arena.derived_scope_steps.get();
+            steps.nested_items += 1;
+            arena.derived_scope_steps.set(steps);
+        }
         prefix.push(item, arena);
         // Only the items of a module expression are mapped here.
         expanded.extend(map_structure_item_spice(
@@ -5954,4 +5960,25 @@ fn longident_comparison_steps_are_linear_without_collecting_segments() {
     while let Longident::Ldot(prefix, _) = path { path = *prefix; }
     let apply = Longident::Lapply(Box::new(Longident::Lident(name)), Box::new(Longident::Lident(name)));
     assert_eq!(longident_matches_borrowed(&arena, &apply, &[]), (true, 1));
+}
+
+
+#[cfg(test)]
+#[test]
+fn ten_thousand_nested_items_take_one_scope_visit_each() {
+    let items = (0..10_000).map(|i| format!("type t{i} = C{i}\n")).collect::<String>();
+    let source = format!("module Nested = {{{items}}}");
+    let mut parser = crate::parser::Parser::new("scope.res", &source);
+    let structure = crate::parser::module::parse_structure(&mut parser);
+    assert!(!parser.has_errors());
+    let mut arena = parser.into_arena();
+    let StructureItemDesc::Pstr_module(module) = &structure[0].pstr_desc else { panic!("module") };
+    let ModuleExprDesc::Pmod_structure(items) = &arena.get_mod_expr(module.pmb_expr).pmod_desc else { panic!("structure") };
+    let items = items.clone();
+    let mapped = map_structure_items_with_mapper(&items, &mut arena, true, super::derive::Scope::default()).unwrap();
+    assert_eq!(mapped.len(), 10_000);
+    let steps = arena.derived_scope_steps.get();
+    assert_eq!(steps.nested_items, 10_000);
+    assert_eq!(steps.prefix_items, 10_000);
+    assert_eq!(steps.shadow_items, 10_000);
 }
