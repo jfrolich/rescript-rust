@@ -944,7 +944,6 @@ mod tests {
     /// 10,000 cases of everything on programs with abbreviations: the
     /// acceptance test of R3c, and of every later slice.
     #[test]
-    #[ignore = "R3c build"]
     fn full_tier_agrees_on_generated_cases() {
         let coverage = run_cases(Tier::Full, 1, 100, 100);
         assert_eq!(coverage.cases, 10_000);

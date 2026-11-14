@@ -1,0 +1,1 @@
+- Build slice R3c of the new type checker: unification expands abbreviations as OCaml's unify2 and unify3 do, with the recursion repair and unify_var.
