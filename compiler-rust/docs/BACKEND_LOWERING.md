@@ -3795,3 +3795,8 @@ Invariant accounting (no production check is silently dropped):
 | `external.rs`: getter/setter/index arity | The same production arity assertions read `lists.get(args).len()`. |
 
 Commands/results: `CARGO_INCREMENTAL=0 cargo test --manifest-path compiler-rust/Cargo.toml bir:: -- --test-threads=1` — **768 passed, zero failures**; strict all-target compiler clippy — **passed**. The mixed whole-Lambda tests retain zero allocations and unchanged capacities after dense-table conversion. Steps 4–6 remain outstanding.
+### Scope correction — step 4
+
+`evaluate_now` records its statement-span start and returns the appended range; both consumers read that exact range and truncate to its saved start. The scratch-empty guard is a production `assert!`, and a new expected-panic test checks rejection of unconsumed statement scratch. The outgoing value-buffer guard is also a production assertion. `finish_self_call` clears `tail_name` before appending the parameter-copy spelling; a new test seeds stale text and verifies `_x`, an empty returned buffer and a valid completed output.
+
+Commands/results: `CARGO_INCREMENTAL=0 cargo test --manifest-path compiler-rust/Cargo.toml bir::lower:: -- --test-threads=1` — **424 passed, zero failures**; strict all-target compiler clippy — **passed**. Steps 5–6 remain outstanding.

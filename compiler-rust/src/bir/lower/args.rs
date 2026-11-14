@@ -57,7 +57,8 @@ impl State {
     fn evaluate_now(&mut self, root: NodeId) -> (Span, NodeId) {
         let mut evaluation = std::mem::take(&mut self.evaluation);
         let Evaluation { work, values, statements } = &mut evaluation;
-        debug_assert!(work.is_empty() && values.is_empty() && statements.is_empty());
+        assert!(work.is_empty() && values.is_empty() && statements.is_empty(), "argument evaluation scratch must be empty");
+        let statement_start = statements.len();
         work.push(Work::Enter(root));
         while let Some(task) = work.pop() {
             self.sequence_steps += 1;
@@ -161,7 +162,10 @@ impl State {
             }
         }
         assert_eq!(values.len(), 1);
-        let span = Span { start: 0, len: statements.len() as u32 };
+        let span = Span {
+            start: crate::bir::index(statement_start),
+            len: crate::bir::index(statements.len() - statement_start),
+        };
         let value = values.pop().expect("held value");
         self.evaluation = evaluation;
         (span, value)
@@ -190,7 +194,7 @@ impl State {
             .any(|arg| self.statements.has_statements(arg.stmts));
         let mut has_code = false;
         let mut later_defines_pure = true;
-        debug_assert!(values.is_empty());
+        assert!(values.is_empty(), "argument value scratch must be empty");
         for (i, arg) in args.iter().enumerate().rev() {
             self.sequence_steps += 1;
             let value = arg.value.expect("argument value");
@@ -227,7 +231,7 @@ impl State {
                     self.evaluate_now(value)
                 };
             has_code |= self.statements.has_statements(arg.stmts) || held.len != 0;
-            later_defines_pure &= self.defines_pure_values(&self.evaluation.statements[..held.len as usize])
+            later_defines_pure &= self.defines_pure_values(&self.evaluation.statements[held.start as usize..(held.start + held.len) as usize])
                 && self.statements.statements(arg.stmts).all(|statement| {
                     if let View::SDecl { value, .. } = self.arena.view(statement) {
                         value.is_none_or(|value| self.runs_no_code(value))
@@ -237,9 +241,9 @@ impl State {
                 });
             if held.len != 0 {
                 self.statements
-                    .fill_held(arg.stmts.start + arg.stmts.len - 1, &self.evaluation.statements[..held.len as usize]);
+                    .fill_held(arg.stmts.start + arg.stmts.len - 1, &self.evaluation.statements[held.start as usize..(held.start + held.len) as usize]);
             }
-            self.evaluation.statements.clear();
+            self.evaluation.statements.truncate(held.start as usize);
             values.push(value);
         }
         values.reverse();
@@ -259,6 +263,18 @@ mod tests {
     use crate::lambda::{
         arena::LamArena, lam_compile::LambdaCompiler, lam_compile_arguments::HeldArgs,
     };
+
+    #[test]
+    #[should_panic(expected = "argument evaluation scratch must be empty")]
+    fn evaluate_now_rejects_unconsumed_statement_scratch() {
+        let mut a = LamArena::new();
+        let root = a.const_(crate::lambda::lam_constant::Constant::JsNull);
+        let mut state = State::new(bridge::import_lambda(&a, root).unwrap());
+        let value = state.arena.new_node(View::JNull, 0);
+        let statement = state.arena.new_node(View::SDebugger, 0);
+        state.evaluation.statements.push(statement);
+        state.evaluate_now(value);
+    }
 
     #[test]
     fn ten_thousand_held_literal_elements_lower_without_allocations() {

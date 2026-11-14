@@ -52,6 +52,7 @@ impl State {
             }
             let copy = if let Some(copy) = self.tail_copies[param.index()] { copy } else {
                 let mut name = std::mem::take(&mut self.tail_name);
+                name.clear();
                 name.push('_');
                 name.push_str(self.arena.vars.name(param).as_str());
                 let copy = self.fresh_variable(&name);
@@ -120,6 +121,25 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tail_copy_spelling_discards_preexisting_scratch() {
+        let mut a = crate::lambda::arena::LamArena::new();
+        let f = ident("f", 1);
+        let x = ident("x", 2);
+        let arg = a.const_(crate::lambda::lam_constant::Constant::JsNull);
+        let body = call(&mut a, f, &[arg]);
+        let root = wrap(&mut a, f, &[x], body);
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        state.tail_name.push_str("stale_field");
+        let output = state.probe(Cx::value(), root).unwrap();
+        assert!(state.tail_name.is_empty());
+        assert!(state.idents.iter().any(|id| id.name() == "_x"));
+        let lowered = state.complete(Cx::value(), output);
+        lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
+    }
+
     #[test]
     fn frame_size() {
         assert_eq!(std::mem::size_of::<Frame>(), 16);
