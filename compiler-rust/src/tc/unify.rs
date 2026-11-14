@@ -54,7 +54,7 @@ pub enum FrameKind {
     /// [`Checker::saved`]: the descriptor `d1` to put back if a later frame
     /// above this one fails (`t1'.desc <- d1`, ctype.ml:2437), then a link
     /// node naming the expanded head `t1'` it goes back into; bit 31 of
-    /// `extra` ([`SWAPPED`]) says unify2 chose the right side
+    /// `extra` (`SWAPPED`) says unify2 chose the right side
     /// (ctype.ml:2299-2303), whose trace entries come out swapped.
     Linked,
     /// Leave the universal-variable scope `extra` (R3g).
