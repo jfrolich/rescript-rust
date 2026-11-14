@@ -4,8 +4,9 @@
 //! answers: the programs of [`PROGRAMS`], each with the lines of the
 //! canonical signature that show which item a name resolved to and with the
 //! warnings its lookups raise. The old checker is driven as a build drives
-//! it: `driver::compile_source_in_process` on a source text, dependencies
-//! compiled the same way and registered in a module registry. Nothing is
+//! it for `rescript build --check-only`: `driver::compile_source_in_process`
+//! on a source text, dependencies compiled the same way and registered in a
+//! module registry. Nothing is
 //! started at a level or a stamp a compilation would not start at.
 //!
 //! The second part is the acceptance tests of the build slices, ignored
@@ -224,6 +225,9 @@ pub(crate) struct Old {
 /// the pinned warnings are those a build prints.
 fn options() -> CompilerOptions {
     CompilerOptions {
+        // A check-only build: type checking, warnings and publication, no
+        // JavaScript (which would need the dependency's output path).
+        check_only: true,
         nopervasives: true,
         warning_specs: vec!["+a-4-9-20-40-41-42-50-61-102-70".to_string()],
         ..Default::default()
