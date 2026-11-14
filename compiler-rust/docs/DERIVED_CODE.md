@@ -826,3 +826,41 @@ the 21 retry bindings in two units; no binding remains to name as a retry.
 Spice and application check-mode builds finish successfully. The original
 constructor-shadow diagnostic and a new nested-scope diagnostic agree in all
 three modes; all 17 diagnostic fixtures pass without changing old expectations.
+
+
+#### Census-off instruction gate: not accepted yet
+
+The strict `tests/tests` gate remains **failed**, so this slice is not ready.
+Base `be1b3a482e5a989d1a1bbecf33a9b4f1aab98fec` and candidate `40a94389a`
+were built sequentially in the same disposable source directory with
+`cargo build --release --locked --manifest-path <source>/rewatch/Cargo.toml`.
+After replacing the base archive with the candidate archive, changed source
+files were touched to invalidate Cargo's mtime cache; distinct binary SHA-256
+hashes verified that both revisions were actually rebuilt. Both binaries then
+built the same checkout, keeping runtime and source paths identical:
+
+```sh
+python3 scripts/compare_build_instructions.py \
+  --base "$BASE_BINARY" "$PWD" --head "$HEAD_BINARY" "$PWD" \
+  --project tests/tests --runs 3 --threshold 0.02 --sequential \
+  --work-dir "$COUNTS" --summary "$REPORT"
+```
+
+| | Instructions, three runs | Minimum |
+|---|---|---:|
+| Base | 4,073,364,802; 4,072,876,325; 4,073,549,768 | 4,072,876,325 |
+| Candidate | 4,080,736,147; 4,080,528,469; 4,080,586,846 | 4,080,528,469 |
+| Change | both compile 743 modules | **+0.1879%** |
+
+The +0.02% limit is not waived. Earlier comparisons with different checkout
+paths also failed (+0.303%); using one input checkout reduced but did not remove
+the difference (+0.087% with separately located compiler builds). An extra
+mapper-disabled fast path and boxing the plan pool did not pass the gate and
+were discarded. A run that accidentally reused the base binary after archive
+replacement was detected by identical binary hashes and excluded entirely.
+
+`--sequential` was added to the comparison script so these measurements never
+run two heavy builds together; only that mode permits sharing a project path.
+No source, oracle, compiler options or threshold was weakened to obtain a pass.
+The remaining blocker is census-off instruction overhead, not application
+retry classification or JSON-identity correctness.
