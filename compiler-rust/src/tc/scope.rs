@@ -972,14 +972,65 @@ impl Scopes {
     /// An item's namespace is its `ExportKind`; items of one key keep the
     /// segment's order.
     pub fn import_table(&mut self, unit: u32, signature: u32) -> TableId {
-        todo!("R4d")
+        let slot = (self.units[unit as usize].tables + signature) as usize;
+        let known = self.table_index[slot];
+        if known != NONE {
+            #[cfg(test)]
+            super::steps::tick();
+            return TableId(known | IMPORTED);
+        }
+        let Scopes {
+            names,
+            units,
+            imported_tables,
+            imported_members,
+            table_index,
+            ..
+        } = self;
+        let segment = &*units[unit as usize].segment;
+        let range = segment.children[signature as usize];
+        let first = imported_members.len() as u32;
+        imported_members.reserve(range.len as usize);
+        for index in range.start..range.start + range.len {
+            #[cfg(test)]
+            super::steps::tick();
+            let item = segment.items[index as usize];
+            let name = names.intern(segment_string(segment, item.name));
+            // `ExportKind`'s discriminants are `Namespace`'s.
+            imported_members.push(Member {
+                key: name.0 << 3 | item.kind as u32,
+                target: index,
+                origin: unit,
+            });
+        }
+        // Stable: items of one key keep the segment's order.
+        imported_members[first as usize..].sort_by_key(|member| member.key);
+        let id = imported_tables.len() as u32;
+        debug_assert!(id < IMPORTED, "more than 2^31 imported tables");
+        imported_tables.push(Table {
+            first,
+            len: range.len,
+            unit,
+        });
+        table_index[slot] = id;
+        TableId(id | IMPORTED)
     }
 
     /// O(1), three loads: the segment and export item a row of
     /// `imported_members` names.
     pub fn item(&self, row: u32) -> (&Segment, &ExportItem) {
-        todo!("R4d")
+        let member = self.imported_members[row as usize];
+        let segment = &*self.units[(member.origin & UNIT_MASK) as usize].segment;
+        (segment, &segment.items[member.target as usize])
     }
+}
+
+/// O(len), no allocation: the text of string `index` of a segment's string
+/// pool. Names are written from Rust strings, so the bytes are UTF-8.
+fn segment_string(segment: &Segment, index: u32) -> &str {
+    let range = segment.signature.strings[index as usize];
+    let bytes = &segment.signature.bytes[range.start as usize..(range.start + range.len) as usize];
+    std::str::from_utf8(bytes).expect("a segment string is UTF-8")
 }
 
 #[cfg(test)]
