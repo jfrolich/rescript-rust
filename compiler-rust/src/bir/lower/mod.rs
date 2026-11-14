@@ -539,7 +539,10 @@ impl State {
             assert_eq!(made, var);
             arena.vars.flags[i] = input.arena.vars.flags[i];
         }
-        arena.js_scope = Some(scope::Scope::new(arena.vars.len()));
+        let mut scope = scope::Scope::new(arena.vars.len());
+        // Reference sites are indexed by emitted nodes, not by source binders.
+        scope.sites.reserve_exact(output_nodes);
+        arena.js_scope = Some(scope);
         arena.pools.j_modules = input
             .globals
             .iter()
