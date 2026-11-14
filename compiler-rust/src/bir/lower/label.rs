@@ -135,6 +135,13 @@ fn class(cont: Cont) -> usize {
     }
 }
 impl Schedule {
+    /// Initial traversal capacity from the imported occurrence count. Event
+    /// tables stay lazy: units without labels do not need those rows.
+    pub(super) fn with_source_capacity(nodes: usize) -> Self {
+        Self { frames: Vec::with_capacity(nodes), values: Vec::with_capacity(nodes),
+            edges: Vec::with_capacity(nodes), ..Self::default() }
+    }
+
     /// O(1): a missing event subtree has no label effects.
     fn cost(&self, edge: Edge, class: usize) -> Cost {
         if edge.step == NONE {

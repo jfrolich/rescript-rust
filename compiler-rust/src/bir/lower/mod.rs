@@ -614,7 +614,7 @@ impl State {
             tries: Vec::new(),
             loops: Vec::new(),
             next_loop_label: 0,
-            labels: label::Schedule::default(),
+            labels: label::Schedule::with_source_capacity(source_nodes),
             try_form_reads: 0,
             catch_work: Vec::new(),
             catch_flag_reads: 0,
