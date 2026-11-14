@@ -1,0 +1,1 @@
+- Preserve source-node identity when a generic parameter is also reached through a shared row, keeping independent canonical printing and inverse conversion lossless without changing instantiation.

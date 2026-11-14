@@ -1,0 +1,12 @@
+Warning number 41
+  /.../fixtures/Shadowed_result_scope/Main.res
+
+  Ok belongs to several types: mine result
+The first one was selected. Disambiguate if this is wrong.
+
+
+  We've found a bug for you!
+  /.../fixtures/Shadowed_result_scope/Main.res
+
+  This has type: t
+  But it's expected to have type: int

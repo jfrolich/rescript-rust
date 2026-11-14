@@ -163,7 +163,7 @@ impl<S: Steps> Lowering<'_, S> {
         // the binding's parameter (`v => (v => e)(v)`) has the binding's
         // result type.
         self.return_unit = conv.is_base_type_with_env(result, "unit", self.env);
-        self.function(conv, param, body)
+        self.function(conv, param, body, self.loc)
     }
 
     /// translcore.ml `transl_function` of a function of one variable.
@@ -173,6 +173,7 @@ impl<S: Steps> Lowering<'_, S> {
         conv: &mut RawLambdaConverter<'_, B>,
         param: crate::parse_arena::StrIdx,
         body: BodyIdx,
+        loc: LamLoc,
     ) -> RawLambda {
         let param = conv.fresh_ident(conv.arena.get_string(param));
         self.locals.push(param);
@@ -191,7 +192,7 @@ impl<S: Steps> Lowering<'_, S> {
                 one_unit_arg: false,
                 is_a_functor: false,
             },
-            self.loc,
+            loc,
         )
     }
 
@@ -309,7 +310,7 @@ impl<S: Steps> Lowering<'_, S> {
         self.node_at(conv, idx, None)
     }
 
-    /// Lower one node with an optional application location. Children go
+    /// Lower one node with an optional expression location. Children go
     /// through `node`, so they do not inherit the override.
     /// Cost: O(body and pattern occurrences below this node), plus matching.
     fn node_at<B: RawLambdaBuilder>(
@@ -324,6 +325,9 @@ impl<S: Steps> Lowering<'_, S> {
         match self.plans.body(idx) {
             BodyNode::At { loc, body } => self.node_at(conv, body, Some(loc)),
             BodyNode::Local(level) => (conv.b.var(self.locals[level as usize]), None),
+            BodyNode::LocalFromEnd(depth) => (
+                conv.b.var(self.locals[self.locals.len() - 1 - depth as usize]), None,
+            ),
             BodyNode::Free(obligation) => {
                 let Obligation::Value {
                     name_loc, expr_loc, ..
@@ -461,7 +465,10 @@ impl<S: Steps> Lowering<'_, S> {
                 };
                 (lam, arity.map(|arity| arity - i32::from(len)))
             }
-            BodyNode::Function { param, body } => (self.function(conv, param, body), None),
+            BodyNode::Function { param, body } => {
+                let loc = location.map_or(self.loc, |loc| conv.lam_loc(loc));
+                (self.function(conv, param, body, loc), None)
+            },
             BodyNode::Field { record, label } => {
                 let (record, _) = self.node(conv, record);
                 let label = self.table.label(label);
@@ -486,7 +493,7 @@ impl<S: Steps> Lowering<'_, S> {
                 let ConstructorKind::Ordinary(reference) = cstr.cstr_kind else {
                     unreachable!("a discharged constructor is an ordinary one")
                 };
-                let loc = SrcLoc::from(dummy);
+                let loc = SrcLoc::from(expression_loc);
                 let lam = if args > 0 {
                     let (elem, _) = self.node(conv, arg);
                     let payload = Some((payload, self.env_ref));
@@ -854,6 +861,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn json_identity_codecs_match_general_raw_lambda() {
+        for (source, expected_lowered) in [
+            ("@spice type t = JSON.t", 1),
+            ("@spice type t = array<JSON.t>", 0),
+            ("@spice.decode type t = array<JSON.t>", 1),
+            ("@spice type t = {value: JSON.t}", 1),
+            ("@spice type t = {value: option<JSON.t>, other?: JSON.t}", 1),
+            ("@spice type t = A(JSON.t) | B", 1),
+        ] {
+            let (planned, lowered) = record_lambda(source, true);
+            let (general, _) = record_lambda(source, false);
+            assert_eq!(lowered, expected_lowered, "{source}");
+            assert_eq!(planned, general, "{source}");
+        }
+    }
+
     /// A record's plan lowers to the raw Lambda of its general form, up to
     /// the numbering of identifiers and of static exits.
     #[test]
@@ -875,6 +899,24 @@ mod tests {
             assert_eq!(none, 0);
             assert_eq!(planned, general, "{source}");
         }
+    }
+
+    #[test]
+    fn json_identity_codecs_preserve_source_maps() {
+        use crate::driver::{CompilerOptions, DerivedPath, compile_source_in_process};
+        let source = format!("{}\n@spice type t = {{value: JSON.t, values: array<JSON.t>}}",
+            crate::binary_ast::derive::fixtures::RECORD_LIBRARY);
+        let options = CompilerOptions {
+            spice_ppx: true,
+            derived_path: DerivedPath::Check,
+            source_map: crate::js_ir::source_map::SourceMapMode::Inline,
+            source_filename: Some("IdentityMap.res".into()),
+            output_path: Some("IdentityMap.js".into()),
+            ..Default::default()
+        };
+        let result = compile_source_in_process(&source, "IdentityMap.res", "IdentityMap", &options,
+            &crate::cmi::persistent_env::ModuleRegistry::new(), false, None).unwrap();
+        assert!(result.js_outputs.iter().any(|output| output.code.contains("sourceMappingURL=")));
     }
 
     /// A user codec has no builtin-identifier location to hide a missing
@@ -1326,8 +1368,13 @@ let probe = r => switch r {
     /// The steps and the terms of lowering the item of a record of `fields`
     /// `int` fields, and the body nodes of its plan.
     fn record_lowering(fields: usize) -> (usize, usize, usize) {
+        record_lowering_type(fields, "int")
+    }
+
+    /// Test-only setup: O(fields) plan, discharge and lowering work.
+    fn record_lowering_type(fields: usize, typ: &str) -> (usize, usize, usize) {
         let mut counts = (0, 0, 0);
-        crate::types::derived::tests::with_record(fields, |tctx, env, item, type_ctx| {
+        crate::types::derived::tests::with_record_type(fields, typ, |tctx, env, item, type_ctx| {
             let arena = tctx.arena;
             crate::types::derived::discharge(tctx, env, item).unwrap();
             let rb = RawArena::new();
@@ -1362,6 +1409,21 @@ let probe = r => switch r {
         assert_eq!(terms_2 - terms_1, 59);
         assert_eq!(nodes, nodes_1 + 9_999 * (nodes_2 - nodes_1));
         assert_eq!(terms, terms_1 + 9_999 * (terms_2 - terms_1));
+    }
+
+    #[test]
+    fn ten_thousand_json_fields_lower_in_linear_steps() {
+        let (one, two, many) = std::thread::Builder::new().stack_size(1 << 30)
+            .spawn(|| (record_lowering_type(1, "JSON.t"),
+                       record_lowering_type(2, "JSON.t"),
+                       record_lowering_type(10_000, "JSON.t")))
+            .unwrap().join().unwrap();
+        assert_eq!(one, (86, 101, 86));
+        assert_eq!(two, (140, 161, 140));
+        assert_eq!(many, (540_032, 600_041, 540_032));
+        assert_eq!(many.0, many.2);
+        assert_eq!(many.0, one.0 + 9_999 * (two.0 - one.0));
+        assert_eq!(many.1, one.1 + 9_999 * (two.1 - one.1));
     }
 
     /// A body of 10,000 nodes is lowered in 10,000 steps that make 10,000

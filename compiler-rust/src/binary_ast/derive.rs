@@ -14,6 +14,29 @@ use crate::parse_arena::ParseArena;
 use crate::parser::ast::{RecFlag, SignatureItem, StructureItem, StructureItemDesc};
 use plan::DerivedIdx;
 
+/// First unsupported form in declaration traversal order, after Q5 exclusions.
+/// One byte carried with a classification; no names or allocated payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum UnplannedForm {
+    /// Identity codec of JSON.t.
+    JsonIdentity,
+    /// User codec with type arguments.
+    AppliedUserCodec,
+    /// A functor application in a type path.
+    AppliedModulePath,
+    /// A type form without a codec plan.
+    UnsupportedType,
+    /// A constant fallback on the declaration.
+    ConstantFallback,
+    /// A record with no fields.
+    EmptyRecord,
+    /// A template key or default rather than a literal node.
+    TemplateLiteral,
+    /// A manifest record or another unsupported declaration shape.
+    DeclarationShape,
+}
+
 /// Why a derived declaration stays on the general path: the rows of the
 /// table in `compiler-rust/docs/DERIVED_CODECS.md`, Q5, and the shapes later
 /// slices plan.
@@ -36,16 +59,41 @@ pub enum GeneralReason {
     /// An `@unboxed` declaration.
     Unboxed,
     /// A record or constructor application needing forms not yet planned.
-    NotYetPlanned,
+    NotYetPlanned(UnplannedForm),
     /// A variant with a representation, attribute or payload codec outside
     /// the plan language; classify it before checking rather than retrying.
     UnsupportedVariant,
+    /// An exposed JSON identity argument needs application abbreviation inference.
+    JsonIdentityArgument,
+    /// A preceding local constructor shadows Ok or Error used by the decoder.
+    ShadowedResultConstructor,
     /// Plans are off for the tree: the switch `RESCRIPT_DERIVED_PATH=general`,
     /// or a tree that is stored or printed instead of compiled.
     Switch,
     /// An obligation of a plan of the unit failed in the checker, and the
     /// unit is compiled again with every declaration on the general path.
     FailedObligation,
+}
+
+impl GeneralReason {
+    /// Dense census bucket, shared by counts and timing. Cost: O(1).
+    pub(crate) fn census_index(self) -> usize {
+        match self {
+            Self::CustomCodec => 0,
+            Self::UserExpression => 1,
+            Self::TypeParameters => 2,
+            Self::RecursiveGroup => 3,
+            Self::SharedNames => 4,
+            Self::UnmeasuredShape => 5,
+            Self::Unboxed => 6,
+            Self::NotYetPlanned(_) => 7,
+            Self::UnsupportedVariant => 8,
+            Self::Switch => 9,
+            Self::FailedObligation => 10,
+            Self::JsonIdentityArgument => 11,
+            Self::ShadowedResultConstructor => 12,
+        }
+    }
 }
 
 /// The path a derived declaration takes.
@@ -78,8 +126,14 @@ pub struct PathCounts {
     pub unboxed: u64,
     /// See [`GeneralReason::NotYetPlanned`].
     pub not_yet_planned: u64,
+    /// Counts indexed by `UnplannedForm`, exactly one per unplanned binding.
+    pub unplanned_forms: [u64; 8],
     /// See [`GeneralReason::UnsupportedVariant`].
     pub unsupported_variant: u64,
+    /// See [`GeneralReason::JsonIdentityArgument`].
+    pub json_identity_argument: u64,
+    /// See [`GeneralReason::ShadowedResultConstructor`].
+    pub shadowed_result_constructor: u64,
     /// See [`GeneralReason::Switch`].
     pub switch: u64,
     /// See [`GeneralReason::FailedObligation`].
@@ -98,7 +152,12 @@ impl PathCounts {
         self.unmeasured_shape += other.unmeasured_shape;
         self.unboxed += other.unboxed;
         self.not_yet_planned += other.not_yet_planned;
+        for (count, increment) in self.unplanned_forms.iter_mut().zip(other.unplanned_forms) {
+            *count += increment;
+        }
         self.unsupported_variant += other.unsupported_variant;
+        self.json_identity_argument += other.json_identity_argument;
+        self.shadowed_result_constructor += other.shadowed_result_constructor;
         self.switch += other.switch;
         self.failed_obligation += other.failed_obligation;
     }
@@ -115,8 +174,13 @@ impl PathCounts {
                 GeneralReason::SharedNames => &mut self.shared_names,
                 GeneralReason::UnmeasuredShape => &mut self.unmeasured_shape,
                 GeneralReason::Unboxed => &mut self.unboxed,
-                GeneralReason::NotYetPlanned => &mut self.not_yet_planned,
+                GeneralReason::NotYetPlanned(form) => {
+                    self.unplanned_forms[form as usize] += bindings;
+                    &mut self.not_yet_planned
+                },
                 GeneralReason::UnsupportedVariant => &mut self.unsupported_variant,
+                GeneralReason::JsonIdentityArgument => &mut self.json_identity_argument,
+                GeneralReason::ShadowedResultConstructor => &mut self.shadowed_result_constructor,
                 GeneralReason::Switch => &mut self.switch,
                 GeneralReason::FailedObligation => &mut self.failed_obligation,
             },
@@ -180,7 +244,8 @@ pub fn value_names(
             plan::Obligation::Type { .. }
             | plan::Obligation::Label { .. }
             | plan::Obligation::Constructor { .. }
-            | plan::Obligation::Literal { .. } => None,
+            | plan::Obligation::Literal { .. }
+            | plan::Obligation::Equal { .. } | plan::Obligation::NotJsonIdentity { .. } => None,
         })
 }
 
@@ -196,6 +261,12 @@ pub fn structure_uses_spice_mapper(items: &[StructureItem], arena: &ParseArena) 
     super::spice_ppx::structure_uses_spice_mapper(items, arena)
 }
 
+/// Index learned by the existing mapper-presence scan; stops at the first
+/// deriving item. O(visited items and attributes), no allocation.
+pub(crate) fn first_spice_item(items: &[StructureItem], arena: &ParseArena) -> Option<usize> {
+    super::spice_ppx::first_spice_item(items, arena)
+}
+
 /// Detect derives in a signature. O(items and visited attributes), delegating to
 /// the existing mapper scan; no additional traversal.
 pub fn signature_uses_spice_mapper(items: &[SignatureItem], arena: &ParseArena) -> bool {
@@ -204,17 +275,219 @@ pub fn signature_uses_spice_mapper(items: &[SignatureItem], arena: &ParseArena) 
 
 /// Expand built-in derives on a structure item. O(generated syntax plus mapper
 /// work), with O(1) timing overhead only when the census is enabled.
-pub fn expand_structure_item_with_mapper(
+pub fn expand_structure_item_with_mapper(item: &StructureItem, arena: &mut ParseArena, active: bool) -> Result<Vec<StructureItem>, String> {
+    expand_structure_item_in_scope(item, arena, active, Scope { result_shadowed: active && shadows_result(item, arena), ..Scope::default() })
+}
+
+/// Per-arena test instrumentation, erased entirely from production builds.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ScopeSteps {
+    pub prefix_items: usize,
+    pub shadow_items: usize,
+    pub constructors: usize,
+    pub nested_items: usize,
+    pub presence_items: usize,
+}
+
+/// Borrowed source-order facts. A position is necessary because the frontend
+/// may map items backwards after collecting a later prefix.
+#[derive(Clone, Copy, Default)]
+pub struct Scope<'a> {
+    /// A preceding declaration shadows a predefined result constructor.
+    pub result_shadowed: bool,
+    pub(super) opaque_imports: bool,
+    pub(super) prefix: Option<(&'a PrefixScope<'a>, usize)>,
+}
+
+impl Scope<'_> {
+    /// O(1): an expression-level open hides inherited syntax facts from a
+    /// module body below it. Restoring the previous scope restores those facts.
+    pub(crate) fn after_open(self) -> Self {
+        Self { result_shadowed: self.result_shadowed, opaque_imports: true, prefix: None }
+    }
+
+    /// O(name bytes + alias-version/scope depth), using canonical spelling
+    /// slots and borrowed strings; no string allocation.
+    pub(crate) fn is_json_identity(self, lid: crate::parse_arena::LidentIdx, arena: &ParseArena) -> bool {
+        self.identity_fact(lid, arena) == Some(true)
+    }
+
+    /// Syntactically known JSON/non-JSON declaration, or unresolved. Import
+    /// epochs invalidate builtin spellings too: none are assumed immune to
+    /// rebinding here. A subsequent concrete declaration establishes a new fact.
+    /// Epoch checks cost O(1) per scope level, with no additional source scan.
+    pub(crate) fn identity_fact(self, lid: crate::parse_arena::LidentIdx, arena: &ParseArena) -> Option<bool> {
+        if super::spice_ppx::is_json_identifier(lid, arena) {
+            return (!self.opaque_imports).then_some(true);
+        }
+        let crate::parser::Longident::Lident(name) = arena.get_longident(lid) else { return None };
+        let fact = match arena.find_interned_string(arena.get_string(*name)) {
+            Some(canonical) => self.alias(canonical.raw() as usize),
+            None if self.opaque_imports => AliasFact::Unknown,
+            None => AliasFact::Unbound,
+        };
+        match fact {
+            AliasFact::Known(identity) => Some(identity),
+            AliasFact::Unknown => None,
+            AliasFact::Unbound => match arena.get_string(*name) {
+                "int" | "float" | "string" | "bool" | "unit" | "char" | "array" | "list" | "option" | "result" | "dict" => Some(false),
+                _ => None,
+            },
+        }
+    }
+
+    fn alias(self, name: usize) -> AliasFact {
+        let Some((prefix, position)) = self.prefix else {
+            return if self.opaque_imports { AliasFact::Unknown } else { AliasFact::Unbound };
+        };
+        let epoch = prefix.facts[position].import_epoch;
+        let mut slot = prefix.names.get(name).copied().unwrap_or(0);
+        while slot != 0 {
+            let entry = &prefix.aliases[slot as usize - 1];
+            if entry.position <= position {
+                if epoch != NO_IMPORT && entry.position < epoch { return AliasFact::Unknown; }
+                return entry.identity.map_or(AliasFact::Unknown, AliasFact::Known);
+            }
+            slot = entry.previous;
+        }
+        if epoch != NO_IMPORT { AliasFact::Unknown } else { prefix.parent.alias(name) }
+    }
+}
+
+enum AliasFact {
+    Known(bool),
+    Unknown,
+    Unbound,
+}
+
+const NO_IMPORT: usize = usize::MAX;
+
+// The existing dense prefix rows also snapshot the latest import position.
+// One current epoch alone cannot answer reverse-order queries across multiple
+// imports. This adds no per-item allocation and keeps epoch queries O(1).
+struct PrefixFacts {
+    shadowed: bool,
+    import_epoch: usize,
+}
+
+struct Alias {
+    position: usize,
+    previous: u32,
+    identity: Option<bool>,
+}
+
+/// Dense prefix facts and a flat version pool, shared by constructor and alias
+/// classification. No per-item allocation; a nested scope borrows its parent.
+pub(crate) struct PrefixScope<'a> {
+    parent: Scope<'a>,
+    facts: Vec<PrefixFacts>,
+    latest_import: usize,
+    names: Vec<u32>,
+    aliases: Vec<Alias>,
+}
+
+impl Default for PrefixScope<'_> {
+    fn default() -> Self {
+        Self { parent: Scope::default(), facts: Vec::new(), latest_import: NO_IMPORT,
+            names: Vec::new(), aliases: Vec::new() }
+    }
+}
+
+impl<'a> PrefixScope<'a> {
+    pub(crate) fn new(parent: Scope<'a>) -> Self { Self { parent, ..Self::default() } }
+    pub(crate) fn len(&self) -> usize { self.facts.len() }
+    pub(crate) fn at(&self, position: usize) -> Scope<'_> {
+        Scope { result_shadowed: self.facts[position].shadowed,
+            opaque_imports: self.facts[position].import_epoch != NO_IMPORT || self.parent.opaque_imports,
+            prefix: Some((self, position)) }
+    }
+
+    /// O(constructors + declarations + newly allocated name slots). Each
+    /// declaration appends one version; only its immediate manifest is read.
+    pub(crate) fn push(&mut self, item: &StructureItem, arena: &mut ParseArena) {
+        #[cfg(test)]
+        {
+            let mut steps = arena.derived_scope_steps.get();
+            steps.prefix_items += 1;
+            arena.derived_scope_steps.set(steps);
+        }
+        let position = self.len();
+        let own_shadow = shadows_result(item, arena);
+        let shadowed = self.facts.last().map_or(self.parent.result_shadowed, |fact| fact.shadowed)
+            || own_shadow;
+        if matches!(item.pstr_desc, StructureItemDesc::Pstr_open(_) | StructureItemDesc::Pstr_include(_)) {
+            self.latest_import = position;
+        }
+        self.facts.push(PrefixFacts { shadowed, import_epoch: self.latest_import });
+        if let StructureItemDesc::Pstr_type(group) = &item.pstr_desc {
+            self.names.resize(self.names.len().max(arena.string_count()), 0);
+            for decl in &group.1 {
+                let identity = if !decl.ptype_params.is_empty() {
+                    None
+                } else if let Some(ty) = decl.ptype_manifest {
+                    match &arena.get_core_type(ty).ptyp_desc {
+                        crate::parser::ast::CoreTypeDesc::Ptyp_constr((lid, args)) if args.is_empty() =>
+                            self.at(position).identity_fact(lid.txt, arena),
+                        crate::parser::ast::CoreTypeDesc::Ptyp_constr((lid, _)) =>
+                            self.at(position).identity_fact(lid.txt, arena).filter(|identity| !identity),
+                        _ => None,
+                    }
+                } else { Some(false) };
+                let name = arena.intern_existing_string(decl.ptype_name.txt).raw() as usize;
+                let previous = self.names[name];
+                self.aliases.push(Alias { position, previous, identity });
+                self.names[name] = self.aliases.len() as u32;
+            }
+        }
+    }
+}
+
+/// Whether this item introduces a local result-constructor name.
+/// Cost: O(constructors), borrowed name comparisons and no allocation.
+pub(crate) fn shadows_result(item: &StructureItem, arena: &ParseArena) -> bool {
+    #[cfg(test)]
+    {
+        let mut steps = arena.derived_scope_steps.get();
+        steps.shadow_items += 1;
+        arena.derived_scope_steps.set(steps);
+    }
+    let is_result = |name| {
+        #[cfg(test)]
+        {
+            let mut steps = arena.derived_scope_steps.get();
+            steps.constructors += 1;
+            arena.derived_scope_steps.set(steps);
+        }
+        matches!(arena.get_string(name), "Ok" | "Error")
+    };
+    match &item.pstr_desc {
+        StructureItemDesc::Pstr_type(group) => group.1.iter().any(|decl| match &decl.ptype_kind {
+            crate::parser::ast::TypeKind::Ptype_variant(constructors) =>
+                constructors.iter().any(|c| is_result(c.pcd_name.txt)),
+            _ => false,
+        }),
+        StructureItemDesc::Pstr_exception(constructor) => is_result(constructor.pext_name.txt),
+        StructureItemDesc::Pstr_typext(extension) => extension.ptyext_constructors.iter()
+            .any(|c| is_result(c.pext_name.txt)),
+        _ => false,
+    }
+}
+
+/// Expand with the constructor scope determined in source order.
+/// Cost: the same mapper work as the unscoped entry point.
+pub fn expand_structure_item_in_scope(
     item: &StructureItem,
     arena: &mut ParseArena,
     active: bool,
+    scope: Scope<'_>,
 ) -> Result<Vec<StructureItem>, String> {
     // O(1) disabled probe: retain the direct call without saving profiling state
     // across a mapper that mutably borrows the arena.
     if arena.derived_census.is_none() {
-        return super::spice_ppx::expand_structure_item_with_mapper(item, arena, active);
+        return super::spice_ppx::expand_structure_item_in_scope(item, arena, active, scope);
     }
-    expand_with_census(item, arena, active)
+    expand_with_census(item, arena, active, scope)
 }
 
 /// O(1) census bookkeeping plus the existing expansion and optional key encoder.
@@ -225,10 +498,11 @@ fn expand_with_census(
     item: &StructureItem,
     arena: &mut ParseArena,
     active: bool,
+    scope: Scope<'_>,
 ) -> Result<Vec<StructureItem>, String> {
     let start = census::start(true);
     let observer_before = arena.derived_census.as_ref().map_or(0, |c| c.observer_ns);
-    let result = super::spice_ppx::expand_structure_item_with_mapper(item, arena, active);
+    let result = super::spice_ppx::expand_structure_item_in_scope(item, arena, active, scope);
     if let (Some(start), Some(census)) = (start, arena.derived_census.as_mut()) {
         census.generation.add(active, census::nanos(start.elapsed()).saturating_sub(census.observer_ns - observer_before));
     }
@@ -294,5 +568,30 @@ fn derive_error_fixture_messages() {
             expand_structure_item_with_mapper(item, &mut arena, true)).collect();
         let error = result.expect_err(name);
         assert!(error.contains(expected), "{name}: expected {expected:?}, got {error:?}");
+    }
+}
+
+#[cfg(test)]
+mod census_reason_tests {
+    use super::*;
+
+    #[test]
+    fn unplanned_forms_count_each_binding_once_at_ten_thousand() {
+        assert_eq!(std::mem::size_of::<UnplannedForm>(), 1);
+        assert_eq!(std::mem::size_of::<GeneralReason>(), 1);
+        assert_eq!(std::mem::size_of::<Classification>(), 1);
+        let mut counts = PathCounts::default();
+        for _ in 0..10_000 {
+            let mut group = PathCounts::default();
+            group.add(Classification::General(GeneralReason::NotYetPlanned(
+                UnplannedForm::JsonIdentity,
+            )), 1);
+            group.add(Classification::General(GeneralReason::JsonIdentityArgument), 1);
+            counts.merge(group);
+        }
+        assert_eq!(counts.json_identity_argument, 10_000);
+        assert_eq!(counts.not_yet_planned, 10_000);
+        assert_eq!(counts.unplanned_forms.iter().sum::<u64>(), 10_000);
+        assert_eq!(counts.unplanned_forms[UnplannedForm::JsonIdentity as usize], 10_000);
     }
 }
