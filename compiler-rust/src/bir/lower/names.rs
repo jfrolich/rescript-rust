@@ -805,6 +805,14 @@ pub(crate) fn replay(
     replay.done
 }
 
+/// How the printer writes a declaration (`emit::walk::Declaration`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Declaration {
+    Omit,
+    Effect,
+    Binding,
+}
+
 /// A frame's `at` while it reads its statement's function literals: this
 /// bit and the row; without it, the index of the next child list.
 const LITERAL: u32 = 1 << 31;
@@ -930,23 +938,33 @@ impl Replay<'_, '_> {
         use crate::bir::View;
         let bir = self.bir;
         match bir.view(statement) {
-            View::SDecl { var, value } => {
+            View::SDecl { var, value } => match self.declaration(statement, value.is_some()) {
+                // Not printed: nothing below it is named.
+                Declaration::Omit => return,
+                // Printed as its value: no binder; its literals are read.
+                Declaration::Effect => {}
                 // A function literal as the value names the binder with its
                 // reservation (`literal`).
-                if !value.is_some_and(|value| self.closed_literal(value)) {
-                    self.name(var);
-                }
-            }
-            View::SRest { var, info, .. } => {
-                if let crate::bir::JsPayload::Rest(fields) = bir.javascript(info) {
-                    for field in bir.rest_fields(*fields) {
-                        if let Some(binding) = field.binding {
-                            self.name(binding);
-                        }
+                Declaration::Binding => {
+                    if !value.is_some_and(|value| self.closed_literal(value)) {
+                        self.name(var);
                     }
                 }
-                self.name(var);
-            }
+            },
+            View::SRest { var, info, .. } => match self.declaration(statement, true) {
+                Declaration::Omit => return,
+                Declaration::Effect => {}
+                Declaration::Binding => {
+                    if let crate::bir::JsPayload::Rest(fields) = bir.javascript(info) {
+                        for field in bir.rest_fields(*fields) {
+                            if let Some(binding) = field.binding {
+                                self.name(binding);
+                            }
+                        }
+                    }
+                    self.name(var);
+                }
+            },
             View::SForRange { var, parts, .. } => {
                 self.name(var);
                 self.finish(var, parts[parts.len() - 2]);
@@ -962,6 +980,27 @@ impl Replay<'_, '_> {
         let first = self.scratch.marks[statement.index()];
         let at = if first == 0 { 0 } else { LITERAL | (first - 1) };
         self.scratch.frames.push(Frame { statement, at, leave: ScopeId::NONE.0 });
+    }
+
+    /// How the printer writes the declaration `statement`
+    /// (`walk::prints_declaration`, from the status the declaration
+    /// carries): not at all when it is dead and pure, as its value alone
+    /// when it is dead and has an effect, else with its binder. The
+    /// lowering writes every declaration as used; the decisions that mark
+    /// one dead are applied before the replay from T4g on. Constant.
+    fn declaration(&self, statement: NodeId, has_value: bool) -> Declaration {
+        use crate::js_ir::op::UsedStats;
+        let node = self.bir.nodes[statement.index()];
+        // `SDecl` packs the let kind in two bits and the status above;
+        // `SRest` keeps bit 15 for its descriptor.
+        let status = (node.aux() & 0x7fff) >> 2;
+        if status == UsedStats::DeadPure as u16 || (status == UsedStats::DeadNonPure as u16 && !has_value) {
+            Declaration::Omit
+        } else if status == UsedStats::DeadNonPure as u16 {
+            Declaration::Effect
+        } else {
+            Declaration::Binding
+        }
     }
 
     /// Whether `var` is a parameter of a function literal whose row has
@@ -1015,7 +1054,11 @@ impl Replay<'_, '_> {
         let info = self.log.rows[row as usize];
         let node = bir.func_owners[info.function.index()].expect("an attached row is live");
         let binder = match bir.view(statement) {
-            View::SDecl { var, value: Some(value) } if value == node => Some(var),
+            View::SDecl { var, value: Some(value) }
+                if value == node && self.declaration(statement, true) == Declaration::Binding =>
+            {
+                Some(var)
+            }
             _ => None,
         };
         let eta = self.eta(info);
@@ -1280,8 +1323,9 @@ mod tests {
             let values: Vec<NodeId> = vars.iter().map(|&var| self.b.new_node(View::Var { var }, 0)).collect();
             self.b.new_node(View::JArray { values: &values }, 0)
         }
+        /// `let var = value`, used, as the lowering writes a declaration.
         fn declare(&mut self, var: VarId, value: NodeId) -> NodeId {
-            self.b.new_node(View::SDecl { var, value: Some(value) }, LetKind::Strict as u16)
+            crate::bir::j::declare(&mut self.b, LetKind::Strict, var, value)
         }
         fn ret(&mut self, value: NodeId) -> NodeId {
             self.b.new_node(View::SReturn { value }, 0)
@@ -1324,9 +1368,262 @@ mod tests {
             let replayed = replay(&self.b, root, &self.idents, &program, &mut Tables::default(), &mut Scratch::default(), &mut printed);
             (printed.names.iter().map(|name| name.map(|name| name.to_string())).collect(), replayed)
         }
+
+        /// The unit whose top-level statements are `statements`, replayed
+        /// and compared with the naming pass on the same tree
+        /// (`emit::naming::compare_with_pass` on the exported program, its
+        /// module list `imports`, its reservations and exports those of
+        /// `reservations` and `exports`): every name, every cached bound
+        /// and every free list agree, no order is in question and no
+        /// reference is left unnamed. Returns the names by variable and the
+        /// cached bounds.
+        fn agrees(mut self, statements: &[NodeId], imports: &[ImportId], reservations: &[VarId], exports: &[VarId]) -> (Vec<Option<String>>, Vec<String>) {
+            use crate::js_ir::ModulePathResolver;
+            let root = self.block(statements);
+            self.b.finish_bulk(root);
+            let subjects: Vec<Subject> = reservations
+                .iter()
+                .map(|&var| {
+                    let ident = self.idents[var.index()];
+                    Subject { slot: var.0, stamp: ident.stamp(), name: ident.name_atom() }
+                })
+                .collect();
+            let program = Program { imports, reservations: &subjects, exports, raw: &[] };
+            let mut printed = Printed::default();
+            let replayed = replay(&self.b, root, &self.idents, &program, &mut Tables::default(), &mut Scratch::default(), &mut printed);
+            let idents: Vec<Ident> = (0..self.b.vars.len()).map(|var| self.idents[self.b.vars.j_origin[var].index()]).collect();
+            let modules: Vec<Ident> = self.b.pools.j_modules.iter().map(|module| module.id).collect();
+            let free = free_lists(&self.b, &self.idents);
+            let module_list: Vec<_> = imports.iter().map(|import| self.b.pools.j_modules[import.index()].clone()).collect();
+            let export_idents = exports.iter().map(|var| self.idents[var.index()]).collect();
+            let reservation_idents = reservations.iter().map(|var| self.idents[var.index()]).collect();
+            let mut resolver = ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+            for module in &modules {
+                resolver.set_module_path_override(module.name(), format!("./{}.js", module.name()));
+            }
+            let imported = crate::bir::bridge_j::Imported::from_lowering(self.b, root, self.idents);
+            let exported = crate::bir::bridge_j::export_lowered(&imported).expect("the tree exports").program;
+            let mut js = crate::lambda::lam_compile::LambdaCompiler::bir_coerced_program(exported.program.arena, exported.program.block, export_idents, reservation_idents);
+            js.modules = module_list;
+            println!("{}", crate::js_ir::print_deps_program_with_directives_and_options(&js, None, &[], false, false, false));
+            let stats = crate::emit::compare_with_pass(&printed, &idents, &modules, &free, &js, &resolver, false).expect("the pass supports the unit");
+            assert_eq!((stats.name_differences, stats.finish_differences, stats.free_differences), (0, 0, 0), "{stats:?} {printed:?}");
+            assert_eq!((replayed.ambiguous_orders, replayed.unnamed_references), (0, 0), "{replayed:?}");
+            assert_eq!(stats.names_replayed, stats.names_pass, "{stats:?} {printed:?}");
+            (
+                printed.names.iter().map(|name| name.map(|name| name.to_string())).collect(),
+                printed.finishes.iter().map(|name| name.to_string()).collect(),
+            )
+        }
+        /// `let var = [reads]`.
+        fn declare_read(&mut self, var: VarId, reads: &[VarId]) -> NodeId {
+            let value = self.read(reads);
+            self.declare(var, value)
+        }
     }
     fn name(names: &[Option<String>], var: VarId) -> Option<&str> {
         names[var.index()].as_deref()
+    }
+
+    #[test]
+    fn the_replay_names_a_range_loop_variable_and_its_cached_bound_as_the_pass_does() {
+        // `let n = []; for (let i = 0, i_finish = [n]; ...) { let i = [i] }
+        // let i_finish = []`: the loop variable is named before the body's
+        // statements, the bound is cached under `i_finish` (neither a
+        // number nor a reference), and both are names of the program, so
+        // the later declarations take suffixes.
+        let mut u = Unit::new();
+        let (n, i, inner, later) = (u.local("n"), u.local("i"), u.local("i"), u.local("i_finish"));
+        let declare_n = u.declare_read(n, &[]);
+        let init = crate::bir::j::plain::int(&mut u.b, 0);
+        let end = u.read(&[n]);
+        let declare_inner = u.declare_read(inner, &[i]);
+        let body = u.block(&[declare_inner]);
+        let range = u.b.new_node(View::SForRange { var: i, parts: &[init, end, body], label: None }, 0);
+        let declare_later = u.declare_read(later, &[]);
+        let (names, finishes) = u.agrees(&[declare_n, range, declare_later], &[], &[], &[n, later]);
+        assert_eq!((name(&names, i), name(&names, inner), name(&names, later)), (Some("i"), Some("i$1"), Some("i_finish$1")));
+        assert_eq!(finishes, ["i_finish"]);
+    }
+
+    #[test]
+    fn the_replay_names_the_cached_bound_of_a_range_loop_over_an_existing_variable() {
+        // `let i = []; let n = []; for (i_finish = [n]; i <= i_finish; ++i) {}`
+        // (`SForRangeExisting`): the loop names no variable, and its bound
+        // is cached under the existing variable's base. A bound that is a
+        // reference is not cached.
+        for cached in [true, false] {
+            let mut u = Unit::new();
+            let (i, n, later) = (u.local("i"), u.local("n"), u.local("i_finish"));
+            let declare_i = u.declare_read(i, &[]);
+            let declare_n = u.declare_read(n, &[]);
+            let variable = u.b.new_node(View::Var { var: i }, 0);
+            let end = if cached { u.read(&[n]) } else { u.b.new_node(View::Var { var: n }, 0) };
+            let body = u.block(&[]);
+            let range = u.b.new_node(View::SForRangeExisting { variable, parts: &[end, body], label: None }, 0);
+            let declare_later = u.declare_read(later, &[]);
+            let (names, finishes) = u.agrees(&[declare_i, declare_n, range, declare_later], &[], &[], &[i]);
+            assert_eq!(name(&names, later), Some(if cached { "i_finish$1" } else { "i_finish" }));
+            assert_eq!(finishes.len(), usize::from(cached));
+        }
+    }
+
+    #[test]
+    fn the_replay_names_a_catch_variable_between_the_body_and_the_handler() {
+        // `try { let e = [] } catch (e) { let e = [e] } finally { let e = [] }`:
+        // a `try` opens no scope, so the three declarations and the catch
+        // variable are names of the program, in print order.
+        let mut u = Unit::new();
+        let (first, caught, second, third) = (u.local("e"), u.local("e"), u.local("e"), u.local("e"));
+        let declare_first = u.declare_read(first, &[]);
+        let body = u.block(&[declare_first]);
+        let declare_second = u.declare_read(second, &[caught]);
+        let handler = u.block(&[declare_second]);
+        let declare_third = u.declare_read(third, &[]);
+        let finally = u.block(&[declare_third]);
+        let attempt = u.b.new_node(View::STry { parts: &[body, handler, finally], exception: Some(caught) }, 0);
+        let (names, _) = u.agrees(&[attempt], &[], &[], &[]);
+        assert_eq!(
+            (name(&names, first), name(&names, caught), name(&names, second), name(&names, third)),
+            (Some("e"), Some("e$1"), Some("e$2"), Some("e$3"))
+        );
+    }
+
+    #[test]
+    fn the_replay_names_the_fields_of_a_rest_declaration_before_its_variable() {
+        // `let source = []; let {a: rest, ...rest$1} = source`: the binders
+        // of the removed fields are named before the rest variable
+        // (`walk::rest_declaration`).
+        let mut u = Unit::new();
+        let (source, field, rest) = (u.local("source"), u.local("rest"), u.local("rest"));
+        let declare_source = u.declare_read(source, &[]);
+        let label = u.b.intern_text("a");
+        let info = u.b.rest_info([crate::bir::RestField { name: label, binding: Some(field) }]);
+        let read = u.b.new_node(View::Var { var: source }, 0);
+        let value = u.b.new_node(View::JRecordRest { value: read, info }, 0);
+        let used = (crate::js_ir::op::UsedStats::Used as u16) << 2;
+        let declare_rest = u.b.new_node(View::SRest { var: rest, value, info }, (1 << 15) | used | LetKind::Strict as u16);
+        let (names, _) = u.agrees(&[declare_source, declare_rest], &[], &[], &[field, rest]);
+        assert_eq!((name(&names, field), name(&names, rest)), (Some("rest"), Some("rest$1")));
+    }
+
+    #[test]
+    fn the_replay_names_the_binder_of_an_eta_function_before_its_reservation() {
+        // `let g = []; let f = p => g(p)` prints `let f = g`: the binder is
+        // named, then the environment is reserved, and the parameter gets
+        // no name (naming.rs `function`, `FunctionForm::Eta`).
+        let mut u = Unit::new();
+        let (g, f, p) = (u.local("g"), u.local("f"), u.local("p"));
+        let declare_g = u.declare_read(g, &[]);
+        let header = u.header(Some(p), 1);
+        open(&mut u.b);
+        let callee = u.b.new_node(View::Var { var: g }, 0);
+        let argument = u.b.new_node(View::Var { var: p }, 0);
+        let info = u.b.js_info(crate::bir::JsPayload::Call(crate::js_ir::CallInfo {
+            kind: crate::js_ir::CallKind::MlCall,
+            arity: crate::js_ir::CallArity::Full,
+            ..Default::default()
+        }));
+        let call = u.b.new_node(View::JCall { callee, args: &[argument], info }, 0);
+        let result = u.ret(call);
+        let (function, scope) = u.function(header, &[result]);
+        assert!(u.flags(scope) & ScopeRow::ETA != 0);
+        let declare_f = u.declare(f, function);
+        let (names, _) = u.agrees(&[declare_g, declare_f], &[], &[], &[f]);
+        assert_eq!((name(&names, g), name(&names, f), name(&names, p)), (Some("g"), Some("f"), None));
+    }
+
+    #[test]
+    fn the_replay_names_the_imports_the_reservations_and_the_exports_of_the_program() {
+        // The program's order (`Names::collect`): the imported modules, the
+        // reservations of export coercion, the statements, the exports. A
+        // local `M1` declared in the program takes a suffix after the
+        // import; the reserved export `x` has its name before the
+        // statement that declares another `x`; an export without a
+        // declaration in the list is named last.
+        let mut u = Unit::new();
+        let (shadow, reserved, other, exported) = (u.local("M1"), u.local("x"), u.local("x"), u.local("late"));
+        let module = u.b.new_node(View::JQualified { module: ImportId(1), member: None }, 0);
+        let declare_shadow = u.declare(shadow, module);
+        let declare_other = u.declare_read(other, &[]);
+        let declare_reserved = u.declare_read(reserved, &[other, exported]);
+        let (names, _) = u.agrees(&[declare_shadow, declare_other, declare_reserved], &[ImportId(1)], &[reserved], &[reserved, exported]);
+        assert_eq!(
+            (name(&names, shadow), name(&names, reserved), name(&names, other), name(&names, exported)),
+            (Some("M1$1"), Some("x"), Some("x$1"), Some("late"))
+        );
+    }
+
+    #[test]
+    fn the_replay_names_nothing_of_a_declaration_the_printer_omits() {
+        // `let dead = () => { let v = [] }` with the status dead and pure
+        // is not printed: neither its binder nor anything in its function
+        // is named. With the status dead and impure it prints as its
+        // value: the function is entered, its binder is not named. The
+        // declaration after it is `v` in the first case (the function was
+        // not entered, and its `v` would not leak anyway) and both sides
+        // agree on every name.
+        use crate::js_ir::op::UsedStats;
+        for status in [UsedStats::DeadPure, UsedStats::DeadNonPure] {
+            let mut u = Unit::new();
+            let (dead, inner, later) = (u.local("dead"), u.local("v"), u.local("v"));
+            let header = u.header(None, 0);
+            open(&mut u.b);
+            let declare_inner = u.declare_read(inner, &[]);
+            let (function, _) = u.function(header, &[declare_inner]);
+            let aux = LetKind::Strict as u16 | ((status as u16) << 2);
+            let declare_dead = u.b.new_node(View::SDecl { var: dead, value: Some(function) }, aux);
+            let declare_later = u.declare_read(later, &[]);
+            let (names, _) = u.agrees(&[declare_dead, declare_later], &[], &[], &[]);
+            assert_eq!(name(&names, dead), None);
+            assert_eq!(name(&names, inner), (status == UsedStats::DeadNonPure).then_some("v"));
+            assert_eq!(name(&names, later), Some("v"));
+        }
+    }
+
+    #[test]
+    fn the_replay_reads_both_lists_of_an_if_in_print_order() {
+        // `let c = []; if ([c]) { let v = [] } else { let v = [] }`: an `if`
+        // opens no scope; the second `v` takes a suffix.
+        let mut u = Unit::new();
+        let (c, yes, no) = (u.local("c"), u.local("v"), u.local("v"));
+        let declare_c = u.declare_read(c, &[]);
+        let condition = u.read(&[c]);
+        let declare_yes = u.declare_read(yes, &[]);
+        let then_ = u.block(&[declare_yes]);
+        let declare_no = u.declare_read(no, &[]);
+        let else_ = u.block(&[declare_no]);
+        let branch = u.b.new_node(View::SIf { condition, then_, else_: Some(else_) }, 0);
+        let (names, _) = u.agrees(&[declare_c, branch], &[], &[], &[]);
+        assert_eq!((name(&names, yes), name(&names, no)), (Some("v"), Some("v$1")));
+    }
+
+    #[test]
+    fn the_replay_reads_the_body_of_a_while_and_the_actions_of_a_switch() {
+        // `let c = []; while ([c]) { let v = [] } switch (c) { default: let v = [] }`:
+        // the bodies are lists of the program's scope.
+        let mut u = Unit::new();
+        let (c, looped, chosen) = (u.local("c"), u.local("v"), u.local("v"));
+        let declare_c = u.declare_read(c, &[]);
+        let condition = u.read(&[c]);
+        let declare_looped = u.declare_read(looped, &[]);
+        let body = u.block(&[declare_looped]);
+        let loop_ = u.b.new_node(View::SWhile { condition, body, label: None }, 0);
+        let scrutinee = u.b.new_node(View::Var { var: c }, 0);
+        let declare_chosen = u.declare_read(chosen, &[]);
+        let default = u.block(&[declare_chosen]);
+        let header = u.b.switch_header(crate::bir::SwitchInput {
+            keys: Vec::new(),
+            clauses: Vec::new(),
+            constants: 0,
+            consts_full: false,
+            blocks_full: false,
+            has_default: true,
+            dispatch: crate::lambda::SwitchDispatch::Direct,
+        });
+        let switch = u.b.new_node(View::SSwitch { scrutinee, actions: &[default], header }, 0);
+        let (names, _) = u.agrees(&[declare_c, loop_, switch], &[], &[], &[]);
+        assert_eq!((name(&names, looped), name(&names, chosen)), (Some("v"), Some("v$1")));
     }
 
     /// `let f = p => { let v = [p]; let g = () => { let v' = [captured]; return [v'] }; return [g] }`
