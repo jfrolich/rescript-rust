@@ -647,7 +647,11 @@ impl Names {
 /// One identifier handed to the naming tables: where its name is kept and
 /// what `Ident`'s order and the suffix rule read of it. `slot` is dense per
 /// unit: the index of the variable an identifier prints as (its origin), or
-/// the number of variables plus the index of an imported module.
+/// the number of variables plus the index of an imported module. Two slots
+/// whose identifiers have one nonzero stamp would get one name in the pass,
+/// which keys names by `Ident` (equal when the nonzero stamps are equal,
+/// `Ident::same`), and two names here, which key them by slot. That does
+/// not occur: a positive stamp is created for one identifier only.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Subject {
@@ -802,9 +806,15 @@ impl Tables {
     /// for stamp zero, or a new name in the current scope (the converted
     /// base, then `base$1`, ... from the group's next suffix, skipping
     /// spellings taken by any base in the current scope and, for a suffixed
-    /// candidate, raw names). Cost: one step, and for a new name one hash
-    /// lookup the first time the slot is named, one step and one interner
-    /// lookup per suffixed candidate, three pushes.
+    /// candidate, raw names). Cost: one step, and for a new name: the first
+    /// time the slot is named in the unit, one conversion and one `bases`
+    /// lookup (one more for the prefix of a base new to the unit that ends
+    /// in a canonical `$number`); one step per candidate tried; per suffixed
+    /// candidate one interner lookup, one `bases` lookup and, when no base
+    /// of the current scope has its spelling, one `raw` lookup; for the base
+    /// itself one `raw` lookup when its prefix's group is in the current
+    /// scope; one push to `assigned`, two pushes when the group is reset in
+    /// this scope and two per candidate passed over.
     pub(crate) fn add(&mut self, subject: Subject) -> Name {
         self.steps += 1;
         if let Some(name) = self.visible[subject.slot as usize] {
