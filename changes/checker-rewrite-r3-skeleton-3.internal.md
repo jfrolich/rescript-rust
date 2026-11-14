@@ -1,0 +1,1 @@
+- Checker rewrite R3: the third design turn (inherited memo entries, objects, polymorphic variant rows): decisions, acceptance tests and build prompts; nothing on a build's path.

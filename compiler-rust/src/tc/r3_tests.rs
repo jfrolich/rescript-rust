@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use super::differential::{Fault, Op, Tier, compare, compile};
-use super::expand::{ABBREV, ALIAS, ExpandMode, Manifest, TypeInfo};
+use super::expand::{ABBREV, ALIAS, ExpandMode, INHERITS, Manifest, TypeInfo};
 use super::graph::{ARROW, CONSTR, GENERIC, Graph, LINK, Mode, NONE, Node, Param, TUPLE, Ty, VAR};
 use super::steps;
 use super::template::Template;
@@ -1311,4 +1311,749 @@ fn unify_var_lowers_before_it_links() {
     assert_eq!(c.g.repr(v), v);
     assert!(c.unify_var(v, p).is_err());
     assert_eq!(c.g.repr(v), v);
+}
+
+// ---------------------------------------------------------------------------
+// R3m: inherited memo entries (section 8.6, decisions 16, 19 and 26).
+// ---------------------------------------------------------------------------
+
+/// Append to the table four abbreviations with a parameter whose bodies
+/// name each other, all marked [`INHERITS`]:
+/// `q<'a> = ('a, q<'a>)`, `m1<'a> = ('a, m2<'a>)`, `m2<'a> = ('a, m3<'a>)`,
+/// `m3<'a> = (m1<'a>, m2<'a>)`. (ReScript accepts such a cycle only through
+/// an object or a variant; the graph does not care, and a tuple keeps these
+/// tests on R3m alone.) Returns `[q, m1, m2, m3]`.
+fn inheriting(c: &mut Checker) -> [u32; 4] {
+    let first = c.types.rows.len() as u32;
+    let types = [first, first + 1, first + 2, first + 3];
+    for _ in types {
+        c.types.rows.push(c.types.rows[PHANTOM as usize]);
+    }
+    let [q, m1, m2, m3] = types;
+    for (ty, bodies) in [(q, [NONE, q]), (m1, [NONE, m2]), (m2, [NONE, m3]), (m3, [m1, m2])] {
+        let param = var_at(c, GENERIC);
+        let elements = bodies.map(|element| match element {
+            NONE => param,
+            element => constr_at(c, GENERIC, element, &[param]),
+        });
+        let body = tuple_at(c, GENERIC, &elements);
+        abbreviation(c, ty, &[param], body);
+        c.types.rows[ty as usize].flags |= INHERITS;
+    }
+    types
+}
+
+/// The representative of element `index` of the tuple `ty`, and its
+/// descriptor.
+fn element(c: &mut Checker, ty: Ty, index: u32) -> (Ty, Node) {
+    let at = child(c, ty, index);
+    let at = c.g.repr(at);
+    (at, c.g.nodes[at.0 as usize])
+}
+
+/// The rule of R3m, by hand, where the harness cannot go (`forget_abbrev`
+/// is no operation of it). `e1 = m1<int>` expands to `(int, c2)`, `c2 =
+/// m2<int>` to `(int, c3)`, and `c3 = m3<int>` to `(m1<int>, m2<int>)`.
+/// The copy of a constructor asks `find_repr p !abbrevs`
+/// (compiler/ml/ctype.ml:780-782):
+///
+/// ```text
+/// let rec find_repr p1 = function
+///   | Mnil -> None
+///   | Mcons (Public, p2, ty, _, _) when Path.same p1 p2 -> Some ty
+///   | Mcons (_, _, _, _, rem) -> find_repr p1 rem
+///   | Mlink {contents = rem} -> find_repr p1 rem
+/// ```
+///
+/// and `c3`'s list is `c3`'s entry, then `c2`'s, then `e1`'s
+/// (`Mlink !abbreviations`, ctype.ml:796-798). So with every entry in
+/// place both elements are links: to `e1` and to `c2`. The same two
+/// answers are observed on the old checker through objects
+/// (`differential::tests::old_checker_inherits_entries_along_the_chain`).
+///
+/// A forgotten entry is taken out of the list and the tail stays
+/// (`forget_abbrev_rec`, compiler/ml/btype.ml:636-644: `Mcons (_, path',
+/// _, _, rem) when Path.same path path' -> rem`): after
+/// `forget_abbrev(c2)` the walk from `c3` passes `c2`'s row and still
+/// finds `e1`, and the copy of `m2<int>` finds nothing and is a new node
+/// whose row continues with `c3`'s.
+/// Reaches: R3m.
+#[test]
+#[ignore = "R3m build"]
+fn an_inherited_entry_is_found_past_a_forgotten_one() {
+    for forget in [false, true] {
+        let mut c = checker(Mode::Success);
+        let [_, m1, m2, m3] = inheriting(&mut c);
+        let int = constr(&mut c, INT, &[]);
+        let e1 = constr(&mut c, m1, &[int]);
+        let x1 = c.expand_head(e1, ExpandMode::Unif).unwrap();
+        let (c2, node) = element(&mut c, x1, 1);
+        assert_eq!((node.tag(), node.a), (CONSTR, m2));
+        let x2 = c.expand_head(c2, ExpandMode::Unif).unwrap();
+        let (c3, node) = element(&mut c, x2, 1);
+        assert_eq!((node.tag(), node.a), (CONSTR, m3));
+        if forget {
+            c.forget_abbrev(c2);
+        }
+        let made = c.g.nodes.len() as u32;
+        let x3 = c.expand_head(c3, ExpandMode::Unif).unwrap();
+        assert_eq!(element(&mut c, x3, 0).0, e1, "forget: {forget}");
+        let (second, node) = element(&mut c, x3, 1);
+        if forget {
+            assert!(second.0 >= made, "a node of this expansion");
+            assert_eq!((node.tag(), node.a), (CONSTR, m2));
+            // Its row continues with c3's: expanding it links `m3<int>`
+            // to c3 (`Mlink`, ctype.ml:796-798).
+            let x4 = c.expand_head(second, ExpandMode::Unif).unwrap();
+            assert_eq!(element(&mut c, x4, 1).0, c3);
+        } else {
+            assert_eq!(second, c2);
+        }
+    }
+}
+
+/// The step relation of decision 16, and the memory formula of decision
+/// 25. `q<q<...q<int>>>`, n deep: expanding the head of each node from the
+/// outside in is, per node, one instance of the four-node template, one
+/// row, and a chain walk of one row (the copy of `q<'a>` finds the node
+/// being expanded first, `find_repr`, compiler/ml/ctype.ml:720-724, and
+/// becomes a link to it, ctype.ml:782). So the steps at n = 10,000 are at
+/// most 11 times those at n = 1,000, there is one row per expanded node and
+/// none for a copy, and the pool is `16 * rows + 4 * by_slot` bytes with
+/// `by_slot` no longer than the list pool.
+/// Reaches: R3m.
+#[test]
+#[ignore = "R3m build"]
+fn expanding_the_heads_down_nested_recursive_nodes_is_linear() {
+    let run = |n: u32| {
+        let mut c = checker(Mode::Success);
+        let [q, ..] = inheriting(&mut c);
+        let mut nodes = vec![constr(&mut c, INT, &[])];
+        for _ in 0..n {
+            let inner = *nodes.last().unwrap();
+            nodes.push(constr(&mut c, q, &[inner]));
+        }
+        let count = steps::scope(|| {
+            for index in (1..=n as usize).rev() {
+                let expansion = c.expand_head(nodes[index], ExpandMode::Unif).unwrap();
+                assert_eq!(element(&mut c, expansion, 1).0, nodes[index]);
+                assert_eq!(element(&mut c, expansion, 0).0, nodes[index - 1]);
+            }
+        });
+        let chains = &c.memo.chains;
+        assert_eq!(chains.rows.len(), n as usize);
+        assert!(chains.by_slot.len() <= c.g.lists.len());
+        let bytes = 16 * chains.rows.len() + 4 * chains.by_slot.len();
+        assert!(bytes <= 16 * n as usize + 4 * c.g.lists.len(), "{bytes}");
+        count
+    };
+    let (small, large) = (run(1_000), run(10_000));
+    assert!(large <= 11 * small, "{small} {large}");
+}
+
+/// A manifest that inherits nothing pays the test of one flag: expanding
+/// `pa<int>` (`type pa<'x> = ('x, int)`, not [`INHERITS`]) takes the steps
+/// it takes today (observed, before R3m: 12) and reads or
+/// writes no row of the pool, which stays unallocated. Runs today and
+/// stays as it is when R3m is built.
+#[test]
+fn an_abbreviation_that_inherits_nothing_reads_no_row() {
+    let mut c = checker(Mode::Success);
+    let int = constr(&mut c, INT, &[]);
+    let node = constr(&mut c, PA, &[int]);
+    let count = steps::scope(|| {
+        c.expand_head(node, ExpandMode::Unif).unwrap();
+    });
+    assert_eq!(count, 12);
+    assert_eq!(c.memo.chains.rows.capacity(), 0);
+    assert_eq!(c.memo.chains.by_slot.capacity(), 0);
+    // And with the nullary memo live (the other reader of the pass over an
+    // instance's nodes): the same pool, still unallocated.
+    let myint = constr(&mut c, MYINT, &[]);
+    c.expand_head(myint, ExpandMode::Unif).unwrap();
+    let node = constr(&mut c, PA, &[int]);
+    c.expand_head(node, ExpandMode::Unif).unwrap();
+    assert_eq!(c.memo.chains.rows.capacity(), 0);
+    assert_eq!(c.memo.chains.by_slot.capacity(), 0);
+}
+
+/// Which types `TypeTable::from_segment` marks [`INHERITS`]: those whose
+/// manifest has a constructor with arguments of a type that expands, on
+/// the identifier's row and on the row of the path through the unit alike.
+/// `a1` names only an abstract type with arguments and `ro` only nullary
+/// constructors: an expansion of either copies no constructor that could
+/// be linked or expanded, and pays nothing (decision 19). `m1` names `m2`,
+/// declared after it: the marks are made when every row exists.
+/// Reaches: R3m.
+#[test]
+#[ignore = "R3m build"]
+fn the_table_marks_the_types_whose_expansions_inherit() {
+    let program = compile(
+        "type t1<'a>\n\
+         type a1<'a> = ('a, t1<'a>)\n\
+         type a2<'a> = (a1<'a>, int)\n\
+         type r<'a> = {f: a1<'a>}\n\
+         type rec ro = {\"hd\": int, \"tl\": ro}\n\
+         type rec po<'a> = {\"hd\": 'a, \"tl\": po<'a>}\n\
+         type rec m1<'a> = {\"a\": 'a, \"n\": m2<'a>}\n\
+         and m2<'a> = {\"a\": 'a, \"n\": m1<'a>}\n\
+         external v: (a1<int>, a2<int>, r<int>, ro, po<int>, m1<int>, m2<int>) = \"v\"\n"
+            .to_string(),
+    );
+    let new = super::differential::New::convert(&program, Tier::Kernel);
+    let table = super::expand::TypeTable::from_segment(&new.segment);
+    let pools = &new.segment.signature;
+    let mut seen = 0;
+    for (index, row) in pools.paths.iter().enumerate() {
+        let name = match *row {
+            super::segment::PathRow::Ident(ident) => pools.identifiers[ident as usize].name,
+            super::segment::PathRow::Dot { name, .. } => name,
+            super::segment::PathRow::Apply { .. } => continue,
+        };
+        let range = pools.strings[name as usize];
+        let name = &pools.bytes[range.start as usize..(range.start + range.len) as usize];
+        let inherits = match name {
+            b"a2" | b"po" | b"m1" | b"m2" => true,
+            b"t1" | b"a1" | b"r" | b"ro" | b"int" => false,
+            _ => continue,
+        };
+        let flags = table.info(index as u32).flags;
+        assert_eq!(flags & INHERITS != 0, inherits, "{}", String::from_utf8_lossy(name));
+        seen += 1;
+    }
+    // Every declared type has two rows: its identifier and `Case.name`.
+    assert!(seen >= 17, "{seen}");
+}
+
+// ---------------------------------------------------------------------------
+// R3e: objects, fields and mutability cells (section 8.6, decision 27).
+// ---------------------------------------------------------------------------
+
+use super::rows::{FieldRef, cell_mutable, cell_node, cell_repr};
+use super::segment::{EXTENDED, ExtraDescriptor, Range};
+
+/// The index of a name, interned by text in the checker's name texts.
+fn name(c: &mut Checker, text: &str) -> u32 {
+    let names = &mut c.extras.names;
+    if let Some(found) = (0..names.spans.len() as u32).find(|&at| names.text(at) == text.as_bytes()) {
+        return found;
+    }
+    let start = names.bytes.len() as u32;
+    names.bytes.extend_from_slice(text.as_bytes());
+    names.spans.push(Range { start, len: text.len() as u32 });
+    names.spans.len() as u32 - 1
+}
+
+/// An extended node at `level` with a new descriptor row and these slots.
+fn extended_at(c: &mut Checker, level: u32, descriptor: ExtraDescriptor, slots: &[Ty]) -> Ty {
+    let a = c.extras.descriptors.len() as u32;
+    c.extras.descriptors.push(descriptor);
+    let b = c.g.lists.len() as u32;
+    c.g.lists.extend_from_slice(slots);
+    c.g.push(Node {
+        head: TUPLE | EXTENDED | (slots.len() as u32) << 8,
+        level,
+        a,
+        b,
+    })
+}
+
+/// A new mutability cell.
+fn cell(c: &mut Checker, mutable: bool) -> Ty {
+    c.g.push(cell_node(mutable))
+}
+
+fn nil_at(c: &mut Checker, level: u32) -> Ty {
+    extended_at(c, level, ExtraDescriptor::Nil, &[])
+}
+
+/// `poly(ty;)`: the type of an object field (typecore.ml:3662).
+fn poly_at(c: &mut Checker, level: u32, ty: Ty) -> Ty {
+    extended_at(c, level, ExtraDescriptor::Poly, &[ty])
+}
+
+/// A field node `label: poly(ty;); rest` with the given cell.
+fn field_at(c: &mut Checker, level: u32, label: &str, cell: Ty, ty: Ty, rest: Ty) -> Ty {
+    let name = name(c, label);
+    let typ = poly_at(c, level, ty);
+    extended_at(c, level, ExtraDescriptor::Field { name, mutability: cell.0 }, &[typ, rest])
+}
+
+/// An object at the current level: the fields in the order given, each
+/// `(label, mutable, type)` with a cell of its own, ending in `rest`.
+/// Returns the object and its field nodes, first field first.
+fn obj(c: &mut Checker, fields: &[(&str, bool, Ty)], rest: Ty) -> (Ty, Vec<Ty>) {
+    let level = c.g.level;
+    let mut list = rest;
+    let mut nodes = Vec::new();
+    for &(label, mutable, ty) in fields.iter().rev() {
+        let cell = cell(c, mutable);
+        list = field_at(c, level, label, cell, ty, list);
+        nodes.push(list);
+    }
+    nodes.reverse();
+    (extended_at(c, level, ExtraDescriptor::Object, &[list]), nodes)
+}
+
+/// The names of an object's fields in list order (links followed), and
+/// what the list ends in.
+fn row(c: &mut Checker, object: Ty) -> (Vec<String>, Ty) {
+    let object = c.g.repr(object);
+    let node = c.g.nodes[object.0 as usize];
+    let mut at = c.g.repr(c.g.lists[node.b as usize]);
+    let mut names = Vec::new();
+    loop {
+        let node = c.g.nodes[at.0 as usize];
+        let field = node.head & EXTENDED != 0;
+        match field.then(|| c.extras.descriptors[node.a as usize]) {
+            Some(ExtraDescriptor::Field { name, .. }) => {
+                names.push(String::from_utf8(c.extras.names.text(name).to_vec()).unwrap());
+                at = c.g.repr(c.g.lists[node.b as usize + 1]);
+            }
+            _ => return (names, at),
+        }
+    }
+}
+
+/// The class of a field node's cell.
+fn class(c: &Checker, field: Ty) -> Ty {
+    let node = c.g.nodes[field.0 as usize];
+    let ExtraDescriptor::Field { mutability, .. } = c.extras.descriptors[node.a as usize] else {
+        panic!("not a field");
+    };
+    cell_repr(&c.g, Ty(mutability))
+}
+
+/// Fields each side lacks (compiler/ml/ctype.ml:2467-2486):
+///
+/// ```text
+/// let pairs, miss1, miss2 = associate_fields fields1 fields2 in
+/// let va = make_rowvar (min l1 l2) (miss2 = []) rest1 (miss1 = []) rest2 in
+/// unify env (build_fields l1 miss1 va) rest2;
+/// unify env rest1 (build_fields l2 miss2 va);
+/// ```
+///
+/// `{.. b, a}` against `{.. c}`, both rests variables: neither list is
+/// used as it is, so `va` is a new variable; the right rest is bound to a
+/// new `a; b; va` (sorted by name, `flatten_fields`, ctype.ml:323, though
+/// the left list has `b` first) and the left rest to a new `c; va`. Each
+/// built field has the descriptor of the field it copies (`mutability =
+/// f_mut`, ctype.ml:325-328): no descriptor row is made, none is written.
+/// The two objects are linked left to right (`link_type t1' t2`,
+/// ctype.ml:2331) and no field node is.
+/// Reaches: R3e.
+#[test]
+#[ignore = "R3e build"]
+fn fields_a_side_lacks_are_built_on_one_row_variable() {
+    let mut c = checker(Mode::Success);
+    let int = constr(&mut c, INT, &[]);
+    let (rest1, rest2) = (var(&mut c), var(&mut c));
+    let (left, lf) = obj(&mut c, &[("b", false, int), ("a", true, int)], rest1);
+    let (right, rf) = obj(&mut c, &[("c", false, int)], rest2);
+    let descriptors = c.extras.descriptors.clone();
+    let nodes = c.g.nodes.len() as u32;
+    c.unify(left, right).unwrap();
+    assert_eq!(c.extras.descriptors, descriptors, "no descriptor row made or written");
+    assert_eq!(c.g.nodes.len() as u32 - nodes, 4, "three fields and one variable");
+    assert_eq!(c.g.repr(left), right);
+    let (names, end) = row(&mut c, right);
+    assert_eq!(names, ["c", "a", "b"]);
+    assert!(end.0 >= nodes && c.g.nodes[end.0 as usize].tag() == VAR);
+    assert_eq!(c.g.nodes[end.0 as usize].level, 2);
+    // The left list, read from its own first field: b, a, then c, va.
+    let built_c = c.g.repr(rest1);
+    assert_eq!(c.g.nodes[built_c.0 as usize].a, c.g.nodes[rf[0].0 as usize].a);
+    let built_a = c.g.repr(rest2);
+    assert_eq!(c.g.nodes[built_a.0 as usize].a, c.g.nodes[lf[1].0 as usize].a);
+    assert!(cell_mutable(&c.g, class(&c, built_a)));
+    assert_eq!(class(&c, built_a), class(&c, lf[1]));
+    assert_eq!(c.g.repr(lf[0]), lf[0], "a field node is not linked");
+}
+
+/// A closed row gains nothing and an open one takes what it lacks
+/// (ctype.ml:2478-2486). `{a, b}` closed against `{.. a}`: the left lacks
+/// nothing of the right, so `va` is the left rest (`use1`); the right rest
+/// is bound to `b; nil` and `unify rest1 va` is one node on both sides.
+/// The other way, `{a}` closed against `{.. a, b}`: `va` is the right rest
+/// (`use2`), and `unify rest1 (b; va)` is `Tnil` against a field: a clash
+/// (`_, _ -> raise (Unify [])`, ctype.ml:2424).
+/// Reaches: R3e.
+#[test]
+#[ignore = "R3e build"]
+fn a_closed_row_takes_no_field() {
+    let mut c = checker(Mode::Success);
+    let int = constr(&mut c, INT, &[]);
+    let nil = nil_at(&mut c, 2);
+    let rest = var(&mut c);
+    let (closed, _) = obj(&mut c, &[("a", false, int), ("b", false, int)], nil);
+    let (open, _) = obj(&mut c, &[("a", false, int)], rest);
+    let nodes = c.g.nodes.len();
+    c.unify(closed, open).unwrap();
+    assert_eq!(c.g.nodes.len() - nodes, 1, "one built field");
+    let (names, end) = row(&mut c, open);
+    assert_eq!((names, end), (vec!["a".to_string(), "b".to_string()], nil));
+
+    for swap in [false, true] {
+        let mut c = checker(Mode::Success);
+        let int = constr(&mut c, INT, &[]);
+        let nil = nil_at(&mut c, 2);
+        let rest = var(&mut c);
+        let (closed, _) = obj(&mut c, &[("a", false, int)], nil);
+        let (open, _) = obj(&mut c, &[("a", false, int), ("b", false, int)], rest);
+        let result = if swap { c.unify(open, closed) } else { c.unify(closed, open) };
+        assert!(result.is_err(), "swap {swap}");
+    }
+}
+
+/// Common fields are unified in name order, and what a failure leaves in
+/// `Mode::Explain` (ctype.ml:2487-2517). `{b: int, a: int}` against `{a:
+/// string, b: unit}`, both closed: the pair of `a` fails first although
+/// `b` is first in the left list. The trace is the pair of the objects,
+/// the pair of two new one-field lists for `a` (`Tfield {f1 with rest =
+/// newty Tnil}`, ctype.ml:2493-2510), the pair of the two field types, and
+/// the pair that clashed. The left rest, linked to the right one by the
+/// tail unification (`Tnil, Tnil`, ctype.ml:2412), has its descriptor back
+/// (`rest1.desc <- d1`, ctype.ml:2514), and so has the left object
+/// (`t1'.desc <- d1`, ctype.ml:2437).
+/// Reaches: R3e.
+#[test]
+#[ignore = "R3e build"]
+fn common_fields_unify_in_name_order_and_a_failure_restores_the_rests() {
+    let mut c = checker(Mode::Explain);
+    let (int, string, unit) = (constr(&mut c, INT, &[]), constr(&mut c, STRING, &[]), constr(&mut c, UNIT, &[]));
+    let (nil1, nil2) = (nil_at(&mut c, 2), nil_at(&mut c, 2));
+    let (left, lf) = obj(&mut c, &[("b", false, int), ("a", false, int)], nil1);
+    let (right, rf) = obj(&mut c, &[("a", false, string), ("b", false, unit)], nil2);
+    assert!(c.unify(left, right).is_err());
+    assert_eq!(c.trace.len(), 4, "{:?}", c.trace);
+    assert_eq!(c.trace[0], [left, right]);
+    let [f1, f2] = c.trace[1];
+    for (made, source) in [(f1, lf[1]), (f2, rf[0])] {
+        assert_ne!(made, source);
+        assert_eq!(c.g.nodes[made.0 as usize].a, c.g.nodes[source.0 as usize].a, "name and cell");
+        assert_eq!(child(&mut c, made, 0), child(&mut c, source, 0));
+        let rest = child(&mut c, made, 1);
+        let rest = c.g.nodes[rest.0 as usize];
+        assert_eq!(c.extras.descriptors[rest.a as usize], ExtraDescriptor::Nil);
+    }
+    let types = [child(&mut c, lf[1], 0), child(&mut c, rf[0], 0)];
+    assert_eq!(c.trace[2], types);
+    assert_eq!(c.trace[3], [int, string]);
+    assert_eq!(c.g.repr(nil1), nil1);
+    assert_eq!(c.g.repr(left), left);
+}
+
+/// `unify_mutability` (ctype.ml:2520-2539), arm by arm:
+///
+/// ```text
+/// | Mutability_value Immutable, Mutability_value Mutable ->
+///   if open1 then set_mutability r1 (Mutability_value Asttypes.Mutable)
+///   else raise (Unify [])
+/// | Mutability_value Mutable, Mutability_value Immutable ->
+///   if open2 then set_mutability r2 (Mutability_value Asttypes.Mutable)
+///   else raise (Unify [])
+/// ...
+/// set_mutability r2 (Mutability_link r1)
+/// ```
+///
+/// `open1` and `open2` are read before the rests are unified
+/// (ctype.ml:2476): an open immutable row against a closed mutable one is
+/// promoted although the tail unification closes it first. The right
+/// class is linked to the left one whatever the values. A restore puts
+/// both writes back (`Cmutability`, btype.ml:745-747). The same answers
+/// are observed on the old checker
+/// (`differential::tests::old_checker_duplicates_the_cells_of_an_open_row`).
+/// Reaches: R3e.
+#[test]
+#[ignore = "R3e build"]
+fn mutability_is_promoted_on_the_open_side_and_classes_merge() {
+    // (left open, left mutable, right open, right mutable) -> unifies
+    let cases = [
+        (true, false, true, true, true),
+        (true, true, true, false, true),
+        (true, false, false, true, true),
+        (false, false, true, true, false),
+        (false, true, true, false, true),
+        (true, true, false, false, false),
+        (false, false, false, true, false),
+        (false, false, false, false, true),
+        (false, true, false, true, true),
+    ];
+    for (open1, mut1, open2, mut2, unifies) in cases {
+        let mut c = checker(Mode::Success);
+        let int = constr(&mut c, INT, &[]);
+        let rest1 = if open1 { var(&mut c) } else { nil_at(&mut c, 2) };
+        let rest2 = if open2 { var(&mut c) } else { nil_at(&mut c, 2) };
+        let (left, lf) = obj(&mut c, &[("x", mut1, int)], rest1);
+        let (right, rf) = obj(&mut c, &[("x", mut2, int)], rest2);
+        let (r1, r2) = (class(&c, lf[0]), class(&c, rf[0]));
+        let descriptors = c.extras.descriptors.clone();
+        let token = c.g.speculate();
+        let result = c.unify(left, right);
+        assert_eq!(result.is_ok(), unifies, "{open1} {mut1} {open2} {mut2}");
+        assert_eq!(c.extras.descriptors, descriptors);
+        if unifies {
+            assert_eq!(class(&c, rf[0]), r1, "the right class links to the left");
+            assert_eq!(cell_mutable(&c.g, r1), mut1 || mut2);
+        }
+        c.restore(token);
+        assert_eq!((class(&c, lf[0]), class(&c, rf[0])), (r1, r2));
+        assert_eq!((cell_mutable(&c.g, r1), cell_mutable(&c.g, r2)), (mut1, mut2));
+    }
+}
+
+/// `make_rowvar` (ctype.ml:2445-2465) when both lists are used as they
+/// are: `va` is the left rest, and of a named left rest and an unnamed
+/// right one the right takes the name (`Tvar (Some _ as name), _ -> if
+/// use2 then set_name rest2 name`) before the two are unified, so the
+/// name survives the link of the left variable to the right
+/// (ctype.ml:2242-2243).
+/// Reaches: R3e.
+#[test]
+#[ignore = "R3e build"]
+fn the_row_variable_keeps_a_name() {
+    let mut c = checker(Mode::Success);
+    let int = constr(&mut c, INT, &[]);
+    let (rest1, rest2) = (var_at(&mut c, 3), var(&mut c));
+    c.g.nodes[rest1.0 as usize].a = 7;
+    let (left, _) = obj(&mut c, &[("x", false, int)], rest1);
+    let (right, _) = obj(&mut c, &[("x", false, int)], rest2);
+    c.unify(left, right).unwrap();
+    assert_eq!(c.g.repr(rest1), rest2);
+    assert_eq!(c.g.nodes[rest2.0 as usize].a, 7);
+    assert_eq!(c.g.nodes[rest2.0 as usize].level, 2);
+}
+
+/// The arms of unify3 beside the object's (ctype.ml:2322-2324, 2412-2413,
+/// 2424). Two field nodes go to `unify_fields` with no link of their own
+/// (`Tfield _, Tfield _ -> unify_fields env t1' t2'`): the rests are
+/// unified and the two field nodes stay two. Two `Tnil` link. Two
+/// polymorphic types without variables link and unify their bodies. An
+/// object against a tuple, and a field against `Tnil`, clash.
+/// Reaches: R3e.
+#[test]
+#[ignore = "R3e build"]
+fn the_other_arms_of_objects() {
+    let mut c = checker(Mode::Success);
+    let int = constr(&mut c, INT, &[]);
+    let (rest1, rest2) = (var(&mut c), var(&mut c));
+    let (_, lf) = obj(&mut c, &[("x", false, int)], rest1);
+    let (_, rf) = obj(&mut c, &[("x", false, int)], rest2);
+    c.unify(lf[0], rf[0]).unwrap();
+    assert_eq!(c.g.repr(rest1), rest2);
+    assert_eq!((c.g.repr(lf[0]), c.g.repr(rf[0])), (lf[0], rf[0]));
+
+    let (nil1, nil2) = (nil_at(&mut c, 2), nil_at(&mut c, 2));
+    c.unify(nil1, nil2).unwrap();
+    assert_eq!(c.g.repr(nil1), nil2);
+
+    let v = var(&mut c);
+    let (p1, p2) = (poly_at(&mut c, 2, v), poly_at(&mut c, 2, int));
+    c.unify(p1, p2).unwrap();
+    assert_eq!((c.g.repr(p1), c.g.repr(v)), (p2, int));
+
+    let nil = nil_at(&mut c, 2);
+    let (object, fields) = obj(&mut c, &[("x", false, int)], nil);
+    let pair = tuple(&mut c, &[int, int]);
+    assert!(c.unify(object, pair).is_err());
+    let nil = nil_at(&mut c, 2);
+    assert!(c.unify(fields[0], nil).is_err());
+}
+
+/// Where the occurrence tests cross an object. `occur_rec` does not
+/// (`| Tobject _ | Tvariant _ -> ()`, ctype.ml:1403): a variable is bound
+/// to an object that holds it. `deep_occur` does (`| Tobject ty | Tlink ty
+/// | Tsubst ty -> deep_occur_budget t0 budget ty`, ctype.ml:1735), and it
+/// decides the route of a variable against a constructor (`Tvar _,
+/// Tconstr _ when deep_occur t1 t2 -> unify2 env t1 t2`, ctype.ml:
+/// 2240-2241). The two differ for `v` (level 2) against `id<obj>` (level
+/// 3) where `obj = {x: v}` is at level 1 and `type id<'a> = 'a`: unify2
+/// expands the constructor to `obj` and lowers both sides to the lower of
+/// the two expanded levels, 1 (ctype.ml:2283-2285), before unify3 links
+/// `v` to the constructor node (`occur` finds nothing: ctype.ml:2316-2319).
+/// Without the route the binding would lower the constructor to the
+/// variable's level, 2. In both modes.
+/// Reaches: R3e.
+#[test]
+#[ignore = "R3e build"]
+fn the_route_of_a_variable_crosses_an_object_and_the_occurrence_test_does_not() {
+    for mode in [Mode::Success, Mode::Explain] {
+        let mut c = checker(mode);
+        let v = var(&mut c);
+        let nil = nil_at(&mut c, 2);
+        let (object, _) = obj(&mut c, &[("x", false, v)], nil);
+        c.unify(v, object).unwrap();
+        assert_eq!(c.g.repr(v), object, "{mode:?}");
+
+        let mut c = checker(mode);
+        let id = c.types.rows.len() as u32;
+        c.types.rows.push(c.types.rows[PHANTOM as usize]);
+        let param = var_at(&mut c, GENERIC);
+        abbreviation(&mut c, id, &[param], param);
+        let v = var(&mut c);
+        let nil = nil_at(&mut c, 1);
+        let cell = cell(&mut c, false);
+        let field = field_at(&mut c, 1, "x", cell, v, nil);
+        let object = extended_at(&mut c, 1, ExtraDescriptor::Object, &[field]);
+        let wrapped = constr_at(&mut c, 3, id, &[object]);
+        c.unify(v, wrapped).unwrap();
+        assert_eq!(c.g.repr(v), wrapped, "{mode:?}");
+        assert_eq!(c.g.nodes[wrapped.0 as usize].level, 1, "{mode:?}");
+    }
+}
+
+/// A scheme `({.. a, x} as 'r, 'r)` whose row ends in a generic variable,
+/// and one that ends in `Tnil`, captured as templates.
+fn object_scheme(c: &mut Checker, open: bool, fields: u32) -> (Template, Vec<Ty>) {
+    let mut nodes = Vec::new();
+    let template = scheme(c, |c| {
+        let int = constr(c, INT, &[]);
+        let rest = if open { var(c) } else { nil_at(c, c.g.level) };
+        let labels: Vec<String> = (0..fields).map(|at| format!("f{at:05}")).collect();
+        let list: Vec<(&str, bool, Ty)> =
+            labels.iter().enumerate().map(|(at, label)| (label.as_str(), at % 2 == 1, int)).collect();
+        let (object, made) = obj(c, &list, rest);
+        nodes = made;
+        tuple(c, &[object, object])
+    });
+    (template, nodes)
+}
+
+/// An instance duplicates the cells of an open row and shares those of a
+/// closed one (compiler/ml/btype.ml:527-530):
+///
+/// ```text
+/// let mutability =
+///   if fresh_mutability || row_terminator_generic f_.rest then
+///     dup_mutability f_.mutability
+///   else mutability_ref_repr f_.mutability
+/// ```
+///
+/// Two instances of the open scheme: each field has a new descriptor row
+/// and a cell that is neither the scheme's nor the other instance's, with
+/// the scheme's value; the scheme's cells are their own representatives
+/// again after each instance (`end_type_copy_session`, btype.ml:449-456).
+/// An instance of the closed scheme makes no descriptor row and no cell.
+/// `template_has_open_row` tells the two apart. Observed on the old
+/// checker: `old_checker_duplicates_the_cells_of_an_open_row`.
+/// Reaches: R3e.
+#[test]
+#[ignore = "R3e build"]
+fn an_instance_duplicates_the_cells_of_an_open_row() {
+    let field_of = |c: &mut Checker, root: Ty, index: u32| {
+        let object = child(c, root, 0);
+        let mut at = child(c, object, 0);
+        for _ in 0..index {
+            at = child(c, at, 1);
+        }
+        c.g.repr(at)
+    };
+    let mut c = checker(Mode::Success);
+    let (open, scheme_fields) = object_scheme(&mut c, true, 2);
+    let has = |c: &Checker, template| {
+        super::rows::template_has_open_row(&c.g.template_nodes, &c.g.template_lists, &c.extras.descriptors, template)
+    };
+    assert!(has(&c, open));
+    let descriptors = c.extras.descriptors.len();
+    let (first, second) = (c.instance_open(open), c.instance_open(open));
+    assert_eq!(c.extras.descriptors.len(), descriptors + 4);
+    for index in 0..2 {
+        let source = class(&c, scheme_fields[index as usize]);
+        let (a, b) = (field_of(&mut c, first, index), field_of(&mut c, second, index));
+        let (ca, cb) = (class(&c, a), class(&c, b));
+        assert!(ca != cb && ca != source && cb != source);
+        assert_eq!(cell_mutable(&c.g, ca), index == 1);
+        assert_eq!(c.g.nodes[source.0 as usize], cell_node(index == 1), "the session ended");
+    }
+    assert!(c.extras.session.is_empty());
+
+    let mut c = checker(Mode::Success);
+    let (closed, scheme_fields) = object_scheme(&mut c, false, 2);
+    assert!(!has(&c, closed));
+    let (descriptors, nodes) = (c.extras.descriptors.len(), c.g.nodes.len());
+    let root = c.instance_open(closed);
+    assert_eq!(c.extras.descriptors.len(), descriptors);
+    let field = field_of(&mut c, root, 0);
+    assert_eq!(class(&c, field), class(&c, scheme_fields[0]));
+    let with_pass = c.g.nodes.len() - nodes;
+    let nodes = c.g.nodes.len();
+    c.instance(closed);
+    assert_eq!(c.g.nodes.len() - nodes, with_pass, "no cell made");
+}
+
+/// Steps of objects, as relations between n = 1,000 and n = 10,000 fields
+/// (name comparisons of the sort are not steps: O(n log n) byte
+/// comparisons, stated in `flatten_fields`):
+/// - unifying two closed objects of n common fields, the left list in
+///   reverse name order: at most 11 times;
+/// - unifying `{.. f0..fn}` with `{.. g0..gn}`, n fields built on each
+///   side: at most 11 times, and 2n + 1 nodes made;
+/// - an instance of an open row of n fields (the terminator of the row is
+///   found once, not once per field, btype.ml:474-506): at most 11 times;
+/// - an instance of a closed row through `Checker::instance`: exactly the
+///   steps of `Graph::instance` (no pass).
+///
+/// Reaches: R3e.
+#[test]
+#[ignore = "R3e build"]
+fn objects_of_ten_thousand_fields_are_linear() {
+    let common = |n: u32| {
+        let mut c = checker(Mode::Success);
+        let int = constr(&mut c, INT, &[]);
+        let labels: Vec<String> = (0..n).map(|at| format!("f{at:05}")).collect();
+        let forward: Vec<(&str, bool, Ty)> = labels.iter().map(|label| (label.as_str(), false, int)).collect();
+        let backward: Vec<(&str, bool, Ty)> = forward.iter().rev().copied().collect();
+        let (nil1, nil2) = (nil_at(&mut c, 2), nil_at(&mut c, 2));
+        let (left, _) = obj(&mut c, &backward, nil1);
+        let (right, _) = obj(&mut c, &forward, nil2);
+        steps::scope(|| c.unify(left, right).unwrap())
+    };
+    let (small, large) = (common(1_000), common(10_000));
+    assert!(large <= 11 * small, "common: {small} {large}");
+
+    let disjoint = |n: u32| {
+        let mut c = checker(Mode::Success);
+        let int = constr(&mut c, INT, &[]);
+        let f: Vec<String> = (0..n).map(|at| format!("f{at:05}")).collect();
+        let g: Vec<String> = (0..n).map(|at| format!("g{at:05}")).collect();
+        let f: Vec<(&str, bool, Ty)> = f.iter().map(|label| (label.as_str(), false, int)).collect();
+        let g: Vec<(&str, bool, Ty)> = g.iter().map(|label| (label.as_str(), false, int)).collect();
+        let (rest1, rest2) = (var(&mut c), var(&mut c));
+        let (left, _) = obj(&mut c, &f, rest1);
+        let (right, _) = obj(&mut c, &g, rest2);
+        let nodes = c.g.nodes.len() as u32;
+        let count = steps::scope(|| c.unify(left, right).unwrap());
+        assert_eq!(c.g.nodes.len() as u32 - nodes, 2 * n + 1);
+        count
+    };
+    let (small, large) = (disjoint(1_000), disjoint(10_000));
+    assert!(large <= 11 * small, "disjoint: {small} {large}");
+
+    let instance = |n: u32| {
+        let mut c = checker(Mode::Success);
+        let (open, _) = object_scheme(&mut c, true, n);
+        steps::scope(|| {
+            c.instance_open(open);
+        })
+    };
+    let (small, large) = (instance(1_000), instance(10_000));
+    assert!(large <= 11 * small, "instance: {small} {large}");
+
+    let mut c = checker(Mode::Success);
+    let (closed, _) = object_scheme(&mut c, false, 10_000);
+    let through = steps::scope(|| {
+        c.instance(closed);
+    });
+    let kernel = steps::scope(|| {
+        c.g.instance(closed);
+    });
+    assert_eq!(through, kernel);
+}
+
+/// The stack entry of a flattened field is 12 bytes; a cell is a node.
+#[test]
+fn sizes_of_object_rows() {
+    assert_eq!(std::mem::size_of::<FieldRef>(), 12);
+    assert_eq!(std::mem::size_of::<ExtraDescriptor>(), 12);
+    assert_eq!(std::mem::size_of_val(&cell_node(true)), 16);
 }

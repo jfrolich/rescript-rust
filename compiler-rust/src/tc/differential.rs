@@ -145,6 +145,14 @@ pub(crate) const OBJECTS: u16 = 1 << 4;
 /// two of them is slice R3f's.
 pub(crate) const VARIANTS: u16 = 1 << 5;
 
+/// [`Plan::with`]: a field of a generated object type that is not its
+/// first is `@set` (mutable) one time in two, and the form prints the class of every field's
+/// mutability cell: `name^k` (`name!^k` when mutable), `k` numbering the
+/// classes at their first visit across the operands of the case, as nodes
+/// are numbered. Two fields that share a cell print one number; two equal
+/// cells print two (section 8.6, decisions 17 and 27).
+pub(crate) const CELLS: u16 = 1 << 6;
+
 /// A tier and what a case adds to it. 4 bytes, passed by value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Plan {
@@ -199,6 +207,13 @@ pub(crate) enum Op {
     /// `iter_type_expr`'s order (compiler/ml/btype.ml:250-257), or the
     /// operand itself when it has no child. [`BUILD`].
     Child(u16, u8),
+    /// A new operand: list slot `n mod arity` of an operand's representative
+    /// when that is an object, a field or a polymorphic type (an object:
+    /// its field list; a field: its type, then the rest; a polymorphic
+    /// type: its body, then its variables), otherwise what `Child` gives.
+    /// Never generated: hand-written cases use it to reach a node inside an
+    /// object.
+    Slot(u16, u8),
 }
 
 /// A deliberately wrong new side, for the tests that prove the harness sees
@@ -306,6 +321,11 @@ fn type_text_with(
             for (index, member) in members.into_iter().enumerate() {
                 if index != 0 {
                     out.push_str(", ");
+                }
+                // The parser takes an attribute on a field that is not the
+                // first of an inline object type.
+                if with & CELLS != 0 && index != 0 && rng.below(2) == 0 {
+                    out.push_str("@set ");
                 }
                 let _ = write!(out, "\"{}\": ", ["x", "y", "z"][member]);
                 type_text_with(rng, with, depth - 1, vars, nullary, unary, out);
@@ -531,7 +551,7 @@ pub(crate) fn operations(rng: &mut Rng, plan: impl Into<Plan>, values: usize) ->
         };
         match op {
             Op::Instance(_) | Op::Copy(_) | Op::Expand(_) => operands += 1,
-            Op::Var | Op::Tuple(..) | Op::Child(..) => operands += 1,
+            Op::Var | Op::Tuple(..) | Op::Child(..) | Op::Slot(..) => operands += 1,
             Op::BeginDef => depth += 1,
             Op::EndDef => {
                 depth -= 1;
@@ -673,6 +693,13 @@ fn old_children(ctx: &TypeContext, ty: TypeExprRef) -> Vec<TypeExprRef> {
     }
 }
 
+/// What a form has numbered so far on the old side: the nodes, and under
+/// [`CELLS`] the classes of mutability cells.
+struct OldSeen {
+    nodes: Vec<TypeExprRef>,
+    cells: Option<Vec<crate::types::type_expr::MutabilityRef>>,
+}
+
 /// O(printed nodes²): the form of every operand, and the text of a trace
 /// whose nodes are numbered after the operands'.
 fn old_forms(
@@ -682,7 +709,10 @@ fn old_forms(
     trace: &[(TypeExprRef, TypeExprRef)],
 ) -> (String, String) {
     let mut form = String::new();
-    let mut seen = Vec::new();
+    let mut seen = OldSeen {
+        nodes: Vec::new(),
+        cells: plan.has(CELLS).then(Vec::new),
+    };
     for (index, &operand) in operands.iter().enumerate() {
         let _ = write!(form, "{index} = ");
         old_form(&old.ctx, old.base, plan.tier.names(), operand, &mut seen, &mut form);
@@ -781,6 +811,24 @@ pub(crate) fn run_old(program: &Program, plan: impl Into<Plan>, ops: &[Op]) -> O
                     len => children[n as usize % len],
                 });
             }
+            Op::Slot(operand, n) => {
+                let ty = operands[operand as usize];
+                let desc: TypeDesc = *ctx.get_desc(ctx.repr(ty));
+                let children = match desc {
+                    TypeDesc::Tobject { fields } => vec![fields],
+                    TypeDesc::Tfield { typ, rest, .. } => vec![typ, rest],
+                    TypeDesc::Tpoly { body, vars } => {
+                        let mut slots = vec![body];
+                        slots.extend(ctx.type_list(vars).iter());
+                        slots
+                    }
+                    _ => old_children(ctx, ty),
+                };
+                operands.push(match children.len() {
+                    0 => ty,
+                    len => children[n as usize % len],
+                });
+            }
         }
         if let Some(trace) = failure {
             if !explain {
@@ -800,16 +848,16 @@ fn old_form(
     base: i32,
     names: bool,
     ty: TypeExprRef,
-    seen: &mut Vec<TypeExprRef>,
+    seen: &mut OldSeen,
     out: &mut String,
 ) {
     let ty = ctx.repr(ty);
-    if let Some(number) = seen.iter().position(|&other| other == ty) {
+    if let Some(number) = seen.nodes.iter().position(|&other| other == ty) {
         let _ = write!(out, "@{number}");
         return;
     }
-    let _ = write!(out, "&{}", seen.len());
-    seen.push(ty);
+    let _ = write!(out, "&{}", seen.nodes.len());
+    seen.nodes.push(ty);
     let level = ctx.get_level(ty);
     if level == GENERIC_LEVEL {
         out.push_str("[G]");
@@ -876,7 +924,16 @@ fn old_form(
         TypeDesc::Tfield { name, mutability, typ, rest } => {
             let mutable = ctx.mutability_repr(mutability)
                 == crate::types::asttypes::MutableFlag::Mutable;
-            let _ = write!(out, "{}{}: ", name.as_str(), if mutable { "!" } else { "" });
+            let _ = write!(out, "{}{}", name.as_str(), if mutable { "!" } else { "" });
+            if let Some(cells) = &mut seen.cells {
+                let class = ctx.mutability_ref_repr(mutability);
+                let number = cells.iter().position(|&other| other == class).unwrap_or_else(|| {
+                    cells.push(class);
+                    cells.len() - 1
+                });
+                let _ = write!(out, "^{number}");
+            }
+            out.push_str(": ");
             old_form(ctx, base, names, typ, seen, out);
             out.push_str("; ");
             old_form(ctx, base, names, rest, seen, out);
@@ -966,6 +1023,11 @@ pub(crate) struct New {
     pub operands: Vec<Ty>,
     /// First instance of each value, for [`Fault::ReuseInstance`].
     first: Vec<Option<Ty>>,
+    /// [`CELLS`]: the classes of mutability cells one form has numbered.
+    cells: Vec<Ty>,
+    /// [`CELLS`]: per value, whether its template has an open row
+    /// (`rows::template_has_open_row`): its instances duplicate cells.
+    open: Vec<bool>,
 }
 
 impl New {
@@ -1000,7 +1062,7 @@ impl New {
         // row, a universal variable or a package, and the descriptor pools
         // stay empty.
         if plan.with & (OBJECTS | VARIANTS) != 0 {
-            checker.extras = super::rows::Extras::from_segment(&segment);
+            checker.extras = super::rows::Extras::from_segment(&segment, &mut checker.g);
         }
         if tier.memo_aware() {
             checker.types = TypeTable::from_segment(&segment);
@@ -1008,8 +1070,24 @@ impl New {
         if plan.has(EXPLAIN) {
             checker.g.mode = Mode::Explain;
         }
+        let open = roots
+            .iter()
+            .map(|root| {
+                // The kernel tier is R1's instance: it has no duplicate.
+                plan.has(CELLS)
+                    && tier != Tier::Kernel
+                    && super::rows::template_has_open_row(
+                        &segment.template_nodes,
+                        &segment.template_lists,
+                        &checker.extras.descriptors,
+                        segment.templates[root.template as usize],
+                    )
+            })
+            .collect();
         let mut new = New {
             first: vec![None; roots.len()],
+            cells: Vec::new(),
+            open,
             segment,
             checker,
             tier,
@@ -1108,7 +1186,9 @@ impl New {
     pub(crate) fn instance(&mut self, value: usize) -> Ty {
         let root = self.roots[value];
         let template = self.segment.templates[root.template as usize];
-        let base = if self.tier.memo_aware() {
+        let base = if self.open[value] {
+            self.checker.instance_open(template)
+        } else if self.tier.memo_aware() {
             self.checker.instance(template)
         } else {
             self.checker.g.instance(template)
@@ -1232,6 +1312,28 @@ impl New {
                     len => children[n as usize % len],
                 });
             }
+            Op::Slot(operand, n) => {
+                use super::segment::{EXTENDED, ExtraDescriptor};
+                let ty = self.operands[operand as usize];
+                let at = self.checker.g.repr(ty);
+                let node = self.checker.g.nodes[at.0 as usize];
+                let listed = node.head & EXTENDED != 0
+                    && node.arity() != 0
+                    && matches!(
+                        self.checker.extras.descriptors[node.a as usize],
+                        ExtraDescriptor::Object | ExtraDescriptor::Field { .. } | ExtraDescriptor::Poly
+                    );
+                let slot = if listed {
+                    self.checker.g.lists[(node.b + u32::from(n) % node.arity()) as usize]
+                } else {
+                    let children = self.children(ty);
+                    match children.len() {
+                        0 => ty,
+                        len => children[n as usize % len],
+                    }
+                };
+                self.operands.push(slot);
+            }
         }
         Ok(())
     }
@@ -1247,6 +1349,7 @@ impl New {
         let mut form = String::new();
         let mut seen = vec![NONE; self.checker.g.nodes.len()];
         let mut count = 0;
+        self.cells.clear();
         let operands = self.operands.clone();
         for (index, operand) in operands.into_iter().enumerate() {
             let _ = write!(form, "{index} = ");
@@ -1377,12 +1480,18 @@ impl New {
                 out.push('}');
             }
             ExtraDescriptor::Field { name, mutability } => {
-                // A cell with its high bit set is a link to another cell.
-                let mut cell = self.checker.extras.mutabilities[mutability as usize];
-                while cell & 1 << 31 != 0 {
-                    cell = self.checker.extras.mutabilities[(cell & !(1 << 31)) as usize];
+                let class = super::rows::cell_repr(&self.checker.g, Ty(mutability));
+                let mutable = super::rows::cell_mutable(&self.checker.g, class);
+                let _ = write!(out, "{}{}", self.string(name), if mutable { "!" } else { "" });
+                if self.plan.has(CELLS) {
+                    let number = self.cells.iter().position(|&other| other == class);
+                    let number = number.unwrap_or_else(|| {
+                        self.cells.push(class);
+                        self.cells.len() - 1
+                    });
+                    let _ = write!(out, "^{number}");
                 }
-                let _ = write!(out, "{}{}: ", self.string(name), if cell != 0 { "!" } else { "" });
+                out.push_str(": ");
                 self.node_form(slot(self, node, 0), seen, count, out);
                 out.push_str("; ");
                 self.node_form(slot(self, node, 1), seen, count, out);
@@ -1500,7 +1609,23 @@ pub(crate) fn run_new(program: &Program, plan: impl Into<Plan>, ops: &[Op], faul
         unchanged: 0,
         changed: 0,
     };
+    // Descriptor rows are shared by every instance of a scheme: no
+    // operation writes one in place (section 8.6, decision 27). The rows
+    // the case starts with are compared after every operation.
+    let frozen = (
+        new.checker.extras.descriptors.clone(),
+        new.checker.extras.variants.clone(),
+        new.checker.extras.row_fields.clone(),
+    );
     for (index, &op) in ops.iter().enumerate() {
+        let extras = &new.checker.extras;
+        assert!(
+            extras.descriptors[..frozen.0.len()] == frozen.0[..]
+                && extras.variants[..frozen.1.len()] == frozen.1[..]
+                && extras.row_fields[..frozen.2.len()] == frozen.2[..],
+            "a descriptor row was written in place before operation {index}: {ops:?}\n{}",
+            program.source
+        );
         let before = match op {
             Op::Unify(..) | Op::Lower(..) if explain => new.form(),
             _ => String::new(),
@@ -2156,6 +2281,58 @@ mod tests {
         external v2: rv = \"v2\"\n\
         external v3: pv<string> = \"v3\"\n";
 
+    /// Three abbreviations with a parameter that reach each other through
+    /// objects: the chain of inherited memo entries has more than one row.
+    const MUTUAL: &str = "type rec m1<'a> = {\"a\": 'a, \"n\": m2<'a>}\n\
+        and m2<'a> = {\"a\": 'a, \"n\": m3<'a>}\n\
+        and m3<'a> = {\"p\": m1<'a>, \"q\": m2<'a>}\n\
+        external v0: m1<string> = \"v0\"\n";
+
+    /// Operand 0 is an `m1<string>` node, 5 the `m2` node its expansion
+    /// made, 10 the `m3` node the expansion of 5 made; then 10 is expanded.
+    const CHAIN_KEPT: [Op; 12] = [
+        Op::Instance(0),
+        Op::Expand(0),
+        Op::Slot(1, 0),
+        Op::Slot(2, 1),
+        Op::Slot(3, 0),
+        Op::Slot(4, 0),
+        Op::Expand(5),
+        Op::Slot(6, 0),
+        Op::Slot(7, 1),
+        Op::Slot(8, 0),
+        Op::Slot(9, 0),
+        Op::Expand(10),
+    ];
+
+    /// As [`CHAIN_KEPT`], with every memo cleaned and 5 expanded again
+    /// before 10 is expanded.
+    const CHAIN_CLEANED: [Op; 14] = [
+        Op::Instance(0),
+        Op::Expand(0),
+        Op::Slot(1, 0),
+        Op::Slot(2, 1),
+        Op::Slot(3, 0),
+        Op::Slot(4, 0),
+        Op::Expand(5),
+        Op::Slot(6, 0),
+        Op::Slot(7, 1),
+        Op::Slot(8, 0),
+        Op::Slot(9, 0),
+        Op::Cleanup,
+        Op::Expand(5),
+        Op::Expand(10),
+    ];
+
+    /// Object types whose fields' cells an instance duplicates (an open
+    /// row of the scheme: `v0`, `v2`, `v4`) or shares (a closed row: `v1`,
+    /// `v3`).
+    const CELL_PROGRAM: &str = "external v0: {.. \"a\": int, \"x\": int} => unit = \"v0\"\n\
+        external v1: {\"a\": int, \"x\": int} => unit = \"v1\"\n\
+        external v2: {.. \"a\": int, @set \"x\": int} => unit = \"v2\"\n\
+        external v3: {\"a\": int, @set \"x\": int} => unit = \"v3\"\n\
+        external v4: ({.. \"a\": int, \"x\": int} as 'r, 'r) => unit = \"v4\"\n";
+
     /// What the old checker shows for a recursive abbreviation today
     /// (observed). The copy an expansion makes of the abbreviation's own
     /// constructor is a link to the node being expanded: for a nullary one
@@ -2192,6 +2369,142 @@ mod tests {
         }
     }
 
+    /// What the old checker shows for a chain of inherited entries today
+    /// (observed). With every entry in place, the copies the expansion of
+    /// the `m3` node makes of `m1<'a>` and `m2<'a>` are links to the two
+    /// nodes whose expansions led to it (`@0`, `@7`): `find_repr` goes on
+    /// through `Mlink` (compiler/ml/ctype.ml:720-724, 796-798). After a
+    /// cleanup the list of the `m2` node is empty (`abbr := Mnil`,
+    /// compiler/ml/btype.ml:626) and so ends there; the `m3` node still
+    /// names that list, so when the `m2` node is expanded again its new
+    /// entry is found (`@7`) and the `m1` node's is not (a new `m1` node).
+    #[test]
+    fn old_checker_inherits_entries_along_the_chain() {
+        let program = compile(MUTUAL.to_string());
+        let plan = Plan::new(Tier::Expand, OBJECTS);
+        let kept = run_old(&program, plan, &CHAIN_KEPT).form;
+        assert!(
+            kept.ends_with(
+                "11 = &16[0]obj{&17[0]p: &18[0]poly(@0;); &19[0]q: &20[0]poly(@7;); &21[0]nil}\n"
+            ),
+            "{kept}"
+        );
+        let cleaned = run_old(&program, plan, &CHAIN_CLEANED).form;
+        assert!(
+            cleaned.ends_with(
+                "12 = &23[0]obj{&24[0]p: &25[0]poly(&26[0]m1<@1>;); &27[0]q: &28[0]poly(@7;); &29[0]nil}\n"
+            ),
+            "{cleaned}"
+        );
+    }
+
+    /// The same two cases on both sides: the acceptance of the chain, of
+    /// what a cleanup cuts and of what a later expansion revives (section
+    /// 8.6, decision 26). Reaches: R3m.
+    #[test]
+    #[ignore = "R3m build"]
+    fn a_chain_of_inherited_entries_agrees() {
+        let program = compile(MUTUAL.to_string());
+        let plan = Plan::new(Tier::Expand, OBJECTS);
+        for ops in [&CHAIN_KEPT[..], &CHAIN_CLEANED[..]] {
+            compare(0, &program, plan, ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
+        }
+    }
+
+    /// The cases of [`CELL_PROGRAM`]: two instances of an open row and two
+    /// of a closed one; a promotion in each order and an instance after
+    /// it; two closed rows that differ; a row closed by a unification and
+    /// then asked for a mutable field; two copies of a generalized open
+    /// row whose object is named twice.
+    const CELL_CASES: [&[Op]; 6] = [
+        &[Op::Instance(0), Op::Instance(0), Op::Instance(1), Op::Instance(1)],
+        &[Op::Instance(0), Op::Instance(2), Op::Unify(0, 1), Op::Instance(0)],
+        &[Op::Instance(2), Op::Instance(0), Op::Unify(0, 1)],
+        &[Op::Instance(1), Op::Instance(3), Op::Unify(0, 1)],
+        &[Op::Instance(1), Op::Instance(0), Op::Unify(0, 1), Op::Instance(2), Op::Unify(0, 2)],
+        &[
+            Op::Instance(4),
+            Op::BeginDef,
+            Op::Instance(4),
+            Op::EndDef,
+            Op::Generalize(1),
+            Op::Copy(1),
+            Op::Copy(1),
+        ],
+    ];
+
+    /// What the old checker shows for mutability cells today (observed;
+    /// section 8.6, decision 27). An instance of a scheme whose row ends in
+    /// a generic variable has cells of its own (`^0 ^1`, then `^2 ^3`:
+    /// `dup_mutability` when `row_terminator_generic`, compiler/ml/btype.ml:
+    /// 462-506, 527-530); the instances of a closed row share the scheme's
+    /// (`^4 ^5` twice). An immutable field of an open row unified with a
+    /// mutable one is promoted (`x!`, compiler/ml/ctype.ml:2530-2532) in
+    /// either order, and the scheme is untouched (the later instance has
+    /// `x^3`, immutable). A closed immutable field against a mutable one is
+    /// a clash (ctype.ml:2532, 2535), also when the row was closed by an
+    /// earlier unification. A copy of a generalized open row duplicates
+    /// once per copy, and the two names of one object in a copy are one
+    /// node.
+    #[test]
+    fn old_checker_duplicates_the_cells_of_an_open_row() {
+        let program = compile(CELL_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, OBJECTS | CELLS);
+        let old = |case: usize| run_old(&program, plan, CELL_CASES[case]);
+        assert_eq!(
+            old(0).form,
+            "0 = &0[0]fn(&1[0]obj{&2[0]a^0: &3[0]poly(&4[0]int;); &5[0]x^1: &6[0]poly(&7[0]int;); &8[0]'}) => &9[0]unit\n\
+             1 = &10[0]fn(&11[0]obj{&12[0]a^2: &13[0]poly(&14[0]int;); &15[0]x^3: &16[0]poly(&17[0]int;); &18[0]'}) => &19[0]unit\n\
+             2 = &20[0]fn(&21[0]obj{&22[0]a^4: &23[0]poly(&24[0]int;); &25[0]x^5: &26[0]poly(&27[0]int;); &28[0]nil}) => &29[0]unit\n\
+             3 = &30[0]fn(&31[0]obj{&32[0]a^4: &33[0]poly(&34[0]int;); &35[0]x^5: &36[0]poly(&37[0]int;); &38[0]nil}) => &39[0]unit\n"
+        );
+        assert_eq!(
+            old(1).form,
+            "0 = &0[0]fn(&1[0]obj{&2[0]a^0: &3[0]poly(&4[0]int;); &5[0]x!^1: &6[0]poly(&7[0]int;); &8[0]'}) => &9[0]unit\n\
+             1 = @0\n\
+             2 = &10[0]fn(&11[0]obj{&12[0]a^2: &13[0]poly(&14[0]int;); &15[0]x^3: &16[0]poly(&17[0]int;); &18[0]'}) => &19[0]unit\n"
+        );
+        assert_eq!(
+            old(2).form,
+            "0 = &0[0]fn(&1[0]obj{&2[0]a^0: &3[0]poly(&4[0]int;); &5[0]x!^1: &6[0]poly(&7[0]int;); &8[0]'}) => &9[0]unit\n\
+             1 = @0\n"
+        );
+        assert_eq!(old(3).failed, Some(2));
+        assert_eq!(old(4).failed, Some(4));
+        let copies = old(5).form;
+        assert!(copies.contains("2 = &20[0]fn(&21[0]obj{&22[0]a^4:") && copies.contains("}, @21)"), "{copies}");
+        assert!(copies.contains("3 = &30[0]fn(&31[0]obj{&32[0]a^6:") && copies.contains("}, @31)"), "{copies}");
+    }
+
+    /// The new side shares where the old side duplicates, until R3e: with
+    /// cell classes printed, the kernel tier differs on generated cases
+    /// (observed: 2,877 of 10,000 at 100 programs by 100 sequences; this
+    /// test runs 10 by 100). So the classes are compared, and a new side
+    /// without the duplicate is seen.
+    #[test]
+    fn cell_classes_show_a_missing_duplicate() {
+        let (coverage, mismatches) = run_plan(Plan::new(Tier::Kernel, OBJECTS | CELLS), 1, 10, 100);
+        assert_eq!(coverage.cases + mismatches.len(), 1_000);
+        assert!(mismatches.len() >= 100, "{}", mismatches.len());
+    }
+
+    /// The cases of [`CELL_CASES`] on both sides: the duplicate of an
+    /// instance and of a copy, the promotion, the clash of a closed row.
+    /// Reaches: R3m, R3e.
+    #[test]
+    #[ignore = "R3e build"]
+    fn cells_agree_on_fixed_cases() {
+        let program = compile(CELL_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, OBJECTS | CELLS);
+        for (index, ops) in CELL_CASES.into_iter().enumerate() {
+            compare(index as u64, &program, plan, ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
+        }
+        let plan = Plan::new(Tier::Full, OBJECTS | CELLS | EXPLAIN);
+        for (index, ops) in CELL_CASES.into_iter().enumerate() {
+            compare(index as u64, &program, plan, ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
+        }
+    }
+
     /// Instance, copy, generalize and lower on programs with objects and
     /// variants: 10,000 cases, on what exists on both sides today.
     #[test]
@@ -2206,7 +2519,7 @@ mod tests {
     /// 317 of 1,200 with objects, 917 and 283 with variants).
     #[test]
     fn old_side_of_the_object_and_variant_plans_is_not_vacuous() {
-        for with in [OBJECTS, VARIANTS] {
+        for with in [OBJECTS, VARIANTS, OBJECTS | CELLS] {
             let plan = Plan::new(Tier::Full, with);
             let (mut ok, mut failed, mut rows) = (0, 0, 0);
             for seed in 1..=12u64 {
@@ -2242,15 +2555,21 @@ mod tests {
         assert_eq!(coverage.cases, 10_000);
     }
 
-    /// 10,000 cases of everything on programs with objects, in both modes:
-    /// the acceptance test of R3e. Reaches: R3m, R3e.
+    /// 10,000 cases of everything on programs with objects, with mutable
+    /// fields and the classes of cells compared, and 10,000 more with made
+    /// nodes: the acceptance test of R3e. A case that differs is read
+    /// against the OCaml arm before either side is followed (decision 18);
+    /// a seed where the old checker departs from ctype.ml is pinned with
+    /// `run_cases_except` and its cause, by the reviewer, not here.
+    /// Reaches: R3m, R3e.
     #[test]
     #[ignore = "R3e build"]
     fn object_plan_agrees_on_generated_cases() {
-        let coverage = run_cases(Plan::new(Tier::Full, OBJECTS), 1, 100, 100);
+        let coverage = run_cases(Plan::new(Tier::Full, OBJECTS | CELLS), 1, 100, 100);
         assert_eq!(coverage.cases, 10_000);
         assert!(coverage.failures * 10 > coverage.cases, "{coverage:?}");
-        run_cases(Plan::new(Tier::Full, OBJECTS | BUILD), 1, 100, 100);
+        run_cases(Plan::new(Tier::Full, OBJECTS | CELLS | BUILD), 1, 100, 100);
+        run_cases(Plan::new(Tier::Full, OBJECTS | CELLS | EXPLAIN), 1, 20, 100);
     }
 
     /// 10,000 cases of everything on programs with variants, and with both:
@@ -2291,6 +2610,7 @@ mod tests {
             include_str!("rows.rs"),
             include_str!("relate.rs"),
             include_str!("unify.rs"),
+            include_str!("expand.rs"),
         ] {
             let mut name = String::new();
             for line in source.lines() {
@@ -2370,6 +2690,19 @@ mod tests {
                 }
                 if rows && (full || body.contains("Tier::Expand")) {
                     reaches.push("R3m");
+                }
+                // A hand-built test: a type marked INHERITS, or the marks
+                // themselves, is R3m's.
+                if body.contains("inheriting(") || body.contains("INHERITS") {
+                    reaches.push("R3m");
+                }
+                // A hand-built object (`obj(`, a field, a scheme of one)
+                // reaches R3e.
+                if ["obj(", "field_at(", "object_scheme(", "instance_open("]
+                    .iter()
+                    .any(|needle| body.contains(needle))
+                {
+                    reaches.push("R3e");
                 }
                 if body.contains("EXPLAIN") && body.contains("SCOPED") {
                     reaches.push("R3k");

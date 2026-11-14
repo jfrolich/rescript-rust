@@ -35,6 +35,22 @@ pub const NEWTYPE: u8 = 8;
 /// A record, a variant or an open type (`expands_to_datatype`,
 /// compiler/ml/ctype.ml:1887). Read by R3h.
 pub const DATATYPE: u8 = 16;
+/// The manifest's template has a constructor with arguments whose type has
+/// [`ABBREV`], [`PRIVATE`] or [`ALIAS`]: an expansion of this type makes
+/// nodes that inherit memo entries ([`Chains`]; CHECKER_REWRITE 8.6,
+/// decision 26). Set on every row of the type (the identifier's and the
+/// path's through the unit) once the rows of its recursive group exist
+/// ([`TypeTable::mark_manifests`]). A type without it never reads or
+/// writes [`Chains`]: the test of this bit, on the row an expansion has
+/// already loaded, is all it pays.
+pub const INHERITS: u8 = 32;
+/// The manifest's template has an object field whose row ends in a
+/// variable of the template (`rows::template_has_open_row`): an expansion
+/// of this type duplicates mutability cells (`dup_mutability`,
+/// compiler/ml/btype.ml:462-472; CHECKER_REWRITE 8.6, decision 27). Set
+/// with [`INHERITS`], in the same pass over the template
+/// ([`TypeTable::mark_manifests`]). (R3e)
+pub const OPEN_ROW: u8 = 64;
 /// Head flag of a constructor node whose slot 0 holds a private expansion
 /// (`Mcons (Private, ..)`, compiler/ml/btype.ml:612). Bit 4 is
 /// `segment::EXTENDED`.
@@ -186,6 +202,26 @@ impl TypeTable {
         }
     }
 
+    /// Set [`INHERITS`] (R3m) and [`OPEN_ROW`] (R3e) on the rows of a
+    /// segment's table: one pass over the rows that have a manifest (not
+    /// an [`ALIAS`]), and for each one pass over the nodes of its template
+    /// (`Segment::template_nodes`, `Template::nodes` and `node_len`).
+    /// `INHERITS`: a constructor with arguments whose row has [`ABBREV`],
+    /// [`PRIVATE`] or [`ALIAS`]. `OPEN_ROW`: a field node (`TUPLE |
+    /// EXTENDED` whose `Segment::signature.descriptor_extras` row is a
+    /// field) whose slot 1 in `Segment::template_lists` is a reference
+    /// with bit 30 to a `VAR` node of the template. The pass over one
+    /// template stops when it has both. O(rows + nodes of the manifests'
+    /// templates), one `TypeInfo` load per constructor with arguments, one
+    /// list load per field, no allocation. Called once, at the end of
+    /// [`TypeTable::from_segment`], when every row exists: a manifest names
+    /// later declarations of its recursive group. R3m builds it for
+    /// `INHERITS`; R3e adds `OPEN_ROW` to the same loop.
+    #[allow(dead_code, unused_variables)]
+    pub fn mark_manifests(&mut self, segment: &Segment) {
+        todo!("R3m")
+    }
+
     /// O(1): one bounds test and one 16-byte load. (R3b)
     #[inline]
     pub fn info(&self, type_index: u32) -> TypeInfo {
@@ -268,6 +304,65 @@ pub struct SimpleMemo {
     pub generation: u32,
 }
 
+/// One memo reference of a constructor with arguments that an expansion
+/// reads through: OCaml's `abbrev_memo ref` (compiler/ml/types.ml), reduced
+/// to the one entry slot 0 holds and the reference its list continues with
+/// (`Mlink`, compiler/ml/ctype.ml:793-799). 16 bytes.
+///
+/// The reference is named by the index of the node's slot 0 in the list
+/// pool, not by the node: a node of a type written through a module alias
+/// and the node it expands to share one list, as they share `abbrev` in
+/// OCaml (`newty2 level (Tconstr (path', args, abbrev))`, ctype.ml:1214),
+/// and so share one row; and a node that was linked no longer holds its
+/// list, while its entry still stands (`Mcons` keeps the path and the
+/// node).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct ChainRow {
+    /// The node whose expansion slot 0 memorizes (`ty0` of `Mcons`,
+    /// compiler/ml/btype.ml:629), or `NONE` for a reference no flagged
+    /// expansion has written: a copy that only continues a chain.
+    pub node: Ty,
+    /// The type index of that node when it was expanded (the path of
+    /// `Mcons`), with [`ENTRY_PRIVATE`] for a private expansion; `NONE`
+    /// beside a `NONE` node.
+    pub type_index: u32,
+    /// The row the list continues with, or `NONE`: the row of the node
+    /// whose expansion made this one.
+    pub parent: u32,
+    /// The index of slot 0 in the list pool. The entry is live while that
+    /// slot holds a node: `forget_abbrev` and a cleanup empty the slot.
+    pub slot: u32,
+}
+
+/// Bit 31 of [`ChainRow::type_index`]: the entry is a private expansion
+/// (`Mcons (Private, ..)`), which `find_repr` never returns
+/// (compiler/ml/ctype.ml:722) and a public lookup does not see
+/// (`lte_public`, compiler/ml/btype.ml:606-610).
+pub const ENTRY_PRIVATE: u32 = 1 << 31;
+
+/// The inherited memo entries (slice R3m; CHECKER_REWRITE 8.6, decisions
+/// 16, 19 and 26): a pool of [`ChainRow`]s and the dense table that finds a
+/// row from a constructor's slot 0. Empty, with no allocation, until the
+/// first expansion of an [`INHERITS`] type.
+///
+/// Memory: `16 * rows.len() + 4 * by_slot.len()` bytes, where `by_slot`
+/// reaches to the highest slot 0 that has a row. A row is made for the
+/// node of each expansion of an `INHERITS` type that has none, and for
+/// each constructor with arguments of an expandable type that such an
+/// expansion copies and does not link. Rows live until the worker resets
+/// the checker for the next unit: a cleanup empties entries and cuts
+/// `parent`s, and frees nothing, because a copy keeps naming the reference
+/// of the node that made it (`Mlink` holds the reference, not its
+/// content).
+#[derive(Default)]
+pub struct Chains {
+    pub rows: Vec<ChainRow>,
+    /// Indexed by a slot-0 list index: the row of that reference, or
+    /// `NONE`. Shorter than the list pool: an index past its end has no row.
+    pub by_slot: Vec<u32>,
+}
+
 /// Both memos' bookkeeping. `cleanup_abbrev` is O(1) for the nullary memo
 /// (a generation) and O(slots written since the last cleanup) for slot 0.
 pub struct Memo {
@@ -281,6 +376,8 @@ pub struct Memo {
     /// that slot 0 in the list pool: a node linked since then no longer
     /// holds its list, and a restore can bring the old descriptor back.
     pub memorized: Vec<Ty>,
+    /// The inherited entries of constructors with arguments (R3m).
+    pub chains: Chains,
     /// The scope of the last expansion (`previous_env`,
     /// compiler/ml/ctype.ml:1163).
     pub env: u32,
@@ -294,6 +391,7 @@ impl Default for Memo {
             generation: 1,
             live: 0,
             memorized: Vec::new(),
+            chains: Chains::default(),
             env: super::graph::NONE,
         }
     }
@@ -331,11 +429,19 @@ impl Checker {
     /// list, and advance the nullary memo's generation (one store).
     /// `Btype.cleanup_abbrev`, compiler/ml/btype.ml:623. Not logged in the
     /// trail: a restore runs a cleanup (compiler/ml/btype.ml:779). (R3b)
+    /// While [`Chains`] has a row, each cleaned slot also ends the chain at
+    /// its row ([`Checker::cut_chain`]: one table load more a slot); with no
+    /// row the loop is as it was. (R3m)
     pub fn cleanup_abbrev(&mut self) {
-        for &slot in &self.memo.memorized {
+        let chained = !self.memo.chains.rows.is_empty();
+        for index in 0..self.memo.memorized.len() {
             #[cfg(test)]
             super::steps::tick();
+            let slot = self.memo.memorized[index];
             self.g.lists[slot.0 as usize] = Ty(NONE);
+            if chained {
+                self.cut_chain(slot.0);
+            }
         }
         self.memo.memorized.clear();
         self.memo.generation = self
@@ -491,7 +597,16 @@ impl Checker {
             return Ok(Ty(NONE));
         }
         let private = matches!(mode, ExpandMode::Opt | ExpandMode::Rigid);
-        let memorized = self.find_expansion(ty, private);
+        let mut memorized = self.find_expansion(ty, private);
+        let mut info = ABSTRACT;
+        if memorized.0 == NONE {
+            info = self.types.info(node.a);
+            // `find_expans` goes on through `Mlink` (btype.ml:618): the
+            // entries of the nodes whose expansions made this one.
+            if info.flags & INHERITS != 0 && node.arity() != 0 {
+                memorized = self.inherited_expansion(node, private);
+            }
+        }
         if memorized.0 != NONE {
             // `update_level env level ty'` unless the node is generic; a
             // clash is ignored (compiler/ml/ctype.ml:1196-1201). The test
@@ -507,7 +622,6 @@ impl Checker {
             }
             return Ok(self.g.repr(expansion));
         }
-        let info = self.types.info(node.a);
         if info.flags & ALIAS != 0 {
             return Ok(self.expand_alias(ty, node, info.manifest));
         }
@@ -519,7 +633,7 @@ impl Checker {
         if u32::from(info.arity) != node.arity() {
             return Err(Clash);
         }
-        self.subst(ty, node, info.manifest, mode)
+        self.subst(ty, node, info, mode)
     }
 
     /// O(1): the expansion of a path through a module alias, a constructor
@@ -553,8 +667,18 @@ impl Checker {
     /// `Unif` that runs under a speculation opened at that parameter, and a
     /// clash restores it: `Safe` then does not expand (`try_expand_safe`,
     /// ctype.ml:1251) and `Opt` returns the clash to [`Checker::expand_head`].
-    fn subst(&mut self, ty: Ty, node: Node, manifest: u32, mode: ExpandMode) -> Result<Ty, Clash> {
-        let manifest = self.types.manifests[manifest as usize];
+    /// A clash this function swallows (`Safe`, and `Opt` through
+    /// [`Checker::expand_head`]) must also cut [`Checker::trace`] back to
+    /// its length before the call that clashed (CHECKER_REWRITE 8.6,
+    /// decision 25): not done yet; the slice that first generates a
+    /// constrained type parameter adds it here with a test.
+    /// For an [`INHERITS`] type the entry is also written to the node's row
+    /// of [`Chains`] ([`Checker::chain_entry`], O(1)) and the pass over the
+    /// instance's nodes gives each copied constructor with arguments its
+    /// place in the chain ([`Checker::link_memorized`]); `info` is the row
+    /// [`Checker::expand_once`] loaded. (R3m)
+    fn subst(&mut self, ty: Ty, node: Node, info: TypeInfo, mode: ExpandMode) -> Result<Ty, Clash> {
+        let manifest = self.types.manifests[info.manifest as usize];
         let base = self.g.nodes.len() as u32;
         let relocate = |reference: Ty| {
             if reference.0 & RELATIVE != 0 {
@@ -566,9 +690,22 @@ impl Checker {
         let body = relocate(manifest.body);
         let private = matches!(mode, ExpandMode::Opt | ExpandMode::Rigid);
         self.memorize(ty, body, private);
+        // `abbreviations () := abbrev` (ctype.ml:1126): the copies below
+        // read the list this node's reference now starts.
+        let chain = if info.flags & INHERITS != 0 && node.arity() != 0 {
+            let entry = if private { node.a | ENTRY_PRIVATE } else { node.a };
+            self.chain_entry(node.b, ty, entry)
+        } else {
+            NONE
+        };
         let level = self.g.level;
         self.g.level = node.level;
-        self.instance(manifest.template);
+        let first = self.g.nodes.len();
+        self.g.instance(manifest.template);
+        let cells = info.flags & OPEN_ROW != 0;
+        if self.memo.live != 0 || chain != NONE || cells {
+            self.link_memorized(first, chain, cells);
+        }
         self.g.level = level;
         let mut speculation = None;
         let mut result = Ok(());
@@ -660,7 +797,7 @@ impl Checker {
         }
         let first = self.g.nodes.len();
         let root = self.g.instance(template);
-        self.link_memorized(first);
+        self.link_memorized(first, NONE, false);
         root
     }
 
@@ -673,7 +810,7 @@ impl Checker {
         }
         let first = self.g.nodes.len();
         let copied = self.g.copy(root);
-        self.link_memorized(first);
+        self.link_memorized(first, NONE, false);
         copied
     }
 
@@ -684,12 +821,41 @@ impl Checker {
     /// the test against the copy itself always holds. A nullary
     /// constructor has no children, so rewriting it after the copy is the
     /// copy OCaml makes. The nodes are fresh: no trail entry.
-    fn link_memorized(&mut self, first: usize) {
-        for index in first..self.g.nodes.len() {
+    ///
+    /// With `chain` (a [`Chains`] row: the copy is an expansion's, of an
+    /// [`INHERITS`] type) the same pass hands each constructor with
+    /// arguments to [`Checker::inherit`]; with `NONE` (an instance or a
+    /// copy outside an expansion, `abbreviations = ref Mnil`) such a node
+    /// costs the one test it cost before.
+    ///
+    /// With `cells` (the copy has a field whose cell it must duplicate: an
+    /// [`OPEN_ROW`] expansion, `Checker::instance_open`, a copy of a graph
+    /// that has fields) each field node goes to `Checker::dup_cell`, and
+    /// the session ends after the pass; a node that is not a constructor
+    /// costs one more test, a constructor nothing. (R3e)
+    pub(super) fn link_memorized(&mut self, first: usize, chain: u32, cells: bool) {
+        // The pass makes nodes (duplicated cells): they are not visited.
+        let end = self.g.nodes.len();
+        for index in first..end {
             #[cfg(test)]
             super::steps::tick();
             let node = self.g.nodes[index];
-            if node.tag() != CONSTR || node.arity() != 0 {
+            if node.tag() != CONSTR {
+                if cells
+                    && node.head & super::segment::EXTENDED != 0
+                    && matches!(
+                        self.extras.descriptors[node.a as usize],
+                        super::segment::ExtraDescriptor::Field { .. }
+                    )
+                {
+                    self.dup_cell(Ty(index as u32), node, first as u32);
+                }
+                continue;
+            }
+            if node.arity() != 0 {
+                if chain != NONE {
+                    self.inherit(Ty(index as u32), node, chain);
+                }
                 continue;
             }
             let target = self.find_repr(node.a);
@@ -697,6 +863,70 @@ impl Checker {
                 self.g.nodes[index] = link_node(node, target);
             }
         }
+        if cells {
+            self.end_cell_session();
+        }
+    }
+
+    /// O(1) amortized: the row of the memo reference at list index `slot`
+    /// (slot 0 of the node being expanded), made when it has none (no
+    /// entry, no parent; `by_slot` grows to `slot + 1`), with its entry set
+    /// to `node` and `entry` (the node's type index, with [`ENTRY_PRIVATE`]
+    /// for a private expansion): `memorize_abbrev` (compiler/ml/btype.ml:629)
+    /// for the part of the list a copy reads. The row's `parent` is kept:
+    /// the entry is put in front of what the reference held. One table
+    /// load, one row write, one step. (R3m)
+    #[allow(unused_variables)]
+    fn chain_entry(&mut self, slot: u32, node: Ty, entry: u32) -> u32 {
+        todo!("R3m")
+    }
+
+    /// One constructor with arguments, `node` at handle `copy`, that the
+    /// expansion whose row is `chain` has just copied
+    /// (compiler/ml/ctype.ml:778-799). When the node's type has none of
+    /// [`ABBREV`], [`PRIVATE`], [`ALIAS`] nothing is done (one `TypeInfo`
+    /// load): no entry can name a type that does not expand, and the node
+    /// is never expanded. Otherwise `find_repr p !abbrevs` (ctype.ml:720-724):
+    /// walk the rows from `chain` by `parent`; the first row whose
+    /// `type_index` equals the node's type index (a private entry carries
+    /// [`ENTRY_PRIVATE`] and so never equals one) and whose slot holds a
+    /// node makes `copy` a link to that row's `node` ([`link_node`]: `Some
+    /// ty when repr ty != t -> Tlink ty`, ctype.ml:782; the copy is newer
+    /// than every row's node). When the walk ends, the copy gets a row of
+    /// its own with `parent = chain` and no entry (`Mlink !abbreviations`,
+    /// ctype.ml:796-798; `by_slot` grows to its slot 0).
+    /// Cost: one step per row visited, at most the length of the chain,
+    /// which is the number of expansions in progress above this copy that
+    /// did not link; then one row push. No allocation beyond the two pools'
+    /// growth. (R3m)
+    #[allow(unused_variables)]
+    fn inherit(&mut self, copy: Ty, node: Node, chain: u32) {
+        todo!("R3m")
+    }
+
+    /// The expansion an inherited entry memorizes for constructor
+    /// descriptor `node` (arguments, an [`INHERITS`] type, slot 0 empty or
+    /// not visible to this lookup), or `NONE`: `find_expans` going on
+    /// through `Mlink` (compiler/ml/btype.ml:612-619). Walk from the
+    /// `parent` of the node's own row (no row: `NONE` after one table
+    /// load); the first row whose slot holds a node, whose type index
+    /// without [`ENTRY_PRIVATE`] is the node's, and which is public or
+    /// looked up privately (`lte_public`, btype.ml:606-610), gives what its
+    /// slot holds. One step per row visited. (R3m)
+    #[allow(unused_variables)]
+    fn inherited_expansion(&self, node: Node, private: bool) -> Ty {
+        todo!("R3m")
+    }
+
+    /// O(1): a cleanup emptied the reference at list index `slot`
+    /// (`abbr := Mnil`, compiler/ml/btype.ml:626): its row, when it has
+    /// one, loses its `parent`. The entry is already dead (the slot is
+    /// empty) and the row stays, because the copies its expansion made
+    /// still continue with it and see the entry a later expansion writes.
+    /// One table load, at most one row write. (R3m)
+    #[allow(unused_variables)]
+    fn cut_chain(&mut self, slot: u32) {
+        todo!("R3m")
     }
 
     /// Lower every node reachable from `root` to at most `level`
@@ -1393,8 +1623,17 @@ mod tests {
             pools: 0,
             list_len: 2,
         };
+        // The template's nodes: the tuple of the parameter and the body,
+        // both variables. `mark_manifests` (R3m) reads them.
+        let generic = |head: u32| Node {
+            head,
+            level: GENERIC,
+            a: NONE,
+            b: 0,
+        };
         let segment = Segment {
             templates: Box::new([template]),
+            template_nodes: Box::new([generic(TUPLE | 2 << 8), generic(VAR), generic(VAR)]),
             type_declarations: decls.into(),
             signature: SignaturePools {
                 identifiers: identifiers.into(),
@@ -1541,6 +1780,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<Manifest>(), 24);
         assert_eq!(std::mem::size_of::<Newtype>(), 8);
         assert_eq!(std::mem::size_of::<SimpleMemo>(), 16);
+        assert_eq!(std::mem::size_of::<ChainRow>(), 16);
         assert_eq!(std::mem::size_of::<ExpandMode>(), 1);
     }
 }
