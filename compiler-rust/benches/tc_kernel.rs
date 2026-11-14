@@ -13,12 +13,16 @@ use std::hint::black_box;
 
 /// O(arguments); build a setup-only constructor with its reserved memo slot.
 fn constr(g: &mut Graph, id: u32, args: &[Ty]) -> Ty {
+    constr_at(g, id, args, GENERIC)
+}
+/// O(arguments); setup-only construction at the requested definition level.
+fn constr_at(g: &mut Graph, id: u32, args: &[Ty], level: u32) -> Ty {
     let b = g.lists.len() as u32;
     g.lists.push(Ty(NONE));
     g.lists.extend_from_slice(args);
     g.push(Node {
         head: CONSTR | (args.len() as u32) << 8,
-        level: GENERIC,
+        level,
         a: id,
         b,
     })
@@ -40,9 +44,13 @@ fn arrow(g: &mut Graph, args: &[Ty], result: Ty) -> Ty {
 }
 /// O(1), construct one distinct variable.
 fn var(g: &mut Graph) -> Ty {
+    var_at(g, GENERIC)
+}
+/// O(1); setup-only fresh variable at the requested definition level.
+fn var_at(g: &mut Graph, level: u32) -> Ty {
     g.push(Node {
         head: VAR,
-        level: GENERIC,
+        level,
         a: NONE,
         b: 0,
     })
@@ -95,6 +103,12 @@ fn main() {
         "unify_ground1",
         "build_ground3",
         "unify_ground3",
+        "build_vars_local",
+        "unify_vars_local",
+        "build_ground1_local",
+        "unify_ground1_local",
+        "build_ground3_local",
+        "unify_ground3_local",
     ];
     let Some(index) = ops.iter().position(|&s| s == op) else {
         eprintln!(
@@ -106,9 +120,14 @@ fn main() {
     let index = black_box(index);
     let mut sink = 0u64;
     if index >= 15 {
-        let shape = (index - 15) / 2;
+        let local = index >= 21;
+        let shape = ((index - 15) % 6) / 2;
         let unify = index % 2 == 0;
         let mut c = Checker::new(g, TypeTable::default());
+        if local {
+            c.g.begin_def();
+        }
+        let level = if local { c.g.level } else { GENERIC };
         // Both members of each pair build identical fresh operands and consume
         // identical handles. Subtract the build-only run, not the empty loop.
         for i in 0..n {
@@ -116,12 +135,12 @@ fn main() {
                 c.g.clear_instances();
             }
             let mut operand = || match shape {
-                0 => var(&mut c.g),
-                1 => constr(&mut c.g, 1, &[]),
+                0 => var_at(&mut c.g, level),
+                1 => constr_at(&mut c.g, 1, &[], level),
                 2 => {
-                    let left = constr(&mut c.g, 1, &[]);
-                    let right = constr(&mut c.g, 2, &[]);
-                    constr(&mut c.g, 3, &[left, right])
+                    let left = constr_at(&mut c.g, 1, &[], level);
+                    let right = constr_at(&mut c.g, 2, &[], level);
+                    constr_at(&mut c.g, 3, &[left, right], level)
                 }
                 _ => unreachable!(),
             };
