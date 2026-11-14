@@ -1327,7 +1327,7 @@ pub(crate) mod tests {
 
     #[test]
     fn import_epochs_guard_a_module_under_an_expression_open() {
-        let source = "module Owner = {@spice type j = JSON.t}\n@spice type j = int\nlet codec = {open Owner; module M = {@spice type rows = array<j>}; M.rows_encodeJson}";
+        let source = "module Owner = {@spice type j = JSON.t}\nmodule Container = {@spice type j = int; let codec = {open Owner; module M = {@spice type rows = array<j>}; M.rows_encodeJson}}";
         let (planned, count) = check_records(source, true).unwrap();
         let (general, _) = check_records(source, false).unwrap();
         assert_eq!(count, 0, "the shadowed alias must trigger the guard and unit retry");

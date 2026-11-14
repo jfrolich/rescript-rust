@@ -734,6 +734,7 @@ module alias because this fixture's runtime no longer supplies `Js`.
 | `open AliasOwner; array<j>` | plan with `NotJsonIdentity`; retries when JSON | owning declaration already contains the resolved path |
 | `array<AliasOwner.legacy>`, owner `Js.Json.t` | plan with `NotJsonIdentity`; retries when JSON | same endpoint as the binding's JSON side |
 | `array<Records.t>` | plan, guard holds | record endpoint differs from JSON; isolated discharge test retains plans |
+| local `j = int`, then `open AliasOwner` or `include AliasOwner`, then `array<j>` | plan with `NotJsonIdentity`; retries when imported `j` is JSON | import epoch invalidates the earlier non-identity fact |
 
 The rule covers the remaining plan-supported shapes because only manifest
 applications expose these generic codec argument types in the binding scheme:
@@ -944,8 +945,8 @@ guessing an alias from its name. Final fixture check: `Parsed 32 source files`, 
 
 `shadowed_result_constructor` also recognizes exception declarations and type
 extensions whose constructor is `Ok` or `Error`, before building a plan.
-Constructor exports through `open` remain guarded by the obligation retry.
-Constructor exports through `include` remain guarded by the obligation retry.
+Constructor exports through `open` remain guarded by the obligation retry; type-alias exports invalidate prefix facts and receive `NotJsonIdentity` checks at exposed argument positions.
+Constructor exports through `include` remain guarded by the obligation retry; type-alias exports likewise invalidate prefix facts and receive the guard.
 The `%%private` route through `handle_private_extension` remains guarded by the
 obligation retry, not claimed as syntactically classified.
 
@@ -1043,3 +1044,42 @@ identical SHA-256 `0a3d301322cf7febdbf8793ae8c3dcbc1ecbadf44670c3b52cecbc5437a02
 The saved comparison binary is the previously measured `40a94389a` build; no
 new instruction or speedup claim is made from this output comparison. All **19**
 diagnostic fixtures still pass default/general/check with unchanged expectations.
+
+
+### Open/include shadowing of prefix alias facts
+
+An explicit structure `open` or `include` advances the scope's import epoch.
+Facts declared before that epoch, and inherited facts, are unresolved afterwards;
+builtin spellings are not exempt. A later concrete declaration establishes a new
+fact; an alias whose right-hand side is still unresolved remains unresolved.
+`is_json_identity` uses these same facts, so it cannot accidentally select the
+syntactic reason while guard emission sees a different answer.
+
+`PrefixScope` stores one current import position. The existing dense prefix rows
+also snapshot it: reverse mapping must distinguish positions between multiple
+imports, not just the most recently scanned import. The additional epoch test is
+O(1) per scope level, with no second source scan and no allocation per item;
+existing name-version/scope lookup costs remain as documented. No-derive units
+still allocate no prefix. The 10,000-derived-item test still counts 10,000 visits.
+
+A derived type cannot occur directly in an expression, but a local module under
+an expression-level `open` can contain one; the mapper therefore applies an
+import barrier while walking that expression and restores its enclosing scope
+afterwards. Tests cover same-scope and inherited facts, later redeclarations,
+builtin names, reverse queries across two imports, and a module under a local
+expression open inside a containing module.
+
+Commands: `cargo test --manifest-path compiler-rust/Cargo.toml import_epochs`
+and `cargo test --manifest-path compiler-rust/Cargo.toml ten_thousand_derived_items`.
+Both compiler clippy configurations pass. `ShadowUser.res` retains the reported
+open/include reproduction and adds the expression-open module case. The CI Spice
+check command finishes successfully with **35 source modules**; the extra local
+module fixture may report the ordinary unused-type warning in both forms.
+
+On the application, the same census/check commands used above report **6,534
+plans**, **6 guards emitted / 0 failed**, **0 failed-obligation bindings**, and
+**21 shadowed-result bindings**. Check mode ends `Finished compilation`; the
+output comparison still finds **3,980 identical files** with SHA-256
+`0a3d301322cf7febdbf8793ae8c3dcbc1ecbadf44670c3b52cecbc5437a02408`.
+All 19 diagnostic fixtures pass unchanged in default/general/check. These gates
+were run after integrating the current rewrite trunk without rewriting history.
