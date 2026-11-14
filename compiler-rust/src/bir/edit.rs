@@ -4,6 +4,101 @@ use crate::lambda::lam_primitive::Primitive;
 use smallvec::{SmallVec, smallvec};
 use std::collections::HashMap;
 
+/// Dense arena handles provide the index; only touched rows are cleared.
+pub(super) trait DenseKey: Copy { fn slot(self) -> usize; }
+macro_rules! dense_keys { ($($key:ty),*) => {$(
+    impl DenseKey for $key { fn slot(self) -> usize { self.index() } }
+)*}; }
+dense_keys!(NodeId, VarId, FuncId, CatchId, JsId);
+
+/// O(1) indexed lookup; O(touched rows) clearing; amortized growth by arena index.
+pub(super) struct DenseMap<K> { rows: Vec<Option<K>>, touched: Vec<usize> }
+impl<K> Default for DenseMap<K> {
+    fn default() -> Self { Self { rows: Vec::new(), touched: Vec::new() } }
+}
+impl<K: DenseKey> DenseMap<K> {
+    fn clear(&mut self) { for slot in self.touched.drain(..) { self.rows[slot] = None; } }
+    pub(super) fn get(&self, key: &K) -> Option<&K> { self.rows.get(key.slot()).and_then(Option::as_ref) }
+    pub(super) fn insert(&mut self, key: K, value: K) {
+        let slot=key.slot();
+        if slot >= self.rows.len() { self.rows.resize(slot+1,None); }
+        if self.rows[slot].replace(value).is_none() { self.touched.push(slot); }
+    }
+    fn extend(&mut self, entries: impl IntoIterator<Item=(K,K)>) {
+        for (key,value) in entries { self.insert(key,value); }
+    }
+    #[cfg(test)]
+    fn capacity(&self) -> usize { self.rows.capacity() }
+    fn reserve_domain(&mut self, slots: usize) { self.rows.reserve(slots.saturating_sub(self.rows.len())); }
+}
+impl<K: DenseKey> std::ops::Index<&K> for DenseMap<K> {
+    type Output=K;
+    fn index(&self,key:&K)->&K { self.get(key).expect("unmapped arena handle") }
+}
+
+/// Retained traversal and renaming storage for repeated subtree copies.
+/// Clearing a copy preserves every buffer's high-water capacity.
+#[derive(Default)]
+pub(crate) struct CopyScratch {
+    order: Vec<NodeId>,
+    stack: Vec<NodeId>,
+    vars: DenseMap<VarId>,
+    funcs: DenseMap<FuncId>,
+    catches: DenseMap<CatchId>,
+    /// Source static labels are sparse numeric identities, not arena indices.
+    labels: HashMap<u32, u32>,
+    js: DenseMap<JsId>,
+    nodes: DenseMap<NodeId>,
+}
+
+#[cfg(test)]
+impl CopyScratch {
+    /// Reserve the already reserved arena domains; recycled handles may change
+    /// which row a second pass visits without increasing the arena's size.
+    pub(crate) fn reserve_arena(&mut self, b: &Bir) {
+        self.vars.reserve_domain(b.vars.name.capacity());
+        self.funcs.reserve_domain(b.vars.funcs.capacity());
+        self.catches.reserve_domain(b.pools.catches.capacity());
+        self.js.reserve_domain(b.pools.js.capacity());
+        self.nodes.reserve_domain(b.nodes.capacity());
+    }
+    pub(crate) fn capacities(&self) -> [usize; 13] {
+        [self.order.capacity(), self.stack.capacity(), self.vars.capacity(), self.funcs.capacity(),
+            self.catches.capacity(), self.labels.capacity(), self.js.capacity(), self.nodes.capacity(),
+         self.vars.touched.capacity(), self.funcs.touched.capacity(), self.catches.touched.capacity(),
+         self.js.touched.capacity(), self.nodes.touched.capacity()]
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum BinderRun {
+    Empty,
+    One(Option<VarId>),
+    Vars(VarSpan),
+    Params(VarSpan),
+    Rest(VarId, RestSpan),
+}
+impl BinderRun {
+    pub(super) fn len(self) -> usize {
+        match self {
+            Self::Empty => 0,
+            Self::One(_) => 1,
+            Self::Vars(s) | Self::Params(s) => s.len(),
+            Self::Rest(_, s) => 1 + s.len as usize,
+        }
+    }
+    pub(super) fn at(self, b: &Bir, slot: usize) -> Option<VarId> {
+        match self {
+            Self::Empty => None,
+            Self::One(v) => v,
+            Self::Vars(s) => Some(VarId(s.start + index(slot))),
+            Self::Params(s) => Some(b.vars.function_params[s.start as usize + slot]),
+            Self::Rest(v, _) if slot == 0 => Some(v),
+            Self::Rest(_, s) => b.rest_fields(s)[slot - 1].binding,
+        }
+    }
+}
+
 impl Bir {
     /// Construct an operation without rewrite rules. Children must be distinct,
     /// detached live roots. `aux` carries the operation's small enum/arity payload.
@@ -17,6 +112,74 @@ impl Bir {
     /// outside bulk construction. Each detached statement is adopted once.
     pub(crate) fn block_from_list(&mut self, list: ListId) -> NodeId {
         self.attach_list(Node::block_list(list), list)
+    }
+
+    /// O(actions): adopt a scrutinee and a finalized pooled action list once.
+    pub(crate) fn switch_from_list(
+        &mut self,
+        scrutinee: NodeId,
+        actions: ListId,
+        header: SwitchId,
+        aux: u16,
+    ) -> NodeId {
+        assert!(
+            self.parents[scrutinee.index()].is_none(),
+            "scrutinee already attached"
+        );
+        if !self.bulk {
+            let weight = self.weight(scrutinee);
+            if weight != 1 {
+                self.adjust_counts(scrutinee, 1 - i64::from(weight));
+            }
+        }
+        let id = self.attach_list(Node::switch_list(scrutinee, actions, header, aux), actions);
+        self.parents[scrutinee.index()] = Some(id);
+        id
+    }
+
+    /// O(arguments): adopt the callee and a pooled argument list exactly once.
+    /// `None` selects construction; `Some` carries ordinary call metadata.
+    pub(crate) fn call_from_list(
+        &mut self,
+        callee: NodeId,
+        args: ListId,
+        info: Option<JsId>,
+    ) -> NodeId {
+        assert!(
+            self.parents[callee.index()].is_none(),
+            "callee already attached"
+        );
+        if !self.bulk {
+            let weight = self.weight(callee);
+            if weight != 1 {
+                self.adjust_counts(callee, 1 - i64::from(weight));
+            }
+        }
+        let id = self.attach_list(Node::call_list(callee, args, info), args);
+        self.parents[callee.index()] = Some(id);
+        id
+    }
+
+    /// O(fields): adopt an object's pooled operands without a temporary vector.
+    /// Each operand is adopted once; cached J facts inspect immediate children.
+    pub(crate) fn object_from_list(&mut self, list: ListId, keys: PropertySpan) -> NodeId {
+        assert_eq!(self.lists.get(list).len(), keys.len as usize);
+        let info = self.js_info(JsPayload::Object(keys));
+        let id = self.attach_list(Node::object_list(list, info), list);
+        if j::facts::delay_safe(self, id) {
+            let mut flags = self.node(id).flags();
+            flags.0 |= NodeFlags::DELAY_SAFE;
+            self.nodes[id.index()].set_flags(flags);
+        }
+        id
+    }
+
+    /// O(operands): adopt a finalized JSX list without a temporary operand vector.
+    pub(crate) fn jsx_from_list(&mut self, list: ListId, header: JsxHeader, children: bool) -> NodeId {
+        assert_eq!(self.lists.get(list).len(), 2 + usize::from(header.spread)
+            + header.props.len as usize + header.children as usize + usize::from(header.key));
+        let info = self.js_info(JsPayload::Jsx(header));
+        self.attach_list(Node::jsx_list(list, info, u16::from(children)), list)
     }
 
     /// [`Self::block_from_list`] for an explicit block statement (B:1225).
@@ -56,27 +219,31 @@ impl Bir {
                 "cannot reference a released dead binding"
             );
         }
-        let children = view.children();
         #[cfg(debug_assertions)]
-        let mut bulk_children = crate::fast_hash::AHashSet::default();
-        for (_i, &child) in children.iter().enumerate() {
-            self.node(child);
-            #[cfg(debug_assertions)]
-            if self.bulk {
-                assert!(bulk_children.insert(child), "shared child");
-            } else {
-                assert!(!children[.._i].contains(&child), "shared child");
+        {
+            if self.child_epoch == u32::MAX {
+                self.checked_children.fill(0);
+                self.child_epoch = 0;
             }
-            debug_assert!(
-                self.parents[child.index()].is_none(),
-                "child already attached"
-            );
+            self.child_epoch += 1;
+            self.checked_children.resize(self.nodes.len(), 0);
+        }
+        for i in 0..view.child_count() {
+            let child = view.child_at(i);
+            #[cfg(debug_assertions)]
+            {
+                assert_ne!(self.checked_children[child.index()], self.child_epoch, "shared child");
+                self.checked_children[child.index()] = self.child_epoch;
+            }
+            self.node(child);
+            debug_assert!(self.parents[child.index()].is_none(), "child already attached");
         }
         let packed = Node::pack(view, aux, &mut self.lists);
         let id = self.allocate(packed);
         self.check_shape(id);
         self.bind(id);
-        for child in children {
+        for i in 0..view.child_count() {
+            let child = view.child_at(i);
             debug_assert!(self.parents[child.index()].is_none(), "shared child");
             if !self.bulk {
                 // Read before linking: a detached root reports the weight it carries.
@@ -129,10 +296,13 @@ impl Bir {
 
     fn mark_captures(&mut self, root: NodeId) -> Result<(), bridge::Unsupported> {
         let epoch = self.next_capture_epoch();
-        let mut stack = vec![(root, 0u32, 1u32)];
+        // The completed arena already supplies a bound on pending children.
+        // Reserve once rather than reallocating on wide completed units.
+        let mut stack = Vec::with_capacity(self.nodes.len());
+        stack.push((root, 0u32, 1u32));
         while let Some((id, depth, weight)) = stack.pop() {
             let view = self.view(id);
-            let children = view.children();
+            let children = view.child_count();
             let boundary = match view {
                 View::Fun { .. } | View::JFun { .. }
                 | View::While { .. } | View::SWhile { .. } => Some(None),
@@ -145,7 +315,9 @@ impl Bir {
             // Parameters and loop variables are bound *inside* their own
             // capture boundary, not in the enclosing function's scope.
             let binder_depth = depth + u32::from(boundary.is_some());
-            for var in self.binders(id) {
+            let run = self.binder_run(id);
+            for slot in 0..run.len() {
+                let Some(var) = run.at(self, slot) else { continue };
                 self.bulk_binders[var.index()] = (epoch, binder_depth);
             }
             if let Some(var) = used_var {
@@ -156,7 +328,9 @@ impl Bir {
             }
             self.weights[id.index()] = weight;
             self.try_adjust_direct(id, i64::from(weight))?;
-            for child in children.into_iter().rev() {
+            for index in (0..children).rev() {
+                // Capture accounting changes flags/counts, never child edges.
+                let child = self.view(id).child_at(index);
                 let enters = match boundary {
                     Some(None) => true,
                     Some(Some(body)) => body == child,
@@ -254,10 +428,10 @@ impl Bir {
                 let JsPayload::Object(keys) = &self.pools.js[info.index()] else {
                     panic!("object needs property keys")
                 };
-                assert_eq!(values.len(), keys.len());
+                assert_eq!(values.len(), self.property_keys(*keys).len());
             }
             View::JBlockLit { info, .. } => {
-                assert!(matches!(self.pools.js[info.index()], JsPayload::Block(_)))
+                assert!(matches!(self.pools.js[info.index()], JsPayload::Block(_) | JsPayload::ConstantBlock(_)))
             }
             View::JJsx { values, info } => {
                 let JsPayload::Jsx(h) = &self.pools.js[info.index()] else {
@@ -266,7 +440,7 @@ impl Bir {
                 assert_eq!(
                     values.len(),
                     2 + usize::from(h.spread)
-                        + h.props.len()
+                        + h.props.len as usize
                         + h.children as usize
                         + usize::from(h.key)
                 );
@@ -277,7 +451,7 @@ impl Bir {
                 else {
                     panic!("template needs segments")
                 };
-                assert_eq!(parts.len(), values.len() + 1);
+                assert_eq!(self.template_parts(*parts).len(), values.len() + 1);
             }
             View::JRecordRest { info, .. } | View::SRest { info, .. } => {
                 assert!(matches!(self.pools.js[info.index()], JsPayload::Rest(_)))
@@ -286,34 +460,36 @@ impl Bir {
         }
     }
 
-    pub(super) fn binders(&self, id: NodeId) -> SmallVec<[VarId; 4]> {
-        match self.view(id) {
-            View::Let { var, .. }
-            | View::SDecl { var, .. }
-            | View::For { var, .. }
-            | View::ForOf { var, .. }
-            | View::ForAwaitOf { var, .. }
-            | View::SForRange { var, parts: [_, _, _], .. }
-            | View::SForOf { var, .. }
-            | View::SForAwaitOf { var, .. } => smallvec![var],
+    /// Snapshot handles, not a materialized list of binders. The descriptor
+    /// stays valid while fresh binders and metadata are appended to the arena.
+    pub(super) fn binder_run(&self, id: NodeId) -> BinderRun {
+        self.binders_in(self.view(id))
+    }
+    fn binders_in(&self, view: View<'_>) -> BinderRun {
+        match view {
+            View::Let { var, .. } | View::SDecl { var, .. } | View::For { var, .. }
+            | View::ForOf { var, .. } | View::ForAwaitOf { var, .. }
+            | View::SForRange { var, parts: [_, _, _], .. } | View::SForOf { var, .. }
+            | View::SForAwaitOf { var, .. } => BinderRun::One(Some(var)),
             View::SRest { var, info, .. } => {
-                let mut binders = smallvec![var];
-                if let JsPayload::Rest(fields) = self.javascript(info) {
-                    binders.extend(fields.iter().filter_map(|field| field.binding));
-                }
-                binders
+                let JsPayload::Rest(fields) = self.javascript(info) else { unreachable!() };
+                BinderRun::Rest(var, *fields)
             }
-            View::Try { exception, .. } => smallvec![exception],
-            View::STry { exception, .. } => exception.into_iter().collect(),
-            View::LetRec { first, values, .. } => (0..index(values.len()))
-                .map(|i| VarId(first.0 + i))
-                .collect(),
+            View::Try { exception, .. } => BinderRun::One(Some(exception)),
+            View::STry { exception, .. } => BinderRun::One(exception),
+            View::LetRec { first, values, .. } => BinderRun::Vars(VarSpan { start: first.0, len: index(values.len()) }),
             View::Fun { header, .. } | View::JFun { header, .. } => {
-                (0..self.function(header).params.len()).map(|i| self.function_parameter(header, i)).collect()
+                let h = self.function(header);
+                if h.flags & FuncHeader::INDIRECT_PARAMS != 0 { BinderRun::Params(h.params) }
+                else { BinderRun::Vars(h.params) }
             }
-            View::Catch { header, .. } => self.catch(header).params.iter().collect(),
-            _ => SmallVec::new(),
+            View::Catch { header, .. } => BinderRun::Vars(self.catch(header).params),
+            _ => BinderRun::Empty,
         }
+    }
+    pub(super) fn binders(&self, id: NodeId) -> SmallVec<[VarId; 4]> {
+        let run = self.binder_run(id);
+        (0..run.len()).filter_map(|slot| run.at(self, slot)).collect()
     }
     fn bind(&mut self, id: NodeId) {
         if let View::Fun { header, .. } | View::JFun { header, .. } = self.view(id) {
@@ -322,7 +498,9 @@ impl Bir {
                 "function header already owned"
             );
         }
-        for var in self.binders(id) {
+        let run = self.binder_run(id);
+            for slot in 0..run.len() {
+                let Some(var) = run.at(self, slot) else { continue };
             assert!(
                 self.vars.binder[var.index()].is_none(),
                 "variable already bound"
@@ -337,7 +515,9 @@ impl Bir {
                 self.func_owners[header.index()] = None;
             }
         }
-        for var in self.binders(id) {
+        let run = self.binder_run(id);
+            for slot in 0..run.len() {
+                let Some(var) = run.at(self, slot) else { continue };
             if self.vars.binder[var.index()] == Some(id) {
                 self.vars.binder[var.index()] = None;
                 self.vars.fact[var.index()] = Fact::Unknown;
@@ -415,7 +595,18 @@ impl Bir {
             changed = self.j_duplicable[id.index()] != duplicable;
             self.j_duplicable[id.index()] = duplicable;
         }
-        for (var, fact) in self.binding_facts(id) {
+        let node = self.node(id);
+        let view = node.view(&self.lists);
+        let run = self.binders_in(view);
+        for slot in 0..run.len() {
+            let Some(var) = run.at(self, slot) else { continue };
+            let fact = match view {
+                View::Let { value, .. } | View::SDecl { value, .. } =>
+                    value.map_or(Fact::Unknown, |v| self.value_fact(v, RecFlag::No)),
+                View::LetRec { values, .. } => self.value_fact(values[slot], RecFlag::Yes),
+                View::Fun { .. } | View::JFun { .. } | View::Catch { .. } => Fact::Param,
+                _ => Fact::Unknown,
+            };
             changed |= self.vars.fact[var.index()] != fact;
             self.vars.fact[var.index()] = fact;
             if matches!(fact, Fact::Module(_)) {
@@ -579,7 +770,9 @@ impl Bir {
             // a newly doubled default. All other cached paths stay valid.
             self.weights[id.index()] = 0;
             self.adjust_direct(id, delta);
-            for child in self.view(id).children() {
+            let view = self.view(id);
+            for at in 0..view.child_count() {
+                let child = view.child_at(at);
                 stack.push((
                     child,
                     delta
@@ -597,10 +790,9 @@ impl Bir {
         child_effects: impl Fn(NodeId) -> (bool, bool),
     ) -> (bool, bool) {
         let view = self.view(id);
-        let children = view.children();
         let j_pure = j::facts::purity(self, id, false, |c| child_effects(c).0);
-        let all_pure = children.iter().all(|&c| child_effects(c).0);
-        let no_alloc = children.iter().all(|&c| child_effects(c).1);
+        let all_pure = (0..view.child_count()).all(|i| child_effects(view.child_at(i)).0);
+        let no_alloc = (0..view.child_count()).all(|i| child_effects(view.child_at(i)).1);
         let effects = match view {
             View::Var { .. }
             | View::Global { .. }
@@ -709,7 +901,8 @@ impl Bir {
         let both = NodeFlags::HAS_EXIT | NodeFlags::HAS_STATEMENT;
         let mut facts = NodeFlags(if own { NodeFlags::HAS_STATEMENT } else { 0 });
         let mut loops = empty;
-        for child in view.children() {
+        for at in 0..view.child_count() {
+            let child = view.child_at(at);
             let (flags, jumps) = child_facts(child);
             facts.0 |= flags.0 & both;
             unit &= flags.contains(if tail == Some(child) { NodeFlags::TRIVIAL_UNIT } else { NodeFlags::PURE });
@@ -819,7 +1012,9 @@ impl Bir {
         uses.clear();
         stack.push(root);
         while let Some(id) = stack.pop() {
-            for var in self.binders(id) {
+            let run = self.binder_run(id);
+            for slot in 0..run.len() {
+                let Some(var) = run.at(self, slot) else { continue };
                 self.capture_binders[var.index()] = epoch;
             }
             if let View::Var { var } = self.view(id) {
@@ -837,7 +1032,9 @@ impl Bir {
             _ => return,
         };
         let epoch = self.next_capture_epoch();
-        for var in self.binders(id) {
+        let run = self.binder_run(id);
+            for slot in 0..run.len() {
+                let Some(var) = run.at(self, slot) else { continue };
             self.capture_binders[var.index()] = epoch;
         }
         self.collect_capture(root, epoch);
@@ -1082,7 +1279,8 @@ impl Bir {
             if Some(id) == keep {
                 continue;
             }
-            for child in self.view(id).children() {
+            for i in 0..self.view(id).child_count() {
+                let child = self.view(id).child_at(i);
                 // A child detached from this node, or adopted by another,
                 // is no longer part of what is released (`detach`).
                 if self.parents[child.index()] != Some(id) {
@@ -1167,15 +1365,43 @@ impl Bir {
         fresh_vars: &mut Vec<(VarId, VarId)>,
         fresh_labels: &mut Vec<(u32, u32)>,
     ) -> NodeId {
-        let mut order = Vec::new();
-        let mut stack = vec![root];
+        self.copy_subtree_with_scratch(root, renaming, fresh_vars, fresh_labels,
+            &mut CopyScratch::default())
+    }
+
+    /// Copy with caller-owned traversal storage; binder allocation order and
+    /// free-variable renaming are identical to `copy_subtree_recording`.
+    pub(crate) fn copy_subtree_with_scratch(
+        &mut self,
+        root: NodeId,
+        renaming: &[(VarId, VarId)],
+        fresh_vars: &mut Vec<(VarId, VarId)>,
+        fresh_labels: &mut Vec<(u32, u32)>,
+        scratch: &mut CopyScratch,
+    ) -> NodeId {
+        // Dense rows are indexed by output handles, including recycled slots.
+        // Reserve the already allocated arena domain, not each visited handle.
+        scratch.nodes.reserve_domain(self.nodes.capacity());
+        let CopyScratch { order, stack, vars, funcs, catches, labels, js, nodes } = scratch;
+        order.clear();
+        stack.clear();
+        vars.clear();
+        funcs.clear();
+        catches.clear();
+        labels.clear();
+        js.clear();
+        nodes.clear();
+        stack.push(root);
         while let Some(id) = stack.pop() {
             order.push(id);
-            stack.extend(self.view(id).children());
+            let view = self.view(id);
+            stack.extend((0..view.child_count()).map(|i| view.child_at(i)));
         }
-        let mut vars: HashMap<_, _> = renaming.iter().copied().collect();
-        for &id in &order {
-            for var in self.binders(id) {
+        vars.extend(renaming.iter().copied());
+        for &id in order.iter() {
+            let run = self.binder_run(id);
+            for slot in 0..run.len() {
+                let Some(var) = run.at(self, slot) else { continue };
                 let fresh = self.new_var_id(self.vars.name(var), index(self.vars.len()));
                 self.vars.flags[fresh.index()].0 =
                     self.vars.flags[var.index()].0 & !VarFlags::EXPORTED;
@@ -1183,11 +1409,7 @@ impl Bir {
                 vars.insert(var, fresh);
             }
         }
-        let mut funcs = HashMap::new();
-        let mut catches = HashMap::new();
-        let mut labels = HashMap::new();
-        let mut js = HashMap::new();
-        for &id in &order {
+        for &id in order.iter() {
             match self.view(id) {
                 View::Fun { header, .. } | View::JFun { header, .. } => {
                     let old = *self.function(header);
@@ -1204,12 +1426,11 @@ impl Bir {
                             len: old.params.len,
                         }
                     };
-                    let new = self.function_header(
-                        params,
-                        self.function_attributes(header).clone(),
-                        old.loc,
-                    );
-                    self.vars.funcs[new.index()].flags = old.flags;
+                    // Attributes are immutable cold metadata. Only the header
+                    // and its owner/parameters need fresh identities.
+                    let new = FuncId(index(self.vars.funcs.len()));
+                    self.func_owners.push(None);
+                    self.vars.funcs.push(FuncHeader { params, ..old });
                     funcs.insert(header, new);
                 }
                 View::Catch { header, .. } => {
@@ -1228,37 +1449,39 @@ impl Bir {
                 _ => {}
             }
         }
-        for &id in &order {
+        for &id in order.iter() {
             if let View::JRecordRest { info, .. } | View::SRest { info, .. } = self.view(id) {
                 if let JsPayload::Rest(fields) = self.javascript(info) {
-                    let fields = fields
-                        .iter()
-                        .map(|field| RestField {
+                    let fields = *fields;
+                    let start = index(self.pools.rest_fields.len());
+                    for i in 0..fields.len {
+                        let field = self.pools.rest_fields[(fields.start + i) as usize];
+                        self.pools.rest_fields.push(RestField {
                             name: field.name,
                             binding: field.binding.map(|v| vars.get(&v).copied().unwrap_or(v)),
-                        })
-                        .collect();
-                    let copied = self.js_info(JsPayload::Rest(fields));
+                        });
+                    }
+                    let copied = self.js_info(JsPayload::Rest(RestSpan { start, len: fields.len }));
                     js.insert(info, copied);
                 }
             }
         }
-        let mut nodes = HashMap::new();
         for &id in order.iter().rev() {
             let packed = self.node(id).remap(
                 &mut self.lists,
                 &super::node::Renaming {
-                    nodes: &nodes,
-                    vars: &vars,
-                    funcs: &funcs,
-                    catches: &catches,
-                    labels: &labels,
-                    js: &js,
+                    nodes,
+                    vars,
+                    funcs,
+                    catches,
+                    labels,
+                    js,
                 },
             );
             let new = self.allocate(packed);
             self.bind(new);
-            for child in self.view(new).children() {
+            for i in 0..self.view(new).child_count() {
+                let child = self.view(new).child_at(i);
                 self.parents[child.index()] = Some(new);
                 let multiplier = self.edge_weight(new, child);
                 if !self.bulk && multiplier != 1 {
@@ -1297,6 +1520,72 @@ mod tests {
     }
 
     #[test]
+    fn retained_copy_scratch_reuses_buffers_and_clears_renames() {
+        let mut b = Bir::default();
+        let free = b.new_var_id(Name::new("free"), 0);
+        let renamed = b.new_var_id(Name::new("renamed"), 1);
+        let root = b.new_node(View::Var { var: free }, 0);
+        let mut scratch = CopyScratch::default();
+        let mut vars = Vec::new();
+        let mut labels = Vec::new();
+        let copied = b.copy_subtree_with_scratch(root, &[(free, renamed)],
+            &mut vars, &mut labels, &mut scratch);
+        assert!(matches!(b.view(copied), View::Var { var } if var == renamed));
+        b.release(copied);
+        let capacities = |s: &CopyScratch| [s.order.capacity(), s.stack.capacity(),
+            s.vars.capacity(), s.funcs.capacity(), s.catches.capacity(),
+            s.labels.capacity(), s.js.capacity(), s.nodes.capacity()];
+        let before = capacities(&scratch);
+        let measured = allocation_counter::measure(|| {
+            for _ in 0..10_000 {
+                let copied = b.copy_subtree_with_scratch(root, &[],
+                    &mut vars, &mut labels, &mut scratch);
+                assert!(matches!(b.view(copied), View::Var { var } if var == free));
+                b.release(copied);
+            }
+        });
+        assert_eq!(measured.count_total, 0, "{measured:?}");
+        assert_eq!(capacities(&scratch), before);
+        assert_eq!(b.vars.uses(free), 1);
+        assert_eq!(b.vars.uses(renamed), 0);
+        b.validate(Some(root)).unwrap();
+    }
+
+    #[test]
+    fn wide_rest_copy_uses_flat_fields_without_allocations() {
+        let mut b = Bir::default();
+        let name = b.intern_text("excluded");
+        let info = b.rest_info(std::iter::repeat_n(RestField { name, binding: None }, 10_000));
+        let value = b.new_node(View::JNull, 0);
+        let root = b.new_node(View::JRecordRest { value, info }, 0);
+        let mut scratch = CopyScratch::default();
+        let mut vars = Vec::new();
+        let mut labels = Vec::new();
+        let copy = b.copy_subtree_with_scratch(root, &[], &mut vars, &mut labels, &mut scratch);
+        b.release(copy);
+        b.pools.rest_fields.reserve(10_000);
+        b.pools.js.reserve(1);
+        let before = [b.pools.rest_fields.capacity(), b.pools.js.capacity(),
+            b.nodes.capacity(), b.parents.capacity(), b.free_nodes.capacity(),
+            scratch.order.capacity(), scratch.stack.capacity(), scratch.nodes.capacity(),
+            scratch.js.capacity()];
+        let measured = allocation_counter::measure(|| {
+            let copy = b.copy_subtree_with_scratch(root, &[], &mut vars, &mut labels, &mut scratch);
+            let View::JRecordRest { info, .. } = b.view(copy) else { panic!() };
+            let JsPayload::Rest(fields) = b.javascript(info) else { panic!() };
+            assert_eq!(b.rest_fields(*fields).len(), 10_000);
+            b.release(copy);
+        });
+        assert_eq!(measured.count_total, 0, "{measured:?}");
+        assert_eq!([b.pools.rest_fields.capacity(), b.pools.js.capacity(),
+            b.nodes.capacity(), b.parents.capacity(), b.free_nodes.capacity(),
+            scratch.order.capacity(), scratch.stack.capacity(), scratch.nodes.capacity(),
+            scratch.js.capacity()], before);
+        assert_eq!(std::mem::size_of::<RestSpan>(), 8);
+        b.validate(Some(root)).unwrap();
+    }
+
+    #[test]
     fn layout() {
         use std::mem::size_of;
         assert_eq!(size_of::<Node>(), 16);
@@ -1325,7 +1614,7 @@ mod tests {
     fn switched_jump(b: &mut Bir, continue_: bool) -> (NodeId, NodeId) {
         let jump = b.new_node(if continue_ { View::Continue } else { View::Break }, 0);
         let scrutinee = lit(b);
-        let header = b.switch_header(SwitchHeader {
+        let header = b.switch_header(SwitchInput {
             keys: vec![], clauses: vec![], constants: 0, consts_full: false,
             blocks_full: false, has_default: true, dispatch: SwitchDispatch::Direct,
         });
@@ -1529,7 +1818,7 @@ mod tests {
         let v = b.new_var_id(Name::new("free"), 0);
         let condition = lit(&mut b);
         let use_ = var(&mut b, v);
-        let h = b.switch_header(SwitchHeader {
+        let h = b.switch_header(SwitchInput {
             keys: vec![],
             clauses: vec![],
             constants: 0,
@@ -1701,7 +1990,7 @@ mod tests {
     fn seeded_random_edits_validate_after_every_edit() {
         fn with_weighted_default(b: &mut Bir, body: NodeId) -> NodeId {
             let scrutinee = lit(b);
-            let header = b.switch_header(SwitchHeader {
+            let header = b.switch_header(SwitchInput {
                 keys: vec![],
                 clauses: vec![],
                 constants: 0,
@@ -1786,7 +2075,7 @@ mod tests {
                 }
                 6 => {
                     let scrutinee = lit(&mut b);
-                    let header = b.switch_header(SwitchHeader {
+                    let header = b.switch_header(SwitchInput {
                         keys: vec![],
                         clauses: vec![],
                         constants: 0,
@@ -1976,7 +2265,7 @@ mod constructor_tests {
         |b| {
             let scrutinee = leaf(&mut b);
             let actions = [leaf(&mut b)];
-            let header = b.switch_header(SwitchHeader {
+            let header = b.switch_header(SwitchInput {
                 keys: vec![],
                 clauses: vec![],
                 constants: 0,
@@ -2001,7 +2290,7 @@ mod constructor_tests {
         |b| {
             let scrutinee = leaf(&mut b);
             let actions = [leaf(&mut b)];
-            let header = b.switch_header(SwitchHeader {
+            let header = b.switch_header(SwitchInput {
                 keys: vec![],
                 clauses: vec![],
                 constants: 0,
@@ -2342,7 +2631,7 @@ mod constructor_tests {
         |b| {
             let values = [leaf(&mut b), leaf(&mut b)];
             let key = b.intern_text("key");
-            let info = b.js_info(JsPayload::Object(vec![PropertyKey::Literal(key); 2]));
+            let info = b.object_info(&[PropertyKey::Literal(key); 2]);
             b.new_node(
                 View::JObject {
                     values: &values,
@@ -2406,13 +2695,13 @@ mod constructor_tests {
         |b| {
             let values = [leaf(&mut b), leaf(&mut b)];
             let text = b.intern_text("");
-            let info = b.js_info(JsPayload::Template(vec![
+            let info = b.template_info(&[
                 TemplatePart {
                     raw: text,
                     cooked: Some(text)
                 };
                 3
-            ]));
+            ], false);
             b.new_node(
                 View::JTemplate {
                     values: &values,
@@ -2429,13 +2718,13 @@ mod constructor_tests {
             let tag = leaf(&mut b);
             let values = [leaf(&mut b), leaf(&mut b)];
             let text = b.intern_text("");
-            let info = b.js_info(JsPayload::Tagged(vec![
+            let info = b.template_info(&[
                 TemplatePart {
                     raw: text,
                     cooked: Some(text)
                 };
                 3
-            ]));
+            ], true);
             b.new_node(
                 View::JTagged {
                     tag,
@@ -2525,7 +2814,7 @@ mod constructor_tests {
         constructs_jrecordrest,
         |b| {
             let value = leaf(&mut b);
-            let info = b.js_info(JsPayload::Rest(vec![]));
+            let info = b.rest_info([]);
             b.new_node(View::JRecordRest { value, info }, 0)
         },
         JRecordRest
@@ -2650,7 +2939,7 @@ mod constructor_tests {
         |b| {
             let scrutinee = leaf(&mut b);
             let actions = [leaf(&mut b)];
-            let header = b.switch_header(SwitchHeader {
+            let header = b.switch_header(SwitchInput {
                 keys: vec![],
                 clauses: vec![],
                 constants: 0,
@@ -2727,7 +3016,7 @@ mod constructor_tests {
         |b| {
             let var = b.new_var_id(Name::new("v"), 0);
             let value = leaf(&mut b);
-            let info = b.js_info(JsPayload::Rest(vec![]));
+            let info = b.rest_info([]);
             b.new_node(View::SRest { var, value, info }, 0)
         },
         SRest
@@ -2753,7 +3042,7 @@ mod boundary_tests {
             let mut root = b.new_node(View::Var { var }, 0);
             for _ in 0..2 {
                 let scrutinee = b.new_node(View::JNull, 0);
-                let header = b.switch_header(SwitchHeader {
+                let header = b.switch_header(SwitchInput {
                     keys: vec![],
                     clauses: vec![],
                     constants: 0,
@@ -2988,10 +3277,10 @@ mod js_metadata_tests {
         let rest = b.new_var_id(Name::new("rest"), 0);
         let field = b.new_var_id(Name::new("field"), 1);
         let name = b.intern_text("field");
-        let info = b.js_info(JsPayload::Rest(vec![RestField {
+        let info = b.rest_info([RestField {
             name,
             binding: Some(field),
-        }]));
+        }]);
         let value = b.new_node(View::JNull, 0);
         let decl = b.new_node(
             View::SRest {
@@ -3019,7 +3308,7 @@ mod js_metadata_tests {
         let JsPayload::Rest(fields) = b.javascript(info) else {
             panic!()
         };
-        let fresh = fields[0].binding.unwrap();
+        let fresh = b.rest_fields(*fields)[0].binding.unwrap();
         assert_ne!(fresh, field);
         assert_eq!(b.vars.binder(fresh), Some(statements[0]));
         let pair = b.new_node(
@@ -3167,7 +3456,7 @@ mod incremental_cost_tests {
         };
         let scrutinee = b.new_node(View::JNull, 0);
         let default = b.new_node(View::JNull, 0);
-        let header = b.switch_header(SwitchHeader {
+        let header = b.switch_header(SwitchInput {
             keys: vec![],
             clauses: vec![],
             constants: 0,
@@ -3292,7 +3581,7 @@ mod incremental_cost_tests {
         b.validate(None).unwrap();
         let (body, leaf) = chain(&mut b, 1000);
         let scrutinee = b.new_node(View::JNull, 0);
-        let header = b.switch_header(SwitchHeader {
+        let header = b.switch_header(SwitchInput {
             keys: vec![],
             clauses: vec![],
             constants: 0,
@@ -3394,7 +3683,7 @@ mod local_weight_tests {
 
     fn weighted(b: &mut Bir, default: NodeId) -> NodeId {
         let scrutinee = b.new_node(View::JNull, 0);
-        let header = b.switch_header(SwitchHeader {
+        let header = b.switch_header(SwitchInput {
             keys: vec![],
             clauses: vec![],
             constants: 0,

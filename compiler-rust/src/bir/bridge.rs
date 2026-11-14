@@ -289,7 +289,7 @@ impl Importer {
                     .cloned()
                     .map(CaseKey::Lambda)
                     .collect();
-                let header = self.bir.switch_header(SwitchHeader {
+                let header = self.bir.switch_header(SwitchInput {
                     keys,
                     clauses: vec![],
                     constants: index(h.n_consts()),
@@ -309,7 +309,7 @@ impl Importer {
                 let keys = (0..h.n_cases())
                     .map(|i| CaseKey::String(self.bir.intern_text(a.str_switch_key(info, i))))
                     .collect();
-                let header = self.bir.switch_header(SwitchHeader {
+                let header = self.bir.switch_header(SwitchInput {
                     keys,
                     clauses: vec![],
                     constants: index(h.n_cases()),
@@ -491,6 +491,11 @@ fn sharing_facts(arena: &LamArena, root: Lam) -> (Vec<u8>, usize, u8) {
 /// cannot reach the export coercion.
 pub(crate) struct ForLowering(Imported);
 impl ForLowering {
+    #[cfg(test)]
+    pub(crate) fn storage_counts(&self) -> (usize, usize) {
+        (self.0.arena.nodes.len(), self.0.arena.lists.slot_count())
+    }
+
     /// The import, for the lowering's state. Constant.
     pub(crate) fn into_imported(self) -> Imported {
         self.0
