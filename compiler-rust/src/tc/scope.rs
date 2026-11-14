@@ -515,7 +515,22 @@ impl Scopes {
     /// scope's layers stop being visible because `opens` is per scope; no
     /// layer row is touched. Panics when no scope is entered.
     pub fn leave(&mut self) {
-        todo!("R4b")
+        let mark = self.entered.pop().expect("leave with no scope entered");
+        self.undo_to(mark);
+        self.current = self.scopes[self.current as usize].parent;
+    }
+
+    /// O(log entries above `mark`), 1 step an entry: pop the log down to
+    /// `mark`, restoring `heads[key] = previous` for each binder popped,
+    /// innermost first.
+    fn undo_to(&mut self, mark: u32) {
+        while self.log.len() as u32 > mark {
+            #[cfg(test)]
+            super::steps::tick();
+            let binder = self.log.pop().expect("the log is above the mark") as usize;
+            let key = self.binders.key[binder] as usize;
+            self.heads[key] = self.binders.previous[binder];
+        }
     }
 
     /// Amortized O(1), 1 step: put a binder in scope. Writes
