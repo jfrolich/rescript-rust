@@ -1640,7 +1640,6 @@ fn long_paths_and_alias_chains_are_linear() {
 /// Reaches: R4a, R4b, R4f. The task text's bound: marking 10,000 uses is
 /// 10,000 steps.
 #[test]
-#[ignore = "R4f build"]
 fn marking_ten_thousand_uses_is_ten_thousand_steps() {
     let mut s = unit_scopes();
     let binders: Vec<Binder> = (0..100)
@@ -1820,7 +1819,6 @@ fn the_walk_decides_whether_an_opened_constructor_shadows() {
 /// under an undone speculation is forgotten; a unit with an error never
 /// calls `finish` and so has only the warnings its lookups raised.
 #[test]
-#[ignore = "R4f build"]
 fn unused_binders_are_reported_in_the_order_armed() {
     let mut s = unit_scopes();
     let t = bind(&mut s, "t", Namespace::Type, 0);

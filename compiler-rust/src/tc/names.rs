@@ -21,8 +21,9 @@
 
 use super::name_table::Name;
 use super::scope::{
-    Binder, BinderKind, Found, IMPORTED, Key, NONE, Namespace, Resolved, ResolvedKind, Scopes,
-    TableId, UNIT_MASK, UnitSource,
+    ARMED_OPEN, Binder, BinderKind, Found, IMPORTED, Key, NONE, Namespace, OPEN_OVERRIDE,
+    OPEN_USED, PATTERN, POSITIVE, PRIVATIZE, Resolved, ResolvedKind, Scopes, TableId, UNIT_MASK,
+    USED, UnitSource, Warning, WarningKind,
 };
 use super::segment::{FUNCTOR_SCOPE, ModuleTypeRow, PathRow, Segment, SignatureKind};
 
@@ -514,13 +515,16 @@ impl Scopes {
     /// delayed check when the declaration enters the environment). The
     /// order of the calls is the order of the warnings.
     pub fn arm(&mut self, binder: Binder) {
-        todo!("R4f")
+        self.armed.push(binder.0);
     }
 
     /// O(1): the same for an open (`Unused_open`,
     /// compiler/ml/env.ml:1890-1894).
     pub fn arm_open(&mut self, open: u32) {
-        todo!("R4f")
+        // `open!` has no slot (compiler/ml/env.ml:1884, CHECKER_REWRITE 9.7
+        // decision 7).
+        debug_assert_eq!(self.opens[open as usize].flags & OPEN_OVERRIDE, 0);
+        self.armed.push(open | ARMED_OPEN);
     }
 
     /// O(1): the length of `armed`, for [`Scopes::disarm`].
@@ -531,7 +535,7 @@ impl Scopes {
     /// O(1): forget what was armed since `mark` (a speculative typing that
     /// was undone drops its delayed checks).
     pub fn disarm(&mut self, mark: u32) {
-        todo!("R4f")
+        self.armed.truncate(mark as usize);
     }
 
     /// 1 step, one load and one store: set used bits of a binder
@@ -539,7 +543,9 @@ impl Scopes {
     /// compiler/ml/env.ml:1080-1093). `bits` is `USED` or a constructor's
     /// usage.
     pub fn mark(&mut self, binder: Binder, bits: u8) {
-        todo!("R4f")
+        #[cfg(test)]
+        super::steps::tick();
+        self.binders.used[binder.0 as usize] |= bits;
     }
 
     /// The walk chose `found` for a use of `key` at `loc`
@@ -604,7 +610,39 @@ impl Scopes {
     /// unit has an error: the warnings of a failing unit are those raised
     /// before the error (CHECKER_REWRITE 2.1, O15).
     pub fn finish(&mut self) {
-        todo!("R4f")
+        let Scopes {
+            binders,
+            opens,
+            armed,
+            warnings,
+            ..
+        } = self;
+        for &entry in armed.iter() {
+            #[cfg(test)]
+            super::steps::tick();
+            let warning = if entry & ARMED_OPEN != 0 {
+                let index = entry & !ARMED_OPEN;
+                let open = opens[index as usize];
+                (open.flags & OPEN_USED == 0).then_some(Warning {
+                    kind: WarningKind::UnusedOpen,
+                    loc: open.loc,
+                    a: index,
+                    b: 0,
+                })
+            } else {
+                // A constructor is used by any of its three usages
+                // (`constructor_usages`, compiler/ml/env.ml:38-47); every
+                // other binder has only `USED`.
+                (binders.used[entry as usize] & (USED | POSITIVE | PATTERN | PRIVATIZE) == 0)
+                    .then_some(Warning {
+                        kind: WarningKind::Unused,
+                        loc: binders.loc[entry as usize],
+                        a: entry,
+                        b: 0,
+                    })
+            };
+            warnings.extend(warning);
+        }
     }
 
     // ----- R4g: reads of other units -----
