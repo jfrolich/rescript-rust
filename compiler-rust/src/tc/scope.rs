@@ -676,7 +676,28 @@ impl Scopes {
     /// (`comp_constrs` and `comp_labels` are lists, compiler/ml/env.ml:
     /// 1480-1500). Must be called before the structure's scopes are left.
     pub fn seal(&mut self, from: u32) -> TableId {
-        todo!("R4c")
+        let first = self.members.len() as u32;
+        // Younger first, so that the stable sort leaves the rows of one
+        // constructor or label key in candidate order.
+        for &binder in self.log[from as usize..].iter().rev() {
+            #[cfg(test)]
+            super::steps::tick();
+            let key = self.binders.key[binder as usize];
+            let ns = Key(key).namespace();
+            // A value, type, module or module type is a member unless a
+            // later binding of its name in the structure replaced it.
+            let member = ns == Namespace::Constructor as u32
+                || ns == Namespace::Label as u32
+                || self.heads[key as usize] == binder;
+            if member {
+                self.members.push(Member {
+                    key,
+                    target: binder,
+                    origin: LOCAL,
+                });
+            }
+        }
+        self.close_table(first)
     }
 
     /// O(1), no step: open `table` in the current scope. Pushes one

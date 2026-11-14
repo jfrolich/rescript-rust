@@ -979,7 +979,6 @@ fn an_open_shadows_a_local_and_a_local_shadows_an_open() {
 /// value, type or module name and every constructor and label, the younger
 /// first; bindings of scopes already left are not members.
 #[test]
-#[ignore = "R4c build"]
 fn seal_lists_what_a_structure_exports() {
     let mut s = unit_scopes();
     let from = s.log_mark();
