@@ -2136,7 +2136,6 @@ mod tests {
     /// result (seed 1000039: the levels kept at operation 10 decide what
     /// operation 13 lowers).
     #[test]
-    #[ignore = "R3k build"]
     fn a_failed_retry_keeps_its_levels_in_the_explaining_mode() {
         let program = compile(FIXED_SCOPED.to_string());
         let plan = Plan::new(Tier::Full, EXPLAIN | SCOPED);
