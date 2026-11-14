@@ -1251,3 +1251,182 @@ mod replay_tests {
         assert_eq!(wrong.name_differences, 1);
     }
 }
+
+/// The names the pass gives on the programs the naming log of the backend
+/// lowering has to get right (THREE_TREES 11.4, "T5 part B as redesigned").
+/// They pin the expected names; the log's own tests assert the same ones.
+#[cfg(test)]
+mod counterexample_tests {
+    use super::*;
+    use crate::ident::IdentFlags;
+    use crate::js_ir::arena::{ForRangeInfo, FunInfo, JsProgram};
+    use crate::js_ir::op::MutableFlag;
+    use crate::lambda::lam_compat::LetKind;
+
+    fn id(name: &str, stamp: i32) -> Ident {
+        Ident::new(name, stamp, IdentFlags::NONE)
+    }
+    fn var(a: &mut JsArena, id: Ident) -> Expr {
+        crate::js_ir::build::exp::var(id, a)
+    }
+    /// `[items]`: an expression that reads its operands and is no call (a
+    /// function whose body returns a call of a variable is eta-reduced).
+    fn read(a: &mut JsArena, items: &[Ident]) -> Expr {
+        let items: Vec<Expr> = items.iter().map(|id| var(a, *id)).collect();
+        crate::js_ir::build::exp::array(&items, MutableFlag::Immutable, a)
+    }
+    fn fun(a: &mut JsArena, params: &[Ident], body: &[Stmt], is_method: bool) -> Expr {
+        let (params, body) = (a.ident_list(params), a.stmt_list(body));
+        let f = a.fun_id(FunInfo { is_method, params, body, return_unit: false, async_: false, directive: None });
+        a.expr(ExprKind::Fun(f))
+    }
+    fn define(a: &mut JsArena, id: Ident, value: Expr) -> Stmt {
+        crate::js_ir::build::stmt::define(id, Some(value), LetKind::Strict, a)
+    }
+    fn ret(a: &mut JsArena, value: Expr) -> Stmt {
+        a.stmt(StmtKind::Return(value))
+    }
+    fn collect(a: JsArena, block: Vec<Stmt>, exports: Vec<Ident>) -> Names {
+        let p = JsDepsProgram { program: JsProgram::new_in(block, exports, a), modules: vec![], side_effect: None };
+        let resolver = ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+        Names::collect(&p, &resolver, false).unwrap()
+    }
+
+    /// `let f = p => { let v = [p]; let g = () => { let v' = [captured]; return [v'] }; return [g] }`.
+    fn nested(capture_outer_local: bool) -> (Names, Ident, Ident) {
+        let (f, p, v, g, inner) = (id("f", 1), id("p", 2), id("v", 3), id("g", 4), id("v", 5));
+        let mut a = JsArena::new();
+        let captured = read(&mut a, &[if capture_outer_local { v } else { p }]);
+        let declare_inner = define(&mut a, inner, captured);
+        let result = read(&mut a, &[inner]);
+        let result = ret(&mut a, result);
+        let g_value = fun(&mut a, &[], &[declare_inner, result], false);
+        let value = read(&mut a, &[p]);
+        let declare_v = define(&mut a, v, value);
+        let declare_g = define(&mut a, g, g_value);
+        let result = read(&mut a, &[g]);
+        let result = ret(&mut a, result);
+        let f_value = fun(&mut a, &[p], &[declare_v, declare_g, result], false);
+        let declare_f = define(&mut a, f, f_value);
+        (collect(a, vec![declare_f], vec![f]), v, inner)
+    }
+
+    #[test]
+    fn a_function_nested_in_a_function_inherits_the_names_of_the_outer_local_it_captures() {
+        // Gap 1 (a): `v` is free in `g`, so `g`'s scope inherits the names
+        // of base `v` and its own `v` is `v$1`.
+        let (names, v, inner) = nested(true);
+        assert_eq!((names.get(&v), names.get(&inner)), ("v", "v$1"));
+        // Without the capture `g` inherits nothing of base `v`.
+        let (names, v, inner) = nested(false);
+        assert_eq!((names.get(&v), names.get(&inner)), ("v", "v"));
+    }
+
+    #[test]
+    fn a_recursive_inner_function_is_not_free_in_the_function_that_declares_it() {
+        // Gap 1 (b): `let f = () => { let g = () => [g]; return [g] }; let g' = 1`.
+        // `g` is free in itself and bound in `f`: `f` reserves nothing in
+        // the program, so the program's own `g'` is `g`, not `g$1`.
+        let (f, g, top) = (id("f", 1), id("g", 2), id("g", 3));
+        let mut a = JsArena::new();
+        let itself = read(&mut a, &[g]);
+        let itself = ret(&mut a, itself);
+        let g_value = fun(&mut a, &[], &[itself], false);
+        let declare_g = define(&mut a, g, g_value);
+        let result = read(&mut a, &[g]);
+        let result = ret(&mut a, result);
+        let f_value = fun(&mut a, &[], &[declare_g, result], false);
+        let declare_f = define(&mut a, f, f_value);
+        let one = crate::js_ir::build::exp::int(1, &mut a);
+        let declare_top = define(&mut a, top, one);
+        let names = collect(a, vec![declare_f, declare_top], vec![f, top]);
+        assert_eq!((names.get(&g), names.get(&top)), ("g", "g"));
+    }
+
+    #[test]
+    fn the_this_of_a_method_is_named_only_when_the_body_reads_it() {
+        // Gap 3: `let m = function (o, x) { return [read] }` as a method.
+        for used in [false, true] {
+            let (m, this, x) = (id("m", 1), id("o", 2), id("x", 3));
+            let mut a = JsArena::new();
+            let result = read(&mut a, &[if used { this } else { x }]);
+            let result = ret(&mut a, result);
+            let value = fun(&mut a, &[this, x], &[result], true);
+            let declare = define(&mut a, m, value);
+            let names = collect(a, vec![declare], vec![m]);
+            assert_eq!(names.printed.get(&this).map(|name| name.as_str()), used.then_some("o"));
+            assert_eq!(names.get(&x), "x");
+        }
+    }
+
+    #[test]
+    fn a_suffix_skips_a_raw_javascript_name_of_the_program() {
+        // Gap 3: `[x$1']; let x = 1; let x' = 2` where `x$1'` is a
+        // JavaScript name: the second `x` is `x$2`.
+        let raw = Ident::new("x$1", 0, IdentFlags::JS);
+        let (first, second) = (id("x", 1), id("x", 2));
+        let mut a = JsArena::new();
+        let value = read(&mut a, &[raw]);
+        let effect = a.stmt(StmtKind::Exp(value));
+        let one = crate::js_ir::build::exp::int(1, &mut a);
+        let declare_first = define(&mut a, first, one);
+        let two = crate::js_ir::build::exp::int(2, &mut a);
+        let declare_second = define(&mut a, second, two);
+        let names = collect(a, vec![effect, declare_first, declare_second], vec![first, second]);
+        assert_eq!((names.get(&first), names.get(&second)), ("x", "x$2"));
+    }
+
+    #[test]
+    fn the_cached_bound_of_a_range_loop_takes_a_name_in_its_scope() {
+        // `for (let i = 1, i_finish = [n]; ...) {}; let i_finish' = 1`: the
+        // bound is cached under `i_finish`, so the declaration after the
+        // loop is `i_finish$1`. A statement names more than its binders.
+        let (n, i, later) = (id("n", 1), id("i", 2), id("i_finish", 3));
+        let mut a = JsArena::new();
+        let one = crate::js_ir::build::exp::int(1, &mut a);
+        let declare_n = define(&mut a, n, one);
+        let init = crate::js_ir::build::exp::int(1, &mut a);
+        let end = read(&mut a, &[n]);
+        let (ident, body) = (a.ident_id(i), a.stmt_list(&[]));
+        let range = a.for_range_id(ForRangeInfo {
+            label: None,
+            init: Some(init),
+            end,
+            ident,
+            direction: crate::js_ir::ForDirection::Upto,
+            body,
+        });
+        let loop_ = a.stmt(StmtKind::ForRange(range));
+        let one = crate::js_ir::build::exp::int(1, &mut a);
+        let declare_later = define(&mut a, later, one);
+        let names = collect(a, vec![declare_n, loop_, declare_later], vec![n, later]);
+        assert_eq!((names.get(&i), names.finish(loop_), names.get(&later)), ("i", "i_finish", "i_finish$1"));
+    }
+
+    #[test]
+    fn two_function_literals_of_one_statement_name_what_they_capture_in_print_order() {
+        // `[() => [x], () => [y]]; let a = 1; let a' = 2`, where the
+        // literals capture the two `a`s declared after them: the literal
+        // printed first names its variable `a`, whatever the stamps. The
+        // order of two literals inside one statement is a naming fact.
+        for swapped in [false, true] {
+            let (first, second) = (id("a", 1), id("a", 2));
+            let mut a = JsArena::new();
+            let (left, right) = if swapped { (first, second) } else { (second, first) };
+            let body = read(&mut a, &[left]);
+            let body = ret(&mut a, body);
+            let left_fun = fun(&mut a, &[], &[body], false);
+            let body = read(&mut a, &[right]);
+            let body = ret(&mut a, body);
+            let right_fun = fun(&mut a, &[], &[body], false);
+            let both = crate::js_ir::build::exp::array(&[left_fun, right_fun], MutableFlag::Immutable, &mut a);
+            let effect = a.stmt(StmtKind::Exp(both));
+            let one = crate::js_ir::build::exp::int(1, &mut a);
+            let declare_first = define(&mut a, first, one);
+            let two = crate::js_ir::build::exp::int(2, &mut a);
+            let declare_second = define(&mut a, second, two);
+            let names = collect(a, vec![effect, declare_first, declare_second], vec![first, second]);
+            assert_eq!((names.get(&left), names.get(&right)), ("a", "a$1"));
+        }
+    }
+}
