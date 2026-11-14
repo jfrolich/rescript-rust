@@ -420,6 +420,25 @@ Module value inclusion invokes `moregeneral` with `inst_nongen=true`, allowing a
 
 D2-1, D2-4, D2-5 and reduced D2-7 are accepted only by Rust; each hits `moregen_occur` and the expanding lowering retry once. D2-6 is a separate reverse-direction interface witness, not evidence that the swallowed lowering error caused that mismatch: its trace never enters `moregen_occur`. D2-7 is the smallest single-file witness found; D2-6 is the two-file witness as tested.
 
+### Fixed
+
+Two commits remove the D2 witnesses; all seven candidates were rerun with
+both compilers after them, and every one now agrees.
+
+- `24d7bee27` makes `moregen_occur` (`compiler-rust/src/types/ctype.rs`)
+  return the failure of its checked level update, as OCaml's raising
+  `update_level` does (`compiler/ml/ctype.ml:2901-2919`), so `moregeneral`
+  answers false before the weak variable is linked. D2-1, D2-4, D2-5 and
+  D2-7 are now rejected with OCaml's "Signature mismatch"; they are the
+  super_errors fixtures `weak_variable_module_constraint_escape_used_later`,
+  `_array`, `_local` and `weak_variable_module_constraint_escape`.
+- `381bc9144` deletes the driver's `apply_moregen_constraints`, which linked
+  each weak variable of an implementation to the stored interface's own type
+  node (`Main.t`) before the inclusion check; OCaml has no such pass
+  (`compiler/ml/typemod.ml:1797-1801`). D2-6 now builds with OCaml's
+  JavaScript; it is `tests/tests/src/weak_variable_interface_instantiation`.
+- D2-2 and D2-3 agreed before and still agree (both build, same JavaScript).
+
 ### D2-1 — WITNESS
 
 `Main.res`:
