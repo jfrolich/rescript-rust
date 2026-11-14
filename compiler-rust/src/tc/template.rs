@@ -210,6 +210,70 @@ mod tests {
         assert_ne!(g.lists[b + 2], g.lists[b + 3]);
         assert_eq!(g.lists[b + 4], local);
     }
+    /// A scheme variable's name is kept beside the instance source, not in
+    /// it: the stored node has no name in `a` and the name in its level
+    /// field, [`descriptor`] gives the scheme's node back, and an instance
+    /// has no name and the level of the instance
+    /// (compiler/ml/btype.ml:510).
+    #[test]
+    fn a_template_keeps_a_variable_name_out_of_the_instance_source() {
+        let mut g = Graph::default();
+        let var = |a| Node {
+            head: VAR,
+            level: GENERIC,
+            a,
+            b: 0,
+        };
+        let (named, plain) = (g.push(var(7)), g.push(var(NONE)));
+        let b = g.lists.len() as u32;
+        g.lists.extend([named, plain]);
+        let tuple = g.push(Node {
+            head: TUPLE | 2 << 8,
+            level: GENERIC,
+            a: 0,
+            b,
+        });
+        let template = g.capture(tuple);
+        let stored: Vec<Node> = g.template_nodes
+            [template.nodes as usize..(template.nodes + template.node_len) as usize]
+            .to_vec();
+        assert_eq!(stored.len(), 3);
+        let variables: Vec<Node> = stored
+            .iter()
+            .copied()
+            .filter(|node| node.tag() == VAR)
+            .collect();
+        assert_eq!(variables.len(), 2);
+        // No stored variable has a name where an instance copies it from.
+        assert!(variables.iter().all(|node| node.a == NONE));
+        let mut names: Vec<u32> = variables.iter().map(|node| node.level).collect();
+        names.sort_unstable();
+        assert_eq!(names, [7, NONE]);
+        // The scheme's own nodes, as its printer and the old checker's
+        // bridge read them.
+        let mut read: Vec<u32> = variables
+            .iter()
+            .map(|&node| {
+                let scheme = descriptor(node);
+                assert_eq!(scheme.level, GENERIC);
+                scheme.a
+            })
+            .collect();
+        read.sort_unstable();
+        assert_eq!(read, [7, NONE]);
+        for &node in stored.iter().filter(|node| node.tag() != VAR) {
+            assert_eq!(descriptor(node), node);
+        }
+        g.begin_def();
+        let out = g.instance(template);
+        let b = g.nodes[out.0 as usize].b as usize;
+        for child in [g.lists[b], g.lists[b + 1]] {
+            let node = g.nodes[child.0 as usize];
+            assert_eq!(node.tag(), VAR);
+            assert_eq!(node.a, NONE, "an instance's variable has no name");
+            assert_eq!(node.level, g.level);
+        }
+    }
 }
 
 /// O(1), no allocation: the descriptor a stored template node stands for.
