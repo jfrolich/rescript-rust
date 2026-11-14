@@ -65,14 +65,14 @@ pub(crate) struct Replayed {
     pub lookups: usize,
     /// Lookups the old environment answered with an item of the trace.
     pub found: usize,
-    /// Lookups answered through an opened layer's member.
+    /// Lookups answered with an item an opened layer had listed by then.
     pub through_open: usize,
     pub binds: usize,
     pub opens: usize,
 }
 
 /// Item numbers by identity, and each number's `name/stamp` text and
-/// whether it was first seen as a member of an opened layer.
+/// whether an opened layer has listed it so far.
 #[derive(Default)]
 struct Items {
     by_identity: HashMap<(Ns, &'static str, i32), u32>,
@@ -86,8 +86,11 @@ impl Items {
         let number = *self.by_identity.entry((ns, name, stamp)).or_insert(next);
         if number == next {
             self.names.push(format!("{name}/{stamp}"));
-            self.opened.push(through_open);
+            self.opened.push(false);
         }
+        // A module's member is bound in the module's body first and listed
+        // by the layer later: it is a member from the layer's event on.
+        self.opened[number as usize] |= through_open;
         number
     }
 }
