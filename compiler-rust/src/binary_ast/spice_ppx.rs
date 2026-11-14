@@ -5877,7 +5877,7 @@ pub fn signature_uses_spice_mapper(signature: &[SignatureItem], arena: &ParseAre
 /// whether the Spice mapper runs over the whole structure; see
 /// [`structure_uses_spice_mapper`].
 pub fn expand_structure_item_with_mapper(item: &StructureItem, arena: &mut ParseArena, mapper_active: bool) -> SpiceResult<Vec<StructureItem>> {
-    expand_structure_item_in_scope(item, arena, mapper_active, false)
+    expand_structure_item_in_scope(item, arena, mapper_active, mapper_active && super::derive::shadows_result(item, arena))
 }
 
 /// Expand with the local constructor scope supplied by the enclosing mapper.
@@ -5891,7 +5891,7 @@ pub fn expand_structure_item_in_scope(
     if !arena.builtin_spice_enabled() {
         return Ok(vec![item.clone()]);
     }
-    map_structure_item_spice(item, arena, mapper_active, result_shadowed || super::derive::shadows_result(item, arena))
+    map_structure_item_spice(item, arena, mapper_active, result_shadowed)
 }
 
 fn map_structure_items_with_mapper(

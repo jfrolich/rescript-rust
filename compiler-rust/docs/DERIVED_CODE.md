@@ -812,7 +812,8 @@ The retained production code is unchanged by these experiments.
 
 `shadowed_result_constructor` is selected before building a decoder-bearing
 plan when the source-order scope contains a local `Ok` or `Error` constructor.
-The frontend computes dense prefix flags before its reverse mapping schedule;
+The frontend lazily computes dense prefix flags at the first mapped item that
+derives (scanning each preceding item at most once), despite its reverse schedule;
 nested modules inherit the flag and keep their local additions within their
 own scope. Encoder-only groups remain eligible for plans. This handles direct
 local variant declarations, not arbitrary constructor exports from an `open`
@@ -828,9 +829,33 @@ constructor-shadow diagnostic and a new nested-scope diagnostic agree in all
 three modes; all 17 diagnostic fixtures pass without changing old expectations.
 
 
-#### Census-off instruction gate: not accepted yet
+#### Census-off instruction gate: CI release profile
 
-The strict `tests/tests` gate remains **failed**, so this slice is not ready.
+The `Instruction count` workflow's `compare` job on `40a94389a3` is the gate:
+fat LTO, **one codegen unit**, five one-worker runs with the minimum per side.
+Base **4,048,840,695**, head **4,049,834,110**, **+0.025%**, with approximately
+0.08% run-to-run spread on each side. This is level at the observed variation;
+it is not a claim of a measured speedup or a numeric result below +0.02%.
+The job passed: https://github.com/jfrolich/rescript-rust/actions/runs/43538246812/job/132274627634.
+The workflow builds each revision with
+`CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 cargo build --release --locked --manifest-path rewatch/Cargo.toml`
+and runs `python3 scripts/compare_build_instructions.py --base <base-binary>
+<base-checkout> --head <head-binary> <head-checkout>` (five runs by default).
+
+For a unit with no derives, `binary_ast/ppx.rs:9695` uses the existing mapper
+presence scan to select `rewrite_structure_scoped::<false>`: one new O(1)
+dispatch, no constructor-scope traversal, no prefix allocation, no JSON identity
+classification. The disabled const-generic branch erases per-item scope work.
+The expansion entry point no longer rescans constructors unconditionally.
+`ten_thousand_items_without_derives_do_no_result_scope_work` asserts zero scope
+steps and no prefix allocation; `result_scope_is_lazy_and_scans_the_prefix_once`
+checks lazy activation and reuse. Run both with
+`cargo test --manifest-path compiler-rust/Cargo.toml result_scope`.
+
+#### Local census-off comparison: fat LTO, default 16 codegen units
+
+This separate-profile local result is retained as evidence, not substituted
+for the one-codegen-unit CI gate.
 Base `be1b3a482e5a989d1a1bbecf33a9b4f1aab98fec` and candidate `40a94389a`
 were built sequentially in the same disposable source directory with
 `cargo build --release --locked --manifest-path <source>/rewatch/Cargo.toml`.
@@ -852,7 +877,7 @@ python3 scripts/compare_build_instructions.py \
 | Candidate | 4,080,736,147; 4,080,528,469; 4,080,586,846 | 4,080,528,469 |
 | Change | both compile 743 modules | **+0.1879%** |
 
-The +0.02% limit is not waived. Earlier comparisons with different checkout
+Earlier local comparisons with different checkout
 paths also failed (+0.303%); using one input checkout reduced but did not remove
 the difference (+0.087% with separately located compiler builds). An extra
 mapper-disabled fast path and boxing the plan pool did not pass the gate and
@@ -862,5 +887,6 @@ replacement was detected by identical binary hashes and excluded entirely.
 `--sequential` was added to the comparison script so these measurements never
 run two heavy builds together; only that mode permits sharing a project path.
 No source, oracle, compiler options or threshold was weakened to obtain a pass.
-The remaining blocker is census-off instruction overhead, not application
-retry classification or JSON-identity correctness.
+Different codegen-unit settings change inlining; the local table does not
+establish a regression under the CI profile. No further layout or mapper
+experiments are retained.

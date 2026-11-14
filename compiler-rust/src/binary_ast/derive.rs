@@ -270,7 +270,7 @@ pub fn signature_uses_spice_mapper(items: &[SignatureItem], arena: &ParseArena) 
 /// Expand built-in derives on a structure item. O(generated syntax plus mapper
 /// work), with O(1) timing overhead only when the census is enabled.
 pub fn expand_structure_item_with_mapper(item: &StructureItem, arena: &mut ParseArena, active: bool) -> Result<Vec<StructureItem>, String> {
-    expand_structure_item_in_scope(item, arena, active, false)
+    expand_structure_item_in_scope(item, arena, active, active && shadows_result(item, arena))
 }
 
 /// Whether this item introduces a local result-constructor name.
