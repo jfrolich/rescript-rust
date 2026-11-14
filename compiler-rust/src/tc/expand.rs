@@ -15,7 +15,7 @@
 //! (`simple_abbrevs`, compiler/ml/ctype.ml:197-202), and slot 0 of a nullary
 //! node stays `NONE`.
 
-use super::graph::{CONSTR, GENERIC, NONE, Node, Ty, VAR};
+use super::graph::{CONSTR, GENERIC, LINK, NONE, Node, Ty, VAR};
 use super::segment::{DeclarationKind, PathRow, Segment, SignatureKind};
 use super::template::Template;
 use super::unify::{Checker, Clash};
@@ -492,7 +492,7 @@ impl Checker {
         self.memorize(ty, body, private);
         let level = self.g.level;
         self.g.level = node.level;
-        self.g.instance(manifest.template);
+        self.instance(manifest.template);
         self.g.level = level;
         let mut speculation = None;
         let mut result = Ok(());
@@ -580,14 +580,48 @@ impl Checker {
     /// node into a link (`Some ty when repr ty != t -> Tlink ty`,
     /// compiler/ml/ctype.ml:782). (R3b)
     pub fn instance(&mut self, template: Template) -> Ty {
-        todo!("R3b")
+        if self.memo.live == 0 {
+            return self.g.instance(template);
+        }
+        let first = self.g.nodes.len();
+        let root = self.g.instance(template);
+        self.link_memorized(first);
+        root
     }
 
     /// The general copy with the same lookup: `Graph::copy` when
     /// `memo.live` is 0, otherwise one `find_repr` per copied nullary
     /// constructor. compiler/ml/ctype.ml:744-797. (R3b)
     pub fn copy(&mut self, root: Ty) -> Ty {
-        todo!("R3b")
+        if self.memo.live == 0 {
+            return self.g.copy(root);
+        }
+        let first = self.g.nodes.len();
+        let copied = self.g.copy(root);
+        self.link_memorized(first);
+        copied
+    }
+
+    /// O(nodes made since `first`): one step a node, one `find_repr` per
+    /// nullary constructor. Each hit becomes a link to the memorized node
+    /// (`Some ty when repr ty != t -> Tlink ty`, compiler/ml/ctype.ml:782):
+    /// the memorized node is older than every node made since `first`, so
+    /// the test against the copy itself always holds. A nullary
+    /// constructor has no children, so rewriting it after the copy is the
+    /// copy OCaml makes. The nodes are fresh: no trail entry.
+    fn link_memorized(&mut self, first: usize) {
+        for index in first..self.g.nodes.len() {
+            #[cfg(test)]
+            super::steps::tick();
+            let node = self.g.nodes[index];
+            if node.tag() != CONSTR || node.arity() != 0 {
+                continue;
+            }
+            let target = self.find_repr(node.a);
+            if target.0 != NONE {
+                self.g.nodes[index] = link_node(node, target);
+            }
+        }
     }
 
     /// Lower every node reachable from `root` to at most `level`
@@ -619,7 +653,13 @@ impl Checker {
 /// O(1): a node that is a link to `target`, keeping `node`'s level.
 /// Shared by the memo lookups of `instance` and `copy`. (R3b)
 pub(crate) fn link_node(node: Node, target: Ty) -> Node {
-    todo!("R3b")
+    // The form `Graph::link` writes.
+    Node {
+        head: LINK,
+        a: target.0,
+        b: 0,
+        ..node
+    }
 }
 
 /// Template reference flag of a node relative to an instance's first node

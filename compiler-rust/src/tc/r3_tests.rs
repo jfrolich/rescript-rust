@@ -674,7 +674,6 @@ fn expansion_is_memorized_per_node_and_per_nullary_type() {
 /// a nullary constructor of that type is a link to it; after a cleanup, and
 /// for a type with an argument, a copy is its own node.
 #[test]
-#[ignore = "R3b build"]
 fn a_copy_of_a_nullary_constructor_links_to_the_memorized_node() {
     for ty in [A, NT] {
         let mut c = checker(Mode::Success);
@@ -724,7 +723,6 @@ fn a_copy_of_a_nullary_constructor_links_to_the_memorized_node() {
 /// Decision 4: with an empty nullary memo the memo-aware instance is R1's
 /// instance: the same nodes, the same steps.
 #[test]
-#[ignore = "R3b build"]
 fn instance_with_an_empty_memo_costs_what_r1_costs() {
     let build = |c: &mut Checker| {
         scheme(c, |c| {
