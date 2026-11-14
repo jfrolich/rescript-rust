@@ -16,6 +16,7 @@ struct TextSpan {
     len: u32,
 }
 impl TextSpan {
+    /// Cost: O(B) amortized for B appended spelling bytes; returns the new text span.
     fn append(text: &str, storage: &mut String) -> Self {
         let start = u32::try_from(storage.len()).expect("constant spelling pool");
         storage.push_str(text);
@@ -24,6 +25,7 @@ impl TextSpan {
             len: u32::try_from(text.len()).expect("constant spelling length"),
         }
     }
+    /// Cost: O(1): borrows the recorded byte range without copying its spelling.
     fn get(self, storage: &str) -> &str {
         &storage[self.start as usize..(self.start + self.len) as usize]
     }
@@ -47,6 +49,8 @@ struct Leaf {
     none: bool,
 }
 /// Snapshot scalar values and spelling ranges, never an owned source payload.
+/// Cost: O(B): copies B constructor-literal/comment bytes into scratch; scalar tags and
+/// already-interned strings take O(1). Does not visit compound constant children.
 fn leaf(arena: &crate::bir::Bir, id: ConstId, text: &mut String) -> Leaf {
     use LeafValue as V;
     debug_assert!(text.is_empty());
@@ -181,6 +185,9 @@ impl State {
     }
     /// H12: K:60 compile_constant. An explicit stack also handles deeply nested
     /// constant blocks and options; each constant occurrence is visited once.
+    /// Cost: O(C + E + B): visits C constant occurrences and E child edges with enter/rebuild
+    /// frames, normalizes/copies B spelling bytes, and pushes the resulting J nodes and
+    /// operand runs. Repeated constant handles count as separate occurrences.
     pub(super) fn constant(&mut self, root: ConstId) -> NodeId {
         let mut work = std::mem::take(&mut self.constant_work);
         let mut values = std::mem::take(&mut self.constant_values);

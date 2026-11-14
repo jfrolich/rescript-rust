@@ -230,6 +230,8 @@ impl State {
 /// X: external_module_ident_name / js_id_name_of_hint_name / collect_start /
 /// collect_next. O(hint bytes); one output string per distinct module binding.
 fn external_binding_name_into(name: &str, hint: &ModuleBindName, result: &mut String) {
+    /// Cost: O(B): decodes the first character, appends its ASCII uppercase form and copies
+    /// the remaining B bytes to the caller buffer.
     fn capitalize(s: &str, result: &mut String) {
         let mut chars = s.chars();
         if let Some(c) = chars.next() { result.push(c.to_ascii_uppercase()); result.push_str(chars.as_str()); }

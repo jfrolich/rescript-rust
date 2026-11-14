@@ -54,6 +54,9 @@ impl State {
 
     /// A:116 evaluate_now and A:178 evaluate_all_now. An explicit work stack
     /// preserves literal shape and visits held literal elements left to right.
+    /// Cost: O(V + E + B + J): walks V held literal/sequence occurrences and E child/property
+    /// slots, appends B bindings/statements, plus J JS-normalizer and released-node visits.
+    /// Uses enter/rebuild frames rather than copying whole literal trees.
     fn evaluate_now(&mut self, root: NodeId) -> (Span, NodeId) {
         let mut evaluation = std::mem::take(&mut self.evaluation);
         let Evaluation { work, values, statements } = &mut evaluation;

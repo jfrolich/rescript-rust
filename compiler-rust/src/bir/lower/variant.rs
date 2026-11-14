@@ -27,6 +27,9 @@ pub(super) struct Metadata {
     numbers: Vec<[Option<crate::bir::ConstId>; 2]>,
 }
 /// Import immutable spelling/number descriptors into unit pools, never plans.
+/// Cost: Expected O(H + K + B + U): scans H switch headers and K keys, normalizes/interns B
+/// literal/name bytes, initializes U new dense numeric rows, and appends one converted key
+/// per named case. Hash collision comparisons add their byte cost.
 pub(super) fn prepare(arena: &mut Bir) -> Metadata {
     let switches = std::mem::take(&mut arena.pools.switches);
     let mut keys = std::mem::take(&mut arena.pools.switch_keys);
@@ -84,18 +87,24 @@ pub(super) fn prepare(arena: &mut Bir) -> Metadata {
 #[derive(Default)]
 struct Sides([Option<Side>; 2]);
 impl Sides {
+    /// Cost: O(1): inspects at most the two fixed side slots and writes the first empty one.
     fn push(&mut self, side: Side) {
         let slot = self.0.iter_mut().find(|side| side.is_none()).expect("at most two named sides");
         *slot = Some(side);
     }
+    /// Cost: O(1): tests the two fixed side slots.
     fn len(&self) -> usize { usize::from(self.0[0].is_some()) + usize::from(self.0[1].is_some()) }
+    /// Cost: O(1): constructs an iterator over at most two optional side slots; consuming it
+    /// inspects at most two slots.
     fn iter(&self) -> impl Iterator<Item = &Side> { self.0.iter().flatten() }
 }
 impl std::ops::Index<usize> for Sides {
     type Output = Side;
+    /// Cost: O(1): indexes and unwraps one of the two fixed side slots.
     fn index(&self, index: usize) -> &Side { self.0[index].as_ref().expect("initialized named side") }
 }
 impl std::ops::IndexMut<usize> for Sides {
+    /// Cost: O(1): mutably indexes and unwraps one of the two fixed side slots.
     fn index_mut(&mut self, index: usize) -> &mut Side { self.0[index].as_mut().expect("initialized named side") }
 }
 

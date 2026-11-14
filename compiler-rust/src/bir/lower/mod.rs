@@ -205,6 +205,9 @@ pub trait ProbeRules {
         output
     }
     /// K0/K2: C:119 append / C:4715 append_effect_output; combine child outputs.
+    /// Cost: implementation-specific child-output combination: consumes the supplied
+    /// completed outputs and delegates realization/statement/normalizer work, never requests
+    /// their source compilation again.
     fn finish(
         &mut self,
         cx: Cx,
@@ -237,6 +240,9 @@ impl<R> SourceProbe<R> {
     /// K1/K6: C:1529 compile_expr / C:5144 compile_if_return_output.
     /// A source node is entered once. Finish frames receive the saved operands
     /// and child outputs, never a request to compile the same child again.
+    /// Cost: O(N + E) scheduling events for N visited source occurrences and E scheduled
+    /// edges, plus enter/child/finish callback work. Pushes each child continuation once and
+    /// drains completed outputs once.
     pub fn probe(
         &mut self,
         rules: &mut impl ProbeRules<Resume = R>,
@@ -515,6 +521,10 @@ struct State {
 impl State {
     /// N1: C:481 new. Transfer cold pools, while source hot nodes/list operands
     /// remain readable. Variables retain source identities, never global stamps.
+    /// Cost: O(N + V + F + G) initialization for source nodes, variables, function headers
+    /// and globals, plus untagged::prepare and variant::prepare metadata work. Reserves
+    /// output node/list/switch domains from imported counts; moves cold pools rather than
+    /// cloning them.
     fn new(mut input: super::bridge::Imported) -> Self {
         let source_nodes = input.arena.nodes.len();
         let source_operands = input.arena.lists.slot_count();
@@ -672,6 +682,8 @@ impl State {
         super::j::pure_expression(&mut self.arena, view, aux)
     }
     /// K1: C:1529 compile_expr. SourceProbe owns the depth-independent traversal.
+    /// Cost: SourceProbe::probe cost: O(N + E) traversal events plus lowering callbacks;
+    /// lends and restores the retained traversal buffers without an additional source walk.
     fn probe(&mut self, cx: Cx, node: NodeId) -> Result<Probed, Unsupported> {
         let mut traversal = std::mem::take(&mut self.traversal);
         let before = traversal.steps;
@@ -800,6 +812,10 @@ impl ProbeRules for State {
     fn source_leave(&mut self, output: &Probed) { self.label_leave(output); }
     type Resume = expr::Resume;
     /// K1/H12: C:1529 compile_expr and K:60 compile_constant.
+    /// Cost: O(1) tag dispatch plus the selected preparer: constant occurrences, application
+    /// spine/arguments, recursive binders, function parameters, or switch metadata. Extending
+    /// dense tables costs their newly initialized rows; descendant lowering is scheduled, not
+    /// performed twice.
     fn enter(&mut self, cx: Cx, node: NodeId) -> Result<ProbePlan<Self::Resume>, Unsupported> {
         let value = match self.source.view(node) {
             View::Var { var } => self.pure_expression(View::Var { var }, 0),

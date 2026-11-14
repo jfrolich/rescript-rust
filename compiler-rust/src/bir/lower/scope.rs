@@ -120,6 +120,8 @@ impl Scope {
     }
 
     /// Initialize source rows with reserved room for known generated bindings.
+    /// Cost: O(V): initializes V variable rows in each of three columns, with reserved
+    /// capacity C >= V; no source nodes or use sites are walked.
     pub(super) fn with_capacity(variables: usize, capacity: usize) -> Self {
         assert!(variables <= capacity);
         let mut uses = Vec::with_capacity(capacity);

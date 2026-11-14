@@ -42,6 +42,9 @@ impl State {
     }
     /// C:1144 compile_apply_call_inner: flatten Na spines without repeatedly
     /// copying the growing argument prefix. Arguments retain left-to-right order.
+    /// Cost: O(A + D) spine flattening and operand pushes for A arguments across D nested
+    /// applications, plus resolver lookup/decoding and any inline_external_function work.
+    /// Each argument enters the reversed buffer once.
     pub(super) fn application(
         &mut self,
         cx: Cx,
@@ -114,8 +117,11 @@ impl State {
         }))
     }
 
-    /// C:1377 compile_external_field_apply. O(imported function + beta work
-    /// + newly allocated variables), using the existing L beta reducer.
+    /// C:1377 compile_external_field_apply; reuses immutable imported templates.
+    /// Cost: O(F + A + V + G + R): F template nodes imported/analysed on first use, A
+    /// arguments detached, V newly synchronized/renamed variables, G newly seen globals, R
+    /// beta-copy and normalization node visits. Rewrites may revisit nodes; R is not claimed
+    /// linear in the original body.
     fn inline_external_function(&mut self, _cx: Cx, key: (crate::bir::ImportId, crate::bir::StrId), function: &crate::lambda::LFunction, args: &[NodeId]) -> Result<NodeId, Unsupported> {
         use crate::bir::{bridge, engine::Engine, l::beta};
         // Align source identities with temporaries already allocated by J.
@@ -212,6 +218,9 @@ impl State {
 
     /// C:1129 compile_apply_call, C:6648 declare_compiled, C:6667
     /// assign_compiled, C:6658 return_compiled: one call, then continuation.
+    /// Cost: O(A + H + S + J): consumes A child outputs, pops H dead call slots, sequences S
+    /// held/statement slots, then call/eta/tail construction and J JS-normalizer/release
+    /// visits. Each argument is appended to retained buffers, not cloned as a subtree.
     pub(super) fn finish_application(
         &mut self,
         cx: Cx,
@@ -319,6 +328,9 @@ impl State {
 
     /// C:1222 resolve_cmj_module_field_arity. Missing and submodule entries are
     /// unknown arity; no hash iteration contributes to output order.
+    /// Cost: Expected O(1) identity-cache probe; on a miss adds field-name hashing, resolver
+    /// module lookup/decoding, and O(K) copying of the K arity segments. Cache iteration
+    /// never determines output.
     fn resolve_cmj_module_field_arity(
         &mut self,
         module: crate::bir::ImportId,
@@ -335,6 +347,8 @@ impl State {
         arity
     }
 
+    /// Cost: O(K): appends the K arity segments and returns their span; unknown arity
+    /// performs no append.
     fn store_call_arity(&mut self, arity: &crate::lambda::lam_arity::Arity) -> Option<AritySpan> {
         let crate::lambda::lam_arity::Arity::Info { arities, .. } = arity else { return None };
         let start = u32::try_from(self.call_arities.len()).expect("arity pool");
@@ -355,6 +369,9 @@ impl State {
 
     /// C:1341 apply_with_arity: consume saturated groups once, then eta-expand
     /// a strictly pure partial application with fresh parameters left to right.
+    /// Cost: O(A + G + P): reads G arity groups, appends A supplied operands to call lists,
+    /// and creates P missing parameters/Var nodes for a pure partial application. Saturated
+    /// groups consume disjoint argument slices.
     fn apply_with_arity(
         &mut self,
         mut callee: NodeId,

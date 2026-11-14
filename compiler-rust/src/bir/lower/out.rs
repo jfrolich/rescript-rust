@@ -63,6 +63,8 @@ pub struct StatementStack {
 }
 impl StatementStack {
     /// Reserve statement and hole slots from the imported output-node estimate.
+    /// Cost: Reserves O(N) statement/hole slots for the imported output estimate N; no
+    /// statements are visited or initialized.
     pub(super) fn with_capacity(slots: usize) -> Self {
         Self { slots: Vec::with_capacity(slots), ..Self::default() }
     }
@@ -414,6 +416,8 @@ enum RealizeWork {
 impl FreePool {
     /// Deferred expressions and their iterative realization share the source
     /// occurrence bound; no separate allocation is needed for each expression.
+    /// Cost: Reserves O(N) deferred-node/work/output slots for N imported occurrences; no
+    /// deferred expressions are visited or initialized.
     pub(super) fn with_source_capacity(nodes: usize) -> Self {
         Self { nodes: Vec::with_capacity(nodes), work: Vec::with_capacity(nodes),
             outputs: Vec::with_capacity(nodes), ..Self::default() }
@@ -471,6 +475,9 @@ impl FreePool {
     }
     /// K2/K6: C:4715 append_effect_output / C:5144 compile_if_return_output.
     /// Explicit postorder stack: each Free is consumed once, even at depth 10k.
+    /// Cost: O(F + S + J): consumes F deferred occurrences with iterative postorder frames,
+    /// transfers S statement slots and pays J normalization/release visits. A consumed Free
+    /// is never realized again.
     pub fn realize(&mut self, cx: Cx, probed: Probed, emit: &mut impl Realizer) -> Out {
         let root = match probed {
             Probed::Out(out) => return out,

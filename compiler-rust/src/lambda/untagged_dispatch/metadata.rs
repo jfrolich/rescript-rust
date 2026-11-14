@@ -139,7 +139,8 @@ impl Index {
         self.refresh(pivot);
         pivot
     }
-    /// Cost: O(log U) link/height updates; one append and at most two rotations.
+    /// Cost: O(log U) link/height updates and at most two rotations, plus one
+    /// amortized O(1) row append (O(U) if its backing pool must relocate).
     /// Appends preserve dense metadata handles, with no sorted-vector shifts.
     fn insert(&mut self, (parent, side): (u32, usize), id: u32) {
         assert_eq!(id as usize, self.nodes.len());
@@ -184,8 +185,8 @@ pub(crate) struct Metadata {
     instance_index: Index,
 }
 impl Metadata {
-    /// Cost: O(B + A) to count class name bytes and ancestors; reserves their
-    /// text, instance and ancestry pools before importing the layout's K kinds.
+    /// Cost: O(K + A) length reads for K kind descriptors and A ancestor names;
+    /// reserves their B spelling bytes and the instance/ancestry rows.
     pub(crate) fn reserve_kinds<'a>(&mut self, kinds: impl Iterator<Item = &'a BlockType>) {
         let (mut instances, mut names, mut bytes, mut ancestors) = (0, 0, 0, 0);
         for kind in kinds {
@@ -207,9 +208,9 @@ impl Metadata {
         self.ancestors.reserve_exact(ancestors);
     }
 
-    /// O(source literal bytes/counts), no interning: reserve the known import
-    /// domain before visiting its literals. Bounds include both source spelling
-    /// and canonical equality spelling; float hex keys fit in forty bytes.
+    /// Cost: O(L) tag/length reads for L source literals; reserves B source and
+    /// canonical spelling bytes plus dense index rows, without interning. Float
+    /// hex keys fit in forty bytes; existing pool relocation adds its row/byte cost.
     pub(crate) fn reserve_literals<'a>(&mut self, tags: impl Iterator<Item = &'a LiteralTag>) {
         let (mut count, mut bytes, mut encoding) = (0, 0, 0);
         for tag in tags {
@@ -344,7 +345,8 @@ impl Metadata {
             .name
             .is_some_and(|name| self.ancestors(a).contains(&name))
     }
-    /// Cost: O(class name and ancestor spelling bytes), once per unique default-boundary payload.
+    /// Cost: O(B + A): copies B class/ancestor name bytes into A ancestor strings,
+    /// once at the default emitter compatibility boundary; arrays copy one identity.
     pub(crate) fn owned_instance(&self, id: InstanceId) -> Instance {
         use crate::types::variant_runtime::{ClassBlocks, ShapeAllocation};
         match self.instances[id.0 as usize].name {

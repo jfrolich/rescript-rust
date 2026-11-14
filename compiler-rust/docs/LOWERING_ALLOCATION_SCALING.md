@@ -375,3 +375,49 @@ Command: `CARGO_INCREMENTAL=0 cargo test --manifest-path compiler-rust/Cargo.tom
 ```text
 test result: ok. 774 passed; 0 failed; 0 ignored; 0 measured; 1720 filtered out; finished in 87.79s
 ```
+
+## Review extension: cost-note coverage
+
+Each new or rewritten non-test function in the shared planner, its metadata and
+BIR lowering now states what it reads, walks, copies or appends. Scalar lookups
+are distinguished from iterator consumption, pool relocation, metadata encoding,
+normalizer/release visits and arbitrary equality callbacks. In particular,
+payload instance ordering retains the reference algorithm's worst-case cubic
+candidate scans times ancestry length; missing-arm selection may revisit its
+payload plan for each unnamed literal. These are not described as linear walks.
+
+Command: `python3 scripts/check_lowering_cost_docs.py --self-test`
+
+```text
+cost scanner self-tests: passed
+cost docs: production functions=472; changed/new=188; missing/generic=0
+```
+
+The lexical checker compares qualified function bodies with the configured base,
+excludes test-only items and trait declarations, preserves literal contents, and
+rejects missing notes and the old generic pool-push sentence. It checks coverage,
+not the truth of asymptotic bounds: those require reading the implementation.
+
+Command: `python3 scripts/check_lowering_cost_docs.py --base b9fbbda06`
+
+```text
+cost docs: production functions=472; changed/new=0; missing/generic=0
+```
+
+This last item changes documentation and its checker, not executable Rust bodies.
+
+## Review extension: trunk literal normalization tests
+
+Both reference functions are copied verbatim from the recorded trunk snapshot
+under test-only modules; neither production implementation changed in this item.
+
+Command: `CARGO_INCREMENTAL=0 cargo test --manifest-path compiler-rust/Cargo.toml trunk_literal_reference -- --nocapture --test-threads=1`
+
+```text
+bigint trunk comparison: table=19; generated=1000; owned and scratch agree
+hex float trunk comparison: table=15; generated raw bit patterns=10000; all agree
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2490 filtered out; finished in 0.02s
+```
+
+All requested edge inputs are explicit table entries. Fixed seeds and generators
+are in the tests; failures print the input string or raw float bits.

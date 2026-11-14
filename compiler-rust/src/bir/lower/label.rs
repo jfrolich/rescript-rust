@@ -137,6 +137,9 @@ fn class(cont: Cont) -> usize {
 impl Schedule {
     /// Initial traversal capacity from the imported occurrence count. Event
     /// tables stay lazy: units without labels do not need those rows.
+    /// Cost: Reserves O(N) slots in each of three scheduling spines for N imported
+    /// occurrences; initializes only their headers, with allocator-dependent capacity
+    /// provision and no source walk.
     pub(super) fn with_source_capacity(nodes: usize) -> Self {
         Self { frames: Vec::with_capacity(nodes), values: Vec::with_capacity(nodes),
             edges: Vec::with_capacity(nodes), ..Self::default() }

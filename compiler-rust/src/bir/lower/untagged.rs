@@ -52,6 +52,8 @@ struct Run<T> {
 }
 impl<T> Run<T> {
     /// O(1): form a checked pool run.
+    /// Cost: O(1): checks/converts two span endpoints and creates a typed marker; no elements
+    /// are visited.
     fn new(start: usize, len: usize, limit: usize) -> Self {
         u32::try_from(start.checked_add(limit).unwrap()).expect("untagged pool capacity");
         assert!(len <= limit);
@@ -63,6 +65,7 @@ impl<T> Run<T> {
         }
     }
     /// O(1): current initialized range.
+    /// Cost: O(1): computes the start/end of this initialized typed span.
     fn range(&self) -> std::ops::Range<usize> {
         self.start as usize..(self.start + self.len) as usize
     }
@@ -71,6 +74,7 @@ struct Pool<T> {
     values: Vec<T>,
 }
 impl<T> Default for Pool<T> {
+    /// Cost: O(1): constructs an empty typed slot vector without allocating.
     fn default() -> Self {
         Self { values: Vec::new() }
     }
@@ -142,6 +146,8 @@ struct ImportedSpan<T> {
     marker: std::marker::PhantomData<T>,
 }
 impl<T> ImportedSpan<T> {
+    /// Cost: O(1): checks/converts two span endpoints and creates a typed marker; no elements
+    /// are visited.
     fn new(start: usize, end: usize) -> Self {
         Self {
             start: u32::try_from(start).unwrap(),
@@ -149,6 +155,7 @@ impl<T> ImportedSpan<T> {
             marker: std::marker::PhantomData,
         }
     }
+    /// Cost: O(1): computes the start/end of this initialized typed span.
     fn range(&self) -> std::ops::Range<usize> {
         self.start as usize..(self.start + self.len) as usize
     }
@@ -172,6 +179,10 @@ struct LiteralEmission {
 }
 
 /// Metadata-only import: no grouping, planning or simplification runs here.
+/// Cost: O(H + K + B log U + A log I + E) amortized: scans H switch headers and K case/fact
+/// entries, interns B spelling bytes among U texts and A ancestry entries among I instances,
+/// then creates E literal-emission rows. Reserves known unit domains; performs no dispatch
+/// planning.
 pub(super) fn prepare(arena: &mut Bir) -> (Storage, dispatch::Plan<u32>) {
     let mut storage = Storage::default();
     let mut graph = dispatch::Plan::default();

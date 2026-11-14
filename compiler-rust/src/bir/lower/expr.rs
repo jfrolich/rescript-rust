@@ -36,6 +36,9 @@ pub(super) enum Resume {
 impl State {
     /// K4/K2/K10: C:2411 compile_let_binding_output, C:4603 compile_effect_output,
     /// C:1997 with_function_scope. Preserve order and reset function boundaries.
+    /// Cost: O(C): appends the C immediate children selected by the resume kind (arguments,
+    /// scheduled bodies, or fixed let/sequence operands). Does not recursively lower those
+    /// children.
     pub(super) fn expression_children(
         &self,
         cx: Cx,
@@ -174,6 +177,9 @@ impl State {
         }
     }
     /// K0/K2/K10: C:119 append, C:4715 append_effect_output, C:562 function_expr.
+    /// Cost: O(C + S + F + J): consumes completed child outputs C, transfers statement slots
+    /// S, realizes deferred nodes F, and pays J selected construct-finisher/JS-
+    /// normalizer/release work. Dispatch itself does not rewalk source children.
     pub(super) fn finish_expression(
         &mut self,
         cx: Cx,
@@ -307,6 +313,8 @@ impl State {
     }
     /// K2: O:339 push_effect_expression. Calls may have effects; pure values
     /// are removed and comma values are split before statements are emitted.
+    /// Cost: O(R): releases the R nodes owned by a discarded strict expression; the purity
+    /// decision reads one cached flag.
     pub(super) fn drop_pure_effect(&mut self, value: NodeId) {
         let mut effects = std::mem::take(&mut self.scratch);
         crate::bir::j::norm::jm14_push_effect_expression(&mut self.arena, value, &mut effects);
