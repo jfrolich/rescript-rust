@@ -744,3 +744,57 @@ Acceptance after classification:
 - Classification tests cover both encoder annotations and decode-only forms;
   the dense reason counts merge correctly at 10,000 bindings. The summary
   accepts both old eleven-bucket and new twelve-bucket census records.
+
+#### Inclusive obligation profile
+
+A census-disabled, one-worker application build was profiled with Callgrind's
+instruction counter (Valgrind 3.22), collecting only inside temporary non-inlined
+wrappers around the six obligation arms. Each wrapper included its callees;
+`--separate-callers=2` separated shared checker functions from ordinary typing.
+The wrappers and their `black_box` return barriers were removed after profiling.
+This is attribution evidence, not a production instruction-gate measurement.
+
+| Obligation | Inclusive instructions | Share of collected work |
+|---|---:|---:|
+| Value | 1,279,549,876 | 59.46% |
+| Constructor | 428,322,821 | 19.90% |
+| Label | 367,978,833 | 17.10% |
+| Type | 53,159,685 | 2.47% |
+| Literal | 22,469,497 | 1.04% |
+| Equality | 566,609 | 0.03% |
+| Total | 2,152,047,321 | 100% |
+
+Within Value, inclusive unification accounts for 604,966,456 instructions,
+instantiation for 333,003,351, and skeleton construction for 100,341,035. These
+are children of the Value total, not additional costs. The first two perform
+required inference work; no lookup, instance, usage mark or unification was
+removed to improve a measurement.
+
+The same instrumented binary compiled an isolated generated record with two
+and 10,000 integer fields. Both runs recompiled only that module. Subtracting
+the two-field total and dividing by 9,998 gives the marginal inclusive cost:
+
+| Obligation | Instructions per added field |
+|---|---:|
+| Value | 233,986.08 |
+| Constructor | 63,241.52 |
+| Label | 61,593.54 |
+| Type | 4,820.99 |
+
+The existing constructor-description sharing change removes repeated metadata
+copies without skipping any inference operations; its isolated measurement
+above saves 0.0302945%. Two further attempts to reduce skeleton construction's
+temporary vectors were tested and **not retained**:
+
+- Borrowed constructor APIs in `TypeContext`: 65,028,457,344 → 65,062,460,883
+  instructions (**+0.0522902%**), identical 3,980 outputs.
+- A helper local to skeleton construction: 65,032,097,813 → 65,033,845,066
+  (**+0.0026868%**), identical 3,980 outputs. The candidate count was restarted
+  after the benchmark command timed out; it used the same prepared runtime and
+  clean-build command, not a baseline from another experiment.
+
+Hyperfine, one worker, one warmup and five clean runs, also gave no reason to
+retain the local helper: base 12.415 ± 0.342 s (12.089–12.914), candidate
+18.909 ± 0.316 s (18.538–19.363). The candidate's five runs were restarted after
+the combined benchmark timed out; these timings do not establish a speedup.
+The retained production code is unchanged by these experiments.
