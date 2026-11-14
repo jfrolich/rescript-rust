@@ -130,8 +130,13 @@ pub(crate) struct Log {
     /// The site ranges `[start, end)` of the closed direct children of the
     /// open scopes, innermost run last.
     children: Vec<[u32; 2]>,
+    /// The nodes `adopt` has still to read. Empty between calls.
+    pending: Vec<NodeId>,
+    /// Nodes `adopt` read: what the one walk over an expression costs.
+    pub(crate) adopted_nodes: usize,
     /// Sites read, run entries read, children skipped, comparisons of the
-    /// sort, rows copied.
+    /// sort, rows copied, nodes adopted and free entries taken over by
+    /// `adopt`.
     pub(crate) steps: usize,
 }
 
@@ -239,6 +244,33 @@ pub(crate) fn open(bir: &mut Bir) -> ScopeId {
 /// whole unit, whatever the nesting.
 pub(crate) fn close(bir: &mut Bir, function: FuncId) -> ScopeId {
     let _ = (bir, function);
+    todo!("T5b-1")
+}
+
+/// An expression that was built before the innermost open scope opened
+/// moves into that scope's function: call it once per such expression,
+/// between `open` and `close` (the eta-expansion of a partial application,
+/// `apply_with_arity`: the callee and each remaining argument; the dispatch
+/// function of an external's argument, `external_dispatch`: the argument).
+/// Its references were recorded as sites before the scope opened, between
+/// the sites of statements that stay outside, so no site range describes
+/// them (THREE_TREES 11.4, "T5 part B as redesigned", G10).
+///
+/// Reads the subtree of `node` once: a `Var` joins the open scope's run
+/// unless that scope saw the variable; a `JQualified` joins it as an import
+/// in the same way; a function literal is not entered: the free entries of
+/// its closed row join the run (a literal without a closed row is a bug of
+/// the caller: asserts). The enclosing scope needs nothing: it read the
+/// moved references as its own sites, and `close` hands this scope's free
+/// entries up as for any function.
+///
+/// This is the one place where an expression is read for a reference.
+/// Cost: one step per node of the subtree outside function literals, one
+/// per function literal and one per free entry of each; `adopted_nodes`
+/// grows by the nodes read. Nothing is allocated once `pending` has its
+/// capacity. Asserts that a function scope is open.
+pub(crate) fn adopt(bir: &mut Bir, node: NodeId) {
+    let _ = (bir, node);
     todo!("T5b-1")
 }
 
@@ -399,7 +431,8 @@ mod tests {
         assert!(log.rows.is_empty() && log.free.is_empty() && log.of_function.is_empty());
         assert!(log.home.is_empty() && log.seen.is_empty() && log.seen_import.is_empty());
         assert!(log.open.is_empty() && log.run.is_empty() && log.children.is_empty());
-        assert_eq!(log.steps, 0);
+        assert!(log.pending.is_empty());
+        assert_eq!((log.steps, log.adopted_nodes), (0, 0));
         let scratch = Scratch::default();
         assert!(scratch.marks.is_empty() && scratch.next.is_empty() && scratch.frames.is_empty() && scratch.reservation.is_empty());
         let program = Program { imports: &[], reservations: &[], exports: &[], raw: &[] };
@@ -953,6 +986,203 @@ mod tests {
         assert!(large <= 10_000 * 8, "{large}");
         let more_sites = steps_of_nesting(10_000, 3);
         assert_eq!(more_sites - large, 2 * 10_000);
+    }
+
+    /// `let f = param => { return param' => [[param], param'] }`, where
+    /// `[param]` was built before the inner scope opened (the eta-expansion
+    /// of a partial application, `apply_with_arity`): the unit, its
+    /// statement, the rows of `f` and the expansion, `param` and `param'`.
+    fn partial_application() -> (Unit, NodeId, [ScopeId; 2], [VarId; 2]) {
+        let mut u = Unit::new();
+        let (f, outer_param) = (u.local("f"), u.local("param"));
+        let outer = u.header(Some(outer_param), 1);
+        open(&mut u.b);
+        let moved = u.read(&[outer_param]);
+        open(&mut u.b);
+        let fresh = u.local("param");
+        let inner = u.header(Some(fresh), 1);
+        adopt(&mut u.b, moved);
+        let own = u.b.new_node(View::Var { var: fresh }, 0);
+        let call = u.b.new_node(View::JArray { values: &[moved, own] }, 0);
+        let result = u.ret(call);
+        let (expansion, inner_scope) = u.function(inner, &[result]);
+        let result = u.ret(expansion);
+        let (f_value, outer_scope) = u.function(outer, &[result]);
+        let declare_f = u.declare(f, f_value);
+        (u, declare_f, [outer_scope, inner_scope], [outer_param, fresh])
+    }
+
+    #[test]
+    #[ignore = "T5b-1 build"]
+    fn an_expression_built_before_the_scope_opened_is_adopted() {
+        // G10: the sites of `[param]` are before the scope's range; without
+        // `adopt` the expansion's free list is empty.
+        let (u, _, [outer, inner], [outer_param, fresh]) = partial_application();
+        assert_eq!(u.free(inner), [FreeRef::var(outer_param)]);
+        assert_eq!(u.free(outer), []);
+        assert_eq!((u.log().home(outer_param), u.log().home(fresh)), (outer, inner));
+        // The array and the reference.
+        assert_eq!(u.log().adopted_nodes, 2);
+    }
+
+    #[test]
+    #[ignore = "T5b-2 build"]
+    fn the_fresh_parameter_of_a_partial_application_does_not_take_the_name_of_an_adopted_local() {
+        // `emit::naming`,
+        // `a_function_inherits_the_names_of_what_an_expression_moved_into_it_reads`.
+        let (mut u, statement, _, [outer_param, fresh]) = partial_application();
+        let (names, replayed) = u.names(&[statement], &[]);
+        assert_eq!((name(&names, outer_param), name(&names, fresh)), (Some("param"), Some("param$1")));
+        assert_eq!((replayed.ambiguous_orders, replayed.unnamed_references), (0, 0));
+    }
+
+    /// `let f = () => { let v = null; return param => [() => { let v' = [v];
+    /// return [v'] }, param] }`, where the inner literal was closed before
+    /// the expansion's scope opened: the unit, its statement, the rows of
+    /// `f`, the literal and the expansion, `v` and `v'`; and the steps and
+    /// nodes of the one `adopt`.
+    fn adopted_literal() -> (Unit, NodeId, [ScopeId; 3], [VarId; 2], [usize; 2]) {
+        let mut u = Unit::new();
+        let (f, v, inner_v) = (u.local("f"), u.local("v"), u.local("v"));
+        let outer = u.header(None, 0);
+        open(&mut u.b);
+        let null = u.b.new_node(View::JNull, 0);
+        let declare_v = u.declare(v, null);
+        let literal_header = u.header(None, 0);
+        open(&mut u.b);
+        let captured = u.read(&[v]);
+        let declare_inner = u.declare(inner_v, captured);
+        let result = u.read(&[inner_v]);
+        let result = u.ret(result);
+        let (literal, literal_scope) = u.function(literal_header, &[declare_inner, result]);
+        open(&mut u.b);
+        let fresh = u.local("param");
+        let inner = u.header(Some(fresh), 1);
+        let before = (u.log().steps, u.log().adopted_nodes);
+        adopt(&mut u.b, literal);
+        let cost = [u.log().steps - before.0, u.log().adopted_nodes - before.1];
+        let own = u.b.new_node(View::Var { var: fresh }, 0);
+        let call = u.b.new_node(View::JArray { values: &[literal, own] }, 0);
+        let result = u.ret(call);
+        let (expansion, inner_scope) = u.function(inner, &[result]);
+        let result = u.ret(expansion);
+        let (f_value, outer_scope) = u.function(outer, &[declare_v, result]);
+        let declare_f = u.declare(f, f_value);
+        (u, declare_f, [outer_scope, literal_scope, inner_scope], [v, inner_v], cost)
+    }
+
+    #[test]
+    #[ignore = "T5b-1 build"]
+    fn an_adopted_function_literal_gives_its_free_entries_and_is_not_entered() {
+        let (u, _, [outer, literal, inner], [v, _], cost) = adopted_literal();
+        assert_eq!(u.free(literal), [FreeRef::var(v)]);
+        assert_eq!(u.free(inner), [FreeRef::var(v)]);
+        assert_eq!(u.free(outer), []);
+        // The literal and its one free entry; its body is not read.
+        assert_eq!(cost, [2, 1]);
+    }
+
+    #[test]
+    #[ignore = "T5b-2 build"]
+    fn a_function_literal_inside_an_adopted_expression_is_replayed_where_it_stands() {
+        // The literal stands in the expansion's `return`: its scope is
+        // entered inside the expansion's and inherits the names of `v`.
+        let (mut u, statement, _, [v, inner_v], _) = adopted_literal();
+        let (names, replayed) = u.names(&[statement], &[]);
+        assert_eq!((name(&names, v), name(&names, inner_v)), (Some("v"), Some("v$1")));
+        assert_eq!((replayed.ambiguous_orders, replayed.unnamed_references), (0, 0));
+    }
+
+    #[test]
+    #[ignore = "T5b-1 build"]
+    fn the_scrutinee_of_a_dispatch_function_is_adopted() {
+        // `external_dispatch`: `(() => { switch (p) {} })()` inside
+        // `p => ...`; the scrutinee was lowered before the function.
+        let mut u = Unit::new();
+        let p = u.local("p");
+        let outer = u.header(Some(p), 1);
+        open(&mut u.b);
+        let arg = u.b.new_node(View::Var { var: p }, 0);
+        open(&mut u.b);
+        adopt(&mut u.b, arg);
+        let header = u.b.switch_header(crate::bir::SwitchHeader {
+            keys: Vec::new(),
+            clauses: Vec::new(),
+            constants: 0,
+            consts_full: false,
+            blocks_full: false,
+            has_default: false,
+            dispatch: crate::lambda::SwitchDispatch::Direct,
+        });
+        let switch = u.b.new_node(View::SSwitch { scrutinee: arg, actions: &[], header }, 1);
+        let dispatch = u.header(None, 0);
+        let (function, inner_scope) = u.function(dispatch, &[switch]);
+        let result = u.ret(function);
+        let (_, outer_scope) = u.function(outer, &[result]);
+        assert_eq!(u.free(inner_scope), [FreeRef::var(p)]);
+        assert_eq!(u.free(outer_scope), []);
+        assert_eq!(u.log().adopted_nodes, 1);
+    }
+
+    #[test]
+    #[ignore = "T5b-1 build"]
+    fn a_module_reference_in_an_adopted_expression_is_free_in_the_function() {
+        let mut u = Unit::new();
+        let outer = u.header(None, 0);
+        open(&mut u.b);
+        let module = u.b.new_node(View::JQualified { module: ImportId(0), member: None }, 0);
+        open(&mut u.b);
+        adopt(&mut u.b, module);
+        let result = u.ret(module);
+        let inner = u.header(None, 0);
+        let (function, inner_scope) = u.function(inner, &[result]);
+        let result = u.ret(function);
+        let (_, outer_scope) = u.function(outer, &[result]);
+        assert_eq!(u.free(inner_scope), [FreeRef::import(ImportId(0))]);
+        assert_eq!(u.free(outer_scope), [FreeRef::import(ImportId(0))]);
+    }
+
+    /// The steps and nodes of adopting `[x, x, ...]` with `references`
+    /// reads; with `in_literal` the reads are the body of a closed function
+    /// literal and the literal is adopted.
+    fn cost_of_adopting(references: usize, in_literal: bool) -> [usize; 2] {
+        let mut u = Unit::new();
+        let x = u.local("x");
+        let outer = u.header(None, 0);
+        open(&mut u.b);
+        let reads = vec![x; references];
+        let moved = if in_literal {
+            let header = u.header(None, 0);
+            open(&mut u.b);
+            let body = u.read(&reads);
+            let body = u.ret(body);
+            u.function(header, &[body]).0
+        } else {
+            u.read(&reads)
+        };
+        open(&mut u.b);
+        let before = (u.log().steps, u.log().adopted_nodes);
+        adopt(&mut u.b, moved);
+        let cost = [u.log().steps - before.0, u.log().adopted_nodes - before.1];
+        let result = u.ret(moved);
+        let inner = u.header(None, 0);
+        let (function, scope) = u.function(inner, &[result]);
+        assert_eq!(u.free(scope), [FreeRef::var(x)]);
+        let result = u.ret(function);
+        u.function(outer, &[result]);
+        cost
+    }
+
+    #[test]
+    #[ignore = "T5b-1 build"]
+    fn ten_thousand_adopted_nodes_cost_one_step_each_and_a_literal_its_free_entries() {
+        let (small, large) = (cost_of_adopting(10_000, false), cost_of_adopting(20_000, false));
+        assert_eq!(large[0] - small[0], 10_000);
+        // The array and its operands.
+        assert_eq!((small[1], large[1]), (10_001, 20_001));
+        // A closed literal costs the same whatever its body holds.
+        assert_eq!(cost_of_adopting(10, true), cost_of_adopting(10_000, true));
+        assert_eq!(cost_of_adopting(10_000, true)[1], 1);
     }
 
     /// A unit of `count` declarations `let k = () => { let v = [v0]; return

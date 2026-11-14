@@ -1901,3 +1901,53 @@ fn the_naming_log_agrees_on_a_body_imported_from_another_module() {
     let root = a.seq_raw(closure, call);
     names_agree(a, root, Some(&resolver), true);
 }
+
+#[test]
+#[ignore = "T5b-3 build"]
+fn the_naming_log_agrees_on_a_partial_application_whose_argument_reads_a_local() {
+    // G10: `let f = param => Other.run(param)` with `run` of arity 2: the
+    // lowering eta-expands (`apply_with_arity`) to
+    // `param$1 => Other.run(param, param$1)`. The argument was lowered
+    // before the expansion's function existed (`names::adopt`).
+    use crate::cmi::persistent_env::CmjExportArity;
+    use crate::js_ir::ModulePathResolver;
+    use crate::lambda::{ApInfo, ApplyStatus, FieldDbgInfo, LamLoc, lam_arity::Arity, lam_primitive::Primitive};
+    for status in [ApplyStatus::Na, ApplyStatus::InferFull, ApplyStatus::Uncurry] {
+        let resolver = ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+        resolver.set_bir_test_export("Other", "run", CmjExportArity::Single(Arity::info(vec![2], false)), None);
+        let mut a = LamArena::new();
+        let (f, param) = (Ident::new("f", 1, IdentFlags::NONE), Ident::new("param", 2, IdentFlags::NONE));
+        let global = a.global_module(Ident::create_persistent("Other"));
+        let callee = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Module { name: crate::name::Name::new("run") }), &[global], LamLoc::NONE);
+        let arg = a.var(param);
+        let applied = a.apply_raw(callee, &[arg], ApInfo { status, loc: LamLoc::NONE });
+        let function = a.function_(1, &[param], applied, Default::default(), LamLoc::NONE);
+        let end = a.var(f);
+        let root = a.let_(LetKind::Strict, f, function, end);
+        names_agree(a, root, Some(&resolver), false);
+    }
+}
+
+#[test]
+#[ignore = "T5b-3 build"]
+fn the_naming_log_agrees_on_a_dispatch_function_whose_scrutinee_reads_a_local() {
+    // G10: `let g = value => f(value)` with `f` an external whose argument
+    // is a polymorphic variant mapped to strings: the argument becomes the
+    // scrutinee of `(() => { switch (value) { ... } })()`
+    // (`external_dispatch`), lowered before that function existed.
+    use crate::lambda::lam_primitive::{Attr, DeclKind, ExternalDecl, JsCall, LabelNoname, Param, Primitive as P};
+    use crate::lambda::LamLoc;
+    let mut a = LamArena::new();
+    let (g, value) = (Ident::new("g", 1, IdentFlags::NONE), Ident::new("value", 2, IdentFlags::NONE));
+    let arg = a.var(value);
+    let call = JsCall {
+        prim_name: "f".into(),
+        arg_types: vec![Param { arg_label: LabelNoname::ArgEmpty, arg_type: Attr::PolyVarString { descr: vec![("tag".into(), "mapped".into())] } }],
+        ffi: ExternalDecl { kind: DeclKind::DeclVal { name: "f".into() }, module_: None, scopes: vec![], variadic: false, effective_arity: 1 },
+    };
+    let applied = a.prim_raw(P::PjsCall(Box::new(call)), &[arg], LamLoc::NONE);
+    let function = a.function_(1, &[value], applied, Default::default(), LamLoc::NONE);
+    let end = a.var(g);
+    let root = a.let_(LetKind::Strict, g, function, end);
+    names_agree(a, root, None, false);
+}
