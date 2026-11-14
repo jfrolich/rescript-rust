@@ -1252,6 +1252,10 @@ pub(crate) fn compare_with_pass(
     Ok(stats)
 }
 
+/// The free lists and the names of `pass_tables`.
+#[cfg(test)]
+pub(crate) type PassTables = (Vec<Vec<Ident>>, Vec<(Ident, Name)>);
+
 /// The pass's free lists and names of `program`, sorted, for the text a
 /// failing oracle test shows beside the replay's (`bir::lower::oracle_tests`).
 #[cfg(test)]
@@ -1259,7 +1263,7 @@ pub(crate) fn pass_tables(
     program: &JsDepsProgram,
     resolver: &ModulePathResolver,
     jsx_preserve: bool,
-) -> Result<(Vec<Vec<Ident>>, Vec<(Ident, Name)>), Unsupported> {
+) -> Result<PassTables, Unsupported> {
     let names = Names::collect(program, resolver, jsx_preserve)?;
     let mut free: Vec<Vec<Ident>> = names.free.values().cloned().collect();
     free.sort_unstable();

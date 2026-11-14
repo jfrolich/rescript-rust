@@ -64,7 +64,7 @@ fn jsx_tag(bir: &Bir, idents: &[Ident], tag: NodeId, spelling: &mut String) -> b
             [first, rest @ ..] => first.is_ascii_lowercase() && rest.iter().all(|c| is_jsx_name_char(*c, true)),
             [] => false,
         },
-        View::Var { var } => idents.get(bir.vars.j_origin[var.index()].index()).is_some_and(|ident| value_name(ident)),
+        View::Var { var } => idents.get(bir.vars.j_origin[var.index()].index()).is_some_and(&mut value_name),
         View::JQualified { module, member } => {
             let module = &bir.pools.j_modules[module.index()];
             match member {

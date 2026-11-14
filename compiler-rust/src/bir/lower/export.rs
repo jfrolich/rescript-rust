@@ -1543,8 +1543,8 @@ impl State {
             self.coercion.trail = undeclared;
         }
         let mut exports = Vec::with_capacity(selected.len());
-        for position in 0..selected.len() {
-            let (index, var) = (position as u32, selected[position]);
+        for (index, selection) in selected.iter_mut().enumerate() {
+            let (index, var) = (index as u32, *selection);
             self.coercion.steps += 1;
             #[cfg(test)]
             let arm;
@@ -1580,7 +1580,7 @@ impl State {
             // The selection is read no more: it becomes the variable of
             // each entry of `Coerced::exports`, which the naming log's
             // replay names last (`State::replay_names`).
-            selected[position] = resolved;
+            *selection = resolved;
             // The top-level statuses read the export set through the origin.
             let origin = self.origin(resolved);
             let scope = self.arena.js_scope.as_mut().expect("lowering scope");
