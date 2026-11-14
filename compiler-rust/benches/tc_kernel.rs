@@ -9,8 +9,10 @@
 //! decision 5) take an interned `Name`; subtract the empty loop.
 //! `checker_instance1..7` are `instance1..7` through `Checker::instance`
 //! with an empty nullary memo (R3b).
-use rescript_compiler::tc::expand::TypeTable;
-use rescript_compiler::tc::graph::{ARROW, CONSTR, GENERIC, Graph, NONE, Node, Param, Ty, VAR};
+use rescript_compiler::tc::expand::{ABBREV, DATATYPE, Manifest, TypeInfo, TypeTable};
+use rescript_compiler::tc::graph::{
+    ARROW, CONSTR, GENERIC, Graph, NONE, Node, Param, TUPLE, Ty, VAR,
+};
 use rescript_compiler::tc::name_table::Name;
 use rescript_compiler::tc::scope::{Binder, BinderKind, Key, Namespace, Scopes};
 use rescript_compiler::tc::unify::Checker;
@@ -171,6 +173,13 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let op = args.get(1).map(String::as_str).unwrap_or("empty");
     let n: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+    match op {
+        "build_datatype2" | "unify_datatype2" | "build_abbrev2" | "unify_abbrev2" => {
+            constructor_application(op, n);
+            return;
+        }
+        _ => {}
+    }
     let mut g = Graph::default();
     let int = constr(&mut g, 1, &[]);
     let ground1 = g.capture(int);
@@ -233,7 +242,7 @@ fn main() {
     ];
     let Some(index) = ops.iter().position(|&s| s == op) else {
         eprintln!(
-            "operation {op} is not implemented by R1; supported: {}",
+            "operation {op} is not implemented; supported: build_datatype2, unify_datatype2, build_abbrev2, unify_abbrev2, {}",
             ops.join(", ")
         );
         std::process::exit(2);
@@ -352,6 +361,101 @@ fn main() {
             }
             _ => unreachable!(),
         }
+    }
+    println!("{op} n={n} sink={}", black_box(sink));
+}
+
+/// K3a: two fresh `c<a, b>` operands, with real declaration rows. In the
+/// abbreviation case `c<x, y> = (x, y)`; otherwise `c` is a datatype.
+/// The build-only twin has the same setup, reset, operands and sink.
+/// O(1) setup and construction; the measured difference is unification.
+fn constructor_application(op: &str, n: u64) {
+    let expands = op.ends_with("abbrev2");
+    let unify = black_box(op.starts_with("unify_"));
+    let mut g = Graph::default();
+    let datatype = TypeInfo {
+        manifest: NONE,
+        scope: 0,
+        newtype: NONE,
+        arity: 0,
+        flags: DATATYPE,
+        reserved: 0,
+    };
+    let mut types = TypeTable {
+        rows: vec![datatype; 4],
+        ..TypeTable::default()
+    };
+    types.rows[3].arity = 2;
+    if expands {
+        let x = var(&mut g);
+        let y = var(&mut g);
+        let b = g.lists.len() as u32;
+        g.lists.extend_from_slice(&[x, y]);
+        let body = g.push(Node {
+            head: TUPLE | 2 << 8,
+            level: GENERIC,
+            a: 0,
+            b,
+        });
+        let b = g.lists.len() as u32;
+        g.lists.extend_from_slice(&[x, y, body]);
+        let root = g.push(Node {
+            head: TUPLE | 3 << 8,
+            level: GENERIC,
+            a: 0,
+            b,
+        });
+        let template = g.capture(root);
+        // Recover relative roots through the public instance API, not private
+        // forwarding storage. This setup instance is discarded before the loop.
+        let base = g.nodes.len() as u32;
+        let sample = g.instance(template);
+        let slots = g.nodes[sample.0 as usize].b as usize;
+        let relative = |ty: Ty| Ty((1 << 30) | (ty.0 - base));
+        types
+            .roots
+            .extend(g.lists[slots..slots + 2].iter().copied().map(relative));
+        types.manifests.push(Manifest {
+            template,
+            params: 0,
+            body: relative(g.lists[slots + 2]),
+        });
+        types.rows[3].flags = ABBREV;
+        types.rows[3].manifest = 0;
+    }
+    let mut c = Checker::new(g, types);
+    let mut sink = 0u64;
+    for i in 0..n {
+        if i & 0xfff == 0 {
+            // Slot indices become invalid at clear_instances. Drop the memo
+            // list too; no cleanup is needed when every operand is discarded.
+            c.memo.memorized.clear();
+            c.g.clear_instances();
+        }
+        let mut operand = || {
+            let a = constr(&mut c.g, 1, &[]);
+            let b = constr(&mut c.g, 2, &[]);
+            constr(&mut c.g, 3, &[a, b])
+        };
+        let left = black_box(operand());
+        let right = black_box(operand());
+        if unify {
+            c.unify(left, right)
+                .expect("unifiable constructor applications");
+        }
+        sink += left.0 as u64 + right.0 as u64;
+    }
+    if n != 0 {
+        let expected = if expands && unify {
+            2 * ((n - 1) % 4096 + 1)
+        } else {
+            0
+        };
+        assert_eq!(
+            c.memo.memorized.len() as u64,
+            expected,
+            "both heads expand once"
+        );
     }
     println!("{op} n={n} sink={}", black_box(sink));
 }
