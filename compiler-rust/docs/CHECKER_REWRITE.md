@@ -2665,6 +2665,17 @@ skeleton; all three were the skeleton's, not the builder's.
    variable and has no level to lower: it is skipped at the push, one
    compare a child) or widens the entry, with a test of a binding to a
    type that holds a frozen child.
+10. **A generalization forgets the nullary memo** (review of R3b). OCaml
+    empties `simple_abbrevs` as the first step of `generalize`,
+    `generalize_structure` and `generalize_expansive`
+    (ctype.ml:519, 543, 668), and the current checker does the same. The
+    skeleton had no entry for it: the kernel's `Graph::generalize` cannot
+    reach the memo. `Checker::generalize` and `Checker::generalize_structure`
+    forget it (one load and one untaken branch while no row is live) and
+    then run the kernel's walk; every generalization of the checker goes
+    through them, and the harness's from the tier that has a memo. Test:
+    `a_generalization_forgets_the_nullary_memo`. R5b's
+    `generalize_expansive` forgets it the same way.
 
 ## 9. R4 as designed
 
