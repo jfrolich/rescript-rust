@@ -16,7 +16,7 @@
 //! node stays `NONE`.
 
 use super::graph::{CONSTR, GENERIC, LINK, NONE, Node, Ty, VAR};
-use super::segment::{DeclarationKind, PathRow, Segment, SignatureKind};
+use super::segment::{DeclarationKind, PathRow, Segment, SignatureKind, UNIT_SCOPE};
 use super::template::Template;
 use super::unify::{Checker, Clash};
 
@@ -102,20 +102,26 @@ impl TypeTable {
     ///
     /// A `paths` row names one of the unit's own declarations when it is an
     /// identifier whose scope is the `ordered_items` index of a type item
-    /// (`IdentRow::scope`; equal stamps, compiler/ext/ident.ml:75). Every
-    /// other row (predefined types, other units' types, a path through a
-    /// module) is an abstract type here. The scope is 0 for every row: a
-    /// segment's types are bound before any level a check reaches.
+    /// (`IdentRow::scope`; equal stamps, compiler/ext/ident.ml:75), or a
+    /// path through the unit itself (`Case.t`, which is how the published
+    /// types of a unit name its own types) whose name is a type item of the
+    /// unit's signature. That join is on a string index, so it reads one
+    /// dense row per segment string ([`own_types`]): the cost has an
+    /// O(strings) term besides the stated one. Every other row (predefined
+    /// types, other units' types, a path through a module) is an abstract
+    /// type here. The scope is 0 for every row: a segment's types are bound
+    /// before any level a check reaches.
     pub fn from_segment(segment: &Segment) -> TypeTable {
         let pools = &segment.signature;
         let mut table = TypeTable {
             rows: Vec::with_capacity(pools.paths.len()),
             ..TypeTable::default()
         };
+        let by_name = own_types(segment);
         for path in pools.paths.iter() {
             #[cfg(test)]
             super::steps::tick();
-            let row = match own_declaration(segment, *path) {
+            let row = match own_declaration(segment, &by_name, *path) {
                 Some(declaration) => table.declaration_row(segment, declaration),
                 None => ABSTRACT,
             };
@@ -205,15 +211,46 @@ const DECL_PRIVATE: u8 = 1;
 const DECL_NEWTYPE: u8 = 8;
 
 /// O(1): the `type_declarations` row a `paths` row names, when it is an
-/// identifier bound by a type item of the segment.
-fn own_declaration(segment: &Segment, path: PathRow) -> Option<u32> {
+/// identifier bound by a type item of the segment, or a path through the
+/// unit itself whose name `by_name` maps to a declaration.
+fn own_declaration(segment: &Segment, by_name: &[u32], path: PathRow) -> Option<u32> {
     let pools = &segment.signature;
-    let PathRow::Ident(ident) = path else {
-        return None;
+    match path {
+        PathRow::Ident(ident) => {
+            let scope = pools.identifiers[ident as usize].scope;
+            let item = pools.ordered_items.get(scope as usize)?;
+            (item.kind == SignatureKind::Type).then_some(item.declaration)
+        }
+        PathRow::Dot { parent, name, .. } => {
+            let PathRow::Ident(unit) = pools.paths[parent as usize] else {
+                return None;
+            };
+            if pools.identifiers[unit as usize].scope != UNIT_SCOPE {
+                return None;
+            }
+            let declaration = *by_name.get(name as usize)?;
+            (declaration != NONE).then_some(declaration)
+        }
+        PathRow::Apply { .. } => None,
+    }
+}
+
+/// O(strings + items of the unit's signature): the `type_declarations` row
+/// of each type item of the unit's own signature, indexed by its name's
+/// string, NONE elsewhere. A later item of a name hides an earlier one, as
+/// in the export table. Empty for a segment with no signature.
+fn own_types(segment: &Segment) -> Vec<u32> {
+    let pools = &segment.signature;
+    let Some(&items) = pools.signatures.first() else {
+        return Vec::new();
     };
-    let scope = pools.identifiers[ident as usize].scope;
-    let item = pools.ordered_items.get(scope as usize)?;
-    (item.kind == SignatureKind::Type).then_some(item.declaration)
+    let mut by_name = vec![NONE; pools.strings.len()];
+    for item in &pools.ordered_items[items.start as usize..(items.start + items.len) as usize] {
+        if item.kind == SignatureKind::Type {
+            by_name[pools.identifiers[item.ident as usize].name as usize] = item.declaration;
+        }
+    }
+    by_name
 }
 
 /// The memo of nullary constructors: one row per type index.
@@ -1030,6 +1067,23 @@ mod tests {
         for name in ["t1", "a0", "a1", "r", "int", "string"] {
             assert!(seen.iter().any(|seen| seen == name), "{name} not in {seen:?}");
         }
+        // The value's type names the unit's own types through the unit
+        // (`Case.a0`): those rows carry the declaration too.
+        let mut through_unit = 0;
+        for (index, path) in pools.paths.iter().enumerate() {
+            let PathRow::Dot { name, .. } = *path else { continue };
+            let range = pools.strings[name as usize];
+            let name = &pools.bytes[range.start as usize..(range.start + range.len) as usize];
+            let info = table.info(index as u32);
+            match name {
+                b"a0" | b"a1" => assert_eq!(info.flags, ABBREV),
+                b"r" => assert_eq!(info.flags, DATATYPE),
+                b"t0" | b"t1" => assert_eq!(info.flags, 0),
+                _ => continue,
+            }
+            through_unit += 1;
+        }
+        assert!(through_unit >= 4, "{:?}", pools.paths);
         let a1 = pools
             .paths
             .iter()
