@@ -295,9 +295,8 @@ impl Checker {
     /// a constructor and the variable occurs in the constructor, `unify2` of
     /// that pair ([`Checker::unify_expanded`]; `deep_occur`,
     /// compiler/ml/ctype.ml:2240-2241). The occurrence found by the binding
-    /// walk is the `deep_occur` test: a generated node of R3c has no object
-    /// or variant row, below which the two differ (R3e adds the rows). The
-    /// cost is [`Checker::bind`]'s, or one walk and the callee.
+    /// walk is the `deep_occur` test: on this route it crosses objects and
+    /// variant rows, which `occur_rec` does not enter. The cost is [`Checker::bind`]'s, or one walk and the callee.
     fn bind_routed(&mut self, var: Ty, ty: Ty, route: Option<[Ty; 2]>) -> Result<(), Clash> {
         let before = self.g.nodes[var.0 as usize];
         let target = self.g.nodes[ty.0 as usize];
@@ -397,12 +396,12 @@ impl Checker {
     ) -> Result<bool, Clash> {
         if !occur_first {
             if routed {
-                return Ok(self.binding_scan(var, ty));
+                return Ok(self.binding_scan(var, ty, true));
             }
             self.binding_walk(var, ty)?;
             return Ok(false);
         }
-        if !self.reaches(var, ty, false) {
+        if !self.reaches(var, ty, routed) {
             return Ok(false);
         }
         if routed {
@@ -431,7 +430,7 @@ impl Checker {
     /// walk gives up (ctype.ml:1396-1402). Explicit stack. (R3a; the
     /// expansion retry R3c)
     pub fn binding_walk(&mut self, var: Ty, ty: Ty) -> Result<(), Clash> {
-        if self.binding_scan(var, ty) {
+        if self.binding_scan(var, ty, false) {
             // The walk went on to the end, so every level `update_level`
             // writes is written; what is left is `occur_rec`'s retry.
             return self.occur_expanding(var, ty);
@@ -443,8 +442,11 @@ impl Checker {
     /// whether `var` was reached. It does not stop at `var`: it lowers
     /// everything `update_level` lowers either way, so that a retry that
     /// finds no occurrence leaves the levels of a successful binding. At
-    /// most 2 steps a node, explicit stack, marks.
-    fn binding_scan(&mut self, var: Ty, ty: Ty) -> bool {
+    /// most 2 steps a node, explicit stack, marks. With `deep` (the route
+    /// of a variable against a constructor, `deep_occur`,
+    /// compiler/ml/ctype.ml:1735, 2240) the occurrence test crosses objects
+    /// and variant rows too.
+    fn binding_scan(&mut self, var: Ty, ty: Ty, deep: bool) -> bool {
         let level = self.g.nodes[var.0 as usize].level;
         // With scoped types the level update is `bind`'s Checker::lower.
         let lower = self.types.scoped == 0;
@@ -484,7 +486,7 @@ impl Checker {
             if lowered {
                 self.g.write(ty, Node { level, ..node });
             }
-            if self.stops_occurrence(node) {
+            if !deep && self.stops_occurrence(node) {
                 if lowered {
                     self.push_flagged(node, LEVEL_ONLY);
                 }

@@ -1889,7 +1889,6 @@ fn the_other_arms_of_objects() {
 /// variable's level, 2. In both modes.
 /// Reaches: R3e.
 #[test]
-#[ignore = "R3e build"]
 fn the_route_of_a_variable_crosses_an_object_and_the_occurrence_test_does_not() {
     for mode in [Mode::Success, Mode::Explain] {
         let mut c = checker(mode);
