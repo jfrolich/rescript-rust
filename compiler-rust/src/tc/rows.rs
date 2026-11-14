@@ -9,8 +9,10 @@
 //! starts with the segment's rows copied ([`Extras::from_segment`]), so the
 //! indices of frozen nodes stay valid; rows made during a check are appended.
 
-use super::graph::{Graph, LINK, NONE, Node, Ty, VAR};
-use super::segment::{ExtraDescriptor, PackageRow, Range, RowFieldRow, Segment, VariantRow};
+use super::graph::{Graph, LINK, NONE, Node, TUPLE, Ty, VAR};
+use super::segment::{
+    ExtraDescriptor, PackageRow, Range, RowFieldKind, RowFieldRow, Segment, VariantRow,
+};
 use super::template::Template;
 use super::unify::{Checker, Clash, Frame};
 
@@ -31,6 +33,20 @@ pub struct Extras {
     /// Scratch of one copy session ([`Checker::dup_cell`]): the cells that
     /// link to their duplicate until [`Checker::end_cell_session`].
     pub session: Vec<Ty>,
+    /// The nodes that hold a reference of a variant field in a slot
+    /// ([`Holder`]): lists by `next`, the head in the reference node's `b`.
+    /// Rows are appended and never written; a restore leaves the rows it
+    /// made unreachable. (R3f)
+    pub holders: Vec<Holder>,
+    /// Scratch of one [`Checker::unify_row`] call: the two flattened rows,
+    /// the left one first, then the types of the field being unified.
+    /// Empty between calls; it keeps its capacity. Not `fields`: a row is
+    /// unified while the frames of an object are pending. (R3f)
+    pub row_scratch: Vec<FieldRef>,
+    /// The childless node a normalized holder of a present field names in
+    /// its reference slot ([`RES_OWN`]), made at its first use. One per
+    /// checker. (R3f)
+    pub present_own: Option<Ty>,
 }
 
 /// Names as text: one buffer and a span per name index. For a graph made
@@ -95,7 +111,191 @@ pub struct FieldRef {
     pub name: u32,
     /// The `Tfield` node, or the row-field index for a variant.
     pub at: u32,
+    /// An object's field: its type. A variant's field: the list index of
+    /// slot 0 of the node the field is a field of (its *home*), so that a
+    /// slot of the field is read with one load also when the home was the
+    /// left node of the pair and is a link by now.
     pub ty: Ty,
+}
+
+// The reference of a variant field (CHECKER_REWRITE 8.6, decision 34).
+//
+// `Reither (c, tl, m, e)` (compiler/ml/types.mli:160-169) is spread over
+// three places. `c`, `m` and the slots of `tl` are the field's
+// `RowFieldRow`, shared by every instance of a scheme and never written.
+// `tl` are slots of the variant node. `e` is one more slot of the variant
+// node, `RowFieldRow::link`, after the published slots: it names a
+// *reference node*, which is what `set_row_field` (btype.ml:742-744)
+// writes:
+//
+// - unresolved (`ref None`): a variable with no name, [`ref_node`]. Its `b`
+//   is the head of its [`Holder`] list or `NONE`.
+// - resolved: a `TUPLE` node that is not `EXTENDED`, whose `a` is what it
+//   was resolved to: [`RES_ABSENT`] (no slot), [`RES_PRESENT`] (no slot:
+//   `Rpresent None`; one slot: `Rpresent (Some t)`), or [`RES_EITHER`] with
+//   [`RES_CONSTANT`] and [`RES_MATCHED`] (`Reither (c, tl', m, e')`: the
+//   slots are `tl'`, then the reference `e'`).
+//
+// Every write is `Graph::write` of the reference node: logged in the trail
+// inside a speculation and undone by its restore, as `set_row_field` logs
+// `Crow` (btype.ml:742). A walk of a type reaches the reference as a child
+// of the variant node and, through it, the types a resolution added.
+//
+// A node whose arity is not above `link` is *unopened*: it has no slot for
+// the reference yet, which stands for a reference of its own that nothing
+// else holds. `Checker::open_row` gives it the slots.
+
+/// `a` of a resolved reference node: `Rabsent`.
+pub const RES_ABSENT: u32 = 1;
+/// `a` of a resolved reference node: `Rpresent`, with the type in slot 0
+/// when the node has one.
+pub const RES_PRESENT: u32 = 2;
+/// `a` of a resolved reference node: `Reither`, the added types in the
+/// slots before the last, the next reference in the last.
+pub const RES_EITHER: u32 = 3;
+/// The two bits of `a` that hold [`RES_ABSENT`], [`RES_PRESENT`] or
+/// [`RES_EITHER`].
+pub const RES_KIND: u32 = 3;
+/// With [`RES_EITHER`]: `c`, the tag is constant.
+pub const RES_CONSTANT: u32 = 4;
+/// With [`RES_EITHER`]: `m`, the tag is matched.
+pub const RES_MATCHED: u32 = 8;
+/// With [`RES_PRESENT`], on `Extras::present_own` only: the field is
+/// present with the first of its own types (`Rpresent (Some (List.hd
+/// tl))`, compiler/ml/btype.ml:117), and the node adds no child.
+pub const RES_OWN: u32 = 16;
+
+/// One node that holds a reference in a slot: 8 bytes. `home` is the
+/// variant node, `next` the next holder of the same reference or `NONE`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct Holder {
+    pub home: Ty,
+    pub next: u32,
+}
+
+/// An unresolved reference (`ref None`) at `level`, with `holders` the head
+/// of its [`Holder`] list or `NONE`. A variable, so that
+/// `generalize_structure` leaves it at the level it leaves the row
+/// variable at, and a copy shares it when it shares that variable
+/// (`let e = if keep then e else ref None`, compiler/ml/btype.ml:374).
+/// O(1).
+pub fn ref_node(level: u32, holders: u32) -> Node {
+    Node {
+        head: VAR,
+        level,
+        a: NONE,
+        b: holders,
+    }
+}
+
+/// What a field is after its reference is followed (`row_field_repr`,
+/// compiler/ml/btype.ml:112-121): 16 bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct FieldRepr {
+    /// `Either`: the unresolved reference, or `NONE` for an unopened node.
+    /// Otherwise `NONE`.
+    pub end: Ty,
+    /// `Present`: the type, or `NONE` for a constant tag. `Either`: the
+    /// first of its types, or `NONE`.
+    pub first: Ty,
+    /// `Either`: how many types it has (`tl @ tl'`, btype.ml:114).
+    pub types: u32,
+    pub kind: RowFieldKind,
+}
+
+/// `row_field_repr` (compiler/ml/btype.ml:112-121) of `field`, a field of
+/// the variant node whose slots start at list index `b` and whose arity
+/// is `arity`. The field's own kind when that is not `Either`; otherwise
+/// the chain of references from its slot: each [`RES_EITHER`] adds its
+/// types and replaces `c` and `m`, [`RES_PRESENT`] with a type is that type
+/// unless the field had one (`Rpresent (Some (List.hd tl))`), [`RES_OWN`]
+/// is the field's first own type. O(resolutions of the field), one node
+/// load each, no write, no allocation.
+pub fn field_repr(g: &Graph, b: u32, arity: u32, field: RowFieldRow) -> FieldRepr {
+    let own = field.types;
+    let mut first = match own.len {
+        0 => Ty(NONE),
+        _ => g.lists[(b + own.start) as usize],
+    };
+    let mut kind = field.kind;
+    if !matches!(kind, RowFieldKind::Either { .. }) {
+        return FieldRepr { end: Ty(NONE), first, types: own.len, kind };
+    }
+    let mut types = own.len;
+    if field.link >= arity {
+        return FieldRepr { end: Ty(NONE), first, types, kind };
+    }
+    let mut reference = g.lists[(b + field.link) as usize];
+    loop {
+        let node = g.nodes[reference.0 as usize];
+        if node.tag() != TUPLE {
+            return FieldRepr { end: reference, first, types, kind };
+        }
+        match node.a & RES_KIND {
+            RES_ABSENT => {
+                kind = RowFieldKind::Absent;
+                return FieldRepr { end: Ty(NONE), first: Ty(NONE), types: 0, kind };
+            }
+            RES_PRESENT => {
+                let argument = node.arity() == 1 || node.a & RES_OWN != 0;
+                if !argument {
+                    first = Ty(NONE);
+                } else if types == 0 {
+                    first = g.lists[node.b as usize];
+                }
+                kind = RowFieldKind::Present;
+                return FieldRepr { end: Ty(NONE), first, types: u32::from(argument), kind };
+            }
+            _ => {
+                let added = node.arity() - 1;
+                if types == 0 && added != 0 {
+                    first = g.lists[node.b as usize];
+                }
+                types += added;
+                kind = RowFieldKind::Either {
+                    constant: node.a & RES_CONSTANT != 0,
+                    matched: node.a & RES_MATCHED != 0,
+                };
+                reference = g.lists[(node.b + added) as usize];
+            }
+        }
+    }
+}
+
+/// The types of an `Either` field in OCaml's order (`tl @ tl'`,
+/// compiler/ml/btype.ml:114), appended to `out`: the field's own, then
+/// those each [`RES_EITHER`] of its chain added. O(types + resolutions),
+/// no allocation when `out` has the capacity.
+pub fn field_types(g: &Graph, b: u32, arity: u32, field: RowFieldRow, out: &mut Vec<Ty>) {
+    let own = field.types;
+    out.extend_from_slice(&g.lists[(b + own.start) as usize..(b + own.start + own.len) as usize]);
+    if field.link >= arity {
+        return;
+    }
+    let mut reference = g.lists[(b + field.link) as usize];
+    loop {
+        let node = g.nodes[reference.0 as usize];
+        if node.tag() != TUPLE || node.a & RES_KIND != RES_EITHER {
+            return;
+        }
+        let added = node.arity() - 1;
+        out.extend_from_slice(&g.lists[node.b as usize..(node.b + added) as usize]);
+        reference = g.lists[(node.b + added) as usize];
+    }
+}
+
+/// How many slots a published node of `row` has: its field types, its
+/// `more` and the arguments of its name (tc/bridge/from_old.rs, `variant`).
+/// The reference of its k-th `Either` field is slot `published_slots + k`.
+/// O(fields).
+pub fn published_slots(row: VariantRow, fields: &[RowFieldRow]) -> u32 {
+    let mut slots = (row.more + 1).max(row.name_arguments.start + row.name_arguments.len);
+    for field in &fields[row.fields.start as usize..(row.fields.start + row.fields.len) as usize] {
+        slots = slots.max(field.types.start + field.types.len);
+    }
+    slots
 }
 
 impl Extras {
@@ -103,7 +303,9 @@ impl Extras {
     /// pushed on `g` per cell of the segment ([`cell_node`]; a frozen cell
     /// holds its value and links to nothing), and one pass over the
     /// descriptors that turns each field's cell index into that node's
-    /// handle. The indices of a segment's rows are the indices here, so the
+    /// handle, and one pass over the variant rows that gives each `Either`
+    /// field the slot of its reference ([`published_slots`]). The indices
+    /// of a segment's rows are the indices here, so the
     /// nodes of an instance name their descriptors without translation.
     /// `g` is the graph made from the same segment (`Segment::graph`).
     pub fn from_segment(segment: &Segment, g: &mut Graph) -> Extras {
@@ -116,10 +318,24 @@ impl Extras {
                 *mutability += first;
             }
         }
+        // A published `Either` field has no reference (`link` is `NONE`,
+        // tc/segment.rs): here it gets the slot its reference will have
+        // once a node of the row is opened, after the published slots.
+        let mut row_fields = pools.row_fields.to_vec();
+        for &row in pools.variants.iter() {
+            let mut slot = published_slots(row, &row_fields);
+            let fields = row.fields;
+            for field in &mut row_fields[fields.start as usize..(fields.start + fields.len) as usize] {
+                if matches!(field.kind, RowFieldKind::Either { .. }) {
+                    field.link = slot;
+                    slot += 1;
+                }
+            }
+        }
         Extras {
             descriptors,
             variants: pools.variants.to_vec(),
-            row_fields: pools.row_fields.to_vec(),
+            row_fields,
             packages: pools.packages.to_vec(),
             names: NameTexts {
                 bytes: pools.bytes.to_vec(),
@@ -127,6 +343,9 @@ impl Extras {
             },
             fields: Vec::new(),
             session: Vec::new(),
+            holders: Vec::new(),
+            row_scratch: Vec::new(),
+            present_own: None,
         }
     }
 }
@@ -395,5 +614,142 @@ mod tests {
     #[test]
     fn sizes() {
         assert_eq!(std::mem::size_of::<FieldRef>(), 12);
+        assert_eq!(std::mem::size_of::<Holder>(), 8);
+        assert_eq!(std::mem::size_of::<FieldRepr>(), 16);
+    }
+
+    /// O(1): push a node.
+    fn push(g: &mut Graph, head: u32, a: u32, slots: &[Ty]) -> Ty {
+        let b = g.lists.len() as u32;
+        g.lists.extend_from_slice(slots);
+        g.push(Node { head: head | (slots.len() as u32) << 8, level: 1, a, b })
+    }
+
+    /// `row_field_repr` on hand-built chains (compiler/ml/btype.ml:112-121):
+    /// an unopened field and an unresolved reference are `Reither` with the
+    /// field's own types; `Reither` in a reference adds its types after
+    /// them and replaces `c` and `m` (`Reither (_, tl', _, {contents = Some
+    /// fi}) -> row_field_repr_aux (tl @ tl') fi`); `Rpresent (Some _)` at
+    /// the end is the first type met on the way (`Rpresent (Some (List.hd
+    /// tl))`) or its own; `Rpresent None` and `Rabsent` are themselves.
+    #[test]
+    fn a_field_is_read_through_its_references() {
+        let mut g = Graph::default();
+        let either = |constant, matched| RowFieldKind::Either { constant, matched };
+        let [t0, t1, t2, t3] = [0u32, 1, 2, 3].map(|serial| {
+            g.push(Node { head: VAR, level: 1, a: NONE, b: serial })
+        });
+        let end = g.push(ref_node(1, NONE));
+        // The home: slots [t0, t1 | more | reference].
+        let field = RowFieldRow {
+            name: 0,
+            types: Range { start: 0, len: 2 },
+            link: 3,
+            kind: either(false, false),
+        };
+        let home = |g: &mut Graph, reference: Ty| {
+            let node = push(g, TUPLE, 0, &[t0, t1, t2, reference]);
+            g.nodes[node.0 as usize]
+        };
+        let read = |g: &Graph, node: Node, arity: u32| {
+            let repr = field_repr(g, node.b, arity, field);
+            let mut types = Vec::new();
+            field_types(g, node.b, arity, field, &mut types);
+            (repr, types)
+        };
+        // Unopened: the node has three slots.
+        let node = home(&mut g, end);
+        let (repr, types) = read(&g, node, 3);
+        assert_eq!(repr, FieldRepr { end: Ty(NONE), first: t0, types: 2, kind: either(false, false) });
+        assert_eq!(types, [t0, t1]);
+        // Unresolved.
+        let (repr, types) = read(&g, node, 4);
+        assert_eq!(repr, FieldRepr { end, first: t0, types: 2, kind: either(false, false) });
+        assert_eq!(types, [t0, t1]);
+        // `Reither (true, [t3], true, end)` in the reference.
+        let added = push(&mut g, TUPLE, RES_EITHER | RES_CONSTANT | RES_MATCHED, &[t3, end]);
+        let node = home(&mut g, added);
+        let (repr, types) = read(&g, node, 4);
+        assert_eq!(repr, FieldRepr { end, first: t0, types: 3, kind: either(true, true) });
+        assert_eq!(types, [t0, t1, t3]);
+        // Then `Rpresent (Some t2)` at the end: the first type met.
+        let present = push(&mut g, TUPLE, RES_PRESENT, &[t2]);
+        let added = push(&mut g, TUPLE, RES_EITHER, &[t3, present]);
+        let node = home(&mut g, added);
+        let (repr, _) = read(&g, node, 4);
+        assert_eq!(repr, FieldRepr { end: Ty(NONE), first: t0, types: 1, kind: RowFieldKind::Present });
+        // A field with no type of its own takes the reference's.
+        let constant = RowFieldRow { types: Range { start: 0, len: 0 }, ..field };
+        let repr = field_repr(&g, node.b, 4, constant);
+        assert_eq!(repr.first, t3);
+        let node = home(&mut g, present);
+        assert_eq!(field_repr(&g, node.b, 4, constant).first, t2);
+        // `Rpresent None`, the normalized holder, `Rabsent`.
+        let none = push(&mut g, TUPLE, RES_PRESENT, &[]);
+        let node = home(&mut g, none);
+        let repr = field_repr(&g, node.b, 4, constant);
+        assert_eq!(repr, FieldRepr { end: Ty(NONE), first: Ty(NONE), types: 0, kind: RowFieldKind::Present });
+        let own = push(&mut g, TUPLE, RES_PRESENT | RES_OWN, &[]);
+        let node = home(&mut g, own);
+        let (repr, _) = read(&g, node, 4);
+        assert_eq!(repr, FieldRepr { end: Ty(NONE), first: t0, types: 1, kind: RowFieldKind::Present });
+        let absent = push(&mut g, TUPLE, RES_ABSENT, &[]);
+        let node = home(&mut g, absent);
+        let (repr, _) = read(&g, node, 4);
+        assert_eq!(repr, FieldRepr { end: Ty(NONE), first: Ty(NONE), types: 0, kind: RowFieldKind::Absent });
+        // A field that is not `Reither` has no reference.
+        let present = RowFieldRow { kind: RowFieldKind::Present, link: NONE, types: Range { start: 0, len: 1 }, ..field };
+        assert_eq!(field_repr(&g, node.b, 4, present).first, t0);
+    }
+
+    /// A chain of 10,000 resolutions is read in one pass, with no write:
+    /// the steps are the loads, counted here by the length.
+    #[test]
+    fn a_chain_of_ten_thousand_resolutions_is_read_once() {
+        let mut g = Graph::default();
+        let end = g.push(ref_node(1, NONE));
+        let ty = g.push(Node { head: VAR, level: 1, a: NONE, b: 0 });
+        let mut reference = end;
+        for _ in 0..10_000 {
+            reference = push(&mut g, TUPLE, RES_EITHER, &[ty, reference]);
+        }
+        let field = RowFieldRow {
+            name: 0,
+            types: Range { start: 0, len: 0 },
+            link: 0,
+            kind: RowFieldKind::Either { constant: false, matched: false },
+        };
+        let home = push(&mut g, TUPLE, 0, &[reference]);
+        let node = g.nodes[home.0 as usize];
+        let before = g.nodes.clone();
+        let repr = field_repr(&g, node.b, 1, field);
+        assert_eq!((repr.end, repr.types, repr.first), (end, 10_000, ty));
+        let mut types = Vec::new();
+        field_types(&g, node.b, 1, field, &mut types);
+        assert_eq!(types.len(), 10_000);
+        assert_eq!(g.nodes, before);
+    }
+
+    /// The reference of the k-th `Either` field of a published row is the
+    /// slot after the published ones.
+    #[test]
+    fn the_reference_slots_follow_the_published_slots() {
+        let either = RowFieldKind::Either { constant: false, matched: false };
+        let fields = [
+            RowFieldRow { name: 0, types: Range { start: 0, len: 2 }, link: NONE, kind: either },
+            RowFieldRow { name: 1, types: Range { start: 2, len: 0 }, link: NONE, kind: RowFieldKind::Present },
+            RowFieldRow { name: 2, types: Range { start: 2, len: 1 }, link: NONE, kind: either },
+        ];
+        let row = VariantRow {
+            fields: Range { start: 0, len: 3 },
+            more: 3,
+            name: 7,
+            name_arguments: Range { start: 4, len: 2 },
+            closed: true,
+            fixed: false,
+        };
+        assert_eq!(published_slots(row, &fields), 6);
+        let unnamed = VariantRow { name: NONE, name_arguments: Range::default(), ..row };
+        assert_eq!(published_slots(unnamed, &fields), 4);
     }
 }
