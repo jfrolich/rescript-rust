@@ -485,6 +485,56 @@ fn binding_finds_the_variable_under_a_lower_root() {
     assert!(c.unify(holder, v).is_err());
 }
 
+/// `update_level` stops at a node that is not above the target level and
+/// does not look below it (`if ty.level > level`,
+/// compiler/ml/ctype.ml:586): a node above the target that is reached only
+/// through such a node keeps its level, and one that is also a child of a
+/// lowered node is lowered, in whichever order the walk meets the two
+/// paths. The occurrence test of a binding goes everywhere; its level
+/// update does not. Both modes leave the same levels: `Mode::Explain` runs
+/// OCaml's two walks, `Mode::Success` the combined one. Added in review of
+/// R3a; expected values from the OCaml lines, not from a run.
+#[test]
+fn binding_lowers_only_what_update_level_reaches() {
+    fn level(c: &Checker, ty: Ty) -> u32 {
+        c.g.nodes[ty.0 as usize].level
+    }
+    for (explain, mode) in [(false, Mode::Success), (true, Mode::Explain)] {
+        for shield_first in [false, true] {
+            // `checker` returns at level 2: the variable's level.
+            let mut c = checker(mode);
+            let v = var(&mut c);
+            assert_eq!(level(&c, v), 2);
+            let hidden = constr_at(&mut c, 4, INT, &[]);
+            let shared = constr_at(&mut c, 4, INT, &[]);
+            // Not above the variable: the level update stops here.
+            let shield = tuple_at(&mut c, 1, &[hidden, shared]);
+            let top = constr_at(&mut c, 4, STRING, &[]);
+            let children = if shield_first {
+                [shield, shared, top]
+            } else {
+                [top, shared, shield]
+            };
+            let root = tuple_at(&mut c, 4, &children);
+            c.unify(v, root).unwrap();
+            let case = (explain, shield_first);
+            assert_eq!(c.g.repr(v), root, "{case:?}");
+            assert_eq!(level(&c, root), 2, "{case:?}");
+            assert_eq!(level(&c, top), 2, "{case:?}");
+            assert_eq!(level(&c, shield), 1, "{case:?}");
+            assert_eq!(level(&c, shared), 2, "{case:?}: a child of the lowered root");
+            assert_eq!(level(&c, hidden), 4, "{case:?}: only below the shield");
+        }
+        // A root that is not above the variable: nothing is lowered.
+        let mut c = checker(mode);
+        let v = var(&mut c);
+        let hidden = constr_at(&mut c, 4, INT, &[]);
+        let root = tuple_at(&mut c, 2, &[hidden]);
+        c.unify(v, root).unwrap();
+        assert_eq!(level(&c, hidden), 4, "explain {explain}");
+    }
+}
+
 /// Links are written in OCaml's direction (O2, CHECKER_REDESIGN I.2.1).
 #[test]
 fn link_directions() {

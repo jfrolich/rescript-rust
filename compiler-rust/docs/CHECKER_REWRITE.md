@@ -2640,3 +2640,16 @@ skeleton; all three were the skeleton's, not the builder's.
    right node, which is the trace pair only while the left head is its own
    expansion. With expansion the frame records the original pair, and the
    swapped side of ctype.ml:2299.
+
+8. **The combined binding walk lowers what `update_level` lowers, no
+   more** (review of R3a). `update_level` does not look below a node that
+   is not above the target (ctype.ml:586); the occurrence test looks
+   everywhere. The first build lowered every node above the target that
+   the occurrence walk met, also below a node `update_level` stops at, so
+   `Mode::Success` and `Mode::Explain` left different levels on a type
+   whose inner node is above a node that holds it (a node made after
+   `end_def` around nodes of the definition). The walk carries, per stack
+   entry, whether it came from a lowered node.
+   `binding_lowers_only_what_update_level_reaches` pins it in both modes.
+   The generator of the harness does not reach such a type today; the
+   second skeleton turn adds an operation that does.

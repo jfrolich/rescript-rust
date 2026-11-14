@@ -275,9 +275,17 @@ impl Checker {
     /// crossing an object or a variant row is visited once (marks), tested
     /// against `var` (`occur_rec`, compiler/ml/ctype.ml:1384), tested for a
     /// free universal variable (`occur_univar`, ctype.ml:1563; R3g fills the
-    /// test), and lowered to the variable's level when above it. At most 2
-    /// steps a node. The occurrence test has no level cut: a node below the
-    /// variable's level can hold the variable (ctype.ml:2217 has none).
+    /// test), and lowered to the variable's level exactly when `update_level`
+    /// would lower it: when it is above that level and is the root of the
+    /// walk or a child of a node this walk lowered. `update_level` does not
+    /// look below a node that is not above the target
+    /// (`if ty.level > level`, compiler/ml/ctype.ml:586), so a node above the
+    /// target that is reached only through such a node keeps its level. A
+    /// node first met on a path that does not lower and met again on one
+    /// that does is lowered at the second meeting. At most 2 steps a node.
+    /// The occurrence test has no level cut: a node below the variable's
+    /// level can hold the variable (ctype.ml:2217 has none). The levels this
+    /// walk leaves are those the two walks of `Mode::Explain` leave.
     /// A constructor node that holds the variable is expanded before the
     /// walk gives up (ctype.ml:1396-1402). Explicit stack. (R3a; the
     /// expansion retry R3c)
