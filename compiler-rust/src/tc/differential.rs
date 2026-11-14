@@ -89,9 +89,8 @@ impl Tier {
         self != Tier::Structural
     }
 
-    /// O(1): whether the form prints variable names (see the module text).
-    /// False below `Expand` until R3b's first commit makes R1's instance drop
-    /// names; that commit makes this true for every tier.
+    /// O(1): whether the form prints variable names: in every tier, since
+    /// R1's instance and copy drop names as the old checker's do.
     fn names(self) -> bool {
         true
     }
