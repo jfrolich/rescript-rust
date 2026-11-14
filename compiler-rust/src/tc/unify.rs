@@ -192,8 +192,11 @@ impl Checker {
     /// the explicit stack. At depth 0 in `Mode::Explain` it opens a
     /// speculation and, on failure, [`Checker::undo_compress`]es it; in
     /// `Mode::Success` it opens none and, on failure outside a speculation,
-    /// sets `unexplained_failure`. Cost: O(pairs popped), each pair one
-    /// [`Checker::unify_pair`]. (R3a)
+    /// sets `unexplained_failure`. `left` and `right` are two distinct
+    /// representatives ([`Checker::unify`] makes them so). The root pair goes
+    /// to [`Checker::unify_pair`] without a frame; the loop runs only when
+    /// that call left frames. Cost: one [`Checker::unify_pair`], then
+    /// O(pairs popped), each pair one [`Checker::unify_pair`]. (R3a)
     pub fn unify_distinct(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
         let top = self.depth == 0;
         let explain = self.g.mode == Mode::Explain;
@@ -209,8 +212,7 @@ impl Checker {
         let saved_base = self.saved.len();
         let trace_base = self.trace.len();
         self.depth += 1;
-        self.push_pair(left, right);
-        let result = self.run_frames(base);
+        let result = self.run_frames(base, left, right);
         self.depth -= 1;
         match result {
             Ok(()) => {
@@ -252,13 +254,20 @@ impl Checker {
         // bound (ctype.ml:2242-2243). A variable that occurs in a
         // constructor goes to `unify2` with the pair as it is
         // (ctype.ml:2240-2241); the binding walk finds that occurrence.
-        if l.tag() == VAR {
-            let route = r.tag() == CONSTR;
-            return self.bind_routed(left, right, route.then_some([left, right]));
-        }
-        if r.tag() == VAR {
-            let route = l.tag() == CONSTR;
-            return self.bind_routed(right, left, route.then_some([left, right]));
+        let bound = if l.tag() == VAR {
+            Some((left, l, right, r))
+        } else if r.tag() == VAR {
+            Some((right, r, left, l))
+        } else {
+            None
+        };
+        if let Some((var, before, ty, target)) = bound {
+            if self.binds_leaf(target) {
+                self.bind_leaf(var, before, ty);
+                return Ok(());
+            }
+            let route = target.tag() == CONSTR;
+            return self.bind_routed(var, ty, route.then_some([left, right]));
         }
         // Two universal variables (ctype.ml:2244) are extended nodes: R3g.
         // Two locally abstract types (ctype.ml:2258) need equations: R3h.
@@ -271,8 +280,14 @@ impl Checker {
         // tracing the node's own memo is used (R3h).
         if l.tag() == CONSTR && r.tag() == CONSTR && l.a == r.a && l.arity() == 0 && r.arity() == 0
         {
-            // `update_level !env t1.level t2; link_type t1 t2`.
-            self.lower_to(right, l.level)?;
+            // `update_level !env t1.level t2; link_type t1 t2`. `right` is a
+            // representative and `r` its descriptor: the outer test of
+            // `update_level` (`if ty.level > level`, ctype.ml:635) reads `r`
+            // with no second `repr`. Nothing is above the generic level, so
+            // a generic `l` never lowers.
+            if r.level > l.level {
+                self.lower(right, l.level)?;
+            }
             self.g.link(left, right);
             return Ok(());
         }
@@ -298,12 +313,11 @@ impl Checker {
     /// cost is [`Checker::bind`]'s, or one walk and the callee.
     fn bind_routed(&mut self, var: Ty, ty: Ty, route: Option<[Ty; 2]>) -> Result<(), Clash> {
         let before = self.g.nodes[var.0 as usize];
-        let target_is_var = self.g.nodes[ty.0 as usize].tag() == VAR;
-        // Of two variables, `link_type` picks the surviving name by the
-        // levels before `update_level` (compiler/ml/btype.ml:727,
-        // ctype.ml:2221-2222): link first, then lower the one node. A
-        // variable cannot hold another, so the occurrence walk is skipped.
-        //
+        let target = self.g.nodes[ty.0 as usize];
+        if self.binds_leaf(target) {
+            self.bind_leaf(var, before, ty);
+            return Ok(());
+        }
         // Decision 6 of "R3 as designed": in `Mode::Explain`, outside a
         // speculation whose owner restores, a failed binding must leave the
         // levels as they were, because a failed top-level unification there
@@ -312,12 +326,14 @@ impl Checker {
         // ctype.ml:2216-2225), in two walks. The speculation this
         // unification opened in `Mode::Explain` is not an owner's.
         let occur_first = self.occur_first();
-        if !target_is_var && self.binding_occurrence(var, ty, occur_first, route.is_some())? {
+        // A node without a child holds nothing: no occurrence walk. With
+        // scoped types its one level is `Checker::lower`'s, below.
+        if !childless(target) && self.binding_occurrence(var, ty, occur_first, route.is_some())? {
             let [left, right] = route.expect("routed occurrence");
             return self.unify_expanded(left, right);
         }
         self.g.link(var, ty);
-        if (target_is_var || occur_first || self.types.scoped != 0)
+        if (occur_first || self.types.scoped != 0)
             && let Err(clash) = self.lower_to(ty, before.level)
         {
             // `t1.desc <- d1` (ctype.ml:2224).
@@ -325,6 +341,46 @@ impl Checker {
             return Err(clash);
         }
         Ok(())
+    }
+
+    /// O(1): whether a binding to a representative whose descriptor is
+    /// `target` is [`Checker::bind_leaf`]'s: `target` is a variable, or has
+    /// no child ([`childless`]) and no type has a scope.
+    #[inline(always)]
+    fn binds_leaf(&self, target: Node) -> bool {
+        target.tag() == VAR || (childless(target) && self.types.scoped == 0)
+    }
+
+    /// O(1): the binding of variable `var`, whose descriptor is `before`, to
+    /// the distinct representative `ty`, a variable or (with no scoped
+    /// types) a node without a child ([`Checker::binds_leaf`]). `ty` holds
+    /// nothing, so there is no occurrence walk: a variable cannot hold
+    /// another, and a node without a child is a walk of one node that finds
+    /// nothing (`occur`, compiler/ml/ctype.ml:2217; nor is it
+    /// `deep_occur`'s, ctype.ml:2240). What remains is the link and
+    /// `update_level` of the one node (ctype.ml:586, 2221-2222): no child,
+    /// and no scope test (a variable has no scope; with no scoped types
+    /// there is none), so one write when `ty` is above the variable, which
+    /// cannot fail. Of two variables, `link_type` picks the surviving name by
+    /// the levels before `update_level` (compiler/ml/btype.ml:727), so the
+    /// link comes first and the node is read after it, its name rule having
+    /// possibly named it; the rule leaves a target that is not a variable
+    /// alone. Always inline (out of line, saving registers costs more than
+    /// the body): one link, one node load, one compare and at most one
+    /// write.
+    #[inline(always)]
+    fn bind_leaf(&mut self, var: Ty, before: Node, ty: Ty) {
+        self.g.link(var, ty);
+        let target = self.g.nodes[ty.0 as usize];
+        if target.level > before.level {
+            self.g.write(
+                ty,
+                Node {
+                    level: before.level,
+                    ..target
+                },
+            );
+        }
     }
 
     /// O(1): whether a binding tests occurrence in a walk of its own before
@@ -633,25 +689,44 @@ impl Checker {
         // nodes, so it is made only after an expansion.
         let mut expanded_left = self.expand_head(left, ExpandMode::Unif)?;
         let mut expanded_right = self.expand_head(right, ExpandMode::Unif)?;
-        if expanded_left != self.g.repr(left) || expanded_right != self.g.repr(right) {
+        let unexpanded = expanded_left == self.g.repr(left) && expanded_right == self.g.repr(right);
+        if !unexpanded {
             expanded_left = self.expand_head(left, ExpandMode::Unif)?;
             expanded_right = self.expand_head(right, ExpandMode::Unif)?;
         }
-        let level = self.g.nodes[expanded_left.0 as usize]
-            .level
-            .min(self.g.nodes[expanded_right.0 as usize].level);
-        self.lower_to(right, level)?;
-        self.lower_to(left, level)?;
-        // `unify_eq t1' t2'` (ctype.ml:2286). The heads are taken again as
-        // representatives: only a scoped lowering links a node, and then
-        // OCaml would read a link's descriptor in unify3.
-        let expanded_left = self.g.repr(expanded_left);
-        let expanded_right = self.g.repr(expanded_right);
-        if expanded_left == expanded_right {
-            return Ok(());
-        }
-        let t1 = self.g.repr(left);
-        let t2 = self.g.repr(right);
+        let left_level = self.g.nodes[expanded_left.0 as usize].level;
+        let right_level = self.g.nodes[expanded_right.0 as usize].level;
+        let level = left_level.min(right_level);
+        let (t1, t2) = if unexpanded && self.types.scoped == 0 {
+            // The heads are the representatives of `left` and `right`, whose
+            // levels were just read: the outer test of `update_level`
+            // (`if ty.level > level`, ctype.ml:635) reads them with no
+            // second `repr`. `level` is the lower of the two, so at most one
+            // is above it. Without scoped types `Graph::lower` links nothing,
+            // so lowering one side does not raise the other and every head
+            // stays its side's representative: `t1 = t1'`, `t2 = t2'`.
+            if right_level > level {
+                self.lower(expanded_right, level)?;
+            } else if left_level > level {
+                self.lower(expanded_left, level)?;
+            }
+            if expanded_left == expanded_right {
+                return Ok(());
+            }
+            (expanded_left, expanded_right)
+        } else {
+            self.lower_to(right, level)?;
+            self.lower_to(left, level)?;
+            // `unify_eq t1' t2'` (ctype.ml:2286). The heads are taken again
+            // as representatives: only a scoped lowering links a node, and
+            // then OCaml would read a link's descriptor in unify3.
+            expanded_left = self.g.repr(expanded_left);
+            expanded_right = self.g.repr(expanded_right);
+            if expanded_left == expanded_right {
+                return Ok(());
+            }
+            (self.g.repr(left), self.g.repr(right))
+        };
         // `if unify_eq t1 t1' || not (unify_eq t2 t2') then unify3 env t1
         // t1' t2 t2' else unify3 env t2 t2' t1 t1'` (ctype.ml:2299-2303).
         if t1 == expanded_left || t2 != expanded_right {
@@ -731,8 +806,11 @@ impl Checker {
             (d1, d2)
         };
         // `occur !env t1' t2'; link_type t1' t2` (ctype.ml:2330-2331),
-        // before the children.
-        self.occur(t1x, t2x)?;
+        // before the children. A `t2'` without a child is not `t1'` (they
+        // are distinct representatives) and holds nothing: no walk.
+        if !childless(d2) {
+            self.occur(t1x, t2x)?;
+        }
         self.g.link(t1x, t2);
         let explain = self.g.mode == Mode::Explain;
         if explain {
@@ -952,7 +1030,9 @@ impl Checker {
         // here the level is written before the link, so of two variables the
         // name is chosen by the levels after it (btype.ml:727).
         let mut result = Ok(());
-        if target.tag() != VAR {
+        // A node without a child holds nothing: no occurrence walk; its one
+        // level is written below.
+        if target.tag() != VAR && !childless(target) {
             match self.binding_occurrence(var, ty, occur_first, target.tag() == CONSTR) {
                 // `Tvar _, Tconstr _ when deep_occur t1 t2 -> unify (ref env)
                 // t1 t2` (ctype.ml:2755).
@@ -961,7 +1041,9 @@ impl Checker {
                 Err(clash) => result = Err(clash),
             }
         }
-        if result.is_ok() && (target.tag() == VAR || occur_first || self.types.scoped != 0) {
+        if result.is_ok()
+            && (target.tag() == VAR || childless(target) || occur_first || self.types.scoped != 0)
+        {
             result = self.lower_to(ty, before.level);
         }
         if result.is_ok() {
@@ -1131,51 +1213,73 @@ impl Checker {
         }
     }
 
-    /// O(1) frame pops each plus the callee: the loop of
-    /// [`Checker::unify_distinct`] over the frames above `base`. A pair whose
-    /// two sides are one node is skipped (`unify_eq`, ctype.ml:2233). On a
-    /// clash returns the failing pair, as it stood, and leaves the frames.
-    fn run_frames(&mut self, base: usize) -> Result<(), [Ty; 2]> {
-        while self.frames.len() > base {
-            let Some(frame) = self.frames.pop() else {
-                break;
-            };
-            match frame.kind {
-                FrameKind::Pair => {
-                    let left = self.g.repr(frame.left);
-                    let right = self.g.repr(frame.right);
-                    if left != right && self.unify_pair(left, right).is_err() {
-                        return Err([left, right]);
-                    }
+    /// The loop of [`Checker::unify_distinct`]: the root pair `left`,
+    /// `right` (two distinct representatives) goes to
+    /// [`Checker::unify_pair`] without a frame, then the frames that call
+    /// left above `base` are popped, O(1) each plus the callee. A popped
+    /// pair whose two sides are one node is skipped (`unify_eq`,
+    /// ctype.ml:2233). One call site of `unify_pair`, so that it stays
+    /// inline. On a clash returns the failing pair, as it stood, and leaves
+    /// the frames: for the root pair, the frames its call left, as when the
+    /// root was a popped frame.
+    fn run_frames(&mut self, base: usize, left: Ty, right: Ty) -> Result<(), [Ty; 2]> {
+        let [mut left, mut right] = [left, right];
+        loop {
+            if self.unify_pair(left, right).is_err() {
+                return Err([left, right]);
+            }
+            // The next pair whose sides differ, running the other frames.
+            loop {
+                if self.frames.len() <= base {
+                    return Ok(());
                 }
-                FrameKind::Linked => self.saved.truncate((frame.extra & !SWAPPED) as usize),
-                FrameKind::LeavePoly => todo!("R3g"),
-                FrameKind::Fields => self.saved.truncate(frame.extra as usize),
-                FrameKind::Field => self.unify_field(frame)?,
-                FrameKind::FieldEnd => {}
-                FrameKind::RowField => self.unify_row_field(frame)?,
-                FrameKind::RowFieldEnd => self.row_field_end(frame)?,
-                FrameKind::RowEnd => self.row_end(frame),
-                FrameKind::Recursion => {
-                    // A clash here is the enclosing pair's: it adds no
-                    // pair of its own to the trace (`Unify []`).
-                    if self.repair_recursion(frame.left, frame.right).is_err() {
-                        return Err([Ty(NONE), Ty(NONE)]);
+                let Some(frame) = self.frames.pop() else {
+                    return Ok(());
+                };
+                match frame.kind {
+                    FrameKind::Pair => {
+                        left = self.g.repr(frame.left);
+                        right = self.g.repr(frame.right);
+                        if left != right {
+                            break;
+                        }
+                    }
+                    FrameKind::Linked => self.saved.truncate((frame.extra & !SWAPPED) as usize),
+                    FrameKind::LeavePoly => todo!("R3g"),
+                    FrameKind::Fields => self.saved.truncate(frame.extra as usize),
+                    FrameKind::Field => self.unify_field(frame)?,
+                    FrameKind::FieldEnd => {}
+                    FrameKind::RowField => self.unify_row_field(frame)?,
+                    FrameKind::RowFieldEnd => self.row_field_end(frame)?,
+                    FrameKind::RowEnd => self.row_end(frame),
+                    FrameKind::Recursion => {
+                        // A clash here is the enclosing pair's: it adds no
+                        // pair of its own to the trace (`Unify []`).
+                        if self.repair_recursion(frame.left, frame.right).is_err() {
+                            return Err([Ty(NONE), Ty(NONE)]);
+                        }
                     }
                 }
             }
         }
-        Ok(())
     }
 
     /// `update_level` of `ty` to `level`: [`Checker::lower`]. O(1) for the
-    /// generic level, which nothing is above; otherwise the callee's cost.
+    /// generic level, which nothing is above, and for a representative that
+    /// is not above `level`, which the outer `update_level` leaves alone
+    /// (`if ty.level > level`, compiler/ml/ctype.ml:635; `Checker::lower`
+    /// makes the same test before its scoped walk): one `repr`, one load and
+    /// one compare. Otherwise the callee's cost.
     #[inline]
     fn lower_to(&mut self, ty: Ty, level: u32) -> Result<(), Clash> {
         if level == GENERIC {
             return Ok(());
         }
-        self.lower(ty, level)
+        let root = self.g.repr(ty);
+        if self.g.nodes[root.0 as usize].level <= level {
+            return Ok(());
+        }
+        self.lower(root, level)
     }
 
     /// O(1): an object or a polymorphic variant row, which `occur_rec`
@@ -1260,6 +1364,18 @@ impl Checker {
     pub fn mode(&self) -> Mode {
         self.g.mode
     }
+}
+
+/// O(1): whether a descriptor has no child: a constructor or a tuple of
+/// arity 0 with no flag bit (`TUPLE` is `CONSTR | 1`, so one mask and one
+/// compare). A variable, a link, an arrow (its result is a child), an
+/// extended node and any node with arguments are not. It tests the whole
+/// head, so a node that is not a representative (head `LINK`) is never
+/// childless.
+#[inline(always)]
+fn childless(node: Node) -> bool {
+    const { assert!(TUPLE == CONSTR | 1) };
+    node.head & !1 == CONSTR
 }
 
 #[cfg(test)]

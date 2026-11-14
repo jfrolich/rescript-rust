@@ -2484,7 +2484,6 @@ mod tests {
     /// what a cleanup cuts and of what a later expansion revives (section
     /// 8.6, decision 26). Reaches: R3m.
     #[test]
-    #[ignore = "R3m build"]
     fn a_chain_of_inherited_entries_agrees() {
         let program = compile(MUTUAL.to_string());
         let plan = Plan::new(Tier::Expand, OBJECTS);
@@ -2625,7 +2624,6 @@ mod tests {
     /// names the same type. Reaches: R3m. Today 89 of 10,000 cases differ
     /// with objects, 159 with variants.
     #[test]
-    #[ignore = "R3m build"]
     fn expand_tier_agrees_on_recursive_abbreviations() {
         let program = compile(RECURSIVE.to_string());
         let plan = Plan::new(Tier::Expand, OBJECTS | VARIANTS);
