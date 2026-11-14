@@ -183,7 +183,7 @@ pub(in crate::binary_ast) fn classify(
     rec_flag: RecFlag,
     shares_names: bool,
 ) -> Classification {
-    classify_in_scope(arena, decl, rec_flag, shares_names, super::super::derive::Scope::default())
+    classify_in_scope(arena, decl, rec_flag, shares_names, crate::binary_ast::derive::Scope::default())
 }
 
 pub(in crate::binary_ast) fn classify_in_scope(
@@ -640,11 +640,45 @@ impl Builder<'_> {
     }
 }
 
+/// Visit exposed manifest arguments once; positions use one reusable stack.
+/// Cost: O(type nodes + emitted position lengths), no per-node allocation.
+fn identity_guards(
+    arena: &mut ParseArena, typ: CoreTypeIdx, scope: super::super::derive::Scope<'_>,
+    path: &mut Vec<u32>, positions: &mut Vec<Span>,
+) {
+    let CoreTypeDesc::Ptyp_constr((lid, args)) = arena.get_core_type(typ).ptyp_desc.clone() else { return };
+    if args.is_empty() {
+        if !path.is_empty() && scope.identity_fact(lid.txt, arena).is_none() {
+            positions.push(arena.plans_mut().push_guard_position(path));
+        }
+        return;
+    }
+    // A single option identity agrees with general inference; nested codec
+    // applications do not share this exception.
+    if path.is_empty() && longident_matches(arena, lid.txt, &["option"])
+        && args.len() == 1
+        && matches!(&arena.get_core_type(arena.type_list(args)[0]).ptyp_desc,
+            CoreTypeDesc::Ptyp_constr((_, inner)) if inner.is_empty())
+    { return; }
+    for i in 0..args.len() {
+        let child = arena.type_list(args)[i];
+        path.push(i as u32);
+        identity_guards(arena, child, scope, path, positions);
+        path.pop();
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ManifestBinding<'a> {
+    name: StrIdx,
+    guards: &'a [Span],
+}
+
 /// Append the binding `<type><suffix> = v => codec(v)`.
 /// Cost: O(codecs of the type); see [`Builder::codec`].
 fn binding(
     arena: &mut ParseArena,
-    type_name: &str,
+    declaration: ManifestBinding<'_>,
     suffix: &str,
     side: Side,
     spec: Spec,
@@ -666,7 +700,15 @@ fn binding(
         (builder.codec(spec, Slot::Root), None)
     };
     let vars = builder.vars;
-    let name = arena.push_string(format!("{type_name}{suffix}"));
+    if !declaration.guards.is_empty() {
+        for &position in declaration.guards {
+            arena.plans_mut().push_obligation(Obligation::NotJsonIdentity { declaration: declaration.name, position });
+        }
+        if let Some(census) = arena.derived_census.as_mut() {
+            census.not_json_identity_emitted += declaration.guards.len() as u64;
+        }
+    }
+    let name = arena.push_string(format!("{}{suffix}", arena.get_string(declaration.name)));
     let param = arena.spice_runtime_v();
     let plans = arena.plans_mut();
     let local = plans.push_body(BodyNode::Local(0));
@@ -697,6 +739,7 @@ pub(super) fn build(
     arena: &mut ParseArena,
     group: &[TypeDeclaration],
     settings: &[Option<GeneratorSettings>],
+    scope: super::super::derive::Scope<'_>,
 ) -> DerivedIdx {
     let first = arena.plans().next_binding();
     let mut scratch = Scratch::default();
@@ -718,8 +761,11 @@ pub(super) fn build(
         }
         let manifest = decl.ptype_manifest.expect("a planned declaration has a manifest");
         if settings.do_encode {
+            let mut guards = Vec::new();
+            identity_guards(arena, manifest, scope, &mut Vec::new(), &mut guards);
+            let guarded = ManifestBinding { name: decl.ptype_name.txt, guards: &guards };
             let encoder = Spec::Type(manifest, EncodeContext::Optional);
-            binding(arena, &type_name, ENCODER_FUNC_SUFFIX, Side::Encode, encoder, Attributes::new(), &mut scratch);
+            binding(arena, guarded, ENCODER_FUNC_SUFFIX, Side::Encode, encoder, Attributes::new(), &mut scratch);
             // `manifest_value_encoder`: only a top-level `option` encodes its
             // value differently from its optional form.
             let value_encoder = match default_option_inner_type(arena.get_core_type(manifest), arena) {
@@ -727,11 +773,11 @@ pub(super) fn build(
                 None => encoder,
             };
             let attributes = vec![unused_value_warning_attribute(arena)].into();
-            binding(arena, &type_name, VALUE_ENCODER_FUNC_SUFFIX, Side::Encode, value_encoder, attributes, &mut scratch);
+            binding(arena, guarded, VALUE_ENCODER_FUNC_SUFFIX, Side::Encode, value_encoder, attributes, &mut scratch);
         }
         if settings.do_decode {
             let decoder = Spec::Type(manifest, EncodeContext::Optional);
-            binding(arena, &type_name, DECODER_FUNC_SUFFIX, Side::Decode, decoder, Attributes::new(), &mut scratch);
+            binding(arena, ManifestBinding { name: decl.ptype_name.txt, guards: &[] }, DECODER_FUNC_SUFFIX, Side::Decode, decoder, Attributes::new(), &mut scratch);
         }
     }
     arena.plans_mut().push_item(first)
@@ -1045,10 +1091,11 @@ mod tests {
                     let actual: Vec<_> = binding
                         .obligations
                         .range()
-                        .map(|i| {
+                        .filter_map(|i| {
                             let obligation = plan.obligation(
                                 crate::binary_ast::derive::plan::ObligationIdx(i as u32),
                             );
+                            if matches!(obligation, Obligation::NotJsonIdentity { .. }) { return None; }
                             let Obligation::Value { name, name_loc, expr_loc, .. } = obligation
                             else {
                                 panic!("a constructor application has value obligations only")
@@ -1057,7 +1104,7 @@ mod tests {
                                 ExprLoc::OfName => name_loc,
                                 ExprLoc::Dummy => arena.dummy_loc(),
                             };
-                            (longident_text(&arena, arena.get_longident(name)), name_loc, expr_loc)
+                            Some((longident_text(&arena, arena.get_longident(name)), name_loc, expr_loc))
                         })
                         .collect();
                     assert_eq!(actual, expected, "{source}: {}", arena.get_string(binding.name));
@@ -1110,7 +1157,7 @@ mod tests {
             .iter()
             .map(|decl| get_generator_settings_from_attributes(&decl.ptype_attributes, &mut arena).unwrap())
             .collect();
-        let idx = build(&mut arena, &inner.1, &settings);
+        let idx = build(&mut arena, &inner.1, &settings, crate::binary_ast::derive::Scope::default());
         let (syntax, syntax_arena) = expand_on(source, Some(GeneralReason::Switch));
         (idx, arena, syntax, syntax_arena)
     }
@@ -1300,7 +1347,7 @@ mod tests {
         for i in binding.obligations.range() {
             let obligation = plans.obligation(ObligationIdx(i as u32));
             out.push(match obligation {
-                Obligation::Equal { .. } => continue,
+                Obligation::Equal { .. } | Obligation::NotJsonIdentity { .. } => continue,
                 Obligation::Value { name, name_loc, expr_loc, .. } => {
                     let expr_loc = match expr_loc {
                         ExprLoc::OfName => name_loc,
@@ -1473,7 +1520,7 @@ mod tests {
         };
         let settings =
             [get_generator_settings_from_attributes(&inner.1[0].ptype_attributes, &mut arena).unwrap()];
-        let idx = build(&mut arena, &inner.1, &settings);
+        let idx = build(&mut arena, &inner.1, &settings, crate::binary_ast::derive::Scope::default());
         let plans = arena.plans();
         let obligations = plans
             .bindings(plans.item(idx))
@@ -1520,7 +1567,7 @@ mod tests {
         };
         let settings =
             [get_generator_settings_from_attributes(&inner.1[0].ptype_attributes, &mut arena).unwrap()];
-        let idx = build(&mut arena, &inner.1, &settings);
+        let idx = build(&mut arena, &inner.1, &settings, crate::binary_ast::derive::Scope::default());
         let plans = arena.plans();
         let bindings = plans.bindings(plans.item(idx));
         let obligations: Vec<_> = bindings.iter().map(|binding| binding.obligations.len as usize).collect();

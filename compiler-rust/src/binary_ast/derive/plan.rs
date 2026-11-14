@@ -156,6 +156,13 @@ pub const NO_VAR: u32 = u32::MAX;
 /// the general form, which fixes the first failure and the order of warnings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Obligation {
+    /// The owning declaration's manifest argument must not alias JSON.
+    NotJsonIdentity {
+        /// Unqualified name of the immediately preceding type declaration.
+        declaration: StrIdx,
+        /// Argument indices from the manifest root, in the guard-position pool.
+        position: Span,
+    },
     /// Two skeletons the shape of a body requires to have the same type.
     Equal {
         /// The expected type at this body position.
@@ -238,7 +245,7 @@ impl Obligation {
             | Obligation::Type { name, .. }
             | Obligation::Label { name, .. }
             | Obligation::Constructor { name, .. } => Some(name),
-            Obligation::Literal { .. } | Obligation::Equal { .. } => None,
+            Obligation::Literal { .. } | Obligation::Equal { .. } | Obligation::NotJsonIdentity { .. } => None,
         }
     }
 }
@@ -541,6 +548,7 @@ pub struct Plans {
     bindings: Vec<Binding>,
     obligations: Vec<Obligation>,
     constructor_locs: Vec<Option<LocIdx>>,
+    guard_positions: Vec<u32>,
     skeletons: Vec<SkeletonNode>,
     body: Vec<BodyNode>,
     body_args: Vec<BodyIdx>,
@@ -549,6 +557,18 @@ pub struct Plans {
 }
 
 impl Plans {
+    /// Append one argument position. Cost: O(position depth), pooled storage.
+    pub fn push_guard_position(&mut self, position: &[u32]) -> Span {
+        let start = self.guard_positions.len() as u32;
+        self.guard_positions.extend_from_slice(position);
+        Span { start, len: position.len() as u32 }
+    }
+
+    /// Argument indices of a guard. Cost: O(1), borrowed pool slice.
+    pub fn guard_position(&self, position: Span) -> &[u32] {
+        &self.guard_positions[position.range()]
+    }
+
     /// O(new slots) on growth, O(1) otherwise; each dense slot initialized
     /// once across monotonic obligation growth, only for explicit locations.
     pub fn set_constructor_loc(&mut self, idx: ObligationIdx, loc: LocIdx) {

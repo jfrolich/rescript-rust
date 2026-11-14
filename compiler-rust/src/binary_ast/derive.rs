@@ -245,7 +245,7 @@ pub fn value_names(
             | plan::Obligation::Label { .. }
             | plan::Obligation::Constructor { .. }
             | plan::Obligation::Literal { .. }
-            | plan::Obligation::Equal { .. } => None,
+            | plan::Obligation::Equal { .. } | plan::Obligation::NotJsonIdentity { .. } => None,
         })
 }
 
@@ -310,11 +310,24 @@ impl Scope<'_> {
             return false;
         };
         arena.find_interned_string(arena.get_string(*name))
-            .is_some_and(|name| self.alias(name.raw() as usize))
+            .is_some_and(|name| self.alias(name.raw() as usize).unwrap_or(false))
     }
 
-    fn alias(self, name: usize) -> bool {
-        let Some((prefix, position)) = self.prefix else { return false };
+    /// Syntactically known JSON/non-JSON declaration, or unresolved.
+    pub(crate) fn identity_fact(self, lid: crate::parse_arena::LidentIdx, arena: &ParseArena) -> Option<bool> {
+        if super::spice_ppx::is_json_identifier(lid, arena) { return Some(true); }
+        let crate::parser::Longident::Lident(name) = arena.get_longident(lid) else { return None };
+        if let Some(canonical) = arena.find_interned_string(arena.get_string(*name))
+            && let Some(fact) = self.alias(canonical.raw() as usize)
+        { return Some(fact); }
+        match arena.get_string(*name) {
+            "int" | "float" | "string" | "bool" | "unit" | "char" | "array" | "list" | "option" | "result" | "dict" => Some(false),
+            _ => None,
+        }
+    }
+
+    fn alias(self, name: usize) -> Option<bool> {
+        let (prefix, position) = self.prefix?;
         let mut slot = prefix.names.get(name).copied().unwrap_or(0);
         while slot != 0 {
             let entry = &prefix.aliases[slot as usize - 1];
@@ -330,7 +343,7 @@ impl Scope<'_> {
 struct Alias {
     position: usize,
     previous: u32,
-    identity: bool,
+    identity: Option<bool>,
 }
 
 /// Dense prefix facts and a flat version pool, shared by constructor and alias
@@ -367,11 +380,17 @@ impl<'a> PrefixScope<'a> {
         if let StructureItemDesc::Pstr_type(group) = &item.pstr_desc {
             self.names.resize(self.names.len().max(arena.string_count()), 0);
             for decl in &group.1 {
-                let identity = decl.ptype_params.is_empty() && decl.ptype_manifest.is_some_and(|ty| {
-                    matches!(&arena.get_core_type(ty).ptyp_desc,
-                        crate::parser::ast::CoreTypeDesc::Ptyp_constr((lid, args))
-                        if args.is_empty() && self.at(position).is_json_identity(lid.txt, arena))
-                });
+                let identity = if !decl.ptype_params.is_empty() {
+                    None
+                } else if let Some(ty) = decl.ptype_manifest {
+                    match &arena.get_core_type(ty).ptyp_desc {
+                        crate::parser::ast::CoreTypeDesc::Ptyp_constr((lid, args)) if args.is_empty() =>
+                            self.at(position).identity_fact(lid.txt, arena),
+                        crate::parser::ast::CoreTypeDesc::Ptyp_constr((lid, _)) =>
+                            self.at(position).identity_fact(lid.txt, arena).filter(|identity| !identity),
+                        _ => None,
+                    }
+                } else { Some(false) };
                 let name = arena.intern_existing_string(decl.ptype_name.txt).raw() as usize;
                 let previous = self.names[name];
                 self.aliases.push(Alias { position, previous, identity });

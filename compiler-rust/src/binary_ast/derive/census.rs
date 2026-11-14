@@ -97,6 +97,10 @@ pub struct Census {
     pub paths: super::PathCounts,
     /// Value obligations by scheme level before instance: non-generic, generic.
     pub value_schemes: [u64; 2],
+    /// Guard obligations emitted during planning.
+    pub not_json_identity_emitted: u64,
+    /// Guard obligations whose failure requests a general retry.
+    pub not_json_identity_failed: u64,
     /// General-path generated body nodes by `GeneralReason::census_index`.
     pub general_syntax_nodes: [u64; 13],
     /// General-path item-exclusive typecheck time by the same reason index.
@@ -128,7 +132,7 @@ impl Census {
                 .then_some([[0; 4]; 2]),
             typed_groups: Vec::new(), shape_classes: Vec::new(), shape_nodes: Vec::new(),
             shape_parameterised: Vec::new(), shape_recursive: Vec::new(), templates: Vec::new(),
-            paths: super::PathCounts::default(), value_schemes: [0; 2], general_syntax_nodes: [0; 13],
+            paths: super::PathCounts::default(), value_schemes: [0; 2], not_json_identity_emitted: 0, not_json_identity_failed: 0, general_syntax_nodes: [0; 13],
             general_typecheck_ns: [0; 13], general_groups: Vec::new(), observer_ns: 0 }
     }
     /// O(new slots) on growth, O(1) otherwise. Each slot is initialized once

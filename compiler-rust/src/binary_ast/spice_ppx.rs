@@ -5617,7 +5617,7 @@ fn map_structure_item_spice(
             if let Some((super::derive::Classification::Plan, ref settings)) = classification {
                 let mapped_item = clone_mapped_structure_item(item, arena, scope)?;
                 let value_item = StructureItem {
-                    pstr_desc: StructureItemDesc::Pstr_derived(plan::build(arena, decls, settings)),
+                    pstr_desc: StructureItemDesc::Pstr_derived(plan::build(arena, decls, settings, scope)),
                     pstr_loc: arena.dummy_loc(),
                 };
                 return Ok(vec![mapped_item, value_item]);

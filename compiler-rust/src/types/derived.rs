@@ -419,6 +419,10 @@ pub fn discharge(
     }
     if result.is_err() {
         let (kind, shape) = match steps.last {
+            Some(Obligation::NotJsonIdentity { .. }) => {
+                tctx.derived_census.as_mut().unwrap().not_json_identity_failed += 1;
+                ("not_json_identity", "manifest_argument")
+            }
             Some(Obligation::Equal { .. }) => ("equation", "body_shape"),
             Some(Obligation::Value { .. }) => ("value", "codec_function"),
             Some(Obligation::Type { .. }) => ("type", "named_type"),
@@ -435,6 +439,88 @@ pub fn discharge(
         tctx.derived_census.as_ref().unwrap().failed_obligation(kind, shape);
     }
     result
+}
+
+/// Follow only nullary alias manifests. Cost: one exact type lookup and one
+/// declaration read per step, at most 64 steps. `repr` may compress existing
+/// links; this does not instantiate, unify, expand, or write abbreviation memos.
+/// Missing declarations, parameters, applied manifests and the depth bound fail
+/// closed. The lookup closure makes the step bound directly testable.
+fn identity_endpoint(
+    ctx: &crate::types::context::TypeContext,
+    mut path: Path,
+    mut lookup: impl FnMut(&Path) -> Option<Arc<crate::types::decl::TypeDeclaration>>,
+) -> Result<(Path, Arc<crate::types::decl::TypeDeclaration>), Fallback> {
+    for _ in 0..64 {
+        let decl = lookup(&path).ok_or(Fallback)?;
+        if !decl.type_params.is_empty() || decl.type_arity != 0 { return Err(Fallback); }
+        let Some(manifest) = decl.type_manifest else { return Ok((path, decl)); };
+        let next = match &*ctx.borrow_desc(ctx.repr(manifest)) {
+            TypeDesc::Tconstr { path, args, .. } => {
+                if !ctx.type_list(*args).is_empty() { return Err(Fallback); }
+                Some(*path)
+            }
+            _ => None,
+        };
+        match next {
+            Some(next) => path = next,
+            None => return Ok((path, decl)),
+        }
+    }
+    Err(Fallback)
+}
+
+/// Read an argument from the already checked owning declaration and the JSON
+/// result from the encoder's established skeleton. Cost: O(position depth) plus
+/// two bounded alias walks. No source-longident resolution or type inference.
+fn not_json_identity(
+    tctx: &mut TypeCheckContext<'_>, env: &Env, arena: &ParseArena,
+    binding: &Binding, declaration: crate::parse_arena::StrIdx, position: Span,
+) -> Result<(), Fallback> {
+    let ctx = tctx.type_ctx;
+    let own = env.find_type(arena.get_string(declaration)).map_err(|_| Fallback)?;
+    let mut argument = own.type_manifest.ok_or(Fallback)?;
+    for &index in arena.plans().guard_position(position) {
+        argument = match &*ctx.borrow_desc(ctx.repr(argument)) {
+            TypeDesc::Tconstr { args, .. } => ctx.type_list(*args).get(index as usize).ok_or(Fallback)?,
+            _ => return Err(Fallback),
+        };
+    }
+    let argument_path = match &*ctx.borrow_desc(ctx.repr(argument)) {
+        TypeDesc::Tconstr { path, args, .. } if ctx.type_list(*args).is_empty() => *path,
+        _ => return Err(Fallback),
+    };
+    let TypeSource::ResultOf { obligation, .. } = binding.ty else { return Err(Fallback) };
+    let head = tctx.typed.derived.resolved(obligation).instance();
+    let result = match &*ctx.borrow_desc(ctx.repr(head)) {
+        TypeDesc::Tarrow { ret, .. } => *ret,
+        _ => return Err(Fallback),
+    };
+    // The optional encoder's JSON side is option<JSON>; its value encoder
+    // returns JSON directly. Read through this one predefined wrapper only.
+    let result = match &*ctx.borrow_desc(ctx.repr(result)) {
+        TypeDesc::Tconstr { path, args, .. } if path.same(&crate::types::predef::path_option()) => {
+            if ctx.type_list(*args).len() != 1 { return Err(Fallback); }
+            ctx.type_list(*args).get(0).ok_or(Fallback)?
+        }
+        _ => result,
+    };
+    let json_path = match &*ctx.borrow_desc(ctx.repr(result)) {
+        TypeDesc::Tconstr { path, args, .. } if ctx.type_list(*args).is_empty() => *path,
+        _ => return Err(Fallback),
+    };
+    let mut lookup = |path: &Path| crate::types::typecore::lookup_type_decl_for_path_exact(
+        path, env, &mut tctx.persistent_env, ctx,
+    );
+    let (argument_path, argument_decl) = identity_endpoint(ctx, argument_path, &mut lookup)?;
+    let (json_path, json_decl) = identity_endpoint(ctx, json_path, &mut lookup)?;
+    // Component views may copy declaration Arcs. Compare the canonical stored
+    // declaration paths too, normalizing module aliases rather than spellings.
+    let argument_path = env.normalize_path(ctx, argument_decl.type_path.as_ref().unwrap_or(&argument_path));
+    let json_path = env.normalize_path(ctx, json_decl.type_path.as_ref().unwrap_or(&json_path));
+    if Arc::ptr_eq(&argument_decl, &json_decl) || argument_path.same(&json_path) {
+        Err(Fallback)
+    } else { Ok(()) }
 }
 
 /// [`discharge`], counting its steps.
@@ -566,6 +652,10 @@ fn discharge_binding(
             }
         );
         let resolved = match plans.obligation(obligation) {
+            Obligation::NotJsonIdentity { declaration, position } => {
+                not_json_identity(tctx, env, arena, binding, declaration, position)?;
+                Resolved::Equation
+            }
             Obligation::Equal { expected, actual } => {
                 let (expected, _) = instantiate(ctx, arena, &tctx.typed.derived,
                     plans.skeleton_from(expected), vars);
@@ -1156,6 +1246,86 @@ pub(crate) mod tests {
     use crate::types::initial_env;
 
     #[test]
+    fn not_json_identity_alias_depth_and_read_counts() {
+        for depth in [1, 3, 10_000] {
+            let ctx = type_context();
+            let mut env = initial_env(&ctx);
+            let template = env.find_type("int").unwrap().clone();
+            let target_id = ctx.create_ident(crate::name::Name::new("endpoint"));
+            let target = Path::pident(target_id);
+            env.add_type(target_id, template.clone());
+            let mut path = target;
+            for i in 0..depth {
+                let id = ctx.create_ident(crate::name::Name::new(&format!("alias{i}")));
+                let mut decl = template.clone();
+                decl.type_manifest = Some(ctx.new_constr(path, Vec::new()));
+                env.add_type(id, decl);
+                path = Path::pident(id);
+            }
+            let mut steps = 0;
+            let result = identity_endpoint(&ctx, path, |path| {
+                steps += 1;
+                crate::types::typecore::lookup_type_decl_for_path_exact(path, &env, &mut None, &ctx)
+            });
+            if depth == 10_000 {
+                assert!(result.is_err());
+                assert_eq!(steps, 64);
+            } else {
+                let (end, _) = result.unwrap();
+                assert!(end.same(&target));
+                assert_eq!(steps, depth + 1);
+            }
+        }
+    }
+
+    #[test]
+    fn not_json_identity_record_and_abstract_endpoints_hold() {
+        let ctx = type_context();
+        let mut env = initial_env(&ctx);
+        let template = env.find_type("int").unwrap().clone();
+        for record in [false, true] {
+            let id = ctx.create_ident(crate::name::Name::new(if record { "record" } else { "abstract" }));
+            let mut decl = template.clone();
+            decl.type_manifest = None;
+            if record {
+                decl.type_kind = crate::types::TypeKind::TypeRecord(Default::default(), crate::types::RecordRepresentation::RecordRegular);
+            }
+            env.add_type(id, decl);
+            let mut steps = 0;
+            identity_endpoint(&ctx, Path::pident(id), |path| {
+                steps += 1;
+                crate::types::typecore::lookup_type_decl_for_path_exact(path, &env, &mut None, &ctx)
+            }).unwrap();
+            assert_eq!(steps, 1);
+        }
+        let absent = ctx.create_ident(crate::name::Name::new("abstract"));
+        assert!(crate::types::typecore::lookup_type_decl_for_path_exact(&Path::pident(absent), &env, &mut None, &ctx).is_none());
+        assert!(crate::types::typecore::lookup_type_decl_for_path(&Path::pident(absent), &env, &mut None, &ctx).is_some());
+    }
+
+    #[test]
+    fn not_json_identity_qualified_record_keeps_its_plan() {
+        let (_, planned) = check_records("module Owner = {@spice type t = {x: int}}\n@spice type rows = array<Owner.t>\n@spice type optionalRows = option<array<Owner.t>>", true).unwrap();
+        assert_eq!(planned, 3, "the owner record and both qualified record controls must keep their plans");
+    }
+
+    #[test]
+    fn not_json_identity_retries_qualified_opened_and_module_aliases() {
+        for source in [
+            "module Owner = {@spice type j = JSON.t}\n@spice type rows = array<Owner.j>",
+            "module Owner = {@spice type j = JSON.t}\n@spice type rows = option<array<Owner.j>>",
+            "module Owner = {@spice type j = JSON.t}\nmodule Local = Owner\n@spice type rows = array<Local.j>",
+            "module Owner = {@spice type j = JSON.t}\nmodule Opened = {open Owner; @spice type rows = array<j>}",
+            "module Js = {module Json = JSON}\nmodule Owner = {@spice type j = Js.Json.t}\n@spice type rows = array<Owner.j>",
+        ] {
+            let (planned, count) = check_records(source, true).unwrap();
+            let (general, _) = check_records(source, false).unwrap();
+            assert_eq!(count, 0, "JSON alias must retry: {source}");
+            assert_eq!(planned, general, "{source}");
+        }
+    }
+
+    #[test]
     fn census_counts_value_scheme_levels_without_changing_them() {
         let ctx = type_context();
         let local = ctx.new_var(None);
@@ -1233,7 +1403,7 @@ pub(crate) mod tests {
         for source in DECLARATIONS {
             let (planned, discharged) = check(source, true).unwrap();
             let (general, none) = check(source, false).unwrap();
-            assert_eq!(discharged, source.matches("type ").count());
+            assert_eq!(discharged, source.matches("type ").count(), "{source}");
             assert_eq!(none, 0);
             assert_eq!(planned, general, "{source}");
         }

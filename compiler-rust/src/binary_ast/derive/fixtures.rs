@@ -96,13 +96,16 @@ pub(crate) fn derive_source(
     parser
         .arena_mut()
         .set_derived_plans((!plans).then_some(super::GeneralReason::Switch));
-    let expanded: Vec<StructureItem> = items
-        .iter()
-        .flat_map(|item| {
-            super::expand_structure_item_with_mapper(item, parser.arena_mut(), true)
-                .unwrap()
-        })
-        .collect();
+    // Supply the same source-prefix facts as the real frontend; the isolated
+    // seam otherwise cannot know declarations from earlier items.
+    let mut prefix = super::PrefixScope::default();
+    let mut expanded = Vec::new();
+    for item in &items {
+        prefix.push(item, parser.arena_mut());
+        expanded.extend(super::expand_structure_item_in_scope(
+            item, parser.arena_mut(), true, prefix.at(prefix.len() - 1),
+        ).unwrap());
+    }
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     (parser, expanded)
 }
