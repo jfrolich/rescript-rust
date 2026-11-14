@@ -642,8 +642,11 @@ impl Checker {
     /// enclosing `unify`, in its order, and `swapped` says unify2 chose the
     /// right side. A variable head is linked to the *original* other side;
     /// otherwise `occur t1' t2'`, the link `t1' -> t2` before the children,
-    /// then the children are pushed. O(1) plus one [`Checker::occur`] and
-    /// one push per child.
+    /// then the children are pushed. When `t2` was expanded and `t1'` occurs
+    /// in it (`create_recursion`, one [`Checker::deep_occur`]), a
+    /// [`FrameKind::Recursion`] frame runs the repair after the children.
+    /// O(1) plus one [`Checker::occur`], at most one `deep_occur` and one
+    /// push per child.
     fn unify3(
         &mut self,
         [t1, t1x, t2, t2x]: [Ty; 4],
@@ -663,6 +666,9 @@ impl Checker {
             self.g.link(t2x, t1);
             return Ok(());
         }
+        // `create_recursion` is computed before anything is linked
+        // (ctype.ml:2308); the variable cases above do not read it.
+        let create_recursion = t2 != t2x && self.deep_occur(t1x, t2);
         if d1.head & d2.head & EXTENDED != 0 {
             self.extended_pair(d1, d2);
         }
@@ -690,9 +696,20 @@ impl Checker {
                 extra: if swapped { extra | SWAPPED } else { extra },
             });
         }
+        if create_recursion {
+            self.frames.push(Frame {
+                left: t2,
+                right: t2x,
+                kind: FrameKind::Recursion,
+                extra: 0,
+            });
+        }
         let pushed = self.push_children(d1, d2);
         if pushed.is_err() {
             // `push_children` pushes nothing when it fails.
+            if create_recursion {
+                self.frames.pop();
+            }
             if explain {
                 self.frames.pop();
                 self.saved.truncate(self.saved.len() - 2);
@@ -700,6 +717,74 @@ impl Checker {
             }
         }
         pushed
+    }
+
+    /// The `create_recursion` repair (compiler/ml/ctype.ml:2428-2436), after
+    /// the children of a pair whose right side `t2` was expanded to `t2x`:
+    /// when `t2` is still a constructor, forget its memo, expand it again,
+    /// and when the new expansion is not closed over `t2`'s arguments link
+    /// `t2` to `t2x`. One [`Checker::forget_abbrev`], one
+    /// [`Checker::expand_head`] and one walk of the arguments and of the
+    /// expansion ([`Checker::closed_over`]).
+    fn repair_recursion(&mut self, t2: Ty, t2x: Ty) -> Result<(), Clash> {
+        // `match t2.desc with Tconstr ...`: the node as it is, not its
+        // representative (`| _ -> ()`, ctype.ml:2436).
+        let node = self.g.nodes[t2.0 as usize];
+        if node.tag() != CONSTR {
+            return Ok(());
+        }
+        self.forget_abbrev(t2);
+        let expansion = self.expand_head(t2, ExpandMode::Unif)?;
+        if !self.closed_over(node, expansion) {
+            let from = self.g.repr(t2);
+            let to = self.g.repr(t2x);
+            self.g.link(from, to);
+        }
+        Ok(())
+    }
+
+    /// `closed_parameterized_type tl ty` (compiler/ml/ctype.ml:441-451) for
+    /// the arguments of constructor descriptor `constr`: whether every
+    /// variable reachable from `ty` is reachable from an argument. One mark
+    /// generation: the nodes reachable from the arguments are marked, then
+    /// the walk of `ty` stops at a marked node. One step a node, explicit
+    /// stack.
+    fn closed_over(&mut self, constr: Node, ty: Ty) -> bool {
+        let generation = self.fresh_marks();
+        self.g.work.clear();
+        for index in 0..constr.arity() {
+            self.g
+                .work
+                .push(self.g.lists[(constr.b + 1 + index) as usize]);
+        }
+        while let Some(ty) = self.g.work.pop() {
+            let ty = self.g.repr(ty);
+            if self.marks[ty.0 as usize] == generation {
+                continue;
+            }
+            #[cfg(test)]
+            super::steps::tick();
+            self.marks[ty.0 as usize] = generation;
+            let node = self.g.nodes[ty.0 as usize];
+            self.g.children(node, false);
+        }
+        self.g.work.push(ty);
+        while let Some(ty) = self.g.work.pop() {
+            let ty = self.g.repr(ty);
+            if self.marks[ty.0 as usize] == generation {
+                continue;
+            }
+            #[cfg(test)]
+            super::steps::tick();
+            self.marks[ty.0 as usize] = generation;
+            let node = self.g.nodes[ty.0 as usize];
+            if node.tag() == VAR {
+                self.g.work.clear();
+                return false;
+            }
+            self.g.children(node, false);
+        }
+        true
     }
 
     /// Push the child pairs of two structure nodes of the same shape, last
@@ -913,7 +998,13 @@ impl Checker {
                 }
                 FrameKind::Linked => self.saved.truncate((frame.extra & !SWAPPED) as usize),
                 FrameKind::LeavePoly => todo!("R3g"),
-                FrameKind::Recursion => todo!("R3c"),
+                FrameKind::Recursion => {
+                    // A clash here is the enclosing pair's: it adds no
+                    // pair of its own to the trace (`Unify []`).
+                    if self.repair_recursion(frame.left, frame.right).is_err() {
+                        return Err([Ty(NONE), Ty(NONE)]);
+                    }
+                }
             }
         }
         Ok(())

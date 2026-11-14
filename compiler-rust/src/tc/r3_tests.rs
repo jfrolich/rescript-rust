@@ -1168,7 +1168,7 @@ fn occurrence_through_an_abbreviation() {
 }
 
 // ---------------------------------------------------------------------------
-// R3c: the cost of the expanding occurrence test.
+// R3c: the cost of the expanding occurrence test and of the recursion repair.
 // ---------------------------------------------------------------------------
 
 /// `v` against a tuple of 10,000 `phantom<v>`: the binding walk reaches `v`
@@ -1216,6 +1216,47 @@ fn occurrence_retry_down_ten_thousand_constructors_fits_the_stack() {
             let count = steps::scope(|| c.unify(v, chain).unwrap());
             assert!(count <= 6 * n, "{count}");
             assert_eq!(c.g.repr(v), chain);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// A tuple of 10,000 variables against `wide<t>`, an abbreviation of a
+/// 10,000-element tuple of `int` whose argument is that tuple: the right
+/// side was expanded and the left head occurs in it, so after the children
+/// the recursion repair forgets the memo, expands again and tests that the
+/// expansion is closed over the arguments (ctype.ml:2428-2436). Linear.
+#[test]
+fn recursion_repair_over_ten_thousand_elements_is_linear() {
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            let n = 10_000u64;
+            let mut c = checker(Mode::Success);
+            let wide_type = c.types.rows.len() as u32;
+            c.types.rows.push(c.types.rows[PHANTOM as usize]);
+            let param = var_at(&mut c, GENERIC);
+            let ints: Vec<Ty> = (0..n)
+                .map(|_| constr_at(&mut c, GENERIC, INT, &[]))
+                .collect();
+            let body = tuple_at(&mut c, GENERIC, &ints);
+            abbreviation(&mut c, wide_type, &[param], body);
+            let vars: Vec<Ty> = (0..n).map(|_| var(&mut c)).collect();
+            let left = tuple(&mut c, &vars);
+            let right = constr(&mut c, wide_type, &[left]);
+            let before = c.g.nodes.len() as u64;
+            let count = steps::scope(|| c.unify(left, right).unwrap());
+            assert!(count <= 12 * n, "{count}");
+            assert_eq!(c.g.repr(left), right);
+            assert_eq!(path(&mut c, vars[0]), INT);
+            // Two expansions: the first, and the repair's.
+            assert!(c.g.nodes.len() as u64 - before >= 2 * (n + 1));
+            let expansion = c.find_expansion(right, false);
+            assert!(
+                u64::from(expansion.0) > before + n,
+                "the repair's expansion"
+            );
         })
         .unwrap()
         .join()
