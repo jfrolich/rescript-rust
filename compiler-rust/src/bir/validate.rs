@@ -57,7 +57,7 @@ impl Bir {
         let mut entered = vec![0usize; self.nodes.len()];
         let mut ended = vec![0usize; self.nodes.len()];
         let mut capture_root = vec![None; self.nodes.len()];
-        let mut functions = vec![false; self.pools.funcs.len()];
+        let mut functions = vec![false; self.vars.funcs.len()];
         let mut stack: Vec<_> = root.map(|id| Work::Enter { id, parent: id, weight: 1 }).into_iter().collect();
         while let Some(work) = stack.pop() {
             self.visit();

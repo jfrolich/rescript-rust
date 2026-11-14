@@ -23,7 +23,7 @@ pub(super) fn lower(
     if let Some(locations) = locations {
         state.located_functions = state
             .arena
-            .pools
+            .vars
             .funcs
             .iter()
             .map(|f| {

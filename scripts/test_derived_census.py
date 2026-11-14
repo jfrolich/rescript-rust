@@ -67,6 +67,20 @@ def main():
             assert error <= .02, (phase, measured, reported)
             print(f"{phase}: census={measured:.3f} ms phase={reported:.3f} ms delta={error:.3%}")
 
+        # Checker census attribution remains single-worker until equality of
+        # shared-world work across worker counts has been established.
+        for workers in (1, 4):
+            counted = temporary / f"checker-{workers}.jsonl"
+            run("clean", project)
+            run("build", project, environment=dict(env,
+                RAYON_NUM_THREADS=str(workers), RESCRIPT_COMPILER_COUNTERS="1",
+                RESCRIPT_DERIVED_CENSUS=str(counted)))
+            records = [json.loads(line) for line in counted.read_text().splitlines()]
+            assert records
+            assert all((record["checker_counters"] is not None) == (workers == 1)
+                       for record in records)
+            print(f"checker census: workers={workers} enabled={workers == 1}")
+
         for case in ("missing-codec", "wrong-codec-type"):
             error_project = temporary / case
             error_project.mkdir()

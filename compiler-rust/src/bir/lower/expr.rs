@@ -363,18 +363,18 @@ mod allocation_tests {
             s.statements.kill(out.stmts);
         };
         let lists = state.arena.lists.storage_shape().0;
-        let functions = state.arena.pools.funcs.len();
+        let functions = state.arena.vars.funcs.len();
         let attributes = state.arena.pools.attrs.len();
         run(&mut state);
         assert_eq!(state.arena.pools.attrs.len(), attributes);
-        assert_eq!(state.arena.pools.funcs.len() - functions, 10_000);
+        assert_eq!(state.arena.vars.funcs.len() - functions, 10_000);
         state.arena.lists.reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
-        state.arena.pools.funcs.reserve(10_000);
+        state.arena.vars.funcs.reserve(10_000);
         state.arena.func_owners.reserve(10_000);
         state.free.reserve_repeat();
         state.arena.js_scope.as_mut().unwrap().reserve_repeat();
         let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
-            s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1, s.arena.pools.funcs.capacity(),
+            s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1, s.arena.vars.funcs.capacity(),
             s.arena.func_owners.capacity(), s.arena.pools.attrs.capacity(), s.traversal.work.capacity(),
             s.traversal.values.capacity(), s.traversal.children.capacity()];
         let before = capacities(&state);

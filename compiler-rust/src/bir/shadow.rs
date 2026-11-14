@@ -934,11 +934,15 @@ pub(crate) struct LowerCandidate {
     pub stats: super::lower::SwitchStats,
     /// Step A's decision per declaration, with the identifier it prints as.
     pub decisions: Vec<(crate::ident::Ident, super::lower::scope::Decision)>,
+    /// The references of `arena` the lowering decided to print as
+    /// `globalThis.name` (`lower::globals`, `bridge_j::qualify`).
+    pub qualified: Vec<crate::js_ir::arena::Expr>,
 }
 
 /// Step A's decisions (`lower::close`) against the legacy tail-call pass's
-/// on `program`, the new side's program after the flatten and
-/// external-shadow passes: the same identifiers on both sides, so the
+/// on `program`, the program that pass receives on the new side (the
+/// lowering's references to shadowed globals qualified, then the flatten
+/// pass): the same identifiers on both sides, so the
 /// comparison is by declared identifier. A difference is a finding, counted
 /// in the report, not a failure of the gate: the legacy pass still decides.
 /// Check mode only. One hash lookup per row and per legacy identifier; the
@@ -1002,7 +1006,7 @@ pub(crate) fn prepare_lower(
         .map_err(|error| LowerFailure::Error(anyhow::anyhow!("lower validation: {error}")))?;
     // bridge_j's exporter uses expr_with/stmt_with and alloc_* only: no
     // smart constructor and no normalize.
-    let exported = super::bridge_j::export_js(&lowered.program)
+    let super::bridge_j::Exported { program: exported, qualified } = super::bridge_j::export_lowered(&lowered.program)
         .map_err(|error| LowerFailure::Error(anyhow::anyhow!("lower export: {error}")))?;
     super::j::write_stats(lowered.program.arena.j_stats)
         .map_err(|error| LowerFailure::Error(anyhow::anyhow!("J normalisation stats: {error}")))?;
@@ -1039,6 +1043,7 @@ pub(crate) fn prepare_lower(
     stats.decisions.decision_reclosed = scope.decisions.len() - decisions.len();
     Ok(LowerCandidate {
         decisions,
+        qualified,
         arena: exported.program.arena,
         block: exported.program.block,
         exports: lowered.coerced.exports,

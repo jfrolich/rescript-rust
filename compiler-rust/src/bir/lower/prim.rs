@@ -763,7 +763,7 @@ impl State {
                 let value = values.next().unwrap_or_else(|| plain::node(&mut self.arena, View::JUndefined, 0));
                 for unused in values { self.arena.release(unused); }
                 if let View::JFun { header, .. } = self.arena.view(value) {
-                    self.arena.pools.funcs[header.index()].flags |= crate::bir::FuncHeader::METHOD;
+                    self.arena.vars.funcs[header.index()].flags |= crate::bir::FuncHeader::METHOD;
                 }
                 value
             }

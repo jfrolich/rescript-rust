@@ -161,6 +161,7 @@ pub(super) fn until_js(
     both.collect_unit_reads = true;
     let mut reference_options = both.clone();
     reference_options.derived_census = None;
+    // The general form has no plan to fall back from.
 
     // The general form of the unit is what the frontend makes of its source
     // with plans off.
@@ -180,6 +181,7 @@ pub(super) fn until_js(
     let general = UntilJs {
         arena: &general_arena,
         structure: &general_structure,
+        fallback: None,
         ..*unit
     };
     // The reference first: it publishes nothing, and what the plans publish
@@ -198,8 +200,9 @@ pub(super) fn until_js(
     let (mut result, reference) = match (result, reference) {
         (Ok(result), Ok(reference)) => (result, reference),
         // A compile that needs locations is retried with them, and checked
-        // then; a unit whose plans cannot be used is compiled without them,
-        // and has nothing to check.
+        // then. A unit whose plans cannot be used continues on its general
+        // form in its attempt loop, and is compared like any other; only a
+        // compile with no general syntax to continue on stops here.
         (Err(error), _) if error.is::<LocationRetry>() || error.is::<DerivedRetry>() => {
             return Err(error);
         }

@@ -827,6 +827,37 @@ fn cross_module_inline_after_lowering_a_closure_with_assignment() {
     compare_oracle(a, root, Some(&resolver), true, &[0,1,2,3,4], None, true);
 }
 
+#[test]
+fn cross_module_inline_of_a_body_that_holds_a_function() {
+    // The function inside the inlined body gets its header while the fragment
+    // is imported, after the unit's own header (the closure's). The lowering
+    // reads headers from its own arena, so that header must be made there: a
+    // header left in the source's table is read out of bounds, or as the
+    // closure's.
+    use crate::cmi::persistent_env::CmjExportArity;
+    use crate::js_ir::ModulePathResolver;
+    use crate::lambda::{ApInfo, ApplyStatus, FieldDbgInfo, LamLoc, Lambda, lam_arity::Arity, lam_primitive::Primitive};
+    let resolver = ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+    let param = Ident::new("arg", 100, IdentFlags::NONE);
+    let first = Ident::new("first", 101, IdentFlags::NONE);
+    let second = Ident::new("second", 102, IdentFlags::NONE);
+    let inner = Lambda::function_(2, vec![first, second], Lambda::var(param), Default::default(), LamLoc::NONE);
+    resolver.set_bir_test_export("Other", "run", CmjExportArity::Single(Arity::info(vec![1], false)),
+        Some(Lambda::function_(1, vec![param], inner, Default::default(), LamLoc::NONE)));
+    let mut a = LamArena::new();
+    let global = a.global_module(Ident::create_persistent("Other"));
+    let callee = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Module { name: crate::name::Name::new("run") }), &[global], LamLoc::NONE);
+    let arg = a.const_(C::JsNull);
+    let call = a.apply_raw(callee, &[arg], ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE });
+    let mutable = Ident::new("mutable", 10, IdentFlags::NONE);
+    let assignment = a.assign(mutable, arg);
+    let unit = Ident::new("unit", 11, IdentFlags::NONE);
+    let attr = crate::lambda::FunctionAttribute { one_unit_arg: true, ..Default::default() };
+    let closure = a.function_(1, &[unit], assignment, attr, LamLoc::NONE);
+    let root = a.seq_raw(closure, call);
+    compare_oracle(a, root, Some(&resolver), true, &[0,1,2,3,4], None, true);
+}
+
 /// The legacy pipeline on one function bound to an exported `run`, with the
 /// passes `order` names (1 flatten, 2 external shadow, 3 tail-call inlining,
 /// 4 record rest, 5 substitution and dead marks, 6 shake), printed. For the T4
@@ -1530,4 +1561,285 @@ fn cached_external_templates_keep_fresh_binders_and_import_once() {
             state.statements.kill(out.stmts);
         }
     }
+}
+
+/// The new side of the gate on the function `build` gives, bound to an
+/// exported `run`: lowered, the references the lowering marked written as
+/// `globalThis.name` (`bridge_j::qualify`), then the legacy passes `order`
+/// names (as `legacy_text`), printed. `order` never holds pass 2 here: the
+/// new side runs no external-shadow pass (THREE_TREES 11.4, "T5 design").
+fn new_text(build: impl Fn(&mut LamArena) -> Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, order: &[u8]) -> (String, usize) {
+    use crate::lambda::js_pass_flatten_and_mark_dead::{apply_js_flatten_and_mark_dead_pass as dead, apply_js_flatten_pass as flatten};
+    let mut a = LamArena::new();
+    let root = build(&mut a);
+    let exported = Ident::new("run", 900, IdentFlags::NONE);
+    let mut input = bridge::import_lambda(&a, root).unwrap();
+    let var = input.arena.new_var_id(exported.name_atom(), exported.stamp() as u32);
+    input.idents.push(exported);
+    let source_root = input.root;
+    let mut state = State::new(input);
+    state.resolver = resolver.cloned();
+    let cx = Cx::declare(LetKind::Strict, var);
+    let probed = state.probe(cx, source_root).unwrap();
+    // As `bir_lower_oracle`: the statements, without a value.
+    let out = state.realize(cx, probed);
+    let run = state.statements.since(Span { start: out.stmts.start, len: 0 });
+    let list = state.statements.take_list(&mut state.arena, run);
+    let lowered = state.finish(list, out.finished, Default::default());
+    lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
+    let bridge_j::Exported { mut program, qualified } = bridge_j::export_lowered(&lowered.program).unwrap();
+    bridge_j::qualify(&mut program, &qualified);
+    let mut program = JsDepsProgram { program: JsProgram::new_in(program.program.block, vec![exported], program.program.arena), modules: vec![], side_effect: None };
+    for pass in order {
+        program = match pass {
+            1 => flatten(program),
+            3 => crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass(program),
+            4 => crate::lambda::js_pass_record_rest::apply_js_record_rest_pass(program),
+            5 => dead(program, false),
+            6 => crate::lambda::js_shake::apply_js_shake_pass(program),
+            _ => unreachable!("pass number"),
+        };
+    }
+    (crate::js_ir::print_deps_program_with_directives_and_options(&program, None, &[], false, false, false), qualified.len())
+}
+
+/// The oracle form of one external-shadow rule: the new side without pass 2
+/// prints what the legacy side prints with it, after the flatten pass alone
+/// and after all passes. Returns the final text and the number of
+/// references the lowering marked.
+fn shadow_rule(build: impl Fn(&mut LamArena) -> Lam + Copy) -> (String, usize) {
+    assert_eq!(new_text(build, None, &[1]).0, legacy_text(build, &[1, 2]));
+    let (text, marked) = new_text(build, None, &[1, 3, 4, 5, 6]);
+    assert_eq!(text, legacy_text(build, &[1, 2, 3, 4, 5, 6]));
+    (text, marked)
+}
+
+fn js_global(a: &mut LamArena, name: &str) -> Lam {
+    a.var(Ident::create_js(name))
+}
+
+fn ext_call(a: &mut LamArena, args: &[Lam]) -> Lam {
+    let ext = a.var(Ident::new("ext", 13, IdentFlags::NONE));
+    call(a, ext, args)
+}
+
+#[test]
+fn the_lowering_decides_the_shadowed_global_the_tail_call_pass_would_hide() {
+    // THREE_TREES.md 11.4, "T4c design" (c), first counterexample, on the
+    // new side: lowered, then P1, P3, P4, P5, P6 and no P2. The parameter
+    // `location` is around the reference when the lowering decides, so the
+    // reference is qualified although P3 then removes the parameter.
+    use crate::lambda::LamLoc;
+    let build = |a: &mut LamArena| {
+        let (g, p, arg) = (Ident::new("g", 10, IdentFlags::NONE), Ident::new("location", 11, IdentFlags::NONE), Ident::new("a", 12, IdentFlags::NONE));
+        let (read, global) = (a.var(p), js_global(a, "location"));
+        let body = ext_call(a, &[read, global]);
+        let function = a.function_(1, &[p], body, Default::default(), LamLoc::NONE);
+        let callee = a.var(g);
+        let x = a.var(arg);
+        let applied = call(a, callee, &[x]);
+        let inner = a.let_(LetKind::Strict, g, function, applied);
+        a.function_(1, &[arg], inner, Default::default(), LamLoc::NONE)
+    };
+    let (text, marked) = new_text(build, None, &[1, 3, 4, 5, 6]);
+    assert_eq!(text, "\n\n\nfunction run(a) {\n  return ext(a, globalThis.location);\n}\n\nexport {\n  run,\n}\n/* No side effect */\n");
+    assert_eq!(marked, 1);
+    assert_eq!(text, legacy_text(build, &[1, 2, 3, 4, 5, 6]));
+}
+
+#[test]
+fn a_declaration_the_tail_call_pass_moves_into_the_list_of_a_global_reference_leaves_it_plain() {
+    // The reverse case: `run = a => { let g = p => { let location = ext(p);
+    // ext(location, p) }; ext(<global location>); return g(a) }`. When the
+    // lowering decides, `let location` is in the callee's list and the
+    // caller's reference is not below it: plain. P3 then moves the
+    // declaration into the caller's list; the reference stays plain, as in
+    // the legacy order.
+    use crate::lambda::LamLoc;
+    let build = |a: &mut LamArena| {
+        let (g, p, arg, local) = (Ident::new("g", 10, IdentFlags::NONE), Ident::new("p", 11, IdentFlags::NONE), Ident::new("a", 12, IdentFlags::NONE), Ident::new("location", 14, IdentFlags::NONE));
+        let read = a.var(p);
+        let value = ext_call(a, &[read]);
+        let (first, second) = (a.var(local), a.var(p));
+        let result = ext_call(a, &[first, second]);
+        let body = a.let_(LetKind::Strict, local, value, result);
+        let function = a.function_(1, &[p], body, Default::default(), LamLoc::NONE);
+        let global = js_global(a, "location");
+        let effect = ext_call(a, &[global]);
+        let callee = a.var(g);
+        let x = a.var(arg);
+        let applied = call(a, callee, &[x]);
+        let rest = a.seq_raw(effect, applied);
+        let inner = a.let_(LetKind::Strict, g, function, rest);
+        a.function_(1, &[arg], inner, Default::default(), LamLoc::NONE)
+    };
+    let (text, marked) = shadow_rule(build);
+    assert_eq!(marked, 0);
+    assert_eq!(text, "\n\n\nfunction run(a) {\n  ext(location);\n  let location$1 = ext(a);\n  return ext(location$1, a);\n}\n\nexport {\n  run,\n}\n/* No side effect */\n");
+}
+
+#[test]
+fn a_declaration_after_the_reference_in_the_same_list_shadows_it() {
+    // `run = () => { ext(<global location>); let location = ext(); return ext(location) }`.
+    use crate::lambda::LamLoc;
+    let build = |a: &mut LamArena| {
+        let local = Ident::new("location", 14, IdentFlags::NONE);
+        let global = js_global(a, "location");
+        let effect = ext_call(a, &[global]);
+        let value = ext_call(a, &[]);
+        let read = a.var(local);
+        let result = ext_call(a, &[read]);
+        let declared = a.let_(LetKind::Strict, local, value, result);
+        let body = a.seq_raw(effect, declared);
+        a.function_(0, &[], body, Default::default(), LamLoc::NONE)
+    };
+    let (text, marked) = shadow_rule(build);
+    assert_eq!(marked, 1);
+    assert!(text.contains("  ext(globalThis.location);\n  let location = ext();\n"), "{text}");
+}
+
+#[test]
+fn a_parameter_shadows_the_global_in_the_function_and_not_beside_it() {
+    // `run = () => { ext(location => ext(location, <global location>)); return ext(<global location>) }`.
+    use crate::lambda::LamLoc;
+    let build = |a: &mut LamArena| {
+        let p = Ident::new("location", 11, IdentFlags::NONE);
+        let (read, global) = (a.var(p), js_global(a, "location"));
+        let inner = ext_call(a, &[read, global]);
+        let function = a.function_(1, &[p], inner, Default::default(), LamLoc::NONE);
+        let effect = ext_call(a, &[function]);
+        let global = js_global(a, "location");
+        let result = ext_call(a, &[global]);
+        let body = a.seq_raw(effect, result);
+        a.function_(0, &[], body, Default::default(), LamLoc::NONE)
+    };
+    let (text, marked) = shadow_rule(build);
+    assert_eq!(marked, 1);
+    assert!(text.contains("ext(location, globalThis.location)"), "{text}");
+    assert!(text.contains("  return ext(location);\n"), "{text}");
+}
+
+#[test]
+fn a_loop_variable_shadows_the_global_in_the_loop() {
+    // `run = () => { for location = 0 to ext(<global location>) { ext(<global location>) }; return ext(<global location>) }`.
+    use crate::lambda::{DirectionFlag, LamLoc};
+    let build = |a: &mut LamArena| {
+        let index = Ident::new("location", 11, IdentFlags::NONE);
+        let start = a.const_(C::Int { i: 0, comment: None });
+        let bound = js_global(a, "location");
+        let finish = ext_call(a, &[bound]);
+        let inside = js_global(a, "location");
+        let effect = ext_call(a, &[inside]);
+        let looped = a.for_(index, start, finish, DirectionFlag::Upto, effect);
+        let after = js_global(a, "location");
+        let result = ext_call(a, &[after]);
+        let body = a.seq_raw(looped, result);
+        a.function_(0, &[], body, Default::default(), LamLoc::NONE)
+    };
+    let (text, marked) = shadow_rule(build);
+    assert!(marked >= 1, "{text}");
+    assert!(text.contains("    ext(globalThis.location);\n"), "{text}");
+    assert!(text.contains("  return ext(location);\n"), "{text}");
+}
+
+#[test]
+fn a_catch_variable_shadows_the_global_in_the_handler() {
+    // `run = () => { try { ext(<global location>) } catch location { ext(location, <global location>) } }`.
+    use crate::lambda::LamLoc;
+    let build = |a: &mut LamArena| {
+        let exception = Ident::new("location", 11, IdentFlags::NONE);
+        let tried = js_global(a, "location");
+        let body = ext_call(a, &[tried]);
+        let (read, global) = (a.var(exception), js_global(a, "location"));
+        let handler = ext_call(a, &[read, global]);
+        let whole = a.try_(body, exception, handler);
+        a.function_(0, &[], whole, Default::default(), LamLoc::NONE)
+    };
+    let (text, marked) = shadow_rule(build);
+    assert_eq!(marked, 1);
+    assert!(text.contains("ext(location);\n"), "{text}");
+    assert!(text.contains(", globalThis.location)"), "{text}");
+}
+
+#[test]
+fn a_declaration_in_one_case_of_a_switch_shadows_the_global_in_its_sibling_cases_and_not_in_the_discriminant() {
+    // `run = x => switch ext(x, <global location>) { | 0 => { let location = ext(); ext(location, location) }
+    // | 1 => ext(<global location>) | 2 => 2 | 3 => 3 }`.
+    use crate::lambda::{LamLoc, SwitchDispatch, SwitchKey};
+    let build = |a: &mut LamArena| {
+        let (x, local) = (Ident::new("x", 10, IdentFlags::NONE), Ident::new("location", 14, IdentFlags::NONE));
+        let (read, global) = (a.var(x), js_global(a, "location"));
+        let scrutinee = ext_call(a, &[read, global]);
+        let value = ext_call(a, &[]);
+        let (first, second) = (a.var(local), a.var(local));
+        let used = ext_call(a, &[first, second]);
+        let zero = a.let_(LetKind::Strict, local, value, used);
+        let sibling = js_global(a, "location");
+        let one = ext_call(a, &[sibling]);
+        let two = a.const_(C::Int { i: 2, comment: None });
+        let three = a.const_(C::Int { i: 3, comment: None });
+        let actions = a.add_list(&[zero, one, two, three]);
+        let info = a.add_switch(true, (0..4).map(SwitchKey::Int), false, std::iter::empty(), false, SwitchDispatch::Direct);
+        let body = a.switch_raw(scrutinee, actions, info);
+        a.function_(1, &[x], body, Default::default(), LamLoc::NONE)
+    };
+    let (text, marked) = shadow_rule(build);
+    assert_eq!(marked, 1, "{text}");
+    assert!(text.contains("switch (ext(x, location)) {"), "{text}");
+    assert!(text.contains("return ext(globalThis.location);"), "{text}");
+}
+
+#[test]
+fn an_imported_module_shadows_the_global_of_its_name_everywhere() {
+    // `run = () => ext(Other.run, <global Other>)`.
+    use crate::cmi::persistent_env::CmjExportArity;
+    use crate::js_ir::ModulePathResolver;
+    use crate::lambda::{FieldDbgInfo, LamLoc, lam_arity::Arity, lam_primitive::Primitive};
+    let resolver = ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+    resolver.set_bir_test_export("Other", "run", CmjExportArity::Single(Arity::info(vec![1], false)), None);
+    let build = |a: &mut LamArena| {
+        let module = a.global_module(Ident::create_persistent("Other"));
+        let field = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Module { name: crate::name::Name::new("run") }), &[module], LamLoc::NONE);
+        let global = js_global(a, "Other");
+        let body = ext_call(a, &[field, global]);
+        a.function_(0, &[], body, Default::default(), LamLoc::NONE)
+    };
+    let (text, marked) = new_text(build, Some(&resolver), &[1, 3, 4, 5, 6]);
+    assert_eq!(marked, 1);
+    assert!(text.contains("return ext(Other.run, globalThis.Other);"), "{text}");
+}
+
+#[test]
+fn a_module_whose_only_reference_the_flatten_pass_drops_still_shadows_the_global_of_its_name() {
+    // THREE_TREES.md 11.4, "T5 design" (a), the hazard: `run = c => {
+    // ignore(c ? Other.run : ext()); return ext(<global Other>) }`. The
+    // lowering counts one live reference to the module `Other` and
+    // qualifies the global; P1 drops the pure branch `Other.run`, so the
+    // legacy external-shadow pass, after P1, sees no reference to the
+    // module and leaves the global plain. Both texts are pinned.
+    use crate::cmi::persistent_env::CmjExportArity;
+    use crate::js_ir::ModulePathResolver;
+    use crate::lambda::{FieldDbgInfo, LamLoc, lam_arity::Arity, lam_primitive::Primitive};
+    let resolver = ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+    resolver.set_bir_test_export("Other", "run", CmjExportArity::Single(Arity::info(vec![1], false)), None);
+    let build = |a: &mut LamArena| {
+        let c = Ident::new("c", 12, IdentFlags::NONE);
+        let module = a.global_module(Ident::create_persistent("Other"));
+        let field = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Module { name: crate::name::Name::new("run") }), &[module], LamLoc::NONE);
+        let test = a.var(c);
+        let other = ext_call(a, &[]);
+        let chosen = a.if_(test, field, other);
+        let ignored = a.prim_raw(Primitive::Pignore, &[chosen], LamLoc::NONE);
+        let global = js_global(a, "Other");
+        let result = ext_call(a, &[global]);
+        let body = a.seq_raw(ignored, result);
+        a.function_(1, &[c], body, Default::default(), LamLoc::NONE)
+    };
+    let (new, marked) = new_text(build, Some(&resolver), &[1, 3, 4, 5, 6]);
+    let legacy = legacy_text(build, &[1, 2, 3, 4, 5, 6]);
+    assert_eq!(marked, 1);
+    // The new side: qualified.
+    assert_eq!(new, "\n\n\nfunction run(c) {\n  if (!c) {\n    ext();\n  }\n  return ext(globalThis.Other);\n}\n\nexport {\n  run,\n}\n/* No side effect */\n");
+    // The legacy side: the global stays plain.
+    assert_eq!(legacy, "\n\n\nfunction run(c) {\n  if (!c) {\n    ext();\n  }\n  return ext(Other);\n}\n\nexport {\n  run,\n}\n/* No side effect */\n");
 }

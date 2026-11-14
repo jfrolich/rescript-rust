@@ -1313,29 +1313,44 @@ impl QualifiedModuleComponents {
         self.signature.clone()
     }
 
-    fn cached_value_index(&self, name: &str) -> Option<(usize, usize)> {
+    fn cached_value_index(
+        &self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Option<(usize, usize)> {
         if self.compiler_counters_enabled {
-            crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Value);
+            crate::perf_counters::record_lazy_hit(ctx, crate::perf_counters::LazyLookupKind::Value);
         }
         self.tables.index.values.get(name).copied()
     }
 
-    fn cached_type_index(&self, name: &str) -> Option<usize> {
+    fn cached_type_index(&self, name: &str, ctx: &super::context::TypeContext) -> Option<usize> {
         if self.compiler_counters_enabled {
-            crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Type);
+            crate::perf_counters::record_lazy_hit(ctx, crate::perf_counters::LazyLookupKind::Type);
         }
         self.tables.index.types.get(name).copied()
     }
 
-    fn cached_module_index(&self, name: &str) -> Option<(usize, usize)> {
+    fn cached_module_index(
+        &self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Option<(usize, usize)> {
         if self.compiler_counters_enabled {
-            crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Module);
+            crate::perf_counters::record_lazy_hit(
+                ctx,
+                crate::perf_counters::LazyLookupKind::Module,
+            );
         }
         self.tables.index.module(name)
     }
 
-    pub(crate) fn lookup_value(&self, name: &str) -> Option<(usize, &Ident, &ValueDescription)> {
-        let (idx, runtime_pos) = self.cached_value_index(name)?;
+    pub(crate) fn lookup_value(
+        &self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Option<(usize, &Ident, &ValueDescription)> {
+        let (idx, runtime_pos) = self.cached_value_index(name, ctx)?;
         match &self.signature[idx] {
             SignatureItem::SigValue(id, desc) => Some((runtime_pos, id, desc)),
             _ => None,
@@ -1359,12 +1374,15 @@ impl QualifiedModuleComponents {
     ) -> Option<(usize, Ident, ValueDescription)> {
         if let Some(cached) = self.tables.component_values.borrow().get(name).cloned() {
             if self.compiler_counters_enabled {
-                crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Value);
+                crate::perf_counters::record_lazy_hit(
+                    ctx,
+                    crate::perf_counters::LazyLookupKind::Value,
+                );
             }
             return cached;
         }
 
-        let (runtime_pos, id, desc) = self.lookup_value(name)?;
+        let (runtime_pos, id, desc) = self.lookup_value(name, ctx)?;
         let mut desc = super::typecore::copy_lookup_value_description_for_subst(desc, ctx);
         // Re-root the copy like the component's other items (see
         // `new_with_child_components_arc_and_value_source_prefix_inner`).
@@ -1434,6 +1452,7 @@ impl QualifiedModuleComponents {
         if let Some(cached) = self.tables.constructors.borrow().get(name).cloned() {
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_lazy_hit(
+                    ctx,
                     crate::perf_counters::LazyLookupKind::Constructor,
                 );
             }
@@ -1456,6 +1475,7 @@ impl QualifiedModuleComponents {
         let built = Arc::new(built);
         if self.compiler_counters_enabled {
             crate::perf_counters::record_lazy_scan(
+                ctx,
                 crate::perf_counters::LazyLookupKind::Constructor,
                 self.signature.len(),
                 built.len(),
@@ -1485,7 +1505,10 @@ impl QualifiedModuleComponents {
     ) -> Arc<Vec<LabelDescription>> {
         if let Some(cached) = self.tables.labels.borrow().get(name).cloned() {
             if self.compiler_counters_enabled {
-                crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Label);
+                crate::perf_counters::record_lazy_hit(
+                    ctx,
+                    crate::perf_counters::LazyLookupKind::Label,
+                );
             }
             return cached;
         }
@@ -1517,6 +1540,7 @@ impl QualifiedModuleComponents {
         let built = Arc::new(built);
         if self.compiler_counters_enabled {
             crate::perf_counters::record_lazy_scan(
+                ctx,
                 crate::perf_counters::LazyLookupKind::Label,
                 self.signature.len(),
                 built.len(),
@@ -1539,7 +1563,7 @@ impl QualifiedModuleComponents {
         name: &str,
         ctx: &super::context::TypeContext,
     ) -> Option<super::decl::LabelArrayRef> {
-        let idx = self.cached_type_index(name)?;
+        let idx = self.cached_type_index(name, ctx)?;
         let SignatureItem::SigType(id, decl, _) = &self.signature[idx] else {
             return None;
         };
@@ -1583,16 +1607,24 @@ impl QualifiedModuleComponents {
         family
     }
 
-    pub(crate) fn lookup_type(&self, name: &str) -> Option<(&Ident, &Arc<TypeDeclaration>)> {
-        let idx = self.cached_type_index(name)?;
+    pub(crate) fn lookup_type(
+        &self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Option<(&Ident, &Arc<TypeDeclaration>)> {
+        let idx = self.cached_type_index(name, ctx)?;
         match &self.signature[idx] {
             SignatureItem::SigType(id, decl, _) => Some((id, decl)),
             _ => None,
         }
     }
 
-    pub(crate) fn lookup_module(&self, name: &str) -> Option<(usize, &Ident, &ModuleDeclaration)> {
-        let (idx, runtime_pos) = self.cached_module_index(name)?;
+    pub(crate) fn lookup_module(
+        &self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Option<(usize, &Ident, &ModuleDeclaration)> {
+        let (idx, runtime_pos) = self.cached_module_index(name, ctx)?;
         match &self.signature[idx] {
             SignatureItem::SigModule(id, md, _) => Some((runtime_pos, id, md)),
             _ => None,
@@ -1611,7 +1643,7 @@ impl QualifiedModuleComponents {
         include_ident: bool,
         ctx: &super::context::TypeContext,
     ) -> Option<Arc<Path>> {
-        let (_, _, md) = self.lookup_module(name)?;
+        let (_, _, md) = self.lookup_module(name, ctx)?;
         if !include_ident && !matches!(md.md_type, ModuleType::MtyAlias(..)) {
             return None;
         }
@@ -1657,6 +1689,7 @@ impl QualifiedModuleComponents {
         if let Some(cached) = self.tables.child_components.borrow().get(name).cloned() {
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_lazy_hit(
+                    ctx,
                     crate::perf_counters::LazyLookupKind::ChildComponent,
                 );
             }
@@ -1686,6 +1719,7 @@ impl QualifiedModuleComponents {
         );
         if self.compiler_counters_enabled {
             crate::perf_counters::record_lazy_scan(
+                ctx,
                 crate::perf_counters::LazyLookupKind::ChildComponent,
                 scanned_items,
                 usize::from(built.is_some()),
@@ -1709,7 +1743,7 @@ impl QualifiedModuleComponents {
         name: &str,
         ctx: &super::context::TypeContext,
     ) -> Option<(usize, Ident, Arc<ModuleDeclaration>)> {
-        let (idx, runtime_pos) = self.cached_module_index(name)?;
+        let (idx, runtime_pos) = self.cached_module_index(name, ctx)?;
         if let Some((id, md)) = self.tables.qualified_modules.borrow().get(name).cloned() {
             let selected_path =
                 submodule_lookup_path(self.access_path.as_ref(), name, runtime_pos, &md);
@@ -2540,7 +2574,7 @@ impl StoredModuleComponents {
             let piece = self.cached_piece.get();
             if piece.is_none_or(|piece| ctx.store_guards_hold(piece)) {
                 if ctx.compiler_counters_enabled() {
-                    crate::perf_counters::record_stored_component_cached();
+                    crate::perf_counters::record_stored_component_cached(ctx);
                 }
                 if let Some(piece) = piece {
                     ctx.touch_store_piece(piece);
@@ -2596,7 +2630,7 @@ impl StoredModuleComponents {
     ) -> Option<QualifiedModuleComponents> {
         let components = build_local_module_components(self, pers_env, ctx, cache_mode)?;
         if ctx.compiler_counters_enabled() {
-            crate::perf_counters::record_stored_component_build(cache_mode);
+            crate::perf_counters::record_stored_component_build(ctx, cache_mode);
         }
         Some(components)
     }
@@ -2911,20 +2945,25 @@ impl<'a> Components<'a> {
         }
     }
 
-    pub(crate) fn lookup_type(self, name: &str) -> Option<(&'a Ident, &'a Arc<TypeDeclaration>)> {
+    pub(crate) fn lookup_type(
+        self,
+        name: &str,
+        ctx: &super::context::TypeContext,
+    ) -> Option<(&'a Ident, &'a Arc<TypeDeclaration>)> {
         match self {
             Components::World(view) => view.lookup_type(name),
-            Components::Local(components) => components.lookup_type(name),
+            Components::Local(components) => components.lookup_type(name, ctx),
         }
     }
 
     pub(crate) fn lookup_module(
         self,
         name: &str,
+        ctx: &super::context::TypeContext,
     ) -> Option<(usize, &'a Ident, &'a ModuleDeclaration)> {
         match self {
             Components::World(view) => view.lookup_module(name),
-            Components::Local(components) => components.lookup_module(name),
+            Components::Local(components) => components.lookup_module(name, ctx),
         }
     }
 

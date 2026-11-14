@@ -3240,6 +3240,7 @@ pub(crate) fn resolve_type_item_through_modules(
     }
     if counters_enabled {
         crate::perf_counters::record_type_item_resolve_scan(
+            ctx,
             scanned_items,
             type_items,
             result.is_some(),
@@ -3772,7 +3773,7 @@ fn lookup_component_module_sig_type(
             crate::types::typecore::ComponentLookupApi::FindType,
             |components| {
                 components
-                    .lookup_type(type_name)
+                    .lookup_type(type_name, ctx)
                     .map(|(id, decl)| (*id, decl.clone()))
             },
         )
@@ -7565,12 +7566,17 @@ pub fn unify(
     }
     // OCaml's outer `unify` (ctype.ml:2589-2594) takes a snapshot so a
     // failure can `undo_compress` before expanding the trace.
-    let top_snapshot = (state.recursion_depth == 1).then(|| {
+    let top_snapshot = if state.recursion_depth == 1 {
         if ctx.compiler_counters_enabled() {
             crate::perf_counters::census_unify(ctx, t1, t2);
         }
-        ctx.snapshot_type_state_for_undo_compress()
-    });
+        // Success mode omits diagnostic-only snapshots. A failure without
+        // one requires the caller to discard and explain the whole unit.
+        ctx.unify_takes_snapshot()
+            .then(|| ctx.snapshot_type_state_for_undo_compress())
+    } else {
+        None
+    };
 
     // Fast path: same reference
     let t1 = ctx.repr(t1);
@@ -7618,6 +7624,9 @@ pub fn unify(
         if let Some(env) = state.env() {
             record_trace_expansions(ctx, env, trace);
         }
+    }
+    if result.is_err() && state.recursion_depth == 0 && top_snapshot.is_none() {
+        ctx.note_unexplained_unify_failure();
     }
     drop(top_snapshot);
     result

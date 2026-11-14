@@ -886,19 +886,28 @@ impl LambdaCompiler {
             let deps = self.finish_lowered_output(deps, &possible_required_modules);
             let checked = candidate.map(|candidate| match candidate {
                 Ok(candidate) => {
-                    let crate::bir::shadow::LowerCandidate { arena: j, block, exports, reservations, dynamic_imports: dynamic, mut stats, decisions } = candidate;
+                    let crate::bir::shadow::LowerCandidate { arena: j, block, exports, reservations, dynamic_imports: dynamic, mut stats, decisions, qualified } = candidate;
                     // The lowering extracted, coerced and resolved the
                     // exports (bir/lower/export.rs): no legacy export code.
                     let new_before = coerced_program(j, block, exports, reservations, shadow_side_effect);
                     self.dynamic_import_modules = dynamic;
-                    // THREE_TREES 11.4, "T4c design": the lowering's step A
-                    // against the tail-call pass on the program that pass
-                    // receives. Counted in the report; the pass decides.
-                    let decided = apply_external_shadow_pass(apply_js_flatten_pass(new_before.clone()));
+                    // THREE_TREES 11.4, "T5 design": the lowering decided
+                    // which references to JavaScript globals are shadowed;
+                    // the new side writes them and runs no external-shadow
+                    // pass.
+                    let mut shadowed = new_before.clone();
+                    crate::bir::bridge_j::qualify(&mut shadowed, &qualified);
+                    let flattened = {
+                        let _phase = info_span!("compiler.js_pass_flatten").entered();
+                        apply_js_flatten_pass(shadowed)
+                    };
+                    // "T4c design": the lowering's step A against the
+                    // tail-call pass on the program that pass receives.
+                    // Counted in the report; the pass decides.
                     let reclosed = stats.decisions.decision_reclosed;
-                    stats.decisions = crate::bir::shadow::compare_decisions(&decisions, &decided.program);
+                    stats.decisions = crate::bir::shadow::compare_decisions(&decisions, &flattened.program);
                     stats.decisions.decision_reclosed = reclosed;
-                    let new_after = self.finish_lowered_output(new_before.clone(), &possible_required_modules);
+                    let new_after = self.finish_flattened_output(flattened, &possible_required_modules);
                     crate::bir::shadow::LowerCheck::Supported(Box::new(crate::bir::shadow::LowerPair {
                         stats,
                         before: [before.expect("check capture"), new_before],
@@ -1004,6 +1013,17 @@ impl LambdaCompiler {
             let _phase = info_span!("compiler.js_pass_external_shadow").entered();
             apply_external_shadow_pass(deps)
         };
+        self.finish_flattened_output(deps, possible_required_modules)
+    }
+
+    /// The passes after the flatten and external-shadow steps, and the
+    /// dependency tail. The new side of the gate enters here: its
+    /// references to shadowed globals were decided by the lowering.
+    fn finish_flattened_output(
+        &mut self,
+        mut deps: DepsProgram,
+        possible_required_modules: &AHashSet<ModuleId>,
+    ) -> DepsProgram {
         deps = {
             let _phase = info_span!("compiler.js_pass_tailcall_inline").entered();
             apply_js_tailcall_inline_pass(deps)

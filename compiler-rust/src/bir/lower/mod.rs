@@ -12,6 +12,9 @@ mod close;
 mod cond;
 mod exit;
 mod export;
+mod globals;
+#[cfg(test)]
+pub(crate) mod names;
 mod expr;
 mod konst;
 mod prim;
@@ -318,6 +321,11 @@ pub(crate) struct SwitchStats {
     /// Statements copied into lists (`StatementStack::copied`): a moved
     /// statement is copied, and decided, once per move.
     pub statements_copied: usize,
+    /// References to JavaScript globals the lowering marked to print as
+    /// `globalThis.name`, and the steps of that decision
+    /// (`globals::decide`).
+    pub globals_qualified: usize,
+    pub global_steps: usize,
     /// Step A against the legacy tail-call pass (`shadow::compare_decisions`),
     /// zero until check mode compares.
     #[serde(flatten)]
@@ -531,6 +539,8 @@ impl State {
         let mut arena = Bir::default();
         arena.begin_bulk();
         arena.pools = std::mem::take(&mut input.arena.pools);
+        arena.vars.funcs = std::mem::take(&mut input.arena.vars.funcs);
+        arena.vars.function_params = std::mem::take(&mut input.arena.vars.function_params);
         // Import already knows the source-node and switch-arm counts. Reserve
         // the output's parallel node columns together; switch arms can emit
         // target-reference, assignment, expression statement, block and break
@@ -553,7 +563,7 @@ impl State {
         // Each imported apply header can produce one ordinary JS call payload.
         // Reserve that known count; primitives/inlining retain safe growth.
         arena.pools.js.reserve_exact(arena.pools.apply.len());
-        arena.func_owners.resize(arena.pools.funcs.len(), None);
+        arena.func_owners.resize(arena.vars.funcs.len(), None);
         // Imported binders, export bindings and one result binding per switch.
         let output_vars = input.arena.vars.len() + input.export_vars.len() + arena.pools.switches.len();
         arena.capture_binders.reserve_exact(output_vars);
@@ -786,7 +796,11 @@ impl State {
         self.arena.finish_bulk(root);
         // Materialize legacy-owned dependency records only at the output boundary.
         let dynamic_imports = self.dynamic_imports.iter().map(|id| self.arena.pools.j_modules[id.index()].clone()).collect();
-        let close_steps = self.arena.js_scope.as_ref().map_or(0, |scope| scope.close_steps);
+        // THREE_TREES 11.4, "T5 design": every list is the one the flatten
+        // pass receives, so the bindings around a reference are final.
+        globals::decide(&mut self.arena, &self.idents);
+        let (close_steps, globals_qualified, global_steps) = self.arena.js_scope.as_ref()
+            .map_or((0, 0, 0), |scope| (scope.close_steps, scope.globals.qualified, scope.globals.steps));
         Lowered {
             program: super::bridge_j::Imported::from_lowering(self.arena, root, self.idents),
             #[cfg(test)]
@@ -801,6 +815,8 @@ impl State {
                 location_visits: self.location_steps,
                 close_steps,
                 statements_copied: self.statements.copied,
+                globals_qualified,
+                global_steps,
                 decisions: DecisionStats::default(),
             },
         }

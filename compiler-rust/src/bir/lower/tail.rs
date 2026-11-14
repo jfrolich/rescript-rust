@@ -75,16 +75,16 @@ impl State {
     pub(super) fn loop_function_body(&mut self, frame: LoopRef, header: FuncId, body: NodeId) -> NodeId {
         let frame = self.tail_frames[frame.0 as usize];
         if !frame.triggered { return body; }
-        let start = self.arena.pools.function_params.len() as u32;
+        let start = self.arena.vars.function_params.len() as u32;
         let mut ordered = std::mem::take(&mut self.tail_order);
         for param in frame.params.iter() {
             self.tail_parameters += 1;
             let copy = self.tail_copies.get(param.index()).copied().flatten();
-            self.arena.pools.function_params.push(copy.unwrap_or(param));
+            self.arena.vars.function_params.push(copy.unwrap_or(param));
             if copy.is_some() { ordered.push(param); }
         }
-        self.arena.pools.funcs[header.index()].params = VarSpan { start, len: frame.params.len };
-        self.arena.pools.funcs[header.index()].flags |= FuncHeader::INDIRECT_PARAMS;
+        self.arena.vars.funcs[header.index()].params = VarSpan { start, len: frame.params.len };
+        self.arena.vars.funcs[header.index()].flags |= FuncHeader::INDIRECT_PARAMS;
         ordered.sort_unstable_by(|&a, &b| {
             self.tail_sort_comparisons += 1;
             let vars = &self.arena.vars;

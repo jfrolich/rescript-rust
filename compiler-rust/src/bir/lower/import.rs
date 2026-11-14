@@ -349,14 +349,14 @@ mod tests {
                 if let Some(value) = out.value { s.arena.release(value); }
                 s.statements.kill(out.stmts);
             };
-            let lists = state.arena.lists.storage_shape().0; let funcs = state.arena.pools.funcs.len();
+            let lists = state.arena.lists.storage_shape().0; let funcs = state.arena.vars.funcs.len();
             let attrs = state.arena.pools.attrs.len(); let infos = state.arena.pools.js.len();
             run(&mut state);
             assert_eq!(state.dynamic_imports.len(), 10_000);
             assert!(state.dynamic_imports.iter().all(|id| *id == state.dynamic_imports[0]));
             state.arena.lists.reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
-            state.arena.pools.funcs.reserve(state.arena.pools.funcs.len() - funcs);
-            state.arena.func_owners.reserve(state.arena.pools.funcs.len() - funcs);
+            state.arena.vars.funcs.reserve(state.arena.vars.funcs.len() - funcs);
+            state.arena.func_owners.reserve(state.arena.vars.funcs.len() - funcs);
             state.arena.pools.attrs.reserve(state.arena.pools.attrs.len() - attrs);
             state.arena.pools.js.reserve(state.arena.pools.js.len() - infos);
             state.arena.vars.j_origin.reserve(20_000); state.arena.vars.name.reserve(20_000);
@@ -368,7 +368,7 @@ mod tests {
             state.dynamic_imports.reserve(10_000); state.free.reserve_repeat();
         state.arena.js_scope.as_mut().unwrap().reserve_repeat();
             let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
-                s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1, s.arena.pools.funcs.capacity(),
+                s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1, s.arena.vars.funcs.capacity(),
                 s.arena.func_owners.capacity(), s.arena.pools.attrs.capacity(), s.arena.pools.js.capacity(),
                 s.arena.pools.j_modules.capacity(), s.arena.pools.imports.capacity(), s.external_bindings.capacity(),
                 s.import_storage.index.capacity(), s.import_storage.keys.capacity(), s.import_storage.key.capacity(),

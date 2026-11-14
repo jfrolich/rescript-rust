@@ -562,7 +562,7 @@ impl<'a> Engine<'a> {
                 let h = *self.bir.function(header);
                 let attrs = self.bir.function_attributes(header).clone();
                 let fresh = self.bir.function_header(h.params, attrs, h.loc);
-                self.bir.pools.funcs[fresh.index()].flags = h.flags;
+                self.bir.vars.funcs[fresh.index()].flags = h.flags;
                 funcs.insert(header, fresh);
             }
             let packed = Node::pack(self.bir.view(n), self.bir.node(n).aux(), &mut lists).remap(
@@ -838,7 +838,7 @@ impl<'a> Engine<'a> {
     pub fn function_header(&mut self, params: VarSpan, like: FuncId) -> FuncId {
         let old = *self.bir.function(like);
         let new = self.bir.function_header_from(like, params);
-        self.bir.pools.funcs[new.index()].flags = old.flags;
+        self.bir.vars.funcs[new.index()].flags = old.flags;
         new
     }
 

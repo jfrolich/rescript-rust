@@ -710,7 +710,7 @@ mod tests {
                 s.arena.pools.switch_keys.capacity(),
                 s.arena.pools.switch_clauses.capacity(),
                 s.arena.pools.switches.capacity(),
-                s.arena.pools.funcs.capacity(),
+                s.arena.vars.funcs.capacity(),
                 s.arena.pools.attrs.capacity(),
                 s.arena.pools.js.capacity(),
                 s.arena.release_stack.capacity(),

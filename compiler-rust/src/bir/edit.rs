@@ -57,7 +57,7 @@ impl CopyScratch {
     /// which row a second pass visits without increasing the arena's size.
     pub(crate) fn reserve_arena(&mut self, b: &Bir) {
         self.vars.reserve_domain(b.vars.name.capacity());
-        self.funcs.reserve_domain(b.pools.funcs.capacity());
+        self.funcs.reserve_domain(b.vars.funcs.capacity());
         self.catches.reserve_domain(b.pools.catches.capacity());
         self.js.reserve_domain(b.pools.js.capacity());
         self.nodes.reserve_domain(b.nodes.capacity());
@@ -92,7 +92,7 @@ impl BinderRun {
             Self::Empty => None,
             Self::One(v) => v,
             Self::Vars(s) => Some(VarId(s.start + index(slot))),
-            Self::Params(s) => Some(b.pools.function_params[s.start as usize + slot]),
+            Self::Params(s) => Some(b.vars.function_params[s.start as usize + slot]),
             Self::Rest(v, _) if slot == 0 => Some(v),
             Self::Rest(_, s) => b.rest_fields(s)[slot - 1].binding,
         }
@@ -670,6 +670,12 @@ impl Bir {
                 if !add {
                     scope.sites[node.var_site() as usize].node = NodeId(u32::MAX);
                 }
+            }
+        }
+        if node.op() == Op::JQualified {
+            if let Some(scope) = &mut self.js_scope {
+                let View::JQualified { module, .. } = node.view(&self.lists) else { unreachable!() };
+                scope.import_reference(module, add);
             }
         }
         if self.is_weighted_switch(node) {
@@ -1408,10 +1414,10 @@ impl Bir {
                 View::Fun { header, .. } | View::JFun { header, .. } => {
                     let old = *self.function(header);
                     let params = if old.flags & FuncHeader::INDIRECT_PARAMS != 0 {
-                        let start = index(self.pools.function_params.len());
+                        let start = index(self.vars.function_params.len());
                         for i in 0..old.params.len() {
                             let original = self.function_parameter(header, i);
-                            self.pools.function_params.push(vars[&original]);
+                            self.vars.function_params.push(vars[&original]);
                         }
                         VarSpan { start, len: old.params.len }
                     } else {
@@ -1422,9 +1428,9 @@ impl Bir {
                     };
                     // Attributes are immutable cold metadata. Only the header
                     // and its owner/parameters need fresh identities.
-                    let new = FuncId(index(self.pools.funcs.len()));
+                    let new = FuncId(index(self.vars.funcs.len()));
                     self.func_owners.push(None);
-                    self.pools.funcs.push(FuncHeader { params, ..old });
+                    self.vars.funcs.push(FuncHeader { params, ..old });
                     funcs.insert(header, new);
                 }
                 View::Catch { header, .. } => {

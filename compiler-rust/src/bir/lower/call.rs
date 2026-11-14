@@ -117,6 +117,17 @@ impl State {
         }))
     }
 
+    /// Exchange, between the source and the lowering's arena, the tables an
+    /// imported fragment appends to: the cold pools, and the function headers
+    /// with their parameter runs (they live in the variable table). A header
+    /// made while a fragment is imported or reduced must get the next
+    /// identity of the arena the lowering reads headers from. O(1).
+    fn swap_fragment_tables(&mut self) {
+        std::mem::swap(&mut self.source.pools, &mut self.arena.pools);
+        std::mem::swap(&mut self.source.vars.funcs, &mut self.arena.vars.funcs);
+        std::mem::swap(&mut self.source.vars.function_params, &mut self.arena.vars.function_params);
+    }
+
     /// C:1377 compile_external_field_apply; reuses immutable imported templates.
     /// Cost: O(F + A + V + G + R): F template nodes imported/analysed on first use, A
     /// arguments detached, V newly synchronized/renamed variables, G newly seen globals, R
@@ -135,10 +146,10 @@ impl State {
         let mut globals = std::mem::take(&mut self.inline_globals);
         let mut foreign = std::mem::take(&mut self.inline_foreign);
         debug_assert!(foreign.is_empty());
-        std::mem::swap(&mut self.source.pools, &mut self.arena.pools);
+        self.swap_fragment_tables();
         // J lowering can append function headers before another L fragment is
         // imported. Its dense owner table must cover those header identities.
-        self.source.func_owners.resize(self.source.pools.funcs.len(), None);
+        self.source.func_owners.resize(self.source.vars.funcs.len(), None);
         let result = (|| {
             let template = if let Some(&template) = self.inline_templates.get(&key) { template } else {
                 // Import only once per immutable export. Beta reduction copies
@@ -173,7 +184,7 @@ impl State {
             self.inline_reductions += 1;
             reduced
         })();
-        std::mem::swap(&mut self.source.pools, &mut self.arena.pools);
+        self.swap_fragment_tables();
         self.idents.append(&mut foreign);
         self.inline_foreign = foreign;
         self.inline_globals = globals;
@@ -194,7 +205,7 @@ impl State {
             self.arena.pools.j_modules.push(crate::js_ir::ModuleId { id, kind: crate::js_ir::Kind::Ml, dynamic_import: false });
             self.module_constants.push(ModuleConstants::Unread);
         }
-        self.arena.func_owners.resize(self.arena.pools.funcs.len(), None);
+        self.arena.func_owners.resize(self.arena.vars.funcs.len(), None);
         self.awaited_units.resize(self.arena.vars.len(), false);
         self.invalid_module_paths.resize(self.source.nodes.len(), false);
         self.switch_facts.resize(self.source.nodes.len(), super::switch::Facts::default());
@@ -540,15 +551,15 @@ mod allocation_tests {
             s.statements.kill(out.stmts);
         };
         let lists = state.arena.lists.storage_shape().0; let source_lists = state.source.lists.storage_shape().0;
-        let funcs = state.arena.pools.funcs.len(); let attrs = state.arena.pools.attrs.len();
+        let funcs = state.arena.vars.funcs.len(); let attrs = state.arena.pools.attrs.len();
         let infos = state.arena.pools.js.len(); let vars = state.arena.vars.len();
         run(&mut state);
         assert_eq!(state.call_arities.len(), 6); assert_eq!(state.call_arity_index.len(), 1);
         assert_eq!(state.arena.vars.len() - vars, 10_000);
         state.arena.lists.reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
         state.source.lists.reserve_test_growth(state.source.lists.storage_shape().0 - source_lists);
-        state.arena.pools.funcs.reserve(state.arena.pools.funcs.len() - funcs);
-        state.arena.func_owners.reserve(state.arena.pools.funcs.len() - funcs);
+        state.arena.vars.funcs.reserve(state.arena.vars.funcs.len() - funcs);
+        state.arena.func_owners.reserve(state.arena.vars.funcs.len() - funcs);
         state.arena.pools.attrs.reserve(state.arena.pools.attrs.len() - attrs);
         state.arena.pools.js.reserve(state.arena.pools.js.len() - infos);
         state.arena.vars.j_origin.reserve(10_000); state.arena.vars.name.reserve(10_000);
@@ -561,7 +572,7 @@ mod allocation_tests {
         state.arena.js_scope.as_mut().unwrap().reserve_repeat();
         let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
             s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1, s.source.lists.storage_shape().1,
-            s.arena.pools.funcs.capacity(), s.arena.func_owners.capacity(), s.arena.pools.attrs.capacity(), s.arena.pools.js.capacity(),
+            s.arena.vars.funcs.capacity(), s.arena.func_owners.capacity(), s.arena.pools.attrs.capacity(), s.arena.pools.js.capacity(),
             s.call_arities.capacity(), s.call_arity_index.capacity(), s.eta_arguments.capacity(), s.call_reversed.capacity(), s.calls.capacity(),
             s.arena.vars.j_origin.capacity(), s.arena.vars.name.capacity(), s.arena.vars.order.capacity(), s.arena.vars.flags.capacity(),
             s.arena.vars.uses.capacity(), s.arena.vars.binder.capacity(), s.arena.vars.fact.capacity(), s.arena.vars.printed.capacity(),
@@ -632,7 +643,7 @@ mod inline_allocation_tests {
                 $m!($s, source.nodes); $m!($s, source.parents); $m!($s, source.free_nodes); $m!($s, source.release_stack);
                 $m!($s, arena.cold); $m!($s, arena.j_duplicable); $m!($s, arena.death_candidates); $m!($s, arena.tail_candidates); $m!($s, arena.tail_calls); $m!($s, arena.self_tail); $m!($s, arena.loop_facts); $m!($s, arena.weights); $m!($s, arena.weight_path); $m!($s, arena.count_stack); $m!($s, arena.effect_work); $m!($s, arena.capture_chain); $m!($s, arena.capture_stack); $m!($s, arena.capture_uses);
                 $m!($s, source.cold); $m!($s, source.j_duplicable); $m!($s, source.death_candidates); $m!($s, source.tail_candidates); $m!($s, source.tail_calls); $m!($s, source.self_tail); $m!($s, source.loop_facts); $m!($s, source.weights); $m!($s, source.weight_path); $m!($s, source.count_stack); $m!($s, source.effect_work); $m!($s, source.capture_chain); $m!($s, source.capture_stack); $m!($s, source.capture_uses);
-                $m!($s, arena.pools.funcs); $m!($s, arena.func_owners); $m!($s, source.func_owners); $m!($s, arena.pools.attrs); $m!($s, arena.pools.js);
+                $m!($s, arena.vars.funcs); $m!($s, arena.func_owners); $m!($s, source.func_owners); $m!($s, arena.pools.attrs); $m!($s, arena.pools.js);
                 $m!($s, arena.vars.j_origin); $m!($s, arena.vars.name); $m!($s, arena.vars.order); $m!($s, arena.vars.flags);
                 $m!($s, arena.vars.uses); $m!($s, arena.vars.binder); $m!($s, arena.vars.fact); $m!($s, arena.vars.printed);
                 $m!($s, source.vars.j_origin); $m!($s, source.vars.name); $m!($s, source.vars.order); $m!($s, source.vars.flags);

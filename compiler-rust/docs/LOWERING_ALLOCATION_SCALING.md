@@ -421,3 +421,50 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2490 filtered out; f
 
 All requested edge inputs are explicit table entries. Fixed seeds and generators
 are in the tests; failures print the input string or raw float bits.
+
+## Review-base merge
+
+Integrated `61a32b487` after the base advanced. Preserve both the global-shadow
+naming work and the allocation audit: function headers/indirect parameter runs
+now follow the variable table, including cached fragment imports, header copies
+and test capacity probes. Retain the cached immutable templates, both sides'
+oracle tests, reserved scope columns and the final global-shadow decision.
+
+Command: `CARGO_INCREMENTAL=0 cargo test --manifest-path compiler-rust/Cargo.toml bir:: -- --test-threads=1`
+
+```text
+test result: ok. 799 passed; 0 failed; 1 ignored; 0 measured; 1749 filtered out; finished in 90.63s
+```
+
+The ignored nested-function naming counterexample is inherited unchanged from
+the new base's T5 work, not introduced by this branch. All four pinned unit-entry
+constants still pass unchanged. No allocation assertion was relaxed.
+
+Command: `CARGO_INCREMENTAL=0 cargo test --manifest-path compiler-rust/Cargo.toml -- --test-threads=1`
+
+```text
+test result: ok. 2523 passed; 0 failed; 26 ignored; 0 measured; 0 filtered out; finished in 169.65s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.66s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.28s
+test result: ok. 5 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+Command: `CARGO_INCREMENTAL=0 cargo test --manifest-path rewatch/Cargo.toml`
+
+```text
+test result: ok. 210 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.96s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.75s
+```
+
+Command: `python3 scripts/check_lowering_cost_docs.py --self-test`
+
+```text
+cost scanner self-tests: passed
+cost docs: production functions=500; changed/new=188; missing/generic=0
+```
+
+Compiler/rewatch builds and strict compiler clippy pass. The JS, stdlib, GenType
+and unchanged coverage commands above also pass on the merged candidate. Older
+instruction/wall-time measurements remain tied to their explicitly named head;
+they do not measure this new merge or attribute upstream changes to this audit.
