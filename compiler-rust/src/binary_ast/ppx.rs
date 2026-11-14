@@ -11658,6 +11658,14 @@ let e = () =>
     }
 
     #[test]
+    fn exception_and_type_extension_shadow_result_constructors() {
+        for declaration in ["exception Error(string)", "exception Ok", "type t += Ok | Error(string)"] {
+            let (arena, items) = parse_structure(declaration);
+            assert!(derive::shadows_result(&items[0], &arena), "{declaration}");
+        }
+    }
+
+    #[test]
     fn result_shadow_scope_follows_source_order_not_mapping_order() {
         let (mut arena, source) = parse_structure(
             "@spice type before = {x: int}\ntype mine = Error\n@spice type after = {y: int}\n@spice.encode type encoder = {z: int}",

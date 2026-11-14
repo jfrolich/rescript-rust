@@ -359,15 +359,18 @@ impl<'a> PrefixScope<'a> {
 /// Whether this item introduces a local result-constructor name.
 /// Cost: O(constructors), borrowed name comparisons and no allocation.
 pub(crate) fn shadows_result(item: &StructureItem, arena: &ParseArena) -> bool {
-    let crate::parser::ast::StructureItemDesc::Pstr_type(group) = &item.pstr_desc else {
-        return false;
-    };
-    group.1.iter().any(|decl| match &decl.ptype_kind {
-        crate::parser::ast::TypeKind::Ptype_variant(constructors) => constructors.iter().any(|c| {
-            matches!(arena.get_string(c.pcd_name.txt), "Ok" | "Error")
+    let is_result = |name| matches!(arena.get_string(name), "Ok" | "Error");
+    match &item.pstr_desc {
+        StructureItemDesc::Pstr_type(group) => group.1.iter().any(|decl| match &decl.ptype_kind {
+            crate::parser::ast::TypeKind::Ptype_variant(constructors) =>
+                constructors.iter().any(|c| is_result(c.pcd_name.txt)),
+            _ => false,
         }),
+        StructureItemDesc::Pstr_exception(constructor) => is_result(constructor.pext_name.txt),
+        StructureItemDesc::Pstr_typext(extension) => extension.ptyext_constructors.iter()
+            .any(|c| is_result(c.pext_name.txt)),
         _ => false,
-    })
+    }
 }
 
 /// Expand with the constructor scope determined in source order.

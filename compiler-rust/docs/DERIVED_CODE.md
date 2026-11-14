@@ -914,3 +914,11 @@ copying its bytes and allocating a per-name string. The existing dense name
 slots then resolve alias versions. No external-unit alias is guessed from its
 name. Final fixture check: `Parsed 32 source files`, `Compiled 32 modules`,
 `Finished compilation`; the nested/local alias classification unit test passes.
+
+
+`shadowed_result_constructor` also recognizes exception declarations and type
+extensions whose constructor is `Ok` or `Error`, before building a plan.
+Constructor exports through `open` remain guarded by the obligation retry.
+Constructor exports through `include` remain guarded by the obligation retry.
+The `%%private` route through `handle_private_extension` remains guarded by the
+obligation retry, not claimed as syntactically classified.
