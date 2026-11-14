@@ -520,8 +520,7 @@ impl Checker {
         match (result, speculation) {
             (Ok(()), Some(token)) => self.g.keep(token),
             (Err(Clash), Some(token)) => {
-                self.g.restore(token);
-                self.cleanup_abbrev();
+                self.restore(token);
                 return if mode == ExpandMode::Safe {
                     Ok(Ty(NONE))
                 } else {
@@ -813,6 +812,38 @@ mod tests {
         for (index, &arg) in args.iter().enumerate() {
             assert_eq!(c.g.repr(Ty(first + index as u32)), arg);
         }
+    }
+
+    /// A restore of 10,000 writes is one step a write plus the cleanup, which
+    /// forgets both memos; a restore with nothing written keeps them
+    /// (compiler/ml/btype.ml:773-781).
+    #[test]
+    fn restore_cleans_the_memos_after_a_write() {
+        let mut c = checker(3);
+        let body = constr(&mut c, GENERIC, 0, &[]);
+        abbreviation(&mut c, 1, &[], body);
+        let param = var(&mut c, GENERIC);
+        abbreviation(&mut c, 2, &[param], param);
+        let nullary = constr(&mut c, 1, 1, &[]);
+        let int = constr(&mut c, 1, 0, &[]);
+        let unary = constr(&mut c, 1, 2, &[int]);
+        c.expand_head(nullary, ExpandMode::Safe).unwrap();
+        c.expand_head(unary, ExpandMode::Safe).unwrap();
+        let token = c.g.speculate();
+        assert_eq!(steps::scope(|| c.restore(token)), 0);
+        assert_eq!(c.find_repr(1), nullary);
+        assert_ne!(c.find_expansion(unary, false).0, NONE);
+        let token = c.g.speculate();
+        let v = var(&mut c, 1);
+        for level in 0..10_000 {
+            c.g.write(v, Node { level, ..c.g.nodes[v.0 as usize] });
+        }
+        // 10,000 restored writes and one memorized slot 0.
+        assert_eq!(steps::scope(|| c.restore(token)), 10_001);
+        assert_eq!(c.g.nodes[v.0 as usize].level, 1);
+        assert_eq!(c.find_repr(1).0, NONE);
+        assert_eq!(c.find_expansion(unary, false).0, NONE);
+        assert_eq!(c.memo.live, 0);
     }
 
     /// `from_segment` is one pass: one step per `paths` row and one per
