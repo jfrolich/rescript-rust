@@ -2107,3 +2107,22 @@ fn a_dispatch_function_whose_scrutinee_reads_a_local_reaches_the_adoption() {
     let root = a.let_(LetKind::Strict, g, function, end);
     assert!(adopted_nodes_of(a, root, None) > 0);
 }
+
+#[test]
+fn the_naming_log_agrees_on_a_function_the_printer_eta_reduces() {
+    // `let f = x => g(x)` with `g` a JavaScript global prints as
+    // `let f = g`: neither side names `x`, which still has a reference.
+    // Reduced from `inventory_tests::pintmax`
+    // (`let unit = (arg0, arg1) => Primitive_int.max(arg0, arg1)`).
+    use crate::lambda::LamLoc;
+    let mut a = LamArena::new();
+    let (f, x) = (Ident::new("f", 1, IdentFlags::NONE), Ident::new("x", 2, IdentFlags::NONE));
+    let callee = js_global(&mut a, "g");
+    let arg = a.var(x);
+    let applied = call(&mut a, callee, &[arg]);
+    let function = a.function_(1, &[x], applied, Default::default(), LamLoc::NONE);
+    let end = a.var(f);
+    let root = a.let_(LetKind::Strict, f, function, end);
+    let stats = names_agree(a, root, None, false);
+    assert_eq!(stats.names_pass, 1);
+}

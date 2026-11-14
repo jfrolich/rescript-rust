@@ -643,10 +643,15 @@ pub(crate) fn replay(
         replay.name(var);
     }
     // A use names nothing here: a variable that is referenced and has no
-    // name is one the pass would have named at the use.
+    // name is one the pass would have named at the use, unless it is a
+    // parameter of a function the printer eta-reduces, which no side names.
     for var in 0..variables {
         let referenced = scope.uses.get(var).is_some_and(|uses| uses.remaining > 0);
-        if referenced && replay.printed.names[var].is_none() && replay.subject(VarId(var as u32)).is_some_and(|s| s.stamp != 0) {
+        if referenced
+            && replay.printed.names[var].is_none()
+            && replay.subject(VarId(var as u32)).is_some_and(|s| s.stamp != 0)
+            && !replay.eta_parameter(VarId(var as u32))
+        {
             replay.done.unnamed_references += 1;
         }
     }
@@ -810,6 +815,19 @@ impl Replay<'_, '_> {
         let first = self.scratch.marks[statement.index()];
         let at = if first == 0 { 0 } else { LITERAL | (first - 1) };
         self.scratch.frames.push(Frame { statement, at, leave: ScopeId::NONE.0 });
+    }
+
+    /// Whether `var` is a parameter of a function literal whose row has
+    /// `ETA`: the printer eta-reduces it, and the pass names none of its
+    /// parameters (naming.rs `function`, `FunctionForm::Eta`). A copy's
+    /// parameters are read through the copy's literal. Constant.
+    fn eta_parameter(&self, var: VarId) -> bool {
+        let Some(binder) = self.bir.vars.binder(var) else { return false };
+        if self.bir.nodes[binder.index()].op() != Op::JFun {
+            return false;
+        }
+        let crate::bir::View::JFun { header, .. } = self.bir.view(binder) else { return false };
+        self.log.scope(header).is_some_and(|scope| self.log.rows[scope.0 as usize].flags & ScopeRow::ETA != 0)
     }
 
     /// Whether `node` is a function literal with a closed row.
