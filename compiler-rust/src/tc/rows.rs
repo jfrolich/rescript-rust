@@ -412,7 +412,9 @@ impl Checker {
     /// the two types (slot 0 of each node), as `run_frames` treats a pair:
     /// their representatives, nothing when they are one node, else
     /// [`Checker::unify_pair`], whose clash is `Err([left, right])`.
-    /// O(1) plus the callee. (R3e)
+    /// O(1) plus the callee. (R3e) Out of line: the loop of `run_frames`
+    /// pays for this arm only when it is popped.
+    #[inline(never)]
     pub fn unify_field(&mut self, frame: Frame) -> Result<(), [Ty; 2]> {
         let (f1, f2) = (frame.left, frame.right);
         let (open1, open2) = (frame.extra & 1 != 0, frame.extra & 2 != 0);
