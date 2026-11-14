@@ -1239,7 +1239,7 @@ texts stay equal.
 | T4a (done) | Export extraction and coercion on top-level rows (`bir/lower/export.rs`, S3.9b), with the position facts of finding 2 as sites ("T4a as built") | `extract_toplevel_exports`, `coerce_lowered_output` | - |
 | T4b (done, RESULT B) | Counterexample: R5 changes the `simplify_if_head` reader of a copied branch; read sites through P1 instead | Nothing; P1 stays until T6 | - |
 | T4c (done, counterexamples) | The statuses and the site of step A, computed and compared in check mode; no splice ("T4c design") | Nothing; P3 stays until P1 (T6) and P2 (T5) have left | T4a, T4b |
-| T5b (built to the replay, not wired: redesign needed (two findings)) | The naming log, replayed through the tables of `emit/naming.rs` ("T5 as built: part B") | Nothing yet; the naming pass stays the oracle | T1 |
+| T5b (redesigned; slices T5b-1 to T5b-3 not built) | The naming log: scope rows and free lists recorded by the lowering, replayed over the final statement lists ("T5 part B as redesigned") | Nothing yet; the naming pass stays the oracle | T1 |
 | T4g | The splice of step A, late marks, late zero, graves, the counter (11.6) | `apply_js_tailcall_inline_pass` | T5, T6 |
 | T4d | Step B | `apply_js_record_rest_pass` | T4g |
 | T4e | Steps C and D | `apply_js_flatten_and_mark_dead_pass` | T4d |
@@ -1722,6 +1722,350 @@ both default differences are noise: nothing part B adds runs by default
 are gone from the new side). The application was not measured: no code it
 runs by default changed.
 
+#### T5 part B as redesigned
+
+Status: design and skeleton (`bir/lower/names.rs`, the tables in
+`emit/naming.rs`, 35 ignored acceptance tests); nothing is built. "Verified"
+below means read in the code at the cited place or pinned by a test that
+runs today; "read" means read only. The three gaps of "T5 as built: part B"
+were checked against the code and are as described:
+
+- G1 (a): `Log::reference` joined a run only when the variable's one
+  membership bit was clear, and `Log::leave` cleared the bits of the
+  innermost run only, so a bit an enclosing function set hid the reference
+  (the deleted `names.rs`, `join` and `leave`). G1 (b): `declare` set the one
+  bound bit for `g` in `f`, and the close of `g`, which had `g` in its own
+  run, cleared it.
+- G2: `State::enter` returns `Resume::Fun` before the body
+  (`bir/lower/mod.rs`); `finish_expression` (`bir/lower/expr.rs`,
+  `Resume::Fun`) takes the body's list, calls `loop_function_body`
+  (`bir/lower/tail.rs`: the header's parameters become copies and `let x =
+  _x` is written in front of the lowered body), allocates a new header when
+  `one_unit_arg` is set, and only then builds the `JFun`; the `SDecl` is
+  written after that (`State::leaf`, `Cont::Declare`).
+- G3: `replay` went through `Names::enter` (a new `Scope` with a hash map
+  per function, persistent maps copied on assignment); it was given no raw
+  names; its `Params` arm named every parameter.
+
+Found while verifying, not in the list:
+
+- G4. **A stored event has no stable place.** A run is copied again each
+  time the lowering moves its statements (one decision in five replaced,
+  "T4c design"), lists are built outside `take_list` (`simplify_if_head`,
+  `cond.rs`, `external.rs`, `coerced_list`, `loop_function_body`), a branch
+  moved after its guard changes the order of two lists, and `copy_j` copies a
+  closed function with fresh binders. Events in construction order would
+  need a splice at each of these.
+- G5. **Imported modules are free variables.** The pass counts a
+  `Qualified` reference as a use (`analyze_expr`), so a function that reads
+  module `M` inherits the names of `M`'s base. The log had variables only.
+- G6. **The cached bound of a range loop takes a name** (`Names::finishes`,
+  `base_finish` under the suffix rule). The log had no event for it. Pinned:
+  `the_cached_bound_of_a_range_loop_takes_a_name_in_its_scope`.
+- G7. **A reference released before the close.** The membership bit stayed
+  set when the constructors folded the read away; the pass, which runs on
+  the finished tree, does not see it (section 2, the conditional capture).
+- G8. **Two function literals in one statement.** When both first name a
+  variable they capture (declared after them, the same base), the one
+  printed first gets the base. Pinned:
+  `two_function_literals_of_one_statement_name_what_they_capture_in_print_order`.
+- G9. **Functions the lowering builds itself** (`call.rs`, `ffi_args.rs`,
+  `import.rs`: a `JFun` not lowered from a source `Fun`) had no `enter`.
+
+**(a) The data.** The idea on record (a scope row per variable, provisional
+statement slots, parameters at the close) is adopted for the row and the
+parameters and replaced for the slots: **no event is stored**, so there is
+no slot to fill. The reason is G2 and G4 together: every stored event needs
+a statement, the statement is written after the event's time, and it is
+then moved, copied or dropped. What an event would say is already in the
+tree: a declaration statement holds its variable, a loop its variable, a
+function literal its header. The replay reads it there.
+
+| Name | What it is | Bytes | Written where |
+| --- | --- | ---: | --- |
+| naming event | Not stored. `Declare`, `Binder`, the cached bound: read from the statement the replay reaches. `Enter`, `Params`, `Leave`: a scope row | 0 | - |
+| `ScopeRow` | One function literal: the printed header, its free list as a run of `Log::free`, flags (`CLOSED`, `ETA`, `THIS_USED`, `COPY`) | 16 | `names::open` pushes it (`State::enter`, `View::Fun`; the three sites of G9); `names::close` fills it (`finish_expression`, after the `JFun` is built) |
+| `FreeRef` | One entry of a free list: a variable or an import | 4 | `names::close` |
+| home, per variable | The row whose scope was innermost when the binder was written; for a parameter the row that closed with it | 4 | `Log::bind` from `Bir::bind`; parameters in `names::close` |
+| seen, per variable and per import | The row that last put it in its run (deduplication) | 4 | `names::close`; `Log::import_reference` from `Bir::register_kind` |
+| row of a header | Dense by `FuncId` | 4 | `names::close`, `Log::copied` |
+| `Open` | An open scope: its row and where its sites, run and children start | 16 | `names::open` |
+| reference | Nothing new: the site `Scope::site` already records (T4a) | 0 | `Bir::allocate`, unchanged |
+| `Subject` | An identifier handed to the tables: slot, stamp, name | 16 | built by the replay per call |
+| `GroupRow`, `Saved`, `Level` | The suffix table of a base, a saved row, a scope's undo marks | 16, 24, 12 | `emit::naming::Tables` |
+| `Frame` | One level of the replay's walk over statement lists | 12 | `names::replay` |
+
+Every size is pinned (`row_sizes`, `replay_sizes`). The value passed down
+the replay's walk is a `Frame` (12 bytes); the value passed to a table call
+is a `Subject` (16).
+
+*No body is walked for a name.* The free variables of a function are read
+from the sites built while its scope was open: at the close, the sites
+since the scope opened, without the ranges of its closed children, one step
+each. A site is read at one close. Nothing is done where a reference is
+built. The replay reads statement lists and scope rows, never an
+expression: a function literal inside an expression is reached from its
+row, by reading the ancestors of its node up to its statement (the form of
+`globals::decide`: from a recorded place towards the root, a node read at
+most twice).
+
+*What the replay does read: one step per statement of the final lists.*
+That is a pass over the statement spine, and it is stated here because the
+standard forbids a second pass for a fact the first could record. The fact
+is the final order of statements, and no construction step has it (G4):
+`close::decide` already pays one step per statement per copy for the same
+reason. The alternative that avoids the spine (an event chain per
+statement, relinked wherever a list is built) costs one step per statement
+per copy, more than one step per final statement, and breaks at every list
+built outside `take_list`. Section 2's "one event per declaration and
+function" becomes "one step per statement and per function"; the naming
+pass reads every node.
+
+*The tables.* The pass's `Names` keeps persistent maps per scope. The
+replay gets tables of its own (`emit::naming::Tables`): one `GroupRow` per
+base with the depth of the scope that has it, and an undo stack. A group
+exists in the current scope when its depth tag is the current depth;
+entering a function re-tags the groups of its environment (saving the row
+before); a group not inherited keeps its tag and so reads as empty; leaving
+restores. "Name `base$k` is taken" is `k < next` and not skipped, so no set
+of names is kept. Two hash structures remain, each with its reason in the
+code: base spelling to group (read once per variable, the answer kept
+dense by slot) and the raw names (read per suffixed candidate). `Names` is
+not touched: it is the oracle.
+
+**(b) The gaps.**
+
+| Gap | Mechanism | Test (ignored until built unless marked) | Cost |
+| --- | --- | --- | --- |
+| G1 (a) | The references of a scope are its own sites, read at its close; an enclosing scope's state is not consulted. Free means: home is not this row | `a_function_nested_in_a_function_captures_a_local_of_the_outer_one`; names: `..._inherits_the_names_of_the_outer_local_it_captures`. Runs today on the pass: the test of the same name in `emit/naming.rs` | one step per site, once |
+| G1 (b) | The home of `g` is written when its declaration is written, after `g`'s own close, in the scope open then (`f`); `g`'s close found no home and so lists `g` as free | `a_recursive_inner_function_is_free_in_itself_and_bound_where_it_is_declared`, `..._reserves_nothing_in_the_program`. Today: `a_recursive_inner_function_is_not_free_in_the_function_that_declares_it` | one write per binder |
+| G2 header | `close` takes the header of the built `JFun`; the row is found by that header | `a_header_replaced_after_the_body_is_the_header_of_the_row`; `the_naming_log_agrees_on_a_function_whose_unit_parameter_is_dropped` | none |
+| G2 aliases | The alias declaration is written before `close`, so its binder's home is the function; the copies are parameters at the close | `the_aliases_of_a_tail_call_loop_are_bound_in_their_function`; `the_naming_log_agrees_on_the_aliases_of_a_tail_call_loop` | one write per parameter |
+| G2 statement after its events | No event: the replay reads the final lists | `a_statement_is_named_where_it_stands_at_the_end` | one step per final statement |
+| G3 warm replay | `Tables` (above) | `a_warm_replay_of_a_unit_with_functions_allocates_nothing`, `warm_tables_allocate_nothing` | an undo push per assignment |
+| G3 raw names | `Program::raw`, filled where `globals::decide` already reads every variable once (its step 1) | `a_suffix_skips_a_raw_javascript_name_of_the_program`, `the_tables_skip_other_bases_and_raw_names`. Today: the test of the first name in `emit/naming.rs` | one read per variable, already paid |
+| G3 `this` | `THIS_USED`: at the close, the first parameter of a method is in the run | `the_this_of_a_method_is_recorded_as_read_only_when_the_body_reads_it`, `..._is_named_only_when_the_body_reads_it`. Today: the test of the second name in `emit/naming.rs` | one comparison per run entry |
+| G5 | `FreeRef` holds an import; `Log::import_reference` | `an_imported_module_is_free_in_every_function_around_its_reference` | one read per module reference |
+| G6 | `Tables::synthetic`, called by the replay at a range loop whose bound is cached | `a_synthetic_name_takes_a_suffix_in_its_scope`. Today: the pass test of G6 | as a new name |
+| G7 | A released site has no node; `close` skips it | `a_reference_released_before_the_close_is_not_free` | none |
+| G8 | The replay reads the literals of a statement in closing order and counts every reservation that first names a variable in a statement with more than one literal (`ambiguous_orders`); the gate requires zero | `two_function_literals_of_one_statement_are_replayed_in_closing_order_and_counted` | one counter |
+| G9 | `open` and `close` at the three sites | the oracle tests, through `names_agree` | - |
+
+Limits, stated and counted, not solved:
+
+- An import released before the close stays in the free list (imports have
+  a count, no sites). Visible as `free_differences`.
+- A reference or a statement released inside a function after its close
+  leaves the free list as it was. Nothing in the lowering does that today
+  (read); the splice of T4g will. Visible as `free_differences`.
+- A use names nothing in the replay. The pass names a variable at a use
+  when it is not visible yet; that is a use before the declaration in the
+  same scope outside a closure, which the lowering does not write (read).
+  Counted: `unnamed_references`.
+- G8's order. In `Bir` the print order of two literals of one statement is
+  not recorded; the count says whether it ever matters.
+
+**(c) Copies and moves.**
+
+- *A statement run copied into a list, again or elsewhere*
+  (`take_list`, `hold_run`, `simplify_if_head`): nothing. The log holds
+  nothing per statement.
+- *A statement dropped*: nothing; it is in no final list. A function
+  literal released with it has no owner node, and its row is skipped. Its
+  free variables stay in the lists of the functions around it: wrong only
+  when that was the last capture (a limit above).
+- *A closed function copied* (`copy_j` through `Bir::copy_subtree`): the
+  copy has a new header; `Log::copied` gives it a row that shares the
+  source's free run. The copy's binders print as their origins, so the
+  shared list names the right identifiers. The copy's binders are bound
+  while another scope is open and get that scope as home: harmless, they
+  are referenced in the copy only, and the copy's rows are final.
+  `a_copied_function_gets_a_row_that_shares_the_free_list_of_its_source`.
+- *Tail-call inlining decided per copy* (`close::decide`): reads counts,
+  writes decisions; it does not touch the log. When T4g performs the
+  splice, the callee's row is released with its literal and its body's
+  statements stand in the caller: the replay names them there. The free
+  lists of functions inside the spliced body are unchanged (their free
+  variables are the callee's parameters, now declared or substituted in the
+  caller: T4g must check substitution, see (g)).
+- *A body imported from another module* (`inline_external_function`): the
+  fragment is imported into the source arena and lowered by the normal path
+  in the scope that is open, so its functions open and close like any
+  other. The log's dense rows grow with the variables and headers made
+  during the import (`Log::variable`; rows by header grow on demand).
+  `the_naming_log_agrees_on_a_body_imported_from_another_module`.
+
+**(d) The oracle.** Both sides print the same tree, the lowering's own
+program before the JS passes with its module list filled in (`new_before`),
+from a table of names by identifier. So "every printed identifier of every
+binder and reference, in order" is equal exactly when, per unit:
+
+1. every variable and module the replay names has the pass's name for its
+   identifier (a variable through its origin), and every identifier the pass
+   names, stamp zero aside, is named by the replay (`name_differences`);
+2. the cached bounds have the same spellings (`finish_differences`);
+3. `ambiguous_orders` and `unnamed_references` are zero.
+
+`free_differences` (the free lists as multisets of identifier sequences,
+copies left out) is required to be zero as well: a wrong free list changes a
+name only when a local of the same base exists, so the names alone would
+hide it. A unit the pass does not support is not compared and is counted.
+
+Zero on all of: the runtime library (113 units), tests/tests, the fixtures
+corpus, and a 3,735-module application. Run, with the replay changing no
+output (its names are compared and dropped; `new_before` is printed by the
+pass as today):
+
+```sh
+python3 scripts/test_backend_coverage.py     # runtime, tests/tests, fixtures
+RESCRIPT_BACKEND=check RESCRIPT_BACKEND_STATS=$DIR <a build of the corpus>
+find $DIR -name '*.json' | xargs cat | jq -s '[.[] | .. | objects | (.name_differences? // 0) + (.finish_differences? // 0) + (.free_differences? // 0) + (.ambiguous_orders? // 0) + (.unnamed_references? // 0)] | add'
+```
+
+The last line prints 0. The first passes with the ratchet unchanged.
+
+**(e) The slices.**
+
+| Slice | Builds | Un-ignores | Lines | Needs |
+| --- | --- | --- | ---: | --- |
+| T5b-1 | The log: `Log`, `open`, `close`, `eta_shape`, the hooks in `Bir` (`new_var_id`, `bind`, `register_kind`, `copy_subtree`) | the 12 tests marked `T5b-1 build` | 350 | - |
+| T5b-2 | `emit::naming::Tables` and `names::replay` | the 18 tests marked `T5b-2 build` | 550 | T5b-1 for the replay's tests; the tables alone need nothing |
+| T5b-3 | The wiring: `open`/`close` in the lowering, the replay at `State::finish`, `free_lists`, `compare_with_pass`, check mode, `names_of`, the gate on four corpora, the measurements | the 5 tests marked `T5b-3 build`; `names_agree` in `compare_oracle` | 400 | T5b-1, T5b-2 |
+
+T5b-1 and the `Tables` half of T5b-2 run in parallel (different files:
+`bir/lower/names.rs` and `bir/edit.rs` against `emit/naming.rs`). The
+replay half of T5b-2 follows T5b-1. T5b-3 is last.
+
+**(f) Build prompts.** Each is issued verbatim.
+
+Common to the three (part of each prompt):
+
+> Repository: `compiler-rust/`. Read first: AGENTS.md; THREE_TREES section
+> 2 and 11.4 "T5 part B as redesigned"; the header of `emit/naming.rs`;
+> `bir/lower/names.rs` whole. You change no signature, no doc-comment cost,
+> no pinned size and no test. If one cannot be met, stop: commit what
+> passes, and report the function, the test, and the smallest input that
+> shows it. Moving code, splitting a function, adding a private helper or a
+> private field is yours to do; say what you moved in the commit message.
+> The intent is stated in each doc comment; the layout of the code is
+> yours. Counts failure: an `allow` attribute; a hash map or set other than
+> the two in `Tables`; an allocation per reference, per statement or per
+> scope once the vectors are warm; a walk over an expression to find a
+> reference, a binder or a function; an ignored test other than those of a
+> later slice; a number you did not measure. Every commit:
+> `cargo check --all-targets --manifest-path compiler-rust/Cargo.toml`
+> prints no warning; `cargo test --manifest-path compiler-rust/Cargo.toml
+> --lib bir::lower::names emit::naming` passes.
+
+T5b-1:
+
+> Task: build the naming log. First edit: `Scope::new` in
+> `bir/lower/scope.rs` builds `names` with `Log::new(variables)`. Then the
+> bodies marked `todo!("T5b-1")` in `bir/lower/names.rs`, and four calls in
+> `bir/`, each inside the existing `if let Some(scope) = &mut self.js_scope`
+> of its function or a new one of that form: `Log::variable` beside
+> `Scope::push` (`Bir::new_var_id`); `Log::bind` in `Bir::bind` for every
+> binder of a node that is not a function literal; `Log::import_reference`
+> in `Bir::register_kind` for a `JQualified` that is added; `Log::copied` in
+> `Bir::copy_subtree_recording` where a function header is copied. Remove
+> `#[ignore = "T5b-1 build"]` from the 12 tests in `bir/lower/names.rs`.
+> Criteria: those 12 pass; `rg -n 'T5b-1' compiler-rust/src` is empty;
+> `cargo test --manifest-path compiler-rust/Cargo.toml --lib bir::` passes
+> (the hooks run in every lowering test). `Log::steps` is asserted as
+> relations between two sizes by the tests; do not add a constant to make
+> one pass.
+
+T5b-2:
+
+> Task: build the naming tables and the replay. First edit:
+> `Tables::begin` in `emit/naming.rs`. Then the other bodies marked
+> `todo!("T5b-2")` there (commit 1: remove the ignore from the 7 tests of
+> `emit::naming::replay_tests` marked `T5b-2 build`), then `names::replay`
+> in `bir/lower/names.rs` (commit 2: remove it from the 11 tests there).
+> The rule of each `Tables` method is the method of `Names` its doc comment
+> names: the two must give the same names; `Names` is not changed.
+> Criteria: the 18 tests pass; `rg -n 'T5b-2' compiler-rust/src` is empty;
+> `rg -n 'im_rc' compiler-rust/src/emit/naming.rs` shows `Group` only.
+
+T5b-3:
+
+> Task: wire the naming log into check mode. First edit: remove
+> `#[cfg(test)]` from `mod names` in `bir/lower/mod.rs`, from the `names`
+> field of `Scope`, and from `Subject`, `Tables`, `Printed`, `FreeLists`,
+> `NameStats`, `compare_with_pass` and their helpers in `emit/naming.rs`.
+> Then, one commit each: (1) `names::open` in `State::enter` (`View::Fun`)
+> and `names::close` in `finish_expression` (`Resume::Fun`) after the
+> `JFun` is built; the same pair around the three functions the lowering
+> builds itself (`call.rs`, `ffi_args.rs`, `import.rs`), `open` before the
+> first node of the body. If a part of such a body was built before `open`
+> could be called, stop and report the site. (2) `Program::raw` collected in
+> step 1 of `globals::decide`; `names::replay` at `State::finish` after
+> `globals::decide`; its `Printed` and `Replayed` carried in `Lowered`.
+> (3) `free_lists`, `compare_with_pass`, `names_of` in
+> `bir/lower/oracle_tests.rs`; remove the 5 ignores; call `names_agree` from
+> `compare_oracle` for the unit context. (4) Check mode
+> (`lam_compile.rs`, where `new_before` is built): `compare_with_pass` on
+> `new_before`; the fields of `NameStats` and `Replayed` flat in the
+> `lower` report; a unit the pass does not support counted as
+> `names_uncompared`. The replay's names are not used for output. (5)
+> Measurements and "T5 part B as built" in THREE_TREES 11.4.
+> Criteria: `cargo test --manifest-path compiler-rust/Cargo.toml` passes;
+> `rg -n 'T5b-' compiler-rust/src` is empty; `rg -n 'cfg\(test\)'
+> compiler-rust/src/bir/lower/names.rs` shows the test module only;
+> `python3 scripts/test_backend_coverage.py` passes with the ratchet
+> unchanged; the `jq` sum of (d) is 0 on the runtime library, tests/tests,
+> the fixtures and the application, with compared and uncompared units per
+> corpus reported; instructions of a clean build of tests/tests
+> (`scripts/compare_build_instructions.py --base <trunk> --head <yours>`):
+> the default build within 0.1%; with `RESCRIPT_BACKEND=check` reported as
+> measured, with the share of `names::` functions from the cachegrind
+> output. When the sum is not 0: reduce one unit to the smallest Lambda,
+> add it to `oracle_tests.rs` through `names_agree`, and decide only
+> between "a body of T5b-1 or T5b-2 is wrong" (fix it) and "the design
+> does not cover it" (commit the test ignored with the reason, report,
+> stop).
+
+**(g) What T6 needs, and 11.8.** T6's builder writes oxc nodes, which have
+no parent link. From the naming log it needs:
+
+1. `open` and `close` unchanged: they read sites and headers, not nodes.
+   The site of a reference must stay the place a release clears.
+2. The replay's two reads of the tree behind one interface: the statements
+   of a list in order with, per statement, its kind, its binders and its
+   child lists; and the statement a function literal stands in. In `Bir`
+   the second is the walk over ancestors. With oxc nodes the builder knows
+   it when a statement constructor receives its expressions: the handle of
+   an expression carries the first and last literal inside it (two row
+   numbers, chained in the order the builder attaches them), which also
+   gives the print order G8 lacks, so `ambiguous_orders` goes away.
+3. `Printed` as the table `oxc_codegen` reads: a symbol id per binder and
+   per reference equal to the variable's index, so that
+   `get_binding_identifier_name` reads `Printed::names`. The cached bound of
+   a range loop needs a symbol of its own per loop.
+4. The replay after the last decision that removes or moves a statement
+   (T4g's splice, T4d, T4e, the shake): names are assigned once, on the
+   final lists. Each of those slices must say what it does to free lists
+   (a spliced callee's parameters are substituted or declared in the
+   caller; a dead declaration's last capture goes).
+
+11.8 as written, paragraph by paragraph:
+
+| Paragraph of 11.8 | Verdict |
+| --- | --- |
+| Opening ("To be issued when T5 is complete ... two design gaps") | Corrected: issued when T5b-3 is merged; the gaps are closed by this section |
+| Task and preconditions | Corrected: the precondition on names is "the `jq` sum of (d) is 0 on the four corpora and `rg -n 'T5b-' src` is empty"; `name_differences` alone is not the gate |
+| Read first | Corrected: add "T5 part B as redesigned", (g); "both T5 as built parts" stays |
+| Step 1 (a) to (c), (e) | Kept |
+| Step 1 (d), identifiers | Corrected: not open. The symbol id is the variable's index; names come from `names::Printed`; the design has to answer only how a statement constructor hands the log the literals of its expressions (point 2 above) and the symbol of a cached bound |
+| Steps 2 and 3 | Kept |
+| Step 4 | Corrected: add "the replay reads the builder's statement lists; the ancestor walk and `Scratch::marks` are deleted" |
+| Step 5 | Kept |
+| Step 6 | Corrected: add the naming tests of this section run against the builder's lists |
+| Step 7 | Kept |
+| End state | Corrected: add "`rg -n 'ambiguous_orders' src` is empty" and "the naming pass (`Names::collect`) is called by the legacy side and by check mode only" |
+| Shortcuts | Kept; add "a second naming rule beside `Tables`" |
+| When a unit differs | Kept |
+
 ### 11.5 Worker prompt for T4b
 
 Which form: it needs one experiment, because nothing read so far proves that
@@ -1957,6 +2301,10 @@ which pass under 11.4, stop).
 
 ### 11.7 Build prompt for T5
 
+Superseded for part B by the prompts of 11.4, "T5 part B as redesigned"
+(f): the skeleton this prompt names was replaced. Kept as the record of
+what was issued.
+
 Part A of T5 is built ("T5 as built"). Part B is a skeleton: types, sizes,
 signatures with their costs, and ignored acceptance tests. Verbatim prompt
 for the builder:
@@ -2047,7 +2395,9 @@ for the builder:
 
 ### 11.8 Worker prompt for T6
 
-Written by the builder of T5 part B; not yet reviewed against the design. T6 starts from a design turn.
+Written by the builder of T5 part B. Reviewed in 11.4, "T5 part B as
+redesigned" (g): each paragraph is kept or corrected there; issue it with
+those corrections. T6 starts from a design turn.
 
 To be issued when T5 is complete, not before: the builder prints names from
 the table T5's replay fills, and part B stopped at its step 4 ("T5 as
