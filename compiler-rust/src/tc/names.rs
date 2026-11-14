@@ -763,14 +763,55 @@ impl Scopes {
     /// it from [`Scopes::unit_by_name`] on every answer that is a unit,
     /// also when the worker knew the unit from an earlier compilation.
     pub fn read_unit(&mut self, unit: u32, bits: u8) {
-        todo!("R4g")
+        #[cfg(test)]
+        super::steps::tick();
+        self.log_unit(unit, bits);
     }
 
     /// 1 step: this unit used the imported member `row`. The first use
     /// appends it to `read_items` and reads its unit; later ones are one
     /// load and one bit test.
     pub fn read_item(&mut self, row: u32) {
-        todo!("R4g")
+        #[cfg(test)]
+        super::steps::tick();
+        self.log_item(row);
+    }
+
+    /// Amortized O(1), no step, no allocation but the growth of
+    /// `unit_read` to `units.len()` and of `read_units`: add `bits` to
+    /// `unit`'s read bits, appending the unit to `read_units` when it had
+    /// none. Every unit with bits is in `read_units`, which is what lets
+    /// [`Scopes::reset`] clear the bits through the list.
+    fn log_unit(&mut self, unit: u32, bits: u8) {
+        debug_assert!(bits != 0, "a read has a bit");
+        if unit as usize >= self.unit_read.len() {
+            self.unit_read.resize(self.units.len(), 0);
+        }
+        let old = self.unit_read[unit as usize];
+        if old == 0 {
+            self.read_units.push(unit);
+        }
+        self.unit_read[unit as usize] = old | bits;
+    }
+
+    /// Amortized O(1), no step, no allocation but the growth of
+    /// `item_read` to one bit per row of `imported_members` and of the two
+    /// logs: on the first use of `row` by this unit, set its bit, append it
+    /// to `read_items` and log a `READ` of its unit with
+    /// [`Scopes::log_unit`]; later uses are one load and one bit test.
+    fn log_item(&mut self, row: u32) {
+        let (word, bit) = (row as usize / 64, 1u64 << (row % 64));
+        if word >= self.item_read.len() {
+            self.item_read
+                .resize(self.imported_members.len().div_ceil(64), 0);
+        }
+        if self.item_read[word] & bit != 0 {
+            return;
+        }
+        self.item_read[word] |= bit;
+        self.read_items.push(row);
+        let unit = self.imported_members[row as usize].origin & UNIT_MASK;
+        self.log_unit(unit, READ);
     }
 }
 
@@ -1086,6 +1127,31 @@ mod tests {
         assert_eq!(s.warnings.len(), 10_000);
         s.finish();
         assert_eq!(s.warnings.len(), 10_000, "the open was used");
+    }
+
+    /// 10,000 units each read twice: one step a read, one log entry a
+    /// unit, in the order first read; the second reads append nothing.
+    #[test]
+    fn ten_thousand_units_read_twice_are_logged_once_each() {
+        let mut s = Scopes::new();
+        let segment = Arc::new(Segment::default());
+        let units: Vec<u32> = (0..10_000)
+            .map(|i| {
+                let name = s.names.intern(&format!("U{i}"));
+                s.add_unit(name, Arc::clone(&segment))
+            })
+            .collect();
+        // Read in reverse, so that the order first read is not the index order.
+        let count = super::super::steps::scope(|| {
+            for _ in 0..2 {
+                for &unit in units.iter().rev() {
+                    s.read_unit(unit, READ);
+                }
+            }
+        });
+        assert_eq!(count, 20_000);
+        assert!(s.read_units.iter().eq(units.iter().rev()));
+        assert!(units.iter().all(|&unit| s.unit_read[unit as usize] == READ));
     }
 
     /// `candidates_in` of a key with 10,000 members, in a table that has
