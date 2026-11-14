@@ -863,16 +863,17 @@ mod tests {
 
     #[test]
     fn json_identity_codecs_match_general_raw_lambda() {
-        for source in [
-            "@spice type t = JSON.t",
-            "@spice type t = array<JSON.t>",
-            "@spice type t = {value: JSON.t}",
-            "@spice type t = {value: option<JSON.t>, other?: JSON.t}",
-            "@spice type t = A(JSON.t) | B",
+        for (source, expected_lowered) in [
+            ("@spice type t = JSON.t", 1),
+            ("@spice type t = array<JSON.t>", 0),
+            ("@spice.decode type t = array<JSON.t>", 1),
+            ("@spice type t = {value: JSON.t}", 1),
+            ("@spice type t = {value: option<JSON.t>, other?: JSON.t}", 1),
+            ("@spice type t = A(JSON.t) | B", 1),
         ] {
             let (planned, lowered) = record_lambda(source, true);
             let (general, _) = record_lambda(source, false);
-            assert_eq!(lowered, 1, "{source}");
+            assert_eq!(lowered, expected_lowered, "{source}");
             assert_eq!(planned, general, "{source}");
         }
     }
