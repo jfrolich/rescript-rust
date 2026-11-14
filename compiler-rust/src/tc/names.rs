@@ -20,7 +20,10 @@
 //! unit, in the order the declarations were armed.
 
 use super::name_table::Name;
-use super::scope::{Binder, Found, Key, Namespace, Resolved, Scopes, TableId, UnitSource};
+use super::scope::{
+    Binder, BinderKind, Found, Key, NONE, Namespace, Resolved, ResolvedKind, Scopes, TableId,
+    UnitSource,
+};
 
 /// What a module is, for a path that goes through it: 8 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +66,13 @@ pub enum PathErrorKind {
     Unsupported,
 }
 
+/// The answer for a module R4 cannot list, about component 0: the caller
+/// that knows the component rewrites it.
+const UNSUPPORTED: PathError = PathError {
+    kind: PathErrorKind::Unsupported,
+    component: 0,
+};
+
 /// `Scopes::unit_read` bit: the unit's interface was loaded for this unit
 /// (`find_pers_struct`, compiler/ml/env.ml:646).
 pub const READ: u8 = 1;
@@ -97,7 +107,36 @@ impl Scopes {
         module: Resolved,
         source: &mut dyn UnitSource,
     ) -> Result<ModuleShape, PathError> {
-        todo!("R4e")
+        let mut at = module;
+        loop {
+            match at.kind() {
+                ResolvedKind::Binder(binder) => {
+                    let payload = self.binders.payload[binder.0 as usize];
+                    match self.binders.kind[binder.0 as usize] {
+                        // A functor's binder has no table (`Functor_comps`,
+                        // compiler/ml/env.ml:966).
+                        BinderKind::Module if payload == NONE => return Ok(ModuleShape::Functor),
+                        BinderKind::Module => return Ok(ModuleShape::Structure(TableId(payload))),
+                        BinderKind::FunctorParameter => {
+                            return Ok(ModuleShape::Abstract(TableId(payload)));
+                        }
+                        // `module N = M`: the alias is followed when its
+                        // members are needed (`normalize_path`,
+                        // compiler/ml/env.ml:854-880), one step each.
+                        BinderKind::ModuleAlias => {
+                            #[cfg(test)]
+                            super::steps::tick();
+                            at = Resolved(payload);
+                        }
+                        _ => return Err(UNSUPPORTED),
+                    }
+                }
+                ResolvedKind::Unit(unit) => {
+                    return Ok(ModuleShape::Structure(self.import_table(unit, 0)));
+                }
+                ResolvedKind::Import(_) => return Err(UNSUPPORTED),
+            }
+        }
     }
 
     /// Resolve a path of one or more names whose last component is in
