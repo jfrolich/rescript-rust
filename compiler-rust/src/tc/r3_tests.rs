@@ -1069,7 +1069,6 @@ fn fixture_9_ground_node_gains_a_variable() {
 /// node (compiler/ml/ctype.ml:2299, 2331: `link_type t1' t2`), so the two
 /// nodes stay two nodes.
 #[test]
-#[ignore = "R3c build"]
 fn fixture_10_two_abbreviations_stay_two_nodes() {
     for (first, second) in [(A, B), (B, A)] {
         let mut c = checker(Mode::Success);
@@ -1100,16 +1099,26 @@ fn fixture_10_two_abbreviations_stay_two_nodes() {
     assert_eq!(c.g.repr(expansion), y);
     // `'x := string` on both sides, then the tuples' first components met.
     assert_eq!(c.g.repr(s1), c.g.repr(s2));
-    // Two nodes of ONE parameterised abbreviation unify their arguments and
-    // link node to node, left to right, with no expansion made.
+    // Two nodes of ONE parameterised abbreviation are expanded as well: only
+    // two nullary constructors of one path link node to node
+    // (compiler/ml/ctype.ml:2248-2257); every other pair of constructors
+    // goes to unify2, which expands both heads ("abbreviations with at
+    // least one parameter are systematically expanded",
+    // ctype.ml:1785-1790). So again the left node's expansion is linked to
+    // the right node, the two nodes stay two, and the expansions'
+    // components meet.
     let mut c = checker(Mode::Success);
     let (s1, s2) = (constr(&mut c, STRING, &[]), constr(&mut c, STRING, &[]));
     let (x, y) = (constr(&mut c, PA, &[s1]), constr(&mut c, PA, &[s2]));
     let nodes = c.g.nodes.len();
     c.unify(x, y).unwrap();
-    assert_eq!(c.g.repr(x), y);
-    assert_eq!(c.g.repr(s1), s2);
-    assert_eq!(c.g.nodes.len(), nodes, "same path: no expansion");
+    assert_eq!(path(&mut c, x), PA);
+    assert_ne!(c.g.repr(x), c.g.repr(y));
+    let expansion = c.find_expansion(x, false);
+    assert_ne!(expansion.0, NONE);
+    assert_eq!(c.g.repr(expansion), y);
+    assert_eq!(c.g.repr(s1), c.g.repr(s2));
+    assert!(c.g.nodes.len() > nodes, "same path, one parameter: both expand");
 }
 
 /// Fixture 11: `type cb = int => unit`,
