@@ -339,7 +339,6 @@ fn instance_from_a_segment_shares_what_the_old_instance_shares() {
 /// Tvar None`). Above the kernel tier the form prints names, so this
 /// compares them: an instance and a copy of a scheme with named variables.
 #[test]
-#[ignore = "R3b build"]
 fn instance_drops_variable_names() {
     let program = compile(SHARING.to_string());
     let ops = [Op::BeginDef, Op::Instance(3), Op::EndDef, Op::Generalize(0), Op::Copy(0)];
@@ -350,7 +349,6 @@ fn instance_drops_variable_names() {
 
 /// The same with the memo-aware instance of R3b.
 #[test]
-#[ignore = "R3b build"]
 fn memo_aware_instance_shares_what_the_old_instance_shares() {
     let program = compile(SHARING.to_string());
     for value in 0..program.values.len() as u16 {
@@ -683,7 +681,6 @@ fn explain_mode_binding_fails_before_it_lowers() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "R3b build"]
 fn expansion_is_memorized_per_node_and_per_nullary_type() {
     let mut c = checker(Mode::Success);
     // Nullary: every node of the type shares one expansion while the memo
@@ -748,7 +745,6 @@ fn expansion_is_memorized_per_node_and_per_nullary_type() {
 /// a nullary constructor of that type is a link to it; after a cleanup, and
 /// for a type with an argument, a copy is its own node.
 #[test]
-#[ignore = "R3b build"]
 fn a_copy_of_a_nullary_constructor_links_to_the_memorized_node() {
     for ty in [A, NT] {
         let mut c = checker(Mode::Success);
@@ -795,10 +791,49 @@ fn a_copy_of_a_nullary_constructor_links_to_the_memorized_node() {
     assert_ne!(first, second);
 }
 
+/// `simple_abbrevs () := Mnil` (compiler/ml/ctype.ml:519, 543): a
+/// generalization forgets the nullary memo, so a later copy of a nullary
+/// constructor is its own node again. `Graph::generalize` alone forgets
+/// nothing (the test above relies on it).
+#[test]
+fn a_generalization_forgets_the_nullary_memo() {
+    for structure in [false, true] {
+        let mut c = checker(Mode::Success);
+        let f = scheme(&mut c, |c| {
+            let (x, y) = (constr(c, A, &[]), constr(c, A, &[]));
+            arrow(c, &[x], y)
+        });
+        let first = c.instance(f);
+        let r1 = Ty(c.g.nodes[first.0 as usize].a);
+        c.expand_head(r1, ExpandMode::Safe).unwrap();
+        let second = c.instance(f);
+        let shared = Ty(c.g.nodes[second.0 as usize].a);
+        assert_eq!(c.g.repr(shared), r1);
+        assert_ne!(c.memo.live, 0);
+        let generation = c.memo.generation;
+        let root = var(&mut c);
+        if structure {
+            let level = c.g.level;
+            c.generalize_structure(root, level);
+        } else {
+            c.generalize(root);
+        }
+        assert_eq!(c.memo.live, 0);
+        assert_eq!(c.memo.generation, generation + 1);
+        let third = c.instance(f);
+        let result = Ty(c.g.nodes[third.0 as usize].a);
+        assert_eq!(c.g.repr(result), result);
+        assert_ne!(result, r1);
+        // With no live row a generalization leaves the generation alone.
+        let root = var(&mut c);
+        c.generalize(root);
+        assert_eq!(c.memo.generation, generation + 1);
+    }
+}
+
 /// Decision 4: with an empty nullary memo the memo-aware instance is R1's
 /// instance: the same nodes, the same steps.
 #[test]
-#[ignore = "R3b build"]
 fn instance_with_an_empty_memo_costs_what_r1_costs() {
     let build = |c: &mut Checker| {
         scheme(c, |c| {

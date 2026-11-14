@@ -512,7 +512,13 @@ impl Checker {
     /// (compiler/ml/btype.ml:773-781). O(writes since the mark) plus
     /// [`Checker::cleanup_abbrev`]. (R3b)
     pub fn restore(&mut self, token: Speculation) {
-        todo!("R3b")
+        let written = self.g.trail.len();
+        self.g.restore(token);
+        // `backtrack` cleans the memos only when something was logged since
+        // the snapshot (`Change _`, compiler/ml/btype.ml:776-779).
+        if self.g.trail.len() != written {
+            self.cleanup_abbrev();
+        }
     }
 
     /// `unify_var` (compiler/ml/ctype.ml:2752-2771): unify a variable that

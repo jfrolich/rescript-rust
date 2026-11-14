@@ -3,7 +3,11 @@
 //! Run: cargo bench --manifest-path compiler-rust/Cargo.toml --bench tc_kernel -- instance7 1000000
 //! For instructions use cachegrind at N and zero, subtract empty; subtract
 //! instance7 from generalize7. Unification and names belong to R3 and R4.
+//! `checker_instance1..7` are `instance1..7` through `Checker::instance`
+//! with an empty nullary memo (R3b).
+use rescript_compiler::tc::expand::TypeTable;
 use rescript_compiler::tc::graph::{ARROW, CONSTR, GENERIC, Graph, NONE, Node, Param, Ty, VAR};
+use rescript_compiler::tc::unify::Checker;
 use std::hint::black_box;
 
 /// O(arguments); build a setup-only constructor with its reserved memo slot.
@@ -80,6 +84,10 @@ fn main() {
         "repr",
         "restore",
         "keep",
+        "checker_instance1",
+        "checker_instance3",
+        "checker_instance5",
+        "checker_instance7",
     ];
     let Some(index) = ops.iter().position(|&s| s == op) else {
         eprintln!(
@@ -90,6 +98,18 @@ fn main() {
     };
     let index = black_box(index);
     let mut sink = 0u64;
+    if index >= 11 {
+        let template = [ground1, ground3, fun5, scheme7][index - 11];
+        let mut c = Checker::new(g, TypeTable::default());
+        for i in 0..n {
+            if i & 0xfff == 0 {
+                c.g.clear_instances();
+            }
+            sink += c.instance(black_box(template)).0 as u64;
+        }
+        println!("{op} n={n} sink={}", black_box(sink));
+        return;
+    }
     for i in 0..n {
         if i & 0xfff == 0 {
             g.clear_instances();
