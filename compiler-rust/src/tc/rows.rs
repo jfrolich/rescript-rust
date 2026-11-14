@@ -711,8 +711,8 @@ impl Checker {
     /// 1. When `closed`, `filter_row_fields row.closed rest`
     ///    (ctype.ml:388-397), from the last field to the first: an absent
     ///    field is dropped; when `row.closed`, a field that is `Reither`
-    ///    with `m` false is resolved to `Rabsent` ([`Checker::resolve`])
-    ///    and dropped; the others stay, in their order.
+    ///    with `m` false is resolved to `Rabsent` ([`Checker::resolve`],
+    ///    then [`Checker::settle`] of the list it returns) and dropped; the others stay, in their order.
     /// 2. A clash when a field is left and `row` is closed or fixed, or
     ///    when `closed`, `row` is fixed and `row` is not closed. Its pair
     ///    is a new empty closed row and a new open row of what is left
@@ -779,6 +779,7 @@ impl Checker {
     ///   holder's first type: the same list index `b` with arity 1
     ///   (`Rpresent (Some (List.hd tl))`). A holder of a list whose
     ///   reference is `Rpresent None` is left as it is.
+    ///
     /// A holder that is anything else by now was written since and is
     /// skipped. O(holders), one step and at most one node write each, no
     /// allocation. (R3f)

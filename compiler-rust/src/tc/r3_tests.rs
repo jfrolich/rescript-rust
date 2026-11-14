@@ -2431,9 +2431,12 @@ fn a_reither_tag_becomes_present_and_a_closed_row_erases_the_others() {
     }
 }
 
+/// How a test makes a tag from the `int` node of its row.
+type Kind = fn(Ty) -> Tag;
+
 /// Two rows, each with the one tag `X` of kind `left` and `right`, both
 /// open; what `X` is in the right row afterwards, or `None` for a clash.
-fn tag_pair(left: fn(Ty) -> Tag, right: fn(Ty) -> Tag, fixed: bool) -> Option<String> {
+fn tag_pair(left: Kind, right: Kind, fixed: bool) -> Option<String> {
     let mut c = checker(Mode::Success);
     let (i1, i2) = (constr(&mut c, INT, &[]), constr(&mut c, INT, &[]));
     let rm1 = var(&mut c);
@@ -2470,18 +2473,19 @@ fn tag_pair(left: fn(Ty) -> Tag, right: fn(Ty) -> Tag, fixed: bool) -> Option<St
 /// - `Reither (false, tl, _, e1), Rpresent (Some t2) when not fixed1`, and
 ///   mirrored; `Reither (true, [], _, e1), Rpresent None`, and mirrored.
 /// - `| _ -> raise (Unify [])`.
+///
 /// Reaches: R3f.
 #[test]
 #[ignore = "R3f build"]
 fn each_pair_of_tag_kinds() {
-    let some: fn(Ty) -> Tag = |ty| Tag::Present(Some(ty));
-    let none: fn(Ty) -> Tag = |_| Tag::Present(None);
-    let absent: fn(Ty) -> Tag = |_| Tag::Absent;
-    let either: fn(Ty) -> Tag = |ty| Tag::Either(false, Some(ty), false);
-    let constant: fn(Ty) -> Tag = |_| Tag::Either(true, None, false);
-    let matched: fn(Ty) -> Tag = |ty| Tag::Either(false, Some(ty), true);
-    let constant_matched: fn(Ty) -> Tag = |_| Tag::Either(true, None, true);
-    let cases: [(&str, fn(Ty) -> Tag, fn(Ty) -> Tag, Option<&str>); 20] = [
+    let some: Kind = |ty| Tag::Present(Some(ty));
+    let none: Kind = |_| Tag::Present(None);
+    let absent: Kind = |_| Tag::Absent;
+    let either: Kind = |ty| Tag::Either(false, Some(ty), false);
+    let constant: Kind = |_| Tag::Either(true, None, false);
+    let matched: Kind = |ty| Tag::Either(false, Some(ty), true);
+    let constant_matched: Kind = |_| Tag::Either(true, None, true);
+    let cases: [(&str, Kind, Kind, Option<&str>); 20] = [
         ("some some", some, some, Some("X()")),
         ("none none", none, none, Some("X")),
         ("some none", some, none, None),
