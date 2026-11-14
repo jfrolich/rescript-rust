@@ -801,7 +801,7 @@ impl Replay<'_, '_> {
             }
             View::SRest { var, info, .. } => {
                 if let crate::bir::JsPayload::Rest(fields) = bir.javascript(info) {
-                    for field in fields {
+                    for field in bir.rest_fields(*fields) {
                         if let Some(binding) = field.binding {
                             self.name(binding);
                         }
@@ -1719,7 +1719,7 @@ mod tests {
         let arg = u.b.new_node(View::Var { var: p }, 0);
         open(&mut u.b);
         adopt(&mut u.b, arg);
-        let header = u.b.switch_header(crate::bir::SwitchHeader {
+        let header = u.b.switch_header(crate::bir::SwitchInput {
             keys: Vec::new(),
             clauses: Vec::new(),
             constants: 0,

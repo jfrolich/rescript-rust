@@ -16,6 +16,7 @@ pub mod engine;
 pub mod l;
 pub mod j;
 pub mod lower;
+pub(crate) mod untagged_plan;
 pub mod replay;
 pub mod shadow;
 mod dump;
@@ -38,6 +39,9 @@ pub use vars::*;
 pub struct Bir {
     /// Logical normalisation costs for the opt-in J backend.
     pub j_stats: j::Stats,
+    // Mutable normalizer callers explicitly lend this retained worklist.
+    j_equal_work: Vec<(NodeId, NodeId)>,
+    j_template_scratch: j::norm::TemplateScratch,
     nodes: Vec<Node>,
     parents: Vec<Option<NodeId>>,
     cold: Vec<Option<ColdId>>,
@@ -64,6 +68,11 @@ pub struct Bir {
     weight_path: Vec<(NodeId, u32)>,
     count_stack: Vec<(NodeId, i64)>,
     release_stack: Vec<(NodeId, u32)>,
+    effect_work: Vec<NodeId>,
+    #[cfg(debug_assertions)]
+    checked_children: Vec<u32>,
+    #[cfg(debug_assertions)]
+    child_epoch: u32,
     capture_epoch: u64,
     capture_binders: Vec<u64>,
     capture_chain: Vec<(u64, bool)>,
@@ -229,7 +238,8 @@ impl Bir {
             bits: value.to_bits(),
         })))
     }
-    /// Intern a constant. Compound fields must already exist.
+    /// Intern a constant in O(encoded payload bytes), using retained encoding
+    /// scratch and a flat key-byte pool. Compound fields must already exist.
     pub fn intern_const(&mut self, value: Constant) -> ConstId {
         if let Constant::Float(ref float) = value {
             self.pools.floats.resize(self.pools.strings.len(), None);
@@ -239,20 +249,30 @@ impl Bir {
             let id = ConstId(index(self.pools.consts.len()));
             self.pools.floats[float.spelling.index()] = Some(id);
             self.pools.consts.push(value);
-            self.pools.const_keys.push(Vec::new());
+            self.pools.const_keys.push((0, 0));
             return id;
         }
-        let key = value.key();
+        let mut key = std::mem::take(&mut self.pools.const_key_scratch);
+        crate::binser::to_vec_reuse(&value, &mut key).expect("Bir constant serialization");
         let hash = self.pools.hash_builder.hash_one(&key);
         if let Some(&(_, id)) = self.pools.const_index.find(hash, |&(_, id)| {
             self.compare_interned();
-            self.pools.const_keys[id.index()] == key
+            let (start, len) = self.pools.const_keys[id.index()];
+            self.pools.const_key_bytes[start as usize..(start + len) as usize] == key
         }) {
+            key.clear();
+            self.pools.const_key_scratch = key;
             return id;
         }
         let id = ConstId(index(self.pools.consts.len()));
         self.pools.consts.push(value);
-        self.pools.const_keys.push(key);
+        let start = index(self.pools.const_key_bytes.len());
+        let len = index(key.len());
+        start.checked_add(len).expect("constant key pool capacity");
+        self.pools.const_key_bytes.extend_from_slice(&key);
+        self.pools.const_keys.push((start, len));
+        key.clear();
+        self.pools.const_key_scratch = key;
         self.pools
             .const_index
             .insert_unique(hash, (hash, id), |&(hash, _)| hash);
@@ -314,6 +334,40 @@ impl Bir {
     pub fn javascript(&self, id: JsId) -> &JsPayload {
         &self.pools.js[id.index()]
     }
+    /// Borrow a block shape, including metadata shared with the source IR.
+    pub fn block_tag(&self, info: JsId) -> &crate::lambda::TagInfo {
+        match self.javascript(info) {
+            JsPayload::Block(tag) => tag,
+            JsPayload::ConstantBlock(id) => {
+                let Constant::Block { tag, .. } = self.constant(*id) else { panic!("constant block shape") };
+                tag
+            }
+            _ => panic!("block shape metadata"),
+        }
+    }
+    /// Borrow immutable template quasis by their unit-pool span.
+    pub fn template_parts(&self, span: TemplateSpan) -> &[TemplatePart] {
+        &self.pools.template_parts[span.start as usize..(span.start + span.len) as usize]
+    }
+    /// Append template quasis without an owning per-template vector.
+    pub fn template_info(&mut self, parts: &[TemplatePart], tagged: bool) -> JsId {
+        let span = TemplateSpan { start: index(self.pools.template_parts.len()), len: index(parts.len()) };
+        self.pools.template_parts.extend_from_slice(parts);
+        self.js_info(if tagged { JsPayload::Tagged(span) } else { JsPayload::Template(span) })
+    }
+    /// O(1): borrow a property-key run without copying metadata.
+    pub fn property_keys(&self, span: PropertySpan) -> &[PropertyKey] {
+        &self.pools.property_keys[span.start as usize..(span.start + span.len) as usize]
+    }
+    /// O(keys.len()): append object keys to the unit pool, not a per-object vector.
+    pub fn object_info(&mut self, keys: &[PropertyKey]) -> JsId {
+        let span = PropertySpan {
+            start: index(self.pools.property_keys.len()),
+            len: index(keys.len()),
+        };
+        self.pools.property_keys.extend_from_slice(keys);
+        self.js_info(JsPayload::Object(span))
+    }
     /// Read a compound constant's fields.
     pub fn constant_fields(&self, span: ConstSpan) -> &[ConstId] {
         &self.pools.const_fields[span.start as usize..(span.start + span.len) as usize]
@@ -341,6 +395,14 @@ impl Bir {
         });
         id
     }
+    /// Allocate a fresh ordinary header while sharing immutable attributes.
+    pub(crate) fn function_header_from(&mut self, source: FuncId, params: VarSpan) -> FuncId {
+        let old = *self.function(source);
+        let id = FuncId(index(self.vars.funcs.len()));
+        self.func_owners.push(None);
+        self.vars.funcs.push(FuncHeader { params, attr: old.attr, loc: old.loc, flags: 0 });
+        id
+    }
     /// Allocate a JavaScript method header, which preserves the `this` binding.
     pub fn method_header(
         &mut self,
@@ -364,16 +426,49 @@ impl Bir {
     pub fn function_attributes(&self, id: FuncId) -> &FunctionAttribute {
         &self.pools.attrs[self.function(id).attr as usize]
     }
-    /// Allocate switch metadata.
-    pub fn switch_header(&mut self, header: SwitchHeader) -> SwitchId {
-        assert!(header.constants as usize <= header.keys.len());
+    /// O(keys + clauses): transfer import metadata into the unit's flat pools.
+    pub fn switch_header(&mut self, header: SwitchInput) -> SwitchId {
+        let keys = KeySpan {
+            start: index(self.pools.switch_keys.len()),
+            len: index(header.keys.len()),
+        };
+        let clauses = ClauseSpan {
+            start: index(self.pools.switch_clauses.len()),
+            len: index(header.clauses.len()),
+        };
+        self.pools.switch_keys.extend(header.keys);
+        self.pools.switch_clauses.extend(header.clauses);
+        self.switch_record(SwitchRecord {
+            keys,
+            clauses,
+            constants: header.constants,
+            consts_full: header.consts_full,
+            blocks_full: header.blocks_full,
+            has_default: header.has_default,
+            dispatch: header.dispatch,
+        })
+    }
+    /// O(1) amortized: store a header whose keys and clauses are already pooled.
+    pub(in crate::bir) fn switch_record(&mut self, header: SwitchRecord) -> SwitchId {
+        assert!(header.constants <= header.keys.len);
         let id = SwitchId(index(self.pools.switches.len()));
         self.pools.switches.push(header);
         id
     }
-    /// Read switch metadata.
-    pub fn switch(&self, id: SwitchId) -> &SwitchHeader {
-        &self.pools.switches[id.index()]
+    /// O(1): borrow the two pooled runs and the dispatch facts.
+    pub fn switch(&self, id: SwitchId) -> SwitchHeader<'_> {
+        let h = &self.pools.switches[id.index()];
+        SwitchHeader {
+            keys: &self.pools.switch_keys
+                [h.keys.start as usize..(h.keys.start + h.keys.len) as usize],
+            clauses: &self.pools.switch_clauses
+                [h.clauses.start as usize..(h.clauses.start + h.clauses.len) as usize],
+            constants: h.constants,
+            consts_full: h.consts_full,
+            blocks_full: h.blocks_full,
+            has_default: h.has_default,
+            dispatch: &h.dispatch,
+        }
     }
     /// Allocate a static catch header.
     pub fn catch_header(&mut self, label: u32, params: VarSpan) -> CatchId {
@@ -406,6 +501,39 @@ impl Bir {
         let id = JsId(index(self.pools.js.len()));
         self.pools.js.push(info);
         id
+    }
+    /// Intern an immutable block shape once per distinct unit metadata key.
+    /// Source primitives are temporarily borrowed outside the arena during
+    /// lowering, so output shapes cannot borrow that movable primitive vector.
+    pub(crate) fn block_info(&mut self, tag: &crate::lambda::TagInfo) -> JsId {
+        let mut key = std::mem::take(&mut self.pools.block_key_scratch);
+        crate::binser::to_vec_reuse(tag, &mut key).expect("block shape encoding");
+        let hash = self.pools.hash_builder.hash_one(&key);
+        let info = if let Some(&(_, info, _, _)) = self.pools.block_index.find(hash, |&(_, _, start, len)| {
+            self.pools.block_key_bytes[start as usize..(start + len) as usize] == key
+        }) {
+            info
+        } else {
+            let info = self.js_info(JsPayload::Block(tag.clone()));
+            let start = index(self.pools.block_key_bytes.len());
+            self.pools.block_key_bytes.extend_from_slice(&key);
+            self.pools.block_index.insert_unique(hash, (hash, info, start, index(key.len())), |entry| entry.0);
+            info
+        };
+        key.clear();
+        self.pools.block_key_scratch = key;
+        info
+    }
+    /// Append immutable record-rest metadata without an owning per-node vector.
+    pub fn rest_info(&mut self, fields: impl IntoIterator<Item = RestField>) -> JsId {
+        let start = index(self.pools.rest_fields.len());
+        self.pools.rest_fields.extend(fields);
+        let len = index(self.pools.rest_fields.len()) - start;
+        self.js_info(JsPayload::Rest(RestSpan { start, len }))
+    }
+    /// Borrow a record-rest descriptor's fields.
+    pub fn rest_fields(&self, span: RestSpan) -> &[RestField] {
+        &self.pools.rest_fields[span.start as usize..(span.start + span.len) as usize]
     }
     /// Intern a module reference in first-use order.
     pub fn import(&mut self, module: Import) -> ImportId {

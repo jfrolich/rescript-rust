@@ -571,7 +571,11 @@ pub fn js4_normalize(b: &mut Bir, statement: NodeId) -> NodeId {
         h.keys.iter().position(|key| matches!(key, crate::bir::CaseKey::Lambda(crate::lambda::SwitchKey::Int(n)) if *n == value))
     } else {
         let View::JStr { text } = b.view(scrutinee) else { return statement; };
-        h.keys.iter().position(|key| matches!(key, crate::bir::CaseKey::JavaScript(crate::lambda::SwitchCaseTag::String(s)) if s == b.text(text)))
+        h.keys.iter().position(|key| match key {
+            crate::bir::CaseKey::String(key) => *key == text,
+            crate::bir::CaseKey::JavaScript(crate::lambda::SwitchCaseTag::String(s)) => s == b.text(text),
+            _ => false,
+        })
     }.or_else(|| h.has_default.then_some(h.keys.len())).expect("literal switch must match a clause or default");
     let action = actions[selected];
     let View::SBlock { statements } = b.view(action) else {
@@ -613,8 +617,18 @@ fn single_value(b: &Bir, statements: &[NodeId], return_: bool) -> Option<NodeId>
         _ => None,
     }
 }
-fn same_assignment_target(b: &Bir, left: NodeId, right: NodeId) -> bool {
-    let mut work = vec![(left, right)];
+fn same_assignment_target(b: &mut Bir, left: NodeId, right: NodeId) -> bool {
+    if matches!(b.view(left), View::Var { .. }) { return p::same_var(b, left, right); }
+    let mut work = std::mem::take(&mut b.j_equal_work);
+    let result = same_assignment_target_with_work(b, left, right, &mut work);
+    work.clear();
+    b.j_equal_work = work;
+    result
+}
+
+fn same_assignment_target_with_work(b: &Bir, left: NodeId, right: NodeId, work: &mut Vec<(NodeId, NodeId)>) -> bool {
+    work.clear();
+    work.push((left, right));
     while let Some((l, r)) = work.pop() {
         match (b.view(l), b.view(r)) {
             (View::Var { .. }, View::Var { .. }) if p::same_var(b, l, r) => {}
@@ -660,8 +674,15 @@ fn same_assignment_target(b: &Bir, left: NodeId, right: NodeId) -> bool {
     }
     true
 }
-fn equal_statements(b: &Bir, left: &[NodeId], right: &[NodeId]) -> bool {
-    left.len() == right.len() && left.iter().zip(right).all(|(&l, &r)| p::equal(b, l, r))
+/// O(compared statements and their paired nodes), borrowing retained equality scratch.
+fn equal_statements(b: &mut Bir, left: crate::bir::ListId, right: crate::bir::ListId) -> bool {
+    let len = b.lists.get(left).len();
+    if len != b.lists.get(right).len() { return false; }
+    for i in 0..len {
+        let (l,r)=(b.lists.get(left)[i],b.lists.get(right)[i]);
+        if !p::equal(b,l,r) { return false; }
+    }
+    true
 }
 /// Branch handles for J-S3. A finalized branch is a ListId; the lowering's
 /// statement stack supplies Span handles so a surviving tail stays in place.
@@ -898,9 +919,9 @@ pub fn js3_simplify_if(
             return js1_exp(b, value);
         }
         if let Some((c, y, n)) = nested_if(b, yes) {
-            let merge = if equal_statements(b, b.lists.get(n), b.lists.get(no)) {
+            let merge = if equal_statements(b, n, no) {
                 Some(false)
-            } else if !b.lists.get(y).is_empty() && equal_statements(b, b.lists.get(y), b.lists.get(no)) {
+            } else if !b.lists.get(y).is_empty() && equal_statements(b, y, no) {
                 Some(true)
             } else { None };
             if let Some(negate) = merge {
@@ -917,10 +938,10 @@ pub fn js3_simplify_if(
         }
         if let Some((c, y, n)) = nested_if(b, no) {
             let merge = if !b.lists.get(yes).is_empty() && !b.lists.get(y).is_empty()
-                && equal_statements(b, b.lists.get(yes), b.lists.get(y)) {
+                && equal_statements(b, yes, y) {
                 Some(false)
             } else if !b.lists.get(yes).is_empty() && !b.lists.get(n).is_empty()
-                && equal_statements(b, b.lists.get(yes), b.lists.get(n)) {
+                && equal_statements(b, yes, n) {
                 Some(true)
             } else { None };
             if let Some(negate) = merge {
@@ -1342,9 +1363,7 @@ pub fn jm11_projection(
     }
     let value = match b.view(target) {
         View::JBlockLit { values, info } => {
-            let crate::bir::JsPayload::Block(tag) = b.javascript(info) else {
-                unreachable!()
-            };
+            let tag = b.block_tag(info);
             if let (Some(field), Some(fields)) = (field, tag.record_fields()) {
                 values
                     .iter()
@@ -1384,71 +1403,56 @@ pub fn jm11_poly_var_access(b: &mut Bir, target: NodeId, payload: bool) -> NodeI
 
 /// J-M12, E:844 interpolated_template. Segment utilities operate on literal
 /// text only; no legacy expression builder is called. Comments inhibit merging.
+#[derive(Default)]
+pub(crate) struct TemplateScratch {
+    pub(crate) text: crate::string_literal::TemplateBuffer,
+    pub(crate) kept: Vec<NodeId>,
+    pub(crate) steps: usize,
+}
+fn template_part(b: &mut Bir, text: &mut crate::string_literal::TemplateBuffer) {
+    let (source, semantic) = text.finish();
+    let raw = b.intern_text(source);
+    let cooked = Some(b.intern_text(semantic));
+    b.pools.template_parts.push(crate::bir::TemplatePart { raw, cooked });
+    text.clear();
+}
+/// J-M12: merge literal interpolations with retained spelling/operand storage.
 pub fn jm12_interpolated_template(
     b: &mut Bir,
-    segments: Vec<crate::string_literal::TemplateSegment>,
-    values: Vec<NodeId>,
+    segments: impl AsRef<[crate::string_literal::TemplateSegment]>,
+    values: impl IntoIterator<Item = NodeId, IntoIter: ExactSizeIterator>,
 ) -> NodeId {
-    use crate::string_literal::{StringLiteral, concat_template, template_from_semantic};
+    let segments = segments.as_ref();
+    let values = values.into_iter();
     assert_eq!(segments.len(), values.len() + 1);
-    let mut segments = segments.into_iter();
-    let mut parts = vec![segments.next().unwrap()];
-    let mut merged = vec![];
-    let mut kept = vec![];
-    for (next, value) in segments.zip(values) {
-        let literal = if b.cold(value).and_then(|c| c.comment).is_some() {
-            None
-        } else {
+    let mut scratch = std::mem::take(&mut b.j_template_scratch);
+    debug_assert!(scratch.kept.is_empty());
+    let start = b.pools.template_parts.len() as u32;
+    scratch.text.push(segments[0].source(), segments[0].semantic());
+    for (next, value) in segments[1..].iter().zip(values) {
+        scratch.steps += 1;
+        let literal = if b.cold(value).and_then(|c| c.comment).is_some() { false } else {
             match b.view(value) {
-                View::JStr { text } => Some(template_from_semantic(b.text(text))),
+                View::JStr { text } => { scratch.text.push_semantic(b.text(text)); true }
                 View::JTemplate { info, .. } if b.node(value).aux() == 1 => {
-                    let crate::bir::JsPayload::Template(p) = b.javascript(info) else {
-                        unreachable!()
-                    };
-                    Some(match p[0].cooked {
-                        Some(s) => StringLiteral::Valid {
-                            source: b.text(p[0].raw).to_owned().into(),
-                            semantic: b.text(s).to_owned().into(),
-                        },
-                        None => StringLiteral::InvalidSource(b.text(p[0].raw).to_owned().into()),
-                    })
+                    let crate::bir::JsPayload::Template(span) = b.javascript(info) else { unreachable!() };
+                    let part = b.template_parts(*span)[0];
+                    scratch.text.push(b.text(part.raw), part.cooked.map_or("", |s| b.text(s)));
+                    true
                 }
-                _ => None,
+                _ => false,
             }
         };
-        if let Some(literal) = literal {
-            parts.push(literal);
-            parts.push(next);
-            b.release(value);
-        } else {
-            merged.push(concat_template(&parts));
-            kept.push(value);
-            parts = vec![next];
-        }
+        if literal { b.release(value); }
+        else { template_part(b, &mut scratch.text); scratch.kept.push(value); }
+        scratch.text.push(next.source(), next.semantic());
     }
-    merged.push(concat_template(&parts));
-    let parts = merged
-        .into_iter()
-        .map(|part| match part {
-            StringLiteral::Valid { source, semantic } => crate::bir::TemplatePart {
-                raw: b.intern_text(&source),
-                cooked: Some(b.intern_text(&semantic)),
-            },
-            StringLiteral::InvalidSource(source) => crate::bir::TemplatePart {
-                raw: b.intern_text(&source),
-                cooked: None,
-            },
-        })
-        .collect();
-    let info = b.js_info(crate::bir::JsPayload::Template(parts));
-    p::node(
-        b,
-        View::JTemplate {
-            values: &kept,
-            info,
-        },
-        u16::from(kept.is_empty()),
-    )
+    template_part(b, &mut scratch.text);
+    let span = crate::bir::TemplateSpan { start, len: b.pools.template_parts.len() as u32 - start };
+    let info = b.js_info(crate::bir::JsPayload::Template(span));
+    let result = p::node(b, View::JTemplate { values: &scratch.kept, info }, u16::from(scratch.kept.is_empty()));
+    scratch.kept.clear(); b.j_template_scratch = scratch;
+    result
 }
 
 fn integer_runtime_call(b: &mut Bir, modulo: bool, left: NodeId, right: NodeId) -> NodeId {
@@ -1522,7 +1526,8 @@ pub fn jm13_int32_mod(b: &mut Bir, check_zero: bool, left: NodeId, right: NodeId
 /// J-M14, O:339 push_effect_expression. Split sequences left-to-right, drop
 /// strictly pure values, and preserve assignment locations carried by unit pairs.
 pub fn jm14_push_effect_expression(b: &mut Bir, value: NodeId, statements: &mut Vec<NodeId>) {
-    let mut work = vec![value];
+    let mut work = std::mem::take(&mut b.effect_work);
+    work.push(value);
     while let Some(value) = work.pop() {
         if let View::JSeq { first, second } = b.view(value) {
             if p::undefined(b, second)
@@ -1553,6 +1558,7 @@ pub fn jm14_push_effect_expression(b: &mut Bir, value: NodeId, statements: &mut 
             statements.push(js1_exp(b, value));
         }
     }
+    b.effect_work = work;
 }
 /// J-M14, O:368 push_s_exp: only numbers/undefined and trivial comma arms drop.
 pub fn jm14_push_s_exp(b: &mut Bir, mut value: NodeId, statements: &mut Vec<NodeId>) {

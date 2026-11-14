@@ -17,12 +17,11 @@
 //! signature itself prints a published unit, without levels and with links
 //! followed, and cannot print an operand that is not generic.
 //!
-//! Variable names are part of the form from the `Expand` tier up: the old
-//! checker's `instance` drops a variable's name (`copy_type_desc`,
-//! compiler/ml/btype.ml:510) and R1's `Graph::instance` and `Graph::copy`
-//! keep it. The harness found that; slice R3b corrects it, and until then
-//! the kernel and structural tiers print no names (`r3_tests::instance_drops_variable_names`
-//! is the test that compares them).
+//! Variable names are part of the form in every tier: the old checker's
+//! `instance` drops a variable's name (`copy_type_desc`,
+//! compiler/ml/btype.ml:510), and so do `Graph::instance` and `Graph::copy`
+//! since slice R3b (`r3_tests::instance_drops_variable_names` is the test
+//! that compares them).
 //!
 //! A failed unification ends the case: what a failed unification leaves in
 //! the graph is not observable (CHECKER_REWRITE "R3 as designed", decision
@@ -90,11 +89,10 @@ impl Tier {
         self != Tier::Structural
     }
 
-    /// O(1): whether the form prints variable names (see the module text).
-    /// False below `Expand` until R3b's first commit makes R1's instance drop
-    /// names; that commit makes this true for every tier.
+    /// O(1): whether the form prints variable names: in every tier, since
+    /// R1's instance and copy drop names as the old checker's do.
     fn names(self) -> bool {
-        self >= Tier::Expand
+        true
     }
 
     /// O(1): whether the new side takes instances and copies through the
@@ -340,7 +338,11 @@ pub(crate) fn operations(rng: &mut Rng, tier: Tier, values: usize) -> Vec<Op> {
 
 /// O(operations + printed nodes²): the old checker's side of a case.
 pub(crate) fn run_old(program: &Program, tier: Tier, ops: &[Op]) -> Outcome {
-    let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+    // Stamps start above the predefined types', as in a compilation
+    // (`Ident.set_current_time 999`, compiler/ml/predef.ml).
+    let ctx = TypeContext::new(Arc::new(IdGenerator::with_start_stamp(
+        crate::types::predef::PREDEF_STAMP_BARRIER,
+    )));
     // The unit's own types are named through the unit (`Case.a0`): they
     // resolve through the persistent environment, as for a dependent.
     let mut registry = ModuleRegistry::new();
@@ -364,6 +366,14 @@ pub(crate) fn run_old(program: &Program, tier: Tier, ops: &[Op]) -> Outcome {
             _ => {}
         }
     }
+    // A unit is checked from a level above every binding time
+    // (`Ctype.init_def (Ident.current_time ())`, compiler/ml/typemod.ml), so
+    // that lowering a type to the unit's first level never fails the scope
+    // test of `update_level` (compiler/ml/ctype.ml:591-598) for a predefined
+    // type or a type of the unit. Without it the old side refused a
+    // unification no compilation can refuse (seed 1000064 of the structural
+    // tier: `int` bound to a variable of the starting level).
+    ctx.init_def(ctx.current_stamp());
     let base = ctx.current_level();
     let mut operands: Vec<TypeExprRef> = Vec::new();
     for (index, op) in ops.iter().enumerate() {
@@ -584,8 +594,16 @@ impl New {
             Op::BeginDef => self.checker.g.begin_def(),
             Op::EndDef => self.checker.g.end_def(),
             Op::Generalize(operand) => {
+                // From the tier that has a memo, a generalization forgets
+                // the nullary memo first (compiler/ml/ctype.ml:519), as the
+                // old side's `ctype::generalize` does.
                 if fault != Fault::SkipGeneralize {
-                    self.checker.g.generalize(self.operands[operand as usize]);
+                    let ty = self.operands[operand as usize];
+                    if self.tier.memo_aware() {
+                        self.checker.generalize(ty);
+                    } else {
+                        self.checker.g.generalize(ty);
+                    }
                 }
             }
             Op::Lower(operand, level) => {
@@ -907,7 +925,6 @@ mod tests {
 
     /// 10,000 cases of unification on programs without abbreviations.
     #[test]
-    #[ignore = "R3a build"]
     fn structural_tier_agrees_on_generated_cases() {
         let coverage = run_cases(Tier::Structural, 1, 100, 100);
         assert_eq!(coverage.cases, 10_000);
@@ -918,7 +935,6 @@ mod tests {
     /// 10,000 cases of expansion, the two memos and their cleanup, with the
     /// memo-aware instance and copy (O11).
     #[test]
-    #[ignore = "R3b build"]
     fn expand_tier_agrees_on_generated_cases() {
         let coverage = run_cases(Tier::Expand, 1, 100, 100);
         assert_eq!(coverage.cases, 10_000);

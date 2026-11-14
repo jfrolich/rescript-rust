@@ -19,6 +19,95 @@ struct Side {
     block: bool,
 }
 
+#[derive(Clone, Copy)]
+struct Imported { keys: crate::bir::KeySpan, tag_name: crate::bir::StrId }
+#[derive(Default)]
+pub(super) struct Metadata {
+    switches: Vec<Option<Imported>>,
+    numbers: Vec<[Option<crate::bir::ConstId>; 2]>,
+}
+/// Import immutable spelling/number descriptors into unit pools, never plans.
+/// Cost: Expected O(H + K + B + U): scans H switch headers and K keys, normalizes/interns B
+/// literal/name bytes, initializes U new dense numeric rows, and appends one converted key
+/// per named case. Hash collision comparisons add their byte cost.
+pub(super) fn prepare(arena: &mut Bir) -> Metadata {
+    let switches = std::mem::take(&mut arena.pools.switches);
+    let mut keys = std::mem::take(&mut arena.pools.switch_keys);
+    let mut metadata = Metadata::default();
+    let mut bigint = String::new();
+    for h in &switches {
+        let SwitchDispatch::Variant(facts) = &h.dispatch else { metadata.switches.push(None); continue };
+        let view = SwitchHeader { keys: &keys[h.keys.start as usize..(h.keys.start + h.keys.len) as usize],
+            clauses: &[], constants: h.constants, consts_full: h.consts_full, blocks_full: h.blocks_full,
+            has_default: h.has_default, dispatch: &h.dispatch };
+        if is_untagged(&view) { metadata.switches.push(None); continue; }
+        let tag_name = arena.intern_text(facts.tag_name.as_deref().unwrap_or("TAG"));
+        let start = keys.len() as u32;
+        for i in 0..h.keys.len as usize {
+            let key = &keys[h.keys.start as usize + i];
+            let literal = match key {
+                CaseKey::Lambda(SwitchKey::Constructor(Case::Constant(tag))) => &tag.literal,
+                CaseKey::Lambda(SwitchKey::Constructor(Case::Block(block))) => &block.tag().literal,
+                _ => unreachable!("variant constructor key"),
+            };
+            let key = match literal {
+                Literal::String(s) => CaseKey::String(arena.intern_text(s)),
+                Literal::Float(s) => {
+                    let text = arena.intern_text(s);
+                    let value = arena.intern_float(s).expect("valid constructor float");
+                    metadata.numbers.resize(arena.pools.strings.len(), [None; 2]);
+                    metadata.numbers[text.index()][0] = Some(value);
+                    CaseKey::Float(text)
+                }
+                Literal::BigInt(s) => {
+                    let text = arena.intern_text(s);
+                    let positive = crate::types::typecore::parse_bigint_literal_into(s, &mut bigint);
+                    bigint.insert(0, if positive { '+' } else { '-' });
+                    let canonical = arena.intern_text(&bigint);
+                    let value = arena.intern_const(crate::bir::Constant::BigInt(canonical));
+                    bigint.clear();
+                    metadata.numbers.resize(arena.pools.strings.len(), [None; 2]);
+                    metadata.numbers[text.index()][1] = Some(value);
+                    CaseKey::BigInt(text)
+                }
+                Literal::Int(i) => CaseKey::JavaScript(Tag::Int(i64::from(*i as i32))),
+                Literal::Bool(b) => CaseKey::JavaScript(Tag::Bool(*b)),
+                Literal::Null => CaseKey::JavaScript(Tag::Null),
+                Literal::Undefined => CaseKey::JavaScript(Tag::Undefined),
+            };
+            keys.push(key);
+        }
+        metadata.switches.push(Some(Imported { keys: crate::bir::KeySpan { start, len: h.keys.len }, tag_name }));
+    }
+    arena.pools.switches = switches;
+    arena.pools.switch_keys = keys;
+    metadata
+}
+
+#[derive(Default)]
+struct Sides([Option<Side>; 2]);
+impl Sides {
+    /// Cost: O(1): inspects at most the two fixed side slots and writes the first empty one.
+    fn push(&mut self, side: Side) {
+        let slot = self.0.iter_mut().find(|side| side.is_none()).expect("at most two named sides");
+        *slot = Some(side);
+    }
+    /// Cost: O(1): tests the two fixed side slots.
+    fn len(&self) -> usize { usize::from(self.0[0].is_some()) + usize::from(self.0[1].is_some()) }
+    /// Cost: O(1): constructs an iterator over at most two optional side slots; consuming it
+    /// inspects at most two slots.
+    fn iter(&self) -> impl Iterator<Item = &Side> { self.0.iter().flatten() }
+}
+impl std::ops::Index<usize> for Sides {
+    type Output = Side;
+    /// Cost: O(1): indexes and unwraps one of the two fixed side slots.
+    fn index(&self, index: usize) -> &Side { self.0[index].as_ref().expect("initialized named side") }
+}
+impl std::ops::IndexMut<usize> for Sides {
+    /// Cost: O(1): mutably indexes and unwraps one of the two fixed side slots.
+    fn index_mut(&mut self, index: usize) -> &mut Side { self.0[index].as_mut().expect("initialized named side") }
+}
+
 /// One named dispatch, never copied down a walk.
 pub(super) struct Plan {
     scrutinee: NodeId,
@@ -26,7 +115,7 @@ pub(super) struct Plan {
     start: Span,
     target: Option<VarId>,
     value: Option<NodeId>,
-    sides: Vec<Side>,
+    sides: Sides,
     active: usize,
     mixed: bool,
     head: u32,
@@ -35,7 +124,7 @@ pub(super) struct Plan {
 }
 
 /// V: untagged_switch precondition. O(keys), borrowed metadata only.
-pub(super) fn is_untagged(h: &SwitchHeader) -> bool {
+pub(super) fn is_untagged(h: &SwitchHeader<'_>) -> bool {
     let SwitchDispatch::Variant(facts) = &h.dispatch else {
         return false;
     };
@@ -86,22 +175,8 @@ impl State {
                 _ => 4,
             }
         });
-        let tag_name = facts.tag_name.as_deref().unwrap_or("TAG").to_owned();
-        let keys: Vec<_> = h
-            .keys
-            .iter()
-            .map(|key| {
-                let tag = match key {
-                    CaseKey::Lambda(SwitchKey::Constructor(Case::Constant(tag))) => tag,
-                    CaseKey::Lambda(SwitchKey::Constructor(Case::Block(block))) => block.tag(),
-                    _ => unreachable!("constructor key in named switch"),
-                };
-                CaseKey::JavaScript(Self::literal_tag(&tag.literal))
-            })
-            .collect();
-        let mut keys = [keys, Vec::new()];
-        keys[1] = keys[0].split_off(n);
-        let tag_name = self.arena.intern_text(&tag_name);
+        let imported = self.named_metadata.switches[header.index()].expect("imported named metadata");
+        let tag_name = imported.tag_name;
         let start = self.statements.mark();
         let binding = match cx.cont {
             Cont::Value(_) => Some((LetKind::Strict, self.fresh_variable("tmp"))),
@@ -128,7 +203,7 @@ impl State {
         } else {
             None
         };
-        let mut sides = Vec::with_capacity(2);
+        let mut sides = Sides::default();
         for block in [false, true] {
             if selected.is_some_and(|selected| selected != block) {
                 continue;
@@ -136,16 +211,11 @@ impl State {
             let range = if block { n..total } else { 0..n };
             let full = if block { block_full } else { const_full };
             let fallback = if full { None } else { default };
-            let actions: Vec<_> = range
-                .clone()
-                .map(|i| self.source.lists.get(operands)[i])
-                .chain(fallback)
-                .collect();
-            let actions = self.source.lists.push(&actions);
-            let side_header = self.arena.switch_header(SwitchHeader {
-                keys: std::mem::take(&mut keys[usize::from(block)]),
-                clauses: Vec::new(),
-                constants: if block { (total - n) as u32 } else { n as u32 },
+            let actions = self.source.lists.slice_append(operands, range.start, range.len(), fallback);
+            let side_header = self.arena.switch_record(crate::bir::SwitchRecord {
+                keys: crate::bir::KeySpan { start: imported.keys.start + range.start as u32, len: range.len() as u32 },
+                clauses: crate::bir::ClauseSpan { start: 0, len: 0 },
+                constants: range.len() as u32,
                 consts_full: full,
                 blocks_full: false,
                 has_default: fallback.is_some(),
@@ -155,7 +225,7 @@ impl State {
             let side = self.switch_plan(frame);
             sides.push(Side {
                 frame,
-                count: side.bodies.len() + usize::from(side.default.is_some()),
+                count: side.groups.bodies.len as usize + usize::from(side.default.is_some()),
                 run: Span::default(),
                 block,
             });
@@ -177,29 +247,26 @@ impl State {
         Ok(frame)
     }
 
-    /// V: literal_tag_value. O(literal spelling), copied only into owned J keys.
-    pub(super) fn literal_tag(tag: &Literal) -> Tag {
-        match tag {
-            Literal::String(s) => Tag::String(s.clone()),
-            Literal::Int(i) => Tag::Int(i64::from(*i as i32)),
-            Literal::Float(s) => Tag::Float(s.clone()),
-            Literal::BigInt(s) => Tag::BigInt(s.clone()),
-            Literal::Bool(b) => Tag::Bool(*b),
-            Literal::Null => Tag::Null,
-            Literal::Undefined => Tag::Undefined,
-        }
-    }
-
     /// V: switch_case_expr. O(literal spelling), one owned J literal.
     pub(super) fn switch_key_expression(&mut self, key: &CaseKey) -> NodeId {
         match key {
             CaseKey::String(text) => plain::node(&mut self.arena, View::JStr { text: *text }, 0),
+            CaseKey::Float(text) | CaseKey::BigInt(text) => {
+                let slot = usize::from(matches!(key, CaseKey::BigInt(_)));
+                let value = self.named_metadata.numbers[text.index()][slot].expect("imported numeric constructor");
+                plain::node(&mut self.arena, View::JNumber { value }, 0)
+            }
             CaseKey::Lambda(SwitchKey::Int(i)) => plain::int(&mut self.arena, *i),
             CaseKey::JavaScript(tag) => match tag {
                 Tag::String(s) => plain::string(&mut self.arena, s),
                 Tag::Int(i) if i32::try_from(*i).is_ok() => plain::int(&mut self.arena, *i as i32),
                 Tag::Int(i) => {
-                    let value = self.arena.intern_float(&i.to_string()).unwrap();
+                    use std::fmt::Write;
+                    let mut spelling = std::mem::take(&mut self.switch_spelling);
+                    debug_assert!(spelling.is_empty());
+                    write!(&mut spelling, "{i}").unwrap();
+                    let value = self.arena.intern_float(&spelling).unwrap();
+                    spelling.clear(); self.switch_spelling = spelling;
                     plain::node(&mut self.arena, View::JNumber { value }, 0)
                 }
                 Tag::Float(s) => {
@@ -207,10 +274,12 @@ impl State {
                     plain::node(&mut self.arena, View::JNumber { value }, 0)
                 }
                 Tag::BigInt(s) => {
-                    let (positive, digits) = crate::types::typecore::parse_bigint_literal(s);
-                    let text = self
-                        .arena
-                        .intern_text(&format!("{}{digits}", if positive { '+' } else { '-' }));
+                    let mut spelling = std::mem::take(&mut self.switch_spelling);
+                    debug_assert!(spelling.is_empty());
+                    let positive = crate::types::typecore::parse_bigint_literal_into(s, &mut spelling);
+                    spelling.insert(0, if positive { '+' } else { '-' });
+                    let text = self.arena.intern_text(&spelling);
+                    spelling.clear(); self.switch_spelling = spelling;
                     let value = self.arena.intern_const(crate::bir::Constant::BigInt(text));
                     plain::node(&mut self.arena, View::JNumber { value }, 0)
                 }
@@ -261,7 +330,7 @@ impl State {
             },
             plan.scrutinee,
         ));
-        for side in &plan.sides {
+        for side in plan.sides.iter() {
             let p = self.switch_plan(side.frame);
             let body_cx = Cx {
                 cont: plan.target.map_or(cx.cont, Cont::Assign),
@@ -269,7 +338,7 @@ impl State {
                 ..cx
             };
             into.extend(
-                p.bodies
+                self.grouped_bodies(&p.groups)
                     .iter()
                     .chain(p.default.iter())
                     .map(|&n| (body_cx, n)),
@@ -364,7 +433,7 @@ impl State {
             }
             self.advance_variant(cx, &mut plan, false);
         } else {
-            let before: usize = plan.sides[..plan.active].iter().map(|s| s.count).sum();
+            let before: usize = plan.sides.iter().take(plan.active).map(|s| s.count).sum();
             let local = index - before;
             let side = &plan.sides[plan.active];
             self.switch_child(cx, side.frame, local, child);
@@ -633,10 +702,96 @@ mod tests {
         }
     }
 
+    fn named_fixture(per_side: usize, numeric: bool) -> (LamArena, crate::lambda::arena::Lam) {
+        let mut a = LamArena::new();
+        let mut constants = Vec::new(); let mut blocks = Vec::new(); let mut literals = Vec::new();
+        for i in 0..per_side {
+            let literal = if numeric { Literal::Float("1".into()) } else { Literal::String(format!("C{i}")) };
+            literals.push(literal.clone());
+            constants.push(SwitchKey::Constructor(Case::Constant(crate::types::VariantTag {
+                name: crate::name::Name::new(&format!("C{i}")), literal,
+            })));
+            blocks.push(SwitchKey::Constructor(Case::Block(crate::types::VariantBlock::Tagged(
+                crate::types::variant_runtime::TaggedBlock {
+                    tag: crate::types::VariantTag { name: crate::name::Name::new(&format!("B{i}")),
+                        literal: if numeric { Literal::BigInt("1".into()) } else { Literal::String(format!("B{i}")) } },
+                    tag_name: Some("kind".into()),
+                }))));
+        }
+        let actions: Vec<_> = (0..2*per_side+1).map(|i| a.const_(C::String(format!("body{i}")))).collect();
+        let actions = a.add_list(&actions);
+        let info = a.add_switch(false, constants, false, blocks, true,
+            SwitchDispatch::Variant(crate::types::VariantMatchingFacts {
+                tag_name: Some("kind".into()), literal_tags: literals, block_types: vec![],
+            }));
+        let x = a.var(Ident::new("x", 10, crate::ident::IdentFlags::NONE));
+        let root = a.switch_raw(x, actions, info);
+        (a, root)
+    }
+
+    #[test]
+    fn numeric_constructor_spelling_does_not_merge_float_and_bigint_values() {
+        let (a, root) = named_fixture(1, true);
+        super::super::oracle_tests::compare(a, root);
+    }
+
+    #[test]
+    fn ten_thousand_named_cases_lower_without_allocations() {
+        for (count, numeric) in [(5_000, false), (1, true)] {
+        let (a, root) = named_fixture(count, numeric);
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let run = |s: &mut State| {
+            let out = s.probe(Cx::returning(), root).unwrap();
+            let out = s.realize(Cx::returning(), out);
+            for node in s.statements.statements(out.stmts) { s.arena.release(node); }
+            if let Some(value) = out.value { s.arena.release(value); }
+            s.statements.kill(out.stmts);
+        };
+        let lists = state.arena.lists.storage_shape().0;
+        let source_lists = state.source.lists.storage_shape().0;
+        let keys = state.arena.pools.switch_keys.len();
+        let headers = state.arena.pools.switches.len();
+        run(&mut state);
+        state.arena.lists.reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
+        state.source.lists.reserve_test_growth(state.source.lists.storage_shape().0 - source_lists);
+        state.arena.pools.switch_keys.reserve(state.arena.pools.switch_keys.len() - keys);
+        state.arena.pools.switches.reserve(state.arena.pools.switches.len() - headers);
+        state.arena.pools.switch_clauses.reserve(state.arena.pools.switch_clauses.len());
+        state.group_indices.reserve(state.group_indices.len()); state.group_nodes.reserve(state.group_nodes.len());
+        state.switch_output_nodes.reserve(state.switch_output_nodes.len());
+        state.switch_output_clauses.reserve(state.switch_output_clauses.len());
+        state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
+        let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
+            s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1, s.source.lists.storage_shape().1,
+            s.arena.pools.switch_keys.capacity(), s.arena.pools.switch_clauses.capacity(), s.arena.pools.switches.capacity(),
+            s.group_indices.capacity(), s.group_nodes.capacity(), s.group_heads.capacity(), s.group_order.capacity(), s.group_table.capacity(),
+            s.switch_output_nodes.capacity(), s.switch_output_clauses.capacity(), s.switches.capacity(), s.variants.capacity(),
+            s.named_metadata.switches.capacity(), s.named_metadata.numbers.capacity(), s.switch_spelling.capacity(),
+            s.traversal.work.capacity(), s.traversal.values.capacity(), s.traversal.children.capacity()];
+        let before = capacities(&state);
+        let free_before = state.free.capacities(); let statements_before = state.statements.capacities();
+        let visits = state.source_steps; let groups = state.switch_group_steps;
+        let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
+        let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
+        println!("named whole Lambda: {allocations:?}; visits={}, grouping={}", state.source_steps-visits, state.switch_group_steps-groups);
+        assert_eq!(allocations.count_total, 0);
+        assert_eq!(capacities(&state), before); assert_eq!(state.free.capacities(), free_before);
+        assert_eq!(state.statements.capacities(), statements_before);
+        assert_eq!(state.source_steps - visits, count * 2 + 4);
+        assert_eq!(state.switch_group_steps - groups, if numeric { 2 } else { count * 4 });
+        }
+    }
+
     #[test]
     fn named_pool_sizes() {
         assert_eq!(std::mem::size_of::<Variant>(), 4);
         assert_eq!(std::mem::size_of::<Side>(), 24);
-        assert_eq!(std::mem::size_of::<Plan>(), 88);
+        assert_eq!(std::mem::size_of::<Sides>(), 48);
+        assert_eq!(std::mem::size_of::<Imported>(), 12);
+        assert_eq!(std::mem::size_of::<Plan>(), 112);
     }
 }

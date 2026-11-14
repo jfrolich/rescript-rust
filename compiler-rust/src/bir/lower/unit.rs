@@ -110,6 +110,134 @@ mod tests {
     use crate::lambda::lam_tag_info::TagInfo;
 
     #[test]
+    fn full_unit_allocation_boundary_conditionals() {
+        assert_unit_allocation_count("conditionals", 68);
+    }
+    #[test]
+    fn full_unit_allocation_boundary_switches() {
+        assert_unit_allocation_count("switches", 85);
+    }
+    #[test]
+    fn full_unit_allocation_boundary_applications() {
+        assert_unit_allocation_count("applications", 68);
+    }
+    #[test]
+    fn full_unit_allocation_boundary_untagged() {
+        assert_unit_allocation_count("untagged", 138);
+    }
+
+    /// Import is outside measurement; fresh state construction, lowering,
+    /// export coercion and owned completion are inside it. Warm the entry once
+    /// per size, then pin the per-unit count, not zero bytes or zero allocations.
+    fn assert_unit_allocation_count(shape: &str, expected: u64) {
+        use crate::lambda::{LamLoc, ApInfo, ApplyStatus};
+        use crate::lambda::lam_primitive::{Primitive as P, Mutable};
+        use crate::lambda::{SwitchDispatch, SwitchKey};
+        use crate::types::{VariantBlock, VariantBlockType, VariantConstructorCase as Case,
+            VariantMatchingFacts, VariantTag};
+        use crate::types::VariantLiteralTag as Literal;
+        let mut counts = [0; 2];
+        for (run, width) in [1_000, 10_000].into_iter().enumerate() {
+            let mut a = LamArena::new();
+            let x = Ident::new("x", 1, crate::ident::IdentFlags::NONE);
+            let root = match shape {
+                "conditionals" => {
+                    let mut body = a.const_(Constant::Int { i: 0, comment: None });
+                    for i in 1..=width {
+                        let condition = a.var(x);
+                        let yes = a.const_(Constant::Int { i, comment: None });
+                        body = a.if_raw(condition, yes, body);
+                    }
+                    body
+                }
+                "applications" => {
+                    let values: Vec<_> = (0..width).map(|_| {
+                        let callee = a.var(x);
+                        a.apply_raw(callee, &[], ApInfo { loc: LamLoc::NONE, status: ApplyStatus::Na })
+                    }).collect();
+                    a.prim_raw(P::Pmakearray, &values, LamLoc::NONE)
+                }
+                "switches" => {
+                    let x = a.var(x);
+                    let values: Vec<_> = (0..width).map(|i| a.const_(Constant::String(format!("value{i}")))).collect();
+                    let values = a.add_list(&values);
+                    let header = a.add_switch(true, (0..width).map(SwitchKey::Int), false, [], false, SwitchDispatch::Direct);
+                    a.switch_raw(x, values, header)
+                }
+                "untagged" => {
+                    let x = a.var(x);
+                    let mut literals: Vec<_> = (0..width - 2).map(|i| Literal::String(format!("tag{i}"))).collect();
+                    let keys: Vec<_> = literals.iter().enumerate().map(|(i, literal)|
+                        SwitchKey::Constructor(Case::Constant(VariantTag {
+                            name: crate::name::Name::new(&format!("C{i}")), literal: literal.clone(),
+                        }))).collect();
+                    literals.push(Literal::Int(42));
+                    let kinds = vec![VariantBlockType::Number, VariantBlockType::Object];
+                    let blocks: Vec<_> = kinds.iter().enumerate().map(|(i, kind)|
+                        SwitchKey::Constructor(Case::Block(VariantBlock::Untagged {
+                            tag: VariantTag { name: crate::name::Name::new(&format!("B{i}")), literal: Literal::String(format!("B{i}")) },
+                            block_type: kind.clone(),
+                        }))).collect();
+                    let values: Vec<_> = (0..width + 1).map(|i| a.const_(Constant::String(format!("body{i}")))).collect();
+                    let values = a.add_list(&values);
+                    let header = a.add_switch(false, keys, false, blocks, true,
+                        SwitchDispatch::Variant(VariantMatchingFacts { tag_name: None, literal_tags: literals, block_types: kinds }));
+                    a.switch_raw(x, values, header)
+                }
+                _ => unreachable!(),
+            };
+            let export = Ident::new("answer", 2, crate::ident::IdentFlags::NONE);
+            let root = a.prim_raw(P::Pmakeblock(TagInfo::ModuleExport(vec![export]), Mutable::Immutable), &[root], LamLoc::NONE);
+            // Both imports are outside the interval. Each actual entry still
+            // owns fresh state; process warmup cannot retain that state's pools.
+            let warm = crate::bir::bridge::import_for_lowering(&a, root).0.unwrap();
+            let input = crate::bir::bridge::import_for_lowering(&a, root).0.unwrap();
+            let source_counts = input.storage_counts();
+            let warm = super::super::lower_with_resolver(warm, None, true, None, false, true).unwrap();
+            let visits = warm.switch_stats.source_visits;
+            drop(warm);
+            let mut result = None;
+            let allocations = allocation_counter::measure(|| {
+                allocation_window_start();
+                result = Some(super::super::lower_with_resolver(input, None, true, None, false, true).unwrap());
+                allocation_window_end();
+            });
+            let result = result.unwrap();
+            assert_eq!(result.switch_stats.source_visits, visits);
+            assert!(visits >= width as usize);
+            assert_eq!(result.coerced.exports.len(), 1);
+            result.program.arena.validate(Some(result.program.root)).unwrap();
+            counts[run] = allocations.count_total;
+            println!("full-unit {shape} width={width}: source={source_counts:?}, output_nodes={}, visits={visits}, {allocations:?}", result.program.arena.nodes.len());
+        }
+        assert_eq!(counts[0], counts[1], "{shape}: allocation count must not scale with visited nodes");
+        // Release builds omit the debug-only child-uniqueness table.
+        let expected = expected - u64::from(!cfg!(debug_assertions));
+        assert_eq!(counts, [expected; 2], "{shape}: per-unit allocation budget changed");
+    }
+
+    #[inline(never)]
+    fn allocation_window_start() { std::hint::black_box(()); }
+    #[inline(never)]
+    fn allocation_window_end() { std::hint::black_box(()); }
+
+    #[test]
+    fn export_consumption_does_not_empty_shared_block_metadata() {
+        let mut source = LamArena::new();
+        let name = Ident::new("answer", 700, crate::ident::IdentFlags::NONE);
+        let tag = TagInfo::ModuleExport(vec![name]);
+        let value = source.const_(Constant::Int { i: 42, comment: None });
+        let root = source.prim_raw(crate::lambda::lam_primitive::Primitive::Pmakeblock(tag.clone(), crate::lambda::lam_primitive::Mutable::Immutable), &[value], crate::lambda::LamLoc::NONE);
+        let input = crate::bir::bridge::import_for_lowering(&source, root).0.unwrap().into_imported(); let root = input.root;
+        let mut state = State::new(input);
+        let probed = state.probe(Cx::value(), root).unwrap();
+        let shared = state.arena.block_info(&tag);
+        let lowered = state.complete_unit(probed);
+        assert_eq!(lowered.program.arena.block_tag(shared), &tag);
+        assert_eq!(lowered.coerced.exports.len(), 1);
+    }
+
+    #[test]
     fn supported_unit_exercises_both_texts_and_shared_export_coercion() {
         for exported in [false, true] {
             let mut source = LamArena::new();
