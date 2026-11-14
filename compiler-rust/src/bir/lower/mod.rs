@@ -519,6 +519,18 @@ impl State {
         let mut arena = Bir::default();
         arena.begin_bulk();
         arena.pools = std::mem::take(&mut input.arena.pools);
+        // Import already knows the source-node and switch-arm counts. Reserve
+        // the output's parallel node columns together; switch arms can emit
+        // assignment, block and break nodes in addition to their source body.
+        // Inlining/FFI expansion may exceed this initial capacity.
+        let output_nodes = input.arena.nodes.len() + 4 * arena.pools.switch_keys.len() + 8;
+        arena.nodes.reserve_exact(output_nodes);
+        arena.parents.reserve_exact(output_nodes);
+        arena.weights.reserve_exact(output_nodes);
+        arena.capture_chain.reserve_exact(output_nodes);
+        arena.j_duplicable.reserve_exact(output_nodes);
+        #[cfg(debug_assertions)]
+        arena.checked_children.reserve_exact(output_nodes);
         arena.func_owners.resize(arena.pools.funcs.len(), None);
         for i in 0..input.arena.vars.len() {
             let var = VarId(i as u32);
