@@ -230,6 +230,8 @@ pub(super) fn prepare(arena: &mut Bir) -> (Storage, dispatch::Plan<u32>) {
             payloads: ImportedSpan::new(payload_start, storage.imported_payloads.values.len()),
         }));
     }
+    // The completed immutable metadata pool gives the exact emission-row count.
+    storage.literals.reserve_exact(graph.metadata.literal_count());
     let mut bigint_spelling = String::new();
     for i in 0..graph.metadata.literal_count() {
         use dispatch::Literal as L;
