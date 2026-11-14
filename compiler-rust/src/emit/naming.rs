@@ -644,249 +644,221 @@ impl Names {
     }
 }
 
-/// What the program scope names besides its statements, in the pass's
-/// order (`Names::collect`): the imported modules first, then the
-/// reservations of export coercion, then the statements, then the exports.
+/// One identifier handed to the naming tables: where its name is kept and
+/// what `Ident`'s order and the suffix rule read of it. `slot` is dense per
+/// unit: the index of the variable an identifier prints as (its origin), or
+/// the number of variables plus the index of an imported module.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Subject {
+    pub(crate) slot: u32,
+    pub(crate) stamp: i32,
+    pub(crate) name: Name,
+}
+
+/// The suffix table of one base (the pass's `Group`), as it stands in the
+/// scope that is current. `scope` is the depth of the scope that created or
+/// inherited it: the group exists in the current scope only when that is
+/// the current depth, otherwise it reads as empty. A name `base$k` of this
+/// base is taken when the group exists, `k < next` and `(group, k)` is not
+/// in `Tables::skipped`; `k` zero is the base itself.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GroupRow {
+    next: u32,
+    scope: u32,
+    /// The name reserved for stamp zero (`Names::reserve`), if any.
+    zero: Option<Name>,
+}
+
+/// A group row as it was before the current scope changed it.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Saved {
+    group: u32,
+    row: GroupRow,
+}
+
+/// Where the current scope's part of each undo stack starts.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Level {
+    saved: u32,
+    assigned: u32,
+    skipped: u32,
+}
+
+/// The naming rule of this file's header on dense tables with an undo
+/// stack, for the replay of the naming log (THREE_TREES 11.4, "T5 part B as
+/// redesigned"): no persistent map, so entering a function and assigning in
+/// an inherited group allocate nothing. The pass's `Names` stays as it is
+/// and is the oracle (`compare_with_pass`).
+///
+/// A scope is a level. A group is inherited by re-tagging its row with the
+/// new depth (the row before is saved); a group the scope does not inherit
+/// keeps its old tag and so reads as empty until the scope assigns in it
+/// (the row before is saved, then reset). `leave` restores the saved rows
+/// last to first, forgets the names assigned in the scope and truncates the
+/// skipped candidates.
 #[cfg(test)]
 #[derive(Default)]
-pub(crate) struct ProgramNames<'a> {
-    pub(crate) imports: &'a [Ident],
-    pub(crate) reservations: &'a [Ident],
-    pub(crate) exports: &'a [Ident],
+pub(crate) struct Tables {
+    groups: Vec<GroupRow>,
+    /// The group of each converted base. A hash map: the key is a spelling
+    /// that several variables share and that has no index of its own; it is
+    /// read once per slot, never per event (`slot_group` keeps the answer).
+    bases: HashMap<Name, u32>,
+    /// The group of each slot plus one, zero while unknown. Dense by slot.
+    slot_group: Vec<u32>,
+    /// The name of each slot while a scope on the stack has it assigned
+    /// (the pass's `visible`). Dense by slot.
+    visible: Vec<Option<Name>>,
+    saved: Vec<Saved>,
+    /// The slots named in the scopes on the stack, innermost last.
+    assigned: Vec<u32>,
+    /// `(group, suffix)` of each candidate that was passed over because
+    /// another base or a raw name has that spelling.
+    skipped: Vec<[u32; 2]>,
+    levels: Vec<Level>,
+    /// The raw JavaScript names of the unit. A hash set for the reason
+    /// `bases` is a hash map; read only for a suffixed candidate.
+    raw: HashSet<Name>,
+    /// The spelling of a suffixed candidate, reused.
+    spelling: String,
+    /// Synthetic names handed out (`Names::finishes`).
+    synthetic: u32,
+    /// One per call of `add`, `add_module`, `reserve` and `synthetic`, one
+    /// per identifier of `enter`, one per candidate tried, one per entry
+    /// undone by `leave` or `begin`.
+    pub(crate) steps: usize,
 }
 
-/// The pass's group and suffix tables, kept between replays so that a
-/// replay with warm tables allocates nothing; with them the reservation of
-/// one function and the stamp-zero bases the program scope reserved (its
-/// stamped names are in its `assigned`), which `Names::reset` empties.
 #[cfg(test)]
-#[derive(Default)]
-pub(crate) struct ReplayTables {
-    names: Names,
-    reservation: Vec<Ident>,
-    zero: Vec<Name>,
+impl Tables {
+    /// Empty the tables for a unit of `slots` slots without releasing their
+    /// storage, with the program as the current scope. Cost: one step per
+    /// group and per name of the previous unit, one per raw name.
+    pub(crate) fn begin(&mut self, slots: usize, raw: &[Name]) {
+        let _ = (slots, raw);
+        todo!("T5b-2")
+    }
+
+    /// `Names::add` for a variable: its visible name, or its own spelling
+    /// for stamp zero, or a new name in the current scope (the converted
+    /// base, then `base$1`, ... from the group's next suffix, skipping
+    /// spellings taken by any base in the current scope and, for a suffixed
+    /// candidate, raw names). Cost: one step, and for a new name one hash
+    /// lookup the first time the slot is named, one step and one interner
+    /// lookup per suffixed candidate, three pushes.
+    pub(crate) fn add(&mut self, subject: Subject) -> Name {
+        let _ = subject;
+        todo!("T5b-2")
+    }
+
+    /// `Names::add` for an imported module: as `add`, but stamp zero is
+    /// named like any other stamp. Cost: as `add`.
+    pub(crate) fn add_module(&mut self, subject: Subject) -> Name {
+        let _ = subject;
+        todo!("T5b-2")
+    }
+
+    /// `Names::reserve` for one identifier: stamp zero reserves its
+    /// converted base in the current scope without a visible name; any
+    /// other is `add`. Returns whether a name was assigned that was not
+    /// visible before. Cost: as `add`.
+    pub(crate) fn reserve(&mut self, subject: Subject) -> bool {
+        let _ = subject;
+        todo!("T5b-2")
+    }
+
+    /// `Names::enter` without its reservation (the caller reserved): a new
+    /// scope that inherits the group of each base of `environment` from the
+    /// nearest scope that has it. Cost: one step and at most one push per
+    /// identifier, one push for the level.
+    pub(crate) fn enter(&mut self, environment: &[Subject]) {
+        let _ = environment;
+        todo!("T5b-2")
+    }
+
+    /// `Names::leave`. Cost: one step per group row the scope changed, per
+    /// name it assigned and per candidate it skipped.
+    pub(crate) fn leave(&mut self) {
+        todo!("T5b-2")
+    }
+
+    /// A name for something that is no identifier of the program (the
+    /// cached bound of a range loop: `Names::finishes`): `base` under the
+    /// suffix rule, in the current scope, with a stamp of its own. Cost: as
+    /// a new name of `add`, without the visible entry.
+    pub(crate) fn synthetic(&mut self, base: Name) -> Name {
+        let _ = base;
+        todo!("T5b-2")
+    }
 }
 
+/// The names of one unit, by what they name. Reused between units.
 #[cfg(test)]
-impl Names {
-    /// Empty the tables for another unit without releasing their storage:
-    /// the program scope's groups stay, emptied in place (a group the
-    /// tables own alone is edited without a copy), so a replay that names
-    /// what an earlier one named allocates nothing. Cost: one removal per
-    /// name the previous replay assigned in the program scope.
-    fn reset(&mut self, zero: &mut Vec<Name>, budget: usize) {
-        self.scopes.truncate(1);
-        if self.scopes.is_empty() {
-            self.scopes.push(Scope::default());
-        }
-        let root = &mut self.scopes[0];
-        for id in root.assigned.drain(..) {
-            let (Some(base), Some(name)) = (self.converted.get(&id.name_atom()), self.visible.get(&id)) else { continue };
-            if let Some(group) = root.groups.get_mut(base) {
-                group.stamps.remove(&id.stamp());
-                group.used.remove(name);
-            }
-        }
-        for base in zero.drain(..) {
-            if let Some(group) = root.groups.get_mut(&base)
-                && let Some(name) = group.stamps.remove(&0)
-            {
-                group.used.remove(&name);
-            }
-        }
-        for group in root.groups.values_mut() {
-            group.next = 0;
-        }
-        root.previous_groups.clear();
-        self.printed.clear();
-        self.finishes.clear();
-        self.visible.clear();
-        self.raw.clear();
-        self.free.clear();
-        self.method_this.clear();
-        self.steps = 0;
-        self.budget = budget;
-    }
-
-    /// `add`, returning the name. One hash lookup more.
-    fn add_named(&mut self, id: Ident) -> Result<Name, Unsupported> {
-        self.add(id, false)?;
-        Ok(self.printed[&id])
-    }
-
-    /// `reserve`, remembering the stamp-zero bases the program scope
-    /// reserves for `reset`.
-    fn reserve_replayed(&mut self, ids: &[Ident], zero: &mut Vec<Name>) -> Result<(), Unsupported> {
-        if self.scopes.len() == 1 {
-            for id in ids {
-                if id.stamp() == 0 {
-                    let base = self.base(*id);
-                    zero.push(base);
-                }
-            }
-        }
-        self.reserve(ids)
-    }
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Printed {
+    /// Dense by variable (a copy has an entry of its own).
+    pub(crate) names: Vec<Option<Name>>,
+    /// Dense by import.
+    pub(crate) modules: Vec<Option<Name>>,
+    /// The cached bounds of range loops, in print order.
+    pub(crate) finishes: Vec<Name>,
 }
 
-/// The names of the replay against the names of the pass, by identifier.
+/// The free lists of a unit's functions as identifiers, back to back;
+/// `ends[i]` is where list `i` ends.
+#[cfg(test)]
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct FreeLists {
+    pub(crate) idents: Vec<Ident>,
+    pub(crate) ends: Vec<u32>,
+}
+
+/// The names of the replay against the names of the pass.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct NameStats {
-    /// Identifiers the pass names, other than the imported modules (named
-    /// from the module list, not from the log) and stamp-zero identifiers
+    /// Identifiers the pass names, other than stamp-zero identifiers
     /// (printed as they are spelled).
     pub(crate) names_pass: usize,
-    /// Variables the replay names.
+    /// Variables and modules the replay names.
     pub(crate) names_replayed: usize,
-    /// Identifiers with different names, or named by one side only.
+    /// Variables and modules whose name is not the pass's name of their
+    /// identifier, plus identifiers the pass names and the replay does not.
     pub(crate) name_differences: usize,
+    /// Cached bounds whose spelling one side has and the other has not
+    /// (as multisets).
+    pub(crate) finish_differences: usize,
+    /// Free lists one side has and the other has not (as multisets of
+    /// identifier sequences). A difference here with no name difference is
+    /// a latent one: no local of the unit has the base that differs.
+    pub(crate) free_differences: usize,
 }
 
-/// Assign the printed names of a unit from its naming log (THREE_TREES
-/// section 2; the rule is this file's header): the events in order, through
-/// `Names::add`, `reserve`, `enter` and `leave`, the same group and suffix
-/// tables the pass uses. `Declare` and `Binder` are `add`; `Enter` reserves
-/// the scope's free variables and the binder of its declaration (the
-/// `Declare` that follows, when it is of the same statement) and enters;
-/// `Params` adds the function's parameters; `Leave` leaves. An event whose
-/// statement `live` rejects is skipped, with the events of a function
-/// literal it holds. `printed[var]` receives the name of every variable
-/// named (by variable, through `idents` for the base and stamp). Returns
-/// the steps: one per event read and one per reserved free variable.
-///
-/// Cost: that, plus the suffix probes of `Names::assign`; nothing is
-/// allocated when `tables` has replayed a log of this size before, except
-/// the spelling of a new suffixed name.
-#[cfg(test)]
-pub(crate) fn replay(
-    tables: &mut ReplayTables,
-    log: &crate::bir::lower::names::Log,
-    vars: &crate::bir::VarTable,
-    idents: &[Ident],
-    program: &ProgramNames<'_>,
-    live: impl Fn(crate::bir::NodeId) -> bool,
-    printed: &mut [Option<Name>],
-) -> Result<usize, Unsupported> {
-    use crate::bir::lower::names::EventKind;
-    let ReplayTables { names, reservation, zero } = tables;
-    let events = &log.events;
-    let budget = 64 * (events.len() + log.free.len() + program.imports.len() + program.reservations.len() + program.exports.len() + 1);
-    names.reset(zero, budget);
-    let ident = |var: crate::bir::VarId| idents[vars.origin(var).index()];
-    for id in program.imports {
-        names.add(*id, true)?;
-    }
-    names.reserve_replayed(program.reservations, zero)?;
-    let mut steps = 0;
-    // The `Declare` of a function declaration's binder, named at its `Enter`.
-    let mut named_binder = usize::MAX;
-    let mut at = 0;
-    while at < events.len() {
-        let event = events[at];
-        steps += 1;
-        match event.kind() {
-            EventKind::Declare | EventKind::Binder => {
-                if at != named_binder && live(event.statement) {
-                    let var = event.var();
-                    printed[var.index()] = Some(names.add_named(ident(var))?);
-                }
-            }
-            EventKind::Enter if !live(event.statement) => {
-                // The function's events leave with its statement.
-                let mut depth = 0usize;
-                loop {
-                    match events[at].kind() {
-                        EventKind::Enter => depth += 1,
-                        EventKind::Leave => depth -= 1,
-                        _ => {}
-                    }
-                    if depth == 0 {
-                        break;
-                    }
-                    at += 1;
-                    steps += 1;
-                }
-            }
-            EventKind::Enter => {
-                // naming.rs `function`: the free variables and the binder,
-                // in `Ident`'s order, are reserved; the binder is named; the
-                // scope inherits the groups of exactly those bases.
-                let free = log.free_variables(event.payload());
-                steps += free.len();
-                reservation.clear();
-                reservation.extend(free.iter().map(|&var| ident(var)));
-                let binder = events.get(at + 2).filter(|declare| {
-                    declare.kind() == EventKind::Declare && declare.statement == event.statement
-                });
-                let binder = binder.map(|declare| declare.var());
-                if let Some(var) = binder {
-                    let id = ident(var);
-                    if let Err(position) = reservation.binary_search(&id) {
-                        reservation.insert(position, id);
-                    }
-                    named_binder = at + 2;
-                }
-                names.reserve_replayed(reservation, zero)?;
-                for &var in free {
-                    printed[var.index()] = Some(names.printed.get(&ident(var)).copied().unwrap_or_else(|| ident(var).name_atom()));
-                }
-                if let Some(var) = binder {
-                    printed[var.index()] = Some(names.add_named(ident(var))?);
-                }
-                names.enter(reservation)?;
-            }
-            EventKind::Params => {
-                let function = event.function();
-                for var in vars.parameters(function) {
-                    printed[var.index()] = Some(names.add_named(ident(var))?);
-                }
-            }
-            EventKind::Leave => names.leave(),
-        }
-        at += 1;
-    }
-    for id in program.exports {
-        names.add(*id, false)?;
-    }
-    Ok(steps)
-}
-
-/// Check mode: the names of a replay against `Names::collect` on
-/// `program`, the lowering's own program before the JS passes with its
-/// module list filled in. `idents[var]` is the identifier `printed[var]`
-/// belongs to. `Err` when the pass does not support the unit (no
-/// comparison). Check mode only. Builds two hash sets (the modules and the
-/// replayed identifiers) and does one hash lookup per named variable and
-/// one per entry of the pass's table (the pass is keyed by identifier).
+/// Check mode: the replay's names against `Names::collect` on `program`,
+/// the lowering's own program before the JS passes with its module list
+/// filled in. `idents[var]` is the identifier of a variable (read through
+/// its origin by the caller: one entry per variable) and `modules[import]`
+/// that of an import. `Err` when the pass does not support the unit (no
+/// comparison). Check mode only. One hash lookup per named variable and
+/// module and one per entry of the pass's tables (the pass is keyed by
+/// identifier); two sorts for the cached bounds and two for the free lists.
 #[cfg(test)]
 pub(crate) fn compare_with_pass(
-    printed: &[Option<Name>],
+    printed: &Printed,
     idents: &[Ident],
+    modules: &[Ident],
+    free: &FreeLists,
     program: &JsDepsProgram,
     resolver: &ModulePathResolver,
     jsx_preserve: bool,
 ) -> Result<NameStats, Unsupported> {
-    let pass = Names::collect(program, resolver, jsx_preserve)?;
-    let modules: HashSet<Ident> = program.modules.iter().map(|module| module.id).collect();
-    let counted = |id: &Ident| id.stamp() != 0 && !modules.contains(id);
-    let mut stats = NameStats {
-        names_pass: pass.printed.keys().filter(|id| counted(id)).count(),
-        ..NameStats::default()
-    };
-    let mut replayed = HashSet::with_capacity(printed.len());
-    for (name, id) in printed.iter().zip(idents) {
-        let Some(name) = name else { continue };
-        stats.names_replayed += 1;
-        let named = pass.printed.get(id);
-        stats.name_differences += usize::from(named != Some(name));
-        if named.is_some() && counted(id) {
-            replayed.insert(*id);
-        }
-    }
-    // Named by the pass only.
-    stats.name_differences += stats.names_pass - replayed.len();
-    Ok(stats)
+    let _ = (printed, idents, modules, free);
+    let _ = Names::collect(program, resolver, jsx_preserve)?;
+    todo!("T5b-3")
 }
 
 // Child order is the legacy printer's order. Shape decisions remain in walk;
@@ -1228,27 +1200,25 @@ mod replay_tests {
 
     #[test]
     fn replay_sizes() {
-        assert_eq!(std::mem::size_of::<ProgramNames<'_>>(), 48);
-        assert_eq!(std::mem::size_of::<NameStats>(), 24);
+        assert_eq!(std::mem::size_of::<Subject>(), 16);
+        assert_eq!(std::mem::size_of::<GroupRow>(), 16);
+        assert_eq!(std::mem::size_of::<Saved>(), 24);
+        assert_eq!(std::mem::size_of::<Level>(), 12);
+        assert_eq!(std::mem::size_of::<NameStats>(), 40);
     }
 
     #[test]
-    fn the_comparison_counts_a_name_the_replay_gets_wrong() {
-        // `let x = 1`, exported: the pass names it `x`.
-        let mut a = JsArena::new();
-        let x = Ident::new("x", 1, crate::ident::IdentFlags::NONE);
-        let one = crate::js_ir::build::exp::int(1, &mut a);
-        let declaration = crate::js_ir::build::stmt::define(x, Some(one), crate::lambda::lam_compat::LetKind::Strict, &mut a);
-        let program = JsDepsProgram {
-            program: crate::js_ir::arena::JsProgram::new_in(vec![declaration], vec![x], a),
-            modules: vec![],
-            side_effect: None,
-        };
-        let resolver = ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
-        let equal = compare_with_pass(&[Some(Name::new("x"))], &[x], &program, &resolver, false).unwrap();
-        assert_eq!(equal, NameStats { names_pass: 1, names_replayed: 1, name_differences: 0 });
-        let wrong = compare_with_pass(&[Some(Name::new("x$1"))], &[x], &program, &resolver, false).unwrap();
-        assert_eq!(wrong.name_differences, 1);
+    fn default_tables_are_empty() {
+        let t = Tables::default();
+        assert!(t.groups.is_empty() && t.bases.is_empty() && t.slot_group.is_empty() && t.visible.is_empty());
+        assert!(t.saved.is_empty() && t.assigned.is_empty() && t.skipped.is_empty() && t.levels.is_empty());
+        assert!(t.raw.is_empty() && t.spelling.is_empty());
+        assert_eq!((t.synthetic, t.steps), (0, 0));
+        let row = GroupRow { next: 0, scope: 0, zero: None };
+        let saved = Saved { group: 0, row };
+        assert_eq!((saved.group, saved.row.next, saved.row.scope, saved.row.zero), (0, 0, 0, None));
+        let level = Level { saved: 0, assigned: 0, skipped: 0 };
+        assert_eq!(level.saved + level.assigned + level.skipped, 0);
     }
 }
 
