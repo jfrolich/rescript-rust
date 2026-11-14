@@ -1224,8 +1224,19 @@ impl Bir {
                     );
                     self.vars.funcs[new.index()].flags = old.flags;
                     #[cfg(test)]
-                    if let Some(scope) = &mut self.js_scope {
-                        scope.names.copied(header, new);
+                    {
+                        // The copy's parameters are bound where the copy is
+                        // made, as its other binders are (`bind`): no scope
+                        // closes over a copy, so the open scope reads the
+                        // copy's sites as its own.
+                        let params: SmallVec<[VarId; 4]> =
+                            (0..old.params.len()).map(|i| self.function_parameter(new, i)).collect();
+                        if let Some(scope) = &mut self.js_scope {
+                            scope.names.copied(header, new);
+                            for var in params {
+                                scope.names.bind(var);
+                            }
+                        }
                     }
                     funcs.insert(header, new);
                 }
