@@ -661,8 +661,7 @@ impl Checker {
         // nodes, so it is made only after an expansion.
         let mut expanded_left = self.expand_head(left, ExpandMode::Unif)?;
         let mut expanded_right = self.expand_head(right, ExpandMode::Unif)?;
-        let unexpanded =
-            expanded_left == self.g.repr(left) && expanded_right == self.g.repr(right);
+        let unexpanded = expanded_left == self.g.repr(left) && expanded_right == self.g.repr(right);
         if !unexpanded {
             expanded_left = self.expand_head(left, ExpandMode::Unif)?;
             expanded_right = self.expand_head(right, ExpandMode::Unif)?;
@@ -1135,9 +1134,7 @@ impl Checker {
                             break;
                         }
                     }
-                    FrameKind::Linked => {
-                        self.saved.truncate((frame.extra & !SWAPPED) as usize)
-                    }
+                    FrameKind::Linked => self.saved.truncate((frame.extra & !SWAPPED) as usize),
                     FrameKind::LeavePoly => todo!("R3g"),
                     FrameKind::Recursion => {
                         // A clash here is the enclosing pair's: it adds no
