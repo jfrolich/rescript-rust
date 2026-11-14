@@ -727,10 +727,44 @@ pub(crate) struct Tables {
     spelling: String,
     /// Synthetic names handed out (`Names::finishes`).
     synthetic: u32,
+    /// What the suffix rule reads of each group besides its row. Dense by
+    /// group.
+    marks: Vec<Marks>,
+    /// `Marks::born` of the row each entry of `saved` holds. Parallel to
+    /// `saved`.
+    saved_born: Vec<u32>,
+    /// Per entry of `skipped`: the group whose `Marks::zero_skip` (for
+    /// suffix zero) or `Marks::as_skip` (otherwise) the entry replaced,
+    /// `NONE` when it replaced none, and the value it replaced.
+    skip_undo: Vec<[u32; 2]>,
     /// One per call of `add`, `add_module`, `reserve` and `synthetic`, one
     /// per identifier of `enter`, one per candidate tried, one per entry
     /// undone by `leave` or `begin`.
     pub(crate) steps: usize,
+}
+
+/// No entry: an empty pointer of `Marks`, or no prefix group.
+#[cfg(test)]
+const NONE: u32 = u32::MAX;
+
+/// What the suffix rule reads of one group besides its `GroupRow`.
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct Marks {
+    /// The base the group is the suffix table of.
+    name: Name,
+    /// The length of `Tables::skipped` when the current row was reset: an
+    /// entry of this group's below it belongs to an older row.
+    born: u32,
+    /// The latest entry of `Tables::skipped` for `(this group, 0)`.
+    zero_skip: u32,
+    /// The latest entry of `Tables::skipped` whose candidate is spelled
+    /// like this group's base: `(prefix, suffix)`.
+    as_skip: u32,
+    /// The group of the base before the final canonical `$number`, or
+    /// `NONE`, and that number.
+    prefix: u32,
+    suffix: u32,
 }
 
 #[cfg(test)]
@@ -739,8 +773,29 @@ impl Tables {
     /// storage, with the program as the current scope. Cost: one step per
     /// group and per name of the previous unit, one per raw name.
     pub(crate) fn begin(&mut self, slots: usize, raw: &[Name]) {
-        let _ = (slots, raw);
-        todo!("T5b-2")
+        self.steps += self.groups.len() + self.assigned.len() + raw.len();
+        self.groups.clear();
+        self.marks.clear();
+        self.bases.clear();
+        self.slot_group.clear();
+        self.slot_group.resize(slots, 0);
+        self.visible.clear();
+        self.visible.resize(slots, None);
+        self.saved.clear();
+        self.saved_born.clear();
+        self.assigned.clear();
+        self.skipped.clear();
+        self.skip_undo.clear();
+        self.levels.clear();
+        self.levels.push(Level {
+            saved: 0,
+            assigned: 0,
+            skipped: 0,
+        });
+        self.raw.clear();
+        self.raw.extend(raw.iter().copied());
+        self.spelling.clear();
+        self.synthetic = 0;
     }
 
     /// `Names::add` for a variable: its visible name, or its own spelling
@@ -751,15 +806,24 @@ impl Tables {
     /// lookup the first time the slot is named, one step and one interner
     /// lookup per suffixed candidate, three pushes.
     pub(crate) fn add(&mut self, subject: Subject) -> Name {
-        let _ = subject;
-        todo!("T5b-2")
+        self.steps += 1;
+        if let Some(name) = self.visible[subject.slot as usize] {
+            name
+        } else if subject.stamp == 0 {
+            subject.name
+        } else {
+            self.name_visible(subject)
+        }
     }
 
     /// `Names::add` for an imported module: as `add`, but stamp zero is
     /// named like any other stamp. Cost: as `add`.
     pub(crate) fn add_module(&mut self, subject: Subject) -> Name {
-        let _ = subject;
-        todo!("T5b-2")
+        self.steps += 1;
+        match self.visible[subject.slot as usize] {
+            Some(name) => name,
+            None => self.name_visible(subject),
+        }
     }
 
     /// `Names::reserve` for one identifier: stamp zero reserves its
@@ -767,8 +831,17 @@ impl Tables {
     /// other is `add`. Returns whether a name was assigned that was not
     /// visible before. Cost: as `add`.
     pub(crate) fn reserve(&mut self, subject: Subject) -> bool {
-        let _ = subject;
-        todo!("T5b-2")
+        self.steps += 1;
+        if subject.stamp == 0 {
+            let group = self.slot_group(subject);
+            self.assign(group, true);
+            false
+        } else if self.visible[subject.slot as usize].is_some() {
+            false
+        } else {
+            self.name_visible(subject);
+            true
+        }
     }
 
     /// `Names::enter` without its reservation (the caller reserved): a new
@@ -776,14 +849,63 @@ impl Tables {
     /// nearest scope that has it. Cost: one step and at most one push per
     /// identifier, one push for the level.
     pub(crate) fn enter(&mut self, environment: &[Subject]) {
-        let _ = environment;
-        todo!("T5b-2")
+        self.levels.push(Level {
+            saved: self.saved.len() as u32,
+            assigned: self.assigned.len() as u32,
+            skipped: self.skipped.len() as u32,
+        });
+        let depth = self.depth();
+        for subject in environment {
+            self.steps += 1;
+            let group = self.slot_group(*subject);
+            // All tags are at most the depth: a row tagged below it is the
+            // group of the nearest scope that has one, the one to inherit.
+            if self.groups[group as usize].scope != depth {
+                self.save(group);
+                self.groups[group as usize].scope = depth;
+            }
+        }
     }
 
     /// `Names::leave`. Cost: one step per group row the scope changed, per
     /// name it assigned and per candidate it skipped.
     pub(crate) fn leave(&mut self) {
-        todo!("T5b-2")
+        let level = self.levels.pop().expect("a scope to leave");
+        let skipped = level.skipped as usize;
+        self.steps += self.skipped.len() - skipped;
+        for (entry, [target, previous]) in self.skipped[skipped..]
+            .iter()
+            .zip(&self.skip_undo[skipped..])
+            .rev()
+        {
+            if *target != NONE {
+                let marks = &mut self.marks[*target as usize];
+                if entry[1] == 0 {
+                    marks.zero_skip = *previous;
+                } else {
+                    marks.as_skip = *previous;
+                }
+            }
+        }
+        self.skipped.truncate(skipped);
+        self.skip_undo.truncate(skipped);
+        let assigned = level.assigned as usize;
+        self.steps += self.assigned.len() - assigned;
+        for slot in self.assigned.drain(assigned..) {
+            self.visible[slot as usize] = None;
+        }
+        let saved = level.saved as usize;
+        self.steps += self.saved.len() - saved;
+        for (entry, born) in self.saved[saved..]
+            .iter()
+            .zip(&self.saved_born[saved..])
+            .rev()
+        {
+            self.groups[entry.group as usize] = entry.row;
+            self.marks[entry.group as usize].born = *born;
+        }
+        self.saved.truncate(saved);
+        self.saved_born.truncate(saved);
     }
 
     /// A name for something that is no identifier of the program (the
@@ -791,8 +913,213 @@ impl Tables {
     /// suffix rule, in the current scope, with a stamp of its own. Cost: as
     /// a new name of `add`, without the visible entry.
     pub(crate) fn synthetic(&mut self, base: Name) -> Name {
-        let _ = base;
-        todo!("T5b-2")
+        self.steps += 1;
+        self.synthetic += 1;
+        let group = self.group(base);
+        self.assign(group, false)
+    }
+
+    /// The depth of the current scope; the program is zero.
+    fn depth(&self) -> u32 {
+        self.levels.len() as u32 - 1
+    }
+
+    /// A new name for a slot that has none visible, made visible in the
+    /// current scope (the rest of `Names::add`). One push to `assigned`
+    /// plus `assign`.
+    fn name_visible(&mut self, subject: Subject) -> Name {
+        let group = self.slot_group(subject);
+        let name = self.assign(group, subject.stamp == 0);
+        self.visible[subject.slot as usize] = Some(name);
+        self.assigned.push(subject.slot);
+        name
+    }
+
+    /// The group of the slot's converted base: `slot_group`, or one
+    /// conversion and one hash lookup the first time.
+    fn slot_group(&mut self, subject: Subject) -> u32 {
+        let known = self.slot_group[subject.slot as usize];
+        if known != 0 {
+            return known - 1;
+        }
+        let group = self.group(convert_ident_atom(subject.name));
+        self.slot_group[subject.slot as usize] = group + 1;
+        group
+    }
+
+    /// The group of `base`, made with an empty row when there is none: one
+    /// hash lookup, and for a new group whose base ends in a canonical
+    /// `$number` the group of the part before it.
+    fn group(&mut self, base: Name) -> u32 {
+        if let Some(group) = self.bases.get(&base) {
+            return *group;
+        }
+        let (prefix, suffix) = match canonical_suffix(base.as_str()) {
+            Some((prefix, suffix)) => (self.group(Name::new(prefix)), suffix),
+            None => (NONE, 0),
+        };
+        let group = self.groups.len() as u32;
+        self.groups.push(GroupRow {
+            next: 0,
+            scope: 0,
+            zero: None,
+        });
+        self.marks.push(Marks {
+            name: base,
+            born: 0,
+            zero_skip: NONE,
+            as_skip: NONE,
+            prefix,
+            suffix,
+        });
+        self.bases.insert(base, group);
+        group
+    }
+
+    /// Push the row of `group` on the undo stack.
+    fn save(&mut self, group: u32) {
+        self.saved.push(Saved {
+            group,
+            row: self.groups[group as usize],
+        });
+        self.saved_born.push(self.marks[group as usize].born);
+    }
+
+    /// Whether `entry` of `skipped` is one of `group`'s current row.
+    fn current_skip(&self, entry: u32, group: u32) -> bool {
+        entry != NONE && entry >= self.marks[group as usize].born
+    }
+
+    /// Whether the base of `group` itself is taken in the current scope
+    /// (`Names::used` of a name that is the base of its group).
+    fn base_taken(&self, group: u32, depth: u32) -> bool {
+        let row = self.groups[group as usize];
+        row.scope == depth
+            && row.next > 0
+            && !self.current_skip(self.marks[group as usize].zero_skip, group)
+    }
+
+    /// The suffix rule of `Names::assign` on group `group` (the stamp-zero
+    /// name returned if `zero` and the group has one): a group not in the
+    /// current scope is reset first. One step per candidate.
+    fn assign(&mut self, group: u32, zero: bool) -> Name {
+        let depth = self.depth();
+        let index = group as usize;
+        if self.groups[index].scope != depth {
+            self.save(group);
+            self.groups[index] = GroupRow {
+                next: 0,
+                scope: depth,
+                zero: None,
+            };
+            self.marks[index].born = self.skipped.len() as u32;
+        }
+        if zero && let Some(name) = self.groups[index].zero {
+            return name;
+        }
+        let marks = self.marks[index];
+        let mut next = self.groups[index].next;
+        let name = loop {
+            self.steps += 1;
+            if next == 0 {
+                // The base is taken by the group of its prefix when that
+                // tried the same spelling as a suffix and kept it: tried
+                // because the suffix is below its next, kept unless a raw
+                // name or another base had it then.
+                let prefix = marks.prefix;
+                let taken = prefix != NONE && {
+                    let row = self.groups[prefix as usize];
+                    row.scope == depth
+                        && marks.suffix < row.next
+                        && !self.raw.contains(&marks.name)
+                        && !self.current_skip(marks.as_skip, prefix)
+                };
+                if !taken {
+                    break marks.name;
+                }
+                self.skip(group, 0, group);
+            } else {
+                self.spelling.clear();
+                self.spelling.push_str(marks.name.as_str());
+                self.spelling.push('$');
+                push_decimal(&mut self.spelling, next);
+                let candidate = Name::new(&self.spelling);
+                // The candidate's own suffix is at least the group's next,
+                // so only a base spelled like it can have taken it.
+                let other = self
+                    .bases
+                    .get(&candidate)
+                    .copied()
+                    .filter(|other| self.base_taken(*other, depth));
+                if let Some(other) = other {
+                    self.skip(group, next, other);
+                } else if self.raw.contains(&candidate) {
+                    self.skip(group, next, NONE);
+                } else {
+                    break candidate;
+                }
+            }
+            next += 1;
+        };
+        let row = &mut self.groups[index];
+        row.next = next + 1;
+        if zero {
+            row.zero = Some(name);
+        }
+        name
+    }
+
+    /// Record that `(group, suffix)` was passed over, pointing the marks
+    /// of `target` (the group itself for suffix zero, else the group spelled
+    /// like the candidate, or `NONE`) at the entry.
+    fn skip(&mut self, group: u32, suffix: u32, target: u32) {
+        let entry = self.skipped.len() as u32;
+        self.skipped.push([group, suffix]);
+        let previous = if target == NONE {
+            NONE
+        } else {
+            let marks = &mut self.marks[target as usize];
+            let pointer = if suffix == 0 {
+                &mut marks.zero_skip
+            } else {
+                &mut marks.as_skip
+            };
+            std::mem::replace(pointer, entry)
+        };
+        self.skip_undo.push([target, previous]);
+    }
+}
+
+/// The part of `name` before a final `$` and the number after it, when that
+/// is a positive decimal without leading zeros that fits a suffix.
+#[cfg(test)]
+fn canonical_suffix(name: &str) -> Option<(&str, u32)> {
+    let (prefix, suffix) = name.rsplit_once('$')?;
+    if suffix.starts_with(|c: char| ('1'..='9').contains(&c))
+        && suffix.bytes().all(|c| c.is_ascii_digit())
+    {
+        suffix.parse().ok().map(|suffix| (prefix, suffix))
+    } else {
+        None
+    }
+}
+
+/// Append `value` in decimal, without allocating.
+#[cfg(test)]
+fn push_decimal(out: &mut String, value: u32) {
+    let mut digits = [0u8; 10];
+    let mut start = digits.len();
+    let mut rest = value;
+    loop {
+        start -= 1;
+        digits[start] = b'0' + (rest % 10) as u8;
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    for digit in &digits[start..] {
+        out.push(char::from(*digit));
     }
 }
 
@@ -1208,6 +1535,11 @@ mod replay_tests {
     }
 
     #[test]
+    fn group_marks_size() {
+        assert_eq!(std::mem::size_of::<Marks>(), 32);
+    }
+
+    #[test]
     fn default_tables_are_empty() {
         let t = Tables::default();
         assert!(t.groups.is_empty() && t.bases.is_empty() && t.slot_group.is_empty() && t.visible.is_empty());
@@ -1222,7 +1554,6 @@ mod replay_tests {
     }
 
     #[test]
-    #[ignore = "T5b-2 build"]
     fn a_module_with_stamp_zero_is_named_like_any_other() {
         let mut t = tables(2, &[]);
         assert_eq!(t.add_module(subject("Foo", 0, 0)).as_str(), "Foo");
@@ -1240,7 +1571,6 @@ mod replay_tests {
     }
 
     #[test]
-    #[ignore = "T5b-2 build"]
     fn the_tables_skip_other_bases_and_raw_names() {
         // `suffixes_respect_other_bases_and_raw_globals`, on the tables.
         let mut t = tables(4, &["x$2"]);
@@ -1254,7 +1584,6 @@ mod replay_tests {
     }
 
     #[test]
-    #[ignore = "T5b-2 build"]
     fn the_tables_inherit_whole_groups_and_siblings_do_not_leak() {
         // `captures_inherit_whole_groups_but_siblings_do_not_leak`, on the
         // tables.
@@ -1280,7 +1609,6 @@ mod replay_tests {
     }
 
     #[test]
-    #[ignore = "T5b-2 build"]
     fn a_reservation_reports_a_first_name_and_stamp_zero_reserves_its_base() {
         let mut t = tables(3, &[]);
         assert!(t.reserve(subject("x", 1, 0)));
@@ -1292,7 +1620,6 @@ mod replay_tests {
     }
 
     #[test]
-    #[ignore = "T5b-2 build"]
     fn a_synthetic_name_takes_a_suffix_in_its_scope() {
         // `the_cached_bound_of_a_range_loop_takes_a_name_in_its_scope`.
         let mut t = tables(2, &[]);
@@ -1319,7 +1646,6 @@ mod replay_tests {
     }
 
     #[test]
-    #[ignore = "T5b-2 build"]
     fn ten_thousand_names_and_scopes_cost_a_constant_number_of_steps_each() {
         // Entering a function that inherits a group of 10,000 names costs
         // what entering one that inherits a group of 5,000 costs.
@@ -1329,7 +1655,6 @@ mod replay_tests {
     }
 
     #[test]
-    #[ignore = "T5b-2 build"]
     fn warm_tables_allocate_nothing() {
         let run = |t: &mut Tables| {
             t.begin(20_000, &[]);
