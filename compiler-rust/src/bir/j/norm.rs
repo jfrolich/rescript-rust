@@ -617,8 +617,18 @@ fn single_value(b: &Bir, statements: &[NodeId], return_: bool) -> Option<NodeId>
         _ => None,
     }
 }
-fn same_assignment_target(b: &Bir, left: NodeId, right: NodeId) -> bool {
-    let mut work = vec![(left, right)];
+fn same_assignment_target(b: &mut Bir, left: NodeId, right: NodeId) -> bool {
+    if matches!(b.view(left), View::Var { .. }) { return p::same_var(b, left, right); }
+    let mut work = std::mem::take(&mut b.j_equal_work);
+    let result = same_assignment_target_with_work(b, left, right, &mut work);
+    work.clear();
+    b.j_equal_work = work;
+    result
+}
+
+fn same_assignment_target_with_work(b: &Bir, left: NodeId, right: NodeId, work: &mut Vec<(NodeId, NodeId)>) -> bool {
+    work.clear();
+    work.push((left, right));
     while let Some((l, r)) = work.pop() {
         match (b.view(l), b.view(r)) {
             (View::Var { .. }, View::Var { .. }) if p::same_var(b, l, r) => {}
