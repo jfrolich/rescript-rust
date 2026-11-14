@@ -917,7 +917,6 @@ mod tests {
     /// 10,000 cases of expansion, the two memos and their cleanup, with the
     /// memo-aware instance and copy (O11).
     #[test]
-    #[ignore = "R3b build"]
     fn expand_tier_agrees_on_generated_cases() {
         let coverage = run_cases(Tier::Expand, 1, 100, 100);
         assert_eq!(coverage.cases, 10_000);

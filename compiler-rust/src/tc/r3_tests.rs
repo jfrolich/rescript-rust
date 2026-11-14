@@ -339,7 +339,6 @@ fn instance_from_a_segment_shares_what_the_old_instance_shares() {
 /// Tvar None`). Above the kernel tier the form prints names, so this
 /// compares them: an instance and a copy of a scheme with named variables.
 #[test]
-#[ignore = "R3b build"]
 fn instance_drops_variable_names() {
     let program = compile(SHARING.to_string());
     let ops = [Op::BeginDef, Op::Instance(3), Op::EndDef, Op::Generalize(0), Op::Copy(0)];
@@ -350,7 +349,6 @@ fn instance_drops_variable_names() {
 
 /// The same with the memo-aware instance of R3b.
 #[test]
-#[ignore = "R3b build"]
 fn memo_aware_instance_shares_what_the_old_instance_shares() {
     let program = compile(SHARING.to_string());
     for value in 0..program.values.len() as u16 {
