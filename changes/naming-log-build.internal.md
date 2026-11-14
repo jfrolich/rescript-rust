@@ -1,0 +1,1 @@
+- Build the naming log of the backend lowering (THREE_TREES 11.4, slice T5b-1): scope rows, free lists read from the reference sites at each function's close, adoption of expressions moved into a function, the eta form, and the arena hooks that record variables, binders, module references and copied functions. Test-only until the lowering calls it.

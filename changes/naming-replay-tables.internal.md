@@ -1,0 +1,1 @@
+- Backend naming log: build the dense naming tables (`emit::naming::Tables`) that the replay of the naming log assigns names with.

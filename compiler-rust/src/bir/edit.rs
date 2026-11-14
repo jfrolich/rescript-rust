@@ -346,13 +346,24 @@ impl Bir {
 
     fn allocate(&mut self, node: Node) -> NodeId {
         let id = self.allocate_slot(node);
-        // The lowering's arena records where each reference is (T4a).
-        if node.op() == Op::Var {
-            if let Some(scope) = &mut self.js_scope {
-                let View::Var { var } = node.view(&self.lists) else { unreachable!() };
-                let site = scope.site(var, id);
-                self.nodes[id.index()].set_var_site(site);
+        // The lowering's arena records where each reference is: a variable
+        // (T4a) or an imported module (the naming log reads both at the
+        // close of a function scope).
+        match node.op() {
+            Op::Var => {
+                if let Some(scope) = &mut self.js_scope {
+                    let View::Var { var } = node.view(&self.lists) else { unreachable!() };
+                    let site = scope.site(var, id);
+                    self.nodes[id.index()].set_site(site);
+                }
             }
+            Op::JQualified => {
+                if let Some(scope) = &mut self.js_scope {
+                    let site = scope.import_site(id);
+                    self.nodes[id.index()].set_site(site);
+                }
+            }
+            _ => {}
         }
         id
     }
@@ -498,6 +509,11 @@ impl Bir {
                 "function header already owned"
             );
         }
+        // A function's parameters get their home where its scope closes.
+        // The op is read from the table, not through `node`, which would
+        // count a visit.
+        let home = self.js_scope.is_some()
+            && !matches!(self.nodes[id.index()].op(), Op::Fun | Op::JFun);
         let run = self.binder_run(id);
             for slot in 0..run.len() {
                 let Some(var) = run.at(self, slot) else { continue };
@@ -506,6 +522,9 @@ impl Bir {
                 "variable already bound"
             );
             self.vars.binder[var.index()] = Some(id);
+            if home && let Some(scope) = &mut self.js_scope {
+                scope.names.bind(var);
+            }
         }
         self.update_facts(id);
     }
@@ -668,7 +687,7 @@ impl Bir {
                 let View::Var { var } = node.view(&self.lists) else { unreachable!() };
                 scope.occurrence(var, add);
                 if !add {
-                    scope.sites[node.var_site() as usize].node = NodeId(u32::MAX);
+                    scope.sites[node.site() as usize].node = NodeId(u32::MAX);
                 }
             }
         }
@@ -676,6 +695,9 @@ impl Bir {
             if let Some(scope) = &mut self.js_scope {
                 let View::JQualified { module, .. } = node.view(&self.lists) else { unreachable!() };
                 scope.import_reference(module, add);
+                if !add {
+                    scope.sites[node.site() as usize].node = NodeId(u32::MAX);
+                }
             }
         }
         if self.is_weighted_switch(node) {
@@ -1153,9 +1175,9 @@ impl Bir {
         } else { false };
         self.nodes[target.index()] = content;
         // A reference that moves into the slot takes its site with it.
-        if content.op() == Op::Var {
+        if matches!(content.op(), Op::Var | Op::JQualified) {
             if let Some(scope) = &mut self.js_scope {
-                scope.sites[content.var_site() as usize].node = target;
+                scope.sites[content.site() as usize].node = target;
             }
         }
         self.parents[target.index()] = parent;
@@ -1431,6 +1453,20 @@ impl Bir {
                     let new = FuncId(index(self.vars.funcs.len()));
                     self.func_owners.push(None);
                     self.vars.funcs.push(FuncHeader { params, ..old });
+                    if self.js_scope.is_some() {
+                        // The copy's parameters are bound where the copy is
+                        // made, as its other binders are (`bind`): no scope
+                        // closes over a copy, so the open scope reads the
+                        // copy's sites as its own.
+                        let params: SmallVec<[VarId; 4]> =
+                            (0..old.params.len()).map(|i| self.function_parameter(new, i)).collect();
+                        if let Some(scope) = &mut self.js_scope {
+                            scope.names.copied(header, new);
+                            for var in params {
+                                scope.names.bind(var);
+                            }
+                        }
+                    }
                     funcs.insert(header, new);
                 }
                 View::Catch { header, .. } => {

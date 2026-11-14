@@ -11,6 +11,7 @@ pub(super) fn lower(
     resolver: Option<&crate::js_ir::ModulePathResolver>,
     cross_module_inline: bool,
     check_div_by_zero: bool,
+    jsx_preserve: bool,
 ) -> Result<Lowered, Unsupported> {
     let input = input.into_imported();
     let mut node = input.root;
@@ -19,6 +20,7 @@ pub(super) fn lower(
     state.resolver = resolver.cloned();
     state.cross_module_inline = cross_module_inline;
     state.check_div_by_zero = check_div_by_zero;
+    state.arena.js_scope.as_mut().expect("lowering scope").names.jsx_preserve = jsx_preserve;
     state.locations = locations.cloned();
     if let Some(locations) = locations {
         state.located_functions = state
@@ -111,19 +113,19 @@ mod tests {
 
     #[test]
     fn full_unit_allocation_boundary_conditionals() {
-        assert_unit_allocation_count("conditionals", 68);
+        assert_unit_allocation_count("conditionals", 85);
     }
     #[test]
     fn full_unit_allocation_boundary_switches() {
-        assert_unit_allocation_count("switches", 85);
+        assert_unit_allocation_count("switches", 102);
     }
     #[test]
     fn full_unit_allocation_boundary_applications() {
-        assert_unit_allocation_count("applications", 68);
+        assert_unit_allocation_count("applications", 85);
     }
     #[test]
     fn full_unit_allocation_boundary_untagged() {
-        assert_unit_allocation_count("untagged", 138);
+        assert_unit_allocation_count("untagged", 155);
     }
 
     /// Import is outside measurement; fresh state construction, lowering,
@@ -193,13 +195,13 @@ mod tests {
             let warm = crate::bir::bridge::import_for_lowering(&a, root).0.unwrap();
             let input = crate::bir::bridge::import_for_lowering(&a, root).0.unwrap();
             let source_counts = input.storage_counts();
-            let warm = super::super::lower_with_resolver(warm, None, true, None, false, true).unwrap();
+            let warm = super::super::lower_with_resolver(warm, None, true, None, false, true, false).unwrap();
             let visits = warm.switch_stats.source_visits;
             drop(warm);
             let mut result = None;
             let allocations = allocation_counter::measure(|| {
                 allocation_window_start();
-                result = Some(super::super::lower_with_resolver(input, None, true, None, false, true).unwrap());
+                result = Some(super::super::lower_with_resolver(input, None, true, None, false, true, false).unwrap());
                 allocation_window_end();
             });
             let result = result.unwrap();
@@ -286,7 +288,7 @@ mod tests {
         let body = source.seq_raw(head, tail);
         let root = source.let_(LetKind::Strict, id, value, body);
         let input = crate::bir::bridge::import_for_lowering(&source, root).0.unwrap();
-        let from_unit = lower(input, None, false, None, false, true).unwrap();
+        let from_unit = lower(input, None, false, None, false, true, false).unwrap();
         let input = crate::bir::bridge::import_for_lowering(&source, root).0.unwrap().into_imported();
         let root = input.root;
         let mut state = State::new(input);
