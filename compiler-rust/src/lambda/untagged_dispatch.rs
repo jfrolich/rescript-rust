@@ -346,6 +346,12 @@ impl<A> Default for Plan<A> {
 }
 
 impl<A> Plan<A> {
+    /// O(1) reservations for emitted and temporary literal clauses.
+    pub(crate) fn reserve_literal_clauses(&mut self, literals: usize) {
+        self.value_clauses.reserve_exact(literals);
+        self.scratch.literal_clauses.reserve_exact(literals);
+    }
+
     /// O(1) reservations from imported arms/fallbacks; grouping does not grow
     /// its dense links while visiting a unit's cases.
     pub(crate) fn reserve_groups(&mut self, arms: usize) {

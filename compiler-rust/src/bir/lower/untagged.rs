@@ -190,6 +190,7 @@ pub(super) fn prepare(arena: &mut Bir) -> (Storage, dispatch::Plan<u32>) {
     storage.imported_payloads.values.reserve_exact(payloads);
     storage.facts.reserve(fact_count, kind_count);
     graph.reserve_groups(literals + payloads + variants);
+    graph.reserve_literal_clauses(literals + fact_count);
     let fact_literals = arena.pools.switches.iter().filter_map(|header| {
         if let SwitchDispatch::Variant(facts) = &header.dispatch { Some(facts.literal_tags.iter()) }
         else { None }
