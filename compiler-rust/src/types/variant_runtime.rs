@@ -498,6 +498,7 @@ pub enum LiteralTag {
 
 /// variant_runtime.ml `number_key`: `-0.` and `0.` are equal for `===`;
 /// `%h` is exact for every other number.
+/// Cost: O(1): bounded floating-point formatting.
 fn number_key_into(x: f64, out: &mut String) {
     out.push_str("number:");
     if x == 0.0 { out.push('0'); } else { hex_float_into(x, out); }
@@ -507,12 +508,14 @@ fn number_key_into(x: f64, out: &mut String) {
 /// `-0x1.8p-1`, `0x0.0000000000001p-1022` for a subnormal, `infinity`,
 /// `nan`, and `-nan` for a NaN with its sign bit set.
 #[cfg(test)]
+/// Cost: O(1): bounded floating-point formatting.
 pub(crate) fn ocaml_hex_float(x: f64) -> String {
     let mut out = String::new();
     hex_float_into(x, &mut out);
     out
 }
 
+/// Cost: O(1): at most thirteen mantissa nibbles.
 fn hex_float_into(x: f64, out: &mut String) {
     use std::fmt::Write;
     if x.is_sign_negative() { out.push('-'); }
@@ -543,6 +546,7 @@ pub(crate) struct LiteralKeyScratch {
     float: Vec<u8>,
 }
 impl LiteralKeyScratch {
+    /// Cost: O(literal spelling bytes), with retained canonicalization scratch.
     pub(crate) fn encode(&mut self, tag: &LiteralTag) -> &str {
         self.output.clear();
         match tag {
@@ -565,6 +569,7 @@ impl LiteralKeyScratch {
         &self.output
     }
     #[cfg(test)]
+    /// Cost: O(1): read three retained buffer capacities.
     pub(crate) fn capacities(&self) -> [usize; 3] {
         [self.output.capacity(), self.digits.capacity(), self.float.capacity()]
     }
@@ -575,6 +580,7 @@ impl LiteralTag {
     /// exactly when they are the same JavaScript value, as `===` compares
     /// them. Ints are emitted as 32-bit numbers, so `1`, `1.0` and
     /// `4294967297` share one, while `1n` is a bigint.
+    /// Cost: O(literal spelling bytes), producing one owned key.
     pub fn value_key(&self) -> String {
         let mut scratch = LiteralKeyScratch::default();
         scratch.encode(self);
@@ -793,6 +799,7 @@ pub struct ConstructorReference {
 
 impl Layout {
     /// variant_runtime.ml `make_layout` / `compute_matching_facts`.
+    /// Cost: O(constructor count plus cloned literal/shape metadata bytes).
     pub fn new(configuration: Configuration, constructors: Vec<ConstructorCase>) -> Self {
         let mut block_types = Vec::new();
         let mut literal_tags = Vec::new();
@@ -805,7 +812,7 @@ impl Layout {
                 ConstructorCase::Block(Block::Tagged(_)) => {}
             }
         }
-        Self {
+        let layout = Self {
             unboxed: configuration.unboxed,
             constructors,
             matching_facts: MatchingFacts {
@@ -813,7 +820,10 @@ impl Layout {
                 block_types,
                 literal_tags,
             },
-        }
+        };
+        #[cfg(test)]
+        crate::lambda::untagged_dispatch::differential::record(&layout);
+        layout
     }
 
     /// variant_runtime.ml `constructor_tag`: the literal of a constant

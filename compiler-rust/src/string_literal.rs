@@ -157,6 +157,7 @@ pub fn replace_invalid_utf8(s: &str) -> String {
 
 /// OCaml `String_literal.normalize_semantic`: convert each malformed byte to
 /// the code point with the same value, keeping valid UTF-8 sequences.
+/// Cost: O(input bytes), allocating only if normalization changes representation.
 pub fn normalize_semantic(semantic: &str) -> Cow<'_, str> {
     let bytes = bytes_of(semantic);
     if is_valid_utf8_bytes(&bytes) {
@@ -167,6 +168,7 @@ pub fn normalize_semantic(semantic: &str) -> Cow<'_, str> {
     Cow::Owned(string_of_bytes(buf))
 }
 
+/// Cost: O(input bytes), reusing the output buffer.
 fn normalize_semantic_bytes_into(bytes: &[u8], buf: &mut Vec<u8>) {
     buf.clear();
     let mut index = 0;
@@ -177,6 +179,7 @@ fn normalize_semantic_bytes_into(bytes: &[u8], buf: &mut Vec<u8>) {
     }
 }
 
+/// Cost: O(input bytes), reusing decoded-byte storage.
 fn decode_js_escapes_into(normalize_template_line_endings: bool, s: &[u8], buf: &mut Vec<u8>) -> Option<()> {
     let len = s.len();
     buf.clear();
@@ -343,6 +346,7 @@ fn decode_js_escapes_into(normalize_template_line_endings: bool, s: &[u8], buf: 
     Some(())
 }
 
+/// Cost: O(input bytes), producing owned decoded bytes.
 fn decode_js_escapes_with(normalize_template_line_endings: bool, s: &[u8]) -> Option<Vec<u8>> {
     let mut buf = Vec::with_capacity(s.len());
     decode_js_escapes_into(normalize_template_line_endings, s, &mut buf)?;
@@ -365,6 +369,7 @@ enum EncodeJsMode {
     Template,
 }
 
+/// Cost: O(input bytes and emitted escape bytes), reusing capacity.
 fn encode_js_into(mode: EncodeJsMode, bytes: &[u8], buf: &mut Vec<u8>) {
     buf.clear();
     for &byte in bytes.iter() {
@@ -398,6 +403,7 @@ fn encode_js_into(mode: EncodeJsMode, bytes: &[u8], buf: &mut Vec<u8>) {
     }
 }
 
+/// Cost: O(input bytes and emitted escape bytes).
 fn encode_js(mode: EncodeJsMode, s: &str) -> String {
     let bytes = bytes_of(s);
     let mut buf = Vec::with_capacity(bytes.len());
@@ -557,15 +563,18 @@ pub(crate) struct TemplateBuffer {
     input: Vec<u8>,
     output: Vec<u8>,
 }
+/// Cost: O(input bytes), reusing byte storage.
 fn bytes_into(s: &str, into: &mut Vec<u8>) {
     into.clear();
     if s.is_ascii() || s.chars().any(|ch| ch as u32 > 0xff) { into.extend_from_slice(s.as_bytes()); }
     else { into.extend(s.chars().map(|ch| ch as u8)); }
 }
 impl TemplateBuffer {
+    /// Cost: O(appended source and semantic bytes), amortized growth.
     pub(crate) fn push(&mut self, source: &str, semantic: &str) {
         self.source.push_str(source); self.semantic.push_str(semantic);
     }
+    /// Cost: O(semantic bytes), reusing encoding buffers.
     fn normalize(&mut self, semantic: &str) {
         self.normalized.clear();
         bytes_into(semantic, &mut self.input);
@@ -575,6 +584,7 @@ impl TemplateBuffer {
             self.normalized.extend(self.output.iter().copied().map(char::from));
         }
     }
+    /// Cost: O(semantic and emitted escape bytes), amortized growth.
     pub(crate) fn push_semantic(&mut self, semantic: &str) {
         self.normalize(semantic);
         bytes_into(&self.normalized, &mut self.input);
@@ -582,6 +592,7 @@ impl TemplateBuffer {
         self.source.extend(self.output.iter().copied().map(char::from));
         self.semantic.push_str(&self.normalized);
     }
+    /// Cost: O(accumulated source and semantic bytes), reusing scratch.
     pub(crate) fn finish(&mut self) -> (&str, &str) {
         bytes_into(&self.source, &mut self.input);
         let same = decode_js_escapes_into(true, &self.input, &mut self.output).is_some()
@@ -599,10 +610,12 @@ impl TemplateBuffer {
         }
         (&self.source, &self.semantic)
     }
+    /// Cost: O(1): clear retained byte/string lengths.
     pub(crate) fn clear(&mut self) {
         self.source.clear(); self.semantic.clear(); self.normalized.clear(); self.input.clear(); self.output.clear();
     }
     #[cfg(test)]
+    /// Cost: O(1): read retained capacity counters.
     pub(crate) fn capacities(&self) -> [usize; 5] {
         [self.source.capacity(), self.semantic.capacity(), self.normalized.capacity(), self.input.capacity(), self.output.capacity()]
     }

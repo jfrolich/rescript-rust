@@ -1,13 +1,13 @@
 //! Immutable spelling and runtime-equality metadata, populated before planning.
 use crate::types::variant_runtime::{BlockType, Instance, LiteralTag};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct TextId(u32);
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct LiteralId(pub(crate) u32);
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct InstanceId(pub(crate) u32);
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Literal {
     String(TextId),
     Int(i64),
@@ -17,7 +17,7 @@ pub(crate) enum Literal {
     Null,
     Undefined,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Kind {
     Number,
     String,
@@ -30,6 +30,7 @@ pub(crate) enum Kind {
     Unknown,
 }
 impl Kind {
+    /// Cost: O(1); reads a scalar or borrowed pool range.
     pub(crate) fn typeof_name(self) -> Option<&'static str> {
         match self {
             Self::Number => Some("number"),
@@ -42,6 +43,7 @@ impl Kind {
             _ => None,
         }
     }
+    /// Cost: O(1); reads a scalar or borrowed pool range.
     pub(crate) fn block_type(self) -> BlockType {
         match self {
             Self::Number => BlockType::Number,
@@ -69,13 +71,13 @@ pub(crate) struct Metadata {
     literals: Vec<(Literal, TextId)>,
     instances: Vec<InstanceRecord>,
     ancestors: Vec<TextId>,
-    hash: ahash::RandomState,
-    text_index: hashbrown::HashTable<TextId>,
-    literal_index: hashbrown::HashTable<LiteralId>,
-    instance_index: hashbrown::HashTable<InstanceId>,
+    text_index: Vec<TextId>,
+    literal_index: Vec<LiteralId>,
+    instance_index: Vec<InstanceId>,
 }
 impl Metadata {
     #[cfg(test)]
+    /// Cost: O(1); reads a scalar or borrowed pool range.
     pub(crate) fn capacities(&self) -> [usize; 11] {
         [
             self.text.capacity(),
@@ -91,31 +93,26 @@ impl Metadata {
             self.encoding.capacities()[2],
         ]
     }
+    /// Cost: O(1); reads a scalar or borrowed pool range.
     pub(crate) fn text(&self, id: TextId) -> &str {
         let (start, len) = self.texts[id.0 as usize];
         &self.text[start as usize..(start + len) as usize]
     }
+    /// O(log U * spelling length) lookup; O(U + spelling length) insertion.
+    /// Sorted handles avoid allocating a hash table for small variant plans.
+    /// Cost: O(log U * spelling bytes) lookup, O(U + spelling bytes) new insertion.
     fn intern(&mut self, text: &str) -> TextId {
-        let hash = self.hash.hash_one(text);
-        if let Some(id) = self.text_index.find(hash, |id| self.text(*id) == text) {
-            return *id;
-        }
+        let slot = match self.text_index.binary_search_by(|id| self.text(*id).cmp(text)) {
+            Ok(slot) => return self.text_index[slot],
+            Err(slot) => slot,
+        };
         let id = TextId(self.texts.len() as u32);
         self.texts.push((self.text.len() as u32, text.len() as u32));
         self.text.push_str(text);
-        let Self {
-            text,
-            texts,
-            hash: builder,
-            text_index,
-            ..
-        } = self;
-        text_index.insert_unique(hash, id, |id| {
-            let (start, len) = texts[id.0 as usize];
-            builder.hash_one(&text[start as usize..(start + len) as usize])
-        });
+        self.text_index.insert(slot, id);
         id
     }
+    /// Cost: O(text interning + canonical encoding + log L) lookup, O(L) new sorted-index insertion.
     pub(crate) fn import_literal(&mut self, tag: &LiteralTag) -> LiteralId {
         let literal = match tag {
             LiteralTag::String(s) => Literal::String(self.intern(s)),
@@ -126,13 +123,10 @@ impl Metadata {
             LiteralTag::Null => Literal::Null,
             LiteralTag::Undefined => Literal::Undefined,
         };
-        let hash = self.hash.hash_one(literal);
-        if let Some(id) = self
-            .literal_index
-            .find(hash, |id| self.literal(*id) == literal)
-        {
-            return *id;
-        }
+        let slot = match self.literal_index.binary_search_by_key(&literal, |id| self.literal(*id)) {
+            Ok(slot) => return self.literal_index[slot],
+            Err(slot) => slot,
+        };
         // Runtime equality and structural tag equality are intentionally separate.
         // Canonicalization belongs to import, never to planning/selection.
         let mut encoding = std::mem::take(&mut self.encoding);
@@ -141,24 +135,22 @@ impl Metadata {
         self.encoding = encoding;
         let id = LiteralId(self.literals.len() as u32);
         self.literals.push((literal, runtime));
-        let Self {
-            literal_index,
-            literals,
-            hash: builder,
-            ..
-        } = self;
-        literal_index.insert_unique(hash, id, |id| builder.hash_one(literals[id.0 as usize].0));
+        self.literal_index.insert(slot, id);
         id
     }
+    /// Cost: O(1); reads a scalar or borrowed pool range.
     pub(crate) fn literal_count(&self) -> usize {
         self.literals.len()
     }
+    /// Cost: O(1); reads a scalar or borrowed pool range.
     pub(crate) fn literal(&self, id: LiteralId) -> Literal {
         self.literals[id.0 as usize].0
     }
+    /// Cost: O(1); reads a scalar or borrowed pool range.
     pub(crate) fn runtime_key(&self, id: LiteralId) -> &str {
         self.text(self.literals[id.0 as usize].1)
     }
+    /// Cost: O(literal spelling bytes), once per unique default-boundary payload.
     pub(crate) fn owned_literal(&self, id: LiteralId) -> LiteralTag {
         match self.literal(id) {
             Literal::String(s) => LiteralTag::String(self.text(s).to_owned()),
@@ -171,24 +163,30 @@ impl Metadata {
         }
     }
     /// O(1): number of interned immutable instance descriptors.
+    /// Cost: O(1); reads a scalar or borrowed pool range.
     pub(crate) fn instance_count(&self) -> usize { self.instances.len() }
+    /// Cost: O(1); reads a scalar or borrowed pool range.
     pub(crate) fn instance_name(&self, id: InstanceId) -> &str {
         self.instances[id.0 as usize]
             .name
             .map_or("Array", |name| self.text(name))
     }
+    /// Cost: O(1); reads a scalar or borrowed pool range.
     pub(crate) fn is_class(&self, id: InstanceId) -> bool {
         self.instances[id.0 as usize].name.is_some()
     }
+    /// Cost: O(1); reads a scalar or borrowed pool range.
     fn ancestors(&self, id: InstanceId) -> &[TextId] {
         let (start, len) = self.instances[id.0 as usize].ancestors;
         &self.ancestors[start as usize..(start + len) as usize]
     }
+    /// Cost: O(ancestor count); reads immutable interned handles.
     pub(crate) fn is_subclass(&self, a: InstanceId, b: InstanceId) -> bool {
         self.instances[b.0 as usize]
             .name
             .is_some_and(|name| self.ancestors(a).contains(&name))
     }
+    /// Cost: O(class name and ancestor spelling bytes), once per unique default-boundary payload.
     pub(crate) fn owned_instance(&self, id: InstanceId) -> Instance {
         use crate::types::variant_runtime::{ClassBlocks, ShapeAllocation};
         match self.instances[id.0 as usize].name {
@@ -204,6 +202,7 @@ impl Metadata {
             },
         }
     }
+    /// Cost: O(ancestor interning + log I * ancestry comparison), O(I) new sorted-index insertion.
     pub(crate) fn import_kind(&mut self, kind: &BlockType) -> Kind {
         match kind {
             BlockType::Number => Kind::Number,
@@ -229,34 +228,22 @@ impl Metadata {
                         Some(name)
                     }
                 };
-                let hash = self.hash.hash_one((name, &self.ancestors[start..]));
-                if let Some(&id) = self.instance_index.find(hash, |id| {
-                    self.instances[id.0 as usize].name == name
-                        && self.ancestors(*id) == &self.ancestors[start..]
+                let slot = match self.instance_index.binary_search_by(|id| {
+                    self.instances[id.0 as usize].name.cmp(&name)
+                        .then_with(|| self.ancestors(*id).cmp(&self.ancestors[start..]))
                 }) {
-                    self.ancestors.truncate(start);
-                    return Kind::Instance(id);
-                }
+                    Ok(slot) => {
+                        self.ancestors.truncate(start);
+                        return Kind::Instance(self.instance_index[slot]);
+                    }
+                    Err(slot) => slot,
+                };
                 let id = InstanceId(self.instances.len() as u32);
                 self.instances.push(InstanceRecord {
                     name,
                     ancestors: (start as u32, (self.ancestors.len() - start) as u32),
                 });
-                let Self {
-                    instance_index,
-                    instances,
-                    ancestors,
-                    hash: builder,
-                    ..
-                } = self;
-                instance_index.insert_unique(hash, id, |id| {
-                    let record = instances[id.0 as usize];
-                    let (start, len) = record.ancestors;
-                    builder.hash_one((
-                        record.name,
-                        &ancestors[start as usize..(start + len) as usize],
-                    ))
-                });
+                self.instance_index.insert(slot, id);
                 Kind::Instance(id)
             }
         }

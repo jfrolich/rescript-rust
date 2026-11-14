@@ -3089,6 +3089,7 @@ pub(crate) fn convert_ident_cow(name: &str) -> Cow<'_, str> {
 }
 
 /// Write identifier conversion into retained storage. O(spelling bytes).
+/// Cost: O(name bytes), reusing destination capacity.
 pub(crate) fn convert_ident_into(name: &str, out: &mut String) {
     out.clear();
     let name = unwrap_uppercase_exotic(name);
@@ -3100,6 +3101,7 @@ pub(crate) fn convert_ident_into(name: &str, out: &mut String) {
     }
 }
 
+/// Cost: O(name bytes), allocating only for a changed spelling.
 fn mangle_ident_name(name: &str) -> Cow<'_, str> {
     if name
         .chars()
@@ -3113,6 +3115,7 @@ fn mangle_ident_name(name: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
+/// Cost: O(name characters and emitted bytes).
 fn append_mangled_ident(name: &str, out: &mut String) {
     for (idx, c) in name.chars().enumerate() {
         if c.is_ascii_alphanumeric() || matches!(c, '_' | '$') {

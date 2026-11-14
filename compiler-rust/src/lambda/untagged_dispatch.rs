@@ -14,6 +14,10 @@
 //! OCaml shares between them.
 
 mod metadata;
+#[cfg(test)]
+mod legacy_planner;
+#[cfg(test)]
+pub(crate) mod differential;
 use crate::types::variant_runtime::{BlockType, LiteralTag, MatchingFacts};
 pub(crate) use metadata::{InstanceId, Kind, Literal, LiteralId, Metadata};
 
@@ -44,6 +48,7 @@ pub(crate) struct FactPool {
     kinds: Vec<Kind>,
 }
 impl FactPool {
+    /// Cost: O(imported literals/kinds plus metadata interning cost); appends flat fact runs.
     pub(crate) fn import(&mut self, metadata: &mut Metadata, facts: &MatchingFacts) -> Facts {
         let literals = LiteralSpan {
             start: self.literals.len() as u32,
@@ -67,6 +72,7 @@ impl FactPool {
         );
         Facts { literals, kinds }
     }
+    /// Cost: O(1), amortized for a pool push; no traversal.
     pub(crate) fn view(&self, facts: Facts) -> FactView<'_> {
         FactView {
             literal_tags: &self.literals[facts.literals.start as usize
@@ -76,6 +82,7 @@ impl FactPool {
         }
     }
     #[cfg(test)]
+    /// Cost: O(1), amortized for a pool push; no traversal.
     pub(crate) fn capacities(&self) -> [usize; 2] {
         [self.literals.capacity(), self.kinds.capacity()]
     }
@@ -98,9 +105,11 @@ pub(crate) struct Clauses {
 }
 
 impl Clauses {
+    /// Cost: O(1), amortized for a pool push; no traversal.
     pub(crate) fn len(self) -> usize {
         self.len as usize
     }
+    /// Cost: O(1), amortized for a pool push; no traversal.
     fn range(self) -> std::ops::Range<usize> {
         self.start as usize..(self.start + self.len) as usize
     }
@@ -140,12 +149,14 @@ pub(crate) struct ValueClauses<'a, A> {
 }
 impl<'a, A> ValueClauses<'a, A> {
     /// O(number of clauses), without materializing a collection.
+    /// Cost: O(1), amortized for a pool push; no traversal.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&'a LiteralTag, &'a Clause<A>)> + '_ {
         self.rows.iter().map(|(literal, clause)| (&self.literals[literal.0 as usize], clause))
     }
 }
 
 /// O(1): borrow a scalar typeof kind without reconstructing metadata.
+/// Cost: O(1), amortized for a pool push; no traversal.
 fn borrowed_typeof(kind: Kind) -> &'static BlockType {
     match kind {
         Kind::Number => &BlockType::Number,
@@ -204,6 +215,7 @@ impl Groups {
     /// Stable grouping from the tail: first-created matching group wins, and
     /// its representative becomes the newly prepended arm. Buckets only narrow
     /// candidate equality tests; they never establish equality themselves.
+    /// Cost: O(n log n + candidate equality work), O(n) retained grouping storage; worst-case n² comparisons.
     fn build<K, A>(
         &mut self,
         arms: &[(K, A)],
@@ -270,6 +282,7 @@ struct Scratch<A> {
     membership: Vec<u64>,
 }
 impl<A> Default for Scratch<A> {
+    /// Cost: O(1), amortized for a pool push; no traversal.
     fn default() -> Self {
         Self {
             arms: Vec::new(),
@@ -320,12 +333,14 @@ pub(crate) struct Plan<A> {
 
 impl<A> Default for Plan<A> {
     /// O(1): empty unit pools defer allocation until graph construction.
+    /// Cost: O(1), amortized for a pool push; no traversal.
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl<A> Plan<A> {
+    /// Cost: O(1), amortized for a pool push; no traversal.
     fn new() -> Self {
         Plan {
             metadata: Metadata::default(),
@@ -349,15 +364,18 @@ impl<A> Plan<A> {
         }
     }
 
+    /// Cost: O(1), amortized for a pool push; no traversal.
     pub(crate) fn root(&self) -> TreeId {
         self.root
     }
 
+    /// Cost: O(1), amortized for a pool push; no traversal.
     pub(crate) fn tree(&self, id: TreeId) -> &Tree<A> {
         &self.trees[id.0 as usize]
     }
 
     /// O(1): borrow imported metadata for the unchanged default emitter.
+    /// Cost: O(1), amortized for a pool push; no traversal.
     pub(crate) fn test(&self, id: TestId) -> Test<'_> {
         match self.stored_test(id) {
             StoredTest::Equals(literal) => Test::Equals(&self.legacy_literals[literal.0 as usize]),
@@ -371,51 +389,62 @@ impl<A> Plan<A> {
     }
 
     /// O(1): borrow a literal clause range; each iteration borrows its tag.
+    /// Cost: O(1), amortized for a pool push; no traversal.
     pub(crate) fn value_clauses(&self, clauses: Clauses) -> ValueClauses<'_, A> {
         ValueClauses { rows: self.stored_value_clauses(clauses), literals: &self.legacy_literals }
     }
 
     /// O(1): borrow the default emitter's scalar typeof clauses.
+    /// Cost: O(1), amortized for a pool push; no traversal.
     pub(crate) fn typeof_clauses(&self, clauses: Clauses) -> &[(BlockType, Clause<A>)] {
         &self.legacy_typeof[clauses.range()]
     }
 
+    /// Cost: O(1), amortized for a pool push; no traversal.
     pub(crate) fn stored_test(&self, id: TestId) -> &StoredTest {
         &self.tests[id.0 as usize]
     }
 
+    /// Cost: O(1), amortized for a pool push; no traversal.
     pub(crate) fn stored_value_clauses(&self, clauses: Clauses) -> &[(LiteralId, Clause<A>)] {
         &self.value_clauses[clauses.range()]
     }
 
+    /// Cost: O(1), amortized for a pool push; no traversal.
     pub(crate) fn stored_typeof_clauses(&self, clauses: Clauses) -> &[(Kind, Clause<A>)] {
         &self.typeof_clauses[clauses.range()]
     }
 
+    /// Cost: O(1), amortized for a pool push; no traversal.
     fn add_test(&mut self, test: StoredTest) -> TestId {
         let id = TestId(self.tests.len() as u32);
         self.tests.push(test);
         id
     }
 
+    /// Cost: O(1), amortized for a pool push; no traversal.
     fn not(&mut self, test: TestId) -> TestId {
         self.add_test(StoredTest::Not(test))
     }
 
+    /// Cost: O(1), amortized for a pool push; no traversal.
     fn and(&mut self, a: TestId, b: TestId) -> TestId {
         self.add_test(StoredTest::And(a, b))
     }
 
+    /// Cost: O(1), amortized for a pool push; no traversal.
     fn or(&mut self, a: TestId, b: TestId) -> TestId {
         self.add_test(StoredTest::Or(a, b))
     }
 
+    /// Cost: O(1), amortized for a pool push; no traversal.
     fn add_tree(&mut self, tree: Tree<A>) -> TreeId {
         let id = TreeId(self.trees.len() as u32);
         self.trees.push(tree);
         id
     }
 
+    /// Cost: O(number of clauses), amortized pool append; no per-clause ownership.
     fn switch_value(&mut self, clauses: &[(LiteralId, Clause<A>)], default: TreeId) -> TreeId
     where
         A: Copy,
@@ -426,6 +455,7 @@ impl<A> Plan<A> {
         self.add_tree(Tree::SwitchValue(Clauses { start, len }, default))
     }
 
+    /// Cost: O(number of clauses), amortized pool append; no per-clause ownership.
     fn switch_typeof(&mut self, clauses: &[(Kind, Clause<A>)], default: TreeId) -> TreeId
     where
         A: Copy,
@@ -465,6 +495,7 @@ type PlanInput<'f, A> = BorrowedInput<'f, A>;
 
 /// The kinds `switch (typeof x)` tells apart; functions and objects are
 /// checked after the classes.
+/// Cost: O(1), amortized for a pool push; no traversal.
 fn is_primitive(kind: &Kind) -> bool {
     matches!(
         kind,
@@ -474,6 +505,7 @@ fn is_primitive(kind: &Kind) -> bool {
 
 /// Stable source groups, emitted in reverse creation order with members in
 /// source order. The same algorithm serves legacy and dense BIR body aliases.
+/// Cost: O(grouping comparisons + arm count), writing into retained clause storage.
 fn clauses<K: Copy, A: Copy>(
     p: &mut Plan<A>,
     same: &impl Fn(&A, &A) -> bool,
@@ -514,6 +546,7 @@ struct PayloadInput<'a, A> {
     has_default: bool,
     arms: &'a [(Kind, A)],
 }
+/// Cost: O(payload grouping and emitted test/tree nodes), excluding caller equality cost.
 fn payload_part<A: Copy>(
     p: &mut Plan<A>,
     same: &impl Fn(&A, &A) -> bool,
@@ -762,6 +795,7 @@ struct SelectedValue<'a> {
     array: bool,
     null: bool,
 }
+/// Cost: O(1), amortized for a pool push; no traversal.
 fn selected_literal(metadata: &Metadata, id: LiteralId) -> SelectedValue<'_> {
     let kind = match metadata.literal(id) {
         Literal::String(_) => Some(Kind::String),
@@ -781,6 +815,7 @@ fn selected_literal(metadata: &Metadata, id: LiteralId) -> SelectedValue<'_> {
 
 /// The owned constant-folding boundary imports its value key once; the selector
 /// below borrows keys, including when planning tests unnamed imported literals.
+/// Cost: O(value spelling import + tests/clauses visited); temporary storage is linear in value bytes and test depth.
 pub(crate) fn select<A: Copy>(
     plan: &Plan<A>,
     value: &Value,
@@ -799,19 +834,21 @@ pub(crate) fn select<A: Copy>(
             null: false,
         },
     };
-    select_tree(plan, plan.root, value, on_test, &mut Vec::new())
+    select_tree(plan, plan.root, &value, on_test, &mut Vec::new())
 }
+/// Cost: O(tests and clauses visited, including key comparisons); O(test depth) retained scratch.
 fn select_tree<A: Copy>(
     p: &Plan<A>,
     mut tree: TreeId,
-    value: SelectedValue<'_>,
+    value: &SelectedValue<'_>,
     on_test: &mut impl FnMut(&StoredTest),
     work: &mut Vec<SelectOp>,
 ) -> Outcome<A> {
+    /// Cost: O(test nodes visited + literal key bytes compared), with short-circuit evaluation.
     fn holds<A>(
         p: &Plan<A>,
         test: TestId,
-        value: SelectedValue<'_>,
+        value: &SelectedValue<'_>,
         on_test: &mut impl FnMut(&StoredTest),
         work: &mut Vec<SelectOp>,
     ) -> bool {
@@ -857,6 +894,7 @@ fn select_tree<A: Copy>(
         }
         result
     }
+    /// Cost: O(clauses examined + key comparison cost); no allocation.
     fn target<K, A>(
         clauses: &[(K, Clause<A>)],
         matches: impl Fn(&K) -> bool,
@@ -902,6 +940,7 @@ fn select_tree<A: Copy>(
 
 /// Structural equality uses retained work stacks, and never assumes that a
 /// source body compares equal to itself (some bodies are incomparable).
+/// Cost: O(expanded tree/test pairs compared); retained worklists, early stop on mismatch.
 fn same_tree<A>(
     p: &Plan<A>,
     same: &impl Fn(&A, &A) -> bool,
@@ -985,6 +1024,7 @@ fn same_tree<A>(
 
 /// Postorder simplifies children before appending a parent's kept clause runs.
 /// No temporary clause vectors can interleave a parent's contiguous span.
+/// Cost: O(reachable nodes plus structural equality work), with retained memo/work storage.
 fn simplify<A: Copy>(p: &mut Plan<A>, same: &impl Fn(&A, &A) -> bool, root: TreeId) -> TreeId {
     if matches!(p.tree(root), Tree::Run(_) | Tree::Fallback | Tree::Skip) {
         return root;
@@ -1124,6 +1164,7 @@ fn simplify<A: Copy>(p: &mut Plan<A>, same: &impl Fn(&A, &A) -> bool, root: Tree
 
 /// untagged_dispatch.ml `plan`; `same` tells two bodies that are one body
 /// apart. Cost is emitted tests/clauses plus source-body equality work.
+/// Cost: O(metadata import + grouping + simplification + unique compatibility payload bytes); one owned plan.
 pub(crate) fn plan<A: Copy>(same: impl Fn(&A, &A) -> bool, input: Input<'_, A>) -> Plan<A> {
     let mut p = Plan::new();
     let mut fact_pool = FactPool::default();
@@ -1162,6 +1203,7 @@ pub(crate) fn plan<A: Copy>(same: impl Fn(&A, &A) -> bool, input: Input<'_, A>) 
 }
 
 /// Append to unit-owned graph pools without importing metadata or invalidating roots.
+/// Cost: O(grouping + simplification + emitted graph size); reuses unit pools.
 pub(crate) fn append<A: Copy>(
     p: &mut Plan<A>,
     same: impl Fn(&A, &A) -> bool,
@@ -1169,6 +1211,7 @@ pub(crate) fn append<A: Copy>(
 ) {
     append_bucketed(p, same, |_| 0, input);
 }
+/// Cost: O(grouping + simplification + emitted graph size); caller buckets only narrow comparisons.
 pub(crate) fn append_bucketed<A: Copy>(
     p: &mut Plan<A>,
     same: impl Fn(&A, &A) -> bool,
@@ -1180,6 +1223,7 @@ pub(crate) fn append_bucketed<A: Copy>(
 
 #[cfg(test)]
 impl<A> Plan<A> {
+    /// Cost: O(pool capacity growth); test-only reservation for a second append pass.
     pub(crate) fn reserve_repeat(&mut self) {
         self.tests.reserve(self.tests.len());
         self.trees.reserve(self.trees.len());
@@ -1187,9 +1231,11 @@ impl<A> Plan<A> {
         self.typeof_clauses.reserve(self.typeof_clauses.len());
         self.simplify_map.reserve(self.trees.len());
     }
+    /// Cost: O(1), amortized for a pool push; no traversal.
     pub(crate) fn grouping_steps(&self) -> usize {
         self.groups.steps
     }
+    /// Cost: O(1), amortized for a pool push; no traversal.
     pub(crate) fn capacities(&self) -> Vec<usize> {
         vec![
             self.tests.capacity(),
@@ -1222,6 +1268,7 @@ impl<A> Plan<A> {
     }
 }
 
+/// Cost: O(grouping + emitted graph + simplification + literal membership/selector work).
 fn plan_tree<A: Copy>(
     p: &mut Plan<A>,
     same: &impl Fn(&A, &A) -> bool,
@@ -1309,7 +1356,7 @@ fn plan_tree<A: Copy>(
                     let outcome = select_tree(
                         p,
                         payload,
-                        selected_literal(&p.metadata, *literal),
+                        &selected_literal(&p.metadata, *literal),
                         &mut |test| {
                             if matches!(test, StoredTest::Instance(id) if p.metadata.is_class(*id)) {
                                 class_check = true;
@@ -1490,6 +1537,8 @@ mod tests {
         ));
         assert_eq!(std::mem::size_of::<TreeId>(), 4);
         assert_eq!(std::mem::size_of::<TestId>(), 4);
+        assert_eq!(std::mem::size_of::<SelectedValue<'_>>(), 32);
+        assert_eq!(std::mem::size_of::<&SelectedValue<'_>>(), 8);
         assert_eq!(std::mem::size_of::<Clauses>(), 8);
         assert_eq!(std::mem::size_of::<Tree<u32>>(), 16);
         assert_eq!(std::mem::size_of::<Clause<u32>>(), 8);

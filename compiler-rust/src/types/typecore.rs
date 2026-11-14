@@ -2406,6 +2406,8 @@ fn parse_int_literal(s: &str) -> Option<i64> {
 /// - remove `_` separators
 /// - remove leading zeros only when followed by decimal digits
 /// - preserve non-decimal heads like `00x1` (after `_` removal)
+///
+/// Cost: O(input bytes), producing the owned normalized spelling.
 pub(crate) fn parse_bigint_literal(s: &str) -> (bool, String) {
     let mut digits = String::new();
     let positive = parse_bigint_literal_into(s, &mut digits);
@@ -2413,6 +2415,7 @@ pub(crate) fn parse_bigint_literal(s: &str) -> (bool, String) {
 }
 
 /// The same normalization into caller-owned scratch; no per-literal strings.
+/// Cost: O(input bytes), reusing the destination buffer.
 pub(crate) fn parse_bigint_literal_into(s: &str, out: &mut String) -> bool {
     let (positive, digits) = if let Some(rest) = s.strip_prefix('-') { (false, rest) }
         else if let Some(rest) = s.strip_prefix('+') { (true, rest) }

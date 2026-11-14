@@ -3747,3 +3747,26 @@ JavaScript only where the old loop probe differed from the OCaml reference.
 The canonical-key import paths above are import work, not part of the previously reported probe/realize interval. They are not evidence that the complete unit entry is allocation-free; that is the separate step-5 correction.
 
 Commands/results: `cargo build --manifest-path compiler-rust/Cargo.toml` passed; `cargo test --manifest-path compiler-rust/Cargo.toml untagged -- --test-threads=1` passed **34 tests**; `cargo clippy --manifest-path compiler-rust/Cargo.toml --all-targets -- -D warnings` passed. `git diff origin/ocaml-to-rust-rewrite -- compiler-rust/src/lambda/lam_compile_variant.rs` is empty. All commands used `CARGO_INCREMENTAL=0`.
+### Scope correction — step 2
+
+- Planner metadata uses sorted handle arrays with binary lookup instead of per-plan/per-selection hash tables. Insertion shifts are linear in the number of distinct entries; cost comments state that tradeoff.
+- The unchanged trunk emitter borrows each literal/instance from the plan's unique immutable compatibility payloads. There is no per-emitted-test payload clone.
+- Selector traversal takes `&SelectedValue`; tests pin the cold descriptor to 32 bytes and the carried reference to 8 bytes.
+- `legacy_planner.rs` is a verbatim copy of trunk `be1b3a482` behind `#[cfg(test)]`. The production planner is still a single algorithm shared by the default adapter and BIR.
+- Differential tests compare reachable plan structure, ordered clauses/tests and bodies for **453 collected untagged declarations from 850 source files** (the complete `tests/tests/src` and runtime implementation corpora), in sixteen completeness/body-sharing configurations each. Hand-written cases additionally cover literals, catch-all, scalar/object/array/class/function shapes, null/undefined, custom discriminant facts and single-case plans. The existing compiler harness options are used to typecheck the actual source files. Collection is test-only, once per untagged declaration, not production per-node instrumentation.
+
+Commands/results:
+
+```text
+rg -n 'HashMap|HashSet|hashbrown|ahash' compiler-rust/src/lambda/untagged_dispatch.rs compiler-rust/src/lambda/untagged_dispatch/metadata.rs
+  no matches
+cmp compiler-rust/src/lambda/untagged_dispatch/legacy_planner.rs <(git show origin/ocaml-to-rust-rewrite:compiler-rust/src/lambda/untagged_dispatch.rs)
+  exit 0
+CARGO_INCREMENTAL=0 cargo test --manifest-path compiler-rust/Cargo.toml untagged -- --nocapture --test-threads=1
+  declarations compared: 453; source files: 850
+  45 passed, 0 failed
+CARGO_INCREMENTAL=0 cargo clippy --manifest-path compiler-rust/Cargo.toml --all-targets -- -D warnings
+  passed
+```
+
+Steps 3–6 remain outstanding; prior candidate measurements do not validate this corrected head.

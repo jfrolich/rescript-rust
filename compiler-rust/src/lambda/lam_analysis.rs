@@ -12,6 +12,7 @@ use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::{InlineAttribute, TagInfo};
 
 /// Check if a primitive operation is pure (no side effects).
+/// Cost: O(1): classify a primitive using scalar properties of its second argument.
 pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Constant>) -> bool {
     is_pure_primitive_with_properties(prim, ConstantProperties {
         nonzero: second_constant.is_some_and(not_zero_constant),
@@ -25,6 +26,7 @@ pub(crate) struct ConstantProperties {
     pub(crate) nonnegative_bigint: bool,
 }
 
+/// Cost: O(1): dispatch on the primitive tag and scalar facts.
 pub(crate) fn is_pure_primitive_with_properties(prim: &Primitive, second: ConstantProperties) -> bool {
     match prim {
         Primitive::Pidentity | Primitive::Pignore => true,

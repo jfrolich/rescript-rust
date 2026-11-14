@@ -88,6 +88,7 @@ pub type FlatMakePath = Vec<FlatMakeStep>;
 
 /// `Translmod.flat_export_name`: the segments, each unwrapped from `\"..."`,
 /// joined with `$`.
+/// Cost: O(path segments and emitted spelling bytes).
 pub fn flat_export_name<S: AsRef<str>>(path: &[S]) -> String {
     let mut name = String::new();
     flat_export_name_into(path.iter().map(AsRef::as_ref), &mut name);
@@ -96,6 +97,7 @@ pub fn flat_export_name<S: AsRef<str>>(path: &[S]) -> String {
 
 /// Append a flat export spelling into retained storage, without a segment vector.
 /// O(segments + spelling bytes); callers clear the destination before reuse.
+/// Cost: O(path segments and emitted spelling bytes), reusing capacity.
 pub(crate) fn flat_export_name_into<'a>(path: impl Iterator<Item = &'a str>, out: &mut String) {
     for (i, part) in path.enumerate() {
         if i != 0 { out.push('$'); }
@@ -251,6 +253,7 @@ pub(crate) fn literal_denotes_same(
 /// variant, which the code generator prints and constant folding evaluates.
 /// A switch with literal arms and no payload arm left is a plain switch on
 /// the literals. `arm` names an arm's action as the plan's body.
+/// Cost: O(arm metadata bytes plus shared planner work).
 pub(crate) fn untagged_plan_with<'s, A: Copy>(
     sw_consts_full: bool,
     sw_consts: &'s [(SwitchKey, A)],

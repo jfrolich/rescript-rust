@@ -13,11 +13,13 @@
 //! result.
 
 /// OCaml `float_of_string_opt`.
+/// Cost: O(input bytes), with separator-removal storage.
 pub fn float_of_string(s: &str) -> Option<f64> {
     float_of_string_in(s, &mut Vec::new())
 }
 
 /// Parse using retained separator-removal storage.
+/// Cost: O(input bytes), reusing separator-removal capacity.
 pub(crate) fn float_of_string_in(s: &str, buf: &mut Vec<u8>) -> Option<f64> {
     buf.clear();
     buf.extend(s.bytes().filter(|&c| c != b'_'));
@@ -258,6 +260,7 @@ fn ldexp(f: f64, exp: i32) -> f64 {
 /// C's `strtod`, which must read the whole string: leading white space, a
 /// sign, then `inf`, `infinity`, `nan`, `nan(...)`, a hexadecimal or a
 /// decimal constant.
+/// Cost: O(input bytes), including numeric parsing.
 fn strtod(buf: &[u8]) -> Option<f64> {
     let mut i = 0;
     while i < buf.len() && is_c_space(buf[i]) {
