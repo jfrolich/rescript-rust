@@ -1505,7 +1505,8 @@ impl State {
 
     /// Record the reservation `ident` of the export variable `export` for
     /// the naming log's replay, as the subject the naming tables take
-    /// (`State::replay_names`). One push.
+    /// (`State::replay_names`). Cost: one push on `reservations`; it
+    /// allocates when the pool grows.
     fn reserve_name(&mut self, export: VarId, ident: Ident) {
         self.names.reservations.push(crate::emit::Subject {
             slot: self.arena.vars.j_origin[export.index()].0,

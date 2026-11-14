@@ -1,0 +1,1 @@
+- State the cost of the backend lowering naming log's functions in the form `scripts/check_lowering_cost_docs.py` accepts.
