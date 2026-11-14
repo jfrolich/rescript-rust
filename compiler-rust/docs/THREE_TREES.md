@@ -1725,7 +1725,8 @@ runs by default changed.
 #### T5 part B as redesigned
 
 Status: design and skeleton (`bir/lower/names.rs`, the tables in
-`emit/naming.rs`, 35 ignored acceptance tests); nothing is built. "Verified"
+`emit/naming.rs`, 44 ignored acceptance tests); nothing is built. Reviewed
+once: see "Decided in review" at the end of this section. "Verified"
 below means read in the code at the cited place or pinned by a test that
 runs today; "read" means read only. The three gaps of "T5 as built: part B"
 were checked against the code and are as described:
@@ -1771,6 +1772,22 @@ Found while verifying, not in the list:
   `two_function_literals_of_one_statement_name_what_they_capture_in_print_order`.
 - G9. **Functions the lowering builds itself** (`call.rs`, `ffi_args.rs`,
   `import.rs`: a `JFun` not lowered from a source `Fun`) had no `enter`.
+- G10 (found in review). **An expression built before the scope opened
+  moves into the function.** Two of the three sites of G9 build a function
+  around expressions the caller lowered earlier: `apply_with_arity`
+  (`bir/lower/call.rs`, the eta-expansion of a strictly pure partial
+  application) returns `param => callee(remaining..., param)` with `callee`
+  and `remaining` already built; `external_dispatch`
+  (`bir/lower/ffi_args.rs`) makes its argument the scrutinee of the `switch`
+  inside `(() => { switch (arg) ... })()`. The sites of those expressions
+  were recorded before any `open`, between the sites of statements the
+  argument lowering hoisted (which stay outside), so no site range holds
+  them: the close finds no reference, the free list is empty, and a fresh
+  `param` can take the name of a local the moved argument reads. Pinned on
+  the pass:
+  `a_function_inherits_the_names_of_what_an_expression_moved_into_it_reads`
+  (`param$1`). `wrap_then_path` (`bir/lower/import.rs`) is not affected:
+  its body is built from its own parameter, and `import` stays outside.
 
 **(a) The data.** The idea on record (a scope row per variable, provisional
 statement slots, parameters at the close) is adopted for the row and the
@@ -1791,6 +1808,7 @@ function literal its header. The replay reads it there.
 | row of a header | Dense by `FuncId` | 4 | `names::close`, `Log::copied` |
 | `Open` | An open scope: its row and where its sites, run and children start | 16 | `names::open` |
 | reference | Nothing new: the site `Scope::site` already records (T4a) | 0 | `Bir::allocate`, unchanged |
+| adopted expression | Nothing stored: `names::adopt` puts what a moved expression reads in the open scope's run; `Log::adopted_nodes` counts the nodes read | 0 | `names::adopt`, at the two sites of G10 |
 | `Subject` | An identifier handed to the tables: slot, stamp, name | 16 | built by the replay per call |
 | `GroupRow`, `Saved`, `Level` | The suffix table of a base, a saved row, a scope's undo marks | 16, 24, 12 | `emit::naming::Tables` |
 | `Frame` | One level of the replay's walk over statement lists | 12 | `names::replay` |
@@ -1803,16 +1821,22 @@ is a `Subject` (16).
 from the sites built while its scope was open: at the close, the sites
 since the scope opened, without the ranges of its closed children, one step
 each. A site is read at one close. Nothing is done where a reference is
-built. The replay reads statement lists and scope rows, never an
+built, with one exception: an expression that was built before its
+function's scope opened is read once where it moves in (`names::adopt`,
+G10). The first pass cannot record that fact: when the argument is lowered
+nobody knows it will end inside a function, and a site range over it would
+include the statements hoisted out of it. This is the only place where an
+expression is read for a reference, and `adopted_nodes` reports what it
+costs. The replay reads statement lists and scope rows, never an
 expression: a function literal inside an expression is reached from its
 row, by reading the ancestors of its node up to its statement (the form of
 `globals::decide`: from a recorded place towards the root, a node read at
 most twice).
 
 *What the replay does read: one step per statement of the final lists.*
-That is a pass over the statement spine, and it is stated here because the
-standard forbids a second pass for a fact the first could record. The fact
-is the final order of statements, and no construction step has it (G4):
+The rule: this is not a second pass for a fact the first pass could record,
+because the fact is the final statement order, which no construction step
+has (G4):
 `close::decide` already pays one step per statement per copy for the same
 reason. The alternative that avoids the spine (an event chain per
 statement, relinked wherever a list is built) costs one step per statement
@@ -1850,6 +1874,7 @@ not touched: it is the oracle.
 | G7 | A released site has no node; `close` skips it | `a_reference_released_before_the_close_is_not_free` | none |
 | G8 | The replay reads the literals of a statement in closing order and counts every reservation that first names a variable in a statement with more than one literal (`ambiguous_orders`); the gate requires zero | `two_function_literals_of_one_statement_are_replayed_in_closing_order_and_counted` | one counter |
 | G9 | `open` and `close` at the three sites | the oracle tests, through `names_agree` | - |
+| G10 | `names::adopt(bir, node)`, once per moved expression between `open` and `close`: the subtree is read once; a `Var` or a module reference joins the open scope's run; a closed function literal is not entered, the free entries of its row join the run | `an_expression_built_before_the_scope_opened_is_adopted`, `the_fresh_parameter_of_a_partial_application_does_not_take_the_name_of_an_adopted_local`, `an_adopted_function_literal_gives_its_free_entries_and_is_not_entered`, `a_function_literal_inside_an_adopted_expression_is_replayed_where_it_stands`, `the_scrutinee_of_a_dispatch_function_is_adopted`, `a_module_reference_in_an_adopted_expression_is_free_in_the_function`, `ten_thousand_adopted_nodes_cost_one_step_each_and_a_literal_its_free_entries`; through the lowering: `the_naming_log_agrees_on_a_partial_application_whose_argument_reads_a_local`, `..._on_a_dispatch_function_whose_scrutinee_reads_a_local`. Today: the pass test of G10 | one step per node of the moved expression outside function literals, one per literal and per free entry of it; adopted nodes <= nodes of the moved expressions; the corpus total is reported, not bounded |
 
 Limits, stated and counted, not solved:
 
@@ -1895,6 +1920,24 @@ Limits, stated and counted, not solved:
   during the import (`Log::variable`; rows by header grow on demand).
   `the_naming_log_agrees_on_a_body_imported_from_another_module`.
 
+- *An expression built before a scope opened, moved into its function*
+  (G10): `names::adopt`. What each party sees afterwards:
+  - the new function: the moved references in its run, so free unless it
+    binds them (it binds only its fresh parameters);
+  - the enclosing scope: nothing more. It reads the moved references as its
+    own sites at its close, and the new function's close hands its free
+    entries up; both put the same variables in its run, which is what the
+    pass computes (`analyze_expr`, `ExprKind::Fun`:
+    `used.extend(free[f])`). A variable put in a run twice is written once:
+    the free list is written without duplicates after the sort;
+  - a closed literal inside the moved expression: its row and free list are
+    final and unchanged. Its site range stays among the enclosing scope's
+    closed children (those sites were read at the literal's own close). No
+    row has a parent, so nothing is re-parented: the replay's prelude finds
+    the literal by its node's ancestors, and the first statement above it
+    is now the `return` inside the new function, so it is entered inside
+    the new function's scope and inherits from it.
+
 **(d) The oracle.** Both sides print the same tree, the lowering's own
 program before the JS passes with its module list filled in (`new_before`),
 from a table of names by identifier. So "every printed identifier of every
@@ -1923,14 +1966,16 @@ find $DIR -name '*.json' | xargs cat | jq -s '[.[] | .. | objects | (.name_diffe
 ```
 
 The last line prints 0. The first passes with the ratchet unchanged.
+`adopted_nodes` is reported per corpus beside it (the sum over units); it
+has no bound.
 
 **(e) The slices.**
 
 | Slice | Builds | Un-ignores | Lines | Needs |
 | --- | --- | --- | ---: | --- |
-| T5b-1 | The log: `Log`, `open`, `close`, `eta_shape`, the hooks in `Bir` (`new_var_id`, `bind`, `register_kind`, `copy_subtree`) | the 12 tests marked `T5b-1 build` | 350 | - |
-| T5b-2 | `emit::naming::Tables` and `names::replay` | the 18 tests marked `T5b-2 build` | 550 | T5b-1 for the replay's tests; the tables alone need nothing |
-| T5b-3 | The wiring: `open`/`close` in the lowering, the replay at `State::finish`, `free_lists`, `compare_with_pass`, check mode, `names_of`, the gate on four corpora, the measurements | the 5 tests marked `T5b-3 build`; `names_agree` in `compare_oracle` | 400 | T5b-1, T5b-2 |
+| T5b-1 | The log: `Log`, `open`, `close`, `adopt`, `eta_shape`, the hooks in `Bir` (`new_var_id`, `bind`, `register_kind`, `copy_subtree`) | the 17 tests marked `T5b-1 build` | 400 | - |
+| T5b-2 | `emit::naming::Tables` and `names::replay` | the 20 tests marked `T5b-2 build` | 550 | T5b-1 for the replay's tests; the tables alone need nothing |
+| T5b-3 | The wiring: `open`/`close`/`adopt` in the lowering, the replay at `State::finish`, `free_lists`, `compare_with_pass`, check mode, `names_of`, the gate on four corpora, the measurements | the 7 tests marked `T5b-3 build`; `names_agree` in `compare_oracle` | 400 | T5b-1, T5b-2 |
 
 T5b-1 and the `Tables` half of T5b-2 run in parallel (different files:
 `bir/lower/names.rs` and `bir/edit.rs` against `emit/naming.rs`). The
@@ -1951,8 +1996,14 @@ Common to the three (part of each prompt):
 > yours. Counts failure: an `allow` attribute; a hash map or set other than
 > the two in `Tables`; an allocation per reference, per statement or per
 > scope once the vectors are warm; a walk over an expression to find a
-> reference, a binder or a function; an ignored test other than those of a
-> later slice; a number you did not measure. Every commit:
+> reference, a binder or a function, with one named exception:
+> `names::adopt` reads an expression that was built before its function's
+> scope opened, once, and nothing else may; an ignored test other than
+> those of a later slice; a number you did not measure. A step-count
+> constant in a test was derived on paper: if the body that meets the doc
+> comment's cost gives a count that differs from a test's by a fixed
+> amount, do not adjust the body or the test: report the two measured
+> counts and the relation between them, and stop. Every commit:
 > `cargo check --all-targets --manifest-path compiler-rust/Cargo.toml`
 > prints no warning; `cargo test --manifest-path compiler-rust/Cargo.toml
 > --lib bir::lower::names emit::naming` passes.
@@ -1968,8 +2019,8 @@ T5b-1:
 > binder of a node that is not a function literal; `Log::import_reference`
 > in `Bir::register_kind` for a `JQualified` that is added; `Log::copied` in
 > `Bir::copy_subtree_recording` where a function header is copied. Remove
-> `#[ignore = "T5b-1 build"]` from the 12 tests in `bir/lower/names.rs`.
-> Criteria: those 12 pass; `rg -n 'T5b-1' compiler-rust/src` is empty;
+> `#[ignore = "T5b-1 build"]` from the 17 tests in `bir/lower/names.rs`.
+> Criteria: those 17 pass; `rg -n 'T5b-1' compiler-rust/src` is empty;
 > `cargo test --manifest-path compiler-rust/Cargo.toml --lib bir::` passes
 > (the hooks run in every lowering test). `Log::steps` is asserted as
 > relations between two sizes by the tests; do not add a constant to make
@@ -1981,10 +2032,10 @@ T5b-2:
 > `Tables::begin` in `emit/naming.rs`. Then the other bodies marked
 > `todo!("T5b-2")` there (commit 1: remove the ignore from the 7 tests of
 > `emit::naming::replay_tests` marked `T5b-2 build`), then `names::replay`
-> in `bir/lower/names.rs` (commit 2: remove it from the 11 tests there).
+> in `bir/lower/names.rs` (commit 2: remove it from the 13 tests there).
 > The rule of each `Tables` method is the method of `Names` its doc comment
 > names: the two must give the same names; `Names` is not changed.
-> Criteria: the 18 tests pass; `rg -n 'T5b-2' compiler-rust/src` is empty;
+> Criteria: the 20 tests pass; `rg -n 'T5b-2' compiler-rust/src` is empty;
 > `rg -n 'im_rc' compiler-rust/src/emit/naming.rs` shows `Group` only.
 
 T5b-3:
@@ -1996,17 +2047,25 @@ T5b-3:
 > Then, one commit each: (1) `names::open` in `State::enter` (`View::Fun`)
 > and `names::close` in `finish_expression` (`Resume::Fun`) after the
 > `JFun` is built; the same pair around the three functions the lowering
-> builds itself (`call.rs`, `ffi_args.rs`, `import.rs`), `open` before the
-> first node of the body. If a part of such a body was built before `open`
-> could be called, stop and report the site. (2) `Program::raw` collected in
+> builds itself: `wrap_then_path` (`import.rs`), `open` before
+> `fresh_variable("m")`; `apply_with_arity` (`call.rs`), `open` before the
+> first `fresh_variable("param")`, then `names::adopt` of `callee` and of
+> each node of `remaining`, in that order, before the call node is built;
+> `external_dispatch` (`ffi_args.rs`), `open` before the first `return` of
+> a case is built, then `names::adopt` of `arg`. `close` after the `JFun`
+> in each. These are the only two places that call `adopt`. If you find
+> another place where a node built before `open` ends inside a function
+> (search: every `View::JFun {` construction and every edit that attaches
+> a node below a `JFun` after its `close`), do not add a call: stop and
+> report the site and a Lambda that reaches it. (2) `Program::raw` collected in
 > step 1 of `globals::decide`; `names::replay` at `State::finish` after
 > `globals::decide`; its `Printed` and `Replayed` carried in `Lowered`.
 > (3) `free_lists`, `compare_with_pass`, `names_of` in
-> `bir/lower/oracle_tests.rs`; remove the 5 ignores; call `names_agree` from
+> `bir/lower/oracle_tests.rs`; remove the 7 ignores; call `names_agree` from
 > `compare_oracle` for the unit context. (4) Check mode
 > (`lam_compile.rs`, where `new_before` is built): `compare_with_pass` on
-> `new_before`; the fields of `NameStats` and `Replayed` flat in the
-> `lower` report; a unit the pass does not support counted as
+> `new_before`; the fields of `NameStats` and `Replayed` and
+> `Log::adopted_nodes` flat in the `lower` report; a unit the pass does not support counted as
 > `names_uncompared`. The replay's names are not used for output. (5)
 > Measurements and "T5 part B as built" in THREE_TREES 11.4.
 > Criteria: `cargo test --manifest-path compiler-rust/Cargo.toml` passes;
@@ -2015,7 +2074,8 @@ T5b-3:
 > `python3 scripts/test_backend_coverage.py` passes with the ratchet
 > unchanged; the `jq` sum of (d) is 0 on the runtime library, tests/tests,
 > the fixtures and the application, with compared and uncompared units per
-> corpus reported; instructions of a clean build of tests/tests
+> corpus reported, and `adopted_nodes` summed per corpus (reported, no
+> bound); instructions of a clean build of tests/tests
 > (`scripts/compare_build_instructions.py --base <trunk> --head <yours>`):
 > the default build within 0.1%; with `RESCRIPT_BACKEND=check` reported as
 > measured, with the share of `names::` functions from the cachegrind
@@ -2047,6 +2107,10 @@ no parent link. From the naming log it needs:
    final lists. Each of those slices must say what it does to free lists
    (a spliced callee's parameters are substituted or declared in the
    caller; a dead declaration's last capture goes).
+5. Exactly one statement-level naming walk: the replay over the builder's
+   lists. T6 adds no other walk for names, and no walk over expressions
+   besides `adopt` (which it may drop if an expression's handle carries
+   what the expression reads; that is T6's design to decide).
 
 11.8 as written, paragraph by paragraph:
 
@@ -2065,6 +2129,45 @@ no parent link. From the naming log it needs:
 | End state | Corrected: add "`rg -n 'ambiguous_orders' src` is empty" and "the naming pass (`Names::collect`) is called by the legacy side and by check mode only" |
 | Shortcuts | Kept; add "a second naming rule beside `Tables`" |
 | When a unit differs | Kept |
+
+**Decided in review** (first round, on the head with the three slices as
+first cut):
+
+1. The replay's one step per statement of the final lists is accepted. It
+   is not a second pass for a fact the first pass could record: the fact is
+   the final statement order, which no construction step has. T6 keeps
+   exactly this one statement-level naming walk ((g) point 5).
+2. Two function literals in one statement: closing order, with
+   `ambiguous_orders` gated at zero; gone at T6.
+3. An import released before the close stays in the free list: a counted
+   limit (`free_differences`).
+4. The functions the lowering builds itself were not as assumed: two of the
+   three move pre-built expressions into the function. G10 and
+   `names::adopt` are the answer. What was searched for further sites, on
+   the tree this section was written against: every construction of
+   `View::JFun` outside tests is `finish_expression` (`bir/lower/expr.rs`:
+   the body is lowered after `open`), the three sites of G9, and
+   `bridge_j.rs` (the import of JavaScript into `Bir`, not the lowering);
+   `bir/j/` builds no function; `Bir::copy_subtree` copies one
+   (`Log::copied`). An edit that attaches a node below a closed `JFun` was
+   not found in the lowering (read; the splice of T4g will be one).
+5. A use names nothing in the replay: accepted as the counter
+   `unnamed_references`, gated at zero.
+
+Known holes in the acceptance tests, which the builders report against and
+do not work around:
+
+- no tree-level test names a loop variable, a catch variable or a rest
+  field through the replay; they are first exercised when T5b-3 calls
+  `names_agree` from `compare_oracle`. The T5b-2 builder writes the arms
+  from the replay's doc comment and says in its report that they are
+  untested; a difference found in T5b-3 is reduced to a Lambda there;
+- no tree-level test has a function in the eta form (`ScopeRow::ETA` set);
+  the same applies;
+- the step-count constants (the `<=` bounds and the exact deltas) were
+  derived on paper and have never run. A builder that finds one off by a
+  fixed amount reports the measured relation and stops (the common part of
+  the prompts).
 
 ### 11.5 Worker prompt for T4b
 
