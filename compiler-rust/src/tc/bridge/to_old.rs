@@ -4175,23 +4175,59 @@ mod round_trip {
             ..Default::default()
         };
         let registry = crate::cmi::persistent_env::ModuleRegistry::new();
-        for seed in 0..64u32 {
-            let mut state = seed + 1;
-            let mut parts = Vec::new();
-            for _ in 0..(2 + seed % 7) {
-                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
-                parts.push(["a", "b", "c"][(state % 3) as usize]);
+        // Fixed seeds and a fixed LCG make every failure exactly reproducible.
+        // Each unit contains every declaration family; recursive terms combine
+        // arrows, tuples, repeated constructor arguments, objects and rows.
+        fn term(state: &mut u32, depth: u32) -> String {
+            *state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            let choice = *state;
+            if depth == 0 {
+                return ["int", "string", "'a"][(choice % 3) as usize].into();
             }
+            let left = term(state, depth - 1);
+            match choice % 6 {
+                0 => {
+                    let right = term(state, depth - 1);
+                    format!("((~value: {left}, ~optional: {right}=?) => {left})")
+                }
+                1 => {
+                    let right = term(state, depth - 1);
+                    format!("({left}, {right})")
+                }
+                2 => format!("pair<{left}, {left}>"),
+                3 => format!("box<{left}>"),
+                4 => format!("{{\"value\": {left}, \"again\": {left}}}"),
+                _ => format!("[#Empty | #Payload({left})]"),
+            }
+        }
+        for seed in 0..512u32 {
+            let mut state = seed + 1;
+            let first = term(&mut state, 3);
+            let second = term(&mut state, 3);
             let source = format!(
                 r#"
+                type box<'a>
                 type pair<'a, 'b> = ('a, 'b)
-                type record<'a> = {{left: 'a, right: ('a, 'a)}}
-                type tagged<'a> = A('a) | B(('a, 'a))
-                let f = (a, b, c) => ({})
-                let labelled = (~x, ~y) => (x, y, x)
-                module M = {{let repeated = x => (x, x)}}
-            "#,
-                parts.join(", ")
+                type repeated<'a> = ('a, 'a)
+                type cell<'a> = {{mutable value: {first}, fixed: {second}, twins: ('a, 'a)}}
+                type tagged<'a> = Empty | Payload({first}, {second})
+                  | Inline({{left: {first}, right: 'a}})
+                type alias<'a> = {second}
+                type closed<'a> = [#Empty | #Payload({first})]
+                type openRow<'a, 'row> = [> #Empty | #Payload({second})] as 'row
+                type object_<'a> = {{"value": {first}, "again": 'a}}
+                module Inner = {{
+                  type t<'a> = {second}
+                  module Deeper = {{let repeated = x => (x, x)}}
+                }}
+                module type S = {{
+                  type t
+                  let use: (~value: t, ~other: t=?) => (t, t)
+                }}
+                external identity: 'a => 'a = "%identity"
+                exception Broken(int, string)
+                let labelled = (~x, ~y=?) => (x, y, x)
+                "#
             );
             let name = format!("Generated{seed}");
             let result = crate::driver::compile_source_in_process(
@@ -4203,10 +4239,10 @@ mod round_trip {
                 false,
                 None,
             )
-            .unwrap_or_else(|error| panic!("{name}: {error}"));
+            .unwrap_or_else(|error| panic!("seed {seed}: {error}\nSOURCE:\n{source}"));
             let unit = result.pers_struct.expect("generated published signature");
             super::super::from_old::check_published(&unit)
-                .unwrap_or_else(|error| panic!("seed {seed}: {error}"));
+                .unwrap_or_else(|error| panic!("seed {seed}: {error}\nSOURCE:\n{source}"));
         }
     }
 }
