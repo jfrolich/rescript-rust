@@ -517,6 +517,7 @@ impl State {
     /// remain readable. Variables retain source identities, never global stamps.
     fn new(mut input: super::bridge::Imported) -> Self {
         let source_nodes = input.arena.nodes.len();
+        let source_operands = input.arena.lists.slot_count();
         let mut arena = Bir::default();
         arena.begin_bulk();
         arena.pools = std::mem::take(&mut input.arena.pools);
@@ -525,6 +526,7 @@ impl State {
         // assignment, block and break nodes in addition to their source body.
         // Inlining/FFI expansion may exceed this initial capacity.
         let output_nodes = input.arena.nodes.len() + 4 * arena.pools.switch_keys.len() + 8;
+        arena.lists.reserve_slots(2 * source_operands + 4 * arena.pools.switch_keys.len() + 8);
         arena.nodes.reserve_exact(output_nodes);
         arena.parents.reserve_exact(output_nodes);
         arena.weights.reserve_exact(output_nodes);

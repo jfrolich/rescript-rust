@@ -53,6 +53,11 @@ pub(super) struct Lists {
     pub(super) pushes: usize,
 }
 impl Lists {
+    /// Allocated operand slots known after source import, including headers.
+    pub(super) fn slot_count(&self) -> usize { self.items.len() }
+    /// Reserve once from a caller's already known operand-domain size.
+    pub(super) fn reserve_slots(&mut self, slots: usize) { self.items.reserve_exact(slots); }
+
     #[cfg(test)]
     pub(super) fn reserve_test_growth(&mut self, extra: usize) {
         self.items.reserve(extra);
