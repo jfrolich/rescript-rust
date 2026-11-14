@@ -258,6 +258,8 @@ mod oracle_tests {
                                 tag_name: None,
                                 literal_tags: (0..count).map(|i| tag(i).literal).collect(),
                                 block_types,
+                                object_cases: Vec::new(),
+                                shared_tags: Vec::new(),
                             })
                         };
                         let header = a.add_switch(

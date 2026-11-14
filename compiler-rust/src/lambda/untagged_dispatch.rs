@@ -14,7 +14,7 @@
 //! OCaml shares between them.
 
 use crate::types::variant_runtime::{
-    BlockType, Instance, LiteralTag, MatchingFacts, same_literal_value,
+    BlockType, FieldCheck, Instance, LiteralTag, MatchingFacts, ObjectCase, same_literal_value,
 };
 
 /// A test in [`Plan::tests`].
@@ -53,6 +53,14 @@ pub(crate) enum Test {
     Instance(Instance),
     /// `x !== null`
     NotNull,
+    /// `"f" in x`, on an object
+    FieldIn(String),
+    /// `x.f === literal`, on an object
+    FieldEquals(String, LiteralTag),
+    /// `typeof x.f === "k"`, on an object
+    FieldTypeof(String, BlockType),
+    /// `Array.isArray(x.f)`, on an object
+    FieldIsArray(String),
     Not(TestId),
     And(TestId, TestId),
     Or(TestId, TestId),
@@ -77,6 +85,9 @@ pub(crate) enum Tree<A> {
     /// `default:`. A switch with one clause that is not empty is printed as
     /// an `if`.
     SwitchTypeof(Clauses, TreeId),
+    /// `switch (x.f)` over literals, on an object; the tree is the
+    /// `default:`. A case's body may be any tree.
+    SwitchField(String, Clauses, TreeId),
 }
 
 /// A `case` of a switch.
@@ -122,6 +133,23 @@ impl<A> Plan<A> {
         &self.tests[id.0 as usize]
     }
 
+    /// Whether the plan reads a field of the value: object cases told apart
+    /// by their fields, or cases of a tagged variant that share a tag.
+    pub(crate) fn tests_fields(&self) -> bool {
+        self.tests.iter().any(|test| {
+            matches!(
+                test,
+                Test::FieldIn(_)
+                    | Test::FieldEquals(..)
+                    | Test::FieldTypeof(..)
+                    | Test::FieldIsArray(_)
+            )
+        }) || self
+            .trees
+            .iter()
+            .any(|tree| matches!(tree, Tree::SwitchField(..)))
+    }
+
     pub(crate) fn value_clauses(&self, clauses: Clauses) -> &[(LiteralTag, Clause<A>)] {
         &self.value_clauses[clauses.range()]
     }
@@ -161,6 +189,18 @@ impl<A> Plan<A> {
         self.add_tree(Tree::SwitchValue(Clauses { start, len }, default))
     }
 
+    fn switch_field(
+        &mut self,
+        field: String,
+        clauses: Vec<(LiteralTag, Clause<A>)>,
+        default: TreeId,
+    ) -> TreeId {
+        let start = self.value_clauses.len() as u32;
+        let len = clauses.len() as u32;
+        self.value_clauses.extend(clauses);
+        self.add_tree(Tree::SwitchField(field, Clauses { start, len }, default))
+    }
+
     fn switch_typeof(&mut self, clauses: Vec<(BlockType, Clause<A>)>, default: TreeId) -> TreeId {
         let start = self.typeof_clauses.len() as u32;
         let len = clauses.len() as u32;
@@ -186,8 +226,13 @@ pub(crate) struct Input<'f, A> {
     pub facts: &'f MatchingFacts,
     /// The arms of the literal cases, in the order of the match.
     pub literal_arms: Vec<(LiteralTag, A)>,
-    /// The arms of the payload cases, in the order of the match.
+    /// The arms of the payload cases, in the order of the match. With
+    /// several object cases (`facts.object_cases`), those are in
+    /// `object_arms` instead.
     pub payload_arms: Vec<(BlockType, A)>,
+    /// The arms of the object cases of a variant with several, by their
+    /// position in `facts.object_cases`.
+    pub object_arms: Vec<(usize, A)>,
     /// Every literal case has an arm.
     pub literals_complete: bool,
     /// Every payload case has an arm.
@@ -287,19 +332,25 @@ type Entry = (Option<TestId>, bool, Option<TreeId>);
 /// The payload cases, after the literals: one `switch (typeof x)` over the
 /// primitive kinds, whose default is an `if` chain over the classes
 /// (subclasses first), arrays, functions and objects.
+#[allow(clippy::too_many_arguments)]
 fn payload_part<A: Clone>(
     p: &mut Plan<A>,
     same: &impl Fn(&A, &A) -> bool,
     block_cases: &[BlockType],
+    object_cases: &[ObjectCase],
     null_guard: bool,
+    only_objects: bool,
     fallback: Option<&A>,
     has_default: bool,
     arms: &[(BlockType, A)],
+    object_arms: &[(usize, A)],
 ) -> TreeId {
-    match (arms, has_default) {
-        ([], true) => return p.add_tree(Tree::Fallback),
-        ([], false) => return p.add_tree(Tree::Skip),
-        ([(_, body)], false) => return p.add_tree(Tree::Run(body.clone())),
+    match (arms, object_arms, has_default) {
+        ([], [], true) => return p.add_tree(Tree::Fallback),
+        ([], [], false) => return p.add_tree(Tree::Skip),
+        ([(_, body)], [], false) | ([], [(_, body)], false) => {
+            return p.add_tree(Tree::Run(body.clone()));
+        }
         _ => {}
     }
     // An arm with the default's body is the default.
@@ -310,6 +361,14 @@ fn payload_part<A: Clone>(
             .cloned()
             .collect(),
         _ => arms.to_vec(),
+    };
+    let object_arms: Vec<(usize, A)> = match fallback {
+        Some(fallback) if has_default => object_arms
+            .iter()
+            .filter(|(_, body)| !same(fallback, body))
+            .cloned()
+            .collect(),
+        _ => object_arms.to_vec(),
     };
     let all_clauses = clauses(
         p,
@@ -346,6 +405,8 @@ fn payload_part<A: Clone>(
         p.add_test(Test::Typeof(BlockType::Object))
     };
     let mut entries: Vec<Entry> = Vec::new();
+    // Tests on the fields of an object case, joined to the object check.
+    let mut field_check: Option<TestId> = None;
     for i in &instances {
         let is_class = matches!(i, Instance::Class { .. });
         match arm(&BlockType::Instance(i.clone())) {
@@ -364,8 +425,33 @@ fn payload_part<A: Clone>(
         let check = p.add_test(Test::Typeof(BlockType::Function));
         entries.push((Some(check), false, Some(body)));
     }
-    if let Some(body) = arm(&BlockType::Object) {
-        entries.push((Some(is_object), false, Some(body)));
+    if object_cases.is_empty() {
+        if let Some(body) = arm(&BlockType::Object) {
+            entries.push((Some(is_object), false, Some(body)));
+        }
+    } else if let Some(mut region) = object_region(p, same, object_cases, &object_arms, has_default) {
+        // With a default after it, `if (o) { if (t) body else default }` is
+        // `if (o && t) body`, and `if (o) { if (t) default else body }` is
+        // `if (o && !t) body`. The tests on fields are joined last, after the
+        // checks that the value is of no earlier case.
+        while has_default && let Tree::If(test, then_, else_) = *p.tree(region) {
+            let test = if matches!(p.tree(else_), Tree::Fallback) {
+                region = then_;
+                test
+            } else if matches!(p.tree(then_), Tree::Fallback) {
+                region = else_;
+                p.not(test)
+            } else {
+                break;
+            };
+            field_check = Some(match field_check {
+                Some(check) => p.and(check, test),
+                None => test,
+            });
+        }
+        // Every value is an object when every case is an object case.
+        let check = (!only_objects).then_some(is_object);
+        entries.push((check, false, Some(region)));
     }
     if let Some(body) = arm(&BlockType::Unknown) {
         entries.push((None, false, Some(body)));
@@ -385,6 +471,14 @@ fn payload_part<A: Clone>(
             check = p.and(check, not_previous);
         }
         entries.push((Some(check), is_class, body));
+    }
+    if let Some(fields) = field_check
+        && let Some((check, _, _)) = entries.last_mut()
+    {
+        *check = Some(match *check {
+            Some(check) => p.and(check, fields),
+            None => fields,
+        });
     }
     // Consecutive checks leading to the default share one `if`.
     let mut merged: Vec<Entry> = Vec::with_capacity(entries.len());
@@ -468,6 +562,180 @@ fn payload_part<A: Clone>(
     p.switch_typeof(primitive_clauses, chain)
 }
 
+/// The test of an object case: its checks joined with `&&`.
+fn object_test<A>(p: &mut Plan<A>, checks: &[FieldCheck]) -> TestId {
+    let mut tests = checks.iter().map(|check| match check {
+        FieldCheck::Present(field) => p.add_test(Test::FieldIn(field.clone())),
+        FieldCheck::Literals(field, literals) => {
+            let mut literals = literals.iter();
+            let first = literals.next().expect("a literal check has a literal");
+            let mut test = p.add_test(Test::FieldEquals(field.clone(), first.clone()));
+            for literal in literals {
+                let equals = p.add_test(Test::FieldEquals(field.clone(), literal.clone()));
+                test = p.or(test, equals);
+            }
+            test
+        }
+        FieldCheck::Kind(field, BlockType::Instance(Instance::Array(_))) => {
+            p.add_test(Test::FieldIsArray(field.clone()))
+        }
+        FieldCheck::Kind(field, kind) => p.add_test(Test::FieldTypeof(field.clone(), kind.clone())),
+    });
+    let first = tests.next().expect("an object test has a check");
+    let rest: Vec<TestId> = tests.collect();
+    rest.into_iter().fold(first, |test, next| p.and(test, next))
+}
+
+/// The dispatch among several object cases, for values that are objects
+/// and of no earlier case: the cases in the order of `cases`, each tested
+/// with its checks, the last not tested. Without a default every value is
+/// of a case with an arm, so only those are tested. `None` when no object
+/// case has an arm.
+fn object_region<A: Clone>(
+    p: &mut Plan<A>,
+    same: &impl Fn(&A, &A) -> bool,
+    cases: &[ObjectCase],
+    arms: &[(usize, A)],
+    has_default: bool,
+) -> Option<TreeId> {
+    if arms.is_empty() {
+        return None;
+    }
+    let body = |p: &mut Plan<A>, case: usize| match arms.iter().find(|(c, _)| *c == case) {
+        Some((_, body)) => p.add_tree(Tree::Run(body.clone())),
+        None => p.add_tree(Tree::Fallback),
+    };
+    let tested: Vec<usize> = (0..cases.len())
+        .filter(|case| has_default || arms.iter().any(|(c, _)| c == case))
+        .collect();
+    let (last, earlier) = tested.split_last()?;
+    if let Some(tree) = field_switch(p, same, cases, earlier, *last, &body) {
+        return Some(tree);
+    }
+    let mut tree = body(p, *last);
+    for case in earlier.iter().rev() {
+        let test = object_test(p, &cases[*case].test);
+        let then_ = body(p, *case);
+        tree = p.add_tree(Tree::If(test, then_, tree));
+    }
+    Some(tree)
+}
+
+/// The only literals a case's field can be, if its type is a set of them.
+fn field_literals<'c>(case: &'c ObjectCase, field: &str) -> Option<&'c [LiteralTag]> {
+    case.literals
+        .iter()
+        .find_map(|(f, literals)| (f == field).then_some(&literals[..]))
+}
+
+/// The fewest distinct literals of one field that make a `switch` on it.
+const FIELD_SWITCH_MIN_LITERALS: usize = 4;
+
+/// The object cases told apart mostly by the literals of one field, as a
+/// `switch (x.f)`: the field whose type is a set of literals in the most of
+/// the tested cases (the first one on a tie), when they have at least
+/// [`FIELD_SWITCH_MIN_LITERALS`] distinct literals on it. The `case L:` arm
+/// tests, in their order, the cases whose literals on `f` include `L` and the
+/// cases whose `f` is not a set of literals, each without a literal check on
+/// `f`; `default:` tests the latter only. Both end in the last case,
+/// untested, as the `if` chain does. Skipping a case is safe: its values
+/// cannot reach the arm, and the value of a later case fails its test
+/// anyway.
+fn field_switch<A: Clone>(
+    p: &mut Plan<A>,
+    same: &impl Fn(&A, &A) -> bool,
+    cases: &[ObjectCase],
+    earlier: &[usize],
+    last: usize,
+    body: &impl Fn(&mut Plan<A>, usize) -> TreeId,
+) -> Option<TreeId> {
+    // The fields with a literal check, in the order they first appear.
+    let mut fields: Vec<(&str, usize)> = Vec::new();
+    for &case in earlier.iter().chain([&last]) {
+        for (field, _) in &cases[case].literals {
+            match fields.iter_mut().find(|(f, _)| f == field) {
+                Some((_, count)) => *count += 1,
+                None => fields.push((field, 1)),
+            }
+        }
+    }
+    let mut best: Option<(&str, usize)> = None;
+    for &(field, count) in &fields {
+        if best.is_none_or(|(_, most)| count > most) {
+            best = Some((field, count));
+        }
+    }
+    let (field, _) = best?;
+    let mut literals: Vec<LiteralTag> = Vec::new();
+    for &case in earlier.iter().chain([&last]) {
+        for literal in field_literals(&cases[case], field).unwrap_or(&[]) {
+            if !literals.iter().any(|known| same_literal_value(known, literal)) {
+                literals.push(literal.clone());
+            }
+        }
+    }
+    if literals.len() < FIELD_SWITCH_MIN_LITERALS {
+        return None;
+    }
+    // The cases a value can be of when `x.f` is `literal` (`None`: none of
+    // the literals), as an `if` chain ending in the last case.
+    let chain = |p: &mut Plan<A>, literal: Option<&LiteralTag>| {
+        let mut tree = body(p, last);
+        for &case in earlier.iter().rev() {
+            let own = field_literals(&cases[case], field);
+            let reachable = match (own, literal) {
+                (None, _) => true,
+                (Some(own), Some(literal)) => own.iter().any(|l| same_literal_value(l, literal)),
+                (Some(_), None) => false,
+            };
+            if !reachable {
+                continue;
+            }
+            let rest: Vec<FieldCheck> = cases[case]
+                .test
+                .iter()
+                .filter(|check| !matches!(check, FieldCheck::Literals(f, _) if f == field))
+                .cloned()
+                .collect();
+            let then_ = body(p, case);
+            tree = if rest.is_empty() {
+                then_
+            } else {
+                let test = object_test(p, &rest);
+                p.add_tree(Tree::If(test, then_, tree))
+            };
+        }
+        tree
+    };
+    let arms: Vec<(LiteralTag, TreeId)> = literals
+        .iter()
+        .map(|literal| (literal.clone(), chain(p, Some(literal))))
+        .collect();
+    let default = chain(p, None);
+    let clauses = field_clauses(p, same, arms);
+    Some(p.switch_field(field.to_string(), clauses, default))
+}
+
+/// Consecutive arms that run the same share one body, the earlier ones
+/// falling through to it.
+fn field_clauses<A: Clone>(
+    p: &Plan<A>,
+    same: &impl Fn(&A, &A) -> bool,
+    arms: Vec<(LiteralTag, TreeId)>,
+) -> Vec<(LiteralTag, Clause<A>)> {
+    let mut clauses = Vec::with_capacity(arms.len());
+    for (index, (literal, tree)) in arms.iter().enumerate() {
+        let shared_with_next = arms
+            .get(index + 1)
+            .is_some_and(|(_, next)| same_tree(p, same, *tree, *next));
+        clauses.push((
+            literal.clone(),
+            if shared_with_next { Clause::FallsThrough(None) } else { Clause::Body(*tree) },
+        ));
+    }
+    clauses
+}
+
 /// What constant folding knows about a constant: the JavaScript value it is
 /// emitted as.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -516,22 +784,38 @@ fn select_tree<A: Clone>(
     on_test: &mut impl FnMut(&Test),
 ) -> Outcome<A> {
     // JavaScript semantics, including the short circuits of `&&` and `||`.
-    fn holds<A>(p: &Plan<A>, test: TestId, value: &Value, on_test: &mut impl FnMut(&Test)) -> bool {
+    // `None` when the outcome depends on a field, which constant folding
+    // does not know.
+    fn holds<A>(
+        p: &Plan<A>,
+        test: TestId,
+        value: &Value,
+        on_test: &mut impl FnMut(&Test),
+    ) -> Option<bool> {
         let test = p.test(test);
         on_test(test);
-        match (test, value) {
+        Some(match (test, value) {
             (Test::Equals(literal), Value::Literal(v)) => same_literal_value(v, literal),
             (Test::Equals(_), Value::Object | Value::Array) => false,
             (Test::Typeof(kind), _) => kind_of(value).as_ref() == Some(kind),
             (Test::Instance(Instance::Array(_)), _) => *value == Value::Array,
             (Test::Instance(Instance::Class { .. }), _) => false,
             (Test::NotNull, _) => *value != Value::Literal(LiteralTag::Null),
-            (Test::Not(test), _) => !holds(p, *test, value, on_test),
+            (
+                Test::FieldIn(_)
+                | Test::FieldEquals(..)
+                | Test::FieldTypeof(..)
+                | Test::FieldIsArray(_),
+                _,
+            ) => return None,
+            (Test::Not(test), _) => !holds(p, *test, value, on_test)?,
             (Test::And(t1, t2), _) => {
-                holds(p, *t1, value, on_test) && holds(p, *t2, value, on_test)
+                holds(p, *t1, value, on_test)? && holds(p, *t2, value, on_test)?
             }
-            (Test::Or(t1, t2), _) => holds(p, *t1, value, on_test) || holds(p, *t2, value, on_test),
-        }
+            (Test::Or(t1, t2), _) => {
+                holds(p, *t1, value, on_test)? || holds(p, *t2, value, on_test)?
+            }
+        })
     }
     fn from_clauses<K, A: Clone>(
         p: &Plan<A>,
@@ -564,13 +848,13 @@ fn select_tree<A: Clone>(
             Tree::Run(body) => Outcome::Arm(body.clone()),
             Tree::Fallback => Outcome::Default,
             Tree::Skip => Outcome::Nothing,
-            Tree::If(test, then_, else_) => {
-                if holds(p, *test, value, on_test) {
-                    run(p, *then_, value, on_test)
-                } else {
-                    run(p, *else_, value, on_test)
-                }
-            }
+            Tree::If(test, then_, else_) => match holds(p, *test, value, on_test) {
+                // Constant folding does not know the fields of a constant: the
+                // dispatch stays.
+                None => Outcome::Nothing,
+                Some(true) => run(p, *then_, value, on_test),
+                Some(false) => run(p, *else_, value, on_test),
+            },
             Tree::Block(tree) => run(p, *tree, value, on_test),
             Tree::SwitchValue(clauses, default) => match value {
                 Value::Literal(v) => from_clauses(
@@ -583,6 +867,8 @@ fn select_tree<A: Clone>(
                 ),
                 Value::Object | Value::Array => run(p, *default, value, on_test),
             },
+            // Constant folding does not know the fields of a constant.
+            Tree::SwitchField(..) => Outcome::Nothing,
             Tree::SwitchTypeof(clauses, default) => match kind_of(value) {
                 Some(kind) => from_clauses(
                     p,
@@ -612,6 +898,11 @@ fn same_tree<A>(p: &Plan<A>, same: &impl Fn(&A, &A) -> bool, tree1: TreeId, tree
         (Tree::Block(t1), Tree::Block(t2)) => same_tree(p, same, *t1, *t2),
         (Tree::SwitchValue(c1, d1), Tree::SwitchValue(c2, d2)) => {
             same_clauses(p, same, p.value_clauses(*c1), p.value_clauses(*c2))
+                && same_tree(p, same, *d1, *d2)
+        }
+        (Tree::SwitchField(f1, c1, d1), Tree::SwitchField(f2, c2, d2)) => {
+            f1 == f2
+                && same_clauses(p, same, p.value_clauses(*c1), p.value_clauses(*c2))
                 && same_tree(p, same, *d1, *d2)
         }
         (Tree::SwitchTypeof(c1, d1), Tree::SwitchTypeof(c2, d2)) => {
@@ -668,6 +959,16 @@ fn simplify<A: Clone>(p: &mut Plan<A>, same: &impl Fn(&A, &A) -> bool, tree: Tre
                 p.switch_value(clauses, default)
             }
         }
+        Tree::SwitchField(field, clauses, default) => {
+            let default = simplify(p, same, default);
+            let clauses = p.value_clauses(clauses).to_vec();
+            let clauses = simplify_clauses(p, same, default, clauses);
+            if clauses.is_empty() {
+                default
+            } else {
+                p.switch_field(field, clauses, default)
+            }
+        }
         Tree::SwitchTypeof(clauses, default) => {
             let default = simplify(p, same, default);
             let clauses = p.typeof_clauses(clauses).to_vec();
@@ -722,6 +1023,103 @@ fn simplify_clauses<K, A: Clone>(
 
 /// untagged_dispatch.ml `plan`; `same` tells two bodies that are one body
 /// apart.
+/// A match on a tagged variant where some cases share a tag.
+pub(crate) struct SharedTagInput<'f, A> {
+    pub facts: &'f MatchingFacts,
+    /// The arms of the literal cases, in the order of the match.
+    pub literal_arms: Vec<(LiteralTag, A)>,
+    /// The arms of the cases with a payload: the case's tag and name.
+    pub block_arms: Vec<(LiteralTag, crate::name::Name, A)>,
+    pub literals_complete: bool,
+    pub blocks_complete: bool,
+    pub fallback: Option<A>,
+}
+
+/// The dispatch of a tagged variant whose cases share tags: `switch (x.tag)`
+/// with a `case` per tag, and in the arm of a shared tag the tests of its
+/// cases on their other fields, in the stored order, the last untested
+/// ([`object_region`]). Literal cases are told apart first, as for any
+/// tagged variant: what is not an object is a literal.
+pub(crate) fn shared_tag_plan<A: Clone>(
+    same: impl Fn(&A, &A) -> bool,
+    input: SharedTagInput<'_, A>,
+) -> Plan<A> {
+    let SharedTagInput {
+        facts,
+        literal_arms,
+        block_arms,
+        literals_complete,
+        blocks_complete,
+        fallback,
+    } = input;
+    let same = &same;
+    let mut p = Plan::new();
+    let default = |p: &mut Plan<A>, complete: bool| {
+        p.add_tree(if !complete && fallback.is_some() {
+            Tree::Fallback
+        } else {
+            Tree::Skip
+        })
+    };
+    let blocks_default = !blocks_complete && fallback.is_some();
+    // The tags in the order of their first arm.
+    let mut tags: Vec<&LiteralTag> = Vec::new();
+    for (literal, _, _) in &block_arms {
+        if !tags.iter().any(|known| same_literal_value(known, literal)) {
+            tags.push(literal);
+        }
+    }
+    let mut arms: Vec<(LiteralTag, TreeId)> = Vec::with_capacity(tags.len());
+    for literal in tags {
+        let of_tag = block_arms
+            .iter()
+            .filter(|(other, _, _)| same_literal_value(other, literal));
+        let tree = match facts.shared_tag(literal) {
+            Some(shared) => {
+                let case_arms: Vec<(usize, A)> = of_tag
+                    .filter_map(|(_, name, action)| {
+                        let position = shared.cases.iter().position(|case| case.name == *name)?;
+                        Some((position, action.clone()))
+                    })
+                    .collect();
+                object_region(&mut p, same, &shared.cases, &case_arms, blocks_default)
+                    .expect("a shared tag with an arm")
+            }
+            None => {
+                let (_, _, action) = of_tag.last().expect("a tag with an arm");
+                p.add_tree(Tree::Run(action.clone()))
+            }
+        };
+        arms.push((literal.clone(), tree));
+    }
+    let clauses = field_clauses(&p, same, arms);
+    let blocks_default = default(&mut p, blocks_complete);
+    let tag_name = facts.tag_name.clone().unwrap_or_else(|| "TAG".to_string());
+    let payload = p.switch_field(tag_name, clauses, blocks_default);
+    p.root = if facts.literal_tags.is_empty() {
+        payload
+    } else {
+        let literal_clauses: Vec<(LiteralTag, Clause<A>)> = literal_arms
+            .iter()
+            .map(|(literal, action)| (literal.clone(), Clause::Body(p.add_tree(Tree::Run(action.clone())))))
+            .collect();
+        let literals_default = default(&mut p, literals_complete);
+        let literals = p.switch_value(literal_clauses, literals_default);
+        // `typeof null` is "object".
+        let typeof_object = p.add_test(Test::Typeof(BlockType::Object));
+        let is_object = if facts.literal_tags.contains(&LiteralTag::Null) {
+            let not_null = p.add_test(Test::NotNull);
+            p.and(typeof_object, not_null)
+        } else {
+            typeof_object
+        };
+        p.add_tree(Tree::If(is_object, payload, literals))
+    };
+    let root = p.root;
+    p.root = simplify(&mut p, same, root);
+    p
+}
+
 pub(crate) fn plan<A: Clone>(same: impl Fn(&A, &A) -> bool, input: Input<'_, A>) -> Plan<A> {
     let mut p = Plan::new();
     p.root = plan_tree(&mut p, &same, input);
@@ -737,11 +1135,13 @@ fn plan_tree<A: Clone>(
         facts,
         literal_arms,
         payload_arms,
+        object_arms,
         literals_complete,
         payloads_complete,
         fallback,
     } = input;
     let block_cases = &facts.block_types[..];
+    let object_cases = &facts.object_cases[..];
     let literal_cases = &facts.literal_tags[..];
     let literal_default = if literals_complete {
         None
@@ -749,15 +1149,23 @@ fn plan_tree<A: Clone>(
         fallback.as_ref()
     };
     let mut payload_has_default = !payloads_complete && fallback.is_some();
+    // Every value is an object: no literal case, and no payload of another
+    // kind.
+    let only_objects = literal_cases.is_empty()
+        && !object_cases.is_empty()
+        && block_cases.iter().all(|kind| *kind == BlockType::Object);
     if literals_complete && literal_arms.is_empty() {
         let payload = payload_part(
             p,
             same,
             block_cases,
+            object_cases,
             false,
+            only_objects,
             fallback.as_ref(),
             payload_has_default,
             &payload_arms,
+            &object_arms,
         );
         return simplify(p, same, payload);
     }
@@ -776,10 +1184,13 @@ fn plan_tree<A: Clone>(
             p,
             same,
             block_cases,
+            object_cases,
             unnamed.iter().any(|l| **l == LiteralTag::Null),
+            only_objects,
             fallback.as_ref(),
             true,
             &payload_arms,
+            &object_arms,
         )
     });
     let skips_the_switch = |p: &Plan<A>, literal: &LiteralTag| -> bool {
@@ -822,10 +1233,13 @@ fn plan_tree<A: Clone>(
         p,
         same,
         block_cases,
+        object_cases,
         null_guard,
+        only_objects,
         fallback.as_ref(),
         payload_has_default,
         &payload_arms,
+        &object_arms,
     );
     let payload = simplify(p, same, payload);
     // A payload dispatch that runs one body unchecked takes the literals with
@@ -882,6 +1296,12 @@ mod tests {
             }
             Test::Instance(instance) => format!("x instanceof {}", instance.as_str()),
             Test::NotNull => "x !== null".to_string(),
+            Test::FieldIn(field) => format!("\"{field}\" in x"),
+            Test::FieldEquals(field, literal) => format!("x.{field} === {}", literal.value_key()),
+            Test::FieldTypeof(field, kind) => {
+                format!("typeof x.{field} === {}", kind.typeof_name().unwrap_or("?"))
+            }
+            Test::FieldIsArray(field) => format!("Array.isArray(x.{field})"),
             Test::Not(test) => format!("!({})", test_to_string(p, *test)),
             Test::And(t1, t2) => {
                 format!("({} && {})", test_to_string(p, *t1), test_to_string(p, *t2))
@@ -906,6 +1326,18 @@ mod tests {
             Tree::Block(tree) => format!("{{{}}}", tree_to_string(p, *tree)),
             Tree::SwitchValue(clauses, default) => format!(
                 "switch (x) {{{}default: {}}}",
+                p.value_clauses(*clauses)
+                    .iter()
+                    .map(|(literal, clause)| format!(
+                        "{}: {}; ",
+                        literal.value_key(),
+                        clause_to_string(p, clause)
+                    ))
+                    .collect::<String>(),
+                tree_to_string(p, *default)
+            ),
+            Tree::SwitchField(field, clauses, default) => format!(
+                "switch (x.{field}) {{{}default: {}}}",
                 p.value_clauses(*clauses)
                     .iter()
                     .map(|(literal, clause)| format!(
@@ -963,6 +1395,8 @@ mod tests {
             tag_name: None,
             block_types: kinds.clone(),
             literal_tags: literals.clone(),
+            object_cases: Vec::new(),
+            shared_tags: Vec::new(),
         };
         plan(
             |a: &&str, b: &&str| a == b,
@@ -972,6 +1406,7 @@ mod tests {
                 payloads_complete: payload_arms.len() == kinds.len(),
                 literal_arms,
                 payload_arms,
+                object_arms: Vec::new(),
                 fallback,
             },
         )

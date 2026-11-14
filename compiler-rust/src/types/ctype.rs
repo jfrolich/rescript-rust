@@ -5926,6 +5926,20 @@ fn can_try_coerce_polyvariant_to_variant(
     )
 }
 
+/// Whether `t1` and `t2` are declared classes (`@instanceOf`) and the class
+/// of `t1` has the class of `t2` among its ancestors.
+fn is_declared_subclass(ctx: &TypeContext, env: &Env, t1: TypeExprRef, t2: TypeExprRef) -> bool {
+    use crate::types::variant_runtime::BlockType;
+    let class = |t| match crate::types::variant_layout::recognized_as(ctx, env, t) {
+        Some(BlockType::Instance(class)) => Some(class),
+        _ => None,
+    };
+    match (class(t1), class(t2)) {
+        (Some(sub), Some(sup)) => sub.is_subclass(&sup),
+        _ => false,
+    }
+}
+
 /// OCaml `coerces_into_private_type env t1 t2` (ctype.ml:3504-3516):
 /// whether `t2` is a private record or variant that `t1`, another type,
 /// would be coerced into.
@@ -5945,7 +5959,10 @@ fn coerces_into_private_type(
                 ) =>
         {
             match extract_concrete_typedecl(ctx, env, t1) {
-                Some((p1, _, _)) => !p1.same(&p2),
+                // A record declared a subclass of the private record with
+                // `@extends` is an instance of it: the fields are compared
+                // as for any record coercion.
+                Some((p1, _, _)) => !p1.same(&p2) && !is_declared_subclass(ctx, env, t1, t2),
                 None => true,
             }
         }

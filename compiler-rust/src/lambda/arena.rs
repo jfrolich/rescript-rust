@@ -1690,6 +1690,7 @@ impl LamArena {
                                 SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(candidate)),
                                 Some(runtime)
                             ) if crate::lambda::same_block_runtime(runtime, candidate)
+                                && crate::lambda::same_shared_case(&payload.dispatch, runtime, candidate)
                         )
                     })
                     .map(|i| acts.blocks[i])

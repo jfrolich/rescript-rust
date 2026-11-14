@@ -2,4 +2,4 @@
 @unboxed
 type t =
   | A({x: int})
-  | B({y: int})
+  | B({x: int})

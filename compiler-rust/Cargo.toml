@@ -46,6 +46,9 @@ oxc_codegen = "=0.158.0"
 oxc_syntax = "=0.158.0"
 oxc_ast_visit = "=0.158.0"
 
+# `%ts` imports: types from the TypeScript checker (tsrs)
+rescript-ts-import = { path = "../ts-import", optional = true }
+
 [dev-dependencies]
 allocation-counter = "0.8.1"
 js-reformat = { path = "../scripts/js-reformat" }
@@ -56,9 +59,12 @@ insta = { version = "1.40", features = ["json"] }
 tempfile = "3"
 
 [features]
-default = ["native"]
+default = ["native", "ts-import"]
 native = ["clap"]
 wasm = []
+# Typed imports from TypeScript (src/ts_import.rs). Links tsrs, the Rust port
+# of the TypeScript compiler; without it `%ts` is an unknown extension.
+ts-import = ["dep:rescript-ts-import"]
 # Explicit opt-in for end-to-end tests; absent from shipping builds.
 test-hooks = []
 

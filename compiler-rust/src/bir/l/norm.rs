@@ -798,7 +798,8 @@ pub(crate) fn decide_switch_on(
                 .position(|key| {
                     matches!((key, runtime.as_ref()),
                         (SwitchKey::Constructor(Case::Block(candidate)), Some(runtime))
-                            if crate::lambda::same_block_runtime(runtime, candidate))
+                            if crate::lambda::same_block_runtime(runtime, candidate)
+                                && crate::lambda::same_shared_case(&h.dispatch, runtime, candidate))
                 })
                 .map(|i| blocks[i])
                 .or(fail)
@@ -1537,6 +1538,8 @@ mod tests {
             tag_name: None,
             block_types: vec![VariantBlockType::String, VariantBlockType::Number],
             literal_tags: vec![VariantLiteralTag::Undefined],
+            object_cases: Vec::new(),
+            shared_tags: Vec::new(),
         });
         let g = if same_bodies { "f" } else { "g" };
         let actions = [

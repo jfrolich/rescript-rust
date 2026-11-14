@@ -758,6 +758,9 @@ impl ProbeRules for State {
             View::Switch { scrutinee, header, .. } => {
                 let operands = self.source.node(node).switch_actions();
                 if matches!(self.arena.switch(header).dispatch, crate::lambda::SwitchDispatch::Variant(_)) {
+                    if variant::shares_a_tag(self.arena.switch(header)) {
+                        return Err(Unsupported("variant cases that share a tag"));
+                    }
                     if variant::is_untagged(self.arena.switch(header)) {
                         return Ok(ProbePlan::Children(expr::Resume::Untagged(self.untagged_switch(cx, scrutinee, operands, header)?)));
                     }

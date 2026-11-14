@@ -921,7 +921,8 @@ decode!(
         BinOp::Div,
         BinOp::Mod,
         BinOp::Pow,
-        BinOp::InstanceOf
+        BinOp::InstanceOf,
+        BinOp::In
     ]
 );
 decode!(

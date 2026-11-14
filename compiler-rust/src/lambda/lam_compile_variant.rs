@@ -82,6 +82,9 @@ fn untagged_switch<'k>(
     let SwitchDispatch::Variant(facts) = dispatch else {
         return false;
     };
+    if crate::lambda::shares_a_tag(dispatch, block_keys.by_ref()) {
+        return true;
+    }
     !facts.block_types.is_empty()
         && ((consts_full && const_keys.len() == 0) || !(blocks_full && block_keys.len() == 0))
         && const_keys.all(|key| {
@@ -218,9 +221,21 @@ where
 
 impl LambdaCompiler {
     fn class_constructor(&mut self, name: &str) -> Expr {
-        let mut parts = name.split('.');
-        let global = parts.next().expect("class path has global");
-        let mut expr = JE::var(Ident::create_persistent(global), &mut self.j);
+        let (path, module) = crate::types::variant_runtime::split_class_name(name);
+        let mut parts = path.split('.');
+        let first = parts.next().expect("class path has global");
+        let mut expr = match module {
+            // The export of the module, imported like a `@module` external.
+            Some(module) => {
+                let module = crate::types::external_ffi_types::ExternalModuleName {
+                    bundle: module.to_string(),
+                    module_bind_name: crate::types::external_ffi_types::ModuleBindName::PhintNothing,
+                    import_attributes: None,
+                };
+                self.translate_scoped_module_value(Some(&module), first, &[])
+            }
+            None => JE::var(Ident::create_persistent(first), &mut self.j),
+        };
         for property in parts {
             expr = self.static_index(expr, property);
         }
@@ -299,6 +314,26 @@ impl LambdaCompiler {
                 let test = self.is_null_expr(scrut);
                 JE::not(test, &mut self.j)
             }
+            UntaggedTest::FieldIn(field) => {
+                let name = JE::string(field, &mut self.j);
+                JE::bin(BinOp::In, name, scrut, &mut self.j)
+            }
+            UntaggedTest::FieldEquals(field, literal) => {
+                let value = self.static_index(scrut, field);
+                let literal = self.switch_case_expr(&Self::literal_tag_value(literal));
+                JE::bin(BinOp::EqEqEq, value, literal, &mut self.j)
+            }
+            UntaggedTest::FieldTypeof(field, kind) => {
+                let value = self.static_index(scrut, field);
+                self.untagged_typeof_expr(value, kind)
+            }
+            UntaggedTest::FieldIsArray(field) => {
+                let value = self.static_index(scrut, field);
+                let array = crate::types::VariantInstance::Array(
+                    crate::types::ShapeAllocation::TUPLE_ARRAY,
+                );
+                self.is_instance_of(&array, value)
+            }
             UntaggedTest::Not(test) => {
                 let test = self.untagged_test_expr(plan, scrut, *test);
                 JE::not(test, &mut self.j)
@@ -368,6 +403,20 @@ impl LambdaCompiler {
                     .collect();
                 vec![JS::string_switch(emit.scrut, clauses, default, &mut this.j)]
             }),
+            Tree::SwitchField(field, clauses, default) => self.with_switch_depth(|this| {
+                let default = this.emit_untagged_tree(a, emit, tail_loop, *default);
+                let default = (!default.is_empty()).then(|| this.j.stmt_list(&default));
+                let clauses = plan
+                    .value_clauses(*clauses)
+                    .iter()
+                    .map(|(literal, clause)| StringClauseInfo {
+                        tag_type: Self::literal_tag_value(literal),
+                        clause: this.emit_untagged_tree_clause(a, emit, tail_loop, clause),
+                    })
+                    .collect();
+                let scrut = this.static_index(emit.scrut, field);
+                vec![JS::string_switch(scrut, clauses, default, &mut this.j)]
+            }),
             Tree::SwitchTypeof(clauses, default)
                 if clauses.len() == 1
                     && matches!(plan.typeof_clauses(*clauses)[0].1, UntaggedClause::Body(_)) =>
@@ -394,6 +443,30 @@ impl LambdaCompiler {
                 let default = this.j.stmt_list(&default);
                 vec![JS::string_switch(expr, clauses, Some(default), &mut this.j)]
             }),
+        }
+    }
+
+    /// A case of a `switch` on a field, whose body may be any tree.
+    fn emit_untagged_tree_clause(
+        &mut self,
+        a: &mut LamArena,
+        emit: &mut UntaggedEmit<'_, '_>,
+        tail_loop: &mut TailLoop<'_>,
+        clause: &UntaggedClause<Lam>,
+    ) -> Clause {
+        match clause {
+            UntaggedClause::Body(body)
+                if !matches!(emit.plan.tree(*body), Tree::Run(_) | Tree::Fallback) =>
+            {
+                let block = self.emit_untagged_tree(a, emit, tail_loop, *body);
+                Clause {
+                    should_break: !block_last_is_return_throw_or_continue(&self.j, &block),
+                    body: self.j.stmt_list(&block),
+                    source_loc: None,
+                    comment: None,
+                }
+            }
+            clause => self.emit_untagged_clause(a, emit, tail_loop, clause),
         }
     }
 

@@ -633,6 +633,7 @@ impl<'a, 'r> Build<'a, 'r> {
             BinOp::Mod => B::Remainder,
             BinOp::Pow => B::Exponential,
             BinOp::InstanceOf => B::Instanceof,
+            BinOp::In => B::In,
             BinOp::And | BinOp::Or | BinOp::Bor => unreachable!(),
         };
         Ok(self.binary(operator, self.high_expr(l)?, self.high_expr(r)?))

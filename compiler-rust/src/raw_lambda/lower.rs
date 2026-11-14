@@ -1500,6 +1500,8 @@ mod tests {
                             literal_tags: vec![crate::types::VariantLiteralTag::String(
                                 "A".to_string().clone(),
                             )],
+                            object_cases: Vec::new(),
+                            shared_tags: Vec::new(),
                         },
                     ),
                 },
@@ -1590,6 +1592,8 @@ mod tests {
                                 crate::types::VariantLiteralTag::String("B".to_string().clone()),
                                 crate::types::VariantLiteralTag::String("A".to_string().clone()),
                             ],
+                            object_cases: Vec::new(),
+                            shared_tags: Vec::new(),
                         },
                     ),
                 },

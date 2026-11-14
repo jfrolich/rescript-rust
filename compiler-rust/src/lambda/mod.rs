@@ -257,6 +257,17 @@ pub(crate) fn untagged_plan_with<'s, A: Clone>(
     let SwitchDispatch::Variant(facts) = sw_dispatch else {
         return None;
     };
+    if shares_a_tag(sw_dispatch, sw_blocks.iter().map(|(key, _)| key)) {
+        return shared_tag_plan(
+            sw_consts_full,
+            sw_consts,
+            sw_blocks_full,
+            sw_blocks,
+            sw_failaction,
+            facts,
+            same,
+        );
+    }
     if facts.block_types.is_empty()
         || !((sw_consts_full && sw_consts.is_empty()) || !(sw_blocks_full && sw_blocks.is_empty()))
     {
@@ -272,23 +283,105 @@ pub(crate) fn untagged_plan_with<'s, A: Clone>(
             | SwitchKey::Int(_) => None,
         })
         .collect::<Option<Vec<_>>>()?;
-    let payload_arms = sw_blocks
+    // The declaration stored the order of its object cases; without it the
+    // arms of several object cases would share one `typeof` test.
+    let objects = facts
+        .block_types
         .iter()
-        .map(|(key, action)| match key {
-            SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
-                crate::types::VariantBlock::Untagged { block_type, .. },
-            )) => Some((block_type.clone(), action.clone())),
-            _ => None,
-        })
-        .collect::<Option<Vec<_>>>()?;
+        .filter(|kind| **kind == crate::types::VariantBlockType::Object)
+        .count();
+    assert!(
+        objects < 2 || facts.object_cases.len() == objects,
+        "untagged variant with {objects} object cases and no stored order"
+    );
+    let mut payload_arms = Vec::with_capacity(sw_blocks.len());
+    let mut object_arms = Vec::new();
+    for (key, action) in sw_blocks {
+        let SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
+            crate::types::VariantBlock::Untagged { tag, block_type },
+        )) = key
+        else {
+            return None;
+        };
+        // An object case of a variant with several is told apart by its
+        // fields.
+        match facts.object_cases.iter().position(|case| case.name == tag.name) {
+            Some(position) if *block_type == crate::types::VariantBlockType::Object => {
+                object_arms.push((position, action.clone()));
+            }
+            _ => payload_arms.push((block_type.clone(), action.clone())),
+        }
+    }
     Some(untagged_dispatch::plan(
         same,
         untagged_dispatch::Input {
             facts,
             literal_arms,
             payload_arms,
+            object_arms,
             literals_complete: sw_consts_full,
             payloads_complete: sw_blocks_full,
+            fallback: sw_failaction,
+        },
+    ))
+}
+
+/// Whether a switch on a tagged variant has an arm for a case whose tag
+/// other cases share, so that the tag alone does not choose the arm.
+pub(crate) fn shares_a_tag<'k>(
+    dispatch: &SwitchDispatch,
+    mut block_keys: impl Iterator<Item = &'k SwitchKey>,
+) -> bool {
+    let SwitchDispatch::Variant(facts) = dispatch else {
+        return false;
+    };
+    !facts.shared_tags.is_empty()
+        && block_keys.any(|key| match key {
+            SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
+                crate::types::VariantBlock::Tagged(block),
+            )) => facts
+                .shared_tag(&block.tag.literal)
+                .is_some_and(|shared| shared.cases.iter().any(|case| case.name == block.tag.name)),
+            _ => false,
+        })
+}
+
+/// [`untagged_plan_with`] for a tagged variant whose cases share tags.
+fn shared_tag_plan<A: Clone>(
+    sw_consts_full: bool,
+    sw_consts: &[(SwitchKey, A)],
+    sw_blocks_full: bool,
+    sw_blocks: &[(SwitchKey, A)],
+    sw_failaction: Option<A>,
+    facts: &crate::types::VariantMatchingFacts,
+    same: impl Fn(&A, &A) -> bool,
+) -> Option<untagged_dispatch::Plan<A>> {
+    let literal_arms = sw_consts
+        .iter()
+        .map(|(key, action)| match key {
+            SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(tag)) => {
+                Some((tag.literal.clone(), action.clone()))
+            }
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let block_arms = sw_blocks
+        .iter()
+        .map(|(key, action)| match key {
+            SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
+                crate::types::VariantBlock::Tagged(block),
+            )) => Some((block.tag.literal.clone(), block.tag.name, action.clone())),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(untagged_dispatch::shared_tag_plan(
+        same,
+        untagged_dispatch::SharedTagInput {
+            facts,
+            literal_arms,
+            block_arms,
+            literals_complete: sw_consts_full,
+            blocks_complete: sw_blocks_full,
             fallback: sw_failaction,
         },
     ))
@@ -322,6 +415,23 @@ pub(crate) fn same_block_runtime(
                 && literal_denotes_same(&block.tag.literal, &case.tag.literal)
         }
         _ => block == case,
+    }
+}
+
+/// Two blocks with a tag that several cases share are the same case only
+/// when they are the same constructor: the tag does not tell them apart.
+pub(crate) fn same_shared_case(
+    dispatch: &SwitchDispatch,
+    block: &crate::types::VariantBlock,
+    case: &crate::types::VariantBlock,
+) -> bool {
+    match (dispatch, block, case) {
+        (
+            SwitchDispatch::Variant(facts),
+            crate::types::VariantBlock::Tagged(block),
+            crate::types::VariantBlock::Tagged(case),
+        ) if facts.shared_tag(&case.tag.literal).is_some() => block.tag.name == case.tag.name,
+        _ => true,
     }
 }
 
@@ -812,6 +922,7 @@ impl Lambda {
                             SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(candidate)),
                             Some(runtime)
                         ) if same_block_runtime(runtime, candidate)
+                            && same_shared_case(&switch.sw_dispatch, runtime, candidate)
                     ))
                     .map(|(_, branch)| branch.clone());
                 action_or_switch(

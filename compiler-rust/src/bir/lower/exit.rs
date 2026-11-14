@@ -1073,6 +1073,8 @@ mod tests {
                 tag_name: None,
                 literal_tags: vec![Literal::String("A".into()), Literal::String("D".into())],
                 block_types: vec![],
+                object_cases: Vec::new(),
+                shared_tags: Vec::new(),
             }),
         );
         a.switch_raw(scrutinee, actions, info)

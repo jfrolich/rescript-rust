@@ -522,6 +522,8 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                             literal_tags: vec![crate::types::VariantLiteralTag::String(
                                 "Empty".to_string().clone(),
                             )],
+                            object_cases: Vec::new(),
+                            shared_tags: Vec::new(),
                         },
                     ),
                 }),
@@ -745,6 +747,8 @@ fn single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_
                             literal_tags: vec![crate::types::VariantLiteralTag::String(
                                 "One".to_string().clone(),
                             )],
+                            object_cases: Vec::new(),
+                            shared_tags: Vec::new(),
                         },
                     ),
                 }),
@@ -788,6 +792,8 @@ fn single_case_staticcatch_wrapped_named_variant_non_unit_return_switch_falls_th
                         literal_tags: vec![crate::types::VariantLiteralTag::String(
                             "One".to_string().clone(),
                         )],
+                        object_cases: Vec::new(),
+                        shared_tags: Vec::new(),
                     },
                 ),
             }),
@@ -851,6 +857,8 @@ fn single_case_staticcatch_wrapped_named_variant_unit_handler_falls_through_like
                             literal_tags: vec![crate::types::VariantLiteralTag::String(
                                 "One".to_string().clone(),
                             )],
+                            object_cases: Vec::new(),
+                            shared_tags: Vec::new(),
                         },
                     ),
                 }),
@@ -927,6 +935,8 @@ fn js_pipeline_keeps_single_case_staticcatch_unit_handler_as_fallthrough_guard()
                                 literal_tags: vec![crate::types::VariantLiteralTag::String(
                                     "One".to_string().clone(),
                                 )],
+                                object_cases: Vec::new(),
+                                shared_tags: Vec::new(),
                             },
                         ),
                     }),

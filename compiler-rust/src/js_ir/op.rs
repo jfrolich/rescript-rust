@@ -65,6 +65,8 @@ pub enum BinOp {
     Pow,
     /// instanceof operator
     InstanceOf,
+    /// in operator
+    In,
 }
 
 impl BinOp {
@@ -94,6 +96,7 @@ impl BinOp {
             BinOp::Mod => "%",
             BinOp::Pow => "**",
             BinOp::InstanceOf => "instanceof",
+            BinOp::In => "in",
         }
     }
 }

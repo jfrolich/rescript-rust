@@ -40,6 +40,8 @@ struct Output {
     finished: Finished,
 }
 const NONE: u32 = u32::MAX;
+/// `untagged_switch` declines a plan that tests fields before emitting it.
+const FIELD_PLAN: &str = "a plan that tests fields is not lowered";
 
 pub(super) struct Plan {
     source: NodeId,
@@ -80,17 +82,40 @@ impl State {
             unreachable!("untagged dispatch")
         };
         let facts = facts.clone();
+        // A class imported from a module is tested against that module's
+        // export (`LambdaCompiler::class_constructor`), not a global.
+        if facts.block_types.iter().any(|kind| {
+            matches!(
+                kind,
+                VariantBlockType::Instance(VariantInstance::Class { name, .. })
+                    if crate::types::variant_runtime::split_class_name(name).1.is_some()
+            )
+        }) {
+            return Err(Unsupported("class case imported from a module"));
+        }
         let mut literal_arms = Vec::with_capacity(n);
         let mut payload_arms = Vec::with_capacity(h.keys.len() - n);
+        let mut object_arms = Vec::new();
         for (i, key) in h.keys.iter().enumerate() {
             match key {
                 CaseKey::Lambda(SwitchKey::Constructor(Case::Constant(tag))) => {
                     literal_arms.push((tag.literal.clone(), i as u32))
                 }
-                CaseKey::Lambda(SwitchKey::Constructor(Case::Block(block))) => payload_arms.push((
-                    block.block_type().expect("untagged payload").clone(),
-                    i as u32,
-                )),
+                CaseKey::Lambda(SwitchKey::Constructor(Case::Block(block))) => {
+                    let kind = block.block_type().expect("untagged payload");
+                    // lambda::untagged_plan_with: an object case of a variant
+                    // with several is told apart by its fields.
+                    let object = (*kind == VariantBlockType::Object)
+                        .then(|| {
+                            let name = block.tag().name;
+                            facts.object_cases.iter().position(|case| case.name == name)
+                        })
+                        .flatten();
+                    match object {
+                        Some(position) => object_arms.push((position, i as u32)),
+                        None => payload_arms.push((kind.clone(), i as u32)),
+                    }
+                }
                 _ => unreachable!("untagged constructor key"),
             }
         }
@@ -110,11 +135,17 @@ impl State {
                 facts: &facts,
                 literal_arms,
                 payload_arms,
+                object_arms,
                 literals_complete: full.0,
                 payloads_complete: full.1,
                 fallback,
             },
         );
+        // Tests and switches on a field of the value are not emitted here
+        // yet: the unit keeps the legacy lowering.
+        if dispatch.tests_fields() {
+            return Err(Unsupported("object cases told apart by their fields"));
+        }
         let (program, actions) =
             Self::untagged_program(&dispatch, &sources, fallback, cx.switch_depth);
         let start = self.statements.mark();
@@ -238,6 +269,7 @@ impl State {
                             work.push(Work::Visit(*default, depth + 1));
                         }
                     }
+                    Tree::SwitchField(..) => unreachable!("{FIELD_PLAN}"),
                 },
             }
         }
@@ -624,6 +656,10 @@ impl State {
                         norm::je4_bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, value, null);
                     norm::je8_not(&mut self.arena, eq)
                 }
+                Test::FieldIn(_)
+                | Test::FieldEquals(..)
+                | Test::FieldTypeof(..)
+                | Test::FieldIsArray(_) => unreachable!("{FIELD_PLAN}"),
                 Test::Not(_) => norm::je8_not(&mut self.arena, values.pop().unwrap()),
                 Test::And(..) | Test::Or(..) => {
                     let r = values.pop().unwrap();
@@ -851,6 +887,8 @@ mod tests {
                                     tag_name: None,
                                     literal_tags: literals.clone(),
                                     block_types: kinds.clone(),
+                                    object_cases: Vec::new(),
+                                    shared_tags: Vec::new(),
                                 }),
                             );
                             let actions = a.add_list(&actions);
@@ -911,6 +949,8 @@ mod tests {
                     tag_name: None,
                     literal_tags: literals.to_vec(),
                     block_types: kinds.to_vec(),
+                    object_cases: Vec::new(),
+                    shared_tags: Vec::new(),
                 }),
             );
             let actions = a.add_list(&actions);
@@ -945,6 +985,8 @@ mod tests {
                 tag_name: None,
                 literal_tags: vec![],
                 block_types: vec![kind],
+                object_cases: Vec::new(),
+                shared_tags: Vec::new(),
             }),
         );
         let mut root = a.const_(C::Int {

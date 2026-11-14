@@ -182,7 +182,19 @@ impl<'src> Parser<'src> {
         // Intern the filename - this StrIdx will be shared by all positions in this file
         let filename_idx = arena.intern_string(&filename.into());
         arena.set_source_file(filename_idx);
-        let scanner = Scanner::new(filename_idx, src);
+        Self::start(arena, src)
+    }
+
+    /// A parser that adds to an arena another parse already filled, for code
+    /// generated for the same file (`%ts` imports). Take the arena back with
+    /// [`Parser::into_arena`]; positions are those of `src`, so the caller
+    /// relocates what was parsed.
+    pub fn in_arena(arena: ParseArena, src: &'src str) -> Self {
+        Self::start(arena, src)
+    }
+
+    fn start(mut arena: ParseArena, src: &'src str) -> Self {
+        let scanner = Scanner::new(arena.source_file(), src);
         // Push initial default positions to arena
         let default_pos = Position::default();
         let default_pos_idx = arena.push_position(default_pos);

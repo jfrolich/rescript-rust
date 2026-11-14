@@ -34,6 +34,22 @@ pub(super) struct Plan {
     literals: u8,
 }
 
+/// Whether the switch has an arm for a case whose tag other cases share
+/// (`lambda::shares_a_tag`). The legacy lowering plans such a switch with
+/// tests on the cases' other fields, which this lowering does not emit yet.
+/// O(keys), borrowed metadata only.
+pub(super) fn shares_a_tag(h: &SwitchHeader) -> bool {
+    crate::lambda::shares_a_tag(
+        &h.dispatch,
+        h.keys[h.constants as usize..]
+            .iter()
+            .filter_map(|key| match key {
+                CaseKey::Lambda(key) => Some(key),
+                _ => None,
+            }),
+    )
+}
+
 /// V: untagged_switch precondition. O(keys), borrowed metadata only.
 pub(super) fn is_untagged(h: &SwitchHeader) -> bool {
     let SwitchDispatch::Variant(facts) = &h.dispatch else {
@@ -531,6 +547,8 @@ mod tests {
                 tag_name: Some("kind".into()),
                 literal_tags: vec![literal, Literal::String("other".into())],
                 block_types: vec![],
+                object_cases: Vec::new(),
+                shared_tags: Vec::new(),
             }),
         );
         let root = a.switch_raw(x, actions, info);
@@ -587,6 +605,8 @@ mod tests {
                 tag_name: None,
                 literal_tags: vec![Literal::String("C".into())],
                 block_types: vec![],
+                object_cases: Vec::new(),
+                shared_tags: Vec::new(),
             };
             let mut root = a.const_(C::Int {
                 i: 42,

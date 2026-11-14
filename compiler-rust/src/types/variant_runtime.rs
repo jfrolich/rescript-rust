@@ -106,6 +106,24 @@ impl ClassBlocks {
     }
 }
 
+/// The name of a class imported from a module, as `Instance::Class` holds
+/// it: the class path, `@`, the module specifier (`Mesh@three`). A class
+/// path has no `@`, so the first one separates the two. A global class is
+/// its path alone. The module is part of the name so that two classes named
+/// alike in different modules are different classes everywhere a class is
+/// compared: cases of a variant, ancestors, interfaces.
+pub fn module_class_name(path: &str, module: &str) -> String {
+    format!("{path}@{module}")
+}
+
+/// The class path of a class name and the module it is imported from.
+pub fn split_class_name(name: &str) -> (&str, Option<&str>) {
+    match name.split_once('@') {
+        Some((path, module)) => (path, Some(module)),
+        None => (name, None),
+    }
+}
+
 impl Instance {
     /// variant_runtime.ml `Instance.to_string`.
     pub fn as_str(&self) -> &str {
@@ -659,6 +677,42 @@ pub struct Configuration {
     pub tag_name: Option<String>,
 }
 
+/// One check on a field of a plain object, by the field's JavaScript name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum FieldCheck {
+    /// `"f" in x`.
+    Present(String),
+    /// `x.f === l1 || x.f === l2 ...`.
+    Literals(String, Vec<LiteralTag>),
+    /// `typeof x.f === "k"`, or `Array.isArray(x.f)` for arrays.
+    Kind(String, BlockType),
+}
+
+impl FieldCheck {
+    /// The JavaScript name of the field checked.
+    pub fn field(&self) -> &str {
+        match self {
+            FieldCheck::Present(field)
+            | FieldCheck::Literals(field, _)
+            | FieldCheck::Kind(field, _) => field,
+        }
+    }
+}
+
+/// An object case of an untagged variant with several, in the order it is
+/// tested: the case and the checks, joined with `&&`, that its values pass
+/// and the values of every later case fail. The last case has no checks.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ObjectCase {
+    /// The constructor's name.
+    pub name: crate::name::Name,
+    /// The test, empty for the last case.
+    pub test: Vec<FieldCheck>,
+    /// The required fields whose type is a set of literals, with the
+    /// literals, in field order: what a `switch` on a field reads.
+    pub literals: Vec<(String, Vec<LiteralTag>)>,
+}
+
 /// OCaml `Variant_runtime.matching_facts`: declaration-level facts needed
 /// when lowering a constructor match.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -670,6 +724,34 @@ pub struct MatchingFacts {
     pub block_types: Vec<BlockType>,
     /// Runtime values of all nullary constructors, in declaration order.
     pub literal_tags: Vec<LiteralTag>,
+    /// For an untagged variant with several object cases, the order they are
+    /// tested in. Empty otherwise, and in a declaration's layout: the match
+    /// derives it from the declaration (`variant_layout::object_case_order`).
+    pub object_cases: Vec<ObjectCase>,
+    /// For a tagged variant, the tags that several cases share, each with
+    /// the order its cases are tested in on their other fields. Empty when
+    /// no tag is shared.
+    pub shared_tags: Vec<SharedTag>,
+}
+
+/// A tag several cases of a tagged variant share: the cases, each an inline
+/// record, in the order they are tested in by their fields other than the
+/// tag (as [`ObjectCase`]s), the last untested.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct SharedTag {
+    /// The tag's value.
+    pub literal: LiteralTag,
+    /// The cases with this tag, in the order they are tested in.
+    pub cases: Vec<ObjectCase>,
+}
+
+impl MatchingFacts {
+    /// The cases that share the tag `literal`, if several do.
+    pub fn shared_tag(&self, literal: &LiteralTag) -> Option<&SharedTag> {
+        self.shared_tags
+            .iter()
+            .find(|shared| same_literal_value(&shared.literal, literal))
+    }
 }
 
 /// OCaml `Variant_runtime.layout`: the completed runtime representation of
@@ -795,6 +877,8 @@ impl Layout {
                 tag_name: configuration.tag_name,
                 block_types,
                 literal_tags,
+                object_cases: Vec::new(),
+                shared_tags: Vec::new(),
             },
         }
     }
@@ -1038,6 +1122,8 @@ mod shape_import_tests {
                 tag_name: None,
                 block_types: vec![class("A", a.clone())],
                 literal_tags: Vec::new(),
+                object_cases: Vec::new(),
+                shared_tags: Vec::new(),
             },
         };
         let original = shapes.clone();
