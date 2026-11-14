@@ -610,7 +610,6 @@ fn explain_mode_keeps_the_trace_and_undoes_compression() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "R3b build"]
 fn expansion_is_memorized_per_node_and_per_nullary_type() {
     let mut c = checker(Mode::Success);
     // Nullary: every node of the type shares one expansion while the memo

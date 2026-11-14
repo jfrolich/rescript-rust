@@ -15,7 +15,7 @@
 //! (`simple_abbrevs`, compiler/ml/ctype.ml:197-202), and slot 0 of a nullary
 //! node stays `NONE`.
 
-use super::graph::{NONE, Node, Ty};
+use super::graph::{CONSTR, GENERIC, NONE, Node, Ty, VAR};
 use super::segment::{DeclarationKind, PathRow, Segment, SignatureKind};
 use super::template::Template;
 use super::unify::{Checker, Clash};
@@ -240,7 +240,9 @@ pub struct Memo {
     /// lookup at all ([`Checker::instance`]).
     pub live: u32,
     /// Constructor nodes whose slot 0 was written since the last cleanup
-    /// (`Btype.memo`, compiler/ml/btype.ml:621).
+    /// (`Btype.memo`, compiler/ml/btype.ml:621), each held as the index of
+    /// that slot 0 in the list pool: a node linked since then no longer
+    /// holds its list, and a restore can bring the old descriptor back.
     pub memorized: Vec<Ty>,
     /// The scope of the last expansion (`previous_env`,
     /// compiler/ml/ctype.ml:1163).
@@ -282,7 +284,10 @@ impl Checker {
     /// [`Checker::cleanup_abbrev`]. `check_abbrev_env`,
     /// compiler/ml/ctype.ml:1163. (R3b)
     pub fn set_env(&mut self, env: u32) {
-        todo!("R3b")
+        if env != self.memo.env {
+            self.cleanup_abbrev();
+            self.memo.env = env;
+        }
     }
 
     /// O(slot-0 memos written since the last cleanup): clear each, drop the
@@ -290,7 +295,18 @@ impl Checker {
     /// `Btype.cleanup_abbrev`, compiler/ml/btype.ml:623. Not logged in the
     /// trail: a restore runs a cleanup (compiler/ml/btype.ml:779). (R3b)
     pub fn cleanup_abbrev(&mut self) {
-        todo!("R3b")
+        for &slot in &self.memo.memorized {
+            #[cfg(test)]
+            super::steps::tick();
+            self.g.lists[slot.0 as usize] = Ty(NONE);
+        }
+        self.memo.memorized.clear();
+        self.memo.generation = self
+            .memo
+            .generation
+            .checked_add(1)
+            .expect("memo generation exhausted");
+        self.memo.live = 0;
     }
 
     /// O(1): the memorized expansion of constructor node `ty` for a public
@@ -298,7 +314,28 @@ impl Checker {
     /// one list load (arguments) or one `simple` row load (nullary).
     /// `find_expans`, compiler/ml/btype.ml:612. (R3b)
     pub fn find_expansion(&self, ty: Ty, private: bool) -> Ty {
-        todo!("R3b")
+        let node = self.g.nodes[ty.0 as usize];
+        if node.arity() == 0 {
+            return match self.memo.simple.get(node.a as usize) {
+                Some(row) if row.generation == self.memo.generation => {
+                    // A private lookup takes the newest entry of either
+                    // kind; a public one is newer than a private one, which
+                    // is memorized only when no expansion was found.
+                    if private && row.expansion.0 == NONE {
+                        row.private_expansion
+                    } else {
+                        row.expansion
+                    }
+                }
+                _ => Ty(NONE),
+            };
+        }
+        let slot = self.g.lists[node.b as usize];
+        if private || node.head & MEMO_PRIVATE == 0 {
+            slot
+        } else {
+            Ty(NONE)
+        }
     }
 
     /// O(1): the node a copy of a nullary constructor of this type links to,
@@ -306,20 +343,64 @@ impl Checker {
     /// compiler/ml/ctype.ml:720. (R3b)
     #[inline]
     pub fn find_repr(&self, type_index: u32) -> Ty {
-        todo!("R3b")
+        match self.memo.simple.get(type_index as usize) {
+            Some(row) if row.generation == self.memo.generation => row.node,
+            _ => Ty(NONE),
+        }
     }
 
     /// Amortized O(1): record `expansion` for constructor node `ty` (slot 0
     /// and the head bit, or the `simple` row). `memorize_abbrev`,
     /// compiler/ml/btype.ml:629. (R3b)
     pub fn memorize(&mut self, ty: Ty, expansion: Ty, private: bool) {
-        todo!("R3b")
+        let node = self.g.nodes[ty.0 as usize];
+        if node.arity() == 0 {
+            let index = node.a as usize;
+            if index >= self.memo.simple.len() {
+                self.memo.simple.resize(index + 1, STALE);
+            }
+            let row = &mut self.memo.simple[index];
+            if row.generation != self.memo.generation {
+                *row = SimpleMemo {
+                    generation: self.memo.generation,
+                    ..STALE
+                };
+                self.memo.live += 1;
+            }
+            if private {
+                row.private_expansion = expansion;
+            } else {
+                row.node = ty;
+                row.expansion = expansion;
+            }
+            return;
+        }
+        // Slot 0 and the head bit are not logged: a restore runs a cleanup
+        // (compiler/ml/btype.ml:779), and the bit is read only beside a slot.
+        self.g.lists[node.b as usize] = expansion;
+        let head = if private {
+            node.head | MEMO_PRIVATE
+        } else {
+            node.head & !MEMO_PRIVATE
+        };
+        self.g.nodes[ty.0 as usize].head = head;
+        self.memo.memorized.push(Ty(node.b));
     }
 
     /// O(1): drop the memorized expansion of constructor node `ty`.
     /// `forget_abbrev`, compiler/ml/btype.ml:646. (R3b; called by R3c)
     pub fn forget_abbrev(&mut self, ty: Ty) {
-        todo!("R3b")
+        let node = self.g.nodes[ty.0 as usize];
+        if node.arity() != 0 {
+            self.g.lists[node.b as usize] = Ty(NONE);
+            return;
+        }
+        if let Some(row) = self.memo.simple.get_mut(node.a as usize)
+            && row.generation == self.memo.generation
+        {
+            *row = STALE;
+            self.memo.live -= 1;
+        }
     }
 
     /// One step of expansion of constructor node `ty` (a representative).
@@ -332,7 +413,125 @@ impl Checker {
     /// constructor node of the target type sharing the argument list.
     /// `expand_abbrev_gen`, compiler/ml/ctype.ml:1187. (R3b)
     pub fn expand_once(&mut self, ty: Ty, mode: ExpandMode) -> Result<Ty, Clash> {
-        todo!("R3b")
+        let node = self.g.nodes[ty.0 as usize];
+        if node.tag() != CONSTR {
+            return Ok(Ty(NONE));
+        }
+        let private = matches!(mode, ExpandMode::Opt | ExpandMode::Rigid);
+        let memorized = self.find_expansion(ty, private);
+        if memorized.0 != NONE {
+            // `update_level env level ty'` unless the node is generic; a
+            // clash is ignored (compiler/ml/ctype.ml:1196-1201). The test
+            // of the level is update_level's own first one (ctype.ml:586).
+            let expansion = self.g.repr(memorized);
+            if node.level != GENERIC && self.g.nodes[expansion.0 as usize].level > node.level {
+                match self.lower(expansion, node.level) {
+                    Ok(()) | Err(Clash) => {}
+                }
+            }
+            return Ok(self.g.repr(expansion));
+        }
+        let info = self.types.info(node.a);
+        if info.flags & ALIAS != 0 {
+            return Ok(self.expand_alias(ty, node, info.manifest));
+        }
+        let expands = info.flags & ABBREV != 0 || (private && info.flags & PRIVATE != 0);
+        if !expands {
+            return Ok(Ty(NONE));
+        }
+        // `subst` raises `Unify []` on an arity mismatch (ctype.ml:1110).
+        if u32::from(info.arity) != node.arity() {
+            return Err(Clash);
+        }
+        self.subst(ty, node, info.manifest, mode)
+    }
+
+    /// O(1): the expansion of a path through a module alias, a constructor
+    /// node of the target type at the node's level sharing its list (and
+    /// with it the memo of a constructor with arguments, as OCaml's
+    /// `newty2 level (Tconstr (path', args, abbrev))` shares `abbrev`,
+    /// compiler/ml/ctype.ml:1211-1214). The old checker memorizes a nullary
+    /// one in the nullary memo (CHECKER_REWRITE 8.6, decision 2), so this
+    /// does too; one with arguments is not memorized, as the old checker's
+    /// rewrite of a parameterised alias is not (types/ctype.rs, `Rewrite`).
+    fn expand_alias(&mut self, ty: Ty, node: Node, target: u32) -> Ty {
+        let expansion = self.g.push(Node {
+            head: node.head & !MEMO_PRIVATE,
+            a: target,
+            ..node
+        });
+        if node.arity() == 0 {
+            self.memorize(ty, expansion, false);
+        }
+        expansion
+    }
+
+    /// `subst` (compiler/ml/ctype.ml:1100-1123) for constructor node `ty`
+    /// with `manifest`: the memo is written first, naming the body the
+    /// instance is about to make; then one instance of the manifest's
+    /// template at the node's level, O(template); then each fresh parameter
+    /// variable is linked to its argument and the argument lowered to the
+    /// node's level (`unify1_var`, ctype.ml:2216): O(arity) and one compare
+    /// each. A parameter that is not a fresh variable (a constrained
+    /// declaration) is unified with [`Checker::unify`]; in every mode but
+    /// `Unif` that runs under a speculation opened at that parameter, and a
+    /// clash restores it: `Safe` then does not expand (`try_expand_safe`,
+    /// ctype.ml:1251) and `Opt` returns the clash to [`Checker::expand_head`].
+    fn subst(&mut self, ty: Ty, node: Node, manifest: u32, mode: ExpandMode) -> Result<Ty, Clash> {
+        let manifest = self.types.manifests[manifest as usize];
+        let base = self.g.nodes.len() as u32;
+        let relocate = |reference: Ty| {
+            if reference.0 & RELATIVE != 0 {
+                Ty(base + (reference.0 & !RELATIVE))
+            } else {
+                reference
+            }
+        };
+        let body = relocate(manifest.body);
+        let private = matches!(mode, ExpandMode::Opt | ExpandMode::Rigid);
+        self.memorize(ty, body, private);
+        let level = self.g.level;
+        self.g.level = node.level;
+        self.g.instance(manifest.template);
+        self.g.level = level;
+        let mut speculation = None;
+        let mut result = Ok(());
+        for index in 0..node.arity() {
+            #[cfg(test)]
+            super::steps::tick();
+            let param = self.g.repr(relocate(self.types.roots[(manifest.params + index) as usize]));
+            let argument = self.g.repr(self.g.lists[(node.b + 1 + index) as usize]);
+            let fresh = param.0 >= base && self.g.nodes[param.0 as usize].tag() == VAR;
+            if fresh {
+                self.g.link(param, argument);
+                if self.g.nodes[argument.0 as usize].level > node.level {
+                    result = self.lower(argument, node.level);
+                }
+            } else {
+                if mode != ExpandMode::Unif && speculation.is_none() {
+                    speculation = Some(self.g.speculate());
+                }
+                result = self.unify(param, argument);
+            }
+            if result.is_err() {
+                break;
+            }
+        }
+        match (result, speculation) {
+            (Ok(()), Some(token)) => self.g.keep(token),
+            (Err(Clash), Some(token)) => {
+                self.g.restore(token);
+                self.cleanup_abbrev();
+                return if mode == ExpandMode::Safe {
+                    Ok(Ty(NONE))
+                } else {
+                    Err(Clash)
+                };
+            }
+            (Ok(()), None) => {}
+            (Err(Clash), None) => return Err(Clash),
+        }
+        Ok(self.g.repr(body))
     }
 
     /// The head of `ty` after every expansion `mode` allows: a loop of
@@ -342,7 +541,33 @@ impl Checker {
     /// is undone with a speculation opened for that step only when the
     /// type's parameters are constrained. (R3b)
     pub fn expand_head(&mut self, ty: Ty, mode: ExpandMode) -> Result<Ty, Clash> {
-        todo!("R3b")
+        let original = self.g.repr(ty);
+        let mut head = original;
+        loop {
+            #[cfg(test)]
+            super::steps::tick();
+            let next = match self.expand_once(head, mode) {
+                Ok(next) => next,
+                // `expand_head_opt` backtracks and returns the type it was
+                // given (compiler/ml/ctype.ml:1330-1335).
+                Err(Clash) if matches!(mode, ExpandMode::Opt | ExpandMode::Rigid) => {
+                    return Ok(original);
+                }
+                // `try_expand_safe` turns a clash into `Cannot_expand`
+                // (compiler/ml/ctype.ml:1251-1256).
+                Err(Clash) if mode == ExpandMode::Safe => return Ok(head),
+                Err(Clash) => return Err(Clash),
+            };
+            if next.0 == NONE {
+                return Ok(head);
+            }
+            let next = self.g.repr(next);
+            // A memo naming the node itself (PR#7324, ctype.ml:1202).
+            if next == head {
+                return Ok(head);
+            }
+            head = next;
+        }
     }
 
     /// An instance of a template that drops variable names, as the old
@@ -397,6 +622,18 @@ pub(crate) fn link_node(node: Node, target: Ty) -> Node {
     todo!("R3b")
 }
 
+/// Template reference flag of a node relative to an instance's first node
+/// (tc/template.rs, `Template`).
+const RELATIVE: u32 = 1 << 30;
+
+/// A row of [`Memo::simple`] that is not live in any generation.
+const STALE: SimpleMemo = SimpleMemo {
+    node: Ty(NONE),
+    expansion: Ty(NONE),
+    private_expansion: Ty(NONE),
+    generation: 0,
+};
+
 #[cfg(test)]
 mod tests {
     use super::super::segment::{
@@ -405,7 +642,138 @@ mod tests {
     use super::super::steps;
     use super::*;
 
-    const RELATIVE: u32 = 1 << 30;
+    use super::super::graph::{Graph, TUPLE};
+
+    /// A checker at level 1 whose types `0..rows` are abstract.
+    fn checker(rows: usize) -> Checker {
+        let mut c = Checker::new(Graph::default(), TypeTable::default());
+        c.types.rows = vec![ABSTRACT; rows];
+        c
+    }
+
+    /// A constructor node at `level`.
+    fn constr(c: &mut Checker, level: u32, ty: u32, args: &[Ty]) -> Ty {
+        let b = c.g.lists.len() as u32;
+        c.g.lists.push(Ty(NONE));
+        c.g.lists.extend_from_slice(args);
+        c.g.push(Node {
+            head: CONSTR | (args.len() as u32) << 8,
+            level,
+            a: ty,
+            b,
+        })
+    }
+
+    /// A variable node at `level`.
+    fn var(c: &mut Checker, level: u32) -> Ty {
+        c.g.push(Node {
+            head: VAR,
+            level,
+            a: NONE,
+            b: 0,
+        })
+    }
+
+    /// Declare `ty` an abbreviation of `body` over `params`, all generic:
+    /// one template of the tuple `(params.., body)`.
+    fn abbreviation(c: &mut Checker, ty: u32, params: &[Ty], body: Ty) {
+        let b = c.g.lists.len() as u32;
+        c.g.lists.extend_from_slice(params);
+        c.g.lists.push(body);
+        let root = c.g.push(Node {
+            head: TUPLE | (params.len() as u32 + 1) << 8,
+            level: GENERIC,
+            a: 0,
+            b,
+        });
+        let template = c.g.capture(root);
+        let first = c.types.roots.len() as u32;
+        for &param in params {
+            let reference = Ty(c.g.forward[param.0 as usize].target);
+            c.types.roots.push(reference);
+        }
+        c.types.manifests.push(Manifest {
+            template,
+            params: first,
+            body: Ty(c.g.forward[body.0 as usize].target),
+        });
+        c.types.rows[ty as usize] = TypeInfo {
+            manifest: c.types.manifests.len() as u32 - 1,
+            arity: params.len() as u16,
+            flags: ABBREV,
+            ..ABSTRACT
+        };
+    }
+
+    /// A chain of 10,000 nullary abbreviations (`type t{i} = t{i-1}`):
+    /// expanding the last is one loop step and one instance of a two-node
+    /// template (the declaration's tuple and the body: two nodes, two list
+    /// slots) per abbreviation; again, one step each from the memo, making
+    /// no node.
+    #[test]
+    fn expanding_a_chain_of_ten_thousand_abbreviations() {
+        let n = 10_000u32;
+        let mut c = checker(n as usize + 1);
+        for ty in 1..=n {
+            let body = constr(&mut c, GENERIC, ty - 1, &[]);
+            abbreviation(&mut c, ty, &[], body);
+        }
+        let last = constr(&mut c, 1, n, &[]);
+        let mut head = last;
+        let count = steps::scope(|| head = c.expand_head(last, ExpandMode::Safe).unwrap());
+        assert!(count <= 5 * u64::from(n) + 1, "{count}");
+        assert_eq!(c.g.nodes[head.0 as usize].a, 0);
+        assert_eq!(c.memo.live, n);
+        let nodes = c.g.nodes.len();
+        let count = steps::scope(|| assert_eq!(c.expand_head(last, ExpandMode::Safe).unwrap(), head));
+        assert!(count <= u64::from(n) + 1, "{count}");
+        assert_eq!(c.g.nodes.len(), nodes);
+        // The nullary memo is forgotten in one store.
+        assert_eq!(steps::scope(|| c.cleanup_abbrev()), 0);
+        assert_eq!(c.memo.live, 0);
+        assert_eq!(c.find_repr(n).0, NONE);
+    }
+
+    /// 10,000 constructors with an argument, each expanded once: a cleanup
+    /// is one step per memorized slot 0, and forgets all of them.
+    #[test]
+    fn cleanup_of_ten_thousand_memos_is_linear() {
+        let mut c = checker(2);
+        let param = var(&mut c, GENERIC);
+        abbreviation(&mut c, 1, &[param], param);
+        let int = constr(&mut c, 1, 0, &[]);
+        let nodes: Vec<Ty> = (0..10_000).map(|_| constr(&mut c, 1, 1, &[int])).collect();
+        for &node in &nodes {
+            assert_eq!(c.expand_head(node, ExpandMode::Safe).unwrap(), int);
+            assert_ne!(c.find_expansion(node, false).0, NONE);
+        }
+        assert_eq!(steps::scope(|| c.cleanup_abbrev()), 10_000);
+        assert!(nodes.iter().all(|&node| c.find_expansion(node, true).0 == NONE));
+        assert!(c.memo.memorized.is_empty());
+    }
+
+    /// A constructor with 10,000 arguments: the instance (one step per
+    /// node and per list slot) and one step per parameter link.
+    #[test]
+    fn expanding_ten_thousand_parameters_is_linear() {
+        let n = 10_000u32;
+        let mut c = checker(2);
+        let params: Vec<Ty> = (0..n).map(|_| var(&mut c, GENERIC)).collect();
+        let body = constr(&mut c, GENERIC, 0, &[]);
+        abbreviation(&mut c, 1, &params, body);
+        let args: Vec<Ty> = (0..n).map(|_| var(&mut c, 1)).collect();
+        let node = constr(&mut c, 1, 1, &args);
+        let mut expansion = node;
+        let count = steps::scope(|| expansion = c.expand_once(node, ExpandMode::Unif).unwrap());
+        // Nodes: the tuple, n parameters, the body; slots: the tuple's n + 1
+        // and the body's slot 0; then n links.
+        assert!(count <= 3 * u64::from(n) + 4, "{count}");
+        assert_eq!(c.g.nodes[expansion.0 as usize].a, 0);
+        let first = c.g.nodes.len() as u32 - n - 2 + 1;
+        for (index, &arg) in args.iter().enumerate() {
+            assert_eq!(c.g.repr(Ty(first + index as u32)), arg);
+        }
+    }
 
     /// `from_segment` is one pass: one step per `paths` row and one per
     /// parameter root of a manifest, on 10,000 declarations.
