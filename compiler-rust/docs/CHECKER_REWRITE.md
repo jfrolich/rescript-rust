@@ -2183,8 +2183,9 @@ it stops and reports a reproduction.
 
 State after the second skeleton turn. Merged: R3a, R3b, R3d, R3c, and K1
 (the kernel's hot paths, TC_KERNEL_R3.md). Designed in the second turn, with
-acceptance tests that are ignored until the slice is built: R3k, R3m, and
-the generated-case acceptance tests of R3e and R3f (the harness prints
+acceptance tests that are ignored until the slice is built: R3k (with its
+prompt in 8.4), R3m (its rule and test; its layout is still open, 8.6,
+decision 16), and the generated-case acceptance tests of R3e and R3f (the harness prints
 objects, fields, variants, polymorphic types and universal variables on
 both sides; `Extras::from_segment` is built, because the harness needs the
 pools to print). Designed as text with a build prompt: K2 (8.7). Not done
@@ -2543,8 +2544,31 @@ cases. If a seed fails and OCaml's source supports your code, stop and
 report the seed: do not copy the old checker's order.
 ```
 
-The last prompt is superseded by decision 5 of 8.6: no builder starts R3e
-to R3j from it.
+```text
+R3k. Read section 8.6, decision 14, and compiler/ml/ctype.ml:584-640 and
+2216-2225. First edit: Checker::lower in src/tc/expand.rs, the second
+pass. In Mode::Explain, when no speculation whose owner restores is open
+(the test Checker::occur_first makes in src/tc/unify.rs), the second pass
+runs without a speculation and a clash keeps what it wrote; the escaping
+node and a new variable at the target level are pushed on Checker::trace
+so that they come after the pairs the enclosing unification adds. One
+commit. Relations to hold: Mode::Success and a lowering inside an owner's
+speculation make the writes and the steps they make today
+(lower_checks_scopes_and_expands_to_escape and the scoped step tests of
+expand.rs unchanged); the Full tier and scoped_plan_agrees_on_generated_
+cases pass with the same pinned seeds. Shortcuts that count as failure:
+keeping the levels in Mode::Success; a trace pair in Mode::Success; a
+variable made when the lowering does not clash. Remove the ignore of
+differential::tests::a_failed_retry_keeps_its_levels_in_the_explaining_
+mode and of no other test.
+```
+
+R3m has no prompt yet: its rule, evidence and acceptance test are fixed
+(8.6, decision 16) and its layout is not.
+
+The prompt of K2 is in section 8.7. The last prompt below is superseded by
+decision 5 of 8.6: no builder starts R3e to R3j from it, and the second
+skeleton turn did not write theirs (8.1).
 
 ```text
 R3e..R3j. First commit, before any body: extend
@@ -2844,25 +2868,40 @@ additions are `differential::Plan` bits; every number below is one run of
     expanding node's (`Mlink !abbreviations`, ctype.ml:793-799). So the
     entries a node sees are its own and those of the chain of nodes whose
     expansions made it.
-    R3m, in `expand.rs`: `Memo::parents`, a dense `Vec<Ty>` by node handle,
-    grown only when written, `NONE` by default. `subst` writes, for every
-    constructor with arguments its instance made, the expanding node as
-    parent, unless that constructor names the type of a node on the
-    expanding node's chain whose slot 0 is live, in which case the new node
-    becomes a link to that node (`link_node`). The chain of a node is the
-    node, then its parent, and so on; a node whose memo was cleaned ends
-    the chain (`cleanup_abbrev` clears its parent with its slot 0, as
-    `abbr := Mnil` cuts the list, btype.ml:623-627) and a node whose entry
-    was forgotten does not (`forget_abbrev` removes one entry and keeps the
-    tail, btype.ml:636-647). Cost: nothing for a body without a
-    constructor with arguments (the pass over the instance's nodes runs
-    only when the manifest has one: a bit in `Manifest`, set by
-    `TypeTable::from_segment`); otherwise one step per node of the
-    instance and one step per chain entry per such constructor. Acceptance:
-    `expand_tier_agrees_on_recursive_abbreviations` (ignored, `R3m build`),
-    and a step relation the builder adds as a reviewed first commit: the
-    expansion of a chain of n nested `po` nodes is linear (n = 1,000 against
-    n = 10,000 within a factor of 11).
+    R3m, in `expand.rs`. The rule is fixed: when `subst` copies a
+    constructor with arguments, it walks the chain of the expanding node
+    (the node, then the node whose expansion made it, and so on); the
+    first chain entry that names the copied constructor's type and has a
+    live expansion makes the copy a link to that entry's node
+    (`link_node`); otherwise the copy's chain continues with the expanding
+    node's. A node whose memo was cleaned ends the chain (`abbr := Mnil`
+    cuts the list, btype.ml:623-627); a node whose entry was forgotten does
+    not (`forget_abbrev` removes one entry and keeps the tail,
+    btype.ml:636-647). Acceptance:
+    `expand_tier_agrees_on_recursive_abbreviations` (ignored, `R3m build`).
+    The layout is **not** fixed, and R3m is not handed to a builder before
+    it is. Two facts found late in this turn rule out the first idea (a
+    dense `Vec<Ty>` of parents by node handle): an entry outlives its node's
+    descriptor (OCaml's entry holds the path and the node, and stays when
+    the node is linked to another, so the type index and slot 0 cannot be
+    read back from the parent node), and `Graph::generalize` visits slot 0
+    as a child (`children(node, true)`, tc/level.rs), so slot 0 cannot
+    hold anything but a node without a change in the kernel. The two
+    layouts that remain:
+    - a pool `Memo::chain` of 16-byte rows `{node, type index, parent row,
+      slot-0 list index}`, one per constructor with arguments made by an
+      expansion whose manifest has one, found from a constructor by a dense
+      `Vec<u32>` indexed by its slot-0 list index (4 bytes per list slot up
+      to the highest one written); slot 0 and the kernel stay as they are.
+      Recommended.
+    - slot 0 holds a flagged row index (what decision 3 foresaw), the row
+      holds the expansion, and `Graph::children` learns to follow it: no
+      dense table, one more compare on every generalization of a
+      constructor, and a change in tc/level.rs.
+    Either way a manifest whose body has no constructor with arguments
+    pays nothing (a flag where the manifest is made), and the step relation
+    is: expanding the heads down a chain of n nested `po` nodes at
+    n = 10,000 takes at most 11 times the steps of n = 1,000.
 17. **The forms of extended nodes.** An object prints `obj{fields}`, a
     field `name: type; rest` (`name!` when mutable), the end of a list
     `nil`, a variant `[closed fixed #tag(type) #tag?cm(types) #tag- |

@@ -1,1 +1,1 @@
-- Checker rewrite R3, second skeleton: the differential harness runs the explaining mode, scoped types and non-monotone types against the old checker, and slices R3e to R3j and K2 are designed with their acceptance tests.
+- Checker rewrite R3, second skeleton: the differential harness runs the explaining mode, scoped types, non-monotone types, objects and variants against the old checker; two corrections it found (R3k, R3m) and the hot paths of unification (K2) are designed.
