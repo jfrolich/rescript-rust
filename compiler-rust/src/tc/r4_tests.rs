@@ -1868,7 +1868,6 @@ fn a_deprecated_item_warns_at_each_use() {
 /// reset forgets them; 10,000 uses of one item are 10,000 steps and one
 /// entry.
 #[test]
-#[ignore = "R4g build"]
 fn reads_are_logged_once_in_the_order_first_read() {
     let mut s = unit_scopes();
     s.freeze();
@@ -1931,7 +1930,6 @@ fn reads_are_logged_once_in_the_order_first_read() {
 /// first read, do not depend on what the worker checked before (its unit
 /// indices and imported rows differ; the names do not).
 #[test]
-#[ignore = "R4g build"]
 fn reads_do_not_depend_on_what_the_worker_checked_before() {
     let segments = || {
         vec![

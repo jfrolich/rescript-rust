@@ -588,6 +588,9 @@ impl Scopes {
             layer => self.use_open(layer, key),
         };
         self.deprecated(found.item, loc);
+        if let ResolvedKind::Import(row) = found.item.kind() {
+            self.read_item(row);
+        }
         hidden
     }
 
