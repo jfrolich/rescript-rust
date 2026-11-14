@@ -303,7 +303,7 @@ impl Bir {
         stack.push((root, 0u32, 1u32));
         while let Some((id, depth, weight)) = stack.pop() {
             let view = self.view(id);
-            let children = view.children();
+            let children = view.child_count();
             let boundary = match view {
                 View::Fun { .. } | View::JFun { .. }
                 | View::While { .. } | View::SWhile { .. } => Some(None),
@@ -329,7 +329,9 @@ impl Bir {
             }
             self.weights[id.index()] = weight;
             self.try_adjust_direct(id, i64::from(weight))?;
-            for child in children.into_iter().rev() {
+            for index in (0..children).rev() {
+                // Capture accounting changes flags/counts, never child edges.
+                let child = self.view(id).child_at(index);
                 let enters = match boundary {
                     Some(None) => true,
                     Some(Some(body)) => body == child,
