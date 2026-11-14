@@ -422,9 +422,9 @@ impl State {
                 }
                 // The callee and the arguments were built before the
                 // function's scope opened and move into it (G10).
-                super::names::adopt(&mut self.arena, callee);
+                super::names::adopt(&mut self.arena, &self.idents, callee);
                 for &node in remaining {
-                    super::names::adopt(&mut self.arena, node);
+                    super::names::adopt(&mut self.arena, &self.idents, node);
                 }
                 let call = self.call_node(callee, &full_args, full);
                 full_args.clear(); self.eta_arguments = full_args;

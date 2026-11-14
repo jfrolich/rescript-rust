@@ -112,6 +112,15 @@ struct Open {
     children: u32,
 }
 
+/// A closed direct child of an open scope: its site range `[start, end)`
+/// and its row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Child {
+    start: u32,
+    end: u32,
+    row: u32,
+}
+
 /// The log of one unit. Lives on the arena's `Scope` beside the counts.
 #[derive(Default)]
 pub(crate) struct Log {
@@ -130,14 +139,20 @@ pub(crate) struct Log {
     seen_import: Vec<u32>,
     /// The open scopes, innermost last. The program is never on it.
     open: Vec<Open>,
-    /// What the open scopes reference, innermost run last: imports as they
-    /// are referenced, free entries handed up by closed children.
+    /// What the open scopes reference, innermost run last: what `adopt`
+    /// read and, during a close, the closing scope's own references.
     run: Vec<FreeRef>,
-    /// The site ranges `[start, end)` of the closed direct children of the
-    /// open scopes, innermost run last.
-    children: Vec<[u32; 2]>,
+    /// The closed direct children of the open scopes, innermost run last.
+    children: Vec<Child>,
     /// The nodes `adopt` has still to read. Empty between calls.
     pending: Vec<NodeId>,
+    /// The unit preserves JSX (`-bs-jsx-preserve`): the printer writes an
+    /// element as `<tag ...>` and does not print its runtime callee, nor
+    /// the tag of an empty fragment. Such an operand is not a reference
+    /// (`unprinted`). Set once, before the first scope opens.
+    pub(crate) jsx_preserve: bool,
+    /// The converted name of a JSX tag, reused (`jsx::printed_form`).
+    spelling: String,
     /// Nodes `adopt` read: what the one walk over an expression costs.
     pub(crate) adopted_nodes: usize,
     /// Sites read, run entries read, children skipped, comparisons of the
@@ -267,13 +282,26 @@ impl Log {
         let mut at = open.sites;
         let children = open.children as usize;
         let mut child = children;
-        while let Some(&[start, stop]) = self.children.get(child) {
+        while let Some(&Child { start, end: stop, row: closed }) = self.children.get(child) {
             self.steps += 1;
-            self.read_sites(bir, row, at, start);
+            self.read_sites(bir, idents, row, at, start);
             at = stop;
             child += 1;
+            // A child whose literal is still there gives its free entries
+            // (naming.rs `analyze_expr`, `ExprKind::Fun`:
+            // `used.extend(free[f])`); one that was released since its
+            // close (a closure in a statement the lowering dropped) gives
+            // nothing, as its sites give nothing.
+            let literal = self.rows[closed as usize];
+            if bir.func_owners.get(literal.function.index()).copied().flatten().is_none() {
+                continue;
+            }
+            for i in literal.free_start..literal.free_start + literal.free_len {
+                self.steps += 1;
+                self.join(row, self.free[i as usize]);
+            }
         }
-        self.read_sites(bir, row, at, end);
+        self.read_sites(bir, idents, row, at, end);
         // 3. The free entries of the run, compacted in place.
         let first = (!header.params.is_empty()).then(|| FreeRef::var(bir.function_parameter(function, 0)));
         let mut flags = ScopeRow::CLOSED;
@@ -325,24 +353,24 @@ impl Log {
         self.rows[row as usize] = ScopeRow { function, free_start, free_len, flags };
         let scope = ScopeId(row);
         self.set_scope(function, scope);
-        // 5. Handed up to the enclosing open scope.
+        // 5. A child of the enclosing open scope.
         self.children.truncate(children);
-        if let Some(parent) = self.open.last().map(|open| open.row) {
-            for i in free_start..free_start + free_len {
-                self.steps += 1;
-                self.join(parent, self.free[i as usize]);
-            }
-            self.children.push([open.sites, end]);
+        if !self.open.is_empty() {
+            self.children.push(Child { start: open.sites, end, row });
         }
         scope
     }
 
-    /// Step 2 of `close` over the sites `[from, to)`: one step each.
-    fn read_sites(&mut self, bir: &Bir, row: u32, from: u32, to: u32) {
+    /// Step 2 of `close` over the sites `[from, to)`: one step each, and
+    /// `unprinted` for each live one in a unit that preserves JSX.
+    fn read_sites(&mut self, bir: &Bir, idents: &[crate::ident::Ident], row: u32, from: u32, to: u32) {
         let sites = &bir.js_scope.as_ref().expect("lowering scope").sites;
         for site in &sites[from as usize..to as usize] {
             self.steps += 1;
             if site.node == NodeId(u32::MAX) {
+                continue;
+            }
+            if self.jsx_preserve && self.unprinted(bir, idents, site.node) {
                 continue;
             }
             let entry = match bir.view(site.node) {
@@ -354,8 +382,45 @@ impl Log {
         }
     }
 
+    /// Whether the printer omits the reference `reference` in a unit that
+    /// preserves JSX: it is the runtime callee of a JSX node printed as an
+    /// element or a fragment, or the tag of one printed as a fragment (the
+    /// reference itself or the object of a chain of members,
+    /// `State::jsx_callee`). The pass does not count such an operand as a
+    /// use (naming.rs `children`, `ExprKind::Jsx`). Only the reference's
+    /// ancestors up to the JSX node are read, never an expression below a
+    /// node. Cost: one step per member above the reference, and
+    /// `jsx::printed_form` when the chain's parent is a JSX node (once per
+    /// element for its callee, once more for a fragment's tag).
+    fn unprinted(&mut self, bir: &Bir, idents: &[crate::ident::Ident], reference: NodeId) -> bool {
+        use crate::bir::View;
+        let mut top = reference;
+        let jsx = loop {
+            let Some(parent) = bir.parents[top.index()] else { return false };
+            match bir.nodes[parent.index()].op() {
+                Op::JDot => {
+                    self.steps += 1;
+                    top = parent;
+                }
+                Op::JJsx => break parent,
+                _ => return false,
+            }
+        };
+        let View::JJsx { values, .. } = bir.view(jsx) else { unreachable!("a JSX node") };
+        let (callee, tag) = (values[0] == top, values[1] == top);
+        if !callee && !tag {
+            return false;
+        }
+        let form = super::jsx::printed_form(bir, idents, jsx, &mut self.spelling);
+        match form {
+            super::jsx::PrintedForm::Runtime => false,
+            super::jsx::PrintedForm::Element => callee,
+            super::jsx::PrintedForm::Fragment => true,
+        }
+    }
+
     /// `adopt` on the log taken out of `bir` (see `adopt`).
-    fn adopt(&mut self, bir: &Bir, node: NodeId) {
+    fn adopt(&mut self, bir: &Bir, idents: &[crate::ident::Ident], node: NodeId) {
         let row = self.open.last().expect("adopt inside an open function scope").row;
         debug_assert!(self.pending.is_empty());
         self.pending.push(node);
@@ -363,6 +428,8 @@ impl Log {
             self.steps += 1;
             self.adopted_nodes += 1;
             match bir.view(node) {
+                crate::bir::View::Var { .. } | crate::bir::View::JQualified { .. }
+                    if self.jsx_preserve && self.unprinted(bir, idents, node) => {}
                 crate::bir::View::Var { var } => self.join(row, FreeRef::var(var)),
                 crate::bir::View::JQualified { module, .. } => self.join(row, FreeRef::import(module)),
                 crate::bir::View::JFun { header, .. } => {
@@ -435,18 +502,21 @@ pub(crate) fn open(bir: &mut Bir) -> ScopeId {
 /// 2. The sites recorded since the scope opened, outside the ranges of its
 ///    closed direct children, are read once each: a live site (its node is
 ///    not released) whose variable this scope did not see yet joins the run.
+///    Each closed direct child whose literal is still live gives the
+///    entries of its free list to the run (naming.rs `analyze_expr`,
+///    `ExprKind::Fun`: `used.extend(free[f])`); a child released since its
+///    close gives nothing.
 /// 3. Each entry of the run whose home is not this row is free. The first
 ///    parameter in the run sets `FIRST_READ`.
 /// 4. The free entries are sorted by `Ident`'s order and written, one per
 ///    identifier, as the row's run of `Log::free`; `ETA` is `eta_shape` of
 ///    the node.
-/// 5. Each free entry joins the enclosing open scope's run (naming.rs
-///    `analyze_expr`, `ExprKind::Fun`: `used.extend(free[f])`), and this
-///    scope's site range joins the enclosing scope's children.
+/// 5. This scope's site range and row join the enclosing open scope's
+///    children.
 ///
-/// Cost: one step per site of step 2, one per closed direct child, one per
-/// entry of the run, one per comparison of the sort, one per free entry
-/// handed up; nothing is allocated once the vectors have their capacity. A
+/// Cost: one step per site of step 2, one per closed direct child and per
+/// free entry of a live one, one per entry of the run, one per comparison
+/// of the sort; nothing is allocated once the vectors have their capacity. A
 /// site is read at one close only, so the sites cost one step each over the
 /// whole unit, whatever the nesting.
 pub(crate) fn close(bir: &mut Bir, idents: &[crate::ident::Ident], function: FuncId) -> ScopeId {
@@ -470,17 +540,17 @@ pub(crate) fn close(bir: &mut Bir, idents: &[crate::ident::Ident], function: Fun
 /// in the same way; a function literal is not entered: the free entries of
 /// its closed row join the run (a literal without a closed row is a bug of
 /// the caller: asserts). The enclosing scope needs nothing: it read the
-/// moved references as its own sites, and `close` hands this scope's free
-/// entries up as for any function.
+/// moved references as its own sites, and takes this scope's free entries
+/// at its own close, as it takes those of any function.
 ///
 /// This is the one place where an expression is read for a reference.
 /// Cost: one step per node of the subtree outside function literals, one
 /// per function literal and one per free entry of each; `adopted_nodes`
 /// grows by the nodes read. Nothing is allocated once `pending` has its
 /// capacity. Asserts that a function scope is open.
-pub(crate) fn adopt(bir: &mut Bir, node: NodeId) {
+pub(crate) fn adopt(bir: &mut Bir, idents: &[crate::ident::Ident], node: NodeId) {
     let mut log = std::mem::take(&mut bir.js_scope.as_mut().expect("lowering scope").names);
-    log.adopt(bir, node);
+    log.adopt(bir, idents, node);
     bir.js_scope.as_mut().expect("lowering scope").names = log;
 }
 
@@ -1056,6 +1126,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<FreeRef>(), 4);
         assert_eq!(std::mem::size_of::<ScopeRow>(), 16);
         assert_eq!(std::mem::size_of::<Open>(), 16);
+        assert_eq!(std::mem::size_of::<Child>(), 12);
         assert_eq!(std::mem::size_of::<Frame>(), 12);
         assert_eq!(std::mem::size_of::<Program<'_>>(), 64);
         assert_eq!(std::mem::size_of::<Replayed>(), 48);
@@ -1312,6 +1383,34 @@ mod tests {
         let kept = u.ret(kept);
         let (_, scope) = u.function(header, &[kept]);
         assert_eq!(u.free(scope), [FreeRef::var(y)]);
+    }
+
+    #[test]
+    fn a_function_literal_released_before_the_enclosing_close_gives_nothing() {
+        // A closure in a statement the lowering drops: it closed with `x`
+        // and a module free, and its literal is released before the
+        // function around it closes. A second closure stays and gives `y`.
+        let mut u = Unit::new();
+        let (x, y) = (u.local("x"), u.local("y"));
+        let outer = u.header(None, 0);
+        open(&mut u.b);
+        let dropped = u.header(None, 0);
+        open(&mut u.b);
+        let module = u.b.new_node(View::JQualified { module: ImportId(1), member: None }, 0);
+        let read = u.read(&[x]);
+        let both = u.b.new_node(View::JArray { values: &[module, read] }, 0);
+        let result = u.ret(both);
+        let (gone, dropped_scope) = u.function(dropped, &[result]);
+        assert_eq!(u.free(dropped_scope), [FreeRef::import(ImportId(1)), FreeRef::var(x)]);
+        let kept = u.header(None, 0);
+        open(&mut u.b);
+        let read = u.read(&[y]);
+        let result = u.ret(read);
+        let (stays, _) = u.function(kept, &[result]);
+        u.b.release(gone);
+        let result = u.ret(stays);
+        let (_, outer_scope) = u.function(outer, &[result]);
+        assert_eq!(u.free(outer_scope), [FreeRef::var(y)]);
     }
 
     #[test]
@@ -1719,7 +1818,7 @@ mod tests {
         open(&mut u.b);
         let fresh = u.local("param");
         let inner = u.header(Some(fresh), 1);
-        adopt(&mut u.b, moved);
+        adopt(&mut u.b, &u.idents, moved);
         let own = u.b.new_node(View::Var { var: fresh }, 0);
         let call = u.b.new_node(View::JArray { values: &[moved, own] }, 0);
         let result = u.ret(call);
@@ -1775,7 +1874,7 @@ mod tests {
         let fresh = u.local("param");
         let inner = u.header(Some(fresh), 1);
         let before = (u.log().steps, u.log().adopted_nodes);
-        adopt(&mut u.b, literal);
+        adopt(&mut u.b, &u.idents, literal);
         let cost = [u.log().steps - before.0, u.log().adopted_nodes - before.1];
         let own = u.b.new_node(View::Var { var: fresh }, 0);
         let call = u.b.new_node(View::JArray { values: &[literal, own] }, 0);
@@ -1817,7 +1916,7 @@ mod tests {
         open(&mut u.b);
         let arg = u.b.new_node(View::Var { var: p }, 0);
         open(&mut u.b);
-        adopt(&mut u.b, arg);
+        adopt(&mut u.b, &u.idents, arg);
         let header = u.b.switch_header(crate::bir::SwitchInput {
             keys: Vec::new(),
             clauses: Vec::new(),
@@ -1844,7 +1943,7 @@ mod tests {
         open(&mut u.b);
         let module = u.b.new_node(View::JQualified { module: ImportId(0), member: None }, 0);
         open(&mut u.b);
-        adopt(&mut u.b, module);
+        adopt(&mut u.b, &u.idents, module);
         let result = u.ret(module);
         let inner = u.header(None, 0);
         let (function, inner_scope) = u.function(inner, &[result]);
@@ -1874,7 +1973,7 @@ mod tests {
         };
         open(&mut u.b);
         let before = (u.log().steps, u.log().adopted_nodes);
-        adopt(&mut u.b, moved);
+        adopt(&mut u.b, &u.idents, moved);
         let cost = [u.log().steps - before.0, u.log().adopted_nodes - before.1];
         let result = u.ret(moved);
         let inner = u.header(None, 0);

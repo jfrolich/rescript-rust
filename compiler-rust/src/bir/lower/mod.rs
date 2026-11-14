@@ -406,7 +406,7 @@ pub(crate) fn lower(
     locations: Option<&crate::lambda::LamLocTable>,
     direct: bool,
 ) -> Result<Lowered, Unsupported> {
-    unit::lower(input, locations, direct, None, false, true)
+    unit::lower(input, locations, direct, None, false, true, false)
 }
 
 /// H2: C:1266 compile_external_field_apply; summaries are read-only inputs.
@@ -417,8 +417,9 @@ pub(crate) fn lower_with_resolver(
     resolver: Option<&crate::js_ir::ModulePathResolver>,
     cross_module_inline: bool,
     check_div_by_zero: bool,
+    jsx_preserve: bool,
 ) -> Result<Lowered, Unsupported> {
-    unit::lower(input, locations, direct, resolver, cross_module_inline, check_div_by_zero)
+    unit::lower(input, locations, direct, resolver, cross_module_inline, check_div_by_zero, jsx_preserve)
 }
 
 /// One immutable summary acquisition per imported module; indexed by ImportId.

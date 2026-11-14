@@ -319,7 +319,7 @@ impl State {
         }
         // The scrutinee was built before the function's scope opened and
         // moves into it (G10).
-        super::names::adopt(&mut self.arena, arg);
+        super::names::adopt(&mut self.arena, &self.idents, arg);
         let header = self.arena.switch_record(crate::bir::SwitchRecord {
             constants: keys.len,
             keys,

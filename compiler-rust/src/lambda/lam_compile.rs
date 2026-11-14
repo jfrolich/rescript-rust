@@ -870,7 +870,7 @@ impl LambdaCompiler {
         self.id_gen.set_current_stamp(js_lowering_start_stamp);
         crate::ident::Ident::set_current_time(js_lowering_start_stamp);
         let candidate = if CHECK {
-            Some(crate::bir::shadow::prepare_lower(&a, root, self.source_map_enabled.then_some(&self.lam_locs), self.module_path_resolver.as_ref(), self.cross_module_inline, self.check_div_by_zero))
+            Some(crate::bir::shadow::prepare_lower(&a, root, self.source_map_enabled.then_some(&self.lam_locs), self.module_path_resolver.as_ref(), self.cross_module_inline, self.check_div_by_zero, self.jsx_preserve))
         } else { None };
         crate::timing::measure(crate::timing::Phase::Codegen, || {
             let compiled = {

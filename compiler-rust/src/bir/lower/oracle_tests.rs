@@ -36,8 +36,12 @@ fn compare_oracle(mut arena: LamArena, root: Lam, resolver: Option<&crate::js_ir
     // A unit the pass does not support is not compared, as check mode
     // counts it in `names_uncompared`.
     let (unit, unit_root) = unit_of(arena.clone(), root);
-    if compared_names(unit.clone(), unit_root, resolver, inline).is_some() {
-        names_agree(unit, unit_root, resolver, inline);
+    // Both ways of printing JSX: a unit that preserves it does not print
+    // the runtime callee of an element.
+    for jsx_preserve in [false, true] {
+        if compared_names(unit.clone(), unit_root, resolver, inline, jsx_preserve).is_some() {
+            names_agree_printing(unit.clone(), unit_root, resolver, inline, jsx_preserve);
+        }
     }
     let target = Ident::new("result", arena.ident_stamp_bound() + 1, IdentFlags::NONE);
     for direct in [false, true] {
@@ -1859,8 +1863,8 @@ fn a_module_whose_only_reference_the_flatten_pass_drops_still_shadows_the_global
 /// the lowering's own exported program. Returns the comparison and what the
 /// replay did. Panics when the lowering or the pass does not support the
 /// unit.
-fn names_of(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, inline: bool) -> (crate::emit::NameStats, names::Replayed) {
-    compared_names(arena, root, resolver, inline).expect("the pass supports the unit")
+fn names_of(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, inline: bool, jsx_preserve: bool) -> (crate::emit::NameStats, names::Replayed) {
+    compared_names(arena, root, resolver, inline, jsx_preserve).expect("the pass supports the unit")
 }
 
 /// `names_of`, or `None` when the pass does not support the unit. Every
@@ -1868,7 +1872,7 @@ fn names_of(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePa
 /// of a test resolves no module of its own, and the pass names a module
 /// that is not imported where it is used, which a built unit does not
 /// have.
-fn compared_names(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, inline: bool) -> Option<(crate::emit::NameStats, names::Replayed)> {
+fn compared_names(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, inline: bool, jsx_preserve: bool) -> Option<(crate::emit::NameStats, names::Replayed)> {
     let mut resolver = resolver.cloned().unwrap_or_else(|| {
         crate::js_ir::ModulePathResolver::from_compile_options(None, None, None, None, None, None, false)
     });
@@ -1880,7 +1884,7 @@ fn compared_names(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::Mo
         }
     }
     let resolver = &resolver;
-    let lowered = lower_for_names(&arena, root, resolver, inline);
+    let lowered = lower_for_names(&arena, root, resolver, inline, jsx_preserve);
     let bir = &lowered.program.arena;
     let idents: Vec<Ident> = (0..bir.vars.len())
         .map(|var| lowered.program.idents[bir.vars.j_origin[var].index()])
@@ -1895,7 +1899,7 @@ fn compared_names(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::Mo
         lowered.coerced.reservations.clone(),
     );
     program.modules = lowered.name_imports.iter().map(|import| bir.pools.j_modules[import.index()].clone()).collect();
-    let stats = crate::emit::compare_with_pass(&lowered.printed, &idents, &modules, &free, &program, resolver, false).ok()?;
+    let stats = crate::emit::compare_with_pass(&lowered.printed, &idents, &modules, &free, &program, resolver, jsx_preserve).ok()?;
     // Shown when an assertion of the caller fails: the text the pass names
     // and the replay's names by variable and by import.
     println!("{}", crate::js_ir::print_deps_program_with_directives_and_options(&program, None, &[], false, false, false));
@@ -1910,7 +1914,7 @@ fn compared_names(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::Mo
         println!("replay free: {:?}", &free.idents[start..end as usize]);
         start = end as usize;
     }
-    if let Ok((pass_free, pass_names)) = crate::emit::pass_tables(&program, resolver) {
+    if let Ok((pass_free, pass_names)) = crate::emit::pass_tables(&program, resolver, jsx_preserve) {
         for list in pass_free {
             println!("pass free: {list:?}");
         }
@@ -1945,16 +1949,16 @@ fn unit_of(mut arena: LamArena, root: Lam) -> (LamArena, Lam) {
 
 /// `root` lowered as a unit (`lower_with_resolver`), as `names_of` and
 /// `adopted_nodes_of` read it.
-fn lower_for_names(arena: &LamArena, root: Lam, resolver: &crate::js_ir::ModulePathResolver, inline: bool) -> Lowered {
+fn lower_for_names(arena: &LamArena, root: Lam, resolver: &crate::js_ir::ModulePathResolver, inline: bool, jsx_preserve: bool) -> Lowered {
     let input = bridge::import_for_lowering(arena, root).0.expect("lowering input");
-    lower_with_resolver(input, None, false, Some(resolver), inline, true).expect("the lowering supports the unit")
+    lower_with_resolver(input, None, false, Some(resolver), inline, true, jsx_preserve).expect("the lowering supports the unit")
 }
 
 /// `Log::adopted_nodes` of `root` lowered as a unit: whether an input
 /// reaches a site of G10 (`names::adopt`).
 fn adopted_nodes_of(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>) -> usize {
     let default = crate::js_ir::ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
-    let lowered = lower_for_names(&arena, root, resolver.unwrap_or(&default), false);
+    let lowered = lower_for_names(&arena, root, resolver.unwrap_or(&default), false, false);
     lowered.program.arena.js_scope.as_ref().expect("lowering scope").names.adopted_nodes
 }
 
@@ -1962,7 +1966,13 @@ fn adopted_nodes_of(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::
 /// every free list; no reservation whose order is in question, no
 /// reference the replay left unnamed.
 fn names_agree(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, inline: bool) -> crate::emit::NameStats {
-    let (stats, replayed) = names_of(arena, root, resolver, inline);
+    names_agree_printing(arena, root, resolver, inline, false)
+}
+
+/// `names_agree` for a unit that prints JSX through the runtime
+/// (`jsx_preserve` false) or preserves it.
+fn names_agree_printing(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, inline: bool, jsx_preserve: bool) -> crate::emit::NameStats {
+    let (stats, replayed) = names_of(arena, root, resolver, inline, jsx_preserve);
     assert_eq!((stats.name_differences, stats.finish_differences, stats.free_differences), (0, 0, 0), "{stats:?}");
     assert_eq!((replayed.ambiguous_orders, replayed.unnamed_references), (0, 0), "{replayed:?}");
     assert_eq!(stats.names_replayed, stats.names_pass, "{stats:?}");
@@ -2309,4 +2319,76 @@ fn the_naming_log_agrees_on_a_function_that_reads_one_module_through_two_imports
     let end = a.var(f);
     let root = a.let_(LetKind::Strict, f, function, end);
     names_agree(a, root, Some(&resolver), false);
+}
+
+#[test]
+fn the_naming_log_agrees_on_a_preserved_element_whose_runtime_callee_is_not_printed() {
+    // `let f = label => <div title={label} />` in a unit that preserves
+    // JSX: the lowering builds `JsxRuntime.jsx("div", {title: label})`, and
+    // the printer writes the element and no callee, so `JsxRuntime` is not
+    // free in `f` (naming.rs `children`, `ExprKind::Jsx`: the callee is
+    // visited for the runtime form only). Printed through the runtime, it
+    // is. The fragment `<></>` prints neither its callee nor its tag.
+    // Reduced from tests/tests/src/jsx_preserve_test.res
+    // (`free_differences: 3`).
+    use crate::lambda::lam_primitive::{DeclKind, ExternalDecl, ExternalModuleName, JsxElement, ModuleBindName, ModuleSource, Primitive as P};
+    use crate::lambda::LamLoc;
+    let runtime = || ModuleSource::ModuleNamed(ExternalModuleName { bundle: "react/jsx-runtime".into(), module_bind_name: ModuleBindName::PhintNothing, import_attributes: None });
+    for fragment in [false, true] {
+        for jsx_preserve in [false, true] {
+            let mut a = LamArena::new();
+            let (f, label) = (Ident::new("f", 1, IdentFlags::NONE), Ident::new("label", 2, IdentFlags::NONE));
+            let tag = if fragment {
+                let decl = ExternalDecl { kind: DeclKind::DeclVal { name: "Fragment".into() }, module_: Some(runtime()), scopes: vec![], variadic: false, effective_arity: 0 };
+                let call = crate::lambda::lam_primitive::JsCall { prim_name: "Fragment".into(), arg_types: vec![], ffi: decl };
+                a.prim_raw(P::PjsCall(Box::new(call)), &[], LamLoc::NONE)
+            } else {
+                a.const_(C::String("div".into()))
+            };
+            let jsx = JsxElement {
+                jsx_name: "jsx".into(),
+                jsx_ffi: ExternalDecl { kind: DeclKind::DeclVal { name: "jsx".into() }, module_: Some(runtime()), scopes: vec![], variadic: false, effective_arity: 2 },
+                jsx_multi: false,
+                jsx_fragment: fragment,
+                jsx_spread: false,
+                jsx_props: if fragment { vec![] } else { vec![("title".into(), false)] },
+                jsx_children: None,
+                jsx_key: false,
+            };
+            let mut args = vec![tag];
+            if !fragment {
+                args.push(a.var(label));
+            }
+            let element = a.prim_raw(P::Pjsx(Box::new(jsx)), &args, LamLoc::NONE);
+            let function = a.function_(1, &[label], element, Default::default(), LamLoc::NONE);
+            let end = a.var(f);
+            let root = a.let_(LetKind::Strict, f, function, end);
+            names_agree_printing(a, root, None, false, jsx_preserve);
+        }
+    }
+}
+
+#[test]
+fn the_naming_log_agrees_on_a_closure_dropped_before_the_function_around_it_closes() {
+    // `let f = c => { ignore(() => Primitive_module.init(c)); 3 }`: the
+    // closure closes with `Primitive_module` free, and the lowering drops
+    // it as a pure effect before `f` closes. A closed child gives its free
+    // entries to the function around it when that function closes, and
+    // only when its literal is still there, so `f` has an empty free list,
+    // as the pass's `f` has. Reduced from a unit of the application corpus
+    // (a closure in a branch the lowering dropped; `free_differences: 2`).
+    use crate::lambda::lam_primitive::Primitive as P;
+    use crate::lambda::LamLoc;
+    let mut a = LamArena::new();
+    let (f, c) = (Ident::new("f", 1, IdentFlags::NONE), Ident::new("c", 2, IdentFlags::NONE));
+    let read = a.var(c);
+    let made = a.prim_raw(P::PinitMod, &[read], LamLoc::NONE);
+    let closure = a.function_(0, &[], made, Default::default(), LamLoc::NONE);
+    let ignored = a.prim_raw(P::Pignore, &[closure], LamLoc::NONE);
+    let three = a.const_(C::Int { i: 3, comment: None });
+    let body = a.seq_raw(ignored, three);
+    let function = a.function_(1, &[c], body, Default::default(), LamLoc::NONE);
+    let end = a.var(f);
+    let root = a.let_(LetKind::Strict, f, function, end);
+    names_agree(a, root, None, false);
 }

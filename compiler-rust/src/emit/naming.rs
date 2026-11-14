@@ -1241,8 +1241,9 @@ pub(crate) fn compare_with_pass(
 pub(crate) fn pass_tables(
     program: &JsDepsProgram,
     resolver: &ModulePathResolver,
+    jsx_preserve: bool,
 ) -> Result<(Vec<Vec<Ident>>, Vec<(Ident, Name)>), Unsupported> {
-    let names = Names::collect(program, resolver, false)?;
+    let names = Names::collect(program, resolver, jsx_preserve)?;
     let mut free: Vec<Vec<Ident>> = names.free.values().cloned().collect();
     free.sort_unstable();
     let mut printed: Vec<(Ident, Name)> = names.printed.iter().map(|(ident, name)| (*ident, *name)).collect();
