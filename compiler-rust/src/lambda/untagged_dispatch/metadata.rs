@@ -6,7 +6,7 @@ pub(crate) struct TextId(u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct LiteralId(pub(crate) u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct InstanceId(u32);
+pub(crate) struct InstanceId(pub(crate) u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Literal {
     String(TextId),
@@ -170,6 +170,8 @@ impl Metadata {
             Literal::Undefined => LiteralTag::Undefined,
         }
     }
+    /// O(1): number of interned immutable instance descriptors.
+    pub(crate) fn instance_count(&self) -> usize { self.instances.len() }
     pub(crate) fn instance_name(&self, id: InstanceId) -> &str {
         self.instances[id.0 as usize]
             .name
@@ -326,6 +328,6 @@ mod tests {
         assert_eq!(std::mem::size_of::<Literal>(), 16);
         assert_eq!(std::mem::size_of::<Kind>(), 8);
         assert_eq!(std::mem::size_of::<InstanceRecord>(), 16);
-        assert_eq!(std::mem::size_of::<super::super::Test>(), 12);
+        assert_eq!(std::mem::size_of::<super::super::StoredTest>(), 12);
     }
 }

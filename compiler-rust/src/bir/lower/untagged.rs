@@ -4,7 +4,7 @@
 use super::*;
 use crate::bir::j::{norm, plain};
 use crate::bir::{CaseKey, ClauseMeta};
-use crate::lambda::untagged_dispatch::{self as dispatch, Clause, Test, TestId, Tree, TreeId};
+use crate::lambda::untagged_dispatch::{self as dispatch, Clause, StoredTest as Test, TestId, Tree, TreeId};
 use crate::lambda::{SwitchCaseTag, SwitchDispatch, SwitchKey};
 use crate::types::VariantConstructorCase as Case;
 
@@ -456,7 +456,7 @@ impl State {
                     Tree::SwitchValue(clauses, default) => {
                         program.push(Op::Begin);
                         work.push(Work::Emit(Op::Switch(tree)));
-                        for (_, clause) in plan.value_clauses(*clauses).iter().rev() {
+                        for (_, clause) in plan.stored_value_clauses(*clauses).iter().rev() {
                             work.push(match clause {
                                 Clause::FallsThrough(_) => Work::Emit(Op::Empty),
                                 Clause::Body(body) => Work::Clause(*body, depth + 1),
@@ -465,7 +465,7 @@ impl State {
                         work.push(Work::Visit(*default, depth + 1));
                     }
                     Tree::SwitchTypeof(clauses, default) => {
-                        let cases = plan.typeof_clauses(*clauses);
+                        let cases = plan.stored_typeof_clauses(*clauses);
                         let small = cases.len() == 1 && matches!(cases[0].1, Clause::Body(_));
                         program.push(Op::Begin);
                         work.push(Work::Emit(Op::Switch(tree)));
@@ -837,7 +837,7 @@ impl State {
         let (cases, typeof_, value_switch) = match dispatch.tree(tree) {
             Tree::SwitchValue(clauses, _) => (*clauses, false, true),
             Tree::SwitchTypeof(clauses, _) => {
-                let cases = dispatch.typeof_clauses(*clauses);
+                let cases = dispatch.stored_typeof_clauses(*clauses);
                 if cases.len() == 1 && matches!(cases[0].1, Clause::Body(_)) {
                     let no = self.untagged_storage.outputs.pop(&mut p.outputs);
                     let yes = self.untagged_storage.outputs.pop(&mut p.outputs);
@@ -870,13 +870,13 @@ impl State {
         };
         for i in 0..count {
             let key = if value_switch {
-                self.untagged_storage.literals[dispatch.value_clauses(cases)[i].0.0 as usize]
+                self.untagged_storage.literals[dispatch.stored_value_clauses(cases)[i].0.0 as usize]
                     .key
                     .clone()
             } else {
                 CaseKey::String(
                     self.arena
-                        .intern_text(dispatch.typeof_clauses(cases)[i].0.typeof_name().unwrap()),
+                        .intern_text(dispatch.stored_typeof_clauses(cases)[i].0.typeof_name().unwrap()),
                 )
             };
             self.arena.pools.switch_keys.push(key);
@@ -885,8 +885,8 @@ impl State {
                 self.untagged_storage.outputs.get(&p.outputs, base + 1 + i),
             );
             let clause = match dispatch.tree(tree) {
-                Tree::SwitchValue(c, _) => &dispatch.value_clauses(*c)[i].1,
-                Tree::SwitchTypeof(c, _) => &dispatch.typeof_clauses(*c)[i].1,
+                Tree::SwitchValue(c, _) => &dispatch.stored_value_clauses(*c)[i].1,
+                Tree::SwitchTypeof(c, _) => &dispatch.stored_typeof_clauses(*c)[i].1,
                 _ => unreachable!(),
             };
             if let Clause::FallsThrough(Some(arm)) = clause {
@@ -947,7 +947,7 @@ impl State {
         let mut values = std::mem::take(&mut self.untagged_storage.test_values);
         work.push((test, false));
         while let Some((id, done)) = work.pop() {
-            let test = dispatch.test(id);
+            let test = dispatch.stored_test(id);
             if !done {
                 work.push((id, true));
                 match test {

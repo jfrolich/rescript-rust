@@ -3728,3 +3728,22 @@ unchanged parameters and lazily created copies is not a contiguous VarId run.
 The default compiler still uses the legacy backend; this slice itself saves
 nothing on that path. The separate short-circuit correction changes default
 JavaScript only where the old loop probe differed from the OCaml reference.
+
+### Scope correction — step 1
+
+| Source file (under `compiler-rust/src`) | Disposition | Named lowering caller and necessity |
+| --- | --- | --- |
+| `js_ir/printer.rs` | Kept | `lower::import::State::compile_import` and `lower::prim_block::State::primitive_field` call `convert_ident_into` to avoid temporary owned spellings. |
+| `lambda/lam_analysis.rs` | Kept | `lower::call::State::inline_external_function` reaches the shared primitive-purity decision through beta reduction; scalar properties avoid reconstructing owned bigint constants. |
+| `lambda/lam_compile_variant.rs` | Reverted | No BIR lowering caller. Restored byte-for-byte to trunk; the shared planner now exposes borrowed compatibility views for the unchanged emitter. |
+| `lambda/mod.rs` | Kept | `lower::prim_block::State::flat_make_field` and `lower::import::State::compile_import` call `flat_export_name_into`; returning an owned export name would allocate per construct. |
+| `lambda/untagged_dispatch.rs` | Kept | `lower::untagged::State::untagged_switch` calls `append_bucketed` on retained graph/planning storage; trunk's owned-input planner allocates for each switch. |
+| `lambda/untagged_dispatch/metadata.rs` | Kept | `lower::untagged::prepare` imports handles; `State::untagged_test` and `State::untagged_instance` borrow those payloads instead of cloning strings/instance ancestry per emitted test. |
+| `ocaml_float.rs` | Kept | `lower::untagged::prepare` reaches `float_of_string_in` via metadata canonical-key encoding; retained separator removal avoids a vector per literal. |
+| `string_literal.rs` | Kept | `lower::prim::State::finish_primitive_values` reaches retained `TemplateBuffer` through `jm12_interpolated_template`, avoiding per-template encoding/normalization vectors. |
+| `types/typecore.rs` | Kept | `lower::konst::State::constant` and `lower::variant::State::switch_key_expression` call `parse_bigint_literal_into` directly, avoiding per-bigint spelling strings. |
+| `types/variant_runtime.rs` | Kept | `lower::untagged::prepare` reaches `LiteralKeyScratch::encode` through `Metadata::import_literal`, retaining canonical equality-key buffers rather than allocating intermediate strings per literal. |
+
+The canonical-key import paths above are import work, not part of the previously reported probe/realize interval. They are not evidence that the complete unit entry is allocation-free; that is the separate step-5 correction.
+
+Commands/results: `cargo build --manifest-path compiler-rust/Cargo.toml` passed; `cargo test --manifest-path compiler-rust/Cargo.toml untagged -- --test-threads=1` passed **34 tests**; `cargo clippy --manifest-path compiler-rust/Cargo.toml --all-targets -- -D warnings` passed. `git diff origin/ocaml-to-rust-rewrite -- compiler-rust/src/lambda/lam_compile_variant.rs` is empty. All commands used `CARGO_INCREMENTAL=0`.

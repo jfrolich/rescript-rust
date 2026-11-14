@@ -108,7 +108,7 @@ impl Clauses {
 
 /// A test on the scrutinee `x` (untagged_dispatch.mli `test`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Test {
+pub(crate) enum StoredTest {
     /// `x === literal`
     Equals(LiteralId),
     /// `typeof x === "k"`, for a kind with a `typeof` name
@@ -120,6 +120,44 @@ pub(crate) enum Test {
     Not(TestId),
     And(TestId, TestId),
     Or(TestId, TestId),
+}
+
+/// Borrowed compatibility view for the unchanged default emitter. O(1) to form.
+pub(crate) enum Test<'a> {
+    Equals(&'a LiteralTag),
+    Typeof(&'a BlockType),
+    Instance(&'a crate::types::variant_runtime::Instance),
+    NotNull,
+    Not(&'a TestId),
+    And(&'a TestId, &'a TestId),
+    Or(&'a TestId, &'a TestId),
+}
+
+/// Borrowed literal clauses; constructing this view costs O(1).
+pub(crate) struct ValueClauses<'a, A> {
+    rows: &'a [(LiteralId, Clause<A>)],
+    literals: &'a [LiteralTag],
+}
+impl<'a, A> ValueClauses<'a, A> {
+    /// O(number of clauses), without materializing a collection.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&'a LiteralTag, &'a Clause<A>)> + '_ {
+        self.rows.iter().map(|(literal, clause)| (&self.literals[literal.0 as usize], clause))
+    }
+}
+
+/// O(1): borrow a scalar typeof kind without reconstructing metadata.
+fn borrowed_typeof(kind: Kind) -> &'static BlockType {
+    match kind {
+        Kind::Number => &BlockType::Number,
+        Kind::String => &BlockType::String,
+        Kind::Bigint => &BlockType::Bigint,
+        Kind::Boolean => &BlockType::Boolean,
+        Kind::Symbol => &BlockType::Symbol,
+        Kind::Function => &BlockType::Function,
+        Kind::Object => &BlockType::Object,
+        Kind::Unknown => &BlockType::Unknown,
+        Kind::Instance(_) => unreachable!("instance is not a typeof kind"),
+    }
 }
 
 /// How the generated code reaches the bodies `A` (untagged_dispatch.mli
@@ -252,7 +290,7 @@ impl<A> Default for Scratch<A> {
 }
 #[derive(Debug, Clone, Copy)]
 enum SelectOp {
-    Test(TestId),
+    StoredTest(TestId),
     Not,
     And(TestId),
     Or(TestId),
@@ -261,7 +299,10 @@ enum SelectOp {
 #[derive(Debug, Clone)]
 pub(crate) struct Plan<A> {
     pub(crate) metadata: Metadata,
-    tests: Vec<Test>,
+    legacy_literals: Vec<LiteralTag>,
+    legacy_instances: Vec<crate::types::variant_runtime::Instance>,
+    legacy_typeof: Vec<(BlockType, Clause<A>)>,
+    tests: Vec<StoredTest>,
     trees: Vec<Tree<A>>,
     value_clauses: Vec<(LiteralId, Clause<A>)>,
     typeof_clauses: Vec<(Kind, Clause<A>)>,
@@ -288,6 +329,9 @@ impl<A> Plan<A> {
     fn new() -> Self {
         Plan {
             metadata: Metadata::default(),
+            legacy_literals: Vec::new(),
+            legacy_instances: Vec::new(),
+            legacy_typeof: Vec::new(),
             tests: Vec::new(),
             trees: Vec::new(),
             value_clauses: Vec::new(),
@@ -313,34 +357,57 @@ impl<A> Plan<A> {
         &self.trees[id.0 as usize]
     }
 
-    pub(crate) fn test(&self, id: TestId) -> &Test {
+    /// O(1): borrow imported metadata for the unchanged default emitter.
+    pub(crate) fn test(&self, id: TestId) -> Test<'_> {
+        match self.stored_test(id) {
+            StoredTest::Equals(literal) => Test::Equals(&self.legacy_literals[literal.0 as usize]),
+            StoredTest::Typeof(kind) => Test::Typeof(borrowed_typeof(*kind)),
+            StoredTest::Instance(instance) => Test::Instance(&self.legacy_instances[instance.0 as usize]),
+            StoredTest::NotNull => Test::NotNull,
+            StoredTest::Not(test) => Test::Not(test),
+            StoredTest::And(a, b) => Test::And(a, b),
+            StoredTest::Or(a, b) => Test::Or(a, b),
+        }
+    }
+
+    /// O(1): borrow a literal clause range; each iteration borrows its tag.
+    pub(crate) fn value_clauses(&self, clauses: Clauses) -> ValueClauses<'_, A> {
+        ValueClauses { rows: self.stored_value_clauses(clauses), literals: &self.legacy_literals }
+    }
+
+    /// O(1): borrow the default emitter's scalar typeof clauses.
+    pub(crate) fn typeof_clauses(&self, clauses: Clauses) -> &[(BlockType, Clause<A>)] {
+        &self.legacy_typeof[clauses.range()]
+    }
+
+    pub(crate) fn stored_test(&self, id: TestId) -> &StoredTest {
         &self.tests[id.0 as usize]
     }
 
-    pub(crate) fn value_clauses(&self, clauses: Clauses) -> &[(LiteralId, Clause<A>)] {
+    pub(crate) fn stored_value_clauses(&self, clauses: Clauses) -> &[(LiteralId, Clause<A>)] {
         &self.value_clauses[clauses.range()]
     }
 
-    pub(crate) fn typeof_clauses(&self, clauses: Clauses) -> &[(Kind, Clause<A>)] {
+    pub(crate) fn stored_typeof_clauses(&self, clauses: Clauses) -> &[(Kind, Clause<A>)] {
         &self.typeof_clauses[clauses.range()]
     }
 
-    fn add_test(&mut self, test: Test) -> TestId {
+    fn add_test(&mut self, test: StoredTest) -> TestId {
         let id = TestId(self.tests.len() as u32);
         self.tests.push(test);
         id
     }
 
     fn not(&mut self, test: TestId) -> TestId {
-        self.add_test(Test::Not(test))
+        self.add_test(StoredTest::Not(test))
     }
 
     fn and(&mut self, a: TestId, b: TestId) -> TestId {
-        self.add_test(Test::And(a, b))
+        self.add_test(StoredTest::And(a, b))
     }
 
     fn or(&mut self, a: TestId, b: TestId) -> TestId {
-        self.add_test(Test::Or(a, b))
+        self.add_test(StoredTest::Or(a, b))
     }
 
     fn add_tree(&mut self, tree: Tree<A>) -> TreeId {
@@ -529,11 +596,11 @@ fn payload_part<A: Copy>(
         }
         // `null`, when it did not go to the default before.
         let is_object = if null_guard {
-            let typeof_object = p.add_test(Test::Typeof(Kind::Object));
-            let not_null = p.add_test(Test::NotNull);
+            let typeof_object = p.add_test(StoredTest::Typeof(Kind::Object));
+            let not_null = p.add_test(StoredTest::NotNull);
             p.and(typeof_object, not_null)
         } else {
-            p.add_test(Test::Typeof(Kind::Object))
+            p.add_test(StoredTest::Typeof(Kind::Object))
         };
         let entries = &mut scratch.entries;
         entries.clear();
@@ -541,18 +608,18 @@ fn payload_part<A: Copy>(
             let is_class = p.metadata.is_class(*i);
             match arm(&Kind::Instance(*i)) {
                 Some(body) => {
-                    let check = p.add_test(Test::Instance(*i));
+                    let check = p.add_test(StoredTest::Instance(*i));
                     entries.push((Some(check), is_class, Some(body)));
                 }
                 None if has_default => {
-                    let check = p.add_test(Test::Instance(*i));
+                    let check = p.add_test(StoredTest::Instance(*i));
                     entries.push((Some(check), is_class, None));
                 }
                 None => {}
             }
         }
         if let Some(body) = arm(&Kind::Function) {
-            let check = p.add_test(Test::Typeof(Kind::Function));
+            let check = p.add_test(StoredTest::Typeof(Kind::Function));
             entries.push((Some(check), false, Some(body)));
         }
         if let Some(body) = arm(&Kind::Object) {
@@ -717,7 +784,7 @@ fn selected_literal(metadata: &Metadata, id: LiteralId) -> SelectedValue<'_> {
 pub(crate) fn select<A: Copy>(
     plan: &Plan<A>,
     value: &Value,
-    on_test: &mut impl FnMut(&Test),
+    on_test: &mut impl FnMut(&StoredTest),
 ) -> Outcome<A> {
     let mut metadata = Metadata::default();
     let value = match value {
@@ -738,51 +805,51 @@ fn select_tree<A: Copy>(
     p: &Plan<A>,
     mut tree: TreeId,
     value: SelectedValue<'_>,
-    on_test: &mut impl FnMut(&Test),
+    on_test: &mut impl FnMut(&StoredTest),
     work: &mut Vec<SelectOp>,
 ) -> Outcome<A> {
     fn holds<A>(
         p: &Plan<A>,
         test: TestId,
         value: SelectedValue<'_>,
-        on_test: &mut impl FnMut(&Test),
+        on_test: &mut impl FnMut(&StoredTest),
         work: &mut Vec<SelectOp>,
     ) -> bool {
         work.clear();
-        work.push(SelectOp::Test(test));
+        work.push(SelectOp::StoredTest(test));
         let mut result = false;
         while let Some(op) = work.pop() {
             match op {
                 SelectOp::Not => result = !result,
                 SelectOp::And(right) => {
                     if result {
-                        work.push(SelectOp::Test(right));
+                        work.push(SelectOp::StoredTest(right));
                     }
                 }
                 SelectOp::Or(right) => {
                     if !result {
-                        work.push(SelectOp::Test(right));
+                        work.push(SelectOp::StoredTest(right));
                     }
                 }
-                SelectOp::Test(id) => {
-                    let test = p.test(id);
+                SelectOp::StoredTest(id) => {
+                    let test = p.stored_test(id);
                     on_test(test);
                     match test {
-                        Test::Equals(id) => result = value.key == Some(p.metadata.runtime_key(*id)),
-                        Test::Typeof(kind) => result = value.kind == Some(*kind),
-                        Test::Instance(id) => result = !p.metadata.is_class(*id) && value.array,
-                        Test::NotNull => result = !value.null,
-                        Test::Not(t) => {
+                        StoredTest::Equals(id) => result = value.key == Some(p.metadata.runtime_key(*id)),
+                        StoredTest::Typeof(kind) => result = value.kind == Some(*kind),
+                        StoredTest::Instance(id) => result = !p.metadata.is_class(*id) && value.array,
+                        StoredTest::NotNull => result = !value.null,
+                        StoredTest::Not(t) => {
                             work.push(SelectOp::Not);
-                            work.push(SelectOp::Test(*t));
+                            work.push(SelectOp::StoredTest(*t));
                         }
-                        Test::And(a, b) => {
+                        StoredTest::And(a, b) => {
                             work.push(SelectOp::And(*b));
-                            work.push(SelectOp::Test(*a));
+                            work.push(SelectOp::StoredTest(*a));
                         }
-                        Test::Or(a, b) => {
+                        StoredTest::Or(a, b) => {
                             work.push(SelectOp::Or(*b));
-                            work.push(SelectOp::Test(*a));
+                            work.push(SelectOp::StoredTest(*a));
                         }
                     }
                 }
@@ -820,12 +887,12 @@ fn select_tree<A: Copy>(
             }
             Tree::Block(inner) => *inner,
             Tree::SwitchValue(clauses, default) => target(
-                p.value_clauses(*clauses),
+                p.stored_value_clauses(*clauses),
                 |id| value.key == Some(p.metadata.runtime_key(*id)),
                 *default,
             ),
             Tree::SwitchTypeof(clauses, default) => target(
-                p.typeof_clauses(*clauses),
+                p.stored_typeof_clauses(*clauses),
                 |kind| value.kind == Some(*kind),
                 *default,
             ),
@@ -858,10 +925,10 @@ fn same_tree<A>(
             (Tree::If(a, ay, an), Tree::If(b, by, bn)) => {
                 tests.push((*a, *b));
                 while let Some((a, b)) = tests.pop() {
-                    match (p.test(a), p.test(b)) {
-                        (Test::Not(a), Test::Not(b)) => tests.push((*a, *b)),
-                        (Test::And(a, aa), Test::And(b, bb))
-                        | (Test::Or(a, aa), Test::Or(b, bb)) => {
+                    match (p.stored_test(a), p.stored_test(b)) {
+                        (StoredTest::Not(a), StoredTest::Not(b)) => tests.push((*a, *b)),
+                        (StoredTest::And(a, aa), StoredTest::And(b, bb))
+                        | (StoredTest::Or(a, aa), StoredTest::Or(b, bb)) => {
                             tests.push((*aa, *bb));
                             tests.push((*a, *b));
                         }
@@ -880,7 +947,7 @@ fn same_tree<A>(
                     return false;
                 }
                 trees.push((*ad, *bd));
-                for ((a, ac), (b, bc)) in p.value_clauses(*a).iter().zip(p.value_clauses(*b)).rev()
+                for ((a, ac), (b, bc)) in p.stored_value_clauses(*a).iter().zip(p.stored_value_clauses(*b)).rev()
                 {
                     if a != b {
                         return false;
@@ -898,7 +965,7 @@ fn same_tree<A>(
                 }
                 trees.push((*ad, *bd));
                 for ((a, ac), (b, bc)) in
-                    p.typeof_clauses(*a).iter().zip(p.typeof_clauses(*b)).rev()
+                    p.stored_typeof_clauses(*a).iter().zip(p.stored_typeof_clauses(*b)).rev()
                 {
                     if a != b {
                         return false;
@@ -944,7 +1011,7 @@ fn simplify<A: Copy>(p: &mut Plan<A>, same: &impl Fn(&A, &A) -> bool, root: Tree
                 }
                 Tree::Block(inner) => work.push((*inner, false)),
                 Tree::SwitchValue(c, d) => {
-                    for (_, clause) in p.value_clauses(*c).iter().rev() {
+                    for (_, clause) in p.stored_value_clauses(*c).iter().rev() {
                         if let Clause::Body(t) = clause {
                             work.push((*t, false));
                         }
@@ -952,7 +1019,7 @@ fn simplify<A: Copy>(p: &mut Plan<A>, same: &impl Fn(&A, &A) -> bool, root: Tree
                     work.push((*d, false));
                 }
                 Tree::SwitchTypeof(c, d) => {
-                    for (_, clause) in p.typeof_clauses(*c).iter().rev() {
+                    for (_, clause) in p.stored_typeof_clauses(*c).iter().rev() {
                         if let Clause::Body(t) = clause {
                             work.push((*t, false));
                         }
@@ -1083,6 +1150,14 @@ pub(crate) fn plan<A: Copy>(same: impl Fn(&A, &A) -> bool, input: Input<'_, A>) 
             fallback: input.fallback,
         },
     );
+    // Materialize each unique immutable payload once, not once per emitted test.
+    // The BIR append entry does not construct these compatibility views.
+    p.legacy_literals = (0..p.metadata.literal_count())
+        .map(|i| p.metadata.owned_literal(LiteralId(i as u32))).collect();
+    p.legacy_instances = (0..p.metadata.instance_count())
+        .map(|i| p.metadata.owned_instance(InstanceId(i as u32))).collect();
+    p.legacy_typeof = p.typeof_clauses.iter()
+        .map(|(kind, clause)| (kind.block_type(), *clause)).collect();
     p
 }
 
@@ -1236,7 +1311,7 @@ fn plan_tree<A: Copy>(
                         payload,
                         selected_literal(&p.metadata, *literal),
                         &mut |test| {
-                            if matches!(test, Test::Instance(id) if p.metadata.is_class(*id)) {
+                            if matches!(test, StoredTest::Instance(id) if p.metadata.is_class(*id)) {
                                 class_check = true;
                             }
                         },
@@ -1288,14 +1363,14 @@ fn plan_tree<A: Copy>(
         if effective.len() <= 2 {
             let mut tree = payload;
             if effective.len() == 2 && same(&effective[0].1, &effective[1].1) {
-                let first = p.add_test(Test::Equals(effective[0].0));
-                let second = p.add_test(Test::Equals(effective[1].0));
+                let first = p.add_test(StoredTest::Equals(effective[0].0));
+                let second = p.add_test(StoredTest::Equals(effective[1].0));
                 let test = p.or(first, second);
                 let run = p.add_tree(Tree::Run(effective[0].1));
                 tree = p.add_tree(Tree::If(test, run, tree));
             } else {
                 for (literal, body) in effective.iter().rev() {
-                    let test = p.add_test(Test::Equals(*literal));
+                    let test = p.add_test(StoredTest::Equals(*literal));
                     let run = p.add_tree(Tree::Run(*body));
                     tree = p.add_tree(Tree::If(test, run, tree));
                 }
@@ -1386,8 +1461,8 @@ mod tests {
     #[test]
     fn deep_tests_and_blocks_use_iterative_selector_and_simplifier() {
         let mut p = Plan::default();
-        let mut first = p.add_test(Test::NotNull);
-        let mut second = p.add_test(Test::NotNull);
+        let mut first = p.add_test(StoredTest::NotNull);
+        let mut second = p.add_test(StoredTest::NotNull);
         for _ in 0..10_000 {
             first = p.not(first);
             second = p.not(second);
@@ -1462,22 +1537,22 @@ mod tests {
     type P = Plan<&'static str>;
 
     fn test_to_string(p: &P, test: TestId) -> String {
-        match p.test(test) {
-            Test::Equals(literal) => {
+        match p.stored_test(test) {
+            StoredTest::Equals(literal) => {
                 format!("x === {}", p.metadata.owned_literal(*literal).value_key())
             }
-            Test::Typeof(block_type) => {
+            StoredTest::Typeof(block_type) => {
                 format!("typeof x === {}", block_type.typeof_name().unwrap_or("?"))
             }
-            Test::Instance(instance) => {
+            StoredTest::Instance(instance) => {
                 format!("x instanceof {}", p.metadata.instance_name(*instance))
             }
-            Test::NotNull => "x !== null".to_string(),
-            Test::Not(test) => format!("!({})", test_to_string(p, *test)),
-            Test::And(t1, t2) => {
+            StoredTest::NotNull => "x !== null".to_string(),
+            StoredTest::Not(test) => format!("!({})", test_to_string(p, *test)),
+            StoredTest::And(t1, t2) => {
                 format!("({} && {})", test_to_string(p, *t1), test_to_string(p, *t2))
             }
-            Test::Or(t1, t2) => {
+            StoredTest::Or(t1, t2) => {
                 format!("({} || {})", test_to_string(p, *t1), test_to_string(p, *t2))
             }
         }
@@ -1497,7 +1572,7 @@ mod tests {
             Tree::Block(tree) => format!("{{{}}}", tree_to_string(p, *tree)),
             Tree::SwitchValue(clauses, default) => format!(
                 "switch (x) {{{}default: {}}}",
-                p.value_clauses(*clauses)
+                p.stored_value_clauses(*clauses)
                     .iter()
                     .map(|(literal, clause)| format!(
                         "{}: {}; ",
@@ -1509,7 +1584,7 @@ mod tests {
             ),
             Tree::SwitchTypeof(clauses, default) => format!(
                 "switch (typeof x) {{{}default: {}}}",
-                p.typeof_clauses(*clauses)
+                p.stored_typeof_clauses(*clauses)
                     .iter()
                     .map(|(block_type, clause)| format!(
                         "{}: {}; ",
@@ -1741,8 +1816,8 @@ mod tests {
             );
             for value in values(&literals, &kinds) {
                 let mut class_checks = 0;
-                let outcome = select(&tree, &value, &mut |test: &Test| {
-                    if matches!(test, Test::Instance(id) if tree.metadata.is_class(*id)) {
+                let outcome = select(&tree, &value, &mut |test: &StoredTest| {
+                    if matches!(test, StoredTest::Instance(id) if tree.metadata.is_class(*id)) {
                         class_checks += 1;
                     }
                 });
