@@ -121,7 +121,7 @@ impl Scope {
             import_uses: Vec::new(),
             globals: Default::default(),
             #[cfg(test)]
-            names: Default::default(),
+            names: super::names::Log::new(variables),
             #[cfg(test)]
             updates: 0,
         }

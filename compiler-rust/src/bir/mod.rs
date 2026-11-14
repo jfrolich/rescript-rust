@@ -146,7 +146,11 @@ impl Bir {
         self.vars.binder.push(None);
         self.vars.fact.push(Fact::Unknown);
         self.vars.printed.push(None);
-        if let Some(scope) = &mut self.js_scope { scope.push(); }
+        if let Some(scope) = &mut self.js_scope {
+            scope.push();
+            #[cfg(test)]
+            scope.names.variable();
+        }
         id
     }
     /// Allocate a contiguous run of fresh parameters/binders.

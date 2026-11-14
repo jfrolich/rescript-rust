@@ -144,14 +144,20 @@ impl Log {
     /// A log for a unit of `variables` variables with the program row and
     /// no open function. Cost: two words per variable, allocated once.
     pub(crate) fn new(variables: usize) -> Self {
-        let _ = variables;
-        todo!("T5b-1")
+        let program = ScopeRow { function: FuncId(u32::MAX), free_start: 0, free_len: 0, flags: 0 };
+        Self {
+            rows: vec![program],
+            home: vec![ScopeId::NONE.0; variables],
+            seen: vec![ScopeId::NONE.0; variables],
+            ..Self::default()
+        }
     }
 
     /// A variable was created (`Bir::new_var_id`, beside `Scope::push`):
     /// its home is `ScopeId::NONE`. Cost: two pushes; no step.
     pub(crate) fn variable(&mut self) {
-        todo!("T5b-1")
+        self.home.push(ScopeId::NONE.0);
+        self.seen.push(ScopeId::NONE.0);
     }
 
     /// The binder of `var` was written (`Bir::bind`, for every binder but a
@@ -161,8 +167,7 @@ impl Log {
     /// scope is open rebinds nothing: a copy has variables of its own) keeps
     /// the last write. Cost: one write; no step.
     pub(crate) fn bind(&mut self, var: VarId) {
-        let _ = var;
-        todo!("T5b-1")
+        self.home[var.index()] = self.open.last().map_or(ScopeId::PROGRAM.0, |open| open.row);
     }
 
     /// A reference to an imported module was built (`Bir::register_kind`,
@@ -172,8 +177,15 @@ impl Log {
     /// 11.4, "T5 part B as redesigned", (b) Gap 1, the stated limit). Cost:
     /// one read and at most one write and one push; no step.
     pub(crate) fn import_reference(&mut self, import: ImportId) {
-        let _ = import;
-        todo!("T5b-1")
+        let Some(open) = self.open.last() else { return };
+        let row = open.row;
+        if self.seen_import.len() <= import.index() {
+            self.seen_import.resize(import.index() + 1, ScopeId::NONE.0);
+        }
+        if self.seen_import[import.index()] != row {
+            self.seen_import[import.index()] = row;
+            self.run.push(FreeRef::import(import));
+        }
     }
 
     /// `Bir::copy_subtree` copied the function literal with header `source`
@@ -184,29 +196,203 @@ impl Log {
     /// closed row (a function of the source arena). Cost: one push and one
     /// write; one step.
     pub(crate) fn copied(&mut self, source: FuncId, copy: FuncId) -> Option<ScopeId> {
-        let _ = (source, copy);
-        todo!("T5b-1")
+        let source = self.scope(source)?;
+        let row = self.rows[source.0 as usize];
+        if row.flags & ScopeRow::CLOSED == 0 {
+            return None;
+        }
+        let scope = ScopeId(index(self.rows.len()));
+        self.rows.push(ScopeRow { function: copy, flags: row.flags | ScopeRow::COPY, ..row });
+        self.set_scope(copy, scope);
+        self.steps += 1;
+        Some(scope)
+    }
+
+    /// Record `scope` as the row of `function`. Amortized O(1).
+    fn set_scope(&mut self, function: FuncId, scope: ScopeId) {
+        if self.of_function.len() <= function.index() {
+            self.of_function.resize(function.index() + 1, 0);
+        }
+        self.of_function[function.index()] = scope.0 + 1;
     }
 
     /// The row of the function with header `function`. Constant.
     pub(crate) fn scope(&self, function: FuncId) -> Option<ScopeId> {
-        let _ = function;
-        todo!("T5b-1")
+        match self.of_function.get(function.index()) {
+            Some(&row) if row != 0 => Some(ScopeId(row - 1)),
+            _ => None,
+        }
     }
 
     /// The home of `var`. Constant.
     pub(crate) fn home(&self, var: VarId) -> ScopeId {
-        let _ = var;
-        todo!("T5b-1")
+        ScopeId(self.home[var.index()])
     }
 
     /// The free list of a closed scope: sorted by `Ident`'s order (stamp,
     /// then name; an import by its module identifier), without duplicates.
     /// Constant.
     pub(crate) fn free(&self, scope: ScopeId) -> &[FreeRef] {
-        let _ = scope;
-        todo!("T5b-1")
+        let row = self.rows[scope.0 as usize];
+        &self.free[row.free_start as usize..(row.free_start + row.free_len) as usize]
     }
+
+    /// Put `entry` in the run of the open scope `row` unless that scope put
+    /// it there before. Amortized O(1); no step.
+    fn join(&mut self, row: u32, entry: FreeRef) {
+        let seen = match (entry.as_var(), entry.as_import()) {
+            (Some(var), _) => &mut self.seen[var.index()],
+            (None, Some(import)) => {
+                if self.seen_import.len() <= import.index() {
+                    self.seen_import.resize(import.index() + 1, ScopeId::NONE.0);
+                }
+                &mut self.seen_import[import.index()]
+            }
+            (None, None) => unreachable!("a free entry is a variable or an import"),
+        };
+        if *seen != row {
+            *seen = row;
+            self.run.push(entry);
+        }
+    }
+
+    /// `close` on the log taken out of `bir` (see `close`).
+    fn close(&mut self, bir: &Bir, function: FuncId) -> ScopeId {
+        let open = self.open.pop().expect("a function scope is open");
+        let row = open.row;
+        // 1. The parameters are bound here.
+        let header = bir.function(function);
+        for i in 0..header.params.len() {
+            self.home[bir.function_parameter(function, i).index()] = row;
+        }
+        // 2. This scope's own sites: those outside its closed children.
+        let sites = &bir.js_scope.as_ref().expect("lowering scope").sites;
+        let end = index(sites.len());
+        let mut at = open.sites;
+        let children = open.children as usize;
+        let mut child = children;
+        while let Some(&[start, stop]) = self.children.get(child) {
+            self.steps += 1;
+            self.read_sites(bir, row, at, start);
+            at = stop;
+            child += 1;
+        }
+        self.read_sites(bir, row, at, end);
+        // 3. The free entries of the run, compacted in place.
+        let method_this = (header.flags & crate::bir::FuncHeader::METHOD != 0 && !header.params.is_empty())
+            .then(|| FreeRef::var(bir.function_parameter(function, 0)));
+        let mut flags = ScopeRow::CLOSED;
+        let start = open.run as usize;
+        let mut kept = start;
+        for i in start..self.run.len() {
+            self.steps += 1;
+            let entry = self.run[i];
+            if Some(entry) == method_this {
+                flags |= ScopeRow::THIS_USED;
+            }
+            if entry.as_var().is_none_or(|var| self.home[var.index()] != row) {
+                self.run[kept] = entry;
+                kept += 1;
+            }
+        }
+        self.run.truncate(kept);
+        // 4. Sorted by `Ident`'s order, written without duplicates.
+        let mut comparisons = 0;
+        self.run[start..].sort_unstable_by(|&a, &b| {
+            comparisons += 1;
+            ident_order(bir, a, b)
+        });
+        self.steps += comparisons;
+        let free_start = index(self.free.len());
+        for &entry in &self.run[start..kept] {
+            if index(self.free.len()) == free_start || self.free.last() != Some(&entry) {
+                self.free.push(entry);
+            }
+        }
+        self.run.truncate(start);
+        let free_len = index(self.free.len()) - free_start;
+        let node = bir.func_owners[function.index()].expect("close after the function literal is built");
+        if eta_shape(bir, node) {
+            flags |= ScopeRow::ETA;
+        }
+        self.rows[row as usize] = ScopeRow { function, free_start, free_len, flags };
+        let scope = ScopeId(row);
+        self.set_scope(function, scope);
+        // 5. Handed up to the enclosing open scope.
+        self.children.truncate(children);
+        if let Some(parent) = self.open.last().map(|open| open.row) {
+            for i in free_start..free_start + free_len {
+                self.steps += 1;
+                self.join(parent, self.free[i as usize]);
+            }
+            self.children.push([open.sites, end]);
+        }
+        scope
+    }
+
+    /// Step 2 of `close` over the sites `[from, to)`: one step each.
+    fn read_sites(&mut self, bir: &Bir, row: u32, from: u32, to: u32) {
+        let sites = &bir.js_scope.as_ref().expect("lowering scope").sites;
+        for site in &sites[from as usize..to as usize] {
+            self.steps += 1;
+            if site.node == NodeId(u32::MAX) {
+                continue;
+            }
+            let crate::bir::View::Var { var } = bir.view(site.node) else { unreachable!("a site is a reference") };
+            self.join(row, FreeRef::var(var));
+        }
+    }
+
+    /// `adopt` on the log taken out of `bir` (see `adopt`).
+    fn adopt(&mut self, bir: &Bir, node: NodeId) {
+        let row = self.open.last().expect("adopt inside an open function scope").row;
+        debug_assert!(self.pending.is_empty());
+        self.pending.push(node);
+        while let Some(node) = self.pending.pop() {
+            self.steps += 1;
+            self.adopted_nodes += 1;
+            match bir.view(node) {
+                crate::bir::View::Var { var } => self.join(row, FreeRef::var(var)),
+                crate::bir::View::JQualified { module, .. } => self.join(row, FreeRef::import(module)),
+                crate::bir::View::JFun { header, .. } => {
+                    let scope = self.scope(header).expect("an adopted function literal is closed");
+                    let literal = self.rows[scope.0 as usize];
+                    assert!(literal.flags & ScopeRow::CLOSED != 0, "an adopted function literal is closed");
+                    for i in literal.free_start..literal.free_start + literal.free_len {
+                        self.steps += 1;
+                        self.join(row, self.free[i as usize]);
+                    }
+                }
+                view => view.children_into(&mut self.pending),
+            }
+        }
+    }
+}
+
+/// `Ident`'s order of two free entries (stamp, then name; a variable by its
+/// origin, an import by its module identifier), then the entries' own
+/// order, so that equal entries are adjacent. Constant.
+fn ident_order(bir: &Bir, a: FreeRef, b: FreeRef) -> std::cmp::Ordering {
+    if a == b {
+        return std::cmp::Ordering::Equal;
+    }
+    let key = |entry: FreeRef| match (entry.as_var(), entry.as_import()) {
+        (Some(var), _) => {
+            let origin = bir.vars.j_origin[var.index()];
+            (i64::from(bir.vars.order(origin)), bir.vars.name(origin))
+        }
+        (None, Some(import)) => {
+            let module = &bir.pools.j_modules[import.index()].id;
+            (i64::from(module.stamp()), module.name_atom())
+        }
+        (None, None) => unreachable!("a free entry is a variable or an import"),
+    };
+    key(a).cmp(&key(b)).then(a.cmp(&b))
+}
+
+/// A `u32` index. Constant.
+fn index(len: usize) -> u32 {
+    u32::try_from(len).expect("naming log capacity")
 }
 
 /// A function's scope opens: call it where the lowering starts the body of
@@ -215,8 +401,13 @@ impl Log {
 /// before the first node of the body is built. Pushes the scope's row and
 /// its entry on the open stack. Cost: two pushes; no step.
 pub(crate) fn open(bir: &mut Bir) -> ScopeId {
-    let _ = bir;
-    todo!("T5b-1")
+    let scope = bir.js_scope.as_mut().expect("lowering scope");
+    let sites = index(scope.sites.len());
+    let log = &mut scope.names;
+    let row = index(log.rows.len());
+    log.rows.push(ScopeRow { function: FuncId(u32::MAX), free_start: 0, free_len: 0, flags: 0 });
+    log.open.push(Open { row, sites, run: index(log.run.len()), children: index(log.children.len()) });
+    ScopeId(row)
 }
 
 /// The innermost open scope closes: call it once the `JFun` with header
@@ -243,8 +434,10 @@ pub(crate) fn open(bir: &mut Bir) -> ScopeId {
 /// site is read at one close only, so the sites cost one step each over the
 /// whole unit, whatever the nesting.
 pub(crate) fn close(bir: &mut Bir, function: FuncId) -> ScopeId {
-    let _ = (bir, function);
-    todo!("T5b-1")
+    let mut log = std::mem::take(&mut bir.js_scope.as_mut().expect("lowering scope").names);
+    let scope = log.close(bir, function);
+    bir.js_scope.as_mut().expect("lowering scope").names = log;
+    scope
 }
 
 /// An expression that was built before the innermost open scope opened
@@ -270,8 +463,9 @@ pub(crate) fn close(bir: &mut Bir, function: FuncId) -> ScopeId {
 /// grows by the nodes read. Nothing is allocated once `pending` has its
 /// capacity. Asserts that a function scope is open.
 pub(crate) fn adopt(bir: &mut Bir, node: NodeId) {
-    let _ = (bir, node);
-    todo!("T5b-1")
+    let mut log = std::mem::take(&mut bir.js_scope.as_mut().expect("lowering scope").names);
+    log.adopt(bir, node);
+    bir.js_scope.as_mut().expect("lowering scope").names = log;
 }
 
 /// Whether the printer eta-reduces the function literal `function`
@@ -281,8 +475,33 @@ pub(crate) fn adopt(bir: &mut Bir, node: NodeId) {
 /// arguments, in order. Cost: one step per parameter; the body is not read
 /// beyond its one statement.
 pub(crate) fn eta_shape(bir: &Bir, function: NodeId) -> bool {
-    let _ = (bir, function);
-    todo!("T5b-1")
+    use crate::bir::View;
+    use crate::js_ir::{CallArity, CallKind};
+    let View::JFun { body, header } = bir.view(function) else { return false };
+    let attributes = bir.function_attributes(header);
+    if bir.function(header).flags & crate::bir::FuncHeader::METHOD != 0 || attributes.async_ || attributes.directive.is_some() {
+        return false;
+    }
+    let View::SBlock { statements: &[statement] } = bir.view(body) else { return false };
+    let View::SReturn { value } = bir.view(statement) else { return false };
+    let View::JCall { callee, args, info } = bir.view(value) else { return false };
+    let callee = match bir.view(callee) {
+        View::Var { var } => Some(var),
+        View::JQualified { .. } => None,
+        _ => return false,
+    };
+    let params = bir.function(header).params.len();
+    if args.len() != params {
+        return false;
+    }
+    for (i, &arg) in args.iter().enumerate() {
+        let param = bir.function_parameter(header, i);
+        if !matches!(bir.view(arg), View::Var { var } if var == param) || callee == Some(param) {
+            return false;
+        }
+    }
+    let crate::bir::JsPayload::Call(info) = bir.javascript(info) else { return false };
+    matches!(info.kind, CallKind::MlCall | CallKind::BuiltinRuntime) && info.arity == CallArity::Full
 }
 
 /// What the program scope names besides its statements, in the pass's order
@@ -441,7 +660,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-1 build"]
     fn a_new_log_has_the_program_row_and_no_home() {
         let mut log = Log::new(2);
         assert_eq!(log.rows.len(), 1);
@@ -564,7 +782,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-1 build"]
     fn a_function_nested_in_a_function_captures_a_local_of_the_outer_one() {
         // Gap 1 (a). The sites of `g` are read at `g`'s close, whatever the
         // enclosing function saw before.
@@ -579,7 +796,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-1 build"]
     fn a_function_that_returns_no_call_is_closed_and_not_eta() {
         let (u, statement, [f, g], _) = nested(true);
         let View::SDecl { value: Some(function), .. } = u.b.view(statement) else { unreachable!() };
@@ -634,7 +850,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-1 build"]
     fn a_recursive_inner_function_is_free_in_itself_and_bound_where_it_is_declared() {
         // Gap 1 (b): the home of `g` is written when its declaration is,
         // after `g`'s own scope closed, and belongs to `f` alone.
@@ -653,7 +868,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-1 build"]
     fn a_reference_released_before_the_close_is_not_free() {
         // Section 2: a capture the constructors fold away. `x` is read in
         // the function and the read is released before the close; `y` is
@@ -671,7 +885,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-1 build"]
     fn the_this_of_a_method_is_recorded_as_read_only_when_the_body_reads_it() {
         // Gap 3.
         for used in [false, true] {
@@ -706,7 +919,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-1 build"]
     fn a_header_replaced_after_the_body_is_the_header_of_the_row() {
         // Gap 2 (`one_unit_arg`, `finish_expression`): the body is built
         // under the header with the unit parameter, the literal with a new
@@ -726,7 +938,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-1 build"]
     fn the_aliases_of_a_tail_call_loop_are_bound_in_their_function() {
         // Gap 2 (`loop_function_body`): after the body was lowered the
         // header's parameter becomes the copy `_x`, and `let x = _x` is
@@ -874,7 +1085,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-1 build"]
     fn a_copied_function_gets_a_row_that_shares_the_free_list_of_its_source() {
         // (c): `copy_j` copies a closed literal. The copy's header is new;
         // its row shares the run and is marked, and the source's row stays.
@@ -899,7 +1109,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-1 build"]
     fn an_imported_module_is_free_in_every_function_around_its_reference() {
         // The pass counts a module reference as a use (naming.rs
         // `analyze_expr`, `Qualified`). The hook is called as
@@ -936,7 +1145,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-1 build"]
     fn ten_thousand_references_cost_one_step_each_at_the_close() {
         // No work where a reference is built; one step per site at the
         // close of the scope it was built in.
@@ -975,7 +1183,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-1 build"]
     fn ten_thousand_nested_functions_read_each_site_at_one_close() {
         // A site inside a closed function is skipped with that function's
         // range: one step per child, not one per site of the child. So the
@@ -1013,7 +1220,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-1 build"]
     fn an_expression_built_before_the_scope_opened_is_adopted() {
         // G10: the sites of `[param]` are before the scope's range; without
         // `adopt` the expansion's free list is empty.
@@ -1072,7 +1278,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-1 build"]
     fn an_adopted_function_literal_gives_its_free_entries_and_is_not_entered() {
         let (u, _, [outer, literal, inner], [v, _], cost) = adopted_literal();
         assert_eq!(u.free(literal), [FreeRef::var(v)]);
@@ -1094,7 +1299,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-1 build"]
     fn the_scrutinee_of_a_dispatch_function_is_adopted() {
         // `external_dispatch`: `(() => { switch (p) {} })()` inside
         // `p => ...`; the scrutinee was lowered before the function.
@@ -1125,7 +1329,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-1 build"]
     fn a_module_reference_in_an_adopted_expression_is_free_in_the_function() {
         let mut u = Unit::new();
         let outer = u.header(None, 0);
@@ -1174,7 +1377,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-1 build"]
     fn ten_thousand_adopted_nodes_cost_one_step_each_and_a_literal_its_free_entries() {
         let (small, large) = (cost_of_adopting(10_000, false), cost_of_adopting(20_000, false));
         assert_eq!(large[0] - small[0], 10_000);
