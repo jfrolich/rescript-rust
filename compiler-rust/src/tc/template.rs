@@ -210,6 +210,87 @@ mod tests {
         assert_ne!(g.lists[b + 2], g.lists[b + 3]);
         assert_eq!(g.lists[b + 4], local);
     }
+    /// A scheme variable's name is kept beside the instance source, not in
+    /// it: the stored node has no name in `a` and the name in its level
+    /// field, [`descriptor`] gives the scheme's node back, and an instance
+    /// has no name and the level of the instance
+    /// (compiler/ml/btype.ml:510).
+    #[test]
+    fn a_template_keeps_a_variable_name_out_of_the_instance_source() {
+        let mut g = Graph::default();
+        let var = |a| Node {
+            head: VAR,
+            level: GENERIC,
+            a,
+            b: 0,
+        };
+        let (named, plain) = (g.push(var(7)), g.push(var(NONE)));
+        let b = g.lists.len() as u32;
+        g.lists.extend([named, plain]);
+        let tuple = g.push(Node {
+            head: TUPLE | 2 << 8,
+            level: GENERIC,
+            a: 0,
+            b,
+        });
+        let template = g.capture(tuple);
+        let stored: Vec<Node> = g.template_nodes
+            [template.nodes as usize..(template.nodes + template.node_len) as usize]
+            .to_vec();
+        assert_eq!(stored.len(), 3);
+        let variables: Vec<Node> = stored
+            .iter()
+            .copied()
+            .filter(|node| node.tag() == VAR)
+            .collect();
+        assert_eq!(variables.len(), 2);
+        // No stored variable has a name where an instance copies it from.
+        assert!(variables.iter().all(|node| node.a == NONE));
+        let mut names: Vec<u32> = variables.iter().map(|node| node.level).collect();
+        names.sort_unstable();
+        assert_eq!(names, [7, NONE]);
+        // The scheme's own nodes, as its printer and the old checker's
+        // bridge read them.
+        let mut read: Vec<u32> = variables
+            .iter()
+            .map(|&node| {
+                let scheme = descriptor(node);
+                assert_eq!(scheme.level, GENERIC);
+                scheme.a
+            })
+            .collect();
+        read.sort_unstable();
+        assert_eq!(read, [7, NONE]);
+        for &node in stored.iter().filter(|node| node.tag() != VAR) {
+            assert_eq!(descriptor(node), node);
+        }
+        g.begin_def();
+        let out = g.instance(template);
+        let b = g.nodes[out.0 as usize].b as usize;
+        for child in [g.lists[b], g.lists[b + 1]] {
+            let node = g.nodes[child.0 as usize];
+            assert_eq!(node.tag(), VAR);
+            assert_eq!(node.a, NONE, "an instance's variable has no name");
+            assert_eq!(node.level, g.level);
+        }
+    }
+}
+
+/// O(1), no allocation: the descriptor a stored template node stands for.
+/// Every template node is generic, so its level field is free: a variable
+/// keeps its scheme name there and NONE in `a`, which is what an instance
+/// copies (compiler/ml/btype.ml:510). Readers that print or convert a scheme
+/// (tc/canonical/view.rs, tc/bridge/to_old.rs) read the name through this.
+pub(crate) fn descriptor(node: Node) -> Node {
+    if node.tag() == VAR {
+        Node {
+            level: GENERIC,
+            a: node.level,
+            ..node
+        }
+    } else {
+        node
+    }
 }
 
 /// Four words, with a pool-range index, avoiding a 65,535-node scheme limit.
@@ -306,7 +387,15 @@ impl Graph {
             let target = base + (self.forward[source.0 as usize].target & !RELATIVE);
             let mut node = self.nodes[source.0 as usize];
             match node.tag() {
-                VAR => {}
+                // The instance source holds no name: an instance copies the
+                // node as it is stored, nameless (`copy_type_desc`,
+                // compiler/ml/btype.ml:510: `Tvar _ -> Tvar None`), and
+                // overwrites the level. The scheme's name moves to the
+                // level field, which no instance reads ([`descriptor`]).
+                VAR => {
+                    node.level = node.a;
+                    node.a = NONE;
+                }
                 ARROW => {
                     node.a = self.capture_ref(Ty(node.a), base).0;
                     let start = self.template_params.len() as u32;
@@ -363,24 +452,40 @@ impl Graph {
     /// variable has no name (compiler/ml/btype.ml:510).
     pub fn instance(&mut self, template: Template) -> Ty {
         if template.node_len == 0 {
-            let root = self.repr(Ty(template.nodes));
-            assert_ne!(
-                self.nodes[root.0 as usize].level, GENERIC,
-                "recapture after external generalization"
-            );
-            return root;
+            return self.instance_external_root(template);
         }
         let pools = self.template_pools[template.pools as usize];
         if pools.external_len == 0 {
             self.instance_inner::<false>(template, &pools)
         } else {
-            self.instance_inner::<true>(template, &pools)
+            self.instance_with_externals(template, &pools)
         }
+    }
+
+    /// O(links), out of line: the instance of a template whose root is not
+    /// generic is that root's representative, which must still not be generic.
+    #[inline(never)]
+    fn instance_external_root(&mut self, template: Template) -> Ty {
+        let root = self.repr(Ty(template.nodes));
+        assert_ne!(
+            self.nodes[root.0 as usize].level, GENERIC,
+            "recapture after external generalization"
+        );
+        root
+    }
+
+    /// O(nodes + slots + external references + links), out of line so that
+    /// the closed instance, inlined into [`Graph::instance`], shares no
+    /// registers with the external references' representative lookups.
+    #[inline(never)]
+    fn instance_with_externals(&mut self, template: Template, pools: &TemplatePools) -> Ty {
+        self.instance_inner::<true>(template, pools)
     }
 
     /// O(nodes + slots + external references + links). Both specializations
     /// share this traversal; closed templates compile without an external
     /// reference case in the per-reference mapping.
+    #[inline(always)]
     fn instance_inner<const EXTERNALS: bool>(
         &mut self,
         template: Template,
@@ -447,11 +552,9 @@ impl Graph {
         }
         // Tag order is VAR, LINK (never captured), CONSTR, TUPLE, ARROW.
         // Capture validates descriptors before publishing template nodes.
+        // A stored variable is already nameless; the level written here
+        // replaces the name the level field holds ([`descriptor`]).
         let b_addend = [0, 0, list_base, list_base, param_base];
-        // A copied variable has no name (`copy_type_desc`,
-        // compiler/ml/btype.ml:510: `Tvar _ -> Tvar None`): an OR by tag,
-        // no branch. An arrow's `a` is rewritten below.
-        let a_mask = [NONE, 0, 0, 0, 0];
         let source =
             &template_nodes[template.nodes as usize..(template.nodes + template.node_len) as usize];
         nodes.extend(source.iter().map(|&original| {
@@ -461,7 +564,6 @@ impl Graph {
                 level: *level,
                 ..original
             };
-            node.a |= a_mask[node.tag() as usize];
             node.b += b_addend[node.tag() as usize];
             if node.tag() == ARROW {
                 node.a = at(Ty(node.a)).0;

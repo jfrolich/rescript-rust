@@ -769,6 +769,7 @@ impl<'s> Rebuild<'s> {
                 }
                 let physical = frame.start + offset as u32;
                 if seg.publication_node(physical) == physical {
+                    let node = crate::tc::template::descriptor(node);
                     let converted = self.node(node, frame, lists, params);
                     self.nodes.push(converted);
                 }

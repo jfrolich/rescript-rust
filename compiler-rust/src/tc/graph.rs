@@ -2,6 +2,8 @@
 
 pub const GENERIC: u32 = 100_000_000;
 pub const VAR: u32 = 0;
+/// A link's head is exactly `LINK`: no arity and no flag bits, so
+/// [`Graph::repr`] tests the whole head.
 pub const LINK: u32 = 1;
 pub const CONSTR: u32 = 2;
 pub const TUPLE: u32 = 3;
@@ -75,6 +77,8 @@ pub struct Graph {
     pub(crate) work: Vec<Ty>,
     pub(crate) forward: Vec<super::template::Forward>,
     pub(crate) copy_generation: u32,
+    /// Instance sources: a variable's name is in the level field, not `a`
+    /// (tc/template.rs `descriptor`).
     pub(crate) template_nodes: Vec<Node>,
     pub(crate) template_lists: Vec<Ty>,
     pub(crate) template_params: Vec<Param>,
@@ -129,39 +133,58 @@ impl Graph {
         ty
     }
 
-    /// Amortized O(1). Only speculative writes append a 20-byte undo entry.
+    /// Amortized O(1). One bounds check and one node store; outside a
+    /// speculation one untaken branch. Only speculative writes load the old
+    /// node and append a 20-byte undo entry.
     pub fn write(&mut self, ty: Ty, node: Node) {
+        let slot = &mut self.nodes[ty.0 as usize];
         if self.speculation_depth != 0 {
-            self.trail.push(Change {
-                ty,
-                before: self.nodes[ty.0 as usize],
-            });
+            self.trail.push(Change { ty, before: *slot });
         }
-        self.nodes[ty.0 as usize] = node;
+        *slot = node;
     }
 
     /// O(1). Link representatives in the caller's direction. The lower-level
-    /// variable's supplied name wins (compiler/ml/btype.ml:713-731).
+    /// variable's supplied name wins (compiler/ml/btype.ml:713-731). One
+    /// bounds check, one node load, one node store and one untaken branch:
+    /// only inside a speculation or for a named variable source does
+    /// [`Graph::link_logged`] run, which logs the write and applies the name
+    /// rule.
     pub fn link(&mut self, from: Ty, to: Ty) {
         if from == to {
             return;
         }
-        let source = self.nodes[from.0 as usize];
+        let slot = &mut self.nodes[from.0 as usize];
+        let source = *slot;
+        *slot = Node {
+            head: LINK,
+            a: to.0,
+            b: 0,
+            ..source
+        };
+        if self.speculation_depth != 0 || (source.tag() == VAR && source.a != NONE) {
+            self.link_logged(from, source, to);
+        }
+    }
+
+    /// O(1), out of line so that [`Graph::link`] saves no register: the
+    /// undo entry of the link inside a speculation (20 bytes, amortized), and
+    /// the name rule (compiler/ml/btype.ml:727): a variable target of a named
+    /// variable takes the name when it has none or a higher level. One node
+    /// load and at most one write.
+    #[inline(never)]
+    fn link_logged(&mut self, from: Ty, source: Node, to: Ty) {
+        if self.speculation_depth != 0 {
+            self.trail.push(Change {
+                ty: from,
+                before: source,
+            });
+        }
+        if source.tag() != VAR || source.a == NONE {
+            return;
+        }
         let target = self.nodes[to.0 as usize];
-        self.write(
-            from,
-            Node {
-                head: LINK,
-                a: to.0,
-                b: 0,
-                ..source
-            },
-        );
-        if source.tag() == VAR
-            && target.tag() == VAR
-            && source.a != NONE
-            && (target.a == NONE || source.level < target.level)
-        {
+        if target.tag() == VAR && (target.a == NONE || source.level < target.level) {
             self.write(
                 to,
                 Node {
@@ -206,20 +229,35 @@ impl Graph {
     /// the walked path. Count one step per followed link and rewritten node:
     /// at most two per link, one for an already direct link. Writes use the
     /// speculative trail. This preserves compiler/ml/btype.ml's representative.
+    /// A representative costs one load, one compare and one untaken branch.
     #[inline]
     pub fn repr(&mut self, ty: Ty) -> Ty {
         Self::repr_parts(&mut self.nodes, &mut self.trail, self.speculation_depth, ty)
     }
 
     /// O(links), at most two steps per link. Split borrows let pool iterators
-    /// resolve external references without borrowing the entire graph.
+    /// resolve external references without borrowing the entire graph. A
+    /// representative returns at once; a link goes to [`Graph::compress`].
     #[inline]
     pub(crate) fn repr_parts(
         nodes: &mut [Node],
         trail: &mut Vec<Change>,
         depth: usize,
-        mut ty: Ty,
+        ty: Ty,
     ) -> Ty {
+        if nodes[ty.0 as usize].head != LINK {
+            return ty;
+        }
+        Self::compress(nodes, trail, depth, ty)
+    }
+
+    /// O(links), at most two steps per link, out of line: follow the links
+    /// from `ty` to the representative, then point every walked node that
+    /// does not already point there at it, with an undo entry inside a
+    /// speculation. Cold, so that the representative's path falls through.
+    #[cold]
+    #[inline(never)]
+    fn compress(nodes: &mut [Node], trail: &mut Vec<Change>, depth: usize, mut ty: Ty) -> Ty {
         let mut root = ty;
         while nodes[root.0 as usize].tag() == LINK {
             #[cfg(test)]
