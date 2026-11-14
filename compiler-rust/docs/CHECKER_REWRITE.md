@@ -3424,3 +3424,16 @@ These bind the builders of R4 and the designers of R5.
    is then not `Missing`. A reason that is an error when read counts as
    deprecated, so that the use reports it. R4f reads the text and the
    migration templates from the same attribute when it warns.
+10. **What the read logs hold** (review of R4g). `read_units` holds every
+    unit whose name was asked and found, in the order first asked;
+    `read_items` holds every imported member the walk chose with
+    `use_found`, in the order first chosen, and reading an item reads its
+    unit. A module on a path is not logged as an item: `use_modules` marks
+    and warns, and the unit of each such module is in `read_units` through
+    `unit_by_name` or through the item at the end of the path. Whether a
+    module on a path needs an entry of its own (its shallow identity: an
+    alias target, or which table it has) is decided by the designer of
+    the first reader of `read_items` (R9), who then adds it in
+    `use_modules` with a test; nothing reads `read_items` before that.
+    A use of an imported member costs two steps, the use and the read it
+    logs; a name that is asked again costs two as well.

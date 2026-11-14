@@ -572,7 +572,8 @@ impl Scopes {
     /// - From R4g on: an imported member is logged in `read_items`.
     ///
     /// It does not set a binder's used bits: that is [`Scopes::mark`], by
-    /// the walk's rules. 1 step, plus `find_below` when the item came
+    /// the walk's rules. 1 step, one more for an imported member (the
+    /// [`Scopes::read_item`] it logs), plus `find_below` when the item came
     /// through a layer that can report shadowing.
     ///
     /// Returns `Some(hidden)` only for a constructor or label found through
