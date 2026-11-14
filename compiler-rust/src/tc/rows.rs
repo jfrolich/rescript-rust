@@ -288,7 +288,8 @@ impl Checker {
             let order = if f1.name == f2.name {
                 Ordering::Equal
             } else {
-                self.extras.names.text(f1.name).cmp(self.extras.names.text(f2.name))
+                let names = &self.extras.names;
+                names.text(f1.name).cmp(names.text(f2.name))
             };
             if order == Ordering::Equal {
                 fields[i - 1].name |= COMMON;
@@ -510,7 +511,10 @@ impl Checker {
     /// template [`Checker::instance`] is the same instance and costs
     /// nothing for cells. O(template) plus one step per new node. (R3e)
     pub fn instance_open(&mut self, template: Template) -> Ty {
-        todo!("R3e")
+        let first = self.g.nodes.len();
+        let root = self.g.instance(template);
+        self.link_memorized(first, NONE, true);
+        root
     }
 
     /// One field node of a copy session (an instance or a copy; `first` is
@@ -535,7 +539,87 @@ impl Checker {
     /// row (12 bytes) per duplicated field, one node per duplicated class.
     /// (R3e)
     pub fn dup_cell(&mut self, field: Ty, node: Node, first: u32) {
-        todo!("R3e")
+        let rest = self.g.lists[node.b as usize + 1];
+        if !self.ends_in_session(rest, first) {
+            return;
+        }
+        let ExtraDescriptor::Field { name, mutability } = self.extras.descriptors[node.a as usize]
+        else {
+            unreachable!("a field node");
+        };
+        let source = cell_repr(&self.g, Ty(mutability));
+        // A cell at or above `first` was made by this session: no instance
+        // or copy makes a cell, which is no node's child.
+        let duplicate = if source.0 >= first {
+            source
+        } else {
+            let cell = self.g.nodes[source.0 as usize];
+            let duplicate = self.g.push(cell);
+            self.g.nodes[source.0 as usize] = super::expand::link_node(cell, duplicate);
+            self.extras.session.push(source);
+            duplicate
+        };
+        let a = self.extras.descriptors.len() as u32;
+        self.extras.descriptors.push(ExtraDescriptor::Field {
+            name,
+            mutability: duplicate.0,
+        });
+        // The field node is the session's own: no trail entry.
+        self.g.nodes[field.0 as usize] = Node { a, ..node };
+    }
+
+    /// `row_terminator_generic rest` (compiler/ml/btype.ml:478-506) for a
+    /// copy session whose nodes start at `first`: whether the row from
+    /// `rest` ends in a variable the session made. The two latest mark
+    /// generations are the session's (`link_memorized` takes them): the
+    /// newest marks a field node of a row that does, the one before a field
+    /// node of a row that does not. A first walk stops at the first marked
+    /// node or at the end, a second marks the field nodes the first passed.
+    /// One step per node passed or marked, so at most two per field node
+    /// over the whole session; links are followed without compression.
+    fn ends_in_session(&mut self, rest: Ty, first: u32) -> bool {
+        let (yes, no) = (self.mark_generation, self.mark_generation - 1);
+        let mut at = rest;
+        let answer = loop {
+            at = cell_repr(&self.g, at);
+            let mark = self.marks.get(at.0 as usize).copied().unwrap_or(0);
+            if mark == yes || mark == no {
+                break mark == yes;
+            }
+            #[cfg(test)]
+            super::steps::tick();
+            let node = self.g.nodes[at.0 as usize];
+            match self.field_descriptor(node) {
+                ExtraDescriptor::Field { .. } => at = self.g.lists[node.b as usize + 1],
+                _ => break node.tag() == VAR && at.0 >= first,
+            }
+        };
+        let generation = if answer { yes } else { no };
+        let mut at = rest;
+        loop {
+            at = cell_repr(&self.g, at);
+            let node = self.g.nodes[at.0 as usize];
+            let mark = self.marks.get(at.0 as usize).copied();
+            let unmarked = mark.is_some_and(|mark| mark != yes && mark != no);
+            if !unmarked || !matches!(self.field_descriptor(node), ExtraDescriptor::Field { .. }) {
+                return answer;
+            }
+            #[cfg(test)]
+            super::steps::tick();
+            self.marks[at.0 as usize] = generation;
+            at = self.g.lists[node.b as usize + 1];
+        }
+    }
+
+    /// O(1) amortized: two consecutive fresh mark generations for a copy
+    /// session ([`Checker::ends_in_session`] reads them as the two latest).
+    pub(super) fn begin_cell_session(&mut self) {
+        let older = self.fresh_marks();
+        if self.fresh_marks() != older + 1 {
+            // The counter wrapped and the marks were cleared: start again
+            // above the cleared value.
+            self.fresh_marks();
+        }
     }
 
     /// End a copy session: every cell of `extras.session` gets its
@@ -544,7 +628,11 @@ impl Checker {
     /// (`end_type_copy_session`, compiler/ml/btype.ml:449-456). O(classes
     /// duplicated). (R3e)
     pub fn end_cell_session(&mut self) {
-        todo!("R3e")
+        while let Some(source) = self.extras.session.pop() {
+            let duplicate = Ty(self.g.nodes[source.0 as usize].a);
+            let mutable = cell_mutable(&self.g, duplicate);
+            self.g.nodes[source.0 as usize] = cell_node(mutable);
+        }
     }
 
     /// `unify_row` (compiler/ml/ctype.ml:2541-2641): merge the two rows'

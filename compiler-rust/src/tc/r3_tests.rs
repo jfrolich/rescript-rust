@@ -2008,7 +2008,6 @@ fn an_instance_duplicates_the_cells_of_an_open_row() {
 ///
 /// Reaches: R3e.
 #[test]
-#[ignore = "R3e build"]
 fn objects_of_ten_thousand_fields_are_linear() {
     let common = |n: u32| {
         let mut c = checker(Mode::Success);

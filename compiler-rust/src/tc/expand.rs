@@ -839,15 +839,18 @@ impl Checker {
     }
 
     /// The general copy with the same lookup: `Graph::copy` when
-    /// `memo.live` is 0, otherwise one `find_repr` per copied nullary
-    /// constructor. compiler/ml/ctype.ml:744-797. (R3b)
+    /// `memo.live` is 0 and the graph has no descriptor row, otherwise the
+    /// pass of [`Checker::link_memorized`]: one `find_repr` per copied
+    /// nullary constructor, and with descriptor rows the duplicate of the
+    /// cells of every copied field whose row ends in a copied variable
+    /// (`Checker::dup_cell`). compiler/ml/ctype.ml:744-797. (R3b, R3e)
     pub fn copy(&mut self, root: Ty) -> Ty {
-        if self.memo.live == 0 {
+        if self.memo.live == 0 && self.extras.descriptors.is_empty() {
             return self.g.copy(root);
         }
         let first = self.g.nodes.len();
         let copied = self.g.copy(root);
-        self.link_memorized(first, NONE, false);
+        self.link_memorized(first, NONE, !self.extras.descriptors.is_empty());
         copied
     }
 
@@ -873,6 +876,9 @@ impl Checker {
     pub(super) fn link_memorized(&mut self, first: usize, chain: u32, cells: bool) {
         // The pass makes nodes (duplicated cells): they are not visited.
         let end = self.g.nodes.len();
+        if cells {
+            self.begin_cell_session();
+        }
         for index in first..end {
             #[cfg(test)]
             super::steps::tick();
