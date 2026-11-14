@@ -690,7 +690,10 @@ impl Scopes {
     /// for every prefix, compiler/ml/env.ml:968-972): for each, in order,
     /// `USED` on a binder, `OPEN_USED` and the shadowing check for the
     /// first one's layer, `Deprecated` for a deprecated module. 1 step a
-    /// module. `names` are the path's components, parallel to `modules`.
+    /// module; a module found through an open also costs that open's
+    /// shadowing check, as in [`Scopes::use_found`] (a scan of the open's
+    /// notes and one [`Scopes::find_below`]). `names` are the path's
+    /// components, parallel to `modules`.
     pub fn use_modules(&mut self, modules: &[Found], names: &[Name], loc: u32) {
         debug_assert_eq!(modules.len(), names.len());
         for (&module, &name) in modules.iter().zip(names) {
