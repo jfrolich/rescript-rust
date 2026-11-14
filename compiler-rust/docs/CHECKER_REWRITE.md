@@ -2616,6 +2616,12 @@ skeleton; all three were the skeleton's, not the builder's.
   pools. Names are compared from `Expand` up until R3b's first commit, which
   turns them on for every tier; the slice of R3a and R3b that merges second
   merges trunk first, so its structural tier runs with names.
+- The old side of the harness starts where a compilation starts: stamps
+  above the predefined types' and the first level at the current stamp
+  (`Ctype.init_def (Ident.current_time ())`). It started at level 0, below
+  the binding time of `int`, so the scope test of `update_level` refused a
+  binding of `int` to a variable of the starting level, which no
+  compilation refuses (found by R3a's structural tier, seed 1000064).
 - `link_directions`: the test's checker is one definition deep, so the two
   nullary constructors are at levels 2 and 3 and the survivor ends at 2.
   The review's own correction above had the levels wrong.
