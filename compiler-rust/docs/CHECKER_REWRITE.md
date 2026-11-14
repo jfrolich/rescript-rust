@@ -3431,6 +3431,39 @@ from this turn.
       (`copy_row`, btype.ml:366-392), exactly as a field of an open row
       needs a cell of its own. `template_has_open_row` grows that case.
 
+Decided in the review of the third skeleton turn (trunk `2f5d0c3b8a`).
+They bind the builders and the fourth skeleton turn.
+
+29. **R3f gets a design turn of its own, and it starts in the harness.**
+    The forms of both sides print the class of every `Reither` reference;
+    the old checker is then asked whether two instances of an annotation's
+    type share a resolution. Only after that is the layout chosen, in the
+    direction decision 28 recommends: the reference is a slot of the
+    variant node. No builder starts R3f before that turn is merged. The
+    turn is decision 34.
+30. **The hand-built tests of R3e were not run, and that is accepted**
+    with the rule its prompt has: a test that contradicts the OCaml lines
+    it quotes is reported with those lines, and the reviewer reads them.
+    The R3e builder's first commit is reviewed against the tests before
+    the second is opened.
+31. **`{..@set "x": int}` is printed and not parsed.** It is not part of
+    R3. It is a task of its own only where this compiler and the OCaml
+    compiler differ on it, or as a syntax fix upstream; it is noted for a
+    later check with both compilers.
+32. **Where the text of a field name comes from while a unit is checked
+    is R5a's decision** (the worker's name table, or a copy in
+    `Extras::names`). Nothing in R3 depends on which.
+33. **A chain through n distinct abbreviations costs a walk of up to n
+    rows per copy**, as `find_repr` costs OCaml (ctype.ml:720-724). It is
+    left as it is; chain lengths are read when `both` mode runs on real
+    programs (R5c).
+
+On record for R5 from the same review: mutability cells live in the
+worker's graph, so the publication of a unit writes each field's cell as
+the value of its class representative; the names replay of `both` mode
+does not see cells, and R5c's comparison of signatures is where a wrong
+class shows.
+
 ### 8.7 The hot paths of unification (K2)
 
 K1 (TC_KERNEL_R3.md, "K1") left unification at these figures, in
