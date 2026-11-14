@@ -646,22 +646,14 @@ impl Checker {
         self.memo.live != 0 && self.find_expansion(ty, true).0 != NONE
     }
 
-    /// `update_level` of `ty` to `level`: [`Graph::lower`] when no type has a
-    /// scope (what [`Checker::lower`] reduces to then), else
-    /// [`Checker::lower`]. O(1) for the generic level, which nothing is
-    /// above; otherwise the callee's cost. R3d folds the unscoped branch
-    /// into [`Checker::lower`], whose own fast path it is.
+    /// `update_level` of `ty` to `level`: [`Checker::lower`]. O(1) for the
+    /// generic level, which nothing is above; otherwise the callee's cost.
     #[inline]
     fn lower_to(&mut self, ty: Ty, level: u32) -> Result<(), Clash> {
         if level == GENERIC {
             return Ok(());
         }
-        if self.types.scoped == 0 {
-            self.g.lower(ty, level);
-            Ok(())
-        } else {
-            self.lower(ty, level)
-        }
+        self.lower(ty, level)
     }
 
     /// O(1): an object or a polymorphic variant row, which `occur_rec`
@@ -701,7 +693,7 @@ impl Checker {
 
     /// Amortized O(1): a fresh generation of `marks`, which grows to the
     /// graph's length; a wrap of the counter clears the marks once.
-    fn fresh_marks(&mut self) -> u32 {
+    pub(super) fn fresh_marks(&mut self) -> u32 {
         if self.marks.len() < self.g.nodes.len() {
             self.marks.resize(self.g.nodes.len(), 0);
         }

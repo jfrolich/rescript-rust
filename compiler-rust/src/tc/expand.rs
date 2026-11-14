@@ -705,6 +705,7 @@ impl Checker {
     /// The walk is tried without expanding constructors that have arguments,
     /// and, after a clash, restored and run again expanding them: the
     /// speculation for that is opened only on this path. Explicit stack. (R3d)
+    #[inline]
     pub fn lower(&mut self, root: Ty, level: u32) -> Result<(), Clash> {
         if self.types.scoped == 0 {
             self.g.lower(root, level);
@@ -855,7 +856,7 @@ impl Checker {
     pub fn lower_args(&mut self, root: Ty) {
         // `seen` (typecore.ml:2505) as marks of this call's generation: one
         // load and one store per arrow, no list.
-        let generation = self.next_mark_generation();
+        let generation = self.fresh_marks();
         let mut ty = root;
         loop {
             #[cfg(test)]
@@ -888,17 +889,6 @@ impl Checker {
             }
             ty = Ty(node.a);
         }
-    }
-
-    /// O(1), or O(nodes) once every 2^32 calls: a mark generation no node
-    /// of [`Checker::marks`] holds yet.
-    fn next_mark_generation(&mut self) -> u32 {
-        if self.mark_generation == u32::MAX {
-            self.marks.fill(0);
-            self.mark_generation = 0;
-        }
-        self.mark_generation += 1;
-        self.mark_generation
     }
 }
 
