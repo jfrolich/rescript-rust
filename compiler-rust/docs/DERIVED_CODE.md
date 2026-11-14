@@ -728,6 +728,12 @@ module alias because this fixture's runtime no longer supplies `Js`.
 | record field `array<j>` | plan | declared record hides the payload |
 | `j`, `option<j>` | plan | identity and single-option exceptions agree |
 | nested module `array<j>` | general: `json_identity_argument` | inherits the preceding local alias |
+| `array<AliasOwner.j>` | plan with `NotJsonIdentity`; retries when JSON | resolved manifest identifies the external JSON alias |
+| `option<array<AliasOwner.j>>` | plan with `NotJsonIdentity`; retries when JSON | guard follows the pooled argument position |
+| `array<Local.j>`, `module Local = AliasOwner` | plan with `NotJsonIdentity`; retries when JSON | comparison is not based on the module alias spelling |
+| `open AliasOwner; array<j>` | plan with `NotJsonIdentity`; retries when JSON | owning declaration already contains the resolved path |
+| `array<AliasOwner.legacy>`, owner `Js.Json.t` | plan with `NotJsonIdentity`; retries when JSON | same endpoint as the binding's JSON side |
+| `array<Records.t>` | plan, guard holds | record endpoint differs from JSON; isolated discharge test retains plans |
 
 The rule covers the remaining plan-supported shapes because only manifest
 applications expose these generic codec argument types in the binding scheme:
@@ -930,8 +936,9 @@ as constructor scope, with flat version records so reverse mapping and nested
 scope borrowing preserve declaration order. Parsed occurrence handles are not
 canonical names: registering an existing spelling in the interner avoids both
 copying its bytes and allocating a per-name string. The existing dense name
-slots then resolve alias versions. No external-unit alias is guessed from its
-name. Final fixture check: `Parsed 32 source files`, `Compiled 32 modules`,
+slots then resolve alias versions. Unresolved external or opened nullary type arguments now receive a
+`NotJsonIdentity` obligation: it reads the checked declaration rather than
+guessing an alias from its name. Final fixture check: `Parsed 32 source files`, `Compiled 32 modules`,
 `Finished compilation`; the nested/local alias classification unit test passes.
 
 
@@ -970,3 +977,69 @@ known-true item; it examines attributes only for later items that the first
 scan never visited. `scope_presence_does_not_rescan_the_known_prefix` places the
 first derive halfway through 10,000 items and asserts exactly 10,000 presence
 visits total across detection and reverse mapping queries.
+
+
+### External JSON identity guard
+
+`NotJsonIdentity` carries the owning type declaration's source name handle and
+a span of argument indices in a dense pool; `Obligation` remains **16 bytes**.
+Only exposed encoder-bearing manifest arguments need it. A direct identity,
+a single option identity, and record/variant payloads keep their established
+exceptions. Prefix facts distinguish known non-JSON types from unresolved aliases.
+
+Discharge reads the immediately preceding declaration from its current scope,
+walks its checked manifest to the argument, and follows nullary manifests through
+`lookup_type_decl_for_path_exact`. `SameNameRecovery::Refused` disables only the
+identifier spelling recovery; every existing caller retains `Allowed` with its
+old behavior. Qualified component lookup and ordinary lazy forcing remain.
+Each alias step takes one exact lookup and one declaration read, at most **64**
+steps per endpoint. A miss, invalid position, parameters, applied constructor,
+or exhausted bound fails closed and requests the existing whole-unit retry.
+There is no instantiation, unification, `expand_head`, abbreviation-memo write,
+or linking of distinct representatives in the guard; `repr` compression is allowed.
+
+Endpoint comparison first checks shared declaration pointer identity. Component
+views can copy declarations and expose no universal declaration uid, so it also
+compares their canonical stored paths (or the resolved endpoint path), normalized
+through module aliases. This normalized-path comparison is explicit, not a test
+of source path spelling. The encoder's JSON side comes from its already established
+skeleton; the optional encoder's single predefined option wrapper is read through.
+
+Tests (`cargo test --manifest-path compiler-rust/Cargo.toml not_json_identity`)
+cover alias depths 1 and 3 (2 and 4 declaration reads), record and abstract
+endpoints (1 read), a 10,000-alias environment stopped after exactly 64 reads,
+strict missing-identifier behavior, independent qualified/module-alias/open/legacy
+JSON retries, and qualified record controls that retain all their plans. The
+isolated seam fixtures receive the same prefix facts as the production frontend;
+no comparison, signature oracle or existing expected output was weakened.
+
+`AliasOwner.res` / `AliasUser.res` add the cross-unit fixture. The same CI command
+listed above ends `Parsed 34 source files`, `Compiled 34 modules`,
+`Finished compilation`. A census build emits an actual
+`not_json_identity / manifest_argument` failure event for AliasUser: **12 guards
+emitted, 1 failed**, followed by its whole-unit general retry (**18 bindings**).
+The record control is consequently general in that retried unit; its independent
+unit test proves that its guard holds and it retains a plan without a failing peer.
+Failure events retain guard counters from abandoned attempts; summaries aggregate
+those events and successful records without double-counting bindings.
+
+Application comparison, before → after the guard:
+
+| Counter | Before | After |
+|---|---:|---:|
+| planned bindings | 6,534 | 6,534 |
+| shadowed_result_constructor | 21 | 21 |
+| failed_obligation bindings | 0 | 0 |
+| json_identity_argument bindings | 0 | 0 |
+| NotJsonIdentity emitted / failed | not present | **6 / 0** |
+
+Commands: `RESCRIPT_FULL_BUILD=1 RESCRIPT_DERIVED_CENSUS=<file> rescript build`,
+then `python3 scripts/derived_census_summary.py <file>`; sum
+`not_json_identity_emitted` and `not_json_identity_failed` across records and
+failure events. Application `RESCRIPT_DERIVED_PATH=check` ends
+`Finished compilation`. `scripts/bench_project.sh <application> <saved-before>
+<candidate> --runtime-from <checkout> --no-instructions` compares **3,980 files**,
+identical SHA-256 `0a3d301322cf7febdbf8793ae8c3dcbc1ecbadf44670c3b52cecbc5437a02408`.
+The saved comparison binary is the previously measured `40a94389a` build; no
+new instruction or speedup claim is made from this output comparison. All **19**
+diagnostic fixtures still pass default/general/check with unchanged expectations.

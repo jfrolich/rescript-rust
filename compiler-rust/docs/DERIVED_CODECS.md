@@ -914,6 +914,15 @@ pass. The census-off gate is CI's fat-LTO, one-codegen-unit comparison; the
 separate local default-16-unit table is not substituted for it. The reviewed
 `d306a20b68` CI comparison was -0.014%; subsequent correction-head CI is reported
 in the PR body rather than claimed from this historical measurement.
+Unresolved external/opened JSON arguments now carry a 16-byte
+`NotJsonIdentity` obligation. It reads the owning declaration's checked manifest,
+uses exact path lookup with spelling recovery refused, and bounds each nullary
+alias walk at 64 declarations. It compares shared declaration identity and
+normalized canonical paths, without new inference or abbreviation writes.
+The cross-unit/module-alias/open/legacy fixtures pass check mode; record controls
+retain plans. Application plans stay 6,534 with six guards emitted and zero guard
+failures; generated outputs remain identical. Detailed commands and limits are
+in `DERIVED_CODE.md`.
 `RESCRIPT_DERIVED_PATH` and the oracle remain; slice 4 is held below.
 
 ### Slice 4. Remove the switch
