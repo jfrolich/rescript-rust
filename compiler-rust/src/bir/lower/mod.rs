@@ -604,7 +604,8 @@ impl State {
             statements: StatementStack::with_capacity(output_nodes),
             free: FreePool::with_source_capacity(source_nodes),
             traversal: SourceProbe {
-                work: Vec::with_capacity(source_nodes),
+                // Each pending child has an entry and a continuation event.
+                work: Vec::with_capacity(2 * source_nodes),
                 values: Vec::with_capacity(source_nodes),
                 children: Vec::with_capacity(source_nodes),
                 steps: 0,
