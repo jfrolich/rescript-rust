@@ -534,6 +534,9 @@ impl State {
         arena.j_duplicable.reserve_exact(output_nodes);
         #[cfg(debug_assertions)]
         arena.checked_children.reserve_exact(output_nodes);
+        // Each imported apply header can produce one ordinary JS call payload.
+        // Reserve that known count; primitives/inlining retain safe growth.
+        arena.pools.js.reserve_exact(arena.pools.apply.len());
         arena.func_owners.resize(arena.pools.funcs.len(), None);
         for i in 0..input.arena.vars.len() {
             let var = VarId(i as u32);
