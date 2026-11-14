@@ -1129,96 +1129,103 @@ re-check. Their output is today's by construction (the second attempt *is*
 today's checker), but that the success mode fails for each of them was not
 tested here. Slice R8 tests it.
 
-### 4.2 as landed: implementation candidate
+### 4.2 as landed
 
-The implementation is on a review branch, **not yet landed**. Its one
-`driver::type_structure_two_modes` attempt owner serves batch builds,
-single-file compilation, interfaces and tooling; the playground reaches the
-batch path. The mode is fixed during context preparation. A validating
-continuation keeps the type context alive without a self-referential owner.
-Its diagnostics and dumps remain buffered until the publication boundary;
-post-structure validation failures also cause an Explain retry.
-A discarded attempt's typed result, environment and context are dropped before
-the Explain context is constructed. Settings contain both the mode and the
-derived-plan choice so another retry reason can share the loop.
+Implementation record for `913faa5ed`; this describes the review candidate,
+not a claim that its branch has already merged.
 
-`RESCRIPT_CHECK_MODE=explain`, read once alongside `RESCRIPT_DERIVED_PATH`,
-selects the original snapshot policy for comparisons and bisection.
-`RESCRIPT_COMPILER_COUNTERS=1` includes `check_attempts` and `explain_reruns`;
-the CLI prints the counter report as well as the in-process build. The CLI
-resets these two observation counters after dependency preparation, before
-checking its selected source; a frontend failure then has zero attempts. These are diagnostic controls,
-not changes to generated JavaScript.
+**One attempt owner.** `driver::type_structure_two_modes` serves all six
+entry points below. Parsing/frontend work happens first; frontend diagnostics
+are reported once outside the attempt. Each iteration then creates a fresh
+`TypeContext`, defers its counters **before environment setup**, fixes its
+`CheckMode`, and runs checking plus the validating continuation. The continuation
+keeps the context alive without a self-referential owner. Reports and dumps are
+private until `AttemptOutput::publish` retains the counters and permits output.
+The typed result, environment, reports and context of an abandoned check are
+dropped before the next check begins. No reports are deduplicated.
 
-Context-reachable probes now count in a lazily allocated per-attempt block:
-journal operations, type creation/copying, unification and traversal census,
-lazy/qualified lookup, frozen-store access, store views, signature copying,
-qualification and freshening, exported signatures, publication/freezing and
-GenType translation. Discarded contexts publish none of these counts. Retained
-contexts publish on keep and flush later work on drop; reusable world scratch
-contexts flush after each build. The CLI flushes retained work before reporting.
+Success-mode unification skips diagnostic-only snapshots, but still snapshots
+under live speculation: `Explain || mutation_logging.compress()`. A type-check
+error, a caught unexplained unification failure, or a continuation validation
+error before publication reruns in Explain. After publication, a later error
+cannot replay that attempt's externally visible work.
 
-Derived-item counter snapshots read only the current context, not global totals,
-so other workers' retained attempts cannot contaminate item attribution. The
-census no longer needs a single-worker restriction. Per-compilation fallback
-signature decodes are local too; shared world imports remain once-per-build.
-Global observations are `check_attempts`, `explain_reruns`, registry snapshots,
-shared world construction and import/decode work. Publication IDs allocate
-identity, rather than measuring work; discarded IDs may leave gaps. Tests cover
-10,000 operations per counter family, discarded/retained attempts, post-keep
-flushes and sibling-publication isolation.
+**Derived fallback shares this loop.** `CheckAttempt::after` applies each retry
+reason at most once: `DerivedFallback` changes from planned to general syntax
+without changing mode; `Explain` changes mode without changing syntax. The
+fallback provider runs only when needed, and the loop owns the resulting
+`GeneralSyntax` (arena, tree and warning-location provider). Checking, diagnostic
+placement, census and lowering all use that syntax. A fallback followed by an
+error therefore takes at most three attempts: planned Success, general Success,
+general Explain. Without a provider, `DerivedRetry` escapes rather than silently
+checking the wrong tree. Source compilation and batch builds supply providers;
+interfaces have no derived implementation plans, and tooling uses general syntax.
 
-Measured evidence, not a replacement for the remaining gates:
+Location retries remain requests to the source owner for a located parse, not
+checker failures. A pending `LocationRetry` discards reports and counters without
+an Explain rerun. The located compile starts its own loop and explains an actual
+error there. Consequently the three-attempt bound is **per loop invocation**, not
+per whole build: a location retry after fallback can regenerate planned syntax
+and fall back again. Its extra abandoned work is not a retained diagnostic.
 
-- CI on the enabled batch revision: a clean single-worker test-project build
-  used 4,018,700,171 instructions versus 4,045,415,710 for its base, **-0.660%**
-  (minimum of five cachegrind runs, 742 modules). This is not a measurement of
-  the final revision after integrating newer trunk changes.
-- The subsequent candidate reported `explain_reruns=0` on both the test project
-  and the 3,735-module application.
-- The diagnostic parity script passed 2,137 cases after integrating trunk.
-- `scripts/test_check_modes.py` passes all 747 fixtures: 597 rechecked,
-  zero byte differences against forced Explain. It requires an Explain
-  rerun when the expected report contains an error and `check_attempts > 0`.
-  Frontend failures are excluded by observed attempts, not by fixture names.
-  `non_generalizable.res` now reports one Explain rerun and the identical
-  diagnostic. A unit test exercises that post-structure validation boundary.
-- Tests compare a warning before a type error, and a warning after a caught
-  failed unification, with forced Explain; both reports match byte-for-byte.
-- A matched-source comparison of candidate `5cda5eb4b` against trunk
-  `474bbcf02` passed both projects: 743 and 3,735 canonical signatures,
-  respectively, with zero diagnostic or generated-file differences.
-- That candidate's five-run application measurement reduced minimum
-  instructions by **0.669%**. Single-worker hyperfine means were
-  9.431 ± 0.263 s (base) and 9.219 ± 0.112 s (candidate); ranges overlap.
-  A synthetic late-type-error unit cost 1.597× forced Explain on the same
-  failure. See [the measurement record](CHECKER_SNAPSHOT_ELISION_MEASUREMENTS.md)
-  for revisions, raw counts, methodology and limitations. These measurements
-  precede later trunk merges and are not final-head acceptance evidence.
+**Entry-point boundaries.** Every row starts its attempt after frontend
+preparation, before initial-environment setup. The end is the validating
+continuation's retained result (or its explained failure); publication begins
+at the boundary shown, never at the first successful `type_structure` return.
 
-Attempt order (each row starts with fresh context and initial environment):
-
-| Entry point | Validation before retaining the attempt | Publication boundary |
+| Entry point | Validation before retention | Publication starts |
 | --- | --- | --- |
-| `compile_source_to_js_with_options_inner` | `type_structure`; inferred/interface coercion; `check_nongen_schemes`; signature normalization; delayed warnings; raw conversion and its diagnostics; lowering and JS diagnostics; fatal warnings | Buffered reports, gentype output and source map writes, then returned JS |
-| `compile_until_js` (batch/playground) | `type_structure`; inferred/interface inclusion; `check_js_names`; `check_nongen_schemes`; normalization; delayed checks; deprecation payload; raw conversion; late warnings and fatal-warning check | `signature_ready` callback and returned pre-JS result; check-only validates inclusion warnings before its callback |
-| `typecheck_interface_source` | `transl_signature`; persistent-environment error; `check_js_names`; self-inclusion through `includemod::escaped`; delayed checks; fatal warnings | Buffered warnings/dumps and returned result |
-| `typecheck_preprocessed_signature_in_process` | `transl_signature`; persistent-environment error; JS-name and self-inclusion checks; delayed/fatal warnings; gentype read; saved-signature and deprecation payload processing | Signature extraction and returned interface result |
-| `typecheck_structure_for_tooling` | `type_structure`; interface inclusion for dependency recording; error conversion | Returned typed arena, context and result |
-| `typecheck_signature_for_tooling` | `transl_signature` and error conversion | Returned typed arena, context and result |
+| `compile_source_to_js_with_options_inner` | `type_structure`; inferred/interface coercion; `check_nongen_schemes`; signature normalization; delayed warnings; raw conversion; lowering/JS diagnostics; fatal warnings | Explicit `attempt_output.publish` before externally written outputs; buffered reports, GenType/source maps and returned JS (typed-only has its own validated boundary) |
+| `compile_until_js` (batch/playground) | `type_structure`; interface inclusion; JS names; non-generalizable schemes; normalization; delayed checks; deprecation payload; raw conversion and late/fatal warnings | `publish_checked` retains before `signature_ready` and the returned pre-JS result; check-only validates inclusion warnings before this callback |
+| `typecheck_interface_source` | `transl_signature`; persistent-environment errors; JS names; self-inclusion; delayed/fatal warnings | Owner publishes buffered reports after the continuation, before returning |
+| `typecheck_preprocessed_signature_in_process` | `transl_signature`; persistent errors; JS-name/self-inclusion checks; delayed/fatal warnings; GenType read; saved-signature/deprecation payload work | Explicit `attempt_output.publish` before extracting/publishing the retained interface result |
+| `typecheck_structure_for_tooling` | `type_structure`; interface inclusion for dependency recording; error conversion | Owner retains before returning typed arena, context and typed result/error |
+| `typecheck_signature_for_tooling` | `transl_signature` and error conversion | Owner retains before returning typed arena, context and typed result/error |
 
-The batch path must freeze its private inferred signature before raw translation
-mutates type nodes; moving that freeze after translation fails the Belt snapshot
-proof. The frozen value is now kept private until validation completes, but its
-freeze/publication instrumentation is attributed to the owning attempt. Derived-plan
-fallback abandons the context before the Explain decision, without publishing
-its counters. The source owner still reparses general syntax outside this loop;
-composing that frontend transition into shared attempt settings remains open.
+The batch path freezes its **private** inferred signature before raw translation
+mutates type nodes; moving that freeze later breaks the Belt snapshot proof.
+The frozen result does not escape via `signature_ready` until validation succeeds.
+Its freeze/hash/publication counters belong to the attempt, not process totals.
 
-Final-head measurements must be repeated after retry composition and trunk
-integration. The strict fixture comparison now includes post-structure
-validation; the remaining retry-ownership requirement is the frontend's
-whole-unit derived fallback.
+**Post-structure failures are included.** `non_generalizable.res` gets through
+structure checking and fails validation of its inferred signature. Its first
+Success attempt is discarded; Explain runs once and emits the same diagnostic
+as forced Explain. The regression `post_structure_validation_is_rechecked_before_publication`
+exercises this boundary. Warning-before-error and caught-unification-failure
+regressions also compare output with forced Explain.
+
+**Counter ownership.** The lazily allocated 1,432-byte `AttemptCounters` holds
+journal, lookup, frozen/store, copy/qualification/freshening, checker census,
+export, publication, GenType and per-attempt signature-decode counts. Keep
+publishes once; later probes flush on drop. Discard publishes none. Item census
+snapshots read only the current context. Shared world/importer work, retry
+observations and identity allocation have explicit, different lifetimes; see
+[the counter audit](CHECKER_SNAPSHOT_ELISION_COUNTER_REVIEW.md) for the complete
+inventory, commit/drop sites, exceptions and personally rerun tests.
+
+`RESCRIPT_CHECK_MODE=explain` selects the reference snapshot policy.
+`RESCRIPT_COMPILER_COUNTERS=1` reports attempts and reruns; the CLI resets those
+two counters after dependency preparation. Frontend failures then have zero
+attempts. The fixture gate excludes them by observation, not fixture names.
+
+**Final implementation evidence**, candidate `913faa5ed` versus `be1b3a482`:
+
+- `scripts/test_check_modes.py`: 747 fixtures, 597 rechecked, zero differences
+  or failures; non-generalizable errors require a rerun, without exemptions.
+- Diagnostic parity: 2,137 cases; JS parity: 737 snapshots; both Rust suites and
+  both `super_errors` suites pass.
+- Clean single-worker `tests/tests`: 944 attempts, **0 Explain reruns**;
+  application: 4,005 attempts, **0 Explain reruns** (includes runtime/dependencies).
+  Ordinary default `tests/tests` build also succeeds, compiling 743 modules.
+- Matched outputs: 743 and 3,735 signatures, respectively, with no differences
+  in diagnostics, JavaScript, generated TypeScript or source maps.
+- Five-run minimum instructions: **−0.620%** for `tests/tests`, **−0.740%** for
+  the application. Application hyperfine: base 12.999 ± 0.840 s, candidate
+  13.094 ± 0.511 s; overlapping ranges, no demonstrated wall-time improvement.
+
+[The measurement record](CHECKER_SNAPSHOT_ELISION_MEASUREMENTS.md) includes exact
+commands and raw counts. Its earlier 1.597× same-failure retry harness result
+belongs to an older revision, not final-head evidence or a universal cost bound.
 
 ### 4.3 What the two prototypes do not prove
 
