@@ -1,0 +1,1 @@
+- Add R3 checker kernel measurements, unification build-only controls, and explicit empty-memo instance gate verdicts.
