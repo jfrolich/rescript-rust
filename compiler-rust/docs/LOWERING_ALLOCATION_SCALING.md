@@ -110,8 +110,9 @@ earlier probe-only interval. `types/typecore.rs` has direct lowerer callers;
 `Metadata::import_literal` → `LiteralKeyScratch::encode`. Neither is unexplained
 or merely a default-path cleanup.
 
-The differential compares **453 declarations from 850 implementation files**,
-with sixteen completeness/sharing/fallback configurations per declaration. Both
+The differential compares **453 recorded layouts (192 distinct printed layouts) from 850 implementation files**,
+with 68,352 plan pairs across full, omitted, partitioned, singleton and reversed
+arm lists and all sixteen completeness/sharing/fallback configurations. Both
 `differential.rs` and the verbatim `legacy_planner.rs` are test-only. Reproduce:
 
 ```sh
@@ -257,7 +258,23 @@ GENTYPE_PARITY_WITHOUT_TELLA=1 python3 scripts/test_backend_coverage.py --target
 | --- | --- | --- |
 | 1. Pinned assertions | Done | Four independent tests pin equality across both sizes and their numeric constants; debug and release pass. |
 | 2. Attribution | Done | Complete owner totals, retained reasons, removed sites and reproducible allocator backtraces above. |
-| 3. Shared-file scope | Done | All nine files have named lowering consumers; unchanged default emitter; 453-declaration differential. |
+| 3. Shared-file scope | Done | All nine files have named lowering consumers; unchanged default emitter; 453-layout differential. |
 | 4. Final validation/report | Done | Fresh tests, parity, coverage and both instruction/wall-time comparisons; default instruction gate passes. |
 
 The PR remains **draft** for review. No approval or merge is implied.
+
+## Review extension: corpus cardinality
+
+Printed-layout deduplication uses `format!("{facts:?}")`; repeated recorded
+layouts still receive every comparison. These are layout counts, not a claim
+that the corpus contains 453 distinct source declarations.
+
+Command: `CARGO_INCREMENTAL=0 cargo test --manifest-path compiler-rust/Cargo.toml lambda::untagged_dispatch::differential -- --nocapture --test-threads=1`
+
+Last line printed by the corpus comparison:
+
+```text
+untagged differential: recorded layouts=453; distinct printed layouts=192; plan pairs=68352; source files=850
+```
+
+Both differential tests pass; expanding the arm subsets exposed no mismatch.

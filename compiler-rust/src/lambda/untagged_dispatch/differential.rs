@@ -65,7 +65,8 @@ snapshot!(legacy, crate::lambda::untagged_dispatch::legacy_planner);
 
 /// Compare full, omitted, partitioned, singleton and reordered arm lists.
 /// Cost: sixteen plan pairs per subset, plus reachable-tree serialization.
-fn compare(facts: &MatchingFacts) {
+fn compare(facts: &MatchingFacts) -> usize {
+    let mut plan_pairs = 0;
     let literals_len = facts.literal_tags.len();
     let count = literals_len + facts.block_types.len();
     let all: Vec<_> = (0..count).collect();
@@ -92,10 +93,12 @@ fn compare(facts: &MatchingFacts) {
                     let a = plan(|a,b| a==b,Input { facts, literal_arms:literals.clone(),payload_arms:payloads.clone(),literals_complete:complete&1!=0,payloads_complete:complete&2!=0,fallback });
                     let b = super::legacy_planner::plan(|a,b| a==b,super::legacy_planner::Input { facts,literal_arms:literals,payload_arms:payloads,literals_complete:complete&1!=0,payloads_complete:complete&2!=0,fallback });
                     assert_eq!(current::tree(&a,a.root()),legacy::tree(&b,b.root()),"facts={facts:?}, subset={subset:?}, shared={shared}, complete={complete}, fallback={fallback:?}");
+                    plan_pairs += 1;
                 }
             }
         }
     }
+    plan_pairs
 }
 
 #[test]
@@ -110,7 +113,7 @@ fn hand_written_plans_match_trunk() {
     compare(&MatchingFacts { tag_name:None,literal_tags:vec![LiteralTag::Null],block_types:vec![] });
 }
 
-/// O(source bytes plus typechecking and sixteen comparisons per untagged layout).
+/// O(typechecking plus subset plan comparisons and printed-layout deduplication).
 fn corpus() {
     use crate::driver::{CompilerOptions,compile_file_to_js_with_options};
     use std::path::{Path,PathBuf};
@@ -129,6 +132,8 @@ fn corpus() {
     files.sort();assert!(files.len()>700);
     let dirs:std::collections::BTreeSet<_>=files.iter().map(|p|p.parent().unwrap().to_path_buf()).collect();
     let mut declarations=0;
+    let mut distinct = std::collections::BTreeSet::new();
+    let mut plan_pairs = 0;
     for path in &files {
         let is_runtime=path.parent()==Some(runtime.as_path());
         let module=path.file_stem().unwrap().to_str().unwrap();
@@ -140,10 +145,15 @@ fn corpus() {
         compile_file_to_js_with_options(path,&options).unwrap_or_else(|e|panic!("{}: {e:#}",path.display()));
         let facts=DECLARATIONS.with(|s|s.borrow_mut().take().unwrap());
         declarations+=facts.len();
-        for facts in facts { compare(&facts); }
+        for facts in facts {
+            distinct.insert(format!("{facts:?}"));
+            plan_pairs += compare(&facts);
+        }
     }
     assert!(declarations>0);
-    println!("untagged declarations compared: {declarations}; source files: {}",files.len());
+    assert!(!distinct.is_empty());
+    assert!(plan_pairs > 16 * declarations);
+    println!("untagged differential: recorded layouts={declarations}; distinct printed layouts={}; plan pairs={plan_pairs}; source files={}", distinct.len(), files.len());
 }
 
 #[test]
