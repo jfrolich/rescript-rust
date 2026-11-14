@@ -516,6 +516,7 @@ impl State {
     /// N1: C:481 new. Transfer cold pools, while source hot nodes/list operands
     /// remain readable. Variables retain source identities, never global stamps.
     fn new(mut input: super::bridge::Imported) -> Self {
+        let source_nodes = input.arena.nodes.len();
         let mut arena = Bir::default();
         arena.begin_bulk();
         arena.pools = std::mem::take(&mut input.arena.pools);
@@ -585,7 +586,12 @@ impl State {
             idents: input.idents,
             statements: StatementStack::default(),
             free: FreePool::default(),
-            traversal: SourceProbe::default(),
+            traversal: SourceProbe {
+                work: Vec::with_capacity(source_nodes),
+                values: Vec::with_capacity(source_nodes),
+                children: Vec::with_capacity(source_nodes),
+                steps: 0,
+            },
             list_block_info: None, constant_steps: 0, constant_children: Vec::new(), constant_text: String::new(), constant_encoding: String::new(), constant_work: Vec::new(), constant_values: Vec::new(),
             argument_outputs: Vec::new(), argument_values: Vec::new(),
             ffi_suffix: Vec::new(), ffi_params: Vec::new(),
