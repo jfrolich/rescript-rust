@@ -123,7 +123,7 @@ mod tests {
     }
     #[test]
     fn full_unit_allocation_boundary_untagged() {
-        assert_unit_allocation_count("untagged", 139);
+        assert_unit_allocation_count("untagged", 138);
     }
 
     /// Import is outside measurement; fresh state construction, lowering,

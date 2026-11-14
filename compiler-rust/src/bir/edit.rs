@@ -29,7 +29,6 @@ impl<K: DenseKey> DenseMap<K> {
     }
     #[cfg(test)]
     fn capacity(&self) -> usize { self.rows.capacity() }
-    #[cfg(test)]
     fn reserve_domain(&mut self, slots: usize) { self.rows.reserve(slots.saturating_sub(self.rows.len())); }
 }
 impl<K: DenseKey> std::ops::Index<&K> for DenseMap<K> {
@@ -1374,6 +1373,9 @@ impl Bir {
         fresh_labels: &mut Vec<(u32, u32)>,
         scratch: &mut CopyScratch,
     ) -> NodeId {
+        // Dense rows are indexed by output handles, including recycled slots.
+        // Reserve the already allocated arena domain, not each visited handle.
+        scratch.nodes.reserve_domain(self.nodes.capacity());
         let CopyScratch { order, stack, vars, funcs, catches, labels, js, nodes } = scratch;
         order.clear();
         stack.clear();
