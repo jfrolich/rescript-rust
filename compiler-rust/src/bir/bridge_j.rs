@@ -451,30 +451,31 @@ impl Importer {
                 E::TemplateLiteral(id) => {
                     aux = 1;
                     let part = self.segment(a.template(id));
-                    let info = self.b.js_info(JsPayload::Template(vec![part]));
+                    let info = self.b.template_info(&[part], false);
                     View::JTemplate { values: c, info }
                 }
                 E::InterpolatedTemplate(id, _) => {
                     if a.segments(id).len() != c.len() + 1 {
                         return Err(Unsupported("JS template segment count"));
                     }
-                    let parts = a.segments(id).iter().map(|s| self.segment(s)).collect();
-                    let info = self.b.js_info(JsPayload::Template(parts));
+                    let start = self.b.pools.template_parts.len() as u32;
+                    for segment in a.segments(id) {
+                        let part = self.segment(segment);
+                        self.b.pools.template_parts.push(part);
+                    }
+                    let info = self.b.js_info(JsPayload::Template(crate::bir::TemplateSpan { start, len: a.segments(id).len() as u32 }));
                     View::JTemplate { values: c, info }
                 }
                 E::TaggedTemplate(_, id, _) => {
                     if a.tagged(id).len() != c.len() {
                         return Err(Unsupported("JS tagged template segment count"));
                     }
-                    let parts = a
-                        .tagged(id)
-                        .iter()
-                        .map(|s| TemplatePart {
-                            raw: self.b.intern_text(s),
-                            cooked: None,
-                        })
-                        .collect();
-                    let info = self.b.js_info(JsPayload::Tagged(parts));
+                    let start = self.b.pools.template_parts.len() as u32;
+                    for s in a.tagged(id) {
+                        let raw = self.b.intern_text(s);
+                        self.b.pools.template_parts.push(TemplatePart { raw, cooked: None });
+                    }
+                    let info = self.b.js_info(JsPayload::Tagged(crate::bir::TemplateSpan { start, len: a.tagged(id).len() as u32 }));
                     View::JTagged {
                         tag: c[0],
                         values: &c[1..],
@@ -509,8 +510,8 @@ impl Importer {
                         .props(props)
                         .iter()
                         .map(|&(k, _)| self.property(a, k))
-                        .collect();
-                    let info = self.b.js_info(JsPayload::Object(keys));
+                        .collect::<Vec<_>>();
+                    let info = self.b.object_info(&keys);
                     View::JObject { values: c, info }
                 }
                 E::Jsx(id) => {
@@ -525,11 +526,13 @@ impl Importer {
                         fragment,
                     } = a.jsx(id);
                     aux = u16::from(children.is_some());
-                    let props = a
-                        .props(props)
-                        .iter()
-                        .map(|&(k, _)| self.property(a, k))
-                        .collect();
+                    let start = index(self.b.pools.property_keys.len());
+                    let len = index(a.props(props).len());
+                    for &(key, _) in a.props(props) {
+                        let key = self.property(a, key);
+                        self.b.pools.property_keys.push(key);
+                    }
+                    let props = PropertySpan { start, len };
                     let h = JsxHeader {
                         spread: spread.is_some(),
                         props,
@@ -549,7 +552,7 @@ impl Importer {
                 E::Await(_) => View::JAwait { value: c[0] },
                 E::Spread(_) => View::JSpread { value: c[0] },
                 E::RecordRest(id, _) => {
-                    let fields = a
+                    let fields: Vec<_> = a
                         .rest(id)
                         .iter()
                         .map(|f| RestField {
@@ -557,7 +560,7 @@ impl Importer {
                             binding: f.ident.map(|id| self.var(id)),
                         })
                         .collect();
-                    let info = self.b.js_info(JsPayload::Rest(fields));
+                    let info = self.b.rest_info(fields);
                     View::JRecordRest { value: c[0], info }
                 }
             },
@@ -667,7 +670,7 @@ impl Importer {
                         .iter()
                         .map(|&(_, c)| self.clause(a, c))
                         .collect::<Result<_, _>>()?;
-                    let header = self.b.switch_header(SwitchHeader {
+                    let header = self.b.switch_header(SwitchInput {
                         keys,
                         clauses,
                         constants: index(h.clauses.len()),
@@ -695,7 +698,7 @@ impl Importer {
                         .iter()
                         .map(|cl| self.clause(a, cl.clause))
                         .collect::<Result<_, _>>()?;
-                    let header = self.b.switch_header(SwitchHeader {
+                    let header = self.b.switch_header(SwitchInput {
                         keys,
                         clauses,
                         constants: index(h.clauses.len()),
@@ -733,7 +736,7 @@ impl Importer {
             };
             self.rest_binders.clear();
             self.rest_binders.insert(var);
-            for v in fields.iter().filter_map(|f| f.binding) {
+            for v in self.b.rest_fields(*fields).iter().filter_map(|f| f.binding) {
                 if self.b.vars.binder(v).is_some() || !self.rest_binders.insert(v) {
                     return Err(Unsupported("multiply bound JS record-rest field"));
                 }
@@ -1189,6 +1192,7 @@ impl Exporter<'_> {
                 let JsPayload::Template(parts) = b.javascript(info) else {
                     return Err(Unsupported("missing J template metadata"));
                 };
+                let parts = b.template_parts(*parts);
                 if aux == 1 {
                     if parts.len() != 1 || !c.is_empty() {
                         return Err(Unsupported("invalid J literal template"));
@@ -1205,6 +1209,7 @@ impl Exporter<'_> {
                 let JsPayload::Tagged(parts) = b.javascript(info) else {
                     return Err(Unsupported("missing J tagged metadata"));
                 };
+                let parts = b.template_parts(*parts);
                 let ss = parts.iter().map(|s| b.text(s.raw).to_owned()).collect();
                 let ss = self.a.tagged_id(ss);
                 E::TaggedTemplate(c[0].expr()?, ss, self.exprs(&c[1..])?)
@@ -1216,10 +1221,7 @@ impl Exporter<'_> {
             View::JArray { .. } => E::Array(self.exprs(c)?, mutability(aux)?),
             View::JOptional { .. } => E::OptionalBlock(c[0].expr()?, aux != 0),
             View::JBlockLit { info, .. } => {
-                let JsPayload::Block(tag) = b.javascript(info) else {
-                    return Err(Unsupported("missing J block metadata"));
-                };
-                let tag = self.a.tag_id(tag.clone());
+                let tag = self.a.tag_id(b.block_tag(info).clone());
                 E::CamlBlock(self.exprs(c)?, mutability(aux)?, tag)
             }
             View::JNumber { value } => {
@@ -1236,7 +1238,7 @@ impl Exporter<'_> {
                 let JsPayload::Object(keys) = b.javascript(info) else {
                     return Err(Unsupported("missing J object metadata"));
                 };
-                E::Object(self.props(keys, c)?)
+                E::Object(self.props(b.property_keys(*keys), c)?)
             }
             View::JJsx { info, .. } => {
                 let JsPayload::Jsx(h) = b.javascript(info) else {
@@ -1250,8 +1252,9 @@ impl Exporter<'_> {
                 } else {
                     None
                 };
-                let props = self.props(&h.props, &c[k..k + h.props.len()])?;
-                k += h.props.len();
+                let keys = b.property_keys(h.props);
+                let props = self.props(keys, &c[k..k + keys.len()])?;
+                k += keys.len();
                 let children = if aux != 0 {
                     Some(self.exprs(&c[k..k + h.children as usize])?)
                 } else {
@@ -1279,7 +1282,7 @@ impl Exporter<'_> {
                 let JsPayload::Rest(fields) = b.javascript(info) else {
                     return Err(Unsupported("missing J rest metadata"));
                 };
-                let fields = fields
+                let fields = b.rest_fields(*fields)
                     .iter()
                     .map(|f| {
                         Ok(js::RecordRestField {
@@ -1456,11 +1459,15 @@ impl Exporter<'_> {
                 } else {
                     let mut clauses = Vec::with_capacity(h.keys.len());
                     for (i, key) in h.keys.iter().enumerate() {
-                        let CaseKey::JavaScript(tag) = key else {
-                            return Err(Unsupported("non-JS string switch key"));
+                        let tag = match key {
+                            CaseKey::JavaScript(tag) => tag.clone(),
+                            CaseKey::String(text) => crate::lambda::SwitchCaseTag::String(b.text(*text).to_owned()),
+                            CaseKey::Float(text) => crate::lambda::SwitchCaseTag::Float(b.text(*text).to_owned()),
+                            CaseKey::BigInt(text) => crate::lambda::SwitchCaseTag::BigInt(b.text(*text).to_owned()),
+                            CaseKey::Lambda(_) => return Err(Unsupported("non-JS string switch key")),
                         };
                         clauses.push(j::StringClauseInfo {
-                            tag_type: tag.clone(),
+                            tag_type: tag,
                             clause: self.clause(h.clauses[i], c[i + 1].block()?),
                         });
                     }

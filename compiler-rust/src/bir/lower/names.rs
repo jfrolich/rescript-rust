@@ -1105,7 +1105,7 @@ mod tests {
         let arg = u.b.new_node(View::Var { var: p }, 0);
         open(&mut u.b);
         adopt(&mut u.b, arg);
-        let header = u.b.switch_header(crate::bir::SwitchHeader {
+        let header = u.b.switch_header(crate::bir::SwitchInput {
             keys: Vec::new(),
             clauses: Vec::new(),
             constants: 0,

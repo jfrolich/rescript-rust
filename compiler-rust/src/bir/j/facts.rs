@@ -39,7 +39,7 @@ pub(crate) fn purity(
             let JsPayload::Object(keys) = b.javascript(info) else {
                 unreachable!()
             };
-            keys.iter()
+            b.property_keys(*keys).iter()
                 .zip(values)
                 .all(|(key, &v)| *key != PropertyKey::Spread && child(v))
         }
@@ -165,7 +165,7 @@ pub(crate) fn delay_safe(b: &Bir, id: NodeId) -> bool {
         View::JTemplate { values, .. } | View::JArray { values } | View::JBlockLit { values, .. } => values.iter().all(|&v| safe(v)),
         View::JObject { values, info } => {
             let JsPayload::Object(keys) = b.javascript(info) else { unreachable!("object keys") };
-            keys.iter().zip(values).all(|(k,&v)| !matches!(k,PropertyKey::Spread | PropertyKey::RecordSpread) && safe(v))
+            b.property_keys(*keys).iter().zip(values).all(|(k,&v)| !matches!(k,PropertyKey::Spread | PropertyKey::RecordSpread) && safe(v))
         }
         // Calls, property accesses, assignment, and statement/L nodes do not
         // establish this J-only fact.

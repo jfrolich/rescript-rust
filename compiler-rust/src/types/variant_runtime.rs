@@ -496,8 +496,7 @@ pub enum LiteralTag {
     Undefined,
 }
 
-/// variant_runtime.ml `number_key`: `-0.` and `0.` are equal for `===`;
-/// `%h` is exact for every other number.
+/// Cost: O(1): the unchanged owned key entry for legacy callers.
 fn number_key(x: f64) -> String {
     if x == 0.0 {
         "number:0".to_string()
@@ -506,9 +505,18 @@ fn number_key(x: f64) -> String {
     }
 }
 
+/// variant_runtime.ml `number_key`: `-0.` and `0.` are equal for `===`;
+/// `%h` is exact for every other number.
+/// Cost: O(1): bounded floating-point formatting.
+fn number_key_into(x: f64, out: &mut String) {
+    out.push_str("number:");
+    if x == 0.0 { out.push('0'); } else { hex_float_into(x, out); }
+}
+
 /// OCaml's `Printf.sprintf "%h"` (`caml_hexstring_of_float`): `0x1p+0`,
 /// `-0x1.8p-1`, `0x0.0000000000001p-1022` for a subnormal, `infinity`,
 /// `nan`, and `-nan` for a NaN with its sign bit set.
+/// Cost: O(1): bounded floating-point formatting.
 pub(crate) fn ocaml_hex_float(x: f64) -> String {
     if x.is_nan() {
         return if x.is_sign_negative() { "-nan" } else { "nan" }.to_string();
@@ -539,11 +547,72 @@ pub(crate) fn ocaml_hex_float(x: f64) -> String {
     format!("{sign}0x{lead}{frac}p{exp_sign}{}", exp.abs())
 }
 
+/// Cost: O(1): at most thirteen mantissa nibbles.
+fn hex_float_into(x: f64, out: &mut String) {
+    use std::fmt::Write;
+    if x.is_sign_negative() { out.push('-'); }
+    if x.is_nan() { out.push_str("nan"); return; }
+    if x.is_infinite() { out.push_str("infinity"); return; }
+    let bits = x.to_bits();
+    let biased_exp = ((bits >> 52) & 0x7ff) as i64;
+    let mantissa = bits & ((1u64 << 52) - 1);
+    let (lead, exp) = if biased_exp == 0 { (0, if mantissa == 0 { 0 } else { -1022 }) }
+        else { (1, biased_exp - 1023) };
+    write!(out, "0x{lead}").unwrap();
+    if mantissa != 0 {
+        out.push('.');
+        let nibbles = 13 - (mantissa.trailing_zeros() / 4) as usize;
+        for i in 0..nibbles {
+            let digit = ((mantissa >> (4 * (12 - i))) & 15) as usize;
+            out.push(b"0123456789abcdef"[digit] as char);
+        }
+    }
+    write!(out, "p{}{exp_abs}", if exp < 0 { '-' } else { '+' }, exp_abs = exp.abs()).unwrap();
+}
+
+/// Reusable canonical-key encoding buffers for immutable literal metadata.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LiteralKeyScratch {
+    pub(crate) output: String,
+    digits: String,
+    float: Vec<u8>,
+}
+impl LiteralKeyScratch {
+    /// Cost: O(literal spelling bytes), with retained canonicalization scratch.
+    pub(crate) fn encode(&mut self, tag: &LiteralTag) -> &str {
+        self.output.clear();
+        match tag {
+            LiteralTag::Int(i) => number_key_into(f64::from(*i as i32), &mut self.output),
+            LiteralTag::Float(f) => match crate::ocaml_float::float_of_string_in(f, &mut self.float) {
+                Some(x) => number_key_into(x, &mut self.output),
+                None => { self.output.push_str("number:"); self.output.push_str(f); }
+            },
+            LiteralTag::BigInt(i) => {
+                let positive = crate::types::typecore::parse_bigint_literal_into(i, &mut self.digits);
+                self.output.push_str("bigint:");
+                if !positive && self.digits != "0" { self.output.push('-'); }
+                self.output.push_str(&self.digits);
+            }
+            LiteralTag::String(s) => { self.output.push_str("string:"); self.output.push_str(s); }
+            LiteralTag::Bool(b) => self.output.push_str(if *b { "true" } else { "false" }),
+            LiteralTag::Null => self.output.push_str("null"),
+            LiteralTag::Undefined => self.output.push_str("undefined"),
+        }
+        &self.output
+    }
+    #[cfg(test)]
+    /// Cost: O(1): read three retained buffer capacities.
+    pub(crate) fn capacities(&self) -> [usize; 3] {
+        [self.output.capacity(), self.digits.capacity(), self.float.capacity()]
+    }
+}
+
 impl LiteralTag {
     /// variant_runtime.ml `literal_value_key`: a key that two literals share
     /// exactly when they are the same JavaScript value, as `===` compares
     /// them. Ints are emitted as 32-bit numbers, so `1`, `1.0` and
     /// `4294967297` share one, while `1n` is a bigint.
+    /// Cost: O(literal spelling bytes), producing one owned key.
     pub fn value_key(&self) -> String {
         match self {
             Self::Int(i) => number_key(f64::from(*i as i32)),
@@ -776,6 +845,7 @@ pub struct ConstructorReference {
 
 impl Layout {
     /// variant_runtime.ml `make_layout` / `compute_matching_facts`.
+    /// Cost: O(constructor count plus cloned literal/shape metadata bytes).
     pub fn new(configuration: Configuration, constructors: Vec<ConstructorCase>) -> Self {
         let mut block_types = Vec::new();
         let mut literal_tags = Vec::new();
@@ -788,7 +858,7 @@ impl Layout {
                 ConstructorCase::Block(Block::Tagged(_)) => {}
             }
         }
-        Self {
+        let layout = Self {
             unboxed: configuration.unboxed,
             constructors,
             matching_facts: MatchingFacts {
@@ -796,7 +866,10 @@ impl Layout {
                 block_types,
                 literal_tags,
             },
-        }
+        };
+        #[cfg(test)]
+        crate::bir::untagged_plan::differential::record(&layout);
+        layout
     }
 
     /// variant_runtime.ml `constructor_tag`: the literal of a constant
@@ -1101,4 +1174,60 @@ pub(crate) fn identity_in_namespace(namespace: u64, identity: u64) -> u64 {
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     (namespace, identity).hash(&mut hash);
     hash.finish()
+}
+
+#[cfg(test)]
+mod trunk_literal_reference {
+    // Verbatim function from be1b3a482e5a989d1a1bbecf33a9b4f1aab98fec.
+    #[cfg(test)]
+pub(crate) fn ocaml_hex_float(x: f64) -> String {
+    if x.is_nan() {
+        return if x.is_sign_negative() { "-nan" } else { "nan" }.to_string();
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { "infinity" } else { "-infinity" }.to_string();
+    }
+    let bits = x.to_bits();
+    let sign = if bits >> 63 == 1 { "-" } else { "" };
+    let biased_exp = ((bits >> 52) & 0x7ff) as i64;
+    let mantissa = bits & ((1u64 << 52) - 1);
+    let (lead, exp) = if biased_exp == 0 {
+        // Zero or subnormal.
+        (0, if mantissa == 0 { 0 } else { -1022 })
+    } else {
+        (1, biased_exp - 1023)
+    };
+    let mut frac = format!("{mantissa:013x}");
+    while frac.ends_with('0') {
+        frac.pop();
+    }
+    let frac = if frac.is_empty() {
+        String::new()
+    } else {
+        format!(".{frac}")
+    };
+    let exp_sign = if exp < 0 { "-" } else { "+" };
+    format!("{sign}0x{lead}{frac}p{exp_sign}{}", exp.abs())
+}
+
+    #[test]
+    fn hex_float_normalization_matches_trunk() {
+        fn check(value: f64) {
+            let expected = ocaml_hex_float(value);
+            let mut out = String::from("prefix:");
+            super::hex_float_into(value, &mut out);
+            assert_eq!(&out[7..], expected, "bits={:016x}", value.to_bits());
+        }
+        let cases = [0.0, -0.0, f64::from_bits(1), f64::from_bits((1u64 << 52) - 1),
+            f64::MIN_POSITIVE, 1.0, -1.0, 0.1, f64::MAX, f64::MIN, f64::EPSILON,
+            f64::INFINITY, f64::NEG_INFINITY, f64::from_bits(0x7ff8000000000000),
+            f64::from_bits(0xfff8000000000000)];
+        for value in cases { check(value); }
+        let mut bits = 0x295a_64b8_0ce7_d13fu64;
+        for _ in 0..10000 {
+            bits = bits.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            check(f64::from_bits(bits));
+        }
+        println!("hex float trunk comparison: table=15; generated raw bit patterns=10000; all agree");
+    }
 }
