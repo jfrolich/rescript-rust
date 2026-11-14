@@ -300,7 +300,8 @@ pub struct Scope<'a> {
 }
 
 impl Scope<'_> {
-    /// O(shadowing depth), using interned-name slots; no string allocation.
+    /// O(name bytes + alias-version/scope depth), using canonical spelling
+    /// slots and borrowed strings; no string allocation.
     pub(crate) fn is_json_identity(self, lid: crate::parse_arena::LidentIdx, arena: &ParseArena) -> bool {
         if super::spice_ppx::is_json_identifier(lid, arena) {
             return true;

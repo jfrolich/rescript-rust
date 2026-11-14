@@ -5888,6 +5888,9 @@ pub fn signature_uses_spice_mapper(signature: &[SignatureItem], arena: &ParseAre
 /// Expand the Spice codecs of one structure item. `mapper_active` tells
 /// whether the Spice mapper runs over the whole structure; see
 /// [`structure_uses_spice_mapper`].
+/// Cost: O(visited item syntax + generated codec syntax), plus O(constructors)
+/// for the standalone scope check when the mapper is active. The scoped main
+/// frontend entry avoids this standalone scan by passing its prefix facts.
 pub fn expand_structure_item_with_mapper(item: &StructureItem, arena: &mut ParseArena, mapper_active: bool) -> SpiceResult<Vec<StructureItem>> {
     expand_structure_item_in_scope(item, arena, mapper_active, super::derive::Scope { result_shadowed: mapper_active && super::derive::shadows_result(item, arena), ..super::derive::Scope::default() })
 }

@@ -9722,8 +9722,11 @@ fn result_shadow_for<'scope, const ENABLED: bool>(
     extend_result_prefix(structure, index, arena, prefix, step)
 }
 
-// Shared by ordinary items and private payloads: each prefix slot is visited
-// at most once, even when several private runs appear in the structure.
+/// Extend source-order facts for ordinary items and private payloads.
+/// Cost: O(new prefix items + their constructors/declarations + name bytes),
+/// plus alias-version/scope depth when resolving an alias manifest. Each slot
+/// is visited at most once across calls; dense buffers grow amortized linearly.
+/// Already collected positions cost O(1), including reverse-order queries.
 fn extend_result_prefix<'scope>(
     structure: &[StructureItem],
     index: usize,
@@ -9739,6 +9742,11 @@ fn extend_result_prefix<'scope>(
     prefix.at(index)
 }
 
+/// Map the scheduled structure items using the mapper-presence fact.
+/// Cost: O(items + visited attributes + mapped syntax and generated codecs),
+/// plus the lazy prefix work documented on `extend_result_prefix` when enabled.
+/// The disabled specialization allocates no prefix or alias buffers and does
+/// no scope traversal; the existing schedule/output buffers remain O(items).
 fn rewrite_structure_scoped<const RESULT_SCOPE: bool>(
     structure: &[StructureItem],
     arena: &mut ParseArena,
