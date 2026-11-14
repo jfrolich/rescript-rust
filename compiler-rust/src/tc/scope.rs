@@ -917,7 +917,27 @@ impl Scopes {
     /// `unit_heads[name]` at it. Returns its index. One `Arc` clone per
     /// worker and unit, never per lookup. Panics at 2^24 units.
     pub fn add_unit(&mut self, name: Name, segment: Arc<Segment>) -> u32 {
-        todo!("R4d")
+        let unit = self.units.len() as u32;
+        assert!(unit <= UNIT_MASK, "more than 2^24 units");
+        let tables = self.table_index.len() as u32;
+        let slots = self.table_index.len() + segment.children.len();
+        self.table_index.resize(slots, NONE);
+        self.units.push(UnitSlot {
+            segment,
+            name,
+            tables,
+        });
+        self.grow_unit_heads(name);
+        self.unit_heads[name.0 as usize] = unit;
+        unit
+    }
+
+    /// Amortized O(1), no step: make `unit_heads` cover `name`, growing it
+    /// to the name table's size with [`NONE`] (every name is below it).
+    fn grow_unit_heads(&mut self, name: Name) {
+        if name.0 as usize >= self.unit_heads.len() {
+            self.unit_heads.resize(self.names.len() as usize, NONE);
+        }
     }
 
     /// 1 step, one load when the name was asked before (from R4g on, one
@@ -926,7 +946,21 @@ impl Scopes {
     /// when no unit has the name (`find_pers_struct`, compiler/ml/env.ml:
     /// 646-691).
     pub fn unit_by_name(&mut self, name: Name, source: &mut dyn UnitSource) -> Option<u32> {
-        todo!("R4d")
+        self.grow_unit_heads(name);
+        match self.unit_heads[name.0 as usize] {
+            NONE => match source.segment(self.names.text(name)) {
+                Some(segment) => Some(self.add_unit(name, segment)),
+                None => {
+                    self.unit_heads[name.0 as usize] = MISSING;
+                    None
+                }
+            },
+            known => {
+                #[cfg(test)]
+                super::steps::tick();
+                (known != MISSING).then_some(known)
+            }
+        }
     }
 
     /// The imported table of export table `signature` of `unit`
