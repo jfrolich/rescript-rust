@@ -747,8 +747,9 @@ mod tests {
     /// A chain of 10,000 nullary abbreviations (`type t{i} = t{i-1}`):
     /// expanding the last is one loop step and one instance of a two-node
     /// template (the declaration's tuple and the body: two nodes, two list
-    /// slots) per abbreviation; again, one step each from the memo, making
-    /// no node.
+    /// slots) per abbreviation, and, the nullary memo being live from the
+    /// first expansion on, the instance's lookup pass over its two nodes;
+    /// again, one step each from the memo, making no node.
     #[test]
     fn expanding_a_chain_of_ten_thousand_abbreviations() {
         let n = 10_000u32;
@@ -760,7 +761,7 @@ mod tests {
         let last = constr(&mut c, 1, n, &[]);
         let mut head = last;
         let count = steps::scope(|| head = c.expand_head(last, ExpandMode::Safe).unwrap());
-        assert!(count <= 5 * u64::from(n) + 1, "{count}");
+        assert!(count <= 7 * u64::from(n) + 1, "{count}");
         assert_eq!(c.g.nodes[head.0 as usize].a, 0);
         assert_eq!(c.memo.live, n);
         let nodes = c.g.nodes.len();
