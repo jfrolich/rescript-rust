@@ -33,8 +33,12 @@ pub(super) fn compare_mapped(arena: LamArena, root: Lam, locations: &crate::lamb
 fn compare_oracle(mut arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, checks: bool, contexts: &[u8], locations: Option<&crate::lambda::LamLocTable>, inline: bool) {
     // THREE_TREES 11.4, "T5 part B as redesigned": the naming log against
     // the pass, on the root lowered as a unit (`unit_of`).
+    // A unit the pass does not support is not compared, as check mode
+    // counts it in `names_uncompared`.
     let (unit, unit_root) = unit_of(arena.clone(), root);
-    names_agree(unit, unit_root, resolver, inline);
+    if compared_names(unit.clone(), unit_root, resolver, inline).is_some() {
+        names_agree(unit, unit_root, resolver, inline);
+    }
     let target = Ident::new("result", arena.ident_stamp_bound() + 1, IdentFlags::NONE);
     for direct in [false, true] {
         for &context in contexts {
@@ -1856,8 +1860,26 @@ fn a_module_whose_only_reference_the_flatten_pass_drops_still_shadows_the_global
 /// replay did. Panics when the lowering or the pass does not support the
 /// unit.
 fn names_of(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, inline: bool) -> (crate::emit::NameStats, names::Replayed) {
-    let default = crate::js_ir::ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
-    let resolver = resolver.unwrap_or(&default);
+    compared_names(arena, root, resolver, inline).expect("the pass supports the unit")
+}
+
+/// `names_of`, or `None` when the pass does not support the unit. Every
+/// module the unit reads gets a path, as in a build: the default resolver
+/// of a test resolves no module of its own, and the pass names a module
+/// that is not imported where it is used, which a built unit does not
+/// have.
+fn compared_names(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, inline: bool) -> Option<(crate::emit::NameStats, names::Replayed)> {
+    let mut resolver = resolver.cloned().unwrap_or_else(|| {
+        crate::js_ir::ModulePathResolver::from_compile_options(None, None, None, None, None, None, false)
+    });
+    let globals = bridge::import_for_lowering(&arena, root).0.expect("lowering input").into_imported().globals;
+    for id in globals {
+        let module = crate::js_ir::ModuleId { id, kind: crate::js_ir::op::Kind::Ml, dynamic_import: false };
+        if resolver.resolve_module_path(&module).is_none() {
+            resolver.set_module_path_override(id.name(), format!("./{}.js", id.name()));
+        }
+    }
+    let resolver = &resolver;
     let lowered = lower_for_names(&arena, root, resolver, inline);
     let bir = &lowered.program.arena;
     let idents: Vec<Ident> = (0..bir.vars.len())
@@ -1873,8 +1895,7 @@ fn names_of(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePa
         lowered.coerced.reservations.clone(),
     );
     program.modules = lowered.name_imports.iter().map(|import| bir.pools.j_modules[import.index()].clone()).collect();
-    let stats = crate::emit::compare_with_pass(&lowered.printed, &idents, &modules, &free, &program, resolver, false)
-        .expect("the pass supports the unit");
+    let stats = crate::emit::compare_with_pass(&lowered.printed, &idents, &modules, &free, &program, resolver, false).ok()?;
     // Shown when an assertion of the caller fails: the text the pass names
     // and the replay's names by variable and by import.
     println!("{}", crate::js_ir::print_deps_program_with_directives_and_options(&program, None, &[], false, false, false));
@@ -1884,7 +1905,7 @@ fn names_of(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePa
     for (import, name) in lowered.printed.modules.iter().enumerate() {
         println!("replay: {:?} -> {name:?}", modules[import]);
     }
-    (stats, lowered.switch_stats.replayed)
+    Some((stats, lowered.switch_stats.replayed))
 }
 
 /// `root` as a unit: a rule test's root reads variables it does not bind,
