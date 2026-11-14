@@ -120,12 +120,13 @@ mod tests {
             VariantMatchingFacts, VariantTag};
         use crate::types::VariantLiteralTag as Literal;
         for shape in ["conditionals", "switches", "applications", "untagged"] {
+            for width in [1_000, 10_000] {
             let mut a = LamArena::new();
             let x = Ident::new("x", 1, crate::ident::IdentFlags::NONE);
             let root = match shape {
                 "conditionals" => {
                     let mut body = a.const_(Constant::Int { i: 0, comment: None });
-                    for i in 1..=10_000 {
+                    for i in 1..=width {
                         let condition = a.var(x);
                         let yes = a.const_(Constant::Int { i, comment: None });
                         body = a.if_raw(condition, yes, body);
@@ -133,7 +134,7 @@ mod tests {
                     body
                 }
                 "applications" => {
-                    let values: Vec<_> = (0..10_000).map(|_| {
+                    let values: Vec<_> = (0..width).map(|_| {
                         let callee = a.var(x);
                         a.apply_raw(callee, &[], ApInfo { loc: LamLoc::NONE, status: ApplyStatus::Na })
                     }).collect();
@@ -141,14 +142,14 @@ mod tests {
                 }
                 "switches" => {
                     let x = a.var(x);
-                    let values: Vec<_> = (0..10_000).map(|i| a.const_(Constant::String(format!("value{i}")))).collect();
+                    let values: Vec<_> = (0..width).map(|i| a.const_(Constant::String(format!("value{i}")))).collect();
                     let values = a.add_list(&values);
-                    let header = a.add_switch(true, (0..10_000).map(SwitchKey::Int), false, [], false, SwitchDispatch::Direct);
+                    let header = a.add_switch(true, (0..width).map(SwitchKey::Int), false, [], false, SwitchDispatch::Direct);
                     a.switch_raw(x, values, header)
                 }
                 "untagged" => {
                     let x = a.var(x);
-                    let mut literals: Vec<_> = (0..9_998).map(|i| Literal::String(format!("tag{i}"))).collect();
+                    let mut literals: Vec<_> = (0..width - 2).map(|i| Literal::String(format!("tag{i}"))).collect();
                     let keys: Vec<_> = literals.iter().enumerate().map(|(i, literal)|
                         SwitchKey::Constructor(Case::Constant(VariantTag {
                             name: crate::name::Name::new(&format!("C{i}")), literal: literal.clone(),
@@ -160,7 +161,7 @@ mod tests {
                             tag: VariantTag { name: crate::name::Name::new(&format!("B{i}")), literal: Literal::String(format!("B{i}")) },
                             block_type: kind.clone(),
                         }))).collect();
-                    let values: Vec<_> = (0..10_001).map(|i| a.const_(Constant::String(format!("body{i}")))).collect();
+                    let values: Vec<_> = (0..width + 1).map(|i| a.const_(Constant::String(format!("body{i}")))).collect();
                     let values = a.add_list(&values);
                     let header = a.add_switch(false, keys, false, blocks, true,
                         SwitchDispatch::Variant(VariantMatchingFacts { tag_name: None, literal_tags: literals, block_types: kinds }));
@@ -179,16 +180,24 @@ mod tests {
             drop(warm);
             let mut result = None;
             let allocations = allocation_counter::measure(|| {
+                allocation_window_start();
                 result = Some(super::super::lower_with_resolver(input, None, true, None, false, true).unwrap());
+                allocation_window_end();
             });
             let result = result.unwrap();
             assert_eq!(result.switch_stats.source_visits, visits);
-            assert!(visits >= 10_000);
+            assert!(visits >= width as usize);
             assert_eq!(result.coerced.exports.len(), 1);
             result.program.arena.validate(Some(result.program.root)).unwrap();
-            println!("full-unit {shape}: visits={visits}, {allocations:?}");
+            println!("full-unit {shape} width={width}: visits={visits}, {allocations:?}");
+            }
         }
     }
+
+    #[inline(never)]
+    fn allocation_window_start() { std::hint::black_box(()); }
+    #[inline(never)]
+    fn allocation_window_end() { std::hint::black_box(()); }
 
     #[test]
     fn export_consumption_does_not_empty_shared_block_metadata() {
