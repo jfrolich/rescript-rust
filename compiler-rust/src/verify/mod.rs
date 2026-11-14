@@ -1,9 +1,11 @@
-//! Checks beyond types (docs/verify): purity, laws and specs.
+//! Checks beyond types (docs/verify): purity, laws and their proofs, and
+//! specs.
 //!
 //! The parser records whether a file has an attribute these checks read, so
 //! a file without one pays nothing.
 
 pub mod laws;
+mod prove;
 pub mod purity;
 pub mod shape;
 pub mod specs;

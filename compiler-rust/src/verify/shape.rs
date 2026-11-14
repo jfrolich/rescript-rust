@@ -39,7 +39,7 @@ use crate::types::variant_runtime::{Block, ConstructorCase, LiteralTag};
 use crate::types::{Env, Path, TypeExprRef, predef};
 
 /// The definitions of the records and variants the shapes of one item name.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Definitions {
     /// By id, in the order they were first named.
     defs: Vec<(String, Option<Value>)>,
@@ -53,6 +53,16 @@ impl Definitions {
             map.insert(id, def.unwrap_or(Value::Null));
         }
         Value::Object(map)
+    }
+
+    /// The definition under an id, once it is complete.
+    pub fn get(&self, id: &str) -> Option<&Value> {
+        self.defs[self.position(id)?].1.as_ref()
+    }
+
+    /// The table as JSON text.
+    pub fn to_json(&self) -> String {
+        self.clone().into_json().to_string()
     }
 
     fn position(&self, id: &str) -> Option<usize> {

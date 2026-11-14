@@ -10369,7 +10369,13 @@ fn verify_typed_structure<'s>(
         &|attributes| laws::is_check(arena, attributes),
         &obligations,
     );
-    let (items, mut misuses) = laws::collect(type_ctx, &tctx.typed, arena, typed_structure);
+    let (items, mut misuses) = laws::collect(
+        type_ctx,
+        &tctx.typed,
+        arena,
+        typed_structure,
+        checks.are_kept(),
+    );
     diagnostics.append(&mut misuses);
     if diagnostics.is_empty() {
         if let crate::verify::Checks::Kept(sink) = checks {
