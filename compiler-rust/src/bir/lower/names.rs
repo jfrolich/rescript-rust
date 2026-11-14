@@ -165,7 +165,13 @@ impl Log {
     /// a catch variable): its home is the innermost open scope, the program
     /// when none is open. A variable bound again (a copy made while another
     /// scope is open rebinds nothing: a copy has variables of its own) keeps
-    /// the last write. Cost: one write; no step.
+    /// the last write.
+    ///
+    /// `Bir::copy_subtree` calls it for the parameters of a function literal
+    /// it copies too: no scope opens or closes for a copy, so the innermost
+    /// open scope reads the copy's sites as its own, and every binder of
+    /// the copy, a parameter included, has to be at home there or the scope
+    /// would list it as free. Cost: one write; no step.
     pub(crate) fn bind(&mut self, var: VarId) {
         self.home[var.index()] = self.open.last().map_or(ScopeId::PROGRAM.0, |open| open.row);
     }
@@ -192,7 +198,8 @@ impl Log {
     /// to one with header `copy` (`bir::j::logic::copy_j`): a row for the
     /// copy that shares the source's free run and flags, with `COPY`. The
     /// copy's own binders print as their origins (`vars.j_origin`), so the
-    /// shared list names the same identifiers. Nothing when `source` has no
+    /// shared list names the same identifiers; their home is the scope the
+    /// copy was made in (`Log::bind`). Nothing when `source` has no
     /// closed row (a function of the source arena). Cost: one push and one
     /// write; one step.
     pub(crate) fn copied(&mut self, source: FuncId, copy: FuncId) -> Option<ScopeId> {
@@ -1448,6 +1455,32 @@ mod tests {
         assert_eq!(u.flags(scope) & ScopeRow::COPY, 0);
         let (source, copied) = (u.log().rows[scope.0 as usize], u.log().rows[copy_scope.0 as usize]);
         assert_eq!((source.free_start, source.free_len), (copied.free_start, copied.free_len));
+    }
+
+    #[test]
+    fn a_function_copied_into_an_open_scope_keeps_its_parameters_out_of_the_free_list() {
+        // The open scope reads the sites of a copy made inside it as its
+        // own: the copy's reference to an outer variable is free in the
+        // open scope, its reference to its own (fresh) parameter is not.
+        let mut u = Unit::new();
+        let x = u.local("x");
+        let p = u.local("p");
+        let inner = u.header(Some(p), 1);
+        open(&mut u.b);
+        let body = u.read(&[p, x]);
+        let body = u.ret(body);
+        let (function, inner_scope) = u.function(inner, &[body]);
+        assert_eq!(u.free(inner_scope), [FreeRef::var(x)]);
+        let outer = u.header(None, 0);
+        open(&mut u.b);
+        let copy = crate::bir::j::logic::copy_j(&mut u.b, function);
+        let View::JFun { header: copied, .. } = u.b.view(copy) else { unreachable!() };
+        let parameter = u.b.function_parameter(copied, 0);
+        assert_ne!(parameter, p);
+        let result = u.ret(copy);
+        let (_, outer_scope) = u.function(outer, &[result]);
+        assert_eq!(u.log().home(parameter), outer_scope);
+        assert_eq!(u.free(outer_scope), [FreeRef::var(x)]);
     }
 
     #[test]
