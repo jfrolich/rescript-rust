@@ -8,7 +8,7 @@
 //! recursive calls would run.
 
 use super::expand::{Memo, TypeTable};
-use super::graph::{CONSTR, GENERIC, Graph, Mode, NONE, Node, Speculation, Ty, VAR};
+use super::graph::{ARROW, CONSTR, GENERIC, Graph, Mode, NONE, Node, Speculation, TUPLE, Ty, VAR};
 use super::rows::Extras;
 use super::segment::{EXTENDED, ExtraDescriptor};
 
@@ -316,7 +316,45 @@ impl Checker {
     /// expansion); R3c adds it. O(1) plus one [`Checker::occur`], two
     /// [`Checker::lower`] and one push per child. (R3a, R3c)
     pub fn unify_expanded(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
-        todo!("R3a")
+        // R3a: each head is its own expansion (`t1' == t1`, `t2' == t2`), so
+        // `unify2` lowers both to the lower of their levels and `unify3`
+        // runs on the pair itself (ctype.ml:2299: `t1 == t1'`), with no
+        // recursion repair (`t2 != t2'` is false, ctype.ml:2310).
+        let level = self.g.nodes[left.0 as usize]
+            .level
+            .min(self.g.nodes[right.0 as usize].level);
+        self.lower_to(right, level)?;
+        self.lower_to(left, level)?;
+        let left = self.g.repr(left);
+        let right = self.g.repr(right);
+        if left == right {
+            return Ok(());
+        }
+        let l = self.g.nodes[left.0 as usize];
+        let r = self.g.nodes[right.0 as usize];
+        // `occur_univar` of these two cases is R3g's.
+        if l.tag() == VAR {
+            self.occur(left, right)?;
+            self.g.link(left, right);
+            return Ok(());
+        }
+        if r.tag() == VAR {
+            self.occur(right, left)?;
+            self.g.link(right, left);
+            return Ok(());
+        }
+        if l.head & r.head & EXTENDED != 0 {
+            self.extended_pair(l, r);
+        }
+        if self.umode == UnifyMode::Pattern {
+            // `add_type_equality` in place of the link (ctype.ml:2329).
+            todo!("R3h")
+        }
+        // `occur !env t1' t2'; link_type t1' t2` (ctype.ml:2330-2331),
+        // before the children.
+        self.occur(left, right)?;
+        self.g.link(left, right);
+        self.push_children(l, r)
     }
 
     /// Push the child pairs of two structure nodes of the same shape, last
@@ -325,7 +363,40 @@ impl Checker {
     /// of one type (ctype.ml:2348-2351, expression mode). Anything else is a
     /// clash or belongs to R3e-R3h. O(children). (R3a)
     pub fn push_children(&mut self, left: Node, right: Node) -> Result<(), Clash> {
-        todo!("R3a")
+        if (left.head | right.head) & EXTENDED != 0 {
+            // An extended descriptor against another kind of node
+            // (`_, _ -> raise (Unify [])`, ctype.ml:2424).
+            return Err(Clash);
+        }
+        let arity = left.arity();
+        if arity != right.arity() {
+            return Err(Clash);
+        }
+        match (left.tag(), right.tag()) {
+            (ARROW, ARROW) => {
+                for i in 0..arity {
+                    let l = self.g.params[(left.b + i) as usize].label;
+                    let r = self.g.params[(right.b + i) as usize].label;
+                    if !self.labels_match(l, r) {
+                        return Err(Clash);
+                    }
+                }
+                // The parameters in order, then the result.
+                self.push_pair(Ty(left.a), Ty(right.a));
+                for i in (0..arity).rev() {
+                    let l = self.g.params[(left.b + i) as usize].ty;
+                    let r = self.g.params[(right.b + i) as usize].ty;
+                    self.push_pair(l, r);
+                }
+            }
+            (TUPLE, TUPLE) => self.push_lists(left.b, right.b, arity),
+            // Expression mode (ctype.ml:2350); pattern mode is R3h's.
+            (CONSTR, CONSTR) if left.a == right.a => {
+                self.push_lists(left.b + 1, right.b + 1, arity)
+            }
+            _ => return Err(Clash),
+        }
+        Ok(())
     }
 
     /// `Btype.undo_compress` (compiler/ml/btype.ml:792): walk the trail back
@@ -358,13 +429,64 @@ impl Checker {
         todo!("R3h")
     }
 
+    /// O(1): push one pair.
+    #[inline]
+    fn push_pair(&mut self, left: Ty, right: Ty) {
+        self.frames.push(Frame {
+            left,
+            right,
+            kind: FrameKind::Pair,
+            extra: 0,
+        });
+    }
+
+    /// O(len): push the pairs of two list ranges, last first.
+    fn push_lists(&mut self, left: u32, right: u32, len: u32) {
+        for i in (0..len).rev() {
+            let l = self.g.lists[(left + i) as usize];
+            let r = self.g.lists[(right + i) as usize];
+            self.push_pair(l, r);
+        }
+    }
+
+    /// O(1): `Asttypes.same_arg_label`, or in pattern mode any two labels
+    /// that are not optional (compiler/ml/ctype.ml:2338-2342). A label is
+    /// an interned name with the low bit set when optional, or `NONE`.
+    #[inline]
+    fn labels_match(&self, left: u32, right: u32) -> bool {
+        let optional = |label: u32| label != NONE && label & 1 != 0;
+        left == right || (self.umode == UnifyMode::Pattern && !optional(left) && !optional(right))
+    }
+
+    /// Two extended descriptors of one kind: the cases of unify3 that the
+    /// row slices build (compiler/ml/ctype.ml:2316-2328, 2400-2421). Two of
+    /// different kinds fall through to the clash of `push_children`. O(1).
+    fn extended_pair(&self, left: Node, right: Node) {
+        let kind = |node: Node| std::mem::discriminant(&self.extras.descriptors[node.a as usize]);
+        if kind(left) != kind(right) {
+            return;
+        }
+        match self.extras.descriptors[left.a as usize] {
+            ExtraDescriptor::Object | ExtraDescriptor::Field { .. } | ExtraDescriptor::Nil => {
+                todo!("R3e")
+            }
+            ExtraDescriptor::Variant(_) => todo!("R3f"),
+            ExtraDescriptor::Univar(_) | ExtraDescriptor::Poly | ExtraDescriptor::Package(_) => {
+                todo!("R3g")
+            }
+            ExtraDescriptor::Substitution => unreachable!("Tsubst outside a copy"),
+        }
+    }
+
     /// O(1) frame pops each plus the callee: the loop of
     /// [`Checker::unify_distinct`] over the frames above `base`. A pair whose
     /// two sides are one node is skipped (`unify_eq`, ctype.ml:2233). On a
     /// clash returns the failing pair, as it stood, and leaves the frames.
     fn run_frames(&mut self, base: usize) -> Result<(), [Ty; 2]> {
         while self.frames.len() > base {
-            let Some(frame) = self.frames.pop() else { break };
+            let Some(frame) = self.frames.pop() else {
+                break;
+            };
             match frame.kind {
                 FrameKind::Pair => {
                     let left = self.g.repr(frame.left);

@@ -385,7 +385,6 @@ fn wide(c: &mut Checker, n: u32) -> Ty {
 }
 
 #[test]
-#[ignore = "R3a build"]
 fn unify_of_equal_wide_types_is_linear() {
     let mut c = checker(Mode::Success);
     let (left, right) = (wide(&mut c, 5000), wide(&mut c, 5000));
@@ -410,7 +409,6 @@ fn unify_of_equal_wide_types_is_linear() {
 /// (compiler/ml/ctype.ml:2330), so the sum of the subtree sizes, plus at
 /// most 260 steps a pair for everything else.
 #[test]
-#[ignore = "R3a build"]
 fn unify_of_equal_deep_types_fits_the_stack() {
     std::thread::Builder::new()
         .stack_size(2 * 1024 * 1024)
@@ -535,7 +533,6 @@ fn link_directions() {
 /// speculation and logs nothing; a failure sets `unexplained_failure` and
 /// leaves no trace. What it wrote stays written: the unit is checked again.
 #[test]
-#[ignore = "R3a build"]
 fn success_mode_keeps_nothing_for_a_failure() {
     let mut c = checker(Mode::Success);
     let (i, s) = (constr(&mut c, INT, &[]), constr(&mut c, STRING, &[]));
