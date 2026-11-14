@@ -658,3 +658,39 @@ planner: 29 passed; 0 failed
 full_unit_allocation_boundary: 4 passed; 0 failed
 warmed string select: calls=10000; allocations=0; instances materialized before emission=0
 ```
+
+### Measured correction: inline shared string buffer loops into owned wrappers
+
+The extracted buffer-writing decoder/encoder added 292,943 exclusive instructions
+to `string_literal` compared with trunk. Inlining those two shared loops into
+the owned wrappers restores scalar replacement of their local Vec headers,
+without duplicating the algorithms or removing retained-buffer entry points.
+A fresh callgrind run reports **11,014,336 exclusive string_literal instructions**,
+exactly trunk's count, versus **11,307,279** before this correction.
+
+Same CI profile; `demand` is before and `inline` is after; five alternating
+pairs through `compare_build_instructions.py --runs 5 --sequential`, 743 modules:
+
+```text
+run 1: base 4,035,921,436  head 4,035,398,913
+run 2: base 4,036,265,178  head 4,034,724,546
+run 3: base 4,035,508,001  head 4,036,992,892
+run 4: base 4,035,983,279  head 4,036,518,952
+run 5: base 4,037,398,267  head 4,037,450,688
+minimum: 4,035,508,001 -> 4,034,724,546; -783,455 (-0.019%)
+```
+
+The five-run means are effectively tied: this is a measured helper-code
+reduction, not a claim of a statistically established whole-build speedup.
+The fresh callgrind total is 4,034,195,819; allocator-exclusive instructions
+are 352,556,095 versus 350,645,794 in the original head run. These changing
+allocator costs must not be silently credited to, or hidden by, the helper
+reduction. `reserve_layout` is now 247,494 inclusive instructions versus
+1,300,438 before the preceding correction; work-pool allocations now occur
+inside the paths that use them instead.
+
+Validation repeated: compiler build and serial full suite 2,604+1+3+5 passed;
+rewatch build and 210+9 passed; JS737/737, stdlib113/113, GenType2/2. Existing
+allocation and differential tests were not edited. The first full run lacked
+React reference artifacts removed by earlier parity cleanup; rebuilding all
+three reference projects before the full retry produced the passing result.

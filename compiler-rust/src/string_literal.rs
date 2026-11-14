@@ -180,6 +180,9 @@ fn normalize_semantic_bytes_into(bytes: &[u8], buf: &mut Vec<u8>) {
 }
 
 /// Cost: O(input bytes), reusing decoded-byte storage.
+// Keep the owned wrapper's Vec local after sharing the buffer-writing algorithm.
+// Otherwise every decoded byte updates an externally visible Vec header.
+#[inline(always)]
 fn decode_js_escapes_into(normalize_template_line_endings: bool, s: &[u8], buf: &mut Vec<u8>) -> Option<()> {
     let len = s.len();
     buf.clear();
@@ -370,6 +373,9 @@ enum EncodeJsMode {
 }
 
 /// Cost: O(input bytes and emitted escape bytes), reusing capacity.
+// The owned entry can scalar-replace its Vec header; retained-buffer callers
+// still use the same encoding loop.
+#[inline(always)]
 fn encode_js_into(mode: EncodeJsMode, bytes: &[u8], buf: &mut Vec<u8>) {
     buf.clear();
     for &byte in bytes.iter() {
