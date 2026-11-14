@@ -248,7 +248,8 @@ impl Log {
         self.of_function[function.index()] = scope.0 + 1;
     }
 
-    /// The row of the function with header `function`. Constant.
+    /// The row of the function with header `function`. Cost: O(1), one
+    /// read of `of_function`.
     pub(crate) fn scope(&self, function: FuncId) -> Option<ScopeId> {
         match self.of_function.get(function.index()) {
             Some(&row) if row != 0 => Some(ScopeId(row - 1)),
@@ -256,7 +257,7 @@ impl Log {
         }
     }
 
-    /// The home of `var`. Constant.
+    /// The home of `var`. Cost: O(1), one read of `places`.
     pub(crate) fn home(&self, var: VarId) -> ScopeId {
         ScopeId(self.places[var.index()].home)
     }
@@ -264,7 +265,8 @@ impl Log {
     /// The free list of a closed scope: sorted by `Ident`'s order (stamp,
     /// then name; an import by its module identifier), one entry per
     /// identifier.
-    /// Constant.
+    /// Cost: O(1): a slice of `free` between the row's bounds; nothing is
+    /// copied.
     pub(crate) fn free(&self, scope: ScopeId) -> &[FreeRef] {
         let row = self.rows[scope.0 as usize];
         &self.free[row.free_start as usize..(row.free_start + row.free_len) as usize]
@@ -273,7 +275,9 @@ impl Log {
     /// One `seen` entry per import of the unit so far, before a close or
     /// an adoption joins one: the imports are few and grow while the unit
     /// is lowered, so the column is sized to the module list when it is
-    /// short, not per reference. Constant unless it grows.
+    /// short, not per reference. Cost: O(1) when the column covers every
+    /// import; otherwise one write per import new since the last call, and
+    /// `seen_import` may reallocate.
     fn size_imports(&mut self, bir: &Bir) {
         let imports = bir.pools.j_modules.len();
         if self.seen_import.len() < imports {
@@ -295,7 +299,16 @@ impl Log {
         }
     }
 
-    /// `close` on the log taken out of `bir` (see `close`).
+    /// `close` on the log taken out of `bir` (see `close`). Cost:
+    /// `size_imports`; one write per parameter (its home); one step per
+    /// own site of the scope (`read_sites`, with `unprinted` per live site
+    /// in a unit that preserves JSX); one step per closed child and one per free entry of
+    /// a child whose literal is still there; one step per entry of the run;
+    /// O(R log R) `ident_order` comparisons, one step each, to sort the R
+    /// entries kept, and one `ident_of` per kept entry; `eta_shape` (one
+    /// pass over the parameters). Pushes at most R entries on `free` and
+    /// one `Child`, and `set_scope` may grow `of_function`: these pools
+    /// allocate when they grow; the run is truncated back to its start.
     fn close(&mut self, bir: &Bir, idents: &[crate::ident::Ident], function: FuncId) -> ScopeId {
         let open = self.open.pop().expect("a function scope is open");
         let row = open.row;
@@ -452,7 +465,12 @@ impl Log {
         }
     }
 
-    /// `adopt` on the log taken out of `bir` (see `adopt`).
+    /// `adopt` on the log taken out of `bir` (see `adopt`). Cost:
+    /// `size_imports`; one step per node of the subtree of `node`, where a
+    /// function literal is not entered but costs one step per entry of its
+    /// free list; `unprinted` per reference in a unit that preserves JSX.
+    /// The stack `pending` is kept across calls and `run` takes at most one
+    /// push per entry joined; both allocate only when they grow.
     fn adopt(&mut self, bir: &Bir, idents: &[crate::ident::Ident], node: NodeId) {
         let row = self.open.last().expect("adopt inside an open function scope").row;
         self.size_imports(bir);
@@ -487,7 +505,10 @@ impl Log {
 /// are adjacent. It is the order the pass sorts a free list by (naming.rs
 /// `sorted`), read from the same identifiers: a variable's `order` is not
 /// its stamp for a hidden identifier (stamp -1) or for a variable the
-/// lowering made for a JavaScript name (stamp 0). Constant.
+/// lowering made for a JavaScript name (stamp 0). Cost: two `ident_of`
+/// and one `Ident` comparison: O(1) unless the stamps are equal and the
+/// names are two different interned names, which `Name::cmp` compares by
+/// their bytes, linear in the shorter name.
 fn ident_order(bir: &Bir, idents: &[crate::ident::Ident], a: FreeRef, b: FreeRef) -> std::cmp::Ordering {
     if a == b {
         return std::cmp::Ordering::Equal;
@@ -498,7 +519,8 @@ fn ident_order(bir: &Bir, idents: &[crate::ident::Ident], a: FreeRef, b: FreeRef
 }
 
 /// The identifier a free entry prints as: a variable's through its origin,
-/// an import's module identifier. Constant.
+/// an import's module identifier. Cost: O(1): a read of `j_origin` and
+/// `idents`, or of the module; the `Ident` is copied, its name is interned.
 fn ident_of(bir: &Bir, idents: &[crate::ident::Ident], entry: FreeRef) -> Option<crate::ident::Ident> {
     match (entry.as_var(), entry.as_import()) {
         (Some(var), _) => idents.get(bir.vars.j_origin[var.index()].index()).copied(),
@@ -507,7 +529,7 @@ fn ident_of(bir: &Bir, idents: &[crate::ident::Ident], entry: FreeRef) -> Option
     }
 }
 
-/// A `u32` index. Constant.
+/// A `u32` index. Cost: O(1).
 fn index(len: usize) -> u32 {
     u32::try_from(len).expect("naming log capacity")
 }
@@ -921,7 +943,8 @@ impl Replay<'_, '_> {
 
     /// Child list `index` of `statement` in print order, or a statement of
     /// a block; for a `try`, its catch variable is named before its handler.
-    /// Constant.
+    /// Cost: O(1) reads of the statement's operands; for a `try` with a
+    /// catch variable, at `index` 1 also `name` (one `Tables::add`).
     fn child(&mut self, statement: NodeId, index: u32) -> Option<NodeId> {
         use crate::bir::View;
         let i = index as usize;
@@ -1007,7 +1030,8 @@ impl Replay<'_, '_> {
     /// carries): not at all when it is dead and pure, as its value alone
     /// when it is dead and has an effect, else with its binder. The
     /// lowering writes every declaration as used; the decisions that mark
-    /// one dead are applied before the replay from T4g on. Constant.
+    /// one dead are applied before the replay from T4g on. Cost: O(1), one
+    /// read of the node's status bits.
     fn declaration(&self, statement: NodeId, has_value: bool) -> Declaration {
         use crate::js_ir::op::UsedStats;
         let node = self.bir.nodes[statement.index()];
@@ -1026,7 +1050,8 @@ impl Replay<'_, '_> {
     /// Whether `var` is a parameter of a function literal whose row has
     /// `ETA`: the printer eta-reduces it, and the pass names none of its
     /// parameters (naming.rs `function`, `FunctionForm::Eta`). A copy's
-    /// parameters are read through the copy's literal. Constant.
+    /// parameters are read through the copy's literal. Cost: O(1): the
+    /// binder's op and header, one `Log::scope` read and `eta`.
     fn eta_parameter(&self, var: VarId) -> bool {
         let Some(binder) = self.bir.vars.binder(var) else { return false };
         if self.bir.nodes[binder.index()].op() != Op::JFun {
@@ -1039,12 +1064,13 @@ impl Replay<'_, '_> {
     /// Whether the printer eta-reduces the function of `row`: it had the
     /// shape at its close and is no method now (a function made a method
     /// after its close keeps `ETA`; `walk::eta_target` refuses a method).
-    /// Constant.
+    /// Cost: O(1), two flag reads.
     fn eta(&self, row: ScopeRow) -> bool {
         row.flags & ScopeRow::ETA != 0 && self.bir.function(row.function).flags & crate::bir::FuncHeader::METHOD == 0
     }
 
-    /// Whether `node` is a function literal with a closed row. Constant.
+    /// Whether `node` is a function literal with a closed row. Cost: O(1),
+    /// one `Log::scope` read and one flag test.
     fn closed_literal(&self, node: NodeId) -> bool {
         use crate::bir::View;
         let View::JFun { header, .. } = self.bir.view(node) else { return false };
@@ -1172,7 +1198,8 @@ impl Replay<'_, '_> {
     }
 
     /// The identifier `var` prints as: its origin's. None for a variable
-    /// without an identifier. Constant.
+    /// without an identifier. Cost: O(1), a read of `j_origin` and the
+    /// identifier.
     fn subject(&self, var: VarId) -> Option<Subject> {
         let origin = self.bir.vars.j_origin[var.index()];
         let ident = self.idents.get(origin.index())?;
@@ -1180,14 +1207,14 @@ impl Replay<'_, '_> {
     }
 
     /// The identifier of an imported module; its slot follows the
-    /// variables'. Constant.
+    /// variables'. Cost: O(1), a read of the module's identifier.
     fn import_subject(&self, import: ImportId) -> Subject {
         let id = &self.bir.pools.j_modules[import.index()].id;
         Subject { slot: index(self.bir.vars.len() + import.index()), stamp: id.stamp(), name: id.name_atom() }
     }
 }
 
-/// Whether nodes of `op` are statements. Constant.
+/// Whether nodes of `op` are statements. Cost: O(1), one match on `op`.
 fn is_statement(op: Op) -> bool {
     matches!(
         op,

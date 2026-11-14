@@ -411,6 +411,7 @@ pub(crate) fn lower(
 }
 
 /// H2: C:1266 compile_external_field_apply; summaries are read-only inputs.
+/// Cost: that of `unit::lower`, which gets the arguments unchanged.
 pub(crate) fn lower_with_resolver(
     input: super::bridge::ForLowering,
     locations: Option<&crate::lambda::LamLocTable>,
