@@ -278,3 +278,36 @@ untagged differential: recorded layouts=453; distinct printed layouts=192; plan 
 ```
 
 Both differential tests pass; expanding the arm subsets exposed no mismatch.
+
+## Review extension: bounded metadata indexing
+
+Text, literal and instance indexes now use dense AVL link pools, not sorted
+vector insertion. Handles remain metadata row numbers. Import costs
+O(B log U + log L) for B spelling bytes, U unique strings and L literal rows;
+ancestry costs O(B log U + A log I) for A ancestors and I instance rows. Reused
+keys copy no pool rows. New entries append one row and rebalance logarithmically,
+without hashes or per-entry heap allocations. This supersedes the sorted-index
+cost descriptions above. The link pools reserve from the same source counts.
+
+Command: `CARGO_INCREMENTAL=0 cargo test --manifest-path compiler-rust/Cargo.toml untagged_dispatch -- --nocapture --test-threads=1`
+
+```text
+reverse literal interning: literals=10000; index moves/comparisons<=1469686; limit=2657542
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 2466 filtered out; finished in 9.41s
+```
+
+The limit is floor(20 N log2 N). Test-only counters charge key comparisons,
+height updates/comparisons and conservative rotation field-move bounds. The
+reserved index vectors do not reallocate in this test. It also reimports every
+literal to check stable identity and recursively checks AVL heights, balance and
+parent links. String-byte comparisons are accounted for by B in the cost, not
+as separate index-element comparisons.
+
+Command: `CARGO_INCREMENTAL=0 cargo test --manifest-path compiler-rust/Cargo.toml bir:: -- --test-threads=1`
+
+```text
+test result: ok. 774 passed; 0 failed; 0 ignored; 0 measured; 1719 filtered out; finished in 90.24s
+```
+
+The pinned allocation constants are unchanged. Strict all-target compiler
+clippy also passes (`cargo clippy --manifest-path compiler-rust/Cargo.toml --all-targets -- -D warnings`).
