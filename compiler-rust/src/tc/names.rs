@@ -21,8 +21,8 @@
 
 use super::name_table::Name;
 use super::scope::{
-    Binder, BinderKind, Found, Key, NONE, Namespace, Resolved, ResolvedKind, Scopes, TableId,
-    UnitSource,
+    Binder, BinderKind, Found, IMPORTED, Key, NONE, Namespace, Resolved, ResolvedKind, Scopes,
+    TableId, UnitSource,
 };
 
 /// What a module is, for a path that goes through it: 8 bytes.
@@ -72,6 +72,15 @@ const UNSUPPORTED: PathError = PathError {
     kind: PathErrorKind::Unsupported,
     component: 0,
 };
+
+/// O(1): the error `kind` about component `component` (a path longer
+/// than `u16::MAX` reports its last representable component).
+fn path_error(kind: PathErrorKind, component: usize) -> PathError {
+    PathError {
+        kind,
+        component: component.min(u16::MAX as usize) as u16,
+    }
+}
 
 /// `Scopes::unit_read` bit: the unit's interface was loaded for this unit
 /// (`find_pers_struct`, compiler/ml/env.ml:646).
@@ -163,7 +172,61 @@ impl Scopes {
         modules: &mut Vec<Found>,
         source: &mut dyn UnitSource,
     ) -> Result<Found, PathError> {
-        todo!("R4e")
+        modules.clear();
+        let (&first, rest) = path.split_first().expect("a path has a component");
+        #[cfg(test)]
+        super::steps::tick();
+        // The first component is a name in scope; a module name with no
+        // binding is a unit (`lookup_module`, compiler/ml/env.ml:985-1000).
+        let first_ns = if rest.is_empty() {
+            ns
+        } else {
+            Namespace::Module
+        };
+        let mut current = match self.find(Key::new(first, first_ns)) {
+            Some(found) => found,
+            None if first_ns == Namespace::Module => match self.unit_by_name(first, source) {
+                Some(unit) => Found {
+                    item: Resolved::unit(unit),
+                    layer: NONE,
+                },
+                None => return Err(path_error(PathErrorKind::UnboundModule, 0)),
+            },
+            None => return Err(path_error(PathErrorKind::Unbound, 0)),
+        };
+        let layer = current.layer;
+        for (index, &name) in rest.iter().enumerate() {
+            #[cfg(test)]
+            super::steps::tick();
+            modules.push(current);
+            // `index` is the component of the module the name is read from.
+            let table = match self.module_shape(current.item, source) {
+                Ok(ModuleShape::Structure(table) | ModuleShape::Abstract(table)) => table,
+                Ok(ModuleShape::Functor) => {
+                    return Err(path_error(PathErrorKind::Functor, index));
+                }
+                Err(error) => return Err(path_error(error.kind, index)),
+            };
+            let key_ns = if index + 1 == rest.len() {
+                ns
+            } else {
+                Namespace::Module
+            };
+            current = match self.search(table, Key::new(name, key_ns)) {
+                Some(row) => Found {
+                    item: self.row_item(table, row),
+                    layer: NONE,
+                },
+                None if key_ns == Namespace::Module => {
+                    return Err(path_error(PathErrorKind::UnboundModule, index + 1));
+                }
+                None => return Err(path_error(PathErrorKind::Unbound, index + 1)),
+            };
+        }
+        Ok(Found {
+            item: current.item,
+            layer,
+        })
     }
 
     /// Every member of `key` in a module's table, in candidate order,
@@ -171,7 +234,42 @@ impl Scopes {
     /// `lookup_all_simple`, compiler/ml/env.ml:1039-1045): one
     /// [`Scopes::search`] and 1 step a candidate.
     pub fn candidates_in(&self, table: TableId, key: Key, out: &mut Vec<Found>) {
-        todo!("R4e")
+        let Some(first) = self.search(table, key) else {
+            return;
+        };
+        let end = self.table_end(table);
+        for row in first..end {
+            if self.member(table, row).key != key.0 {
+                break;
+            }
+            #[cfg(test)]
+            super::steps::tick();
+            out.push(Found {
+                item: self.row_item(table, row),
+                layer: NONE,
+            });
+        }
+    }
+
+    /// O(1), no step: what row `row` of `table` names, the binder of a
+    /// local member or the imported row itself.
+    fn row_item(&self, table: TableId, row: u32) -> Resolved {
+        if table.0 & IMPORTED != 0 {
+            Resolved::import(row)
+        } else {
+            Resolved::binder(Binder(self.member(table, row).target))
+        }
+    }
+
+    /// O(1), no step: the row after the last of `table`, in the pool its
+    /// rows live in.
+    fn table_end(&self, table: TableId) -> u32 {
+        let row = if table.0 & IMPORTED != 0 {
+            self.imported_tables[(table.0 & !IMPORTED) as usize]
+        } else {
+            self.tables[table.0 as usize]
+        };
+        row.first + row.len
     }
 
     // ----- R4f: usage and the warnings of a lookup -----
@@ -303,5 +401,37 @@ mod tests {
         assert_eq!(std::mem::size_of::<PathError>(), 4);
         assert!(std::mem::size_of::<Result<Found, PathError>>() <= 16);
         assert!(std::mem::size_of::<Result<ModuleShape, PathError>>() <= 16);
+    }
+
+    /// `candidates_in` of a key with 10,000 members, in a table that has
+    /// 10,000 more of other keys: one search (at most 15 comparisons) and
+    /// one step a candidate, in table order.
+    #[test]
+    fn ten_thousand_qualified_candidates_are_one_step_each() {
+        let mut s = Scopes::new();
+        let a = Key::new(s.names.intern("A"), Namespace::Constructor);
+        let b = Key::new(s.names.intern("B"), Namespace::Constructor);
+        let rows: Vec<(Key, Binder)> = (0..20_000)
+            .map(|i| {
+                let key = if i % 2 == 0 { a } else { b };
+                (key, s.binders.push(key, 0, 0, BinderKind::Constructor))
+            })
+            .collect();
+        let table = s.table_from(&rows);
+        let mut out = Vec::with_capacity(10_000);
+        let count = super::super::steps::scope(|| s.candidates_in(table, a, &mut out));
+        assert!(count <= 10_000 + 15, "{count}");
+        assert_eq!(out.len(), 10_000);
+        assert!(
+            out.iter()
+                .zip(rows.iter().step_by(2))
+                .all(|(found, &(_, binder))| {
+                    *found
+                        == Found {
+                            item: Resolved::binder(binder),
+                            layer: NONE,
+                        }
+                })
+        );
     }
 }
