@@ -178,6 +178,17 @@ impl Binders {
         Binder(binder)
     }
 
+    /// O(rows removed): drop every binder from `len` on, in all six arrays.
+    fn truncate(&mut self, len: u32) {
+        let len = len as usize;
+        self.key.truncate(len);
+        self.payload.truncate(len);
+        self.loc.truncate(len);
+        self.previous.truncate(len);
+        self.kind.truncate(len);
+        self.used.truncate(len);
+    }
+
     /// O(1): how many binders exist; the age a layer is compared with.
     pub fn len(&self) -> u32 {
         self.key.len() as u32
@@ -578,7 +589,16 @@ impl Scopes {
     /// with (predefined types, the initially opened modules). Called once
     /// per worker, with scope 0 current.
     pub fn freeze(&mut self) {
-        todo!("R4b")
+        debug_assert_eq!(self.entered.len(), 1, "freeze outside scope 0");
+        self.frozen = Frozen {
+            binders: self.binders.len(),
+            scopes: self.scopes.len() as u32,
+            log: self.log.len() as u32,
+            layers: self.layers.len() as u32,
+            opens: self.opens.len() as u32,
+            tables: self.tables.len() as u32,
+            members: self.members.len() as u32,
+        };
     }
 
     /// O(bindings above the prefix + reads of the last unit): leave every
@@ -587,7 +607,45 @@ impl Scopes {
     /// `read_units` and `read_items` (not the whole bit sets). Names, units
     /// and imported tables stay.
     pub fn reset(&mut self) {
-        todo!("R4b")
+        let frozen = self.frozen;
+        while self.entered.len() > 1 {
+            self.leave();
+        }
+        // Bindings made in scope 0 after the freeze.
+        self.undo_to(frozen.log);
+        // Layers scope 0 opened after the freeze: one load each through
+        // `older` (layers are appended, so an older layer has a lower index).
+        if self.current != NONE {
+            let scope = &mut self.scopes[self.current as usize];
+            while scope.opens != NONE && scope.opens >= frozen.layers {
+                scope.opens = self.layers[scope.opens as usize].older;
+            }
+        }
+        // The opens of the prefix start the next unit unused and with no
+        // name reported: one write per open of the prefix, a per-worker
+        // constant. Notes are written by lookups, which come after the
+        // freeze, so the prefix has none and `notes` is emptied.
+        for open in &mut self.opens[..frozen.opens as usize] {
+            open.shadowed = NONE;
+            open.flags &= !OPEN_USED;
+        }
+        self.binders.truncate(frozen.binders);
+        self.scopes.truncate(frozen.scopes as usize);
+        self.layers.truncate(frozen.layers as usize);
+        self.opens.truncate(frozen.opens as usize);
+        self.notes.clear();
+        self.tables.truncate(frozen.tables as usize);
+        self.members.truncate(frozen.members as usize);
+        self.armed.clear();
+        self.warnings.clear();
+        for &unit in &self.read_units {
+            self.unit_read[unit as usize] = 0;
+        }
+        self.read_units.clear();
+        for &row in &self.read_items {
+            self.item_read[row as usize / 64] &= !(1 << (row % 64));
+        }
+        self.read_items.clear();
     }
 
     // ----- R4c: member tables of this unit, opened layers, lookup -----

@@ -744,7 +744,6 @@ fn shadowing_and_namespaces() {
 
 /// Reaches: R4a, R4b. A unit starts from the frozen prefix.
 #[test]
-#[ignore = "R4b build"]
 fn reset_returns_to_the_frozen_prefix() {
     let mut s = unit_scopes();
     let int = bind(&mut s, "int", Namespace::Type, 0);
