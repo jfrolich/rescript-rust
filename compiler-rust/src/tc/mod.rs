@@ -62,6 +62,10 @@ pub mod scope;
 // R4 oracle. Not compiled without debug assertions.
 #[cfg(debug_assertions)]
 pub(crate) mod scope_trace;
+// The R4 oracle: the trace replayed on `Scopes`, under `RESCRIPT_CHECKER=both`
+// in builds with debug assertions.
+#[cfg(debug_assertions)]
+pub(crate) mod scope_oracle;
 
 #[cfg(test)]
 mod differential;
@@ -71,5 +75,3 @@ mod r3_tests;
 // assertions only.
 #[cfg(all(test, debug_assertions))]
 mod r4_tests;
-#[cfg(all(test, debug_assertions))]
-mod scope_oracle;
