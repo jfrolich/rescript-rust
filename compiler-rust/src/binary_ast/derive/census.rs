@@ -194,7 +194,9 @@ impl Census {
     pub(crate) fn failed_obligation(&self, kind: &'static str, shape: &'static str) {
         use std::io::Write;
         let event = serde_json::json!({"version": 1, "event": "failed_obligation",
-            "module": self.module, "obligation": kind, "type_shape": shape});
+            "module": self.module, "obligation": kind, "type_shape": shape,
+            "not_json_identity_emitted": self.not_json_identity_emitted,
+            "not_json_identity_failed": self.not_json_identity_failed});
         let mut encoded = serde_json::to_vec(&event).expect("failure census is serializable");
         encoded.push(b'\n');
         let _guard = OUTPUT.lock().unwrap_or_else(|e| e.into_inner());

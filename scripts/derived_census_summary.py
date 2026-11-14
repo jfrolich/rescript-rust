@@ -28,13 +28,18 @@ def summarize(rows):
     result.update(modules=0, bindings=[0, 0], syntax_nodes=[0, 0],
                   checker_counters=[[0] * 4, [0] * 4], counter_modules=0, paths={}, path_timing_records=0,
                   planned_typecheck_ns=0, planned_conversion_ns=0, unplanned_forms={},
-                  general_typecheck_ns=0, general_conversion_ns=0, general_costs={}, general_cost_records=0, failed_obligations={})
+                  general_typecheck_ns=0, general_conversion_ns=0, general_costs={}, general_cost_records=0, failed_obligations={},
+                  not_json_identity_emitted=0, not_json_identity_failed=0)
     shapes = collections.defaultdict(list)
     templates = []
     template_sizes = []
     for row in rows:
         if row.get("version") != 1:
             raise ValueError(f"Unsupported census version: {row.get('version')!r}")
+        # An abandoned attempt emits these counters in its failure event;
+        # the final general retry emits zero. Count attempts, not just survivors.
+        for key in ("not_json_identity_emitted", "not_json_identity_failed"):
+            result[key] += row.get(key, 0)
         if row.get("event") == "failed_obligation":
             key = f"{row['obligation']} / {row['type_shape']}"
             result["failed_obligations"][key] = result["failed_obligations"].get(key, 0) + 1
@@ -146,6 +151,9 @@ def markdown(summary):
         lines += ["", "| Path | Bindings |", "|---|---:|"]
         for reason, count in sorted(summary["paths"].items()):
             lines.append(f"| {reason} | {count} |")
+    if summary["not_json_identity_emitted"] or summary["not_json_identity_failed"]:
+        lines += ["", f"NotJsonIdentity obligations: {summary['not_json_identity_emitted']} emitted; "
+                  f"{summary['not_json_identity_failed']} failed (including abandoned attempts)."]
     if summary["failed_obligations"]:
         lines += ["", "| Failed obligation / expected type shape | Abandoned attempts |", "|---|---:|"]
         for key, count in sorted(summary["failed_obligations"].items()):
