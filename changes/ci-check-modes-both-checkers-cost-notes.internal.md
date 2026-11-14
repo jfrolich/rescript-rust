@@ -1,0 +1,1 @@
+- CI runs three checks that existed without a job: the check-mode comparison of the diagnostics fixtures, a debug build with both type checkers and the names replay on the runtime and the test suite, and the cost notes of changed lowering functions.

@@ -2136,7 +2136,6 @@ mod tests {
     /// result (seed 1000039: the levels kept at operation 10 decide what
     /// operation 13 lowers).
     #[test]
-    #[ignore = "R3k build"]
     fn a_failed_retry_keeps_its_levels_in_the_explaining_mode() {
         let program = compile(FIXED_SCOPED.to_string());
         let plan = Plan::new(Tier::Full, EXPLAIN | SCOPED);
@@ -2305,10 +2304,16 @@ mod tests {
             }
         }
         assert!(methods.iter().any(|(name, slice)| name == "unify_fields" && slice == "R3e"));
-        let mut checked = 0;
+        // Every ignored test of the two files is checked: an `ignore` that
+        // does not name its slice as "R3x build" is not skipped silently.
+        // The number itself is not pinned: each slice removes its own.
+        let (mut checked, mut ignored) = (0, 0);
         for source in [include_str!("differential.rs"), include_str!("r3_tests.rs")] {
             let lines: Vec<&str> = source.lines().collect();
             for (at, line) in lines.iter().enumerate() {
+                if line.trim_start().starts_with("#[ignore") {
+                    ignored += 1;
+                }
                 let Some(slice) = line
                     .trim_start()
                     .strip_prefix("#[ignore = \"")
@@ -2380,6 +2385,6 @@ mod tests {
                 checked += 1;
             }
         }
-        assert_eq!(checked, 4, "ignored R3 tests checked");
+        assert_eq!(checked, ignored, "an ignored R3 test does not name its slice");
     }
 }
