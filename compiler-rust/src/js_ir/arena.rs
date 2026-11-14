@@ -822,6 +822,12 @@ impl JsArena {
         self.expr_cold(e).source_loc
     }
 
+    /// Replace `e` in place by `kind` without comment or location: every
+    /// holder of the handle sees the new expression.
+    pub(crate) fn overwrite_expr(&mut self, e: Expr, kind: ExprKind) {
+        *self.exprs.get_mut(e.index()) = ExprNode { kind, cold: None };
+    }
+
     /// `e` with a different kind and the same comment and location. Returns
     /// `e` itself when the kind is unchanged.
     pub fn rekind_expr(&mut self, e: Expr, kind: ExprKind) -> Expr {
