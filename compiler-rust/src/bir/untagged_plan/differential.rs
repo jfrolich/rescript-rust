@@ -19,10 +19,43 @@ pub(crate) fn record(layout: &Layout) {
     }
 }
 
-macro_rules! snapshot {
-    ($name:ident, $implementation:path) => {
-        mod $name {
-            use $implementation as implementation;
+        mod current {
+            use crate::bir::untagged_plan as implementation;
+            use implementation::{Plan, StoredTest as Test, TestId, Tree, TreeId, Clause};
+            /// O(expanded test size); this test serializer deliberately preserves order.
+            fn test(p: &Plan<u32>, id: TestId) -> String {
+                match p.stored_test(id) {
+                    Test::Equals(tag) => format!("eq({:?})", p.metadata.owned_literal(*tag)),
+                    Test::Typeof(kind) => format!("typeof({:?})", kind.block_type()),
+                    Test::Instance(id) => if p.metadata.is_class(*id) { format!("instance({})", p.metadata.instance_name(*id)) } else { "array".into() },
+                    Test::NotNull => "nonnull".into(),
+                    Test::Not(t) => format!("not({})", test(p, *t)),
+                    Test::And(a,b) => format!("and({},{})", test(p,*a),test(p,*b)),
+                    Test::Or(a,b) => format!("or({},{})", test(p,*a),test(p,*b)),
+                }
+            }
+            /// O(expanded clause size), for test comparison only.
+            fn clause(p: &Plan<u32>, c: &Clause<u32>) -> String {
+                match c {
+                    Clause::FallsThrough(a) => format!("fall({a:?})"),
+                    Clause::Body(t) => tree(p,*t),
+                }
+            }
+            /// O(expanded plan size), ignoring only pool indices and unreachable rows.
+            pub(super) fn tree(p: &Plan<u32>, id: TreeId) -> String {
+                match p.tree(id) {
+                    Tree::Run(a) => format!("run({a})"),
+                    Tree::Fallback => "fallback".into(),
+                    Tree::Skip => "skip".into(),
+                    Tree::If(t,a,b) => format!("if({},{},{})",test(p,*t),tree(p,*a),tree(p,*b)),
+                    Tree::Block(t) => format!("block({})",tree(p,*t)),
+                    Tree::SwitchValue(c,d) => { assert_eq!(c.len(), p.stored_value_clauses(*c).iter().count()); format!("value({:?};{})",p.stored_value_clauses(*c).iter().map(|(tag,c)| (format!("{:?}", p.metadata.owned_literal(*tag)),clause(p,c))).collect::<Vec<_>>(),tree(p,*d)) },
+                    Tree::SwitchTypeof(c,d) => format!("type({:?};{})",p.stored_typeof_clauses(*c).iter().map(|(kind,c)| (format!("{:?}", kind.block_type()),clause(p,c))).collect::<Vec<_>>(),tree(p,*d)),
+                }
+            }
+        }
+        mod legacy {
+            use crate::lambda::untagged_dispatch as implementation;
             use implementation::{Plan, Test, TestId, Tree, TreeId, Clause};
             use crate::types::variant_runtime::Instance;
             /// O(expanded test size); this test serializer deliberately preserves order.
@@ -58,10 +91,6 @@ macro_rules! snapshot {
                 }
             }
         }
-    };
-}
-snapshot!(current, crate::bir::untagged_plan);
-snapshot!(legacy, crate::lambda::untagged_dispatch);
 
 /// Compare full, omitted, partitioned, singleton and reordered arm lists.
 /// Cost: sixteen plan pairs per subset, plus reachable-tree serialization.

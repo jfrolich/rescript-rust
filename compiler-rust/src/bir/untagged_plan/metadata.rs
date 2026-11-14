@@ -44,6 +44,7 @@ impl Kind {
         }
     }
     /// Cost: O(1); reads a scalar or borrowed pool range.
+    #[cfg(test)]
     pub(crate) fn block_type(self) -> BlockType {
         match self {
             Self::Number => BlockType::Number,
@@ -309,7 +310,8 @@ impl Metadata {
     pub(crate) fn runtime_key(&self, id: LiteralId) -> &str {
         self.text(self.literals[id.0 as usize].1)
     }
-    /// Cost: O(literal spelling bytes), once per unique default-boundary payload.
+    #[cfg(test)]
+    /// Cost: O(literal spelling bytes), for test projection only.
     pub(crate) fn owned_literal(&self, id: LiteralId) -> LiteralTag {
         match self.literal(id) {
             Literal::String(s) => LiteralTag::String(self.text(s).to_owned()),
@@ -321,6 +323,7 @@ impl Metadata {
             Literal::Undefined => LiteralTag::Undefined,
         }
     }
+    #[cfg(test)]
     /// O(1): number of interned immutable instance descriptors.
     /// Cost: O(1); reads a scalar or borrowed pool range.
     pub(crate) fn instance_count(&self) -> usize { self.instances.len() }
@@ -344,23 +347,6 @@ impl Metadata {
         self.instances[b.0 as usize]
             .name
             .is_some_and(|name| self.ancestors(a).contains(&name))
-    }
-    /// Cost: O(B + A): copies B class/ancestor name bytes into A ancestor strings,
-    /// once at the default emitter compatibility boundary; arrays copy one identity.
-    pub(crate) fn owned_instance(&self, id: InstanceId) -> Instance {
-        use crate::types::variant_runtime::{ClassBlocks, ShapeAllocation};
-        match self.instances[id.0 as usize].name {
-            None => Instance::Array(ShapeAllocation::fresh()),
-            Some(name) => Instance::Class {
-                name: self.text(name).to_owned(),
-                ancestors: self
-                    .ancestors(id)
-                    .iter()
-                    .map(|s| self.text(*s).to_owned())
-                    .collect(),
-                blocks: ClassBlocks::fresh(0),
-            },
-        }
     }
     /// Cost: O(B log U + A log I) comparisons and O(A + log I) row/link updates,
     /// for B total name bytes, A ancestors, U strings and I unique instances.

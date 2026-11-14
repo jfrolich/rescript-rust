@@ -2,9 +2,9 @@
 //!
 //! Port of `compiler/ml/untagged_dispatch.ml`: which tests the generated code
 //! runs on the scrutinee, in which statements, and which body each path runs.
-//! `LambdaCompiler::compile_untagged_plan` prints a plan as JavaScript, and
-//! constant folding (`Lambda::switch`) evaluates it with [`select`], so a
-//! folded match and the generated code agree by construction.
+//! BIR lowering retains these pools for a unit; BIR normalization evaluates
+//! owned plans with [`select`]. Legacy Lambda lowering has its separate,
+//! unchanged planner in `lambda::untagged_dispatch`.
 //!
 //! OCaml builds the plan as a tree of `test` and `tree` values. Here a
 //! [`Plan`] keeps its tests, its tree nodes and the cases of its switches in
@@ -134,47 +134,6 @@ pub(crate) enum StoredTest {
     Not(TestId),
     And(TestId, TestId),
     Or(TestId, TestId),
-}
-
-/// Borrowed compatibility view for the unchanged default emitter. O(1) to form.
-pub(crate) enum Test<'a> {
-    Equals(&'a LiteralTag),
-    Typeof(&'a BlockType),
-    Instance(&'a crate::types::variant_runtime::Instance),
-    NotNull,
-    Not(&'a TestId),
-    And(&'a TestId, &'a TestId),
-    Or(&'a TestId, &'a TestId),
-}
-
-/// Borrowed literal clauses; constructing this view costs O(1).
-pub(crate) struct ValueClauses<'a, A> {
-    rows: &'a [(LiteralId, Clause<A>)],
-    literals: &'a [LiteralTag],
-}
-impl<'a, A> ValueClauses<'a, A> {
-    /// O(number of clauses), without materializing a collection.
-    /// Cost: O(1) to construct the borrowed iterator; consuming C clauses performs C literal-
-    /// pool lookups.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&'a LiteralTag, &'a Clause<A>)> + '_ {
-        self.rows.iter().map(|(literal, clause)| (&self.literals[literal.0 as usize], clause))
-    }
-}
-
-/// O(1): borrow a scalar typeof kind without reconstructing metadata.
-/// Cost: O(1): matches one scalar kind and returns a static BlockType reference.
-fn borrowed_typeof(kind: Kind) -> &'static BlockType {
-    match kind {
-        Kind::Number => &BlockType::Number,
-        Kind::String => &BlockType::String,
-        Kind::Bigint => &BlockType::Bigint,
-        Kind::Boolean => &BlockType::Boolean,
-        Kind::Symbol => &BlockType::Symbol,
-        Kind::Function => &BlockType::Function,
-        Kind::Object => &BlockType::Object,
-        Kind::Unknown => &BlockType::Unknown,
-        Kind::Instance(_) => unreachable!("instance is not a typeof kind"),
-    }
 }
 
 /// How the generated code reaches the bodies `A` (untagged_dispatch.mli
@@ -318,9 +277,6 @@ enum SelectOp {
 #[derive(Debug, Clone)]
 pub(crate) struct Plan<A> {
     pub(crate) metadata: Metadata,
-    legacy_literals: Vec<LiteralTag>,
-    legacy_instances: Vec<std::cell::OnceCell<crate::types::variant_runtime::Instance>>,
-    legacy_typeof: Vec<(BlockType, Clause<A>)>,
     tests: Vec<StoredTest>,
     trees: Vec<Tree<A>>,
     value_clauses: Vec<(LiteralId, Clause<A>)>,
@@ -393,9 +349,6 @@ impl<A> Plan<A> {
     fn new() -> Self {
         Plan {
             metadata: Metadata::default(),
-            legacy_literals: Vec::new(),
-            legacy_instances: Vec::new(),
-            legacy_typeof: Vec::new(),
             tests: Vec::new(),
             trees: Vec::new(),
             value_clauses: Vec::new(),
@@ -422,33 +375,6 @@ impl<A> Plan<A> {
     /// Cost: O(1): indexes one tree row without walking its children.
     pub(crate) fn tree(&self, id: TreeId) -> &Tree<A> {
         &self.trees[id.0 as usize]
-    }
-
-    /// Cost: O(1) for scalar/cached tests; the first instance request copies B name bytes and
-    /// A ancestor descriptors in O(B + A), then caches the compatibility value.
-    pub(crate) fn test(&self, id: TestId) -> Test<'_> {
-        match self.stored_test(id) {
-            StoredTest::Equals(literal) => Test::Equals(&self.legacy_literals[literal.0 as usize]),
-            StoredTest::Typeof(kind) => Test::Typeof(borrowed_typeof(*kind)),
-            StoredTest::Instance(instance) => Test::Instance(self.legacy_instances[instance.0 as usize].get_or_init(|| self.metadata.owned_instance(*instance))),
-            StoredTest::NotNull => Test::NotNull,
-            StoredTest::Not(test) => Test::Not(test),
-            StoredTest::And(a, b) => Test::And(a, b),
-            StoredTest::Or(a, b) => Test::Or(a, b),
-        }
-    }
-
-    /// O(1): borrow a literal clause range; each iteration borrows its tag.
-    /// Cost: O(1): constructs a borrowed clause span and literal-pool view; no clauses are
-    /// visited here.
-    pub(crate) fn value_clauses(&self, clauses: Clauses) -> ValueClauses<'_, A> {
-        ValueClauses { rows: self.stored_value_clauses(clauses), literals: &self.legacy_literals }
-    }
-
-    /// O(1): borrow the default emitter's scalar typeof clauses.
-    /// Cost: O(1): returns the recorded typeof-clause slice without visiting its entries.
-    pub(crate) fn typeof_clauses(&self, clauses: Clauses) -> &[(BlockType, Clause<A>)] {
-        &self.legacy_typeof[clauses.range()]
     }
 
     /// Cost: O(1): indexes one stored test descriptor, without descending its test handles.
@@ -1248,7 +1174,7 @@ fn simplify<A: Copy>(p: &mut Plan<A>, same: &impl Fn(&A, &A) -> bool, root: Tree
 /// Cost: O(B log U + A log I + P + C) amortized import/materialization plus plan_tree work: B
 /// literal/class spelling bytes, U text rows, A ancestry entries, I instance rows, P fact/arm
 /// occurrences, C unique literal payload bytes copied. Reserves layout-sized pools; instance
-/// payloads stay lazy until test().
+/// payloads remain dense descriptors; no legacy emitter views are materialized.
 pub(crate) fn plan<A: Copy>(same: impl Fn(&A, &A) -> bool, input: Input<'_, A>) -> Plan<A> {
     let mut p = Plan::new();
     let literal_count = input.facts.literal_tags.len() + input.literal_arms.len();
@@ -1281,14 +1207,7 @@ pub(crate) fn plan<A: Copy>(same: impl Fn(&A, &A) -> bool, input: Input<'_, A>) 
             fallback: input.fallback,
         },
     );
-    // Materialize each unique immutable payload once, not once per emitted test.
-    // The BIR append entry does not construct these compatibility views.
-    p.legacy_literals = (0..p.metadata.literal_count())
-        .map(|i| p.metadata.owned_literal(LiteralId(i as u32))).collect();
-    p.legacy_instances = (0..p.metadata.instance_count())
-        .map(|_| std::cell::OnceCell::new()).collect();
-    p.legacy_typeof = p.typeof_clauses.iter()
-        .map(|(kind, clause)| (kind.block_type(), *clause)).collect();
+
     p
 }
 
@@ -1612,7 +1531,7 @@ mod tests {
     }
 
     #[test]
-    fn warmed_string_selection_reuses_keys_and_defers_instance_materialization() {
+    fn warmed_string_selection_reuses_keys_and_borrows_instance_descriptors() {
         let c = class("C", &[]);
         let d = class("D", &[]);
         let literals = vec![s("hit")];
@@ -1623,8 +1542,9 @@ mod tests {
         let mut p = plan_of(literals, kinds, Some("default"), literal_arms, payload_arms);
         assert!(p.tests.capacity() >= 8 * cases);
         assert!(p.trees.capacity() >= 16 * cases);
-        assert!(!p.legacy_instances.is_empty());
-        assert!(p.legacy_instances.iter().all(|cell| cell.get().is_none()));
+        let instances = p.metadata.instance_count();
+        assert!(instances > 0);
+        let metadata_capacity = p.metadata.capacities();
         let value = Value::Literal(s("hit"));
         let mut visited = 0;
         assert!(matches!(select(&mut p, &value, &mut |_| visited += 1), Outcome::Arm("literal")));
@@ -1635,14 +1555,15 @@ mod tests {
             }
         });
         assert_eq!(measured.count_total, 0, "{measured:?}");
-        assert!(p.legacy_instances.iter().all(|cell| cell.get().is_none()));
+        assert_eq!(p.metadata.instance_count(), instances);
+        assert_eq!(p.metadata.capacities(), metadata_capacity);
         let test = p.tests.iter().position(|t| matches!(t, StoredTest::Instance(_))).unwrap();
         let id = TestId(test as u32);
-        match (p.test(id), p.test(id)) {
-            (Test::Instance(first), Test::Instance(second)) => assert!(std::ptr::eq(first, second)),
+        match (p.stored_test(id), p.stored_test(id)) {
+            (StoredTest::Instance(first), StoredTest::Instance(second)) => assert!(std::ptr::eq(first, second)),
             _ => unreachable!(),
         }
-        assert_eq!(p.legacy_instances.iter().filter(|cell| cell.get().is_some()).count(), 1);
+        assert_eq!(p.metadata.instance_count(), instances);
         println!("warmed string select: calls=10000; allocations={}; instances materialized before emission=0", measured.count_total);
     }
 
