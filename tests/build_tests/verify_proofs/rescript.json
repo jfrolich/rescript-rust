@@ -1,0 +1,6 @@
+{
+  "name": "verify_proofs",
+  "sources": ["src"],
+  "package-specs": { "module": "esmodule", "in-source": false },
+  "suffix": ".mjs"
+}

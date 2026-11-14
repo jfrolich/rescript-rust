@@ -70,6 +70,37 @@ pub(super) struct Collector<'a> {
     diagnostics: Vec<Diagnostic>,
     /// The expressions of the checks found where a check may be.
     placed: Vec<TExprIdx>,
+    /// Whether to try to prove each law, as `rescript verify` does.
+    prove: bool,
+    structure: &'a Structure,
+    /// The file's bindings, once a law needed them.
+    index: Option<super::purity::Index>,
+    /// The laws proved so far: later ones may use them.
+    lemmas: Vec<super::prove::Lemma>,
+}
+
+/// Whether a law is marked `@law(proved)`: it must be proved, not only run.
+fn wants_proof(arena: &ParseArena, attributes: &Attributes) -> bool {
+    use crate::parser::ast::{
+        ExpressionDesc as Parsed, Payload as Written, StructureItemDesc as Item,
+    };
+    use crate::parser::longident::Longident;
+    attributes.iter().any(|(name, payload)| {
+        arena.get_string(name.txt) == LAW
+            && match payload {
+                Written::PStr(items) if items.len() == 1 => match &items[0].pstr_desc {
+                    Item::Pstr_eval(eval) => match &arena.get_expr(eval.0).pexp_desc {
+                        Parsed::Pexp_ident(lid) => matches!(
+                            arena.get_longident(lid.txt),
+                            Longident::Lident(word) if arena.get_string(*word) == "proved"
+                        ),
+                        _ => false,
+                    },
+                    _ => false,
+                },
+                _ => false,
+            }
+    })
 }
 
 /// The checks of a type checked implementation, and what is wrong with the
@@ -80,6 +111,7 @@ pub fn collect(
     ta: &TypedArena,
     arena: &ParseArena,
     structure: &Structure,
+    prove: bool,
 ) -> (Vec<Item>, Vec<Diagnostic>) {
     let mut collector = Collector {
         ctx,
@@ -88,6 +120,10 @@ pub fn collect(
         items: Vec::new(),
         diagnostics: Vec::new(),
         placed: Vec::new(),
+        prove,
+        structure,
+        index: None,
+        lemmas: Vec::new(),
     };
     collector.structure(structure, &mut Vec::new());
     let mut misplaced = Misplaced {
@@ -246,7 +282,46 @@ impl Collector<'_> {
                 }
             }
         }
-        ok.then(|| json!({ "params": parameters, "defs": definitions.into_json() }))
+        if !ok {
+            return None;
+        }
+        // A proof is for every value; a run is for the values it made.
+        let proof = self.prove.then(|| {
+            let index = self
+                .index
+                .get_or_insert_with(|| super::purity::index(ta, self.arena, self.structure));
+            let shapes: Vec<Value> = parameters.iter().map(|p| p["shape"].clone()).collect();
+            let names: Vec<String> = parameters
+                .iter()
+                .map(|p| p["name"].as_str().unwrap_or_default().to_string())
+                .collect();
+            let proof = super::prove::prove(
+                ctx,
+                ta,
+                index,
+                definitions.clone(),
+                binding.vb_expr,
+                &names,
+                &shapes,
+                &self.lemmas,
+            );
+            if proof["status"] == "proved" {
+                self.lemmas.push(super::prove::Lemma {
+                    name: name.to_string(),
+                    expr: binding.vb_expr,
+                    shapes,
+                });
+            }
+            proof
+        });
+        let mut detail = json!({ "params": parameters, "defs": definitions.into_json() });
+        if let Some(proof) = proof {
+            detail["proof"] = proof;
+        }
+        if wants_proof(self.arena, &binding.vb_attributes) {
+            detail["must"] = json!(true);
+        }
+        Some(detail)
     }
 }
 

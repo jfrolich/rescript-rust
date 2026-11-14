@@ -174,7 +174,7 @@ struct Scope {
 
 /// Every single-name `let` of the file by identifier, and its modules.
 #[derive(Default)]
-struct Index {
+pub(super) struct Index {
     bindings: HashMap<i32, Binding>,
     /// Bindings with an annotation, in source order.
     annotated: Vec<i32>,
@@ -182,8 +182,13 @@ struct Index {
 }
 
 impl Index {
+    /// The expression and the name of a binding.
+    pub(super) fn definition(&self, stamp: i32) -> Option<(TExprIdx, &'static str)> {
+        self.bindings.get(&stamp).map(|binding| (binding.expr, binding.name))
+    }
+
     /// The binding a path of this file names, if it is one the index knows.
-    fn resolve(&self, path: &Path) -> Option<i32> {
+    pub(super) fn resolve(&self, path: &Path) -> Option<i32> {
         match path.view() {
             PathView::Pident(id) => self.bindings.contains_key(&id.stamp()).then(|| id.stamp()),
             PathView::Pdot(parent, name, _) => {
@@ -1261,6 +1266,19 @@ fn what_happens(message: &str) -> String {
     let first = first.split(", and `").next().unwrap_or(first);
     let first = first.split(". ").next().unwrap_or(first);
     first.trim_end_matches('.').replace('\n', " ")
+}
+
+/// The bindings of a type checked implementation.
+/// Cost: one walk of the typed tree.
+pub(super) fn index(ta: &TypedArena, arena: &ParseArena, structure: &Structure) -> Index {
+    let mut indexer = Indexer {
+        ta,
+        arena,
+        index: Index::default(),
+        implied: &|_| false,
+    };
+    indexer.structure(structure);
+    indexer.index
 }
 
 /// Check every `@pure` and `@mutates` binding of a type checked
