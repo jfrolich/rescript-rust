@@ -270,12 +270,28 @@ impl Checker {
     /// cost is [`Checker::bind`]'s, or one walk and the callee.
     fn bind_routed(&mut self, var: Ty, ty: Ty, route: Option<[Ty; 2]>) -> Result<(), Clash> {
         let before = self.g.nodes[var.0 as usize];
-        let target_is_var = self.g.nodes[ty.0 as usize].tag() == VAR;
-        // Of two variables, `link_type` picks the surviving name by the
-        // levels before `update_level` (compiler/ml/btype.ml:727,
-        // ctype.ml:2221-2222): link first, then lower the one node. A
-        // variable cannot hold another, so the occurrence walk is skipped.
-        //
+        if self.g.nodes[ty.0 as usize].tag() == VAR {
+            // Of two variables, `link_type` picks the surviving name by the
+            // levels before `update_level` (compiler/ml/btype.ml:727,
+            // ctype.ml:2221-2222): link first, then lower the one node,
+            // which has no child and no scope: `if ty.level > level`
+            // (ctype.ml:586), one write. A variable cannot hold another, so
+            // there is no occurrence walk, and lowering a variable cannot
+            // fail. The node is read after the link, whose name rule may
+            // have named it.
+            self.g.link(var, ty);
+            let target = self.g.nodes[ty.0 as usize];
+            if target.level > before.level {
+                self.g.write(
+                    ty,
+                    Node {
+                        level: before.level,
+                        ..target
+                    },
+                );
+            }
+            return Ok(());
+        }
         // Decision 6 of "R3 as designed": in `Mode::Explain`, outside a
         // speculation whose owner restores, a failed binding must leave the
         // levels as they were, because a failed top-level unification there
@@ -284,12 +300,12 @@ impl Checker {
         // ctype.ml:2216-2225), in two walks. The speculation this
         // unification opened in `Mode::Explain` is not an owner's.
         let occur_first = self.occur_first();
-        if !target_is_var && self.binding_occurrence(var, ty, occur_first, route.is_some())? {
+        if self.binding_occurrence(var, ty, occur_first, route.is_some())? {
             let [left, right] = route.expect("routed occurrence");
             return self.unify_expanded(left, right);
         }
         self.g.link(var, ty);
-        if (target_is_var || occur_first || self.types.scoped != 0)
+        if (occur_first || self.types.scoped != 0)
             && let Err(clash) = self.lower_to(ty, before.level)
         {
             // `t1.desc <- d1` (ctype.ml:2224).
