@@ -1129,3 +1129,59 @@ pub(crate) fn identity_in_namespace(namespace: u64, identity: u64) -> u64 {
     (namespace, identity).hash(&mut hash);
     hash.finish()
 }
+
+#[cfg(test)]
+mod trunk_literal_reference {
+    // Verbatim function from be1b3a482e5a989d1a1bbecf33a9b4f1aab98fec.
+    #[cfg(test)]
+pub(crate) fn ocaml_hex_float(x: f64) -> String {
+    if x.is_nan() {
+        return if x.is_sign_negative() { "-nan" } else { "nan" }.to_string();
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { "infinity" } else { "-infinity" }.to_string();
+    }
+    let bits = x.to_bits();
+    let sign = if bits >> 63 == 1 { "-" } else { "" };
+    let biased_exp = ((bits >> 52) & 0x7ff) as i64;
+    let mantissa = bits & ((1u64 << 52) - 1);
+    let (lead, exp) = if biased_exp == 0 {
+        // Zero or subnormal.
+        (0, if mantissa == 0 { 0 } else { -1022 })
+    } else {
+        (1, biased_exp - 1023)
+    };
+    let mut frac = format!("{mantissa:013x}");
+    while frac.ends_with('0') {
+        frac.pop();
+    }
+    let frac = if frac.is_empty() {
+        String::new()
+    } else {
+        format!(".{frac}")
+    };
+    let exp_sign = if exp < 0 { "-" } else { "+" };
+    format!("{sign}0x{lead}{frac}p{exp_sign}{}", exp.abs())
+}
+
+    #[test]
+    fn hex_float_normalization_matches_trunk() {
+        fn check(value: f64) {
+            let expected = ocaml_hex_float(value);
+            let mut out = String::from("prefix:");
+            super::hex_float_into(value, &mut out);
+            assert_eq!(&out[7..], expected, "bits={:016x}", value.to_bits());
+        }
+        let cases = [0.0, -0.0, f64::from_bits(1), f64::from_bits((1u64 << 52) - 1),
+            f64::MIN_POSITIVE, 1.0, -1.0, 0.1, f64::MAX, f64::MIN, f64::EPSILON,
+            f64::INFINITY, f64::NEG_INFINITY, f64::from_bits(0x7ff8000000000000),
+            f64::from_bits(0xfff8000000000000)];
+        for value in cases { check(value); }
+        let mut bits = 0x295a_64b8_0ce7_d13fu64;
+        for _ in 0..10000 {
+            bits = bits.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            check(f64::from_bits(bits));
+        }
+        println!("hex float trunk comparison: table=15; generated raw bit patterns=10000; all agree");
+    }
+}

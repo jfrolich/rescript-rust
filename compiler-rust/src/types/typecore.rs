@@ -30849,3 +30849,83 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod trunk_literal_reference {
+    // Verbatim function from be1b3a482e5a989d1a1bbecf33a9b4f1aab98fec.
+    #[cfg(test)]
+pub(crate) fn parse_bigint_literal(s: &str) -> (bool, String) {
+    fn remove_leading_sign(s: &str) -> (bool, &str) {
+        if s.is_empty() {
+            (false, s)
+        } else if let Some(rest) = s.strip_prefix('-') {
+            (false, rest)
+        } else if let Some(rest) = s.strip_prefix('+') {
+            (true, rest)
+        } else {
+            (true, s)
+        }
+    }
+
+    fn remove_leading_zeros(s: &str) -> String {
+        // OCaml removes separators before any zero/sign logic.
+        let without_underscores: String = s.chars().filter(|c| *c != '_').collect();
+        let starts_with_minus = without_underscores.starts_with('-');
+        let without_sign = without_underscores
+            .strip_prefix('-')
+            .or_else(|| without_underscores.strip_prefix('+'))
+            .unwrap_or(&without_underscores);
+
+        let processed = if without_sign.is_empty() {
+            String::new()
+        } else {
+            let bytes = without_sign.as_bytes();
+            let mut idx = 0usize;
+            while idx < bytes.len() && bytes[idx] == b'0' {
+                idx += 1;
+            }
+            if idx >= bytes.len() {
+                "0".to_string()
+            } else if bytes[idx].is_ascii_digit() {
+                without_sign[idx..].to_string()
+            } else {
+                without_sign.to_string()
+            }
+        };
+
+        if starts_with_minus {
+            format!("-{processed}")
+        } else {
+            processed
+        }
+    }
+
+    let (sign, digits) = remove_leading_sign(s);
+    (sign, remove_leading_zeros(digits))
+}
+
+    #[test]
+    fn bigint_normalization_matches_trunk() {
+        fn check(input: &str) {
+            let expected = parse_bigint_literal(input);
+            assert_eq!(super::parse_bigint_literal(input), expected, "input={input:?}");
+            let mut out = String::from("stale destination");
+            let positive = super::parse_bigint_literal_into(input, &mut out);
+            assert_eq!((positive, out), expected, "scratch input={input:?}");
+        }
+        let cases = ["", "0", "000", "007", "00x1", "_0_0", "--5", "-+5", "+-5", "+", "-", "-0", "+0", "1_000", "-1_000", "0x1F", "-0x1F", "0b101", "0o17"];
+        for input in cases { check(input); }
+        let mut seed = 0x3157_a821_694c_dbe0u64;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed
+        };
+        let alphabet = b"+-_0123456789abcdefxob";
+        for _ in 0..1000 {
+            let len = (next() >> 32) as usize % 64;
+            let input: String = (0..len).map(|_| alphabet[(next() >> 32) as usize % alphabet.len()] as char).collect();
+            check(&input);
+        }
+        println!("bigint trunk comparison: table=19; generated=1000; owned and scratch agree");
+    }
+}
