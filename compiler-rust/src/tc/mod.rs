@@ -38,16 +38,20 @@ pub mod bridge;
 
 pub mod canonical;
 
-// R3 skeleton: each build slice removes the allowance from the module it
-// completes (CHECKER_REWRITE.md, "R3 as designed").
-#[allow(dead_code, unused_variables)]
+// R3 skeleton: bodies are `todo!`, so parameters are unused and an output
+// vector looks like a slice to clippy. Each build slice removes the
+// allowance from the module it completes (CHECKER_REWRITE.md, "R3 as
+// designed").
+#[allow(dead_code, unused_variables, clippy::ptr_arg)]
 pub mod expand;
-#[allow(dead_code, unused_variables)]
+#[allow(dead_code, unused_variables, clippy::ptr_arg)]
 pub mod relate;
-#[allow(dead_code, unused_variables)]
+#[allow(dead_code, unused_variables, clippy::ptr_arg)]
 pub mod rows;
-#[allow(dead_code, unused_variables)]
+#[allow(dead_code, unused_variables, clippy::ptr_arg)]
 pub mod unify;
 
 #[cfg(test)]
 mod differential;
+#[cfg(test)]
+mod r3_tests;

@@ -269,10 +269,14 @@ impl Checker {
         todo!("R3d")
     }
 
-    /// `lower_args` of the old checker (types/ctype.rs:11682), the walk an
-    /// application runs over the callee's instance: O(nodes above the
-    /// current level), expanding a nullary abbreviation it meets so that the
-    /// nullary memo names that node. (R3d)
+    /// `lower_args` of the old checker (types/ctype.rs:11682; OCaml
+    /// compiler/ml/typecore.ml:2335-2342), which an application runs on the
+    /// callee's instance: expand the head ([`ExpandMode::Safe`]); while it is
+    /// an arrow, lower each parameter to the current level
+    /// ([`Checker::lower`]) and go on with the result. O(arrows in the
+    /// result chain) expansions plus the lowering. The expansion of a result
+    /// that is a nullary abbreviation is what makes that node the nullary
+    /// memo's representative (O11). (R3d)
     pub fn lower_args(&mut self, root: Ty) {
         todo!("R3d")
     }

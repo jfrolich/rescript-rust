@@ -27,7 +27,10 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use super::bridge::from_old::{Input, from_old};
-use super::graph::{ARROW, CONSTR, GENERIC, Graph, NONE, TUPLE, Ty, VAR};
+use super::expand::{ExpandMode, TypeTable};
+use super::graph::{ARROW, CONSTR, GENERIC, NONE, TUPLE, Ty, VAR};
+use super::rows::Extras;
+use super::unify::Checker;
 use super::segment::{PathRow, SchemeRoot, Segment, SignatureKind};
 use crate::cmi::persistent_env::ModuleRegistry;
 use crate::cmi::portable_types::{PortablePersStruct, internalize_pers_struct};
@@ -442,11 +445,13 @@ fn old_form(
     }
 }
 
-/// The new side of a case: the converted segment, a graph of it, and the
-/// scheme root of every value.
+/// The new side of a case: the converted segment, a checker over a graph of
+/// it, and the scheme root of every value. In the kernel tier the checker
+/// only holds the graph: every operation is R1's.
 pub(crate) struct New {
     pub segment: Segment,
-    pub graph: Graph,
+    pub checker: Checker,
+    pub tier: Tier,
     pub roots: Vec<SchemeRoot>,
     pub operands: Vec<Ty>,
     /// First instance of each value, for [`Fault::ReuseInstance`].
@@ -455,7 +460,7 @@ pub(crate) struct New {
 
 impl New {
     /// O(the unit): convert the program's publication with `from_old`.
-    pub(crate) fn convert(program: &Program) -> New {
+    pub(crate) fn convert(program: &Program, tier: Tier) -> New {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let segment = program
             .unit
@@ -478,11 +483,16 @@ impl New {
             .map(|item| pools.roots[pools.values[item.declaration as usize].ty as usize])
             .collect();
         assert_eq!(roots.len(), program.values.len(), "{}", program.source);
-        let graph = segment.graph();
+        let mut checker = Checker::new(segment.graph(), TypeTable::default());
+        if tier != Tier::Kernel {
+            checker.types = TypeTable::from_segment(&segment);
+            checker.extras = Extras::from_segment(&segment);
+        }
         New {
             first: vec![None; roots.len()],
             segment,
-            graph,
+            checker,
+            tier,
             roots,
             operands: Vec::new(),
         }
@@ -491,9 +501,12 @@ impl New {
     /// O(template): an instance of a value's scheme, as R2's tests take one.
     pub(crate) fn instance(&mut self, value: usize) -> Ty {
         let root = self.roots[value];
-        let base = self
-            .graph
-            .instance(self.segment.templates[root.template as usize]);
+        let template = self.segment.templates[root.template as usize];
+        let base = if self.tier == Tier::Kernel {
+            self.checker.g.instance(template)
+        } else {
+            self.checker.instance(template)
+        };
         if root.ty.0 & RELATIVE != 0 {
             Ty(base.0 + (root.ty.0 & !RELATIVE))
         } else {
@@ -517,31 +530,51 @@ impl New {
                 self.operands.push(ty);
             }
             Op::Copy(operand) => {
-                let ty = self.graph.copy(self.operands[operand as usize]);
+                let source = self.operands[operand as usize];
+                let ty = if self.tier == Tier::Kernel {
+                    self.checker.g.copy(source)
+                } else {
+                    self.checker.copy(source)
+                };
                 self.operands.push(ty);
             }
-            Op::BeginDef => self.graph.begin_def(),
-            Op::EndDef => self.graph.end_def(),
+            Op::BeginDef => self.checker.g.begin_def(),
+            Op::EndDef => self.checker.g.end_def(),
             Op::Generalize(operand) => {
                 if fault != Fault::SkipGeneralize {
-                    self.graph.generalize(self.operands[operand as usize]);
+                    self.checker.g.generalize(self.operands[operand as usize]);
                 }
             }
             Op::Lower(operand, level) => {
                 let ty = self.operands[operand as usize];
                 let level = 1 + u32::from(level);
                 if fault == Fault::ShallowLower {
-                    let ty = self.graph.repr(ty);
-                    let node = self.graph.nodes[ty.0 as usize];
+                    let ty = self.checker.g.repr(ty);
+                    let node = self.checker.g.nodes[ty.0 as usize];
                     if node.level > level {
-                        self.graph.nodes[ty.0 as usize].level = level;
+                        self.checker.g.nodes[ty.0 as usize].level = level;
                     }
+                } else if self.tier == Tier::Kernel {
+                    self.checker.g.lower(ty, level);
                 } else {
-                    self.graph.lower(ty, level);
+                    // The old side lowers without an environment
+                    // (`ctype::update_level`): no scope can clash.
+                    self.checker.lower(ty, level).expect("no scoped type");
                 }
             }
-            Op::Unify(..) => unimplemented!("R3a: unification on the new graph"),
-            Op::Expand(_) | Op::Cleanup => unimplemented!("R3b: expansion on the new graph"),
+            Op::Unify(left, right) => {
+                let (left, right) = (self.operands[left as usize], self.operands[right as usize]);
+                return self.checker.unify(left, right).map_err(|_| ());
+            }
+            Op::Expand(operand) => {
+                // `ctype::expand_head` is OCaml's `expand_head`.
+                let ty = self
+                    .checker
+                    .expand_head(self.operands[operand as usize], ExpandMode::Safe)
+                    .expect("safe expansion does not clash");
+                self.operands.push(ty);
+            }
+            Op::Cleanup => self.checker.cleanup_abbrev(),
         }
         Ok(())
     }
@@ -549,7 +582,7 @@ impl New {
     /// O(printed nodes): the form of every operand; see the module text.
     pub(crate) fn form(&mut self) -> String {
         let mut form = String::new();
-        let mut seen = vec![NONE; self.graph.nodes.len()];
+        let mut seen = vec![NONE; self.checker.g.nodes.len()];
         let mut count = 0;
         let operands = self.operands.clone();
         for (index, operand) in operands.into_iter().enumerate() {
@@ -570,7 +603,7 @@ impl New {
 
     /// O(nodes reachable): print one new node.
     fn node_form(&mut self, ty: Ty, seen: &mut [u32], count: &mut u32, out: &mut String) {
-        let ty = self.graph.repr(ty);
+        let ty = self.checker.g.repr(ty);
         if seen[ty.0 as usize] != NONE {
             let _ = write!(out, "@{}", seen[ty.0 as usize]);
             return;
@@ -578,7 +611,7 @@ impl New {
         let _ = write!(out, "&{count}");
         seen[ty.0 as usize] = *count;
         *count += 1;
-        let node = self.graph.nodes[ty.0 as usize];
+        let node = self.checker.g.nodes[ty.0 as usize];
         if node.level == GENERIC {
             out.push_str("[G]");
         } else {
@@ -609,7 +642,7 @@ impl New {
                         if index != 0 {
                             out.push_str(", ");
                         }
-                        let child = self.graph.lists[(node.b + 1 + index) as usize];
+                        let child = self.checker.g.lists[(node.b + 1 + index) as usize];
                         self.node_form(child, seen, count, out);
                     }
                     out.push('>');
@@ -621,7 +654,7 @@ impl New {
                     if index != 0 {
                         out.push_str(", ");
                     }
-                    let child = self.graph.lists[(node.b + index) as usize];
+                    let child = self.checker.g.lists[(node.b + index) as usize];
                     self.node_form(child, seen, count, out);
                 }
                 out.push(')');
@@ -632,7 +665,7 @@ impl New {
                     if index != 0 {
                         out.push_str(", ");
                     }
-                    let param = self.graph.params[(node.b + index) as usize];
+                    let param = self.checker.g.params[(node.b + index) as usize];
                     if param.label != NONE {
                         let optional = if param.label & 1 != 0 { "?" } else { "" };
                         let _ = write!(out, "~{}{optional}: ", self.string(param.label >> 1));
@@ -648,8 +681,8 @@ impl New {
 }
 
 /// O(operations + printed nodes): the new graph's side of a case.
-pub(crate) fn run_new(program: &Program, ops: &[Op], fault: Fault) -> Outcome {
-    let mut new = New::convert(program);
+pub(crate) fn run_new(program: &Program, tier: Tier, ops: &[Op], fault: Fault) -> Outcome {
+    let mut new = New::convert(program, tier);
     for (index, &op) in ops.iter().enumerate() {
         if new.apply(op, fault).is_err() {
             return Outcome {
@@ -669,11 +702,12 @@ pub(crate) fn run_new(program: &Program, ops: &[Op], fault: Fault) -> Outcome {
 pub(crate) fn compare(
     seed: u64,
     program: &Program,
+    tier: Tier,
     ops: &[Op],
     fault: Fault,
 ) -> Result<Outcome, String> {
     let old = run_old(program, ops);
-    let new = run_new(program, ops, fault);
+    let new = run_new(program, tier, ops, fault);
     if old == new {
         return Ok(old);
     }
@@ -707,7 +741,7 @@ pub(crate) fn run_cases(tier: Tier, first_seed: u64, programs: u64, per_program:
             let case_seed = seed.wrapping_mul(1_000_003).wrapping_add(sequence);
             let mut rng = Rng(case_seed);
             let ops = operations(&mut rng, tier, program.values.len());
-            match compare(case_seed, &program, &ops, Fault::None) {
+            match compare(case_seed, &program, tier, &ops, Fault::None) {
                 Ok(outcome) => {
                     coverage.cases += 1;
                     coverage.failures += usize::from(outcome.failed.is_some());
@@ -759,7 +793,8 @@ mod tests {
             Op::Instance(1),
             Op::Instance(2),
         ];
-        let outcome = compare(0, &program, &ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
+        let outcome =
+            compare(0, &program, Tier::Kernel, &ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(outcome.failed, None);
         // The form is not vacuous: it shows sharing inside one instance, a
         // generic and a lowered operand, a label and both constructor forms.
@@ -788,8 +823,9 @@ mod tests {
             ),
         ];
         for (fault, ops) in cases {
-            compare(77, &program, ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
-            let report = compare(77, &program, ops, fault).expect_err("the fault must be seen");
+            compare(77, &program, Tier::Kernel, ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
+            let report = compare(77, &program, Tier::Kernel, ops, fault)
+                .expect_err("the fault must be seen");
             assert!(report.contains("seed 77"), "{report}");
             assert!(report.contains("--- old") && report.contains("--- new"), "{report}");
         }
@@ -806,7 +842,7 @@ mod tests {
             let found = (0..200u64).any(|seed| {
                 let mut rng = Rng(seed);
                 let ops = operations(&mut rng, Tier::Kernel, program.values.len());
-                compare(seed, &program, &ops, fault).is_err()
+                compare(seed, &program, Tier::Kernel, &ops, fault).is_err()
             });
             assert!(found, "{fault:?} not found by 200 generated cases\n{}", program.source);
         }
@@ -822,6 +858,37 @@ mod tests {
         assert_eq!(coverage.failures, 0, "no kernel operation can fail");
         assert!(coverage.sharing * 4 > coverage.cases, "{coverage:?}");
         assert!(coverage.mixed_levels * 50 > coverage.cases, "{coverage:?}");
+    }
+
+    /// 10,000 cases of unification on programs without abbreviations.
+    #[test]
+    #[ignore = "R3a build"]
+    fn structural_tier_agrees_on_generated_cases() {
+        let coverage = run_cases(Tier::Structural, 1, 100, 100);
+        assert_eq!(coverage.cases, 10_000);
+        assert!(coverage.failures * 20 > coverage.cases, "{coverage:?}");
+        assert!((coverage.cases - coverage.failures) * 20 > coverage.cases, "{coverage:?}");
+    }
+
+    /// 10,000 cases of expansion, the two memos and their cleanup, with the
+    /// memo-aware instance and copy (O11).
+    #[test]
+    #[ignore = "R3b build"]
+    fn expand_tier_agrees_on_generated_cases() {
+        let coverage = run_cases(Tier::Expand, 1, 100, 100);
+        assert_eq!(coverage.cases, 10_000);
+        assert_eq!(coverage.failures, 0);
+    }
+
+    /// 10,000 cases of everything on programs with abbreviations: the
+    /// acceptance test of R3c, and of every later slice.
+    #[test]
+    #[ignore = "R3c build"]
+    fn full_tier_agrees_on_generated_cases() {
+        let coverage = run_cases(Tier::Full, 1, 100, 100);
+        assert_eq!(coverage.cases, 10_000);
+        assert!(coverage.failures * 20 > coverage.cases, "{coverage:?}");
+        assert!((coverage.cases - coverage.failures) * 20 > coverage.cases, "{coverage:?}");
     }
 
     /// The old side of the higher tiers runs today, so the generator is
