@@ -12213,6 +12213,59 @@ mod tests {
             assert_eq!(finishes.get(), 1);
         }
     }
+    #[test]
+    fn a_unit_of_ten_thousand_items_that_fails_in_its_last_item_is_checked_exactly_twice() {
+        std::thread::Builder::new().stack_size(64 * 1024 * 1024).spawn(|| {
+            use crate::types::context::CheckMode;
+            use std::fmt::Write;
+            let mut source = String::new();
+            for n in 0..10_000 {
+                writeln!(source, "let x{n} = {n}").unwrap();
+            }
+            source.push_str("let bad: bool = 1\n");
+            let mut reports = Vec::new();
+            // Explicit Explain is the mode selected by RESCRIPT_CHECK_MODE=explain;
+            // do not mutate process environment in parallel unit tests.
+            for first_mode in [CheckMode::Success, CheckMode::Explain] {
+                let mut parser = super::Parser::new("TenThousand.res", &source);
+                let structure = super::module::parse_structure(&mut parser);
+                crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
+                let options = super::CompilerOptions { nopervasives: true, ..Default::default() };
+                let attempts = std::cell::RefCell::new(Vec::new());
+                let (_, result) = super::type_structure_two_modes(
+                    super::CheckUnit {
+                        filename: "TenThousand.res", options: &options, registry: None,
+                        module_name: None, file_config: &Default::default(),
+                        frontend_warning_specs: &[], derived_plans: true, mode: first_mode,
+                    },
+                    super::UnitSyntax::new(parser.arena(), &structure, &options), None,
+                    |tctx, env, syntax| {
+                        let mode = if tctx.type_ctx.unify_takes_snapshot() {
+                            CheckMode::Explain
+                        } else { CheckMode::Success };
+                        attempts.borrow_mut().push(mode);
+                        let result = super::type_structure(tctx, env, syntax.arena, syntax.tree);
+                        if mode == CheckMode::Success {
+                            assert_eq!(tctx.type_ctx.journal_entries_for_test(), 0);
+                        }
+                        result
+                    },
+                    |ctx, _, typed, syntax, _| -> super::Result<()> {
+                        typed.map(|_| ()).map_err(|error| super::type_mod_error_to_anyhow(
+                            error, ctx, syntax.arena, &source, "TenThousand.res", false,
+                        ))
+                    },
+                );
+                assert_eq!(*attempts.borrow(), if first_mode == CheckMode::Success {
+                    vec![CheckMode::Success, CheckMode::Explain]
+                } else { vec![CheckMode::Explain] });
+                reports.push(format!("{:#}", result.unwrap_err()));
+            }
+            assert_eq!(reports[0], reports[1]);
+            assert!(reports[0].contains("bool"));
+        }).unwrap().join().unwrap();
+    }
+
     /// The settings of the one attempt loop: each retry reason applies once,
     /// a fallback keeps the check mode and an explanation keeps the path.
     #[test]

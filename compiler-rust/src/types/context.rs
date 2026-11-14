@@ -1621,6 +1621,12 @@ impl TypeContext {
         self.unexplained_unify_failure.set(true);
     }
 
+    /// Test observation only: the live journal entries owned by this context.
+    #[cfg(test)]
+    pub(crate) fn journal_entries_for_test(&self) -> usize {
+        self.mutation_journal.borrow().entries.len()
+    }
+
     /// Whether this attempt encountered a failure without a diagnostic snapshot.
     /// A unit-checking caller must discard such an attempt and explain it again.
     /// Cost: one `Cell` read.
