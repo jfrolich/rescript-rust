@@ -1461,6 +1461,88 @@ fn plan_tree<A: Copy>(
     result
 }
 
+use crate::lambda::{SwitchKey, SwitchDispatch, TagInfo};
+use crate::lambda::lam_constant::Constant;
+/// Cost: O(constant spelling bytes); preserves the legacy constant classification.
+pub(crate) fn untagged_value(c: &Constant) -> Option<Value> {
+    use crate::types::VariantLiteralTag as L;
+    use Value;
+    Some(match c {
+        Constant::String(s) | Constant::ImmString(s) => Value::Literal(L::String(s.clone())),
+        Constant::Int { i, .. } => Value::Literal(L::Int(i64::from(*i))),
+        Constant::NativeInt { i, .. } => Value::Literal(L::Int(i64::from(*i as i32))),
+        Constant::Float(f) => Value::Literal(L::Float(f.clone())),
+        Constant::JsTrue => Value::Literal(L::Bool(true)),
+        Constant::JsFalse => Value::Literal(L::Bool(false)),
+        Constant::JsNull => Value::Literal(L::Null),
+        Constant::JsUndefined { .. } => Value::Literal(L::Undefined),
+        // `Const_polyvar name`.
+        Constant::Pointer(name) => Value::Literal(L::String(name.clone())),
+        Constant::Constructor(tag) => Value::Literal(tag.literal.clone()),
+        // `Bigint_utils.to_string sign digits`.
+        Constant::BigInt { negative, value } => Value::Literal(L::BigInt(if *negative {
+            format!("-{value}")
+        } else {
+            value.clone()
+        })),
+        Constant::Block { tag_info, .. } => match &**tag_info {
+            TagInfo::Tuple => Value::Array,
+            TagInfo::Record(record) if record.array => Value::Array,
+            _ => Value::Object,
+        },
+        Constant::Char(_) | Constant::Some(_) | Constant::ModuleAlias => return None,
+    })
+}
+/// Cost: O(arm metadata bytes plus planner work).
+pub(crate) fn untagged_plan_with<'s, A: Copy>(
+    sw_consts_full: bool,
+    sw_consts: &'s [(SwitchKey, A)],
+    sw_blocks_full: bool,
+    sw_blocks: &'s [(SwitchKey, A)],
+    sw_failaction: Option<A>,
+    sw_dispatch: &'s SwitchDispatch,
+    same: impl Fn(&A, &A) -> bool,
+) -> Option<Plan<A>> {
+    let SwitchDispatch::Variant(facts) = sw_dispatch else {
+        return None;
+    };
+    if facts.block_types.is_empty()
+        || !((sw_consts_full && sw_consts.is_empty()) || !(sw_blocks_full && sw_blocks.is_empty()))
+    {
+        return None;
+    }
+    let literal_arms = sw_consts
+        .iter()
+        .map(|(key, action)| match key {
+            SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(tag)) => {
+                Some((tag.literal.clone(), *action))
+            }
+            SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(_))
+            | SwitchKey::Int(_) => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let payload_arms = sw_blocks
+        .iter()
+        .map(|(key, action)| match key {
+            SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
+                crate::types::VariantBlock::Untagged { block_type, .. },
+            )) => Some((block_type.clone(), *action)),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(plan(
+        same,
+        Input {
+            facts,
+            literal_arms,
+            payload_arms,
+            literals_complete: sw_consts_full,
+            payloads_complete: sw_blocks_full,
+            fallback: sw_failaction,
+        },
+    ))
+}
+
 /// Port of upstream's `tests/ounit_tests/ounit_untagged_dispatch_tests.ml`:
 /// the expected plans are upstream's.
 #[cfg(test)]
@@ -2077,86 +2159,4 @@ mod tests {
             ),
         );
     }
-}
-
-use crate::lambda::{SwitchKey, SwitchDispatch, TagInfo};
-use crate::lambda::lam_constant::Constant;
-/// Cost: O(constant spelling bytes); preserves the legacy constant classification.
-pub(crate) fn untagged_value(c: &Constant) -> Option<Value> {
-    use crate::types::VariantLiteralTag as L;
-    use Value;
-    Some(match c {
-        Constant::String(s) | Constant::ImmString(s) => Value::Literal(L::String(s.clone())),
-        Constant::Int { i, .. } => Value::Literal(L::Int(i64::from(*i))),
-        Constant::NativeInt { i, .. } => Value::Literal(L::Int(i64::from(*i as i32))),
-        Constant::Float(f) => Value::Literal(L::Float(f.clone())),
-        Constant::JsTrue => Value::Literal(L::Bool(true)),
-        Constant::JsFalse => Value::Literal(L::Bool(false)),
-        Constant::JsNull => Value::Literal(L::Null),
-        Constant::JsUndefined { .. } => Value::Literal(L::Undefined),
-        // `Const_polyvar name`.
-        Constant::Pointer(name) => Value::Literal(L::String(name.clone())),
-        Constant::Constructor(tag) => Value::Literal(tag.literal.clone()),
-        // `Bigint_utils.to_string sign digits`.
-        Constant::BigInt { negative, value } => Value::Literal(L::BigInt(if *negative {
-            format!("-{value}")
-        } else {
-            value.clone()
-        })),
-        Constant::Block { tag_info, .. } => match &**tag_info {
-            TagInfo::Tuple => Value::Array,
-            TagInfo::Record(record) if record.array => Value::Array,
-            _ => Value::Object,
-        },
-        Constant::Char(_) | Constant::Some(_) | Constant::ModuleAlias => return None,
-    })
-}
-/// Cost: O(arm metadata bytes plus planner work).
-pub(crate) fn untagged_plan_with<'s, A: Copy>(
-    sw_consts_full: bool,
-    sw_consts: &'s [(SwitchKey, A)],
-    sw_blocks_full: bool,
-    sw_blocks: &'s [(SwitchKey, A)],
-    sw_failaction: Option<A>,
-    sw_dispatch: &'s SwitchDispatch,
-    same: impl Fn(&A, &A) -> bool,
-) -> Option<Plan<A>> {
-    let SwitchDispatch::Variant(facts) = sw_dispatch else {
-        return None;
-    };
-    if facts.block_types.is_empty()
-        || !((sw_consts_full && sw_consts.is_empty()) || !(sw_blocks_full && sw_blocks.is_empty()))
-    {
-        return None;
-    }
-    let literal_arms = sw_consts
-        .iter()
-        .map(|(key, action)| match key {
-            SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(tag)) => {
-                Some((tag.literal.clone(), *action))
-            }
-            SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(_))
-            | SwitchKey::Int(_) => None,
-        })
-        .collect::<Option<Vec<_>>>()?;
-    let payload_arms = sw_blocks
-        .iter()
-        .map(|(key, action)| match key {
-            SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
-                crate::types::VariantBlock::Untagged { block_type, .. },
-            )) => Some((block_type.clone(), *action)),
-            _ => None,
-        })
-        .collect::<Option<Vec<_>>>()?;
-    Some(plan(
-        same,
-        Input {
-            facts,
-            literal_arms,
-            payload_arms,
-            literals_complete: sw_consts_full,
-            payloads_complete: sw_blocks_full,
-            fallback: sw_failaction,
-        },
-    ))
 }

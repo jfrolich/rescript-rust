@@ -1079,6 +1079,19 @@ impl Realizer for State {
     }
 }
 
+/// Cost: O(path segments and emitted bytes), reusing the destination.
+pub(crate) fn flat_export_name_into<'a>(path: impl Iterator<Item = &'a str>, out: &mut String) {
+    for (i, part) in path.enumerate() {
+        if i != 0 { out.push('$'); }
+        let part = if part.len() >= 3 && part.starts_with("\\\"") && part.ends_with('"') {
+            &part[2..part.len() - 1]
+        } else {
+            part
+        };
+        out.push_str(part);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1183,18 +1196,5 @@ mod tests {
         }
         assert_eq!(std::mem::size_of::<SourceProbe<()>>(), 80);
         assert_eq!(std::mem::size_of::<ProbePlan<()>>(), 20);
-    }
-}
-
-/// Cost: O(path segments and emitted bytes), reusing the destination.
-pub(crate) fn flat_export_name_into<'a>(path: impl Iterator<Item = &'a str>, out: &mut String) {
-    for (i, part) in path.enumerate() {
-        if i != 0 { out.push('$'); }
-        let part = if part.len() >= 3 && part.starts_with("\\\"") && part.ends_with('"') {
-            &part[2..part.len() - 1]
-        } else {
-            part
-        };
-        out.push_str(part);
     }
 }

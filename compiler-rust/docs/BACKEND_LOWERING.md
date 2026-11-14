@@ -3956,3 +3956,13 @@ Corrected-head results: **2,462 compiler unit tests passed, 25 existing ignores;
 | 6. Commands/instruction gate | Done for CI profile | Both modes measured; default −0.044423% meets +0.02%; wall-time results and limitations disclosed. |
 
 **Keep the PR draft.** The passing performance/parity gates do not replace the outstanding full-unit allocation requirement.
+
+### S3.2d planner boundary correction
+
+The pooled untagged planner now lives under `bir/untagged_plan`; the legacy
+planner and its Lambda callers are unchanged from trunk. BIR owns the new
+metadata/graph pools and no longer constructs legacy emitter views or instances.
+The final CI-profile gate passes at +0.000768% default instructions; check mode
+is -2.561383%. See `LOWERING_ALLOCATION_SCALING.md`, final candidate section,
+for the raw five-pair tables and shared-file disposition. Earlier shared-planner
+measurements and descriptions in this history are superseded by that split.

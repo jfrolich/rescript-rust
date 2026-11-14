@@ -106,8 +106,8 @@ def main():
     args = parser.parse_args()
     if args.self_test:
         self_test()
-    paths = [ROOT / 'compiler-rust/src/lambda/untagged_dispatch.rs',
-             ROOT / 'compiler-rust/src/lambda/untagged_dispatch/metadata.rs']
+    paths = [ROOT / 'compiler-rust/src/bir/untagged_plan.rs',
+             ROOT / 'compiler-rust/src/bir/untagged_plan/metadata.rs']
     paths += sorted(p for p in (ROOT / 'compiler-rust/src/bir/lower').glob('*.rs')
                     if not p.name.endswith('_tests.rs'))
     total = changed = 0

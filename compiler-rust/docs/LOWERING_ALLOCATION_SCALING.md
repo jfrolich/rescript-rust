@@ -1,7 +1,8 @@
 # Complete-unit lowering allocation scaling
 
-**Default-path gate remains blocked at `44ac9d4de`: +0.048%, above +0.02%.**
-The final reproduction and remaining-cost decision are at the end of this report.
+**The split-planner candidate passes the default-path gate: +0.000768%, within +0.02%.**
+Check mode is -2.561383%. Final raw counts and source-boundary checks are at the end;
+all earlier performance results are historical.
 
 The criterion is a constant number of allocation calls per unit, **not zero
 allocations or constant bytes**. The four tests warm the real entry once at each
@@ -34,11 +35,11 @@ per-unit count. The same totals hold at both sizes.
 | Owner under `src/` | C | S | A | U | Disposition |
 | --- | ---: | ---: | ---: | ---: | --- |
 | `bir/lower/mod.rs` | 27 | 36 | 28 | 36 | per unit, kept: output columns, source traversal, variables, grouping and fingerprint domains reserved from imported counts; owned unit completion. |
-| `lambda/untagged_dispatch.rs` | 0 | 0 | 0 | 25 | per unit, kept: pre-reserved graph/group/clause/memo pools and retained fixed-kind planning/equality scratch. |
+| `bir/untagged_plan.rs` | 0 | 0 | 0 | 25 | per unit, kept: pre-reserved graph/group/clause/memo pools and retained fixed-kind planning/equality scratch. |
 | `bir/lower/export.rs` | 18 | 19 | 18 | 19 | per unit, kept: unchanged exporter materializes rows, names and owned output once for the fixture's single export; rows are sized from the completed variable domain. |
 | `bir/lower/untagged.rs` | 0 | 1 | 0 | 18 | per unit, kept: imported runs, literal/text/emission reservations and plan-local stacks sized from known arm/action counts. |
 | `bir/edit.rs` | 3 | 3 | 3 | 10 | per unit, kept: release/finalization work; mixed dispatch additionally copies one fixed-size cached fallback using retained traversal/remapping storage. Dense node rows reserve the arena domain. |
-| `lambda/untagged_dispatch/metadata.rs` | 0 | 0 | 0 | 6 | per unit, kept: literal rows, sorted indexes, text bytes and canonical spelling scratch reserved before import. |
+| `bir/untagged_plan/metadata.rs` | 0 | 0 | 0 | 6 | per unit, kept: literal rows, dense AVL indexes, text bytes and canonical spelling scratch reserved before import. |
 | `bir/lower/out.rs` | 4 | 4 | 4 | 4 | per unit, kept: reserved statement and deferred-realization columns. |
 | `bir/lower/switch.rs` | 0 | 4 | 0 | 1 | per unit, kept: switch output runs sized from case counts, one plan frame and retained fingerprint traversal. |
 | `lambda/lam_tag_info.rs` | 3 | 4 | 3 | 4 | per unit, kept: clone/serialization of the fixed export-block record at the owned compatibility boundary. |
@@ -90,22 +91,25 @@ or compiler code. The table above is the profiler's printed owner table.
 
 ## Shared files outside BIR
 
-These changes are kept to avoid per-construct ownership in the named lowering
-paths without duplicating the existing algorithms. “Allocation-free” here means
-the retained inner path; the complete unit entry has the constants above.
+Retained shared helpers have named BIR lowering consumers. Legacy-owned entries
+remain on their trunk forms; the default callgrind comparison below verifies the
+remaining shared functions are level or cheaper. The pooled planner itself is
+now entirely under BIR.
 
 | Source file (under `compiler-rust/src`) | Disposition | Named lowering caller and necessity |
 | --- | --- | --- |
-| `js_ir/printer.rs` | Kept | `lower::import::State::compile_import` and `lower::prim_block::State::primitive_field` call `convert_ident_into` to avoid temporary owned spellings. |
-| `lambda/lam_analysis.rs` | Kept | `lower::call::State::inline_external_function` reaches `is_pure_primitive_with_properties` through `beta::reduce` and `bir::l::flatten`; scalar properties avoid reconstructing owned bigint constants. |
-| `lambda/lam_compile_variant.rs` | Reverted | No BIR lowering caller. Restored byte-for-byte to trunk; the shared planner now exposes borrowed compatibility views for the unchanged emitter. |
-| `lambda/mod.rs` | Kept | `lower::prim_block::State::flat_make_field` and `lower::import::State::compile_import` call `flat_export_name_into`; returning an owned export name would allocate per construct. |
-| `lambda/untagged_dispatch.rs` | Kept | `lower::untagged::State::untagged_switch` calls `append_bucketed` on retained graph/planning storage; trunk's owned-input planner allocates for each switch. |
-| `lambda/untagged_dispatch/metadata.rs` | Kept | `lower::untagged::prepare` imports handles; `State::untagged_test` and `State::untagged_instance` borrow those payloads instead of cloning strings/instance ancestry per emitted test. |
-| `ocaml_float.rs` | Kept | `lower::untagged::prepare` reaches `float_of_string_in` via metadata canonical-key encoding; retained separator removal avoids a vector per literal. |
-| `string_literal.rs` | Kept | `lower::prim::State::finish_primitive_values` reaches retained `TemplateBuffer` through `jm12_interpolated_template`, avoiding per-template encoding/normalization vectors. |
-| `types/typecore.rs` | Kept | `lower::konst::State::constant` and `lower::variant::State::switch_key_expression` call `parse_bigint_literal_into` directly, avoiding per-bigint spelling strings. |
-| `types/variant_runtime.rs` | Kept | `lower::untagged::prepare` reaches `LiteralKeyScratch::encode` through `Metadata::import_literal`, retaining canonical equality-key buffers rather than allocating intermediate strings per literal. |
+| `js_ir/printer.rs` | Kept | `lower::import::State::compile_import` and `lower::prim_block::State::primitive_field` need `convert_ident_into`; default conversion saves 686,278 exclusive instructions. |
+| `lambda/lam_analysis.rs` | BIR helper added; legacy entry unchanged | `lower::call::State::inline_external_function` reaches the scalar-property classifier through beta reduction/flattening and `bir::l::facts`; no owned bigint reconstruction. Default purity instructions are level. |
+| `lambda/lam_compile.rs` | Unchanged from trunk | Every legacy caller uses the trunk planner. |
+| `lambda/lam_compile_variant.rs` | Unchanged from trunk | No new planner compatibility API remains. |
+| `lambda/arena.rs` | Unchanged from trunk | Legacy normalization uses the trunk planner. |
+| `lambda/mod.rs` | Unchanged from trunk | The retained flat-name writer moved to `bir/lower/mod.rs`, used by `lower::prim_block::State::flat_make_field` and `lower::import::State::compile_import`. |
+| `lambda/untagged_dispatch.rs` | Unchanged from trunk | Always compiled; exclusively serves legacy callers. |
+| `bir/untagged_plan.rs` and `metadata.rs` | Moved under BIR | `lower::untagged::prepare` imports unit-owned metadata; `State::untagged_switch` appends plans; BIR normalization retains the owned entry for `decide_switch_on`. |
+| `ocaml_float.rs` | BIR buffer entry added; owned entry restored | `lower::untagged::prepare` reaches `float_of_string_in` through canonical-key encoding. The shared no-lowercase-allocation parser saves 2,985 exclusive default instructions. |
+| `string_literal.rs` | Kept | `lower::prim::State::finish_primitive_values` reaches `TemplateBuffer` through `jm12_interpolated_template`; default helper instructions are level. |
+| `types/typecore.rs` | BIR buffer entry added; owned entry restored | `lower::konst::State::constant` and `lower::variant::State::switch_key_expression` need `parse_bigint_literal_into`; default bigint instructions are level. |
+| `types/variant_runtime.rs` | BIR encoder and test hook kept; owned entries restored | `lower::untagged::prepare` reaches `LiteralKeyScratch::encode` through BIR metadata; legacy `value_key`, `number_key` and hex formatting are trunk bodies. Default literal-key instructions are level. |
 
 The `prepare` metadata work is inside the full-unit interval. It was outside the
 earlier probe-only interval. `types/typecore.rs` has direct lowerer callers;
@@ -115,14 +119,15 @@ or merely a default-path cleanup.
 
 The differential compares **453 recorded layouts (192 distinct printed layouts) from 850 implementation files**,
 with 68,352 plan pairs across full, omitted, partitioned, singleton and reversed
-arm lists and all sixteen completeness/sharing/fallback configurations. Both
-`differential.rs` and the verbatim `legacy_planner.rs` are test-only. Reproduce:
+arm lists and all sixteen completeness/sharing/fallback configurations. The differential under `bir/untagged_plan` is test-only; it compares both
+production planners. The recording hook in `types/variant_runtime.rs` remains
+`#[cfg(test)]`. Reproduce:
 
 ```sh
 CARGO_INCREMENTAL=0 cargo test --manifest-path compiler-rust/Cargo.toml \
   corpus_declarations_match_trunk -- --nocapture --test-threads=1
-git show be1b3a482:compiler-rust/src/lambda/untagged_dispatch.rs | \
-  cmp - compiler-rust/src/lambda/untagged_dispatch/legacy_planner.rs
+git show origin/ocaml-to-rust-rewrite:compiler-rust/src/lambda/untagged_dispatch.rs | \
+  cmp - compiler-rust/src/lambda/untagged_dispatch.rs
 rg -n 'parse_bigint_literal_into|convert_ident_into|flat_export_name_into|jm12_interpolated_template' compiler-rust/src/bir/lower
 rg -n 'is_pure_primitive_with_properties' compiler-rust/src/bir
 ```
@@ -700,140 +705,144 @@ three reference projects before the full retry produced the passing result.
 
 ## Final candidate and remaining-cost decision
 
-Production candidate `44ac9d4de` retains the two measured corrections, compared
-against merge-base `7ba19b2a63916ae28741c1ccb7f3720edc68e81a`. All results below
-use the same fat-LTO, single-codegen-unit binaries and 743-module corpora.
+**Decision implemented: two planners, split on the same seam as the two
+lowerings.** Legacy Lambda callers use the byte-identical trunk planner at its
+original path. BIR lowering and normalization use `bir/untagged_plan` and its
+dense metadata pools. No legacy-facing views, OnceCells or owned-instance
+materialization remain in that planner. Its owned `plan` entry remains because
+`bir/l/norm.rs::decide_switch_on` calls it; no behavior change is needed there.
 
-| Binary | SHA-256 |
-| --- | --- |
-| base | `658b0bd56373c729d167ed3cb2fc1d5842c1da2508f5ae61766990a70f145f21` |
-| original head a42524ae0e | `efcc8051eb13497f68ac2c768d5011b150c1239754e5fb613b6e0228dd46de6e` |
-| demand-driven work pools | `2c2514121654c806727890c3aca7043f30570e623b90cf0d906d41d6327a5ce7` |
-| final string-loop candidate | `dc31da6e21ac3f4d6fb4456fb4492adad28dd042327a67d71ed3b5c27a30b18c` |
+Commits: `ca7319bab` moves/restores the planners and callers; `0fb9f529d` removes
+compatibility storage; `88c8ce644` restores default-path owned helper bodies.
+Final validation also moved the BIR adapters before their test modules to satisfy
+clippy; this changes declaration order, not their bodies. The final measurements
+below use the rebuilt binary after that cleanup, not the earlier split binary.
 
-### Default path: failed acceptance gate
+Base is merge-base `7ba19b2a63916ae28741c1ccb7f3720edc68e81a`; each side builds
+743 modules from matching source trees. Both use fat LTO, one codegen unit:
 
 ```sh
+CARGO_INCREMENTAL=0 CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
+  cargo build --release --locked --manifest-path rewatch/Cargo.toml
 env -u RESCRIPT_BACKEND python3 scripts/compare_build_instructions.py \
   --base temp/default-audit/bin/base temp/default-audit/base \
-  --head temp/default-audit/bin/inline temp/default-audit/head \
-  --runs 5 --sequential --threshold 0.02 --work-dir temp/default-audit/inline-final
+  --head temp/default-audit/bin/split-final temp/default-audit/head \
+  --runs 5 --sequential --threshold 0.02 \
+  --work-dir temp/default-audit/split-final-default
 ```
 
-```text
-run 1: base 4,035,189,413  head 4,037,043,275
-run 2: base 4,035,253,123  head 4,035,283,157
-run 3: base 4,036,680,742  head 4,035,701,033
-run 4: base 4,033,343,332  head 4,036,933,220
-run 5: base 4,036,293,069  head 4,036,610,209
-minimum: 4,033,343,332 -> 4,035,283,157
-change: +1,939,825 (+0.048%)
-```
+Final binary SHA-256:
+`28a01cb5ed593955a652e2c62cd872fa6f881af1b64c6d6b6ca875610fc4151f`.
+Base SHA-256:
+`658b0bd56373c729d167ed3cb2fc1d5842c1da2508f5ae61766990a70f145f21`.
 
-The +0.02% allowance is about 806,669 instructions: approximately **1,133,156**
-instructions remain above budget. No threshold override or increase trailer is
-being used to present this as a pass.
+### Default path: passes +0.02% gate
 
-### Check mode: current result, not the historical figure
+| Alternating pair | Base instructions | Final candidate instructions |
+| --- | ---: | ---: |
+| 1 | 4,034,996,152 | 4,034,021,015 |
+| 2 | 4,034,048,298 | 4,035,784,061 |
+| 3 | 4,033,990,045 | 4,035,558,685 |
+| 4 | 4,036,448,382 | 4,035,291,581 |
+| 5 | 4,035,276,952 | 4,035,935,395 |
+| **Minimum** | **4,033,990,045** | **4,034,021,015** |
 
-Use the same command with `RESCRIPT_BACKEND=check` (without `env -u`). The
-600-second command deadline interrupted the fifth pair; the first four complete
-pairs were retained, the interrupted pair discarded, and one fresh sequential
-base/head pair completed with `--runs 1` in `inline-check-fifth`. These are the
-five complete pairs, not a selection of their fastest members:
+Raw script verdict: `Within the threshold of +0.02%.`
+Change: **+30,970 (+0.000767726%)**, reported rounded as +0.001% by the script.
+The earlier split run before declaration-order cleanup was -0.012%; it is not
+substituted for this final run. No instruction-increase waiver is used.
 
-```text
-run 1: base 20,562,560,859  head 20,035,030,997
-run 2: base 20,560,313,563  head 20,037,513,690
-run 3: base 20,550,397,553  head 20,022,815,002
-run 4: base 20,568,043,457  head 20,035,929,767
-run 5: base 20,555,534,227  head 20,037,666,193
-minimum: 20,550,397,553 -> 20,022,815,002
-change: -527,582,551 (-2.567262%)
-```
+### Check mode: five complete alternating pairs
 
-### Remaining costs for the coordinator's storage-design decision
+Use the same command with `RESCRIPT_BACKEND=check` instead of `env -u`. Run
+three pairs into `split-final-check-first`, then two into
+`split-final-check-last`, keeping each command below the execution deadline.
+All five complete pairs are included, in order:
 
-The final callgrind run is compared with the original base callgrind run.
-**Exclusive**, non-overlapping differences still reconcile exactly:
+| Alternating pair | Base instructions | Final candidate instructions |
+| --- | ---: | ---: |
+| 1 | 20,556,056,212 | 20,033,674,639 |
+| 2 | 20,563,698,495 | 20,040,249,799 |
+| 3 | 20,549,904,158 | 20,030,323,329 |
+| 4 | 20,568,982,340 | 20,035,420,122 |
+| 5 | 20,558,190,076 | 20,023,542,495 |
+| **Minimum** | **20,549,904,158** | **20,023,542,495** |
+
+Change: **-526,361,663 (-2.561382569%)**. This is within 0.006 percentage
+points of the pre-split -2.567262% figure, well inside the requested 0.2-point
+change bound. The check-mode benefit is retained.
+
+### Shared-function attribution after the split
+
+The final binary's one-worker default callgrind run reports 4,031,802,137
+instructions. Its whole-run total is not substituted for the cachegrind gate;
+allocator/run differences were already documented above. The following are
+exclusive, non-overlapping function buckets from that run and the original
+base callgrind run:
 
 | Bucket | Base | Final candidate | Difference |
 | --- | ---: | ---: | ---: |
-| Planner symbols | 1,074,694 | 1,813,872 | +739,178 |
-| Rust allocation plumbing | 70,076,535 | 70,725,995 | +649,460 |
-| Allocator internals | 350,247,213 | 352,556,095 | +2,308,882 |
-| compile_expr symbols, including inlined work | 10,436,996 | 10,802,996 | +366,000 |
-| string_literal symbols | 11,014,336 | 11,014,336 | 0 |
-| Memory operations | 208,933,552 | 209,199,361 | +265,809 |
-| Literal keys | 122,600 | 178,232 | +55,632 |
-| Primitive purity | 99,924 | 99,567 | -357 |
-| Float/hex helpers | 37,890 | 35,602 | -2,288 |
-| Bigint parser | 49,147 | 46,164 | -2,983 |
-| Identifier conversion helpers | 9,803,872 | 9,117,594 | -686,278 |
-| Other/unexplained | 3,368,714,929 | 3,368,606,005 | -108,924 |
-| **Total** | **4,030,611,688** | **4,034,195,819** | **+3,584,131** |
+| Literal keys | 122,600 | 122,600 | 0 |
+| String literal helpers | 11,014,336 | 11,014,336 | 0 |
+| Identifier conversion | 9,803,872 | 9,117,594 | -686,278 |
+| Float helpers | 37,890 | 34,905 | -2,985 |
+| Bigint parser | 49,147 | 49,147 | 0 |
+| Primitive purity | 99,924 | 99,924 | 0 |
+| BIR planner | 0 | 0 | 0 |
 
-The difference between this callgrind delta and the final cachegrind-minimum
-delta is **-1,644,306** instructions. It remains a measurement/tool/run
-discrepancy, not an attributed optimization. Allocator costs varied materially
-between runs; there is no claim that all allocator differences come from the
-planner, or that the residual compile_expr cost is understood.
+The former +55,632 literal-key row came from routing owned `value_key` through
+a fresh three-buffer `LiteralKeyScratch`. Legacy entry bodies now match trunk;
+BIR retains the reusable encoder. No BIR planner work runs on the default path.
+Reproduce callgrind with the command earlier in this report, using
+`bin/split-final` and output `callgrind/split-final.out`.
 
-Useful **inclusive** entry points, not additional ledger rows:
+### Structural and validation gates
 
-| Entry | Base | Final candidate | Interpretation |
-| --- | ---: | ---: | --- |
-| Emitter `Sw::untagged_plan` | 2,621,287 | 3,219,727 | +598,440 including descendants |
-| Constant `LamArena::decide_switch` | 1,311,537 | 1,693,389 | +381,852 including descendants |
-| `FactPool::import` | absent | 425,031 | Includes metadata import |
-| `FactPool::reserve` | absent | 77,679 | Cold imported-domain storage |
-| `Metadata::import_literal` | absent | 340,192 | Includes keys/interning |
-| `Metadata::import_kind` | absent | 134,168 | Includes class/name interning |
-| `Metadata::intern` | absent | 216,815 | Includes AVL and string operations |
-| All `Index::insert` calls | absent | 124,314 | Includes 17,843 in rotate; not 142,157 |
-| memcpy directly called by intern | absent | 10,357 | 732 calls; included in intern |
-| memcmp directly called by intern | absent | 22,477 | 1,211 calls; included in intern |
-| `Plan::test` | inlined | 27,804 | Includes 14,505 in lazy instance initialization |
+```sh
+git diff origin/ocaml-to-rust-rewrite -- \
+  compiler-rust/src/lambda/untagged_dispatch.rs \
+  compiler-rust/src/lambda/lam_compile.rs \
+  compiler-rust/src/lambda/lam_compile_variant.rs \
+  compiler-rust/src/lambda/arena.rs compiler-rust/src/lambda/mod.rs
+# No output.
+rg -n 'bir::untagged_plan' compiler-rust/src --glob '!compiler-rust/src/bir/**'
+# Only types/variant_runtime.rs's #[cfg(test)] differential recording hook.
+```
 
-Even eliminating *all* measured AVL insertion and direct interning memcpy work
-would not close the remaining 1.13 M budget gap. A small-plan linear index could
-only remove a subset of that insertion work and would add comparisons; these
-measurements do not justify retaining an unmeasured replacement. Likewise,
-removing the source-text copy alone cannot close the gap.
+- Compiler build: passed. Full serial suite: 2,604 unit + 4 integration + 5
+  doctests passed; existing 26 unit and 7 doctest ignores unchanged.
+- BIR suite: **819 passed**, one existing ignore. BIR planner: 20 passed; the
+  restored production legacy planner supplies its own nine tests.
+- Differential: **453 recorded / 192 distinct printed layouts, 68,352 pairs,
+  850 files**. Ordered projection, subset enumeration and comparison/cardinality
+  assertions are unchanged; the BIR serializer now reads stored descriptors.
+- The warmed selector retains its zero-allocation, capacity, traversal/result
+  and stable-borrow checks. Assertions on deleted OnceCells were replaced by
+  unchanged metadata count/capacity checks; there is no test-only instance
+  materializer hiding the deleted production API.
+- Four whole-unit tests and fresh GDB attribution: **68/85/68/138 at both
+  widths**; owner counts unchanged, planner paths now under BIR. No current
+  release-allocation claim is made.
+- Rewatch build and 210 unit + 9 integration tests: passed.
+- JS737/737, stdlib113/113, GenType2/2: passed.
+- Coverage ratchet: passed without baseline changes.
+- Strict compiler all-target clippy: passed after declaration-order cleanup.
+- Cost scanner follows the moved files: 494 production functions, 187
+  changed/new, zero missing/generic notes; lexical self-tests pass.
 
-The remaining shared-planner import, graph, scratch and compatibility views are
-part of the audited owned/unit storage design. Reintroducing the old owned
-planner as a second production path, reverting that storage, or changing the
-untouched variant emitter is not an authorized correction here. **Stop for the
-coordinator's decision with the gate failed**, rather than claiming these
-figures prove the cost is irreducible or waiving the budget. The measurements
-do not prove that further optimization is impossible; a wider ownership/API
-change would need its own scope and review.
+### Wall-time context (not a speedup claim)
 
-### Wall-time context and final checks
-
-Hyperfine used `--warmup 1 --runs 5`, one worker, the same binaries/corpora,
-and a `--prepare` command cleaning both projects with their respective binaries.
-Each command sets `RESCRIPT_RUNTIME` to its own archive's runtime and runs
-`build` on its `tests/tests`; the default run unsets `RESCRIPT_BACKEND`, and the
-check run sets it to `check`. Raw results are `temp/default-audit/wall-default.json`
-and `wall-check.json`. No wall-time speedup or RSS reduction is claimed.
+Hyperfine: one worker, `--warmup 1 --runs 5`; prepare cleans both projects using
+their respective binaries. Each build command sets its own archive's runtime.
+Default unsets `RESCRIPT_BACKEND`; check sets it to `check`. Raw JSON:
+`temp/default-audit/split-wall-default.json` and `split-wall-check.json`.
 
 | Mode / binary | Mean seconds | Standard deviation | Min | Max |
 | --- | ---: | ---: | ---: | ---: |
-| default base | 0.696808 | 0.029463 | 0.655739 | 0.729725 |
-| default candidate | 0.667182 | 0.012223 | 0.648360 | 0.682585 |
-| check base | 1.997421 | 0.052220 | 1.965121 | 2.088066 |
-| check candidate | 2.001201 | 0.048236 | 1.938536 | 2.051147 |
+| default base | 0.758226 | 0.050891 | 0.672942 | 0.793976 |
+| default candidate | 0.917928 | 0.394318 | 0.712964 | 1.622294 |
+| check base | 1.877121 | 0.092185 | 1.758392 | 1.984534 |
+| check candidate | 1.924275 | 0.038955 | 1.878432 | 1.977426 |
 
-Compiler/rewatch builds and tests, JS/stdlib/GenType parity passed for the
-production candidate as recorded above. Final strict all-target compiler clippy
-passed; the cost scanner reports 500 production functions, 188 changed/new,
-zero missing/generic notes. The coverage ratchet passed unchanged (initial
-setup lacked OCAML_BSC, then a 300-second attempt timed out; the explicit
-OCAML_BSC run completed under a 600-second bound). Four complete-unit debug
-allocation tests remain **68/85/68/138 at both widths**. No current-candidate
-release allocation count or application benchmark is claimed.
-
-`bir/lower/export.rs` and `lambda/lam_compile_variant.rs` remain identical to
-the pinned base; existing allocation/differential assertions are unchanged.
+No wall-time speedup, RSS reduction or current application benchmark is claimed.
+The PR remains draft for coordinator review.
