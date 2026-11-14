@@ -1486,7 +1486,6 @@ fn an_abbreviation_that_inherits_nothing_reads_no_row() {
 /// declared after it: the marks are made when every row exists.
 /// Reaches: R3m.
 #[test]
-#[ignore = "R3m build"]
 fn the_table_marks_the_types_whose_expansions_inherit() {
     let program = compile(
         "type t1<'a>\n\

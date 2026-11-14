@@ -143,6 +143,7 @@ impl TypeTable {
             };
             table.rows.push(row);
         }
+        table.mark_manifests(segment);
         table
     }
 
@@ -217,9 +218,26 @@ impl TypeTable {
     /// [`TypeTable::from_segment`], when every row exists: a manifest names
     /// later declarations of its recursive group. R3m builds it for
     /// `INHERITS`; R3e adds `OPEN_ROW` to the same loop.
-    #[allow(dead_code, unused_variables)]
     pub fn mark_manifests(&mut self, segment: &Segment) {
-        todo!("R3m")
+        for index in 0..self.rows.len() {
+            let row = self.rows[index];
+            if row.manifest == NONE || row.flags & ALIAS != 0 {
+                continue;
+            }
+            let template = self.manifests[row.manifest as usize].template;
+            let start = template.nodes as usize;
+            for node in &segment.template_nodes[start..start + template.node_len as usize] {
+                #[cfg(test)]
+                super::steps::tick();
+                if node.tag() == CONSTR
+                    && node.arity() != 0
+                    && self.info(node.a).flags & (ABBREV | PRIVATE | ALIAS) != 0
+                {
+                    self.rows[index].flags |= INHERITS;
+                    break;
+                }
+            }
+        }
     }
 
     /// O(1): one bounds test and one 16-byte load. (R3b)
@@ -1646,7 +1664,7 @@ mod tests {
         };
         let mut table = TypeTable::default();
         let count = steps::scope(|| table = TypeTable::from_segment(&segment));
-        assert_eq!(count, 2 * u64::from(n) + 1);
+        assert_eq!(count, 5 * u64::from(n) + 1);
         assert_eq!(table.rows.len(), n as usize + 1);
         assert_eq!(table.scoped, 0);
         assert_eq!(
