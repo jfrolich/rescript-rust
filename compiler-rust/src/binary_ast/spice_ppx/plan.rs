@@ -81,7 +81,7 @@ struct TypeFacts {
 /// Collect the facts of one type and the types under it.
 /// Cost: O(type nodes), one visit each; recursion depth is the type's depth;
 /// no allocation.
-fn type_facts(typ_idx: CoreTypeIdx, arena: &ParseArena, facts: &mut TypeFacts) {
+fn type_facts(typ_idx: CoreTypeIdx, arena: &ParseArena, facts: &mut TypeFacts, scope: super::super::derive::Scope<'_>) {
     let typ = arena.get_core_type(typ_idx);
     facts.custom_codec |= typ
         .ptyp_attributes
@@ -89,7 +89,7 @@ fn type_facts(typ_idx: CoreTypeIdx, arena: &ParseArena, facts: &mut TypeFacts) {
         .any(|attr| arena.get_string(attr.0.txt) == "spice.codec");
     match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr((lid, args)) => {
-            facts.json_identity |= is_json_identifier(lid.txt, arena);
+            facts.json_identity |= scope.is_json_identity(lid.txt, arena);
             // The codec of a user's type that takes arguments takes their
             // codecs one at a time (`t_encode(a)(b)(v)`); a plan describes
             // the library's, which take them at once.
@@ -104,13 +104,13 @@ fn type_facts(typ_idx: CoreTypeIdx, arena: &ParseArena, facts: &mut TypeFacts) {
             };
             facts.unplanned = facts.unplanned.or(unplanned);
             for i in 0..args.len() {
-                type_facts(arena.type_list(*args)[i], arena, facts);
+                type_facts(arena.type_list(*args)[i], arena, facts, scope);
             }
         }
         CoreTypeDesc::Ptyp_tuple(items) => {
             facts.unmeasured = true;
             for i in 0..items.len() {
-                type_facts(arena.type_list(*items)[i], arena, facts);
+                type_facts(arena.type_list(*items)[i], arena, facts, scope);
             }
         }
         CoreTypeDesc::Ptyp_variant(_) => facts.unmeasured = true,
@@ -130,10 +130,10 @@ fn type_facts(typ_idx: CoreTypeIdx, arena: &ParseArena, facts: &mut TypeFacts) {
 /// The facts of every field of a record, and whether a `@spice.default` or
 /// `@spice.key` holds a user expression.
 /// Cost: O(fields + their type nodes and attributes); no allocation.
-fn label_facts(labels: &[LabelDeclaration], arena: &ParseArena, facts: &mut TypeFacts) -> bool {
+fn label_facts(labels: &[LabelDeclaration], arena: &ParseArena, facts: &mut TypeFacts, scope: super::super::derive::Scope<'_>) -> bool {
     let mut user_expression = false;
     for label in labels {
-        type_facts(label.pld_type, arena, facts);
+        type_facts(label.pld_type, arena, facts, scope);
         user_expression |=
             find_attributes(&label.pld_attributes, &["spice.default", "spice.key"], arena).1;
     }
@@ -183,6 +183,16 @@ pub(in crate::binary_ast) fn classify(
     rec_flag: RecFlag,
     shares_names: bool,
 ) -> Classification {
+    classify_in_scope(arena, decl, rec_flag, shares_names, super::super::derive::Scope::default())
+}
+
+pub(in crate::binary_ast) fn classify_in_scope(
+    arena: &ParseArena,
+    decl: &TypeDeclaration,
+    rec_flag: RecFlag,
+    shares_names: bool,
+    scope: super::super::derive::Scope<'_>,
+) -> Classification {
     use GeneralReason::*;
     let general = Classification::General;
     if rec_flag == RecFlag::Recursive {
@@ -203,20 +213,20 @@ pub(in crate::binary_ast) fn classify(
     let (has_fallback, mut user_expression) =
         find_attributes(&decl.ptype_attributes, &["spice.fallback"], arena);
     if let Some(manifest) = decl.ptype_manifest {
-        type_facts(manifest, arena, &mut facts);
+        type_facts(manifest, arena, &mut facts, scope);
     }
     match &decl.ptype_kind {
-        TypeKind::Ptype_record(labels) => user_expression |= label_facts(labels, arena, &mut facts),
+        TypeKind::Ptype_record(labels) => user_expression |= label_facts(labels, arena, &mut facts, scope),
         TypeKind::Ptype_variant(constructors) => {
             for constructor in constructors {
                 match &constructor.pcd_args {
                     ConstructorArguments::Pcstr_tuple(args) => {
                         for arg in args {
-                            type_facts(*arg, arena, &mut facts);
+                            type_facts(*arg, arena, &mut facts, scope);
                         }
                     }
                     ConstructorArguments::Pcstr_record(labels) => {
-                        user_expression |= label_facts(labels, arena, &mut facts);
+                        user_expression |= label_facts(labels, arena, &mut facts, scope);
                     }
                 }
             }
@@ -291,13 +301,13 @@ pub(in crate::binary_ast) fn classify(
         && let Some(manifest) = decl.ptype_manifest
         && let CoreTypeDesc::Ptyp_constr((lid, args)) = &arena.get_core_type(manifest).ptyp_desc
     {
-        let direct_identity = is_json_identifier(lid.txt, arena);
+        let direct_identity = scope.is_json_identity(lid.txt, arena);
         let direct_option_identity = longident_matches(arena, lid.txt, &["option"])
             && arena.type_list(*args).len() == 1
             && matches!(
                 &arena.get_core_type(arena.type_list(*args)[0]).ptyp_desc,
                 CoreTypeDesc::Ptyp_constr((inner, inner_args))
-                    if inner_args.is_empty() && is_json_identifier(inner.txt, arena)
+                    if inner_args.is_empty() && scope.is_json_identity(inner.txt, arena)
             );
         if !direct_identity && !direct_option_identity {
             return general(JsonIdentityArgument);

@@ -2518,6 +2518,17 @@ impl ParseArena {
         PatIdx::from_u32(self.synthetic_pattern_base + slot as u32)
     }
 
+    /// Canonical spelling handle without copying an existing occurrence.
+    /// Cost: O(name bytes), amortized O(1) interner insertion.
+    pub fn intern_existing_string(&mut self, idx: StrIdx) -> StrIdx {
+        self.strings.intern_existing(idx)
+    }
+
+    /// Look up a canonical spelling. Cost: O(name bytes), no allocation.
+    pub fn find_interned_string(&self, name: &str) -> Option<StrIdx> {
+        self.strings.find_interned(name)
+    }
+
     /// Find the most recently inserted string index for the given content.
     ///
     /// This scans from the end to prefer the latest identity when the same string

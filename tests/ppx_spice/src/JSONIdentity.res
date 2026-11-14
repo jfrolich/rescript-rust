@@ -21,3 +21,16 @@ module Js = {module Json = JSON}
 @spice type nullValue = Null.t<JSON.t>
 @spice.decode type decodedArray = array<JSON.t>
 @spice.decode type decodedNested = array<option<JSON.t>>
+
+// A local identity alias is resolved through its generated codec value.
+@spice type j = JSON.t
+@spice type viaAlias = array<j>
+@spice type viaAliasOption = option<array<j>>
+@spice type aliasRecord = {items: array<j>}
+@spice type nestedDictionary = dict<option<JSON.t>>
+@spice type optionalList = option<list<JSON.t>>
+@spice type viaAliasIdentity = j
+@spice type viaAliasSingleOption = option<j>
+module AliasNested = {
+  @spice type nestedAliasArray = array<j>
+}

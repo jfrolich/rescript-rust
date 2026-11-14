@@ -1348,7 +1348,7 @@ fn library_codec(
 
 /// Whether the constructor is the JSON type itself, whose codec is the
 /// identity. Cost: O(path depth) borrowed comparisons; no allocation.
-fn is_json_identifier(lid_idx: LidentIdx, arena: &ParseArena) -> bool {
+pub(super) fn is_json_identifier(lid_idx: LidentIdx, arena: &ParseArena) -> bool {
     longident_matches(arena, lid_idx, &["Js", "Json", "t"])
         || longident_matches(arena, lid_idx, &["JSON", "t"])
 }
@@ -4421,15 +4421,15 @@ fn structure_item_contains_spice_type_decl(item: &StructureItem, arena: &ParseAr
     }
 }
 
-struct LocCloner<'a> {
+struct LocCloner<'a, 'scope> {
     arena: &'a mut ParseArena,
     error: Option<String>,
-    result_shadowed: bool,
+    scope: super::derive::Scope<'scope>,
 }
 
-impl<'a> LocCloner<'a> {
-    fn new(arena: &'a mut ParseArena, result_shadowed: bool) -> Self {
-        Self { arena, error: None, result_shadowed }
+impl<'a, 'scope> LocCloner<'a, 'scope> {
+    fn new(arena: &'a mut ParseArena, scope: super::derive::Scope<'scope>) -> Self {
+        Self { arena, error: None, scope }
     }
 
     fn finish(self) -> SpiceResult<()> {
@@ -5181,7 +5181,7 @@ impl<'a> LocCloner<'a> {
             ModuleExprDesc::Pmod_ident(lid) => self.located(lid),
             ModuleExprDesc::Pmod_structure(items) => {
                 let original = std::mem::take(items);
-                match map_structure_items_with_mapper(&original, self.arena, true, self.result_shadowed) {
+                match map_structure_items_with_mapper(&original, self.arena, true, self.scope) {
                     Ok(mapped) => **items = mapped,
                     Err(error) => {
                         *items = original;
@@ -5504,10 +5504,10 @@ impl<'a> LocCloner<'a> {
 fn clone_mapped_structure_item(
     item: &StructureItem,
     arena: &mut ParseArena,
-    result_shadowed: bool,
+    scope: super::derive::Scope<'_>,
 ) -> SpiceResult<StructureItem> {
     let mut mapped_item = item.clone();
-    let mut cloner = LocCloner::new(arena, result_shadowed);
+    let mut cloner = LocCloner::new(arena, scope);
     cloner.structure_item(&mut mapped_item);
     cloner.finish()?;
     Ok(mapped_item)
@@ -5518,7 +5518,7 @@ fn clone_mapped_signature_item(
     arena: &mut ParseArena,
 ) -> SpiceResult<SignatureItem> {
     let mut mapped_item = item.clone();
-    let mut cloner = LocCloner::new(arena, false);
+    let mut cloner = LocCloner::new(arena, super::derive::Scope::default());
     cloner.signature_item(&mut mapped_item);
     cloner.finish()?;
     Ok(mapped_item)
@@ -5548,7 +5548,7 @@ fn classify_group(
     rec_flag: RecFlag,
     decls: &[TypeDeclaration],
     settings: &[Option<GeneratorSettings>],
-    result_shadowed: bool,
+    scope: super::derive::Scope<'_>,
 ) -> super::derive::Classification {
     use super::derive::Classification;
     let deriving = settings.iter().filter(|settings| settings.is_some()).count();
@@ -5561,7 +5561,7 @@ fn classify_group(
             continue;
         }
         bindings += count;
-        match plan::classify(arena, decl, rec_flag, shares_names) {
+        match plan::classify_in_scope(arena, decl, rec_flag, shares_names, scope) {
             Classification::Plan => {},
             general @ Classification::General(_) => {
                 if group == Classification::Plan {
@@ -5570,7 +5570,7 @@ fn classify_group(
             }
         }
     }
-    if group == Classification::Plan && result_shadowed
+    if group == Classification::Plan && scope.result_shadowed
         && settings.iter().flatten().any(|settings| settings.do_decode)
     {
         group = Classification::General(super::derive::GeneralReason::ShadowedResultConstructor);
@@ -5585,7 +5585,7 @@ fn map_structure_item_spice(
     item: &StructureItem,
     arena: &mut ParseArena,
     mapper_active: bool,
-    result_shadowed: bool,
+    scope: super::derive::Scope<'_>,
 ) -> SpiceResult<Vec<StructureItem>> {
     match &item.pstr_desc {
         StructureItemDesc::Pstr_type(inner) => {
@@ -5604,12 +5604,12 @@ fn map_structure_item_spice(
                 .collect::<SpiceResult<smallvec::SmallVec<[Option<GeneratorSettings>; 4]>>>()
                 && settings.iter().any(|settings| settings.is_some())
             {
-                Some((classify_group(arena, *rec_flag, decls, &settings, result_shadowed), settings))
+                Some((classify_group(arena, *rec_flag, decls, &settings, scope), settings))
             } else {
                 None
             };
             if let Some((super::derive::Classification::Plan, ref settings)) = classification {
-                let mapped_item = clone_mapped_structure_item(item, arena, result_shadowed)?;
+                let mapped_item = clone_mapped_structure_item(item, arena, scope)?;
                 let value_item = StructureItem {
                     pstr_desc: StructureItemDesc::Pstr_derived(plan::build(arena, decls, settings)),
                     pstr_loc: arena.dummy_loc(),
@@ -5637,12 +5637,12 @@ fn map_structure_item_spice(
 
             if vbs.is_empty() {
                 if mapper_active {
-                    Ok(vec![clone_mapped_structure_item(item, arena, result_shadowed)?])
+                    Ok(vec![clone_mapped_structure_item(item, arena, scope)?])
                 } else {
                     Ok(vec![item.clone()])
                 }
             } else {
-                let mapped_item = clone_mapped_structure_item(item, arena, result_shadowed)?;
+                let mapped_item = clone_mapped_structure_item(item, arena, scope)?;
 
                 let general = arena.push_vb_list(&vbs);
                 if let (Some(census), Some(reason)) = (&mut arena.derived_census, reason) {
@@ -5658,7 +5658,7 @@ fn map_structure_item_spice(
         }
         _ => {
             if mapper_active || structure_item_contains_spice_type_decl(item, arena) {
-                Ok(vec![clone_mapped_structure_item(item, arena, result_shadowed)?])
+                Ok(vec![clone_mapped_structure_item(item, arena, scope)?])
             } else {
                 Ok(vec![item.clone()])
             }
@@ -5877,7 +5877,7 @@ pub fn signature_uses_spice_mapper(signature: &[SignatureItem], arena: &ParseAre
 /// whether the Spice mapper runs over the whole structure; see
 /// [`structure_uses_spice_mapper`].
 pub fn expand_structure_item_with_mapper(item: &StructureItem, arena: &mut ParseArena, mapper_active: bool) -> SpiceResult<Vec<StructureItem>> {
-    expand_structure_item_in_scope(item, arena, mapper_active, mapper_active && super::derive::shadows_result(item, arena))
+    expand_structure_item_in_scope(item, arena, mapper_active, super::derive::Scope { result_shadowed: mapper_active && super::derive::shadows_result(item, arena), ..super::derive::Scope::default() })
 }
 
 /// Expand with the local constructor scope supplied by the enclosing mapper.
@@ -5886,29 +5886,30 @@ pub fn expand_structure_item_in_scope(
     item: &StructureItem,
     arena: &mut ParseArena,
     mapper_active: bool,
-    result_shadowed: bool,
+    scope: super::derive::Scope<'_>,
 ) -> SpiceResult<Vec<StructureItem>> {
     if !arena.builtin_spice_enabled() {
         return Ok(vec![item.clone()]);
     }
-    map_structure_item_spice(item, arena, mapper_active, result_shadowed)
+    map_structure_item_spice(item, arena, mapper_active, scope)
 }
 
 fn map_structure_items_with_mapper(
     structure: &[StructureItem],
     arena: &mut ParseArena,
     mapper_active: bool,
-    mut result_shadowed: bool,
+    scope: super::derive::Scope<'_>,
 ) -> SpiceResult<Vec<StructureItem>> {
     let mut expanded = Vec::new();
+    let mut prefix = super::derive::PrefixScope::new(scope);
     for item in structure {
-        result_shadowed |= super::derive::shadows_result(item, arena);
+        prefix.push(item, arena);
         // Only the items of a module expression are mapped here.
         expanded.extend(map_structure_item_spice(
             item,
             arena,
             mapper_active,
-            result_shadowed,
+            prefix.at(prefix.len() - 1),
         )?);
     }
     Ok(expanded)

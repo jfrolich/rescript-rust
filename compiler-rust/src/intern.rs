@@ -150,6 +150,27 @@ impl Interner {
         idx
     }
 
+    /// Find an already interned spelling. O(bytes) hashing, no allocation.
+    pub fn find_interned(&self, s: &str) -> Option<StrIdx> {
+        let hash = self.hasher.hash_one(s);
+        self.table.find(hash, |&idx| self.get(idx) == s).copied()
+    }
+
+    /// Register an existing occurrence in the deduplication table without
+    /// copying its bytes. O(bytes) hashing, amortized O(1) table insertion.
+    pub fn intern_existing(&mut self, idx: StrIdx) -> StrIdx {
+        if let Some(existing) = self.find_interned(self.get(idx)) {
+            return existing;
+        }
+        let hash = self.hasher.hash_one(self.get(idx));
+        let (bytes, spans, hasher) = (&self.bytes, &self.spans, &self.hasher);
+        self.table.insert_unique(hash, idx, |&idx| {
+            let (start, end) = spans[idx.0 as usize];
+            hasher.hash_one(&bytes[start as usize..end as usize])
+        });
+        idx
+    }
+
     /// Push a string without deduplication, always returning a NEW StrIdx
     /// (unique for marshal identity).
     ///

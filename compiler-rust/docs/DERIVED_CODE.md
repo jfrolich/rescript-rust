@@ -723,6 +723,11 @@ module alias because this fixture's runtime no longer supplies `Js`.
 | `dict<option<JSON.t>>` | general: `json_identity_argument` | nested encoder argument sharing differs |
 | `Null.t<JSON.t>` | general: `json_identity_argument` | encoder result and argument sharing differ |
 | decode-only array, option, nested array/option, result | plan | each agrees without encoder application lowering |
+| `j = JSON.t`, then `array<j>` | general: `json_identity_argument` | oracle differs: result is separate in plan, shared with element in general |
+| `option<array<j>>` | general: `json_identity_argument` | exposed nested identity alias |
+| record field `array<j>` | plan | declared record hides the payload |
+| `j`, `option<j>` | plan | identity and single-option exceptions agree |
+| nested module `array<j>` | general: `json_identity_argument` | inherits the preceding local alias |
 
 The rule covers the remaining plan-supported shapes because only manifest
 applications expose these generic codec argument types in the binding scheme:
@@ -890,3 +895,22 @@ No source, oracle, compiler options or threshold was weakened to obtain a pass.
 Different codegen-unit settings change inlining; the local table does not
 establish a regression under the CI profile. No further layout or mapper
 experiments are retained.
+
+
+The alias rows were built with `RESCRIPT_DERIVED_PATH=check`, together with the
+previously tabulated `dict<option<JSON.t>>` and `option<list<JSON.t>>`, now explicit
+fixture declarations. The first unclassified `array<j>` probe printed:
+
+```text
+plans:   value viaAlias_encodeJson: &0((&1(array<&2(Stdlib.JSON@16.t)>)) => &3(Stdlib.JSON@16.t))
+general: value viaAlias_encodeJson: &0((&1(array<&2(Stdlib.JSON@16.t)>)) => @2)
+```
+
+Local identity aliases are now recorded during the same lazy source-prefix scan
+as constructor scope, with flat version records so reverse mapping and nested
+scope borrowing preserve declaration order. Parsed occurrence handles are not
+canonical names: registering an existing spelling in the interner avoids both
+copying its bytes and allocating a per-name string. The existing dense name
+slots then resolve alias versions. No external-unit alias is guessed from its
+name. Final fixture check: `Parsed 32 source files`, `Compiled 32 modules`,
+`Finished compilation`; the nested/local alias classification unit test passes.

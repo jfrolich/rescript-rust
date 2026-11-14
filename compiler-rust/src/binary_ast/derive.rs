@@ -270,7 +270,90 @@ pub fn signature_uses_spice_mapper(items: &[SignatureItem], arena: &ParseArena) 
 /// Expand built-in derives on a structure item. O(generated syntax plus mapper
 /// work), with O(1) timing overhead only when the census is enabled.
 pub fn expand_structure_item_with_mapper(item: &StructureItem, arena: &mut ParseArena, active: bool) -> Result<Vec<StructureItem>, String> {
-    expand_structure_item_in_scope(item, arena, active, active && shadows_result(item, arena))
+    expand_structure_item_in_scope(item, arena, active, Scope { result_shadowed: active && shadows_result(item, arena), ..Scope::default() })
+}
+
+/// Borrowed source-order facts. A position is necessary because the frontend
+/// may map items backwards after collecting a later prefix.
+#[derive(Clone, Copy, Default)]
+pub struct Scope<'a> {
+    /// A preceding declaration shadows a predefined result constructor.
+    pub result_shadowed: bool,
+    pub(super) prefix: Option<(&'a PrefixScope<'a>, usize)>,
+}
+
+impl Scope<'_> {
+    /// O(shadowing depth), using interned-name slots; no string allocation.
+    pub(crate) fn is_json_identity(self, lid: crate::parse_arena::LidentIdx, arena: &ParseArena) -> bool {
+        if super::spice_ppx::is_json_identifier(lid, arena) {
+            return true;
+        }
+        let crate::parser::Longident::Lident(name) = arena.get_longident(lid) else {
+            return false;
+        };
+        arena.find_interned_string(arena.get_string(*name))
+            .is_some_and(|name| self.alias(name.raw() as usize))
+    }
+
+    fn alias(self, name: usize) -> bool {
+        let Some((prefix, position)) = self.prefix else { return false };
+        let mut slot = prefix.names.get(name).copied().unwrap_or(0);
+        while slot != 0 {
+            let entry = &prefix.aliases[slot as usize - 1];
+            if entry.position <= position {
+                return entry.identity;
+            }
+            slot = entry.previous;
+        }
+        prefix.parent.alias(name)
+    }
+}
+
+struct Alias {
+    position: usize,
+    previous: u32,
+    identity: bool,
+}
+
+/// Dense prefix facts and a flat version pool, shared by constructor and alias
+/// classification. No per-item allocation; a nested scope borrows its parent.
+#[derive(Default)]
+pub(crate) struct PrefixScope<'a> {
+    parent: Scope<'a>,
+    shadows: Vec<bool>,
+    names: Vec<u32>,
+    aliases: Vec<Alias>,
+}
+
+impl<'a> PrefixScope<'a> {
+    pub(crate) fn new(parent: Scope<'a>) -> Self { Self { parent, ..Self::default() } }
+    pub(crate) fn len(&self) -> usize { self.shadows.len() }
+    pub(crate) fn at(&self, position: usize) -> Scope<'_> {
+        Scope { result_shadowed: self.shadows[position], prefix: Some((self, position)) }
+    }
+
+    /// O(constructors + declarations + newly allocated name slots). Each
+    /// declaration appends one version; only its immediate manifest is read.
+    pub(crate) fn push(&mut self, item: &StructureItem, arena: &mut ParseArena) {
+        let position = self.len();
+        let shadowed = self.shadows.last().copied().unwrap_or(self.parent.result_shadowed)
+            || shadows_result(item, arena);
+        self.shadows.push(shadowed);
+        if let StructureItemDesc::Pstr_type(group) = &item.pstr_desc {
+            self.names.resize(self.names.len().max(arena.string_count()), 0);
+            for decl in &group.1 {
+                let identity = decl.ptype_params.is_empty() && decl.ptype_manifest.is_some_and(|ty| {
+                    matches!(&arena.get_core_type(ty).ptyp_desc,
+                        crate::parser::ast::CoreTypeDesc::Ptyp_constr((lid, args))
+                        if args.is_empty() && self.at(position).is_json_identity(lid.txt, arena))
+                });
+                let name = arena.intern_existing_string(decl.ptype_name.txt).raw() as usize;
+                let previous = self.names[name];
+                self.aliases.push(Alias { position, previous, identity });
+                self.names[name] = self.aliases.len() as u32;
+            }
+        }
+    }
 }
 
 /// Whether this item introduces a local result-constructor name.
@@ -293,14 +376,14 @@ pub fn expand_structure_item_in_scope(
     item: &StructureItem,
     arena: &mut ParseArena,
     active: bool,
-    result_shadowed: bool,
+    scope: Scope<'_>,
 ) -> Result<Vec<StructureItem>, String> {
     // O(1) disabled probe: retain the direct call without saving profiling state
     // across a mapper that mutably borrows the arena.
     if arena.derived_census.is_none() {
-        return super::spice_ppx::expand_structure_item_in_scope(item, arena, active, result_shadowed);
+        return super::spice_ppx::expand_structure_item_in_scope(item, arena, active, scope);
     }
-    expand_with_census(item, arena, active, result_shadowed)
+    expand_with_census(item, arena, active, scope)
 }
 
 /// O(1) census bookkeeping plus the existing expansion and optional key encoder.
@@ -311,11 +394,11 @@ fn expand_with_census(
     item: &StructureItem,
     arena: &mut ParseArena,
     active: bool,
-    result_shadowed: bool,
+    scope: Scope<'_>,
 ) -> Result<Vec<StructureItem>, String> {
     let start = census::start(true);
     let observer_before = arena.derived_census.as_ref().map_or(0, |c| c.observer_ns);
-    let result = super::spice_ppx::expand_structure_item_in_scope(item, arena, active, result_shadowed);
+    let result = super::spice_ppx::expand_structure_item_in_scope(item, arena, active, scope);
     if let (Some(start), Some(census)) = (start, arena.derived_census.as_mut()) {
         census.generation.add(active, census::nanos(start.elapsed()).saturating_sub(census.observer_ns - observer_before));
     }
