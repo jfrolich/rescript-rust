@@ -4577,7 +4577,7 @@ mod tests {
         let source = ctx.dotted_from_ident(root.clone(), name, 7);
         let types = TypeSubstPaths::default();
         let type_names = HashMap::new();
-        let mut modules = ModuleStampSubstMap::new();
+        let mut modules = ModuleStampSubstMap::default();
         let module_names = HashMap::new();
         let copy = |modules: &ModuleStampSubstMap| {
             substitute_type_path(
@@ -4599,7 +4599,7 @@ mod tests {
         let expected = Path::pdot_pos(Path::pident(target), name.name_atom(), 7);
         assert_eq!(copy(&modules), expected);
         assert_eq!(copy(&modules), expected);
-        let mut separate = ModuleStampSubstMap::new();
+        let mut separate = ModuleStampSubstMap::default();
         insert_module_stamp_subst(&mut separate, &root_id, Path::pident(target));
         assert_eq!(copy(&separate), expected);
         // Nested dots are rebuilt, but their unchanged terminal prefix is retained.
@@ -4607,7 +4607,7 @@ mod tests {
         let copied = substitute_module_path(
             &ctx,
             &nested,
-            &ModuleStampSubstMap::new(),
+            &ModuleStampSubstMap::default(),
             &module_names,
             None,
         );
@@ -4665,7 +4665,7 @@ mod tests {
             target,
         );
         let names = HashMap::new();
-        let modules = ModuleStampSubstMap::new();
+        let modules = ModuleStampSubstMap::default();
         let module_names = HashMap::new();
         let paths = SubstPaths {
             type_stamp_map: &types,
