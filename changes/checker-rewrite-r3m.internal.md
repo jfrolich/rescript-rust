@@ -1,0 +1,1 @@
+- Type checker rewrite: copies made by an expansion inherit the memo entries of the nodes being expanded, as the old checker does.

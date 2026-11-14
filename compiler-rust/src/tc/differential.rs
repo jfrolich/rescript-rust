@@ -2402,7 +2402,6 @@ mod tests {
     /// what a cleanup cuts and of what a later expansion revives (section
     /// 8.6, decision 26). Reaches: R3m.
     #[test]
-    #[ignore = "R3m build"]
     fn a_chain_of_inherited_entries_agrees() {
         let program = compile(MUTUAL.to_string());
         let plan = Plan::new(Tier::Expand, OBJECTS);
