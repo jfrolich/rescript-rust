@@ -1,0 +1,1 @@
+- Document executed checker-departure probes, observed inclusion differences, and debugger-confirmed reachability limits.
