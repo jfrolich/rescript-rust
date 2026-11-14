@@ -117,6 +117,8 @@ pub enum Site {
     Construct,
     /// In an expression; the name carries no location.
     ConstructNone,
+    /// In an expression; the name location is in the obligation side table.
+    ConstructAt,
     /// In a pattern; the name carries no location.
     Pattern,
     /// In a pattern; the name carries the dummy location.
@@ -154,6 +156,20 @@ pub const NO_VAR: u32 = u32::MAX;
 /// the general form, which fixes the first failure and the order of warnings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Obligation {
+    /// The owning declaration's manifest argument must not alias JSON.
+    NotJsonIdentity {
+        /// Unqualified name of the immediately preceding type declaration.
+        declaration: StrIdx,
+        /// Argument indices from the manifest root, in the guard-position pool.
+        position: Span,
+    },
+    /// Two skeletons the shape of a body requires to have the same type.
+    Equal {
+        /// The expected type at this body position.
+        expected: SkeletonIdx,
+        /// The type stated by the body itself.
+        actual: SkeletonIdx,
+    },
     /// A value: looked up as an identifier expression is (usage marking and
     /// the deprecation check included), instantiated once, and the instance
     /// unified with the instantiated `skeleton`.
@@ -229,7 +245,7 @@ impl Obligation {
             | Obligation::Type { name, .. }
             | Obligation::Label { name, .. }
             | Obligation::Constructor { name, .. } => Some(name),
-            Obligation::Literal { .. } => None,
+            Obligation::Literal { .. } | Obligation::Equal { .. } | Obligation::NotJsonIdentity { .. } => None,
         }
     }
 }
@@ -310,13 +326,15 @@ pub enum OptionalArg {
 pub enum BodyNode {
     /// Preserve the source location of this application, not its children.
     At {
-        /// The location used by the general converter for this application.
+        /// The location used by the general converter for this expression.
         loc: LocIdx,
-        /// The application whose children retain their own locations.
+        /// The expression whose children retain their own locations.
         body: BodyIdx,
     },
     /// The parameter of an enclosing function, counted from the outermost.
     Local(u32),
+    /// A local counted from the innermost binder, for closed nested functions.
+    LocalFromEnd(u32),
     /// The value a `Value` obligation resolved.
     Free(ObligationIdx),
     /// An application to unlabelled arguments, after an optional one.
@@ -529,6 +547,8 @@ pub struct Plans {
     items: Vec<Item>,
     bindings: Vec<Binding>,
     obligations: Vec<Obligation>,
+    constructor_locs: Vec<Option<LocIdx>>,
+    guard_positions: Vec<u32>,
     skeletons: Vec<SkeletonNode>,
     body: Vec<BodyNode>,
     body_args: Vec<BodyIdx>,
@@ -537,6 +557,30 @@ pub struct Plans {
 }
 
 impl Plans {
+    /// Append one argument position. Cost: O(position depth), pooled storage.
+    pub fn push_guard_position(&mut self, position: &[u32]) -> Span {
+        let start = self.guard_positions.len() as u32;
+        self.guard_positions.extend_from_slice(position);
+        Span { start, len: position.len() as u32 }
+    }
+
+    /// Argument indices of a guard. Cost: O(1), borrowed pool slice.
+    pub fn guard_position(&self, position: Span) -> &[u32] {
+        &self.guard_positions[position.range()]
+    }
+
+    /// O(new slots) on growth, O(1) otherwise; each dense slot initialized
+    /// once across monotonic obligation growth, only for explicit locations.
+    pub fn set_constructor_loc(&mut self, idx: ObligationIdx, loc: LocIdx) {
+        self.constructor_locs.resize(self.constructor_locs.len().max(idx.0 as usize + 1), None);
+        self.constructor_locs[idx.0 as usize] = Some(loc);
+    }
+
+    /// O(1): the explicit source location of a `ConstructAt` obligation.
+    pub fn constructor_loc(&self, idx: ObligationIdx) -> LocIdx {
+        self.constructor_locs[idx.0 as usize].expect("ConstructAt has a location")
+    }
+
     /// Number of derived items. Cost: O(1).
     pub fn item_count(&self) -> usize {
         self.items.len()
@@ -795,4 +839,20 @@ mod tests {
             }).collect()
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn explicit_constructor_locations_grow_once_at_ten_thousand() {
+    assert_eq!(std::mem::size_of::<Option<LocIdx>>(), 8);
+    assert_eq!(std::mem::size_of::<Site>(), 1);
+    let mut plans = Plans::default();
+    let mut initialized = 0;
+    for i in 0..10_000 {
+        let before = plans.constructor_locs.len();
+        plans.set_constructor_loc(ObligationIdx(i), LocIdx(i));
+        initialized += plans.constructor_locs.len() - before;
+        assert_eq!(plans.constructor_loc(ObligationIdx(i)), LocIdx(i));
+    }
+    assert_eq!(initialized, 10_000);
 }

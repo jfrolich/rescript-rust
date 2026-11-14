@@ -16,6 +16,7 @@
 //! (`compiler-rust/docs/DERIVED_CODECS.md`, "The cheapest sound path".)
 
 use smallvec::SmallVec;
+use std::borrow::Cow;
 
 use crate::binary_ast::derive::plan::{
     Binding, BindingIdx, DerivedIdx, ExprLoc, LabelUse, NO_VAR, Obligation, ObligationIdx, Owner,
@@ -35,6 +36,8 @@ use crate::types::typedtree::EnvRef;
 /// What a discharged obligation resolved to.
 #[derive(Debug, Clone, Copy)]
 pub enum Resolved {
+    /// A body-shape equation discharged by unification; no runtime payload.
+    Equation,
     /// A value: the path its name resolved to, and the instance of its type
     /// that its skeleton was unified with.
     Value {
@@ -70,7 +73,7 @@ impl Resolved {
     pub fn path(self) -> Path {
         match self {
             Resolved::Value { path, .. } | Resolved::Type(path) => path,
-            Resolved::Label(_) | Resolved::Constructor { .. } | Resolved::Literal(_) => {
+            Resolved::Equation | Resolved::Label(_) | Resolved::Constructor { .. } | Resolved::Literal(_) => {
                 unreachable!("a skeleton names a type obligation, a body's free node a value")
             }
         }
@@ -81,7 +84,8 @@ impl Resolved {
     pub fn instance(self) -> TypeExprRef {
         match self {
             Resolved::Value { instance, .. } => instance,
-            Resolved::Type(_)
+            Resolved::Equation
+            | Resolved::Type(_)
             | Resolved::Label(_)
             | Resolved::Constructor { .. }
             | Resolved::Literal(_) => {
@@ -111,6 +115,26 @@ pub struct Bound {
     pub obligations: Span,
 }
 
+/// One dense name-cache entry. Owner is part of the key: the same spelling
+/// can denote the declaration's constructor and a predefined constructor.
+#[derive(Debug, Clone, Copy)]
+struct ConstructorName {
+    epoch: u32,
+    slot: u32,
+    owner: Owner,
+}
+
+impl Default for ConstructorName {
+    fn default() -> Self { Self { epoch: 0, slot: 0, owner: Owner::Option } }
+}
+
+impl ConstructorName {
+    // O(1); zero is the vacant slot, otherwise slots are stored one-based.
+    fn get(self, epoch: u32, owner: Owner) -> Option<u32> {
+        (self.slot != 0 && self.epoch == epoch && self.owner == owner).then(|| self.slot - 1)
+    }
+}
+
 /// The tables of one typed arena. `reserve` sizes them once per compilation.
 #[derive(Debug, Default)]
 pub struct DerivedTable {
@@ -132,6 +156,9 @@ pub struct DerivedTable {
     labels: Vec<Arc<LabelDescription>>,
     /// The descriptions `Resolved::Constructor` names.
     constructors: Vec<Arc<ConstructorDescription>>,
+    /// Unqualified names keyed by binding obligation start and owner.
+    /// A binding has one immutable environment; epochs prevent cross-binding reuse.
+    constructor_names: Vec<ConstructorName>,
     /// The constants `Resolved::Literal` names.
     constants: Vec<crate::types::typedtree::Constant>,
     /// The instances of the argument types of the constructors
@@ -277,7 +304,8 @@ impl DerivedTable {
             .filter_map(|resolved| match resolved {
                 Some(Resolved::Value { path, .. }) => Some(*path),
                 Some(
-                    Resolved::Type(_)
+                    Resolved::Equation
+                    | Resolved::Type(_)
                     | Resolved::Label(_)
                     | Resolved::Constructor { .. }
                     | Resolved::Literal(_),
@@ -321,6 +349,11 @@ pub struct Discharged {
 /// The steps of a discharge, for the tests that prove its cost. The checker
 /// passes `()`, whose methods are empty.
 pub trait Steps {
+    /// O(1): observe the current obligation; the normal path erases this call.
+    fn obligation(&mut self, _obligation: Obligation) {}
+    /// Census-only scheme level before instantiation. The normal path erases
+    /// this call without even reading the level. Cost: O(1).
+    fn value_scheme(&mut self, _ctx: &crate::types::context::TypeContext, _ty: TypeExprRef) {}
     /// An environment lookup.
     fn lookup(&mut self);
     /// An instance of a looked-up value's type.
@@ -338,6 +371,28 @@ impl Steps for () {
     fn unification(&mut self) {}
 }
 
+/// Last obligation visited, only when the census is enabled.
+#[derive(Default)]
+struct CensusSteps {
+    last: Option<Obligation>,
+    value_schemes: [u64; 2],
+}
+
+impl Steps for CensusSteps {
+    fn value_scheme(&mut self, ctx: &crate::types::context::TypeContext, ty: TypeExprRef) {
+        let generic = ctx.get_level(ctx.repr(ty)) == crate::types::type_expr::GENERIC_LEVEL;
+        self.value_schemes[usize::from(generic)] += 1;
+    }
+    /// O(1): overwrite the inline observation without allocating.
+    fn obligation(&mut self, obligation: Obligation) { self.last = Some(obligation); }
+    /// O(1): no additional operation counters in this observer.
+    fn lookup(&mut self) {}
+    /// O(1): no additional operation counters in this observer.
+    fn instance(&mut self) {}
+    /// O(1): no additional operation counters in this observer.
+    fn unification(&mut self) {}
+}
+
 /// Discharge the obligations of a derived item and enter its bindings.
 /// Cost: O(obligations + skeleton nodes of the item): per value obligation
 /// one environment lookup, one instance of the value's type and one
@@ -345,13 +400,127 @@ impl Steps for () {
 /// and two unifications; per literal one unification; per binding one function type, one environment entry and one
 /// signature item made of the same value description, without a lookup. No
 /// allocation per obligation beyond the type nodes of the instances and
-/// skeletons; one buffer of signature items per item.
+/// skeletons; one buffer of signature items per item. The first item sizes a
+/// dense constructor-name table in O(interned names); later items reuse it.
+/// Unqualified constructor descriptions are copied once per name per binding,
+/// while all lookup, usage, instance and unification work remains ordered.
 pub fn discharge(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     item: DerivedIdx,
 ) -> Result<Discharged, Fallback> {
-    discharge_counting(tctx, env, item, &mut ())
+    if tctx.derived_census.is_none() {
+        return discharge_counting(tctx, env, item, &mut ());
+    }
+    let mut steps = CensusSteps::default();
+    let result = discharge_counting(tctx, env, item, &mut steps);
+    for (total, count) in tctx.derived_census.as_mut().unwrap().value_schemes.iter_mut().zip(steps.value_schemes) {
+        *total += count;
+    }
+    if result.is_err() {
+        let (kind, shape) = match steps.last {
+            Some(Obligation::NotJsonIdentity { .. }) => {
+                tctx.derived_census.as_mut().unwrap().not_json_identity_failed += 1;
+                ("not_json_identity", "manifest_argument")
+            }
+            Some(Obligation::Equal { .. }) => ("equation", "body_shape"),
+            Some(Obligation::Value { .. }) => ("value", "codec_function"),
+            Some(Obligation::Type { .. }) => ("type", "named_type"),
+            Some(Obligation::Label { .. }) => ("label", "record"),
+            Some(Obligation::Constructor { of, .. }) => ("constructor", match of {
+                Owner::Option => "option",
+                Owner::Result => "result",
+                Owner::Declared => "declared_variant",
+                Owner::Type => "qualified_variant",
+            }),
+            Some(Obligation::Literal { .. }) => ("literal", "constant"),
+            None => ("binding", "binding_type"),
+        };
+        tctx.derived_census.as_ref().unwrap().failed_obligation(kind, shape);
+    }
+    result
+}
+
+/// Follow only nullary alias manifests. Cost: one exact type lookup and one
+/// declaration read per step, at most 64 steps. `repr` may compress existing
+/// links; this does not instantiate, unify, expand, or write abbreviation memos.
+/// Missing declarations, parameters, applied manifests and the depth bound fail
+/// closed. The lookup closure makes the step bound directly testable.
+fn identity_endpoint(
+    ctx: &crate::types::context::TypeContext,
+    mut path: Path,
+    mut lookup: impl FnMut(&Path) -> Option<Arc<crate::types::decl::TypeDeclaration>>,
+) -> Result<(Path, Arc<crate::types::decl::TypeDeclaration>), Fallback> {
+    for _ in 0..64 {
+        let decl = lookup(&path).ok_or(Fallback)?;
+        if !decl.type_params.is_empty() || decl.type_arity != 0 { return Err(Fallback); }
+        let Some(manifest) = decl.type_manifest else { return Ok((path, decl)); };
+        let next = match &*ctx.borrow_desc(ctx.repr(manifest)) {
+            TypeDesc::Tconstr { path, args, .. } => {
+                if !ctx.type_list(*args).is_empty() { return Err(Fallback); }
+                Some(*path)
+            }
+            _ => None,
+        };
+        match next {
+            Some(next) => path = next,
+            None => return Ok((path, decl)),
+        }
+    }
+    Err(Fallback)
+}
+
+/// Read an argument from the already checked owning declaration and the JSON
+/// result from the encoder's established skeleton. Cost: O(position depth) plus
+/// two bounded alias walks. No source-longident resolution or type inference.
+fn not_json_identity(
+    tctx: &mut TypeCheckContext<'_>, env: &Env, arena: &ParseArena,
+    binding: &Binding, declaration: crate::parse_arena::StrIdx, position: Span,
+) -> Result<(), Fallback> {
+    let ctx = tctx.type_ctx;
+    let own = env.find_type(arena.get_string(declaration)).map_err(|_| Fallback)?;
+    let mut argument = own.type_manifest.ok_or(Fallback)?;
+    for &index in arena.plans().guard_position(position) {
+        argument = match &*ctx.borrow_desc(ctx.repr(argument)) {
+            TypeDesc::Tconstr { args, .. } => ctx.type_list(*args).get(index as usize).ok_or(Fallback)?,
+            _ => return Err(Fallback),
+        };
+    }
+    let argument_path = match &*ctx.borrow_desc(ctx.repr(argument)) {
+        TypeDesc::Tconstr { path, args, .. } if ctx.type_list(*args).is_empty() => *path,
+        _ => return Err(Fallback),
+    };
+    let TypeSource::ResultOf { obligation, .. } = binding.ty else { return Err(Fallback) };
+    let head = tctx.typed.derived.resolved(obligation).instance();
+    let result = match &*ctx.borrow_desc(ctx.repr(head)) {
+        TypeDesc::Tarrow { ret, .. } => *ret,
+        _ => return Err(Fallback),
+    };
+    // The optional encoder's JSON side is option<JSON>; its value encoder
+    // returns JSON directly. Read through this one predefined wrapper only.
+    let result = match &*ctx.borrow_desc(ctx.repr(result)) {
+        TypeDesc::Tconstr { path, args, .. } if path.same(&crate::types::predef::path_option()) => {
+            if ctx.type_list(*args).len() != 1 { return Err(Fallback); }
+            ctx.type_list(*args).get(0).ok_or(Fallback)?
+        }
+        _ => result,
+    };
+    let json_path = match &*ctx.borrow_desc(ctx.repr(result)) {
+        TypeDesc::Tconstr { path, args, .. } if ctx.type_list(*args).is_empty() => *path,
+        _ => return Err(Fallback),
+    };
+    let mut lookup = |path: &Path| crate::types::typecore::lookup_type_decl_for_path_exact(
+        path, env, &mut tctx.persistent_env, ctx,
+    );
+    let (argument_path, argument_decl) = identity_endpoint(ctx, argument_path, &mut lookup)?;
+    let (json_path, json_decl) = identity_endpoint(ctx, json_path, &mut lookup)?;
+    // Component views may copy declaration Arcs. Compare the canonical stored
+    // declaration paths too, normalizing module aliases rather than spellings.
+    let argument_path = env.normalize_path(ctx, argument_decl.type_path.as_ref().unwrap_or(&argument_path));
+    let json_path = env.normalize_path(ctx, json_decl.type_path.as_ref().unwrap_or(&json_path));
+    if Arc::ptr_eq(&argument_decl, &json_decl) || argument_path.same(&json_path) {
+        Err(Fallback)
+    } else { Ok(()) }
 }
 
 /// [`discharge`], counting its steps.
@@ -366,6 +535,8 @@ pub fn discharge_counting(
     let item = plans.item(idx);
     let bindings = plans.bindings(item);
     tctx.typed.derived.reserve(plans);
+    // One dense name table per unit, not per binding or constructor visit.
+    tctx.typed.derived.constructor_names.resize(arena.string_count(), ConstructorName::default());
 
     // `Typecore.type_binding` starts with `Typetexp.reset_type_variables`.
     tctx.reset_type_variables();
@@ -470,6 +641,7 @@ fn discharge_binding(
     let mut record_expression: Option<(crate::types::decl::LabelArrayRef, u32, u32)> = None;
     for slot in binding.obligations.range() {
         let obligation = ObligationIdx(slot as u32);
+        steps.obligation(plans.obligation(obligation));
         // Whether the obligation is a label of the record expression or
         // pattern being discharged.
         let grouped = matches!(
@@ -480,6 +652,20 @@ fn discharge_binding(
             }
         );
         let resolved = match plans.obligation(obligation) {
+            Obligation::NotJsonIdentity { declaration, position } => {
+                not_json_identity(tctx, env, arena, binding, declaration, position)?;
+                Resolved::Equation
+            }
+            Obligation::Equal { expected, actual } => {
+                let (expected, _) = instantiate(ctx, arena, &tctx.typed.derived,
+                    plans.skeleton_from(expected), vars);
+                let (actual, _) = instantiate(ctx, arena, &tctx.typed.derived,
+                    plans.skeleton_from(actual), vars);
+                steps.unification();
+                crate::types::ctype::unify(ctx, &mut tctx.unify_state, expected, actual)
+                    .map_err(|_| Fallback)?;
+                Resolved::Equation
+            }
             Obligation::Value {
                 name,
                 name_loc,
@@ -526,6 +712,7 @@ fn discharge_binding(
                     RecArg::Rejected,
                 )
                 .map_err(|_| Fallback)?;
+                steps.value_scheme(ctx, desc.val_type);
                 steps.instance();
                 let instance = crate::types::ctype::instance(ctx, desc.val_type);
                 let nodes = plans.skeleton_from(skeleton);
@@ -698,6 +885,10 @@ fn discharge_binding(
                         arena.dummy_loc(),
                         crate::types::usage::ConstructorUsage::Positive,
                     ),
+                    Site::ConstructAt => (
+                        plans.constructor_loc(obligation),
+                        crate::types::usage::ConstructorUsage::Positive,
+                    ),
                     Site::ConstructNone => (
                         arena.none_loc(),
                         crate::types::usage::ConstructorUsage::Positive,
@@ -728,7 +919,7 @@ fn discharge_binding(
                         if !is_predefined {
                             return Err(Fallback);
                         }
-                        desc.clone()
+                        Cow::Borrowed(desc)
                     }
                     // A constructor of the declaration being derived, which
                     // the item follows: an unqualified name whose first
@@ -745,7 +936,7 @@ fn discharge_binding(
                         {
                             return Err(Fallback);
                         }
-                        env.find_constructor(last).map_err(|_| Fallback)?.clone()
+                        Cow::Borrowed(env.find_constructor(last).map_err(|_| Fallback)?)
                     }
                     // A qualified name: the lookup of typecore.ml
                     // `type_construct`, in the module that qualifies it. That
@@ -760,7 +951,7 @@ fn discharge_binding(
                             crate::types::env::OpenLookupKind::Component,
                             Some(loc),
                         );
-                        crate::types::typecore::lookup_constructor_in_module(
+                        Cow::Owned(crate::types::typecore::lookup_constructor_in_module(
                             longident,
                             arena,
                             env,
@@ -769,7 +960,7 @@ fn discharge_binding(
                             Some(result),
                         )
                         .ok_or(Fallback)?
-                        .1
+                        .1)
                     }
                 };
                 // A plan describes an ordinary constructor of a regular
@@ -782,7 +973,7 @@ fn discharge_binding(
                     || desc.cstr_arity != i32::from(arity)
                     || desc.cstr_args.len() != usize::from(arity)
                     || !matches!(desc.cstr_kind, crate::types::ConstructorKind::Ordinary(_))
-                    || (matches!(site, Site::Construct | Site::ConstructNone)
+                    || (matches!(site, Site::Construct | Site::ConstructNone | Site::ConstructAt)
                         && desc.cstr_private == crate::types::PrivateFlag::Private)
                 {
                     return Err(Fallback);
@@ -800,11 +991,28 @@ fn discharge_binding(
                         .map_err(|_| Fallback)?;
                 }
                 let table = &mut tctx.typed.derived;
-                table.constructors.push(Arc::new(desc));
+                // Names are interned by the plan builder. Reuse only the stored
+                // description, never a lookup, usage mark, instance or unification.
+                let name_slot = match longident {
+                    crate::parser::Longident::Lident(name) => Some(name.raw() as usize),
+                    crate::parser::Longident::Ldot(..) | crate::parser::Longident::Lapply(..) => None,
+                };
+                let cached = name_slot.and_then(|slot|
+                    table.constructor_names[slot].get(binding.obligations.start, of));
+                let desc_slot = if let Some(slot) = cached {
+                    slot
+                } else {
+                    let slot = table.constructors.len() as u32;
+                    table.constructors.push(Arc::new(desc.into_owned()));
+                    if let Some(name_slot) = name_slot {
+                        table.constructor_names[name_slot] = ConstructorName { epoch: binding.obligations.start, slot: slot + 1, owner: of };
+                    }
+                    slot
+                };
                 let first_arg = table.constructor_args.len() as u32;
                 table.constructor_args.extend_from_slice(&args);
                 Resolved::Constructor {
-                    desc: table.constructors.len() as u32 - 1,
+                    desc: desc_slot,
                     args: first_arg,
                     res,
                 }
@@ -1038,6 +1246,110 @@ pub(crate) mod tests {
     use crate::types::initial_env;
 
     #[test]
+    fn not_json_identity_alias_depth_and_read_counts() {
+        for depth in [1, 3, 10_000] {
+            let ctx = type_context();
+            let mut env = initial_env(&ctx);
+            let template = env.find_type("int").unwrap().clone();
+            let target_id = ctx.create_ident(crate::name::Name::new("endpoint"));
+            let target = Path::pident(target_id);
+            env.add_type(target_id, template.clone());
+            let mut path = target;
+            for i in 0..depth {
+                let id = ctx.create_ident(crate::name::Name::new(&format!("alias{i}")));
+                let mut decl = template.clone();
+                decl.type_manifest = Some(ctx.new_constr(path, Vec::new()));
+                env.add_type(id, decl);
+                path = Path::pident(id);
+            }
+            let mut steps = 0;
+            let result = identity_endpoint(&ctx, path, |path| {
+                steps += 1;
+                crate::types::typecore::lookup_type_decl_for_path_exact(path, &env, &mut None, &ctx)
+            });
+            if depth == 10_000 {
+                assert!(result.is_err());
+                assert_eq!(steps, 64);
+            } else {
+                let (end, _) = result.unwrap();
+                assert!(end.same(&target));
+                assert_eq!(steps, depth + 1);
+            }
+        }
+    }
+
+    #[test]
+    fn not_json_identity_record_and_abstract_endpoints_hold() {
+        let ctx = type_context();
+        let mut env = initial_env(&ctx);
+        let template = env.find_type("int").unwrap().clone();
+        for record in [false, true] {
+            let id = ctx.create_ident(crate::name::Name::new(if record { "record" } else { "abstract" }));
+            let mut decl = template.clone();
+            decl.type_manifest = None;
+            if record {
+                decl.type_kind = crate::types::TypeKind::TypeRecord(Default::default(), crate::types::RecordRepresentation::RecordRegular);
+            }
+            env.add_type(id, decl);
+            let mut steps = 0;
+            identity_endpoint(&ctx, Path::pident(id), |path| {
+                steps += 1;
+                crate::types::typecore::lookup_type_decl_for_path_exact(path, &env, &mut None, &ctx)
+            }).unwrap();
+            assert_eq!(steps, 1);
+        }
+        let absent = ctx.create_ident(crate::name::Name::new("abstract"));
+        assert!(crate::types::typecore::lookup_type_decl_for_path_exact(&Path::pident(absent), &env, &mut None, &ctx).is_none());
+        assert!(crate::types::typecore::lookup_type_decl_for_path(&Path::pident(absent), &env, &mut None, &ctx).is_some());
+    }
+
+    #[test]
+    fn not_json_identity_qualified_record_keeps_its_plan() {
+        let (_, planned) = check_records("module Owner = {@spice type t = {x: int}}\n@spice type rows = array<Owner.t>\n@spice type optionalRows = option<array<Owner.t>>", true).unwrap();
+        assert_eq!(planned, 3, "the owner record and both qualified record controls must keep their plans");
+    }
+
+    #[test]
+    fn not_json_identity_retries_qualified_opened_and_module_aliases() {
+        for source in [
+            "module Owner = {@spice type j = JSON.t}\n@spice type rows = array<Owner.j>",
+            "module Owner = {@spice type j = JSON.t}\n@spice type rows = option<array<Owner.j>>",
+            "module Owner = {@spice type j = JSON.t}\nmodule Local = Owner\n@spice type rows = array<Local.j>",
+            "module Owner = {@spice type j = JSON.t}\nmodule Opened = {open Owner; @spice type rows = array<j>}",
+            "module Js = {module Json = JSON}\nmodule Owner = {@spice type j = Js.Json.t}\n@spice type rows = array<Owner.j>",
+        ] {
+            let (planned, count) = check_records(source, true).unwrap();
+            let (general, _) = check_records(source, false).unwrap();
+            assert_eq!(count, 0, "JSON alias must retry: {source}");
+            assert_eq!(planned, general, "{source}");
+        }
+    }
+
+    #[test]
+    fn import_epochs_guard_a_module_under_an_expression_open() {
+        let source = "module Owner = {@spice type j = JSON.t}\nmodule Container = {@spice type j = int; let codec = {open Owner; module M = {@spice type rows = array<j>}; M.rows_encodeJson}}";
+        let (planned, count) = check_records(source, true).unwrap();
+        let (general, _) = check_records(source, false).unwrap();
+        assert_eq!(count, 0, "the shadowed alias must trigger the guard and unit retry");
+        assert_eq!(planned, general);
+    }
+
+    #[test]
+    fn census_counts_value_scheme_levels_without_changing_them() {
+        let ctx = type_context();
+        let local = ctx.new_var(None);
+        let generic = ctx.new_generic_type(TypeDesc::Tvar(None));
+        let mut steps = CensusSteps::default();
+        for _ in 0..10_000 {
+            steps.value_scheme(&ctx, local);
+            steps.value_scheme(&ctx, generic);
+        }
+        assert_eq!(steps.value_schemes, [10_000, 10_000]);
+        assert_ne!(ctx.get_level(local), crate::types::type_expr::GENERIC_LEVEL);
+        assert_eq!(ctx.get_level(generic), crate::types::type_expr::GENERIC_LEVEL);
+    }
+
+    #[test]
     fn sizes_are_pinned() {
         assert_eq!(std::mem::size_of::<Option<Resolved>>(), 16);
         assert_eq!(std::mem::size_of::<Option<Bound>>(), 32);
@@ -1100,7 +1412,7 @@ pub(crate) mod tests {
         for source in DECLARATIONS {
             let (planned, discharged) = check(source, true).unwrap();
             let (general, none) = check(source, false).unwrap();
-            assert_eq!(discharged, source.matches("type ").count());
+            assert_eq!(discharged, source.matches("type ").count(), "{source}");
             assert_eq!(none, 0);
             assert_eq!(planned, general, "{source}");
         }
@@ -1280,7 +1592,16 @@ pub(crate) mod tests {
         fields: usize,
         test: impl FnOnce(&mut TypeCheckContext<'_>, &Env, DerivedIdx, &TypeContext),
     ) {
-        let labels: Vec<String> = (0..fields).map(|i| format!("f{i}: int")).collect();
+        with_record_type(fields, "int", test);
+    }
+
+    /// Test-only setup: O(fields) generated source and normal frontend work.
+    pub(crate) fn with_record_type(
+        fields: usize,
+        typ: &str,
+        test: impl FnOnce(&mut TypeCheckContext<'_>, &Env, DerivedIdx, &TypeContext),
+    ) {
+        let labels: Vec<String> = (0..fields).map(|i| format!("f{i}: {typ}")).collect();
         let source = format!("@spice type t = {{{}}}", labels.join(", "));
         let (parser, structure) =
             crate::binary_ast::derive::fixtures::frontend_source(&source, true);
@@ -1341,6 +1662,62 @@ pub(crate) mod tests {
     /// instance each (a field access instantiates inside the checker's
     /// lookup, a type has none), and one counted unification each (a label
     /// or a constructor unifies its argument and its result).
+    #[test]
+    fn ten_thousand_json_fields_discharge_in_linear_steps() {
+        let count = |fields| {
+            let mut steps = Counted::default();
+            with_record_type(fields, "JSON.t", |tctx, env, item, _| {
+                discharge_counting(tctx, env, item, &mut steps).unwrap();
+            });
+            steps
+        };
+        let (one, two, many) = (count(1), count(2), count(10_000));
+        assert_eq!(one, Counted { lookups: 32, instances: 23, unifications: 32 });
+        assert_eq!(two, Counted { lookups: 52, instances: 37, unifications: 55 });
+        assert_eq!(many, Counted { lookups: 200_012, instances: 140_009, unifications: 230_009 });
+        assert_eq!(many.lookups, one.lookups + 9_999 * (two.lookups - one.lookups));
+        assert_eq!(many.instances, one.instances + 9_999 * (two.instances - one.instances));
+        assert_eq!(many.unifications, one.unifications + 9_999 * (two.unifications - one.unifications));
+    }
+
+    #[test]
+    fn constructor_name_cache_is_keyed_by_owner_and_binding() {
+        let declared = ConstructorName { epoch: 7, slot: 3, owner: Owner::Declared };
+        assert_eq!(declared.get(7, Owner::Declared), Some(2));
+        assert_eq!(declared.get(7, Owner::Result), None);
+        assert_eq!(declared.get(8, Owner::Declared), None);
+        let result = ConstructorName { epoch: 7, slot: 4, owner: Owner::Result };
+        assert_eq!(result.get(7, Owner::Result), Some(3));
+        assert_eq!(result.get(7, Owner::Declared), None);
+        assert_eq!(ConstructorName::default().get(0, Owner::Option), None);
+    }
+
+    #[test]
+    fn constructor_name_cache_starts_empty_in_each_unit() {
+        for _ in 0..2 {
+            with_record(1, |tctx, env, item, _| {
+                assert!(tctx.typed.derived.constructor_names.is_empty());
+                assert!(tctx.typed.derived.constructors.is_empty());
+                discharge_counting(tctx, env, item, &mut ()).unwrap();
+                assert!(!tctx.typed.derived.constructors.is_empty());
+            });
+        }
+    }
+
+    #[test]
+    fn constructor_descriptions_are_shared_within_each_binding() {
+        assert_eq!(std::mem::size_of::<ConstructorName>(), 12);
+        let mut sizes = Vec::new();
+        for fields in [1, 2, 10_000] {
+            with_record(fields, |tctx, env, item, _| {
+                discharge_counting(tctx, env, item, &mut ()).unwrap();
+                sizes.push(tctx.typed.derived.constructors.len());
+                assert_eq!(tctx.typed.derived.constructor_names.len(), tctx.arena.string_count());
+            });
+        }
+        assert_eq!(sizes, [7, 7, 7]);
+    }
+
     #[test]
     fn a_record_of_ten_thousand_fields_is_discharged_in_linear_steps() {
         let steps = |fields: usize| {
@@ -1554,4 +1931,18 @@ pub(crate) mod tests {
             }
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn census_observer_has_one_inline_obligation_and_two_counts() {
+    assert_eq!(std::mem::size_of::<CensusSteps>(), 32);
+    let mut observer = CensusSteps::default();
+    for _ in 0..10_000 {
+        observer.obligation(Obligation::Type {
+            name: crate::parse_arena::LidentIdx(0),
+            name_loc: crate::parse_arena::LocIdx(0), arity: 0, var: NO_VAR,
+        });
+    }
+    assert!(matches!(observer.last, Some(Obligation::Type { .. })));
 }

@@ -28667,6 +28667,28 @@ pub(crate) fn lookup_type_decl_for_path(
         pers_env,
         ctx,
         ComponentLookupApi::FindType,
+        SameNameRecovery::Allowed,
+    )
+}
+
+/// Whether a missing identifier may recover by its spelling.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SameNameRecovery {
+    Allowed,
+    Refused,
+}
+
+/// Path lookup without same-name identifier recovery. Qualified component
+/// lookup and lazy component forcing are identical to the ordinary accessor.
+pub(crate) fn lookup_type_decl_for_path_exact(
+    type_path: &Path,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &crate::types::context::TypeContext,
+) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
+    lookup_type_decl_for_path_with_cache_mode(
+        type_path, env, pers_env, ctx, ComponentLookupApi::FindType,
+        SameNameRecovery::Refused,
     )
 }
 
@@ -28676,6 +28698,7 @@ fn lookup_type_decl_for_path_with_cache_mode(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
     cache_mode: ComponentLookupApi,
+    recovery: SameNameRecovery,
 ) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
     fn lookup_raw_type_decl_from_module_path(
         module_path: &Path,
@@ -28722,7 +28745,9 @@ fn lookup_type_decl_for_path_with_cache_mode(
     // Only use env.lookup_type directly for simple identifiers after the exact
     // lookup. For qualified paths, env.lookup_type currently resolves by leaf
     // name and can return an unrelated declaration with the same type name.
-    if let PathView::Pident(id) = type_path.view() {
+    if recovery == SameNameRecovery::Allowed
+        && let PathView::Pident(id) = type_path.view()
+    {
         if let Some(decl) = env.lookup_type_arc_by_ident(id) {
             return Some(decl.clone());
         }
@@ -28746,7 +28771,7 @@ fn lookup_type_decl_for_path_with_cache_mode(
             .is_some_and(|first| first.is_ascii_uppercase());
         if could_be_inline_record_constructor
             && let Some(parent_decl) =
-                lookup_type_decl_for_path_with_cache_mode(parent, env, pers_env, ctx, cache_mode)
+                lookup_type_decl_for_path_with_cache_mode(parent, env, pers_env, ctx, cache_mode, recovery)
         {
             if let crate::types::TypeKind::TypeVariant(ref constrs, layout) = parent_decl.type_kind
             {
@@ -28894,6 +28919,7 @@ fn lookup_type_decl_for_path_with_cache_mode(
                     pers_env,
                     ctx,
                     cache_mode,
+                    recovery,
                 )
             {
                 return Some(decl);

@@ -493,6 +493,19 @@ the compiler options are created (where `RESCRIPT_DERIVED_CENSUS` is read in
   - the unit reads, as sets;
   - the warnings, as text in order.
 
+The JSON identity fixture also checks the abbreviation-memo observation O11
+in `CHECKER_REWRITE.md`, not an independently demonstrated diagnostic difference.
+General application inference instances the callee and runs `lower_args`
+(`types/typecore.rs::type_application_parts`; `compiler/ml/typecore.ml:2826–2828`),
+whose arrow-spine walk expands the return type as well as lowering argument
+levels (`compiler/ml/typecore.ml:2503–2514`). Expanding `JSON.t` records its
+representative in the simple-abbreviation memo, so a later instance can reuse
+that representative for both concrete occurrences through `find_repr`
+(`types/ctype.rs::copy_type_cached`; `compiler/ml/ctype.ml:778–782`). This explains
+why the general path's later `values_encodeJson` shares its array element and
+result nodes while the plan without application lowering does not; the signature
+oracle and successful-program fixture retain that distinction.
+
 Diagnostics are gated on the error fixtures by running each with the switch
 unset and with `general` and comparing the output byte for byte, and by the
 `super_errors` expectations themselves.
@@ -866,7 +879,55 @@ Checks to paste: the same list as slice 2, plus a fixture (with and without
 codecs, asserting no unused-constructor warning in either mode.
 ```
 
+### Slice 3b as built
+
+The census separates successful planned typechecking/conversion from general
+bindings, reports a closed unsupported-form census and inclusive costs for all
+six obligation kinds. General group reasons use dense parse-value-list tables.
+Retry events identify the last obligation and expected owner, not the resolved
+conflicting type; the retry remains the safety net.
+
+JSON identity plans remove the application's 136 formerly unplanned bindings.
+The final application census is 6,534 plans, 21 upfront
+`shadowed_result_constructor`, zero `failed_obligation` and zero
+`json_identity_argument`. Local JSON aliases are resolved syntactically in the
+same lazy prefix scan; the unchanged oracle fixture covers direct and nested
+containers, alias uses, records and variants. Exposed encoder applications whose
+sharing differs take the named general reason before planning. No linking-only
+inference or application-callee lowering is retained.
+
+Constructor descriptions use a dense name table keyed by binding epoch and
+`Owner`, owned by a fresh typed arena per unit. All lookups, usage marks,
+instantiation and unification remain. The isolated sharing experiment saved
+0.0302945%; a 10,000-field record retains seven descriptions. Inclusive profile
+and measured marginal per-field costs are in `DERIVED_CODE.md`; marginal
+per-variant-constructor instruction attribution was **not measured**.
+
+Source-prefix scope is lazy and tested on 10,000 distinct derived items,
+10,000 constructors, and 10,000 nested items. The no-derive test exercises the
+real dispatch and observes zero scope work. No-derive units still execute the
+constant-time dispatch, empty prefix initialization, and disabled census probes
+per rewritten item and per type declaration; this is not zero total overhead.
+
+Spice/application check builds and 19 diagnostic fixtures in all three modes
+pass. The census-off gate is CI's fat-LTO, one-codegen-unit comparison; the
+separate local default-16-unit table is not substituted for it. The reviewed
+`d306a20b68` CI comparison was -0.014%; subsequent correction-head CI is reported
+in the PR body rather than claimed from this historical measurement.
+Unresolved external/opened JSON arguments now carry a 16-byte
+`NotJsonIdentity` obligation. It reads the owning declaration's checked manifest,
+uses exact path lookup with spelling recovery refused, and bounds each nullary
+alias walk at 64 declarations. It compares shared declaration identity and
+normalized canonical paths, without new inference or abbreviation writes.
+The cross-unit/module-alias/open/legacy fixtures pass check mode; record controls
+retain plans. Application plans stay 6,534 with six guards emitted and zero guard
+failures; generated outputs remain identical. Detailed commands and limits are
+in `DERIVED_CODE.md`.
+`RESCRIPT_DERIVED_PATH` and the oracle remain; slice 4 is held below.
+
 ### Slice 4. Remove the switch
+
+**Status: held until the new checker handles derived items.**
 
 - **Files:** `driver.rs`, a test under `compiler-rust/tests/` or the existing
   Spice test module.
@@ -882,7 +943,10 @@ codecs, asserting no unused-constructor warning in either mode.
 Polymorphic variants, tuples, `@spice.serde`, custom codecs and parameterised
 types are not sliced. Each needs a census first that shows its share.
 
-## Risks and what was not measured
+## Risks and what was not measured in the original projection
+
+The following are historical limits of the initial projection, not the status
+of the implemented slices described above.
 
 - **Nothing was prototyped.** Every removal fraction is extrapolated. The
   type-checking range rests on counter ratios from `tests/ppx_spice`, whose mix

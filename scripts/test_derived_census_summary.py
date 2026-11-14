@@ -11,6 +11,18 @@ def row():
 
 
 class DerivedCensusSummaryTest(unittest.TestCase):
+    def test_json_identity_argument_reason_and_old_reason_arrays(self):
+        old = row()
+        old.update(general_syntax_nodes=[0] * 11, general_typecheck_ns=[0] * 11)
+        current = row()
+        current.update(paths={"json_identity_argument": 3},
+                       general_syntax_nodes=[0] * 11 + [42],
+                       general_typecheck_ns=[0] * 11 + [7])
+        result = summarize([old, current])
+        self.assertEqual(result["paths"]["json_identity_argument"], 3)
+        self.assertEqual(result["general_costs"]["json_identity_argument"]["general_syntax_nodes"], 42)
+        self.assertIn("json_identity_argument", markdown(result))
+
     def test_sums_ten_thousand_records_without_losing_integer_precision(self):
         item = row()
         item["typecheck"]["derived"] = 2**53 + 1
@@ -47,6 +59,80 @@ class DerivedCensusSummaryTest(unittest.TestCase):
         item["shape_nodes"].pop()
         with self.assertRaises(ValueError):
             summarize([item])
+
+    def test_path_timing_preserves_totals_and_counts(self):
+        item = row()
+        item.update(planned_typecheck_ns=7, planned_conversion_ns=3,
+                    paths={"plan": 2, "not_yet_planned": 1})
+        result = summarize(item for _ in range(10_000))
+        self.assertEqual(result["planned_typecheck_ns"], 70_000)
+        self.assertEqual(result["general_typecheck_ns"], 40_000)
+        self.assertEqual(result["planned_conversion_ns"], 30_000)
+        self.assertEqual(result["general_conversion_ns"], 80_000)
+        self.assertEqual(result["paths"], {"plan": 20_000, "not_yet_planned": 10_000})
+        self.assertIn("Bindings on a plan ms", markdown(result))
+
+    def test_legacy_records_do_not_claim_general_timing(self):
+        result = summarize([row()])
+        self.assertEqual(result["path_timing_records"], 0)
+        self.assertEqual(result["general_typecheck_ns"], 0)
+        self.assertIn("Path timing availability: 0/1", markdown(result))
+
+    def test_invalid_path_timing_and_counts(self):
+        for value in (-1, 12, 1.5, True):
+            item = row()
+            item.update(planned_typecheck_ns=value, planned_conversion_ns=0)
+            with self.assertRaises(ValueError):
+                summarize([item])
+        item = row()
+        item["paths"] = {"plan": -1}
+        with self.assertRaises(ValueError):
+            summarize([item])
+
+    def test_unplanned_forms_reconcile(self):
+        item = row()
+        item["paths"] = {"not_yet_planned": 3, "unplanned_forms": [1, 2, 0, 0, 0, 0, 0, 0]}
+        result = summarize([item, item])
+        self.assertEqual(result["unplanned_forms"]["json_identity"], 2)
+        self.assertEqual(result["unplanned_forms"]["applied_user_codec"], 4)
+        self.assertIn("First unplanned form", markdown(result))
+        item["paths"]["not_yet_planned"] = 4
+        with self.assertRaises(ValueError):
+            summarize([item])
+
+    def test_general_costs(self):
+        item = row()
+        item.update(general_syntax_nodes=[2] + [0] * 10,
+                    general_typecheck_ns=[7] + [0] * 10, paths={"custom_codec": 1})
+        result = summarize([item, item])
+        self.assertEqual(result["general_costs"]["custom_codec"],
+                         {"general_syntax_nodes": 4, "general_typecheck_ns": 14})
+        self.assertIn("Generated body syntax nodes", markdown(result))
+        item["general_typecheck_ns"].pop()
+        with self.assertRaises(ValueError):
+            summarize([item])
+
+    def test_failed_attempt_does_not_double_count_bindings(self):
+        event = dict(version=1, event="failed_obligation", module="example",
+                     obligation="constructor", type_shape="result")
+        result = summarize([event, row()])
+        self.assertEqual(result["modules"], 1)
+        self.assertEqual(result["bindings"], [3, 2])
+        self.assertEqual(result["failed_obligations"], {"constructor / result": 1})
+        self.assertIn("constructor / result", markdown(result))
+
+    def test_not_json_identity_failure_is_named_without_double_counting(self):
+        event = dict(version=1, event="failed_obligation", module="AliasUser",
+                     obligation="not_json_identity", type_shape="manifest_argument",
+                     not_json_identity_emitted=12, not_json_identity_failed=1)
+        result = summarize([event, row()])
+        self.assertEqual(result["bindings"], [3, 2])
+        self.assertEqual(result["failed_obligations"],
+                         {"not_json_identity / manifest_argument": 1})
+        self.assertIn("not_json_identity / manifest_argument", markdown(result))
+        self.assertEqual(result["not_json_identity_emitted"], 12)
+        self.assertEqual(result["not_json_identity_failed"], 1)
+        self.assertIn("12 emitted; 1 failed", markdown(result))
 
     def test_counter_sides(self):
         item = row()
