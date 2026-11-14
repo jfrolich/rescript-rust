@@ -543,13 +543,26 @@ impl State {
         // Reserve that known count; primitives/inlining retain safe growth.
         arena.pools.js.reserve_exact(arena.pools.apply.len());
         arena.func_owners.resize(arena.pools.funcs.len(), None);
+        // Imported binders, export bindings and one result binding per switch.
+        let output_vars = input.arena.vars.len() + input.export_vars.len() + arena.pools.switches.len();
+        arena.capture_binders.reserve_exact(output_vars);
+        arena.bulk_binders.reserve_exact(output_vars);
+        arena.vars.j_origin.reserve_exact(output_vars);
+        arena.vars.name.reserve_exact(output_vars);
+        arena.vars.order.reserve_exact(output_vars);
+        arena.vars.flags.reserve_exact(output_vars);
+        arena.vars.uses.reserve_exact(output_vars);
+        arena.vars.binder.reserve_exact(output_vars);
+        arena.vars.fact.reserve_exact(output_vars);
+        arena.vars.printed.reserve_exact(output_vars);
         for i in 0..input.arena.vars.len() {
             let var = VarId(i as u32);
             let made = arena.new_var_id(input.arena.vars.name(var), input.arena.vars.order(var));
             assert_eq!(made, var);
             arena.vars.flags[i] = input.arena.vars.flags[i];
         }
-        let mut scope = scope::Scope::new(arena.vars.len());
+        let mut scope = scope::Scope::with_capacity(arena.vars.len(), output_vars);
+        scope.decisions.reserve_exact(output_vars);
         // Reference sites are indexed by emitted nodes, not by source binders.
         scope.sites.reserve_exact(output_nodes);
         arena.js_scope = Some(scope);

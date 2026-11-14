@@ -115,17 +115,19 @@ impl Scope {
 
     /// Allocate zeroed rows once at lowering entry. Cost: O(variables).
     pub(crate) fn new(variables: usize) -> Self {
-        Self {
-            uses: vec![Uses::default(); variables],
-            sites: Vec::new(),
-            site_heads: vec![0; variables],
-            facts: vec![VarFacts::default(); variables],
-            decisions: Vec::new(),
-            spine: Vec::new(),
-            close_steps: 0,
-            #[cfg(test)]
-            updates: 0,
-        }
+        Self::with_capacity(variables, variables)
+    }
+
+    /// Initialize source rows with reserved room for known generated bindings.
+    pub(super) fn with_capacity(variables: usize, capacity: usize) -> Self {
+        assert!(variables <= capacity);
+        let mut uses = Vec::with_capacity(capacity);
+        let mut site_heads = Vec::with_capacity(capacity);
+        let mut facts = Vec::with_capacity(capacity);
+        uses.resize(variables, Uses::default());
+        site_heads.resize(variables, 0);
+        facts.resize(variables, VarFacts::default());
+        Self { uses, site_heads, facts, ..Self::default() }
     }
 
     /// Add a fresh variable's row. Cost: amortized O(1), no node walk.
