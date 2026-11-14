@@ -3872,55 +3872,46 @@ fn compile_with_location_retry<T>(
     ast: &StoredAst,
     build: &BuildCommandState,
     options: &rescript_compiler::driver::CompilerOptions,
-    mut compile: impl FnMut(&StoredAst, &rescript_compiler::driver::CompilerOptions) -> Result<T>,
+    mut compile: impl FnMut(&StoredAst, &rescript_compiler::driver::CompilerOptions,
+        Option<rescript_compiler::driver::DerivedFallback<'_>>) -> Result<T>,
 ) -> Result<T> {
-    use rescript_compiler::driver::{DerivedPath, DerivedRetry, LocationRetry};
-    // A check compiles the general form of a unit that has plans as well:
-    // `tree` is the parse being compiled, `source` what it was parsed from.
-    let checked = |tree: &StoredAst,
-                   source: &Arc<super::build_types::ParseSource>,
-                   options: &mut rescript_compiler::driver::CompilerOptions| {
-        if options.derived_path == DerivedPath::Check && tree.arena().plans().item_count() > 0 {
+    use rescript_compiler::driver::{DerivedPath, LocationRetry};
+    // Set up for each tree compiled, `tree` being the parse and `source`
+    // what it was parsed from. A check compiles the general form of a unit
+    // that has plans as well. A unit with plans gets its general syntax,
+    // which the compiler's attempt loop continues on when the checker cannot
+    // use a plan; nothing of the abandoned attempt is published.
+    let per_tree = |tree: &StoredAst,
+                    source: &Arc<super::build_types::ParseSource>,
+                    options: &mut rescript_compiler::driver::CompilerOptions| {
+        if tree.arena().plans().item_count() == 0 {
+            return;
+        }
+        if options.derived_path == DerivedPath::Check {
             let (source, locations) = (source.clone(), tree.arena().stores_locations());
             options.derived_reference =
                 Some(Arc::new(move || super::parse::general_form(&source, locations)));
             options.derived_differences = Some(build.derived_differences.clone());
         }
     };
-    let mut attempt = |ast: &StoredAst| {
-        let check = options.derived_path == DerivedPath::Check && ast.arena().plans().item_count() > 0;
-        match ast.retry_source() {
-            Some(source) if !ast.arena().stores_locations() || check => {
-                let mut options = options.clone();
-                // A location-free compile places its warnings in a located
-                // parse of the same source; it returns
-                // `LocationRetry::Warning` when it cannot.
-                if !ast.arena().stores_locations() {
-                    let source = source.clone();
-                    options.warning_locations = Some(Arc::new(move || {
-                        super::parse::reparse_arena_with_locations(&source)
-                    }));
-                }
-                checked(ast, source, &mut options);
-                compile(ast, &options)
+    let fallback = || derived_fallback(ast, ast.arena().stores_locations());
+    let fallback = matches!(ast, StoredAst::Structure(_)).then_some(
+        &fallback as rescript_compiler::driver::DerivedFallback<'_>);
+    let result = match ast.retry_source() {
+        Some(source) if !ast.arena().stores_locations()
+            || (options.derived_path == DerivedPath::Check && ast.arena().plans().item_count() > 0) => {
+            let mut options = options.clone();
+            // A location-free compile places its warnings in a located
+            // parse of the same source; it returns
+            // `LocationRetry::Warning` when it cannot.
+            if !ast.arena().stores_locations() {
+                options.warning_locations = Some(warning_locations(source));
             }
-            _ => compile(ast, options),
+            per_tree(ast, source, &mut options);
+            compile(ast, &options, fallback)
         }
+        _ => compile(ast, options, fallback),
     };
-    let result = attempt(ast);
-    // A unit with a plan the checker could not use is compiled again from
-    // the syntax of its derived code. Nothing of the first attempt was
-    // published.
-    let general;
-    let (ast, result) = match result {
-        Err(error) if error.is::<DerivedRetry>() => {
-            general = super::parse::reparse_without_plans(ast)?;
-            let result = attempt(&general);
-            (&general, result)
-        }
-        result => (ast, result),
-    };
-    drop(attempt);
     let local_retry = !ast.arena().stores_locations()
         && matches!(
             &result,
@@ -3943,9 +3934,12 @@ fn compile_with_location_retry<T>(
         let located = super::parse::reparse_with_locations(ast)?;
         let mut options = options.clone();
         if let Some(source) = ast.retry_source() {
-            checked(&located, source, &mut options);
+            per_tree(&located, source, &mut options);
         }
-        return compile(&located, &options);
+        let fallback = || derived_fallback(ast, true);
+        let fallback = matches!(located, StoredAst::Structure(_)).then_some(
+            &fallback as rescript_compiler::driver::DerivedFallback<'_>);
+        return compile(&located, &options, fallback);
     }
     if !build.parses_with_locations() && result.is_err() {
         // Type errors can quote declarations from dependency interfaces.
@@ -3957,6 +3951,42 @@ fn compile_with_location_retry<T>(
     }
     result
 }
+
+/// The located parse of `source`, in which a location-free compile of it
+/// places its warnings (`CompilerOptions::warning_locations`).
+/// Cost now: one Arc reference-count increment and one closure allocation.
+/// Cost when called: a source parse/frontend run with location tables. The
+/// owned `WarningLocations` API requires the closure to retain `ParseSource`;
+/// it cannot borrow the temporary options assembly's reference to that Arc.
+fn warning_locations(
+    source: &Arc<super::build_types::ParseSource>,
+) -> rescript_compiler::driver::WarningLocations {
+    let source = source.clone();
+    Arc::new(move || super::parse::reparse_arena_with_locations(&source))
+}
+
+/// The general syntax of the implementation `ast`
+/// (`DerivedFallback`): its source parsed again with
+/// derived code as syntax, with locations when `locations` (the tree being
+/// compiled has them). Cost: one frontend run, only after fallback is requested.
+fn derived_fallback(ast: &StoredAst, locations: bool) -> Result<rescript_compiler::driver::GeneralSyntax<rescript_compiler::parser::ast::Structure>> {
+    let StoredAst::Structure(general) = super::parse::reparse_without_plans(ast, locations)? else {
+        anyhow::bail!("a parse without plans changed the kind of the unit")
+    };
+    let warning_locations = match &general.retry_source {
+        Some(source) if !general.arena.stores_locations() => Some(warning_locations(source)),
+        _ => None,
+    };
+    let general =
+        Arc::try_unwrap(general).map_err(|_| anyhow::anyhow!("a new parse without plans is shared"))?;
+    Ok(rescript_compiler::driver::GeneralSyntax {
+        arena: general.arena,
+        tree: general.structure,
+        warning_locations,
+    })
+}
+
+
 
 fn compile_module_in_process_to_js_boundary(
     package: &packages::Package,
@@ -4047,7 +4077,7 @@ fn compile_module_in_process_to_js_boundary(
         let intf_key = format!("{module_name}:intf");
         let intf_result = match stored_asts.get(&intf_key) {
             Some(ast @ StoredAst::Signature(_)) => {
-                compile_with_location_retry(ast, build_command_state, &options, |ast, options| {
+                compile_with_location_retry(ast, build_command_state, &options, |ast, options, _fallback| {
                     let StoredAst::Signature(stored) = ast else {
                         unreachable!("interface retry changed AST kind")
                     };
@@ -4207,7 +4237,7 @@ fn compile_module_in_process_to_js_boundary(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match stored_asts.get(&impl_key) {
                 Some(ast @ StoredAst::Structure(_)) => {
-                    compile_with_location_retry(ast, build_command_state, &options, |ast, options| {
+                    compile_with_location_retry(ast, build_command_state, &options, |ast, options, fallback| {
                         let StoredAst::Structure(stored) = ast else {
                             unreachable!("implementation retry changed AST kind")
                         };
@@ -4229,6 +4259,7 @@ fn compile_module_in_process_to_js_boundary(
                             gentype_interface.clone(),
                             signature_hook,
                             publication,
+                            fallback,
                         )
                     })
                 }

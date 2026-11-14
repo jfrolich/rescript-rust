@@ -158,7 +158,9 @@ pub fn main(args: Vec<String>, registry: Option<RegistryProvider>) {
     let handler = builder
         .spawn(|| {
             enable_cli_cleanup_skip();
-            match run(args, registry) {
+            let result = run(args, registry);
+            crate::perf_counters::print_report();
+            match result {
                 Ok(()) => {
                     let _ = std::io::stdout().flush();
                     let _ = std::io::stderr().flush();
@@ -649,6 +651,7 @@ fn compile_in_process(
         }
     };
 
+    crate::perf_counters::begin_cli_unit();
     if is_interface {
         let result = crate::driver::typecheck_interface_source_in_process(
             &source,
@@ -726,6 +729,7 @@ fn compile_in_process(
     }
     options.js_output_targets = targets.clone();
 
+    crate::perf_counters::begin_cli_unit();
     let result = crate::driver::compile_source_in_process(
         &source,
         &filename,

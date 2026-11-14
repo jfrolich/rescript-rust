@@ -534,21 +534,32 @@ impl PortablePersStruct {
         self.summary.get_or_init(|| {
             Arc::new(super::item_deps::SignatureSummary::of(
                 &self.ps_name,
-                &self.decode_signature(encoded),
+                &self.decode_signature(encoded, None),
             ))
         })
     }
 
     /// The main signature, decoded after ensuring bytes exist.
     pub fn signature(&self) -> PortableSignature {
-        self.decode_signature(self.encoded())
+        self.decode_signature(self.encoded(), None)
     }
 
-    fn decode_signature(&self, encoded: &EncodedSignatures) -> PortableSignature {
+    /// Decode an owned signature for this attempt. Cost: O(encoded bytes +
+    /// rebased names), with allocations for the decoded graph. The first
+    /// `encoded()` access can also serialize the retained signature graph.
+    /// Counter attribution is one local increment per signature, not per node.
+    fn signature_for_attempt(&self, ctx: &TypeContext) -> PortableSignature {
+        self.decode_signature(self.encoded(), Some(ctx))
+    }
+
+    fn decode_signature(&self, encoded: &EncodedSignatures, ctx: Option<&TypeContext>) -> PortableSignature {
         if crate::perf_counters::enabled()
             && self.published_generation == Some(crate::types::thread_store::build_generation())
         {
-            crate::perf_counters::record_published_signature_decode();
+            match ctx {
+                Some(ctx) => crate::perf_counters::record_attempt_signature_decode(ctx),
+                None => crate::perf_counters::record_published_signature_decode(),
+            }
         }
         let mut sig = encoded.sig.decode();
         self.rebase_names(&mut sig.cmi_longident_names);
@@ -1931,7 +1942,22 @@ pub enum SignaturePublicationMode {
 
 /// Publish directly from the checker. The portable oracle is check-only;
 /// ordinary storage reconstructs it from the frozen graph after release.
+/// The publication's counters count in `ctx`, the unit's checking attempt.
 pub(crate) fn publish_signature(
+    ps: &PersStruct, ctx: &TypeContext, arena: Option<&ParseArena>,
+    mode: SignaturePublicationMode, checked: bool,
+) -> (Arc<PortablePersStruct>, Option<super::signature_check::Comparison>) {
+    crate::perf_counters::attribute_publication(ctx, || {
+        publish_signature_attributed(ps, ctx, arena, mode, checked)
+    })
+}
+
+/// Cost: build the exported graph, then fingerprint and per-item hash walks
+/// over its reachable types; allocate the frozen graph and one publication.
+/// Fallback serializes a portable graph instead. Check mode additionally
+/// builds the portable oracle and both byte encodings. These are whole-unit
+/// walks, not constant-time publication or per-lookup instrumentation.
+fn publish_signature_attributed(
     ps: &PersStruct, ctx: &TypeContext, arena: Option<&ParseArena>,
     mode: SignaturePublicationMode, checked: bool,
 ) -> (Arc<PortablePersStruct>, Option<super::signature_check::Comparison>) {
@@ -2187,7 +2213,7 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         }
     }
     let sig = if shareable {
-        let portable = pps.signature();
+        let portable = pps.signature_for_attempt(ctx);
         let intern = |name: &str| store.intern_longident_name(name);
         let files = FileRemap::new(&portable.cmi_longident_names, &intern);
         let map = |file| files.map(file);
@@ -2198,7 +2224,7 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         );
         internalize_signature_into_store(&portable.ps_sig, &portable.type_graph, &locs, store)
     } else {
-        let portable = pps.signature();
+        let portable = pps.signature_for_attempt(ctx);
         let intern = |name: &str| ctx.intern_cmi_longident_name(name);
         let files = FileRemap::new(&portable.cmi_longident_names, &intern);
         let map = |file| files.map(file);

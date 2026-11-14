@@ -1,0 +1,1 @@
+- Avoid diagnostic-only unification snapshots during successful unit checks and recheck failed attempts with full diagnostic state.
