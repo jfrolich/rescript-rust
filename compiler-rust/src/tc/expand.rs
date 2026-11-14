@@ -143,6 +143,7 @@ impl TypeTable {
             };
             table.rows.push(row);
         }
+        table.mark_manifests(segment);
         table
     }
 
@@ -217,9 +218,26 @@ impl TypeTable {
     /// [`TypeTable::from_segment`], when every row exists: a manifest names
     /// later declarations of its recursive group. R3m builds it for
     /// `INHERITS`; R3e adds `OPEN_ROW` to the same loop.
-    #[allow(dead_code, unused_variables)]
     pub fn mark_manifests(&mut self, segment: &Segment) {
-        todo!("R3m")
+        for index in 0..self.rows.len() {
+            let row = self.rows[index];
+            if row.manifest == NONE || row.flags & ALIAS != 0 {
+                continue;
+            }
+            let template = self.manifests[row.manifest as usize].template;
+            let start = template.nodes as usize;
+            for node in &segment.template_nodes[start..start + template.node_len as usize] {
+                #[cfg(test)]
+                super::steps::tick();
+                if node.tag() == CONSTR
+                    && node.arity() != 0
+                    && self.info(node.a).flags & (ABBREV | PRIVATE | ALIAS) != 0
+                {
+                    self.rows[index].flags |= INHERITS;
+                    break;
+                }
+            }
+        }
     }
 
     /// O(1): one bounds test and one 16-byte load. (R3b)
@@ -361,6 +379,25 @@ pub struct Chains {
     /// Indexed by a slot-0 list index: the row of that reference, or
     /// `NONE`. Shorter than the list pool: an index past its end has no row.
     pub by_slot: Vec<u32>,
+}
+
+impl Chains {
+    /// Amortized O(1): a row with no entry for the reference at list index
+    /// `slot`, continuing with row `parent`; `by_slot` grows to `slot + 1`.
+    fn push(&mut self, slot: u32, parent: u32) -> u32 {
+        let row = self.rows.len() as u32;
+        self.rows.push(ChainRow {
+            node: Ty(NONE),
+            type_index: NONE,
+            parent,
+            slot,
+        });
+        if self.by_slot.len() <= slot as usize {
+            self.by_slot.resize(slot as usize + 1, NONE);
+        }
+        self.by_slot[slot as usize] = row;
+        row
+    }
 }
 
 /// Both memos' bookkeeping. `cleanup_abbrev` is O(1) for the nullary memo
@@ -876,9 +913,18 @@ impl Checker {
     /// for the part of the list a copy reads. The row's `parent` is kept:
     /// the entry is put in front of what the reference held. One table
     /// load, one row write, one step. (R3m)
-    #[allow(unused_variables)]
     fn chain_entry(&mut self, slot: u32, node: Ty, entry: u32) -> u32 {
-        todo!("R3m")
+        #[cfg(test)]
+        super::steps::tick();
+        let chains = &mut self.memo.chains;
+        let mut row = chains.by_slot.get(slot as usize).copied().unwrap_or(NONE);
+        if row == NONE {
+            row = chains.push(slot, NONE);
+        }
+        let chain = &mut chains.rows[row as usize];
+        chain.node = node;
+        chain.type_index = entry;
+        row
     }
 
     /// One constructor with arguments, `node` at handle `copy`, that the
@@ -899,9 +945,24 @@ impl Checker {
     /// which is the number of expansions in progress above this copy that
     /// did not link; then one row push. No allocation beyond the two pools'
     /// growth. (R3m)
-    #[allow(unused_variables)]
     fn inherit(&mut self, copy: Ty, node: Node, chain: u32) {
-        todo!("R3m")
+        if self.types.info(node.a).flags & (ABBREV | PRIVATE | ALIAS) == 0 {
+            return;
+        }
+        let mut at = chain;
+        while at != NONE {
+            #[cfg(test)]
+            super::steps::tick();
+            let row = self.memo.chains.rows[at as usize];
+            if row.type_index == node.a && self.g.lists[row.slot as usize].0 != NONE {
+                // `Some ty when repr ty != t -> Tlink ty` (ctype.ml:782).
+                self.g.nodes[copy.0 as usize] = link_node(node, row.node);
+                return;
+            }
+            at = row.parent;
+        }
+        // `Mlink !abbreviations` (ctype.ml:796-798).
+        self.memo.chains.push(node.b, chain);
     }
 
     /// The expansion an inherited entry memorizes for constructor
@@ -913,9 +974,28 @@ impl Checker {
     /// without [`ENTRY_PRIVATE`] is the node's, and which is public or
     /// looked up privately (`lte_public`, btype.ml:606-610), gives what its
     /// slot holds. One step per row visited. (R3m)
-    #[allow(unused_variables)]
     fn inherited_expansion(&self, node: Node, private: bool) -> Ty {
-        todo!("R3m")
+        #[cfg(test)]
+        super::steps::tick();
+        let chains = &self.memo.chains;
+        let mut at = match chains.by_slot.get(node.b as usize) {
+            Some(&own) if own != NONE => chains.rows[own as usize].parent,
+            _ => return Ty(NONE),
+        };
+        while at != NONE {
+            #[cfg(test)]
+            super::steps::tick();
+            let row = chains.rows[at as usize];
+            let held = self.g.lists[row.slot as usize];
+            if held.0 != NONE
+                && row.type_index & !ENTRY_PRIVATE == node.a
+                && (private || row.type_index & ENTRY_PRIVATE == 0)
+            {
+                return held;
+            }
+            at = row.parent;
+        }
+        Ty(NONE)
     }
 
     /// O(1): a cleanup emptied the reference at list index `slot`
@@ -924,9 +1004,13 @@ impl Checker {
     /// empty) and the row stays, because the copies its expansion made
     /// still continue with it and see the entry a later expansion writes.
     /// One table load, at most one row write. (R3m)
-    #[allow(unused_variables)]
     fn cut_chain(&mut self, slot: u32) {
-        todo!("R3m")
+        let chains = &mut self.memo.chains;
+        if let Some(&row) = chains.by_slot.get(slot as usize)
+            && row != NONE
+        {
+            chains.rows[row as usize].parent = NONE;
+        }
     }
 
     /// Lower every node reachable from `root` to at most `level`
@@ -1646,7 +1730,7 @@ mod tests {
         };
         let mut table = TypeTable::default();
         let count = steps::scope(|| table = TypeTable::from_segment(&segment));
-        assert_eq!(count, 2 * u64::from(n) + 1);
+        assert_eq!(count, 5 * u64::from(n) + 1);
         assert_eq!(table.rows.len(), n as usize + 1);
         assert_eq!(table.scoped, 0);
         assert_eq!(
