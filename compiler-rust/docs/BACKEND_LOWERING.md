@@ -3361,7 +3361,10 @@ so no vector rotation is needed. Label finalization runs after each successful
 probe while the retained traversal counts only that probe's new visits. All four
 existing whole-Lambda zero-allocation fixtures still pass after integration.
 
-### 7.5.2 Final audit validation and measurements
+### 7.5.2 Historical audit validation and measurements
+
+These results describe `9de839339`, not the corrected head. Section 11 supersedes
+the readiness claim, records the full-unit allocation gap and gives fresh counts.
 
 The measured implementation is `9de839339`; the later arity-comment cleanup
 changes no executable code. All inventoried non-export sites now have a
@@ -3729,6 +3732,8 @@ The default compiler still uses the legacy backend; this slice itself saves
 nothing on that path. The separate short-circuit correction changes default
 JavaScript only where the old loop probe differed from the OCaml reference.
 
+## 11. Allocation audit correction
+
 ### Scope correction — step 1
 
 | Source file (under `compiler-rust/src`) | Disposition | Named lowering caller and necessity |
@@ -3769,7 +3774,7 @@ CARGO_INCREMENTAL=0 cargo clippy --manifest-path compiler-rust/Cargo.toml --all-
   passed
 ```
 
-Steps 3–6 remain outstanding; prior candidate measurements do not validate this corrected head.
+At step 2, steps 3–6 remained outstanding; the final status is recorded below.
 ### Scope correction — step 3
 
 Copy remapping now uses dense, touched-row tables for NodeId, VarId, FuncId, CatchId and JsId. Only source labels retain a map because their sparse numeric identities are not arena indices. Dense copy-table reservations cover the already reserved arena domains: recycling may visit a different row on the second pass without growing the arena. All measured intervals and zero-allocation assertions remain intact.
@@ -3830,3 +3835,119 @@ The nine auxiliary helper measurements are accounted for below. All remain auxil
 | `untagged_dispatch::metadata::canonical_encoding_reuses_buffers_for_ten_thousand_literals` | Variant literal preparation/dispatch; currently included in cold unit construction. |
 
 The additional `export::rows_and_references_are_read_without_allocation_once_the_tables_are_warm` measurement belongs to the explicitly unchanged export subsystem; it also does not prove allocation-free `complete_unit`. Step 6 remains outstanding.
+### Scope correction — step 6: corrected-head measurements and reproducibility
+
+Measured implementation: **`bbb2172b3`** (the final correction commit changes documentation only). Control: **`be1b3a482`**, the integrated trunk snapshot. Both binaries use **release fat LTO, one codegen unit**, rustc `1.102.0-nightly (ac8310ba6 2026-11-09)`. Cachegrind is 3.22.0; Hyperfine is 1.18.0. Both modes compile the same pinned `e5ada1df93` corpus, **738 modules**. Both complete sets of runtime/project `.res`/`.resi` paths and their hashes match: **925 files**. This supersedes the older candidate's measurements in §7.5.2; it is not a new 16-codegen-unit measurement.
+
+An initial comparison was discarded: the control directory had five additional source files (743 versus 738 modules). Checking only the known manifest's hashes had missed them. The reported runs use a separate exact copy of the pinned corpus and compare **path sets as well as bytes**.
+
+| Mode | Control minimum instructions | Corrected minimum instructions | Change | Gate |
+| --- | ---: | ---: | ---: | --- |
+| Default (`RESCRIPT_BACKEND` unset) | 4,054,425,367 | 4,052,624,269 | −1,801,098 (−0.044423%) | Pass: below +0.02% |
+| Check (`RESCRIPT_BACKEND=check`) | 20,598,024,416 | 20,127,912,150 | −470,112,266 (−2.282317%) | Measured separately |
+
+Five-run counts, in order:
+
+- Default control: 4,056,247,047; 4,055,773,576; 4,056,220,896; 4,054,425,367; 4,054,625,541.
+- Default corrected: 4,053,264,415; 4,055,238,432; 4,055,029,144; 4,054,865,040; 4,052,624,269.
+- Check control: 20,598,024,416; 20,599,425,884; 20,601,615,124; 20,605,243,035; 20,604,625,683.
+- Check corrected: 20,149,982,036; 20,152,362,854; 20,127,912,150; 20,137,919,836; 20,155,305,499.
+
+Wall time is not hidden behind the instruction result. Ten Hyperfine runs after two warmups, one worker, clean before each run:
+
+| Mode / binary | Mean ± standard deviation | Minimum–maximum |
+| --- | ---: | ---: |
+| Default / control | 0.790597 ± 0.041530 s | 0.728379–0.867935 s |
+| Default / corrected | 0.936360 ± 0.134663 s | 0.755327–1.171562 s |
+| Check / control | 1.936807 ± 0.334485 s | 1.760560–2.874819 s |
+| Check / corrected | 1.821763 ± 0.066696 s | 1.716106–1.917797 s |
+
+The default corrected wall-time mean is slower. Hyperfine also flagged a check-control outlier. No wall-time speedup or profile-independent improvement is claimed. The +0.02% instruction gate passes for the specified CI profile, not by waiving the threshold.
+
+#### Commands for the measurements
+
+Run from the repository root. `temp/lowering-trunk-control` is a source archive of `be1b3a482`; the two corpus directories are separate exact copies of the `e5ada1df93` corpus, including its dependency setup. Use fresh directories when preparing archives: extracting over another revision leaves extra source files behind. Build the control in its archive, without switching the working branch:
+
+```sh
+export CARGO_INCREMENTAL=0
+CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 cargo build --release --manifest-path temp/lowering-trunk-control/rewatch/Cargo.toml
+CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 cargo build --release --manifest-path rewatch/Cargo.toml
+BASE="$PWD/temp/lowering-trunk-control/rewatch/target/release/rescript"
+HEAD="$PWD/rewatch/target/release/rescript"
+B_CORPUS="$PWD/temp/lowering-correction-base-corpus"
+H_CORPUS="$PWD/temp/lowering-candidate-corpus"
+export B_CORPUS H_CORPUS
+python3 - <<'PY'
+import hashlib, os
+from pathlib import Path
+def sources(root):
+    return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
+            for sub in ['tests/tests', 'packages/@rescript/runtime']
+            for p in (root/sub).rglob('*') if p.suffix in ('.res', '.resi')}
+a, b = (sources(Path(os.environ[key])) for key in ['B_CORPUS', 'H_CORPUS'])
+assert a == b
+print(len(a))  # 925, and equal path sets rather than only matching known files
+PY
+env -u RESCRIPT_BACKEND python3 scripts/compare_build_instructions.py \
+  --base "$BASE" "$B_CORPUS" --head "$HEAD" "$H_CORPUS" \
+  --runs 5 --threshold 0.02 --work-dir temp/lowering-correction-default-exact
+RESCRIPT_BACKEND=check python3 scripts/compare_build_instructions.py \
+  --base "$BASE" "$B_CORPUS" --head "$HEAD" "$H_CORPUS" \
+  --runs 5 --threshold 0.02 --work-dir temp/lowering-correction-check-exact
+```
+
+The script prepares each runtime outside measurement, cleans before every measured build and sets `RAYON_NUM_THREADS=1` plus the side's runtime path. Its output includes every run, minimum, module count and percentage. Do not accept its result if module counts differ.
+
+```sh
+PREPARE="'$BASE' clean '$B_CORPUS/tests/tests' && '$HEAD' clean '$H_CORPUS/tests/tests'"
+for MODE in default check; do
+  if [ "$MODE" = default ]; then BACKEND='-u RESCRIPT_BACKEND'; else BACKEND='RESCRIPT_BACKEND=check'; fi
+  hyperfine --warmup 2 --runs 10 --prepare "$PREPARE" \
+    --export-json "temp/lowering-correction-$MODE-hyperfine.json" \
+    "env $BACKEND RAYON_NUM_THREADS=1 RESCRIPT_RUNTIME='$B_CORPUS/packages/@rescript/runtime' '$BASE' build '$B_CORPUS/tests/tests'" \
+    "env $BACKEND RAYON_NUM_THREADS=1 RESCRIPT_RUNTIME='$H_CORPUS/packages/@rescript/runtime' '$HEAD' build '$H_CORPUS/tests/tests'"
+done
+```
+
+For the **historical** §7.5.2 instruction/wall-time tables, use the same commands with archives/binaries of the revisions named there: `e5ada1df93` and `9de839339` at 16 codegen units for original/check timing, and `be1b3a482` and `9de839339` at respectively 16 or 1 codegen units for the two default comparisons. Keep the same pinned corpus; do not compare profiles against one another.
+
+#### Validation commands and result provenance
+
+The allocation totals, work counters and type sizes in the earlier proof tables are executable assertions in their named tests. To reproduce all BIR proof rows, run `cargo test --manifest-path compiler-rust/Cargo.toml bir:: -- --nocapture --test-threads=1` with `CARGO_INCREMENTAL=0`. The original rows describe the probe boundary; the new full-entry table is printed by `cargo test --manifest-path compiler-rust/Cargo.toml full_unit_allocation_boundary -- --nocapture --test-threads=1`. Planner metadata/fact-pool rows and differential counts use `cargo test --manifest-path compiler-rust/Cargo.toml untagged -- --nocapture --test-threads=1`. For historical rather than corrected layouts, run those commands in an archive of the row's recorded revision.
+
+Before file-backed compiler tests, build the OCaml reference and its artifacts. Benchmark/parity clean commands can remove dependency artifacts; regenerate them rather than skipping a failing corpus file:
+
+```sh
+export TMPDIR=/tmp CARGO_INCREMENTAL=0
+opam exec --switch=rescript -- dune build --root . compiler/bsc/rescript_compiler_main.exe compiler/syntax/cli/res_cli.exe
+export OCAML_BSC="$PWD/_build/default/compiler/bsc/rescript_compiler_main.exe"
+export RESCRIPT_RUNTIME="$PWD/packages/@rescript/runtime"
+export RESCRIPT_CLI="$PWD/rewatch/target/debug/rescript"
+cargo build --manifest-path compiler-rust/Cargo.toml
+cargo build --manifest-path rewatch/Cargo.toml
+"$RESCRIPT_CLI" build-reference --bsc "$OCAML_BSC" packages/@rescript/runtime
+"$RESCRIPT_CLI" build-reference --bsc "$OCAML_BSC" tests/dependencies/rescript-react
+"$RESCRIPT_CLI" build-reference --bsc "$OCAML_BSC" tests/tests
+cargo test --manifest-path compiler-rust/Cargo.toml -- --test-threads=1
+cargo test --manifest-path rewatch/Cargo.toml
+cargo clippy --manifest-path compiler-rust/Cargo.toml --all-targets -- -D warnings
+./scripts/test_js_output_parity.sh
+./scripts/test_stdlib_output_parity.sh
+GENTYPE_PARITY_WITHOUT_TELLA=1 ./scripts/test_gentype_output_parity.sh
+GENTYPE_PARITY_WITHOUT_TELLA=1 python3 scripts/test_backend_coverage.py --target debug
+```
+
+Corrected-head results: **2,462 compiler unit tests passed, 25 existing ignores; 4 integration tests; 5 doctests passed, 7 existing ignores**. The full run includes **771 BIR tests**. Rewatch: **210 unit + 9 integration tests passed**. Strict compiler clippy passed. Exact focused JS **472/472**, canonical snapshots **737/737**, stdlib **113/113**, in-repository GenType **2/2** and the unchanged backend coverage ratchet passed. No new ignores, fixture changes or ratchet updates. The corpus differential was rerun after regenerating reference artifacts and again reported **453 declarations / 850 source files**. External application results remain unmeasured.
+
+#### Correction status
+
+| Ordered step | Status | Evidence / remaining work |
+| --- | --- | --- |
+| 1. Default-path file audit | Done | Ten-file disposition table; unchanged trunk variant emitter. |
+| 2. Retained planner | Done | No production planner hash tables; borrowed payloads/selector; size/cost tests; verbatim test-only reference and corpus differential. |
+| 3. BIR maps/equality/invariants | Done | Dense handle remaps, documented non-index keys, explicit scratch, invariant accounting; all BIR tests pass. |
+| 4. Scratch lifecycle | Done | Saved span and production assertions; stale tail-name regression. |
+| 5. Full-unit zero-allocation proofs | **Not done** | Real entry measured, but 259–567 allocations remain; nine helper tests explicitly remain auxiliary. Requires reusable unit ownership, not moving the measurement boundary. |
+| 6. Commands/instruction gate | Done for CI profile | Both modes measured; default −0.044423% meets +0.02%; wall-time results and limitations disclosed. |
+
+**Keep the PR draft.** The passing performance/parity gates do not replace the outstanding full-unit allocation requirement.
