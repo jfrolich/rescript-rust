@@ -73,7 +73,6 @@ trait Operand<'a>: Sized {
     fn decode(raw: u32, lists: &'a Lists) -> Self;
     fn children(self, _out: &mut SmallVec<[NodeId; 4]>) {}
     /// `children` into a reused vector. Cost: one push per child.
-    #[cfg(test)]
     fn children_into(self, _out: &mut Vec<NodeId>) {}
     fn remap(raw: u32, _lists: &mut Lists, _map: &Renaming<'_>) -> u32 {
         raw
@@ -128,7 +127,6 @@ impl Operand<'_> for NodeId {
     fn children(self, out: &mut SmallVec<[NodeId; 4]>) {
         out.push(self);
     }
-    #[cfg(test)]
     fn children_into(self, out: &mut Vec<NodeId>) {
         out.push(self);
     }
@@ -146,7 +144,6 @@ impl Operand<'_> for Option<NodeId> {
     fn children(self, out: &mut SmallVec<[NodeId; 4]>) {
         out.extend(self);
     }
-    #[cfg(test)]
     fn children_into(self, out: &mut Vec<NodeId>) {
         out.extend(self);
     }
@@ -197,7 +194,6 @@ impl<'a> Operand<'a> for &'a [NodeId] {
     fn children(self, out: &mut SmallVec<[NodeId; 4]>) {
         out.extend_from_slice(self);
     }
-    #[cfg(test)]
     fn children_into(self, out: &mut Vec<NodeId>) {
         out.extend_from_slice(self);
     }
@@ -265,7 +261,6 @@ macro_rules! nodes {
             /// The children, pushed on `out` (`children` without its
             /// inline vector, which spills past four). Cost: one push per
             /// child; nothing is allocated once `out` has the capacity.
-            #[cfg(test)]
             pub(super) fn children_into(self, out: &mut Vec<NodeId>) {
                 match self { $(Self::$op $({ $($field),* })? => { $($($field.children_into(out);)*)? }),* }
             }

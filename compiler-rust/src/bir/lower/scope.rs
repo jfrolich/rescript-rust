@@ -100,9 +100,8 @@ pub(crate) struct Scope {
     pub(crate) import_uses: Vec<u32>,
     /// The tables of the external-shadow decision (`globals::decide`).
     pub(crate) globals: super::globals::Globals,
-    /// The naming log (`names.rs`). For tests only until the lowering
-    /// feeds it (THREE_TREES 11.4, "T5 part B as redesigned").
-    #[cfg(test)]
+    /// The naming log (`names.rs`, THREE_TREES 11.4, "T5 part B as
+    /// redesigned").
     pub(crate) names: super::names::Log,
     #[cfg(test)]
     pub(crate) updates: usize,
@@ -120,7 +119,6 @@ impl Scope {
             close_steps: 0,
             import_uses: Vec::new(),
             globals: Default::default(),
-            #[cfg(test)]
             names: super::names::Log::new(variables),
             #[cfg(test)]
             updates: 0,

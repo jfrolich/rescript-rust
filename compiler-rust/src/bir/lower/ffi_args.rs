@@ -299,6 +299,7 @@ impl State {
         let mut keys = Vec::new();
         let mut actions = Vec::new();
         let mut clauses = Vec::new();
+        super::names::open(&mut self.arena);
         for (key, value) in cases {
             self.primitive_steps += 1;
             keys.push(crate::bir::CaseKey::JavaScript(
@@ -312,6 +313,9 @@ impl State {
                 loc: None,
             });
         }
+        // The scrutinee was built before the function's scope opened and
+        // moves into it (G10).
+        super::names::adopt(&mut self.arena, arg);
         let header = self.arena.switch_header(crate::bir::SwitchHeader {
             constants: keys.len() as u32,
             keys,
@@ -337,6 +341,7 @@ impl State {
             crate::lambda::LamLoc::NONE,
         );
         let callee = self.pure_expression(View::JFun { body, header }, 0);
+        super::names::close(&mut self.arena, header);
         self.call_node(callee, &[], Default::default())
     }
 

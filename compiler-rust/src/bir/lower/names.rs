@@ -24,10 +24,14 @@
 //! moved, copied into another list or dropped needs no bookkeeping: the
 //! replay reads the lists that exist at the end.
 //!
-//! Nothing here is called by the lowering yet (slice T5b-3); the module is
-//! compiled for tests only until then.
-use crate::bir::{Bir, FuncId, ImportId, NodeId, Op, VarId};
+//! The lowering calls `open`, `close` and `adopt`; the replay is wired into
+//! check mode next.
+use crate::bir::{Bir, FuncId, ImportId, NodeId, VarId};
+#[cfg(test)]
+use crate::bir::Op;
+#[cfg(test)]
 use crate::emit::{Printed, Subject, Tables};
+#[cfg(test)]
 use crate::name::Name;
 
 /// A row of `Log::rows`. Row 0 is the program.
@@ -232,6 +236,7 @@ impl Log {
     }
 
     /// The home of `var`. Constant.
+    #[cfg(test)]
     pub(crate) fn home(&self, var: VarId) -> ScopeId {
         ScopeId(self.home[var.index()])
     }
@@ -239,6 +244,7 @@ impl Log {
     /// The free list of a closed scope: sorted by `Ident`'s order (stamp,
     /// then name; an import by its module identifier), without duplicates.
     /// Constant.
+    #[cfg(test)]
     pub(crate) fn free(&self, scope: ScopeId) -> &[FreeRef] {
         let row = self.rows[scope.0 as usize];
         &self.free[row.free_start as usize..(row.free_start + row.free_len) as usize]
@@ -517,6 +523,7 @@ pub(crate) fn eta_shape(bir: &Bir, function: NodeId) -> bool {
 /// statements, then the exports. `raw` holds the spellings the pass skips
 /// when it picks a suffix (`Names::raw`: the name of every variable that is
 /// a JavaScript name, `js_ir::arena::is_raw_js_name`, and occurs).
+#[cfg(test)]
 pub(crate) struct Program<'a> {
     pub(crate) imports: &'a [ImportId],
     pub(crate) reservations: &'a [Subject],
@@ -524,6 +531,7 @@ pub(crate) struct Program<'a> {
     pub(crate) raw: &'a [Name],
 }
 
+#[cfg(test)]
 /// One level of the replay's walk over statement lists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Frame {
@@ -535,6 +543,7 @@ struct Frame {
     leave: u32,
 }
 
+#[cfg(test)]
 /// Storage the replay reuses between units.
 #[derive(Default)]
 pub(crate) struct Scratch {
@@ -552,6 +561,7 @@ pub(crate) struct Scratch {
     spelling: String,
 }
 
+#[cfg(test)]
 /// What one replay did.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct Replayed {
@@ -571,6 +581,7 @@ pub(crate) struct Replayed {
     /// use the pass would have named.
     pub(crate) unnamed_references: usize,
 }
+#[cfg(test)]
 impl Replayed {
     /// All steps. Constant.
     pub(crate) fn steps(&self) -> usize {
@@ -607,6 +618,7 @@ impl Replayed {
 /// node is read at most twice), plus the cost of each `Tables` call. `marks`
 /// is cleared once per unit (four bytes a node). Nothing is allocated once
 /// `scratch`, `tables` and `printed` have held a unit of this size.
+#[cfg(test)]
 pub(crate) fn replay(
     bir: &Bir,
     root: NodeId,
@@ -654,8 +666,10 @@ pub(crate) fn replay(
 
 /// A frame's `at` while it reads its statement's function literals: this
 /// bit and the row; without it, the index of the next child list.
+#[cfg(test)]
 const LITERAL: u32 = 1 << 31;
 
+#[cfg(test)]
 /// The state of one `replay`.
 struct Replay<'a, 'b> {
     bir: &'a Bir,
@@ -667,6 +681,7 @@ struct Replay<'a, 'b> {
     done: Replayed,
 }
 
+#[cfg(test)]
 impl Replay<'_, '_> {
     /// Attach each closed, live row to the statement its literal stands in
     /// (see `replay`). One step per row and per ancestor read; an ancestor
@@ -944,6 +959,7 @@ impl Replay<'_, '_> {
     }
 }
 
+#[cfg(test)]
 /// Whether nodes of `op` are statements. Constant.
 fn is_statement(op: Op) -> bool {
     matches!(
@@ -971,6 +987,7 @@ fn is_statement(op: Op) -> bool {
 /// The free lists of the live rows that are no copies, as identifiers, for
 /// the comparison with the pass (`emit::naming::compare_with_pass`). Check
 /// mode only. Cost: one step per row and per entry; allocates the result.
+#[cfg(test)]
 pub(crate) fn free_lists(bir: &Bir, idents: &[crate::ident::Ident]) -> crate::emit::FreeLists {
     let _ = (bir, idents);
     todo!("T5b-3")

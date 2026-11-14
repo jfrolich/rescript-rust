@@ -325,9 +325,16 @@ impl State {
                     len: missing as u32,
                 };
                 let mut full_args = remaining.to_vec();
+                super::names::open(&mut self.arena);
                 for _ in 0..missing {
                     let var = self.fresh_variable("param");
                     full_args.push(self.pure_expression(View::Var { var }, 0));
+                }
+                // The callee and the arguments were built before the
+                // function's scope opened and move into it (G10).
+                super::names::adopt(&mut self.arena, callee);
+                for &node in remaining {
+                    super::names::adopt(&mut self.arena, node);
                 }
                 let call = self.call_node(callee, &full_args, full);
                 let ret = crate::bir::j::return_value(&mut self.arena, call);
@@ -337,7 +344,9 @@ impl State {
                     Default::default(),
                     crate::lambda::LamLoc::NONE,
                 );
-                return self.pure_expression(View::JFun { body, header }, 0);
+                let function = self.pure_expression(View::JFun { body, header }, 0);
+                super::names::close(&mut self.arena, header);
+                return function;
             } else {
                 return self.call_node(callee, remaining, crate::js_ir::CallInfo::default());
             }

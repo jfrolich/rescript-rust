@@ -286,6 +286,7 @@ impl State {
                     header
                 };
                 let value = self.pure_expression(View::JFun { body, header }, 0);
+                super::names::close(&mut self.arena, header);
                 if let Some(loc) = source_loc {
                     self.arena
                         .set_cold(value, crate::bir::Cold { loc, comment: None });

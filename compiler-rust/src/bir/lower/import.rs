@@ -60,6 +60,8 @@ impl State {
     /// X: wrap_then_path. O(path segments + spelling bytes). The callback
     /// owns one parameter and a linear member chain, with no subtree copy.
     fn wrap_then_path(&mut self, import: NodeId, path: &[String]) -> NodeId {
+        // `import` stays outside the callback: nothing is adopted.
+        super::names::open(&mut self.arena);
         let param = self.fresh_variable("m");
         let mut value = self.pure_expression(View::Var { var: param }, 0);
         for segment in path {
@@ -77,6 +79,7 @@ impl State {
             LamLoc::NONE,
         );
         let callback = self.pure_expression(View::JFun { body, header }, 0);
+        super::names::close(&mut self.arena, header);
         let then = self.static_member(import, "then");
         self.call_node(then, &[callback], Default::default())
     }

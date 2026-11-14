@@ -148,7 +148,6 @@ impl Bir {
         self.vars.printed.push(None);
         if let Some(scope) = &mut self.js_scope {
             scope.push();
-            #[cfg(test)]
             scope.names.variable();
         }
         id

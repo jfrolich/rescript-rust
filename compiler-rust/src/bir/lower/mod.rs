@@ -13,7 +13,6 @@ mod cond;
 mod exit;
 mod export;
 mod globals;
-#[cfg(test)]
 pub(crate) mod names;
 mod expr;
 mod konst;
@@ -694,6 +693,8 @@ impl ProbeRules for State {
                 return Ok(ProbePlan::Children(expr::Resume::Call(call)));
             }
             View::Fun { body, header } => {
+                // The body is lowered next, inside the function's scope.
+                names::open(&mut self.arena);
                 return Ok(ProbePlan::Children(expr::Resume::Fun { body, header, loop_: self.tail_functions.get(node.index()).copied().flatten() }));
             }
             View::Let { var, value, body } => {

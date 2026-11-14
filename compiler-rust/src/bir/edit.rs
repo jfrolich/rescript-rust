@@ -325,16 +325,15 @@ impl Bir {
         // A function's parameters get their home where its scope closes.
         // The op is read from the table, not through `node`, which would
         // count a visit.
-        #[cfg(test)]
-        let literal = matches!(self.nodes[id.index()].op(), Op::Fun | Op::JFun);
+        let home = self.js_scope.is_some()
+            && !matches!(self.nodes[id.index()].op(), Op::Fun | Op::JFun);
         for var in self.binders(id) {
             assert!(
                 self.vars.binder[var.index()].is_none(),
                 "variable already bound"
             );
             self.vars.binder[var.index()] = Some(id);
-            #[cfg(test)]
-            if !literal && let Some(scope) = &mut self.js_scope {
+            if home && let Some(scope) = &mut self.js_scope {
                 scope.names.bind(var);
             }
         }
@@ -494,7 +493,6 @@ impl Bir {
             if let Some(scope) = &mut self.js_scope {
                 let View::JQualified { module, .. } = node.view(&self.lists) else { unreachable!() };
                 scope.import_reference(module, add);
-                #[cfg(test)]
                 if add {
                     scope.names.import_reference(module);
                 }
@@ -1223,8 +1221,7 @@ impl Bir {
                         old.loc,
                     );
                     self.vars.funcs[new.index()].flags = old.flags;
-                    #[cfg(test)]
-                    {
+                    if self.js_scope.is_some() {
                         // The copy's parameters are bound where the copy is
                         // made, as its other binders are (`bind`): no scope
                         // closes over a copy, so the open scope reads the
