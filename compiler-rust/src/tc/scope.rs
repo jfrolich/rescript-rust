@@ -706,7 +706,23 @@ impl Scopes {
     /// Returns that index
     /// (compiler/ml/env.ml:1874-1911).
     pub fn open(&mut self, table: TableId, loc: u32, root: u32, flags: u32) -> u32 {
-        todo!("R4c")
+        debug_assert!(self.current != NONE, "open with no scope entered");
+        debug_assert_eq!(self.layers.len(), self.opens.len());
+        let index = self.layers.len() as u32;
+        let scope = &mut self.scopes[self.current as usize];
+        self.layers.push(Layer {
+            table,
+            mark: self.binders.len(),
+            older: scope.opens,
+        });
+        scope.opens = index;
+        self.opens.push(Open {
+            loc,
+            root,
+            shadowed: NONE,
+            flags,
+        });
+        index
     }
 
     /// At most floor(log2 n) + 1 steps (one a comparison) for a table of n
@@ -742,6 +758,44 @@ impl Scopes {
             self.imported_members[row as usize]
         } else {
             self.members[row as usize]
+        }
+    }
+
+    /// The lookup of `key` among the binder `head` (or [`NONE`]) and the
+    /// layers from `layer` through `older`: one [`Scopes::search`] per
+    /// layer whose mark is above `head` (every layer when `head` is
+    /// [`NONE`]), innermost first, stopping at the first that has the key;
+    /// no other step, no write. A layer's mark is never above a younger
+    /// layer's, so the first layer not above `head` ends the walk
+    /// (compiler/ml/env.ml:272-289: `current` before `components` before
+    /// `next`).
+    fn find_from(&self, key: Key, head: u32, mut layer: u32) -> Option<Found> {
+        while layer != NONE {
+            let row = self.layers[layer as usize];
+            if head != NONE && row.mark <= head {
+                break;
+            }
+            if let Some(member) = self.search(row.table, key) {
+                return Some(Found {
+                    item: self.resolved(row.table, member),
+                    layer,
+                });
+            }
+            layer = row.older;
+        }
+        (head != NONE).then_some(Found {
+            item: Resolved::binder(Binder(head)),
+            layer: NONE,
+        })
+    }
+
+    /// O(1), no step: what row `row` of `table` names: its binder for a
+    /// local table, the row itself for an imported one.
+    fn resolved(&self, table: TableId, row: u32) -> Resolved {
+        if table.0 & IMPORTED != 0 {
+            Resolved::import(row)
+        } else {
+            Resolved::binder(Binder(self.members[row as usize].target))
         }
     }
 
@@ -783,7 +837,8 @@ impl Scopes {
     /// first, stopping at the first that has the key. With no head binder
     /// every visible layer is probed. No allocation, no write.
     pub fn find(&self, key: Key) -> Option<Found> {
-        todo!("R4c")
+        let head = self.head(key);
+        self.find_from(key, head, self.scopes[self.current as usize].opens)
     }
 
     /// What `layer`'s member hides: the lookup of `key` restricted to

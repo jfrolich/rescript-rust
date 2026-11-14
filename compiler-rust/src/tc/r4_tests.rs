@@ -804,7 +804,6 @@ fn a_table_of_ten_thousand_members_is_searched_in_fourteen_steps() {
 /// Every table here has one member, so a probe is one comparison and the
 /// counts are exact: 1 for the head and 1 a layer probed.
 #[test]
-#[ignore = "R4c build"]
 fn a_lookup_under_ten_opened_modules() {
     let mut s = unit_scopes();
     let old_x = bind(&mut s, "x", Namespace::Value, 0);
