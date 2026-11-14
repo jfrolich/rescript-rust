@@ -37,3 +37,6 @@ pub mod publish;
 pub mod bridge;
 
 pub mod canonical;
+
+#[cfg(test)]
+mod differential;

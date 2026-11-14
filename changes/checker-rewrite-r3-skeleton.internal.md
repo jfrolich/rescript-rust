@@ -1,0 +1,1 @@
+- Design the third slice of the type checker rewrite (unification and expansion on the new graph) as ten build slices, with its skeleton, its acceptance tests and a differential harness against the current checker.
