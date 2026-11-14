@@ -247,7 +247,7 @@ impl Log {
     }
 
     /// `close` on the log taken out of `bir` (see `close`).
-    fn close(&mut self, bir: &Bir, function: FuncId) -> ScopeId {
+    fn close(&mut self, bir: &Bir, idents: &[crate::ident::Ident], function: FuncId) -> ScopeId {
         let open = self.open.pop().expect("a function scope is open");
         let row = open.row;
         // 1. The parameters are bound here.
@@ -290,7 +290,7 @@ impl Log {
         let mut comparisons = 0;
         self.run[start..].sort_unstable_by(|&a, &b| {
             comparisons += 1;
-            ident_order(bir, a, b)
+            ident_order(bir, idents, a, b)
         });
         self.steps += comparisons;
         let free_start = index(self.free.len());
@@ -363,22 +363,22 @@ impl Log {
     }
 }
 
-/// `Ident`'s order of two free entries (stamp, then name; a variable by its
-/// origin, an import by its module identifier), then the entries' own
-/// order, so that equal entries are adjacent. Constant.
-fn ident_order(bir: &Bir, a: FreeRef, b: FreeRef) -> std::cmp::Ordering {
+/// `Ident`'s order of two free entries (`Ident::cmp`: stamp, then name,
+/// then flags; a variable by the identifier of its origin, an import by its
+/// module identifier), then the entries' own order, so that equal entries
+/// are adjacent. It is the order the pass sorts a free list by (naming.rs
+/// `sorted`), read from the same identifiers: a variable's `order` is not
+/// its stamp for a hidden identifier (stamp -1) or for a variable the
+/// lowering made for a JavaScript name (stamp 0). Constant.
+fn ident_order(bir: &Bir, idents: &[crate::ident::Ident], a: FreeRef, b: FreeRef) -> std::cmp::Ordering {
     if a == b {
         return std::cmp::Ordering::Equal;
     }
+    // A variable without an identifier is never reserved
+    // (`Replay::subject`); it sorts before the others.
     let key = |entry: FreeRef| match (entry.as_var(), entry.as_import()) {
-        (Some(var), _) => {
-            let origin = bir.vars.j_origin[var.index()];
-            (i64::from(bir.vars.order(origin)), bir.vars.name(origin))
-        }
-        (None, Some(import)) => {
-            let module = &bir.pools.j_modules[import.index()].id;
-            (i64::from(module.stamp()), module.name_atom())
-        }
+        (Some(var), _) => idents.get(bir.vars.j_origin[var.index()].index()).copied(),
+        (None, Some(import)) => Some(bir.pools.j_modules[import.index()].id),
         (None, None) => unreachable!("a free entry is a variable or an import"),
     };
     key(a).cmp(&key(b)).then(a.cmp(&b))
@@ -427,9 +427,9 @@ pub(crate) fn open(bir: &mut Bir) -> ScopeId {
 /// handed up; nothing is allocated once the vectors have their capacity. A
 /// site is read at one close only, so the sites cost one step each over the
 /// whole unit, whatever the nesting.
-pub(crate) fn close(bir: &mut Bir, function: FuncId) -> ScopeId {
+pub(crate) fn close(bir: &mut Bir, idents: &[crate::ident::Ident], function: FuncId) -> ScopeId {
     let mut log = std::mem::take(&mut bir.js_scope.as_mut().expect("lowering scope").names);
-    let scope = log.close(bir, function);
+    let scope = log.close(bir, idents, function);
     bir.js_scope.as_mut().expect("lowering scope").names = log;
     scope
 }
@@ -862,7 +862,7 @@ impl Replay<'_, '_> {
         let log = self.log;
         for &entry in log.free(ScopeId(row)) {
             if let Some(own) = pending {
-                match ident_order(bir, own, entry) {
+                match ident_order(bir, self.idents, own, entry) {
                     std::cmp::Ordering::Less => {
                         self.reserve(own, several);
                         pending = None;
@@ -1123,13 +1123,10 @@ mod tests {
         fn function(&mut self, header: FuncId, statements: &[NodeId]) -> (NodeId, ScopeId) {
             let body = self.block(statements);
             let function = self.b.new_node(View::JFun { body, header }, 0);
-            (function, close(&mut self.b, header))
+            (function, close(&mut self.b, &self.idents, header))
         }
         fn log(&self) -> &Log {
             &self.b.js_scope.as_ref().unwrap().names
-        }
-        fn log_mut(&mut self) -> &mut Log {
-            &mut self.b.js_scope.as_mut().unwrap().names
         }
         fn free(&self, scope: ScopeId) -> Vec<FreeRef> {
             self.log().free(scope).to_vec()

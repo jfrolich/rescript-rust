@@ -1235,6 +1235,21 @@ pub(crate) fn compare_with_pass(
     Ok(stats)
 }
 
+/// The pass's free lists and names of `program`, sorted, for the text a
+/// failing oracle test shows beside the replay's (`bir::lower::oracle_tests`).
+#[cfg(test)]
+pub(crate) fn pass_tables(
+    program: &JsDepsProgram,
+    resolver: &ModulePathResolver,
+) -> Result<(Vec<Vec<Ident>>, Vec<(Ident, Name)>), Unsupported> {
+    let names = Names::collect(program, resolver, false)?;
+    let mut free: Vec<Vec<Ident>> = names.free.values().cloned().collect();
+    free.sort_unstable();
+    let mut printed: Vec<(Ident, Name)> = names.printed.iter().map(|(ident, name)| (*ident, *name)).collect();
+    printed.sort_unstable_by_key(|(ident, _)| *ident);
+    Ok((free, printed))
+}
+
 /// The entries one sorted side has and the other has not, as multisets.
 /// Sorts both. One step per entry after the sorts.
 fn multiset_difference<T: Ord>(left: &mut [T], right: &mut [T]) -> usize {

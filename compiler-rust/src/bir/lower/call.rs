@@ -436,7 +436,7 @@ impl State {
                     crate::lambda::LamLoc::NONE,
                 );
                 let function = self.pure_expression(View::JFun { body, header }, 0);
-                super::names::close(&mut self.arena, header);
+                super::names::close(&mut self.arena, &self.idents, header);
                 return function;
             } else {
                 return self.call_node(callee, remaining, crate::js_ir::CallInfo::default());

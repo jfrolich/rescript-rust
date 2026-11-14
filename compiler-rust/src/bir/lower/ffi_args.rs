@@ -337,7 +337,7 @@ impl State {
             crate::lambda::LamLoc::NONE,
         );
         let callee = self.pure_expression(View::JFun { body, header }, 0);
-        super::names::close(&mut self.arena, header);
+        super::names::close(&mut self.arena, &self.idents, header);
         self.call_node(callee, &[], Default::default())
     }
 

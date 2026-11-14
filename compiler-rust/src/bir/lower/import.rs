@@ -91,7 +91,7 @@ impl State {
             LamLoc::NONE,
         );
         let callback = self.pure_expression(View::JFun { body, header }, 0);
-        super::names::close(&mut self.arena, header);
+        super::names::close(&mut self.arena, &self.idents, header);
         let then = self.static_member(import, "then");
         self.call_node(then, &[callback], Default::default())
     }

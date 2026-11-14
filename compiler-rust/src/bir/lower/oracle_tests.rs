@@ -1905,6 +1905,19 @@ fn compared_names(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::Mo
     for (import, name) in lowered.printed.modules.iter().enumerate() {
         println!("replay: {:?} -> {name:?}", modules[import]);
     }
+    let mut start = 0;
+    for &end in &free.ends {
+        println!("replay free: {:?}", &free.idents[start..end as usize]);
+        start = end as usize;
+    }
+    if let Ok((pass_free, pass_names)) = crate::emit::pass_tables(&program, resolver) {
+        for list in pass_free {
+            println!("pass free: {list:?}");
+        }
+        for (ident, name) in pass_names {
+            println!("pass: {ident:?} -> {name:?}");
+        }
+    }
     Some((stats, lowered.switch_stats.replayed))
 }
 
@@ -2166,6 +2179,56 @@ fn the_naming_log_agrees_on_a_function_whose_module_reference_folds_away() {
     let zero = a.const_(C::Int { i: 0, comment: None });
     let equal = a.prim_raw(P::Pintcomp(Comparison::Eq), &[order, zero], LamLoc::NONE);
     let function = a.function_(2, &[left, right], equal, Default::default(), LamLoc::NONE);
+    let end = a.var(f);
+    let root = a.let_(LetKind::Strict, f, function, end);
+    names_agree(a, root, None, false);
+}
+
+#[test]
+fn the_naming_log_agrees_on_a_function_whose_option_wrapper_folds_away() {
+    // `let f = value => isNotNone(Some(Primitive_module.init(value)))`:
+    // `Some` builds `Primitive_option.some(...)`, and the test for `None`
+    // releases that call with its module reference before `f` closes
+    // (`prim.rs`, `PisNotNone`). The free list of `f` holds
+    // `Primitive_module` only. Reduced from
+    // `prim::tests::option_arms_match_legacy` (`PisNotNone`, shape 8).
+    use crate::lambda::lam_primitive::Primitive as P;
+    use crate::lambda::LamLoc;
+    let mut a = LamArena::new();
+    let (f, value) = (Ident::new("f", 1, IdentFlags::NONE), Ident::new("value", 2, IdentFlags::NONE));
+    let read = a.var(value);
+    let module = a.prim_raw(P::PinitMod, &[read], LamLoc::NONE);
+    let some = a.prim_raw(P::Psome, &[module], LamLoc::NONE);
+    let test = a.prim_raw(P::PisNotNone, &[some], LamLoc::NONE);
+    let function = a.function_(1, &[value], test, Default::default(), LamLoc::NONE);
+    let end = a.var(f);
+    let root = a.let_(LetKind::Strict, f, function, end);
+    names_agree(a, root, None, false);
+}
+
+#[test]
+fn the_naming_log_agrees_on_the_order_of_a_free_list_with_a_javascript_name() {
+    // `let f = value => new F(Primitive_module.init(value))` with `F` an
+    // external: the free list of `f` is `[F, Primitive_module]` in
+    // `Ident`'s order (both stamp zero, then the name). The variable the
+    // lowering makes for `F` has an order of its own, which is not its
+    // stamp, so the list is sorted by the identifiers, as the pass sorts
+    // it. Reduced from
+    // `a_result_the_lowering_assigns_is_not_held_before_a_statement_argument_of_an_external`
+    // (`DeclNew`).
+    use crate::lambda::lam_primitive::{DeclKind, ExternalDecl, JsCall, Param, Primitive as P};
+    use crate::lambda::LamLoc;
+    let mut a = LamArena::new();
+    let (f, value) = (Ident::new("f", 1, IdentFlags::NONE), Ident::new("value", 2, IdentFlags::NONE));
+    let read = a.var(value);
+    let module = a.prim_raw(P::PinitMod, &[read], LamLoc::NONE);
+    let call = JsCall {
+        prim_name: "F".into(),
+        arg_types: vec![Param::dummy()],
+        ffi: ExternalDecl { kind: DeclKind::DeclNew { name: "F".into() }, module_: None, scopes: vec![], variadic: false, effective_arity: 1 },
+    };
+    let made = a.prim_raw(P::PjsCall(Box::new(call)), &[module], LamLoc::NONE);
+    let function = a.function_(1, &[value], made, Default::default(), LamLoc::NONE);
     let end = a.var(f);
     let root = a.let_(LetKind::Strict, f, function, end);
     names_agree(a, root, None, false);
