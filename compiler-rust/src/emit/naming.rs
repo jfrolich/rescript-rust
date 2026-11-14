@@ -1173,9 +1173,10 @@ pub(crate) struct NameStats {
     /// Cached bounds whose spelling one side has and the other has not
     /// (as multisets).
     pub(crate) finish_differences: usize,
-    /// Free lists one side has and the other has not (as multisets of
-    /// identifier sequences). A difference here with no name difference is
-    /// a latent one: no local of the unit has the base that differs.
+    /// Free lists one side has and the other has not, as multisets of
+    /// identifier sequences, live copies included on both sides (the pass
+    /// keeps one list per function literal, a copy included). A difference
+    /// here with no name difference is a latent one: no local of the unit has the base that differs.
     pub(crate) free_differences: usize,
 }
 
@@ -1235,8 +1236,6 @@ pub(crate) fn compare_with_pass(
     let mut pass_finishes: Vec<&str> = names.finishes.values().map(|name| name.as_str()).collect();
     let mut replay_finishes: Vec<&str> = printed.finishes.iter().map(|name| name.as_str()).collect();
     stats.finish_differences = multiset_difference(&mut pass_finishes, &mut replay_finishes);
-    // Free lists as sets of identifier sequences: a function the lowering
-    // copied is one sequence for both sides.
     let mut pass_free: Vec<&[Ident]> = names.free.values().map(Vec::as_slice).collect();
     let mut replay_free: Vec<&[Ident]> = Vec::with_capacity(free.ends.len());
     let mut start = 0;
@@ -1244,10 +1243,6 @@ pub(crate) fn compare_with_pass(
         replay_free.push(&free.idents[start..end as usize]);
         start = end as usize;
     }
-    pass_free.sort_unstable();
-    pass_free.dedup();
-    replay_free.sort_unstable();
-    replay_free.dedup();
     stats.free_differences = multiset_difference(&mut pass_free, &mut replay_free);
     Ok(stats)
 }

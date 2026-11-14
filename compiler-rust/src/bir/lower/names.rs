@@ -1189,14 +1189,15 @@ fn is_statement(op: Op) -> bool {
     )
 }
 
-/// The free lists of the live rows that are no copies, as identifiers, for
-/// the comparison with the pass (`emit::naming::compare_with_pass`). Check
-/// mode only. Cost: one step per row and per entry; allocates the result.
+/// The free lists of the live rows, copies included (the pass keeps one
+/// list per function literal, a copy included), as identifiers, for the
+/// comparison with the pass (`emit::naming::compare_with_pass`). Check mode
+/// only. Cost: one step per row and per entry; allocates the result.
 pub(crate) fn free_lists(bir: &Bir, idents: &[crate::ident::Ident]) -> crate::emit::FreeLists {
     let log = &bir.js_scope.as_ref().expect("lowering scope").names;
     let mut lists = crate::emit::FreeLists::default();
     for (row, info) in log.rows.iter().enumerate().skip(1) {
-        if info.flags & ScopeRow::CLOSED == 0 || info.flags & ScopeRow::COPY != 0 {
+        if info.flags & ScopeRow::CLOSED == 0 {
             continue;
         }
         if bir.func_owners.get(info.function.index()).copied().flatten().is_none() {

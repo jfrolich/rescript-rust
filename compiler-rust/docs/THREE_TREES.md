@@ -1955,7 +1955,7 @@ binder and reference, in order" is equal exactly when, per unit:
 3. `ambiguous_orders` and `unnamed_references` are zero.
 
 `free_differences` (the free lists as multisets of identifier sequences,
-copies left out) is required to be zero as well: a wrong free list changes a
+live copies included on both sides) is required to be zero as well: a wrong free list changes a
 name only when a local of the same base exists, so the names alone would
 hide it. A unit the pass does not support is not compared and is counted.
 
@@ -2288,8 +2288,15 @@ the comparison with the pass before the change.
    same storage allocates none. Shared instead of added: `Vars::printed`
    for the names, the export selection for the exported variables, one
    reservation list, `born` in `Saved`, one per-variable column.
-8. *The comparison* (`compare_with_pass`) is unchanged. `compare_oracle`
-   compares each rule test in both ways of printing JSX.
+8. *The comparison* (`compare_with_pass`) compares the free lists as
+   multisets of identifier sequences, live copies included on both sides
+   (was: sorted and deduplicated sets, with the copies left out on the
+   replay's side only, so two equal lists counted as one and two swapped
+   lists cancelled). `free_lists` gives the list of every closed row whose
+   literal is live, a copy's included, as the pass keeps one list per
+   function literal, a copy included. Zero on all four corpora in this
+   form (the gate below). `compare_oracle` compares each rule test in both ways of
+   printing JSX.
 
 **Kept from the wiring slice, with the reason.**
 
