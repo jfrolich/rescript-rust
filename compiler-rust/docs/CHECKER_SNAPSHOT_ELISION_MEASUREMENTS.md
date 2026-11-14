@@ -211,3 +211,53 @@ ratio is lower because the failure skips the backend, so it is not an estimate
 of the type checker's retry overhead alone. This synthetic late-type-error case
 does not establish a worst-case bound for all unit shapes or later validation
 failures.
+
+## Ten-thousand-item late failure (R8a review correction)
+
+Measured checker implementation `ef00cdb84` with the checked-in
+`compiler-rust/examples/check_retry_cost.rs` harness (the same direct driver
+entry point and 64 MiB stack as the earlier harness). The passing twin contains
+10,000 `let xN = N` items. The failing twin appends `let bad: bool = 1`.
+
+```sh
+python3 - <<'PYTHON'
+from pathlib import Path
+source = ''.join(f'let x{n} = {n}\n' for n in range(10_000))
+Path('/tmp/pass.res').write_text(source)
+Path('/tmp/fail.res').write_text(source + 'let bad: bool = 1\n')
+PYTHON
+CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
+  cargo build --locked --release --manifest-path compiler-rust/Cargo.toml \
+  --example check_retry_cost
+for case in pass fail; do
+  for n in 1 2 3 4 5; do
+    env -u RESCRIPT_CHECK_MODE -u RESCRIPT_COMPILER_COUNTERS \
+      valgrind --tool=cachegrind --cache-sim=no --branch-sim=no \
+      --cachegrind-out-file="/tmp/$case-$n.cachegrind" \
+      compiler-rust/target/release/examples/check_retry_cost \
+      "/tmp/$case.res" "$case"
+  done
+done
+```
+
+Raw cachegrind output (`I refs`, process-ID prefixes omitted), in run order:
+
+```text
+pass:
+I refs: 15,354,558,787
+I refs: 15,354,638,358
+I refs: 15,354,745,557
+I refs: 15,355,725,291
+I refs: 15,355,296,076
+fail:
+I refs: 554,579,658
+I refs: 553,799,753
+I refs: 554,248,774
+I refs: 554,385,788
+I refs: 553,589,777
+```
+
+Minimum-of-five: passing **15,354,558,787**, failing **553,589,777** instructions.
+Fail/pass = **0.036054×**, below 2.2×. This is the requested full-compilation
+comparison, not isolated type-checker overhead: only the passing twin runs the
+backend. It does not establish a bound for other unit shapes.
