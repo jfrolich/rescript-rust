@@ -1081,19 +1081,42 @@ export async function run(manifest, host) {
   return failed;
 }
 
+// How the compiler proved a law (docs/verify/proof.md).
+function howProved(proof) {
+  const parts = [];
+  if (proof.induction.length > 0) parts.push(`induction on ${proof.induction.join(", ")}`);
+  else if (proof.cases > 1) parts.push(`${proof.cases} cases`);
+  else parts.push("by computation");
+  if (proof.lemmas.length > 0) parts.push(`using ${proof.lemmas.join(", ")}`);
+  return parts.join(", ");
+}
+
 export function runItem(item, name, value, options, lines) {
   if (item.kind === "law") {
+    // A law the compiler proved is run all the same: the run checks the
+    // prover against the program as it is compiled.
     const result = checkLaw(value, name, item.detail, options);
+    const proof = item.detail.proof;
+    const proved = proof !== undefined && proof.status === "proved";
+    if (result.status === "failed") {
+      for (const line of result.counterexample) lines.push(line);
+      lines.push(result.raised === undefined ? "the law returned false" : `the law raised ${result.raised}`);
+      if (proved) lines.push("rescript proved this law, and this run breaks it: that is a bug in rescript, please report it");
+      const shrunk = result.shrinks > 0 ? `, made smaller ${plural(result.shrinks, "time")}` : "";
+      return { ok: false, summary: `fails (case ${result.cases}${shrunk})` };
+    }
     if (result.status === "proved") {
       return { ok: true, summary: `holds for all ${plural(result.cases, "value")}` };
     }
-    if (result.status === "passed") {
-      return { ok: true, summary: `held for ${plural(result.cases, "random case")}` };
+    if (proved) return { ok: true, summary: `proved for every value (${howProved(proof)})` };
+    const ran = `held for ${plural(result.cases, "random case")}`;
+    const reason = proof === undefined ? "this run did not look for one" : proof.reason;
+    if (item.detail.must) {
+      lines.push(`${ran}, which is not a proof`);
+      lines.push(`no proof was found: ${reason}`);
+      return { ok: false, summary: "is not proved" };
     }
-    for (const line of result.counterexample) lines.push(line);
-    lines.push(result.raised === undefined ? "the law returned false" : `the law raised ${result.raised}`);
-    const shrunk = result.shrinks > 0 ? `, made smaller ${plural(result.shrinks, "time")}` : "";
-    return { ok: false, summary: `fails (case ${result.cases}${shrunk})` };
+    return { ok: true, summary: proof === undefined ? ran : `${ran} (no proof: ${reason})` };
   }
   if (item.kind === "spec") {
     const result = checkSpec(value, name, item.detail, options);
