@@ -963,7 +963,6 @@ fn an_application_memorizes_the_result_node() {
 /// `myint => myint`. A plain node becomes the unexpanded abbreviation node,
 /// whichever side it is on (compiler/ml/ctype.ml:2299-2303, 2331).
 #[test]
-#[ignore = "R3c build"]
 fn fixture_1_plain_node_takes_the_abbreviation() {
     for swapped in [false, true] {
         let mut c = checker(Mode::Success);
@@ -986,7 +985,6 @@ fn fixture_1_plain_node_takes_the_abbreviation() {
 /// `myint => r`. `a` is the node of one instance of the label; another
 /// instance of the label is not renamed.
 #[test]
-#[ignore = "R3c build"]
 fn fixture_6b_one_label_instance_is_renamed() {
     let mut c = checker(Mode::Success);
     // The label `n`: its type and the record's.
@@ -1013,7 +1011,6 @@ fn fixture_6b_one_label_instance_is_renamed() {
 /// `h: ((myint, int)) => (myint, int)`, `pairConst: (int, int)`. The link
 /// lands on a node inside `q`'s type (O6).
 #[test]
-#[ignore = "R3c build"]
 fn fixture_7_link_inside_another_bindings_type() {
     let mut c = checker(Mode::Success);
     let pair_const = scheme(&mut c, |c| {
@@ -1043,7 +1040,6 @@ fn fixture_7_link_inside_another_bindings_type() {
 /// `takesP: (phantom<'a>, 'a) => unit`: `(phantom<'a>, 'a) => phantom<'a>`.
 /// A ground node gains a variable (O9).
 #[test]
-#[ignore = "R3c build"]
 fn fixture_9_ground_node_gains_a_variable() {
     let mut c = checker(Mode::Success);
     let (a, w) = (var(&mut c), var(&mut c));
@@ -1120,7 +1116,6 @@ fn fixture_10_two_abbreviations_stay_two_nodes() {
 /// `let g = f => { plainF(f); takesCb(f); f }`: `cb => cb`. A node that is
 /// not a constructor is linked to the abbreviation.
 #[test]
-#[ignore = "R3c build"]
 fn fixture_11_arrow_takes_the_abbreviation() {
     let mut c = checker(Mode::Success);
     let f = var(&mut c);
@@ -1138,7 +1133,6 @@ fn fixture_11_arrow_takes_the_abbreviation() {
 /// `myint => (myint, box<string>)`: the variable links to the *copy* of
 /// the label's `myint`, which survives as the representative.
 #[test]
-#[ignore = "R3c build"]
 fn idea_1_the_label_copy_survives() {
     let mut c = checker(Mode::Success);
     let count = scheme(&mut c, |c| {
@@ -1162,7 +1156,6 @@ fn idea_1_the_label_copy_survives() {
 /// variable that occurs only in a phantom argument is bound to the
 /// constructor; one that occurs in a real argument is a clash (O13).
 #[test]
-#[ignore = "R3c build"]
 fn occurrence_through_an_abbreviation() {
     let mut c = checker(Mode::Success);
     let v = var(&mut c);
@@ -1172,4 +1165,59 @@ fn occurrence_through_an_abbreviation() {
     let v = var(&mut c);
     let p = constr(&mut c, PA, &[v]);
     assert!(c.unify(v, p).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// R3c: the cost of the expanding occurrence test.
+// ---------------------------------------------------------------------------
+
+/// `v` against a tuple of 10,000 `phantom<v>`: the binding walk reaches `v`
+/// under every element, and `occur_rec`'s retry expands each `phantom<v>`
+/// once (compiler/ml/ctype.ml:1396-1402). Linear, on a 2 MB stack.
+#[test]
+fn occurrence_retry_through_ten_thousand_phantoms_is_linear() {
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            let n = 10_000u64;
+            let mut c = checker(Mode::Success);
+            let v = var(&mut c);
+            let elements: Vec<Ty> = (0..n).map(|_| constr(&mut c, PHANTOM, &[v])).collect();
+            let wide = tuple(&mut c, &elements);
+            // Measured: 13 steps an element, most of them the expansion
+            // (two loop steps, one parameter, the 3-node template).
+            let count = steps::scope(|| c.unify(v, wide).unwrap());
+            assert!(count <= 14 * n, "{count}");
+            assert_eq!(c.g.repr(v), wide);
+            for &element in &elements {
+                assert_ne!(c.find_expansion(element, false).0, NONE);
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// `v` against `phantom<phantom<...<v>>>`, 10,000 deep: a variable in a
+/// constructor goes to `unify2` (ctype.ml:2240), whose `occur` finds `v`
+/// and expands only the innermost constructor. Linear, on a 2 MB stack.
+#[test]
+fn occurrence_retry_down_ten_thousand_constructors_fits_the_stack() {
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            let n = 10_000u64;
+            let mut c = checker(Mode::Success);
+            let v = var(&mut c);
+            let mut chain = v;
+            for _ in 0..n {
+                chain = constr(&mut c, PHANTOM, &[chain]);
+            }
+            let count = steps::scope(|| c.unify(v, chain).unwrap());
+            assert!(count <= 6 * n, "{count}");
+            assert_eq!(c.g.repr(v), chain);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }

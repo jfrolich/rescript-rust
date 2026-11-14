@@ -7,7 +7,7 @@
 //! it. Recursion is an explicit stack of [`Frame`]s, popped in the order the
 //! recursive calls would run.
 
-use super::expand::{Memo, TypeTable};
+use super::expand::{ExpandMode, Memo, TypeTable, link_node};
 use super::graph::{
     ARROW, CONSTR, Change, GENERIC, Graph, LINK, Mode, NONE, Node, Speculation, TUPLE, Ty, VAR,
 };
@@ -47,10 +47,15 @@ pub enum UnifyMode {
 pub enum FrameKind {
     /// Unify `left` with `right`.
     Pair,
-    /// The children of the node `left` were all unified: nothing to undo.
-    /// In `Mode::Explain`, `extra` indexes [`Checker::saved`], the
-    /// descriptor to put back into `left` if a later frame above this one
-    /// fails (`t1'.desc <- d1`, compiler/ml/ctype.ml:2437).
+    /// The children of a linked structure pair were all unified: nothing to
+    /// undo. `Mode::Explain` only. `left` and `right` are the pair of the
+    /// enclosing `unify` call, before expansion and in its order: the trace
+    /// entry (compiler/ml/ctype.ml:2272). `extra` indexes
+    /// [`Checker::saved`]: the descriptor `d1` to put back if a later frame
+    /// above this one fails (`t1'.desc <- d1`, ctype.ml:2437), then a link
+    /// node naming the expanded head `t1'` it goes back into; bit 31 of
+    /// `extra` ([`SWAPPED`]) says unify2 chose the right side
+    /// (ctype.ml:2299-2303), whose trace entries come out swapped.
     Linked,
     /// Leave the universal-variable scope `extra` (R3g).
     LeavePoly,
@@ -58,6 +63,11 @@ pub enum FrameKind {
     /// compiler/ml/ctype.ml:2428-2436 for the pair (R3c).
     Recursion,
 }
+
+/// Bit 31 of a [`FrameKind::Linked`] frame's `extra`: `unify2` ran `unify3`
+/// on the swapped pair (compiler/ml/ctype.ml:2301-2303), so every trace entry
+/// made below the frame is reversed.
+const SWAPPED: u32 = 1 << 31;
 
 /// One entry of the explicit stack: 16 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,24 +221,27 @@ impl Checker {
         let l = self.g.nodes[left.0 as usize];
         let r = self.g.nodes[right.0 as usize];
         // `Tvar _, _` before `_, Tvar _`: of two variables the left one is
-        // bound (ctype.ml:2242-2243). A variable in a constructor goes to
-        // the binding walk, whose expansion retry (R3c) stands for the
-        // `deep_occur` cases of ctype.ml:2240-2241.
+        // bound (ctype.ml:2242-2243). A variable that occurs in a
+        // constructor goes to `unify2` with the pair as it is
+        // (ctype.ml:2240-2241); the binding walk finds that occurrence.
         if l.tag() == VAR {
-            return self.bind(left, right);
+            let route = r.tag() == CONSTR;
+            return self.bind_routed(left, right, route.then_some([left, right]));
         }
         if r.tag() == VAR {
-            return self.bind(right, left);
+            let route = l.tag() == CONSTR;
+            return self.bind_routed(right, left, route.then_some([left, right]));
         }
         // Two universal variables (ctype.ml:2244) are extended nodes: R3g.
         // Two locally abstract types (ctype.ml:2258) need equations: R3h.
-        if l.tag() == CONSTR
-            && r.tag() == CONSTR
-            && l.a == r.a
-            && l.arity() == 0
-            && r.arity() == 0
-            && !self.has_cached_expansion(left)
-            && !self.has_cached_expansion(right)
+        //
+        // `has_cached_expansion p1 !a1` reads the node's own memo
+        // (ctype.ml:2251), which `proper_abbrevs` never writes for a
+        // nullary constructor: its expansion goes to `simple_abbrevs`
+        // (ctype.ml:200-202). Slot 0 of a nullary node stays empty here too
+        // (expand.rs), so the test is always false. With GADT instance
+        // tracing the node's own memo is used (R3h).
+        if l.tag() == CONSTR && r.tag() == CONSTR && l.a == r.a && l.arity() == 0 && r.arity() == 0
         {
             // `update_level !env t1.level t2; link_type t1 t2`.
             self.lower_to(right, l.level)?;
@@ -245,6 +258,17 @@ impl Checker {
     /// when no type has a scope; with scoped types the level update is a
     /// separate [`Checker::lower`]. (R3a)
     pub fn bind(&mut self, var: Ty, ty: Ty) -> Result<(), Clash> {
+        self.bind_routed(var, ty, None)
+    }
+
+    /// [`Checker::bind`], or, when `route` holds the pair of a variable and
+    /// a constructor and the variable occurs in the constructor, `unify2` of
+    /// that pair ([`Checker::unify_expanded`]; `deep_occur`,
+    /// compiler/ml/ctype.ml:2240-2241). The occurrence found by the binding
+    /// walk is the `deep_occur` test: a generated node of R3c has no object
+    /// or variant row, below which the two differ (R3e adds the rows). The
+    /// cost is [`Checker::bind`]'s, or one walk and the callee.
+    fn bind_routed(&mut self, var: Ty, ty: Ty, route: Option<[Ty; 2]>) -> Result<(), Clash> {
         let before = self.g.nodes[var.0 as usize];
         let target_is_var = self.g.nodes[ty.0 as usize].tag() == VAR;
         // Of two variables, `link_type` picks the surviving name by the
@@ -259,14 +283,10 @@ impl Checker {
         // any level is written (`occur`, `link_type`, `update_level`:
         // ctype.ml:2216-2225), in two walks. The speculation this
         // unification opened in `Mode::Explain` is not an owner's.
-        let own = usize::from(self.g.mode == Mode::Explain && self.depth > 0);
-        let occur_first = self.g.mode == Mode::Explain && self.g.speculation_depth <= own;
-        if !target_is_var {
-            if occur_first {
-                self.occur(var, ty)?;
-            } else {
-                self.binding_walk(var, ty)?;
-            }
+        let occur_first = self.occur_first();
+        if !target_is_var && self.binding_occurrence(var, ty, occur_first, route.is_some())? {
+            let [left, right] = route.expect("routed occurrence");
+            return self.unify_expanded(left, right);
         }
         self.g.link(var, ty);
         if (target_is_var || occur_first || self.types.scoped != 0)
@@ -277,6 +297,48 @@ impl Checker {
             return Err(clash);
         }
         Ok(())
+    }
+
+    /// O(1): whether a binding tests occurrence in a walk of its own before
+    /// it writes a level (decision 6 of "R3 as designed"): in
+    /// `Mode::Explain` outside a speculation whose owner restores.
+    #[inline]
+    fn occur_first(&self) -> bool {
+        let own = usize::from(self.g.mode == Mode::Explain && self.depth > 0);
+        self.g.mode == Mode::Explain && self.g.speculation_depth <= own
+    }
+
+    /// The occurrence part of a binding of `var` to `ty` (not a variable):
+    /// `Ok(true)` when `routed` and `var` occurs in `ty` (the caller runs
+    /// `unify2`), `Ok(false)` when the binding may be linked, a clash when
+    /// `var` occurs even after the expansions `occur_rec` makes
+    /// (compiler/ml/ctype.ml:1396-1402). With `occur_first`, one
+    /// [`Checker::occur`]-style walk that writes nothing; otherwise the
+    /// combined [`Checker::binding_walk`] (or its scan alone when `routed`),
+    /// which lowers. Cost: one walk of
+    /// `ty`; when `var` is found, one [`Checker::occur_expanding`] more.
+    fn binding_occurrence(
+        &mut self,
+        var: Ty,
+        ty: Ty,
+        occur_first: bool,
+        routed: bool,
+    ) -> Result<bool, Clash> {
+        if !occur_first {
+            if routed {
+                return Ok(self.binding_scan(var, ty));
+            }
+            self.binding_walk(var, ty)?;
+            return Ok(false);
+        }
+        if !self.reaches(var, ty, false) {
+            return Ok(false);
+        }
+        if routed {
+            return Ok(true);
+        }
+        self.occur_expanding(var, ty)?;
+        Ok(false)
     }
 
     /// The walk a binding makes over `ty`: every node reachable without
@@ -298,12 +360,27 @@ impl Checker {
     /// walk gives up (ctype.ml:1396-1402). Explicit stack. (R3a; the
     /// expansion retry R3c)
     pub fn binding_walk(&mut self, var: Ty, ty: Ty) -> Result<(), Clash> {
+        if self.binding_scan(var, ty) {
+            // The walk went on to the end, so every level `update_level`
+            // writes is written; what is left is `occur_rec`'s retry.
+            return self.occur_expanding(var, ty);
+        }
+        Ok(())
+    }
+
+    /// The walk of [`Checker::binding_walk`] without the expansion retry:
+    /// whether `var` was reached. It does not stop at `var`: it lowers
+    /// everything `update_level` lowers either way, so that a retry that
+    /// finds no occurrence leaves the levels of a successful binding. At
+    /// most 2 steps a node, explicit stack, marks.
+    fn binding_scan(&mut self, var: Ty, ty: Ty) -> bool {
         let level = self.g.nodes[var.0 as usize].level;
         // With scoped types the level update is `bind`'s Checker::lower.
         let lower = self.types.scoped == 0;
         let generation = self.fresh_marks();
         self.g.work.clear();
         self.g.work.push(Ty(ty.0 | LOWERS));
+        let mut found = false;
         while let Some(entry) = self.g.work.pop() {
             let ty = self.g.repr(Ty(entry.0 & !(LEVEL_ONLY | LOWERS)));
             let node = self.g.nodes[ty.0 as usize];
@@ -326,11 +403,12 @@ impl Checker {
             }
             #[cfg(test)]
             super::steps::tick();
-            if ty == var {
-                self.g.work.clear();
-                return Err(Clash);
-            }
             self.marks[ty.0 as usize] = generation;
+            if ty == var {
+                // A variable has no child and is not above its own level.
+                found = true;
+                continue;
+            }
             let lowered = above && entry.0 & LOWERS != 0;
             if lowered {
                 self.g.write(ty, Node { level, ..node });
@@ -343,7 +421,7 @@ impl Checker {
                 self.push_flagged(node, if lowered { LOWERS } else { 0 });
             }
         }
-        Ok(())
+        found
     }
 
     /// `occur` of one structure node in another (compiler/ml/ctype.ml:1488),
@@ -352,9 +430,154 @@ impl Checker {
     /// structure pair, as in OCaml; see "R3 as designed", decision 6. (R3a)
     pub fn occur(&mut self, node: Ty, ty: Ty) -> Result<(), Clash> {
         if self.reaches(node, ty, false) {
+            // `occur_cannot_fail` could not decide (ctype.ml:1496-1499):
+            // `occur_full`, whose `occur_rec` expands before it gives up.
+            self.occur_expanding(node, ty)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// `occur_rec` (compiler/ml/ctype.ml:1384-1408) in expression mode, run
+    /// once [`Checker::reaches`] found `node` in `ty`: a clash when `node`
+    /// occurs. A constructor one of whose arguments holds `node` is expanded
+    /// (`try_expand_head try_expand_once`, [`ExpandMode::Unif`]) and the
+    /// expansion is tested in its place; a constructor that does not expand
+    /// holds it. Children are tested in `iter_type_expr`'s order and a node
+    /// stops at its first child that holds `node`, so the expansions made
+    /// are OCaml's. Each node is decided once (marks: free, holding, on the
+    /// path; OCaml re-walks a shared node and finds the same answer, the
+    /// expansions it would make again being memorized). An object or a
+    /// variant row is not entered (ctype.ml:1403). A node met again on the
+    /// path (a cycle, which expression mode does not build) holds `node`
+    /// when it is a constructor and not otherwise, as `visited` decides.
+    /// Cost: one step and one frame per node, plus one
+    /// [`Checker::expand_head`] per constructor that holds `node`, on
+    /// [`Checker::frames`] above the length it finds.
+    fn occur_expanding(&mut self, node: Ty, ty: Ty) -> Result<(), Clash> {
+        let free = self.fresh_marks();
+        let holds = self.fresh_marks();
+        let busy = self.fresh_marks();
+        let base = self.frames.len();
+        let mut result = self.occur_visit(node, ty, [free, holds, busy]);
+        let outcome = loop {
+            if self.frames.len() == base {
+                break result;
+            }
+            let top = self.frames.len() - 1;
+            let frame = self.frames[top];
+            let parent = frame.left;
+            match result.take() {
+                // The expansion of `parent` decided it.
+                Some(holds_node) if frame.right.0 != NONE => {
+                    result = Some(self.occur_finish(parent, holds_node, [free, holds]));
+                }
+                Some(false) => {}
+                Some(true) => {
+                    let descriptor = self.g.nodes[parent.0 as usize];
+                    if descriptor.tag() != CONSTR {
+                        result = Some(self.occur_finish(parent, true, [free, holds]));
+                        continue;
+                    }
+                    let expansion = match self.expand_head(parent, ExpandMode::Unif) {
+                        Ok(expansion) => self.g.repr(expansion),
+                        Err(Clash) => {
+                            self.frames.truncate(base);
+                            return Err(Clash);
+                        }
+                    };
+                    if expansion == parent {
+                        // `Cannot_expand`: the constructor holds it.
+                        result = Some(self.occur_finish(parent, true, [free, holds]));
+                        continue;
+                    }
+                    self.frames[top].right = expansion;
+                    result = self.occur_visit(node, expansion, [free, holds, busy]);
+                }
+                None => {
+                    let descriptor = self.g.nodes[parent.0 as usize];
+                    let index = frame.extra;
+                    match self.child(descriptor, index) {
+                        Some(child) => {
+                            self.frames[top].extra = index + 1;
+                            result = self.occur_visit(node, child, [free, holds, busy]);
+                        }
+                        None => {
+                            result = Some(self.occur_finish(parent, false, [free, holds]));
+                        }
+                    }
+                }
+            }
+        };
+        self.frames.truncate(base);
+        if outcome == Some(true) {
             Err(Clash)
         } else {
             Ok(())
+        }
+    }
+
+    /// O(1): one node of [`Checker::occur_expanding`]: decided at once
+    /// (`node` itself, a node already decided or on the path, a node with no
+    /// child, an object or a variant row), or pushed as a frame whose `extra`
+    /// is the next child and whose `right` is the expansion it waits for.
+    /// The marks grow, amortized, to nodes an expansion made.
+    fn occur_visit(&mut self, node: Ty, ty: Ty, [free, holds, busy]: [u32; 3]) -> Option<bool> {
+        #[cfg(test)]
+        super::steps::tick();
+        let ty = self.g.repr(ty);
+        if ty == node {
+            return Some(true);
+        }
+        let descriptor = self.g.nodes[ty.0 as usize];
+        // An expansion made during the walk adds nodes past the marks.
+        if ty.0 as usize >= self.marks.len() {
+            self.marks.resize(self.g.nodes.len(), 0);
+        }
+        let mark = self.marks[ty.0 as usize];
+        if mark == free {
+            return Some(false);
+        }
+        if mark == holds {
+            return Some(true);
+        }
+        if mark == busy {
+            return Some(descriptor.tag() == CONSTR);
+        }
+        if self.stops_occurrence(descriptor) || self.child(descriptor, 0).is_none() {
+            self.marks[ty.0 as usize] = free;
+            return Some(false);
+        }
+        self.marks[ty.0 as usize] = busy;
+        self.frames.push(Frame {
+            left: ty,
+            right: Ty(NONE),
+            kind: FrameKind::Pair,
+            extra: 0,
+        });
+        None
+    }
+
+    /// O(1): pop the frame of `ty` in [`Checker::occur_expanding`], record
+    /// whether it holds the node, and return that.
+    fn occur_finish(&mut self, ty: Ty, holds_node: bool, [free, holds]: [u32; 2]) -> bool {
+        self.frames.pop();
+        self.marks[ty.0 as usize] = if holds_node { holds } else { free };
+        holds_node
+    }
+
+    /// O(1): child `index` of a representative descriptor in
+    /// `iter_type_expr`'s order (compiler/ml/btype.ml:250-257: an arrow's
+    /// parameters, then its result), or `None` past the last.
+    #[inline]
+    fn child(&self, node: Node, index: u32) -> Option<Ty> {
+        let arity = node.arity();
+        match node.tag() {
+            ARROW if index < arity => Some(self.g.params[(node.b + index) as usize].ty),
+            ARROW if index == arity => Some(Ty(node.a)),
+            CONSTR if index < arity => Some(self.g.lists[(node.b + 1 + index) as usize]),
+            TUPLE if index < arity => Some(self.g.lists[(node.b + index) as usize]),
+            _ => None,
         }
     }
 
@@ -375,35 +598,73 @@ impl Checker {
     /// expansion); R3c adds it. O(1) plus one [`Checker::occur`], two
     /// [`Checker::lower`] and one push per child. (R3a, R3c)
     pub fn unify_expanded(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
-        // R3a: each head is its own expansion (`t1' == t1`, `t2' == t2`), so
-        // `unify2` lowers both to the lower of their levels and `unify3`
-        // runs on the pair itself (ctype.ml:2299: `t1 == t1'`), with no
-        // recursion repair (`t2 != t2'` is false, ctype.ml:2310).
-        let level = self.g.nodes[left.0 as usize]
+        // `ignore (expand_head_unif !env t1); ignore (expand_head_unif !env
+        // t2)`, then both again: an expansion may change the representative
+        // of the other side (ctype.ml:2278-2283). When neither side expanded
+        // the second pair would read the same graph and return the same
+        // nodes, so it is made only after an expansion.
+        let mut expanded_left = self.expand_head(left, ExpandMode::Unif)?;
+        let mut expanded_right = self.expand_head(right, ExpandMode::Unif)?;
+        if expanded_left != self.g.repr(left) || expanded_right != self.g.repr(right) {
+            expanded_left = self.expand_head(left, ExpandMode::Unif)?;
+            expanded_right = self.expand_head(right, ExpandMode::Unif)?;
+        }
+        let level = self.g.nodes[expanded_left.0 as usize]
             .level
-            .min(self.g.nodes[right.0 as usize].level);
+            .min(self.g.nodes[expanded_right.0 as usize].level);
         self.lower_to(right, level)?;
         self.lower_to(left, level)?;
-        let left = self.g.repr(left);
-        let right = self.g.repr(right);
-        if left == right {
+        // `unify_eq t1' t2'` (ctype.ml:2286). The heads are taken again as
+        // representatives: only a scoped lowering links a node, and then
+        // OCaml would read a link's descriptor in unify3.
+        let expanded_left = self.g.repr(expanded_left);
+        let expanded_right = self.g.repr(expanded_right);
+        if expanded_left == expanded_right {
             return Ok(());
         }
-        let l = self.g.nodes[left.0 as usize];
-        let r = self.g.nodes[right.0 as usize];
+        let t1 = self.g.repr(left);
+        let t2 = self.g.repr(right);
+        // `if unify_eq t1 t1' || not (unify_eq t2 t2') then unify3 env t1
+        // t1' t2 t2' else unify3 env t2 t2' t1 t1'` (ctype.ml:2299-2303).
+        if t1 == expanded_left || t2 != expanded_right {
+            self.unify3(
+                [t1, expanded_left, t2, expanded_right],
+                [left, right],
+                false,
+            )
+        } else {
+            self.unify3([t2, expanded_right, t1, expanded_left], [left, right], true)
+        }
+    }
+
+    /// `unify3 env t1 t1' t2 t2'` (compiler/ml/ctype.ml:2305-2438) on
+    /// `[t1, t1', t2, t2']`, all representatives; `pair` is the pair of the
+    /// enclosing `unify`, in its order, and `swapped` says unify2 chose the
+    /// right side. A variable head is linked to the *original* other side;
+    /// otherwise `occur t1' t2'`, the link `t1' -> t2` before the children,
+    /// then the children are pushed. O(1) plus one [`Checker::occur`] and
+    /// one push per child.
+    fn unify3(
+        &mut self,
+        [t1, t1x, t2, t2x]: [Ty; 4],
+        pair: [Ty; 2],
+        swapped: bool,
+    ) -> Result<(), Clash> {
+        let d1 = self.g.nodes[t1x.0 as usize];
+        let d2 = self.g.nodes[t2x.0 as usize];
         // `occur_univar` of these two cases is R3g's.
-        if l.tag() == VAR {
-            self.occur(left, right)?;
-            self.g.link(left, right);
+        if d1.tag() == VAR {
+            self.occur(t1x, t2)?;
+            self.g.link(t1x, t2);
             return Ok(());
         }
-        if r.tag() == VAR {
-            self.occur(right, left)?;
-            self.g.link(right, left);
+        if d2.tag() == VAR {
+            self.occur(t2x, t1)?;
+            self.g.link(t2x, t1);
             return Ok(());
         }
-        if l.head & r.head & EXTENDED != 0 {
-            self.extended_pair(l, r);
+        if d1.head & d2.head & EXTENDED != 0 {
+            self.extended_pair(d1, d2);
         }
         if self.umode == UnifyMode::Pattern {
             // `add_type_equality` in place of the link (ctype.ml:2329).
@@ -411,26 +672,32 @@ impl Checker {
         }
         // `occur !env t1' t2'; link_type t1' t2` (ctype.ml:2330-2331),
         // before the children.
-        self.occur(left, right)?;
-        self.g.link(left, right);
+        self.occur(t1x, t2x)?;
+        self.g.link(t1x, t2);
         let explain = self.g.mode == Mode::Explain;
         if explain {
             // Popped after the children: the descriptor to put back if
-            // one of them fails (`t1'.desc <- d1`, ctype.ml:2437).
+            // one of them fails (`t1'.desc <- d1`, ctype.ml:2437), and the
+            // node it goes back into.
             let extra = self.saved.len() as u32;
-            self.saved.push(l);
+            self.saved.push(d1);
+            self.saved.push(link_node(d1, t1x));
+            let [left, right] = pair;
             self.frames.push(Frame {
                 left,
                 right,
                 kind: FrameKind::Linked,
-                extra,
+                extra: if swapped { extra | SWAPPED } else { extra },
             });
         }
-        let pushed = self.push_children(l, r);
-        if pushed.is_err() && explain {
-            self.frames.pop();
-            self.saved.pop();
-            self.g.write(left, l);
+        let pushed = self.push_children(d1, d2);
+        if pushed.is_err() {
+            // `push_children` pushes nothing when it fails.
+            if explain {
+                self.frames.pop();
+                self.saved.truncate(self.saved.len() - 2);
+                self.g.write(t1x, d1);
+            }
         }
         pushed
     }
@@ -543,22 +810,37 @@ impl Checker {
     /// enclosing pairs are the `Linked` frames above `base`; the entries a
     /// nested unification already wrote stay after this one's. O(frames
     /// above `base` + trace entries since `trace_base`).
+    /// Below a swapped `unify3` every entry is reversed
+    /// (`List.map (fun (x, y) -> (y, x))`, ctype.ml:2303), twice swapped is
+    /// as made. A clash of a recursion repair has no pair of its own (`NONE`).
     #[cold]
     fn explain_failure(&mut self, base: usize, trace_base: usize, left: Ty, right: Ty) {
         let inner = self.trace.len() - trace_base;
+        let mut swapped = false;
         for index in base..self.frames.len() {
             let frame = self.frames[index];
             if frame.kind == FrameKind::Linked {
-                self.trace.push([frame.left, frame.right]);
+                let entry = [frame.left, frame.right];
+                self.trace
+                    .push(if swapped { [entry[1], entry[0]] } else { entry });
+                swapped ^= frame.extra & SWAPPED != 0;
             }
         }
-        self.trace.push([left, right]);
+        if left.0 != NONE {
+            self.trace.push(if swapped {
+                [right, left]
+            } else {
+                [left, right]
+            });
+        }
         self.trace[trace_base..].rotate_left(inner);
         for index in (base..self.frames.len()).rev() {
             let frame = self.frames[index];
             if frame.kind == FrameKind::Linked {
-                let descriptor = self.saved[frame.extra as usize];
-                self.g.write(frame.left, descriptor);
+                let slot = (frame.extra & !SWAPPED) as usize;
+                let descriptor = self.saved[slot];
+                let target = Ty(self.saved[slot + 1].a);
+                self.g.write(target, descriptor);
             }
         }
     }
@@ -629,21 +911,12 @@ impl Checker {
                         return Err([left, right]);
                     }
                 }
-                FrameKind::Linked => self.saved.truncate(frame.extra as usize),
+                FrameKind::Linked => self.saved.truncate((frame.extra & !SWAPPED) as usize),
                 FrameKind::LeavePoly => todo!("R3g"),
                 FrameKind::Recursion => todo!("R3c"),
             }
         }
         Ok(())
-    }
-
-    /// O(1) when no nullary memo row is live; otherwise one
-    /// [`Checker::find_expansion`]. Whether a nullary constructor node has a
-    /// memorized expansion, public or private (`has_cached_expansion`,
-    /// compiler/ml/ctype.ml:2251).
-    #[inline]
-    fn has_cached_expansion(&self, ty: Ty) -> bool {
-        self.memo.live != 0 && self.find_expansion(ty, true).0 != NONE
     }
 
     /// `update_level` of `ty` to `level`: [`Checker::lower`]. O(1) for the
