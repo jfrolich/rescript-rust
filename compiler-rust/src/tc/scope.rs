@@ -23,8 +23,13 @@
 //!
 //! Step counts (`tc::steps`, test builds): one tick per binder pushed, per
 //! binding written, per binding undone, per head load, per comparison of a
-//! table search, per member written to a table, per candidate produced, per
-//! alias followed. Work that is not in a loop is not ticked.
+//! table search, per member written to a table (local or imported), per
+//! log entry `seal` reads, per candidate produced, per alias followed, per
+//! component of a path, per answer of `unit_by_name` and of `import_table`
+//! that was known before, per `mark`, per `use_found`, per module of
+//! `use_modules`, per armed entry `finish` reads, per `read_unit` and
+//! `read_item`. `enter`, `open`, `arm` and the other O(1) calls that are
+//! in none of these tick nothing.
 
 use std::sync::Arc;
 
@@ -611,7 +616,8 @@ impl Scopes {
         todo!("R4d")
     }
 
-    /// 1 step, one load when the name was asked before; otherwise one call
+    /// 1 step, one load when the name was asked before (from R4g on, one
+    /// more step for the read it logs); otherwise one call
     /// of `source` and [`Scopes::add_unit`], or `MISSING` recorded. `None`
     /// when no unit has the name (`find_pers_struct`, compiler/ml/env.ml:
     /// 646-691).

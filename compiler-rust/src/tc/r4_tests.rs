@@ -1170,10 +1170,8 @@ fn an_export_table_is_imported_once() {
     let unit = s.unit_by_name(wide, &mut source).unwrap();
     assert_eq!(s.unit_by_name(missing, &mut source), None);
     assert_eq!(source.asked, 2);
-    assert_eq!(
-        steps::scope(|| assert_eq!(s.unit_by_name(wide, &mut source), Some(unit))),
-        1
-    );
+    // 1 step in R4d; 2 from R4g on, which logs the read.
+    assert!(steps::scope(|| assert_eq!(s.unit_by_name(wide, &mut source), Some(unit))) <= 2);
     assert_eq!(
         steps::scope(|| assert_eq!(s.unit_by_name(missing, &mut source), None)),
         1
