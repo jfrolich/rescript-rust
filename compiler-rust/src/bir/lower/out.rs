@@ -62,6 +62,11 @@ pub struct StatementStack {
     empties: Vec<(u32, NodeId)>,
 }
 impl StatementStack {
+    /// Reserve statement and hole slots from the imported output-node estimate.
+    pub(super) fn with_capacity(slots: usize) -> Self {
+        Self { slots: Vec::with_capacity(slots), ..Self::default() }
+    }
+
     #[cfg(test)]
     pub(super) fn reserve_repeat(&mut self) { self.held.reserve(self.held.len()); }
 
