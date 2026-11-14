@@ -349,6 +349,15 @@ jobs:
       - name: Test the worker-count determinism gate
         run: python3 -m unittest discover -s scripts -p test_worker_determinism_test.py
 
+      - name: Test the derived-code census summary
+        run: python3 -m unittest discover -s scripts -p test_derived_census_summary.py
+
+      - name: Test the sequential instruction comparison
+        run: python3 -m unittest discover -s scripts -p test_compare_build_instructions.py
+
+      - name: Test the check-mode comparison rule
+        run: python3 -m unittest discover -s scripts -p test_check_modes_gate.py
+
   compiler-tests:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 40
