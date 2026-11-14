@@ -855,7 +855,6 @@ fn lower_checks_scopes_and_expands_to_escape() {
 /// the result; a later instance of the same scheme then has both its
 /// nullary nodes linked to the first instance's result node.
 #[test]
-#[ignore = "R3d build"]
 fn an_application_memorizes_the_result_node() {
     for ty in [A, NT] {
         let mut c = checker(Mode::Success);

@@ -42,7 +42,6 @@ pub mod canonical;
 // vector looks like a slice to clippy. Each build slice removes the
 // allowance from the module it completes (CHECKER_REWRITE.md, "R3 as
 // designed").
-#[allow(dead_code, unused_variables, clippy::ptr_arg)]
 pub mod expand;
 #[allow(dead_code, unused_variables, clippy::ptr_arg)]
 pub mod relate;

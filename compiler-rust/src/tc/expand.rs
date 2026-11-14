@@ -866,7 +866,52 @@ impl Checker {
     /// that is a nullary abbreviation is what makes that node the nullary
     /// memo's representative (O11). (R3d)
     pub fn lower_args(&mut self, root: Ty) {
-        todo!("R3d")
+        // `seen` (typecore.ml:2505) as marks of this call's generation: one
+        // load and one store per arrow, no list.
+        let generation = self.next_mark_generation();
+        let mut ty = root;
+        loop {
+            #[cfg(test)]
+            super::steps::tick();
+            let head = match self.expand_head(ty, ExpandMode::Safe) {
+                Ok(head) => head,
+                Err(Clash) => unreachable!("a safe expansion does not clash"),
+            };
+            let index = head.0 as usize;
+            if index >= self.marks.len() {
+                self.marks.resize(self.g.nodes.len(), 0);
+            }
+            if self.marks[index] == generation {
+                return;
+            }
+            self.marks[index] = generation;
+            let node = self.g.nodes[index];
+            if node.tag() != ARROW {
+                return;
+            }
+            // `unify_var env (newvar ()) typ` (typecore.ml:2511): the
+            // variable is new, so what remains is the parameter lowered to
+            // the current level; OCaml asserts that it cannot fail.
+            let level = self.g.level;
+            for index in 0..node.arity() {
+                let param = self.g.params[(node.b + index) as usize].ty;
+                if self.lower(param, level).is_err() {
+                    unreachable!("lower_args failed to lower a parameter");
+                }
+            }
+            ty = Ty(node.a);
+        }
+    }
+
+    /// O(1), or O(nodes) once every 2^32 calls: a mark generation no node
+    /// of [`Checker::marks`] holds yet.
+    fn next_mark_generation(&mut self) -> u32 {
+        if self.mark_generation == u32::MAX {
+            self.marks.fill(0);
+            self.mark_generation = 0;
+        }
+        self.mark_generation += 1;
+        self.mark_generation
     }
 }
 
@@ -1130,6 +1175,57 @@ mod tests {
         // The escaping argument is not reached through the expansion.
         assert_eq!(c.g.nodes[escaping.0 as usize].level, 3);
         assert!(c.g.trail.is_empty());
+    }
+
+    /// `lower_args` over a chain of 10,000 arrows: one loop step, one
+    /// expansion step and one lowering of the parameter (one step: a
+    /// variable one level up) per arrow, at most 4 steps an arrow; a chain
+    /// whose result is the arrow itself stops at the second visit.
+    #[test]
+    fn lower_args_over_ten_thousand_arrows() {
+        let n = 10_000u32;
+        let mut c = checker(1);
+        c.g.begin_def();
+        let mut ty = var(&mut c, 2);
+        for _ in 0..n {
+            let param = var(&mut c, 3);
+            let b = c.g.params.len() as u32;
+            c.g.params.push(super::super::graph::Param {
+                ty: param,
+                label: NONE,
+                loc: NONE,
+            });
+            ty = c.g.push(Node {
+                head: super::super::graph::ARROW | 1 << 8,
+                level: 2,
+                a: ty.0,
+                b,
+            });
+        }
+        let count = steps::scope(|| c.lower_args(ty));
+        assert!(count <= 4 * u64::from(n) + 2, "{count}");
+        assert!(
+            c.g.nodes
+                .iter()
+                .filter(|node| node.tag() == VAR)
+                .all(|node| node.level == 2)
+        );
+        // `f: 'a => f`: the result is the arrow itself.
+        let param = var(&mut c, 2);
+        let b = c.g.params.len() as u32;
+        c.g.params.push(super::super::graph::Param {
+            ty: param,
+            label: NONE,
+            loc: NONE,
+        });
+        let cyclic = Ty(c.g.nodes.len() as u32);
+        c.g.push(Node {
+            head: super::super::graph::ARROW | 1 << 8,
+            level: 2,
+            a: cyclic.0,
+            b,
+        });
+        assert!(steps::scope(|| c.lower_args(cyclic)) <= 8);
     }
 
     /// A restore of 10,000 writes is one step a write plus the cleanup, which
