@@ -63,17 +63,36 @@ macro_rules! snapshot {
 snapshot!(current, crate::lambda::untagged_dispatch);
 snapshot!(legacy, crate::lambda::untagged_dispatch::legacy_planner);
 
-/// Compare sixteen completeness/body-sharing combinations per declaration.
-/// Cost: sixteen planner runs plus serialization of their reachable trees.
+/// Compare full, omitted, partitioned, singleton and reordered arm lists.
+/// Cost: sixteen plan pairs per subset, plus reachable-tree serialization.
 fn compare(facts: &MatchingFacts) {
-    for shared in [false, true] {
-        for complete in 0..4 {
-            for fallback in [None, Some(999)] {
-                let literals: Vec<_> = facts.literal_tags.iter().enumerate().map(|(i,t)| (t.clone(),if shared { 0 } else { i as u32 })).collect();
-                let payloads: Vec<_> = facts.block_types.iter().enumerate().map(|(i,t)| (t.clone(),if shared { 0 } else { (i+facts.literal_tags.len()) as u32 })).collect();
-                let a = plan(|a,b| a==b,Input { facts, literal_arms:literals.clone(),payload_arms:payloads.clone(),literals_complete:complete&1!=0,payloads_complete:complete&2!=0,fallback });
-                let b = super::legacy_planner::plan(|a,b| a==b,super::legacy_planner::Input { facts,literal_arms:literals,payload_arms:payloads,literals_complete:complete&1!=0,payloads_complete:complete&2!=0,fallback });
-                assert_eq!(current::tree(&a,a.root()),legacy::tree(&b,b.root()),"facts={facts:?}, shared={shared}, complete={complete}, fallback={fallback:?}");
+    let literals_len = facts.literal_tags.len();
+    let count = literals_len + facts.block_types.len();
+    let all: Vec<_> = (0..count).collect();
+    let mut subsets = vec![all.clone()];
+    for omitted in 0..count {
+        if count <= 12 || omitted == 0 || omitted + 1 == count || omitted % 4 == 0 {
+            subsets.push(all.iter().copied().filter(|&i| i != omitted).collect());
+        }
+    }
+    subsets.push((0..literals_len).collect());
+    subsets.push((literals_len..count).collect());
+    for kept in 0..count {
+        subsets.push(vec![kept]);
+    }
+    subsets.push(all.into_iter().rev().collect());
+    for subset in subsets {
+        for shared in [false, true] {
+            for complete in 0..4 {
+                for fallback in [None, Some(999)] {
+                    let literals: Vec<_> = subset.iter().copied().filter(|&i| i < literals_len)
+                        .map(|i| (facts.literal_tags[i].clone(), if shared { 0 } else { i as u32 })).collect();
+                    let payloads: Vec<_> = subset.iter().copied().filter(|&i| i >= literals_len)
+                        .map(|i| (facts.block_types[i - literals_len].clone(), if shared { 0 } else { i as u32 })).collect();
+                    let a = plan(|a,b| a==b,Input { facts, literal_arms:literals.clone(),payload_arms:payloads.clone(),literals_complete:complete&1!=0,payloads_complete:complete&2!=0,fallback });
+                    let b = super::legacy_planner::plan(|a,b| a==b,super::legacy_planner::Input { facts,literal_arms:literals,payload_arms:payloads,literals_complete:complete&1!=0,payloads_complete:complete&2!=0,fallback });
+                    assert_eq!(current::tree(&a,a.root()),legacy::tree(&b,b.root()),"facts={facts:?}, subset={subset:?}, shared={shared}, complete={complete}, fallback={fallback:?}");
+                }
             }
         }
     }
