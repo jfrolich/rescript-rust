@@ -3800,3 +3800,33 @@ Commands/results: `CARGO_INCREMENTAL=0 cargo test --manifest-path compiler-rust/
 `evaluate_now` records its statement-span start and returns the appended range; both consumers read that exact range and truncate to its saved start. The scratch-empty guard is a production `assert!`, and a new expected-panic test checks rejection of unconsumed statement scratch. The outgoing value-buffer guard is also a production assertion. `finish_self_call` clears `tail_name` before appending the parameter-copy spelling; a new test seeds stale text and verifies `_x`, an empty returned buffer and a valid completed output.
 
 Commands/results: `CARGO_INCREMENTAL=0 cargo test --manifest-path compiler-rust/Cargo.toml bir::lower:: -- --test-threads=1` — **424 passed, zero failures**; strict all-target compiler clippy — **passed**. Steps 5–6 remain outstanding.
+### Scope correction — step 5: full-unit boundary measured, zero-allocation requirement NOT DONE
+
+Added `unit::tests::full_unit_allocation_boundary_for_four_construct_families`. Each fixture imports two independent inputs, warms the real entry once, then measures **`lower_with_resolver` through `complete_unit` and `finish`** on the second input. Every output has one coerced export, equal warm/measured source-visit counts and a validated arena. Imports and output validation/destruction are outside the interval. No existing zero-allocation test or assertion was weakened.
+
+| 10,000-wide/deep family | Source visits | Full-entry allocations | Allocated bytes |
+| --- | ---: | ---: | ---: |
+| Conditionals | 30,002 | 261 | 14,076,641 |
+| Ordinary switches | 10,003 | 307 | 18,276,966 |
+| Applications | 20,002 | 259 | 12,554,993 |
+| Genuine mixed untagged dispatch | 10,004 | 567 | 31,765,163 |
+
+Command: `CARGO_INCREMENTAL=0 cargo test --manifest-path compiler-rust/Cargo.toml full_unit_allocation_boundary -- --nocapture --test-threads=1`. Strict all-target compiler clippy also passes. These are **characterization results, not zero-allocation proofs**. The allocation counter's retained-byte delta can be negative because entry consumes and frees imported input allocated before measurement; the table reports total allocation calls/bytes, not that delta.
+
+`unit::lower` constructs a new `State`; `complete_unit(self)` consumes it and moves the owned arena into `Lowered`. Thus warming the public entry does not retain its scratch or output capacities. Inventory disposition: **unit state construction and owned completion remain not converted**. Meeting the requested warmed whole-unit zero bound needs an explicit reusable unit workspace/output-return protocol, including resetting identities, metadata and scope state. Merely moving `State::new` outside the measured closure would not satisfy this requirement. The PR remains draft; the older probe/realize/release measurements do not close this gap.
+
+The nine auxiliary helper measurements are accounted for below. All remain auxiliary; none is relabelled a whole-unit proof. These paths can be reached from lowering, so there is no claim that a unit fixture is impossible. Their full-unit zero-allocation replacements remain **not converted** with the workspace requirement above.
+
+| Helper measurement | Reachable enclosing path / outstanding full-unit proof |
+| --- | --- |
+| `edit::retained_copy_scratch_reuses_buffers_and_clears_renames` | Cached branch-body or imported-body copying; needs unit-level capacity reuse. |
+| `edit::wide_rest_copy_uses_flat_fields_without_allocations` | Copied rest-field bodies; needs a full unit with that body plus reusable completion. |
+| `j::norm_tests::ten_thousand_nested_ifs_rewrite_without_branch_vectors_or_list_pushes` | Conditional normalization; the new conditional entry characterization is nonzero. |
+| `untagged::ten_thousand_reserved_plan_slots_do_not_allocate` | Untagged planner/output storage; the new mixed entry characterization is nonzero. |
+| `record::rejected_record_candidates_clear_retained_storage` | Rejected record-copy candidate followed by ordinary lowering; needs the full-entry rejection fixture and reuse. |
+| `close::ten_thousand_declarations_are_decided_without_allocating_once_the_tables_are_warm` | Statement closing during unit completion; the new entry tests include closing but are nonzero. |
+| `l::beta::rejected_wide_simple_plans_and_motion_walks_reuse_storage` | Non-simple imported function application; needs a unit entry fixture with reusable completion. |
+| `untagged_dispatch::ten_thousand_imported_fact_runs_use_only_reserved_unit_pools` | Switch-fact preparation in `State::new`; currently cold for each entry. |
+| `untagged_dispatch::metadata::canonical_encoding_reuses_buffers_for_ten_thousand_literals` | Variant literal preparation/dispatch; currently included in cold unit construction. |
+
+The additional `export::rows_and_references_are_read_without_allocation_once_the_tables_are_warm` measurement belongs to the explicitly unchanged export subsystem; it also does not prove allocation-free `complete_unit`. Step 6 remains outstanding.

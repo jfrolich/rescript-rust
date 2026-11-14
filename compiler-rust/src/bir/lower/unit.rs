@@ -109,6 +109,87 @@ mod tests {
     use crate::lambda::lam_constant::Constant;
     use crate::lambda::lam_tag_info::TagInfo;
 
+    /// Cold unit ownership is deliberately included here, unlike the retained
+    /// probe proofs. This characterizes the real entry; it does not assert zero.
+    #[test]
+    fn full_unit_allocation_boundary_for_four_construct_families() {
+        use crate::lambda::{LamLoc, ApInfo, ApplyStatus};
+        use crate::lambda::lam_primitive::{Primitive as P, Mutable};
+        use crate::lambda::{SwitchDispatch, SwitchKey};
+        use crate::types::{VariantBlock, VariantBlockType, VariantConstructorCase as Case,
+            VariantMatchingFacts, VariantTag};
+        use crate::types::VariantLiteralTag as Literal;
+        for shape in ["conditionals", "switches", "applications", "untagged"] {
+            let mut a = LamArena::new();
+            let x = Ident::new("x", 1, crate::ident::IdentFlags::NONE);
+            let root = match shape {
+                "conditionals" => {
+                    let mut body = a.const_(Constant::Int { i: 0, comment: None });
+                    for i in 1..=10_000 {
+                        let condition = a.var(x);
+                        let yes = a.const_(Constant::Int { i, comment: None });
+                        body = a.if_raw(condition, yes, body);
+                    }
+                    body
+                }
+                "applications" => {
+                    let values: Vec<_> = (0..10_000).map(|_| {
+                        let callee = a.var(x);
+                        a.apply_raw(callee, &[], ApInfo { loc: LamLoc::NONE, status: ApplyStatus::Na })
+                    }).collect();
+                    a.prim_raw(P::Pmakearray, &values, LamLoc::NONE)
+                }
+                "switches" => {
+                    let x = a.var(x);
+                    let values: Vec<_> = (0..10_000).map(|i| a.const_(Constant::String(format!("value{i}")))).collect();
+                    let values = a.add_list(&values);
+                    let header = a.add_switch(true, (0..10_000).map(SwitchKey::Int), false, [], false, SwitchDispatch::Direct);
+                    a.switch_raw(x, values, header)
+                }
+                "untagged" => {
+                    let x = a.var(x);
+                    let mut literals: Vec<_> = (0..9_998).map(|i| Literal::String(format!("tag{i}"))).collect();
+                    let keys: Vec<_> = literals.iter().enumerate().map(|(i, literal)|
+                        SwitchKey::Constructor(Case::Constant(VariantTag {
+                            name: crate::name::Name::new(&format!("C{i}")), literal: literal.clone(),
+                        }))).collect();
+                    literals.push(Literal::Int(42));
+                    let kinds = vec![VariantBlockType::Number, VariantBlockType::Object];
+                    let blocks: Vec<_> = kinds.iter().enumerate().map(|(i, kind)|
+                        SwitchKey::Constructor(Case::Block(VariantBlock::Untagged {
+                            tag: VariantTag { name: crate::name::Name::new(&format!("B{i}")), literal: Literal::String(format!("B{i}")) },
+                            block_type: kind.clone(),
+                        }))).collect();
+                    let values: Vec<_> = (0..10_001).map(|i| a.const_(Constant::String(format!("body{i}")))).collect();
+                    let values = a.add_list(&values);
+                    let header = a.add_switch(false, keys, false, blocks, true,
+                        SwitchDispatch::Variant(VariantMatchingFacts { tag_name: None, literal_tags: literals, block_types: kinds }));
+                    a.switch_raw(x, values, header)
+                }
+                _ => unreachable!(),
+            };
+            let export = Ident::new("answer", 2, crate::ident::IdentFlags::NONE);
+            let root = a.prim_raw(P::Pmakeblock(TagInfo::ModuleExport(vec![export]), Mutable::Immutable), &[root], LamLoc::NONE);
+            // Both imports are outside the interval. Each actual entry still
+            // owns fresh state; process warmup cannot retain that state's pools.
+            let warm = crate::bir::bridge::import_for_lowering(&a, root).0.unwrap();
+            let input = crate::bir::bridge::import_for_lowering(&a, root).0.unwrap();
+            let warm = super::super::lower_with_resolver(warm, None, true, None, false, true).unwrap();
+            let visits = warm.switch_stats.source_visits;
+            drop(warm);
+            let mut result = None;
+            let allocations = allocation_counter::measure(|| {
+                result = Some(super::super::lower_with_resolver(input, None, true, None, false, true).unwrap());
+            });
+            let result = result.unwrap();
+            assert_eq!(result.switch_stats.source_visits, visits);
+            assert!(visits >= 10_000);
+            assert_eq!(result.coerced.exports.len(), 1);
+            result.program.arena.validate(Some(result.program.root)).unwrap();
+            println!("full-unit {shape}: visits={visits}, {allocations:?}");
+        }
+    }
+
     #[test]
     fn export_consumption_does_not_empty_shared_block_metadata() {
         let mut source = LamArena::new();
