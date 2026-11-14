@@ -2149,13 +2149,12 @@ fn the_naming_log_agrees_on_a_function_the_printer_eta_reduces() {
 }
 
 #[test]
-#[ignore = "design gap: an import released before its function closes stays in the free list (THREE_TREES 11.4, T5 part B as built)"]
 fn the_naming_log_agrees_on_a_function_whose_module_reference_folds_away() {
     // `let f = (left, right) => Primitive_int.compare(left, right) == 0`
     // prints `left === right`: the comparison builds a reference to
     // `Primitive_int`, which the constructor of `===` releases before `f`
-    // closes. Imports have a count and no sites, so `f`'s free list keeps
-    // `Primitive_int` and the pass's has nothing: `free_differences: 2`.
+    // closes. The reference has a site, the release clears it, and the
+    // close of `f` skips it: the free list is empty, as the pass's is.
     // Reduced from `prim_cmp::tests::integer_comparison_strips_runtime_compare_before_zero`.
     use crate::lambda::lam_compat::Comparison;
     use crate::lambda::lam_primitive::Primitive as P;

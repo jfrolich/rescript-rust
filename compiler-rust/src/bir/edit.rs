@@ -346,13 +346,24 @@ impl Bir {
 
     fn allocate(&mut self, node: Node) -> NodeId {
         let id = self.allocate_slot(node);
-        // The lowering's arena records where each reference is (T4a).
-        if node.op() == Op::Var {
-            if let Some(scope) = &mut self.js_scope {
-                let View::Var { var } = node.view(&self.lists) else { unreachable!() };
-                let site = scope.site(var, id);
-                self.nodes[id.index()].set_var_site(site);
+        // The lowering's arena records where each reference is: a variable
+        // (T4a) or an imported module (the naming log reads both at the
+        // close of a function scope).
+        match node.op() {
+            Op::Var => {
+                if let Some(scope) = &mut self.js_scope {
+                    let View::Var { var } = node.view(&self.lists) else { unreachable!() };
+                    let site = scope.site(var, id);
+                    self.nodes[id.index()].set_site(site);
+                }
             }
+            Op::JQualified => {
+                if let Some(scope) = &mut self.js_scope {
+                    let site = scope.import_site(id);
+                    self.nodes[id.index()].set_site(site);
+                }
+            }
+            _ => {}
         }
         id
     }
@@ -676,7 +687,7 @@ impl Bir {
                 let View::Var { var } = node.view(&self.lists) else { unreachable!() };
                 scope.occurrence(var, add);
                 if !add {
-                    scope.sites[node.var_site() as usize].node = NodeId(u32::MAX);
+                    scope.sites[node.site() as usize].node = NodeId(u32::MAX);
                 }
             }
         }
@@ -684,8 +695,8 @@ impl Bir {
             if let Some(scope) = &mut self.js_scope {
                 let View::JQualified { module, .. } = node.view(&self.lists) else { unreachable!() };
                 scope.import_reference(module, add);
-                if add {
-                    scope.names.import_reference(module);
+                if !add {
+                    scope.sites[node.site() as usize].node = NodeId(u32::MAX);
                 }
             }
         }
@@ -1164,9 +1175,9 @@ impl Bir {
         } else { false };
         self.nodes[target.index()] = content;
         // A reference that moves into the slot takes its site with it.
-        if content.op() == Op::Var {
+        if matches!(content.op(), Op::Var | Op::JQualified) {
             if let Some(scope) = &mut self.js_scope {
-                scope.sites[content.var_site() as usize].node = target;
+                scope.sites[content.site() as usize].node = target;
             }
         }
         self.parents[target.index()] = parent;

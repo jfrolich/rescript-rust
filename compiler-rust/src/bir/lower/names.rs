@@ -177,24 +177,6 @@ impl Log {
         self.home[var.index()] = self.open.last().map_or(ScopeId::PROGRAM.0, |open| open.row);
     }
 
-    /// A reference to an imported module was built (`Bir::register_kind`,
-    /// `JQualified`, `add`): the import joins the innermost open scope's
-    /// run unless that scope put it there before. Nothing when no function
-    /// is open. A reference released later stays in the run (THREE_TREES
-    /// 11.4, "T5 part B as redesigned", (b) Gap 1, the stated limit). Cost:
-    /// one read and at most one write and one push; no step.
-    pub(crate) fn import_reference(&mut self, import: ImportId) {
-        let Some(open) = self.open.last() else { return };
-        let row = open.row;
-        if self.seen_import.len() <= import.index() {
-            self.seen_import.resize(import.index() + 1, ScopeId::NONE.0);
-        }
-        if self.seen_import[import.index()] != row {
-            self.seen_import[import.index()] = row;
-            self.run.push(FreeRef::import(import));
-        }
-    }
-
     /// `Bir::copy_subtree` copied the function literal with header `source`
     /// to one with header `copy` (`bir::j::logic::copy_j`): a row for the
     /// copy that shares the source's free run and flags, with `COPY`. The
@@ -346,8 +328,12 @@ impl Log {
             if site.node == NodeId(u32::MAX) {
                 continue;
             }
-            let crate::bir::View::Var { var } = bir.view(site.node) else { unreachable!("a site is a reference") };
-            self.join(row, FreeRef::var(var));
+            let entry = match bir.view(site.node) {
+                crate::bir::View::Var { var } => FreeRef::var(var),
+                crate::bir::View::JQualified { module, .. } => FreeRef::import(module),
+                _ => unreachable!("a site is a reference"),
+            };
+            self.join(row, entry);
         }
     }
 
@@ -1539,22 +1525,83 @@ mod tests {
     #[test]
     fn an_imported_module_is_free_in_every_function_around_its_reference() {
         // The pass counts a module reference as a use (naming.rs
-        // `analyze_expr`, `Qualified`). The hook is called as
-        // `Bir::register_kind` calls it for a `JQualified`.
+        // `analyze_expr`, `Qualified`). A `JQualified` has a site, as a
+        // `Var` has (`Bir::allocate`).
         let mut u = Unit::new();
         let outer = u.header(None, 0);
         open(&mut u.b);
         let inner = u.header(None, 0);
         open(&mut u.b);
-        u.log_mut().import_reference(ImportId(3));
-        u.log_mut().import_reference(ImportId(3));
-        let null = u.b.new_node(View::JNull, 0);
-        let result = u.ret(null);
+        let first = u.b.new_node(View::JQualified { module: ImportId(3), member: None }, 0);
+        let second = u.b.new_node(View::JQualified { module: ImportId(3), member: None }, 0);
+        let pair = u.b.new_node(View::JArray { values: &[first, second] }, 0);
+        let result = u.ret(pair);
         let (value, inner_scope) = u.function(inner, &[result]);
         let result = u.ret(value);
         let (_, outer_scope) = u.function(outer, &[result]);
         assert_eq!(u.free(inner_scope), [FreeRef::import(ImportId(3))]);
         assert_eq!(u.free(outer_scope), [FreeRef::import(ImportId(3))]);
+    }
+
+    #[test]
+    fn a_module_reference_released_before_the_close_is_not_free() {
+        // `(l, r) => Primitive_int.compare(l, r) == 0` prints `l === r`:
+        // the constructors release the module reference before the
+        // function closes, and the pass, on the finished tree, has no
+        // module in the free list. Import 1 is read twice and one read is
+        // released; import 0 is read once and released.
+        let mut u = Unit::new();
+        let header = u.header(None, 0);
+        open(&mut u.b);
+        let gone = u.b.new_node(View::JQualified { module: ImportId(0), member: None }, 0);
+        let half = u.b.new_node(View::JQualified { module: ImportId(1), member: None }, 0);
+        let folded = u.b.new_node(View::JArray { values: &[gone, half] }, 0);
+        u.b.release(folded);
+        let kept = u.b.new_node(View::JQualified { module: ImportId(1), member: None }, 0);
+        let kept = u.ret(kept);
+        let (_, scope) = u.function(header, &[kept]);
+        assert_eq!(u.free(scope), [FreeRef::import(ImportId(1))]);
+    }
+
+    #[test]
+    fn a_module_reference_that_replaces_a_node_keeps_its_site() {
+        // `Bir::replace` moves the reference's content into another slot:
+        // the site follows, so the close still reads it and a later
+        // release still clears it.
+        let mut u = Unit::new();
+        let header = u.header(None, 0);
+        open(&mut u.b);
+        let null = u.b.new_node(View::JNull, 0);
+        let result = u.ret(null);
+        let module = u.b.new_node(View::JQualified { module: ImportId(2), member: None }, 0);
+        u.b.replace(null, module);
+        let (_, scope) = u.function(header, &[result]);
+        assert_eq!(u.free(scope), [FreeRef::import(ImportId(2))]);
+    }
+
+    /// The steps of the log for one function with `references` reads of one
+    /// imported module.
+    fn steps_of_module_references(references: usize) -> usize {
+        let mut u = Unit::new();
+        let header = u.header(None, 0);
+        open(&mut u.b);
+        let values: Vec<NodeId> = (0..references)
+            .map(|_| u.b.new_node(View::JQualified { module: ImportId(0), member: None }, 0))
+            .collect();
+        let body = u.b.new_node(View::JArray { values: &values }, 0);
+        let body = u.ret(body);
+        let (_, scope) = u.function(header, &[body]);
+        assert_eq!(u.free(scope), [FreeRef::import(ImportId(0))]);
+        u.log().steps
+    }
+
+    #[test]
+    fn ten_thousand_module_references_cost_one_step_each() {
+        // One step per site at the close, as for a variable; nothing where
+        // the reference is built or released.
+        let (small, large) = (steps_of_module_references(1_000), steps_of_module_references(10_000));
+        assert_eq!(large - small, 9_000);
+        assert_eq!(steps_of_module_references(10_000), steps_of_references(10_000));
     }
 
     /// The steps of the log for one function with `references` reads of one

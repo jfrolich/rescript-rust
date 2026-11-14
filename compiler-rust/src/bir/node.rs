@@ -460,16 +460,23 @@ impl Node {
     pub(super) fn set_flags(&mut self, flags: NodeFlags) {
         self.flags = flags;
     }
-    /// The site of a `Var` in the lowering arena (`lower::scope::Site`), kept
-    /// in the leaf's unused second word so that it moves with the node's
-    /// content. O(1).
-    pub(super) fn var_site(self) -> u32 {
-        assert_eq!(self.op, Op::Var);
-        self.words[1]
+    /// The site of a `Var` or of a `JQualified` in the lowering arena
+    /// (`lower::scope::Site`), kept in the leaf's unused word (the second
+    /// of a `Var`, the third of a `JQualified`) so that it moves with the
+    /// node's content. O(1).
+    pub(super) fn site(self) -> u32 {
+        match self.op {
+            Op::Var => self.words[1],
+            Op::JQualified => self.words[2],
+            op => unreachable!("{op:?} has no site"),
+        }
     }
-    pub(super) fn set_var_site(&mut self, site: u32) {
-        assert_eq!(self.op, Op::Var);
-        self.words[1] = site;
+    pub(super) fn set_site(&mut self, site: u32) {
+        match self.op {
+            Op::Var => self.words[1] = site,
+            Op::JQualified => self.words[2] = site,
+            op => unreachable!("{op:?} has no site"),
+        }
     }
     /// The reference prints as `globalThis.name` (`lower::globals`). O(1).
     pub(super) fn var_qualified(self) -> bool {

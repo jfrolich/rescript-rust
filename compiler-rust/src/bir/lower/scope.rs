@@ -13,13 +13,18 @@ pub(crate) struct Uses {
 /// The position fact of one reference (THREE_TREES 11.4, "T4a as built"):
 /// its node and the next site of the same variable. The statement the
 /// reference is in and its parent are read from the node when the top level
-/// is complete (`lower::export`).
+/// is complete (`lower::export`). A reference to an imported module has a
+/// site too (THREE_TREES 11.4, "T5 part B as built"): the naming log reads
+/// the sites of a function scope at its close, and a release clears the
+/// site of a module reference as it clears a variable's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Site {
-    /// The `Var` node, or `NodeId(u32::MAX)` once it was released.
+    /// The `Var` or `JQualified` node, or `NodeId(u32::MAX)` once it was
+    /// released.
     pub(crate) node: NodeId,
     /// The site of the same variable recorded before this one, plus one;
-    /// zero ends the chain.
+    /// zero ends the chain. Zero for a module reference: no chain is kept
+    /// per import (nothing reads the references of one import).
     pub(crate) next: u32,
 }
 
@@ -82,7 +87,7 @@ impl Decision {
 #[derive(Default)]
 pub(crate) struct Scope {
     pub(crate) uses: Vec<Uses>,
-    /// One per `Var` node ever built, in creation order.
+    /// One per `Var` and per `JQualified` node ever built, in creation order.
     pub(crate) sites: Vec<Site>,
     /// The last site of each variable plus one, zero for none. Dense by VarId.
     pub(crate) site_heads: Vec<u32>,
@@ -172,6 +177,14 @@ impl Scope {
         let head = &mut self.site_heads[var.index()];
         self.sites.push(Site { node, next: *head });
         *head = index + 1;
+        index
+    }
+
+    /// Record the reference `node` to an imported module where it is built.
+    /// Returns the site's index, which the node keeps. Cost: one push.
+    pub(crate) fn import_site(&mut self, node: NodeId) -> u32 {
+        let index = u32::try_from(self.sites.len()).expect("site capacity");
+        self.sites.push(Site { node, next: 0 });
         index
     }
 
