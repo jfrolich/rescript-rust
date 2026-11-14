@@ -34,6 +34,7 @@ impl State {
                 let crate::bir::JsPayload::Template(parts) = self.arena.javascript(info) else {
                     unreachable!()
                 };
+                let parts = self.arena.template_parts(*parts);
                 parts[0].cooked.map(|s| self.arena.text(s))
             }
             _ => None,

@@ -208,6 +208,9 @@ pub trait ProbeRules {
         output
     }
     /// K0/K2: C:119 append / C:4715 append_effect_output; combine child outputs.
+    /// Cost: implementation-specific child-output combination: consumes the supplied
+    /// completed outputs and delegates realization/statement/normalizer work, never requests
+    /// their source compilation again.
     fn finish(
         &mut self,
         cx: Cx,
@@ -217,65 +220,80 @@ pub trait ProbeRules {
 }
 
 /// Explicit source traversal, separate from realization of deferred J operands.
-#[derive(Default)]
-pub struct SourceProbe {
+pub struct SourceProbe<R> {
+    work: Vec<ProbeWork<R>>,
+    values: Vec<Probed>,
+    children: Vec<(Cx, NodeId)>,
     /// Source occurrences offered to dispatch (one per incoming tree edge).
     pub steps: usize,
 }
-impl SourceProbe {
+enum ProbeWork<R> {
+    Enter(Cx, NodeId),
+    EnterChild(Cx, NodeId, usize, usize),
+    Finish(Cx, R, usize),
+    Child(Cx, usize, usize),
+}
+impl<R> Default for SourceProbe<R> {
+    /// O(1): initialize empty reusable storage; backing buffers grow on demand.
+    fn default() -> Self {
+        Self { work: Vec::new(), values: Vec::new(), children: Vec::new(), steps: 0 }
+    }
+}
+impl<R> SourceProbe<R> {
     /// K1/K6: C:1529 compile_expr / C:5144 compile_if_return_output.
     /// A source node is entered once. Finish frames receive the saved operands
     /// and child outputs, never a request to compile the same child again.
+    /// Cost: O(N + E) scheduling events for N visited source occurrences and E scheduled
+    /// edges, plus enter/child/finish callback work. Pushes each child continuation once and
+    /// drains completed outputs once.
     pub fn probe(
         &mut self,
-        rules: &mut impl ProbeRules,
+        rules: &mut impl ProbeRules<Resume = R>,
         cx: Cx,
         node: NodeId,
     ) -> Result<Probed, super::bridge::Unsupported> {
-        enum Work<R> {
-            Enter(Cx, NodeId),
-            EnterChild(Cx, NodeId, usize, usize),
-            Finish(Cx, R, usize),
-            Child(Cx, usize, usize),
-        }
-        let mut work = vec![Work::Enter(cx, node)];
-        let mut values = Vec::new();
-        let mut children = Vec::new();
+        self.work.clear();
+        self.values.clear();
+        self.children.clear();
+        let work = &mut self.work;
+        let values = &mut self.values;
+        let children = &mut self.children;
+        work.push(ProbeWork::Enter(cx, node));
         while let Some(task) = work.pop() {
             let task = match task {
-                Work::EnterChild(cx, node, parent, index) => {
-                    let Work::Finish(_, resume, _) = &work[parent] else { unreachable!("parent resume") };
-                    Work::Enter(rules.child_context(cx, resume, index), node)
+                ProbeWork::EnterChild(cx, node, parent, index) => {
+                    let ProbeWork::Finish(_, resume, _) = &work[parent] else { unreachable!("parent resume") };
+                    ProbeWork::Enter(rules.child_context(cx, resume, index), node)
                 }
                 task => task,
             };
             match task {
-                Work::EnterChild(..) => unreachable!("resolved child context"),
-                Work::Enter(cx, node) => {
+                ProbeWork::EnterChild(..) => unreachable!("resolved child context"),
+                ProbeWork::Enter(cx, node) => {
                     self.steps += 1;
                     rules.source_enter(cx, node);
                     match rules.enter(cx, node)? {
                         ProbePlan::Ready(value) => { rules.source_leave(&value); values.push(value); },
                         ProbePlan::Children(resume) => {
-                            rules.children(cx, &resume, &mut children);
+                            rules.children(cx, &resume, children);
                             let parent = work.len();
-                            work.push(Work::Finish(cx, resume, children.len()));
+                            work.push(ProbeWork::Finish(cx, resume, children.len()));
                             for (index, (cx, node)) in children.drain(..).enumerate().rev() {
-                                work.push(Work::Child(cx, parent, index));
-                                work.push(Work::EnterChild(cx, node, parent, index));
+                                work.push(ProbeWork::Child(cx, parent, index));
+                                work.push(ProbeWork::EnterChild(cx, node, parent, index));
                             }
                         }
                     }
                 }
-                Work::Child(cx, parent, index) => {
-                    let Work::Finish(_, resume, _) = &work[parent] else {
+                ProbeWork::Child(cx, parent, index) => {
+                    let ProbeWork::Finish(_, resume, _) = &work[parent] else {
                         unreachable!("parent resume frame")
                     };
                     let child = values.pop().expect("completed source child");
                     let cx = rules.child_context(cx, resume, index);
                     values.push(rules.child(cx, resume, index, child));
                 }
-                Work::Finish(cx, resume, count) => {
+                ProbeWork::Finish(cx, resume, count) => {
                     let start = values
                         .len()
                         .checked_sub(count)
@@ -396,14 +414,36 @@ struct State {
     tail_functions: Vec<Option<LoopRef>>,
     tail_copies: Vec<Option<VarId>>,
     tail_assignments: Vec<NodeId>,
+    tail_name: String,
+    call_reversed: Vec<NodeId>,
+    call_arities: Vec<i32>,
+    /// A module/member pair has no canonical dense handle; individual component handles do not index their sparse Cartesian product.
+    call_arity_index: std::collections::HashMap<(crate::bir::ImportId, crate::bir::StrId), Option<call::AritySpan>>,
+    eta_arguments: Vec<NodeId>,
+    calls: Vec<Option<call::Plan>>,
     tail_order: Vec<VarId>,
     rec_members: Vec<rec::Member>,
     rec_steps: usize,
     switches: Vec<Option<switch::Plan>>,
     variants: Vec<Option<variant::Plan>>,
+    named_metadata: variant::Metadata,
+    switch_spelling: String,
     untagged: Vec<Option<untagged::Plan>>,
+    untagged_storage: untagged::Storage,
+    untagged_dispatch: crate::bir::untagged_plan::Plan<u32>,
     switch_facts: Vec<switch::Facts>,
     switch_work: Vec<(NodeId, bool)>,
+    group_indices: Vec<usize>,
+    group_nodes: Vec<NodeId>,
+    /// Structural body equivalence joins different NodeIds, so no existing node index identifies an equality group.
+    group_table: hashbrown::HashTable<usize>,
+    group_order: Vec<usize>,
+    group_heads: Vec<usize>,
+    switch_output_nodes: Vec<NodeId>,
+    switch_output_clauses: Vec<crate::bir::ClauseMeta>,
+    switch_group_steps: usize,
+    switch_hash_bytes: Vec<u8>,
+    switch_constant_work: Vec<(crate::bir::ConstId, crate::bir::ConstId)>,
     switch_pairs: Vec<(NodeId, NodeId)>,
     switch_primitive_hashes: Vec<u64>,
     switch_constant_hashes: Vec<u64>,
@@ -415,13 +455,35 @@ struct State {
     idents: Vec<Ident>,
     statements: StatementStack,
     free: FreePool,
+    traversal: SourceProbe<expr::Resume>,
+    list_block_info: Option<crate::bir::JsId>,
+    constant_steps: usize,
+    constant_children: Vec<NodeId>,
+    constant_text: String,
+    constant_encoding: String,
+    constant_work: Vec<konst::Work>,
+    constant_values: Vec<(NodeId, bool)>,
+    argument_outputs: Vec<Out>,
+    argument_values: Vec<NodeId>,
+    ffi_suffix: Vec<ffi_args::LaterLiteral>,
+    ffi_params: Vec<usize>,
     source_steps: usize,
     invalid_module_paths: Vec<bool>,
     awaited_units: Vec<bool>,
-    dynamic_imports: Vec<crate::js_ir::ModuleId>,
+    dynamic_imports: Vec<crate::bir::ImportId>,
+    import_storage: import::Storage,
     external_references: Vec<Option<crate::bir::ImportId>>,
     external_globals: Vec<Option<VarId>>,
+    external_pending: Vec<(u32, NodeId)>,
+    external_values: Vec<NodeId>,
     inline_globals: Vec<Ident>,
+    inline_foreign: Vec<Ident>,
+    /// Imported export templates are keyed by sparse module/member pairs, which have no existing dense template identity.
+    inline_templates: std::collections::HashMap<(crate::bir::ImportId, crate::bir::StrId), call::InlineTemplate>,
+    inline_param_stats: Vec<super::l::beta::ParamStats>,
+    inline_engine: super::engine::Reuse,
+    inline_imports: usize,
+    inline_reductions: usize,
     inline_scratch: crate::bir::l::beta::Scratch,
     external_bindings: Vec<[Option<VarId>; 2]>,
     module_constants: Vec<ModuleConstants>,
@@ -436,6 +498,8 @@ struct State {
     location_work: Vec<(NodeId,bool)>,
     location_steps: usize,
     sequence_steps: usize,
+    evaluation: args::Evaluation,
+    object_scratch: record::Scratch,
     primitive_steps: usize,
     /// Let/Seq nodes read by row R5 step 0 of section 3.6.
     spine_steps: usize,
@@ -465,20 +529,64 @@ struct State {
 impl State {
     /// N1: C:481 new. Transfer cold pools, while source hot nodes/list operands
     /// remain readable. Variables retain source identities, never global stamps.
+    /// Cost: O(N + V + F + G) initialization for source nodes, variables, function headers
+    /// and globals, plus untagged::prepare and variant::prepare metadata work. Reserves
+    /// output node/list/switch domains from imported counts; moves cold pools rather than
+    /// cloning them.
     fn new(mut input: super::bridge::Imported) -> Self {
+        let source_nodes = input.arena.nodes.len();
+        let source_operands = input.arena.lists.slot_count();
         let mut arena = Bir::default();
         arena.begin_bulk();
         arena.pools = std::mem::take(&mut input.arena.pools);
         arena.vars.funcs = std::mem::take(&mut input.arena.vars.funcs);
         arena.vars.function_params = std::mem::take(&mut input.arena.vars.function_params);
+        // Import already knows the source-node and switch-arm counts. Reserve
+        // the output's parallel node columns together; switch arms can emit
+        // target-reference, assignment, expression statement, block and break
+        // nodes in addition to their source body, plus per-switch scaffolding.
+        // Inlining/FFI expansion may exceed this initial capacity.
+        let switch_arms = arena.pools.switch_keys.len() + arena.pools.switches.len();
+        let output_nodes = source_nodes + 5 * arena.pools.switch_keys.len()
+            + 16 * arena.pools.switches.len() + 8;
+        // Mixed dispatch can emit both literal and payload clause runs.
+        arena.pools.switch_clauses.reserve_exact(2 * switch_arms);
+        arena.pools.switch_keys.reserve_exact(switch_arms + 16 * arena.pools.switches.len());
+        arena.lists.reserve_slots(2 * source_operands + 4 * arena.pools.switch_keys.len() + 8);
+        arena.nodes.reserve_exact(output_nodes);
+        arena.parents.reserve_exact(output_nodes);
+        arena.weights.reserve_exact(output_nodes);
+        arena.capture_chain.reserve_exact(output_nodes);
+        arena.j_duplicable.reserve_exact(output_nodes);
+        #[cfg(debug_assertions)]
+        arena.checked_children.reserve_exact(output_nodes);
+        // Each imported apply header can produce one ordinary JS call payload.
+        // Reserve that known count; primitives/inlining retain safe growth.
+        arena.pools.js.reserve_exact(arena.pools.apply.len());
         arena.func_owners.resize(arena.vars.funcs.len(), None);
+        // Imported binders, export bindings and one result binding per switch.
+        let output_vars = input.arena.vars.len() + input.export_vars.len() + arena.pools.switches.len();
+        arena.capture_binders.reserve_exact(output_vars);
+        arena.bulk_binders.reserve_exact(output_vars);
+        arena.vars.j_origin.reserve_exact(output_vars);
+        arena.vars.name.reserve_exact(output_vars);
+        arena.vars.order.reserve_exact(output_vars);
+        arena.vars.flags.reserve_exact(output_vars);
+        arena.vars.uses.reserve_exact(output_vars);
+        arena.vars.binder.reserve_exact(output_vars);
+        arena.vars.fact.reserve_exact(output_vars);
+        arena.vars.printed.reserve_exact(output_vars);
         for i in 0..input.arena.vars.len() {
             let var = VarId(i as u32);
             let made = arena.new_var_id(input.arena.vars.name(var), input.arena.vars.order(var));
             assert_eq!(made, var);
             arena.vars.flags[i] = input.arena.vars.flags[i];
         }
-        arena.js_scope = Some(scope::Scope::new(arena.vars.len()));
+        let mut scope = scope::Scope::with_capacity(arena.vars.len(), output_vars);
+        scope.decisions.reserve_exact(output_vars);
+        // Reference sites are indexed by emitted nodes, not by source binders.
+        scope.sites.reserve_exact(output_nodes);
+        arena.js_scope = Some(scope);
         arena.pools.j_modules = input
             .globals
             .iter()
@@ -491,29 +599,55 @@ impl State {
         let next_order = (0..input.arena.vars.len())
             .map(|i| input.arena.vars.order(VarId(i as u32)))
             .max().unwrap_or(0).checked_add(1).expect("identifier order capacity");
+        let (untagged_storage, untagged_dispatch) = untagged::prepare(&mut arena);
+        let named_metadata = variant::prepare(&mut arena);
+        let needs_hashes = switch_arms != 0 || !arena.pools.catches.is_empty();
         Self {
+            evaluation: args::Evaluation::default(),
+            object_scratch: record::Scratch::default(),
             tail_arguments: 0, tail_parameters: 0, tail_sort_comparisons: 0, tail_body_statements: 0,
             tail_frames: Vec::new(), tail_functions: Vec::new(), tail_copies: Vec::new(),
-            tail_assignments: Vec::new(), tail_order: Vec::new(),
+            tail_assignments: Vec::new(), tail_name: String::new(), call_reversed: Vec::new(), call_arities: Vec::new(), call_arity_index: Default::default(), eta_arguments: Vec::new(), calls: Vec::new(), tail_order: Vec::new(),
             rec_members: Vec::new(), rec_steps: 0,
             switch_facts: vec![switch::Facts::default(); input.arena.nodes.len()],
-            switches: Vec::new(), variants: Vec::new(), untagged: Vec::new(), switch_work: Vec::new(), switch_pairs: Vec::new(),
-            switch_primitive_hashes: Vec::new(), switch_constant_hashes: Vec::new(),
+            switches: Vec::new(), variants: Vec::new(), named_metadata, switch_spelling: String::new(), untagged: Vec::new(), untagged_storage, untagged_dispatch, switch_work: Vec::new(), switch_pairs: Vec::new(),
+            group_indices: Vec::with_capacity(2 * switch_arms),
+            group_nodes: Vec::with_capacity(switch_arms),
+            group_table: hashbrown::HashTable::with_capacity(switch_arms),
+            group_order: Vec::with_capacity(switch_arms), group_heads: Vec::with_capacity(switch_arms),
+            switch_output_nodes: Vec::new(), switch_output_clauses: Vec::new(), switch_group_steps: 0,
+            switch_hash_bytes: Vec::new(), switch_constant_work: Vec::new(),
+            switch_primitive_hashes: Vec::with_capacity(if needs_hashes { arena.pools.prims.len() } else { 0 }),
+            switch_constant_hashes: Vec::with_capacity(if needs_hashes { arena.pools.consts.len() } else { 0 }),
             switch_comparisons: 0, switch_compared: 0, switch_visits: 0,
             invalid_module_paths: vec![false; input.arena.nodes.len()],
             awaited_units: vec![false; input.arena.vars.len()],
-            dynamic_imports: Vec::new(),
+            dynamic_imports: Vec::new(), import_storage: Default::default(),
             external_references: Vec::new(),
             external_globals: Vec::new(),
-            inline_globals: Vec::new(),
+            external_pending: Vec::new(),
+            external_values: Vec::new(),
+            inline_globals: Vec::new(), inline_foreign: Vec::new(), inline_templates: Default::default(),
+            inline_param_stats: Vec::new(), inline_engine: Default::default(), inline_imports: 0, inline_reductions: 0,
             inline_scratch: Default::default(),
             external_bindings: Vec::new(),
             module_constants: (0..arena.pools.j_modules.len()).map(|_| ModuleConstants::Unread).collect(),
             source: input.arena,
             arena,
             idents: input.idents,
-            statements: StatementStack::default(),
-            free: FreePool::default(),
+            statements: StatementStack::with_capacity(output_nodes),
+            free: FreePool::with_source_capacity(source_nodes),
+            traversal: SourceProbe {
+                // Each pending child has an entry and a continuation event.
+                work: Vec::with_capacity(2 * source_nodes),
+                values: Vec::with_capacity(source_nodes),
+                children: Vec::with_capacity(source_nodes),
+                steps: 0,
+            },
+            list_block_info: None, constant_steps: 0, constant_children: Vec::new(), constant_text: String::new(), constant_encoding: String::new(), constant_work: Vec::new(), constant_values: Vec::new(),
+            argument_outputs: Vec::with_capacity(source_operands),
+            argument_values: Vec::with_capacity(source_operands),
+            ffi_suffix: Vec::new(), ffi_params: Vec::new(),
             source_steps: 0,
             direct: false,
             located_functions: Vec::new(),
@@ -533,7 +667,7 @@ impl State {
             tries: Vec::new(),
             loops: Vec::new(),
             next_loop_label: 0,
-            labels: label::Schedule::default(),
+            labels: label::Schedule::with_source_capacity(source_nodes),
             try_form_reads: 0,
             catch_work: Vec::new(),
             catch_flag_reads: 0,
@@ -558,10 +692,14 @@ impl State {
         super::j::pure_expression(&mut self.arena, view, aux)
     }
     /// K1: C:1529 compile_expr. SourceProbe owns the depth-independent traversal.
+    /// Cost: SourceProbe::probe cost: O(N + E) traversal events plus lowering callbacks;
+    /// lends and restores the retained traversal buffers without an additional source walk.
     fn probe(&mut self, cx: Cx, node: NodeId) -> Result<Probed, Unsupported> {
-        let mut traversal = SourceProbe::default();
+        let mut traversal = std::mem::take(&mut self.traversal);
+        let before = traversal.steps;
         let output = traversal.probe(self, cx, node);
-        self.source_steps += traversal.steps;
+        self.source_steps += traversal.steps - before;
+        self.traversal = traversal;
         if output.is_ok() { self.finish_labels(); }
         output
     }
@@ -588,6 +726,19 @@ impl State {
     /// and of `finish`.
     fn complete_unit(mut self, probed: Probed) -> Lowered {
         let out = self.realize(Cx::value(), probed);
+        // Export coercion takes ownership of the root's identifier vector.
+        // Isolate that output-boundary payload so shared source/block shapes
+        // remain immutable for any other surviving block occurrence.
+        if let Some(mut end) = out.value {
+            while let View::JSeq { second, .. } = self.arena.view(end) { end = second; }
+            if let View::JBlockLit { info, .. } = self.arena.view(end) {
+                if let crate::lambda::TagInfo::ModuleExport(exports) = self.arena.block_tag(info) {
+                    let tag = crate::lambda::TagInfo::ModuleExport(exports.clone());
+                    let owned = self.arena.js_info(crate::bir::JsPayload::Block(tag));
+                    self.arena.nodes[end.index()].set_block_info(owned);
+                }
+            }
+        }
         let exports = self.extract_exports(out.value, out.finished);
         let run = self.statements.since(Span {
             start: out.stmts.start,
@@ -643,6 +794,8 @@ impl State {
             header.uses = 0;
         }
         self.arena.finish_bulk(root);
+        // Materialize legacy-owned dependency records only at the output boundary.
+        let dynamic_imports = self.dynamic_imports.iter().map(|id| self.arena.pools.j_modules[id.index()].clone()).collect();
         // THREE_TREES 11.4, "T5 design": every list is the one the flatten
         // pass receives, so the bindings around a reference are final.
         globals::decide(&mut self.arena, &self.idents);
@@ -653,7 +806,7 @@ impl State {
             #[cfg(test)]
             finished: _finished,
             coerced,
-            dynamic_imports: self.dynamic_imports,
+            dynamic_imports,
             switch_stats: SwitchStats {
                 source_visits: self.source_steps,
                 fingerprint_visits: self.switch_visits,
@@ -675,6 +828,10 @@ impl ProbeRules for State {
     fn source_leave(&mut self, output: &Probed) { self.label_leave(output); }
     type Resume = expr::Resume;
     /// K1/H12: C:1529 compile_expr and K:60 compile_constant.
+    /// Cost: O(1) tag dispatch plus the selected preparer: constant occurrences, application
+    /// spine/arguments, recursive binders, function parameters, or switch metadata. Extending
+    /// dense tables costs their newly initialized rows; descendant lowering is scheduled, not
+    /// performed twice.
     fn enter(&mut self, cx: Cx, node: NodeId) -> Result<ProbePlan<Self::Resume>, Unsupported> {
         let value = match self.source.view(node) {
             View::Var { var } => self.pure_expression(View::Var { var }, 0),
@@ -686,11 +843,11 @@ impl ProbeRules for State {
                 0,
             ),
             View::Const { value } => self.constant(value),
-            View::Apply { callee, args, info } => {
-                let args = args.to_vec();
+            View::Apply { callee, info, .. } => {
+                let args = self.source.node(node).apply_args();
                 let tail = self.self_call(cx, callee);
-                let mut call = self.application(cx, callee, &args, info)?;
-                call.tail = tail;
+                let call = self.application(cx, callee, args, info)?;
+                self.calls[call.0 as usize].as_mut().unwrap().tail = tail;
                 return Ok(ProbePlan::Children(expr::Resume::Call(call)));
             }
             View::Fun { body, header } => {
@@ -758,7 +915,7 @@ impl ProbeRules for State {
             View::Switch { scrutinee, header, .. } => {
                 let operands = self.source.node(node).switch_actions();
                 if matches!(self.arena.switch(header).dispatch, crate::lambda::SwitchDispatch::Variant(_)) {
-                    if variant::is_untagged(self.arena.switch(header)) {
+                    if variant::is_untagged(&self.arena.switch(header)) {
                         return Ok(ProbePlan::Children(expr::Resume::Untagged(self.untagged_switch(cx, scrutinee, operands, header)?)));
                     }
                     return Ok(ProbePlan::Children(expr::Resume::Variant(self.named_variant(cx, scrutinee, operands, header)?)));
@@ -922,6 +1079,19 @@ impl Realizer for State {
     }
 }
 
+/// Cost: O(path segments and emitted bytes), reusing the destination.
+pub(crate) fn flat_export_name_into<'a>(path: impl Iterator<Item = &'a str>, out: &mut String) {
+    for (i, part) in path.enumerate() {
+        if i != 0 { out.push('$'); }
+        let part = if part.len() >= 3 && part.starts_with("\\\"") && part.ends_with('"') {
+            &part[2..part.len() - 1]
+        } else {
+            part
+        };
+        out.push_str(part);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1024,7 +1194,7 @@ mod tests {
             assert_eq!(probe.steps, 20_001);
             assert!(rules.seen.iter().all(|&visits| visits == 1));
         }
-        assert_eq!(std::mem::size_of::<SourceProbe>(), 8);
+        assert_eq!(std::mem::size_of::<SourceProbe<()>>(), 80);
         assert_eq!(std::mem::size_of::<ProbePlan<()>>(), 20);
     }
 }

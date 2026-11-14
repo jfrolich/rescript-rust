@@ -65,6 +65,7 @@ pub(super) fn string_of(b: &Bir, id: NodeId) -> Option<&str> {
             let crate::bir::JsPayload::Template(parts) = b.javascript(info) else {
                 unreachable!()
             };
+            let parts = b.template_parts(*parts);
             Some(parts[0].cooked.map_or("", |text| b.text(text)))
         }
         _ => None,
@@ -84,11 +85,14 @@ pub(super) fn bool_of(b: &Bir, id: NodeId) -> Option<bool> {
 pub(super) fn undefined(b: &Bir, id: NodeId) -> bool {
     matches!(b.view(id), View::JUndefined)
 }
-pub(super) fn equal(b: &Bir, left: NodeId, right: NodeId) -> bool {
-    super::equal::equal(b, left, right, &mut 0)
+pub(super) fn equal(b: &mut Bir, left: NodeId, right: NodeId) -> bool {
+    let mut work = std::mem::take(&mut b.j_equal_work);
+    let result = super::equal::equal_with_work(b, left, right, &mut 0, &mut work);
+    b.j_equal_work = work;
+    result
 }
 pub(super) fn same_var(b: &Bir, left: NodeId, right: NodeId) -> bool {
-    matches!(b.view(left), View::Var { .. } | View::JQualified { .. }) && equal(b, left, right)
+    super::equal::identity_equal(b, left, right).unwrap_or(false)
 }
 /// Retain disjoint descendants and release the replaced shells and discarded
 /// operands. Detach before release: Bir skips edges that no longer belong to it.

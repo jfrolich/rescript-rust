@@ -11,6 +11,13 @@ pub(super) struct Record {
     loc: LamLoc,
 }
 
+#[derive(Default)]
+pub(super) struct Scratch {
+    operands: Vec<NodeId>,
+    pub(super) keys: Vec<PropertyKey>,
+    pub(super) values: Vec<NodeId>,
+}
+
 impl State {
     /// C: try_compile_record_spread / collect_record_spread_overrides.
     /// O(k + field-name bytes) for k consecutive writes, with one inspection
@@ -35,8 +42,14 @@ impl State {
             return None;
         }
         let loc = self.arena.primitive(primitive).loc;
-        let mut operands = vec![*init];
-        let mut keys = vec![PropertyKey::RecordSpread];
+        let init = *init;
+        let mut scratch = std::mem::take(&mut self.object_scratch);
+        let operands = &mut scratch.operands;
+        let keys = &mut scratch.keys;
+        debug_assert!(operands.is_empty() && keys.is_empty());
+        operands.push(init);
+        keys.push(PropertyKey::RecordSpread);
+        let result = (|| {
         loop {
             self.primitive_steps += 1;
             match self.source.view(body) {
@@ -70,13 +83,13 @@ impl State {
             }
         }
         keys[1..].reverse();
-        let info = self.arena.js_info(JsPayload::Object(keys));
-        let operands = self.source.lists.push(&operands);
-        Some(Record {
-            operands,
-            info,
-            loc,
-        })
+        let info = self.arena.object_info(keys);
+        let operands = self.source.lists.push(operands);
+        Some(Record { operands, info, loc })
+        })();
+        scratch.operands.clear(); scratch.keys.clear();
+        self.object_scratch = scratch;
+        result
     }
 
     /// C: try_compile_record_spread. O(k) child scheduling, in source order.
@@ -102,7 +115,8 @@ impl State {
         children: impl Iterator<Item = Probed>,
     ) -> Probed {
         let mut start = None;
-        let mut values = Vec::with_capacity(self.source.lists.get(record.operands).len());
+        let mut values = std::mem::take(&mut self.object_scratch.values);
+        debug_assert!(values.is_empty());
         for child in children {
             self.primitive_steps += 1;
             let Probed::Out(out) = child else {
@@ -120,6 +134,8 @@ impl State {
             },
             0,
         );
+        values.clear();
+        self.object_scratch.values = values;
         if self
             .locations
             .as_ref()
@@ -151,7 +167,7 @@ impl State {
     pub(super) fn duplicate_record(&mut self, source: NodeId) -> NodeId {
         let info = self
             .arena
-            .js_info(JsPayload::Object(vec![PropertyKey::RecordSpread]));
+            .object_info(&[PropertyKey::RecordSpread]);
         plain::node(
             &mut self.arena,
             View::JObject {
@@ -165,17 +181,15 @@ impl State {
     /// P: compile_primitive_js PrecordRest. O(k + label bytes) for k excluded
     /// fields; store labels once in the arena's cold rest descriptor.
     pub(super) fn record_rest(&mut self, source: NodeId, excluded: &[String]) -> NodeId {
-        let fields = excluded
-            .iter()
-            .map(|name| {
-                self.primitive_steps += 1;
-                crate::bir::RestField {
-                    name: self.arena.intern_text(name),
-                    binding: None,
-                }
-            })
-            .collect();
-        let info = self.arena.js_info(JsPayload::Rest(fields));
+        let start = self.arena.pools.rest_fields.len() as u32;
+        for name in excluded {
+            self.primitive_steps += 1;
+            let name = self.arena.intern_text(name);
+            self.arena.pools.rest_fields.push(crate::bir::RestField { name, binding: None });
+        }
+        let info = self.arena.js_info(JsPayload::Rest(crate::bir::RestSpan {
+            start, len: excluded.len() as u32,
+        }));
         plain::node(
             &mut self.arena,
             View::JRecordRest {
@@ -273,6 +287,72 @@ mod tests {
             .arena
             .validate(Some(lowered.program.root))
             .unwrap();
+    }
+
+    #[test]
+    fn rejected_record_candidates_clear_retained_storage() {
+        let (a, root) = copy(1);
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let View::Let { var, value: Some(value), body } = state.source.view(root) else { panic!() };
+        // The initializer is valid, but its own Prim is not an override spine.
+        assert!(state.record_copy(var, value, value).is_none());
+        let before = (state.object_scratch.operands.capacity(), state.object_scratch.keys.capacity());
+        let allocations = allocation_counter::measure(|| {
+            for _ in 0..10_000 { assert!(state.record_copy(var, value, value).is_none()); }
+        });
+        assert_eq!(allocations.count_total, 0, "{allocations:?}");
+        assert_eq!((state.object_scratch.operands.capacity(), state.object_scratch.keys.capacity()), before);
+        assert!(state.object_scratch.operands.is_empty() && state.object_scratch.keys.is_empty());
+        assert!(state.record_copy(var, value, body).is_some());
+        assert!(state.object_scratch.operands.is_empty() && state.object_scratch.keys.is_empty());
+    }
+
+    #[test]
+    fn ten_thousand_record_overrides_lower_without_allocations() {
+        let (a, root) = copy(10_000);
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let run = |s: &mut State| {
+            let out = s.probe(Cx::returning(), root).unwrap();
+            let out = s.realize(Cx::returning(), out);
+            for node in s.statements.statements(out.stmts) { s.arena.release(node); }
+            if let Some(value) = out.value { s.arena.release(value); }
+            s.statements.kill(out.stmts);
+        };
+        let lists = state.arena.lists.storage_shape().0;
+        let source_lists = state.source.lists.storage_shape().0;
+        let keys = state.arena.pools.property_keys.len();
+        run(&mut state);
+        state.arena.lists.reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
+        state.source.lists.reserve_test_growth(state.source.lists.storage_shape().0 - source_lists);
+        state.arena.pools.property_keys.reserve(state.arena.pools.property_keys.len() - keys);
+        state.arena.pools.js.reserve(1);
+        state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
+        let capacities = |s: &State| {
+            [s.object_scratch.operands.capacity(), s.object_scratch.keys.capacity(), s.object_scratch.values.capacity(),
+                s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(), s.arena.release_stack.capacity(),
+                s.arena.lists.storage_shape().1, s.source.lists.storage_shape().1, s.arena.pools.property_keys.capacity(),
+                s.arena.pools.js.capacity(), s.traversal.work.capacity(), s.traversal.values.capacity(), s.traversal.children.capacity()]
+        };
+        let before = capacities(&state);
+        let free_before = state.free.capacities();
+        let statements_before = state.statements.capacities();
+        let source = state.source_steps;
+        let primitive = state.primitive_steps;
+        let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
+        let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
+        assert_eq!(allocations.count_total, 0, "{allocations:?}");
+        assert_eq!(capacities(&state), before);
+        assert_eq!(state.free.capacities(), free_before);
+        assert_eq!(state.statements.capacities(), statements_before);
+        assert_eq!(state.source_steps - source, 10_002);
+        assert_eq!(state.primitive_steps - primitive, 40_002);
+        assert!(state.object_scratch.operands.is_empty() && state.object_scratch.keys.is_empty() && state.object_scratch.values.is_empty());
     }
 
     #[test]
