@@ -1262,3 +1262,44 @@ fn recursion_repair_over_ten_thousand_elements_is_linear() {
         .join()
         .unwrap();
 }
+
+/// `unify_var` (compiler/ml/ctype.ml:2752-2771) writes the level before the
+/// link, so of two named variables the name is chosen by the levels after
+/// it (btype.ml:727): the target keeps its own, where `unify1_var`, which
+/// links first, gives it the lower variable's. A variable in a constructor
+/// goes to `unify` (ctype.ml:2755); a failure starts the trace with the
+/// pair.
+#[test]
+fn unify_var_lowers_before_it_links() {
+    let named = |c: &mut Checker, level: u32, name: u32| {
+        let v = var_at(c, level);
+        c.g.nodes[v.0 as usize].a = name;
+        v
+    };
+    let mut c = checker(Mode::Success);
+    let (v, w) = (named(&mut c, 2, 10), named(&mut c, 3, 20));
+    c.unify_var(v, w).unwrap();
+    assert_eq!(c.g.repr(v), w);
+    assert_eq!(c.g.nodes[w.0 as usize].a, 20);
+    assert_eq!(c.g.nodes[w.0 as usize].level, 2);
+    let mut c = checker(Mode::Success);
+    let (v, w) = (named(&mut c, 2, 10), named(&mut c, 3, 20));
+    c.unify(v, w).unwrap();
+    assert_eq!(c.g.nodes[w.0 as usize].a, 10, "unify1_var links first");
+
+    let mut c = checker(Mode::Success);
+    let v = var(&mut c);
+    let ph = constr(&mut c, PHANTOM, &[v]);
+    c.unify_var(v, ph).unwrap();
+    assert_eq!(c.g.repr(v), ph);
+
+    let mut c = checker(Mode::Explain);
+    let v = var(&mut c);
+    let p = constr(&mut c, PA, &[v]);
+    let tuple_of_v = tuple(&mut c, &[v, v]);
+    assert!(c.unify_var(v, tuple_of_v).is_err());
+    assert_eq!(c.trace, [[v, tuple_of_v]]);
+    assert_eq!(c.g.repr(v), v);
+    assert!(c.unify_var(v, p).is_err());
+    assert_eq!(c.g.repr(v), v);
+}

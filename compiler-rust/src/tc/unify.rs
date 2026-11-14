@@ -878,7 +878,49 @@ impl Checker {
     /// `Mode::Explain`. O(1) plus [`Checker::bind`] or [`Checker::unify`].
     /// (R3c)
     pub fn unify_var(&mut self, var: Ty, ty: Ty) -> Result<(), Clash> {
-        todo!("R3c")
+        let var = self.g.repr(var);
+        let ty = self.g.repr(ty);
+        if var == ty {
+            return Ok(());
+        }
+        // `| _ -> unify (ref env) t1 t2`.
+        if self.g.nodes[var.0 as usize].tag() != VAR {
+            return self.unify(var, ty);
+        }
+        let before = self.g.nodes[var.0 as usize];
+        let target = self.g.nodes[ty.0 as usize];
+        let occur_first = self.occur_first();
+        // `occur env t1 t2; update_level env t1.level t2; link_type t1 t2`:
+        // here the level is written before the link, so of two variables the
+        // name is chosen by the levels after it (btype.ml:727).
+        let mut result = Ok(());
+        if target.tag() != VAR {
+            match self.binding_occurrence(var, ty, occur_first, target.tag() == CONSTR) {
+                // `Tvar _, Tconstr _ when deep_occur t1 t2 -> unify (ref env)
+                // t1 t2` (ctype.ml:2755).
+                Ok(true) => return self.unify(var, ty),
+                Ok(false) => {}
+                Err(clash) => result = Err(clash),
+            }
+        }
+        if result.is_ok() && (target.tag() == VAR || occur_first || self.types.scoped != 0) {
+            result = self.lower_to(ty, before.level);
+        }
+        if result.is_ok() {
+            self.g.link(var, ty);
+            return Ok(());
+        }
+        // `raise (Unify ((t1, t2) :: trace))` (ctype.ml:2766-2768): the
+        // failure of a unification that is not nested in another.
+        if self.depth == 0 {
+            if self.g.mode == Mode::Explain {
+                self.trace.clear();
+                self.trace.push([var, ty]);
+            } else if self.g.speculation_depth == 0 {
+                self.unexplained_failure = true;
+            }
+        }
+        result
     }
 
     /// `unify_gadt` (compiler/ml/ctype.ml:2739-2750): one unification in
