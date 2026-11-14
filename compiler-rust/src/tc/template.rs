@@ -388,24 +388,40 @@ impl Graph {
     /// variable has no name (compiler/ml/btype.ml:510).
     pub fn instance(&mut self, template: Template) -> Ty {
         if template.node_len == 0 {
-            let root = self.repr(Ty(template.nodes));
-            assert_ne!(
-                self.nodes[root.0 as usize].level, GENERIC,
-                "recapture after external generalization"
-            );
-            return root;
+            return self.instance_external_root(template);
         }
         let pools = self.template_pools[template.pools as usize];
         if pools.external_len == 0 {
             self.instance_inner::<false>(template, &pools)
         } else {
-            self.instance_inner::<true>(template, &pools)
+            self.instance_with_externals(template, &pools)
         }
+    }
+
+    /// O(links), out of line: the instance of a template whose root is not
+    /// generic is that root's representative, which must still not be generic.
+    #[inline(never)]
+    fn instance_external_root(&mut self, template: Template) -> Ty {
+        let root = self.repr(Ty(template.nodes));
+        assert_ne!(
+            self.nodes[root.0 as usize].level, GENERIC,
+            "recapture after external generalization"
+        );
+        root
+    }
+
+    /// O(nodes + slots + external references + links), out of line so that
+    /// the closed instance, inlined into [`Graph::instance`], shares no
+    /// registers with the external references' representative lookups.
+    #[inline(never)]
+    fn instance_with_externals(&mut self, template: Template, pools: &TemplatePools) -> Ty {
+        self.instance_inner::<true>(template, pools)
     }
 
     /// O(nodes + slots + external references + links). Both specializations
     /// share this traversal; closed templates compile without an external
     /// reference case in the per-reference mapping.
+    #[inline(always)]
     fn instance_inner<const EXTERNALS: bool>(
         &mut self,
         template: Template,

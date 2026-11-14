@@ -2,6 +2,8 @@
 
 pub const GENERIC: u32 = 100_000_000;
 pub const VAR: u32 = 0;
+/// A link's head is exactly `LINK`: no arity and no flag bits, so
+/// [`Graph::repr`] tests the whole head.
 pub const LINK: u32 = 1;
 pub const CONSTR: u32 = 2;
 pub const TUPLE: u32 = 3;
@@ -227,20 +229,35 @@ impl Graph {
     /// the walked path. Count one step per followed link and rewritten node:
     /// at most two per link, one for an already direct link. Writes use the
     /// speculative trail. This preserves compiler/ml/btype.ml's representative.
+    /// A representative costs one load, one compare and one untaken branch.
     #[inline]
     pub fn repr(&mut self, ty: Ty) -> Ty {
         Self::repr_parts(&mut self.nodes, &mut self.trail, self.speculation_depth, ty)
     }
 
     /// O(links), at most two steps per link. Split borrows let pool iterators
-    /// resolve external references without borrowing the entire graph.
+    /// resolve external references without borrowing the entire graph. A
+    /// representative returns at once; a link goes to [`Graph::compress`].
     #[inline]
     pub(crate) fn repr_parts(
         nodes: &mut [Node],
         trail: &mut Vec<Change>,
         depth: usize,
-        mut ty: Ty,
+        ty: Ty,
     ) -> Ty {
+        if nodes[ty.0 as usize].head != LINK {
+            return ty;
+        }
+        Self::compress(nodes, trail, depth, ty)
+    }
+
+    /// O(links), at most two steps per link, out of line: follow the links
+    /// from `ty` to the representative, then point every walked node that
+    /// does not already point there at it, with an undo entry inside a
+    /// speculation. Cold, so that the representative's path falls through.
+    #[cold]
+    #[inline(never)]
+    fn compress(nodes: &mut [Node], trail: &mut Vec<Change>, depth: usize, mut ty: Ty) -> Ty {
         let mut root = ty;
         while nodes[root.0 as usize].tag() == LINK {
             #[cfg(test)]
