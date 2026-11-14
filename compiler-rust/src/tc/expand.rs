@@ -729,15 +729,26 @@ impl Checker {
         if self.g.nodes[root.0 as usize].level <= level {
             return Ok(());
         }
-        // Without expanding constructors that have arguments; a clash is
-        // `backtrack snap`: a restore with its memo cleanup.
+        // First without expanding constructors that have arguments; after a
+        // clash, `backtrack snap` (a restore with its memo cleanup) and once
+        // more expanding them.
         let token = self.g.speculate();
         if self.lower_scoped(root, level, false).is_ok() {
             self.g.keep(token);
             return Ok(());
         }
         self.restore(token);
-        Err(Clash)
+        // OCaml runs the second pass outside the snapshot and leaves what a
+        // failed one wrote ("Levels should be restored", ctype.ml:599). Here
+        // a clash leaves the graph as it was before the call: the writes are
+        // undone, the memos are kept as OCaml keeps them (no `backtrack`).
+        let token = self.g.speculate();
+        let result = self.lower_scoped(root, level, true);
+        match result {
+            Ok(()) => self.g.keep(token),
+            Err(Clash) => self.g.restore(token),
+        }
+        result
     }
 
     /// One pass of the inner `update_level env level expand`
@@ -1044,8 +1055,8 @@ mod tests {
 
     /// The scoped walk over a 10,000-deep type on a 2 MB stack: one step a
     /// node when nothing escapes, one speculation, closed. When the bottom
-    /// node escapes, at most 4 steps a node, and the graph is as it was
-    /// before the call.
+    /// node escapes, two passes and two restores, at most 4 steps a node,
+    /// and the graph is as it was before the call.
     #[test]
     fn scoped_lowering_of_ten_thousand_nodes() {
         std::thread::Builder::new()
@@ -1096,6 +1107,28 @@ mod tests {
         let head = c.g.repr(last);
         assert_eq!(c.g.nodes[head.0 as usize].a, 0);
         assert_eq!(c.g.nodes[head.0 as usize].level, 1);
+        assert!(c.g.trail.is_empty());
+    }
+
+    /// The expanding retry: a constructor with an argument whose argument
+    /// escapes is a clash without expanding, and is replaced by its
+    /// expansion on the second pass (`type phantom<'a> = int`).
+    #[test]
+    fn the_retry_expands_a_constructor_with_arguments() {
+        let mut c = checker(3);
+        let param = var(&mut c, GENERIC);
+        let body = constr(&mut c, GENERIC, 0, &[]);
+        abbreviation(&mut c, 1, &[param], body);
+        c.types.rows[2].scope = 2;
+        c.types.scoped = 1;
+        let escaping = constr(&mut c, 3, 2, &[]);
+        let phantom = constr(&mut c, 3, 1, &[escaping]);
+        c.lower(phantom, 1).unwrap();
+        let head = c.g.repr(phantom);
+        assert_eq!(c.g.nodes[head.0 as usize].a, 0);
+        assert_eq!(c.g.nodes[head.0 as usize].level, 1);
+        // The escaping argument is not reached through the expansion.
+        assert_eq!(c.g.nodes[escaping.0 as usize].level, 3);
         assert!(c.g.trail.is_empty());
     }
 
