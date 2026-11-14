@@ -1,0 +1,1 @@
+- Checker rewrite R4g: the new checker logs the units and imported items a unit reads, once each and in the order first read.
