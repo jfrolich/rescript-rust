@@ -323,8 +323,10 @@ impl Bir {
             );
         }
         // A function's parameters get their home where its scope closes.
+        // The op is read from the table, not through `node`, which would
+        // count a visit.
         #[cfg(test)]
-        let literal = matches!(self.view(id), View::Fun { .. } | View::JFun { .. });
+        let literal = matches!(self.nodes[id.index()].op(), Op::Fun | Op::JFun);
         for var in self.binders(id) {
             assert!(
                 self.vars.binder[var.index()].is_none(),
