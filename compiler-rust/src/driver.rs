@@ -10595,22 +10595,29 @@ fn type_structure_two_modes<S, T, R>(
         let type_ctx = fresh_type_context();
         type_ctx.set_location_namespace(&options.location_identity(filename));
         type_ctx.defer_attempt_counters();
-        let type_check = || {
-            let (mut tctx, env) = crate::timing::measure(crate::timing::Phase::EnvSetup, || {
-                in_process_type_check_context(&type_ctx, &unit, syntax.arena, attempt.mode)
-            });
-            // Census ownership follows the syntax, including its general form
-            // after fallback; it is not conditional on using derived plans.
-            tctx.derived_census = syntax.arena.derived_census.clone();
-            let typed = crate::timing::measure(crate::timing::Phase::Typecheck, || {
-                env.and_then(|env| check(&mut tctx, &env, syntax).map(|typed| (typed, env)))
-            });
-            (tctx, typed)
-        };
+        // The environment setup and type checking of this attempt, binding
+        // `$tctx` and `$typed`. A macro rather than a closure, so that a build
+        // without debug assertions compiles exactly these statements.
+        macro_rules! type_check {
+            ($tctx:ident, $typed:ident) => {
+                let (mut $tctx, env) = crate::timing::measure(crate::timing::Phase::EnvSetup, || {
+                    in_process_type_check_context(&type_ctx, &unit, syntax.arena, attempt.mode)
+                });
+                // Census ownership follows the syntax, including its general form
+                // after fallback; it is not conditional on using derived plans.
+                $tctx.derived_census = syntax.arena.derived_census.clone();
+                let $typed = crate::timing::measure(crate::timing::Phase::Typecheck, || {
+                    env.and_then(|env| check(&mut $tctx, &env, syntax).map(|typed| (typed, env)))
+                });
+            };
+        }
         #[cfg(not(debug_assertions))]
-        let (tctx, typed) = type_check();
+        type_check!(tctx, typed);
         #[cfg(debug_assertions)]
-        let (tctx, typed) = match names_replayed(options.checker, unit.module_name.unwrap_or(filename), type_check) {
+        let (tctx, typed) = match names_replayed(options.checker, unit.module_name.unwrap_or(filename), || {
+            type_check!(tctx, typed);
+            (tctx, typed)
+        }) {
             Ok(checked) => checked,
             Err(mismatch) => return (type_ctx, Err(anyhow::Error::msg(mismatch))),
         };
