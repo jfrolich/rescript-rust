@@ -10,12 +10,14 @@ use crate::types::external_ffi_types::{ExternalModuleName, ModuleBindName};
 
 #[derive(Default)]
 pub(super) struct Storage {
+    /// Full serialized module identity has no handle until interning assigns one.
     index: hashbrown::HashTable<(u64, ImportId, u32, u32)>,
     keys: Vec<u8>,
     key: Vec<u8>,
     binding: String,
     flat: String,
     export: String,
+    /// Persistent Ident stamps are external identities, not dense unit-local handles.
     resolved: std::collections::HashMap<Ident, (ImportId, Option<crate::bir::StrId>)>,
 }
 

@@ -664,8 +664,15 @@ fn same_assignment_target(b: &Bir, left: NodeId, right: NodeId) -> bool {
     }
     true
 }
-fn equal_statements(b: &Bir, left: &[NodeId], right: &[NodeId]) -> bool {
-    left.len() == right.len() && left.iter().zip(right).all(|(&l, &r)| p::equal(b, l, r))
+/// O(compared statements and their paired nodes), borrowing retained equality scratch.
+fn equal_statements(b: &mut Bir, left: crate::bir::ListId, right: crate::bir::ListId) -> bool {
+    let len = b.lists.get(left).len();
+    if len != b.lists.get(right).len() { return false; }
+    for i in 0..len {
+        let (l,r)=(b.lists.get(left)[i],b.lists.get(right)[i]);
+        if !p::equal(b,l,r) { return false; }
+    }
+    true
 }
 /// Branch handles for J-S3. A finalized branch is a ListId; the lowering's
 /// statement stack supplies Span handles so a surviving tail stays in place.
@@ -902,9 +909,9 @@ pub fn js3_simplify_if(
             return js1_exp(b, value);
         }
         if let Some((c, y, n)) = nested_if(b, yes) {
-            let merge = if equal_statements(b, b.lists.get(n), b.lists.get(no)) {
+            let merge = if equal_statements(b, n, no) {
                 Some(false)
-            } else if !b.lists.get(y).is_empty() && equal_statements(b, b.lists.get(y), b.lists.get(no)) {
+            } else if !b.lists.get(y).is_empty() && equal_statements(b, y, no) {
                 Some(true)
             } else { None };
             if let Some(negate) = merge {
@@ -921,10 +928,10 @@ pub fn js3_simplify_if(
         }
         if let Some((c, y, n)) = nested_if(b, no) {
             let merge = if !b.lists.get(yes).is_empty() && !b.lists.get(y).is_empty()
-                && equal_statements(b, b.lists.get(yes), b.lists.get(y)) {
+                && equal_statements(b, yes, y) {
                 Some(false)
             } else if !b.lists.get(yes).is_empty() && !b.lists.get(n).is_empty()
-                && equal_statements(b, b.lists.get(yes), b.lists.get(n)) {
+                && equal_statements(b, yes, n) {
                 Some(true)
             } else { None };
             if let Some(negate) = merge {

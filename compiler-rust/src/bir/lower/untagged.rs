@@ -1649,7 +1649,7 @@ mod tests {
                 d.test_values.capacity(),
                 d.copied_vars.capacity(),
                 d.copied_labels.capacity(),
-                s.arena.j_equal_work.borrow().capacity(),
+                s.arena.j_equal_work.capacity(),
             ]
         };
         let before = capacities(&state);
@@ -1662,6 +1662,7 @@ mod tests {
         let graph_before = state.untagged_dispatch.capacities();
         let free_before = state.free.capacities();
         let metadata_before = state.untagged_dispatch.metadata.capacities();
+        state.untagged_storage.copy_scratch.reserve_arena(&state.arena);
         let copy_before = state.untagged_storage.copy_scratch.capacities();
         let counts = (
             state.source_steps,

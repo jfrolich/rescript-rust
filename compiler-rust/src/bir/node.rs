@@ -60,12 +60,12 @@ pub struct Node {
 }
 
 pub(super) struct Renaming<'a> {
-    pub nodes: &'a HashMap<NodeId, NodeId>,
-    pub vars: &'a HashMap<VarId, VarId>,
-    pub funcs: &'a HashMap<FuncId, FuncId>,
-    pub catches: &'a HashMap<CatchId, CatchId>,
+    pub nodes: &'a super::edit::DenseMap<NodeId>,
+    pub vars: &'a super::edit::DenseMap<VarId>,
+    pub funcs: &'a super::edit::DenseMap<FuncId>,
+    pub catches: &'a super::edit::DenseMap<CatchId>,
     pub labels: &'a HashMap<u32, u32>,
-    pub js: &'a HashMap<JsId, JsId>,
+    pub js: &'a super::edit::DenseMap<JsId>,
 }
 
 trait Operand<'a>: Sized {

@@ -38,9 +38,8 @@ pub use vars::*;
 pub struct Bir {
     /// Logical normalisation costs for the opt-in J backend.
     pub j_stats: j::Stats,
-    // Equality is a read-only arena query. Its non-reentrant traversal borrows
-    // this unit-owned scratch only for the duration of that query.
-    j_equal_work: std::cell::RefCell<Vec<(NodeId, NodeId)>>,
+    // Mutable normalizer callers explicitly lend this retained worklist.
+    j_equal_work: Vec<(NodeId, NodeId)>,
     j_template_scratch: j::norm::TemplateScratch,
     nodes: Vec<Node>,
     parents: Vec<Option<NodeId>>,

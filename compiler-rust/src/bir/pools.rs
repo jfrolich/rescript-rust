@@ -460,19 +460,25 @@ pub struct Import {
 #[derive(Default)]
 pub(super) struct Pools {
     pub hash_builder: ahash::RandomState,
+    /// Raw spelling has no StrId until interning assigns its canonical handle.
     pub text_index: hashbrown::HashTable<(u64, StrId)>,
+    /// A structural constant value has no ConstId until interning canonicalizes it.
     pub const_index: hashbrown::HashTable<(u64, ConstId)>,
     pub const_keys: Vec<(u32, u32)>,
     pub const_key_bytes: Vec<u8>,
     pub const_key_scratch: Vec<u8>,
+    /// Primitive payload contents have no PrimId before interning, even when their operands already have handles.
     pub prim_index: hashbrown::HashTable<(u64, PrimId)>,
     pub prim_keys: Vec<Vec<u8>>,
+    /// Full import identity has no ImportId until its contents are interned.
     pub import_index: hashbrown::HashTable<(u64, ImportId)>,
+    /// Source labels are sparse imported numbers, not positions in the catch pool.
     pub catch_labels: hashbrown::HashMap<u32, CatchId, ahash::RandomState>,
     pub next_label: u64,
     pub consts: Vec<Constant>,
     pub floats: Vec<Option<ConstId>>,
     pub const_fields: Vec<ConstId>,
+    /// Equal sequences may occupy different spans; no existing list handle identifies their canonical contents.
     pub const_fields_index: hashbrown::HashTable<(u64, ConstSpan)>,
     pub prims: Vec<PrimPayload>,
     pub funcs: Vec<FuncHeader>,
@@ -485,6 +491,7 @@ pub(super) struct Pools {
     pub apply: Vec<ApInfo>,
     pub js: Vec<JsPayload>,
     pub template_parts: Vec<TemplatePart>,
+    /// Serialized block metadata has no canonical JsId before interning.
     pub block_index: hashbrown::HashTable<(u64, JsId, u32, u32)>,
     pub block_key_bytes: Vec<u8>,
     pub block_key_scratch: Vec<u8>,

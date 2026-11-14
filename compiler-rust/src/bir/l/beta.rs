@@ -61,6 +61,7 @@ pub(crate) struct Scratch {
     spare: Vec<NodeId>,
     moved: Vec<(VarId, NodeId)>,
     /// Static labels of the handlers copied so far, by source label.
+    /// Source static labels are sparse imported numbers, not dense arena handles.
     labels: hashbrown::HashMap<u32, (u32, CatchId), ahash::RandomState>,
 }
 impl Scratch {

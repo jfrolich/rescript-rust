@@ -4,25 +4,70 @@ use crate::lambda::lam_primitive::Primitive;
 use smallvec::{SmallVec, smallvec};
 use std::collections::HashMap;
 
+/// Dense arena handles provide the index; only touched rows are cleared.
+pub(super) trait DenseKey: Copy { fn slot(self) -> usize; }
+macro_rules! dense_keys { ($($key:ty),*) => {$(
+    impl DenseKey for $key { fn slot(self) -> usize { self.index() } }
+)*}; }
+dense_keys!(NodeId, VarId, FuncId, CatchId, JsId);
+
+/// O(1) indexed lookup; O(touched rows) clearing; amortized growth by arena index.
+pub(super) struct DenseMap<K> { rows: Vec<Option<K>>, touched: Vec<usize> }
+impl<K> Default for DenseMap<K> {
+    fn default() -> Self { Self { rows: Vec::new(), touched: Vec::new() } }
+}
+impl<K: DenseKey> DenseMap<K> {
+    fn clear(&mut self) { for slot in self.touched.drain(..) { self.rows[slot] = None; } }
+    pub(super) fn get(&self, key: &K) -> Option<&K> { self.rows.get(key.slot()).and_then(Option::as_ref) }
+    pub(super) fn insert(&mut self, key: K, value: K) {
+        let slot=key.slot();
+        if slot >= self.rows.len() { self.rows.resize(slot+1,None); }
+        if self.rows[slot].replace(value).is_none() { self.touched.push(slot); }
+    }
+    fn extend(&mut self, entries: impl IntoIterator<Item=(K,K)>) {
+        for (key,value) in entries { self.insert(key,value); }
+    }
+    #[cfg(test)]
+    fn capacity(&self) -> usize { self.rows.capacity() }
+    #[cfg(test)]
+    fn reserve_domain(&mut self, slots: usize) { self.rows.reserve(slots.saturating_sub(self.rows.len())); }
+}
+impl<K: DenseKey> std::ops::Index<&K> for DenseMap<K> {
+    type Output=K;
+    fn index(&self,key:&K)->&K { self.get(key).expect("unmapped arena handle") }
+}
+
 /// Retained traversal and renaming storage for repeated subtree copies.
 /// Clearing a copy preserves every buffer's high-water capacity.
 #[derive(Default)]
 pub(crate) struct CopyScratch {
     order: Vec<NodeId>,
     stack: Vec<NodeId>,
-    vars: HashMap<VarId, VarId>,
-    funcs: HashMap<FuncId, FuncId>,
-    catches: HashMap<CatchId, CatchId>,
+    vars: DenseMap<VarId>,
+    funcs: DenseMap<FuncId>,
+    catches: DenseMap<CatchId>,
+    /// Source static labels are sparse numeric identities, not arena indices.
     labels: HashMap<u32, u32>,
-    js: HashMap<JsId, JsId>,
-    nodes: HashMap<NodeId, NodeId>,
+    js: DenseMap<JsId>,
+    nodes: DenseMap<NodeId>,
 }
 
 #[cfg(test)]
 impl CopyScratch {
-    pub(crate) fn capacities(&self) -> [usize; 8] {
+    /// Reserve the already reserved arena domains; recycled handles may change
+    /// which row a second pass visits without increasing the arena's size.
+    pub(crate) fn reserve_arena(&mut self, b: &Bir) {
+        self.vars.reserve_domain(b.vars.name.capacity());
+        self.funcs.reserve_domain(b.pools.funcs.capacity());
+        self.catches.reserve_domain(b.pools.catches.capacity());
+        self.js.reserve_domain(b.pools.js.capacity());
+        self.nodes.reserve_domain(b.nodes.capacity());
+    }
+    pub(crate) fn capacities(&self) -> [usize; 13] {
         [self.order.capacity(), self.stack.capacity(), self.vars.capacity(), self.funcs.capacity(),
-            self.catches.capacity(), self.labels.capacity(), self.js.capacity(), self.nodes.capacity()]
+            self.catches.capacity(), self.labels.capacity(), self.js.capacity(), self.nodes.capacity(),
+         self.vars.touched.capacity(), self.funcs.touched.capacity(), self.catches.touched.capacity(),
+         self.js.touched.capacity(), self.nodes.touched.capacity()]
     }
 }
 

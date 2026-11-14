@@ -403,6 +403,7 @@ struct State {
     tail_name: String,
     call_reversed: Vec<NodeId>,
     call_arities: Vec<i32>,
+    /// A module/member pair has no canonical dense handle; individual component handles do not index their sparse Cartesian product.
     call_arity_index: std::collections::HashMap<(crate::bir::ImportId, crate::bir::StrId), Option<call::AritySpan>>,
     eta_arguments: Vec<NodeId>,
     calls: Vec<Option<call::Plan>>,
@@ -420,6 +421,7 @@ struct State {
     switch_work: Vec<(NodeId, bool)>,
     group_indices: Vec<usize>,
     group_nodes: Vec<NodeId>,
+    /// Structural body equivalence joins different NodeIds, so no existing node index identifies an equality group.
     group_table: hashbrown::HashTable<usize>,
     group_order: Vec<usize>,
     group_heads: Vec<usize>,
@@ -462,6 +464,7 @@ struct State {
     external_values: Vec<NodeId>,
     inline_globals: Vec<Ident>,
     inline_foreign: Vec<Ident>,
+    /// Imported export templates are keyed by sparse module/member pairs, which have no existing dense template identity.
     inline_templates: std::collections::HashMap<(crate::bir::ImportId, crate::bir::StrId), call::InlineTemplate>,
     inline_param_stats: Vec<super::l::beta::ParamStats>,
     inline_engine: super::engine::Reuse,

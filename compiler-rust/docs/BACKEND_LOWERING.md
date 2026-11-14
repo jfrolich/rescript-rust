@@ -3770,3 +3770,28 @@ CARGO_INCREMENTAL=0 cargo clippy --manifest-path compiler-rust/Cargo.toml --all-
 ```
 
 Steps 3–6 remain outstanding; prior candidate measurements do not validate this corrected head.
+### Scope correction — step 3
+
+Copy remapping now uses dense, touched-row tables for NodeId, VarId, FuncId, CatchId and JsId. Only source labels retain a map because their sparse numeric identities are not arena indices. Dense copy-table reservations cover the already reserved arena domains: recycling may visit a different row on the second pass without growing the arena. All measured intervals and zero-allocation assertions remain intact.
+
+The remaining maps in the requested files have field doc comments identifying the absent index: raw serialized/text/value keys awaiting interning, sparse external Ident/label identities, structural equality groups spanning different nodes, or sparse module/member pairs without a canonical pair handle.
+
+`Bir::j_equal_work` is now a plain retained vector. Mutable normalizers explicitly lend it to `equal_with_work`; speculative logic also takes an explicit scratch parameter. No RefCell remains there. The compatibility read-only query keeps its existing API; identity-leaf comparisons need no worklist allocation. Export-boundary equality is still outside the claimed warmed-lowering scope.
+
+Invariant accounting (no production check is silently dropped):
+
+| Original check | Current equivalent |
+| --- | --- |
+| `edit.rs`: unique children (`bulk_children.insert` / slice membership) | The same debug-only check uses epoch-indexed `checked_children`; duplicate handles assert unequal epochs before assignment. |
+| `edit.rs`: detached child parent | `debug_assert!(parents[child].is_none())` remains, with an additional live-node check. |
+| `edit.rs`: object property/value count | `assert_eq!(values.len(), property_keys(span).len())` checks the actual pooled range. |
+| `edit.rs`: block metadata kind | The assertion accepts the two intentional representations, `Block` and `ConstantBlock`; all other payloads still fail. |
+| `edit.rs`: JSX operand count | The original formula now reads the property span length. |
+| `edit.rs`: template segment count | `assert_eq!(template_parts(span).len(), values.len()+1)` checks the pooled range. |
+| `untagged.rs`: completed program and one output | Both assertions remain, reading typed span lengths. |
+| `mod.rs`: switch constant-prefix bound | `assert!(header.constants <= header.keys.len)` checks the span length. |
+| `external.rs`: exactly one object argument | The exhaustive `[Some(value), None]` pattern panics on every other shape, with the original message. |
+| `external.rs`: all source arguments consumed | `debug_assert_eq!(at, argc)` replaces the iterator exhaustion check. |
+| `external.rs`: getter/setter/index arity | The same production arity assertions read `lists.get(args).len()`. |
+
+Commands/results: `CARGO_INCREMENTAL=0 cargo test --manifest-path compiler-rust/Cargo.toml bir:: -- --test-threads=1` — **768 passed, zero failures**; strict all-target compiler clippy — **passed**. The mixed whole-Lambda tests retain zero allocations and unchanged capacities after dense-table conversion. Steps 4–6 remain outstanding.

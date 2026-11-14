@@ -535,13 +535,14 @@ impl<'a> Engine<'a> {
     /// Copy a binder-free exit handler without allocating new identities.
     /// Unlike `copy_subtree`, exit substitution must preserve the legacy
     /// identities. Binder-containing handlers are moved, never copied.
-    /// Cost: one traversal and allocation per node; no hash iteration.
+    /// Cost: O(copied nodes + highest source handle) for dense remap rows;
+    /// no hash lookup or iteration for arena handles.
     pub fn copy_exit_handler(&mut self, root: NodeId) -> NodeId {
         use std::collections::HashMap;
         let mut work = vec![(root, false)];
-        let mut nodes = HashMap::new();
-        let mut funcs = HashMap::new();
-        let empty = HashMap::new();
+        let mut nodes = super::edit::DenseMap::default();
+        let mut funcs = super::edit::DenseMap::default();
+        let empty = super::edit::DenseMap::default();
         let mut lists = Lists::default();
         while let Some((n, done)) = work.pop() {
             if !done {
@@ -570,9 +571,9 @@ impl<'a> Engine<'a> {
                     nodes: &nodes,
                     vars: &empty,
                     funcs: &funcs,
-                    catches: &HashMap::new(),
+                    catches: &super::edit::DenseMap::default(),
                     labels: &HashMap::new(),
-                    js: &HashMap::new(),
+                    js: &super::edit::DenseMap::default(),
                 },
             );
             let new = self.node(packed.view(&lists), packed.aux(), 1);
