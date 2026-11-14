@@ -45,6 +45,10 @@ pub struct Extras {
     /// Empty between calls; it keeps its capacity. Not `fields`: a row is
     /// unified while the frames of an object are pending. (R3f)
     pub row_scratch: Vec<FieldRef>,
+    /// Set by [`Checker::copy`] around its pass over the nodes it made:
+    /// `g.work` holds the node each was copied from
+    /// ([`Checker::copy_refs`]). (R3n)
+    pub copying: bool,
     /// `passive_variants` and `rigid_variants`
     /// (compiler/ml/ctype.ml:2184-2190), read by
     /// [`Checker::unify_row_field`]; both false in unification proper.
@@ -367,6 +371,7 @@ impl Extras {
             session: Vec::new(),
             holders: Vec::new(),
             row_scratch: Vec::new(),
+            copying: false,
             passive_variants: false,
             rigid_variants: false,
         }
@@ -661,8 +666,11 @@ impl Checker {
     ///    rm2.desc <- md2`, ctype.ml:2637-2641).
     /// 8. [`Checker::set_more`] for row 2 with `r1`, then for row 1 with
     ///    `r2` (ctype.ml:2618-2619).
-    /// 9. When `row1.closed`, a [`FrameKind::RowEnd`] frame (`left` the
-    ///    right node `t2x`); then one [`FrameKind::RowField`] frame per
+    /// 9. When `closed`, a [`FrameKind::RowEnd`] frame (`left` the right
+    ///    node `t2x`): `static_row row1` reads row 1 again after both
+    ///    `set_more` (`row_repr`, btype.ml:162-170), and that row is closed
+    ///    exactly when `closed` is (a fixed row 1 that is open while
+    ///    `closed` holds has clashed in step 8). Then one [`FrameKind::RowField`] frame per
     ///    pair, the last pair of step 3's order first, so that they are
     ///    popped in that order; `left` and `right` of a frame are the two
     ///    `ty` of the pair's [`FieldRef`]s, `extra` the index in `saved`
@@ -881,15 +889,18 @@ impl Checker {
         todo!("R3f")
     }
 
-    /// The pop of a [`FrameKind::RowEnd`] frame, pushed for a closed row 1
-    /// (`if static_row row1 then ... link_type rm (newty2 rm.level Tnil)`,
-    /// compiler/ml/ctype.ml:2630-2636). Row 1's fields are, by now, the
-    /// fields of the right node's row except those only row 2 had, which
-    /// are absent since row 1 is closed; so: flatten the row of the
-    /// frame's `left` (its representative; the scratch is cut back
-    /// afterwards); when no field of it is `Either` and its `more` is a
-    /// variable, that variable is linked to a new `Tnil` node at its level
-    /// (one node, one 12-byte descriptor row). O(fields of the row). (R3f)
+    /// The pop of a [`FrameKind::RowEnd`] frame, pushed when the merged
+    /// row is closed (`if static_row row1 then ... link_type rm (newty2
+    /// rm.level Tnil)`, compiler/ml/ctype.ml:2630-2636), after every
+    /// common tag. Row 1 read again has the tags of the right node's row
+    /// (its own, and through its `more` those it gained); a tag only one
+    /// of the two lists is one that was absent or was made absent, so
+    /// "no field is `Reither`" is the same question on either. So:
+    /// flatten the row of the frame's `left` (its representative; the
+    /// scratch is cut back afterwards); when no field of it is `Either`
+    /// ([`field_repr`]) and its `more` is a variable, that variable is
+    /// linked to a new `Tnil` node at its level (one node, one 12-byte
+    /// descriptor row). O(fields of the row), one step a field. (R3f)
     pub fn row_end(&mut self, frame: Frame) {
         todo!("R3f")
     }
@@ -912,45 +923,52 @@ impl Checker {
         todo!("R3f")
     }
 
-    /// The references of the variant nodes one copy session made
-    /// (`copy_row`, compiler/ml/btype.ml:366-392, with `keep =
-    /// more.level <> generic_level`, ctype.ml:806), for the node `node`
-    /// at handle `copy`; `first` is the first node of the session and
-    /// `source` the node it is the copy of, or `NONE` when the session is
-    /// an instance of a template. Called by the pass of
-    /// [`Checker::link_memorized`] for each variant node, when the graph
-    /// has a variant row. The row variable is the representative of the
-    /// node's `more` slot, followed through the variant nodes it leads to;
-    /// the session shares it (`keep`) when its handle is below `first`.
+    /// The references of one variant node a copy made (`copy_row`,
+    /// compiler/ml/btype.ml:366-392, with `keep = more.level <>
+    /// generic_level`, ctype.ml:806): `node` at handle `copy`, of the copy
+    /// session whose first node is `first`. Called by the pass of
+    /// [`Checker::link_memorized`] for each variant node while
+    /// `extras.copying` is set, which [`Checker::copy`] does around its
+    /// pass: the node `copy` was copied from is `g.work[copy - first]`
+    /// (`Graph::copy` queues each source when it makes its copy, and the
+    /// pass does not touch the queue). An instance of a template never
+    /// comes here: every node of a template is generic, so its rows are
+    /// unopened and their row variables are the instance's own.
     ///
-    /// - An unopened node, not `keep`: nothing. Its references are its
-    ///   own (`ref None`).
-    /// - An unopened node, `keep`: the source is opened
-    ///   ([`Checker::open_row`], its new references at the level of the
-    ///   row variable, so that every later copy shares them), and the
-    ///   copy is opened onto the same unresolved references: its own
-    ///   [`RES_EITHER`] nodes for the fields that have types (the copy's
-    ///   own type slots), each a holder of the source's reference.
-    /// - An opened node, `keep`: each `Reither` field's chain must end in
-    ///   the unresolved reference the source's ends in. When the session
-    ///   copied that reference (its handle is at or above `first`: it was
-    ///   generic while the row variable was not), the last node of the
-    ///   copy's chain is pointed at the source's (`g.work[handle -
-    ///   first]`, the node the session copied it from). The chain nodes
-    ///   the session made that have types become holders of it, each
-    ///   once.
-    /// - An opened node, not `keep`: each `Reither` field gets a chain of
-    ///   its own with a new unresolved reference at its end (`ref None`
-    ///   per field). A chain node is taken as it is when the session made
-    ///   it and no field of the session has taken it (marks, one
-    ///   generation a session); otherwise it is copied (one node, the
-    ///   same type slots in a new list). The holder lists are made anew.
+    /// The row variable is the representative of the node's `more` slot,
+    /// followed through the variant nodes it leads to; the copy shares it
+    /// (`keep`) when its handle is below `first`.
     ///
-    /// A field whose chain ends resolved is left as it is. O(fields of
-    /// the node + their chains), one step a field; per `Reither` field at
-    /// most one node, one list of the chain node's length and 8 bytes of
-    /// holder. (R3n)
-    pub fn copy_refs(&mut self, copy: Ty, node: Node, first: u32, source: Ty) {
+    /// - The source is unopened, not `keep`: nothing. The copy's
+    ///   references are its own (`ref None`).
+    /// - The source is unopened, `keep`: the source is opened with its
+    ///   new references at the level of the row variable
+    ///   ([`Checker::open_row`], then one `Graph::write` of the level of
+    ///   each reference it made), so that every later copy shares them;
+    ///   then the copy is opened onto the same unresolved references: its
+    ///   own [`RES_EITHER`] node for each field that has types (the copy's
+    ///   own type slots), a holder of the source's reference.
+    /// - The source is opened, `keep`: each `Reither` field's chain must
+    ///   end in the unresolved reference the source's ends in. When the
+    ///   session copied that reference (its handle is at or above
+    ///   `first`: it was generic while the row variable was not), the
+    ///   slot that names it in the copy's chain is pointed at the
+    ///   source's (`g.work[handle - first]`). The chain nodes of the copy
+    ///   that have types become holders of it, each once.
+    /// - The source is opened, not `keep`: each `Reither` field gets a
+    ///   chain of its own with a new unresolved reference at its end, at
+    ///   the current level (`ref None` per field). A chain node is taken
+    ///   as it is when the session made it and no field of the session
+    ///   has taken it (marks, one generation a session); otherwise it is
+    ///   copied (one node, the same slots in a new list). The slot that
+    ///   named the old end names the new one, and the chain nodes that
+    ///   have types are its holders.
+    ///
+    /// A field whose chain ends resolved is left as the copy made it.
+    /// O(fields of the node + their chains), one step a field; per
+    /// `Reither` field at most one node per chain node, one reference
+    /// and 8 bytes of holder. (R3n)
+    pub fn copy_refs(&mut self, copy: Ty, node: Node, first: u32) {
         todo!("R3n")
     }
 

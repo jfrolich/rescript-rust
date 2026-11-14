@@ -2860,15 +2860,68 @@ mod tests {
         assert!(mismatches.len() >= 20, "{}", mismatches.len());
     }
 
-    /// 10,000 cases of everything on programs with variants, and with both:
-    /// the acceptance test of R3f. Reaches: R3m, R3e, R3f.
+    /// The fixed cases of [`REF_PROGRAM`] that make no copy, on both
+    /// sides, with the classes of references printed: a `Reither` row
+    /// against an open row with one of its tags present, in both orders;
+    /// against a closed row without it; against another instance of
+    /// itself; and, in the explaining mode, the rows unified before a
+    /// later component clashes, in both orders.
+    /// Reaches: R3m, R3f.
     #[test]
     #[ignore = "R3f build"]
+    fn variant_rows_agree_on_fixed_cases() {
+        let program = compile(REF_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, VARIANTS | REFS);
+        let cases: [&[Op]; 5] = [
+            &[Op::Instance(0), Op::Instance(1), Op::Unify(0, 1), Op::Instance(0)],
+            &[Op::Instance(1), Op::Instance(0), Op::Unify(0, 1)],
+            &[Op::Instance(0), Op::Instance(2), Op::Unify(0, 1)],
+            &[Op::Instance(0), Op::Instance(0), Op::Unify(0, 1)],
+            &[Op::Instance(2), Op::Instance(1), Op::Unify(0, 1)],
+        ];
+        for (index, ops) in cases.into_iter().enumerate() {
+            compare(index as u64, &program, plan, ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
+        }
+        let plan = Plan::new(Tier::Full, VARIANTS | REFS | EXPLAIN);
+        for (index, ops) in [[3, 4], [4, 3]].into_iter().enumerate() {
+            let ops = [Op::Instance(ops[0]), Op::Instance(ops[1]), Op::Unify(0, 1)];
+            compare(10 + index as u64, &program, plan, &ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
+        }
+    }
+
+    /// The copies of an annotation's type and of a generalized type on
+    /// both sides (the cases of `old_checker_shares_the_references_of_an_
+    /// annotation` and `old_checker_resolves_a_shared_reference_for_every_
+    /// holder`), then 10,000 cases of everything on programs with
+    /// variants, with the classes of references compared, and 10,000 with
+    /// objects and made nodes too: the acceptance test of R3f and R3n
+    /// together. A generated case copies rows, so it needs both. A case
+    /// that differs is read against the OCaml arm before either side is
+    /// followed (decision 18); a seed where the old checker departs from
+    /// ctype.ml is pinned with `run_cases_except` and its cause by the
+    /// reviewer, not by the builder.
+    /// Reaches: R3m, R3e, R3f, R3n.
+    #[test]
+    #[ignore = "R3n build"]
     fn variant_plan_agrees_on_generated_cases() {
-        let coverage = run_cases(Plan::new(Tier::Full, VARIANTS), 1, 100, 100);
+        let program = compile(REF_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, VARIANTS | REFS);
+        let cases: [Vec<Op>; 6] = [
+            ANNOTATION.to_vec(),
+            GENERALIZED.to_vec(),
+            then(&ANNOTATION, &[Op::Instance(1), Op::Unify(1, 3)]),
+            then(&GENERALIZED, &[Op::Instance(1), Op::Unify(1, 3)]),
+            then(&ANNOTATION, &[Op::Instance(2), Op::Unify(1, 3)]),
+            then(&ANNOTATION, &[Op::Instance(1), Op::Unify(1, 3), Op::Copy(0), Op::Copy(1)]),
+        ];
+        for (index, ops) in cases.iter().enumerate() {
+            compare(index as u64, &program, plan, ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
+        }
+        let coverage = run_cases(plan, 1, 100, 100);
         assert_eq!(coverage.cases, 10_000);
         assert!(coverage.failures * 10 > coverage.cases, "{coverage:?}");
-        run_cases(Plan::new(Tier::Full, OBJECTS | VARIANTS | BUILD), 1, 100, 100);
+        run_cases(Plan::new(Tier::Full, OBJECTS | VARIANTS | REFS | BUILD), 1, 100, 100);
+        run_cases(Plan::new(Tier::Full, VARIANTS | REFS | EXPLAIN), 1, 20, 100);
     }
 
     /// The mechanical check of the first skeleton turn's second lesson:
@@ -2882,15 +2935,16 @@ mod tests {
     /// R3x.
     #[test]
     fn ignored_tests_name_the_slices_they_reach() {
-        let before: [(&str, &[&str]); 8] = [
+        let before: [(&str, &[&str]); 9] = [
             ("R3k", &[]),
             ("R3m", &[]),
             ("R3e", &["R3m"]),
             ("R3f", &["R3m", "R3e"]),
+            ("R3n", &["R3m", "R3e", "R3f"]),
             ("R3g", &["R3m", "R3e"]),
-            ("R3h", &["R3m", "R3e", "R3f", "R3g"]),
-            ("R3i", &["R3m", "R3e", "R3f", "R3g"]),
-            ("R3j", &["R3m", "R3e", "R3f", "R3g"]),
+            ("R3h", &["R3m", "R3e", "R3f", "R3n", "R3g"]),
+            ("R3i", &["R3m", "R3e", "R3f", "R3n", "R3g"]),
+            ("R3j", &["R3m", "R3e", "R3f", "R3n", "R3g"]),
         ];
         // Method name -> slice, from the bodies that are still `todo!`.
         let mut methods: Vec<(String, String)> = Vec::new();
@@ -2978,6 +3032,20 @@ mod tests {
                 }
                 if rows && (full || body.contains("Tier::Expand")) {
                     reaches.push("R3m");
+                }
+                // A copy of a row is R3n's: a generated case (every plan
+                // draws `Op::Copy`), or a fixed one that copies.
+                if full
+                    && body.contains("VARIANTS")
+                    && ["run_cases", "Op::Copy", "ANNOTATION", "GENERALIZED"]
+                        .iter()
+                        .any(|needle| body.contains(needle))
+                {
+                    reaches.push("R3n");
+                }
+                // A hand-built variant row reaches R3f.
+                if ["variant_at(", "tag_pair("].iter().any(|needle| body.contains(needle)) {
+                    reaches.push("R3f");
                 }
                 // A hand-built test: a type marked INHERITS, or the marks
                 // themselves, is R3m's.
