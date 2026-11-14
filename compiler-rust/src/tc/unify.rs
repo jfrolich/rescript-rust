@@ -226,17 +226,20 @@ impl Checker {
         // bound (ctype.ml:2242-2243). A variable that occurs in a
         // constructor goes to `unify2` with the pair as it is
         // (ctype.ml:2240-2241); the binding walk finds that occurrence.
-        if l.tag() == VAR {
-            if r.tag() == VAR {
-                self.bind_var(left, l, right);
+        let bound = if l.tag() == VAR {
+            Some((left, l, right, r))
+        } else if r.tag() == VAR {
+            Some((right, r, left, l))
+        } else {
+            None
+        };
+        if let Some((var, before, ty, target)) = bound {
+            if self.binds_leaf(target) {
+                self.bind_leaf(var, before, ty);
                 return Ok(());
             }
-            let route = r.tag() == CONSTR;
-            return self.bind_routed(left, right, route.then_some([left, right]));
-        }
-        if r.tag() == VAR {
-            let route = l.tag() == CONSTR;
-            return self.bind_routed(right, left, route.then_some([left, right]));
+            let route = target.tag() == CONSTR;
+            return self.bind_routed(var, ty, route.then_some([left, right]));
         }
         // Two universal variables (ctype.ml:2244) are extended nodes: R3g.
         // Two locally abstract types (ctype.ml:2258) need equations: R3h.
@@ -282,8 +285,9 @@ impl Checker {
     /// cost is [`Checker::bind`]'s, or one walk and the callee.
     fn bind_routed(&mut self, var: Ty, ty: Ty, route: Option<[Ty; 2]>) -> Result<(), Clash> {
         let before = self.g.nodes[var.0 as usize];
-        if self.g.nodes[ty.0 as usize].tag() == VAR {
-            self.bind_var(var, before, ty);
+        let target = self.g.nodes[ty.0 as usize];
+        if self.binds_leaf(target) {
+            self.bind_leaf(var, before, ty);
             return Ok(());
         }
         // Decision 6 of "R3 as designed": in `Mode::Explain`, outside a
@@ -294,7 +298,9 @@ impl Checker {
         // ctype.ml:2216-2225), in two walks. The speculation this
         // unification opened in `Mode::Explain` is not an owner's.
         let occur_first = self.occur_first();
-        if self.binding_occurrence(var, ty, occur_first, route.is_some())? {
+        // A node without a child holds nothing: no occurrence walk. With
+        // scoped types its one level is `Checker::lower`'s, below.
+        if !childless(target) && self.binding_occurrence(var, ty, occur_first, route.is_some())? {
             let [left, right] = route.expect("routed occurrence");
             return self.unify_expanded(left, right);
         }
@@ -309,19 +315,33 @@ impl Checker {
         Ok(())
     }
 
-    /// O(1): the binding of variable `var`, whose descriptor is `before`, to
-    /// the distinct variable `ty`, both representatives. Of two variables,
-    /// `link_type` picks the surviving name by the levels before
-    /// `update_level` (compiler/ml/btype.ml:727, ctype.ml:2221-2222): link
-    /// first, then lower the one node, which has no child and no scope:
-    /// `if ty.level > level` (ctype.ml:586), one write. A variable cannot
-    /// hold another, so there is no occurrence walk, and lowering a variable
-    /// cannot fail. The node is read after the link, whose name rule may
-    /// have named it. Always inline (out of line, saving registers costs
-    /// more than the body): one link, one node load, one compare and at
-    /// most one write.
+    /// O(1): whether a binding to a representative whose descriptor is
+    /// `target` is [`Checker::bind_leaf`]'s: `target` is a variable, or has
+    /// no child ([`childless`]) and no type has a scope.
     #[inline(always)]
-    fn bind_var(&mut self, var: Ty, before: Node, ty: Ty) {
+    fn binds_leaf(&self, target: Node) -> bool {
+        target.tag() == VAR || (childless(target) && self.types.scoped == 0)
+    }
+
+    /// O(1): the binding of variable `var`, whose descriptor is `before`, to
+    /// the distinct representative `ty`, a variable or (with no scoped
+    /// types) a node without a child ([`Checker::binds_leaf`]). `ty` holds
+    /// nothing, so there is no occurrence walk: a variable cannot hold
+    /// another, and a node without a child is a walk of one node that finds
+    /// nothing (`occur`, compiler/ml/ctype.ml:2217; nor is it
+    /// `deep_occur`'s, ctype.ml:2240). What remains is the link and
+    /// `update_level` of the one node (ctype.ml:586, 2221-2222): no child,
+    /// and no scope test (a variable has no scope; with no scoped types
+    /// there is none), so one write when `ty` is above the variable, which
+    /// cannot fail. Of two variables, `link_type` picks the surviving name by
+    /// the levels before `update_level` (compiler/ml/btype.ml:727), so the
+    /// link comes first and the node is read after it, its name rule having
+    /// possibly named it; the rule leaves a target that is not a variable
+    /// alone. Always inline (out of line, saving registers costs more than
+    /// the body): one link, one node load, one compare and at most one
+    /// write.
+    #[inline(always)]
+    fn bind_leaf(&mut self, var: Ty, before: Node, ty: Ty) {
         self.g.link(var, ty);
         let target = self.g.nodes[ty.0 as usize];
         if target.level > before.level {
@@ -733,8 +753,11 @@ impl Checker {
             todo!("R3h")
         }
         // `occur !env t1' t2'; link_type t1' t2` (ctype.ml:2330-2331),
-        // before the children.
-        self.occur(t1x, t2x)?;
+        // before the children. A `t2'` without a child is not `t1'` (they
+        // are distinct representatives) and holds nothing: no walk.
+        if !childless(d2) {
+            self.occur(t1x, t2x)?;
+        }
         self.g.link(t1x, t2);
         let explain = self.g.mode == Mode::Explain;
         if explain {
@@ -950,7 +973,9 @@ impl Checker {
         // here the level is written before the link, so of two variables the
         // name is chosen by the levels after it (btype.ml:727).
         let mut result = Ok(());
-        if target.tag() != VAR {
+        // A node without a child holds nothing: no occurrence walk; its one
+        // level is written below.
+        if target.tag() != VAR && !childless(target) {
             match self.binding_occurrence(var, ty, occur_first, target.tag() == CONSTR) {
                 // `Tvar _, Tconstr _ when deep_occur t1 t2 -> unify (ref env)
                 // t1 t2` (ctype.ml:2755).
@@ -959,7 +984,9 @@ impl Checker {
                 Err(clash) => result = Err(clash),
             }
         }
-        if result.is_ok() && (target.tag() == VAR || occur_first || self.types.scoped != 0) {
+        if result.is_ok()
+            && (target.tag() == VAR || childless(target) || occur_first || self.types.scoped != 0)
+        {
             result = self.lower_to(ty, before.level);
         }
         if result.is_ok() {
@@ -1224,6 +1251,18 @@ impl Checker {
     pub fn mode(&self) -> Mode {
         self.g.mode
     }
+}
+
+/// O(1): whether a descriptor has no child: a constructor or a tuple of
+/// arity 0 with no flag bit (`TUPLE` is `CONSTR | 1`, so one mask and one
+/// compare). A variable, a link, an arrow (its result is a child), an
+/// extended node and any node with arguments are not. It tests the whole
+/// head, so a node that is not a representative (head `LINK`) is never
+/// childless.
+#[inline(always)]
+fn childless(node: Node) -> bool {
+    const { assert!(TUPLE == CONSTR | 1) };
+    node.head & !1 == CONSTR
 }
 
 #[cfg(test)]
