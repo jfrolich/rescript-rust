@@ -496,10 +496,13 @@ impl Checker {
             // `update_level env level ty'` unless the node is generic; a
             // clash is ignored (compiler/ml/ctype.ml:1196-1201). The test
             // of the level is update_level's own first one (ctype.ml:586).
+            // The ignored `Unify` takes its trace with it: the escaping pair
+            // of the explaining mode is dropped.
             let expansion = self.g.repr(memorized);
             if node.level != GENERIC && self.g.nodes[expansion.0 as usize].level > node.level {
-                match self.lower(expansion, node.level) {
-                    Ok(()) | Err(Clash) => {}
+                let trace = self.trace.len();
+                if self.lower(expansion, node.level).is_err() {
+                    self.trace.truncate(trace);
                 }
             }
             return Ok(self.g.repr(expansion));
@@ -704,7 +707,12 @@ impl Checker {
     /// (a link, then the walk continues on the expansion) or is a clash.
     /// The walk is tried without expanding constructors that have arguments,
     /// and, after a clash, restored and run again expanding them: the
-    /// speculation for that is opened only on this path. Explicit stack. (R3d)
+    /// speculation for that is opened only on this path. In `Mode::Explain`
+    /// outside a speculation whose owner restores ([`Checker::occur_first`])
+    /// the second pass runs as OCaml's does, outside any snapshot: a clash
+    /// keeps what it wrote and pushes the escaping pair on
+    /// [`Checker::trace`] ([`Checker::escape_pair`]). The choice costs one
+    /// compare of the mode, on the clash path only. Explicit stack. (R3d, R3k)
     #[inline]
     pub fn lower(&mut self, root: Ty, level: u32) -> Result<(), Clash> {
         if self.types.scoped == 0 {
@@ -727,16 +735,51 @@ impl Checker {
         }
         self.restore(token);
         // OCaml runs the second pass outside the snapshot and leaves what a
-        // failed one wrote ("Levels should be restored", ctype.ml:599). Here
-        // a clash leaves the graph as it was before the call: the writes are
-        // undone, the memos are kept as OCaml keeps them (no `backtrack`).
-        let token = self.g.speculate();
-        let result = self.lower_scoped(root, level, true);
-        match result {
-            Ok(()) => self.g.keep(token),
-            Err(Clash) => self.g.restore(token),
+        // failed one wrote ("Levels should be restored", ctype.ml:599), and
+        // `unify1_var` puts back the variable's descriptor only
+        // (ctype.ml:2223-2225). That is observable in the explaining mode
+        // (CHECKER_REWRITE 8.6, decision 14), where nothing restores.
+        if self.occur_first() {
+            let trace_base = self.trace.len();
+            return self
+                .lower_scoped(root, level, true)
+                .map_err(|escaping| self.escape_pair(trace_base, escaping, level));
         }
-        result
+        // Elsewhere nothing reads either: `Mode::Success` reports no trace,
+        // and an owner's speculation restores. A clash leaves the graph as
+        // it was before the call: the writes are undone, the memos are kept
+        // as OCaml keeps them (no `backtrack`).
+        let token = self.g.speculate();
+        match self.lower_scoped(root, level, true) {
+            Ok(()) => {
+                self.g.keep(token);
+                Ok(())
+            }
+            Err(_) => {
+                self.g.restore(token);
+                Err(Clash)
+            }
+        }
+    }
+
+    /// The failure of a kept second pass in the explaining mode:
+    /// `raise (Unify [(ty, newvar2 level)])` (compiler/ml/ctype.ml:600).
+    /// The trace is cut back to `trace_base` (that `Unify` is the whole
+    /// trace of `update_level`) and gets the escaping node and one new
+    /// variable at `level`; an enclosing unification puts its own pairs
+    /// before them ([`Checker::explain_failure`] rotates the inner entries
+    /// last). O(1) amortized: one node and one trace entry.
+    #[cold]
+    fn escape_pair(&mut self, trace_base: usize, escaping: Ty, level: u32) -> Clash {
+        self.trace.truncate(trace_base);
+        let var = self.g.push(Node {
+            head: VAR,
+            level,
+            a: NONE,
+            b: 0,
+        });
+        self.trace.push([escaping, var]);
+        Clash
     }
 
     /// One pass of the inner `update_level env level expand`
@@ -747,8 +790,9 @@ impl Checker {
     /// load per constructor above `level`, one push per child; each
     /// expansion is one [`Checker::expand_once`] and one link. Nodes are
     /// visited in OCaml's order (children pushed last first). On a clash the
-    /// stack is cut back to where it was; the caller undoes the writes.
-    fn lower_scoped(&mut self, root: Ty, level: u32, expand: bool) -> Result<(), Clash> {
+    /// stack is cut back to where it was and the error is the constructor
+    /// that clashed; the caller undoes or keeps the writes.
+    fn lower_scoped(&mut self, root: Ty, level: u32, expand: bool) -> Result<(), Ty> {
         let base = self.frames.len();
         self.push_lowering(root);
         let result = self.lower_scoped_loop(base, level, expand);
@@ -758,7 +802,7 @@ impl Checker {
 
     /// The loop of [`Checker::lower_scoped`]: pops entries above `base`.
     /// Its cost is the caller's.
-    fn lower_scoped_loop(&mut self, base: usize, level: u32, expand: bool) -> Result<(), Clash> {
+    fn lower_scoped_loop(&mut self, base: usize, level: u32, expand: bool) -> Result<(), Ty> {
         while self.frames.len() > base {
             let ty = self.frames.pop().expect("entry above base").left;
             let ty = self.g.repr(ty);
@@ -776,7 +820,7 @@ impl Checker {
                     // goes on from `ty`, now a link to the expansion
                     // (ctype.ml:593-594, 603-604). A `Unify` raised by the
                     // expansion is not caught there: it is this pass's clash.
-                    let expansion = self.expand_once(ty, ExpandMode::Unif)?;
+                    let expansion = self.expand_once(ty, ExpandMode::Unif).map_err(|_| ty)?;
                     let expansion = if expansion.0 == NONE {
                         expansion
                     } else {
@@ -793,7 +837,7 @@ impl Checker {
                     // `Cannot_expand`: a constructor below its scope is a
                     // clash (ctype.ml:596-599).
                     if escapes {
-                        return Err(Clash);
+                        return Err(ty);
                     }
                 }
             }
@@ -1104,6 +1148,56 @@ mod tests {
                 assert!(c.g.trail.is_empty());
                 assert_eq!(c.g.speculation_depth, 0);
                 assert!(c.frames.is_empty());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// A chain of `n` constructors of an abstract scoped type with one
+    /// argument (`t1<t1<..t2..>>`, scope 1) around a nullary one whose scope
+    /// is above the target (`t2`, scope 2), every node at level 3, lowered
+    /// to 1 in the explaining mode outside any speculation: both passes
+    /// clash at the bottom. The retry keeps what it wrote (every node of the
+    /// chain at 1), the trace is the escaping node against one new variable
+    /// at 1, and no speculation stays open (decision 14 of 8.6, R3k).
+    fn explained_retry_clash(n: u32) -> u64 {
+        let mut c = checker(3);
+        c.g.mode = super::super::graph::Mode::Explain;
+        c.types.rows[1].scope = 1;
+        c.types.rows[1].arity = 1;
+        c.types.rows[2].scope = 2;
+        c.types.scoped = 2;
+        let escaping = constr(&mut c, 3, 2, &[]);
+        let mut root = escaping;
+        for _ in 0..n {
+            root = constr(&mut c, 3, 1, &[root]);
+        }
+        let nodes = c.g.nodes.len();
+        let count = steps::scope(|| assert!(c.lower(root, 1).is_err()));
+        assert_eq!(c.g.nodes.len(), nodes + 1);
+        assert!(c.g.nodes[1..nodes].iter().all(|node| node.level == 1));
+        assert_eq!(c.g.nodes[escaping.0 as usize].level, 3);
+        assert_eq!(c.trace, vec![[escaping, Ty(nodes as u32)]]);
+        let var = c.g.nodes[nodes];
+        assert_eq!((var.tag(), var.level), (VAR, 1));
+        assert_eq!(c.g.speculation_depth, 0);
+        assert!(c.frames.is_empty());
+        count
+    }
+
+    /// [`explained_retry_clash`] at 1,000 and 10,000 constructors on a 2 MB
+    /// stack: the steps grow linearly, at most 11 times from one to the
+    /// other.
+    #[test]
+    fn explained_retry_clash_over_ten_thousand_scoped_constructors() {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let small = explained_retry_clash(1_000);
+                let large = explained_retry_clash(10_000);
+                println!("steps: {small} at 1,000, {large} at 10,000");
+                assert!(large <= 11 * small, "{small} {large}");
             })
             .unwrap()
             .join()
