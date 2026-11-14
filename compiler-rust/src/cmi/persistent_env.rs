@@ -4154,10 +4154,6 @@ impl Default for ModuleStampSubstMap {
 }
 
 impl ModuleStampSubstMap {
-    fn new() -> Self {
-        Self::default()
-    }
-
     fn get(&self, stamp: &i32) -> Option<&(Name, Arc<Path>)> {
         self.stamps.get(stamp)
     }
@@ -4581,7 +4577,7 @@ mod tests {
         let source = ctx.dotted_from_ident(root.clone(), name, 7);
         let types = TypeSubstPaths::default();
         let type_names = HashMap::new();
-        let mut modules = ModuleStampSubstMap::new();
+        let mut modules = ModuleStampSubstMap::default();
         let module_names = HashMap::new();
         let copy = |modules: &ModuleStampSubstMap| {
             substitute_type_path(
@@ -4603,7 +4599,7 @@ mod tests {
         let expected = Path::pdot_pos(Path::pident(target), name.name_atom(), 7);
         assert_eq!(copy(&modules), expected);
         assert_eq!(copy(&modules), expected);
-        let mut separate = ModuleStampSubstMap::new();
+        let mut separate = ModuleStampSubstMap::default();
         insert_module_stamp_subst(&mut separate, &root_id, Path::pident(target));
         assert_eq!(copy(&separate), expected);
         // Nested dots are rebuilt, but their unchanged terminal prefix is retained.
@@ -4611,7 +4607,7 @@ mod tests {
         let copied = substitute_module_path(
             &ctx,
             &nested,
-            &ModuleStampSubstMap::new(),
+            &ModuleStampSubstMap::default(),
             &module_names,
             None,
         );
@@ -4669,7 +4665,7 @@ mod tests {
             target,
         );
         let names = HashMap::new();
-        let modules = ModuleStampSubstMap::new();
+        let modules = ModuleStampSubstMap::default();
         let module_names = HashMap::new();
         let paths = SubstPaths {
             type_stamp_map: &types,
@@ -6020,51 +6016,6 @@ pub fn substitute_type_paths_in_sig(
         }
     }
 }
-
-/// Rewrite Tconstr paths in a signature using a direct stamp → path map.
-/// Used to remap CMI idents to implementation idents before moregen linking.
-pub(crate) fn substitute_type_paths_in_sig_with_stamp_map(
-    sig_items: &[SignatureItem],
-    stamp_map: &HashMap<i32, Path>,
-    ctx: &TypeContext,
-) {
-    if stamp_map.is_empty() {
-        return;
-    }
-    let stamp_map = &TypeSubstPaths {
-        stamps: stamp_map.clone(),
-        ..TypeSubstPaths::default()
-    };
-    let empty: HashMap<Name, Path> = HashMap::new();
-    let empty_module_stamp = ModuleStampSubstMap::new();
-    let empty_module_names: HashMap<Name, Arc<Path>> = HashMap::new();
-    let paths = SubstPaths {
-        type_stamp_map: stamp_map,
-        type_name_map: &empty,
-        module_stamp_map: &empty_module_stamp,
-        module_name_map: &empty_module_names,
-        protected_module_head: None,
-    };
-    let mut visited = visit_set();
-    for item in sig_items {
-        match item {
-            SignatureItem::SigValue(_id, desc) => {
-                substitute_type_expr_path(desc.val_type, paths, ctx, &mut visited);
-            }
-            SignatureItem::SigType(_id, decl, _) => {
-                for &param in &decl.type_params {
-                    substitute_type_expr_path(param, paths, ctx, &mut visited);
-                }
-                if let Some(manifest) = decl.type_manifest {
-                    substitute_type_expr_path(manifest, paths, ctx, &mut visited);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-
 
 /// Recursively walk a type expression and substitute Tconstr paths.
 fn substitute_type_expr_path(

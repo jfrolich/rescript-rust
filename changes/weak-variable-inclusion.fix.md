@@ -1,0 +1,1 @@
+- A weak type variable of an earlier item no longer matches, through a module constraint, an abstract type declared after it, and an implementation whose weak value an interface gives an abstract type of the same unit is accepted again, as with the OCaml compiler.

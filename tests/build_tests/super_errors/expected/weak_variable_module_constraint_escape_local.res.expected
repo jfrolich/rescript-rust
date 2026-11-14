@@ -1,0 +1,18 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/weak_variable_module_constraint_escape_local.res[0m:[2m7:21-8:19[0m
+
+   5 [2m│[0m let f = () => {let r = ref(None)
+   6 [2m│[0m module M: {type t
+   [1;31m7[0m [2m│[0m let v: option<t>} = [1;31m{type t[0m
+   [1;31m8[0m [2m│[0m [1;31mlet v = r.contents}[0m
+   9 [2m│[0m r.contents}
+  10 [2m│[0m 
+
+  Signature mismatch:
+  
+  Actual declaration ([36m/.../fixtures/weak_variable_module_constraint_escape_local.res[0m:[2m8:5[0m):
+    let v: option<'_weak1>
+  
+  Expected declaration ([36m/.../fixtures/weak_variable_module_constraint_escape_local.res[0m:[2m7:1-16[0m):
+    let v: option<t>
