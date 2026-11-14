@@ -1,0 +1,1 @@
+- Type checker rewrite: member tables of a unit, sealing a structure, opened layers and the lookup of a name with its candidates (slice R4c).
