@@ -2328,10 +2328,18 @@ the comparison with the pass before the change.
 
 `scripts/test_backend_coverage.py` prints the first three lines and fails
 when a sum is not zero (the `Backend bridge coverage` job). The uncompared
-units are those the naming pass rejects, for its own reasons. Two were
-seen on these corpora: the runtime's `Stdlib_Dict.res` ("delete call
-syntax") and `jsx_preserve_cases.res` of tests/tests ("JSX sequence
-container").
+units are those the naming pass rejects, for its own reasons; their number
+per corpus is recorded in `compiler-rust/tests/backend_coverage.txt`
+(`names-uncompared`) and the script fails when it rises (`--record`
+writes the current numbers). One per corpus, found by printing the pass's
+`Unsupported` reason in a check build of each corpus:
+
+- runtime library: `Stdlib_Dict.res`, "delete call syntax";
+- tests/tests: `src/jsx_preserve_cases.res`, "JSX sequence container";
+- fixtures: the runtime's `Stdlib_Dict.res` again (the fixtures script
+  builds the runtime with the fixtures), "delete call syntax";
+- the application: the runtime's `Stdlib_Dict.res` (its stats name the
+  unit; the reason is that of the same source in the runtime library).
 
 **What the replay costs**, from the counters of the same builds (steps are
 unit operations of `names.rs`; the calls into `Tables` come on top):

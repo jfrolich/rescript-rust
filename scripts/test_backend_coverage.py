@@ -137,9 +137,33 @@ def fact_counts(directory, prefix=None):
     return dict(sorted(totals.items()))
 
 
+# The ratchet entry for the units the naming pass rejects, per corpus: those
+# units have no oracle, so their number may fall and never rise.
+UNCOMPARED = "names-uncompared"
+
+
+def ratchet(results, naming):
+    """The ratchet file's content: the stages and the uncompared units."""
+    recorded = dict(results)
+    recorded[UNCOMPARED] = {corpus: counts["uncompared"] for corpus, counts in naming.items()}
+    return recorded
+
+
+def write_record(path, results, naming):
+    path.write_text(json.dumps(ratchet(results, naming), indent=2, sort_keys=True) + "\n")
+
+
 def check(actual, baseline):
     for stage in STAGES:
         check_stage(stage, actual[stage], baseline[stage])
+    check_uncompared(actual[UNCOMPARED], baseline[UNCOMPARED])
+
+
+def check_uncompared(actual, baseline):
+    for corpus, old in baseline.items():
+        new = actual[corpus]
+        if new > old:
+            raise RuntimeError(f"{UNCOMPARED}: {corpus}: uncompared units grew: {new} > {old}")
 
 
 def check_stage(stage, actual, baseline):
@@ -216,8 +240,7 @@ def main():
             exits_rules[corpus] = flatten_counts(reports, prefix, "lambda-exits")
             alias_rules[corpus] = flatten_counts(reports, prefix, "lambda-alias")
             alias_facts[corpus] = fact_counts(reports, prefix)
-    text = json.dumps(results, indent=2, sort_keys=True) + "\n"
-    print(text, end="")
+    print(json.dumps(results, indent=2, sort_keys=True))
     print("lambda-norm rule firings (not ratcheted):")
     print(json.dumps(rules, indent=2, sort_keys=True))
     print("lambda-flatten rule firings (not ratcheted):")
@@ -235,9 +258,9 @@ def main():
               f"uncompared {counts['uncompared']}, adopted_nodes {counts['adopted_nodes']}, "
               f"sum of (d) {counts['differences']}")
     if args.record:
-        RATCHET.write_text(text)
+        write_record(RATCHET, results, naming)
     else:
-        check(results, json.loads(RATCHET.read_text()))
+        check(ratchet(results, naming), json.loads(RATCHET.read_text()))
         print("Backend coverage ratchet passed")
     differing = {corpus: counts["differences"] for corpus, counts in naming.items() if counts["differences"]}
     if differing:

@@ -122,5 +122,10 @@
         "shared Lambda subtree with binder": 1
       }
     }
+  },
+  "names-uncompared": {
+    "fixtures": 1,
+    "runtime": 1,
+    "tests/tests": 1
   }
 }

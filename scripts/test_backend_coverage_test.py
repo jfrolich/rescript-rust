@@ -15,6 +15,7 @@ class CoverageGateTests(unittest.TestCase):
         corpora = {"runtime": {"units": 10, "identical": 8,
                                "unsupported": {"reason": 2}}}
         self.baseline = {stage: copy.deepcopy(corpora) for stage in coverage.STAGES}
+        self.baseline[coverage.UNCOMPARED] = {"runtime": 1}
 
     def test_unchanged_and_improved_pass(self):
         check(self.baseline, self.baseline)
@@ -103,6 +104,7 @@ class CoverageGateTests(unittest.TestCase):
     def test_fully_supported_corpus_keeps_no_fallback(self):
         full = {stage: {"runtime": {"units": 10, "identical": 10, "unsupported": {}}}
                 for stage in coverage.STAGES}
+        full[coverage.UNCOMPARED] = {"runtime": 0}
         actual = copy.deepcopy(full)
         actual["lambda-bridge"]["runtime"] = {"units": 11, "identical": 11, "unsupported": {}}
         check(actual, full)
@@ -110,6 +112,27 @@ class CoverageGateTests(unittest.TestCase):
                                               "unsupported": {"reason": 1}}
         with self.assertRaisesRegex(RuntimeError, "gained a fallback"):
             check(actual, full)
+
+    def test_growing_uncompared_units_fail(self):
+        actual = copy.deepcopy(self.baseline)
+        actual[coverage.UNCOMPARED]["runtime"] = 0
+        check(actual, self.baseline)
+        actual[coverage.UNCOMPARED]["runtime"] = 2
+        with self.assertRaisesRegex(
+                RuntimeError, "names-uncompared: runtime: uncompared units grew: 2 > 1"):
+            check(actual, self.baseline)
+
+    def test_record_writes_the_uncompared_units(self):
+        results = {stage: self.baseline[stage] for stage in coverage.STAGES}
+        naming = {"runtime": {"compared": 9, "uncompared": 3, "adopted_nodes": 0,
+                              "differences": 0}}
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "ratchet.txt"
+            coverage.write_record(path, results, naming)
+            recorded = json.loads(path.read_text())
+        self.assertEqual(recorded[coverage.UNCOMPARED], {"runtime": 3})
+        self.assertEqual({key: recorded[key] for key in coverage.STAGES}, results)
+        check(coverage.ratchet(results, naming), recorded)
 
     def test_new_reason_fails(self):
         actual = copy.deepcopy(self.baseline)
