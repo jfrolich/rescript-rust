@@ -1869,7 +1869,6 @@ fn unused_binders_are_reported_in_the_order_armed() {
 /// per use, at the use, for a local declaration and for an imported one,
 /// and for a module a path goes through.
 #[test]
-#[ignore = "R4f build"]
 fn a_deprecated_item_warns_at_each_use() {
     let segment = compiled_segment("Old", "@deprecated(\"gone\") let v = 1\nlet w = 2\n");
     let mut s = unit_scopes();

@@ -21,9 +21,9 @@
 
 use super::name_table::Name;
 use super::scope::{
-    ARMED_OPEN, Binder, BinderKind, Found, IMPORTED, Key, NONE, Namespace, OPEN_OVERRIDE,
-    OPEN_USED, PATTERN, POSITIVE, PRIVATIZE, Resolved, ResolvedKind, Scopes, ShadowNote, TableId,
-    UNIT_MASK, USED, UnitSource, Warning, WarningKind,
+    ARMED_OPEN, Binder, BinderKind, DEPRECATED, Found, IMPORTED, Key, MEMBER_DEPRECATED, NONE,
+    Namespace, OPEN_OVERRIDE, OPEN_USED, PATTERN, POSITIVE, PRIVATIZE, Resolved, ResolvedKind,
+    Scopes, ShadowNote, TableId, UNIT_MASK, USED, UnitSource, Warning, WarningKind,
 };
 use super::segment::{FUNCTOR_SCOPE, ModuleTypeRow, PathRow, Segment, SignatureKind};
 
@@ -581,9 +581,43 @@ impl Scopes {
     pub fn use_found(&mut self, found: Found, key: Key, loc: u32) -> Option<Found> {
         #[cfg(test)]
         super::steps::tick();
-        match found.layer {
+        // The open's slot runs inside the lookup (compiler/ml/env.ml:
+        // 279-288), the deprecation check after it (typetexp.ml:98-123).
+        let hidden = match found.layer {
             NONE => None,
             layer => self.use_open(layer, key),
+        };
+        self.deprecated(found.item, loc);
+        hidden
+    }
+
+    /// O(1), no step: push `Deprecated` at `loc` when `item` is deprecated:
+    /// a binder with `DEPRECATED`, an imported member with
+    /// `MEMBER_DEPRECATED` (both set by the first attribute named
+    /// `deprecated`, CHECKER_REWRITE 9.7 decision 9), a unit whose
+    /// interface carries `@@deprecated` (`ps_comps.deprecated`,
+    /// compiler/ml/env.ml:1003, kept as `UnitRow::deprecated`). The text
+    /// and the migration templates are read from that attribute by the
+    /// reporter.
+    fn deprecated(&mut self, item: Resolved, loc: u32) {
+        let deprecated = match item.kind() {
+            ResolvedKind::Binder(binder) => self.binders.used[binder.0 as usize] & DEPRECATED != 0,
+            ResolvedKind::Import(row) => {
+                self.imported_members[row as usize].origin & MEMBER_DEPRECATED != 0
+            }
+            ResolvedKind::Unit(unit) => self.units[unit as usize]
+                .segment
+                .signature
+                .unit
+                .is_some_and(|row| row.deprecated != NONE),
+        };
+        if deprecated {
+            self.warnings.push(Warning {
+                kind: WarningKind::Deprecated,
+                loc,
+                a: item.0,
+                b: 0,
+            });
         }
     }
 
@@ -658,7 +692,22 @@ impl Scopes {
     /// first one's layer, `Deprecated` for a deprecated module. 1 step a
     /// module. `names` are the path's components, parallel to `modules`.
     pub fn use_modules(&mut self, modules: &[Found], names: &[Name], loc: u32) {
-        todo!("R4f")
+        debug_assert_eq!(modules.len(), names.len());
+        for (&module, &name) in modules.iter().zip(names) {
+            #[cfg(test)]
+            super::steps::tick();
+            // `find_name ~mark:true` runs the open's slot, then
+            // `mark_module_used`, then `report_deprecated`
+            // (compiler/ml/env.ml:968-972). A module hides only modules:
+            // `use_open` reports it itself and returns `None`.
+            if module.layer != NONE {
+                self.use_open(module.layer, Key::new(name, Namespace::Module));
+            }
+            if let ResolvedKind::Binder(binder) = module.item.kind() {
+                self.binders.used[binder.0 as usize] |= USED;
+            }
+            self.deprecated(module.item, loc);
+        }
     }
 
     /// End of the unit: 1 step per armed entry, in the order armed. A
@@ -959,6 +1008,81 @@ mod tests {
         let k17 = Key::new(s.names.find("K17").unwrap(), Namespace::Module);
         assert!(s.search(k16, k17).is_some());
         assert_eq!(shape(&mut s, "Deep"), Err(UNSUPPORTED));
+    }
+
+    /// `use_modules` of a path through 10,000 local modules is one step a
+    /// module, marks each used and warns for the deprecated ones only.
+    #[test]
+    fn using_ten_thousand_modules_is_one_step_each() {
+        let mut s = Scopes::new();
+        s.enter();
+        let mut modules = Vec::with_capacity(10_000);
+        let mut names = Vec::with_capacity(10_000);
+        for i in 0..10_000 {
+            let name = s.names.intern(&format!("M{i}"));
+            let binder = s.binders.push(
+                Key::new(name, Namespace::Module),
+                NONE,
+                i,
+                BinderKind::Module,
+            );
+            if i % 2 == 0 {
+                s.binders.used[binder.0 as usize] |= DEPRECATED;
+            }
+            s.bind(binder);
+            modules.push(Found {
+                item: Resolved::binder(binder),
+                layer: NONE,
+            });
+            names.push(name);
+        }
+        let count = super::super::steps::scope(|| s.use_modules(&modules, &names, 7));
+        assert_eq!(count, 10_000);
+        assert!(s.binders.used.iter().all(|used| used & USED == USED));
+        assert_eq!(s.warnings.len(), 5_000);
+        assert!(
+            s.warnings
+                .iter()
+                .all(|w| w.kind == WarningKind::Deprecated && w.loc == 7)
+        );
+    }
+
+    /// An open that shadowed 10,000 values: each first use is one step and
+    /// one `find_below`, reports once, and a second use of every name adds
+    /// one step and no warning (the note scan has no step of its own).
+    #[test]
+    fn an_open_that_shadows_ten_thousand_names_reports_each_once() {
+        let mut s = Scopes::new();
+        s.enter();
+        let mut members = Vec::with_capacity(10_000);
+        let mut keys = Vec::with_capacity(10_000);
+        for i in 0..10_000 {
+            let key = Key::new(s.names.intern(&format!("v{i}")), Namespace::Value);
+            let older = s.binders.push(key, 0, 0, BinderKind::Let);
+            s.bind(older);
+            members.push((key, s.binders.push(key, 0, 0, BinderKind::Let)));
+            keys.push(key);
+        }
+        let table = s.table_from(&members);
+        let open = s.open(table, 77, 0, 0);
+        s.arm_open(open);
+        let found: Vec<Found> = keys.iter().map(|&key| s.find(key).unwrap()).collect();
+        assert!(found.iter().all(|found| found.layer == open));
+        let count = super::super::steps::scope(|| {
+            for (&found, &key) in found.iter().zip(&keys) {
+                assert_eq!(s.use_found(found, key, 1), None);
+            }
+        });
+        // `use_found`, and `find_below`'s head load: 2 steps a use.
+        assert_eq!(count, 2 * 10_000);
+        assert_eq!(s.warnings.len(), 10_000);
+        let count = super::super::steps::scope(|| {
+            assert_eq!(s.use_found(found[0], keys[0], 2), None);
+        });
+        assert_eq!(count, 1);
+        assert_eq!(s.warnings.len(), 10_000);
+        s.finish();
+        assert_eq!(s.warnings.len(), 10_000, "the open was used");
     }
 
     /// `candidates_in` of a key with 10,000 members, in a table that has
