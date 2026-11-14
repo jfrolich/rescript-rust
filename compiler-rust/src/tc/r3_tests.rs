@@ -385,7 +385,6 @@ fn wide(c: &mut Checker, n: u32) -> Ty {
 }
 
 #[test]
-#[ignore = "R3a build"]
 fn unify_of_equal_wide_types_is_linear() {
     let mut c = checker(Mode::Success);
     let (left, right) = (wide(&mut c, 5000), wide(&mut c, 5000));
@@ -410,7 +409,6 @@ fn unify_of_equal_wide_types_is_linear() {
 /// (compiler/ml/ctype.ml:2330), so the sum of the subtree sizes, plus at
 /// most 260 steps a pair for everything else.
 #[test]
-#[ignore = "R3a build"]
 fn unify_of_equal_deep_types_fits_the_stack() {
     std::thread::Builder::new()
         .stack_size(2 * 1024 * 1024)
@@ -429,7 +427,6 @@ fn unify_of_equal_deep_types_fits_the_stack() {
 }
 
 #[test]
-#[ignore = "R3a build"]
 fn binding_a_variable_is_one_walk_of_the_type() {
     std::thread::Builder::new()
         .stack_size(2 * 1024 * 1024)
@@ -472,7 +469,6 @@ fn binding_a_variable_is_one_walk_of_the_type() {
 /// `end_def` around a variable of the definition): the binding must fail
 /// (O13), so the occurrence test cannot stop at a lower level.
 #[test]
-#[ignore = "R3a build"]
 fn binding_finds_the_variable_under_a_lower_root() {
     let mut c = checker(Mode::Success);
     c.g.begin_def();
@@ -489,9 +485,58 @@ fn binding_finds_the_variable_under_a_lower_root() {
     assert!(c.unify(holder, v).is_err());
 }
 
+/// `update_level` stops at a node that is not above the target level and
+/// does not look below it (`if ty.level > level`,
+/// compiler/ml/ctype.ml:586): a node above the target that is reached only
+/// through such a node keeps its level, and one that is also a child of a
+/// lowered node is lowered, in whichever order the walk meets the two
+/// paths. The occurrence test of a binding goes everywhere; its level
+/// update does not. Both modes leave the same levels: `Mode::Explain` runs
+/// OCaml's two walks, `Mode::Success` the combined one. Added in review of
+/// R3a; expected values from the OCaml lines, not from a run.
+#[test]
+fn binding_lowers_only_what_update_level_reaches() {
+    fn level(c: &Checker, ty: Ty) -> u32 {
+        c.g.nodes[ty.0 as usize].level
+    }
+    for (explain, mode) in [(false, Mode::Success), (true, Mode::Explain)] {
+        for shield_first in [false, true] {
+            // `checker` returns at level 2: the variable's level.
+            let mut c = checker(mode);
+            let v = var(&mut c);
+            assert_eq!(level(&c, v), 2);
+            let hidden = constr_at(&mut c, 4, INT, &[]);
+            let shared = constr_at(&mut c, 4, INT, &[]);
+            // Not above the variable: the level update stops here.
+            let shield = tuple_at(&mut c, 1, &[hidden, shared]);
+            let top = constr_at(&mut c, 4, STRING, &[]);
+            let children = if shield_first {
+                [shield, shared, top]
+            } else {
+                [top, shared, shield]
+            };
+            let root = tuple_at(&mut c, 4, &children);
+            c.unify(v, root).unwrap();
+            let case = (explain, shield_first);
+            assert_eq!(c.g.repr(v), root, "{case:?}");
+            assert_eq!(level(&c, root), 2, "{case:?}");
+            assert_eq!(level(&c, top), 2, "{case:?}");
+            assert_eq!(level(&c, shield), 1, "{case:?}");
+            assert_eq!(level(&c, shared), 2, "{case:?}: a child of the lowered root");
+            assert_eq!(level(&c, hidden), 4, "{case:?}: only below the shield");
+        }
+        // A root that is not above the variable: nothing is lowered.
+        let mut c = checker(mode);
+        let v = var(&mut c);
+        let hidden = constr_at(&mut c, 4, INT, &[]);
+        let root = tuple_at(&mut c, 2, &[hidden]);
+        c.unify(v, root).unwrap();
+        assert_eq!(level(&c, hidden), 4, "explain {explain}");
+    }
+}
+
 /// Links are written in OCaml's direction (O2, CHECKER_REDESIGN I.2.1).
 #[test]
-#[ignore = "R3a build"]
 fn link_directions() {
     let mut c = checker(Mode::Success);
     // A variable becomes the other node, whichever side it is on.
@@ -539,7 +584,6 @@ fn link_directions() {
 /// speculation and logs nothing; a failure sets `unexplained_failure` and
 /// leaves no trace. What it wrote stays written: the unit is checked again.
 #[test]
-#[ignore = "R3a build"]
 fn success_mode_keeps_nothing_for_a_failure() {
     let mut c = checker(Mode::Success);
     let (i, s) = (constr(&mut c, INT, &[]), constr(&mut c, STRING, &[]));
@@ -571,7 +615,6 @@ fn success_mode_keeps_nothing_for_a_failure() {
 /// failure undoes path compression only, restores the linked structure's
 /// descriptor (`t1'.desc <- d1`), keeps the trace and is not unexplained.
 #[test]
-#[ignore = "R3a build"]
 fn explain_mode_keeps_the_trace_and_undoes_compression() {
     let mut c = checker(Mode::Explain);
     let (l, r) = (var(&mut c), var(&mut c));
@@ -605,6 +648,34 @@ fn explain_mode_keeps_the_trace_and_undoes_compression() {
     assert_eq!(c.g.nodes[l.0 as usize].tag(), TUPLE);
     assert!(c.g.trail.is_empty());
     assert_eq!(c.g.speculation_depth, 0);
+}
+
+/// Decision 6 of section 8.6: in `Mode::Explain`, outside a speculation
+/// whose owner restores, a binding checks occurrence before it writes a
+/// level (`occur`, then `link_type`, then `update_level`;
+/// compiler/ml/ctype.ml:2216-2225). A failed top-level unification there
+/// undoes path compression only, so this pins that a binding that fails on
+/// occurrence leaves every level of the type as it was, although the type
+/// has nodes above the variable's level that the combined walk of
+/// `Mode::Success` would have lowered before it met the variable.
+#[test]
+fn explain_mode_binding_fails_before_it_lowers() {
+    let mut c = checker(Mode::Explain);
+    let v = var(&mut c);
+    c.g.begin_def();
+    let int = constr(&mut c, INT, &[]);
+    let inner = tuple(&mut c, &[int]);
+    let holder = tuple(&mut c, &[v, inner]);
+    c.g.end_def();
+    let levels: Vec<u32> = c.g.nodes.iter().map(|node| node.level).collect();
+    assert!(levels[holder.0 as usize] > levels[v.0 as usize]);
+    assert!(c.unify(v, holder).is_err());
+    let after: Vec<u32> = c.g.nodes.iter().map(|node| node.level).collect();
+    assert_eq!(after, levels, "no level was written");
+    assert_eq!(c.g.nodes[v.0 as usize].tag(), VAR);
+    assert!(c.g.trail.is_empty());
+    assert_eq!(c.g.speculation_depth, 0);
+    assert!(!c.unexplained_failure);
 }
 
 // ---------------------------------------------------------------------------

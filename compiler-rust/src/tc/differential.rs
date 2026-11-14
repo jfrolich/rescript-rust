@@ -340,7 +340,11 @@ pub(crate) fn operations(rng: &mut Rng, tier: Tier, values: usize) -> Vec<Op> {
 
 /// O(operations + printed nodes²): the old checker's side of a case.
 pub(crate) fn run_old(program: &Program, tier: Tier, ops: &[Op]) -> Outcome {
-    let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+    // Stamps start above the predefined types', as in a compilation
+    // (`Ident.set_current_time 999`, compiler/ml/predef.ml).
+    let ctx = TypeContext::new(Arc::new(IdGenerator::with_start_stamp(
+        crate::types::predef::PREDEF_STAMP_BARRIER,
+    )));
     // The unit's own types are named through the unit (`Case.a0`): they
     // resolve through the persistent environment, as for a dependent.
     let mut registry = ModuleRegistry::new();
@@ -364,6 +368,14 @@ pub(crate) fn run_old(program: &Program, tier: Tier, ops: &[Op]) -> Outcome {
             _ => {}
         }
     }
+    // A unit is checked from a level above every binding time
+    // (`Ctype.init_def (Ident.current_time ())`, compiler/ml/typemod.ml), so
+    // that lowering a type to the unit's first level never fails the scope
+    // test of `update_level` (compiler/ml/ctype.ml:591-598) for a predefined
+    // type or a type of the unit. Without it the old side refused a
+    // unification no compilation can refuse (seed 1000064 of the structural
+    // tier: `int` bound to a variable of the starting level).
+    ctx.init_def(ctx.current_stamp());
     let base = ctx.current_level();
     let mut operands: Vec<TypeExprRef> = Vec::new();
     for (index, op) in ops.iter().enumerate() {
@@ -907,7 +919,6 @@ mod tests {
 
     /// 10,000 cases of unification on programs without abbreviations.
     #[test]
-    #[ignore = "R3a build"]
     fn structural_tier_agrees_on_generated_cases() {
         let coverage = run_cases(Tier::Structural, 1, 100, 100);
         assert_eq!(coverage.cases, 10_000);
