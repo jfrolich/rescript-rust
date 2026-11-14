@@ -1481,7 +1481,6 @@ fn a_path_through_two_local_aliases() {
 /// table for `A.B`, and aliases inside a dependency are followed in its
 /// segment.
 #[test]
-#[ignore = "R4e build"]
 fn a_path_through_aliases_of_another_unit() {
     let old = old_checker(&READS_CHAIN);
     let dep = segment_of("Dep", &old.deps[0].1);

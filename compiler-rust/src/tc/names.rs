@@ -22,8 +22,9 @@
 use super::name_table::Name;
 use super::scope::{
     Binder, BinderKind, Found, IMPORTED, Key, NONE, Namespace, Resolved, ResolvedKind, Scopes,
-    TableId, UnitSource,
+    TableId, UNIT_MASK, UnitSource,
 };
+use super::segment::{FUNCTOR_SCOPE, ModuleTypeRow, PathRow, Segment, SignatureKind};
 
 /// What a module is, for a path that goes through it: 8 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +74,57 @@ const UNSUPPORTED: PathError = PathError {
     component: 0,
 };
 
+/// How many components of dependencies' paths [`Scopes::module_shape`]
+/// keeps waiting at once: one a `Dot` of an alias or module type name it
+/// is inside. A published alias is written as in the source (`module Q =
+/// P.A`, one waiting); a module with more is `Unsupported` and the unit is
+/// declined.
+const PENDING: usize = 16;
+
+/// [`Pending::unit`] bit: the component names a module type.
+const PENDING_MODULE_TYPE: u32 = 1 << 31;
+
+/// A component of a dependency's path still to be read: 8 bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Pending {
+    /// The unit whose string pool holds `name`, with
+    /// [`PENDING_MODULE_TYPE`].
+    unit: u32,
+    /// A string of that unit's segment.
+    name: u32,
+}
+
+/// Where [`Scopes::module_shape`] is: 12 bytes, its loop variable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum At {
+    /// A module of this unit, a unit, or an imported member.
+    Resolved(Resolved),
+    /// A `signature.modules` row of `unit`: a module, or with
+    /// `module_type` a module type, declared in the unit's signature.
+    Declaration {
+        unit: u32,
+        row: u32,
+        module_type: bool,
+    },
+    /// A `signature.paths` row of `unit` naming a module, or with
+    /// `module_type` a module type.
+    Path {
+        unit: u32,
+        path: u32,
+        module_type: bool,
+    },
+}
+
+/// O(1), no allocation: the text of string `index` of a segment's string
+/// pool. Names are written from Rust strings, so the bytes are UTF-8.
+fn segment_text(segment: &Segment, index: u32) -> &str {
+    let range = segment.signature.strings[index as usize];
+    std::str::from_utf8(
+        &segment.signature.bytes[range.start as usize..(range.start + range.len) as usize],
+    )
+    .expect("a segment string is UTF-8")
+}
+
 /// O(1): the error `kind` about component `component` (a path longer
 /// than `u16::MAX` reports its last representable component).
 fn path_error(kind: PathErrorKind, component: usize) -> PathError {
@@ -116,36 +168,219 @@ impl Scopes {
         module: Resolved,
         source: &mut dyn UnitSource,
     ) -> Result<ModuleShape, PathError> {
-        let mut at = module;
+        // The components of the dependencies' paths still to be read, the
+        // innermost path's root-most component on top: an alias `A.B.C`
+        // pushes `C` then `B` and continues with `A`.
+        let mut pending = [Pending { unit: 0, name: 0 }; PENDING];
+        let mut depth = 0;
+        let mut at = At::Resolved(module);
         loop {
-            match at.kind() {
-                ResolvedKind::Binder(binder) => {
-                    let payload = self.binders.payload[binder.0 as usize];
-                    match self.binders.kind[binder.0 as usize] {
-                        // A functor's binder has no table (`Functor_comps`,
-                        // compiler/ml/env.ml:966).
-                        BinderKind::Module if payload == NONE => return Ok(ModuleShape::Functor),
-                        BinderKind::Module => return Ok(ModuleShape::Structure(TableId(payload))),
-                        BinderKind::FunctorParameter => {
-                            return Ok(ModuleShape::Abstract(TableId(payload)));
+            let shape = match at {
+                At::Resolved(resolved) => match resolved.kind() {
+                    ResolvedKind::Binder(binder) => {
+                        let payload = self.binders.payload[binder.0 as usize];
+                        match self.binders.kind[binder.0 as usize] {
+                            // A functor's binder has no table (`Functor_comps`,
+                            // compiler/ml/env.ml:966).
+                            BinderKind::Module if payload == NONE => ModuleShape::Functor,
+                            BinderKind::Module => ModuleShape::Structure(TableId(payload)),
+                            BinderKind::FunctorParameter => ModuleShape::Abstract(TableId(payload)),
+                            // `module N = M`: the alias is followed when its
+                            // members are needed (`normalize_path`,
+                            // compiler/ml/env.ml:854-880), one step each.
+                            BinderKind::ModuleAlias => {
+                                #[cfg(test)]
+                                super::steps::tick();
+                                at = At::Resolved(Resolved(payload));
+                                continue;
+                            }
+                            _ => return Err(UNSUPPORTED),
                         }
-                        // `module N = M`: the alias is followed when its
-                        // members are needed (`normalize_path`,
-                        // compiler/ml/env.ml:854-880), one step each.
-                        BinderKind::ModuleAlias => {
+                    }
+                    ResolvedKind::Unit(unit) => ModuleShape::Structure(self.import_table(unit, 0)),
+                    ResolvedKind::Import(row) => {
+                        let member = self.imported_members[row as usize];
+                        if Key(member.key).namespace() != Namespace::Module as u32 {
+                            return Err(UNSUPPORTED);
+                        }
+                        let unit = member.origin & UNIT_MASK;
+                        let item = self.units[unit as usize].segment.items[member.target as usize];
+                        at = At::Declaration {
+                            unit,
+                            row: item.payload,
+                            module_type: false,
+                        };
+                        continue;
+                    }
+                },
+                At::Declaration {
+                    unit,
+                    row,
+                    module_type,
+                } => {
+                    let pools = &self.units[unit as usize].segment.signature;
+                    let declared = pools.modules[row as usize].module_type;
+                    if declared == NONE {
+                        // An abstract module type has no members.
+                        return Err(UNSUPPORTED);
+                    }
+                    match pools.module_types[declared as usize] {
+                        ModuleTypeRow::Signature(signature) => {
+                            let table = self.import_table(unit, signature);
+                            if module_type {
+                                ModuleShape::Abstract(table)
+                            } else {
+                                ModuleShape::Structure(table)
+                            }
+                        }
+                        ModuleTypeRow::Functor { .. } => ModuleShape::Functor,
+                        // `module N = P`, or a module (type) whose type is
+                        // the named module type `P`: one step, then `P`.
+                        ModuleTypeRow::Alias { path, .. } if !module_type => {
                             #[cfg(test)]
                             super::steps::tick();
-                            at = Resolved(payload);
+                            at = At::Path {
+                                unit,
+                                path,
+                                module_type: false,
+                            };
+                            continue;
                         }
-                        _ => return Err(UNSUPPORTED),
+                        ModuleTypeRow::Ident(path) => {
+                            #[cfg(test)]
+                            super::steps::tick();
+                            at = At::Path {
+                                unit,
+                                path,
+                                module_type: true,
+                            };
+                            continue;
+                        }
+                        ModuleTypeRow::Alias { .. } => return Err(UNSUPPORTED),
                     }
                 }
-                ResolvedKind::Unit(unit) => {
-                    return Ok(ModuleShape::Structure(self.import_table(unit, 0)));
+                At::Path {
+                    unit,
+                    path,
+                    module_type,
+                } => {
+                    at =
+                        self.path_root(unit, path, module_type, &mut pending, &mut depth, source)?;
+                    continue;
                 }
-                ResolvedKind::Import(_) => return Err(UNSUPPORTED),
+            };
+            if depth == 0 {
+                return Ok(shape);
             }
+            // The next component of a dependency's path, read from the
+            // module just found: one search.
+            depth -= 1;
+            at = self.read_component(shape, pending[depth])?;
         }
+    }
+
+    /// The start of path `path` of `unit`'s signature: every `Dot` from
+    /// the last component up is pushed on `pending` (1 load each, no
+    /// step), then the root identifier is read. An identifier whose
+    /// `IdentRow::scope` is an item index names that item of the same
+    /// unit: its declaration, no name lookup. A persistent identifier
+    /// (scope `NONE`, stamp 0) names a unit: one intern of its name and one
+    /// [`Scopes::unit_by_name`]. `module_type` says that the path's last
+    /// component names a module type. A functor application, a functor's
+    /// parameter, the unit itself, an unknown unit, a kind that does not
+    /// match and more than [`PENDING`] components waiting are
+    /// [`PathErrorKind::Unsupported`].
+    fn path_root(
+        &mut self,
+        unit: u32,
+        path: u32,
+        mut module_type: bool,
+        pending: &mut [Pending; PENDING],
+        depth: &mut usize,
+        source: &mut dyn UnitSource,
+    ) -> Result<At, PathError> {
+        let pools = &self.units[unit as usize].segment.signature;
+        let mut row = path;
+        let ident = loop {
+            match pools.paths[row as usize] {
+                PathRow::Ident(ident) => break pools.identifiers[ident as usize],
+                PathRow::Dot { parent, name, .. } => {
+                    if *depth == PENDING {
+                        return Err(UNSUPPORTED);
+                    }
+                    pending[*depth] = Pending {
+                        unit: unit | if module_type { PENDING_MODULE_TYPE } else { 0 },
+                        name,
+                    };
+                    *depth += 1;
+                    row = parent;
+                    module_type = false;
+                }
+                PathRow::Apply { .. } => return Err(UNSUPPORTED),
+            }
+        };
+        if ident.scope < FUNCTOR_SCOPE {
+            let item = pools.ordered_items[ident.scope as usize];
+            let kind = if module_type {
+                SignatureKind::ModuleType
+            } else {
+                SignatureKind::Module
+            };
+            if item.kind != kind {
+                return Err(UNSUPPORTED);
+            }
+            return Ok(At::Declaration {
+                unit,
+                row: item.declaration,
+                module_type,
+            });
+        }
+        if ident.scope != NONE || ident.stamp != 0 || module_type {
+            return Err(UNSUPPORTED);
+        }
+        let Scopes { names, units, .. } = self;
+        let name = names.intern(segment_text(&units[unit as usize].segment, ident.name));
+        match self.unit_by_name(name, source) {
+            Some(unit) => Ok(At::Resolved(Resolved::unit(unit))),
+            None => Err(UNSUPPORTED),
+        }
+    }
+
+    /// One [`Scopes::search`] and one probe of the name table, no
+    /// allocation: the member `component` names in the module whose shape
+    /// is `shape`. A name the worker never interned is in no table it
+    /// imported. A functor, or a name the table does not have, is
+    /// [`PathErrorKind::Unsupported`]: a published path names a member.
+    fn read_component(&self, shape: ModuleShape, component: Pending) -> Result<At, PathError> {
+        let table = match shape {
+            ModuleShape::Structure(table) | ModuleShape::Abstract(table) => table,
+            ModuleShape::Functor => return Err(UNSUPPORTED),
+        };
+        let module_type = component.unit & PENDING_MODULE_TYPE != 0;
+        let unit = component.unit & !PENDING_MODULE_TYPE;
+        let text = segment_text(&self.units[unit as usize].segment, component.name);
+        let name = self.names.find(text).ok_or(UNSUPPORTED)?;
+        let ns = if module_type {
+            Namespace::ModuleType
+        } else {
+            Namespace::Module
+        };
+        let row = self.search(table, Key::new(name, ns)).ok_or(UNSUPPORTED)?;
+        let item = self.row_item(table, row);
+        if !module_type {
+            return Ok(At::Resolved(item));
+        }
+        // A module type is read in its own unit's segment.
+        let ResolvedKind::Import(row) = item.kind() else {
+            return Err(UNSUPPORTED);
+        };
+        let member = self.imported_members[row as usize];
+        let unit = member.origin & UNIT_MASK;
+        Ok(At::Declaration {
+            unit,
+            row: self.units[unit as usize].segment.items[member.target as usize].payload,
+            module_type: true,
+        })
     }
 
     /// Resolve a path of one or more names whose last component is in
@@ -401,6 +636,233 @@ mod tests {
         assert_eq!(std::mem::size_of::<PathError>(), 4);
         assert!(std::mem::size_of::<Result<Found, PathError>>() <= 16);
         assert!(std::mem::size_of::<Result<ModuleShape, PathError>>() <= 16);
+        assert_eq!(std::mem::size_of::<At>(), 12);
+        assert_eq!(std::mem::size_of::<Pending>(), 8);
+    }
+
+    use crate::tc::scope::UnitSource;
+    use crate::tc::segment::{
+        ChildTable, ExportItem, ExportKind, IdentRow, ItemStatus, ModuleRow, Range,
+        SignatureItemRow, SignaturePools,
+    };
+    use std::sync::Arc;
+
+    /// No unit but the one a test adds.
+    struct NoUnits;
+
+    impl UnitSource for NoUnits {
+        fn segment(&mut self, _: &str) -> Option<Arc<Segment>> {
+            None
+        }
+    }
+
+    /// A segment's string pool of `texts`.
+    fn strings(texts: &[String]) -> (Box<[u8]>, Box<[Range]>) {
+        let mut bytes = Vec::new();
+        let mut ranges = Vec::new();
+        for text in texts {
+            ranges.push(Range {
+                start: bytes.len() as u32,
+                len: text.len() as u32,
+            });
+            bytes.extend_from_slice(text.as_bytes());
+        }
+        (bytes.into(), ranges.into())
+    }
+
+    /// A `modules` row of module type `module_type`.
+    fn module_row(module_type: u32) -> ModuleRow {
+        ModuleRow {
+            module_type,
+            attributes: Range::default(),
+            loc: 0,
+            path: 0,
+        }
+    }
+
+    /// A unit `Dep` whose signature is `module M0 = {}`, then `module Mi =
+    /// M(i-1)` for i up to `n - 1`, every module exported: item `i` of the
+    /// signature is `Mi`, its identifier's scope is `i`, `paths[i]` names it.
+    fn alias_chain(n: u32) -> Arc<Segment> {
+        let (bytes, strings) = strings(&(0..n).map(|i| format!("M{i}")).collect::<Vec<_>>());
+        let mut module_types = vec![ModuleTypeRow::Signature(1)];
+        module_types.extend((1..n).map(|i| ModuleTypeRow::Alias {
+            path: i - 1,
+            present: true,
+        }));
+        Arc::new(Segment {
+            items: (0..n)
+                .map(|i| ExportItem {
+                    name: i,
+                    payload: i,
+                    kind: ExportKind::Module,
+                })
+                .collect(),
+            children: Box::new([
+                ChildTable { start: 0, len: n },
+                ChildTable { start: n, len: 0 },
+            ]),
+            signature: SignaturePools {
+                bytes,
+                strings,
+                identifiers: (0..n)
+                    .map(|i| IdentRow {
+                        name: i,
+                        stamp: i as i32 + 1,
+                        flags: 0,
+                        scope: i,
+                    })
+                    .collect(),
+                paths: (0..n).map(PathRow::Ident).collect(),
+                ordered_items: (0..n)
+                    .map(|i| SignatureItemRow {
+                        ident: i,
+                        declaration: i,
+                        kind: SignatureKind::Module,
+                        status: ItemStatus::Ordinary,
+                    })
+                    .collect(),
+                modules: (0..n).map(module_row).collect(),
+                module_types: module_types.into(),
+                ..SignaturePools::default()
+            },
+            ..Segment::default()
+        })
+    }
+
+    /// A dependency's chain of 10,000 aliases is 10,000 steps, a loop that
+    /// fits a 2 MB stack, and ends at the table of `M0`.
+    #[test]
+    fn ten_thousand_imported_aliases_are_one_step_each() {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let mut s = Scopes::new();
+                let name = s.names.intern("Dep");
+                let unit = s.add_unit(name, alias_chain(10_001));
+                let table = s.import_table(unit, 0);
+                let last = Key::new(s.names.find("M10000").unwrap(), Namespace::Module);
+                let row = s.search(table, last).unwrap();
+                let mut shape = None;
+                let count = super::super::steps::scope(|| {
+                    shape = Some(s.module_shape(Resolved::import(row), &mut NoUnits))
+                });
+                // The last step imports `M0`'s empty table: no member, no step.
+                assert_eq!(count, 10_000);
+                let first = s.table_index[s.units[unit as usize].tables as usize + 1];
+                assert_eq!(
+                    shape.unwrap(),
+                    Ok(ModuleShape::Structure(TableId(first | IMPORTED)))
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// A unit `Dep` with modules `K0` to `K17`, `Kj+1` the one member of
+    /// `Kj`, and `module Ok = K0.K1....K16` (16 components waiting) and
+    /// `module Deep = K0.K1....K17` (17).
+    fn nested(depth: u32) -> Arc<Segment> {
+        let mut texts: Vec<String> = (0..=depth).map(|j| format!("K{j}")).collect();
+        texts.extend(["Ok".to_string(), "Deep".to_string()]);
+        let (bytes, strings) = strings(&texts);
+        let (ok, deep) = (depth + 1, depth + 2);
+        // Items 0, 1, 2: K0, Ok, Deep (the unit's table); 2 + j: Kj.
+        let mut items = vec![
+            ExportItem {
+                name: 0,
+                payload: 0,
+                kind: ExportKind::Module,
+            },
+            ExportItem {
+                name: ok,
+                payload: ok,
+                kind: ExportKind::Module,
+            },
+            ExportItem {
+                name: deep,
+                payload: deep,
+                kind: ExportKind::Module,
+            },
+        ];
+        items.extend((1..=depth).map(|j| ExportItem {
+            name: j,
+            payload: j,
+            kind: ExportKind::Module,
+        }));
+        let mut children = vec![ChildTable { start: 0, len: 3 }];
+        children.extend((1..=depth).map(|j| ChildTable {
+            start: 2 + j,
+            len: 1,
+        }));
+        children.push(ChildTable {
+            start: 3 + depth,
+            len: 0,
+        });
+        let mut module_types: Vec<ModuleTypeRow> = (0..=depth)
+            .map(|j| ModuleTypeRow::Signature(j + 1))
+            .collect();
+        for path in [depth - 1, depth] {
+            module_types.push(ModuleTypeRow::Alias {
+                path,
+                present: true,
+            });
+        }
+        let mut paths = vec![PathRow::Ident(0)];
+        paths.extend((1..=depth).map(|j| PathRow::Dot {
+            parent: j - 1,
+            name: j,
+            position: 0,
+        }));
+        Arc::new(Segment {
+            items: items.into(),
+            children: children.into(),
+            signature: SignaturePools {
+                bytes,
+                strings,
+                identifiers: Box::new([IdentRow {
+                    name: 0,
+                    stamp: 1,
+                    flags: 0,
+                    scope: 0,
+                }]),
+                paths: paths.into(),
+                ordered_items: Box::new([SignatureItemRow {
+                    ident: 0,
+                    declaration: 0,
+                    kind: SignatureKind::Module,
+                    status: ItemStatus::Ordinary,
+                }]),
+                modules: (0..=depth + 2).map(module_row).collect(),
+                module_types: module_types.into(),
+                ..SignaturePools::default()
+            },
+            ..Segment::default()
+        })
+    }
+
+    /// An alias of a dependency with 16 components waiting is followed to
+    /// the innermost module; with 17 it is `Unsupported`.
+    #[test]
+    fn a_dependency_path_waits_on_at_most_sixteen_components() {
+        let depth = PENDING as u32 + 1;
+        let mut s = Scopes::new();
+        let name = s.names.intern("Dep");
+        let unit = s.add_unit(name, nested(depth));
+        let table = s.import_table(unit, 0);
+        let shape = |s: &mut Scopes, text: &str| {
+            let key = Key::new(s.names.find(text).unwrap(), Namespace::Module);
+            let row = s.search(table, key).unwrap();
+            s.module_shape(Resolved::import(row), &mut NoUnits)
+        };
+        // `Ok` is `K16`, whose table holds `K17`.
+        let Ok(ModuleShape::Structure(k16)) = shape(&mut s, "Ok") else {
+            panic!("Ok is a structure");
+        };
+        let k17 = Key::new(s.names.find("K17").unwrap(), Namespace::Module);
+        assert!(s.search(k16, k17).is_some());
+        assert_eq!(shape(&mut s, "Deep"), Err(UNSUPPORTED));
     }
 
     /// `candidates_in` of a key with 10,000 members, in a table that has
