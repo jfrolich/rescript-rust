@@ -10557,6 +10557,14 @@ fn type_structure_two_modes<S, T, R>(
         }
         let mut reports = AttemptOutput::new(attempt.mode);
         let output = finish(&type_ctx, tctx, typed, syntax, &mut reports);
+        // Location retries request another parse, not an explanation of this
+        // check. Leave its reports and counters private; the located compile
+        // will explain any actual failure on its own syntax.
+        if reports.publication == AttemptPublication::Pending
+            && output.as_ref().is_err_and(|error| error.is::<LocationRetry>())
+        {
+            return (type_ctx, output);
+        }
         if reports.publication == AttemptPublication::Pending && attempt.mode == CheckMode::Success
             && (output.is_err() || type_ctx.unexplained_unify_failure())
         {
@@ -12401,6 +12409,37 @@ mod tests {
             reports.push(format!("{:#}", result.unwrap_err()));
         }
         assert_eq!(reports[0], reports[1]);
+    }
+
+    #[test]
+    fn location_retries_do_not_explain_or_publish_the_unlocated_attempt() {
+        use crate::types::context::CheckMode;
+        for retry in [super::LocationRetry::Warning, super::LocationRetry::Output,
+                      super::LocationRetry::Diagnostic] {
+            let mut parser = super::Parser::new("Locations.res", "let x = 1");
+            let structure = super::module::parse_structure(&mut parser);
+            crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
+            let options = super::CompilerOptions { nopervasives: true, ..Default::default() };
+            let finishes = std::cell::Cell::new(0);
+            let (_, result) = super::type_structure_two_modes(
+                super::CheckUnit {
+                    filename: "Locations.res", options: &options, registry: None,
+                    module_name: None, file_config: &Default::default(),
+                    frontend_warning_specs: &[], derived_plans: true, mode: CheckMode::Success,
+                },
+                super::UnitSyntax::new(parser.arena(), &structure, &options), None,
+                |tctx, env, syntax| super::type_structure(tctx, env, syntax.arena, syntax.tree),
+                |_, _, typed, _, reports| -> super::Result<()> {
+                    typed.unwrap();
+                    finishes.set(finishes.get() + 1);
+                    // Publishing this deliberately invalid Success report would fail.
+                    reports.stderr.extend_from_slice(b"discarded location-free report");
+                    Err(retry.into())
+                },
+            );
+            assert_eq!(finishes.get(), 1);
+            assert_eq!(result.unwrap_err().downcast_ref::<super::LocationRetry>(), Some(&retry));
+        }
     }
 
     #[test]
