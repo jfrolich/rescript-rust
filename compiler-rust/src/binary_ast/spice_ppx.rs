@@ -5157,7 +5157,10 @@ impl<'a, 'scope> LocCloner<'a, 'scope> {
             ExpressionDesc::Pexp_open(inner) => {
                 let (_, ref mut lid, ref mut expr) = **inner;
                 self.located(lid);
+                let enclosing = self.scope;
+                self.scope = enclosing.after_open();
                 self.expression_idx(expr);
+                self.scope = enclosing;
             }
             ExpressionDesc::Pexp_extension(ext) => self.extension(ext),
             ExpressionDesc::Pexp_raw(raw) => {

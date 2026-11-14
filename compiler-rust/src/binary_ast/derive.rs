@@ -296,48 +296,79 @@ pub(crate) struct ScopeSteps {
 pub struct Scope<'a> {
     /// A preceding declaration shadows a predefined result constructor.
     pub result_shadowed: bool,
+    pub(super) opaque_imports: bool,
     pub(super) prefix: Option<(&'a PrefixScope<'a>, usize)>,
 }
 
 impl Scope<'_> {
+    /// O(1): an expression-level open hides inherited syntax facts from a
+    /// module body below it. Restoring the previous scope restores those facts.
+    pub(crate) fn after_open(self) -> Self {
+        Self { result_shadowed: self.result_shadowed, opaque_imports: true, prefix: None }
+    }
+
     /// O(name bytes + alias-version/scope depth), using canonical spelling
     /// slots and borrowed strings; no string allocation.
     pub(crate) fn is_json_identity(self, lid: crate::parse_arena::LidentIdx, arena: &ParseArena) -> bool {
-        if super::spice_ppx::is_json_identifier(lid, arena) {
-            return true;
-        }
-        let crate::parser::Longident::Lident(name) = arena.get_longident(lid) else {
-            return false;
-        };
-        arena.find_interned_string(arena.get_string(*name))
-            .is_some_and(|name| self.alias(name.raw() as usize).unwrap_or(false))
+        self.identity_fact(lid, arena) == Some(true)
     }
 
-    /// Syntactically known JSON/non-JSON declaration, or unresolved.
+    /// Syntactically known JSON/non-JSON declaration, or unresolved. Import
+    /// epochs invalidate builtin spellings too: none are assumed immune to
+    /// rebinding here. A subsequent concrete declaration establishes a new fact.
+    /// Epoch checks cost O(1) per scope level, with no additional source scan.
     pub(crate) fn identity_fact(self, lid: crate::parse_arena::LidentIdx, arena: &ParseArena) -> Option<bool> {
-        if super::spice_ppx::is_json_identifier(lid, arena) { return Some(true); }
+        if super::spice_ppx::is_json_identifier(lid, arena) {
+            return (!self.opaque_imports).then_some(true);
+        }
         let crate::parser::Longident::Lident(name) = arena.get_longident(lid) else { return None };
-        if let Some(canonical) = arena.find_interned_string(arena.get_string(*name))
-            && let Some(fact) = self.alias(canonical.raw() as usize)
-        { return Some(fact); }
-        match arena.get_string(*name) {
-            "int" | "float" | "string" | "bool" | "unit" | "char" | "array" | "list" | "option" | "result" | "dict" => Some(false),
-            _ => None,
+        let fact = match arena.find_interned_string(arena.get_string(*name)) {
+            Some(canonical) => self.alias(canonical.raw() as usize),
+            None if self.opaque_imports => AliasFact::Unknown,
+            None => AliasFact::Unbound,
+        };
+        match fact {
+            AliasFact::Known(identity) => Some(identity),
+            AliasFact::Unknown => None,
+            AliasFact::Unbound => match arena.get_string(*name) {
+                "int" | "float" | "string" | "bool" | "unit" | "char" | "array" | "list" | "option" | "result" | "dict" => Some(false),
+                _ => None,
+            },
         }
     }
 
-    fn alias(self, name: usize) -> Option<bool> {
-        let (prefix, position) = self.prefix?;
+    fn alias(self, name: usize) -> AliasFact {
+        let Some((prefix, position)) = self.prefix else {
+            return if self.opaque_imports { AliasFact::Unknown } else { AliasFact::Unbound };
+        };
+        let epoch = prefix.facts[position].import_epoch;
         let mut slot = prefix.names.get(name).copied().unwrap_or(0);
         while slot != 0 {
             let entry = &prefix.aliases[slot as usize - 1];
             if entry.position <= position {
-                return entry.identity;
+                if epoch != NO_IMPORT && entry.position < epoch { return AliasFact::Unknown; }
+                return entry.identity.map_or(AliasFact::Unknown, AliasFact::Known);
             }
             slot = entry.previous;
         }
-        prefix.parent.alias(name)
+        if epoch != NO_IMPORT { AliasFact::Unknown } else { prefix.parent.alias(name) }
     }
+}
+
+enum AliasFact {
+    Known(bool),
+    Unknown,
+    Unbound,
+}
+
+const NO_IMPORT: usize = usize::MAX;
+
+// The existing dense prefix rows also snapshot the latest import position.
+// One current epoch alone cannot answer reverse-order queries across multiple
+// imports. This adds no per-item allocation and keeps epoch queries O(1).
+struct PrefixFacts {
+    shadowed: bool,
+    import_epoch: usize,
 }
 
 struct Alias {
@@ -348,19 +379,28 @@ struct Alias {
 
 /// Dense prefix facts and a flat version pool, shared by constructor and alias
 /// classification. No per-item allocation; a nested scope borrows its parent.
-#[derive(Default)]
 pub(crate) struct PrefixScope<'a> {
     parent: Scope<'a>,
-    shadows: Vec<bool>,
+    facts: Vec<PrefixFacts>,
+    latest_import: usize,
     names: Vec<u32>,
     aliases: Vec<Alias>,
 }
 
+impl Default for PrefixScope<'_> {
+    fn default() -> Self {
+        Self { parent: Scope::default(), facts: Vec::new(), latest_import: NO_IMPORT,
+            names: Vec::new(), aliases: Vec::new() }
+    }
+}
+
 impl<'a> PrefixScope<'a> {
     pub(crate) fn new(parent: Scope<'a>) -> Self { Self { parent, ..Self::default() } }
-    pub(crate) fn len(&self) -> usize { self.shadows.len() }
+    pub(crate) fn len(&self) -> usize { self.facts.len() }
     pub(crate) fn at(&self, position: usize) -> Scope<'_> {
-        Scope { result_shadowed: self.shadows[position], prefix: Some((self, position)) }
+        Scope { result_shadowed: self.facts[position].shadowed,
+            opaque_imports: self.facts[position].import_epoch != NO_IMPORT || self.parent.opaque_imports,
+            prefix: Some((self, position)) }
     }
 
     /// O(constructors + declarations + newly allocated name slots). Each
@@ -374,9 +414,12 @@ impl<'a> PrefixScope<'a> {
         }
         let position = self.len();
         let own_shadow = shadows_result(item, arena);
-        let shadowed = self.shadows.last().copied().unwrap_or(self.parent.result_shadowed)
+        let shadowed = self.facts.last().map_or(self.parent.result_shadowed, |fact| fact.shadowed)
             || own_shadow;
-        self.shadows.push(shadowed);
+        if matches!(item.pstr_desc, StructureItemDesc::Pstr_open(_) | StructureItemDesc::Pstr_include(_)) {
+            self.latest_import = position;
+        }
+        self.facts.push(PrefixFacts { shadowed, import_epoch: self.latest_import });
         if let StructureItemDesc::Pstr_type(group) = &item.pstr_desc {
             self.names.resize(self.names.len().max(arena.string_count()), 0);
             for decl in &group.1 {

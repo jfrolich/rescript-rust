@@ -1326,6 +1326,15 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn import_epochs_guard_a_module_under_an_expression_open() {
+        let source = "module Owner = {@spice type j = JSON.t}\n@spice type j = int\nlet codec = {open Owner; module M = {@spice type rows = array<j>}; M.rows_encodeJson}";
+        let (planned, count) = check_records(source, true).unwrap();
+        let (general, _) = check_records(source, false).unwrap();
+        assert_eq!(count, 0, "the shadowed alias must trigger the guard and unit retry");
+        assert_eq!(planned, general);
+    }
+
+    #[test]
     fn census_counts_value_scheme_levels_without_changing_them() {
         let ctx = type_context();
         let local = ctx.new_var(None);

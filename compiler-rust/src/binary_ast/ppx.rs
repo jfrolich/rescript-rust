@@ -11696,6 +11696,31 @@ let e = () =>
     }
 
     #[test]
+    fn import_epochs_invalidate_aliases_and_builtins_in_source_order() {
+        for import in ["open Owner", "include Owner"] {
+            let (mut arena, items) = parse_structure(&format!(
+                "type j = int\n{import}\ntype j = {{value: int}}\n{import}\nlet marker = 0"
+            ));
+            let j = arena.push_lident("j");
+            let int = arena.push_lident("int");
+            let mut prefix = derive::PrefixScope::default();
+            for item in &items { prefix.push(item, &mut arena); }
+            // Query backwards after both imports have been collected.
+            for (position, expected) in [(3, None), (2, Some(false)), (1, None), (0, Some(false))] {
+                assert_eq!(prefix.at(position).identity_fact(j, &arena), expected);
+                let mut nested = derive::PrefixScope::new(prefix.at(position));
+                nested.push(&items[4], &mut arena);
+                assert_eq!(nested.at(0).identity_fact(j, &arena), expected);
+            }
+            assert_eq!(prefix.at(0).identity_fact(int, &arena), Some(false));
+            assert_eq!(prefix.at(1).identity_fact(int, &arena), None);
+            let mut nested = derive::PrefixScope::new(prefix.at(1));
+            nested.push(&items[2], &mut arena);
+            assert_eq!(nested.at(0).identity_fact(j, &arena), Some(false));
+        }
+    }
+
+    #[test]
     fn json_alias_scope_survives_reverse_mapping_and_nested_modules() {
         let (mut arena, source) = parse_structure(
             "@spice type j = JSON.t\n@spice type a = array<j>\n@spice type b = option<j>\nmodule M = {@spice type c = array<j>}"
