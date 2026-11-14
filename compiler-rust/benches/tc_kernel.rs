@@ -3,6 +3,8 @@
 //! Run: cargo bench --manifest-path compiler-rust/Cargo.toml --bench tc_kernel -- instance7 1000000
 //! For instructions use cachegrind at N and zero, subtract empty; subtract
 //! instance7 from generalize7. For unification subtract its `build_*` twin.
+//! `bind_ground1` binds a fresh variable to a fresh nullary constructor
+//! (K2, CHECKER_REWRITE.md section 8.7 (d)); its twin is `build_bind_ground1`.
 //! The R4 operations (`binder` to `intern`, CHECKER_REWRITE.md section 9.3,
 //! decision 5) take an interned `Name`; subtract the empty loop.
 //! `checker_instance1..7` are `instance1..7` through `Checker::instance`
@@ -224,6 +226,10 @@ fn main() {
         "find_miss2",
         "bind_leave",
         "intern",
+        "build_bind_ground1",
+        "bind_ground1",
+        "build_bind_ground1_local",
+        "bind_ground1_local",
     ];
     let Some(index) = ops.iter().position(|&s| s == op) else {
         eprintln!(
@@ -233,14 +239,21 @@ fn main() {
         std::process::exit(2);
     };
     let index = black_box(index);
-    if index >= 27 {
+    if (27..33).contains(&index) {
         names(op, index, n);
         return;
     }
     let mut sink = 0u64;
     if index >= 15 {
-        let local = index >= 21;
-        let shape = ((index - 15) % 6) / 2;
+        let local = (21..27).contains(&index) || index >= 35;
+        // The operand shapes of the left and the right side: a variable, a
+        // nullary constructor, a constructor of two nullary ones.
+        let [left_shape, right_shape] = if index >= 33 {
+            [0, 1]
+        } else {
+            let shape = ((index - 15) % 6) / 2;
+            [shape, shape]
+        };
         let unify = index % 2 == 0;
         let mut c = Checker::new(g, TypeTable::default());
         if local {
@@ -253,7 +266,7 @@ fn main() {
             if i & 0xfff == 0 {
                 c.g.clear_instances();
             }
-            let mut operand = || match shape {
+            let mut operand = |shape| match shape {
                 0 => var_at(&mut c.g, level),
                 1 => constr_at(&mut c.g, 1, &[], level),
                 2 => {
@@ -263,10 +276,10 @@ fn main() {
                 }
                 _ => unreachable!(),
             };
-            let left = black_box(operand());
-            let right = black_box(operand());
+            let left = black_box(operand(left_shape));
+            let right = black_box(operand(right_shape));
             if unify {
-                c.unify(left, right).expect("equal benchmark operands");
+                c.unify(left, right).expect("unifiable benchmark operands");
             }
             sink += left.0 as u64 + right.0 as u64;
         }

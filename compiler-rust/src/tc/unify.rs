@@ -1053,13 +1053,21 @@ impl Checker {
     }
 
     /// `update_level` of `ty` to `level`: [`Checker::lower`]. O(1) for the
-    /// generic level, which nothing is above; otherwise the callee's cost.
+    /// generic level, which nothing is above, and for a representative that
+    /// is not above `level`, which the outer `update_level` leaves alone
+    /// (`if ty.level > level`, compiler/ml/ctype.ml:635; `Checker::lower`
+    /// makes the same test before its scoped walk): one `repr`, one load and
+    /// one compare. Otherwise the callee's cost.
     #[inline]
     fn lower_to(&mut self, ty: Ty, level: u32) -> Result<(), Clash> {
         if level == GENERIC {
             return Ok(());
         }
-        self.lower(ty, level)
+        let root = self.g.repr(ty);
+        if self.g.nodes[root.0 as usize].level <= level {
+            return Ok(());
+        }
+        self.lower(root, level)
     }
 
     /// O(1): an object or a polymorphic variant row, which `occur_rec`
