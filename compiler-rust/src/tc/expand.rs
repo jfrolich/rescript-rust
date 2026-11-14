@@ -93,7 +93,8 @@ pub struct TypeTable {
 }
 
 impl TypeTable {
-    /// O(paths + type declarations of the segment), one pass, no hashing: a
+    /// O(paths + type declarations + strings of the segment), no hashing:
+    /// one dense row per segment string ([`own_types`]), then one pass with a
     /// row per `paths` row; the rows of the unit's own type declarations
     /// carry their arity, [`ABBREV`]/[`PRIVATE`]/[`DATATYPE`] and a manifest
     /// whose template is the declaration's item template
@@ -105,9 +106,8 @@ impl TypeTable {
     /// (`IdentRow::scope`; equal stamps, compiler/ext/ident.ml:75), or a
     /// path through the unit itself (`Case.t`, which is how the published
     /// types of a unit name its own types) whose name is a type item of the
-    /// unit's signature. That join is on a string index, so it reads one
-    /// dense row per segment string ([`own_types`]): the cost has an
-    /// O(strings) term besides the stated one. Every other row (predefined
+    /// unit's signature. That join is on a string index, so it reads the
+    /// dense row per segment string. Every other row (predefined
     /// types, other units' types, a path through a module) is an abstract
     /// type here. The scope is 0 for every row: a segment's types are bound
     /// before any level a check reaches.
