@@ -152,8 +152,11 @@ fn published_digest(unit: &crate::cmi::portable_types::PortablePersStruct) -> [u
     digest
 }
 
-/// Request this unit's segment in the current world. Only the first request
-/// converts; ordinary old-checker registration and loading do not call it.
+/// Expected O(1) unit-table lookup plus one OnceLock read on a warm success;
+/// cloning a cached error additionally copies its message bytes. The first
+/// request costs stored-graph materialization (if needed) plus [`from_old`],
+/// and hashes the unit name/deprecation bytes. It allocates one cached Arc;
+/// ordinary old-checker registration and loading never request conversion.
 pub(crate) fn published_segment(
     unit: &std::sync::Arc<crate::cmi::portable_types::PortablePersStruct>,
     ctx: &crate::types::context::TypeContext,
@@ -247,7 +250,11 @@ struct OldVisits {
     count: u64,
 }
 
-/// [`from_old`], also returning how many old nodes were read.
+/// O(old nodes + edges + metadata + exports log exports + fields log fields
+/// plus binder/reference sorting and captured nodes/slots). Each old node is read
+/// once; publication additionally visits captured nodes and identity entries.
+/// Dense buffers/pools use O(source + output) space; no per-node heap or hash
+/// lookup. Returns the test-only old-source visit count alongside the segment.
 fn run(input: Input<'_>) -> (Segment, OldVisits) {
     // The name table's lock is held for the conversion only, not publication.
     let (mut tc, rows, roots, schemes, unit, items, children, visits) = {

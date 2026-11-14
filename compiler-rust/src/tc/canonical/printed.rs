@@ -3029,5 +3029,8 @@ mod tests {
         assert_eq!(std::mem::size_of::<super::SigOut>(), 12);
         assert_eq!(std::mem::size_of::<super::PolyFrame>(), 20);
         assert_eq!(std::mem::size_of::<super::FunctorParam>(), 16);
+        assert_eq!(std::mem::size_of::<super::VField>(), 12);
+        assert_eq!(std::mem::size_of::<super::OField>(), 8);
+        assert_eq!(std::mem::size_of::<super::SigFrame>(), 24);
     }
 }

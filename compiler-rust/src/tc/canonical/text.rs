@@ -22,7 +22,7 @@ pub(super) enum LongidentStyle {
     Structural,
 }
 
-/// `{:?}` of a `&str`.
+/// O(input bytes + escaped output bytes): `{:?}` of a `&str`.
 fn quoted(out: &mut String, text: &str) {
     let _ = write!(out, "{text:?}");
 }
@@ -532,7 +532,7 @@ impl View<'_> {
     }
 }
 
-/// `{:?}` of `external_ffi_types::ReturnWrapper`.
+/// O(1), no allocation: `{:?}` of `external_ffi_types::ReturnWrapper`.
 fn return_wrapper_name(wrapper: ReturnWrapperRow) -> &'static str {
     match wrapper {
         ReturnWrapperRow::Unset => "ReturnUnset",

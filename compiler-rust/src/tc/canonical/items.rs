@@ -962,7 +962,7 @@ impl<'g, 's> Items<'g, 's> {
 
 }
 
-/// `{:?}` of `decl::RecStatus`.
+/// O(1), no allocation: `{:?}` of `decl::RecStatus`.
 fn rec_status(status: ItemStatus) -> &'static str {
     match status {
         ItemStatus::Recursive(RecStatus::First) => "TrecFirst",
@@ -980,5 +980,6 @@ mod tests {
         assert_eq!(std::mem::size_of::<super::NodeNumber>(), 8);
         assert_eq!(std::mem::size_of::<super::Own>(), 16);
         assert_eq!(std::mem::size_of::<super::PathStep>(), 8);
+        assert_eq!(std::mem::size_of::<super::PathRoot>(), 1);
     }
 }

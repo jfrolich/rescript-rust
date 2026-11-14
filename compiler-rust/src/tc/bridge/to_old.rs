@@ -245,7 +245,12 @@ struct Visits {
     count: u64,
 }
 
-/// [`to_old`], also returning how many old nodes were made.
+/// O(stored nodes + slots + metadata/output bytes + signature items +
+/// unresolved components log unresolved components), with dense offset setup
+/// before converting each distinct publication identity. Owned recursive old
+/// metadata is rebuilt iteratively. Space is O(segment pools + old output);
+/// cell identities use one bulk atomic reservation, labels reuse cached names.
+/// Returns the test-only number of old nodes made alongside the publication.
 fn run(segment: &Segment) -> (Output, Visits) {
     let unit = segment
         .signature

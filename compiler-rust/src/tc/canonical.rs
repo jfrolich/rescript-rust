@@ -44,8 +44,14 @@ use std::fmt::Write as _;
 
 use crate::tc::segment::Segment;
 
-/// The canonical text of the unit `segment` publishes (see the module
-/// documentation). Panics on a segment without a unit row.
+/// The canonical text of the unit `segment` publishes. Initialization costs
+/// O(stored nodes + templates + identifiers log identifiers). Printing costs
+/// the expanded type/metadata visits and output bytes, plus row/object sorts,
+/// structural equality pairs, scope/name scans and document-layout lookahead.
+/// These terms are explicit in the subordinate walks: shared type expansion
+/// and repeated layout probes mean this is not linear in stored node count.
+/// Space is O(dense node state + expanded documents + output + walk stacks).
+/// Panics on a segment without a unit row; never mutates the segment.
 pub fn canonical_signature(segment: &Segment) -> String {
     let unit = segment
         .signature

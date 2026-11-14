@@ -382,6 +382,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<Node>(), 12);
         assert_eq!(std::mem::size_of::<Cmd>(), 12);
         assert_eq!(std::mem::size_of::<D>(), 4);
+        assert_eq!(std::mem::size_of::<Line>(), 1);
     }
 
     #[test]

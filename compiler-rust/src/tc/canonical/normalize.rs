@@ -664,6 +664,7 @@ mod tests {
     #[test]
     fn ten_thousand_partners_have_bounded_radix_probes() {
         assert_eq!(std::mem::size_of::<PairNode>(), 16);
+        assert_eq!(std::mem::size_of::<ObjectField>(), 12);
         let mut pairs = Pairs::default();
         let count = steps::scope(|| {
             for i in 0..10_000 {
