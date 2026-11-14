@@ -1884,7 +1884,9 @@ fn compared_names(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::Mo
         }
     }
     let resolver = &resolver;
-    let lowered = lower_for_names(&arena, root, resolver, inline, jsx_preserve);
+    let mut lowered = lower_for_names(&arena, root, resolver, inline, jsx_preserve);
+    // The variables' names are in the arena's column (`State::replay_names`).
+    lowered.printed.names = lowered.program.arena.vars.printed.clone();
     let bir = &lowered.program.arena;
     let idents: Vec<Ident> = (0..bir.vars.len())
         .map(|var| lowered.program.idents[bir.vars.j_origin[var].index()])

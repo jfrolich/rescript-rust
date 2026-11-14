@@ -112,6 +112,18 @@ struct Open {
     children: u32,
 }
 
+/// What the log keeps per variable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Place {
+    /// The row that binds the variable, `ScopeId::NONE` without a binder.
+    home: u32,
+    /// The row that last put the variable in its run (deduplication).
+    seen: u32,
+}
+impl Place {
+    const NONE: Self = Self { home: ScopeId::NONE.0, seen: ScopeId::NONE.0 };
+}
+
 /// A closed direct child of an open scope: its site range `[start, end)`
 /// and its row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,10 +143,10 @@ pub(crate) struct Log {
     /// The row of each function header plus one, zero for none. Dense by
     /// FuncId, grown by `close` and `copied`.
     of_function: Vec<u32>,
-    /// The row that binds each variable. Dense by VarId.
-    home: Vec<u32>,
-    /// The row that last put each variable in its run. Dense by VarId.
-    seen: Vec<u32>,
+    /// Per variable its home and the row that last put it in a run. Dense
+    /// by VarId; one column, because both are written per variable and
+    /// read together at a close.
+    places: Vec<Place>,
     /// The same for imports. Dense by ImportId, grown on demand.
     seen_import: Vec<u32>,
     /// The open scopes, innermost last. The program is never on it.
@@ -163,22 +175,28 @@ pub(crate) struct Log {
 
 impl Log {
     /// A log for a unit of `variables` variables with the program row and
-    /// no open function. Cost: two words per variable, allocated once.
-    pub(crate) fn new(variables: usize) -> Self {
+    /// no open function, with room for `capacity` variables and for the
+    /// rows of `functions` function literals (the source's count; the
+    /// lowering's own functions and copies grow the rows). Cost: one
+    /// `Place` per variable; three allocations (the places, the rows, the
+    /// rows by header) and one for the free lists, which get room for one
+    /// entry per variable (an estimate: a unit whose functions capture more
+    /// grows it), whatever the unit's size.
+    pub(crate) fn with_capacity(variables: usize, capacity: usize, functions: usize) -> Self {
+        assert!(variables <= capacity);
         let program = ScopeRow { function: FuncId(u32::MAX), free_start: 0, free_len: 0, flags: 0 };
-        Self {
-            rows: vec![program],
-            home: vec![ScopeId::NONE.0; variables],
-            seen: vec![ScopeId::NONE.0; variables],
-            ..Self::default()
-        }
+        let mut rows = Vec::with_capacity(functions + 1);
+        rows.push(program);
+        let mut places = Vec::with_capacity(capacity);
+        places.resize(variables, Place::NONE);
+        Self { rows, places, of_function: Vec::with_capacity(functions), free: Vec::with_capacity(capacity), ..Self::default() }
     }
 
     /// A variable was created (`Bir::new_var_id`, beside `Scope::push`):
-    /// its home is `ScopeId::NONE`. Cost: two pushes; no step.
+    /// its home is `ScopeId::NONE`. Cost: one push (within the capacity of
+    /// `with_capacity` for the variables the lowering counted); no step.
     pub(crate) fn variable(&mut self) {
-        self.home.push(ScopeId::NONE.0);
-        self.seen.push(ScopeId::NONE.0);
+        self.places.push(Place::NONE);
     }
 
     /// The binder of `var` was written (`Bir::bind`, for every binder but a
@@ -194,7 +212,7 @@ impl Log {
     /// the copy, a parameter included, has to be at home there or the scope
     /// would list it as free. Cost: one write; no step.
     pub(crate) fn bind(&mut self, var: VarId) {
-        self.home[var.index()] = self.open.last().map_or(ScopeId::PROGRAM.0, |open| open.row);
+        self.places[var.index()].home = self.open.last().map_or(ScopeId::PROGRAM.0, |open| open.row);
     }
 
     /// `Bir::copy_subtree` copied the function literal with header `source`
@@ -236,7 +254,7 @@ impl Log {
 
     /// The home of `var`. Constant.
     pub(crate) fn home(&self, var: VarId) -> ScopeId {
-        ScopeId(self.home[var.index()])
+        ScopeId(self.places[var.index()].home)
     }
 
     /// The free list of a closed scope: sorted by `Ident`'s order (stamp,
@@ -248,17 +266,23 @@ impl Log {
         &self.free[row.free_start as usize..(row.free_start + row.free_len) as usize]
     }
 
+    /// One `seen` entry per import of the unit so far, before a close or
+    /// an adoption joins one: the imports are few and grow while the unit
+    /// is lowered, so the column is sized to the module list when it is
+    /// short, not per reference. Constant unless it grows.
+    fn size_imports(&mut self, bir: &Bir) {
+        let imports = bir.pools.j_modules.len();
+        if self.seen_import.len() < imports {
+            self.seen_import.resize(imports, ScopeId::NONE.0);
+        }
+    }
+
     /// Put `entry` in the run of the open scope `row` unless that scope put
-    /// it there before. Amortized O(1); no step.
+    /// it there before (`size_imports` first). O(1); no step.
     fn join(&mut self, row: u32, entry: FreeRef) {
         let seen = match (entry.as_var(), entry.as_import()) {
-            (Some(var), _) => &mut self.seen[var.index()],
-            (None, Some(import)) => {
-                if self.seen_import.len() <= import.index() {
-                    self.seen_import.resize(import.index() + 1, ScopeId::NONE.0);
-                }
-                &mut self.seen_import[import.index()]
-            }
+            (Some(var), _) => &mut self.places[var.index()].seen,
+            (None, Some(import)) => &mut self.seen_import[import.index()],
             (None, None) => unreachable!("a free entry is a variable or an import"),
         };
         if *seen != row {
@@ -271,10 +295,11 @@ impl Log {
     fn close(&mut self, bir: &Bir, idents: &[crate::ident::Ident], function: FuncId) -> ScopeId {
         let open = self.open.pop().expect("a function scope is open");
         let row = open.row;
+        self.size_imports(bir);
         // 1. The parameters are bound here.
         let header = bir.function(function);
         for i in 0..header.params.len() {
-            self.home[bir.function_parameter(function, i).index()] = row;
+            self.places[bir.function_parameter(function, i).index()].home = row;
         }
         // 2. This scope's own sites: those outside its closed children.
         let sites = &bir.js_scope.as_ref().expect("lowering scope").sites;
@@ -422,6 +447,7 @@ impl Log {
     /// `adopt` on the log taken out of `bir` (see `adopt`).
     fn adopt(&mut self, bir: &Bir, idents: &[crate::ident::Ident], node: NodeId) {
         let row = self.open.last().expect("adopt inside an open function scope").row;
+        self.size_imports(bir);
         debug_assert!(self.pending.is_empty());
         self.pending.push(node);
         while let Some(node) = self.pending.pop() {
@@ -629,6 +655,49 @@ pub(crate) struct Scratch {
     reservation: Vec<Subject>,
     /// The spelling of a cached bound's base, reused.
     spelling: String,
+}
+
+/// The replay's storage, kept in the lowering's state beside its other
+/// pools: the naming tables, the walk's scratch, and the program's import
+/// and reservation lists. A second replay with the same storage allocates
+/// nothing.
+#[derive(Default)]
+pub(crate) struct Storage {
+    pub(crate) tables: Tables,
+    pub(crate) scratch: Scratch,
+    /// The imports the program names, in the order of the module list.
+    pub(crate) imports: Vec<ImportId>,
+    /// The reservations of export coercion as subjects, pushed where the
+    /// coercion makes them (`export.rs`, `State::reserve_name`): one list
+    /// instead of a list of variables and a list built from it.
+    pub(crate) reservations: Vec<Subject>,
+}
+impl Storage {
+    /// Size the storage for the unit in `bir`, once, before `replay`: every
+    /// vector whose length the unit bounds gets that length, so a fresh
+    /// storage costs a number of allocations that does not grow with the
+    /// unit (LOWERING_ALLOCATION_SCALING.md lists them). The bounds: one
+    /// mark per node, one chain link and at most one level per row, a
+    /// reservation no longer than the longest free list and its binder,
+    /// one list entry per import (the reservations of export coercion are
+    /// pushed where the coercion makes them, `State::reserve_name`);
+    /// for the tables (`Tables::size`) one group and one visible name
+    /// per slot, and one saved row per entry of an environment on the
+    /// stack or name first assigned in a scope (at most the free entries
+    /// of the unit, one binder per row and one name per slot). Cost: one step per row (the longest free list); no step per
+    /// node, variable or entry.
+    pub(crate) fn reserve(&mut self, bir: &Bir) {
+        let log = &bir.js_scope.as_ref().expect("lowering scope").names;
+        let (rows, imports) = (log.rows.len(), bir.pools.j_modules.len());
+        let longest = log.rows.iter().map(|row| row.free_len as usize).max().unwrap_or(0);
+        let scratch = &mut self.scratch;
+        scratch.marks.reserve_exact(bir.nodes.len().saturating_sub(scratch.marks.len()));
+        scratch.next.reserve_exact(rows.saturating_sub(scratch.next.len()));
+        scratch.reservation.reserve_exact((longest + 1).saturating_sub(scratch.reservation.len()));
+        self.imports.reserve_exact(imports.saturating_sub(self.imports.len()));
+        let slots = bir.vars.len() + imports;
+        self.tables.size(slots, log.free.len() + rows + slots, rows);
+    }
 }
 
 /// What one replay did.
@@ -1114,8 +1183,7 @@ mod tests {
             self.rows.reserve(self.rows.len());
             self.free.reserve(self.free.len());
             self.of_function.reserve(self.of_function.len());
-            self.home.reserve(self.home.len());
-            self.seen.reserve(self.seen.len());
+            self.places.reserve(self.places.len());
             self.seen_import.reserve(self.seen_import.len());
         }
     }
@@ -1127,6 +1195,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<ScopeRow>(), 16);
         assert_eq!(std::mem::size_of::<Open>(), 16);
         assert_eq!(std::mem::size_of::<Child>(), 12);
+        assert_eq!(std::mem::size_of::<Place>(), 8);
         assert_eq!(std::mem::size_of::<Frame>(), 12);
         assert_eq!(std::mem::size_of::<Program<'_>>(), 64);
         assert_eq!(std::mem::size_of::<Replayed>(), 48);
@@ -1146,7 +1215,7 @@ mod tests {
     fn default_storage_is_empty() {
         let log = Log::default();
         assert!(log.rows.is_empty() && log.free.is_empty() && log.of_function.is_empty());
-        assert!(log.home.is_empty() && log.seen.is_empty() && log.seen_import.is_empty());
+        assert!(log.places.is_empty() && log.seen_import.is_empty());
         assert!(log.open.is_empty() && log.run.is_empty() && log.children.is_empty());
         assert!(log.pending.is_empty());
         assert_eq!((log.steps, log.adopted_nodes), (0, 0));
@@ -1159,7 +1228,7 @@ mod tests {
 
     #[test]
     fn a_new_log_has_the_program_row_and_no_home() {
-        let mut log = Log::new(2);
+        let mut log = Log::with_capacity(2, 3, 0);
         assert_eq!(log.rows.len(), 1);
         assert_eq!((log.home(VarId(0)), log.home(VarId(1))), (ScopeId::NONE, ScopeId::NONE));
         // A variable created later, bound while no function is open.

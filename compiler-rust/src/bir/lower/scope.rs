@@ -130,13 +130,14 @@ impl Scope {
     /// Allocate zeroed rows once at lowering entry. Cost: O(variables).
     #[cfg(test)]
     pub(crate) fn new(variables: usize) -> Self {
-        Self::with_capacity(variables, variables)
+        Self::with_capacity(variables, variables, 0)
     }
 
     /// Initialize source rows with reserved room for known generated bindings.
-    /// Cost: O(V): initializes V variable rows in each of three columns, with reserved
-    /// capacity C >= V; no source nodes or use sites are walked.
-    pub(super) fn with_capacity(variables: usize, capacity: usize) -> Self {
+    /// Cost: O(V): initializes V variable rows in each of four columns (the
+    /// fourth is the naming log's), with reserved capacity C >= V; no source
+    /// nodes or use sites are walked. `functions` sizes the naming log's rows.
+    pub(super) fn with_capacity(variables: usize, capacity: usize, functions: usize) -> Self {
         assert!(variables <= capacity);
         let mut uses = Vec::with_capacity(capacity);
         let mut site_heads = Vec::with_capacity(capacity);
@@ -148,7 +149,7 @@ impl Scope {
             uses,
             site_heads,
             facts,
-            names: super::names::Log::new(variables),
+            names: super::names::Log::with_capacity(variables, capacity, functions),
             ..Self::default()
         }
     }

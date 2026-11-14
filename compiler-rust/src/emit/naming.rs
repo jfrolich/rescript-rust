@@ -677,6 +677,8 @@ struct GroupRow {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Saved {
     group: u32,
+    /// `Marks::born` of the saved row (in the padding beside `group`).
+    born: u32,
     row: GroupRow,
 }
 
@@ -729,9 +731,6 @@ pub(crate) struct Tables {
     /// What the suffix rule reads of each group besides its row. Dense by
     /// group.
     marks: Vec<Marks>,
-    /// `Marks::born` of the row each entry of `saved` holds. Parallel to
-    /// `saved`.
-    saved_born: Vec<u32>,
     /// Per entry of `skipped`: the group whose `Marks::zero_skip` (for
     /// suffix zero) or `Marks::as_skip` (otherwise) the entry replaced,
     /// `NONE` when it replaced none, and the value it replaced.
@@ -765,6 +764,30 @@ struct Marks {
 }
 
 impl Tables {
+    /// Room for a unit of `slots` slots whose function scopes on the stack
+    /// inherit at most `inherited` identifiers and nest at most `depth`
+    /// deep, so that `begin` and the calls after it grow no vector whose
+    /// length these bound: one group (row, marks, base) and one assigned
+    /// name per slot, one saved row per inherited identifier, one level
+    /// per scope and the program's. The candidates passed over (`skipped`,
+    /// `skip_undo`) and the groups of synthetic names and of prefixes have
+    /// no bound here and grow when they occur. Cost: constant; at most one
+    /// allocation per vector.
+    pub(crate) fn size(&mut self, slots: usize, inherited: usize, depth: usize) {
+        fn room<T>(vector: &mut Vec<T>, len: usize) {
+            vector.reserve_exact(len.saturating_sub(vector.len()));
+        }
+        room(&mut self.groups, slots);
+        room(&mut self.marks, slots);
+        let bases = slots.saturating_sub(self.bases.len());
+        self.bases.reserve(bases);
+        room(&mut self.slot_group, slots);
+        room(&mut self.visible, slots);
+        room(&mut self.assigned, slots);
+        room(&mut self.saved, inherited);
+        room(&mut self.levels, depth + 1);
+    }
+
     /// Empty the tables for a unit of `slots` slots without releasing their
     /// storage, with the program as the current scope. Cost: one step per
     /// group and per name of the previous unit, one per raw name.
@@ -778,7 +801,6 @@ impl Tables {
         self.visible.clear();
         self.visible.resize(slots, None);
         self.saved.clear();
-        self.saved_born.clear();
         self.assigned.clear();
         self.skipped.clear();
         self.skip_undo.clear();
@@ -898,16 +920,11 @@ impl Tables {
         }
         let saved = level.saved as usize;
         self.steps += self.saved.len() - saved;
-        for (entry, born) in self.saved[saved..]
-            .iter()
-            .zip(&self.saved_born[saved..])
-            .rev()
-        {
+        for entry in self.saved[saved..].iter().rev() {
             self.groups[entry.group as usize] = entry.row;
-            self.marks[entry.group as usize].born = *born;
+            self.marks[entry.group as usize].born = entry.born;
         }
         self.saved.truncate(saved);
-        self.saved_born.truncate(saved);
     }
 
     /// A name for something that is no identifier of the program (the
@@ -982,9 +999,9 @@ impl Tables {
     fn save(&mut self, group: u32) {
         self.saved.push(Saved {
             group,
+            born: self.marks[group as usize].born,
             row: self.groups[group as usize],
         });
-        self.saved_born.push(self.marks[group as usize].born);
     }
 
     /// Whether `entry` of `skipped` is one of `group`'s current row.
@@ -1635,7 +1652,7 @@ mod replay_tests {
         assert!(t.raw.is_empty() && t.spelling.is_empty());
         assert_eq!((t.synthetic, t.steps), (0, 0));
         let row = GroupRow { next: 0, scope: 0, zero: None };
-        let saved = Saved { group: 0, row };
+        let saved = Saved { group: 0, born: 0, row };
         assert_eq!((saved.group, saved.row.next, saved.row.scope, saved.row.zero), (0, 0, 0, None));
         let level = Level { saved: 0, assigned: 0, skipped: 0 };
         assert_eq!(level.saved + level.assigned + level.skipped, 0);

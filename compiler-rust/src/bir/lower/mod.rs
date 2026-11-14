@@ -391,8 +391,9 @@ pub(crate) struct Lowered {
     pub coerced: export::Coerced,
     pub dynamic_imports: Vec<crate::js_ir::ModuleId>,
     pub switch_stats: SwitchStats,
-    /// The names of the naming log's replay (`names::replay`), by variable
-    /// and by import; compared with the pass in check mode, not printed.
+    /// The names of the naming log's replay (`names::replay`) by import
+    /// and the cached bounds; the names by variable are the arena's
+    /// `Vars::printed`. Compared with the pass in check mode, not printed.
     /// What the replay did is in `SwitchStats::replayed`.
     pub printed: crate::emit::Printed,
     /// The imports the replay named in the program, in its order.
@@ -444,6 +445,8 @@ struct State {
     /// A module/member pair has no canonical dense handle; individual component handles do not index their sparse Cartesian product.
     call_arity_index: std::collections::HashMap<(crate::bir::ImportId, crate::bir::StrId), Option<call::AritySpan>>,
     eta_arguments: Vec<NodeId>,
+    /// The storage of the naming log's replay (`replay_names`).
+    names: names::Storage,
     calls: Vec<Option<call::Plan>>,
     tail_order: Vec<VarId>,
     rec_members: Vec<rec::Member>,
@@ -606,7 +609,7 @@ impl State {
             assert_eq!(made, var);
             arena.vars.flags[i] = input.arena.vars.flags[i];
         }
-        let mut scope = scope::Scope::with_capacity(arena.vars.len(), output_vars);
+        let mut scope = scope::Scope::with_capacity(arena.vars.len(), output_vars, arena.vars.funcs.len());
         scope.decisions.reserve_exact(output_vars);
         // Reference sites are indexed by emitted nodes, not by source binders.
         scope.sites.reserve_exact(output_nodes);
@@ -698,6 +701,7 @@ impl State {
             catch_walk_steps: 0,
             export_vars: input.export_vars,
             coercion: Default::default(),
+            names: names::Storage::default(),
         }
     }
     /// K1: C:1529 compile_expr. Direct mode is the bounded P1 oracle: convert
@@ -824,7 +828,7 @@ impl State {
         // pass receives, so the bindings around a reference are final.
         globals::decide(&mut self.arena, &self.idents);
         let mut printed = crate::emit::Printed::default();
-        let (replayed, name_imports) = self.replay_names(root, &coerced, &mut printed);
+        let (replayed, name_imports) = self.replay_names(root, &mut printed);
         let (adopted_nodes, name_log_steps) = self.arena.js_scope.as_ref()
             .map_or((0, 0), |scope| (scope.names.adopted_nodes, scope.names.steps));
         let (close_steps, globals_qualified, global_steps) = self.arena.js_scope.as_ref()
@@ -860,50 +864,48 @@ impl State {
     }
 
     /// The names of the finished unit whose root block is `root`
-    /// (`names::replay`, after `globals::decide`), written to `printed`;
-    /// what the replay did and the imports it named in the program. The
+    /// (`names::replay`, after `globals::decide`): the variables' in the
+    /// arena's `Vars::printed`, the modules' and the cached bounds in
+    /// `printed`; what the replay did and the imports it named in the
+    /// program. The
     /// program's imports are those with a live reference that are neither
     /// dynamic nor unresolved, in the order of the module list
-    /// (`lam_compile::module_sort_cmp`). Cost: one step per import and a
-    /// sort of the named ones, one per reservation, and `names::replay`.
-    fn replay_names(&self, root: NodeId, coerced: &export::Coerced, printed: &mut crate::emit::Printed) -> (names::Replayed, Vec<crate::bir::ImportId>) {
+    /// (`lam_compile::module_sort_cmp`). The replay's storage is the
+    /// state's (`names::Storage`), sized here once per unit
+    /// (`names::Storage::reserve`). Cost: one step per import and a sort of
+    /// the named ones, one per reservation, and `names::replay`.
+    fn replay_names(&mut self, root: NodeId, printed: &mut crate::emit::Printed) -> (names::Replayed, Vec<crate::bir::ImportId>) {
+        let mut storage = std::mem::take(&mut self.names);
         let scope = self.arena.js_scope.as_ref().expect("lowering scope");
         let modules = &self.arena.pools.j_modules;
-        let mut imports: Vec<crate::bir::ImportId> = (0..modules.len())
+        storage.reserve(&self.arena);
+        storage.imports.clear();
+        storage.imports.extend((0..modules.len())
             .filter(|&index| {
                 let module = &modules[index];
                 scope.import_uses.get(index).is_some_and(|&uses| uses > 0)
                     && !module.dynamic_import
                     && self.resolver.as_ref().is_none_or(|resolver| resolver.resolve_module_path(module).is_some())
             })
-            .map(|index| crate::bir::ImportId(index as u32))
-            .collect();
-        imports.sort_by(|a, b| crate::lambda::lam_compile::module_sort_cmp(&modules[a.index()], &modules[b.index()]));
-        let reservations: Vec<crate::emit::Subject> = coerced
-            .reservations
-            .iter()
-            .zip(&self.coercion.reserved)
-            .map(|(ident, &var)| crate::emit::Subject {
-                slot: self.arena.vars.j_origin[var.index()].0,
-                stamp: ident.stamp(),
-                name: ident.name_atom(),
-            })
-            .collect();
+            .map(|index| crate::bir::ImportId(index as u32)));
+        storage.imports.sort_by(|a, b| crate::lambda::lam_compile::module_sort_cmp(&modules[a.index()], &modules[b.index()]));
+        let names::Storage { tables, scratch, imports, reservations } = &mut storage;
         let program = names::Program {
-            imports: &imports,
-            reservations: &reservations,
-            exports: &self.coercion.exported,
+            imports,
+            reservations,
+            exports: &self.coercion.selected,
             raw: &scope.globals.raw,
         };
-        let replayed = names::replay(
-            &self.arena,
-            root,
-            &self.idents,
-            &program,
-            &mut crate::emit::Tables::default(),
-            &mut names::Scratch::default(),
-            printed,
-        );
+        // The names of the variables are written in the arena's own
+        // column (`Vars::printed`, one entry per variable, unused until
+        // now): the replay borrows it and gives it back.
+        printed.names = std::mem::take(&mut self.arena.vars.printed);
+        let replayed = names::replay(&self.arena, root, &self.idents, &program, tables, scratch, printed);
+        self.arena.vars.printed = std::mem::take(&mut printed.names);
+        // The named imports leave with the unit; the rest of the storage
+        // stays the state's.
+        let imports = std::mem::take(&mut storage.imports);
+        self.names = storage;
         (replayed, imports)
     }
 }

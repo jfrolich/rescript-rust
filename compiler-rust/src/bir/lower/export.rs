@@ -125,7 +125,7 @@ pub(super) struct Tables {
     /// Rebound exports inserted before a row, by ascending row.
     inserted: Vec<(u32, NodeId)>,
     /// The variable each export selects, in export order.
-    selected: Vec<VarId>,
+    pub(super) selected: Vec<VarId>,
     /// The fold is running: the declarations after the top level are not
     /// in the block yet (C:1238).
     folding: bool,
@@ -140,10 +140,6 @@ pub(super) struct Tables {
     /// The references to the variable of the last collecting `mentions`
     /// pass that stand in a later row: what `substitute_after` replaces.
     later: Vec<NodeId>,
-    /// The export variable of each entry of `Coerced::reservations`.
-    pub(super) reserved: Vec<VarId>,
-    /// The variable of each entry of `Coerced::exports`.
-    pub(super) exported: Vec<VarId>,
     /// Rows, exports, alias-chain links, sites and ancestors visited.
     pub(super) steps: usize,
     /// Sites read from a variable's chain, released ones included.
@@ -1361,7 +1357,7 @@ impl State {
         let block_ended = finished == Finished::True;
         let mut selected = std::mem::take(&mut self.coercion.selected);
         let mut reservations = Vec::new();
-        self.coercion.reserved.clear();
+        self.names.reservations.clear();
         for index in 0..exports.len() as u32 {
             self.coercion.steps += 1;
             let export = exports[index as usize];
@@ -1399,7 +1395,7 @@ impl State {
                         };
                         if chosen != export {
                             reservations.push(ident);
-                            self.coercion.reserved.push(export);
+                            self.reserve_name(export, ident);
                         }
                         selected.push(chosen);
                         self.arena.release(value);
@@ -1415,7 +1411,7 @@ impl State {
                         };
                         if chosen != export {
                             reservations.push(ident);
-                            self.coercion.reserved.push(export);
+                            self.reserve_name(export, ident);
                         }
                         selected.push(chosen);
                         self.arena.release(value);
@@ -1476,7 +1472,7 @@ impl State {
             let rebound = self.renamed(export);
             self.sync_tables();
             reservations.push(ident);
-            self.coercion.reserved.push(export);
+            self.reserve_name(export, ident);
             let property = if value_var.is_some() {
                 LetKind::Alias
             } else {
@@ -1515,9 +1511,20 @@ impl State {
     /// function alias, the self-alias target, a reusable same-name binding,
     /// the alias chain. Cost: one step per export, per declaration carrying
     /// its name and per declaration on its alias chains.
+    /// Record the reservation `ident` of the export variable `export` for
+    /// the naming log's replay, as the subject the naming tables take
+    /// (`State::replay_names`). One push.
+    fn reserve_name(&mut self, export: VarId, ident: Ident) {
+        self.names.reservations.push(crate::emit::Subject {
+            slot: self.arena.vars.j_origin[export.index()].0,
+            stamp: ident.stamp(),
+            name: ident.name_atom(),
+        });
+    }
+
     fn resolve_exports(&mut self, finished: Finished) -> Vec<Ident> {
         self.coercion.folding = false;
-        let selected = std::mem::take(&mut self.coercion.selected);
+        let mut selected = std::mem::take(&mut self.coercion.selected);
         if finished == Finished::True {
             // The set of declared identifiers is read before any is added:
             // an export selected twice is declared twice (C:806-818).
@@ -1536,10 +1543,9 @@ impl State {
             self.coercion.trail = undeclared;
         }
         let mut exports = Vec::with_capacity(selected.len());
-        self.coercion.exported.clear();
-        for (index, &var) in selected.iter().enumerate() {
+        for position in 0..selected.len() {
+            let (index, var) = (position as u32, selected[position]);
             self.coercion.steps += 1;
-            let index = index as u32;
             #[cfg(test)]
             let arm;
             let resolved = if self.keeps_function_alias(index, var) {
@@ -1571,7 +1577,10 @@ impl State {
             #[cfg(test)]
             self.coercion.resolved.push(arm);
             exports.push(self.ident(resolved));
-            self.coercion.exported.push(resolved);
+            // The selection is read no more: it becomes the variable of
+            // each entry of `Coerced::exports`, which the naming log's
+            // replay names last (`State::replay_names`).
+            selected[position] = resolved;
             // The top-level statuses read the export set through the origin.
             let origin = self.origin(resolved);
             let scope = self.arena.js_scope.as_mut().expect("lowering scope");

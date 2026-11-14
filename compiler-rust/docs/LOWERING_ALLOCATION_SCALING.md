@@ -19,10 +19,14 @@ Each test asserts both `count(1_000) == count(10_000)` and its numeric constant:
 
 | Family | 1,000 elements | 10,000 elements | Release constant |
 | --- | ---: | ---: | ---: |
-| Conditionals | 68 | 68 | 67 |
-| Ordinary switches | 85 | 85 | 84 |
-| Applications | 68 | 68 | 67 |
-| Mixed untagged dispatch | 138 | 138 | 137 |
+| Conditionals | 85 | 85 | 84 |
+| Ordinary switches | 102 | 102 | 101 |
+| Applications | 85 | 85 | 84 |
+| Mixed untagged dispatch | 155 | 155 | 154 |
+
+Each figure is 17 above the one before the naming log (68, 85, 68, 138): the
+log and its replay (THREE_TREES 11.4, "T5 part B as built") add 17 allocations
+to a unit, the same at both widths. "The naming log" below names each one.
 
 Release omits the one debug-only child-uniqueness table. These are proofs for
 these four shapes, not a claim about every possible program, number of exports,
@@ -40,7 +44,8 @@ per-unit count. The same totals hold at both sizes.
 | --- | ---: | ---: | ---: | ---: | --- |
 | `bir/lower/mod.rs` | 27 | 36 | 28 | 36 | per unit, kept: output columns, source traversal, variables, grouping and fingerprint domains reserved from imported counts; owned unit completion. |
 | `bir/untagged_plan.rs` | 0 | 0 | 0 | 25 | per unit, kept: pre-reserved graph/group/clause/memo pools and retained fixed-kind planning/equality scratch. |
-| `bir/lower/export.rs` | 18 | 19 | 18 | 19 | per unit, kept: unchanged exporter materializes rows, names and owned output once for the fixture's single export; rows are sized from the completed variable domain. |
+| `bir/lower/export.rs` | 19 | 20 | 19 | 20 | per unit, kept: unchanged exporter materializes rows, names and owned output once for the fixture's single export; rows are sized from the completed variable domain. One of them is the naming log's reservation list (below). |
+| `bir/lower/names.rs` | 16 | 16 | 16 | 16 | per unit, kept: the naming log and its replay, each vector named below. |
 | `bir/lower/untagged.rs` | 0 | 1 | 0 | 18 | per unit, kept: imported runs, literal/text/emission reservations and plan-local stacks sized from known arm/action counts. |
 | `bir/edit.rs` | 3 | 3 | 3 | 10 | per unit, kept: release/finalization work; mixed dispatch additionally copies one fixed-size cached fallback using retained traversal/remapping storage. Dense node rows reserve the arena domain. |
 | `bir/untagged_plan/metadata.rs` | 0 | 0 | 0 | 6 | per unit, kept: literal rows, dense AVL indexes, text bytes and canonical spelling scratch reserved before import. |
@@ -56,7 +61,7 @@ per-unit count. The same totals hold at both sizes.
 | `bir/lower/call.rs` | 0 | 0 | 1 | 0 | per unit, kept: first-use call frame storage, reused across all calls. |
 | `bir/lower/variant.rs` | 0 | 1 | 0 | 1 | per unit, kept: source-switch-indexed metadata, sized from existing headers. |
 | `lambda/lam_primitive.rs` | 0 | 1 | 0 | 1 | per unit, kept: fixed primitive fingerprint serialization into retained scratch. |
-| **Total** | **68** | **85** | **68** | **138** | |
+| **Total** | **85** | **102** | **85** | **155** | |
 
 Removed sites: geometric growth of output node/operand/variable columns,
 traversal and label spines, deferred expressions, statement slots, reference
@@ -69,6 +74,73 @@ each comparison. Each site was committed separately as it was identified.
 A capacity estimate is not a rejection limit: unusual FFI/inlining expansions
 can still grow safely. Small fixed-boundary scratch is retained after first use;
 the measurements must not be generalized to shapes absent from these tests.
+
+## The naming log
+
+The naming log and its replay (`bir/lower/names.rs`, the tables in
+`emit/naming.rs`) are storage of the lowering: the log is on the arena's
+`Scope`, the replay's storage (`names::Storage`) is a field of the lowering
+state, and both are sized once per unit from counts the lowering has, so their
+vectors cost a constant number of allocations whatever the unit's width. A
+second replay with the same storage allocates nothing
+(`a_warm_replay_of_a_unit_with_functions_allocates_nothing`,
+`warm_tables_allocate_nothing`), and the four warmed lowering tests
+(`ten_thousand_held_literal_elements_lower_without_allocations`,
+`ten_thousand_wide_arity_partial_calls_lower_without_allocations`,
+`ten_thousand_copied_external_bodies_reuse_storage`,
+`ten_thousand_imports_share_metadata_without_allocations`) stay at zero with
+their assertions unchanged: the log's per-variable column has the capacity of
+the scope's (`Scope::with_capacity(variables, capacity, functions)`).
+
+The 17 allocations of a unit, by the profiler's backtraces (the same in the
+four shapes and at both widths):
+
+| Vector | Sized where, to what | Why it cannot share an existing pool |
+| --- | --- | --- |
+| `Log::rows` | `Log::with_capacity`, the source's function literals and the program | One row per function literal; the header pool is keyed by header, and a row outlives its header's owner. |
+| `Log::places` | `Log::with_capacity`, the scope's variable capacity | Home and last-seen row per variable, one column (they were two). The scope's `VarFacts` and `Uses` are pinned at 8 bytes and read by `close::decide` per declaration; widening them costs that walk. |
+| `Log::free` | `Log::with_capacity`, one entry per variable (an estimate) | The free lists of every function back to back; nothing else holds an entry per captured variable. |
+| `Scratch::marks` | `Storage::reserve`, one per node | The statement a function literal stands in, by node. No per-node column of the arena is free at the end of a unit (parents, weights and the capture chain are read by the export). |
+| `Scratch::next` | `Storage::reserve`, one per row | The chain of the literals of one statement. `ScopeRow` is pinned at 16 bytes and has no spare word. |
+| `Scratch::reservation` | `Storage::reserve`, the longest free list and a binder | The subjects `Tables::enter` takes as one slice. |
+| `Scratch::frames` | first push; grows with the nesting depth of statement lists, not with the width | The replay's explicit stack. |
+| `Tables::groups`, `Tables::marks` | `Tables::size`, one per slot | Hot row and cold marks of a base's suffix table, split so that `enter` and `leave` touch 16 bytes a group. |
+| `Tables::bases` | `Tables::size`, one per slot | Base spelling to group: a spelling has no dense index (read once per slot). |
+| `Tables::slot_group`, `Tables::visible` | `Tables::size`, one per slot | The group and the visible name of a slot. Kept apart: `visible` is read on every `add`, `slot_group` once per slot, and one column of both is 16 bytes a slot against 12. |
+| `Tables::assigned` | `Tables::size`, one per slot | The undo stack of names. |
+| `Tables::saved` | `Tables::size`, the unit's free entries, rows and slots | The undo stack of group rows. It now holds `born` in its padding: `saved_born` is gone. |
+| `Tables::levels` | `Tables::size`, one per row and the program | The undo marks of the scopes on the stack. |
+| `Tables::spelling` | first suffixed candidate | The spelling of `base$n`, reused. |
+| `Storage::reservations` | `State::reserve_name`, where export coercion makes a reservation | One list of subjects. It replaced two (the export variables in `export.rs` and the subjects built from them). |
+
+Not allocated in these shapes, and at most one allocation each when they
+occur: `Log::of_function` (sized to the source's function literals),
+`Log::seen_import` (sized to the module list at a close), `Storage::imports`
+(sized to the module list; sorting more than twenty of them allocates the
+sort's buffer once), `Printed::modules` (one per import), `Tables::raw` (the
+unit's raw JavaScript names). Grown where they occur, without a bound from
+the unit: `Log::open`, `Log::run`, `Log::children` and `Log::pending`
+(stacks: the nesting depth of functions and the entries of the scopes on it),
+`Tables::skipped` and `Tables::skip_undo` (a candidate passed over),
+`Printed::finishes` (a range loop whose bound is cached), `Scratch::spelling`
+(the same loops).
+
+Shared instead of added: the names of the variables are written in the
+arena's own column (`Vars::printed`, one entry per variable, reserved with the
+other variable columns and unused until the replay; `State::replay_names`
+lends it to the replay), so the replay has no name vector of its own; the
+variable of each export is written over `export::Tables::selected` once the
+selection is read no more (it was a list of its own); the reservations are
+one list (above); `saved_born` is a field of `Saved`; the log's two
+per-variable columns are one. The first wiring of the replay measured 20
+above the figures before the log; sizing every bounded vector once made it
+21; these shares brought it to 17.
+
+`Log::reserve_repeat` stays, as a test helper: it is what every pool of the
+lowering has for the warmed tests (`Scope::reserve_repeat`,
+`StatementStack::reserve_repeat`, `FreePool::reserve_repeat`): room for a
+second lowering of the same input in one state. It is not the production
+mechanism; that is `Log::with_capacity` and `Storage::reserve`.
 
 ## Reproduce the counts and attribution
 

@@ -113,19 +113,19 @@ mod tests {
 
     #[test]
     fn full_unit_allocation_boundary_conditionals() {
-        assert_unit_allocation_count("conditionals", 68);
+        assert_unit_allocation_count("conditionals", 85);
     }
     #[test]
     fn full_unit_allocation_boundary_switches() {
-        assert_unit_allocation_count("switches", 85);
+        assert_unit_allocation_count("switches", 102);
     }
     #[test]
     fn full_unit_allocation_boundary_applications() {
-        assert_unit_allocation_count("applications", 68);
+        assert_unit_allocation_count("applications", 85);
     }
     #[test]
     fn full_unit_allocation_boundary_untagged() {
-        assert_unit_allocation_count("untagged", 138);
+        assert_unit_allocation_count("untagged", 155);
     }
 
     /// Import is outside measurement; fresh state construction, lowering,

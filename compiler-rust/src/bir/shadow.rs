@@ -1065,7 +1065,8 @@ pub(crate) fn prepare_lower(
         modules: bir.pools.j_modules.iter().map(|module| module.id).collect(),
         free: super::lower::names::free_lists(bir, &lowered.program.idents),
         imports: lowered.name_imports.iter().map(|import| bir.pools.j_modules[import.index()].clone()).collect(),
-        printed: lowered.printed,
+        // The variables' names are in the arena's column.
+        printed: crate::emit::Printed { names: bir.vars.printed.clone(), ..lowered.printed },
     };
     Ok(LowerCandidate {
         decisions,
