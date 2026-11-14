@@ -115,14 +115,19 @@ fn named(e: &Engine<'_>, n: NodeId, var: VarId) -> bool {
 /// and refine_let (lam_util.rs:110-115). A candidate scan, not a whole-unit
 /// fact. Assignment targets count as occurrences too.
 pub(crate) fn hit(e: &Engine<'_>, root: NodeId, var: VarId) -> bool {
-    let mut work = vec![root];
+    hit_with_work(e, root, var, &mut Vec::new())
+}
+
+pub(crate) fn hit_with_work(e: &Engine<'_>, root: NodeId, var: VarId, work: &mut Vec<NodeId>) -> bool {
+    work.clear(); work.push(root);
+    let mut found = false;
     while let Some(n) = work.pop() {
         match e.bir().view(n) {
-            View::Var { var: v } | View::Assign { var: v, .. } if v == var => return true,
-            _ => work.extend(e.bir().view(n).children()),
+            View::Var { var: v } | View::Assign { var: v, .. } if v == var => { found = true; break; }
+            view => work.extend((0..view.child_count()).map(|at| view.child_at(at))),
         }
     }
-    false
+    work.clear(); found
 }
 
 /// Legacy eliminate_tuple, lines 45-70; lam_pass_deep_flatten.ml:31-34.
@@ -185,45 +190,31 @@ pub(crate) fn safe_alias(e: &Engine<'_>, mut n: NodeId) -> bool {
 /// Legacy no_side_effects, lam_analysis.rs:215-265. Bir PURE is deliberately
 /// more conservative; using it here would retain Strict instead of StrictOpt.
 pub(crate) fn pure(e: &Engine<'_>, root: NodeId) -> bool {
-    use crate::lambda::lam_constant::Constant as C;
-    let mut work = vec![root];
+    pure_with_work(e, root, &mut Vec::new())
+}
+
+pub(crate) fn pure_with_work(e: &Engine<'_>, root: NodeId, work: &mut Vec<NodeId>) -> bool {
+    work.clear(); work.push(root);
+    let result = (|| {
     while let Some(n) = work.pop() {
         match e.bir().view(n) {
             View::Var { .. } | View::Const { .. } | View::Fun { .. } | View::Global { .. } => {
                 continue;
             }
             View::Prim { args, primitive } => {
-                let second = args.get(1).and_then(|n| match e.bir().view(*n) {
+                use crate::lambda::lam_analysis::ConstantProperties;
+                let (nonzero, nonnegative_bigint) = args.get(1).map_or((false, false), |n| match e.bir().view(*n) {
                     View::Const { value } => match e.bir().constant(value) {
-                        Constant::Int(i)
-                        | Constant::DecoratedInt {
-                            value: i,
-                            native: false,
-                            ..
-                        } => Some(C::int(*i as i32)),
-                        Constant::NativeInt(i)
-                        | Constant::DecoratedInt {
-                            value: i,
-                            native: true,
-                            ..
-                        } => Some(C::NativeInt {
-                            i: *i,
-                            comment: None,
-                        }),
-                        Constant::BigInt(s) => {
-                            let text = e.bir().text(*s);
-                            Some(C::BigInt {
-                                negative: text.starts_with('-'),
-                                value: text.trim_start_matches(['-', '+']).to_owned(),
-                            })
-                        }
-                        _ => None,
+                        Constant::Int(i) | Constant::DecoratedInt { value: i, native: false, .. } => (*i as i32 != 0, false),
+                        Constant::NativeInt(i) | Constant::DecoratedInt { value: i, native: true, .. } => (*i != 0, false),
+                        Constant::BigInt(s) => { let text = e.bir().text(*s); (text.trim_start_matches(['-', '+']) != "0", !text.starts_with('-')) }
+                        _ => (false, false),
                     },
-                    _ => None,
+                    _ => (false, false),
                 });
-                if !crate::lambda::lam_analysis::is_pure_primitive(
+                if !crate::lambda::lam_analysis::is_pure_primitive_with_properties(
                     &e.bir().primitive(primitive).primitive,
-                    second.as_ref(),
+                    ConstantProperties { nonzero, nonnegative_bigint },
                 ) {
                     return false;
                 }
@@ -236,9 +227,12 @@ pub(crate) fn pure(e: &Engine<'_>, root: NodeId) -> bool {
             | View::Seq { .. } => {}
             _ => return false,
         }
-        work.extend(e.bir().view(n).children());
+        let view = e.bir().view(n);
+        work.extend((0..view.child_count()).map(|at| view.child_at(at)));
     }
     true
+    })();
+    work.clear(); result
 }
 
 /// Legacy refine_let_parts, lam_util.rs:66-140 (lam_util.ml:68-138).
@@ -303,7 +297,7 @@ pub(crate) fn refine(e: &mut Engine<'_>, n: NodeId) -> Changed {
     let kind = e.bir().node(n).aux();
     let next = if matches!(kind, 0 | 2) && safe_alias(e, value) {
         1
-    } else if kind == 0 && pure(e, value) {
+    } else if kind == 0 && e.pure(value) {
         2
     } else {
         kind

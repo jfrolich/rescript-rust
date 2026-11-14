@@ -19,13 +19,15 @@ enum Recipe {
 }
 struct Plan<'a> {
     b: &'a Bir,
+    equal_work: &'a mut Vec<(NodeId, NodeId)>,
     recipes: Vec<Recipe>,
     steps: usize,
 }
 impl<'a> Plan<'a> {
-    fn new(b: &'a Bir) -> Self {
+    fn new(b: &'a Bir, equal_work: &'a mut Vec<(NodeId, NodeId)>) -> Self {
         Self {
             b,
+            equal_work,
             recipes: vec![],
             steps: 0,
         }
@@ -203,7 +205,7 @@ impl<'a> Plan<'a> {
         while let Some((l, r)) = stack.pop() {
             self.steps += 1;
             if let (Some(l), Some(r)) = (self.source(l), self.source(r)) {
-                if !super::equal::equal(self.b, l, r, &mut self.steps) {
+                if !super::equal::equal_with_work(self.b, l, r, &mut self.steps, self.equal_work) {
                     return false;
                 }
                 continue;
@@ -678,7 +680,8 @@ pub(super) fn simplify(
     or: bool,
     steps: &mut usize,
 ) -> Option<NodeId> {
-    let mut plan = Plan::new(b);
+    let mut equal_work = std::mem::take(&mut b.j_equal_work);
+    let mut plan = Plan::new(b, &mut equal_work);
     let (lt, rt) = (Term::Source(l), Term::Source(r));
     let result = if or {
         plan.or(0, lt, rt)
@@ -688,6 +691,7 @@ pub(super) fn simplify(
     let measured = plan.steps;
     *steps += measured;
     let recipes = plan.recipes;
+    b.j_equal_work = equal_work;
     if or {
         b.j_stats.or_attempts += 1;
         b.j_stats.max_or_steps = b.j_stats.max_or_steps.max(measured);
@@ -698,10 +702,12 @@ pub(super) fn simplify(
     result.map(|result| finish(b, recipes, result, &[l, r]))
 }
 pub(super) fn negate(b: &mut Bir, value: NodeId, steps: &mut usize) -> Option<NodeId> {
-    let mut plan = Plan::new(b);
+    let mut equal_work = std::mem::take(&mut b.j_equal_work);
+    let mut plan = Plan::new(b, &mut equal_work);
     let result = plan.negate(Term::Source(value));
     *steps += plan.steps;
     let recipes = plan.recipes;
+    b.j_equal_work = equal_work;
     result.map(|result| finish(b, recipes, result, &[value]))
 }
 pub(super) fn negated_and(
@@ -713,7 +719,8 @@ pub(super) fn negated_and(
     if !p::pure(b, test) || !p::pure(b, no) {
         return None;
     }
-    let mut plan = Plan::new(b);
+    let mut equal_work = std::mem::take(&mut b.j_equal_work);
+    let mut plan = Plan::new(b, &mut equal_work);
     let t = Term::Source(test);
     // Full J-E8 not, including integer and ordered-comparison cases.
     let negated = if let Some(n) = p::int_of(b, test) {
@@ -745,6 +752,7 @@ pub(super) fn negated_and(
     let measured = plan.steps;
     *steps += measured;
     let recipes = plan.recipes;
+    b.j_equal_work = equal_work;
     b.j_stats.and_attempts += 1;
     b.j_stats.max_and_steps = b.j_stats.max_and_steps.max(measured);
     result.map(|result| finish(b, recipes, result, &[test, no]))

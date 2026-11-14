@@ -2606,6 +2606,853 @@ fragment, multi-child, optional-prop, spread and key policy. The declaration
 exception for record copies is documented in section 3.4. These are opt-in
 lowering changes; they claim no default-path performance improvement.
 
+### 7.5 Allocation-site inventory (S3.2d baseline)
+
+Baseline: `e5ada1df93`. This is the **pre-conversion inventory**, not a claim
+that lowering is allocation-free. `pending` means the site is still present.
+Line numbers refer to this baseline; function names are the stable references.
+The excluded concurrent slice is `loops.rs`, `label.rs`, and `rec.rs`.
+Test modules (including `oracle_tests.rs`) are excluded.
+
+The required discovery command is:
+
+```sh
+rg -n 'Vec::new|vec!\[|SmallVec|Box::new|\.collect\(|\.to_vec\(|\.clone\(\)|String::' compiler-rust/src/bir/lower
+```
+
+The table also includes `Vec` fields/signatures, `Vec::with_capacity`,
+turbofish `collect`, `to_owned`, and `into_vec`, which that command misses.
+A signature/import row identifies storage/API ownership, not a separate
+allocation instruction. Empty-vector constructors are kept even though they
+allocate only on growth; fixed-capacity small vectors are not exempted.
+"Per construct" includes per call, catch, switch, function or literal,
+not once per compilation. Payload clones must be checked through their
+nested fields (e.g. a function attribute owns an optional directive string).
+
+Rows marked `removed` describe implemented changes; `pending` rows remain
+intended design, **not implemented state**.
+In particular, switching a local vector to a pool handle requires changing
+consuming APIs too: `JsPayload::Object` owns a property-key vector, switch
+headers own keys/clauses, and the untagged dispatch planner owns its plan.
+Moving those allocations outside this directory would not satisfy the audit.
+The statement stack and node-list pool must be used end to end.
+
+| Baseline file:line and function/type | Site | Frequency | Replacement / reason retained | State |
+| --- | --- | --- | --- | --- |
+| `args.rs:46` `evaluate_now` | `fn evaluate_now(&mut self, root: NodeId) -> (Vec<NodeId>, NodeId) {` | per construct/walk | Returns an 8-byte span into retained evaluation statement storage rather than an owning vector. | removed |
+| `args.rs:51` `Work` | `let mut work = vec![Work::Enter(root)];` | per visited node | The evaluation work stack belongs to State and is empty when restored after each walk. | removed |
+| `args.rs:52` `Work` | `let mut values = Vec::new();` | per visited node | The evaluation value stack belongs to State and is empty when restored after each walk. | removed |
+| `args.rs:53` `Work` | `let mut statements = Vec::new();` | per visited node | Held statements use retained evaluation storage and are cleared after transfer to StatementStack. | removed |
+| `args.rs:111` `Work` | `let children: Vec<_> = values.drain(values.len() - count..).collect();` | per visited node | Rebuilt literal operands borrow a suffix of the retained value stack; no child vector is collected. | removed |
+| `args.rs:163` `sequence_arguments` | `args: smallvec::SmallVec<[Out; 4]>,` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
+| `args.rs:164` `sequence_arguments` | `) -> (Span, smallvec::SmallVec<[NodeId; 4]>) {` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
+| `args.rs:178` `sequence_arguments` | `let mut values = smallvec::SmallVec::with_capacity(args.len());` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
+| `args.rs:184` `sequence_arguments` | `(Vec::new(), value)` | per visited node | The no-hold path now returns an empty scalar span and creates no vector. | removed |
+| `call.rs:9` `Call` | `pub operands: Vec<NodeId>,` | per construct | pooled source operand lists and retained spine scratch; four-byte call frame | removed |
+| `call.rs:32` `application` | `let mut reversed: Vec<_> = args.iter().rev().copied().collect();` | per construct | pooled source operand lists and retained spine scratch; four-byte call frame | removed |
+| `call.rs:48` `application` | `let mut operands = Vec::with_capacity(1 + reversed.len());` | per construct | pooled source operand lists and retained spine scratch; four-byte call frame | removed |
+| `call.rs:66` `application` | `return Ok(Call { tail: None, operands: vec![reduced], inline: true, status, loc, external: None });` | per construct | pooled source operand lists and retained spine scratch; four-byte call frame | removed |
+| `call.rs:94` `inline_external_function` | `let root = lambda.function_(function.arity, &function.params, body, function.attr.clone(), function.loc);` | per construct | Each immutable external export is imported once into a cached source template; its attribute payload is unit metadata, not cloned per inline call. | justified |
+| `call.rs:104` `inline_external_function` | `let mut foreign = Vec::new();` | per construct | Foreign identifier storage is retained, appended into the unit identity table, and restored empty. | removed |
+| `call.rs:175` `finish_application` | `.collect();` | per construct | reusable traversal/output/argument buffer retained in lowering state | removed |
+| `call.rs:197` `finish_application` | `self.apply_with_arity(callee, arity, values.into_vec())` | per construct | Call arguments borrow the retained sequencing value buffer; no into_vec conversion remains. | removed |
+| `call.rs:267` `resolve_cmj_module_field_arity` | `crate::cmi::persistent_env::CmjExportArity::Single(arity) => Some(arity.clone()),` | per construct | Each module/member summary is resolved once and represented by an 8-byte span over unit arity groups, including groups wider than SmallVec inline capacity. | removed |
+| `call.rs:289` `apply_with_arity` | `args: Vec<NodeId>,` | per construct | apply_with_arity borrows a node slice; it does not own an argument vector. | removed |
+| `call.rs:300` `apply_with_arity` | `callee = self.call_node(callee, &remaining[..count], full.clone());` | per construct | stays: call-info scalar clone; no heap value | non-allocating |
+| `call.rs:313` `apply_with_arity` | `let mut full_args = remaining.to_vec();` | per construct | Eta expansion uses retained cleared argument storage and preserves left-to-right fresh parameter creation. | removed |
+| `cond.rs:154` `conditional_children` | `into: &mut Vec<(Cx, NodeId)>,` | per construct | Borrowed child-buffer parameter appends to retained SourceProbe.children; the signature owns no per-node allocation. | justified |
+| `exit.rs:75` `Plan` | `groups: Vec<usize>,` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
+| `exit.rs:76` `Plan` | `next: Vec<usize>,` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
+| `exit.rs:77` `Plan` | `bodies: Vec<NodeId>,` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
+| `exit.rs:78` `Plan` | `output: Vec<NodeId>,` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
+| `exit.rs:79` `Plan` | `clauses: Vec<ClauseMeta>,` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
+| `exit.rs:282` `catch` | `(Vec::new(), Vec::new(), Vec::new())` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
+| `exit.rs:300` `catch` | `output: Vec::new(),` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
+| `exit.rs:301` `catch` | `clauses: Vec::new(),` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
+| `exit.rs:314` `catch_children` | `pub(super) fn catch_children(&self, cx: Cx, frame: Catch, into: &mut Vec<(Cx, NodeId)>) {` | per construct | borrows the retained source traversal queue; owns no buffer | retained |
+| `exit.rs:436` `exit_dispatch` | `let mut keys = Vec::with_capacity(plan.len as usize);` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
+| `exit.rs:437` `exit_dispatch` | `let mut clauses = Vec::with_capacity(plan.len as usize);` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
+| `exit.rs:438` `exit_dispatch` | `let mut actions = Vec::with_capacity(plan.len as usize);` | per construct | typed grouping/output spans and pooled switch keys, clauses and actions | removed |
+| `exit.rs:509` `exit_children` | `pub(super) fn exit_children(&self, cx: Cx, exit: &Exit, into: &mut Vec<(Cx, NodeId)>) {` | per construct | borrows the retained source traversal queue; owns no buffer | retained |
+| `expr.rs:42` `expression_children` | `into: &mut Vec<(Cx, NodeId)>,` | per visited node | Borrowed child-buffer parameter appends to retained SourceProbe.children; the signature owns no per-node allocation. | justified |
+| `expr.rs:278` `finish_expression` | `let attr = attr.clone();` | per visited node | Replacement headers share the source immutable attribute handle; directive strings are not cloned. | removed |
+| `expr.rs:308` `drop_pure_effect` | `let mut effects = Vec::new();` | per construct/walk | reusable traversal/output/argument buffer retained in lowering state | removed |
+| `external.rs:8` `module` | `use smallvec::SmallVec;` | declaration | removed SmallVec import | removed |
+| `external.rs:64` `compile_js_object_create` | `args: SmallVec<[NodeId; 4]>,` | per construct | list-pool handle; no transient argument collection | removed |
+| `external.rs:68` `compile_js_object_create` | `let mut keys = Vec::new();` | per construct | PropertySpan into the arena property-key pool | removed |
+| `external.rs:69` `compile_js_object_create` | `let mut values = Vec::new();` | per construct | ListId adopted directly by object_from_list | removed |
+| `external.rs:70` `compile_js_object_create` | `let mut effects: SmallVec<[NodeId; 4]> = SmallVec::new();` | per construct | single Option<NodeId>, fused in source order | removed |
+| `external.rs:71` `compile_js_object_create` | `let mut pending: Vec<(u32, NodeId)> = Vec::new();` | per construct | State::external_pending, taken, drained and returned | removed |
+| `external.rs:229` `translate_scoped_global_value` | `let head = scopes.first().map_or(name, String::as_str);` | per construct | stays: borrowed string projection; no allocation | non-allocating |
+| `external.rs:266` `translate_scoped_module_value` | `let head = scopes.first().map_or(name, String::as_str);` | per construct | stays: borrowed string projection; no allocation | non-allocating |
+| `external.rs:287` `external_module_binding` | `bundle: name.to_owned(),` | per construct | borrowed module spelling; owned import metadata remains in import.rs | removed |
+| `external.rs:312` `compile_js_call` | `args: SmallVec<[NodeId; 4]>,` | per construct | list-pool handle; no transient argument collection | removed |
+| `external.rs:384` `compile_js_call` | `args.collect(),` | per construct | list-pool handle; no transient argument collection | removed |
+| `ffi_args.rs:6` `module` | `use smallvec::SmallVec;` | declaration | SmallVec import moved into test module only | removed |
+| `ffi_args.rs:112` `hold_external_args` | `args: SmallVec<[Out; 4]>,` | per construct | borrowed output slice and reusable suffix/spec-index buffers | removed |
+| `ffi_args.rs:113` `hold_external_args` | `) -> SmallVec<[Out; 4]> {` | per construct | borrowed output slice and reusable suffix/spec-index buffers | removed |
+| `ffi_args.rs:115` `hold_external_args` | `let mut held = SmallVec::with_capacity(args.len());` | per construct | borrowed output slice and reusable suffix/spec-index buffers | removed |
+| `ffi_args.rs:136` `hold_external_obj_args` | `args: SmallVec<[Out; 4]>,` | per construct | borrowed output slice and reusable suffix/spec-index buffers | removed |
+| `ffi_args.rs:137` `hold_external_obj_args` | `) -> SmallVec<[Out; 4]> {` | per construct | borrowed output slice and reusable suffix/spec-index buffers | removed |
+| `ffi_args.rs:138` `hold_external_obj_args` | `let params: SmallVec<[&ObjParam; 4]> = specs` | per construct | borrowed output slice and reusable suffix/spec-index buffers | removed |
+| `ffi_args.rs:146` `hold_external_obj_args` | `.collect();` | per construct | borrowed output slice and reusable suffix/spec-index buffers | removed |
+| `ffi_args.rs:147` `hold_external_obj_args` | `let mut suffix: SmallVec<[LaterLiteral; 4]> = SmallVec::with_capacity(args.len());` | per construct | borrowed output slice and reusable suffix/spec-index buffers | removed |
+| `ffi_args.rs:200` `hold_external_obj_args` | `.collect()` | per construct | borrowed output slice and reusable suffix/spec-index buffers | removed |
+| `ffi_args.rs:299` `external_dispatch` | `let mut keys = Vec::new();` | per construct | pooled keys, clauses and action lists; borrowed case strings | removed |
+| `ffi_args.rs:300` `external_dispatch` | `let mut actions = Vec::new();` | per construct | pooled keys, clauses and action lists; borrowed case strings | removed |
+| `ffi_args.rs:301` `external_dispatch` | `let mut clauses = Vec::new();` | per construct | pooled keys, clauses and action lists; borrowed case strings | removed |
+| `ffi_args.rs:363` `external_polyvar_string_expr` | `let cases: Vec<_> = cases` | per construct | pooled keys, clauses and action lists; borrowed case strings | removed |
+| `ffi_args.rs:365` `external_polyvar_string_expr` | `.map(&#124;(key, value)&#124; (key.clone(), plain::string(&mut self.arena, value)))` | per construct | pooled keys, clauses and action lists; borrowed case strings | removed |
+| `ffi_args.rs:366` `external_polyvar_string_expr` | `.collect();` | per construct | pooled keys, clauses and action lists; borrowed case strings | removed |
+| `ffi_args.rs:389` `external_polyvar_int_expr` | `let cases: Vec<_> = cases` | per construct | pooled keys, clauses and action lists; borrowed case strings | removed |
+| `ffi_args.rs:391` `external_polyvar_int_expr` | `.map(&#124;(key, value)&#124; (key.clone(), plain::int(&mut self.arena, *value as i32)))` | per construct | pooled keys, clauses and action lists; borrowed case strings | removed |
+| `ffi_args.rs:392` `external_polyvar_int_expr` | `.collect();` | per construct | pooled keys, clauses and action lists; borrowed case strings | removed |
+| `ffi_args.rs:403` `external_polyvar_event_exprs` | `) -> SmallVec<[NodeId; 2]> {` | per construct | fixed [Option<NodeId>; 2], 16 bytes; no spill path | removed |
+| `ffi_args.rs:427` `external_polyvar_event_exprs` | `smallvec::smallvec![tag, value]` | per construct | fixed [Option<NodeId>; 2], 16 bytes; no spill path | removed |
+| `ffi_args.rs:438` `lower_external_arg_values_and_effect` | `) -> (SmallVec<[NodeId; 2]>, Option<NodeId>) {` | per construct | fixed [Option<NodeId>; 2], 16 bytes; no spill path | removed |
+| `ffi_args.rs:441` `lower_external_arg_values_and_effect` | `smallvec::smallvec![self.external_option_unwrap_expr(cx, raw)],` | per construct | fixed [Option<NodeId>; 2], 16 bytes; no spill path | removed |
+| `ffi_args.rs:454` `lower_external_arg_values_and_effect` | `return (SmallVec::new(), None);` | per construct | fixed [Option<NodeId>; 2], 16 bytes; no spill path | removed |
+| `ffi_args.rs:456` `lower_external_arg_values_and_effect` | `Attr::Ignore => return (SmallVec::new(), self.external_arg_effect(cx, arg)),` | per construct | fixed [Option<NodeId>; 2], 16 bytes; no spill path | removed |
+| `ffi_args.rs:460` `lower_external_arg_values_and_effect` | `SmallVec::new()` | per construct | fixed [Option<NodeId>; 2], 16 bytes; no spill path | removed |
+| `ffi_args.rs:462` `lower_external_arg_values_and_effect` | `smallvec::smallvec![plain::node(&mut self.arena, View::JUndefined, 1)]` | per construct | fixed [Option<NodeId>; 2], 16 bytes; no spill path | removed |
+| `ffi_args.rs:476` `lower_external_arg_values_and_effect` | `(smallvec::smallvec![value], None)` | per construct | fixed [Option<NodeId>; 2], 16 bytes; no spill path | removed |
+| `ffi_args.rs:502` `assemble_external_args_no_splice` | `args: SmallVec<[NodeId; 4]>,` | per construct | ListId input/output and reusable argument assembly buffer | removed |
+| `ffi_args.rs:503` `assemble_external_args_no_splice` | `) -> (SmallVec<[NodeId; 4]>, Option<NodeId>) {` | per construct | ListId input/output and reusable argument assembly buffer | removed |
+| `ffi_args.rs:505` `assemble_external_args_no_splice` | `let mut values = SmallVec::with_capacity(specs.len());` | per construct | ListId input/output and reusable argument assembly buffer | removed |
+| `ffi_args.rs:506` `assemble_external_args_no_splice` | `let mut effects: SmallVec<[NodeId; 4]> = SmallVec::new();` | per construct | ListId input/output and reusable argument assembly buffer | removed |
+| `ffi_args.rs:548` `assemble_external_args_with_splice` | `args: SmallVec<[NodeId; 4]>,` | per construct | ListId input/output and reusable argument assembly buffer | removed |
+| `ffi_args.rs:549` `assemble_external_args_with_splice` | `) -> (SmallVec<[NodeId; 4]>, Option<NodeId>) {` | per construct | ListId input/output and reusable argument assembly buffer | removed |
+| `ffi_args.rs:551` `assemble_external_args_with_splice` | `let mut values = SmallVec::with_capacity(specs.len());` | per construct | ListId input/output and reusable argument assembly buffer | removed |
+| `ffi_args.rs:552` `assemble_external_args_with_splice` | `let mut effects: SmallVec<[NodeId; 4]> = SmallVec::new();` | per construct | ListId input/output and reusable argument assembly buffer | removed |
+| `ffi_args.rs:595` `assemble_external_args` | `args: SmallVec<[NodeId; 4]>,` | per construct | ListId input/output and reusable argument assembly buffer | removed |
+| `ffi_args.rs:597` `assemble_external_args` | `) -> (SmallVec<[NodeId; 4]>, Option<NodeId>) {` | per construct | ListId input/output and reusable argument assembly buffer | removed |
+| `import.rs:110` `external_module` | `name: external.bundle.clone(),` | per construct | Owned bundle/attribute payload is created only for a distinct immutable unit module key; cache-hit references use ImportId without cloning. | justified |
+| `import.rs:114` `external_module` | `.clone()` | per construct | Owned bundle/attribute payload is created only for a distinct immutable unit module key; cache-hit references use ImportId without cloning. | justified |
+| `import.rs:176` `compile_import` | `.push(self.arena.pools.j_modules[module.index()].clone());` | per construct | Dynamic dependency occurrences retain ImportId handles during lowering, preserving order and duplicates; owned compatibility records materialize only at final output. | removed |
+| `import.rs:194` `capitalize` | `let mut result = String::with_capacity(s.len());` | per construct | Binding capitalization and sanitization append to retained cleared spelling storage. | removed |
+| `import.rs:218` `external_binding_name` | `let mut result = String::new();` | per construct | Binding capitalization and sanitization append to retained cleared spelling storage. | removed |
+| `import.rs:234` `external_binding_name` | `name.clone()` | per construct | Binding capitalization and sanitization append to retained cleared spelling storage. | removed |
+| `jsx.rs:70` `compile_jsx` | `let mut props = Vec::with_capacity(jsx.jsx_props.len());` | per visited node | Converted: JSX property metadata is an eight-byte PropertySpan into the unit property-key pool. | converted |
+| `jsx.rs:71` `compile_jsx` | `let mut values = Vec::with_capacity(` | per visited node | Converted: reserve operand-list slots once, compact omitted props in place, and attach that list directly. | converted |
+| `jsx.rs:159` `duplicate_jsx_key` | `let mut spine = smallvec::SmallVec::<[NodeId; 4]>::new();` | per visited node | Converted: duplicate member spines using retained unit node scratch, cleared on success and rejection. | converted |
+| `konst.rs:55` `Work` | `let mut work = vec![Work::Enter(root)];` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
+| `konst.rs:56` `Work` | `let mut values: Vec<(NodeId, bool)> = Vec::new();` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
+| `konst.rs:60` `Work` | `let constant = self.arena.constant(id).clone();` | per visited node | Compound metadata stays behind source handles; leaf decoding snapshots only scalars and spans in retained spelling storage, never clones Constant. | removed |
+| `konst.rs:177` `Work` | `let children: Vec<_> = values.drain(start..).map(&#124;(node, _)&#124; node).collect();` | per visited node | Block operands use retained cleared constant_children storage. | removed |
+| `mod.rs:190` `children` | `fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>);` | per construct | Borrowed child-buffer parameter appends to retained SourceProbe.children; the signature owns no per-node allocation. | justified |
+| `mod.rs:230` `Work` | `let mut work = vec![Work::Enter(cx, node)];` | per construct | reusable traversal/output/argument buffer retained in lowering state | removed |
+| `mod.rs:231` `Work` | `let mut values = Vec::new();` | per construct | reusable traversal/output/argument buffer retained in lowering state | removed |
+| `mod.rs:232` `Work` | `let mut children = Vec::new();` | per construct | reusable traversal/output/argument buffer retained in lowering state | removed |
+| `mod.rs:295` `Lowered` | `pub dynamic_imports: Vec<crate::js_ir::ModuleId>,` | per construct | Legacy output ownership boundary: lowering records ImportIds; final compatibility output materializes owned dependency records once, outside lowering allocation proofs. | justified |
+| `mod.rs:333` `State` | `tail_frames: Vec<tail::Frame>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:334` `State` | `tail_functions: Vec<Option<LoopRef>>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:335` `State` | `tail_copies: Vec<Option<VarId>>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:336` `State` | `tail_assignments: Vec<NodeId>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:337` `State` | `tail_order: Vec<VarId>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:338` `State` | `rec_values: Vec<Option<NodeId>>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:339` `State` | `switches: Vec<Option<switch::Plan>>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:340` `State` | `variants: Vec<Option<variant::Plan>>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:341` `State` | `untagged: Vec<Option<untagged::Plan>>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:342` `State` | `switch_facts: Vec<switch::Facts>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:343` `State` | `switch_work: Vec<(NodeId, bool)>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:344` `State` | `switch_pairs: Vec<(NodeId, NodeId)>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:345` `State` | `switch_primitive_hashes: Vec<u64>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:346` `State` | `switch_constant_hashes: Vec<u64>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:352` `State` | `idents: Vec<Ident>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:356` `State` | `invalid_module_paths: Vec<bool>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:357` `State` | `awaited_units: Vec<bool>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:358` `State` | `dynamic_imports: Vec<crate::js_ir::ModuleId>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:359` `State` | `external_references: Vec<Option<crate::bir::ImportId>>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:360` `State` | `external_globals: Vec<Option<VarId>>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:361` `State` | `inline_globals: Vec<Ident>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:363` `State` | `external_bindings: Vec<[Option<VarId>; 2]>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:364` `State` | `module_constants: Vec<ModuleConstants>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:366` `State` | `located_functions: Vec<bool>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:372` `State` | `switch_locations: Vec<location::Fact>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:373` `State` | `location_work: Vec<(NodeId,bool)>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:380` `State` | `scratch: Vec<NodeId>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:383` `State` | `jumps: Vec<exit::Jump>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:385` `State` | `catch_table: Vec<(NodeId, crate::bir::CatchId)>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:386` `State` | `catches: Vec<Option<exit::Plan>>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:387` `State` | `tries: Vec<try_::Plan>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:389` `State` | `catch_work: Vec<NodeId>,` | once per unit | stays: reusable lowering-state storage | retained |
+| `mod.rs:418` `new` | `.collect();` | once per unit | stays: once per unit | retained |
+| `mod.rs:424` `new` | `tail_frames: Vec::new(), tail_functions: Vec::new(), tail_copies: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:425` `new` | `tail_assignments: Vec::new(), tail_order: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:426` `new` | `rec_values: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:427` `new` | `switch_facts: vec![switch::Facts::default(); input.arena.nodes.len()],` | once per unit | stays: once per unit | retained |
+| `mod.rs:428` `new` | `switches: Vec::new(), variants: Vec::new(), untagged: Vec::new(), switch_work: Vec::new(), switch_pairs: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:429` `new` | `switch_primitive_hashes: Vec::new(), switch_constant_hashes: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:431` `new` | `invalid_module_paths: vec![false; input.arena.nodes.len()],` | once per unit | stays: once per unit | retained |
+| `mod.rs:432` `new` | `awaited_units: vec![false; input.arena.vars.len()],` | once per unit | stays: once per unit | retained |
+| `mod.rs:433` `new` | `dynamic_imports: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:434` `new` | `external_references: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:435` `new` | `external_globals: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:436` `new` | `inline_globals: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:438` `new` | `external_bindings: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:439` `new` | `module_constants: (0..arena.pools.j_modules.len()).map(&#124;_&#124; ModuleConstants::Unread).collect(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:447` `new` | `located_functions: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:453` `new` | `switch_locations: Vec::new(), location_work: Vec::new(), location_steps: 0,` | once per unit | stays: once per unit | retained |
+| `mod.rs:457` `new` | `scratch: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:458` `new` | `jumps: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:459` `new` | `catch_table: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:460` `new` | `catches: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:461` `new` | `tries: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:463` `new` | `catch_work: Vec::new(),` | once per unit | stays: once per unit | retained |
+| `mod.rs:560` `enter` | `let args = args.to_vec();` | per construct | pooled source operand lists and retained spine scratch; four-byte call frame | removed |
+| `mod.rs:713` `children` | `fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>) {` | per construct | Borrowed child-buffer parameter appends to retained SourceProbe.children; the signature owns no per-node allocation. | justified |
+| `out.rs:52` `StatementStack` | `slots: Vec<Option<Slot>>,` | once per unit | stays: reusable statement-stack storage | retained |
+| `out.rs:53` `StatementStack` | `held: Vec<NodeId>,` | once per unit | stays: reusable statement-stack storage | retained |
+| `out.rs:62` `StatementStack` | `empties: Vec<(u32, NodeId)>,` | once per unit | stays: reusable statement-stack storage | retained |
+| `out.rs:378` `FreePool` | `nodes: Vec<Option<Free>>,` | per visited node | Append-only unit FreePool node storage, not a separately owned container per visited node. | justified |
+| `out.rs:435` `Work` | `let mut work = vec![Work::Enter(root, cx)];` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
+| `out.rs:436` `Work` | `let mut outputs = Vec::new();` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
+| `prim.rs:122` `finish_primitive_payload` | `.collect();` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
+| `prim.rs:127` `finish_primitive_payload` | `let mut outputs: smallvec::SmallVec<[Out; 4]> = outputs;` | per visited node | reusable traversal/output/argument buffer retained in lowering state | removed |
+| `prim.rs:164` `finish_primitive_payload` | `.collect::<Vec<_>>(),` | per visited node | Dictionary extraction and spread share retained cleared object key/value buffers with record lowering; final keys append to the unit property pool. | removed |
+| `prim.rs:173` `finish_primitive_payload` | `let (keys, kept): (Vec<_>, Vec<_>) = entries.into_iter().unzip();` | per visited node | Dictionary extraction and spread share retained cleared object key/value buffers with record lowering; final keys append to the unit property pool. | removed |
+| `prim.rs:195` `finish_primitive_payload` | `let mut keys = Vec::new();` | per visited node | Dictionary extraction and spread share retained cleared object key/value buffers with record lowering; final keys append to the unit property pool. | removed |
+| `prim.rs:196` `finish_primitive_payload` | `let mut kept = Vec::new();` | per visited node | Dictionary extraction and spread share retained cleared object key/value buffers with record lowering; final keys append to the unit property pool. | removed |
+| `prim.rs:272` `finish_primitive_payload` | `let info = self.arena.js_info(crate::bir::JsPayload::Block(tag.clone()));` | per visited node | A unit shape interner returns a shared JsId; only the first distinct metadata key owns a tag clone, never each block occurrence. | removed |
+| `prim.rs:372` `finish_primitive_payload` | `norm::jm12_interpolated_template(&mut self.arena, segments.clone(), values.into_vec())` | per visited node | Borrow source segments; output quasis append directly to the unit TemplatePart pool and interpolation uses retained normalization storage. | removed |
+| `prim.rs:381` `finish_primitive_payload` | `.collect();` | per visited node | Borrow source segments; output quasis append directly to the unit TemplatePart pool and interpolation uses retained normalization storage. | removed |
+| `prim_block.rs:13` `flat_make_field` | `let mut segments = smallvec::SmallVec::<[&str; 4]>::new();` | per visited node | Converted: spell segments from retained node scratch into retained string storage without a segment vector. | converted |
+| `prim_block.rs:14` `flat_make_field` | `let mut visited = smallvec::SmallVec::<[NodeId; 4]>::new();` | per visited node | Converted: borrow and clear the unit node scratch on both successful and failed module-path probes. | converted |
+| `record.rs:38` `record_copy` | `let mut operands = vec![*init];` | per construct | Candidate operands use State-owned scratch, cleared on both successful recognition and early rejection. | removed |
+| `record.rs:39` `record_copy` | `let mut keys = vec![PropertyKey::RecordSpread];` | per construct | Candidate property keys use State-owned scratch, cleared on both successful recognition and early rejection. | removed |
+| `record.rs:83` `record_children` | `pub(super) fn record_children(&self, cx: Cx, record: &Record, into: &mut Vec<(Cx, NodeId)>) {` | per construct | This borrowed child-buffer parameter appends to retained SourceProbe.children and owns no construct allocation. | justified |
+| `record.rs:105` `finish_record` | `let mut values = Vec::with_capacity(self.source.lists.get(record.operands).len());` | per construct | Final record operands use a retained value buffer, cleared after constructing the pooled object list. | removed |
+| `record.rs:154` `duplicate_record` | `.js_info(JsPayload::Object(vec![PropertyKey::RecordSpread]));` | per construct | The singleton spread key is a stack slice copied directly into the unit property pool. | removed |
+| `record.rs:177` `record_rest` | `.collect();` | per construct | Rest fields append directly to the unit pool and the descriptor holds a RestSpan. | removed |
+| `scope.rs:16` `Scope` | `pub(crate) uses: Vec<Uses>,` | once per unit | stays: dense variable-indexed table | retained |
+| `scope.rs:24` `new` | `uses: vec![Uses::default(); variables],` | once per unit | stays: once per unit | retained |
+| `switch.rs:33` `Plan` | `groups: Vec<usize>,` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:34` `Plan` | `next: Vec<usize>,` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:35` `Plan` | `pub(super) bodies: Vec<NodeId>,` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:37` `Plan` | `output: Vec<NodeId>,` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:38` `Plan` | `clauses: Vec<ClauseMeta>,` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:71` `integer_switch` | `let keys = h.keys[..n].to_vec();` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:75` `integer_switch` | `let mut actions = all[..n].to_vec();` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:82` `integer_switch` | `clauses: Vec::new(),` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:140` `plan_switch` | `(0..count).collect(),` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:141` `plan_switch` | `vec![NONE; count],` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:142` `plan_switch` | `self.source.lists.get(operands)[..count].to_vec(),` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:169` `plan_switch` | `output: Vec::new(),` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:170` `plan_switch` | `clauses: Vec::new(),` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:205` `group_switch_cases` | `) -> (Vec<usize>, Vec<usize>, Vec<NodeId>) {` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:212` `group_switch_cases` | `let cases = self.source.lists.get(operands)[..count].to_vec();` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:213` `group_switch_cases` | `let fingerprints: Vec<_> = cases.iter().map(&#124;n&#124; self.switch_facts[n.index()]).collect();` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:217` `group_switch_cases` | `let mut groups = Vec::new();` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:218` `group_switch_cases` | `let mut next = vec![NONE; cases.len()];` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:219` `group_switch_cases` | `let mut heads: Vec<usize> = (0..cases.len()).collect();` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:253` `group_switch_cases` | `let bodies = groups.iter().map(&#124;&i&#124; cases[i]).collect();` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:547` `switch_children` | `pub(super) fn switch_children(&self, cx: Cx, frame: Switch, into: &mut Vec<(Cx, NodeId)>) {` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:684` `finish_switch` | `let mut keys = Vec::new();` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:685` `finish_switch` | `let mut clauses = Vec::new();` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:686` `finish_switch` | `let mut actions = Vec::new();` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:693` `finish_switch` | `crate::lambda::SwitchCaseTag::String(self.arena.text(*text).to_owned()),` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:695` `finish_switch` | `key => key.clone(),` | per construct | pooled group/output runs and typed key/clause/action handles | removed |
+| `switch.rs:831` `prepare_switch_hashes` | `let mut bytes = Vec::new();` | once per unit | retained serialization scratch buffer | removed |
+| `switch.rs:892` `switch_constants_equal` | `let mut work = smallvec::SmallVec::<[(crate::bir::ConstId, crate::bir::ConstId); 8]>::new();` | per construct | retained constant-pair scratch buffer | removed |
+| `switch.rs:962` `finish_small_switch` | `let key = self.arena.switch(plan.header).keys[0].clone();` | per construct | borrowed key from its temporarily acquired pool; no clone | removed |
+| `tail.rs:40` `finish_self_call` | `pub(super) fn finish_self_call(&mut self, frame: LoopRef, statements: Span, values: smallvec::SmallVec<[NodeId; 4]>) -> Probed {` | per construct | borrowed node slice supplied by reusable sequencing buffer | removed |
+| `try_.rs:65` `try_children` | `pub(super) fn try_children(&self, cx: Cx, frame: Try, into: &mut Vec<(Cx, NodeId)>) {` | per construct | Borrowed child-buffer parameter appends to retained SourceProbe.children; the signature owns no per-node allocation. | justified |
+| `unit.rs:33` `lower` | `.collect();` | once per unit | stays: once per unit | retained |
+| `untagged.rs:53` `Plan` | `program: Vec<Op>,` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:55` `Plan` | `actions: Vec<Action>,` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:56` `Plan` | `cached: Vec<Option<NodeId>>,` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:57` `Plan` | `finished: Vec<Finished>,` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:58` `Plan` | `remaining: Vec<u32>,` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:59` `Plan` | `marks: Vec<Span>,` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:60` `Plan` | `outputs: Vec<Output>,` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:82` `untagged_switch` | `let facts = facts.clone();` | per construct | borrow source matching facts while appending to the unit graph | removed |
+| `untagged.rs:83` `untagged_switch` | `let mut literal_arms = Vec::with_capacity(n);` | per construct | Literal arms are imported into a unit-owned typed pool and each switch retains an 8-byte span. | removed |
+| `untagged.rs:84` `untagged_switch` | `let mut payload_arms = Vec::with_capacity(h.keys.len() - n);` | per construct | Payload arms are imported into a unit-owned typed pool and each switch retains an 8-byte span. | removed |
+| `untagged.rs:88` `untagged_switch` | `literal_arms.push((tag.literal.clone(), i as u32))` | per construct | LiteralId handles borrow immutable spelling and precomputed emission descriptors; no arm owns a cloned tag. | removed |
+| `untagged.rs:91` `untagged_switch` | `block.block_type().expect("untagged payload").clone(),` | per construct | Kind and InstanceId handles reference the immutable metadata bank instead of cloning class names or ancestors. | removed |
+| `untagged.rs:97` `untagged_switch` | `let sources = self.source.lists.get(operands).to_vec();` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:135` `untagged_switch` | `let remaining = actions.iter().map(&#124;a&#124; a.uses).collect();` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:136` `untagged_switch` | `let cached = vec![None; actions.len()];` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:137` `untagged_switch` | `let finished = vec![Finished::False; actions.len()];` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:153` `untagged_switch` | `marks: Vec::new(),` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:154` `untagged_switch` | `outputs: Vec::new(),` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:167` `untagged_program` | `) -> (Vec<Op>, Vec<Action>) {` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:168` `untagged_program` | `let mut program = Vec::new();` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:169` `untagged_program` | `let mut actions: Vec<Action> = Vec::new();` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:170` `untagged_program` | `let mut cache = vec![[NONE; 2]; sources.len()];` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:171` `untagged_program` | `let mut work = vec![Work::Visit(plan.root(), depth)];` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:248` `untagged_children` | `pub(super) fn untagged_children(&self, cx: Cx, frame: Untagged, into: &mut Vec<(Cx, NodeId)>) {` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:332` `copy_dispatch_output` | `let mut vars = Vec::new();` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:333` `copy_dispatch_output` | `let mut labels = Vec::new();` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:414` `advance_untagged` | `let body: Vec<_> = self.statements.statements(out.run).collect();` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:489` `untagged_switch_statement` | `.collect::<Vec<_>>(),` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:511` `untagged_switch_statement` | `.collect(),` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:522` `untagged_switch_statement` | `let mut actions = Vec::with_capacity(keys.len() + usize::from(has_default));` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:523` `untagged_switch_statement` | `let mut clauses = Vec::with_capacity(actions.capacity());` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:589` `untagged_test` | `let mut work = vec![(test, false)];` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `untagged.rs:590` `untagged_test` | `let mut values = Vec::new();` | per construct | typed unit-owned pool runs or retained scratch; no construct-owned vector | removed |
+| `variant.rs:29` `Plan` | `sides: Vec<Side>,` | per construct | Two bounded sides live inline in a fixed two-slot record (48 bytes), never a heap vector. | removed |
+| `variant.rs:89` `named_variant` | `let tag_name = facts.tag_name.as_deref().unwrap_or("TAG").to_owned();` | per construct | Tag-name spelling is a unit-interned StrId prepared once; lowering borrows the descriptor. | removed |
+| `variant.rs:90` `named_variant` | `let keys: Vec<_> = h` | per construct | Imported typed key spans address the flat unit key pool; side headers reuse subspans. | removed |
+| `variant.rs:101` `named_variant` | `.collect();` | per construct | No collected key vector remains; metadata preparation appends directly to the unit pool. | removed |
+| `variant.rs:102` `named_variant` | `let mut keys = [keys, Vec::new()];` | per construct | No split vectors remain; constant and block sides select scalar subspans. | removed |
+| `variant.rs:131` `named_variant` | `let mut sides = Vec::with_capacity(2);` | per construct | Fixed two-slot sides replace the capacity-two vector. | removed |
+| `variant.rs:139` `named_variant` | `let actions: Vec<_> = range` | per construct | Source actions and optional fallback copy directly into the unit list pool. | removed |
+| `variant.rs:140` `named_variant` | `.clone()` | per construct | The scalar range clone allocated nothing; direct list-span copying now removes even that clone. | removed |
+| `variant.rs:143` `named_variant` | `.collect();` | per construct | The temporary action collection is gone; slice_append appends directly into the unit list pool. | removed |
+| `variant.rs:147` `named_variant` | `clauses: Vec::new(),` | per construct | The empty vector allocated nothing; headers now carry an empty ClauseSpan directly. | removed |
+| `variant.rs:183` `literal_tag` | `Literal::String(s) => Tag::String(s.clone()),` | per construct | String keys use unit-interned spelling handles, not owned tag clones. | removed |
+| `variant.rs:185` `literal_tag` | `Literal::Float(s) => Tag::Float(s.clone()),` | per construct | Float keys retain original spelling handles and prepared ConstIds. | removed |
+| `variant.rs:186` `literal_tag` | `Literal::BigInt(s) => Tag::BigInt(s.clone()),` | per construct | Bigint keys retain original spelling handles and canonical ConstIds; float and bigint columns stay distinct. | removed |
+| `variant.rs:255` `variant_children` | `pub(super) fn variant_children(&self, cx: Cx, frame: Variant, into: &mut Vec<(Cx, NodeId)>) {` | per construct | This borrowed child-buffer parameter appends to retained SourceProbe.children and owns no construct allocation. | justified |
+
+The external allocation tests now start from their Lambda source nodes, after
+one-time import, and include source traversal, constant lowering, FFI holding,
+argument sequencing, emission, deferred realization and release of the J output.
+After warming and reserving another pass's append-only pool growth, 10,000
+eight-argument calls and one 10,000-field object allocate zero times. Source
+visits are 99,999 and 10,001; primitive steps are 250,000 and 40,001.
+A separate whole-Lambda FFI test lowers 10,000 string-dispatch cases with zero
+allocations, two source visits and 10,004 primitive steps. All three tests assert
+unchanged recorded buffer capacities. Import and final unit export are outside
+these scopes; no claim is made that their once-per-unit allocations disappear.
+
+Property spans are 8 bytes, operand-list handles 4 bytes, pending entries 8
+bytes, and `JsPayload` 40 bytes. Bounded FFI argument conversion uses a fixed
+16-byte pair of optional handles, with no spill path. Switch keys and clauses
+are stored in typed pools, referenced by 8-byte spans; the cold stored switch
+record is 96 bytes. Existing import builders transfer their owned input into
+these pools; the FFI emitter writes directly into the pools without an owned
+intermediate switch header. The other switch emitters now use retained planner
+storage and immutable metadata handles, as recorded below.
+
+Source traversal, deferred realization, constant traversal, argument holding
+and sequencing retain their work buffers between probes. Debug child-sharing
+validation uses a reusable dense epoch table rather than a per-node hash set;
+the sharing check still happens before mutation. Module metadata still owns
+spelling/attributes at the J bridge boundary; borrowing the module-itself
+spelling removes its temporary descriptor, not those outstanding allocations.
+
+The direct-switch slice stores grouped case heads/links, representative source
+bodies, lowered actions and clause metadata in flat unit-owned pools. A source
+frame remains a 4-byte switch handle; its cold plan is 108 bytes (formerly 200).
+The 24-byte group descriptor is cold data; helpers borrow it. Fingerprints are
+values without arena identities, so their retained hash table maps fingerprints
+to case positions while all per-case state remains in dense indexed arrays.
+A 10,000-case whole-Lambda switch with distinct string-valued bodies allocates
+zero times after warming and pool reservation, at 10,002 source visits and
+20,000 grouping steps; recorded capacities remain unchanged. Pooled J keys
+retain interned spelling handles, including floats and big integers, rather
+than cloning strings into each output header.
+
+The untagged plan now contains **no owned vectors**. Its 120-byte cold record
+refers to typed unit-wide program/action/stack pools; the shared dispatch graph's
+four pools also live once per lowering state. The owned legacy planner API and
+borrowed append API invoke the same planning function. Source-body equivalence
+is computed through the existing structural grouping pass, then the planner uses
+dense aliases. Incomparable bodies receive no alias, even for self-comparison.
+
+A complete Lambda fixture with 10,000 nested single-payload dispatches now runs
+twice with **zero allocations** in the measured second pass and unchanged
+recorded capacities: 20,001 source visits, 10,000 emission-program steps and
+20,000 grouping steps. It includes planning, traversal, emission, realization
+and release. Import is outside measurement; append-only growth is pre-reserved
+after warming. The subsequent mixed/literal proof covers 9,998 explicit literal cases and two
+payload cases, plus a default reused through an unnamed numeric literal. Its
+warmed whole-Lambda probe/realize/release pass allocates zero times, with stable
+recorded capacities: 10,003 source visits, 20,002 source-grouping steps, 20,008
+program steps, 10,003 planner-grouping steps and one actual output copy. That
+copied default is binder-free; binder freshening has separate copier regressions.
+Small string, float and bigint Equals fixtures each allocate zero times, with
+6 source visits, 8 source-grouping steps, 14 program steps, 4 planner-grouping
+steps and one output copy. Import and final export are excluded from those
+lowering measurements, not relabelled as allocation-free.
+
+Import itself now stores switch facts and arms in unit pools, rather than
+relocating per-switch vectors. A separate 10,000-run fact-import test, after
+warming and reserving append-only growth, allocates zero times and keeps all
+recorded fact/metadata capacities unchanged. A 10,000-literal canonical-key
+encoding test likewise reuses its warmed output, bigint and float buffers with
+zero allocations. ImportedPlan is 32 bytes, each typed arm span is 8 bytes, and
+Facts is 16 bytes. Unique metadata still grows the unit pools during import;
+these proofs do not claim that the initial unit allocation disappears.
+
+| Additional owning API/site | Frequency | Disposition |
+| --- | --- | --- |
+| `untagged.rs` former `Plan.dispatch` | per construct | converted: four graph pools owned by `State::untagged_dispatch` |
+| `untagged_dispatch.rs` `PlanInput.literal_arms.into_owned()` | per mixed/literal plan | converted: append copies only Copy handles into retained effective-arm scratch; there is no Cow ownership conversion |
+| `untagged_dispatch.rs` grouping, payload partitioning and simplification vectors | per general plan | converted: unit-owned linked groups, partition/entry buffers and iterative postorder/equality/selector stacks retain their capacities |
+| `untagged.rs` literal and instance arm metadata clones | per arm | converted: typed literal/instance handles reference a flat immutable spelling/ancestor bank |
+| `edit.rs` `copy_subtree_recording` temporary maps and vectors | per copied action | converted: caller-owned CopyScratch retains traversal/maps; operand and rest-field remapping append directly to unit pools |
+| `untagged.rs` imported literal/payload vectors | per imported switch | converted: two typed 8-byte spans address shared unit arm pools; no per-switch vector is moved across the measurement boundary |
+| `untagged_dispatch.rs` imported fact vectors | per imported switch | converted: a 16-byte Facts record references literal/kind spans in a unit FactPool |
+| `metadata.rs` canonical literal-key encoding | per imported literal | converted: reusable string/digit/float buffers encode keys directly into the metadata text pool |
+| `untagged.rs` bigint descriptor formatting | per imported bigint | converted: one import-pass spelling buffer is cleared and reused, retaining original key spelling separately from canonical ConstId |
+| `ocaml_float.rs` separator removal and case folding | per canonical float parse | converted: callers can supply retained byte scratch; special-value recognition compares ASCII without allocating lowercase copies |
+
+
+Catch plans now own no vectors and occupy 80 bytes (120 before the output
+conversion, 168 before grouping was pooled). The 10,000-catch whole-Lambda
+fixture emits a flattened integer dispatch and measures zero allocations on its
+warmed second pass, with unchanged recorded capacities, 20,001 source visits,
+9,999 flattening flag reads and 20,000 grouping steps. This also exposed constant
+interning's temporary serialized-key vector: constant keys now use an 8-byte
+byte-pool span and retained encoding scratch, rather than one owned vector per
+constant. Compound constant contents and canonical encodings are unchanged.
+
+The tail-call argument consumer already borrows the sequencing buffer. Its
+whole-Lambda call test exposed three earlier copies (source args, reversed spine,
+and call operands): those are now source list handles and retained spine scratch.
+A call's 64-byte cold metadata record lives in a unit pool; the walk carries a
+4-byte handle. Copied-parameter name formatting also uses retained string scratch.
+The 10,000-argument test establishes an enclosing function context, then lowers
+the entire Lambda call, arguments, sequencing and jump emission and releases the
+output twice. The measured pass allocates zero times with unchanged capacities,
+10,002 source visits and 10,001 argument visits (including the callee). This
+fixture does not measure wrapping the enclosing function into a loop.
+
+#### JSX slice
+
+JSX cold property metadata now uses a `PropertySpan` (8 bytes). Lowering writes
+operands directly into a reserved list, compacts omitted optional properties,
+and attaches that list without copying. Key duplication reuses the unit node
+scratch, including on rejected spines.
+
+Complete warmed lowering/realization/release has zero allocations and stable
+recorded capacities for each of four 10,000-element fixtures:
+
+| Fixture | Source visits | Primitive steps |
+| --- | ---: | ---: |
+| Properties (half omitted as optional undefined) | 10,002 | 20,002 |
+| Effectful expression children | 20,002 | 40,002 |
+| Callee scopes | 2 | 10,001 |
+| Duplicable key member spine | 10,003 | 30,004 |
+
+These fixtures do not cover external module metadata allocation or the separate
+held-literal argument path; those remain their own inventory responsibilities.
+
+#### Module-field slice
+
+`flat_make_field` retains source-node scratch and name storage across probes;
+flat export spelling no longer constructs a temporary segment vector.
+`primitive_field` borrows record names and formats module/positional names into
+the same synchronous name scratch instead of allocating strings per field.
+
+The whole-Lambda `ten_thousand_module_fields_lower_without_allocations` fixture
+lowers and releases 10,000 module fields twice. Both successful global paths and
+failed local paths have zero warmed allocations and unchanged recorded
+capacities. The failure cache is cleared on each pass, so the second pass still
+exercises the complete failed-spine walk. Successful paths take one source visit
+and 10,001 primitive steps; failed paths take 10,001 visits and 40,000 primitive
+steps. The debug child-validation table is reserved to the warm run's node
+high-water mark before measurement (a one-node success otherwise first grows
+that table on its second construction).
+
+Argument holding now walks literal child slots directly rather than materializing
+`View::children` SmallVecs. The whole-Lambda held-array fixture contains 10,000
+call-valued elements followed by a statement-producing argument, so it actually
+holds and rebuilds the earlier literal rather than taking the no-hold path.
+After warming and reserving append-only variable/list/held-statement growth,
+probe, realize and release allocate zero times with unchanged recorded capacities:
+20,005 source visits, 30,004 sequencing steps and 10,000 fresh holds per pass.
+The returned held-statement span is 8 bytes and the work entry 16 bytes. The
+original sequencing oracle still checks right-to-left temporary allocation and
+left-to-right execution, including method objects and all supported literal shapes.
+
+| Additional owning API/site | Frequency | Disposition |
+| --- | --- | --- |
+| `args.rs` evaluate-now `View::children()` | per held literal | converted: child slots are indexed directly in reverse scheduling order, with no SmallVec spill |
+| `args.rs` Evaluation buffers | once per lowering State | retained: work/values/statements reuse their high-water capacity and are cleared before restoration/next use |
+
+Record-copy recognition and finalization now retain candidate operand, property-key
+and result-value buffers in State. Both success and every rejection clear the
+candidate buffers. The whole-Lambda 10,000-override record-copy fixture measures
+zero allocations after warming and append-only pool reservation, with unchanged
+recorded capacities, 10,002 source visits and 40,002 primitive steps. The separate
+10,000-rejected-candidate test also allocates zero times and then successfully
+recognizes a valid candidate using the same cleared storage. The record resume
+remains 12 bytes; no output or traversal ownership moves into the resume.
+
+Unit-argument function lowering now creates a fresh zero-parameter header while
+sharing the immutable source attributes. The whole-Lambda fixture containing
+10,000 directive-bearing functions performs 10,000 actual header replacements
+without adding an attribute entry; its warmed probe/realize/release pass allocates
+zero times with unchanged recorded capacities and 20,001 source visits. Function
+headers remain 20 bytes. A small directive fixture compares all continuations
+against legacy output.
+
+Named dispatch now stores its two sides inline (48 bytes), immutable constructor
+spelling/value descriptors in unit pools, and source action runs directly in the
+unit list pool. The whole-Lambda 10,000-case fixture has 5,000 constants and 5,000
+tagged blocks with distinct bodies and a fallback: warmed probe/realize/release
+allocates zero with unchanged recorded capacities, 10,004 source visits and
+20,000 grouping steps. A two-case float/bigint fixture with identical source
+spelling also allocates zero (six visits, two grouping steps), and compares against
+legacy output. Float and bigint descriptor columns remain distinct. The plan is
+112 bytes (formerly 88); imported descriptors are 12 bytes. Initial unit metadata
+import is outside these measurements; preparation does no body grouping.
+
+| Newly found site | Previous ownership | Disposition |
+| --- | --- | --- |
+| `variant::named_variant` key `split_off` | per-side vector allocation | removed: unit-key subspans |
+| `variant::switch_key_expression` large integer `to_string` | temporary string | removed: retained cleared encoding buffer |
+| `variant::switch_key_expression` bigint parser and `format!` | temporary strings | removed: caller-owned bigint encoding buffer; named numeric descriptors bypass reconstruction |
+
+Dictionary extraction no longer collects and unzips entry tuples: it appends
+keys and kept values directly to the retained object buffers shared with record
+lowering. Dictionary spread reuses those same buffers while preserving flattening,
+detachment, duplicate-key order and release behavior. Whole-Lambda proofs for
+10,000 dictionary entries and 10,000 flattened object spreads each measure zero
+warmed allocations and unchanged recorded capacities. Their exact source/primitive
+counts are 30,002/50,003 and 50,001/100,001 respectively. The buffers are empty after
+both complete probe/realize/release passes. These fixtures use tuple block metadata;
+owned constructor/record block tags are handled by the shared-shape conversion below.
+
+Compound-constant block metadata now references its immutable source ConstId;
+block work entries are 12 bytes and final operand lists use cleared retained
+storage. Primitive block shapes are interned by serialized metadata key into a
+unit-owned flat byte pool and shared JsIds. Only first insertion of a distinct
+shape clones its owned payload; source primitives cannot be borrowed by output
+metadata while primitive dispatch temporarily holds their pool outside the arena.
+The builtin list shape is created once per State, not once per list constructor.
+
+Three whole-Lambda 10,000-block fixtures measure zero warmed allocations with
+unchanged recorded capacities. The constant-block fixture uses owned constructor
+tags (1 source / 20,001 constant / 0 primitive visits); primitive constructor blocks
+use 20,001 / 10,000 / 30,001, and lists use 30,001 / 20,000 / 40,001. Primitive and
+list fixtures also assert that all 10,000 occurrences create exactly one unit shape
+on the first pass, ruling out a relocated metadata allocation per occurrence.
+Constructor/decorated constant leaves are covered by the separate proof below.
+
+| Newly found site | Previous ownership | Disposition |
+| --- | --- | --- |
+| `prim::Pmakelist` builtin constructor shape | boxed/name metadata per node | removed: one immutable shape cached in State |
+| `konst::Work::Block` | owning cloned TagInfo in each work entry | removed: source ConstId and scalar field count |
+
+Constant leaves now decode borrowed source payloads into a 16-byte scalar value
+descriptor plus optional comment span. Source spelling and numeric encoding use
+two retained, cleared strings; neither constant nor pointer/constructor metadata
+is cloned. The whole-Lambda 10,000-leaf proof mixes nominal strings/floats/bigints,
+wide runtime constructor integers, runtime bigints, native integer comments,
+polyvariant comments and runtime strings. Warmed probe/realize/release allocates
+zero with unchanged recorded capacities and 10,001 source / 10,000 constant /
+10,001 primitive visits. Nested option tests preserve the distinction between
+nominal undefined (an option-none marker) and decorated constructor undefined.
+
+| Newly found site | Previous ownership | Disposition |
+| --- | --- | --- |
+| `konst` native/runtime integer formatting | fresh `to_string` | removed: retained encoding string |
+| `konst` nominal bigint normalization | parser result and formatted string | removed: caller-owned normalization buffer |
+| `konst` runtime bigint prefix | formatted string | removed: retained encoding string |
+| `konst` constructor/pointer comments | deep constant payload clone | removed: borrowed decoding and retained spelling spans |
+
+Templates now address unit-owned quasi runs with 8-byte TemplateSpans; neither
+plain nor tagged template metadata owns a vector. Primitive lowering borrows the
+source segments, and J-M12 retains its kept operands and source/semantic/encoding
+buffers. The owned and retained APIs share byte normalization, escape decoding
+and encoding cores; boundary tests compare 1,000 segment triples, invalid recovery
+sources and native/byte-model Unicode. Concatenation still checks the joined raw
+spelling against joined semantics and canonicalizes only when that check fails.
+
+Three whole-Lambda 10,000-operand fixtures measure zero warmed allocations with
+unchanged recorded capacities: all-literal interpolation (including an actual
+`${` boundary requiring canonicalization), mixed literal/template/dynamic
+interpolation, and tagged templates. Exact source/primitive/normalization counts
+are 10,001/10,001/10,000, 10,001/13,334/10,000 and 10,002/13,335/0. Comments still
+inhibit literal merging; nested tagged/ordinary templates retain separate shapes.
+
+| Newly found site | Previous ownership | Disposition |
+| --- | --- | --- |
+| `JsPayload::Template` / `Tagged` | per-template quasi Vec | removed: unit TemplateSpan |
+| `jm12_interpolated_template` parts / merged / kept | temporary vectors per normalization | removed: streaming pooled quasis and retained kept buffer |
+| `jm12_interpolated_template` literal reconstruction | cloned source/cooked strings | removed: borrowed strings appended to retained buffers |
+| template concatenation/encoding helpers | temporary decoded/encoded vectors and strings | removed from lowering path: shared cores accept retained storage |
+
+External call arity summaries now resolve once per module/member into 8-byte
+AritySpans over unit-owned groups. Known empty arity remains distinct from unknown
+arity. Eta expansion borrows the sequenced arguments and reuses a cleared full-call
+argument buffer; fresh parameters retain left-to-right creation order. The
+whole-Lambda 10,000-partial-call fixture uses a six-group summary (past SmallVec's
+inline limit), saturates four groups and actually creates one eta parameter per
+call. Its warmed pass allocates zero with unchanged recorded capacities, 80,001
+source visits and 60,000 sequencing steps; all 10,000 calls share six stored arity
+groups. Append-only reservations include variable columns and JS occurrence rows.
+All-five-continuation oracle tests also exercise the six-group summary.
+This arity proof does not exercise cross-module *body inlining*; the separate
+copied-body proofs below cover that path.
+
+Import metadata is now shared by the complete immutable external-module key
+(identifier, bundle, attributes, default flag and dynamic flag). Cache hits clone
+no owned payload. Binding spelling, flat-make joining and export-name conversion
+use retained cleared strings; resolved ML paths are cached as unit text handles.
+Dynamic dependency occurrences retain ImportIds, including duplicates and order.
+Owned ModuleId compatibility records are materialized only in final `complete`;
+that legacy-output ownership boundary is outside probe/realize/release proofs.
+
+Whole-Lambda fixtures execute 10,000 attributed external imports with two callback
+members and 10,000 resolved ML imports with mangled flat-make callbacks. Both
+measure zero warmed allocations with unchanged recorded capacities, 10,001 source
+visits and respectively 40,001 / 30,001 primitive steps. All occurrences share one
+module descriptor; callback/global variables and dynamic occurrence runs reserve
+append-only growth before measurement. Metadata-key and unusual-name oracle tests
+preserve flag/attribute distinctions and first-binding naming.
+
+| Newly found site | Previous ownership | Disposition |
+| --- | --- | --- |
+| import resolver cache-hit path | owned returned path per occurrence | removed: unit text-handle resolution cache |
+| import flat-make and export-name callbacks | temporary joined/mangled strings and singleton owned arrays | removed: retained spellings and borrowed iterator |
+| final dependency compatibility records | one owned ModuleId per output occurrence | final export boundary, outside lowering allocation claim; order and duplicates preserved |
+
+Trunk export-fold integration preserves `export.rs` unchanged. Its new occurrence
+site pool and variable site-head pool are append-only; warmed allocation proofs now
+reserve their repeat growth and assert all three scope capacities are unchanged.
+At final unit completion, only the consumed root export shape is given an owned
+identifier payload. Source/shared shapes stay immutable; the export fold can move
+that output vector without emptying another block's metadata. The wide constant
+block proof also covers a 10,000-field module-export shape (1 source / 10,001
+constant visits, zero warmed allocations); export coercion itself is not measured.
+
+The following trunk export sites are inventoried only, not converted:
+
+| Site | Storage/allocation | Ownership | Disposition |
+| --- | --- | --- | --- |
+| `export.rs:104` | `values: Vec<NodeId>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:105` | `rows: Vec<Row>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:107` | `decl: Vec<u32>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:109` | `position: Vec<u32>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:111` | `seen: Vec<bool>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:112` | `trail: Vec<VarId>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:116` | `row_of: Vec<u32>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:117` | `path: Vec<NodeId>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:120` | `name_head: Vec<u32>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:121` | `name_tail: Vec<u32>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:122` | `name_next: Vec<u32>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:126` | `inserted: Vec<(u32, NodeId)>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:128` | `selected: Vec<VarId>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:142` | `later: Vec<NodeId>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:148` | `arms: Vec<Arm>,` | retained unit/result storage; no conversion in this audit | test-only |
+| `export.rs:150` | `resolved: Vec<Resolved>,` | retained unit/result storage; no conversion in this audit | test-only |
+| `export.rs:157` | `pub exports: Vec<Ident>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:159` | `pub reservations: Vec<Ident>,` | retained unit/result storage; no conversion in this audit | export scope (unchanged) |
+| `export.rs:162` | `pub arms: Vec<(Arm, Resolved)>,` | retained unit/result storage; no conversion in this audit | test-only |
+| `export.rs:254` export identifier transfer | `std::mem::take(exports)` | moves existing output-boundary ownership; no clone | export scope (unchanged) |
+| `export.rs:285` export_variables | borrowed `into: &mut Vec<VarId>` | appends into caller storage | export scope (unchanged) |
+| `export.rs:1354` coerce_exports | `Vec::with_capacity(idents.len())` | fresh export-variable vector | deferred: export scope |
+| `export.rs:1359` coerce_exports | `Vec::new()` reservations | grows output name reservations | deferred: export scope |
+| `export.rs:1494` test arm collection | `.collect()` | cfg(test) reporting vector | test-only |
+| `export.rs:1530` resolve_exports | `Vec::with_capacity(selected.len())` | owned final export identifiers | deferred: export scope |
+
+| Newly found non-export site | Ownership | Disposition |
+| --- | --- | --- |
+| `call::inline_external_function` fresh LamArena/body import/bridge fragment | once per immutable external export template; cache hits reuse the source body and flat parameter statistics | justified unit import |
+| `complete_unit` consumed root export identifier payload | one final compatibility payload, protecting shared immutable shapes | final export boundary, outside lowering proof |
+
+The later trunk close-decision integration also adds append-only variable facts
+and copied-run decisions to Scope. Repeat reservations now include those pools;
+capacity checks cover sites, site heads, occurrence counts, variable facts,
+decisions and the retained return spine. The lowering-import wrapper is preserved
+in the export-ownership regression. Close decisions and export functionality are
+unchanged; all existing allocation proofs still pass after the integration.
+
+External body inlining now imports each immutable module/member function once.
+Subsequent candidates reuse the detached source template and flat parameter
+statistics; the existing beta reducer still copies/normalizes each result and
+renames its binders. Engine worklist/summary storage and rule/provenance statistics
+are retained across invocations. A whole-Lambda 10,000-call test exercises both
+simple substitution and a copied let-binding body, asserting exactly one source
+import and 10,000 reductions; repeated-call all-continuation oracles preserve
+fresh binder behavior. Those import-count tests alone are not allocation proofs;
+the complete probe/realize/release measurements below provide that gate.
+
+| Newly exposed inlining site | Ownership | Disposition |
+| --- | --- | --- |
+| `beta::delay_safe` traversal | retained work and separate purity walk; indexed children avoid SmallVec spills | removed |
+| `beta::simple` motion/usage/order/operand buffers | retained vectors cleared on acceptance and rejection; original ordering test unchanged | removed |
+| `beta::can_move` analysis | retained effect-state/traversal and hit/purity buffers, including early rejection | removed |
+| `beta::copy` traversal, operands, binder enumeration and static labels | retained work/value vectors, borrowed operand suffixes, binder-run descriptors and a cleared retained label map | removed |
+| `beta::reduce` effects/rest/spare/moved runs | retained vectors restored on every exit; original reduction and binding order unchanged | removed |
+| Engine normalization summaries and refinement purity | retained work vectors; indexed children | removed |
+| Engine copied function attributes | shared immutable attribute handle | removed |
+| Source node facts and occurrence recount children | indexed children, no transient SmallVec spills | removed |
+
+Beta motion/simple-plan classification now retains its motion, usage, ordering,
+operand, traversal and effect-state buffers. Both acceptance and early rejection
+clear the buffers. Hit and purity walkers share storage-taking implementations
+with their existing callers; indexed children avoid hidden SmallVec spills.
+Primitive purity consumes scalar constant properties, avoiding owned bigint
+reconstruction while preserving the same decision table. A helper regression
+repeats a rejected 16-operand simple plan plus both classification walks 10,000
+times with zero warmed allocations and stable capacities. This is deliberately
+only a helper proof; the following whole-Lambda measurements exercise real copies.
+
+The final body-inlining gate runs complete probe/realize/release for 10,000 calls
+to a non-simple external function: a strict effectful local binding whose value
+occurs twice in the returned array. The 16-parameter variant additionally uses
+six effectful call arguments, exercising retained argument bindings, sequencing
+and wide operands. Neither fixture is an identity-only substitution. Both use
+one imported immutable function template and one flat parameter-statistics run.
+The beta copy work item is 12 bytes; the template descriptor is 12 bytes.
+
+Inlining consumes source arguments, so the tests import **two independent
+whole-Lambda trees before measurement**, warm the first and measure the second.
+They reserve observed append-only growth, not transient per-call collections.
+The measured interval includes every call, body copy, normalization, lowering,
+realization and output release. Final owned legacy-output conversion is excluded.
+
+| Whole-Lambda copied-body fixture | Calls | Allocations | Source visits | Sequencing steps | Primitive steps |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| One parameter, repeated local use | 10,000 | 0 | 70,001 | 59,999 | 60,001 |
+| Sixteen parameters, six effectful arguments | 10,000 | 0 | 400,001 | 269,999 | 330,001 |
+
+Both fixtures assert unchanged recorded capacities for source/output node and
+variable columns, lists, metadata headers, traversal storage, beta scratch,
+Engine reuse, template/statistics/foreign storage, Scope, FreePool and statement
+runs. They assert one import across both passes, 20,000 total reductions, empty
+transient buffers and exact logical costs. Repeated-call all-five-continuation
+oracles cover simple substitution and both copied-body shapes, including wide
+effectful arguments and distinct emitted local binders. Existing beta oracles
+continue to cover nested binders, capture, labels and loop-start rewriting;
+these two whole-Lambda allocation fixtures do not claim exhaustive opcode
+coverage. All inventoried non-export conversions are complete; export ownership
+allocations remain explicitly deferred above. No wall-time speedup is inferred
+from these allocation proofs.
+
+### 7.5.1 Concurrent loop, label and recursive-value additions
+
+The baseline exclusions for `loops.rs`, `label.rs` and `rec.rs` no longer apply
+after integrating `81b8b26a5`. These are the new production `Vec` sites; no
+production `SmallVec` site was introduced in these three files. Test-fixture
+vectors are not compile-path allocations.
+
+| Site at integration | Storage | Frequency | Disposition |
+| --- | --- | --- | --- |
+| `loops.rs:59` `loop_children` | borrowed `&mut Vec<(Cx, NodeId)>` | shared source traversal | retained caller-owned buffer; not an owned construct vector |
+| `rec.rs:77` `recursive_children` | borrowed `&mut Vec<(Cx, NodeId)>` | shared source traversal | retained caller-owned buffer; not an owned construct vector |
+| `rec.rs:93` `recursive_dummy` | `JsPayload::Object(Vec::new())` | per dummy | removed: `object_info(&[])` adopts property-pool metadata |
+| `label.rs:115` `Schedule.frames` | `Vec<Frame>` | once-per-unit stack | retained typed frame pool; high-water capacity reused |
+| `label.rs:116` `Schedule.values` | `Vec<Edge>` | once-per-unit stack | retained typed event stack; high-water capacity reused |
+| `label.rs:117` `Schedule.edges` | `Vec<Edge>` | once-per-unit pool | retained indexed event-edge pool |
+| `label.rs:118` `Schedule.steps` | `Vec<Step>` | once-per-unit pool | retained indexed scheduling-step pool |
+| `label.rs:119` `Schedule.costs` | `Vec<[Cost; 6]>` | once-per-unit pool | retained dense costs indexed by scheduling step |
+| `label.rs:120` `Schedule.numbers` | `Vec<Option<u32>>` | once-per-unit pool | retained dense numbers indexed by loop |
+| `label.rs:121` `Schedule.work` | `Vec<Work>` | once-per-unit stack | retained scheduling scratch; high-water capacity reused |
+
+The 10,000-node whole-Lambda while-loop fixture confirms that this retained
+storage allocates zero times after warming and explicit append-only reservation.
+It includes output release, checks unchanged loop/scheduler capacities, and records
+20,001 source visits. No production loop buffer needed replacement.
+
+The labelled-loop fixture also lowers and releases 10,000 nested loops twice,
+including an actual switch-nested break and symbol resolution. Its warmed pass
+allocates zero times, preserves recorded capacities, visits 20,005 source nodes
+and performs 30,007 scheduling steps. The second pass assigns a fresh label
+number rather than reusing the first result. Scheduler vectors remain justified
+unit-owned pools, not per-construct collections.
+
+The recursive-value fixture lowers and releases a 10,000-member Lambda group
+twice: zero warmed allocations, unchanged recorded capacities, 10,002 source
+visits and 50,000 member steps. This exercises integer constants and declarations;
+the recursive dummy-object constructor was already converted to property-pool
+metadata during integration. Remaining production storage is unit-owned.
+
+The integration keeps method-callee evaluation order and default-first string
+switch traversal from trunk. Group outputs still write their stable pooled slots,
+so no vector rotation is needed. Label finalization runs after each successful
+probe while the retained traversal counts only that probe's new visits. All four
+existing whole-Lambda zero-allocation fixtures still pass after integration.
+
+### 7.5.2 Historical audit validation and measurements
+
+These results describe `9de839339`, not the corrected head. Section 11 supersedes
+the readiness claim, records the full-unit allocation gap and gives fresh counts.
+
+The measured implementation is `9de839339`; the later arity-comment cleanup
+changes no executable code. All inventoried non-export sites now have a
+conversion or an explicit unit/import/output-boundary justification. The
+production lowering scan has no small-vector occurrences: `rg SmallVec
+compiler-rust/src/bir/lower` finds only the `ffi_args.rs` test module.
+`export.rs` is identical to integrated trunk `be1b3a482`; its allocations remain
+inventory-only, not part of the conversion claim.
+
+The final inlining diff was reviewed directly, including scratch restoration on
+rejection/error, fresh binders, source-argument consumption, pool exchange and
+summary invalidation. Variable-keyed substitutions use dense vectors. The
+remaining template dictionary has a composite module/member key, not an existing
+dense template index; the retained label dictionary uses sparse source labels
+and is never iterated to determine output order. No per-node synchronization was
+introduced. Allocation proofs measure warmed lowering, **not** source import,
+first-use immutable export-template import, or final owned compatibility output.
+
+Independent validation of the final implementation:
+
+| Gate | Result |
+| --- | --- |
+| Compiler build / strict all-target clippy | Pass |
+| BIR tests | 768 passed |
+| Full compiler unit suite, serial | 2,448 passed, 25 ignored, zero failures |
+| Compiler printer/source-map integration tests | 4 passed |
+| Compiler doctests | 5 passed, 7 ignored |
+| Rewatch build / tests | 210 unit and 9 integration tests passed |
+| Exact focused JS reference fixtures | 472/472 passed |
+| Canonical JS snapshots | 737/737 passed |
+| Exact stdlib reference parity | 113/113 passed |
+| In-repository GenType suites | 2/2 passed, including typechecking |
+| Backend coverage ratchet, debug executable | Passed without recording a new baseline |
+
+The full compiler suite requires file-backed reference artifacts. After building
+the OCaml compiler, `rescript build-reference --bsc <reference-bsc>` was run for
+the runtime, Belt and `tests/tests`, then the suite ran with `--test-threads=1`.
+This resolved the earlier missing-artifact and parallel shared-page failures;
+they are not counted as passing runs. The reference used OCaml 5.5.1. The external
+3,735-module application comparison and its GenType suite were **not run**.
+
+#### Pinned check-mode comparison
+
+Both executables compiled the same `e5ada1df93` source corpus (`tests/tests`,
+738 compiled modules), in separate directories. The 925 runtime/project
+`.res`/`.resi` source inputs were hash-compared before measurement. Each build
+used release fat LTO with the repository's default **16 codegen units**,
+`RAYON_NUM_THREADS=1`, and `RESCRIPT_BACKEND=check`. The project was cleaned before
+each measured build. Runtime preparation is outside the interval; normal build
+work remains inside it. Cachegrind counts use the minimum of five runs. Hyperfine
+uses ten measured runs after two warmups. These results include changes merged
+from trunk since the original baseline, not just this audit's isolated effect.
+
+| Check-mode measurement | Original `e5ada1df93` | Candidate `9de839339` |
+| --- | ---: | ---: |
+| Minimum instructions | 20,239,125,629 | 20,243,874,351 |
+| Hyperfine mean ± standard deviation | 1.952 ± 0.136 s | 1.955 ± 0.104 s |
+| Hyperfine minimum–maximum | 1.833–2.265 s | 1.769–2.117 s |
+
+Instruction change: **+4,748,722 (+0.02346%)**. Wall time is within observed
+variation. **This audit demonstrates the bounded warmed allocation properties,
+not a measured compiler speedup.**
+
+Five instruction counts, in run order:
+
+- Original: 20,239,125,629; 20,240,176,326; 20,244,341,457; 20,245,730,450; 20,239,316,676.
+- Candidate: 20,256,554,850; 20,249,280,224; 20,245,855,715; 20,253,557,268; 20,243,874,351.
+
+#### Default-path instruction gate and profile sensitivity
+
+For the default-path gate, both current trunk `be1b3a482` and the candidate were
+rebuilt with the CI profile: release fat LTO and **one codegen unit**. Both used
+the identical pinned corpus, one worker, and `RESCRIPT_BACKEND` unset. Five-run
+minima are **4,054,000,770 → 4,054,528,801**, an increase of **528,031
+(+0.01302%)**, within the audit's **+0.02%** budget.
+
+- Trunk: 4,054,220,098; 4,054,850,998; 4,054,958,689; 4,054,000,770; 4,054,612,378.
+- Candidate: 4,054,528,801; 4,057,561,718; 4,055,634,860; 4,056,042,783; 4,057,139,755.
+
+The default 16-codegen-unit profile behaves differently and is **not** hidden by
+that gate result: its minimum rises from **4,078,047,529** on current trunk to
+**4,090,187,328** on the candidate (**+0.29769%**). Against the original baseline's
+**4,081,609,225**, the same candidate is **+0.21016%**. Callgrind attributes most
+of the 16-codegen-unit difference to generated memcpy calls in parser paths;
+that observation does not establish its root cause. Do not describe this as a
+profile-independent performance improvement, or interchange the one- and
+16-codegen-unit measurements.
+
 ## 8. The gate and the slices
 
 ### 8.1 The gate
@@ -2884,3 +3731,238 @@ unchanged parameters and lazily created copies is not a contiguous VarId run.
 The default compiler still uses the legacy backend; this slice itself saves
 nothing on that path. The separate short-circuit correction changes default
 JavaScript only where the old loop probe differed from the OCaml reference.
+
+## 11. Allocation audit correction
+
+**Historical correction record.** The zero-at-entry criterion below was replaced
+by constant allocations per unit across source sizes. See
+[the completed scaling proof and final measurements](LOWERING_ALLOCATION_SCALING.md)
+for the current assertions, attribution and review status.
+
+### Scope correction — step 1
+
+| Source file (under `compiler-rust/src`) | Disposition | Named lowering caller and necessity |
+| --- | --- | --- |
+| `js_ir/printer.rs` | Kept | `lower::import::State::compile_import` and `lower::prim_block::State::primitive_field` call `convert_ident_into` to avoid temporary owned spellings. |
+| `lambda/lam_analysis.rs` | Kept | `lower::call::State::inline_external_function` reaches the shared primitive-purity decision through beta reduction; scalar properties avoid reconstructing owned bigint constants. |
+| `lambda/lam_compile_variant.rs` | Reverted | No BIR lowering caller. Restored byte-for-byte to trunk; the shared planner now exposes borrowed compatibility views for the unchanged emitter. |
+| `lambda/mod.rs` | Kept | `lower::prim_block::State::flat_make_field` and `lower::import::State::compile_import` call `flat_export_name_into`; returning an owned export name would allocate per construct. |
+| `lambda/untagged_dispatch.rs` | Kept | `lower::untagged::State::untagged_switch` calls `append_bucketed` on retained graph/planning storage; trunk's owned-input planner allocates for each switch. |
+| `lambda/untagged_dispatch/metadata.rs` | Kept | `lower::untagged::prepare` imports handles; `State::untagged_test` and `State::untagged_instance` borrow those payloads instead of cloning strings/instance ancestry per emitted test. |
+| `ocaml_float.rs` | Kept | `lower::untagged::prepare` reaches `float_of_string_in` via metadata canonical-key encoding; retained separator removal avoids a vector per literal. |
+| `string_literal.rs` | Kept | `lower::prim::State::finish_primitive_values` reaches retained `TemplateBuffer` through `jm12_interpolated_template`, avoiding per-template encoding/normalization vectors. |
+| `types/typecore.rs` | Kept | `lower::konst::State::constant` and `lower::variant::State::switch_key_expression` call `parse_bigint_literal_into` directly, avoiding per-bigint spelling strings. |
+| `types/variant_runtime.rs` | Kept | `lower::untagged::prepare` reaches `LiteralKeyScratch::encode` through `Metadata::import_literal`, retaining canonical equality-key buffers rather than allocating intermediate strings per literal. |
+
+The canonical-key import paths above are import work, not part of the previously reported probe/realize interval. They are not evidence that the complete unit entry is allocation-free; that is the separate step-5 correction.
+
+Commands/results: `cargo build --manifest-path compiler-rust/Cargo.toml` passed; `cargo test --manifest-path compiler-rust/Cargo.toml untagged -- --test-threads=1` passed **34 tests**; `cargo clippy --manifest-path compiler-rust/Cargo.toml --all-targets -- -D warnings` passed. `git diff origin/ocaml-to-rust-rewrite -- compiler-rust/src/lambda/lam_compile_variant.rs` is empty. All commands used `CARGO_INCREMENTAL=0`.
+### Scope correction — step 2
+
+- Planner metadata uses sorted handle arrays with binary lookup instead of per-plan/per-selection hash tables. Insertion shifts are linear in the number of distinct entries; cost comments state that tradeoff.
+- The unchanged trunk emitter borrows each literal/instance from the plan's unique immutable compatibility payloads. There is no per-emitted-test payload clone.
+- Selector traversal takes `&SelectedValue`; tests pin the cold descriptor to 32 bytes and the carried reference to 8 bytes.
+- `legacy_planner.rs` is a verbatim copy of trunk `be1b3a482` behind `#[cfg(test)]`. The production planner is still a single algorithm shared by the default adapter and BIR.
+- Differential tests compare reachable plan structure, ordered clauses/tests and bodies for **453 collected untagged declarations from 850 source files** (the complete `tests/tests/src` and runtime implementation corpora), in sixteen completeness/body-sharing configurations each. Hand-written cases additionally cover literals, catch-all, scalar/object/array/class/function shapes, null/undefined, custom discriminant facts and single-case plans. The existing compiler harness options are used to typecheck the actual source files. Collection is test-only, once per untagged declaration, not production per-node instrumentation.
+
+Commands/results:
+
+```text
+rg -n 'HashMap|HashSet|hashbrown|ahash' compiler-rust/src/lambda/untagged_dispatch.rs compiler-rust/src/lambda/untagged_dispatch/metadata.rs
+  no matches
+cmp compiler-rust/src/lambda/untagged_dispatch/legacy_planner.rs <(git show origin/ocaml-to-rust-rewrite:compiler-rust/src/lambda/untagged_dispatch.rs)
+  exit 0
+CARGO_INCREMENTAL=0 cargo test --manifest-path compiler-rust/Cargo.toml untagged -- --nocapture --test-threads=1
+  declarations compared: 453; source files: 850
+  45 passed, 0 failed
+CARGO_INCREMENTAL=0 cargo clippy --manifest-path compiler-rust/Cargo.toml --all-targets -- -D warnings
+  passed
+```
+
+At step 2, steps 3–6 remained outstanding; the final status is recorded below.
+### Scope correction — step 3
+
+Copy remapping now uses dense, touched-row tables for NodeId, VarId, FuncId, CatchId and JsId. Only source labels retain a map because their sparse numeric identities are not arena indices. Dense copy-table reservations cover the already reserved arena domains: recycling may visit a different row on the second pass without growing the arena. All measured intervals and zero-allocation assertions remain intact.
+
+The remaining maps in the requested files have field doc comments identifying the absent index: raw serialized/text/value keys awaiting interning, sparse external Ident/label identities, structural equality groups spanning different nodes, or sparse module/member pairs without a canonical pair handle.
+
+`Bir::j_equal_work` is now a plain retained vector. Mutable normalizers explicitly lend it to `equal_with_work`; speculative logic also takes an explicit scratch parameter. No RefCell remains there. The compatibility read-only query keeps its existing API; identity-leaf comparisons need no worklist allocation. Export-boundary equality is still outside the claimed warmed-lowering scope.
+
+Invariant accounting (no production check is silently dropped):
+
+| Original check | Current equivalent |
+| --- | --- |
+| `edit.rs`: unique children (`bulk_children.insert` / slice membership) | The same debug-only check uses epoch-indexed `checked_children`; duplicate handles assert unequal epochs before assignment. |
+| `edit.rs`: detached child parent | `debug_assert!(parents[child].is_none())` remains, with an additional live-node check. |
+| `edit.rs`: object property/value count | `assert_eq!(values.len(), property_keys(span).len())` checks the actual pooled range. |
+| `edit.rs`: block metadata kind | The assertion accepts the two intentional representations, `Block` and `ConstantBlock`; all other payloads still fail. |
+| `edit.rs`: JSX operand count | The original formula now reads the property span length. |
+| `edit.rs`: template segment count | `assert_eq!(template_parts(span).len(), values.len()+1)` checks the pooled range. |
+| `untagged.rs`: completed program and one output | Both assertions remain, reading typed span lengths. |
+| `mod.rs`: switch constant-prefix bound | `assert!(header.constants <= header.keys.len)` checks the span length. |
+| `external.rs`: exactly one object argument | The exhaustive `[Some(value), None]` pattern panics on every other shape, with the original message. |
+| `external.rs`: all source arguments consumed | `debug_assert_eq!(at, argc)` replaces the iterator exhaustion check. |
+| `external.rs`: getter/setter/index arity | The same production arity assertions read `lists.get(args).len()`. |
+
+Commands/results: `CARGO_INCREMENTAL=0 cargo test --manifest-path compiler-rust/Cargo.toml bir:: -- --test-threads=1` — **768 passed, zero failures**; strict all-target compiler clippy — **passed**. The mixed whole-Lambda tests retain zero allocations and unchanged capacities after dense-table conversion. Steps 4–6 remain outstanding.
+### Scope correction — step 4
+
+`evaluate_now` records its statement-span start and returns the appended range; both consumers read that exact range and truncate to its saved start. The scratch-empty guard is a production `assert!`, and a new expected-panic test checks rejection of unconsumed statement scratch. The outgoing value-buffer guard is also a production assertion. `finish_self_call` clears `tail_name` before appending the parameter-copy spelling; a new test seeds stale text and verifies `_x`, an empty returned buffer and a valid completed output.
+
+Commands/results: `CARGO_INCREMENTAL=0 cargo test --manifest-path compiler-rust/Cargo.toml bir::lower:: -- --test-threads=1` — **424 passed, zero failures**; strict all-target compiler clippy — **passed**. Steps 5–6 remain outstanding.
+### Scope correction — step 5: full-unit boundary measured, zero-allocation requirement NOT DONE
+
+Added `unit::tests::full_unit_allocation_boundary_for_four_construct_families`. Each fixture imports two independent inputs, warms the real entry once, then measures **`lower_with_resolver` through `complete_unit` and `finish`** on the second input. Every output has one coerced export, equal warm/measured source-visit counts and a validated arena. Imports and output validation/destruction are outside the interval. No existing zero-allocation test or assertion was weakened.
+
+| 10,000-wide/deep family | Source visits | Full-entry allocations | Allocated bytes |
+| --- | ---: | ---: | ---: |
+| Conditionals | 30,002 | 261 | 14,076,641 |
+| Ordinary switches | 10,003 | 307 | 18,276,966 |
+| Applications | 20,002 | 259 | 12,554,993 |
+| Genuine mixed untagged dispatch | 10,004 | 567 | 31,765,163 |
+
+Command: `CARGO_INCREMENTAL=0 cargo test --manifest-path compiler-rust/Cargo.toml full_unit_allocation_boundary -- --nocapture --test-threads=1`. Strict all-target compiler clippy also passes. These are **characterization results, not zero-allocation proofs**. The allocation counter's retained-byte delta can be negative because entry consumes and frees imported input allocated before measurement; the table reports total allocation calls/bytes, not that delta.
+
+`unit::lower` constructs a new `State`; `complete_unit(self)` consumes it and moves the owned arena into `Lowered`. Thus warming the public entry does not retain its scratch or output capacities. Inventory disposition: **unit state construction and owned completion remain not converted**. Meeting the requested warmed whole-unit zero bound needs an explicit reusable unit workspace/output-return protocol, including resetting identities, metadata and scope state. Merely moving `State::new` outside the measured closure would not satisfy this requirement. The PR remains draft; the older probe/realize/release measurements do not close this gap.
+
+The nine auxiliary helper measurements are accounted for below. All remain auxiliary; none is relabelled a whole-unit proof. These paths can be reached from lowering, so there is no claim that a unit fixture is impossible. Their full-unit zero-allocation replacements remain **not converted** with the workspace requirement above.
+
+| Helper measurement | Reachable enclosing path / outstanding full-unit proof |
+| --- | --- |
+| `edit::retained_copy_scratch_reuses_buffers_and_clears_renames` | Cached branch-body or imported-body copying; needs unit-level capacity reuse. |
+| `edit::wide_rest_copy_uses_flat_fields_without_allocations` | Copied rest-field bodies; needs a full unit with that body plus reusable completion. |
+| `j::norm_tests::ten_thousand_nested_ifs_rewrite_without_branch_vectors_or_list_pushes` | Conditional normalization; the new conditional entry characterization is nonzero. |
+| `untagged::ten_thousand_reserved_plan_slots_do_not_allocate` | Untagged planner/output storage; the new mixed entry characterization is nonzero. |
+| `record::rejected_record_candidates_clear_retained_storage` | Rejected record-copy candidate followed by ordinary lowering; needs the full-entry rejection fixture and reuse. |
+| `close::ten_thousand_declarations_are_decided_without_allocating_once_the_tables_are_warm` | Statement closing during unit completion; the new entry tests include closing but are nonzero. |
+| `l::beta::rejected_wide_simple_plans_and_motion_walks_reuse_storage` | Non-simple imported function application; needs a unit entry fixture with reusable completion. |
+| `untagged_dispatch::ten_thousand_imported_fact_runs_use_only_reserved_unit_pools` | Switch-fact preparation in `State::new`; currently cold for each entry. |
+| `untagged_dispatch::metadata::canonical_encoding_reuses_buffers_for_ten_thousand_literals` | Variant literal preparation/dispatch; currently included in cold unit construction. |
+
+The additional `export::rows_and_references_are_read_without_allocation_once_the_tables_are_warm` measurement belongs to the explicitly unchanged export subsystem; it also does not prove allocation-free `complete_unit`. Step 6 remains outstanding.
+### Scope correction — step 6: corrected-head measurements and reproducibility
+
+Measured implementation: **`bbb2172b3`** (the final correction commit changes documentation only). Control: **`be1b3a482`**, the integrated trunk snapshot. Both binaries use **release fat LTO, one codegen unit**, rustc `1.102.0-nightly (ac8310ba6 2026-11-09)`. Cachegrind is 3.22.0; Hyperfine is 1.18.0. Both modes compile the same pinned `e5ada1df93` corpus, **738 modules**. Both complete sets of runtime/project `.res`/`.resi` paths and their hashes match: **925 files**. This supersedes the older candidate's measurements in §7.5.2; it is not a new 16-codegen-unit measurement.
+
+An initial comparison was discarded: the control directory had five additional source files (743 versus 738 modules). Checking only the known manifest's hashes had missed them. The reported runs use a separate exact copy of the pinned corpus and compare **path sets as well as bytes**.
+
+| Mode | Control minimum instructions | Corrected minimum instructions | Change | Gate |
+| --- | ---: | ---: | ---: | --- |
+| Default (`RESCRIPT_BACKEND` unset) | 4,054,425,367 | 4,052,624,269 | −1,801,098 (−0.044423%) | Pass: below +0.02% |
+| Check (`RESCRIPT_BACKEND=check`) | 20,598,024,416 | 20,127,912,150 | −470,112,266 (−2.282317%) | Measured separately |
+
+Five-run counts, in order:
+
+- Default control: 4,056,247,047; 4,055,773,576; 4,056,220,896; 4,054,425,367; 4,054,625,541.
+- Default corrected: 4,053,264,415; 4,055,238,432; 4,055,029,144; 4,054,865,040; 4,052,624,269.
+- Check control: 20,598,024,416; 20,599,425,884; 20,601,615,124; 20,605,243,035; 20,604,625,683.
+- Check corrected: 20,149,982,036; 20,152,362,854; 20,127,912,150; 20,137,919,836; 20,155,305,499.
+
+Wall time is not hidden behind the instruction result. Ten Hyperfine runs after two warmups, one worker, clean before each run:
+
+| Mode / binary | Mean ± standard deviation | Minimum–maximum |
+| --- | ---: | ---: |
+| Default / control | 0.790597 ± 0.041530 s | 0.728379–0.867935 s |
+| Default / corrected | 0.936360 ± 0.134663 s | 0.755327–1.171562 s |
+| Check / control | 1.936807 ± 0.334485 s | 1.760560–2.874819 s |
+| Check / corrected | 1.821763 ± 0.066696 s | 1.716106–1.917797 s |
+
+The default corrected wall-time mean is slower. Hyperfine also flagged a check-control outlier. No wall-time speedup or profile-independent improvement is claimed. The +0.02% instruction gate passes for the specified CI profile, not by waiving the threshold.
+
+#### Commands for the measurements
+
+Run from the repository root. `temp/lowering-trunk-control` is a source archive of `be1b3a482`; the two corpus directories are separate exact copies of the `e5ada1df93` corpus, including its dependency setup. Use fresh directories when preparing archives: extracting over another revision leaves extra source files behind. Build the control in its archive, without switching the working branch:
+
+```sh
+export CARGO_INCREMENTAL=0
+CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 cargo build --release --manifest-path temp/lowering-trunk-control/rewatch/Cargo.toml
+CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 cargo build --release --manifest-path rewatch/Cargo.toml
+BASE="$PWD/temp/lowering-trunk-control/rewatch/target/release/rescript"
+HEAD="$PWD/rewatch/target/release/rescript"
+B_CORPUS="$PWD/temp/lowering-correction-base-corpus"
+H_CORPUS="$PWD/temp/lowering-candidate-corpus"
+export B_CORPUS H_CORPUS
+python3 - <<'PY'
+import hashlib, os
+from pathlib import Path
+def sources(root):
+    return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
+            for sub in ['tests/tests', 'packages/@rescript/runtime']
+            for p in (root/sub).rglob('*') if p.suffix in ('.res', '.resi')}
+a, b = (sources(Path(os.environ[key])) for key in ['B_CORPUS', 'H_CORPUS'])
+assert a == b
+print(len(a))  # 925, and equal path sets rather than only matching known files
+PY
+env -u RESCRIPT_BACKEND python3 scripts/compare_build_instructions.py \
+  --base "$BASE" "$B_CORPUS" --head "$HEAD" "$H_CORPUS" \
+  --runs 5 --threshold 0.02 --work-dir temp/lowering-correction-default-exact
+RESCRIPT_BACKEND=check python3 scripts/compare_build_instructions.py \
+  --base "$BASE" "$B_CORPUS" --head "$HEAD" "$H_CORPUS" \
+  --runs 5 --threshold 0.02 --work-dir temp/lowering-correction-check-exact
+```
+
+The script prepares each runtime outside measurement, cleans before every measured build and sets `RAYON_NUM_THREADS=1` plus the side's runtime path. Its output includes every run, minimum, module count and percentage. Do not accept its result if module counts differ.
+
+```sh
+PREPARE="'$BASE' clean '$B_CORPUS/tests/tests' && '$HEAD' clean '$H_CORPUS/tests/tests'"
+for MODE in default check; do
+  if [ "$MODE" = default ]; then BACKEND='-u RESCRIPT_BACKEND'; else BACKEND='RESCRIPT_BACKEND=check'; fi
+  hyperfine --warmup 2 --runs 10 --prepare "$PREPARE" \
+    --export-json "temp/lowering-correction-$MODE-hyperfine.json" \
+    "env $BACKEND RAYON_NUM_THREADS=1 RESCRIPT_RUNTIME='$B_CORPUS/packages/@rescript/runtime' '$BASE' build '$B_CORPUS/tests/tests'" \
+    "env $BACKEND RAYON_NUM_THREADS=1 RESCRIPT_RUNTIME='$H_CORPUS/packages/@rescript/runtime' '$HEAD' build '$H_CORPUS/tests/tests'"
+done
+```
+
+For the **historical** §7.5.2 instruction/wall-time tables, use the same commands with archives/binaries of the revisions named there: `e5ada1df93` and `9de839339` at 16 codegen units for original/check timing, and `be1b3a482` and `9de839339` at respectively 16 or 1 codegen units for the two default comparisons. Keep the same pinned corpus; do not compare profiles against one another.
+
+#### Validation commands and result provenance
+
+The allocation totals, work counters and type sizes in the earlier proof tables are executable assertions in their named tests. To reproduce all BIR proof rows, run `cargo test --manifest-path compiler-rust/Cargo.toml bir:: -- --nocapture --test-threads=1` with `CARGO_INCREMENTAL=0`. The original rows describe the probe boundary; the new full-entry table is printed by `cargo test --manifest-path compiler-rust/Cargo.toml full_unit_allocation_boundary -- --nocapture --test-threads=1`. Planner metadata/fact-pool rows and differential counts use `cargo test --manifest-path compiler-rust/Cargo.toml untagged -- --nocapture --test-threads=1`. For historical rather than corrected layouts, run those commands in an archive of the row's recorded revision.
+
+Before file-backed compiler tests, build the OCaml reference and its artifacts. Benchmark/parity clean commands can remove dependency artifacts; regenerate them rather than skipping a failing corpus file:
+
+```sh
+export TMPDIR=/tmp CARGO_INCREMENTAL=0
+opam exec --switch=rescript -- dune build --root . compiler/bsc/rescript_compiler_main.exe compiler/syntax/cli/res_cli.exe
+export OCAML_BSC="$PWD/_build/default/compiler/bsc/rescript_compiler_main.exe"
+export RESCRIPT_RUNTIME="$PWD/packages/@rescript/runtime"
+export RESCRIPT_CLI="$PWD/rewatch/target/debug/rescript"
+cargo build --manifest-path compiler-rust/Cargo.toml
+cargo build --manifest-path rewatch/Cargo.toml
+"$RESCRIPT_CLI" build-reference --bsc "$OCAML_BSC" packages/@rescript/runtime
+"$RESCRIPT_CLI" build-reference --bsc "$OCAML_BSC" tests/dependencies/rescript-react
+"$RESCRIPT_CLI" build-reference --bsc "$OCAML_BSC" tests/tests
+cargo test --manifest-path compiler-rust/Cargo.toml -- --test-threads=1
+cargo test --manifest-path rewatch/Cargo.toml
+cargo clippy --manifest-path compiler-rust/Cargo.toml --all-targets -- -D warnings
+./scripts/test_js_output_parity.sh
+./scripts/test_stdlib_output_parity.sh
+GENTYPE_PARITY_WITHOUT_TELLA=1 ./scripts/test_gentype_output_parity.sh
+GENTYPE_PARITY_WITHOUT_TELLA=1 python3 scripts/test_backend_coverage.py --target debug
+```
+
+Corrected-head results: **2,462 compiler unit tests passed, 25 existing ignores; 4 integration tests; 5 doctests passed, 7 existing ignores**. The full run includes **771 BIR tests**. Rewatch: **210 unit + 9 integration tests passed**. Strict compiler clippy passed. Exact focused JS **472/472**, canonical snapshots **737/737**, stdlib **113/113**, in-repository GenType **2/2** and the unchanged backend coverage ratchet passed. No new ignores, fixture changes or ratchet updates. The corpus differential was rerun after regenerating reference artifacts and again reported **453 declarations / 850 source files**. External application results remain unmeasured.
+
+#### Correction status
+
+| Ordered step | Status | Evidence / remaining work |
+| --- | --- | --- |
+| 1. Default-path file audit | Done | Ten-file disposition table; unchanged trunk variant emitter. |
+| 2. Retained planner | Done | No production planner hash tables; borrowed payloads/selector; size/cost tests; verbatim test-only reference and corpus differential. |
+| 3. BIR maps/equality/invariants | Done | Dense handle remaps, documented non-index keys, explicit scratch, invariant accounting; all BIR tests pass. |
+| 4. Scratch lifecycle | Done | Saved span and production assertions; stale tail-name regression. |
+| 5. Full-unit zero-allocation proofs | **Not done** | Real entry measured, but 259–567 allocations remain; nine helper tests explicitly remain auxiliary. Requires reusable unit ownership, not moving the measurement boundary. |
+| 6. Commands/instruction gate | Done for CI profile | Both modes measured; default −0.044423% meets +0.02%; wall-time results and limitations disclosed. |
+
+**Keep the PR draft.** The passing performance/parity gates do not replace the outstanding full-unit allocation requirement.
+
+### S3.2d planner boundary correction
+
+The pooled untagged planner now lives under `bir/untagged_plan`; the legacy
+planner and its Lambda callers are unchanged from trunk. BIR owns the new
+metadata/graph pools and no longer constructs legacy emitter views or instances.
+The final CI-profile gate passes at +0.000768% default instructions; check mode
+is -2.561383%. See `LOWERING_ALLOCATION_SCALING.md`, final candidate section,
+for the raw five-pair tables and shared-file disposition. Earlier shared-planner
+measurements and descriptions in this history are superseded by that split.
