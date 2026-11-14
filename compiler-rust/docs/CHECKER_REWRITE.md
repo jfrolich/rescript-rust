@@ -2708,6 +2708,95 @@ skeleton; all three were the skeleton's, not the builder's.
       and a clash of the recursion repair. The second R3 skeleton turn adds
       an Explain-mode tier.
 
+Decided in the second skeleton turn, each with what was run. The harness
+additions are `differential::Plan` bits; every number below is one run of
+100 programs by 100 operation sequences on trunk `5bf0f4c121`.
+
+12. **The explaining mode agrees with the old checker, traces included**
+    (`Plan` bit `EXPLAIN`). Both sides run in the explaining mode, a failed
+    operation does not end the case, and the harness compares the trace pair
+    by pair (numbered with the operands) and the graph the failure leaves.
+    9,999 of 10,000 cases agree: 2,223 failing cases, 317 traces of more
+    than one pair. The graph after a failed unification does *not* always
+    print as before it: 2,215 failures leave it as it was and 503 do not,
+    on both sides alike, because a failure in this mode undoes path
+    compression and the descriptors of linked structures only
+    (btype.ml:792-800, ctype.ml:2437); a variable bound or two nullary
+    constructors linked before the clash stay
+    (`the_explained_trace_of_a_fixed_case`). The reversed trace below a
+    swapped unify3 (ctype.ml:2299-2303) is reached with a trace of two
+    pairs by seed 2000091
+    (`explain_reaches_the_reversed_trace_below_a_swapped_unify3`). A clash
+    while `create_recursion` holds (ctype.ml:2308) needs the node-building
+    operations of `BUILD` and is reached by seeds 2000018 and 13000074
+    (`explain_reaches_a_clash_with_the_recursion_repair_pending`); no case
+    of 10,000 fails inside the repair itself or below such a pair, because
+    the second expansion of a type that expanded a moment before can clash
+    only through a constrained parameter, and the generator declares none.
+    That path rests on reading (ctype.ml:2428-2436) and on
+    `recursion_repair_over_ten_thousand_elements_is_linear`.
+    Not classified: seed 35000137. After a failed unification of generic
+    operands the new side links a later instance's nullary constructor to
+    the node that unification memorized (a generic node); the old side
+    makes a fresh node. Neither `undo_compress` cleans a memo. Which of the
+    two OCaml does is not known; the seed is pinned in
+    `explain_plan_agrees_on_generated_cases`.
+    With `BUILD`, seven more seeds differ, all one cause: the old checker
+    lowers a type before the occurrence check of a binding fails, where
+    `unify1_var` checks first (ctype.ml:2216-2225); the new side follows
+    OCaml (decision 6). Read by hand for seeds 7000101 and 15000055.
+13. **Scoped types** (`Plan` bit `SCOPED`). A program declares three late
+    types whose scopes are one, two and three levels above the level the
+    case starts at; the old side binds them to local identifiers with the
+    next three stamps, the new side sets `TypeInfo::scope`. In
+    `Mode::Success` 9,996 of 10,000 cases agree (2,291 failing cases), and
+    removing the scopes from the new side is seen by generated cases
+    (`Fault::NoScopes`). The four seeds that differ:
+    - 16000145: two nullary constructors of one late abbreviation. The old
+      checker's shortcut lowers without the environment
+      (types/ctype.rs, `update_level(ctx, ..)` in the nullary case), so
+      the node keeps its name below its scope; OCaml's lowers with it
+      (`update_level !env t1.level t2`, ctype.ml:2255) and the node becomes
+      its expansion, as on the new side. A fault of the old checker.
+    - 49000200, 49000205 (and 49000183 with `BUILD`): the retry of
+      `update_level` runs `backtrack snap` (ctype.ml:638-639), which
+      forgets every memo (btype.ml:773-781), so the second pass expands to
+      new nodes and unify2's `t2` is no longer `t2'`: unify3 runs unswapped
+      and links the left expansion. The new side does that; the old side
+      links the other way. Derived from the source, not run on OCaml.
+    - 81000306: not classified.
+    These are reported, not fixed: the old checker is not changed in this
+    turn. `run_cases_except` pins the list so that a change on either side
+    is seen.
+14. **The recorded difference of R3d is observable: slice R3k corrects
+    it.** When the retry of a lowering clashes too, OCaml keeps the levels
+    the second pass wrote (ctype.ml:599, "Levels should be restored") and
+    raises `Unify [(ty, newvar2 level)]`; `unify1_var` then puts back the
+    variable's descriptor only (ctype.ml:2223-2225). R3d restores the
+    levels and has no pair. In `Mode::Success` nothing reads either. In the
+    explaining mode both are read: the escaping pair is the last pair of
+    the trace, which is where the "would escape its scope" text comes from,
+    and the levels decide what a later operation lowers and generalizes.
+    Generated evidence: with `EXPLAIN | SCOPED | BUILD`, 69 of 10,000 cases
+    differ; in seed 1000039 the levels kept at operation 10 decide what
+    operation 13 lowers. `old_checker_keeps_the_levels_of_a_failed_retry`
+    pins the old side today; `a_failed_retry_keeps_its_levels_in_the_
+    explaining_mode` is R3k's acceptance test (ignored, `R3k build`).
+    R3k, 60 lines in `expand.rs`: in `Checker::lower`, when the graph is in
+    `Mode::Explain` and no speculation whose owner restores is open, the
+    second pass runs without a speculation of its own (its writes stay)
+    and, on a clash, pushes `[escaping node, a new variable at the target
+    level]` on `Checker::trace` after the pairs the enclosing unification
+    adds. `Mode::Success` and a lowering inside an owner's speculation are
+    unchanged (the owner restores). Cost: none in `Mode::Success` (one
+    compare of the mode on the clash path only).
+15. **Decision 8 is reached by the generator** (`Plan` bit `BUILD`:
+    `Op::Var`, `Op::Tuple`, `Op::Child`, and after an `EndDef` a tuple of
+    two operands, a variable and their unification). 10,000 cases agree in
+    `Mode::Success`. A new side that lowers every node above the variable's
+    level, with no cut (`Fault::UnprunedBinding`, what the first build of
+    R3a did), is reported by 111 of them.
+
 ## 9. R4 as designed
 
 Section 6.5 gave R4 as one slice of seven commits. It is replaced by this
