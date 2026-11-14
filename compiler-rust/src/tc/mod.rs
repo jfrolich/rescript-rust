@@ -38,5 +38,16 @@ pub mod bridge;
 
 pub mod canonical;
 
+// R3 skeleton: each build slice removes the allowance from the module it
+// completes (CHECKER_REWRITE.md, "R3 as designed").
+#[allow(dead_code, unused_variables)]
+pub mod expand;
+#[allow(dead_code, unused_variables)]
+pub mod relate;
+#[allow(dead_code, unused_variables)]
+pub mod rows;
+#[allow(dead_code, unused_variables)]
+pub mod unify;
+
 #[cfg(test)]
 mod differential;
