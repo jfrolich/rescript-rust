@@ -346,6 +346,11 @@ impl<A> Default for Plan<A> {
 }
 
 impl<A> Plan<A> {
+    /// O(1): reserve the simplifier's pending-tree stack before planning.
+    pub(crate) fn reserve_simplify_work(&mut self, trees: usize) {
+        self.simplify_work.reserve_exact(trees);
+    }
+
     /// O(1): initial tree capacity supplied by the unit's imported arm domain.
     pub(crate) fn reserve_trees(&mut self, trees: usize) {
         self.trees.reserve_exact(trees);

@@ -195,6 +195,7 @@ pub(super) fn prepare(arena: &mut Bir) -> (Storage, dispatch::Plan<u32>) {
     // These are capacities, not a rejection bound on larger expansions.
     let graph_nodes = 4 * (literals + payloads) + 16 * variants;
     graph.reserve_trees(graph_nodes);
+    graph.reserve_simplify_work(graph_nodes);
     let fact_literals = arena.pools.switches.iter().filter_map(|header| {
         if let SwitchDispatch::Variant(facts) = &header.dispatch { Some(facts.literal_tags.iter()) }
         else { None }
