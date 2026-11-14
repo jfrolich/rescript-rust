@@ -582,8 +582,16 @@ impl New {
             Op::BeginDef => self.checker.g.begin_def(),
             Op::EndDef => self.checker.g.end_def(),
             Op::Generalize(operand) => {
+                // From the tier that has a memo, a generalization forgets
+                // the nullary memo first (compiler/ml/ctype.ml:519), as the
+                // old side's `ctype::generalize` does.
                 if fault != Fault::SkipGeneralize {
-                    self.checker.g.generalize(self.operands[operand as usize]);
+                    let ty = self.operands[operand as usize];
+                    if self.tier.memo_aware() {
+                        self.checker.generalize(ty);
+                    } else {
+                        self.checker.g.generalize(ty);
+                    }
                 }
             }
             Op::Lower(operand, level) => {

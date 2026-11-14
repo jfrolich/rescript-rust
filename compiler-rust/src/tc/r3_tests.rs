@@ -720,6 +720,46 @@ fn a_copy_of_a_nullary_constructor_links_to_the_memorized_node() {
     assert_ne!(first, second);
 }
 
+/// `simple_abbrevs () := Mnil` (compiler/ml/ctype.ml:519, 543): a
+/// generalization forgets the nullary memo, so a later copy of a nullary
+/// constructor is its own node again. `Graph::generalize` alone forgets
+/// nothing (the test above relies on it).
+#[test]
+fn a_generalization_forgets_the_nullary_memo() {
+    for structure in [false, true] {
+        let mut c = checker(Mode::Success);
+        let f = scheme(&mut c, |c| {
+            let (x, y) = (constr(c, A, &[]), constr(c, A, &[]));
+            arrow(c, &[x], y)
+        });
+        let first = c.instance(f);
+        let r1 = Ty(c.g.nodes[first.0 as usize].a);
+        c.expand_head(r1, ExpandMode::Safe).unwrap();
+        let second = c.instance(f);
+        let shared = Ty(c.g.nodes[second.0 as usize].a);
+        assert_eq!(c.g.repr(shared), r1);
+        assert_ne!(c.memo.live, 0);
+        let generation = c.memo.generation;
+        let root = var(&mut c);
+        if structure {
+            let level = c.g.level;
+            c.generalize_structure(root, level);
+        } else {
+            c.generalize(root);
+        }
+        assert_eq!(c.memo.live, 0);
+        assert_eq!(c.memo.generation, generation + 1);
+        let third = c.instance(f);
+        let result = Ty(c.g.nodes[third.0 as usize].a);
+        assert_eq!(c.g.repr(result), result);
+        assert_ne!(result, r1);
+        // With no live row a generalization leaves the generation alone.
+        let root = var(&mut c);
+        c.generalize(root);
+        assert_eq!(c.memo.generation, generation + 1);
+    }
+}
+
 /// Decision 4: with an empty nullary memo the memo-aware instance is R1's
 /// instance: the same nodes, the same steps.
 #[test]

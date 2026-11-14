@@ -346,6 +346,42 @@ impl Checker {
         self.memo.live = 0;
     }
 
+    /// O(1): forget the nullary memo and nothing else: no slot-0 memo is
+    /// touched and no row is read. `simple_abbrevs () := Mnil`, the first
+    /// step of every generalization (compiler/ml/ctype.ml:519, 543, 668).
+    /// The generation advances only when a row is live, so generalizations
+    /// that follow no nullary expansion cost one load and one untaken
+    /// branch and never exhaust the generation. Not logged in the trail, as
+    /// the memo is not. (R3b)
+    #[inline]
+    pub fn forget_simple_memo(&mut self) {
+        if self.memo.live != 0 {
+            self.memo.generation = self
+                .memo
+                .generation
+                .checked_add(1)
+                .expect("memo generation exhausted");
+            self.memo.live = 0;
+        }
+    }
+
+    /// [`Checker::forget_simple_memo`], then `Graph::generalize`: its cost
+    /// plus O(1). `generalize`, compiler/ml/ctype.ml:518-520. Every
+    /// generalization of the checker goes through here; `Graph::generalize`
+    /// alone is the kernel's walk and forgets nothing. (R3b)
+    pub fn generalize(&mut self, root: Ty) {
+        self.forget_simple_memo();
+        self.g.generalize(root);
+    }
+
+    /// [`Checker::forget_simple_memo`], then `Graph::generalize_structure`:
+    /// its cost plus O(1). `generalize_structure`,
+    /// compiler/ml/ctype.ml:542-544. (R3b)
+    pub fn generalize_structure(&mut self, root: Ty, var_level: u32) {
+        self.forget_simple_memo();
+        self.g.generalize_structure(root, var_level);
+    }
+
     /// O(1): the memorized expansion of constructor node `ty` for a public
     /// (`private == false`) or private lookup, or `NONE`. One node load, then
     /// one list load (arguments) or one `simple` row load (nullary).
