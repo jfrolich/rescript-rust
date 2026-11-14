@@ -17,12 +17,11 @@
 //! signature itself prints a published unit, without levels and with links
 //! followed, and cannot print an operand that is not generic.
 //!
-//! Variable names are part of the form in every tier but `Kernel`: the old
-//! checker's `instance` drops a variable's name (`copy_type_desc`,
-//! compiler/ml/btype.ml:510) and R1's `Graph::instance` and `Graph::copy`
-//! keep it. The harness found that; slice R3b corrects it, and until then
-//! the kernel tier prints no names (`r3_tests::instance_drops_variable_names`
-//! is the test that compares them).
+//! Variable names are part of the form in every tier: the old checker's
+//! `instance` drops a variable's name (`copy_type_desc`,
+//! compiler/ml/btype.ml:510), and so do `Graph::instance` and `Graph::copy`
+//! since slice R3b (`r3_tests::instance_drops_variable_names` is the test
+//! that compares them).
 //!
 //! A failed unification ends the case: what a failed unification leaves in
 //! the graph is not observable (CHECKER_REWRITE "R3 as designed", decision
@@ -93,7 +92,7 @@ impl Tier {
 
     /// O(1): whether the form prints variable names (see the module text).
     fn names(self) -> bool {
-        self != Tier::Kernel
+        true
     }
 }
 
