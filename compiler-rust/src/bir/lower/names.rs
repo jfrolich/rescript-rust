@@ -26,7 +26,7 @@
 //!
 //! Nothing here is called by the lowering yet (slice T5b-3); the module is
 //! compiled for tests only until then.
-use crate::bir::{Bir, FuncId, ImportId, NodeId, VarId};
+use crate::bir::{Bir, FuncId, ImportId, NodeId, Op, VarId};
 use crate::emit::{Printed, Subject, Tables};
 use crate::name::Name;
 
@@ -541,6 +541,8 @@ pub(crate) struct Scratch {
     frames: Vec<Frame>,
     /// The reservation of the function being entered.
     reservation: Vec<Subject>,
+    /// The spelling of a cached bound's base, reused.
+    spelling: String,
 }
 
 /// What one replay did.
@@ -607,8 +609,356 @@ pub(crate) fn replay(
     scratch: &mut Scratch,
     printed: &mut Printed,
 ) -> Replayed {
-    let _ = (bir, root, idents, program, tables, scratch, printed);
-    todo!("T5b-2")
+    let scope = bir.js_scope.as_ref().expect("lowering scope");
+    let log = &scope.names;
+    let variables = bir.vars.len();
+    let imports = bir.pools.j_modules.len();
+    tables.begin(variables + imports, program.raw);
+    printed.names.clear();
+    printed.names.resize(variables, None);
+    printed.modules.clear();
+    printed.modules.resize(imports, None);
+    printed.finishes.clear();
+    let mut replay = Replay { bir, idents, log, tables, scratch, printed, done: Replayed::default() };
+    replay.prelude();
+    for &import in program.imports {
+        replay.name_import(import);
+    }
+    for &subject in program.reservations {
+        replay.tables.reserve(subject);
+        if subject.stamp != 0 && (subject.slot as usize) < variables {
+            replay.printed.names[subject.slot as usize] = Some(replay.tables.add(subject));
+        }
+    }
+    replay.statements(root);
+    for &var in program.exports {
+        replay.name(var);
+    }
+    // A use names nothing here: a variable that is referenced and has no
+    // name is one the pass would have named at the use.
+    for var in 0..variables {
+        let referenced = scope.uses.get(var).is_some_and(|uses| uses.remaining > 0);
+        if referenced && replay.printed.names[var].is_none() && replay.subject(VarId(var as u32)).is_some_and(|s| s.stamp != 0) {
+            replay.done.unnamed_references += 1;
+        }
+    }
+    replay.done
+}
+
+/// A frame's `at` while it reads its statement's function literals: this
+/// bit and the row; without it, the index of the next child list.
+const LITERAL: u32 = 1 << 31;
+
+/// The state of one `replay`.
+struct Replay<'a, 'b> {
+    bir: &'a Bir,
+    idents: &'a [crate::ident::Ident],
+    log: &'a Log,
+    tables: &'b mut Tables,
+    scratch: &'b mut Scratch,
+    printed: &'b mut Printed,
+    done: Replayed,
+}
+
+impl Replay<'_, '_> {
+    /// Attach each closed, live row to the statement its literal stands in
+    /// (see `replay`). One step per row and per ancestor read; an ancestor
+    /// is read once on the first walk and once when it is marked.
+    fn prelude(&mut self) {
+        let (bir, scratch) = (self.bir, &mut *self.scratch);
+        scratch.marks.clear();
+        scratch.marks.resize(bir.nodes.len(), 0);
+        scratch.next.clear();
+        scratch.next.resize(self.log.rows.len(), 0);
+        for row in (1..self.log.rows.len()).rev() {
+            self.done.scopes += 1;
+            let info = self.log.rows[row];
+            if info.flags & ScopeRow::CLOSED == 0 {
+                continue;
+            }
+            let Some(literal) = bir.func_owners.get(info.function.index()).copied().flatten() else { continue };
+            // The first walk: up to a statement or a marked expression.
+            let mut at = bir.parents[literal.index()];
+            let (stop, statement) = loop {
+                let Some(node) = at else { break (None, None) };
+                self.done.ancestors += 1;
+                if is_statement(bir.nodes[node.index()].op()) {
+                    break (Some(node), Some(node));
+                }
+                let mark = scratch.marks[node.index()];
+                if mark != 0 {
+                    break (Some(node), Some(NodeId(mark - 1)));
+                }
+                at = bir.parents[node.index()];
+            };
+            let (Some(stop), Some(statement)) = (stop, statement) else { continue };
+            // The second walk marks the expressions passed on the first.
+            let mut node = bir.parents[literal.index()].expect("read on the first walk");
+            while node != stop {
+                self.done.ancestors += 1;
+                scratch.marks[node.index()] = statement.0 + 1;
+                node = bir.parents[node.index()].expect("read on the first walk");
+            }
+            scratch.next[row] = scratch.marks[statement.index()];
+            scratch.marks[statement.index()] = row as u32 + 1;
+        }
+    }
+
+    /// The statements of the block `root` and everything below them, one
+    /// frame per open list.
+    fn statements(&mut self, root: NodeId) {
+        self.scratch.frames.clear();
+        self.scratch.frames.push(Frame { statement: root, at: 0, leave: ScopeId::NONE.0 });
+        while let Some(&frame) = self.scratch.frames.last() {
+            if frame.at & LITERAL != 0 {
+                let row = frame.at & !LITERAL;
+                let next = self.scratch.next[row as usize];
+                self.scratch.frames.last_mut().expect("the frame read").at = if next == 0 { 0 } else { LITERAL | (next - 1) };
+                self.literal(row, frame.statement);
+                continue;
+            }
+            let Some(child) = self.child(frame.statement, frame.at) else {
+                self.scratch.frames.pop();
+                if frame.leave != ScopeId::NONE.0 {
+                    self.tables.leave();
+                }
+                continue;
+            };
+            self.scratch.frames.last_mut().expect("the frame read").at += 1;
+            let in_list = self.bir.nodes[frame.statement.index()].op() == Op::SBlock;
+            if in_list {
+                self.done.statements += 1;
+            }
+            self.statement(child);
+        }
+    }
+
+    /// Child list `index` of `statement` in print order, or a statement of
+    /// a block; for a `try`, its catch variable is named before its handler.
+    /// Constant.
+    fn child(&mut self, statement: NodeId, index: u32) -> Option<NodeId> {
+        use crate::bir::View;
+        let i = index as usize;
+        match self.bir.view(statement) {
+            View::SBlock { statements } => statements.get(i).copied(),
+            View::SIf { then_, else_, .. } => match i {
+                0 => Some(then_),
+                1 => else_,
+                _ => None,
+            },
+            View::SWhile { body, .. } => (i == 0).then_some(body),
+            View::SForRange { parts, .. }
+            | View::SForRangeExisting { parts, .. }
+            | View::SForOf { parts, .. }
+            | View::SForAwaitOf { parts, .. } => (i == 0).then(|| parts[parts.len() - 1]),
+            View::STry { parts, exception } => {
+                if i == 1
+                    && let Some(var) = exception
+                {
+                    self.name(var);
+                }
+                parts.get(i).copied()
+            }
+            View::SSwitch { actions, .. } => actions.get(i).copied(),
+            _ => None,
+        }
+    }
+
+    /// Reach `statement`: name its binders and open its frame, which reads
+    /// its function literals, then its child lists.
+    fn statement(&mut self, statement: NodeId) {
+        use crate::bir::View;
+        let bir = self.bir;
+        match bir.view(statement) {
+            View::SDecl { var, value } => {
+                // A function literal as the value names the binder with its
+                // reservation (`literal`).
+                if !value.is_some_and(|value| self.closed_literal(value)) {
+                    self.name(var);
+                }
+            }
+            View::SRest { var, info, .. } => {
+                if let crate::bir::JsPayload::Rest(fields) = bir.javascript(info) {
+                    for field in fields {
+                        if let Some(binding) = field.binding {
+                            self.name(binding);
+                        }
+                    }
+                }
+                self.name(var);
+            }
+            View::SForRange { var, parts, .. } => {
+                self.name(var);
+                self.finish(var, parts[parts.len() - 2]);
+            }
+            View::SForRangeExisting { variable, parts, .. } => {
+                if let View::Var { var } = bir.view(variable) {
+                    self.finish(var, parts[parts.len() - 2]);
+                }
+            }
+            View::SForOf { var, .. } | View::SForAwaitOf { var, .. } => self.name(var),
+            _ => {}
+        }
+        let first = self.scratch.marks[statement.index()];
+        let at = if first == 0 { 0 } else { LITERAL | (first - 1) };
+        self.scratch.frames.push(Frame { statement, at, leave: ScopeId::NONE.0 });
+    }
+
+    /// Whether `node` is a function literal with a closed row.
+    fn closed_literal(&self, node: NodeId) -> bool {
+        use crate::bir::View;
+        let View::JFun { header, .. } = self.bir.view(node) else { return false };
+        self.log.scope(header).is_some_and(|scope| self.log.rows[scope.0 as usize].flags & ScopeRow::CLOSED != 0)
+    }
+
+    /// The cached bound of a range loop over `var`, when the bound `end` is
+    /// neither a number nor a reference (`walk::finish_binding`).
+    fn finish(&mut self, var: VarId, end: NodeId) {
+        if matches!(self.bir.nodes[end.index()].op(), Op::JNumber | Op::Var | Op::JQualified) {
+            return;
+        }
+        let Some(subject) = self.subject(var) else { return };
+        let spelling = &mut self.scratch.spelling;
+        spelling.clear();
+        spelling.push_str(crate::js_ir::printer::convert_ident_atom(subject.name).as_str());
+        spelling.push_str("_finish");
+        let name = self.tables.synthetic(Name::new(spelling));
+        self.printed.finishes.push(name);
+    }
+
+    /// The function literal of `row`, standing in `statement`: its
+    /// reservation, its scope, its parameters and its body's frame.
+    fn literal(&mut self, row: u32, statement: NodeId) {
+        use crate::bir::View;
+        let bir = self.bir;
+        let info = self.log.rows[row as usize];
+        let node = bir.func_owners[info.function.index()].expect("an attached row is live");
+        let binder = match bir.view(statement) {
+            View::SDecl { var, value: Some(value) } if value == node => Some(var),
+            _ => None,
+        };
+        let eta = info.flags & ScopeRow::ETA != 0;
+        if eta && let Some(binder) = binder {
+            self.name(binder);
+        }
+        // More than one literal in the statement: the order of the
+        // reservations is the closing order, not a print order.
+        let first = self.scratch.marks[statement.index()] - 1;
+        let several = self.scratch.next[first as usize] != 0;
+        self.scratch.reservation.clear();
+        let mut pending = binder.map(FreeRef::var);
+        let log = self.log;
+        for &entry in log.free(ScopeId(row)) {
+            if let Some(own) = pending {
+                match ident_order(bir, own, entry) {
+                    std::cmp::Ordering::Less => {
+                        self.reserve(own, several);
+                        pending = None;
+                    }
+                    std::cmp::Ordering::Equal => pending = None,
+                    std::cmp::Ordering::Greater => {}
+                }
+            }
+            self.reserve(entry, several);
+        }
+        if let Some(own) = pending {
+            self.reserve(own, several);
+        }
+        if let Some(binder) = binder {
+            self.name(binder);
+        }
+        self.tables.enter(&self.scratch.reservation);
+        if eta {
+            self.tables.leave();
+            return;
+        }
+        let header = bir.function(info.function);
+        let method = header.flags & crate::bir::FuncHeader::METHOD != 0;
+        for i in 0..header.params.len() {
+            if i == 0 && method && info.flags & ScopeRow::THIS_USED == 0 {
+                continue;
+            }
+            self.name(bir.function_parameter(info.function, i));
+        }
+        let View::JFun { body, .. } = bir.view(node) else { unreachable!("a row's node is a function literal") };
+        self.scratch.frames.push(Frame { statement: body, at: 0, leave: row });
+    }
+
+    /// Reserve one entry of a literal's reservation and keep it for
+    /// `Tables::enter`. One step.
+    fn reserve(&mut self, entry: FreeRef, several: bool) {
+        let subject = match (entry.as_var(), entry.as_import()) {
+            (Some(var), _) => self.subject(var),
+            (None, Some(import)) => Some(self.import_subject(import)),
+            (None, None) => unreachable!("a free entry is a variable or an import"),
+        };
+        let Some(subject) = subject else { return };
+        self.done.reserved += 1;
+        if self.tables.reserve(subject) && several {
+            self.done.ambiguous_orders += 1;
+        }
+        self.scratch.reservation.push(subject);
+        if subject.stamp == 0 {
+            return;
+        }
+        match (entry.as_var(), entry.as_import()) {
+            (Some(var), _) => self.printed.names[var.index()] = Some(self.tables.add(subject)),
+            (None, Some(import)) => self.printed.modules[import.index()] = Some(self.tables.add_module(subject)),
+            (None, None) => {}
+        }
+    }
+
+    /// Name the binder `var` in the current scope (`Tables::add`).
+    fn name(&mut self, var: VarId) {
+        if let Some(subject) = self.subject(var) {
+            self.printed.names[var.index()] = Some(self.tables.add(subject));
+        }
+    }
+
+    /// Name an imported module in the program (`Tables::add_module`).
+    fn name_import(&mut self, import: ImportId) {
+        let subject = self.import_subject(import);
+        self.printed.modules[import.index()] = Some(self.tables.add_module(subject));
+    }
+
+    /// The identifier `var` prints as: its origin's. None for a variable
+    /// without an identifier.
+    fn subject(&self, var: VarId) -> Option<Subject> {
+        let origin = self.bir.vars.j_origin[var.index()];
+        let ident = self.idents.get(origin.index())?;
+        Some(Subject { slot: origin.0, stamp: ident.stamp(), name: ident.name_atom() })
+    }
+
+    /// The identifier of an imported module; its slot follows the
+    /// variables'.
+    fn import_subject(&self, import: ImportId) -> Subject {
+        let id = &self.bir.pools.j_modules[import.index()].id;
+        Subject { slot: index(self.bir.vars.len() + import.index()), stamp: id.stamp(), name: id.name_atom() }
+    }
+}
+
+/// Whether nodes of `op` are statements. Constant.
+fn is_statement(op: Op) -> bool {
+    matches!(
+        op,
+        Op::SBlock
+            | Op::SDecl
+            | Op::SExp
+            | Op::SIf
+            | Op::SWhile
+            | Op::SForRangeExisting
+            | Op::SForRange
+            | Op::SForOf
+            | Op::SForAwaitOf
+            | Op::SSwitch
+            | Op::SReturn
+            | Op::SThrow
+            | Op::STry
+            | Op::SBreak
+            | Op::SContinue
+            | Op::SDebugger
+            | Op::SRest
+    )
 }
 
 /// The free lists of the live rows that are no copies, as identifiers, for
@@ -816,7 +1166,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-2 build"]
     fn a_function_nested_in_a_function_inherits_the_names_of_the_outer_local_it_captures() {
         let (mut u, statement, _, [v, inner]) = nested(true);
         let (names, replayed) = u.names(&[statement], &[]);
@@ -860,7 +1209,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-2 build"]
     fn a_recursive_inner_function_reserves_nothing_in_the_program() {
         let (mut u, statements, _, [g, top]) = recursive();
         let (names, _) = u.names(&statements, &[]);
@@ -901,7 +1249,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-2 build"]
     fn the_this_of_a_method_is_named_only_when_the_body_reads_it() {
         for used in [false, true] {
             let mut u = Unit::new();
@@ -958,7 +1305,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-2 build"]
     fn a_statement_is_named_where_it_stands_at_the_end() {
         // Gap 2 and section 2's second hard example: two declarations of
         // one base, built first then second. Names follow the final list,
@@ -986,7 +1332,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-2 build"]
     fn a_local_takes_the_name_of_an_outer_variable_the_function_does_not_capture() {
         // Section 2, first hard example:
         // `let y = null; let k = a => { let y' = [a]; return [y'] };
@@ -1035,7 +1380,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-2 build"]
     fn two_function_literals_of_one_statement_are_replayed_in_closing_order_and_counted() {
         // The literal that closed first names its variable `a` (the pass:
         // the literal printed first, `emit::naming`,
@@ -1051,7 +1395,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-2 build"]
     fn two_variables_first_named_by_one_reservation_are_named_in_order() {
         // Section 2, third hard example: `let f = () => [v', v]; let v =
         // null; let v' = null`. The reservation of `f` names both, in
@@ -1073,7 +1416,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-2 build"]
     fn a_suffix_skips_a_raw_javascript_name_of_the_program() {
         // Gap 3.
         let mut u = Unit::new();
@@ -1232,7 +1574,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-2 build"]
     fn the_fresh_parameter_of_a_partial_application_does_not_take_the_name_of_an_adopted_local() {
         // `emit::naming`,
         // `a_function_inherits_the_names_of_what_an_expression_moved_into_it_reads`.
@@ -1288,7 +1629,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-2 build"]
     fn a_function_literal_inside_an_adopted_expression_is_replayed_where_it_stands() {
         // The literal stands in the expansion's `return`: its scope is
         // entered inside the expansion's and inherits the names of `v`.
@@ -1410,7 +1750,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-2 build"]
     fn the_replay_is_linear_in_statements_and_rows() {
         let run = |count: usize| {
             let (mut u, statements) = functions(count);
@@ -1430,7 +1769,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-2 build"]
     fn a_warm_replay_of_a_unit_with_functions_allocates_nothing() {
         // Gap 3: entering a function and assigning a suffixed name in an
         // inherited group allocate nothing once the tables are warm.
@@ -1448,7 +1786,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-2 build"]
     fn ten_thousand_literals_on_one_spine_read_each_ancestor_at_most_twice() {
         // `[f1, [f2, [f3, ...]]]` in one statement: literal `k` is `k`
         // arrays below its statement. Each array is read once on the way up

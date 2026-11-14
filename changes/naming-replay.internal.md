@@ -1,0 +1,1 @@
+- Backend naming log: build the replay (`names::replay`) that assigns printed names from the final statement lists and the scope rows of the log.
