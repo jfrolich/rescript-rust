@@ -10,9 +10,17 @@ use super::view::View;
 use crate::tc::graph::NONE;
 use crate::tc::segment::{
     AttributePayloadRow, BlockTypeRow, ConstantArgumentRow, ExternalKindRow, FfiAttributeRow,
-    FfiLabelRow, FfiRow, InlineConstantRow, LiteralRow, ModuleSourceRow, PrimitiveKindRow, Range,
+    FfiLabelRow, FfiRow, InlineConstantRow, LiteralRow, LongidentRow, ModuleSourceRow, PrimitiveKindRow, Range,
     ReturnWrapperRow, RuntimeConstructorRow, SemanticStringValue, StringPair,
 };
+
+/// The two existing longident contracts differ only in unresolved spelling
+/// and whether an application is accepted by the consumer.
+#[derive(Clone, Copy)]
+pub(super) enum LongidentStyle {
+    Printed,
+    Structural,
+}
 
 /// `{:?}` of a `&str`.
 fn quoted(out: &mut String, text: &str) {
@@ -20,6 +28,45 @@ fn quoted(out: &mut String, text: &str) {
 }
 
 impl View<'_> {
+    /// O(components + output bytes), one explicit stack shared by both sections.
+    /// Printed follows Longident.flatten (no applications, raw #index names);
+    /// structural follows canonical_sig.write_longident (<unresolved> names).
+    pub(super) fn write_longident(&self, out: &mut String, lid: u32, style: LongidentStyle) {
+        enum Step { Row(u32), Char(char), Name(u32), Unresolved(u32) }
+        let mut work: smallvec::SmallVec<[Step; 8]> = smallvec::smallvec![Step::Row(lid)];
+        while let Some(step) = work.pop() {
+            match step {
+                Step::Char(c) => out.push(c),
+                Step::Name(name) => out.push_str(self.str(name)),
+                Step::Unresolved(raw) => match style {
+                    LongidentStyle::Printed => { write!(out, "#{raw}").expect("writing a string"); }
+                    LongidentStyle::Structural => out.push_str("<unresolved>"),
+                },
+                Step::Row(row) => match self.longident(row) {
+                    LongidentRow::Ident(name) => work.push(Step::Name(name)),
+                    LongidentRow::Unresolved(raw) => work.push(Step::Unresolved(raw)),
+                    LongidentRow::Dot { parent, name } => {
+                        work.push(Step::Name(name));
+                        work.push(Step::Char('.'));
+                        work.push(Step::Row(parent));
+                    }
+                    LongidentRow::UnresolvedDot { parent, raw } => {
+                        work.push(Step::Unresolved(raw));
+                        work.push(Step::Char('.'));
+                        work.push(Step::Row(parent));
+                    }
+                    LongidentRow::Apply { functor, argument } => {
+                        assert!(matches!(style, LongidentStyle::Structural), "Longident.flat");
+                        work.push(Step::Char(')'));
+                        work.push(Step::Row(argument));
+                        work.push(Step::Char('('));
+                        work.push(Step::Row(functor));
+                    }
+                },
+            }
+        }
+    }
+
     /// `{:?}` of a string of the pool.
     fn q(&self, out: &mut String, index: u32) {
         quoted(out, self.str(index));
@@ -492,5 +539,39 @@ fn return_wrapper_name(wrapper: ReturnWrapperRow) -> &'static str {
         ReturnWrapperRow::Identity => "ReturnIdentity",
         ReturnWrapperRow::NullToOption => "ReturnNullToOpt",
         ReturnWrapperRow::NullUndefinedToOption => "ReturnNullUndefinedToOpt",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tc::segment::Segment;
+
+    #[test]
+    fn shared_longident_walk_preserves_both_rendering_contracts() {
+        let mut segment = Segment::default();
+        segment.signature.bytes = Box::from(*b"AB");
+        segment.signature.strings = Box::new([
+            Range { start: 0, len: 1 }, Range { start: 1, len: 1 },
+        ]);
+        segment.signature.longidents = Box::new([
+            LongidentRow::Ident(0),
+            LongidentRow::Dot { parent: 0, name: 1 },
+            LongidentRow::Unresolved(17),
+            LongidentRow::UnresolvedDot { parent: 1, raw: 9 },
+            LongidentRow::Apply { functor: 0, argument: 3 },
+        ]);
+        let view = View::new(&segment);
+        for (row, style, expected) in [
+            (1, LongidentStyle::Printed, "A.B"),
+            (2, LongidentStyle::Printed, "#17"),
+            (3, LongidentStyle::Printed, "A.B.#9"),
+            (3, LongidentStyle::Structural, "A.B.<unresolved>"),
+            (4, LongidentStyle::Structural, "A(A.B.<unresolved>)"),
+        ] {
+            let mut text = String::new();
+            view.write_longident(&mut text, row, style);
+            assert_eq!(text, expected);
+        }
     }
 }

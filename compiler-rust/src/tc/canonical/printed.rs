@@ -13,13 +13,14 @@ use std::fmt::Write as _;
 use std::hash::BuildHasher as _;
 
 use super::doc::{D, Docs};
+use super::text::LongidentStyle;
 use super::normalize::{ObjectField, is_row_name};
 use super::view::{Desc, Graph, Marks, N, Slots};
 use crate::fast_hash::AHashMap;
 use crate::tc::graph::{GENERIC, NONE};
 use crate::tc::segment::{
     AttributePayloadRow, DeclarationKind, ExtensionStatus, ExternalKindRow, FfiRow,
-    InlineConstantRow, ItemStatus, LiteralRow, LongidentRow, ModuleSourceRow, ModuleTypeRow,
+    InlineConstantRow, ItemStatus, LiteralRow, ModuleSourceRow, ModuleTypeRow,
     PathRow, PrimitiveKindRow, Range, RecStatus, ReturnWrapperRow, RowFieldKind,
     RuntimeConstructorRow, SemanticStringValue, SignatureKind,
 };
@@ -1175,7 +1176,7 @@ impl<'g, 's> Printed<'g, 's> {
                 for i in 0..package.longidents.len {
                     let lid = self.g.v.p.indices[(package.longidents.start + i) as usize];
                     name.clear();
-                    self.flatten_longident(&mut name, lid);
+                    self.g.v.write_longident(&mut name, lid, LongidentStyle::Printed);
                     let doc = self.docs.text(&name);
                     self.dpool.push(doc);
                 }
@@ -1605,45 +1606,6 @@ impl<'g, 's> Printed<'g, 's> {
         let open = self.text("(");
         let close = self.text(")");
         self.docs.concat(&[module, open, head, package, close])
-    }
-
-    /// O(components): `Longident.flatten` joined with dots. Unresolved
-    /// components retain their raw diagnostic spelling (printtyp.rs:1561).
-    fn flatten_longident(&self, out: &mut String, lid: u32) {
-        let mut parts: smallvec::SmallVec<[(u32, bool); 8]> = smallvec::SmallVec::new();
-        let mut current = lid;
-        loop {
-            match self.g.v.longident(current) {
-                LongidentRow::Ident(name) => {
-                    parts.push((name, true));
-                    break;
-                }
-                LongidentRow::Unresolved(raw) => {
-                    parts.push((raw, false));
-                    break;
-                }
-                LongidentRow::UnresolvedDot { parent, raw } => {
-                    parts.push((raw, false));
-                    current = parent;
-                }
-                LongidentRow::Dot { parent, name } => {
-                    parts.push((name, true));
-                    current = parent;
-                }
-                // `Longident.flat` rejects an application.
-                LongidentRow::Apply { .. } => unreachable!("Longident.flat"),
-            }
-        }
-        for (index, &(part, resolved)) in parts.iter().rev().enumerate() {
-            if index > 0 {
-                out.push('.');
-            }
-            if resolved {
-                out.push_str(self.g.v.str(part));
-            } else {
-                write!(out, "#{part}").expect("writing to a string");
-            }
-        }
     }
 
     // ------------------------------------------------------------------

@@ -5,9 +5,10 @@
 use std::fmt::Write as _;
 
 use super::view::{Desc, Graph, N};
+use super::text::LongidentStyle;
 use crate::tc::graph::{GENERIC, NONE};
 use crate::tc::segment::{
-    ConstructorArgumentsRow, DeclarationKind, ExtensionStatus, ItemStatus, LongidentRow,
+    ConstructorArgumentsRow, DeclarationKind, ExtensionStatus, ItemStatus,
     ModuleTypeRow, PathRow, Range, RecStatus, RecordRepresentationRow, RowFieldKind, ShapeRow,
     SignatureKind,
 };
@@ -942,7 +943,7 @@ impl<'g, 's> Items<'g, 's> {
                     for i in 0..count {
                         text.push_str(" with ");
                         let lid = self.g.v.p.indices[(package.longidents.start + i) as usize];
-                        self.write_longident(&mut text, lid);
+                        self.g.v.write_longident(&mut text, lid, LongidentStyle::Structural);
                         text.push_str(" = ");
                         child!(self.g.slot(args, i));
                     }
@@ -958,46 +959,7 @@ impl<'g, 's> Items<'g, 's> {
         self.text = text;
     }
 
-    /// O(components), one explicit stack: types/canonical_sig.rs
-    /// `write_longident`; a component the pool's name table did not hold is
-    /// `<unresolved>`.
-    fn write_longident(&mut self, out: &mut String, lid: u32) {
-        #[derive(Clone, Copy)]
-        enum Lid {
-            Row(u32),
-            Char(u8),
-            Name(u32),
-        }
-        let mut work: smallvec::SmallVec<[Lid; 8]> = smallvec::smallvec![Lid::Row(lid)];
-        let v = &self.g.v;
-        while let Some(step) = work.pop() {
-            match step {
-                Lid::Char(c) => out.push(c as char),
-                Lid::Name(NONE) => out.push_str("<unresolved>"),
-                Lid::Name(name) => out.push_str(v.str(name)),
-                Lid::Row(row) => match v.longident(row) {
-                    LongidentRow::Ident(name) => out.push_str(v.str(name)),
-                    LongidentRow::Unresolved(_) => out.push_str("<unresolved>"),
-                    LongidentRow::UnresolvedDot { parent, .. } => {
-                        work.push(Lid::Name(NONE));
-                        work.push(Lid::Char(b'.'));
-                        work.push(Lid::Row(parent));
-                    }
-                    LongidentRow::Dot { parent, name } => {
-                        work.push(Lid::Name(name));
-                        work.push(Lid::Char(b'.'));
-                        work.push(Lid::Row(parent));
-                    }
-                    LongidentRow::Apply { functor, argument } => {
-                        work.push(Lid::Char(b')'));
-                        work.push(Lid::Row(argument));
-                        work.push(Lid::Char(b'('));
-                        work.push(Lid::Row(functor));
-                    }
-                },
-            }
-        }
-    }
+
 }
 
 /// `{:?}` of `decl::RecStatus`.
