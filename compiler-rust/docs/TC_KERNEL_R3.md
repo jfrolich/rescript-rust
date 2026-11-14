@@ -1187,3 +1187,117 @@ and no step count changed an assertion (the unification step tests bound
 the count from above). `tc` is not on a compiler build's path (the driver's
 default checker is the old one), so no application or `tests/tests` saving
 is claimed; the CI `Instruction count` check reports the build's figures.
+
+## K3a: where unification's instructions go
+
+### 1. Now: trunk `c4e9326eb`
+
+Measured on x86-64 Linux with Valgrind 3.22.0 and the pinned
+`rustc 1.102.0-nightly (ac8310ba6 2026-11-09)`. R1 method: fat LTO,
+one codegen unit, line tables, 1,000,000 iterations minus zero, then
+subtract the operation's own build-only twin. No compiler source changed.
+The reference script was run first and reproduced R1's raw figures
+(in particular `empty 18`, `unify_ground1 318`, `unify_ground3 746`).
+
+```sh
+CARGO_TARGET_DIR=/tmp/checker-reference cargo build --release \
+  --manifest-path compiler-rust/docs/prototypes/checker-kernel/Cargo.toml
+bash compiler-rust/docs/prototypes/checker-kernel/measure.sh \
+  /tmp/checker-reference/release/checker-kernel
+CARGO_PROFILE_BENCH_CODEGEN_UNITS=1 CARGO_PROFILE_BENCH_DEBUG=line-tables-only \
+  cargo bench --manifest-path compiler-rust/Cargo.toml --bench tc_kernel --no-run
+# Finished `bench` profile [optimized + debuginfo] target(s) in 3m 32s
+# For every operation, retain and annotate both files:
+valgrind --tool=cachegrind --cache-sim=no --cachegrind-out-file=OP.zero.cg BENCH OP 0
+valgrind --tool=cachegrind --cache-sim=no --cachegrind-out-file=OP.full.cg BENCH OP 1000000
+cg_annotate --auto=yes --threshold=0 OP.full.cg
+cg_annotate --auto=yes --threshold=0 OP.zero.cg
+```
+
+All operations, including controls. A dash means the row is a control,
+not an additional subtraction. R4's `binder` is cheaper than the common
+empty loop; its negative adjusted result is a control mismatch, not negative
+execution cost. Use its raw column for the absolute loop measurement.
+
+| Operation | Raw (full − zero)/million | Subtract | Net |
+|---|---:|---|---:|
+| `instance1` | 156.060859 | `empty` | 137.058573 |
+| `instance3` | 236.309335 | `empty` | 217.307049 |
+| `instance5` | 324.338016 | `empty` | 305.335730 |
+| `instance7` | 344.272216 | `empty` | 325.269930 |
+| `generalize7` | 793.272216 | `instance7` | 449.000000 |
+| `empty` | 19.002286 | — | 19.002286 |
+| `lower7` | 766.272202 | `instance7` | 421.999986 |
+| `copy7` | 1728.581013 | `empty` | 1709.578727 |
+| `repr` | 165.060901 | `instance1` | 9.000042 |
+| `restore` | 219.061239 | `instance1` | 63.000380 |
+| `keep` | 200.061281 | `instance1` | 44.000422 |
+| `checker_instance1` | 145.060825 | `empty` | 126.058539 |
+| `checker_instance3` | 226.309301 | `empty` | 207.307015 |
+| `checker_instance5` | 313.337982 | `empty` | 294.335696 |
+| `checker_instance7` | 333.272182 | `empty` | 314.269896 |
+| `build_vars` | 78.070447 | — | 78.070447 |
+| `unify_vars` | 197.070447 | `build_vars` | 119.000000 |
+| `build_ground1` | 98.077977 | — | 98.077977 |
+| `unify_ground1` | 220.077977 | `build_ground1` | 122.000000 |
+| `build_ground3` | 200.441105 | — | 200.441105 |
+| `unify_ground3` | 1117.395074 | `build_ground3` | 916.953969 |
+| `build_vars_local` | 78.070445 | — | 78.070445 |
+| `unify_vars_local` | 197.070445 | `build_vars_local` | 119.000000 |
+| `build_ground1_local` | 98.077947 | — | 98.077947 |
+| `unify_ground1_local` | 220.077947 | `build_ground1_local` | 122.000000 |
+| `build_ground3_local` | 200.441075 | — | 200.441075 |
+| `unify_ground3_local` | 1117.395044 | `build_ground3_local` | 916.953969 |
+| `binder` | 11.000245 | `empty` | -8.002041 |
+| `find_local` | 66.000251 | `empty` | 46.997965 |
+| `find_open` | 243.000267 | `empty` | 223.997981 |
+| `find_miss2` | 643.000253 | `empty` | 623.997967 |
+| `bind_leave` | 191.184379 | `empty` | 172.182093 |
+| `intern` | 179.000246 | `empty` | 159.997960 |
+| `build_bind_ground1` | 88.092208 | — | 88.092208 |
+| `bind_ground1` | 212.092266 | `build_bind_ground1` | 124.000058 |
+| `build_bind_ground1_local` | 88.092266 | — | 88.092266 |
+| `bind_ground1_local` | 212.092208 | `build_bind_ground1_local` | 123.999942 |
+
+Raw output (I refs, including startup):
+
+```text
+operation zero full raw
+instance1 330998 156391857 156.060859
+instance3 331035 236640370 236.309335
+instance5 331072 324669088 324.338016
+instance7 331105 344603321 344.272216
+generalize7 331042 793603258 793.272216
+empty 330954 19333240 19.002286
+lower7 330992 766603194 766.272202
+copy7 331001 1728912014 1728.581013
+repr 330938 165391839 165.060901
+restore 331030 219392269 219.061239
+keep 330978 200392259 200.061281
+checker_instance1 331171 145391996 145.060825
+checker_instance3 331205 226640506 226.309301
+checker_instance5 331245 313669227 313.337982
+checker_instance7 331287 333603469 333.272182
+build_vars 331290 78401737 78.070447
+unify_vars 331324 197401771 197.070447
+build_ground1 331338 98409315 98.077977
+unify_ground1 331376 220409353 220.077977
+build_ground3 331409 200772514 200.441105
+unify_ground3 331442 1117726516 1117.395074
+build_vars_local 331223 78401668 78.070445
+unify_vars_local 331252 197401697 197.070445
+build_ground1_local 331279 98409226 98.077947
+unify_ground1_local 331313 220409260 220.077947
+build_ground3_local 331347 200772422 200.441075
+unify_ground3_local 331381 1117726425 1117.395044
+binder 421253 11421498 11.000245
+find_local 913190 66913441 66.000251
+find_open 890467 243890734 243.000267
+find_miss2 1112031 644112284 643.000253
+bind_leave 332865 191517244 191.184379
+intern 625677 179625923 179.000246
+build_bind_ground1 331317 88423525 88.092208
+bind_ground1 331407 212423673 212.092266
+build_bind_ground1_local 331360 88423626 88.092266
+bind_ground1_local 331366 212423574 212.092208
+```
