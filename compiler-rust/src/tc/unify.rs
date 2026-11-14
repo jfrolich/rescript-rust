@@ -148,23 +148,45 @@ impl Checker {
     /// [`Checker::unify_pair`]. (R3a)
     pub fn unify_distinct(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
         let top = self.depth == 0;
+        let explain = self.g.mode == Mode::Explain;
+        // `unify_takes_snapshot` (types/context.rs:1609), as decision 5 of
+        // "R3 as designed" restricts it: only the explaining mode opens one.
+        let token = if top && explain {
+            self.trace.clear();
+            Some(self.g.speculate())
+        } else {
+            None
+        };
         let base = self.frames.len();
+        let saved_base = self.saved.len();
+        let trace_base = self.trace.len();
         self.depth += 1;
-        self.frames.push(Frame {
-            left,
-            right,
-            kind: FrameKind::Pair,
-            extra: 0,
-        });
+        self.push_pair(left, right);
         let result = self.run_frames(base);
         self.depth -= 1;
-        if result.is_err() {
-            self.frames.truncate(base);
-            if top && self.g.speculation_depth == 0 {
-                self.unexplained_failure = true;
+        match result {
+            Ok(()) => {
+                if let Some(token) = token {
+                    self.g.keep(token);
+                }
+                Ok(())
+            }
+            Err([left, right]) => {
+                if explain {
+                    self.explain_failure(base, trace_base, left, right);
+                }
+                self.frames.truncate(base);
+                self.saved.truncate(saved_base);
+                match token {
+                    Some(token) => self.undo_compress(token),
+                    None if top && self.g.speculation_depth == 0 => {
+                        self.unexplained_failure = true;
+                    }
+                    None => {}
+                }
+                Err(Clash)
             }
         }
-        result.map_err(|_| Clash)
     }
 
     /// One pair of distinct representatives: the first step of `unify`
@@ -354,7 +376,26 @@ impl Checker {
         // before the children.
         self.occur(left, right)?;
         self.g.link(left, right);
-        self.push_children(l, r)
+        let explain = self.g.mode == Mode::Explain;
+        if explain {
+            // Popped after the children: the descriptor to put back if
+            // one of them fails (`t1'.desc <- d1`, ctype.ml:2437).
+            let extra = self.saved.len() as u32;
+            self.saved.push(l);
+            self.frames.push(Frame {
+                left,
+                right,
+                kind: FrameKind::Linked,
+                extra,
+            });
+        }
+        let pushed = self.push_children(l, r);
+        if pushed.is_err() && explain {
+            self.frames.pop();
+            self.saved.pop();
+            self.g.write(left, l);
+        }
+        pushed
     }
 
     /// Push the child pairs of two structure nodes of the same shape, last
@@ -427,6 +468,33 @@ impl Checker {
     /// before and after. (R3h)
     pub fn unify_gadt(&mut self, newtype_level: u32, left: Ty, right: Ty) -> Result<(), Clash> {
         todo!("R3h")
+    }
+
+    /// The failure path of the explaining mode: the trace, outermost pair
+    /// first (each enclosing `unify` adds its pair, ctype.ml:2272), and the
+    /// descriptors of the linked structure nodes enclosing the failure put
+    /// back, innermost first (`t1'.desc <- d1`, ctype.ml:2437). The
+    /// enclosing pairs are the `Linked` frames above `base`; the entries a
+    /// nested unification already wrote stay after this one's. O(frames
+    /// above `base` + trace entries since `trace_base`).
+    #[cold]
+    fn explain_failure(&mut self, base: usize, trace_base: usize, left: Ty, right: Ty) {
+        let inner = self.trace.len() - trace_base;
+        for index in base..self.frames.len() {
+            let frame = self.frames[index];
+            if frame.kind == FrameKind::Linked {
+                self.trace.push([frame.left, frame.right]);
+            }
+        }
+        self.trace.push([left, right]);
+        self.trace[trace_base..].rotate_left(inner);
+        for index in (base..self.frames.len()).rev() {
+            let frame = self.frames[index];
+            if frame.kind == FrameKind::Linked {
+                let descriptor = self.saved[frame.extra as usize];
+                self.g.write(frame.left, descriptor);
+            }
+        }
     }
 
     /// O(1): push one pair.
