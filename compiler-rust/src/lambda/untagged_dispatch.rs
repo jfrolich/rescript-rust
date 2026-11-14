@@ -48,6 +48,12 @@ pub(crate) struct FactPool {
     kinds: Vec<Kind>,
 }
 impl FactPool {
+    /// O(1) reservations from the imported unit's fact-run lengths.
+    pub(crate) fn reserve(&mut self, literals: usize, kinds: usize) {
+        self.literals.reserve_exact(literals);
+        self.kinds.reserve_exact(kinds);
+    }
+
     /// Cost: O(imported literals/kinds plus metadata interning cost); appends flat fact runs.
     pub(crate) fn import(&mut self, metadata: &mut Metadata, facts: &MatchingFacts) -> Facts {
         let literals = LiteralSpan {
