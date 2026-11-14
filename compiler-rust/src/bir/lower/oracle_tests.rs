@@ -31,6 +31,9 @@ pub(super) fn compare_mapped(arena: LamArena, root: Lam, locations: &crate::lamb
 }
 
 fn compare_oracle(mut arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, checks: bool, contexts: &[u8], locations: Option<&crate::lambda::LamLocTable>, inline: bool) {
+    // THREE_TREES 11.4, "T5 part B as redesigned": the naming log against
+    // the pass, on the root lowered as a unit.
+    names_agree(arena.clone(), root, resolver, inline);
     let target = Ident::new("result", arena.ident_stamp_bound() + 1, IdentFlags::NONE);
     for direct in [false, true] {
         for &context in contexts {
@@ -1807,8 +1810,41 @@ fn a_module_whose_only_reference_the_flatten_pass_drops_still_shadows_the_global
 /// replay did. Panics when the lowering or the pass does not support the
 /// unit.
 fn names_of(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, inline: bool) -> (crate::emit::NameStats, names::Replayed) {
-    let _ = (arena, root, resolver, inline);
-    todo!("T5b-3")
+    let default = crate::js_ir::ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+    let resolver = resolver.unwrap_or(&default);
+    let lowered = lower_for_names(&arena, root, resolver, inline);
+    let bir = &lowered.program.arena;
+    let idents: Vec<Ident> = (0..bir.vars.len())
+        .map(|var| lowered.program.idents[bir.vars.j_origin[var].index()])
+        .collect();
+    let modules: Vec<Ident> = bir.pools.j_modules.iter().map(|module| module.id).collect();
+    let free = names::free_lists(bir, &lowered.program.idents);
+    let exported = bridge_j::export_lowered(&lowered.program).expect("lowered program exports").program;
+    let mut program = LambdaCompiler::bir_coerced_program(
+        exported.program.arena,
+        exported.program.block,
+        lowered.coerced.exports.clone(),
+        lowered.coerced.reservations.clone(),
+    );
+    program.modules = lowered.name_imports.iter().map(|import| bir.pools.j_modules[import.index()].clone()).collect();
+    let stats = crate::emit::compare_with_pass(&lowered.printed, &idents, &modules, &free, &program, resolver, false)
+        .expect("the pass supports the unit");
+    (stats, lowered.replayed)
+}
+
+/// `root` lowered as a unit (`lower_with_resolver`), as `names_of` and
+/// `adopted_nodes_of` read it.
+fn lower_for_names(arena: &LamArena, root: Lam, resolver: &crate::js_ir::ModulePathResolver, inline: bool) -> Lowered {
+    let input = bridge::import_for_lowering(arena, root).0.expect("lowering input");
+    lower_with_resolver(input, None, false, Some(resolver), inline, true).expect("the lowering supports the unit")
+}
+
+/// `Log::adopted_nodes` of `root` lowered as a unit: whether an input
+/// reaches a site of G10 (`names::adopt`).
+fn adopted_nodes_of(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>) -> usize {
+    let default = crate::js_ir::ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+    let lowered = lower_for_names(&arena, root, resolver.unwrap_or(&default), false);
+    lowered.program.arena.js_scope.as_ref().expect("lowering scope").names.adopted_nodes
 }
 
 /// The log and the pass agree on `root`: every name, every cached bound,
@@ -1823,7 +1859,6 @@ fn names_agree(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::Modul
 }
 
 #[test]
-#[ignore = "T5b-3 build"]
 fn the_naming_log_agrees_on_a_function_whose_unit_parameter_is_dropped() {
     // Gap 2: `let f = (unit) => { mutable = null }` with `one_unit_arg`: the
     // literal gets a header without the parameter after its body was
@@ -1844,7 +1879,6 @@ fn the_naming_log_agrees_on_a_function_whose_unit_parameter_is_dropped() {
 }
 
 #[test]
-#[ignore = "T5b-3 build"]
 fn the_naming_log_agrees_on_the_aliases_of_a_tail_call_loop() {
     // Gap 2: `let rec loop = (i, acc) => { later(() => i + acc); loop(i + 1, acc) }`.
     // The closure captures the parameters, so the tail-call rewrite gives
@@ -1872,7 +1906,6 @@ fn the_naming_log_agrees_on_the_aliases_of_a_tail_call_loop() {
 }
 
 #[test]
-#[ignore = "T5b-3 build"]
 fn the_naming_log_agrees_on_a_body_imported_from_another_module() {
     // (c): `Other.run(null)` with `run = arg => (first, second) => arg`
     // inlined: the function inside the imported body is lowered here, after
@@ -1903,7 +1936,6 @@ fn the_naming_log_agrees_on_a_body_imported_from_another_module() {
 }
 
 #[test]
-#[ignore = "T5b-3 build"]
 fn the_naming_log_agrees_on_a_partial_application_whose_argument_reads_a_local() {
     // G10: `let f = param => Other.run(param)` with `run` of arity 2: the
     // lowering eta-expands (`apply_with_arity`) to
@@ -1929,7 +1961,6 @@ fn the_naming_log_agrees_on_a_partial_application_whose_argument_reads_a_local()
 }
 
 #[test]
-#[ignore = "T5b-3 build"]
 fn the_naming_log_agrees_on_a_dispatch_function_whose_scrutinee_reads_a_local() {
     // G10: `let g = value => f(value)` with `f` an external whose argument
     // is a polymorphic variant mapped to strings: the argument becomes the
@@ -1950,4 +1981,49 @@ fn the_naming_log_agrees_on_a_dispatch_function_whose_scrutinee_reads_a_local() 
     let end = a.var(g);
     let root = a.let_(LetKind::Strict, g, function, end);
     names_agree(a, root, None, false);
+}
+
+#[test]
+fn a_partial_application_whose_argument_reads_a_local_reaches_the_adoption() {
+    // The input of `the_naming_log_agrees_on_a_partial_application_whose_argument_reads_a_local`:
+    // the eta-expansion is built, so `names::adopt` reads the callee and
+    // the argument.
+    use crate::cmi::persistent_env::CmjExportArity;
+    use crate::js_ir::ModulePathResolver;
+    use crate::lambda::{ApInfo, ApplyStatus, FieldDbgInfo, LamLoc, lam_arity::Arity, lam_primitive::Primitive};
+    for status in [ApplyStatus::Na, ApplyStatus::InferFull, ApplyStatus::Uncurry] {
+        let resolver = ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+        resolver.set_bir_test_export("Other", "run", CmjExportArity::Single(Arity::info(vec![2], false)), None);
+        let mut a = LamArena::new();
+        let (f, param) = (Ident::new("f", 1, IdentFlags::NONE), Ident::new("param", 2, IdentFlags::NONE));
+        let global = a.global_module(Ident::create_persistent("Other"));
+        let callee = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Module { name: crate::name::Name::new("run") }), &[global], LamLoc::NONE);
+        let arg = a.var(param);
+        let applied = a.apply_raw(callee, &[arg], ApInfo { status, loc: LamLoc::NONE });
+        let function = a.function_(1, &[param], applied, Default::default(), LamLoc::NONE);
+        let end = a.var(f);
+        let root = a.let_(LetKind::Strict, f, function, end);
+        assert!(adopted_nodes_of(a, root, Some(&resolver)) > 0, "{status:?}");
+    }
+}
+
+#[test]
+fn a_dispatch_function_whose_scrutinee_reads_a_local_reaches_the_adoption() {
+    // The input of `the_naming_log_agrees_on_a_dispatch_function_whose_scrutinee_reads_a_local`:
+    // the dispatch function is built, so `names::adopt` reads its scrutinee.
+    use crate::lambda::lam_primitive::{Attr, DeclKind, ExternalDecl, JsCall, LabelNoname, Param, Primitive as P};
+    use crate::lambda::LamLoc;
+    let mut a = LamArena::new();
+    let (g, value) = (Ident::new("g", 1, IdentFlags::NONE), Ident::new("value", 2, IdentFlags::NONE));
+    let arg = a.var(value);
+    let call = JsCall {
+        prim_name: "f".into(),
+        arg_types: vec![Param { arg_label: LabelNoname::ArgEmpty, arg_type: Attr::PolyVarString { descr: vec![("tag".into(), "mapped".into())] } }],
+        ffi: ExternalDecl { kind: DeclKind::DeclVal { name: "f".into() }, module_: None, scopes: vec![], variadic: false, effective_arity: 1 },
+    };
+    let applied = a.prim_raw(P::PjsCall(Box::new(call)), &[arg], LamLoc::NONE);
+    let function = a.function_(1, &[value], applied, Default::default(), LamLoc::NONE);
+    let end = a.var(g);
+    let root = a.let_(LetKind::Strict, g, function, end);
+    assert!(adopted_nodes_of(a, root, None) > 0);
 }

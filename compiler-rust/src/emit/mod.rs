@@ -3,7 +3,7 @@ mod build;
 mod literal;
 mod naming;
 #[cfg(test)]
-pub(crate) use naming::{FreeLists, NameStats, Printed, Subject, Tables};
+pub(crate) use naming::{FreeLists, NameStats, Printed, Subject, Tables, compare_with_pass};
 mod program;
 mod raw;
 pub use raw::RawSegment;

@@ -6609,7 +6609,7 @@ fn module_sort_name(module: &ModuleId) -> &str {
     }
 }
 
-fn module_sort_cmp(left: &ModuleId, right: &ModuleId) -> std::cmp::Ordering {
+pub(crate) fn module_sort_cmp(left: &ModuleId, right: &ModuleId) -> std::cmp::Ordering {
     let left_name = module_sort_name(left).as_bytes();
     let right_name = module_sort_name(right).as_bytes();
     left_name

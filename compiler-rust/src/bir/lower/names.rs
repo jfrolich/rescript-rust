@@ -24,8 +24,8 @@
 //! moved, copied into another list or dropped needs no bookkeeping: the
 //! replay reads the lists that exist at the end.
 //!
-//! The lowering calls `open`, `close` and `adopt`; the replay is wired into
-//! check mode next.
+//! The lowering calls `open`, `close` and `adopt`, and `replay` at the end
+//! of the unit; check mode compares the names with the pass.
 use crate::bir::{Bir, FuncId, ImportId, NodeId, VarId};
 #[cfg(test)]
 use crate::bir::Op;
@@ -989,8 +989,29 @@ fn is_statement(op: Op) -> bool {
 /// mode only. Cost: one step per row and per entry; allocates the result.
 #[cfg(test)]
 pub(crate) fn free_lists(bir: &Bir, idents: &[crate::ident::Ident]) -> crate::emit::FreeLists {
-    let _ = (bir, idents);
-    todo!("T5b-3")
+    let log = &bir.js_scope.as_ref().expect("lowering scope").names;
+    let mut lists = crate::emit::FreeLists::default();
+    for (row, info) in log.rows.iter().enumerate().skip(1) {
+        if info.flags & ScopeRow::CLOSED == 0 || info.flags & ScopeRow::COPY != 0 {
+            continue;
+        }
+        if bir.func_owners.get(info.function.index()).copied().flatten().is_none() {
+            continue;
+        }
+        for &entry in log.free(ScopeId(row as u32)) {
+            match (entry.as_var(), entry.as_import()) {
+                (Some(var), _) => {
+                    if let Some(&ident) = idents.get(bir.vars.j_origin[var.index()].index()) {
+                        lists.idents.push(ident);
+                    }
+                }
+                (None, Some(import)) => lists.idents.push(bir.pools.j_modules[import.index()].id),
+                (None, None) => unreachable!("a free entry is a variable or an import"),
+            }
+        }
+        lists.ends.push(index(lists.idents.len()));
+    }
+    lists
 }
 
 #[cfg(test)]
@@ -1180,7 +1201,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "T5b-3 build"]
     fn the_free_lists_of_a_unit_are_listed_by_row() {
         // `f` (nothing free), then `g` (`v`).
         let (u, _, _, [v, _]) = nested(true);

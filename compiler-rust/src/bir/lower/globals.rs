@@ -57,6 +57,10 @@ pub(crate) struct Globals {
     pub(crate) steps: usize,
     /// References that print as `globalThis.name`.
     pub(crate) qualified: usize,
+    /// The spellings of the referenced variables that are JavaScript names
+    /// (`js_ir::arena::is_raw_js_name`), written by step 1: the raw names
+    /// of the naming replay (`names::Program::raw`). May repeat a name.
+    pub(crate) raw: Vec<Name>,
 }
 
 /// `is_js_global` of the legacy pass.
@@ -104,6 +108,7 @@ pub(crate) fn decide(bir: &mut Bir, idents: &[Ident]) {
     globals.names.clear();
     globals.rows.clear();
     globals.links.clear();
+    globals.raw.clear();
     let ident = |bir: &Bir, var: usize| idents.get(bir.vars.j_origin[var].index()).copied();
     let variables = bir.vars.len();
     globals.steps += variables;
@@ -112,6 +117,9 @@ pub(crate) fn decide(bir: &mut Bir, idents: &[Ident]) {
             continue;
         }
         let Some(ident) = ident(bir, var) else { continue };
+        if crate::js_ir::arena::is_raw_js_name(&ident) && scope.uses[var].remaining > 0 {
+            globals.raw.push(ident.name_atom());
+        }
         if is_js_global(&ident) {
             let row = globals.row(ident.name_atom());
             let head = globals.rows[row as usize].global;

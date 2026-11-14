@@ -140,6 +140,10 @@ pub(super) struct Tables {
     /// The references to the variable of the last collecting `mentions`
     /// pass that stand in a later row: what `substitute_after` replaces.
     later: Vec<NodeId>,
+    /// The export variable of each entry of `Coerced::reservations`.
+    pub(super) reserved: Vec<VarId>,
+    /// The variable of each entry of `Coerced::exports`.
+    pub(super) exported: Vec<VarId>,
     /// Rows, exports, alias-chain links, sites and ancestors visited.
     pub(super) steps: usize,
     /// Sites read from a variable's chain, released ones included.
@@ -1357,6 +1361,7 @@ impl State {
         let block_ended = finished == Finished::True;
         let mut selected = std::mem::take(&mut self.coercion.selected);
         let mut reservations = Vec::new();
+        self.coercion.reserved.clear();
         for index in 0..exports.len() as u32 {
             self.coercion.steps += 1;
             let export = exports[index as usize];
@@ -1394,6 +1399,7 @@ impl State {
                         };
                         if chosen != export {
                             reservations.push(ident);
+                            self.coercion.reserved.push(export);
                         }
                         selected.push(chosen);
                         self.arena.release(value);
@@ -1409,6 +1415,7 @@ impl State {
                         };
                         if chosen != export {
                             reservations.push(ident);
+                            self.coercion.reserved.push(export);
                         }
                         selected.push(chosen);
                         self.arena.release(value);
@@ -1469,6 +1476,7 @@ impl State {
             let rebound = self.renamed(export);
             self.sync_tables();
             reservations.push(ident);
+            self.coercion.reserved.push(export);
             let property = if value_var.is_some() {
                 LetKind::Alias
             } else {
@@ -1528,6 +1536,7 @@ impl State {
             self.coercion.trail = undeclared;
         }
         let mut exports = Vec::with_capacity(selected.len());
+        self.coercion.exported.clear();
         for (index, &var) in selected.iter().enumerate() {
             self.coercion.steps += 1;
             let index = index as u32;
@@ -1562,6 +1571,7 @@ impl State {
             #[cfg(test)]
             self.coercion.resolved.push(arm);
             exports.push(self.ident(resolved));
+            self.coercion.exported.push(resolved);
             // The top-level statuses read the export set through the origin.
             let origin = self.origin(resolved);
             let scope = self.arena.js_scope.as_mut().expect("lowering scope");

@@ -1193,9 +1193,86 @@ pub(crate) fn compare_with_pass(
     resolver: &ModulePathResolver,
     jsx_preserve: bool,
 ) -> Result<NameStats, Unsupported> {
-    let _ = (printed, idents, modules, free);
-    let _ = Names::collect(program, resolver, jsx_preserve)?;
-    todo!("T5b-3")
+    let names = Names::collect(program, resolver, jsx_preserve)?;
+    let mut stats = NameStats::default();
+    // The identifiers the replay names, once each (copies print as their
+    // origin's identifier).
+    let mut replayed: HashSet<Ident> = HashSet::with_capacity(printed.names.len());
+    // A module is named under the suffix rule whatever its stamp; another
+    // identifier of stamp zero prints as it is spelled.
+    let module_set: HashSet<Ident> = modules.iter().copied().collect();
+    let named = printed
+        .names
+        .iter()
+        .zip(idents)
+        .map(|(name, ident)| (name, ident, false))
+        .chain(printed.modules.iter().zip(modules).map(|(name, ident)| (name, ident, true)));
+    for (name, ident, module) in named {
+        let Some(name) = name else { continue };
+        if ident.stamp() == 0 && !module {
+            continue;
+        }
+        if !replayed.insert(*ident) {
+            continue;
+        }
+        if names.printed.get(ident) != Some(name) {
+            stats.name_differences += 1;
+        }
+    }
+    stats.names_replayed = replayed.len();
+    for ident in names.printed.keys() {
+        if ident.stamp() == 0 && !module_set.contains(ident) {
+            continue;
+        }
+        stats.names_pass += 1;
+        if !replayed.contains(ident) {
+            stats.name_differences += 1;
+        }
+    }
+    let mut pass_finishes: Vec<&str> = names.finishes.values().map(|name| name.as_str()).collect();
+    let mut replay_finishes: Vec<&str> = printed.finishes.iter().map(|name| name.as_str()).collect();
+    stats.finish_differences = multiset_difference(&mut pass_finishes, &mut replay_finishes);
+    // Free lists as sets of identifier sequences: a function the lowering
+    // copied is one sequence for both sides.
+    let mut pass_free: Vec<&[Ident]> = names.free.values().map(Vec::as_slice).collect();
+    let mut replay_free: Vec<&[Ident]> = Vec::with_capacity(free.ends.len());
+    let mut start = 0;
+    for &end in &free.ends {
+        replay_free.push(&free.idents[start..end as usize]);
+        start = end as usize;
+    }
+    pass_free.sort_unstable();
+    pass_free.dedup();
+    replay_free.sort_unstable();
+    replay_free.dedup();
+    stats.free_differences = multiset_difference(&mut pass_free, &mut replay_free);
+    Ok(stats)
+}
+
+/// The entries one sorted side has and the other has not, as multisets.
+/// Sorts both. One step per entry after the sorts.
+#[cfg(test)]
+fn multiset_difference<T: Ord>(left: &mut [T], right: &mut [T]) -> usize {
+    left.sort_unstable();
+    right.sort_unstable();
+    let (mut i, mut j, mut differences) = (0, 0, 0);
+    while i < left.len() && j < right.len() {
+        match left[i].cmp(&right[j]) {
+            std::cmp::Ordering::Less => {
+                differences += 1;
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                differences += 1;
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    differences + (left.len() - i) + (right.len() - j)
 }
 
 // Child order is the legacy printer's order. Shape decisions remain in walk;
@@ -1685,7 +1762,6 @@ mod replay_tests {
     }
 
     #[test]
-    #[ignore = "T5b-3 build"]
     fn the_comparison_counts_what_the_replay_gets_wrong() {
         // `let x = 1`, exported: the pass names it `x`, has no cached bound
         // and no function.

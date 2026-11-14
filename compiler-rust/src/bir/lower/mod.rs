@@ -355,6 +355,15 @@ pub(crate) struct Lowered {
     pub coerced: export::Coerced,
     pub dynamic_imports: Vec<crate::js_ir::ModuleId>,
     pub switch_stats: SwitchStats,
+    /// The names of the naming log's replay (`names::replay`), by variable
+    /// and by import; compared with the pass in check mode, not printed.
+    #[cfg(test)]
+    pub printed: crate::emit::Printed,
+    #[cfg(test)]
+    pub replayed: names::Replayed,
+    /// The imports the replay named in the program, in its order.
+    #[cfg(test)]
+    pub name_imports: Vec<crate::bir::ImportId>,
 }
 
 /// N1: C:663 compile_deps_program_in_arena; one fresh J arena for this migration cut.
@@ -645,6 +654,10 @@ impl State {
         // THREE_TREES 11.4, "T5 design": every list is the one the flatten
         // pass receives, so the bindings around a reference are final.
         globals::decide(&mut self.arena, &self.idents);
+        #[cfg(test)]
+        let mut printed = crate::emit::Printed::default();
+        #[cfg(test)]
+        let (replayed, name_imports) = self.replay_names(root, &coerced, &mut printed);
         let (close_steps, globals_qualified, global_steps) = self.arena.js_scope.as_ref()
             .map_or((0, 0, 0), |scope| (scope.close_steps, scope.globals.qualified, scope.globals.steps));
         Lowered {
@@ -665,7 +678,62 @@ impl State {
                 global_steps,
                 decisions: DecisionStats::default(),
             },
+            #[cfg(test)]
+            printed,
+            #[cfg(test)]
+            replayed,
+            #[cfg(test)]
+            name_imports,
         }
+    }
+
+    /// The names of the finished unit whose root block is `root`
+    /// (`names::replay`, after `globals::decide`), written to `printed`;
+    /// what the replay did and the imports it named in the program. The
+    /// program's imports are those with a live reference that are neither
+    /// dynamic nor unresolved, in the order of the module list
+    /// (`lam_compile::module_sort_cmp`). Cost: one step per import and a
+    /// sort of the named ones, one per reservation, and `names::replay`.
+    #[cfg(test)]
+    fn replay_names(&self, root: NodeId, coerced: &export::Coerced, printed: &mut crate::emit::Printed) -> (names::Replayed, Vec<crate::bir::ImportId>) {
+        let scope = self.arena.js_scope.as_ref().expect("lowering scope");
+        let modules = &self.arena.pools.j_modules;
+        let mut imports: Vec<crate::bir::ImportId> = (0..modules.len())
+            .filter(|&index| {
+                let module = &modules[index];
+                scope.import_uses.get(index).is_some_and(|&uses| uses > 0)
+                    && !module.dynamic_import
+                    && self.resolver.as_ref().is_none_or(|resolver| resolver.resolve_module_path(module).is_some())
+            })
+            .map(|index| crate::bir::ImportId(index as u32))
+            .collect();
+        imports.sort_by(|a, b| crate::lambda::lam_compile::module_sort_cmp(&modules[a.index()], &modules[b.index()]));
+        let reservations: Vec<crate::emit::Subject> = coerced
+            .reservations
+            .iter()
+            .zip(&self.coercion.reserved)
+            .map(|(ident, &var)| crate::emit::Subject {
+                slot: self.arena.vars.j_origin[var.index()].0,
+                stamp: ident.stamp(),
+                name: ident.name_atom(),
+            })
+            .collect();
+        let program = names::Program {
+            imports: &imports,
+            reservations: &reservations,
+            exports: &self.coercion.exported,
+            raw: &scope.globals.raw,
+        };
+        let replayed = names::replay(
+            &self.arena,
+            root,
+            &self.idents,
+            &program,
+            &mut crate::emit::Tables::default(),
+            &mut names::Scratch::default(),
+            printed,
+        );
+        (replayed, imports)
     }
 }
 
