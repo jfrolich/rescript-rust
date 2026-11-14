@@ -1,0 +1,1 @@
+- Checker rewrite R3k: in the explaining mode, a scoped lowering whose expanding retry clashes keeps the levels it wrote and ends the trace with the escaping pair, as OCaml does.
