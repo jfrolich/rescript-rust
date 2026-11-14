@@ -244,6 +244,26 @@ pub(super) fn prepare(arena: &mut Bir) -> (Storage, dispatch::Plan<u32>) {
             payloads: ImportedSpan::new(payload_start, storage.imported_payloads.values.len()),
         }));
     }
+    // Reserve inherited output text storage from the imported spellings and
+    // typeof kinds before interning emission keys. No per-literal table growth.
+    let (mut strings, mut bytes) = (kind_count, 8 * kind_count);
+    for i in 0..graph.metadata.literal_count() {
+        use dispatch::Literal as L;
+        match graph.metadata.literal(dispatch::LiteralId(i as u32)) {
+            L::String(s) | L::Float(s) => {
+                strings += 1;
+                bytes += graph.metadata.text(s).len();
+            }
+            L::BigInt(s) => {
+                strings += 2;
+                bytes += 2 * graph.metadata.text(s).len() + 1;
+            }
+            L::Int(_) | L::Bool(_) | L::Null | L::Undefined => {}
+        }
+    }
+    arena.pools.strings.reserve_exact(strings);
+    arena.pools.text.reserve_exact(bytes);
+    arena.pools.text_index.reserve(strings, |&(hash, _)| hash);
     // The completed immutable metadata pool gives the exact emission-row count.
     storage.literals.reserve_exact(graph.metadata.literal_count());
     let mut bigint_spelling = String::new();
