@@ -52,7 +52,6 @@ pub mod unify;
 
 // R4 skeleton: bodies are `todo!`. Each build slice removes the allowance
 // from the module it completes (CHECKER_REWRITE.md, "R4 as designed").
-#[allow(dead_code, unused_variables, clippy::ptr_arg)]
 pub mod name_table;
 #[allow(dead_code, unused_variables, clippy::ptr_arg)]
 pub mod names;

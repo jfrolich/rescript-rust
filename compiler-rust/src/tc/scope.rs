@@ -165,7 +165,28 @@ impl Binders {
     /// scope until [`Scopes::bind`]. `previous` starts at [`NONE`] and
     /// `used` at 0. Panics at 2^30 binders.
     pub fn push(&mut self, key: Key, payload: u32, loc: u32, kind: BinderKind) -> Binder {
-        todo!("R4a")
+        #[cfg(test)]
+        super::steps::tick();
+        let binder = self.len();
+        assert!(binder < 1 << 30, "more than 2^30 binders");
+        self.key.push(key.0);
+        self.payload.push(payload);
+        self.loc.push(loc);
+        self.previous.push(NONE);
+        self.kind.push(kind);
+        self.used.push(0);
+        Binder(binder)
+    }
+
+    /// O(rows removed): drop every binder from `len` on, in all six arrays.
+    fn truncate(&mut self, len: u32) {
+        let len = len as usize;
+        self.key.truncate(len);
+        self.payload.truncate(len);
+        self.loc.truncate(len);
+        self.previous.truncate(len);
+        self.kind.truncate(len);
+        self.used.truncate(len);
     }
 
     /// O(1): how many binders exist; the age a layer is compared with.
@@ -484,7 +505,19 @@ impl Scopes {
     /// O(1), no step: enter a scope inside the current one and make it
     /// current. Its `opens` is the parent's. Returns its index.
     pub fn enter(&mut self) -> u32 {
-        todo!("R4b")
+        let index = self.scopes.len() as u32;
+        let opens = match self.current {
+            NONE => NONE,
+            parent => self.scopes[parent as usize].opens,
+        };
+        self.scopes.push(Scope {
+            parent: self.current,
+            first_binder: self.binders.len(),
+            opens,
+        });
+        self.entered.push(self.log.len() as u32);
+        self.current = index;
+        index
     }
 
     /// O(bindings made in the scope), 1 step a binding: restore the head of
@@ -493,7 +526,22 @@ impl Scopes {
     /// scope's layers stop being visible because `opens` is per scope; no
     /// layer row is touched. Panics when no scope is entered.
     pub fn leave(&mut self) {
-        todo!("R4b")
+        let mark = self.entered.pop().expect("leave with no scope entered");
+        self.undo_to(mark);
+        self.current = self.scopes[self.current as usize].parent;
+    }
+
+    /// O(log entries above `mark`), 1 step an entry: pop the log down to
+    /// `mark`, restoring `heads[key] = previous` for each binder popped,
+    /// innermost first.
+    fn undo_to(&mut self, mark: u32) {
+        while self.log.len() as u32 > mark {
+            #[cfg(test)]
+            super::steps::tick();
+            let binder = self.log.pop().expect("the log is above the mark") as usize;
+            let key = self.binders.key[binder] as usize;
+            self.heads[key] = self.binders.previous[binder];
+        }
     }
 
     /// Amortized O(1), 1 step: put a binder in scope. Writes
@@ -503,13 +551,32 @@ impl Scopes {
     /// the binder (a binder is pushed after every open that is to hide
     /// nothing of it), checked by a debug assertion on the innermost layer.
     pub fn bind(&mut self, binder: Binder) {
-        todo!("R4b")
+        #[cfg(test)]
+        super::steps::tick();
+        debug_assert!(self.current != NONE, "bind with no scope entered");
+        debug_assert!(
+            match self.scopes[self.current as usize].opens {
+                NONE => true,
+                layer => self.layers[layer as usize].mark <= binder.0,
+            },
+            "a binder older than a visible layer is bound"
+        );
+        let key = self.binders.key[binder.0 as usize] as usize;
+        if key >= self.heads.len() {
+            // Every key of a name below `names.len()` is below this.
+            self.heads.resize(8 * self.names.len() as usize, NONE);
+        }
+        self.binders.previous[binder.0 as usize] = self.heads[key];
+        self.heads[key] = binder.0;
+        self.log.push(binder.0);
     }
 
     /// 1 step, one load: the innermost binder of `key`, ignoring opened
     /// layers; [`NONE`] when the key has none or is beyond the table.
     pub fn head(&self, key: Key) -> u32 {
-        todo!("R4b")
+        #[cfg(test)]
+        super::steps::tick();
+        self.heads.get(key.0 as usize).copied().unwrap_or(NONE)
     }
 
     /// O(1): the length of the log now. Taken when a structure is entered
@@ -522,7 +589,16 @@ impl Scopes {
     /// with (predefined types, the initially opened modules). Called once
     /// per worker, with scope 0 current.
     pub fn freeze(&mut self) {
-        todo!("R4b")
+        debug_assert_eq!(self.entered.len(), 1, "freeze outside scope 0");
+        self.frozen = Frozen {
+            binders: self.binders.len(),
+            scopes: self.scopes.len() as u32,
+            log: self.log.len() as u32,
+            layers: self.layers.len() as u32,
+            opens: self.opens.len() as u32,
+            tables: self.tables.len() as u32,
+            members: self.members.len() as u32,
+        };
     }
 
     /// O(bindings above the prefix + reads of the last unit): leave every
@@ -531,7 +607,45 @@ impl Scopes {
     /// `read_units` and `read_items` (not the whole bit sets). Names, units
     /// and imported tables stay.
     pub fn reset(&mut self) {
-        todo!("R4b")
+        let frozen = self.frozen;
+        while self.entered.len() > 1 {
+            self.leave();
+        }
+        // Bindings made in scope 0 after the freeze.
+        self.undo_to(frozen.log);
+        // Layers scope 0 opened after the freeze: one load each through
+        // `older` (layers are appended, so an older layer has a lower index).
+        if self.current != NONE {
+            let scope = &mut self.scopes[self.current as usize];
+            while scope.opens != NONE && scope.opens >= frozen.layers {
+                scope.opens = self.layers[scope.opens as usize].older;
+            }
+        }
+        // The opens of the prefix start the next unit unused and with no
+        // name reported: one write per open of the prefix, a per-worker
+        // constant. Notes are written by lookups, which come after the
+        // freeze, so the prefix has none and `notes` is emptied.
+        for open in &mut self.opens[..frozen.opens as usize] {
+            open.shadowed = NONE;
+            open.flags &= !OPEN_USED;
+        }
+        self.binders.truncate(frozen.binders);
+        self.scopes.truncate(frozen.scopes as usize);
+        self.layers.truncate(frozen.layers as usize);
+        self.opens.truncate(frozen.opens as usize);
+        self.notes.clear();
+        self.tables.truncate(frozen.tables as usize);
+        self.members.truncate(frozen.members as usize);
+        self.armed.clear();
+        self.warnings.clear();
+        for &unit in &self.read_units {
+            self.unit_read[unit as usize] = 0;
+        }
+        self.read_units.clear();
+        for &row in &self.read_items {
+            self.item_read[row as usize / 64] &= !(1 << (row % 64));
+        }
+        self.read_items.clear();
     }
 
     // ----- R4c: member tables of this unit, opened layers, lookup -----

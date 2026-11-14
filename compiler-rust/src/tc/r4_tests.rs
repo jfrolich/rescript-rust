@@ -571,7 +571,6 @@ fn wide_segment(n: u32) -> Arc<Segment> {
 
 /// Reaches: R4a.
 #[test]
-#[ignore = "R4a build"]
 fn names_are_interned_once_and_dense() {
     let mut s = Scopes::new();
     let a = s.names.intern("alpha");
@@ -594,7 +593,6 @@ fn names_are_interned_once_and_dense() {
 /// Reaches: R4a. Pushing 10,000 binders is 10,000 steps, and every array
 /// has the row.
 #[test]
-#[ignore = "R4a build"]
 fn ten_thousand_binders_are_one_step_each() {
     let mut s = Scopes::new();
     let key = key(&mut s, "x", Namespace::Value);
@@ -627,7 +625,6 @@ fn ten_thousand_binders_are_one_step_each() {
 /// Reaches: R4a, R4b. The task text's bound: 10,000 bindings in one scope
 /// and leaving it is at most 3 steps a binding (push, bind, undo).
 #[test]
-#[ignore = "R4b build"]
 fn ten_thousand_bindings_then_leaving_is_three_steps_a_binding() {
     let mut s = unit_scopes();
     let keys: Vec<Key> = (0..10_000)
@@ -668,7 +665,6 @@ fn ten_thousand_bindings_then_leaving_is_three_steps_a_binding() {
 /// Reaches: R4a, R4b. The task text's bound: a lookup under 10,000 nested
 /// scopes is 1 step, whichever scope bound the name.
 #[test]
-#[ignore = "R4b build"]
 fn a_lookup_under_ten_thousand_nested_scopes_is_one_step() {
     let mut s = unit_scopes();
     let outer = bind(&mut s, "outer", Namespace::Value, 0);
@@ -713,7 +709,6 @@ fn a_lookup_under_ten_thousand_nested_scopes_is_one_step() {
 /// restores it; and one name in two namespaces is two keys (pinned by
 /// `ONE_NAME_IN_EACH_NAMESPACE`).
 #[test]
-#[ignore = "R4b build"]
 fn shadowing_and_namespaces() {
     let mut s = unit_scopes();
     let first = bind(&mut s, "x", Namespace::Value, 1);
@@ -749,7 +744,6 @@ fn shadowing_and_namespaces() {
 
 /// Reaches: R4a, R4b. A unit starts from the frozen prefix.
 #[test]
-#[ignore = "R4b build"]
 fn reset_returns_to_the_frozen_prefix() {
     let mut s = unit_scopes();
     let int = bind(&mut s, "int", Namespace::Type, 0);
