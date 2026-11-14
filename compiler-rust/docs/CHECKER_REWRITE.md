@@ -2518,8 +2518,9 @@ expand_head(ExpandMode::Unif) on both sides as unify2 does
 (ctype.ml:2276-2303). The link of unify3 is from the expanded head of the
 chosen side to the ORIGINAL node of the other side (ctype.ml:2331), written
 before the children are pushed. Commits as in section 8.3. Relations to
-hold: fixture_10's assertions; unifying two nodes of one abbreviation
-makes no node; the Full tier of the differential test passes at 10,000
+hold: fixture_10's assertions; unifying two nodes of one NULLARY
+abbreviation makes no node (two nodes of one parameterised abbreviation
+are expanded: 8.6, decision 11); the Full tier of the differential test passes at 10,000
 cases. If a seed fails and OCaml's source supports your code, stop and
 report the seed: do not copy the old checker's order.
 ```
@@ -2676,6 +2677,36 @@ skeleton; all three were the skeleton's, not the builder's.
     through them, and the harness's from the tier that has a memo. Test:
     `a_generalization_forgets_the_nullary_memo`. R5b's
     `generalize_expansive` forgets it the same way.
+11. **What unify2 expands** (review of R3c; the builder stopped at the
+    skeleton's test, correctly).
+    - Only two nullary constructors of one path link node to node
+      (ctype.ml:2248-2257). Two nodes of one parameterised abbreviation go
+      to unify2 like any other pair and both heads are expanded
+      (ctype.ml:1785-1790, 2278-2281); the left node's expansion is linked
+      to the right node. The skeleton's last block of
+      `fixture_10_two_abbreviations_stay_two_nodes` and the relation in the
+      R3c prompt said otherwise and were wrong; both are corrected.
+    - The cached-expansion test of the nullary shortcut reads the node's
+      own memo (ctype.ml:2251), which a nullary constructor never gets
+      outside GADT instance tracing: its expansions go to the nullary memo
+      (`proper_abbrevs`, ctype.ml:200-202). R3a read the nullary memo
+      there; the test is gone until R3h needs the node's own memo.
+    - A variable against a constructor it occurs in goes to unify2 with the
+      pair as it is (ctype.ml:2240-2241), not to a retry inside the binding
+      walk: `v` against `id<v>` with `type id<'a> = 'a` succeeds and links
+      nothing. The occurrence the binding walk finds stands for
+      `deep_occur` while no node has a row; R3e makes it cross rows, with a
+      test.
+    - In `Mode::Success` that walk has lowered the constructor's nodes to
+      the variable's level before unify2 expands, where OCaml expands
+      first. Accepted: unify2 lowers the same nodes at least as far
+      (ctype.ml:2284-2285), and an expansion read from a memo is lowered to
+      its node's level at every read (ctype.ml:1196-1200). The Full tier is
+      the judge; R5c's `both` mode is the second.
+    - Not reached by the harness, resting on unit tests or on reading
+      alone: the reversed trace below a swapped unify3 in `Mode::Explain`,
+      and a clash of the recursion repair. The second R3 skeleton turn adds
+      an Explain-mode tier.
 
 ## 9. R4 as designed
 

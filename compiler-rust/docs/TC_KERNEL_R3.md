@@ -719,3 +719,205 @@ uses each executable's own empty loop. The three failing R3b gates still fail.
 No full compiler test suite was run locally. No files under
 `compiler-rust/src` changed. The earlier application sanity check was not
 repeated: this addition still changes only bench code and documentation.
+
+## K1
+
+Revisions: before `f3f78af19` (trunk, with this report's bench), after
+`4b1162ede` (this branch merged with that trunk). Same method as above: Valgrind 3.22
+cachegrind, pinned toolchain, fat LTO, one codegen unit, line tables, one
+million operations minus the zero-iteration run of the same program;
+instances minus `empty`, `generalize7` and `lower7` minus `instance7`,
+`repr`, `restore` and `keep` minus `instance1`, `copy7` minus `empty`,
+unification minus its `build_*` twin. Both columns are measured on this
+machine; the "before" column is not copied from the tables above (trunk
+moved since: unification costs more there than at `2d93b31cf`). The
+per-commit figures below were measured before the merge, against
+`3b5b5b61e` (trunk `8ca6c42dbb` with this report's bench), whose figures
+equal `f3f78af19`'s to the instruction.
+
+| Operation | Before | After | Change | Gate |
+|---|---:|---:|---:|---|
+| `instance1` | 150.06 | 137.06 | -13.00 | ≤ 143: met |
+| `instance3` | 238.31 | 217.31 | -21.00 | ≤ 223: met |
+| `instance5` | 332.34 | 305.34 | -27.00 | ≤ 308: met |
+| `instance7` | 356.27 | 325.27 | -31.00 | ≤ 330: met |
+| `checker_instance1` | 140.06 | 126.06 | -14.00 | ≤ 143: met |
+| `checker_instance3` | 228.31 | 207.31 | -21.00 | ≤ 223: met |
+| `checker_instance5` | 323.34 | 294.34 | -29.00 | ≤ 308: met |
+| `checker_instance7` | 346.27 | 314.27 | -32.00 | ≤ 330: met |
+| `unify_vars` | 258.00 | 192.00 | -66.00 | lower: met |
+| `unify_ground1` | 222.00 | 157.00 | -65.00 | lower: met |
+| `unify_ground3` | 885.96 | 700.95 | -185.01 | lower: met |
+| `unify_vars_local` | 337.00 | 267.00 | -70.00 | lower: met |
+| `unify_ground1_local` | 306.00 | 235.00 | -71.00 | lower: met |
+| `unify_ground3_local` | 1223.96 | 1013.95 | -210.01 | lower: met |
+| `generalize7` | 489.00 | 449.00 | -40.00 | ≤ +2: met |
+| `lower7` | 459.00 | 422.00 | -37.00 | ≤ +2: met |
+| `copy7` | 1803.58 | 1709.58 | -94.00 | ≤ +2: met |
+| `repr` | 12.00 | 9.00 | -3.00 | ≤ +2: met |
+| `restore` | 70.00 | 63.00 | -7.00 | ≤ +2: met |
+| `keep` | 49.00 | 44.00 | -5.00 | ≤ +2: met |
+
+Per commit (net instructions, each built and measured whole):
+
+| Operation | Before | 1: `5ca6d85e5` | 2: `94fd9d07d` | 3: `2a3d37c22` |
+|---|---:|---:|---:|---:|
+| `instance1/3/5/7` | 150/238/332/356 | 140/220/305/327 | 139/219/304/326 | 137/217/305/325 |
+| `checker_instance1/3/5/7` | 140/228/323/346 | 130/210/296/317 | 131/211/297/318 | 126/207/294/314 |
+| `unify_vars/ground1/ground3` | 258/222/886 | 258/222/886 | 214/174/753 | 192/157/701 |
+| `…_local` | 337/306/1224 | 337/306/1224 | 293/258/1087 | 267/235/1014 |
+| `generalize7`, `lower7` | 489, 459 | 489, 459 | 469, 439 | 449, 422 |
+| `copy7` | 1803.58 | 1774.58 | 1772.58 | 1709.58 |
+| `repr`, `restore`, `keep` | 12, 70, 49 | 12, 70, 49 | 12, 63, 45 | 9, 63, 44 |
+
+### Raw output
+
+```text
+revision operation zero full raw
+before instance1 329598 169390165 169.060567
+before instance3 329632 257638579 257.308947
+before instance5 329670 351667070 351.337400
+before instance7 329707 375601306 375.271599
+before generalize7 329664 864601235 864.271571
+before empty 329578 19331848 19.002270
+before lower7 329610 834601195 834.271585
+before copy7 329618 1822909825 1822.580207
+before repr 329598 181390151 181.060553
+before restore 329640 239390551 239.060911
+before keep 329646 218390571 218.060925
+before checker_instance1 329761 159390326 159.060565
+before checker_instance3 329803 247638748 247.308945
+before checker_instance5 329839 342667237 342.337398
+before checker_instance7 329873 365601470 365.271597
+before build_vars 329880 99400209 99.070329
+before unify_vars 329914 357400443 357.070529
+before build_ground1 329914 119407620 119.077706
+before unify_ground1 329948 341407854 341.077906
+before build_ground3 329982 229770801 229.440819
+before unify_ground3 330016 1115728703 1115.398687
+before build_vars_local 329821 99400150 99.070329
+before unify_vars_local 329855 436400384 436.070529
+before build_ground1_local 329869 119407547 119.077678
+before unify_ground1_local 329903 425407781 425.077878
+before build_ground3_local 329937 229770728 229.440791
+before unify_ground3_local 329971 1453728630 1453.398659
+after instance1 331871 156392472 156.060601
+after instance3 331905 236640902 236.308997
+after instance5 331943 324669445 324.337502
+after instance7 331980 344603682 344.271702
+after generalize7 331923 793603625 793.271702
+after empty 331851 19334107 19.002256
+after lower7 331855 766603571 766.271716
+after copy7 331891 1728912170 1728.580279
+after repr 331857 165392444 165.060587
+after restore 331899 219392871 219.060972
+after keep 331905 200392863 200.060958
+after checker_instance1 332034 145392633 145.060599
+after checker_instance3 332076 226641071 226.308995
+after checker_instance5 332112 313669612 313.337500
+after checker_instance7 332146 333603846 333.271700
+after build_vars 332124 98402464 98.070340
+after unify_vars 332158 290402697 290.070539
+after build_ground1 332186 118409875 118.077689
+after unify_ground1 332220 275410108 275.077888
+after build_ground3 332254 228773056 228.440802
+after unify_ground3 332288 929726848 929.394560
+after build_vars_local 332079 98402391 98.070312
+after unify_vars_local 332113 365402624 365.070511
+after build_ground1_local 332127 118409816 118.077689
+after unify_ground1_local 332161 353410049 353.077888
+after build_ground3_local 332195 228772997 228.440802
+after unify_ground3_local 332229 1242726789 1242.394560
+```
+
+### 1. Instances copy nameless variables
+
+Capture stores a variable's scheme name in the template node's level field
+and NONE in `a`. Every template node is generic and an instance overwrites
+the level, so the instance copies the node as stored; the `a_mask` table and
+its OR per copied node (`template.rs:464`, 41 attributed instructions in
+`instance7`) are gone. Readers of a variable's name in a template or
+segment:
+
+| Reader | Needs the scheme name? | Where it reads it now |
+|---|---|---|
+| `Graph::instance` (template.rs) | No: an instance is nameless (compiler/ml/btype.ml:510) | — |
+| Canonical printer, `View::raw` (tc/canonical/view.rs) | Yes: prints `'a` of a scheme | `template::descriptor` of the stored node |
+| Old-graph bridge, template nodes (tc/bridge/to_old.rs) | Yes: `Tvar (Some name)` of the published scheme | `template::descriptor` of the stored node |
+| `publish` (tc/publish.rs) | No: moves the pools; shared nodes are not templates | — |
+| `from_old` `resolve_roots` (tc/bridge/from_old.rs) | No: reads a synthetic tuple's list and arity | — |
+| Differential printer (tc/differential.rs `node_form`) | No template read: prints live graph nodes | unchanged |
+| `Segment::graph` (tc/publish.rs) | No: copies the pool as stored | — |
+
+`Graph::copy` keeps its `VAR => node.a = NONE` arm: its source is a live
+node whose name the unit still prints, so the source cannot hold no name,
+and the store sits in a match arm the copy takes anyway.
+
+### 2. `Graph::link` and `Graph::write`
+
+`link` takes one slot borrow: one bounds check, one 16-byte load and the
+link store. Only inside a speculation or for a named variable source does
+the out-of-line `link_logged` run (trail entry, then the name rule, which
+loads the target). `write` reads the old node only inside a speculation.
+Small enough now, `link` is inlined by LLVM into its callers, so it has no
+function row in the attribution. Function attribution of `unify_ground1`:
+
+| Function | Before | After |
+|---|---:|---:|
+| `Checker::unify_distinct` | 131.000008 | 132.000007 |
+| `tc_kernel::main::{closure#2}` | 92.000072 | 92.000072 |
+| `tc_kernel::main` | 63.002027 | 51.002024 |
+| `Graph::link` | 55.000000 | — (inlined) |
+
+`Graph::link`'s inlined lines in `unify_distinct` after the change:
+`graph.rs:158` (slot load) 2, `graph.rs:159` (link store) 5,
+`graph.rs:165` (speculation and named-variable test) 4: **11**, plus its
+bounds check and the Vec pointer/length loads charged to the library lines
+`slice/index.rs:245`, `vec/mod.rs:1823` and `raw_vec/mod.rs:635`: about
+15 per call, against 55. The call site's argument setup (`unify.rs:235`, 4)
+is gone with the call. Gate (≤ 25): met.
+
+### 3. `Graph::repr`
+
+`repr_parts` returns a node whose head is not exactly `LINK` at once and
+calls the cold, out-of-line `compress` (the former walk, unchanged step
+counts and trail entries) for a link. Every link is written with
+`head: LINK` (no arity or flag bits; documented on `LINK`), so the test
+compares the whole head. x86-64 code of the fast path in `tc_kernel::main`:
+
+```text
+cmp    %r13,%rsi                 ; slice bounds check
+jbe    <panic_bounds_check>
+mov    %r13,%rax
+shl    $0x4,%rax
+cmpl   $0x1,(%rdi,%rax,1)        ; head == LINK
+je     <call Graph::compress>    ; untaken for a representative
+```
+
+`graph.rs:248` is charged 12 instructions in `main` (two calls) against 29
+for the two calls before. The bounds check stays: a handle is not known to be
+in range without `unsafe`.
+
+The changed inlining moved the register allocation of `Graph::instance`
+(`self` spilled to the stack in the closed copy: `instance1` 139 → 148
+with only the repr change). The closed path is now alone in `instance`: the
+zero-node external root and the specialization with external references are
+out-of-line calls (`instance_external_root`, `instance_with_externals`).
+
+### Checks
+
+```text
+cargo test --manifest-path compiler-rust/Cargo.toml --lib tc::
+test tc::differential::tests::kernel_tier_agrees_on_generated_cases ... ok
+test tc::differential::tests::structural_tier_agrees_on_generated_cases ... ok
+test tc::differential::tests::expand_tier_agrees_on_generated_cases ... ok
+test result: ok. 137 passed; 0 failed; 22 ignored; 0 measured; 2606 filtered out
+cargo clippy --locked --manifest-path compiler-rust/Cargo.toml --all-targets --all-features -- -D warnings
+Finished `dev` profile [unoptimized + debuginfo] target(s)
+```
+
+That is the merged head. Before the merge the branch ran 131 passed and 28
+ignored, the same as its base; this branch adds, removes and ignores no test
+(the merged trunk brings the difference). `tc` is not on a compiler build's path, so
+no application or `tests/tests` saving is claimed; the CI `Instruction
+count` check reports the build's figures.

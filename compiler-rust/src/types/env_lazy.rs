@@ -2472,20 +2472,6 @@ pub(crate) struct StoredModuleComponents {
     functor_result_subst_cache: OnceCell<RefCell<HashMap<Path, FunctorResultSubst>>>,
 }
 
-#[cfg(test)]
-impl StoredModuleComponents {
-    /// The seed environment, access path and declaration, for the test that
-    /// compares the tables with the environment log.
-    pub(crate) fn test_parts(&self) -> (&super::env::Env, &Path, &ModuleDeclaration, bool) {
-        (
-            &self.seed_env,
-            &self.access_path,
-            &self.module_decl,
-            self.parent_context.is_some(),
-        )
-    }
-}
-
 impl StoredModuleComponents {
     pub(crate) fn new(
         seed_env: super::env::Env,

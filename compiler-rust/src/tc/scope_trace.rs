@@ -80,9 +80,9 @@ pub(crate) fn push(event: Event) {
 
 /// The closure's cost plus O(events): the events the old environment reports
 /// on this thread while `f` runs. Captures do not nest; a panic in `f` leaves
-/// the capture off for the next one. Tests only until slice R4h wires the
-/// capture into `RESCRIPT_CHECKER=both`.
-#[cfg(test)]
+/// the capture off for the next one. The driver captures each unit it
+/// checks under `RESCRIPT_CHECKER=both`; the module exists with debug
+/// assertions only.
 pub(crate) fn capture<R>(f: impl FnOnce() -> R) -> (R, Vec<Event>) {
     struct Off;
     impl Drop for Off {

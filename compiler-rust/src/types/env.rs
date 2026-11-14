@@ -3292,12 +3292,6 @@ pub(crate) fn predef_declarations(ctx: &TypeContext) -> Vec<crate::types::world:
     env.0
 }
 
-/// The environment as a version log, built beside the tables and compared
-/// with them (docs/CHECKER_REDESIGN.md, H.2.8 step 4).
-#[cfg(test)]
-#[path = "env_log.rs"]
-mod env_log;
-
 #[cfg(test)]
 mod tests {
     use super::*;

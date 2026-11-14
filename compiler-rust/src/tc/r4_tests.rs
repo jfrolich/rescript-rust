@@ -22,7 +22,7 @@ use super::scope::{
     OPEN_OVERRIDE, OPEN_USED, PATTERN, Resolved, ResolvedKind, Scopes, TableId, USED, UnitSource,
     WarningKind,
 };
-use super::scope_oracle::{Resolver, replay};
+use super::scope_oracle::{OnScopes, namespace, replay};
 use super::scope_trace::{self, Event, Ns};
 use super::segment::{
     ChildTable, ExportItem, ExportKind, Range, Segment, SignaturePools, ValueRow,
@@ -1085,70 +1085,6 @@ fn candidates_are_innermost_first() {
     assert_eq!(steps::scope(|| s.candidates(a, &mut out)), 10_000);
     assert_eq!(out.len(), 10_000);
     assert_eq!(out[0].item, Resolved::binder(Binder(9_999)));
-}
-
-/// [`Scopes`] as a resolver of the oracle. An item is a binder's payload.
-struct OnScopes {
-    scopes: Scopes,
-    out: Vec<Found>,
-}
-
-fn namespace(ns: Ns) -> Namespace {
-    match ns {
-        Ns::Value => Namespace::Value,
-        Ns::Type => Namespace::Type,
-        Ns::Module => Namespace::Module,
-        Ns::ModuleType => Namespace::ModuleType,
-        Ns::Constructor => Namespace::Constructor,
-        Ns::Label => Namespace::Label,
-    }
-}
-
-impl OnScopes {
-    fn item(&self, found: Found) -> u32 {
-        match found.item.kind() {
-            ResolvedKind::Binder(binder) => self.scopes.binders.payload[binder.0 as usize],
-            other => panic!("the replay binds nothing imported: {other:?}"),
-        }
-    }
-}
-
-impl Resolver for OnScopes {
-    fn enter(&mut self) {
-        self.scopes.enter();
-    }
-
-    fn leave(&mut self) {
-        self.scopes.leave();
-    }
-
-    fn bind(&mut self, ns: Ns, name: &str, item: u32) {
-        bind(&mut self.scopes, name, namespace(ns), item);
-    }
-
-    fn open(&mut self, members: &[(Ns, &str, u32)]) {
-        let rows: Vec<(Key, Binder)> = members
-            .iter()
-            .map(|&(ns, name, item)| {
-                let binder = push(&mut self.scopes, name, namespace(ns), item);
-                (Key(self.scopes.binders.key[binder.0 as usize]), binder)
-            })
-            .collect();
-        let table = self.scopes.table_from(&rows);
-        self.scopes.open(table, 0, 0, 0);
-    }
-
-    fn first(&mut self, ns: Ns, name: &str) -> Option<u32> {
-        let key = key(&mut self.scopes, name, namespace(ns));
-        self.scopes.find(key).map(|found| self.item(found))
-    }
-
-    fn all(&mut self, ns: Ns, name: &str, out: &mut Vec<u32>) {
-        let key = key(&mut self.scopes, name, namespace(ns));
-        self.out.clear();
-        self.scopes.candidates(key, &mut self.out);
-        out.extend(self.out.iter().map(|&found| self.item(found)));
-    }
 }
 
 /// Reaches: R4a, R4b, R4c. The oracle of decision 4 on the new structure:
