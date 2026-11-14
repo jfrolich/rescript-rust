@@ -1,0 +1,1 @@
+- Checker rewrite R4 (binders, scopes and lookups): design, skeleton, acceptance tests and a lookup oracle that replays the old environment's bindings, opens and lookups. No build uses the new code.

@@ -372,6 +372,25 @@ impl OpenedLayers {
         }
     }
 
+    /// R4 oracle: every member of the layer; the candidates of one
+    /// constructor or label name in the order a lookup finds them.
+    #[cfg(debug_assertions)]
+    fn trace_members(&self) -> Vec<crate::tc::scope_trace::Member> {
+        use crate::tc::scope_trace::Ns;
+        let mut members = Vec::new();
+        members.extend(self.values.values().map(|(id, _, _)| (Ns::Value, id.name(), id.stamp())));
+        members.extend(self.types.values().map(|(id, _, _)| (Ns::Type, id.name(), id.stamp())));
+        members.extend(self.modules.values().map(|(id, _, _)| (Ns::Module, id.name(), id.stamp())));
+        members.extend(self.modtypes.values().map(|(id, _, _)| (Ns::ModuleType, id.name(), id.stamp())));
+        for candidates in self.constrs.values() {
+            members.extend(candidates.iter().map(|(id, _)| (Ns::Constructor, id.name(), id.stamp())));
+        }
+        for candidates in self.labels.values() {
+            members.extend(candidates.iter().map(|(id, _)| (Ns::Label, id.name(), id.stamp())));
+        }
+        members
+    }
+
     fn is_empty(&self) -> bool {
         self.values.is_empty()
             && self.types.is_empty()
@@ -1305,6 +1324,20 @@ impl<T: Clone> TycompTbl<T> {
         }
     }
 
+    /// R4 oracle: the stamps of `collect_all_key`'s candidates, in its order.
+    #[cfg(debug_assertions)]
+    fn trace_candidates(&self, key: Name, stamps: &mut Vec<i32>) {
+        if let Some(entries) = self.current.get(&key) {
+            stamps.extend(entries.iter().rev().map(|(id, _)| id.stamp()));
+        }
+        if let Some(opened) = &self.opened {
+            if let Some(entries) = opened.components.get(&key) {
+                stamps.extend(entries.iter().map(|(id, _)| id.stamp()));
+            }
+            opened.next.trace_candidates(key, stamps);
+        }
+    }
+
     /// OCaml `TycompTbl.find_all`: each candidate with the `mk_callback`
     /// data of its opened layer, `(slot, first hidden candidate)`.
     pub fn find_all_marking(
@@ -1640,6 +1673,8 @@ impl Env {
         &ConstructorDescription,
         OpenSlotMark<'_, ConstructorDescription>,
     )> {
+        #[cfg(debug_assertions)]
+        self.trace_lookup(crate::tc::scope_trace::Ns::Constructor, name, true);
         self.data
             .constrs
             .find_all_marking(name)
@@ -1658,6 +1693,8 @@ impl Env {
         &self,
         name: &str,
     ) -> Vec<(&LabelDescription, OpenSlotMark<'_, LabelDescription>)> {
+        #[cfg(debug_assertions)]
+        self.trace_lookup(crate::tc::scope_trace::Ns::Label, name, true);
         self.data
             .labels
             .find_all_marking(name)
@@ -1678,7 +1715,66 @@ impl Env {
 
     /// Mark this environment as changed.
     fn bump_id(&mut self) {
+        #[cfg(debug_assertions)]
+        let from = self.id;
         self.id = next_env_id();
+        #[cfg(debug_assertions)]
+        if crate::tc::scope_trace::on() {
+            crate::tc::scope_trace::push(crate::tc::scope_trace::Event::Version { from, to: self.id });
+        }
+    }
+
+    /// R4 oracle: report a binding this version added. One thread-local load
+    /// while no capture runs; absent from a release build.
+    #[cfg(debug_assertions)]
+    fn trace_bind(&self, ns: crate::tc::scope_trace::Ns, id: &Ident) {
+        if crate::tc::scope_trace::on() {
+            crate::tc::scope_trace::push(crate::tc::scope_trace::Event::Bind {
+                env: self.id,
+                ns,
+                name: id.name(),
+                stamp: id.stamp(),
+            });
+        }
+    }
+
+    /// R4 oracle: report a lookup by name with the stamps it finds, by a
+    /// second read of the same table. O(candidates) while a capture runs,
+    /// one thread-local load otherwise; absent from a release build.
+    #[cfg(debug_assertions)]
+    fn trace_lookup(&self, ns: crate::tc::scope_trace::Ns, name: impl crate::name::NameKey, all: bool) {
+        use crate::tc::scope_trace::Ns;
+        if !crate::tc::scope_trace::on() {
+            return;
+        }
+        let mut found = Vec::new();
+        let first = |entry: Option<&Ident>, found: &mut Vec<i32>| found.extend(entry.map(Ident::stamp));
+        match ns {
+            Ns::Value => first(self.data.values.find_by_name_with_id(name).map(|e| e.0), &mut found),
+            Ns::Type => first(self.data.types.find_by_name_with_id(name).map(|e| e.0), &mut found),
+            Ns::Module => first(self.data.modules.find_by_name_with_id(name).map(|e| e.0), &mut found),
+            Ns::ModuleType => first(self.data.modtypes.find_by_name_with_id(name).map(|e| e.0), &mut found),
+            Ns::Constructor => {
+                if let Some(key) = name.name_key() {
+                    self.data.constrs.trace_candidates(key, &mut found);
+                }
+            }
+            Ns::Label => {
+                if let Some(key) = name.name_key() {
+                    self.data.labels.trace_candidates(key, &mut found);
+                }
+            }
+        }
+        if !all {
+            found.truncate(1);
+        }
+        crate::tc::scope_trace::push(crate::tc::scope_trace::Event::Lookup {
+            env: self.id,
+            ns,
+            name: name.text().to_string(),
+            all,
+            found,
+        });
     }
 
     /// Mark a change to the bindings that module-path resolution reads.
@@ -1804,12 +1900,16 @@ impl Env {
     /// Add a value binding.
     pub fn add_value(&mut self, id: Ident, desc: ValueDescription) {
         self.bump_id();
+        #[cfg(debug_assertions)]
+        self.trace_bind(crate::tc::scope_trace::Ns::Value, &id);
         let desc = Arc::new(desc);
         self.data_mut().values.add(id, desc);
     }
 
     /// Find a value by name.
     pub fn find_value(&self, name: impl crate::name::NameKey) -> EnvResult<&ValueDescription> {
+        #[cfg(debug_assertions)]
+        self.trace_lookup(crate::tc::scope_trace::Ns::Value, name, false);
         self.data
             .values
             .find_by_name(name)
@@ -1819,6 +1919,8 @@ impl Env {
 
     /// Find a value by name, returning both the identifier and description.
     pub fn find_value_with_id(&self, name: impl crate::name::NameKey) -> EnvResult<(&Ident, &ValueDescription)> {
+        #[cfg(debug_assertions)]
+        self.trace_lookup(crate::tc::scope_trace::Ns::Value, name, false);
         self.data
             .values
             .find_by_name_with_id(name)
@@ -1831,6 +1933,8 @@ impl Env {
         &self,
         name: impl crate::name::NameKey,
     ) -> EnvResult<(Path, &Arc<ValueDescription>)> {
+        #[cfg(debug_assertions)]
+        self.trace_lookup(crate::tc::scope_trace::Ns::Value, name, false);
         self.data
             .values
             .find_by_name_with_path(name)
@@ -1888,6 +1992,8 @@ impl Env {
     /// `id` loses its labels' array. Use [`Env::store_type`] for `Env.add_type`.
     pub fn add_type(&mut self, id: Ident, decl: impl Into<Arc<TypeDeclaration>>) {
         self.bump_scope();
+        #[cfg(debug_assertions)]
+        self.trace_bind(crate::tc::scope_trace::Ns::Type, &id);
         let decl = decl.into();
         let data = self.data_mut();
         data.types.add(id, decl);
@@ -1937,12 +2043,16 @@ impl Env {
         decl.type_variance = variance;
         let decl = Arc::new(decl);
         self.bump_scope();
+        #[cfg(debug_assertions)]
+        self.trace_bind(crate::tc::scope_trace::Ns::Type, &id);
         self.data_mut().types.add(id, decl.clone());
         Some(decl)
     }
 
     /// Find a type by name.
     pub fn find_type(&self, name: impl crate::name::NameKey) -> EnvResult<&TypeDeclaration> {
+        #[cfg(debug_assertions)]
+        self.trace_lookup(crate::tc::scope_trace::Ns::Type, name, false);
         self.data
             .types
             .find_by_name(name)
@@ -1955,6 +2065,8 @@ impl Env {
     /// Local bindings resolve to `Pident(id)`, while opened bindings resolve to
     /// `Pdot(root, name, pos)` from the symbolic open layer.
     pub fn find_type_with_path(&self, name: impl crate::name::NameKey) -> EnvResult<(Path, &TypeDeclaration)> {
+        #[cfg(debug_assertions)]
+        self.trace_lookup(crate::tc::scope_trace::Ns::Type, name, false);
         self.data
             .types
             .find_by_name_with_path(name)
@@ -1967,6 +2079,8 @@ impl Env {
         &self,
         name: impl crate::name::NameKey,
     ) -> EnvResult<(Path, &Arc<TypeDeclaration>)> {
+        #[cfg(debug_assertions)]
+        self.trace_lookup(crate::tc::scope_trace::Ns::Type, name, false);
         self.data
             .types
             .find_by_name_with_path(name)
@@ -2116,12 +2230,16 @@ impl Env {
     /// Add a constructor binding.
     pub fn add_constructor(&mut self, id: Ident, desc: ConstructorDescription) {
         self.bump_id();
+        #[cfg(debug_assertions)]
+        self.trace_bind(crate::tc::scope_trace::Ns::Constructor, &id);
         let desc = Arc::new(desc);
         self.data_mut().constrs.add(id, desc);
     }
 
     /// Find a constructor by name.
     pub fn find_constructor(&self, name: impl crate::name::NameKey) -> EnvResult<&ConstructorDescription> {
+        #[cfg(debug_assertions)]
+        self.trace_lookup(crate::tc::scope_trace::Ns::Constructor, name, false);
         self.data
             .constrs
             .find_by_name(name)
@@ -2131,6 +2249,8 @@ impl Env {
 
     /// Find all constructors with a given name.
     pub fn find_all_constructors(&self, name: impl crate::name::NameKey) -> Vec<&ConstructorDescription> {
+        #[cfg(debug_assertions)]
+        self.trace_lookup(crate::tc::scope_trace::Ns::Constructor, name, true);
         self.data
             .constrs
             .find_all(name)
@@ -2146,6 +2266,8 @@ impl Env {
     /// Add a label binding.
     pub fn add_label(&mut self, id: Ident, desc: LabelDescription) {
         self.bump_id();
+        #[cfg(debug_assertions)]
+        self.trace_bind(crate::tc::scope_trace::Ns::Label, &id);
         let desc = Arc::new(desc);
         self.data_mut().labels.add(id, desc);
     }
@@ -2165,6 +2287,8 @@ impl Env {
 
     /// Find a label by name.
     pub fn find_label(&self, name: impl crate::name::NameKey) -> EnvResult<&LabelDescription> {
+        #[cfg(debug_assertions)]
+        self.trace_lookup(crate::tc::scope_trace::Ns::Label, name, false);
         self.data
             .labels
             .find_by_name(name)
@@ -2174,6 +2298,8 @@ impl Env {
 
     /// Find all labels with a given name.
     pub fn find_all_labels(&self, name: impl crate::name::NameKey) -> Vec<&LabelDescription> {
+        #[cfg(debug_assertions)]
+        self.trace_lookup(crate::tc::scope_trace::Ns::Label, name, true);
         self.data
             .labels
             .find_all(name)
@@ -2214,6 +2340,8 @@ impl Env {
         );
         self.bump_scope();
         self.invalidate_module_alias_caches();
+        #[cfg(debug_assertions)]
+        self.trace_bind(crate::tc::scope_trace::Ns::Module, &id);
         let decl = Arc::new(decl);
         self.data_mut().modules.add(id, decl);
         self.data_mut().module_components.add(id, stored_components);
@@ -2251,6 +2379,13 @@ impl Env {
             return;
         }
         self.bump_scope();
+        #[cfg(debug_assertions)]
+        if crate::tc::scope_trace::on() {
+            crate::tc::scope_trace::push(crate::tc::scope_trace::Event::Open {
+                env: self.id,
+                members: layers.trace_members(),
+            });
+        }
         self.invalidate_module_alias_caches();
         let root = Arc::new(root);
         let data = self.data_mut();
@@ -2275,6 +2410,8 @@ impl Env {
 
     /// Find a module by name.
     pub fn find_module(&self, name: impl crate::name::NameKey) -> EnvResult<&ModuleDeclaration> {
+        #[cfg(debug_assertions)]
+        self.trace_lookup(crate::tc::scope_trace::Ns::Module, name, false);
         self.data
             .modules
             .find_by_name(name)
@@ -2284,6 +2421,8 @@ impl Env {
 
     /// Find a module by name, returning both the identifier and declaration.
     pub fn find_module_with_id(&self, name: impl crate::name::NameKey) -> EnvResult<(&Ident, &ModuleDeclaration)> {
+        #[cfg(debug_assertions)]
+        self.trace_lookup(crate::tc::scope_trace::Ns::Module, name, false);
         self.data
             .modules
             .find_by_name_with_id(name)
@@ -2296,6 +2435,8 @@ impl Env {
     /// Local bindings resolve to `Pident(id)`, while opened bindings resolve to
     /// `Pdot(root, name, pos)` from the symbolic open layer.
     pub fn find_module_with_path(&self, name: impl crate::name::NameKey) -> EnvResult<(Path, &ModuleDeclaration)> {
+        #[cfg(debug_assertions)]
+        self.trace_lookup(crate::tc::scope_trace::Ns::Module, name, false);
         self.data
             .modules
             .find_by_name_with_path(name)
@@ -2510,12 +2651,16 @@ impl Env {
     /// Add a module type binding.
     pub fn add_modtype(&mut self, id: Ident, decl: ModtypeDeclaration) {
         self.bump_scope();
+        #[cfg(debug_assertions)]
+        self.trace_bind(crate::tc::scope_trace::Ns::ModuleType, &id);
         let decl = Arc::new(decl);
         self.data_mut().modtypes.add(id, decl);
     }
 
     /// Find a module type by name.
     pub fn find_modtype(&self, name: impl crate::name::NameKey) -> EnvResult<&ModtypeDeclaration> {
+        #[cfg(debug_assertions)]
+        self.trace_lookup(crate::tc::scope_trace::Ns::ModuleType, name, false);
         self.data
             .modtypes
             .find_by_name(name)
@@ -2528,6 +2673,8 @@ impl Env {
     /// Local bindings resolve to `Pident(id)`, while opened bindings resolve to
     /// `Pdot(root, name, pos)` from the symbolic open layer.
     pub fn find_modtype_with_path(&self, name: impl crate::name::NameKey) -> EnvResult<(Path, &ModtypeDeclaration)> {
+        #[cfg(debug_assertions)]
+        self.trace_lookup(crate::tc::scope_trace::Ns::ModuleType, name, false);
         self.data
             .modtypes
             .find_by_name_with_path(name)

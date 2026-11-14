@@ -878,7 +878,6 @@ fn instance_with_an_empty_memo_costs_what_r1_costs() {
 /// Without a scoped type, the checked lowering is R1's: the same levels,
 /// the same steps.
 #[test]
-#[ignore = "R3d build"]
 fn lower_without_scopes_costs_what_r1_costs() {
     let mut plain = checker(Mode::Success);
     plain.g.begin_def();
@@ -897,7 +896,6 @@ fn lower_without_scopes_costs_what_r1_costs() {
 /// replaced by its expansion to avoid that (compiler/ml/ctype.ml:590-600),
 /// which renames the node.
 #[test]
-#[ignore = "R3d build"]
 fn lower_checks_scopes_and_expands_to_escape() {
     let mut c = checker(Mode::Success);
     c.types.rows[T as usize].scope = 2;
@@ -928,7 +926,6 @@ fn lower_checks_scopes_and_expands_to_escape() {
 /// the result; a later instance of the same scheme then has both its
 /// nullary nodes linked to the first instance's result node.
 #[test]
-#[ignore = "R3d build"]
 fn an_application_memorizes_the_result_node() {
     for ty in [A, NT] {
         let mut c = checker(Mode::Success);

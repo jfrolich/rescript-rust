@@ -1650,6 +1650,9 @@ equal levels; a snapshot in Mode::Success.
 
 ### 6.5 R4: scopes and names
 
+Replaced by section 9 ("R4 as designed"); the text below is the task it was
+cut from.
+
 ```text
 Task R4: binders, scopes and lookups.
 
@@ -2662,3 +2665,720 @@ skeleton; all three were the skeleton's, not the builder's.
    variable and has no level to lower: it is skipped at the push, one
    compare a child) or widens the entry, with a test of a binding to a
    type that holds a frozen child.
+10. **A generalization forgets the nullary memo** (review of R3b). OCaml
+    empties `simple_abbrevs` as the first step of `generalize`,
+    `generalize_structure` and `generalize_expansive`
+    (ctype.ml:519, 543, 668), and the current checker does the same. The
+    skeleton had no entry for it: the kernel's `Graph::generalize` cannot
+    reach the memo. `Checker::generalize` and `Checker::generalize_structure`
+    forget it (one load and one untaken branch while no row is live) and
+    then run the kernel's walk; every generalization of the checker goes
+    through them, and the harness's from the tier that has a memo. Test:
+    `a_generalization_forgets_the_nullary_memo`. R5b's
+    `generalize_expansive` forgets it the same way.
+
+## 9. R4 as designed
+
+Section 6.5 gave R4 as one slice of seven commits. It is replaced by this
+section: nine build slices, a skeleton (`src/tc/{name_table,scope,names}.rs`,
+every body `todo!("R4x")`), the old environment's trace
+(`src/tc/scope_trace.rs`), an oracle that replays it
+(`src/tc/scope_oracle.rs`) and acceptance tests (`src/tc/r4_tests.rs`). A
+builder fills bodies in. It does not change a signature, a stated cost or a
+test; when one cannot be met it stops and reports a reproduction.
+
+### 9.1 The data
+
+Sizes are pinned by `scope::tests::sizes`, `names::tests::sizes` and
+`name_table::tests::sizes`.
+
+| Row | Bytes | One per | Layout |
+|---|---:|---|---|
+| `Name` | 4 | distinct name of a worker | dense index into `NameTable` (bytes in one buffer, a span per name, one hash table by content). Kept for the worker |
+| `Key` | 4 | name in a namespace | `name << 3 \| namespace`; indexes the head table, orders a member table |
+| binder | 18 | bound name | `Binders`: `key` 4, `payload` 4 (a type, a type index, a member row, a table or an alias target, by kind), `loc` 4, `previous` 4 (the binder of the same key it hid), `kind` 1, `used` 1 (used, the three constructor usages, deprecated) |
+| head | 4 | key | `Scopes::heads[key]`: the innermost binder of the key, or none |
+| log entry | 4 | binding in an active scope | the binder; its undo datum is `previous` |
+| `Scope` | 12 | scope | `parent`, `first_binder`, `opens` (innermost visible layer) |
+| `Layer` | 12 | `open` | `table`, `mark` (the binder count when opened), `older` |
+| `Open` | 16 | `open` | `loc`, `root`, `shadowed` (list of names already reported), `flags` (used, `open!`) |
+| `ShadowNote` | 8 | name an open was reported to shadow | `key`, `next` |
+| `Table` | 12 | member table | `first`, `len`, `unit` |
+| `Member` | 12 | member of a module | `key`, `target` (a binder, or the index of an `ExportItem` in the unit's segment), `origin` (local, or the unit with a deprecated bit) |
+| `UnitSlot` | 16 | dependency a worker has read | `Arc<Segment>`, `name`, first slot of its tables in `table_index` |
+| `Resolved` | 4 | what a use means | bits 31..30: a binder; a row of `imported_members`; a unit |
+| `Found` | 8 | answer of a lookup | `item: Resolved`, `layer` (the open it came through, or none) |
+| `Warning` | 16 | warning raised | `kind`, `loc`, `a`, `b` |
+
+**What an identifier resolves to.** A `Resolved`, 4 bytes: a binder of this
+unit (also for a member of a module of this unit, reached through an open
+or a path), or a row of the worker's imported members (which names the unit
+and the export item), or a unit. The walk of R5b stores it in
+`ExprRow::resolved` and passes nothing else down for a name. A lookup
+returns `Found` (8 bytes) because the use needs the layer once, for the
+open's usage and shadowing; it is not stored.
+
+**What a lookup walks.** By name: one load of the head, then one binary
+search in each visible layer whose `mark` is above the head binder,
+innermost first, stopping at the first that has the key
+(`Scopes::find`). By path: the first component as a name (or as a unit),
+then per component one `module_shape` (aliases followed, 1 step each) and
+one binary search in the module's table (`Scopes::lookup_path`). By binder:
+one indexed load of the array wanted.
+
+**Where the rows live.** `Scopes` is one value per worker. Names, units and
+imported tables stay for the worker; binders, scopes, layers, local tables,
+warnings and read logs are truncated to the frozen prefix by
+`Scopes::reset`. The head table is never cleared: leaving every scope
+restores it.
+
+### 9.2 The slices
+
+| Slice | Builds | File | Depends on | Can be built beside | Lines |
+|---|---|---|---|---|---:|
+| R4a | The name table; `Binders::push` | `name_table.rs`, `scope.rs` | R2 | R4h | 150 |
+| R4b | Scopes, the head table, the undo log, `freeze` and `reset` | `scope.rs` | R4a | R4h | 250 |
+| R4c | Member tables of this unit, `seal`, opened layers, `find`, `find_below`, `candidates` | `scope.rs` | R4b | R4h | 450 |
+| R4d | Dependencies: units by name, an export table imported once per worker, deprecation bits | `scope.rs` | R4c | R4h, R4i | 350 |
+| R4e | Paths: `module_shape` through aliases, `lookup_path`, `candidates_in` | `names.rs` | R4d | R4h, R4i | 450 |
+| R4f | Usage and the warnings of a use: `arm`, `mark`, `use_found`, `use_modules`, `finish` | `names.rs` | R4e | R4h, R4i | 350 |
+| R4g | Reads of other units | `names.rs`, two call sites in `scope.rs` | R4f | R4h, R4i | 150 |
+| R4h | Deletes `types/env_log.rs` and `types/env_log_tests.rs` | `types/` | nothing | any slice | -4,466 |
+| R4i | The oracle under `RESCRIPT_CHECKER=both` in builds with debug assertions; the bench | `driver.rs`, `scope_oracle.rs`, `benches/tc_kernel.rs` | R4c | R4d to R4h | 300 |
+
+R4a to R4g are one line: they fill the same two files and each uses the
+one before. R4h reads nothing of the rest. R4i needs the lookup of R4c and
+nothing later.
+
+**What still reads `env_log.rs`.** Nothing. Its only reference is
+`#[path = "env_log.rs"] mod env_log;` under `#[cfg(test)]` at the end of
+`types/env.rs`, and `env_log.rs` includes `env_log_tests.rs` the same way.
+`rg -n 'env_log' compiler-rust/src` prints those two lines and the file's
+own text. Deleting the two files and the `mod` line removes 4,466 lines and
+their tests, and no other test.
+
+Every slice has its acceptance tests in full in `r4_tests.rs`, ignored
+with the slice's name, except R4h (a deletion: its criteria are commands)
+and the wiring of R4i (a command on `tests/tests`; the oracle itself is
+tested today).
+
+### 9.3 Decisions
+
+Each is settled by a test that runs on the old checker today
+(`r4_tests.rs`, `scope_oracle.rs`), by a probe with a release build of
+trunk and the OCaml compiler as witness, or by the OCaml source.
+
+**1. Lookup order and shadowing.**
+
+- *Local over open, open over an older local.* One table per namespace
+  holds current bindings and, below them, an opened layer and the table
+  before the open (`IdTbl`, compiler/ml/env.ml:240-290). A lookup takes
+  the current bindings first, then the layer, then what was there before:
+  a binding made after the open hides the layer's member, the layer hides
+  every binding made before it. Pinned by `LOCAL_SHADOWS_AN_OPEN`
+  (`y: int`), `OPEN_SHADOWS_A_LOCAL` (`y: string`) and `LOCAL_OPENS` (an
+  open inside a function hiding a binding of the enclosing function, and
+  ending with its block). In the design this is one comparison: a layer is
+  probed when its `mark` is above the head binder.
+- *Later open over earlier.* `LATER_OPEN_WINS`: `y: float` from the second
+  open, `z: int` from the first.
+- *The same name in two namespaces.* `ONE_NAME_IN_EACH_NAMESPACE`: the type
+  `t`, the label `t` and the value `t`; the constructor `T` and the module
+  `T`. A `Key` carries the namespace, so they are different heads.
+- *Constructors and labels.* A lookup returns every candidate, innermost
+  first (`TycompTbl.find_all`, env.ml:202-213, and `lookup_all_simple`,
+  env.ml:1028-1045); the choice among them by the expected type is
+  `disambiguate` (compiler/ml/typecore.ml:976-1070). **R4's part**:
+  `Scopes::candidates` (and `candidates_in` for `M.A`), in that order,
+  with the layer each came through. **Not R4's**: choosing by the expected
+  type, reading a label or a constructor straight from the expected
+  type's declaration when it is not in scope at all, and the warnings of
+  the choice (40, 41, 42); that is R5b for records and variants of the
+  core language. `TYPE_DIRECTED` pins both halves on the old checker:
+  `(r: a) => r.x` is `a => int` although `b` was declared later with the
+  same label, and `r => r.x` is `b => string`, the first candidate.
+- *A qualified path through aliases.* `PATH_THROUGH_TWO_ALIASES`:
+  `module N = A; module O = N; O.B.v` and, across units,
+  `module P = Dep; module Q = P.A; Q.B.v`, both `string`; the signature
+  keeps `module Q = P.A` as written. `Env.lookup` resolves the module
+  prefix with `lookup_module_descr` and then reads the component
+  (env.ml:952-1026); an alias is followed when its components are needed
+  (env.ml:732-760, 854-880). In the design an alias binder's payload is the
+  `Resolved` of its target and `module_shape` follows it, 1 step an alias.
+
+**2. Warnings at a lookup.** Probes, each compiled by a release build of
+trunk and by the OCaml compiler with the same output:
+
+| Program | Reported |
+|---|---|
+| `open M` hides a local `x`; `let y = x`; then a type error | warning 44 at the `open`, then the error |
+| the same with the type error before `let y = x` | the error only |
+| `open M` never used, then a type error | the error only: no warning 33 |
+| `M.v` deprecated; `let a = M.v`; a type error; `let c = M.v` | warning 3 at the first use, then the error |
+| unused type, constructors, value, variable, no error | 34, 37, 37, 34, 34, 32, 26 in declaration order, after everything else |
+
+So there are two kinds, and the contract (2.1, O15) follows from when each
+is raised.
+
+- *Raised when the walk reaches the use*: deprecation (3;
+  compiler/ml/typetexp.ml:98-123, env.ml:940-945 for a module on a path)
+  and "this open statement shadows" (44 for a value, type, module or module
+  type; 45 for a constructor or label). The latter is raised by the open's
+  `using` callback the first time a lookup goes through the layer and finds
+  something older that it hides, once per name and open, not for `open!`
+  (env.ml:279-288, 1881-1908). `Scopes::use_found` and `use_modules` raise
+  both, with one exception (9.7, decision 6): for a constructor or a label
+  the open shadows only when the two result types differ
+  (`check_shadowing`, env.ml:415-420), so `use_found` hands the hidden item
+  back and the walk reports through `Scopes::shadows`. Finding raises
+  nothing: `find`, `candidates` and `lookup_path`
+  write no flag and no warning, so a lookup that disambiguation or a
+  speculative typing abandons leaves no trace (2.4, idea 5).
+- *Armed at the declaration, raised at the end of the unit*: unused value,
+  variable, type, constructor, module (26, 27, 32, 34, 37, 60) and unused
+  open (33). OCaml registers a delayed check when the declaration enters
+  the environment (`check_usage`, env.ml:1562-1576; env.ml:1890-1894 for
+  an open) and runs the checks in that order after typing; a unit with an
+  error never runs them. `Scopes::arm` and `arm_open` keep the order;
+  `Scopes::finish` raises; the caller does not call `finish` for a failing
+  unit.
+- *What "used" means.* An open: a lookup went through its layer and was
+  used (`OPEN_USED`). A value, type or module: `mark(binder, USED)`
+  (`mark_value_used`, `mark_type_used`, `mark_module_used`,
+  env.ml:947-950, 1080-1088). A constructor: any of built, matched,
+  privatized (env.ml:38-47). *Which* uses count is the walk's rule, not
+  R4's: a use of a `let rec` binding inside its own definition does not
+  (compiler/ml/typecore.ml, `type_let`, the `current_slot` and
+  `rec_needed` refs), and signature inclusion marks what a signature
+  exports. R4 gives the bit and the order.
+
+Pinned today by `old_checker_lookup_warnings_are_pinned`: the warnings of
+the thirteen programs, in order.
+
+**3. Unit reads.** The old checker records two things.
+
+- *The units whose interface it loaded*: `PersistentEnv::find_pers_struct`
+  records an import for the unit and for every unit its CRC list names
+  (`record_import`, cmi/persistent_env.rs; `Env.find_pers_struct` and
+  `add_import`, compiler/ml/env.ml:570, 646-691); under `-no-alias-deps`
+  an alias names a unit without loading it (`check_pers_struct`,
+  env.ml:666, called from types/typemod.rs). The driver reads the set as
+  `loaded_units` (sorted) and `imports` (with CRCs, for the `.cmi`).
+- *Item reads for incremental builds*: `types::unit_reads` walks the typed
+  tree after checking and collects every path rooted at a unit and every
+  type the tree carries (its module comment; `structure_reads`,
+  `signature_reads`), which `cmi::item_deps::resolve_reads` closes over the
+  declarations they reach.
+
+R4 logs: a unit when its interface is loaded for this unit
+(`unit_by_name`, also when the worker knew the unit from an earlier
+compilation, and also for a lookup that is abandoned, as OCaml's load is);
+an imported member when it is used (`use_found`). Both are dense bits with
+a list in the order first read. That order is the order of the walk, so it
+does not depend on worker count; the *indices* in the lists do (they are
+the worker's), and a consumer turns them into names
+(`reads_do_not_depend_on_what_the_worker_checked_before`).
+
+R4 deliberately leaves: reads through a type that no lookup of this unit
+named (the inferred type of `Dep.f()` mentions `Other.t`), reads of an
+expansion that crosses a unit (R5a fills `expand::TypeTable` rows and logs
+there), the CRC closure of a loaded unit and the `.cmi` import list (R5c),
+and the port of the item-read consumer (R9c). Until R9c the old
+`unit_reads` walk runs on the bridge's typed tree.
+
+**4. The oracle.**
+
+- *Where the old checker reports.* In `types/env.rs`: `bump_id` (a new
+  environment version and the one it extends), the seven `add_*` functions
+  (a binding with namespace, name and stamp), `add_prebuilt_open_layers`
+  (a layer with every member), and the seventeen `find_*` functions by
+  name (a lookup with the stamps found: one for `IdTbl.find_name`, all
+  candidates for `TycompTbl.find_all`). An item's identity is namespace,
+  name and stamp: the old side reads it off the `Ident`, the replaying
+  side binds it as a number.
+- *What it costs when off.* The hooks are under `#[cfg(debug_assertions)]`:
+  a release build has no instruction for them, so the CI instruction count
+  cannot move. In a debug build a hook is one thread-local load while no
+  capture runs.
+- *The same scope structure without a walk.* The new side cannot have the
+  walk's scopes before R5b. It does not need them: the old environment is
+  persistent, its versions form a tree, and a lookup names its version.
+  `scope_oracle::replay` moves a scope structure through that tree with a
+  stack discipline (leave to the common ancestor, enter down to the
+  lookup's version, one scope a version) and asks the same question. That
+  the trace is sufficient is not argued, it is run:
+  `the_reference_model_answers_what_the_old_environment_answered` replays
+  the thirteen programs on a naive model and agrees on every lookup, and
+  `a_wrong_resolution_is_reported` shows a model with one rule wrong being
+  caught. Slice R4c runs it on `Scopes`
+  (`scopes_answer_what_the_old_environment_answered`); slice R4i runs it
+  on every unit of `tests/tests` under `RESCRIPT_CHECKER=both`.
+- *What it cannot check before R5b.* The replay opens a layer with the
+  members the old layer had, not with a segment's: that an imported table
+  lists the same members is `an_import_lists_the_members_of_the_old_layer`
+  (R4d). A qualified path is not a lookup of `Env`'s tables in the old
+  checker (the prefix is one, the rest goes through component tables of
+  `env_lazy.rs`): paths are tested on the pinned programs (R4e) and on
+  whole units by R5c's oracle, which compares resolved rows. The choice by
+  expected type is not R4's.
+
+**5. The two measurement gates.** The old checker costs, from H.2.11
+(table of 2.2): 299 instructions a lookup by name (603 M for 2,017,342),
+105 a lookup by identifier (684 M for 6,487,233), 932 a binding with its
+undo. The kernel of 2.2 measured 5, 5 and 44 for a design without layers.
+
+The bench (`benches/tc_kernel.rs`, measured as TC_KERNEL_R1.md describes)
+gets these operations; every one takes an interned `Name`:
+
+| Operation | Shape | Gate |
+|---|---|---:|
+| `binder` | `binders.payload[b]` for a binder in an array of 1,000 | 10 |
+| `find_local` | `find` of a name bound after two opened layers of 256 members | 80 |
+| `find_open` | `find` of a name with no binding, in the inner of two layers of 256 members | 80 |
+| `find_miss2` | `find` of a name in the third layer after missing two of 256 members | reported |
+| `bind_leave` | `enter`, `push`, `bind`, `leave` | reported, beside the kernel's 44 |
+| `intern` | `NameTable::intern` of an 8-byte name already in the table | reported |
+
+Interning is not inside the 80: a lookup takes a `Name`. How a syntax node's
+name becomes a `Name` is R5b's (question 2 of 9.6).
+
+**6. Corrections to the task text of 6.5.**
+
+- *"Open layers that point at a Segment's export table."* An export
+  table's names are indices of the segment's own string pool and the table
+  is sorted by them (bridge/from_old.rs, "Export names are segment string
+  indices"). A worker cannot probe it with its own name. A layer therefore
+  points at a member table; for a dependency that is the export table
+  imported once per worker and table: one 12-byte row and one hash per
+  export item, then never again. "Open a module: O(1)" (3.3) holds from the
+  second open of a table on. The alternative is question 1 of 9.6.
+- *"The per-namespace head table indexed by interned name."* One table
+  indexed by `Key`: the namespaces of one name are adjacent.
+- *"The undo log" of 8-byte entries `name, previous` (3.2).* `previous`
+  is a binder array, because the candidates of a constructor or label are
+  the chain through it; a log entry is the binder, 4 bytes.
+- *"Used bit."* A byte: a constructor has three usages (env.ml:38-47).
+- *"The warnings a lookup raises (deprecation, unused open)."* Unused open
+  is not raised by a lookup; it is armed at the open and raised at the end
+  of the unit. A lookup raises deprecation and the shadowing warnings 44
+  and 45, which the text does not name.
+- *"A lookup under 10 opened modules probes at most 10 layers."* A probe is
+  a binary search, so the count is 1 plus the comparisons. The test uses
+  one-member tables, where a probe is one comparison and the counts are
+  exact (11 for a miss, 4 for a hit in the third layer, 1 when the binding
+  is younger than every layer), and one 10,000-member layer (at most 15).
+- *"Every identifier the old checker resolved resolves to the same item
+  here."* As decision 4: every lookup by name of the old environment, by
+  replay; qualified paths and the choice by expected type are not
+  replayable before R5b.
+- *"Unit reads logged at the lookup."* A unit at its load, an item at its
+  use; reads no lookup names are R5's and R9c's (decision 3).
+- *Paths R4 does not resolve.* A module whose type is a named module type
+  resolves to that module type's members (`ModuleShape::Abstract`); giving
+  their types the module's path is `Mtype.strengthen`, R6d's. A functor
+  application in a path and a module type that is neither a signature nor
+  a name of one give `PathErrorKind::Unsupported`; R6d declines or builds
+  them.
+- *"A lookup by name outside the walk's current scope" is a failure.* Kept.
+  It follows that a row's `scope` index cannot answer "what does this name
+  mean there" later; `Scope` rows stay for the unit, and what a reader
+  needs from them is question 5 of 9.6.
+- *"`rg -n 'HashMap|Rc<|RefCell' src/tc/scope.rs src/tc/names.rs` gives
+  0."* Kept, with `src/tc/name_table.rs` beside them holding the one hash
+  table (`hashbrown::HashTable`): no index exists for the bytes of a name.
+  `UnitSlot` holds an `Arc<Segment>`, cloned once per worker and unit.
+- *3,000 lines.* About 2,150 of implementation in seven slices, 300 for
+  the oracle's wiring and the bench.
+
+### 9.4 Per slice: functions, end state, commits, failure, gates
+
+The gates of 5.3 apply to every slice. Tests are in `src/tc/r4_tests.rs`;
+a slice is done when its tests pass without `ignore`. `rg` is run from
+`compiler-rust/`.
+
+**R4a.** Functions: `NameTable::{intern, find, text}`, `Binders::push`. End
+state: `rg -n 'todo!\("R4a"\)' src/tc` is empty; tests
+`names_are_interned_once_and_dense`,
+`ten_thousand_binders_are_one_step_each`. Commits: (1) the name table; (2)
+binders. Failure: a `String` or a `Box` per name; a hash seeded per
+process (names must hash the same in every run: fixed seeds, as
+`crate::name` does); a binder row wider than the six arrays.
+
+**R4b.** Functions: `Scopes::{enter, leave, bind, head, freeze, reset}`.
+End state: `rg -n 'todo!\("R4b"\)' src/tc` is empty; tests
+`ten_thousand_bindings_then_leaving_is_three_steps_a_binding`,
+`a_lookup_under_ten_thousand_nested_scopes_is_one_step`,
+`shadowing_and_namespaces`, `reset_returns_to_the_frozen_prefix`. Commits:
+(1) enter, bind, head; (2) leave; (3) freeze and reset. Failure: clearing
+or scanning the head table; a scope that copies its parent's bindings; a
+`leave` that walks binders instead of the log.
+
+**R4c.** Functions: `Scopes::{table_from, seal, open, search, member,
+find, find_below, candidates}`. End state: `rg -n 'todo!\("R4c"\)'
+src/tc` is empty; tests
+`a_table_of_ten_thousand_members_is_searched_in_fourteen_steps`,
+`a_lookup_under_ten_opened_modules`,
+`an_open_shadows_a_local_and_a_local_shadows_an_open`,
+`seal_lists_what_a_structure_exports`, `candidates_are_innermost_first`,
+`scopes_answer_what_the_old_environment_answered`. Commits: (1) tables and
+search; (2) seal; (3) open and find; (4) find_below and candidates.
+Failure: probing a layer older than the head binder; a linear scan of a
+table; a sort that is not stable; copying a table to open it.
+
+**R4d.** Functions: `Scopes::{add_unit, unit_by_name, import_table,
+item}`. End state: `rg -n 'todo!\("R4d"\)' src/tc` is empty; tests
+`an_export_table_is_imported_once`,
+`an_import_lists_the_members_of_the_old_layer`,
+`an_import_knows_what_is_deprecated`. Commits: (1) units; (2) the import;
+(3) deprecation bits. Failure: importing a unit's every table when one is
+asked; an import per unit compiled instead of per worker; asking the
+source twice for one name; an `Arc` clone per lookup.
+
+**R4e.** Functions: `Scopes::{module_shape, lookup_path, candidates_in}`.
+End state: `rg -n 'todo!\("R4e"\)' src/tc` is empty; tests
+`a_path_through_two_local_aliases`,
+`a_path_through_aliases_of_another_unit`,
+`long_paths_and_alias_chains_are_linear`. Commits: (1) local modules and
+aliases; (2) paths; (3) modules of a dependency: signatures, aliases,
+named module types, functors. Failure: recursion over an alias chain or a
+path; marking or warning in a lookup; resolving an alias when it is bound
+instead of when its members are needed.
+
+**R4f.** Functions: `Scopes::{arm, arm_open, disarm, mark, use_found,
+shadows, use_modules, finish}`. End state: `rg -n 'todo!\("R4f"\)' src/tc`
+is empty; tests `marking_ten_thousand_uses_is_ten_thousand_steps`,
+`an_open_is_used_or_unused_and_reports_shadowing_once`,
+`the_walk_decides_whether_an_opened_constructor_shadows`,
+`unused_binders_are_reported_in_the_order_armed`,
+`a_deprecated_item_warns_at_each_use`. Commits: (1) arm, mark, finish; (2)
+opens: usage and shadowing; (3) deprecation and `use_modules`. Failure: a
+warning raised by `find`, `candidates` or `lookup_path`; an unused warning
+raised before `finish`; `finish` in binder order instead of armed order; a
+set keyed by name for the shadowing notes.
+
+**R4g.** Functions: `Scopes::{read_unit, read_item}`; one call in
+`unit_by_name` and one in `use_found`. End state: `rg -n 'todo!\("R4'
+src/tc` prints nothing; the
+`#[allow(...)]` lines of `name_table`, `names` and `scope` in
+`src/tc/mod.rs` are gone; tests
+`reads_are_logged_once_in_the_order_first_read`,
+`reads_do_not_depend_on_what_the_worker_checked_before`. Commits: (1) the
+two logs; (2) the two call sites and the reset. Failure: clearing a bit
+set by its length at `reset`; a sorted or hashed read set; a read logged
+by `find`.
+
+**R4h.** End state: `src/types/env_log.rs` and
+`src/types/env_log_tests.rs` do not exist; `rg -n 'env_log' src` prints
+nothing; `cargo test --manifest-path compiler-rust/Cargo.toml` runs the
+same tests as before minus those of `env_log_tests.rs` (paste both
+counts). One commit. Failure: any other change to `types/env.rs`.
+
+**R4i.** Changes: `scope_trace::capture` and `tc::scope_oracle` compiled
+with `debug_assertions` instead of `test`; in `driver.rs`, with
+`CheckerChoice::Both` and debug assertions, the type checking of a unit
+runs under `scope_trace::capture` and its events are replayed on a
+`Scopes` (the `OnScopes` resolver moves from `r4_tests.rs` to
+`scope_oracle.rs`); a `Mismatch` fails the unit as a signature mismatch
+does; the bench operations of decision 5. End state: a debug build of
+`rescript` with `RESCRIPT_CHECKER=both` builds `tests/tests` with no
+mismatch and the log line `tc-names-replayed <unit> <lookups>` for every
+unit (`rg -c`); a release build's instruction count on `tests/tests` is
+within 0.02% of its base; the bench table. Commits: (1) the resolver and
+the cfg; (2) the driver; (3) the bench. Failure: a hook, a branch or a
+thread-local on the release path; replaying under `old`; a capture that
+is left on after a panic.
+
+### 9.5 The build prompts
+
+The common part of 6.0 is prepended to each. Then, verbatim, with the
+slice's name in place of "R4x":
+
+```text
+You build slice R4x of the type checker rewrite. Read, in this order:
+AGENTS.md; compiler-rust/docs/CHECKER_REWRITE.md sections 2.1, 3.3 and 9;
+compiler-rust/src/tc/name_table.rs, scope.rs and names.rs whole; the tests
+of your slice in compiler-rust/src/tc/r4_tests.rs. The skeleton is fixed:
+you fill in every body that says todo!("R4x") with your slice's name, and
+nothing else. You do not change a signature, a doc comment's stated cost,
+a size test, or a test. You do not add `#[ignore]`, and you remove the
+`#[ignore = "R4x build"]` of your slice only. If a signature, a cost or a
+test cannot be met, stop: write the smallest reproduction in the pull
+request (the test, the line that fails, the OCaml lines the doc comment
+cites and what they say) and end your turn. Do not work around it. A test
+that contradicts the OCaml lines its doc comment cites is reported the
+same way; it is corrected by the designer, not by you.
+
+The behaviour is OCaml's, at the location each doc comment cites; read
+that code before you write the body. The programs at the top of
+r4_tests.rs pin what the current checker answers; they run today and must
+keep passing unchanged.
+
+The intent, not a layout: how you split a body into private helpers is
+yours to decide; say what you did in the commit message. A private helper
+has a doc comment that states its cost. Steps: `#[cfg(test)]
+super::steps::tick()` exactly where the module comment of scope.rs says a
+step is counted, and nowhere else. No recursion: a chain is a loop. No
+allocation in a lookup. No hash map anywhere but NameTable. Nothing in
+compiler-rust/src/types/ is called from these files.
+
+When a module has no todo! left, remove its #[allow(...)] line in
+src/tc/mod.rs and fix what the compiler then reports.
+
+Done means, all on your last commit:
+  cargo test --manifest-path compiler-rust/Cargo.toml tc::   passes, and
+    the tests named for your slice in section 9.4 are not ignored;
+  rg -n 'todo!\("R4x"\)' compiler-rust/src/tc                prints nothing;
+  rg -n 'HashMap|Rc<|RefCell' compiler-rust/src/tc/scope.rs
+    compiler-rust/src/tc/names.rs                            prints nothing;
+  cargo clippy --locked --manifest-path compiler-rust/Cargo.toml
+    --all-targets --all-features -- -D warnings              passes;
+  the gates of section 5.3. Nothing of R4 is on a build's path, so the
+  instruction count of tests/tests must not move: say the two numbers.
+Paste the output of each in the pull request.
+```
+
+Then one of these:
+
+```text
+R4a. First edit: NameTable::intern in src/tc/name_table.rs. Hash the bytes
+with ahash::RandomState::with_seeds and four fixed constants (not
+RandomState::new: the numbering must not depend on a per-process seed
+beyond the order names arrive in); the table holds name indices and
+compares by the bytes of the span. Then find and text, then Binders::push
+in src/tc/scope.rs. Commits as in section 9.4. Relations to hold:
+interning a text a second time writes nothing; the n-th distinct text is
+Name(n - 1); push is one row in each of the six arrays and one step.
+```
+
+```text
+R4b. First edit: Scopes::enter in src/tc/scope.rs, then bind and head.
+bind writes previous[binder] = heads[key], heads[key] = binder, and
+appends the binder to the log; when the key is beyond heads, grow heads to
+8 * names.len() filled with NONE first. leave pops the log down to the
+length recorded in `entered` and, for each binder popped, writes
+heads[key] = previous (innermost first), then makes the parent current.
+freeze records the seven lengths; reset leaves every scope above scope 0
+through the log, truncates binders, scopes, log, layers, opens, notes,
+tables and members to the frozen lengths, and clears armed, warnings and
+the read logs (the read bits through the two lists). Commits as in
+section 9.4. Relations to hold: a head load is 1 step whatever the depth;
+entering costs no step; leaving a scope with k bindings is k steps; after
+leaving every scope the head table equals what it was before the first
+enter; a Scope row is never removed before reset.
+```
+
+```text
+R4c. First edit: Scopes::table_from in src/tc/scope.rs: append the rows to
+`members` with origin LOCAL, sort that run by key with a stable sort, push
+the Table. Then search (binary search for the FIRST row of the key), then
+seal, then open, find, find_below, candidates. seal reads log[from..]: a
+binder whose namespace is Value, Type, Module or ModuleType is a member
+when heads[key] is that binder; a Constructor or Label always; rows of one
+key are in the order younger first, so give table_from the log's entries
+in reverse. find: h = head(key); walk the layers from the current scope's
+`opens` through `older` while layer.mark > h (every layer when h is NONE);
+the first whose table has the key answers with that member and the layer;
+otherwise h with layer NONE. candidates merges two chains by age: the
+binders from h through `previous`, and the layers; a layer's members come
+before every binder below its mark. Commits as in section 9.4. Relations
+to hold: find writes nothing; a layer whose mark is not above the head
+binder is never searched; search of a table of n members is at most
+floor(log2 n) + 1 steps; the oracle test
+scopes_answer_what_the_old_environment_answered passes on all thirteen
+programs. If it reports a Mismatch, paste it: it names the lookup and what
+each side found.
+```
+
+```text
+R4d. First edit: Scopes::add_unit in src/tc/scope.rs, then unit_by_name
+(unit_heads grows to names.len() with NONE; MISSING is recorded when the
+source has no such unit), then import_table. An export table is
+Segment::children[signature], a range of Segment::items; an item's name is
+an index of the segment's string pool: its text is
+signature.bytes[signature.strings[name]]. Intern it, make the key with the
+item's kind as the namespace (the discriminants are equal), write one
+Member with target = the item's index in Segment::items and origin = the
+unit, sort the run by key with a stable sort, push the Table to
+imported_tables and store its id with the IMPORTED bit in table_index.
+The deprecated bit: a value's attributes are signature.values[payload]
+.attributes, a type's signature.type_details[payload].attributes, a
+module's or module type's signature.modules[payload].attributes; a member
+is deprecated when one attribute's payload row is
+AttributePayloadRow::Deprecated. Constructors and labels get no bit in
+this slice. Commits as in section 9.4. Relations to hold: the second
+import of a table is 1 step and writes nothing; importing table s of a
+unit imports no other table; the source is asked once per name and worker.
+```
+
+```text
+R4e. First edit: Scopes::module_shape in src/tc/names.rs, the Binder
+cases, as a loop. Then lookup_path for local modules, then the imported
+cases of module_shape: an imported Module item's payload is a
+signature.modules row; its module_type indexes signature.module_types:
+Signature(s) is export table s; Alias { path } is a signature.paths row:
+PathRow::Ident(i) with signature.identifiers[i].scope an item index k
+below UNIT_SCOPE names signature.ordered_items[k] of the same unit (its
+declaration is a modules row: continue with it, no name lookup), with
+scope NONE names a unit by the identifier's name (unit_by_name), and
+PathRow::Dot continues from the parent's shape with one search;
+ModuleTypeRow::Ident(path) resolves the module type's row the same way and
+answers Abstract of its signature's table; Functor answers Functor.
+Everything else answers PathErrorKind::Unsupported. Commits as in section
+9.4. Relations to hold: a lookup marks nothing and warns nothing; `modules`
+has one entry per component before the last, the alias binder itself and
+not its target; an alias chain of length k is k steps and no recursion;
+two paths that end at one imported item return the same Resolved.
+```
+
+```text
+R4f. First edit: Scopes::mark in src/tc/names.rs, then arm, arm_open,
+disarm and finish, then use_found. use_found for an item found through
+layer L: set OPEN_USED on opens[L]; when the open is not OPEN_OVERRIDE and
+find_below(key, L) is Some and no ShadowNote of this open has the key:
+for a Value, Type, Module or ModuleType key push the note and the warning
+OpenShadows at the open's loc with a = the key and b = L; for a
+Constructor or Label key push nothing and return what find_below found
+(the walk calls shadows(L, key), which pushes that note and warning
+without scanning). Every other case returns None. Then, for any item: when
+the binder has DEPRECATED or the
+imported member has MEMBER_DEPRECATED, push Deprecated at `loc` with a =
+the Resolved. finish walks `armed` once, in order: a binder is unused when
+its `used` byte has none of USED, POSITIVE, PATTERN, PRIVATIZE. Commits as
+in section 9.4. Relations to hold: the warnings vector after a sequence of
+uses is the same whatever was found and not used in between; a second use
+of the same name through the same open adds no shadowing warning; finish
+adds one warning per armed entry that is unused and nothing else.
+```
+
+```text
+R4g. First edit: Scopes::read_unit in src/tc/names.rs, then read_item
+(which reads the item's unit). Then call read_unit(unit, READ) in
+unit_by_name for every answer that is a unit, also on the path that only
+loads unit_heads, and read_item in use_found for an imported member. reset
+already clears the logs through the two lists. Remove the three
+#[allow(...)] lines of the R4 modules in src/tc/mod.rs. Commits as in
+section 9.4. Relations to hold: the names of read_units, in order, are the
+same for a worker that checked other units before and for a fresh one; a
+second read of a unit or an item appends nothing.
+```
+
+```text
+R4h. This slice deletes; it fills no body. First edit: remove the two
+lines `#[path = "env_log.rs"]` and `mod env_log;` at the end of
+compiler-rust/src/types/env.rs. Then `git rm
+compiler-rust/src/types/env_log.rs compiler-rust/src/types/env_log_tests.rs`.
+Nothing else reads them: before you delete, run
+`rg -n 'env_log' compiler-rust/src` and paste it; it must show only that
+`mod` line, the `#[path = "env_log_tests.rs"]` line inside env_log.rs and
+the files' own text. Done means: the two files are gone, the same command
+prints nothing, cargo test passes with the test count lower by exactly
+the tests of env_log_tests.rs (paste both counts), and the gates of
+section 5.3. One commit.
+```
+
+```text
+R4i. First edit: in compiler-rust/src/tc/mod.rs compile scope_oracle with
+`#[cfg(debug_assertions)]`, and in scope_trace.rs give `capture` the same
+cfg; move the OnScopes resolver and its `namespace` function from
+r4_tests.rs to scope_oracle.rs unchanged. Then the driver: where
+CheckerChoice::Both is handled in compiler-rust/src/driver.rs, under
+`#[cfg(debug_assertions)]`, run the unit's type checking inside
+scope_trace::capture, replay the events on OnScopes with a new Scopes, and
+on a Mismatch fail the unit with the text of the Mismatch and the unit's
+name; on success log `tc-names-replayed <unit> <lookups>` at debug level
+with target "rescript_checker". Then the bench: add the operations of
+section 9.3, decision 5, to compiler-rust/benches/tc_kernel.rs and measure
+them as docs/TC_KERNEL_R1.md describes. Relations to hold: with the
+switch at `old` or `new`, or without debug assertions, no capture starts;
+a release build's instruction count on tests/tests is within 0.02% of its
+base (paste both numbers); `binder` is at most 10 instructions and
+`find_local` and `find_open` at most 80. If a gate is missed, report the
+number and the annotated lines; do not change the shape measured.
+```
+
+### 9.6 Open questions
+
+1. **An export table is imported into each worker's names, 12 bytes and
+   one hash an item, once per worker and table.** The alternative is one
+   name table for the build, filled at publication, so that every worker
+   probes a segment's table in place and nothing is imported. It needs a
+   lock at publication and when a worker meets a new name, a change to
+   R2's `ExportItem::name`, and name numbers that depend on scheduling in
+   a published segment. Recommended: keep the import; R5c reports the
+   imported members per worker on the application, and the build-wide
+   table is built only if that is above 1% of a build.
+2. **A syntax node's name becomes a `Name` by one hash, unless R5b keeps a
+   dense table per unit from the parser's string index.** The parser gives
+   every identifier occurrence its own index (`Interner::push_interned`),
+   so that table has one slot an occurrence and saves nothing by itself.
+   Recommended: R5b measures `intern` on real units first; the 80 of the
+   gate excludes it either way.
+3. **Qualified paths are not replayed by the oracle**, because the old
+   checker does not resolve them in `Env`'s tables. Recommended: accept;
+   the pinned programs cover aliases now and R5c's oracle compares the
+   resolved row of every expression on whole units.
+4. **The names check of `both` mode needs a build with debug assertions.**
+   Recommended: R4i reports how long a debug `rescript` takes on
+   `tests/tests` under `both`; the coordinator adds it to the
+   `compiler-tests` job if it is under ten minutes, and otherwise a
+   release build with `-C debug-assertions` only for that job.
+5. **A row keeps a scope index, but a name cannot be looked up at a
+   remembered scope.** The printer of the explaining mode (shortest path
+   of a type at the error) and editor completion ask "what is visible
+   here". The `Scope` rows and `first_binder` are kept for the unit, but
+   a binder does not record its scope, so the visible set of a left scope
+   is not recoverable when the walk bound into one scope after a child was
+   entered. Recommended: R5b enters a scope for every binding construct
+   whose continuation must not see later bindings (as OCaml makes a new
+   environment), which makes a scope's own binders the run from
+   `first_binder` to its first child's; R8a states what the printer needs
+   before anything is added to a binder.
+
+### 9.7 Decided in review
+
+These bind the builders of R4 and the designers of R5.
+
+1. **The export table of a dependency is imported per worker** (question
+   1). No build-wide name table: it would put a lock on every new name and
+   scheduling-dependent numbers into a published segment. R5c reports, on
+   an application of several thousand units, the imported members per
+   worker and the instructions of `import_table`; a build-wide table is
+   designed only when that is above 1% of a build.
+2. **A name of the syntax tree becomes a `Name` by one hash in R5b**
+   (question 2), and R5b reports that hash per source line on real units.
+   The gate of 80 excludes it; the gate of R5c (covered units at most 60%
+   of the old checker's cost) includes it. A dense table from the parser's
+   string index is designed only on that figure.
+3. **Qualified paths are not replayed** (question 3). The pinned programs
+   cover them until R5c's oracle compares the resolved row of every
+   expression.
+4. **The names check of `both` mode runs in a build with debug
+   assertions** (question 4). R4i reports the time of a debug `rescript`
+   on `tests/tests` under `both`; the coordinator wires it into CI.
+5. **Nothing is added to a binder for "what is visible here"** (question
+   5). R5b enters a scope where OCaml makes a new environment that a
+   continuation must not see past; R8a states what the printer needs.
+6. **An open shadows a constructor or a label only when the result types
+   differ.** `check_shadowing` (compiler/ml/env.ml:415-420) reports
+   `Constructor` and `Label` only when `same_constr` says the two result
+   types are different type constructors after head expansion; a value,
+   type, module or module type is reported whenever something is hidden.
+   The skeleton's `use_found` reported every hidden name. Witness, the
+   same output from the OCaml compiler and a release build of trunk: with
+   `type t = A | B` and `module M = { type t2 = t = A | B }`, `open M`
+   followed by a use of `A` reports nothing; with `type t2 = A | C` it
+   reports warning 45. Names have no types, so `use_found` returns the
+   hidden item for a constructor or label and the walk (R5b), which has
+   both descriptions, compares the result types' head constructors and
+   calls `Scopes::shadows`. No note is written before the walk's verdict:
+   OCaml adds to `shadowed` only what it reports. Tests:
+   `old_checker_open_of_the_same_type_reports_no_shadowing` (runs today)
+   and `the_walk_decides_whether_an_opened_constructor_shadows` (R4f).
+7. **`open!` is never armed.** OCaml gives an `open!` no slot at all
+   (env.ml:1884): no usage, no shadowing, no unused-open warning. R5b
+   calls `arm_open` only for an `open` without `!` whose location is not a
+   ghost.
+8. **`segment_of` in the tests reads a published unit through a fresh
+   `TypeContext`.** That is a conversion, not a check: nothing is unified
+   in it. A test that unifies or lowers on the old checker builds its
+   context as the driver does (8.6, the harness's start level).
