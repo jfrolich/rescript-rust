@@ -959,6 +959,41 @@ mod tests {
         assert_eq!(table.info(n + 100), ABSTRACT);
     }
 
+    /// A phantom unary abbreviation over an abstract type of the unit
+    /// expands to that type (differential seed 2000018).
+    #[test]
+    fn a_phantom_abbreviation_of_a_compiled_unit_expands() {
+        use super::super::differential::{New, Tier, compile};
+        let program = compile(
+            "type t0\ntype a2<'a> = t0\nexternal v2: a2<'b> = \"v2\"\n".to_string(),
+        );
+        let mut new = New::convert(&program, Tier::Expand);
+        let ty = new.instance(0);
+        let node = new.checker.g.nodes[ty.0 as usize];
+        let pools = &new.segment.signature;
+        let path = pools.paths[node.a as usize];
+        let ident = match path {
+            PathRow::Ident(ident) => Some(pools.identifiers[ident as usize]),
+            _ => None,
+        };
+        let item = ident.and_then(|ident| pools.ordered_items.get(ident.scope as usize).copied());
+        let info = new.checker.types.info(node.a);
+        let manifest = (info.manifest != NONE)
+            .then(|| new.checker.types.manifests[info.manifest as usize]);
+        let slot = new.checker.g.lists[node.b as usize];
+        let report = format!(
+            "node {node:?} slot0 {slot:?}\npath {path:?}\nident {ident:?}\nitem {item:?}\ninfo {info:?}\n\
+             manifest {manifest:?}\nitems {:?}\ndeclarations {:?}",
+            pools.ordered_items, new.segment.type_declarations
+        );
+        let once = new.checker.expand_once(ty, ExpandMode::Safe);
+        let head = new.checker.expand_head(ty, ExpandMode::Safe).unwrap();
+        assert_ne!(head, ty, "{report}\nexpand_once {once:?}");
+        let head = new.checker.g.nodes[head.0 as usize];
+        assert_eq!(head.tag(), CONSTR, "{report}");
+        assert_eq!(head.arity(), 0, "{report}");
+    }
+
     /// On a compiled program: the paths of the unit's own types carry their
     /// declaration; a predefined type is abstract.
     #[test]
