@@ -1,7 +1,7 @@
 //! J construction: plain typed nodes, cached facts, and section-6 normalisers.
 pub mod norm;
 pub mod plain;
-mod logic;
+pub(crate) mod logic;
 pub mod facts;
 pub mod equal;
 

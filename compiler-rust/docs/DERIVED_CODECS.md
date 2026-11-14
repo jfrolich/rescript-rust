@@ -1,8 +1,8 @@
 # Derived codecs without the whole pipeline
 
-Status: design. Slice 1 is implemented (#215); slices 2 to 4 are not
-([STATUS.md](STATUS.md)). No production code accompanied this document. The measurement
-patch and script it used are in `prototypes/derived-codecs/`.
+Status: slices 1–3 are implemented; slice 4 remains. The original design and
+its estimates are retained below, followed by implementation results in each
+slice. The original measurement patch is in `prototypes/derived-codecs/`.
 
 `@spice` on a type declaration derives `<name>_encode`, `<name>_encodeJson` and
 `<name>_decode`. Today the derive appends syntax to the `ParseArena`, and that
@@ -233,13 +233,23 @@ Produced with probes (rewatch build, default warnings plus the corpus flags):
 | non-exhaustive or redundant match (8, 11), unused variable (26, 27) | cannot occur: every generated match is total and every binder is used (checked by reading the generators; the oracle asserts no such warning on the corpus) | not produced |
 | unused constructor or label of a private declaration | suppressed today because the body uses each | the `Label` and `Constructor` obligations mark each |
 
-**Fallback rule.** When any obligation of an item fails, the checker restores
-the type state (`snapshot_type_state` in `types/context.rs`), discards the
-warnings buffered for the item, asks the seam for the item's general form, and
-checks that with `type_binding`. The diagnostic is today's because it is
-produced by today's code on today's syntax. Warnings of a discharge are
-buffered per item and committed only on success, so a fallback does not report
-a deprecation twice.
+**Fallback rule.** When any obligation of an item fails, the checker abandons
+the unit: nothing of the attempt is reported or published. Whoever holds the
+unit's source runs the front end again with plans off, which generates the
+unit's derived code as syntax, and compiles that. The diagnostic is today's
+because it is produced by today's code on today's syntax, and a deprecation is
+reported once because the warnings of the abandoned attempt are dropped with
+it. The syntax of an item is therefore generated only where it is needed: for
+a unit with a failed obligation, for `RESCRIPT_DERIVED_PATH=general` and for
+the reference compile of `check`, and for a tree that is stored or printed
+instead of compiled. An item whose plan holds costs no generation and no
+front-end rewrite. (Slice 1 generated the syntax beside every plan and typed
+it per item after restoring the type state; the checker holds the parse arena
+by shared reference, so syntax made on demand has no arena to live in that
+the readers of the typed tree could also read. Compiling the unit again needs
+no second handle space. Its cost, one more front end and type check of the
+unit, falls only on a unit with a failed obligation: one that reports an
+error, or one whose library has another shape than the plan states.)
 
 ### What reads the typed body afterwards
 
@@ -376,12 +386,11 @@ returning `Plan` or `General(reason)`; there is no "unknown" result. General:
 | a `type … and …` group in which two declarations share a label or constructor name | the label obligations would resolve to the wrong declaration |
 | `@spice.serde` variants and polymorphic variants, polymorphic variants (57 bindings), tuples | not among the three measured shapes; each can move later if a census shows it matters |
 | `@unboxed` declarations | a different body per representation; rare |
-| any item nested in a functor body or a first-class module | not examined |
 
 An item reaches the general path in two ways: the classifier returns `General`
 in the front end (the syntax is generated as today and the item is an ordinary
-derived value group), or a plan's obligations fail in the checker (the seam
-generates the syntax then). Both are tested by the same three means: a unit
+derived value group), or a plan's obligations fail in the checker (the unit is
+compiled again with plans off, and the seam generates the syntax then). Both are tested by the same three means: a unit
 test per reason that the classifier returns it; the error fixtures added in
 slice 1 (the probes of Q1) under `tests/build_tests/super_errors/` with a
 project that enables the derive; and the oracle, which compiles every unit of
@@ -397,8 +406,8 @@ type declaration with @spice
                          │
    checker: type_structure_item, arm Pstr_derived
         discharge obligations in order (lookups, instances, unifications)
-        ├── one fails ──► restore, drop buffered warnings,
-        │                 derive::general_form(item) ──► type_binding (today)
+        ├── one fails ──► abandon the unit; its source is compiled again
+        │                 with plans off (every item as syntax, as today)
         └── all hold ──► enter bindings, record results
                          Tstr_derived { plan, idents, results }
                          │
@@ -422,9 +431,10 @@ are pinned: an obligation and a body node are at most 16 bytes, a skeleton node
 
 **The seam** grows from four functions to these: the two detectors, the
 signature expander (interfaces are unchanged: they contain only value
-declarations), `classify`, `plan` (build the plan of a supported item),
-`general_form` (today's `map_type_decl_structure` for one item, used for
-`General` items and for fallback), and `lower`. Deleting the derive still means
+declarations), the structure expander, which classifies each group of
+declarations and makes its plan or its syntax (today's
+`map_type_decl_structure`), `free_names` (the names a plan resolves, for the
+dependency scan), and the lowering. Deleting the derive still means
 emptying these bodies.
 
 **State per compilation.** Obligation results are a dense table indexed by
@@ -482,6 +492,19 @@ the compiler options are created (where `RESCRIPT_DERIVED_CENSUS` is read in
   - the export summary: arities, constants, inlinable bodies, purity;
   - the unit reads, as sets;
   - the warnings, as text in order.
+
+The JSON identity fixture also checks the abbreviation-memo observation O11
+in `CHECKER_REWRITE.md`, not an independently demonstrated diagnostic difference.
+General application inference instances the callee and runs `lower_args`
+(`types/typecore.rs::type_application_parts`; `compiler/ml/typecore.ml:2826–2828`),
+whose arrow-spine walk expands the return type as well as lowering argument
+levels (`compiler/ml/typecore.ml:2503–2514`). Expanding `JSON.t` records its
+representative in the simple-abbreviation memo, so a later instance can reuse
+that representative for both concrete occurrences through `find_repr`
+(`types/ctype.rs::copy_type_cached`; `compiler/ml/ctype.ml:778–782`). This explains
+why the general path's later `values_encodeJson` shares its array element and
+result nodes while the plan without application lowering does not; the signature
+oracle and successful-program fixture retain that distinction.
 
 Diagnostics are gated on the error fixtures by running each with the switch
 unset and with `general` and comparing the output byte for byte, and by the
@@ -625,6 +648,16 @@ body for the maintainers to add.
 
 ### Slice 2. Records
 
+**Status: done.** A record with at least one field takes a plan. The
+discharge of its labels does not split `type_record`: the labels of the record
+expression hold when each name's first candidate in scope is the label at the
+field's position of one non-private record, all of whose labels are written,
+and anything else fails the obligation. Kept general beyond the table of Q5: an
+empty record, a template literal as a key or default, a `JSON.t` field, and a
+field of a user's type applied to arguments (its codec takes the arguments'
+codecs one at a time, which a plan's skeleton does not describe).
+`check` compared source maps already. Not measured: the application.
+
 - **Files:** `binary_ast/spice_ppx.rs` (plan builder for records),
   `binary_ast/derive/plan.rs` (the remaining body nodes), `types/derived.rs`
   (`Label`, `Constructor`, `Literal`), `raw_lambda/convert/derived.rs`,
@@ -707,6 +740,94 @@ not round it into a claim about another project).
 
 ### Slice 3. Variants
 
+#### Implementation and measurements
+
+`binary_ast/spice_ppx/plan/variant.rs` builds ordinary constructors, tuple
+payloads, inline records and string/float aliases. Inline records reuse the
+record encoder and decoder builders. Every declared constructor is an ordered
+`Constructor` obligation in pattern position in each encoder and construction
+position in the decoder. The five-variant order test compares those obligations
+with a walk of the general syntax.
+
+The generic plan adds prefix-pooled patterns, conditionals, lets, integer
+constants, multi-argument construction, record updates and application
+locations. The existing converter builds the terms; its match compiler handles
+constructor and string switches and decomposes tuple scrutinees. No variant
+selection switch remains. `General(NotYetPlanned)` no longer classifies a
+variant; `unsupported_variant` identifies unsupported payload codecs,
+attributes, generalized constructors or pool-capacity limits before discharge.
+`Aliased_variant_payload` pins one impossible form: a scalar alias with a payload
+has an unbound `json_arr` in the general decoder. The original private-declaration
+fixture confirms constructors used only by codecs do not warn in either path.
+
+Body nodes, obligations and cases remain 16 bytes; pattern nodes are 8 bytes.
+Generated names reuse one spelling buffer per item. Per-constructor variable,
+node and case lists use item-wide scratch pools, not one `Vec` per constructor.
+The constructor obligation no longer stores an unused type-obligation handle;
+its result skeleton already states that type. Arity uses `u16`, with checked
+capacity boundaries including the extra failure/wildcard cases.
+
+The tests at 10,000 one-argument constructors pin:
+
+| Work | Fixed part | Per constructor | Total |
+|---|---:|---:|---:|
+| Builder obligations | 10 | 23 | 230,010 |
+| Builder body nodes / lowering body visits | 38 | 45 | 450,038 |
+| Pattern nodes / lowering pattern visits | 2 | 10 | 100,002 |
+| Discharge lookups | 10 | 23 | 230,010 |
+| Discharge instances | 7 | 20 | 200,007 |
+| Discharge counted unifications | 7 | 23 | 230,007 |
+| Emitted raw Lambda terms | 68 | 58 | 580,068 |
+
+These counts are for one argument per constructor. The general decoder's
+multiple-argument error matrix has quadratic size in a constructor's arity;
+the plan preserves that matrix rather than changing its match semantics.
+The full `Variants.res` raw Lambda is equal after stamp and exit renumbering.
+The source-map oracle exposed missing constructor-application locations; an
+explicit `At` node fixes them without changing child locations. An external-codec
+regression test fails without that node; the complete Spice fixture also passes
+with linked maps enabled.
+
+Release measurements at `40a0c61d1`, compared with the pre-slice compiler at
+`b91b359ba` (one worker; the candidate also incorporates intervening trunk):
+
+| Application census | Before | After |
+|---|---:|---:|
+| Planned bindings | 5,776 | 6,392 |
+| General variant bindings | 637 | 21 |
+| `not_yet_planned` bindings | 764 | 136 |
+| `unsupported_variant` bindings | 0 | 9 |
+| `failed_obligation` bindings | 18 | 21 |
+| Units retried | 2 | 2 |
+
+The same two units retry; counting the newly eligible bindings in those units
+increases the fallback binding count, not the number of retries. Other census
+reasons are unchanged: user expressions 504, unmeasured shapes 87, custom codecs
+36, type parameters 9 and recursive groups 6.
+
+`bench_project.sh` on the 3,735-module application produced identical 3,980
+outputs and counted 65,447,816,693 instructions before and 65,092,842,723 after
+(**−0.5424%**). `compare_checker_builds.py` found no difference in 3,735 signatures,
+18 diagnostic logs or 3,980 JavaScript/related outputs. Hyperfine (five measured
+runs, one warmup) measured the candidate at 9.095 ± 0.363 s, range 8.789–9.559 s;
+the earlier baseline was 10.155 ± 0.319 s, range 9.652–10.532 s. These timings were
+not interleaved; the instruction comparison is the stronger performance result.
+
+On `tests/ppx_spice`, the candidate's default path retired 1,934,170,258
+instructions versus 1,997,544,344 with `general` (about **−3.17%**). This comparison
+includes the earlier plan slices; it is not the incremental saving of variants.
+`tests/tests` derives no codecs, so this change saves nothing there; CI's
+instruction-count gate protects that path.
+
+Local gates pass: compiler build, 33 focused derived tests and 15 plan tests;
+rewatch build and tests (209 unit, one integration and eight runtime-snapshot
+tests); check-mode builds of both Spice projects and the application; all 15
+diagnostic fixtures in unset/general/check modes; and the linked-map Spice build.
+The full compiler suite and OCaml output parity are CI gates, not local runs.
+
+The original slice specification follows.
+
+
 - **Files:** `binary_ast/spice_ppx.rs` (plan builder for
   `variants_generate_codecs` without `@spice.serde`),
   `raw_lambda/convert/derived.rs` (`Switch` on a declared constructor and on a string).
@@ -758,7 +879,55 @@ Checks to paste: the same list as slice 2, plus a fixture (with and without
 codecs, asserting no unused-constructor warning in either mode.
 ```
 
+### Slice 3b as built
+
+The census separates successful planned typechecking/conversion from general
+bindings, reports a closed unsupported-form census and inclusive costs for all
+six obligation kinds. General group reasons use dense parse-value-list tables.
+Retry events identify the last obligation and expected owner, not the resolved
+conflicting type; the retry remains the safety net.
+
+JSON identity plans remove the application's 136 formerly unplanned bindings.
+The final application census is 6,534 plans, 21 upfront
+`shadowed_result_constructor`, zero `failed_obligation` and zero
+`json_identity_argument`. Local JSON aliases are resolved syntactically in the
+same lazy prefix scan; the unchanged oracle fixture covers direct and nested
+containers, alias uses, records and variants. Exposed encoder applications whose
+sharing differs take the named general reason before planning. No linking-only
+inference or application-callee lowering is retained.
+
+Constructor descriptions use a dense name table keyed by binding epoch and
+`Owner`, owned by a fresh typed arena per unit. All lookups, usage marks,
+instantiation and unification remain. The isolated sharing experiment saved
+0.0302945%; a 10,000-field record retains seven descriptions. Inclusive profile
+and measured marginal per-field costs are in `DERIVED_CODE.md`; marginal
+per-variant-constructor instruction attribution was **not measured**.
+
+Source-prefix scope is lazy and tested on 10,000 distinct derived items,
+10,000 constructors, and 10,000 nested items. The no-derive test exercises the
+real dispatch and observes zero scope work. No-derive units still execute the
+constant-time dispatch, empty prefix initialization, and disabled census probes
+per rewritten item and per type declaration; this is not zero total overhead.
+
+Spice/application check builds and 19 diagnostic fixtures in all three modes
+pass. The census-off gate is CI's fat-LTO, one-codegen-unit comparison; the
+separate local default-16-unit table is not substituted for it. The reviewed
+`d306a20b68` CI comparison was -0.014%; subsequent correction-head CI is reported
+in the PR body rather than claimed from this historical measurement.
+Unresolved external/opened JSON arguments now carry a 16-byte
+`NotJsonIdentity` obligation. It reads the owning declaration's checked manifest,
+uses exact path lookup with spelling recovery refused, and bounds each nullary
+alias walk at 64 declarations. It compares shared declaration identity and
+normalized canonical paths, without new inference or abbreviation writes.
+The cross-unit/module-alias/open/legacy fixtures pass check mode; record controls
+retain plans. Application plans stay 6,534 with six guards emitted and zero guard
+failures; generated outputs remain identical. Detailed commands and limits are
+in `DERIVED_CODE.md`.
+`RESCRIPT_DERIVED_PATH` and the oracle remain; slice 4 is held below.
+
 ### Slice 4. Remove the switch
+
+**Status: held until the new checker handles derived items.**
 
 - **Files:** `driver.rs`, a test under `compiler-rust/tests/` or the existing
   Spice test module.
@@ -774,7 +943,10 @@ codecs, asserting no unused-constructor warning in either mode.
 Polymorphic variants, tuples, `@spice.serde`, custom codecs and parameterised
 types are not sliced. Each needs a census first that shows its share.
 
-## Risks and what was not measured
+## Risks and what was not measured in the original projection
+
+The following are historical limits of the initial projection, not the status
+of the implemented slices described above.
 
 - **Nothing was prototyped.** Every removal fraction is extrapolated. The
   type-checking range rests on counter ratios from `tests/ppx_spice`, whose mix
@@ -802,8 +974,11 @@ types are not sliced. Each needs a census first that shows its share.
 - **Editor tooling.** Whether hover, references or rename read the typed
   bodies of derived bindings (through the type-constructor locations the
   built-in codec identifiers carry) was not established.
-- **Functor bodies and first-class modules** containing derived items were not
-  examined and are classified general.
+- **Functor bodies and first-class modules.** A derived declaration inside a
+  module expression takes a plan like one at the top level (slice 2); the
+  walks over nested structures read the obligation results where they read
+  the identifiers of a typed body. `%%private` admits no type declaration, so
+  no derived declaration sits in one.
 - **Obligation order.** The first reported failure and the order of
   deprecation warnings depend on discharging in today's typing order. The
   order tests assert it for a handful of declarations; the fixtures and the

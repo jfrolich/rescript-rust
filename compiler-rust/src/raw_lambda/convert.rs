@@ -48,7 +48,7 @@ use crate::types::typecore::TypeCoreWarning;
 use crate::types::typedtree::{
     ApplyArg, Case, Constant as TConstant, Expression, ExpressionDesc, FunctionParam,
     ModuleCoercion, ModuleExpr, ModuleExprDesc, Partial, Pattern, PatternDesc, RecordField,
-    Structure, StructureItem, StructureItemDesc, ValueBinding, TypedArena, TPatIdx,
+    Structure, StructureItem, StructureItemDesc, ValueBinding, TypedArena, TPatIdx, EnvRef,
 };
 
 // Keep these aligned with compiler/ml/predef.ml's allocation order. The
@@ -229,6 +229,67 @@ impl<B: RawLambdaBuilder> ArgLowering<B, ApplyArg> for TypedArgs {
     fn lower(&mut self, conv: &mut RawLambdaConverter<'_, B>, arg: &ApplyArg) -> RawLambda {
         let expr = arg.expression.expect("a supplied argument has an expression");
         conv.convert_expr_raw(conv.ta.expr(expr))
+    }
+}
+
+/// Whether a primitive reads the syntax of its arguments instead of their
+/// values: a location primitive, a dynamic import, raw JavaScript. The
+/// converter handles these on the typed arguments
+/// ([`RawLambdaConverter::convert_apply_raw`]), so a body without typed
+/// expressions cannot apply them. Cost: O(1) string comparisons.
+pub(crate) fn primitive_reads_syntax(prim: &crate::types::PrimitiveDescription) -> bool {
+    let name = prim.prim_name.as_str();
+    name.starts_with("%loc_")
+        || matches!(name, "%import" | "#import" | "%raw" | "#raw_expr" | "#raw_stmt")
+}
+
+/// What the choice of a primitive reads of the arguments it is applied to
+/// ([`RawLambdaConverter::translate_primitive_application_raw`]).
+#[derive(Clone, Copy)]
+struct PrimitiveArgs {
+    /// The type of the first argument and the environment it was typed in;
+    /// the null type when there is no argument.
+    first: (TypeExprRef, EnvRef),
+    /// The number of arguments the primitive is applied to.
+    count: u16,
+}
+
+/// How the written fields of a record are lowered
+/// ([`RawLambdaConverter::record_of`]).
+trait FieldLowering<B: RawLambdaBuilder, F> {
+    /// The label the field writes.
+    fn label<'f, 'a: 'f>(
+        &self,
+        conv: &RawLambdaConverter<'a, B>,
+        field: &'f F,
+    ) -> &'f LabelDescription;
+    /// Whether the field is an optional one written as a literal `None`.
+    fn static_optional_none(&self, conv: &RawLambdaConverter<'_, B>, field: &F) -> bool;
+    /// The term of the field's value.
+    fn lower(&mut self, conv: &mut RawLambdaConverter<'_, B>, field: &F) -> RawLambda;
+}
+
+/// The fields of a typed record expression.
+struct TypedFields;
+
+impl<B: RawLambdaBuilder> FieldLowering<B, RecordField> for TypedFields {
+    #[inline(always)]
+    fn label<'f, 'a: 'f>(
+        &self,
+        _: &RawLambdaConverter<'a, B>,
+        field: &'f RecordField,
+    ) -> &'f LabelDescription {
+        &field.0
+    }
+
+    #[inline(always)]
+    fn static_optional_none(&self, conv: &RawLambdaConverter<'_, B>, field: &RecordField) -> bool {
+        record_field_is_static_optional_none(conv.ta, field)
+    }
+
+    #[inline(always)]
+    fn lower(&mut self, conv: &mut RawLambdaConverter<'_, B>, field: &RecordField) -> RawLambda {
+        conv.convert_expr_raw(conv.ta.expr(field.2))
     }
 }
 
@@ -707,11 +768,14 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         self.sync_local_stamp_generators();
     }
 
-    fn compile_matching_with_synced_stamps(
+    /// `Matching.compile_matching` on cases whose patterns are in `pa`: the
+    /// typed tree's, or built in its overlay.
+    fn compile_matching_with_synced_stamps<'p>(
         &mut self,
+        pa: &'p full_matching::PatArena<'p>,
         handler_fun: impl FnOnce() -> RawLambda,
         arg: RawLambda,
-        pat_act_list: Vec<(&Pattern, full_matching::CaseAction)>,
+        pat_act_list: Vec<(&'p Pattern, full_matching::CaseAction)>,
         partial: Partial,
     ) -> RawLambda {
         self.sync_matching_stamps();
@@ -720,7 +784,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         let arena = crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b);
         let env = full_matching::MatchEnv {
             ctx_ref: self.type_ctx,
-            ta: self.ta,
+            pa,
             arena: &arena,
             next_raise_count: &mut self.next_static_raise,
         };
@@ -744,13 +808,16 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         self.sync_matching_stamps();
         let loc = self.loc(loc);
         let arena = crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b);
-        let env = full_matching::MatchEnv {
-            ctx_ref: self.type_ctx,
-            ta: self.ta,
-            arena: &arena,
-            next_raise_count: &mut self.next_static_raise,
-        };
-        let lambda = full_matching::for_let(env, loc, param, pat, body);
+        let lambda = full_matching::for_let(
+            self.type_ctx,
+            self.ta,
+            &arena,
+            &mut self.next_static_raise,
+            loc,
+            param,
+            pat,
+            body,
+        );
         self.sync_matching_stamps();
         lambda
     }
@@ -765,9 +832,11 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         self.sync_matching_stamps();
         let loc = self.loc(loc);
         let arena = crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b);
+        let store = full_matching::PatStore::default();
+        let pa = full_matching::PatArena::new(self.ta, &store);
         let env = full_matching::MatchEnv {
             ctx_ref: self.type_ctx,
-            ta: self.ta,
+            pa: &pa,
             arena: &arena,
             next_raise_count: &mut self.next_static_raise,
         };
@@ -783,9 +852,11 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
     ) -> RawLambda {
         self.sync_matching_stamps();
         let arena = crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b);
+        let store = full_matching::PatStore::default();
+        let pa = full_matching::PatArena::new(self.ta, &store);
         let env = full_matching::MatchEnv {
             ctx_ref: self.type_ctx,
-            ta: self.ta,
+            pa: &pa,
             arena: &arena,
             next_raise_count: &mut self.next_static_raise,
         };
@@ -801,12 +872,27 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         pat_act_list: Vec<(&Pattern, full_matching::CaseAction)>,
         partial: Partial,
     ) -> RawLambda {
+        let store = full_matching::PatStore::default();
+        let pa = full_matching::PatArena::new(self.ta, &store);
+        self.multiple_matching_of(&pa, loc, paraml, pat_act_list, partial)
+    }
+
+    /// Match already lowered tuple components using the caller's pattern arena.
+    /// Cost: that of `Matching.for_multiple_match`; no synthetic tuple term.
+    fn multiple_matching_of<'p>(
+        &mut self,
+        pa: &'p full_matching::PatArena<'p>,
+        loc: LocIdx,
+        paraml: Vec<RawLambda>,
+        pat_act_list: Vec<(&'p Pattern, full_matching::CaseAction)>,
+        partial: Partial,
+    ) -> RawLambda {
         self.sync_matching_stamps();
         let loc = self.loc(loc);
         let arena = crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b);
         let env = full_matching::MatchEnv {
             ctx_ref: self.type_ctx,
-            ta: self.ta,
+            pa,
             arena: &arena,
             next_raise_count: &mut self.next_static_raise,
         };
@@ -1688,17 +1774,6 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
     /// Like specialize_comparison but uses the expression's stored env for type checks.
     /// This avoids the issue where self.env (the initial env) doesn't have local type
     /// definitions, causing expand_head to produce incorrect expansions.
-    fn specialize_comparison_with_env(
-        &self,
-        table: ComparisonSpecialization,
-        arg: &Expression,
-    ) -> Primitive {
-        let ty = arg.exp_type;
-        let env = self.env_for_expr(arg);
-        let env_ref = env.as_deref().unwrap_or(self.env);
-        self.specialize_comparison_in_env(table, ty, env_ref)
-    }
-
     fn has_constant_constructor_arg(expr: &Expression) -> bool {
         match &expr.exp_desc {
             ExpressionDesc::Texp_construct(_, cstr, _) => {
@@ -1924,39 +1999,55 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
 
     /// Translcore.transl_primitive_application: `None` means the primitive
     /// is an external whose application must be expanded from its FFI spec.
+    /// What the choice of a primitive reads of the arguments it is applied
+    /// to, for a typed application.
+    fn primitive_args(args: &[&Expression]) -> PrimitiveArgs {
+        PrimitiveArgs {
+            count: args.len() as u16,
+            first: args
+                .first()
+                .map_or((TypeExprRef::null(), EnvRef(0)), |arg| (arg.exp_type, arg.exp_env)),
+        }
+    }
+
+    /// The primitive an application of the builtin `prim` is, or `None` for
+    /// an external (translcore.ml `transl_primitive_application`). `ty` is
+    /// the type of the applied value; `constant_constructor` says whether
+    /// an argument is a constant constructor, and is asked only for a
+    /// comparison.
+    /// Cost: O(1) type inspections; one copy of the primitive's name.
     fn translate_primitive_application_raw(
         &mut self,
         prim: &crate::types::PrimitiveDescription,
         ty: TypeExprRef,
-        args: &[&Expression],
+        args: PrimitiveArgs,
+        constant_constructor: impl FnOnce() -> bool,
         loc: SrcLoc,
     ) -> Option<Primitive> {
         let prim_name = Self::raw_primitive_name(&prim.prim_name).to_string();
+        let (first_type, first_env) = args.first;
 
-        if let [arg1] | [arg1, _] = args {
-            if let Some(primitive) = self.translate_unified_ops_primitive(&prim_name, arg1.exp_type)
-            {
+        if matches!(args.count, 1 | 2) {
+            if let Some(primitive) = self.translate_unified_ops_primitive(&prim_name, first_type) {
                 return Some(primitive);
             }
         }
 
-        if let [arg1, _] = args {
+        if args.count == 2 {
             if let Some(table) = Self::comparison_specialization(&prim_name) {
-                if self.is_base_type(arg1.exp_type, "bool") {
+                if self.is_base_type(first_type, "bool") {
                     return Some(table.boolcomp);
                 }
-                if args
-                    .iter()
-                    .any(|arg| Self::has_constant_constructor_arg(arg))
-                    && table.simplify_constant_constructor
-                {
+                if table.simplify_constant_constructor && constant_constructor() {
                     return Some(table.intcomp);
                 }
                 // Use arg's type directly for specialization, matching OCaml's
                 // transl_prim_2 which checks the arg's exp_type via its env.
                 // specialize_primitive_raw falls back to funct.exp_type with self.env
                 // which may not have local type definitions, causing incorrect expansion.
-                return Some(self.specialize_comparison_with_env(table, arg1));
+                let env = self.type_ctx.get_typed_env(first_env);
+                let env = env.as_deref().unwrap_or(self.env);
+                return Some(self.specialize_comparison_in_env(table, first_type, env));
             }
         }
 
@@ -2413,6 +2504,17 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         elems: Vec<RawLambda>,
         loc: impl Into<SrcLoc>,
     ) -> RawLambda {
+        self.raw_block_or_prim_of(tag_info, &elems, loc)
+    }
+
+    /// A block of lowered elements: a constant when every element is one.
+    /// Cost: O(elements).
+    fn raw_block_or_prim_of(
+        &self,
+        tag_info: TagInfo,
+        elems: &[RawLambda],
+        loc: impl Into<SrcLoc>,
+    ) -> RawLambda {
         let rb = self.b;
         let loc: SrcLoc = loc.into();
         if let Some(constants) = elems
@@ -2427,38 +2529,38 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         } else {
             rb.prim(
                 Primitive::Pmakeblock(tag_info, Mutable::Immutable),
-                &elems,
+                elems,
                 self.lam_loc(loc),
             )
         }
     }
 
+    /// The tag of the block an ordinary constructor with arguments makes.
+    /// `payload` is the type of its argument, and the environment that was
+    /// typed in, when it has exactly one.
+    /// Cost: O(1) besides the test whether an option's payload can be
+    /// `undefined`, which inspects the head of the payload's type.
     fn raw_constructor_tag_info(
         &self,
         cstr: &crate::types::ConstructorDescription,
-        args: &[&Expression],
+        payload: Option<(TypeExprRef, EnvRef)>,
     ) -> TagInfo {
         match &cstr.cstr_kind {
             crate::types::ConstructorKind::Ordinary(_) if constructor_has_optional_shape(cstr) => {
-                match args {
-                    [arg] => {
+                match payload {
+                    Some((ty, env)) => {
                         // translcore.ml:818-824: `type_cannot_contain_undefined
                         // arg.exp_type arg.exp_env`.
-                        let can_skip =
-                            self.type_ctx.get_typed_env(arg.exp_env).is_some_and(|env| {
-                                type_cannot_contain_undefined(
-                                    self.type_ctx,
-                                    env.as_ref(),
-                                    arg.exp_type,
-                                )
-                            });
+                        let can_skip = self.type_ctx.get_typed_env(env).is_some_and(|env| {
+                            type_cannot_contain_undefined(self.type_ctx, env.as_ref(), ty)
+                        });
                         if can_skip {
                             TagInfo::SomeNotNested
                         } else {
                             TagInfo::Some
                         }
                     }
-                    _ => TagInfo::Some,
+                    None => TagInfo::Some,
                 }
             }
             _ => {
@@ -2499,74 +2601,38 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
     ) -> RawLambda {
         let rb = self.b;
         if cstr.cstr_inlined.is_some() {
-            return match args {
+            let elem = match args {
                 [arg] => match &arg.exp_desc {
-                    ExpressionDesc::Texp_record {
-                        fields,
-                        extended_expression,
-                        ..
-                    } => self.convert_record_raw(
-                        SrcLoc::from(arg.exp_loc),
-                        self.ta.record_fields(*fields),
-                        extended_expression.map(|e| self.ta.expr(e)),
-                        inlined_record_representation(cstr),
-                    ),
+                    ExpressionDesc::Texp_record { fields, extended_expression, .. } => {
+                        self.convert_record_raw(
+                            SrcLoc::from(arg.exp_loc),
+                            self.ta.record_fields(*fields),
+                            extended_expression.map(|e| self.ta.expr(e)),
+                            inlined_record_representation(cstr),
+                        )
+                    }
                     _ => self.convert_expr_raw(arg),
                 },
-                [] => rb.const_(raw_constructor_constant(self.type_ctx, cstr, 0)),
-                _ => rb.unit(),
+                [] => return self.construct_inline_of(cstr, &[]),
+                _ => unreachable!("inline record constructors have one argument"),
             };
+            return self.construct_inline_of(cstr, &[elem]);
         }
 
         match cstr.cstr_kind {
             crate::types::ConstructorKind::Ordinary(reference) => {
-                match reference.representation(self.type_ctx) {
-                    crate::types::VariantConstructorCase::Constant(_) => {
-                        match cstr.cstr_name.as_str() {
-                            "true" => rb.const_(Constant::JsTrue),
-                            "false" => rb.const_(Constant::JsFalse),
-                            _ => rb.const_(raw_constructor_constant(
-                                self.type_ctx,
-                                cstr,
-                                reference.position as i32,
-                            )),
-                        }
+                // No buffer for the common arities.
+                match args {
+                    [] => self.construct_of(loc, cstr, reference, &[], None),
+                    [arg] => {
+                        let elem = self.convert_expr_raw(arg);
+                        let payload = Some((arg.exp_type, arg.exp_env));
+                        self.construct_of(loc, cstr, reference, &[elem], payload)
                     }
-                    crate::types::VariantConstructorCase::Block(block)
-                        if block.is_untagged()
-                            && self
-                                .type_ctx
-                                .with_variant_layout(reference.variant, |layout| {
-                                    layout.constructors.len() == 1
-                                }) =>
-                    {
-                        match args {
-                            [arg] => self.convert_expr_raw(arg),
-                            [] => rb.const_(raw_constructor_constant(self.type_ctx, cstr, 0)),
-                            _ => rb.unit(),
-                        }
-                    }
-                    // translcore.ml Texp_construct: untagged payload constructors
-                    // have no Lambda or JS block.
-                    crate::types::VariantConstructorCase::Block(block)
-                        if block.is_untagged() && !constructor_has_optional_shape(cstr) =>
-                    {
-                        match args {
-                            [arg] => self.convert_expr_raw(arg),
-                            _ => unreachable!(
-                                "untagged constructor arity is checked by the type checker"
-                            ),
-                        }
-                    }
-                    crate::types::VariantConstructorCase::Block(_) => {
-                        let elems = args.iter().map(|arg| self.convert_expr_raw(arg)).collect();
-                        let tag_info = self.raw_constructor_tag_info(cstr, args);
-                        self.raw_block_or_prim(
-                            reference.block_index(self.type_ctx) as i32,
-                            tag_info,
-                            elems,
-                            loc,
-                        )
+                    _ => {
+                        let elems: Vec<RawLambda> =
+                            args.iter().map(|arg| self.convert_expr_raw(arg)).collect();
+                        self.construct_of(loc, cstr, reference, &elems, None)
                     }
                 }
             }
@@ -2583,6 +2649,91 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         }
     }
 
+    /// An inline record already carries its constructor representation,
+    /// including extension identity for extensible variants and exceptions.
+    /// Cost: O(1); no wrapper block is allocated.
+    fn construct_inline_of(
+        &self,
+        cstr: &crate::types::ConstructorDescription,
+        elems: &[RawLambda],
+    ) -> RawLambda {
+        match elems {
+            [arg] => *arg,
+            [] => self.b.const_(raw_constructor_constant(self.type_ctx, cstr, 0)),
+            _ => unreachable!("inline record constructors have one argument"),
+        }
+    }
+
+    /// translcore.ml `Texp_construct` of an ordinary constructor: the value `cstr` makes of its lowered arguments
+    /// `elems`. `payload` is the type of the argument, and the environment
+    /// that was typed in, when there is exactly one.
+    /// Cost: O(arguments): one constant, the argument itself for an untagged
+    /// constructor, or one block.
+    fn construct_of(
+        &mut self,
+        loc: SrcLoc,
+        cstr: &crate::types::ConstructorDescription,
+        reference: crate::types::variant_runtime::ConstructorReference,
+        elems: &[RawLambda],
+        payload: Option<(TypeExprRef, EnvRef)>,
+    ) -> RawLambda {
+        let rb = self.b;
+        if cstr.cstr_inlined.is_some() {
+            return self.construct_inline_of(cstr, elems);
+        }
+        match reference.representation(self.type_ctx) {
+            crate::types::VariantConstructorCase::Constant(_) => match cstr.cstr_name.as_str() {
+                "true" => rb.const_(Constant::JsTrue),
+                "false" => rb.const_(Constant::JsFalse),
+                _ => rb.const_(raw_constructor_constant(
+                    self.type_ctx,
+                    cstr,
+                    reference.position as i32,
+                )),
+            },
+            crate::types::VariantConstructorCase::Block(block)
+                if block.is_untagged()
+                    && self
+                        .type_ctx
+                        .with_variant_layout(reference.variant, |layout| {
+                            layout.constructors.len() == 1
+                        }) =>
+            {
+                match elems {
+                    [arg] => *arg,
+                    [] => rb.const_(raw_constructor_constant(self.type_ctx, cstr, 0)),
+                    _ => rb.unit(),
+                }
+            }
+            // translcore.ml Texp_construct: untagged payload constructors
+            // have no Lambda or JS block.
+            crate::types::VariantConstructorCase::Block(block)
+                if block.is_untagged() && !constructor_has_optional_shape(cstr) =>
+            {
+                match elems {
+                    [arg] => *arg,
+                    _ => unreachable!("untagged constructor arity is checked by the type checker"),
+                }
+            }
+            crate::types::VariantConstructorCase::Block(_) => {
+                let tag_info = self.raw_constructor_tag_info(cstr, payload);
+                self.raw_block_or_prim_of(tag_info, elems, loc)
+            }
+        }
+    }
+
+    /// translcore.ml `Texp_field`: the field `lbl` of the lowered `record`.
+    /// An unboxed record is its field.
+    /// Cost: O(1), at most one node.
+    fn field_of(&self, lbl: &LabelDescription, record: RawLambda, loc: SrcLoc) -> RawLambda {
+        if matches!(lbl.lbl_repres, RecordRepresentation::RecordUnboxed(_)) {
+            record
+        } else {
+            let (pos, info) = raw_record_field_access(lbl);
+            self.b.prim(Primitive::Pfield(pos, info), &[record], self.lam_loc(loc))
+        }
+    }
+
     /// `transl_record` (compiler/ml/translcore.ml:1770-1923). `fields` are
     /// the written fields in position order; the record's labels are their
     /// `lbl_all` (`all_labels fields`, none for `{}`).
@@ -2593,23 +2744,46 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         base: Option<&Expression>,
         empty_repres: Option<RecordRepresentation>,
     ) -> RawLambda {
+        let base_lam = base.map(|expr| self.convert_expr_raw(expr));
+        self.record_of(loc, fields, base_lam, empty_repres, &mut TypedFields)
+    }
+
+    /// [`Self::convert_record_raw`] over fields `how` lowers: those of a
+    /// typed record expression, or those of a derived item's body.
+    /// `base_lam` is the lowered record the literal extends.
+    /// Cost: O(labels of the record): one slot per label to place the
+    /// written fields by position, one term per field and one block.
+    fn record_of<F>(
+        &mut self,
+        loc: SrcLoc,
+        fields: &[F],
+        base_lam: Option<RawLambda>,
+        empty_repres: Option<RecordRepresentation>,
+        how: &mut impl FieldLowering<B, F>,
+    ) -> RawLambda {
         let rb = self.b;
-        let all_labels =
-            crate::types::typedtree::record_all_labels(self.type_ctx, fields).unwrap_or_default();
+        let first_lbl = fields.first().map(|first| how.label(self, first));
+        // `all_labels` (translcore.ml:1020-1028): the `lbl_all` of the
+        // written labels, none for `{}`.
+        let all_labels = first_lbl
+            .map(|first| {
+                self.type_ctx
+                    .label_family(first.lbl_all)
+                    .expect("a written record label points to its registered lbl_all")
+            })
+            .unwrap_or_default();
         let all_labels = all_labels.as_slice();
-        let first_lbl = fields.first().map(|(first_lbl, _, _)| first_lbl);
         let repres = first_lbl
             .map(|lbl| lbl.lbl_repres.clone())
             .or(empty_repres)
             .unwrap_or(RecordRepresentation::RecordRegular);
         let mutable_flag = raw_record_mutable_flag(all_labels);
-        let base_lam = base.map(|expr| self.convert_expr_raw(expr));
 
         // `record_copies_fields` (translcore.ml:1037-1050): with no `init`, or
         // a small record with no optional field, copy the fields one by one.
         // A shallow copy is an object spread, so an array record always
         // copies its fields.
-        let build_direct = base.is_none()
+        let build_direct = base_lam.is_none()
             || repres == RecordRepresentation::RecordArray
             || (all_labels.len() < 20 && !all_labels.iter().any(|lbl| lbl.lbl_optional));
 
@@ -2636,19 +2810,25 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                     .all(|lbl| lbl.lbl_repres == RecordRepresentation::RecordRegular);
             let logical_field_count = compact.then_some(all_labels.len());
 
-            let by_position = crate::types::typedtree::record_fields_by_position(fields, all_labels);
+            // `fields_by_position` (translcore.ml:1030-1035): each label
+            // with the field the literal writes for it, in position order.
+            let mut written: Vec<Option<&F>> = vec![None; all_labels.len()];
+            for field in fields {
+                written[how.label(self, field).lbl_pos as usize] = Some(field);
+            }
             // The block keeps these vectors: a compact block holds at most the
             // written fields, so do not reserve a slot per label.
-            let slots = if compact { fields.len() } else { by_position.len() };
+            let slots = if compact { fields.len() } else { all_labels.len() };
             let mut elems = Vec::with_capacity(slots);
             let mut fields_info = Vec::with_capacity(slots);
-            for (lbl, field) in by_position {
+            for (lbl, field) in all_labels.iter().zip(written) {
                 let (lbl, value) = match (field, &init_var) {
-                    (Some(field), _) if compact && record_field_is_static_optional_none(self.ta, field) => {
+                    (Some(field), _) if compact && how.static_optional_none(self, field) => {
                         continue;
                     }
-                    (Some((written_lbl, _, expr)), _) => {
-                        (written_lbl.as_ref(), self.convert_expr_raw(self.ta.expr(*expr)))
+                    (Some(field), _) => {
+                        let value = how.lower(self, field);
+                        (how.label(self, field), value)
                     }
                     (None, None) if compact => continue,
                     // An optional field the literal leaves out.
@@ -2742,7 +2922,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                 }
                 RecordRepresentation::RecordExtension => {
                     // translcore.ml:1870-1876 reads the path of `lbl_all.(0)`.
-                    let Some(first_lbl) = first_lbl.map(|lbl| lbl.as_ref()).or(all_labels.first()) else {
+                    let Some(first_lbl) = first_lbl.or(all_labels.first()) else {
                         return rb.unit();
                     };
                     let path = match self.type_desc(first_lbl.lbl_res) {
@@ -2786,13 +2966,14 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         // the LAST field ends up outermost in the sequence chain.
         let copy_id = self.fresh_ident("newrecord");
         let mut body = rb.var(copy_id);
-        for (lbl, _, expr) in fields.iter() {
-            let Some((pos, info)) = raw_record_setfield_access(lbl) else {
+        for field in fields.iter() {
+            let Some((pos, info)) = raw_record_setfield_access(how.label(self, field)) else {
                 continue;
             };
+            let value = how.lower(self, field);
             let update = rb.prim(
                 Primitive::Psetfield(pos, info),
-                &[rb.var(copy_id), self.convert_expr_raw(self.ta.expr(*expr))],
+                &[rb.var(copy_id), value],
                 self.lam_loc(loc),
             );
             body = rb.seq(update, body);
@@ -4791,9 +4972,9 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                 let census_start = crate::derived_census::start(self.derived_census.is_some());
                 let result = derived::lower(self, *idx, body, &mut ());
                 if let (Some(census), Some(start)) = (&mut self.derived_census, census_start) {
-                    census
-                        .conversion
-                        .add(true, crate::derived_census::nanos(start.elapsed()));
+                    let elapsed = crate::derived_census::nanos(start.elapsed());
+                    census.conversion.add(true, elapsed);
+                    census.planned_conversion_ns += elapsed;
                 }
                 result
             }
@@ -5229,16 +5410,8 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                 empty_representation.as_deref().cloned(),
             ),
             ExpressionDesc::Texp_field(record, _, lbl) => {
-                if matches!(lbl.lbl_repres, RecordRepresentation::RecordUnboxed(_)) {
-                    self.convert_expr_raw(self.ta.expr(*record))
-                } else {
-                    let (pos, info) = raw_record_field_access(lbl);
-                    rb.prim(
-                        Primitive::Pfield(pos, info),
-                        &[self.convert_expr_raw(self.ta.expr(*record))],
-                        self.lam_loc(expr.exp_loc),
-                    )
-                }
+                let record = self.convert_expr_raw(self.ta.expr(*record));
+                self.field_of(lbl, record, SrcLoc::from(expr.exp_loc))
             }
             ExpressionDesc::Texp_setfield(record, _, lbl, value) => {
                 if let Some((pos, info)) = raw_record_setfield_access(lbl) {
@@ -5423,7 +5596,6 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         cases: &[Case],
         partial: Partial,
     ) -> RawLambda {
-        let rb = self.b;
         let pat_act_list = self.cases_to_pat_act_list(cases);
 
         // OCaml optimization: when the scrutinee is a tuple, decompose into
@@ -5441,7 +5613,26 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         }
 
         let scrut_lam = self.convert_expr_raw(scrut);
+        let store = full_matching::PatStore::default();
+        let pa = full_matching::PatArena::new(self.ta, &store);
+        self.matching_of(&pa, loc, scrut_lam, pat_act_list, partial)
+    }
 
+    /// translcore.ml `Texp_match` without exception cases: the match of the
+    /// lowered scrutinee against cases whose patterns are in `pa` (the typed
+    /// tree's, or built in its overlay from descriptions) and whose actions
+    /// are lowered. A partial match that fails raises `Match_failure` at
+    /// `loc`.
+    /// Cost: that of `Matching.compile_matching` on the cases.
+    fn matching_of<'p>(
+        &mut self,
+        pa: &'p full_matching::PatArena<'p>,
+        loc: LocIdx,
+        scrut_lam: RawLambda,
+        pat_act_list: Vec<(&'p Pattern, full_matching::CaseAction)>,
+        partial: Partial,
+    ) -> RawLambda {
+        let rb = self.b;
         let loc_for_handler = self.loc(loc);
         let node_loc = self.lam_loc(loc);
         let fname = self.basename_for_loc(loc_for_handler);
@@ -5471,7 +5662,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                 node_loc,
             )
         };
-        self.compile_matching_with_synced_stamps(handler_fun, scrut_lam, pat_act_list, partial)
+        self.compile_matching_with_synced_stamps(pa, handler_fun, scrut_lam, pat_act_list, partial)
     }
 
     /// Compile a Texp_match with exception cases.
@@ -5544,7 +5735,10 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                     node_loc,
                 )
             };
+            let store = full_matching::PatStore::default();
+            let pa = full_matching::PatArena::new(self.ta, &store);
             self.compile_matching_with_synced_stamps(
+                &pa,
                 handler_fun,
                 rb.var(val_id),
                 pat_act_list,
@@ -6279,7 +6473,10 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                                     LamLoc::NONE,
                                 )
                             };
+                            let store = full_matching::PatStore::default();
+                            let pa = full_matching::PatArena::new(self.ta, &store);
                             acc = self.compile_matching_with_synced_stamps(
+                                &pa,
                                 handler_fun,
                                 value,
                                 pat_act_list,
@@ -6559,50 +6756,16 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                             .iter()
                             .map(|expr| self.convert_expr_raw(expr))
                             .collect::<Vec<_>>();
-                        match self.translate_primitive_application_raw(
-                            prim,
-                            funct.exp_type,
-                            &applied_exprs,
+                        self.primitive_application_of(
+                            loc_idx,
                             SrcLoc::from(loc),
-                        ) {
-                            // an external: expand its FFI spec here; %raw
-                            // parses and classifies its snippet
-                            None => match (raw_name, arg_lams.as_slice()) {
-                                ("#raw_expr" | "#raw_stmt", [code]) => {
-                                    let code = match rb.const_of(*code) {
-                                        Some(Constant::String(s) | Constant::ImmString(s)) => s,
-                                        _ => unreachable!("%raw takes a string constant"),
-                                    };
-                                    rb.prim(
-                                        Primitive::PrawJsCode(
-                                            crate::lambda::lam_primitive::JsRawInfo {
-                                                code,
-                                                is_stmt: raw_name == "#raw_stmt",
-                                            },
-                                        ),
-                                        &[],
-                                        self.lam_loc(loc),
-                                    )
-                                }
-                                _ => {
-                                    let env = self.env_for_expr(funct);
-                                    let env = env.as_deref().unwrap_or(self.env);
-                                    self.transl_external_application(
-                                        SrcLoc::from(loc),
-                                        env,
-                                        prim,
-                                        desc.val_type,
-                                        arg_lams,
-                                    )
-                                }
-                            },
-                            Some(primitive) => {
-                                self.report_polymorphic_comparison_warning(
-                                    loc_idx, &primitive, &arg_lams,
-                                );
-                                self.mk_builtin(primitive, arg_lams, SrcLoc::from(loc))
-                            }
-                        }
+                            prim,
+                            (funct.exp_type, desc.val_type),
+                            funct.exp_env,
+                            Self::primitive_args(&applied_exprs),
+                            || applied_exprs.iter().any(|arg| Self::has_constant_constructor_arg(arg)),
+                            arg_lams,
+                        )
                     };
                     return if rest.is_empty() {
                         base
@@ -6627,6 +6790,67 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
             None
         };
         self.transl_apply_raw(funct_lam, args, loc, uncurried_partial_application)
+    }
+
+    /// translcore.ml `Texp_apply` of a primitive to all the arguments it
+    /// takes, already lowered as `arg_lams`: a builtin becomes its
+    /// primitive, an external the expansion of its FFI specification.
+    /// `types` are the type the value is applied at and the type it is
+    /// declared with; `env` is the environment the value was typed in, read
+    /// for an external only; `constant_constructor` as for
+    /// [`Self::translate_primitive_application_raw`]. Not
+    /// for the primitives that read the syntax of their arguments (a
+    /// location primitive, a dynamic import), which the caller handles.
+    /// Cost: O(arguments) besides the expansion of an external.
+    #[allow(clippy::too_many_arguments)]
+    fn primitive_application_of(
+        &mut self,
+        loc_idx: LocIdx,
+        loc: SrcLoc,
+        prim: &crate::types::PrimitiveDescription,
+        (applied_type, declared_type): (TypeExprRef, TypeExprRef),
+        env: EnvRef,
+        args: PrimitiveArgs,
+        constant_constructor: impl FnOnce() -> bool,
+        arg_lams: Vec<RawLambda>,
+    ) -> RawLambda {
+        let rb = self.b;
+        let raw_name = Self::raw_primitive_name(&prim.prim_name);
+        match self.translate_primitive_application_raw(
+            prim,
+            applied_type,
+            args,
+            constant_constructor,
+            loc,
+        ) {
+            // an external: expand its FFI spec here; %raw
+            // parses and classifies its snippet
+            None => match (raw_name, arg_lams.as_slice()) {
+                ("#raw_expr" | "#raw_stmt", [code]) => {
+                    let code = match rb.const_of(*code) {
+                        Some(Constant::String(s) | Constant::ImmString(s)) => s,
+                        _ => unreachable!("%raw takes a string constant"),
+                    };
+                    rb.prim(
+                        Primitive::PrawJsCode(crate::lambda::lam_primitive::JsRawInfo {
+                            code,
+                            is_stmt: raw_name == "#raw_stmt",
+                        }),
+                        &[],
+                        self.lam_loc(loc),
+                    )
+                }
+                _ => {
+                    let env = self.type_ctx.get_typed_env(env);
+                    let env = env.as_deref().unwrap_or(self.env);
+                    self.transl_external_application(loc, env, prim, declared_type, arg_lams)
+                }
+            },
+            Some(primitive) => {
+                self.report_polymorphic_comparison_warning(loc_idx, &primitive, &arg_lams);
+                self.mk_builtin(primitive, arg_lams, loc)
+            }
+        }
     }
 
     fn transl_apply_raw(
@@ -6996,6 +7220,12 @@ mod tests {
         crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(items))
     }
 
+    /// What is handed to the choice of a primitive per application.
+    #[test]
+    fn primitive_args_are_twelve_bytes() {
+        assert_eq!(std::mem::size_of::<PrimitiveArgs>(), 12);
+    }
+
     use super::*;
     use crate::lambda::Lambda;
     use crate::types::typedtree::TExprIdx;
@@ -7008,6 +7238,24 @@ mod tests {
     use crate::parser::ast::Attributes;
 
     use crate::types::env::initial_env;
+
+    #[test]
+    fn inline_extension_records_keep_their_representation() {
+        let js = crate::driver::compile_source_to_js_with_options(
+            r#"
+                type t = ..
+                type t += Point({@as("x-coord") x: int, y: int})
+                exception Failed({code: int})
+                let point = Point({x: 1, y: 2})
+                let failure = Failed({code: 3})
+            "#,
+            "InlineExtension.res",
+            &crate::driver::CompilerOptions::default(),
+        ).unwrap();
+        assert!(js.contains("\"x-coord\": 1"), "{js}");
+        assert!(js.contains("code: 3"), "{js}");
+        assert_eq!(js.matches("RE_EXN_ID:").count(), 2, "{js}");
+    }
 
     #[test]
     fn nullary_unboxed_constructor_keeps_constructor_metadata_in_raw_lambda() {

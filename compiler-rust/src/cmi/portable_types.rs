@@ -225,6 +225,41 @@ enum PublishedSignature {
     Shared(super::shared_reader::PublishedGraph),
 }
 
+impl PortablePersStruct {
+    /// Read the old frozen unit for the checker bridge. The common source-built
+    /// case borrows its existing graph. A stored unit materializes its graph
+    /// only when this reader explicitly asks, never at registration.
+    pub(crate) fn with_published_graph<R>(
+        self: &Arc<Self>,
+        ctx: &TypeContext,
+        read: impl FnOnce(&super::shared_reader::PublishedGraph) -> R,
+    ) -> Result<R, String> {
+        let decoded = self.decoded.lock().unwrap();
+        if let Some((PublishedSignature::Shared(graph), _)) = decoded.as_ref() {
+            return Ok(read(graph));
+        }
+        drop(decoded);
+        let ps = internalize_pers_struct(self.clone(), ctx);
+        let (graph, _) = signature_builder::build(&ps, ctx, None, &PublicationStamps::new(ctx))
+            .ok_or_else(|| format!("checker bridge cannot freeze published unit {}", self.ps_name))?;
+        Ok(read(&graph))
+    }
+}
+
+#[cfg(test)]
+impl PortablePersStruct {
+    /// O(1) plus `f`: the frozen graph of a unit published as one.
+    pub(crate) fn with_shared_graph<R>(
+        &self,
+        f: impl FnOnce(&super::shared_reader::PublishedGraph) -> R,
+    ) -> Option<R> {
+        match self.decoded.lock().unwrap().as_ref() {
+            Some((PublishedSignature::Shared(graph), _)) => Some(f(graph)),
+            _ => None,
+        }
+    }
+}
+
 impl PublishedSignature {
     fn portable(&self) -> std::borrow::Cow<'_, PortableSignature> {
         match self {
@@ -534,21 +569,32 @@ impl PortablePersStruct {
         self.summary.get_or_init(|| {
             Arc::new(super::item_deps::SignatureSummary::of(
                 &self.ps_name,
-                &self.decode_signature(encoded),
+                &self.decode_signature(encoded, None),
             ))
         })
     }
 
     /// The main signature, decoded after ensuring bytes exist.
     pub fn signature(&self) -> PortableSignature {
-        self.decode_signature(self.encoded())
+        self.decode_signature(self.encoded(), None)
     }
 
-    fn decode_signature(&self, encoded: &EncodedSignatures) -> PortableSignature {
+    /// Decode an owned signature for this attempt. Cost: O(encoded bytes +
+    /// rebased names), with allocations for the decoded graph. The first
+    /// `encoded()` access can also serialize the retained signature graph.
+    /// Counter attribution is one local increment per signature, not per node.
+    fn signature_for_attempt(&self, ctx: &TypeContext) -> PortableSignature {
+        self.decode_signature(self.encoded(), Some(ctx))
+    }
+
+    fn decode_signature(&self, encoded: &EncodedSignatures, ctx: Option<&TypeContext>) -> PortableSignature {
         if crate::perf_counters::enabled()
             && self.published_generation == Some(crate::types::thread_store::build_generation())
         {
-            crate::perf_counters::record_published_signature_decode();
+            match ctx {
+                Some(ctx) => crate::perf_counters::record_attempt_signature_decode(ctx),
+                None => crate::perf_counters::record_published_signature_decode(),
+            }
         }
         let mut sig = encoded.sig.decode();
         self.rebase_names(&mut sig.cmi_longident_names);
@@ -1931,7 +1977,22 @@ pub enum SignaturePublicationMode {
 
 /// Publish directly from the checker. The portable oracle is check-only;
 /// ordinary storage reconstructs it from the frozen graph after release.
+/// The publication's counters count in `ctx`, the unit's checking attempt.
 pub(crate) fn publish_signature(
+    ps: &PersStruct, ctx: &TypeContext, arena: Option<&ParseArena>,
+    mode: SignaturePublicationMode, checked: bool,
+) -> (Arc<PortablePersStruct>, Option<super::signature_check::Comparison>) {
+    crate::perf_counters::attribute_publication(ctx, || {
+        publish_signature_attributed(ps, ctx, arena, mode, checked)
+    })
+}
+
+/// Cost: build the exported graph, then fingerprint and per-item hash walks
+/// over its reachable types; allocate the frozen graph and one publication.
+/// Fallback serializes a portable graph instead. Check mode additionally
+/// builds the portable oracle and both byte encodings. These are whole-unit
+/// walks, not constant-time publication or per-lookup instrumentation.
+fn publish_signature_attributed(
     ps: &PersStruct, ctx: &TypeContext, arena: Option<&ParseArena>,
     mode: SignaturePublicationMode, checked: bool,
 ) -> (Arc<PortablePersStruct>, Option<super::signature_check::Comparison>) {
@@ -2138,6 +2199,20 @@ fn shared_pers_struct_at(
     Some((Arc::new(ps), base))
 }
 
+/// Read a detached checker-bridge publication through the ordinary shared
+/// graph relocation, without serializing a portable intermediate.
+pub(crate) fn import_checker_publication(
+    graph: &mut super::shared_reader::PublishedGraph,
+    unit: &str,
+    ctx: &TypeContext,
+) -> Result<Arc<Signature>, String> {
+    let pool = ctx.thread_store().shared_pool();
+    assert!(std::ptr::eq(graph.names.as_ref(), pool.names_ref()));
+    signature_builder::promote(graph, unit, pool)
+        .map(|published| published.signature)
+        .ok_or_else(|| format!("checker bridge cannot publish rebuilt unit {unit}"))
+}
+
 /// Load a PortablePersStruct for the current compilation.
 ///
 /// The dependency graph is internalized once per build into the world's
@@ -2187,7 +2262,7 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         }
     }
     let sig = if shareable {
-        let portable = pps.signature();
+        let portable = pps.signature_for_attempt(ctx);
         let intern = |name: &str| store.intern_longident_name(name);
         let files = FileRemap::new(&portable.cmi_longident_names, &intern);
         let map = |file| files.map(file);
@@ -2198,7 +2273,7 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         );
         internalize_signature_into_store(&portable.ps_sig, &portable.type_graph, &locs, store)
     } else {
-        let portable = pps.signature();
+        let portable = pps.signature_for_attempt(ctx);
         let intern = |name: &str| ctx.intern_cmi_longident_name(name);
         let files = FileRemap::new(&portable.cmi_longident_names, &intern);
         let map = |file| files.map(file);

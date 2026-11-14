@@ -323,7 +323,8 @@ impl StatementStack {
     /// into the child-list pool once: one step per statement, hole and dead
     /// range of the run. The top run is popped; a run below the top becomes
     /// one dead range, so that what follows it is not moved. Never flattens
-    /// SBlock here.
+    /// SBlock here. The copied run is closed (`close::decide`: one more step
+    /// per statement) when the arena counts JavaScript occurrences.
     pub fn take_list(&mut self, bir: &mut Bir, span: Span) -> ListId {
         if span.len == 0 {
             // An empty run holds no slot. Its start is above the top when
@@ -335,7 +336,15 @@ impl StatementStack {
         let id = bir.lists.push_iter(count, self.statements(span));
         self.copied += count;
         self.kill(span);
+        self.close(bir, id);
         id
+    }
+    /// THREE_TREES 11.4, step A: decide the declarations of a copied list.
+    /// Cost: that of `close::decide`; nothing on an arena without counts.
+    pub(super) fn close(&mut self, bir: &mut Bir, list: ListId) {
+        if bir.js_scope.is_some() {
+            super::close::decide(bir, list);
+        }
     }
 }
 

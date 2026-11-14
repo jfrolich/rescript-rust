@@ -29,6 +29,9 @@ pub struct Imported {
     pub root: NodeId,
     pub(super) idents: Vec<Ident>,
     pub(super) globals: Vec<Ident>,
+    /// The variables the export blocks name, block after block, each block
+    /// preceded by its length. Filled for the lowering only (T4a).
+    pub(super) export_vars: Vec<u32>,
     /// The legacy name of each static label a round created.
     labels: std::collections::BTreeMap<u32, u32>,
     #[cfg(test)]
@@ -41,10 +44,29 @@ pub(super) struct Importer {
     vars: AHashMap<Ident, VarId>,
     idents: Vec<Ident>,
     globals: Vec<Ident>,
+    /// `Some` for the lowering: see `Imported::export_vars`.
+    export_vars: Option<Vec<u32>>,
     #[cfg(test)]
     identifier_lookups: usize,
 }
 impl Importer {
+    /// The lowering compares exports with variables (T4a): give every
+    /// identifier of an export block its variable. One lookup per export in
+    /// the identifier table.
+    fn export_block(&mut self, tag: &crate::lambda::TagInfo) {
+        if self.export_vars.is_none() {
+            return;
+        }
+        let crate::lambda::TagInfo::ModuleExport(ids) = tag else {
+            return;
+        };
+        let mut vars = self.export_vars.take().unwrap_or_default();
+        vars.push(index(ids.len()));
+        for &id in ids {
+            vars.push(self.var(id).0);
+        }
+        self.export_vars = Some(vars);
+    }
     fn var(&mut self, ident: Ident) -> VarId {
         #[cfg(test)]
         {
@@ -78,6 +100,7 @@ impl Importer {
             root,
             idents: self.idents,
             globals: self.globals,
+            export_vars: self.export_vars.unwrap_or_default(),
             labels: Default::default(),
             #[cfg(test)]
             identifier_lookups: self.identifier_lookups,
@@ -171,10 +194,13 @@ impl Importer {
                     if *negative { "-" } else { "+" },
                     value
                 ))),
-                C::Block { tag_info, .. } => Constant::Block {
+                C::Block { tag_info, .. } => {
+                    self.export_block(tag_info);
+                    Constant::Block {
                     tag: *tag_info.clone(),
                     fields: self.bir.const_fields(&values[start..]),
-                },
+                    }
+                }
                 C::Some(_) => Constant::Some(values[start]),
                 C::ModuleAlias => Constant::ModuleAlias,
             };
@@ -245,6 +271,9 @@ impl Importer {
             }
             L::Prim { info, .. } => {
                 let p = a.prim_payload(info);
+                if let crate::lambda::lam_primitive::Primitive::Pmakeblock(tag, _) = &p.primitive {
+                    self.export_block(tag);
+                }
                 let primitive = self.bir.intern_prim(PrimPayload {
                     primitive: p.primitive.clone(),
                     loc: p.loc,
@@ -456,6 +485,18 @@ fn sharing_facts(arena: &LamArena, root: Lam) -> (Vec<u8>, usize, u8) {
     (binder, reachable, shared)
 }
 
+/// An import that recorded the variables of every export block: what the
+/// unit lowering (`lower::lower_with_resolver`) reads its exports from. Only
+/// `import_for_lowering` makes one, so a unit imported without the records
+/// cannot reach the export coercion.
+pub(crate) struct ForLowering(Imported);
+impl ForLowering {
+    /// The import, for the lowering's state. Constant.
+    pub(crate) fn into_imported(self) -> Imported {
+        self.0
+    }
+}
+
 /// Import occurrences, as the legacy lowering does. Binder-free shared
 /// subtrees are copied per edge, with a hard budget of four times the reachable
 /// source nodes. Repeated binder subtrees cannot retain unique Bir binders.
@@ -465,8 +506,9 @@ pub fn import_lambda(arena: &LamArena, root: Lam) -> Result<Imported, Unsupporte
 
 /// Same import, with the subset of binder fallbacks due solely to catch labels.
 /// The binder analysis runs once, also when the import is unsupported.
-pub(crate) fn import_for_lowering(arena: &LamArena, root: Lam) -> (Result<Imported, Unsupported>, bool) {
-    import_with_sharing(arena, root, true)
+pub(crate) fn import_for_lowering(arena: &LamArena, root: Lam) -> (Result<ForLowering, Unsupported>, bool) {
+    let (imported, catch_only) = import_with_sharing(arena, root, true);
+    (imported.map(ForLowering), catch_only)
 }
 
 fn import_with_sharing(arena: &LamArena, root: Lam, lowering: bool) -> (Result<Imported, Unsupported>, bool) {
@@ -478,17 +520,20 @@ fn import_with_sharing(arena: &LamArena, root: Lam, lowering: bool) -> (Result<I
     } else if shared != 0 {
         Err(Unsupported("shared Lambda subtree with binder"))
     } else {
-        import_with_facts(arena, root, &binders, reachable)
+        import_with_facts(arena, root, &binders, reachable, lowering)
     };
     (result, catch_only)
 }
 
-fn import_with_facts(arena: &LamArena, root: Lam, has_binder: &[u8], reachable: usize) -> Result<Imported, Unsupported> {
+fn import_with_facts(arena: &LamArena, root: Lam, has_binder: &[u8], reachable: usize, lowering: bool) -> Result<Imported, Unsupported> {
     enum Work {
         Enter(Lam),
         Finish(L, usize),
     }
-    let mut importer = Importer::default();
+    let mut importer = Importer {
+        export_vars: lowering.then(Vec::new),
+        ..Importer::default()
+    };
     importer.bir.begin_bulk();
     let mut work = vec![Work::Enter(root)];
     let mut values = Vec::new();
@@ -527,6 +572,7 @@ fn import_with_facts(arena: &LamArena, root: Lam, has_binder: &[u8], reachable: 
         root,
         idents: importer.idents,
         globals: importer.globals,
+        export_vars: importer.export_vars.unwrap_or_default(),
         labels: Default::default(),
         #[cfg(test)]
         identifier_lookups: importer.identifier_lookups,

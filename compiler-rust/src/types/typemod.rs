@@ -552,20 +552,11 @@ fn lookup_rebind_constructor<'a>(
     lid: &Located<LidentIdx>,
 ) -> TypeModResult<(Path, crate::types::decl::ConstructorDescription)> {
     let longident = tctx.resolve_lid(lid.txt).clone();
-    let result = match &longident {
-        Longident::Lident(name_idx) => {
-            let name = tctx.arena.get_string(*name_idx);
-            env.find_constructor(name).ok().map(|desc| {
-                let desc = desc.clone();
-                let path = match &desc.cstr_kind {
-                    crate::types::ConstructorKind::Extension(path) => *path,
-                    crate::types::ConstructorKind::Ordinary(_) => {
-                        Path::pident(Ident::create_persistent(name))
-                    }
-                };
-                (path, desc)
-            })
-        }
+    let desc = match &longident {
+        Longident::Lident(name_idx) => env
+            .find_constructor(tctx.arena.get_string(*name_idx))
+            .ok()
+            .cloned(),
         Longident::Ldot(_, _) => crate::types::typecore::lookup_constructor_in_module(
             &longident,
             tctx.arena,
@@ -573,14 +564,26 @@ fn lookup_rebind_constructor<'a>(
             &mut tctx.persistent_env,
             tctx.type_ctx,
             None,
-        ),
+        )
+        .map(|(_, desc)| desc),
         Longident::Lapply(_, _) => None,
     };
-    result.ok_or_else(|| {
+    let desc = desc.ok_or_else(|| {
         TypeModError::CoreError(crate::types::typecore::unbound_constructor_lookup_error(
             tctx, env, lid.loc, &longident,
         ))
-    })
+    })?;
+    // The path the rebound constructor is read at is the one its description
+    // carries (compiler/ml/typedecl.ml:1745-1749): for `M.E` the field `E`
+    // of `M`, not a name of its own. A constructor that is no extension is
+    // rejected by the caller, which unifies its type with the extended one.
+    let path = match &desc.cstr_kind {
+        crate::types::ConstructorKind::Extension(path) => *path,
+        crate::types::ConstructorKind::Ordinary(_) => Path::pident(Ident::create_persistent(
+            tctx.arena.get_string(longident.last_idx()),
+        )),
+    };
+    Ok((path, desc))
 }
 
 /// The arguments of a rebound extension constructor (compiler/ml/
@@ -3343,6 +3346,10 @@ pub enum UnboundTypeVarDetail {
 pub enum TypeModError {
     /// Core type checking error.
     CoreError(TypeCoreError),
+    /// An obligation of a derived item's plan failed
+    /// (`TypeCheckContext::derived_fallback`): no diagnostic, the unit is
+    /// compiled again with plans off.
+    DerivedFallback,
     /// Module type not found.
     UnboundModtype {
         /// Source location to report.
@@ -7454,7 +7461,7 @@ fn lookup_module_paths_by_lid(
                 ctx,
                 |components| {
                     components
-                        .lookup_module(submod_name)
+                        .lookup_module(submod_name, ctx)
                         .map(|(runtime_pos, _, _md)| {
                             (
                                 Path::pdot_pos(
@@ -7797,7 +7804,7 @@ fn lookup_module_alias_by_lid(
                 ctx,
                 |components| {
                     components
-                        .lookup_module(submod_name)
+                        .lookup_module(submod_name, ctx)
                         .and_then(|(_, _, md)| alias_of_module_type(&md.md_type))
                 },
             )
@@ -13728,8 +13735,20 @@ fn extract_module_type_from_mod_expr_inner(
                 let current_env_snapshot = local_env.clone();
                 let current_env = current_env_snapshot.as_ref().or(env);
                 match &item.str_desc {
-                    StructureItemDesc::Tstr_derived(_) => {
-                        unreachable!("{}", crate::types::derived::TOP_LEVEL_ONLY)
+                    // A derived item declares its bindings as regular values.
+                    StructureItemDesc::Tstr_derived(idx) => {
+                        for bound in ta.derived.bound(*idx) {
+                            sig_items.push(SigItem::SigValue(
+                                bound.ident,
+                                crate::types::decl::ValueDescription {
+                                    val_type: bound.ty,
+                                    val_kind: crate::types::decl::ValueKind::ValReg,
+                                    val_loc: crate::types::DeclLoc::none(),
+                                    val_attributes: Default::default(),
+                                    val_path: None,
+                                },
+                            ));
+                        }
                     }
                     StructureItemDesc::Tstr_value(_, bindings) => {
                         for vb in ta.value_bindings(*bindings) {
@@ -16310,16 +16329,20 @@ fn type_structure_item_with_census<'a>(
     let counter_before = tctx
         .derived_census
         .as_ref()
-        .and_then(|c| c.counter_snapshot());
+        .and_then(|c| c.counter_snapshot(tctx.type_ctx));
     let (typed_item, item_sig, new_env) = type_structure_item(tctx, env, arena, item)?;
     if let (Some(census), Some(start)) = (&mut tctx.derived_census, census_start) {
         let derived = crate::binary_ast::derive::is_derived_item(item, arena);
-        census.account_counters(derived, counter_before);
+        census.account_counters(tctx.type_ctx, derived, counter_before);
         let children = census.typecheck.total() - census_before;
-        census.typecheck.add(
-            derived,
-            crate::derived_census::nanos(start.elapsed()).saturating_sub(children),
-        );
+        let elapsed = crate::derived_census::nanos(start.elapsed()).saturating_sub(children);
+        census.typecheck.add(derived, elapsed);
+        if let Some(reason) = census.general_group(item) {
+            census.general_typecheck_ns[reason.census_index()] += elapsed;
+        }
+        if matches!(typed_item.str_desc, StructureItemDesc::Tstr_derived(_)) {
+            census.planned_typecheck_ns += elapsed;
+        }
         if derived && let StructureItemDesc::Tstr_value(_, group) = typed_item.str_desc {
             census.mark_typed_group(group.start());
         }
@@ -16912,46 +16935,22 @@ fn type_structure_item<'a>(
             ))
         }
 
-        // A derived item: discharge the obligations of its plan, or, when one
-        // fails, type the value group it stands for.
-        ParsedStructureItemDesc::Pstr_derived(idx) if !tctx.derived_plans => {
-            let general = crate::binary_ast::derive::general_item(arena, loc, *idx);
-            type_structure_item(tctx, env, arena, &general)
-        }
+        // A derived item: discharge the obligations of its plan. When one
+        // fails the unit is compiled again with plans off.
         ParsedStructureItemDesc::Pstr_derived(idx) => {
             match crate::types::derived::discharge(tctx, env, *idx) {
-                Ok(discharged) => {
-                    // typemod.ml type_structure: the signature holds the
-                    // value descriptions the bindings have in the environment.
-                    let sig_items = tctx
-                        .typed
-                        .derived
-                        .bound(*idx)
-                        .map(|bound| {
-                            let value_desc = discharged
-                                .env
-                                .lookup_value(&Path::pident(bound.ident))
-                                .expect("derived binding missing from structure environment")
-                                .clone();
-                            crate::types::decl::SignatureItem::SigValue(bound.ident, value_desc)
-                        })
-                        .collect();
-                    Ok((
-                        StructureItem {
-                            str_desc: StructureItemDesc::Tstr_derived(*idx),
-                            str_loc: loc,
-                            str_env: EnvRef(0),
-                        },
-                        sig_items,
-                        discharged.env,
-                    ))
-                }
+                Ok(discharged) => Ok((
+                    StructureItem {
+                        str_desc: StructureItemDesc::Tstr_derived(*idx),
+                        str_loc: loc,
+                        str_env: EnvRef(0),
+                    },
+                    discharged.sig_items,
+                    discharged.env,
+                )),
                 Err(crate::types::derived::Fallback) => {
-                    if let Some(census) = &mut tctx.derived_census {
-                        census.paths.fallback += arena.plans().item(*idx).bindings.len as u64;
-                    }
-                    let general = crate::binary_ast::derive::general_item(arena, loc, *idx);
-                    type_structure_item(tctx, env, arena, &general)
+                    tctx.derived_fallback = true;
+                    Err(TypeModError::DerivedFallback)
                 }
             }
         }

@@ -8,8 +8,9 @@ instructions the process executes. The build runs on one worker thread, so
 the count barely moves between runs of the same executable (about 0.1% from
 run to run); the smallest of `--runs` builds (five by default) is the side's count.
 
-Both sides run at the same time, each in its own checkout, so the two
-projects must be separate directories.
+Both sides run at the same time by default, or sequentially with --sequential,
+each in its own checkout. Sequential runs can share a checkout to keep source
+and runtime path lengths identical.
 
   scripts/compare_build_instructions.py \\
       --base BASE_RESCRIPT BASE_CHECKOUT --head HEAD_RESCRIPT HEAD_CHECKOUT
@@ -113,6 +114,7 @@ def main():
     parser.add_argument("--project", default="tests/tests", help="project to build, relative to each checkout")
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--threshold", type=float, default=0.1, help="allowed increase, in percent")
+    parser.add_argument("--sequential", action="store_true", help="run heavy builds one at a time")
     parser.add_argument("--allow-increase", action="store_true", help="report an increase without failing")
     parser.add_argument("--summary", help="file to append the Markdown report to")
     parser.add_argument("--work-dir", help="where to keep the cachegrind files")
@@ -122,10 +124,10 @@ def main():
     work_dir.mkdir(parents=True, exist_ok=True)
     base = Side("base", *args.base, args.project, work_dir)
     head = Side("head", *args.head, args.project, work_dir)
-    if base.project == head.project:
-        raise SystemExit("the base and head projects must be separate checkouts")
+    if base.project == head.project and not args.sequential:
+        raise SystemExit("the base and head projects must be separate checkouts unless --sequential is used")
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1 if args.sequential else 2) as pool:
         list(pool.map(Side.prepare, (base, head)))
         for index in range(args.runs):
             base_count, head_count = pool.map(lambda side: side.measure(index), (base, head))

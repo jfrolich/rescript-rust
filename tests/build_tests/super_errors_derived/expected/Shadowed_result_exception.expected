@@ -1,0 +1,11 @@
+Warning number 41
+  /.../fixtures/Shadowed_result_exception/Main.res
+
+  Ok belongs to several types: exn result
+The first one was selected. Disambiguate if this is wrong.
+
+
+  We've found a bug for you!
+  /.../fixtures/Shadowed_result_exception/Main.res
+
+  This variant constructor Ok expects 0 arguments, but it's being passed 1.

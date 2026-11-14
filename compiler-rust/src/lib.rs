@@ -41,7 +41,8 @@ pub mod context;
 pub mod debug_flags;
 pub mod diagnostics;
 pub mod driver;
-pub(crate) mod tc;
+#[doc(hidden)]
+pub mod tc;
 pub mod emit;
 pub mod fast_hash;
 /// GenType TypeScript emitter port.

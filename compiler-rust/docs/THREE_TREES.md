@@ -999,6 +999,232 @@ pair_0`; `pair_0` has no P3 status; D drops `pair`: the legacy output.
 **The counter.** Sites spliced, and of those the number whose callee has a
 level L use count other than one, in the check report.
 
+#### T4b experiment: RESULT B (copied-branch reader)
+
+Copy-time R1–R8 were tested and removed. The first printed-text difference
+was `Primitive_object.res`, `lower` line 75: a following `if` became an
+`else if`. The reduced Lambda is a one-case string switch:
+
+```text
+function (x, y) => stringswitch x {
+  "a": if y then 1 else 2;
+  default: sequence(initMod(), 3)
+}
+```
+
+`State::if_statement` (`bir/lower/cond.rs`) copies both branches with
+`StatementStack::take_list`, then calls `js3_simplify_if`. Its
+`simplify_if_head` reader tests the last statement syntactically. Before
+R5 the case is `Return(Cond(y, 1, 2))`, so the default is moved after the
+guard. Copy-time R5 makes that last statement an `If`, so the default stays
+inside `else`. This is not an incorrect implementation of R5: the rule's
+printed-text oracle agrees with legacy Flatten. The test
+`flattening_a_copied_return_branch_changes_the_simplify_if_head_reader`
+pins both complete final texts and recreates this one copied-branch
+boundary using the legacy rule oracle; no alternate production path remains.
+
+The count trial initially included export-tuple references. These belong to
+finding 2/T4a, not to a flattening failure: the test
+`export_tuple_occurrences_are_not_the_tailcall_pass_input_counts` pinned
+built=1 versus post-coercion C0=0 with identical final text. (T4a closed
+that drift: the lowering's own export coercion releases the reference, and
+the test, now `export_coercion_consumes_the_export_tuple_occurrence`,
+asserts built=0, equal to C0.) Repeating the
+experiment subtracted exactly the references in that sentinel tuple from
+the comparison (not from `built`); the printed-text difference remained.
+The trial observed 331 excluded occurrences in 331 variable rows across 73
+runtime units, each row excluding one reference. The application attempt
+observed 209 such rows across 61 runtime units before failure; these are
+partial observations, not whole-corpus counts. The tests and fixtures
+corpora were not reached by the failed runtime-first experiment.
+
+The count comparison is not retained: generated variables also need an
+identity correspondence between lowerings (`_list/1024` and `_list/1027`
+both have two references), and raw Ident lookup is not that correspondence.
+The printed-text counterexample alone establishes RESULT B. No inference
+about count parity or commutation with T4c–T4e follows from this experiment.
+
+T4b is done in the counterexample form: pass 1 stays until T6. T4c must read
+its sites through P1's reshaping (finding 1), without moving that reshaping
+ahead of the lowering's copied-list readers. R1–R8, their copy-time call,
+the skipped pass and the experimental count comparison have been deleted.
+
+#### T4c design: RESULT (the inlining cannot leave before P1 and P2)
+
+With step A in the lowering, the new side's order is A, P1, P2, P4, P5, P6
+against P1, P2, P3, P4, P5, P6. Three things must hold for the two printed
+texts to stay equal. (a) holds. (b) holds only with two additions that are
+not facts of a statement. (c) fails, twice, each with a test that asserts
+both complete texts. So P3 stays on the new side, as P1 does.
+
+**(a) The sites.** P3 inlines at the last statement of a statement list when
+it is `return f(args)` (`TailcallInlineState::block_items`,
+`try_inline_single_return_statement`). Read through P1, as a function of the
+returned expression `e` of a `return` the lowering wrote:
+
+```text
+sites(e) = sites(a) + sites(b)   e = c ? a : b    (P1: Return(Cond) becomes If(c, [return a], [return b]))
+         = sites(b)              e = (a, b)       (P1: Return(Seq) becomes a; return b)
+         = { e }                 e = f(args), f a variable
+         = {}                    otherwise
+```
+
+P1 applies its `return` rules to the `return`s it creates, so the function is
+recursive in the same places. A `return` that P1 creates inside the `if` of a
+returned conditional is the only statement of its list, so a site below a
+conditional is a site wherever the `return` stands. A site reached without
+passing a conditional is one only if the `return` is the last statement of
+its list after P1 spliced nested blocks; the lowering knows that where the
+run is copied (`StatementStack::take_list`: the last slot). The predicate `c`
+and the heads `a` hold no site: P1 leaves `c` in the predicate of the `if`
+and makes each head an expression statement. No other P1 rule creates a
+`return`. `try_inline_single_return_statement` also inlines a function
+literal called in place (`return (function (p) {...})(x)`), with the arity
+rule and without a status; `sites` has the same case with `e` a call of a
+function literal.
+
+**(b) The count.** P3's `UseCounts` counts `Var` nodes by identifier in the
+program after P1 and P2.
+
+- P2 replaces a reference to a JavaScript global by `globalThis.name`. A
+  global is never declared, so no count of a declared variable changes.
+- P1 moves nodes in every rule but one: an expression statement that is a
+  conditional loses a branch that has no side effect, and the whole
+  statement when both branches and the predicate have none (`Flatten::
+  statement`, `Exp(Cond)`). Every variable read in such a branch has one
+  occurrence less in C0 than in `built`. The lowering leaves such
+  statements (`jm14_push_effect_expression` drops a strictly pure value, not
+  a pure branch). Which variables lose an occurrence is a property of the
+  branch's contents, not of the statement: recording it where the statement
+  is built means visiting the branch there, which is P1's rule applied at
+  that point. It is the rule T4b could not move.
+- Identity. P3 counts by identifier. The lowering gives a copied function
+  literal (`copy_j` in `bir/j/logic.rs`: a repeated pure function) binders of
+  its own that print as the originals (`vars.j_origin`); the legacy arena
+  shares the one function. A variable declared inside a function that is
+  copied has C0 equal to the sum of `built` over its copies, and the copy is
+  made after the runs inside the function closed. A status read from `built`
+  at the close is wrong for it: `built` is one per copy, C0 is two, P3 does
+  not inline.
+
+So `built` at the close is C0 for a variable that is read in no dropped
+branch and declared in no function that is copied later. The second
+condition is not known at the close. Commit 2 of T4c measures both: the
+lowering computes the status of each declaration of a run from `built` where
+the run is copied, records the site, and check mode compares them with what
+P3 computes on the same program after P1 and P2 (the same identifiers, so
+the comparison is by declaration; the caution about generated identifiers of
+the T4b experiment concerns comparisons between the two lowerings).
+
+**(c) P1 and P2 after the splice.** Two counterexamples
+(`bir/lower/oracle_tests.rs`).
+
+1. *P2 reads the bindings around a reference.*
+   `inlining_before_the_external_shadow_pass_hides_the_binding_that_shadows_
+   a_global`: `run = a => { let g = location => ext(location, location')
+   ; return g(a) }`, where `location'` is the JavaScript global. P2 qualifies
+   a global when a binding of an enclosing list, a parameter, a loop
+   variable or a catch variable prints with its name. In legacy order the
+   parameter `location` is around the reference when P2 runs:
+   `return ext(a, globalThis.location)`. With the splice first, the parameter
+   was renamed to `a` and the function is gone: `return ext(a, location)`.
+   The reverse happens too: the declarations of the callee's body land in the
+   caller's list and shadow globals read anywhere in that list. A grave (a
+   dead declaration kept without value) keeps a removed declaration visible
+   to P2; nothing keeps a parameter visible, and nothing hides a spliced
+   declaration from the rest of the caller's list.
+2. *P1 maps the predicate of an `if` it did not create.*
+   `flattening_after_a_site_in_a_returned_conditional_was_spliced_maps_its_
+   predicate`: `run = c => { let f = p => ext(p, p); return ext(z => z ? 1 :
+   2) ? f(c) : 3 }`. The callee's statements can only stand in a branch of an
+   `if`, so step A has to write the `if` that P1's `Return(Cond)` rule would
+   write. That rule leaves the predicate unmapped: in legacy order the
+   callback prints `z => z ? 1 : 2`. P1 run afterwards meets an `if`
+   statement and maps its predicate (`map_statement_children`): the callback
+   prints as `if (z) { return 1; } else { return 2; }`. No expression P1
+   passes over can stand for the callee's statements, so the `if` cannot be
+   left for P1 to write.
+
+The remaining parts of (c) hold as read: P1 flattens a spliced body as it
+flattens the function body in place (`block_items` splices the block the
+site becomes; a block of one statement is unwrapped), and the substitution
+of a parameter by a variable or a constant does not change which branches
+P1's purity tests drop (a variable and a substitutable constant are both
+pure).
+
+**What has to move first.** P3's decisions can leave the new side only when
+neither P1 nor P2 runs after the lowering:
+
+- with P1's `return` and expression-statement rules (T6), which removes
+  counterexample 2 and the dropped-branch term of (b): the lowering then
+  writes the `if` itself, once, and releases the dropped branch through the
+  path that maintains `built`;
+- with the names decided in the lowering (T5), which removes
+  counterexample 1: P2 is a naming decision (which printed names are bound
+  around a reference), and after a splice the binding structure P2 would
+  read no longer exists;
+- with a count by origin, or with copies made before the runs inside the
+  copied function close.
+
+Until then step A's *decisions* are computed and compared (commit 2 of T4c),
+and the splice is not performed. T4d and T4e read the tree P3 wrote (finding
+5 and 6), so they stay behind P3 as well: the next legacy step that can
+leave the new side is the shake (T4f needs the dead marks of P5, so it waits
+too) or, in legacy order from the other end, P1 at T6.
+
+**As built and measured** (`bir/lower/close.rs`, `scope::return_sites`,
+`shadow::compare_decisions`). Where a run is copied, last statement first:
+a `return` records the calls `sites` gives as the site of their callee
+(`VarFacts`, 8 bytes, dense by variable: the site and the exported bit), and
+a declaration gets a `Decision` (8 bytes: the status from `built`, whether it
+is an inline candidate with a site, `built`). The top level is decided after
+the coercion, with the export set marked through each export's origin. One
+step per statement and per operand on the way to a call; 3 steps per
+declaration at 10,000 (`ten_thousand_declarations_close_in_three_steps_
+each`). Check mode runs P1 and P2 on a copy of the new side's program and
+compares, per declared identifier, with `js_pass_tailcall_inline::decisions`.
+
+| Corpus | Units | Declarations | Inline candidates (lowering / P3) | Count, status, site differences | Extra, missing, copied | Decisions replaced |
+| --- | --- | --- | --- | --- | --- | --- |
+| runtime | 113 | 878 | 22 / 22 | 0, 0, 0 | 0, 0, 0 | 116 |
+| tests/tests | 854 | 8,429 | 109 / 109 | 0, 0, 0 | 0, 0, 0 | 960 |
+| the application | 3,848 | 144,584 | 2,279 / 2,279 | 0, 0, 0 | 0, 0, 0 | 31,158 |
+
+(The fixtures corpus was not run: it needs the reference compiler's
+executable.) So (b) holds on these corpora only. Both hazards are pinned as
+differences between `built` and the count P3 reads:
+`a_pure_branch_the_flatten_pass_drops_takes_an_occurrence_built_still_
+counts` (`ignore(c ? x : ext())` leaves the statement `c ? x : ext();`;
+`built` of `x` is one, P3 counts zero and makes `let x = ext()` an expression
+statement) and `a_copied_function_doubles_the_legacy_count_of_the_variables_
+declared_inside_it` (the function is copied with `copy_j` after its run
+closed: `built` is one per copy and the decision is "inline candidate", P3
+counts two and keeps the function). No unit of the corpora has either shape.
+The counter 11.4 asked for (sites spliced) is the inline-candidate column:
+nothing is spliced.
+
+Instructions of a clean build of `tests/tests` (cachegrind, one worker
+thread, release binary, one run each; run-to-run noise is about 0.1%),
+before (the head of the export slice) and after: with `RESCRIPT_BACKEND=
+check` 20,616,262,185 and 20,759,677,746 (+0.70%: the close, and P1 and P2
+run once more on a copy of the new side's program for the comparison); the
+default build 4,072,030,942 and 4,074,346,809 (+0.06%, within noise: the
+default build does not run the lowering).
+
+Two places where the code is not what "The design" says:
+
+- *A run is not closed once.* A statement the lowering moves out of a copied
+  list (`simplify_if_head` moving a branch after its guard, a held run) is
+  copied again, and its declaration is decided again: about one decision in
+  five on the application. The last decision is the one that stands; a
+  splice at the first close would be done on a list that is read again.
+- *`take_list` is not the only place a statement list is made.*
+  `simplify_if_head` (`bir/j/norm.rs`) builds `if (!c) { return n }` with a
+  list of its own, and `n` can come from a run that was never copied. Its
+  site was missed until `return_sites` was called there (one declaration in
+  tests/tests). `cond.rs` and `external.rs` build lists directly as well;
+  none of them holds a `return`.
+
 #### Re-cut: one legacy step leaves the new side per slice
 
 The commit order of the T4 prompt (block facts, dead declarations, record
@@ -1010,17 +1236,491 @@ texts stay equal.
 
 | Slice | Moves into the lowering | New side stops running | Needs |
 | --- | --- | --- | --- |
-| T4a | Export extraction and coercion on top-level rows (`bir/lower/export.rs`, S3.9b), with the position facts of finding 2 | `coerce_lowered_output` | - |
-| T4b | P1 as rules applied where a run is copied; or the proof that sites can be read through P1's reshaping and that P1 commutes with T4c to T4e | `apply_js_flatten_pass`, or nothing | - |
-| T4c | Step A, late marks, late zero, graves, the counter | `apply_js_tailcall_inline_pass` | T4a, T4b |
-| T4d | Step B | `apply_js_record_rest_pass` | T4c |
+| T4a (done) | Export extraction and coercion on top-level rows (`bir/lower/export.rs`, S3.9b), with the position facts of finding 2 as sites ("T4a as built") | `extract_toplevel_exports`, `coerce_lowered_output` | - |
+| T4b (done, RESULT B) | Counterexample: R5 changes the `simplify_if_head` reader of a copied branch; read sites through P1 instead | Nothing; P1 stays until T6 | - |
+| T4c (done, counterexamples) | The statuses and the site of step A, computed and compared in check mode; no splice ("T4c design") | Nothing; P3 stays until P1 (T6) and P2 (T5) have left | T4a, T4b |
+| T5b (built to the replay, not wired: redesign needed (two findings)) | The naming log, replayed through the tables of `emit/naming.rs` ("T5 as built: part B") | Nothing yet; the naming pass stays the oracle | T1 |
+| T4g | The splice of step A, late marks, late zero, graves, the counter (11.6) | `apply_js_tailcall_inline_pass` | T5, T6 |
+| T4d | Step B | `apply_js_record_rest_pass` | T4g |
 | T4e | Steps C and D | `apply_js_flatten_and_mark_dead_pass` | T4d |
 | T4f | The shake as a filter over the rows | `apply_js_shake_pass` | T4a, T4e |
 
+**The order as read after T4c**: for each legacy pass still on the new side,
+the passes that must have left it first, and what shows the dependency. A
+pass leaves when its decisions are taken in the lowering; "not tested" means
+the dependency is read from the code and no test asserts two texts for it.
+
+| Legacy pass | Leaves at | Must have left first | Shown by |
+| --- | --- | --- | --- |
+| P1 flatten | T6 | none; but its rules cannot be applied where a run is copied, so it leaves with the lowering's list readers | `flattening_a_copied_return_branch_changes_the_simplify_if_head_reader` |
+| P2 external shadow | T5 (left: "T5 as built") | none: it is before P3 in legacy order; the decision is taken once at the unit root, on the lists P1 receives | the rule tests of "T5 as built"; the four corpora |
+| P3 tail-call inlining | T4g | P1 | `flattening_after_a_site_in_a_returned_conditional_was_spliced_maps_its_predicate`; for the count, `a_pure_branch_the_flatten_pass_drops_takes_an_occurrence_built_still_counts` |
+| | | P2 | `inlining_before_the_external_shadow_pass_hides_the_binding_that_shadows_a_global` |
+| | | (also: a count by origin, or no copy after a close) | `a_copied_function_doubles_the_legacy_count_of_the_variables_declared_inside_it` |
+| P4 record rest | T4d | P3: it reads the slots after the declaration as P3 left them | not tested |
+| P5 substitution and dead marks | T4e | P3 | `a_declaration_the_tail_call_pass_finds_dead_is_not_materialised`, `block_substitution_and_dead_removal_do_not_commute_with_tailcall_inlining`, `inlining_from_an_outer_scope_takes_the_last_use_of_a_variable_of_a_closed_scope` |
+| | | P4: it reads the field reads P5 replaces (finding 6) | not tested |
+| P6 shake | T4f | P5: it reads the dead marks (`used_stats` in `js_shake.rs`) | not tested |
+
 `apply_external_shadow_pass` (P2) rewrites references to JavaScript globals
 that a binding shadows. It changes no count of a declared variable, but it
-reads which bindings exist, so it has to see the declarations P3 and P5
-remove; it stays until the names are decided in the lowering (T5).
+reads which bindings exist, so it has to see the parameters and declarations
+P3 removes and must not see the ones P3 moves into another list.
+
+**What T5 must deliver for P3 to leave.** P2's decision for a reference to a
+JavaScript global is: some binding around the reference prints with the
+global's name (`printed_binding_name`, `convert_ident_name`). The bindings
+are the declarations of every enclosing statement list (all of the list, not
+only those before the reference; the cases of one `switch` share a scope),
+the parameters of every enclosing function, loop variables, catch variables,
+and the imported modules of the unit. T5 delivers that decision as a fact of
+the reference node, taken on the binding structure the lowering wrote and
+not changed by a later scope-close decision: a reference that P2 would
+qualify is built as `globalThis.name` (or carries a bit the printer reads),
+and one P2 would leave stays plain even when a splice later puts a
+declaration of that name into its list. The check a worker can run: with T5
+in, `rg -n 'apply_external_shadow_pass' src/lambda/lam_compile.rs` shows the
+legacy side only, and the Lambda of
+`inlining_before_the_external_shadow_pass_hides_the_binding_that_shadows_a_
+global` lowered by the new side and run through P1, P3, P4, P5, P6 (no P2)
+prints `return ext(a, globalThis.location);`. The reverse case needs its own
+test in T5: a callee whose body declares `let location = ...`, inlined into
+a caller that reads the global `location`, prints the global unqualified,
+as the legacy order does.
+
+#### T4a as built
+
+Done. The new side of the `lower` gate runs neither `extract_toplevel_exports`
+nor `coerce_lowered_output`: it goes from `bridge_j::export_js` to the six
+passes. The legacy side and the default build keep both. Code:
+`bir/lower/export.rs`, entered from `State::complete_unit`.
+
+**What a row is.** `Row`, 8 bytes: the node of one top-level statement and a
+word of bits (declaration; has an initialiser; the initialiser is a function
+literal; a top-level block statement; a statement directly inside one;
+moved to the export tail; a rebound export was inserted before it; inserted;
+declared after the top level). The rows are the top-level run of the
+statement stack in output order, written when the unit's last value is
+complete (`build_rows`): one step per statement of the run and per statement
+directly inside a top-level block. The bits come from the statement node and
+the operation of its initialiser; no statement body is read. A row keeps its
+index for the whole fold: a moved declaration is marked, a declaration the
+fold adds is a new row with a bit that says where it is written, so "before"
+and "after" are comparisons of indices. `coerced_list` writes the final list
+from the rows, one step per row.
+
+**What an export is.** No record: the values of the exports, detached, in a
+vector by export index, and the variable each export names. The importer
+gives every identifier of an export block a `VarId` where it imports the
+block (one lookup per export in the identifier table it already has, for the
+lowering only), so the fold compares variables, never identifiers. A
+variable the lowering copied compares through its origin (`vars.j_origin`),
+which is the identity the legacy identifiers have.
+
+**Step 1, extraction** (`extract_exports`). The unit no longer ends in a
+sentinel statement that carries `Out::value`. The value is read as
+`extract_toplevel_exports` reads it: an export block gives the exports and
+their values; a comma whose right spine ends in an export block gives its
+heads as effect statements (`jm14_push_effect_expression`) and then the
+block; `undefined` gives nothing; anything else is one effect. A finished
+unit replaces every value by `undefined`. The sentinel remains in a
+test-only `State::complete`, for the rule tests of single constructs.
+
+**Step 2, the fold** (`coerce_exports`), one export at a time in export
+order, the arms in the legacy order. What each arm reads:
+
+| Legacy helper | Reads on rows |
+| --- | --- |
+| `collect_declared_idents` | the first declaration row of the variable (dense by variable); for a declaration below the top level, the parents of its node up to the top level: declared when only `SIf` and `SBlock` lie between |
+| `find_declaration`, `same_name_export_alias_binding`, `block_declares_*` | the first declaration row of the variable |
+| `resolve_tail_move_replacement_expression`, `tail_move_materialized_root_ident`, `resolve_tail_move_initializer_kind` | the initialiser of each declaration on the alias chain; a chain visits a variable once (a mark dense by variable, cleared from a trail) |
+| `statement_mentions_ident_anywhere` (uses before, uses after), `later_toplevel_initializer_mentions_ident`, `later_toplevel_function_mentions_ident`, `tail_move_uses_are_safe_to_inline`, `replacement_resolves_to_recursive_function` | the sites of the variable, one pass (`mentions`, below) |
+| `has_later_toplevel_function_binding`, `later_toplevel_effect_allows_tail_move`, `can_reuse_existing_undefined_export_binding` | the index of the last row with the function bit, of the last row that is no declaration, and of the last row with a top-level effect (read once per unit, from the last row backwards, from the strict-purity flag of each row's expression); none changes during the fold, because a moved declaration and its replacement are strictly pure |
+| `direct_reused_same_name_export_alias_binding`, `reusable_same_name_export_binding`, `count_materialized_same_name_binding_roots` | the declaration rows that carry the export's name, chained in row order |
+| `insert_rebound_export_before_equivalent_later_binding` | the rows from the last one backwards while they are such bindings |
+| `substitute_after` | the references the `mentions` pass kept: each is replaced by a copy of the replacement |
+
+**The position fact.** `Site`, 8 bytes (`bir/lower/scope.rs`): the node of
+one reference and the next site of the same variable; the head is dense by
+`VarId`. A site is written where the reference is lowered, in the one place
+a node is allocated (`Bir::allocate`); the `Var` leaf keeps its site index
+in its unused second word, so the site follows the node when a replacement
+moves the node's content into another slot, and is cleared where the node is
+released.
+
+11.4 asked for two facts per reference at that point: the statement it is in
+and whether its position is safe for a moved alias. Neither exists there. A
+reference is built before its parent, and the statement that will hold it is
+not on the stack yet; a reserved slot is filled and a held run is moved to an
+earlier slot after later statements were pushed (`fill`, `hold_run`), so
+neither the slot count nor the order of creation gives the row. Both facts
+are therefore read from the site's node when the top level is complete:
+
+- safe position: the parent's operation and the operand the reference
+  fills (callee of a call, of a flat call or of a tagged template; target of
+  `new`), one read;
+- the statement, and whether a function literal lies between: the row
+  reached through the parent links (`row_of`). A table dense by node
+  remembers the row and the function bit of every ancestor a walk has
+  passed, so a walk stops at the first ancestor another walk reached, and
+  each node above a queried reference is entered once per unit. A reference
+  whose root is no row (an export value) is in no statement.
+
+A variable is asked about by at most one export: every arm that reads sites
+reads those of a variable carrying the export's name, and export names are
+distinct. One pass over the variable's sites answers all the questions of
+that export and keeps the references in later rows for the substitution, so
+a reference is read from its chain once. The chain holds one site per `Var`
+node ever built for the variable, released ones included.
+
+**Names.** The rows that declare a variable with an export's name are found
+by name: one table from the export names to the export index, one lookup per
+top-level declaration with an initialiser. A name is a process-wide interned
+string, not a handle of the unit, so no dense index exists for it. It is the
+only hash table of the slice.
+
+**Step 3** (`resolve_exports`). The declaration of exports a finished top
+level left undeclared, then `resolve_export_aliases` (its four arms in
+order: a kept function alias, the self-alias target, a reusable same-name
+binding, the alias chain), on the rows of the final block: the declarations
+the fold added are statements of it. The lowering returns the final
+statement list, the exported identifiers and the reserved names
+(`Lowered::coerced`).
+
+**Cost**, asserted at 10,000 in `export.rs`: 2 steps per row and 8 per
+export for 10,000 exports of their own declarations (100,000 steps, no site
+read); 10,000 references to one moved alias are read once each, in at most 3
+steps per reference and 3 per row; rows and references are read again
+without a heap allocation once the tables have their capacity.
+
+**Read in the legacy code, not changed.** In
+`move_same_name_export_alias_to_export_tail` a binding whose initialiser
+resolves to a literal never moves: `blocked_by_literal_binding` (the kind is
+not `Alias`) and `blocked_by_literal_alias_preserved_in_block` (the kind is
+`Alias`) cover every kind. `blocked_by_direct_literal_reuse`,
+`blocked_by_literal_alias_without_materialized_root` and the literal arm of
+`later_toplevel_effect_allows_tail_move` are unreachable from it. The rows
+implement the reachable behaviour: a literal stays.
+
+#### T5 design
+
+Status: design, written before any code. Part A moves P2's decision into the
+lowering; part B is the naming log of section 2. "Read" marks a claim from
+the cited code that no test asserts yet.
+
+**(a) Where P2's decision is taken: once, when the unit's root block
+exists** (`State::finish` in `bir/lower/mod.rs`, after the export coercion).
+Not at the close of a run, for three reasons read from the code:
+
+- P2 reads all declarations of a list, also those after the reference. A
+  run is copied each time the lowering moves its statements ("T4c design",
+  as built: one decision in five replaced), so at the close of a run the
+  list a reference ends up in is not known. At the root every list is the
+  one P1 receives.
+- A statement's list is a node (`SBlock`, `aux` 0 for a body, 1 for an
+  explicit block statement) and every node has its parent
+  (`Bir::parents`, maintained by every constructor and edit). So "the
+  bindings around a reference" is its ancestor chain: no position has to be
+  recorded while lowering, and nothing is keyed by a list.
+- Every binding has one binder node (`VarTable::binder`, written by
+  `Bir::bind` where the node is built: `SDecl`, `SRest`, `JFun` for
+  parameters, `SForRange`/`SForOf`/`SForAwaitOf`, `STry` for the catch
+  variable), and every reference is a site (`Scope::sites`, written by
+  `Bir::allocate`, chained per variable, cleared on release; T4a). Both are
+  recorded where the lowering writes them, already.
+
+*What P1 does to the lists P2 reads* (`Flatten` in
+`js_pass_flatten_and_mark_dead.rs`; P2 runs after it). `block_items`
+splices a block statement into the list it stands in, so the declarations
+of an explicit block become declarations of the enclosing list and shadow
+references of that whole list: `{ let location = 1; f(location) }
+g(location')` has the global `location'` qualified only after P1. The
+lowering writes explicit blocks (`explicit_block_from_list` in
+`bir/j/norm.rs` and `bir/lower/cond.rs`). So the scope of a declaration is
+its nearest enclosing block that is not an explicit block statement. P1's
+other rules move no declaration: `Return(Cond)` and `Exp(Cond)` build lists
+of `return`s and expression statements, the sequence rules build blocks of
+expression statements. P1 drops references (a pure branch of a conditional
+in statement position): a dropped reference needs no decision, and a
+dropped function takes its sites with it. One input of P2 does depend on
+what P1 drops: an imported module is a binding of the program only while a
+`Qualified` reference to it is in the tree (`ReferencedNames`). The lowering
+counts the references it built and released (a count per import, kept like
+the counts of T1); a module whose last reference stands in a branch that
+only P1 drops is counted as a binding by the lowering and not by P2. That
+is the hazard of "T4c design" (b) again, it leaves with P1 at T6, and it
+needs a module and a global of one printed name. Read, not tested.
+
+*The decision.* A reference to a JavaScript global `g` (P2's `is_js_global`
+on the identifier the variable prints as) is qualified when a binding that
+prints as `g` (c) is: a declaration whose scope block is an ancestor of the
+reference; a parameter of an enclosing function; the variable of an
+enclosing `for` statement (the whole statement, bounds included); the catch
+variable of a `try` whose handler block is an ancestor; a declaration in
+any case of an enclosing `switch` whose case block, not its discriminant,
+is on the path (the cases share a scope: P2's `add_switch_declarations`);
+or an imported module with a live reference that is not a dynamic import.
+`SForRangeExisting` binds no variable of its own: its target is declared in
+an enclosing block, which covers the loop (read).
+
+*Algorithm* (`bir/lower/globals.rs`), per name, with an epoch per name and
+one mark per node (`u32`, dense by node, allocated the first time a unit
+has a binding that prints as a referenced global):
+
+1. One read per variable: those whose identifier is a JavaScript global and
+   that have a site are the referenced globals. None: done. This is the
+   only cost for a unit without such a reference.
+2. One read per variable with a binder: its printed name looked up among
+   the referenced globals' names. The key is an interned name: P2 relates
+   a binding to a global through the spelling only, and a `Name` is a
+   process-wide pointer without a per-unit index, so this is one table
+   keyed by `Name` (its hash is stored in the name), built per unit that
+   reaches step 2. No match and no matching import: done.
+3. Per matching binding, one mark on its scope node: the block (through
+   explicit blocks), the `switch` statement when the block is a case, the
+   function, the loop, the handler block.
+4. Per site of the name, its ancestors are read up to the first marked one
+   (or the root), then the nodes passed are marked with the result, so a
+   node is read at most twice per name whatever the number of sites below
+   it. At a marked `switch` the walk continues when it arrived from the
+   discriminant.
+
+No statement body and no finished tree is walked to find a reference or a
+binding; the walk is from a recorded site towards the root.
+
+**(b) A copied or moved statement.** The decision is taken after every
+copy and move of the lowering (`take_list`, `hold_run`,
+`simplify_if_head`, `copy_j`), on the tree as it is then: a moved
+statement has the parent it ended with, and the references of a copied
+function are sites of their own, decided in the place the copy stands.
+Nothing is decided per copy, and nothing is re-taken. For T4g: a splice
+must run after this point (the decision is on the binding structure the
+lowering wrote; P3 in legacy order runs after P2 on the whole program), or
+call it first. The bit stays with the node when a splice moves it.
+
+**(c) `printed_binding_name`** is `convert_ident_name` of the identifier's
+name, and nothing for an identifier with the JavaScript flag. It reads the
+name only (not the suffix the naming pass gives), so it is known when the
+variable is created; it is read at the decision, through the variable's
+origin (`vars.j_origin`: a copied binder prints as its original).
+
+**The fact, not the qualified form.** The reference stays a `Var` node and
+gets one bit (`aux`). Why not build `globalThis.name`: (1) the name is
+decided after the node has been read by the lowering's own rules, which
+must see what the legacy lowering sees, a variable (purity, delay safety,
+`return_sites`); (2) the first comparison point of check mode prints the
+program before any pass, where the legacy side has no qualified
+reference. The reader of the bit is whoever turns `Bir` into JavaScript:
+`bridge_j` today (it returns the handles of the marked references, and the
+new side rewrites exactly those to `globalThis.name` before P1: one write
+per marked reference, no walk), the builder of T6 afterwards. P1 reads a
+qualified reference as it reads a variable (`expression_has_no_side_effects`
+is true for a static index of a variable; no rule of `Flatten` matches
+either); read, and the gate asserts it on the corpora.
+
+**(d) The T4c comparison without P2.** `compare_decisions` needs the
+program P3 receives. Legacy: P1, P2. New side: the marked references
+rewritten, then P1: the same program, built by the path the new side takes
+anyway, so the extra P1 and P2 on a copy that T4c added are gone. P2
+changes no count of a declared variable ("T4c design" (b)), so the
+comparison itself is unchanged. The report gains the number of qualified
+references and the steps of the decision.
+
+**(e) Part B: the naming log.** The oracle is `emit/naming.rs` run on the
+program the lowering wrote (exported, before the passes); the log
+describes that same tree.
+
+| Event | Logged where | Answers |
+| --- | --- | --- |
+| `Declare(var)` | where an `SDecl` is written (binder before initialiser; after the reservation for a function declaration that is not eta-reduced) | hard example 2: the event carries its statement, and an event whose statement is not in the final list is skipped |
+| `Params(function)` | where the `JFun` is built | - |
+| `Enter(function)`, `Leave` | around the function's events: `Enter` carries the function's free-variable list | hard examples 1 and 3: the list is final at the close and is sorted by `order` there |
+| `Binder(var)` | loop and catch variables, before their bodies | - |
+| `Use(var)` | no event: a use names nothing unless it is the first print of a free variable, which `Enter` reserves | hard example 1 |
+
+The free variables of a function: every site built between the function's
+entry and its close whose variable has no binder inside, with one
+membership bit per variable (dense, cleared through the list at the
+close). A function's list is added to its parent's at the close (the
+oracle's `used.extend(free[f])`). Replay (`fn replay` in
+`emit/naming.rs`) reads the events of one scope in final statement order
+through the existing `Group` and `Scope` tables and writes a name per
+variable; check mode compares that table with `Names::printed`.
+
+Open before code, to be settled by the first comparison run and written
+into "T5 as built": the oracle skips statements and branches the printer
+omits (`walk::prints_declaration`, `omitted_expression`, `else_omitted`,
+`tail_effect`, the eta form of `function_form`); each is a shape test on
+the finished statement that the log has to carry as a bit of the event or
+decide at replay.
+
+#### T5 as built: part A (part B is a skeleton, 11.7)
+
+`bir/lower/globals.rs` (`decide`, called from `State::finish`), the bit
+(`Bir::qualify_global`, `Node::var_qualified`), the count of live
+references per import (`Scope::import_reference`, from
+`Bir::register_kind`), `bridge_j::export_lowered` and `bridge_j::qualify`,
+and the gate (`lam_compile.rs`: the new side qualifies, flattens, compares
+the step A decisions on that program and continues with
+`finish_flattened_output`; `apply_external_shadow_pass` is called by the
+legacy side only). As designed, with one addition: the printed text of a
+qualified reference drops the reference's comment and location, as the
+legacy pass does (`JsArena::overwrite_expr`).
+
+Check mode, zero text differences at both comparison points:
+
+| Corpus | Units | References qualified (units) | Steps of the decision | Step A differences |
+| --- | --- | --- | --- | --- |
+| runtime | 113 | 0 | 2,734 | 0 |
+| tests/tests | 855 (736 in the ratchet's count) | 29 (6) | 23,992 | 0 |
+| fixtures | 609 | 0 | 22,542 | 0 |
+| the application | 3,848 | 29 (16) | 478,518 | 0 |
+
+`scripts/test_backend_coverage.py` passes with the ratchet unchanged.
+Tests: the two inlining cases and one rule per kind of binding in the
+oracle form (`bir/lower/oracle_tests.rs`, from
+`the_lowering_decides_the_shadowed_global_the_tail_call_pass_would_hide`
+on: the new side without pass 2 prints what the legacy side prints with
+it); steps at 10,000 references, at 10,000 bindings and at depth 10,000,
+zero allocations on a second decision, sizes (`globals.rs`).
+
+Not done in part A: the instruction counts, the test of the hazard of (a)
+and a rule test for `SForRangeExisting`; all three are done in "T5 as
+built: part B".
+
+#### T5 as built: part B (stopped at step 4: two design gaps)
+
+Built, at the skeleton's signatures, costs, sizes and tests (11.7 steps 1
+to 3): `Log::declare`, `binder`, `reference`, `enter` and `leave`
+(`bir/lower/names.rs`); `emit::naming::replay` through the pass's `Names`
+tables; `emit::naming::compare_with_pass`. The eight tests of the log and
+the comparison test pass. To meet the signatures of `enter` and `replay`,
+which read a function's parameters from `&VarTable`, the function headers
+and the tail-call rewrite's indirect parameter runs moved from `Pools` to
+`VarTable` (one owner; `Bir::function` reads the same storage). The warm
+replay is allocation-free for declarations: `Names::reset` empties the
+program scope's groups in place (a group is a persistent map, so dropping
+and recreating one allocates).
+
+Not built: step 4 (the lowering logs) and step 5 (check mode), because of
+the two gaps below; the module, `replay` and `compare_with_pass` are still
+compiled for tests only, and no corpus was compared. The printer shape tests
+of step 5 (`prints_declaration`, `omitted_expression`, `else_omitted`,
+`tail_effect`, the eta form) were not placed for the same reason.
+
+**Gap 1: one membership bit and one bound bit per variable do not give the
+free variables of a function nested in a function.** The bits are set by
+the innermost open scope and cleared through its run at its close, so the
+bits an enclosing *function* set are still set while an inner function is
+open. A reference in the inner function to a variable the enclosing
+function referenced or declared finds its membership bit set and is not
+added to the inner run; a reference to a parameter of the enclosing
+function finds the bound bit `enter` set and is read as bound at the inner
+close. Either way the variable is missing from the inner free list, which
+`Names::analyze_fun` has. The shared bound bit also errs the other way
+(read from the code, not tested): in `let f = () => { let rec g = () => g(); g() }`
+the bit `declare` sets for `g` in `f` is cleared by `g`'s own close, because
+`g` referenced itself, so `f`'s later reference to `g` reads `g` as free in
+`f`. The redesign must cover both directions. The program scope is not affected (it keeps no
+run), so every skeleton test passes: they nest functions in the program or
+capture program-level variables only. Reproduction, the events the
+lowering would log for
+
+```rescript
+let f = p => { let v = ext(p); let g = () => { let v = ext(v); ext(v) }; g }
+```
+
+`enter(f)` (bound: `p`), `declare(f)` (the binder), `declare(v)` (member,
+bound), `reference(p)` (member), `enter(g)`, `declare(g)` (the binder),
+`reference(v)` (the outer `v`, in the initialiser: its member bit is set by
+`f`, so it is not recorded), `declare(v')` (member, bound),
+`reference(v')`, `leave(g)`: `free_variables(g)` is empty, the pass gives
+`[v]`. The replay then reserves nothing at `g`'s `Enter`, `g`'s scope does
+not inherit the group of `v`, and the inner declaration is named `v`
+(`let v = ext(v)`, a reference before its own declaration) where the pass
+names it `v$1`. With the costs of the skeleton (`reference`: one bit test
+and one push the first time; `enter`: two pushes and one bit write per
+parameter) there is no way to tell "in the innermost run" from "in an
+enclosing run"; telling them apart in constant time needs, per variable,
+the scope that last recorded it and the scope that binds it (two dense
+`u32` rows by `VarId`, scopes numbered in stack order), which is not "one
+membership bit per variable". The example is the ignored test
+`a_function_nested_in_a_function_captures_a_local_of_the_outer_one`
+(`bir/lower/names.rs`), which asserts the correct result (`[v]`, and
+`v$1` for the inner declaration).
+
+**Gap 2: the lowering has no statement when a function's scope opens.**
+`Log::enter(function, statement, vars)` has to be called before the
+body's references are built, so that `reference` puts them in its run, and
+the binder's `Declare` has to be the event two after `Enter` (the replay's
+rule and the tests). Three construction sites contradict that:
+
+1. The body before the `JFun` before its statement: `State::enter`
+   (`bir/lower/mod.rs`, `View::Fun`) returns `Resume::Fun`, the body is
+   lowered as its child (`expression_children`, `bir/lower/expr.rs`),
+   `finish_expression` (`bir/lower/expr.rs`, `Resume::Fun`) then takes the
+   body's list and builds the `JFun`, and only after that does
+   `State::leaf` (`bir/lower/mod.rs`, `Cont::Declare`) write the `SDecl`
+   (or an expression statement holds it). No node of the statement exists
+   at `enter`, and a `Declare` logged where the `SDecl` is written follows
+   the body's events.
+2. The `one_unit_arg` header replacement: `finish_expression`
+   (`bir/lower/expr.rs`, `Resume::Fun`) allocates a new header without
+   the unit parameter after the body, so the `FuncId` logged at `Enter` is
+   not the printed function's and its `Params` include the unit argument.
+3. The tail-call aliases: `loop_function_body` (`bir/lower/tail.rs`)
+   declares `let x = _x` after the body was lowered, while the aliases
+   print before it.
+
+Closing this needs a mechanism the design does not have, for example
+events logged with a provisional statement that the write of the statement
+fills in, and `Params` logged at the close. Finding 2 has no test: an
+assertion about the log of a lowered Lambda needs step 4 to exist.
+
+Open, read from the code and not tested:
+
+- A warm replay of a log with functions still allocates (`replay` in
+  `emit/naming.rs`, through `Names::enter`: a new `Scope` table per
+  function, and an assignment in an inherited group copies its persistent
+  node).
+- Raw JavaScript names are not passed to the replay (`ProgramNames`,
+  `replay`): the pass skips them when it picks a suffix (`Names::raw`, read
+  in `Names::assign`).
+- The `this` of a method is named by the pass only when the body uses it
+  (`Names::method_this_used`, read in `Names::function`); the replay's
+  `Params` arm names every parameter, and the log keeps no record of that
+  use after the close.
+
+Part A leftovers, done: the hazard of (a) is pinned
+(`a_module_whose_only_reference_the_flatten_pass_drops_still_shadows_the_global_of_its_name`
+in `bir/lower/oracle_tests.rs`: the new side prints
+`ext(globalThis.Other)`, the legacy side `ext(Other)`, so the hazard is
+real, not only read), and `SForRangeExisting` has a rule test
+(`a_loop_over_an_existing_variable_binds_nothing_and_the_declaration_of_its_target_covers_it`
+in `globals.rs`; the lowering never builds that statement, only the import
+of JavaScript into `Bir` does, so the test builds `Bir` directly).
+
+Instruction counts of a clean build of `tests/tests` (743 modules), release
+binaries (fat LTO, `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1`), one worker
+thread, cachegrind, the smallest of the runs; each line is one run of
+`scripts/compare_build_instructions.py --base A --head B --runs N`, both
+sides in worktrees at paths of equal length ("this head" is d2da40cff, the
+last commit that changes code):
+
+| Mode | Compared | Runs | First | Second | Change |
+| --- | --- | ---: | ---: | ---: | ---: |
+| default | `be1b3a482e` / this head | 3 | 4,042,502,066 | 4,044,423,272 | +0.048% |
+| default | skeleton head `1da0feb06` / this head | 3 | 4,045,205,646 | 4,045,800,056 | +0.015% |
+| `RESCRIPT_BACKEND=check` | `be1b3a482e` / this head | 2 | 20,614,165,045 | 20,572,095,782 | -0.204% |
+| `RESCRIPT_BACKEND=check` | skeleton head `1da0feb06` / this head | 2 | 20,574,784,559 | 20,570,457,316 | -0.021% |
+
+Runs of one binary spread by up to 5.4 M (0.13%) in the default build, so
+both default differences are noise: nothing part B adds runs by default
+(the log, the replay and the comparison are compiled for tests only, and
+`Bir` is built in check mode only). Part A saves 0.2% of the check build
+(the external-shadow pass and the extra flatten and shadow passes on a copy
+are gone from the new side). The application was not measured: no code it
+runs by default changed.
 
 ### 11.5 Worker prompt for T4b
 
@@ -1141,6 +1841,300 @@ test) and RESULT B. If you cannot tell which within the unit, it is RESULT
 B: report the unit and the line.
 ```
 
+### 11.6 Worker prompt for T4g
+
+To be issued when T5 and T6 are merged, not before ("T4c design"). It takes
+over what T4c could not do. Two things in it come from what T4c measured and
+are not in "The design": a list is copied more than once, so the splice
+needs a close that happens once; and a function copied after its runs closed
+has variables whose count is split over the copies.
+
+```text
+Task T4g: the backend lowering splices a function at its single tail call
+(step A of docs/THREE_TREES.md 11.4), so that the new side of the `lower`
+gate stops running the legacy pass apply_js_tailcall_inline_pass.
+Repository: compiler-rust/. Preconditions, check them first and stop with a
+report if one fails: `rg -n 'apply_js_flatten_pass|apply_external_shadow_
+pass' src/lambda/lam_compile.rs` shows both skipped for the new side (T6 and
+T5 are in); `shadow::compare_decisions` reports no count, status or site
+difference on the runtime, tests/tests and the application.
+
+Read first: docs/THREE_TREES.md 1.1, 1.5 and all of 11.4 ("The design",
+"T4c design" with its two counterexamples, the two count hazards, "as built
+and measured", the order table); src/lambda/js_pass_tailcall_inline.rs whole
+(statuses, try_inline_single_return_statement including the function literal
+called in place, inline_named_call and active_decls, immutable_param_mask,
+inline_tailcall_call, is_substitutable_constant, substituted_truth,
+SubstituteInline and its shadowing rules); src/bir/lower/close.rs,
+scope.rs (Uses, VarFacts, Decision, return_sites), out.rs (take_list),
+export.rs (the top-level close); src/bir/j/logic.rs (copy_j); src/bir/
+shadow.rs (compare_decisions, check_lower); the tests named in the order
+table.
+
+What exists: close::decide gives every declaration of a copied list its
+status from `built` and return_sites records the site of a callee. A
+declaration is decided once per copy of its statement (the last decision
+stands), so a list being copied is not "the scope closing".
+
+Do exactly this, one commit each, in this order, each pushed when made:
+1. Design, in 11.4 under "T4g as built", before any code. Answer: (a) where
+   the splice happens so that it happens once per declaration and after
+   every use of the callee is lowered: the copy of a function body's list
+   and the top-level list after coercion are the candidates; say how the
+   decisions of the lists inside that body are found without walking it (a
+   mark in `Scope::decisions` at function entry is the suggestion; it is not
+   tested); (b) with P1 gone, what a site is: state it on the statements
+   the lowering now writes and delete return_sites if the last statement of
+   a list is all that remains; (c) copy_j: either the copy keeps one count
+   per origin, or a function that holds a candidate is never copied after
+   its body closed, or a copied candidate is not spliced; choose one, and
+   turn a_copied_function_doubles_the_legacy_count_of_the_variables_
+   declared_inside_it into a test of the final text; (d) the function
+   literal called in place (no status, arity rule only).
+2. VarFacts grows to 16 bytes: the declaration's statement node, the site,
+   the head of the read sites, state bits. The late mark (a bit of a leaf's
+   aux) on every node a scope-close decision creates.
+3. The splice with the legacy rules: arity equal or no splice; a parameter
+   never assigned in the body is renamed to an argument that is a variable,
+   replaced by a substitutable constant, otherwise declared `let p = arg`
+   (kind Variable); a conditional or a negation on a parameter replaced by a
+   boolean or integer constant keeps one branch; shadowing by an inner
+   declaration, parameter, loop or catch variable ends the substitution for
+   that name. The callee's statements take the place of the `return`; the
+   declaration becomes dead and pure. Late zero: a decrement that brings
+   `remaining` of a variable of a closed run to zero marks its declaration
+   through VarFacts. Graves: occurrences a decision removes are logged
+   against the anchoring variable and subtracted from `built` when a later
+   release reaches the anchor. The new side skips
+   apply_js_tailcall_inline_pass; compare_decisions and
+   js_pass_tailcall_inline::decisions are deleted (one path).
+4. Rule tests in src/bir/lower/oracle_tests.rs in the oracle form (the same
+   Lambda through the legacy pipeline with all passes and through the new
+   one, texts compared): a function inlined at its single tail call; the
+   call in a branch of a returned conditional and as the last operand of a
+   returned sequence; count two; a count that becomes one only after a
+   later pass; `pair[0](2)`; fewer, equal, more arguments; a parameter
+   replaced by a variable, by a constant, declared, never read, assigned; a
+   method, `async`, a directive; late zero (finding 3); a dead block binding
+   (finding 5); an exported function; a candidate used inside its own
+   initialiser; the two T4c counterexamples and the two count hazards, now
+   with equal texts.
+5. Step-count tests at 10,000: a run of 10,000 declarations of which half
+   are single-use functions with a tail-call site (state the bound per
+   declaration and assert it); 10,000 nested scopes each inlining into the
+   next, without recursion on the native stack; a body inlined once is
+   rewritten once. A zero-allocation test with warm pools in the form of
+   src/bir/j/norm_tests.rs. size_of pinned: VarFacts 16, Uses 8, a read
+   site 8. The counter in the lower report: sites spliced, and of those the
+   number whose callee's level L use count is not one.
+6. docs/STATUS.md (row T4g), the re-cut table, tests/backend_coverage.txt
+   if a count improved, changes/lowering-tail-call-splice.internal.md.
+
+End state, to paste in the pull request with the output:
+- `rg -n 'apply_js_tailcall_inline_pass' src/lambda/lam_compile.rs src/bir`
+  shows it skipped for the new side only.
+- `rg -n 'lam_compile|js_exp_make|js_ir::build|js_pass_' src/bir/lower
+  src/bir/j` matches only inside #[cfg(test)] modules.
+- scripts/test_backend_coverage.py passes with stage `lower` unchanged in
+  every corpus; RESCRIPT_BACKEND=check on the application: no difference in
+  any unit.
+- cargo test for compiler-rust; the CI instruction count within +0.02%;
+  check-mode instructions on tests/tests before and after (one pass fewer:
+  it should fall).
+
+Shortcuts that count as failure: splicing where a list is copied instead of
+at a close that happens once; finding a site or a parameter's occurrences by
+walking a body that is not being inlined; a hash map keyed by a variable or
+a node; a Vec, Box or String per declaration or per site; an Unsupported
+reason; a weakened test; the legacy pass called from bir/ outside tests.
+
+When a unit differs: reduce it to the smallest Lambda and decide only
+between "a rule of the splice is implemented wrongly" (fix it, add the rule
+test) and "another legacy pass reads what the splice changed" (commit the
+Lambda as a test asserting both texts, keep the pass on the new side, write
+which pass under 11.4, stop).
+```
+
+### 11.7 Build prompt for T5
+
+Part A of T5 is built ("T5 as built"). Part B is a skeleton: types, sizes,
+signatures with their costs, and ignored acceptance tests. Verbatim prompt
+for the builder:
+
+> Task: build part B of T5 of `compiler-rust/docs/THREE_TREES.md` (the
+> naming log) and close part A's open measurements. Read first: AGENTS.md;
+> THREE_TREES section 2; 11.4 "T5 design" (e) and "T5 as built"; the header
+> of `emit/naming.rs`; `bir/lower/names.rs` (the skeleton);
+> `bir/lower/globals.rs` (how part A records nothing new and decides at
+> `State::finish`); `bir/shadow.rs` and `lam_compile.rs` (the gate).
+>
+> Decided, not yours to change: the events (`Declare`, `Params`, `Enter`,
+> `Leave`, `Binder`; a reference is no event), the free-variable list with
+> one membership bit per variable, filled where a reference is built and
+> finalised at `Log::leave`; the replay through the existing `Names`
+> tables; the oracle is `Names::collect` run on the lowering's own program
+> before the JS passes (the passes still change which statements exist, so
+> the final program is not what the log describes), with its module list
+> filled in; part A's decision point, bit and bridge.
+>
+> Commits, in order, each building without warnings
+> (`cargo clippy --all-targets -- -D warnings`) and passing
+> `cargo test --lib bir::` and `emit::`:
+>
+> 1. `Log::declare`, `binder`, `reference`, `enter`, `leave`
+>    (`bir/lower/names.rs`). Turns on nothing yet (the tests also need the
+>    replay); add no test of your own in place of the ignored ones.
+> 2. `emit::naming::replay`. Turns on, in `bir/lower/names.rs`:
+>    `a_local_takes_the_name_of_an_outer_variable_the_function_does_not_capture`,
+>    `a_removed_declaration_takes_its_event_with_it`,
+>    `two_variables_first_named_by_one_reservation_are_named_in_order`,
+>    `a_loop_variable_is_named_before_the_declarations_of_its_body`,
+>    `ten_thousand_declarations_are_logged_and_replayed_in_one_step_each`,
+>    `ten_thousand_nested_functions_cost_a_constant_number_of_steps_each`.
+> 3. `emit::naming::compare_with_pass`. Turns on
+>    `the_comparison_counts_a_name_the_replay_gets_wrong`
+>    (`emit/naming.rs`).
+> 4. The lowering logs: remove `cfg(test)` from `mod names`, `replay`,
+>    `compare_with_pass` and their types; a `Log` on `lower::scope::Scope`;
+>    `reference` from `Bir::allocate` beside `Scope::site`; `declare` where
+>    an `SDecl` is written, `binder` where loop and `try` statements are
+>    built, `enter`/`leave` around a function body (K10,
+>    `with_function_scope`). Add one oracle-form test per event kind in
+>    `bir/lower/oracle_tests.rs`: Lambda lowered, the log replayed, the
+>    table compared with `compare_with_pass` on the exported program, zero
+>    differences; and the three hard examples of section 2 as Lambda.
+> 5. Check mode: after `prepare_lower`, replay and `compare_with_pass` on
+>    `new_before` with its modules filled in
+>    (`collect_modules_from_js_block`); `NameStats` flattened into the
+>    `lower` report; a difference is an error naming the unit and the
+>    identifier. The printer shape tests the pass applies
+>    (`walk::prints_declaration`, `omitted_expression`, `else_omitted`,
+>    `tail_effect`, the eta form of `function_form`) are bits you add to
+>    the event where the statement is written or tests at replay: say
+>    which, per test, in "T5 as built: part B".
+> 6. Part A leftovers: a test for the hazard of "T5 design" (a) (a module
+>    of a global's printed name whose only reference stands in a pure
+>    branch of a conditional statement: assert both complete texts, as the
+>    T4c hazards are pinned); a rule test for `SForRangeExisting`.
+> 7. Measurements and documents: instruction counts of a clean build of
+>    `tests/tests` (release binary, `RAYON_NUM_THREADS=1`, cachegrind as
+>    `scripts/compare_build_instructions.py` does) with
+>    `RESCRIPT_BACKEND=check` and by default, at `be1b3a482e`, at this
+>    skeleton's head and at your head; "T5 as built: part B"; STATUS.md row
+>    T5; the worker prompt for T6 in the form of 11.6.
+>
+> End state, checkable: `rg -n 'fn replay' compiler-rust/src/emit/naming.rs`
+> has one hit; `rg -n 'cfg\(test\)' compiler-rust/src/bir/lower/names.rs`
+> shows the test module only; `rg -n 'T5 build' compiler-rust/src` is
+> empty; `rg -n 'apply_external_shadow_pass'
+> compiler-rust/src/lambda/lam_compile.rs compiler-rust/src/bir/shadow.rs`
+> still shows the legacy side only; `name_differences` is zero on every
+> unit the pass supports in the runtime library, tests/tests, the fixtures
+> and the application, with the number of supported units per corpus
+> reported; `scripts/test_backend_coverage.py` passes with the ratchet
+> unchanged or risen; the default build's instruction count is within
+> noise.
+>
+> Shortcuts that count as failure: changing a signature, a doc-comment
+> cost, a pinned size or a test of the skeleton instead of meeting it (if
+> one cannot be met, stop and report the function and the reason); a walk
+> over a statement body or a finished tree to find references, bindings or
+> free variables; a hash map keyed by a variable, node or scope in the log
+> (the `Names` tables stay as they are: they are the pass's, and the pass
+> is not removed in this slice); an `allow` attribute; an ignored test
+> other than the ones named above before their commit; a number you did
+> not measure.
+
+### 11.8 Worker prompt for T6
+
+Written by the builder of T5 part B; not yet reviewed against the design. T6 starts from a design turn.
+
+To be issued when T5 is complete, not before: the builder prints names from
+the table T5's replay fills, and part B stopped at its step 4 ("T5 as
+built: part B", two design gaps). It follows T4's statements on what the
+new side still runs (the flatten pass stays until this slice, "T4b").
+
+```text
+Task T6: the builder over oxc nodes (docs/THREE_TREES.md section 3): the
+backend lowering writes the JavaScript tree as oxc nodes through a thin
+builder of our own, and RESCRIPT_BACKEND=new prints from it. Repository:
+compiler-rust/. Preconditions, check them first and stop with a report if
+one fails: `rg -n 'cfg\(test\)' src/bir/lower/names.rs` shows the test
+module only and check mode reports name_differences 0 on the runtime,
+tests/tests, the fixtures and the application (T5 is complete); `rg -n
+'apply_external_shadow_pass' src/lambda/lam_compile.rs src/bir/shadow.rs`
+shows the legacy side only.
+
+Read first: docs/THREE_TREES.md sections 2, 3 and 7, all of 11.4 (T4b's
+RESULT B, "T5 design", both "T5 as built" parts); the header of
+src/emit/naming.rs; src/emit/build.rs and src/emit/walk.rs (the printer
+decisions the oxc path takes today, from the JS IR); src/bir/j/ whole (the
+constructors of rows J-E1 to J-E10, J-S1 to J-S5 and J-M0 to J-M13 of
+BACKEND_LOWERING 6); src/bir/bridge_j.rs (deleted by this slice) and the J
+opcodes of src/bir/node.rs; src/bir/lower/out.rs; the gate in
+src/lambda/lam_compile.rs and src/bir/shadow.rs; in oxc 0.158,
+`Expression`, `oxc_allocator::Box`, the `node_id` cell, and
+`Codegen::with_scoping`.
+
+Do exactly this, one commit each, in this order, each pushed when made:
+1. Design, in 11.4 under "T6 design", before any code. Answer: (a) the
+   handle a constructor takes and returns (the oxc `Expression` by value,
+   its flags, a J kind tag; its size, at most 24 bytes, and why) and the
+   facts table indexed by `node_id` (2 bytes a node; the side pool for
+   block shapes, call information and `undefined`); (b) per row of J-E,
+   J-S and J-M, what it reads of a child and how it reads it from the
+   handle or the table; (c) where each printer decision of
+   BACKEND_REDESIGN A.7 is taken: when the node is attached, or when the
+   function's scope closes (unit return, eta form, arrow or `function`);
+   (d) identifiers: the symbol id a binding and a reference carry, how ids
+   are allocated, and how the name table of T5's replay reaches
+   oxc_codegen; (e) each rule of the flatten pass (`Flatten` in
+   js_pass_flatten_and_mark_dead.rs) that the builder now applies where it
+   writes a statement, with the T4b result for the copied-branch reader.
+2. src/emit/builder.rs: the handle and the facts table with size_of
+   pinned; the leaf and expression constructors, each with its cost in its
+   doc comment.
+3. The statement and block constructors, and the flatten rules of 1(e).
+4. bir::j writes through the builder; bir/lower changes types only;
+   RESCRIPT_BACKEND=new prints the builder's program; check mode compares
+   that text with the legacy text on every supported unit.
+5. Delete src/bir/bridge_j.rs, the J opcodes of src/bir/node.rs and the
+   Bir view of src/emit/walk.rs (one path); the new side runs no flatten
+   pass.
+6. Rule tests in the oracle form for every row of 1(b) and every flatten
+   rule of 1(e); step-count tests at 10,000 for a long statement list, a
+   deep expression and a long string concatenation; a zero-allocation test
+   with a warm allocator in the form of src/bir/j/norm_tests.rs.
+7. docs/STATUS.md (row T6), tests/backend_coverage.txt if a count
+   improved, changes/lowering-oxc-builder.internal.md.
+
+End state, to paste in the pull request with the output:
+- `rg 'JSeq|JBlockLit' src/bir/node.rs` is empty; `rg bridge_j src` is
+  empty; `rg -n 'apply_js_flatten_pass' src/lambda/lam_compile.rs` shows
+  the legacy side only.
+- The reformat-and-compare suites pass; RESCRIPT_BACKEND=check: no text
+  difference in any supported unit of the four corpora, with the number
+  of supported units per corpus reported; scripts/test_backend_coverage.py
+  passes with the ratchet unchanged or risen.
+- Instruction counts of a clean build of tests/tests (release binary,
+  RAYON_NUM_THREADS=1, cachegrind as scripts/compare_build_instructions.py
+  does): RESCRIPT_BACKEND=new below the default; the default within the
+  CI threshold.
+
+Shortcuts that count as failure: a JS IR built and converted to oxc
+nodes; a pass over the finished oxc tree for a fact the builder could
+have recorded when it attached the node; a hash map keyed by a node, a
+variable or a symbol; a Vec, Box or String per node outside the oxc
+allocator; an Unsupported reason added to make a unit pass; a weakened or
+ignored test; bridge_j kept as a fallback.
+
+When a unit differs: reduce it to the smallest Lambda and decide only
+between "a builder rule is implemented wrongly" (fix it, add the rule
+test) and "a legacy pass reads what the builder changed" (commit the
+Lambda as a test asserting both texts, write which pass under 11.4,
+stop).
+```
+
 ## 12. Risks and what was not measured
 
 Not measured:
@@ -1209,4 +2203,8 @@ Risks:
 | Section 1.3 | hoisting and substitution happen while lowering, removal when the statements are copied | the tail-call pass drops a dead block binding before it is materialised, and record rest reads the field reads substitution would replace; both tested or read in 11.4 (findings 5 and 6), so they happen at the close |
 | Section 1.1 | the site is a final `return f(args)` of a statement-stack run | the pass finds sites on the tree the flatten pass wrote: inside a returned conditional the lowering writes no such statement (11.4, finding 1, tested) |
 | Section 1.3, 1.5 | a declaration with no remaining use is removed at scope close | inlining from an outer scope can take the last use later (11.4, finding 3, tested) |
+| 11.4, "The design" and the re-cut table | step A runs in the lowering, before P1 and P2, and the new side then drops P3 | P2 reads the bindings around a reference and P1 maps the predicate of an `if` it did not create: the text differs in both cases (11.4, "T4c design" (c), tested), and a copied function doubles C0 of its variables after their runs closed ((b), read) |
 | Row T4 and the T4 prompt | export coercion on rows is the sixth step, after the scope-close decisions | every top-level status reads the export set and counts taken after coercion (11.4, finding 2); it is the first step |
+| 11.4, finding 2 and "The design" | per reference, the statement it is in and whether its position is safe are recorded where the reference is lowered | a reference is built before its parent and before its statement has a slot (reserved slots and held runs are filled later), so only the site (node, next) is recorded there; the row and the position are read through the parent links at the end of the top level ("T4a as built") |
+| BACKEND_LOWERING 8.1 step 4 and 8.2 | export extraction and coercion are in the shared tail; the unit's last value is the export block, carried for `extract_toplevel_exports` | the lowering extracts, coerces and resolves the exports itself; the shared tail is the six passes; S3.9b is done as T4a, first of the T4 slices, not last |
+| `move_same_name_export_alias_to_export_tail` (`js_shake.rs`) | several conditions block a literal binding in particular cases | two of them together block every literal binding, so the others are unreachable ("T4a as built") |

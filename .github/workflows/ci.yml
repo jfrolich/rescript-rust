@@ -411,6 +411,20 @@ jobs:
           name: binaries-${{ matrix.node-target }}
           path: packages/@rescript/${{ matrix.node-target }}/bin
 
+      # `rescript` compiles the runtime from its sources on every build and
+      # writes no interfaces to its lib/rescript; `rescript-ocaml` reads
+      # Pervasives.cmi and the rest from there (compiler/core/res_compmisc.ml).
+      - name: Build the runtime interfaces with rescript-ocaml
+        if: matrix.upload_libs
+        run: |
+          runtime="$PWD/packages/@rescript/runtime"
+          (cd "$runtime" && RESCRIPT_RUNTIME="$runtime" \
+            "$OLDPWD/packages/@rescript/${{ matrix.node-target }}/bin/rescript-ocaml.exe" build)
+          test -f "$runtime/lib/rescript/Pervasives.cmi"
+          # The .cmj files describe the checked-in JavaScript.
+          git diff --exit-code -- "$runtime/lib/js" "$runtime/lib/es6"
+        shell: bash
+
       - name: "Upload artifacts: lib/rescript"
         if: matrix.upload_libs
         uses: actions/upload-artifact@v7

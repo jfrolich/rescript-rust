@@ -71,6 +71,15 @@ pub enum LocationRetry {
     Output,
 }
 
+/// An obligation of a derived item's plan failed in the checker, which
+/// abandoned the unit before publishing anything, and the compile had no
+/// [`DerivedFallback`] to continue the unit's attempt loop
+/// on. Whoever holds the unit's source makes that general syntax with
+/// [`DerivedPath::Fallback`].
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+#[error("a derived item's plan could not be used")]
+pub struct DerivedRetry;
+
 /// A compile failure whose report is already formatted for the user: print
 /// `output` as is and exit with `exit_code`.
 #[derive(Debug)]
@@ -235,13 +244,14 @@ pub type WarningLocations =
     std::sync::Arc<dyn Fn() -> Option<crate::parse_arena::ParseArena> + Send + Sync>;
 
 /// Place the warnings of a location-free compile in a located parse of the
-/// same source, replacing each warning's location identity with the matching
-/// location of `located` (parsed on first use). Returns false when any
+/// same source (`warning_locations` of the syntax that was checked),
+/// replacing each warning's location identity with the matching location
+/// of `located` (parsed on first use). Returns false when any
 /// warning cannot be placed with certainty; the caller then retries the
 /// whole compile with locations. A located compile needs no placement.
 fn place_location_free_warnings(
     arena: &crate::parse_arena::ParseArena,
-    options: &CompilerOptions,
+    warning_locations: Option<&WarningLocations>,
     located: &mut Option<crate::parse_arena::ParseArena>,
     warnings: &mut [TypeCoreWarning],
 ) -> bool {
@@ -256,7 +266,7 @@ fn place_location_free_warnings(
         return false;
     };
     if located.is_none() {
-        let Some(parse) = options.warning_locations.as_ref().and_then(|parse| parse()) else {
+        let Some(parse) = warning_locations.and_then(|parse| parse()) else {
             return false;
         };
         // Both parses must have issued the same locations, or identities and
@@ -285,17 +295,21 @@ fn publish_signature(
     type_ctx: &TypeContext,
     arena: &ParseArena,
     publication: SignaturePublicationMode,
-) -> Result<Option<std::sync::Arc<PortablePersStruct>>> {
-    let Some(check) = &options.signature_check else {
-        return Ok(env.extract_module_update(module_name, type_ctx, Some(arena), publication));
+) -> Result<(Option<std::sync::Arc<PortablePersStruct>>, Option<crate::cmi::signature_check::PreparedReport>)> {
+    let (unit, report) = if let Some(check) = &options.signature_check {
+        match env.extract_module_update_checked(module_name, type_ctx, Some(arena), publication) {
+            Some((unit, comparison)) => (Some(unit), Some(check.prepare(filename, &comparison)?)),
+            None => (None, None),
+        }
+    } else {
+        (env.extract_module_update(module_name, type_ctx, Some(arena), publication), None)
     };
-    let Some((pers_struct, comparison)) =
-        env.extract_module_update_checked(module_name, type_ctx, Some(arena), publication)
-    else {
-        return Ok(None);
-    };
-    check.report(filename, &comparison)?;
-    Ok(Some(pers_struct))
+    if options.checker == CheckerChoice::Both
+        && let Some(unit) = &unit
+    {
+        crate::tc::bridge::from_old::check_published(unit).map_err(anyhow::Error::msg)?;
+    }
+    Ok((unit, report))
 }
 
 /// The path derived items take: the switch `RESCRIPT_DERIVED_PATH`
@@ -310,6 +324,9 @@ pub enum DerivedPath {
     /// `check`: a unit with a planned item is compiled both ways in the
     /// same process, and a difference between the two fails its compile.
     Check,
+    /// Not a value of the switch: the path of one unit after
+    /// [`DerivedRetry`]. Every item of the unit is on the general path.
+    Fallback,
 }
 
 impl DerivedPath {
@@ -330,6 +347,59 @@ impl DerivedPath {
         })
     }
 }
+
+impl crate::types::context::CheckMode {
+    /// O(1) per unit after the first environment read. `explain` disables the
+    /// success attempt for diagnostic comparisons and regression bisection.
+    fn from_env() -> Self {
+        static MODE: std::sync::OnceLock<crate::types::context::CheckMode> = std::sync::OnceLock::new();
+        *MODE.get_or_init(|| match std::env::var("RESCRIPT_CHECK_MODE").as_deref() {
+            Err(_) | Ok("") => Self::Success,
+            Ok("explain") => Self::Explain,
+            Ok(other) => {
+                eprintln!("RESCRIPT_CHECK_MODE is `{other}`; it is unset or `explain`");
+                std::process::exit(2)
+            }
+        })
+    }
+}
+
+impl DerivedPath {
+    /// Why the derive seam plans no item of a unit on this path, or `None`
+    /// when it plans. Cost: O(1).
+    pub fn plans_off(self) -> Option<crate::binary_ast::derive::GeneralReason> {
+        use crate::binary_ast::derive::GeneralReason;
+        match self {
+            DerivedPath::Plans | DerivedPath::Check => None,
+            DerivedPath::General => Some(GeneralReason::Switch),
+            DerivedPath::Fallback => Some(GeneralReason::FailedObligation),
+        }
+    }
+}
+
+/// See [`CompilerOptions::derived_reference`].
+pub type DerivedReference =
+    std::sync::Arc<dyn Fn() -> Result<(crate::parse_arena::ParseArena, Structure)> + Send + Sync>;
+
+/// The syntax of a unit with every derived item as code
+/// ([`DerivedPath::Fallback`]): what a unit is checked from once a plan of
+/// it could not be used. Made by whoever holds the unit's source.
+pub struct GeneralSyntax<S> {
+    /// Node storage of `tree`, ready for type checking.
+    pub arena: crate::parse_arena::ParseArena,
+    /// The unit's tree after the frontend.
+    pub tree: S,
+    /// For a location-free `arena`: its located parse, in which warnings
+    /// are placed ([`CompilerOptions::warning_locations`] of this syntax).
+    pub warning_locations: Option<WarningLocations>,
+}
+
+/// Borrowed general-syntax provider, called only after a derived plan fails.
+/// O(1) to pass; no ownership or allocation on the successful first attempt.
+pub type DerivedFallback<'a> = &'a dyn Fn() -> Result<GeneralSyntax<Structure>>;
+
+/// See [`CompilerOptions::derived_differences`].
+pub type DerivedDifferences = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
 
 /// Unit checker selection; the old checker remains the default during construction.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -430,6 +500,17 @@ pub struct CompilerOptions {
     pub derived_census: Option<PathBuf>,
     /// The path derived items take, read once when options are created.
     pub derived_path: DerivedPath,
+    /// For `RESCRIPT_DERIVED_PATH=check`: the frontend's result for the
+    /// unit's source with [`DerivedPath::General`], ready for type checking,
+    /// or why the frontend could not give it (the error names the source it
+    /// read). The reference compile of a check runs on it.
+    pub derived_reference: Option<DerivedReference>,
+    /// For `RESCRIPT_DERIVED_PATH=check`: where a build collects what the
+    /// check found, to report every unit before it fails. With it a unit
+    /// that differs goes on with the result of its plans; without it the
+    /// first difference fails the unit's compile. Locked once per
+    /// difference, never for a unit that passes.
+    pub derived_differences: Option<DerivedDifferences>,
     /// Dormant backend migration mode, selected before compiling modules.
     pub backend: crate::bir::shadow::BackendMode,
     /// Dormant publication equality oracle; configured once, not per unit.
@@ -726,6 +807,8 @@ impl Default for CompilerOptions {
             checker: CheckerChoice::from_env(),
             derived_census: Self::derived_census_from_env(),
             derived_path: DerivedPath::from_env(),
+            derived_reference: None,
+            derived_differences: None,
             backend: crate::bir::shadow::BackendMode::from_env(),
             signature_check: crate::cmi::signature_check::SignatureCheck::from_env(),
             js_printer: crate::emit::PrinterMode::from_env(),
@@ -4869,19 +4952,6 @@ fn format_compiler_warning_report(
     output
 }
 
-fn emit_type_warnings(
-    arena: &ParseArena,
-    source: &str,
-    filename: &str,
-    warnings: &[TypeCoreWarning],
-) {
-    if warnings.is_empty() {
-        return;
-    }
-
-    write_stderr_raw(&format_type_warnings(arena, source, filename, warnings));
-}
-
 /// [`format_type_warnings`], reading the source only when there is a
 /// warning to report.
 fn format_type_warnings_lazy<'s>(
@@ -4896,7 +4966,7 @@ fn format_type_warnings_lazy<'s>(
     format_type_warnings(arena, source(), filename, warnings)
 }
 
-/// The reports [`emit_type_warnings`] prints, as one string.
+/// Type warnings rendered as one string for attempt-local buffering.
 fn format_type_warnings(
     arena: &ParseArena,
     source: &str,
@@ -6195,6 +6265,34 @@ pub fn compile_source_to_js_with_options(
     )
 }
 
+/// Borrow the inputs of a possible fallback. O(1), no heap allocation.
+fn general_syntax_provider<'a>(
+    source: &'a str, filename: &'a str, options: &'a CompilerOptions,
+) -> impl Fn() -> Result<GeneralSyntax<Structure>> + 'a {
+    move || general_implementation_syntax(source, filename, options)
+}
+
+/// The general syntax of an implementation whose plan could not be used
+/// ([`DerivedFallback`]): the frontend run again on its
+/// source with [`DerivedPath::Fallback`]. Its reports were printed with the
+/// first tree and are not printed again. Cost: one parse and frontend run
+/// of the unit and one copy of the options, only for a unit that falls back.
+fn general_implementation_syntax(
+    source: &str,
+    filename: &str,
+    options: &CompilerOptions,
+) -> Result<GeneralSyntax<Structure>> {
+    let mut options = options.clone();
+    options.derived_path = DerivedPath::Fallback;
+    let mut parser = Parser::new(filename, source);
+    let structure = module::parse_structure(&mut parser);
+    let frontend =
+        run_implementation_frontend(&mut parser, structure, source, filename, &options, &mut String::new())?;
+    parser.arena_mut().reserve_typecheck_synthetic_capacity();
+    crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
+    Ok(GeneralSyntax { arena: parser.into_arena(), tree: frontend.structure, warning_locations: None })
+}
+
 #[cfg(test)]
 fn compile_source_to_js_with_trace(
     source: &str,
@@ -6265,7 +6363,7 @@ pub fn run_implementation_frontend(
     parser.arena_mut().set_builtin_spice(options.builtin_spice());
     parser
         .arena_mut()
-        .set_derived_plans(options.derived_path != DerivedPath::General);
+        .set_derived_plans(options.derived_path.plans_off());
     let frontend_warnings =
         ppx::collect_leading_builtin_warning_attributes(&structure, parser.arena())
             .map_err(|err| ppx_error_to_anyhow(err, parser.arena(), source, filename))?;
@@ -6432,6 +6530,7 @@ fn compile_source_to_js_with_options_inner(
     if !options.frontend_already_reported {
         write_stderr(&frontend_output);
     }
+    let unit_options = options;
     let ImplementationFrontend {
         structure,
         warnings_fatal: ppx_warnings_have_errors,
@@ -6458,44 +6557,22 @@ fn compile_source_to_js_with_options_inner(
     };
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
-    // Type check
-    let type_ctx = fresh_type_context();
-    type_ctx.set_location_namespace(&options.location_identity(filename));
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
-    let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
-    tctx.experimental_let_unwrap = experimental_let_unwrap;
-    tctx.transparent_modules = options.transparent_modules;
-    apply_warning_options(&mut tctx, options);
-    // Ppx_entry.rewrite_* (ppx_entry.ml:28, 47) applies the leading warning
-    // attributes; compiling a preprocessed `.ast` does not run it again.
-    if !options.frontend_already_reported {
-        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
-    }
-    apply_file_config_warning_options(&mut tctx, &file_config);
-    let mut pers_env = PersistentEnv::new();
-    let (load_path, load_path_display) = shared_load_path_with_display(options);
-    type_ctx.set_load_paths_shared(load_path.clone());
-    pers_env.set_load_path_shared(load_path.clone(), load_path_display);
-    pers_env.set_open_modules(options.open_modules.clone());
-    pers_env.set_jsx_version(options.jsx_version);
-    pers_env.set_experimental_let_unwrap(options.experimental_let_unwrap);
-    pers_env.set_jsx_module(options.jsx_module.clone());
     let current_unit_name = options.current_unit_name();
-    pers_env.set_compiling_module(current_unit_name.clone());
-
-    // Store persistent env in the type check context for module resolution
-    tctx.set_persistent_env(pers_env);
-
-    let typed = initial_type_env(
-        &mut tctx,
-        &file_config.open_modules(options),
-        file_config.nopervasives(options),
-        current_unit_name.as_deref(),
-    )
-    .and_then(|env| {
-        offer_unit_to_checker(options.checker, filename);
-        type_structure(&mut tctx, &env, parser.arena(), &structure).map(|typed| (typed, env))
-    });
+    let fallback = || general_implementation_syntax(source, filename, unit_options);
+    let (type_ctx, result) = type_structure_two_modes(
+        CheckUnit { filename, options, registry: None,
+            module_name: current_unit_name.as_deref(), file_config: &file_config,
+            frontend_warning_specs: &frontend_warning_specs, derived_plans: true,
+            mode: crate::types::context::CheckMode::from_env() },
+        UnitSyntax::new(parser.arena(), &structure, options),
+        (parser.arena().plans().item_count() > 0).then_some(&fallback as &dyn Fn() -> Result<GeneralSyntax<Structure>>),
+        |tctx, env, syntax| {
+            tctx.experimental_let_unwrap = experimental_let_unwrap;
+            type_structure(tctx, env, syntax.arena, syntax.tree)
+        },
+        |type_ctx, mut tctx, typed, syntax, attempt_output| {
+    let UnitSyntax { arena, .. } = syntax;
     let ((typed_structure, final_env), env) = match typed {
         Ok(result) => result,
         Err(e) => {
@@ -6507,7 +6584,7 @@ fn compile_source_to_js_with_options_inner(
             tctx.drain_open_slot_uses();
             let suppress_info_style =
                 !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
-            emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+            attempt_output.warnings(arena, source, filename, &tctx.warnings);
             if let Some(error) = tctx
                 .persistent_env
                 .as_ref()
@@ -6517,8 +6594,8 @@ fn compile_source_to_js_with_options_inner(
             }
             return Err(type_mod_error_to_anyhow(
                 e,
-                &type_ctx,
-                parser.arena(),
+                type_ctx,
+                arena,
                 source,
                 filename,
                 suppress_info_style,
@@ -6533,7 +6610,7 @@ fn compile_source_to_js_with_options_inner(
         return Err(persistent_env_error_to_anyhow(error, filename));
     }
     tctx.drain_open_slot_uses();
-    emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+    attempt_output.warnings(arena, source, filename, &tctx.warnings);
     // js_implementation.ml:158-163: `Warnings.check_fatal` runs only after
     // `Typemod.type_implementation_more`, whose delayed checks
     // (typemod.ml:1769-1776) still report their warnings.
@@ -6560,7 +6637,7 @@ fn compile_source_to_js_with_options_inner(
     // OCaml's Includemod.compunit -> moregeneral -> moregen links weak (non-generic)
     // type variables from value-restricted expressions to the corresponding types
     // from the .resi interface. This happens BEFORE sexp serialization.
-    apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options, has_resi);
+    apply_moregen_constraints(&mut tctx, type_ctx, &typed_structure, options, has_resi);
     if has_resi {
         check_compunit_inclusion_for_errors(
             &mut tctx,
@@ -6593,20 +6670,20 @@ fn compile_source_to_js_with_options_inner(
             crate::types::includemod::simplify_signature(&typed_structure.str_type);
         // typemod.ml `type_implementation_more`: `check_js_names ~toplevel:true
         // simple_sg` before the inferred-signature inclusion.
-        if let Err(e) = crate::types::typemod::check_js_names(&type_ctx, true, &simple_signature) {
+        if let Err(e) = crate::types::typemod::check_js_names(type_ctx, true, &simple_signature) {
             let suppress_info_style =
                 !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
             return Err(type_mod_error_to_anyhow(
                 e,
-                &type_ctx,
-                parser.arena(),
+                type_ctx,
+                arena,
                 source,
                 filename,
                 suppress_info_style,
             ));
         }
         let implementation_coercion = coerce_to_inferred_signature(
-            &type_ctx,
+            type_ctx,
             &env,
             source_file_for_interface,
             &typed_structure.str_type,
@@ -6614,14 +6691,14 @@ fn compile_source_to_js_with_options_inner(
         );
         // A payload reader's error escapes the inclusion (includecore.ml:45).
         let implementation_coercion =
-            match crate::types::includemod::escaped(&type_ctx, implementation_coercion) {
+            match crate::types::includemod::escaped(type_ctx, implementation_coercion) {
                 Ok(coercion) => coercion,
                 Err(e) => {
-                    emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+                    attempt_output.warnings(arena, source, filename, &tctx.warnings);
                     return Err(type_mod_error_to_anyhow(
                         e.into(),
-                        &type_ctx,
-                        parser.arena(),
+                        type_ctx,
+                        arena,
                         source,
                         filename,
                         !tctx.warnings.is_empty()
@@ -6631,21 +6708,21 @@ fn compile_source_to_js_with_options_inner(
             }
             .map_err(|e| anyhow!("Inferred signature inclusion failed: {e:?}"))?;
         if let Err(e) =
-            crate::types::typemod::check_nongen_schemes(&type_ctx, &final_env, &simple_signature)
+            crate::types::typemod::check_nongen_schemes(type_ctx, &final_env, &simple_signature)
         {
             // The warnings printed so far have set up colors (misc.ml:337-392).
             let suppress_info_style =
                 !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
             return Err(type_mod_error_to_anyhow(
                 e,
-                &type_ctx,
-                parser.arena(),
+                type_ctx,
+                arena,
                 source,
                 filename,
                 suppress_info_style,
             ));
         }
-        normalize_signature(&type_ctx, &final_env, &simple_signature);
+        normalize_signature(type_ctx, &final_env, &simple_signature);
         (Some(simple_signature), Some(implementation_coercion))
     } else {
         (None, None)
@@ -6656,7 +6733,7 @@ fn compile_source_to_js_with_options_inner(
     // typedtree-only runs must therefore flush value-usage checks before the dump.
     tctx.flush_value_usage_checks();
     let delayed_warnings = &tctx.warnings[delayed_type_warning_start..];
-    emit_type_warnings(parser.arena(), source, filename, delayed_warnings);
+    attempt_output.warnings(arena, source, filename, delayed_warnings);
     // `Warnings.check_fatal` only runs at lam_compile_main.ml:420 (or right
     // after typing for typedtree/cmi-only runs, js_implementation.ml:158-159),
     // so a fatal typing warning still lets Translmod report its warnings.
@@ -6666,23 +6743,23 @@ fn compile_source_to_js_with_options_inner(
 
     // Print typed tree if requested
     if options.dump_typed_sexp {
-        let mut stderr = std::io::stderr();
+        let stderr = &mut attempt_output.stderr;
         let _ = print_typed_structure(
-            parser.arena(),
-            &type_ctx,
+            arena,
+            type_ctx,
             &tctx.typed,
             &typed_structure,
-            &mut stderr,
+            stderr,
         );
     }
     if options.dump_typed_sexp_locs {
-        let mut stderr = std::io::stderr();
+        let stderr = &mut attempt_output.stderr;
         let _ = print_typed_structure_with_locs(
-            parser.arena(),
-            &type_ctx,
+            arena,
+            type_ctx,
             &tctx.typed,
             &typed_structure,
-            &mut stderr,
+            stderr,
         );
     }
 
@@ -6691,12 +6768,12 @@ fn compile_source_to_js_with_options_inner(
     if let Some(simple_signature) = inferred_simple_signature.as_deref()
         && !has_resi
     {
-        saved_signature_copy(&type_ctx, simple_signature);
+        saved_signature_copy(type_ctx, simple_signature);
     }
 
     // `process_with_gentype` runs after the JS is emitted
     // (js_implementation.ml:164), which a fatal warning prevents.
-    if options.gentype_config.is_some() && !typing_warnings_fatal {
+    let pending_gentype = if options.gentype_config.is_some() && !typing_warnings_fatal {
         let module_name = current_unit_name
             .clone()
             .unwrap_or_else(|| module_name_from_source_filename(source_file_for_interface));
@@ -6709,34 +6786,33 @@ fn compile_source_to_js_with_options_inner(
             let current_raw_sig =
                 std::sync::Arc::new(crate::types::typecore::copy_lookup_signature_for_subst(
                     simple_signature,
-                    &type_ctx,
+                    type_ctx,
                 ));
             type_ctx.register_gentype_raw_module_sig(&module_name, current_raw_sig.clone());
             type_ctx.register_raw_module_sig(&module_name, current_raw_sig);
         }
-        let gentype = process_gentype_typed_artifact_if_enabled(
+        process_gentype_typed_artifact_if_enabled(
             options,
             has_resi.then(|| interface_source_gentype_read(source_file_for_interface)),
             GentypeUnit {
                 annots: crate::gentype::main::TypedArtifactAnnots::Implementation(&typed_structure),
-                arena: parser.arena(),
+                arena,
                 ta: &tctx.typed,
-                type_ctx: &type_ctx,
+                type_ctx,
                 source: &|| source.to_string(),
                 filename: source_file_for_interface,
                 module_name: &module_name,
             },
-        );
-        print!("{}", apply_gentype_outcome(gentype, "", source_file_for_interface)?);
-    }
+        )
+    } else { None };
 
-    let lambda_start_stamp = synchronize_lambda_start_stamp(&type_ctx);
+    let lambda_start_stamp = synchronize_lambda_start_stamp(type_ctx);
 
     let unit_name = options.current_unit_name().unwrap_or_default();
     let implementation_coercion = inferred_implementation_coercion.unwrap_or_else(|| {
         compute_raw_implementation_coercion(
             &mut tctx,
-            &type_ctx,
+            type_ctx,
             &env,
             &typed_structure,
             options,
@@ -6746,9 +6822,9 @@ fn compile_source_to_js_with_options_inner(
     let raw_arena = crate::raw_lambda::RawArena::for_typed_exprs(tctx.typed.expr_count());
     let mut raw_converter =
         crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
-            parser.arena(),
+            arena,
             &tctx.typed,
-            &type_ctx,
+            type_ctx,
             &env,
             lambda_start_stamp,
             unit_name,
@@ -6768,7 +6844,7 @@ fn compile_source_to_js_with_options_inner(
     let interface_signature = if has_resi {
         implementation_interface_signature(
             &mut tctx.persistent_env,
-            &type_ctx,
+            type_ctx,
             source_file_for_interface,
             current_unit_name.as_deref(),
         )
@@ -6777,7 +6853,7 @@ fn compile_source_to_js_with_options_inner(
     };
     let flat_make_paths = flat_make_paths_of_signature(
         &mut tctx.persistent_env,
-        &type_ctx,
+        type_ctx,
         &final_env,
         if has_resi {
             interface_signature.as_deref().map(Vec::as_slice)
@@ -6791,7 +6867,7 @@ fn compile_source_to_js_with_options_inner(
     let lam_locs = raw_converter.take_lam_locs();
     if let Some(diagnostic) = raw_converter.take_diagnostic() {
         // A Translmod error escapes before `Warnings.check_fatal`.
-        emit_type_warnings(parser.arena(), source, filename, &raw_warnings);
+        attempt_output.warnings(arena, source, filename, &raw_warnings);
         return Err(UserDiagnostic::new(
             format_compiler_error_report_from_location(
                 source,
@@ -6804,8 +6880,8 @@ fn compile_source_to_js_with_options_inner(
         .into());
     }
     let late_type_warnings = &tctx.warnings[post_type_warning_start..];
-    emit_type_warnings(parser.arena(), source, filename, late_type_warnings);
-    emit_type_warnings(parser.arena(), source, filename, &raw_warnings);
+    attempt_output.warnings(arena, source, filename, late_type_warnings);
+    attempt_output.warnings(arena, source, filename, &raw_warnings);
     // lam_compile_main.ml:420 `Warnings.check_fatal ()` runs after the
     // lambda and JS passes (checked below, after `lam_compile`).
     let warnings_fatal = typing_warnings_fatal
@@ -6823,11 +6899,9 @@ fn compile_source_to_js_with_options_inner(
                 .to_string();
     }
 
-    if SKIP_CLI_CLEANUP.load(Ordering::Relaxed) {
-        std::mem::forget(raw_converter);
-    } else {
-        drop(raw_converter);
-    }
+    // This attempt can still fail during lowering: release its checker borrows
+    // normally rather than leaking the discarded graph on the CLI fast path.
+    drop(raw_converter);
     let (mut lowered_arena, lowered_root, export_idents) =
         crate::raw_lambda::lower::lower_to_translmod_lambda(raw_arena.into_inner(), raw_lambda);
     // js_implementation.ml:165 prints `-drawlambda` on Translmod's result.
@@ -6836,10 +6910,11 @@ fn compile_source_to_js_with_options_inner(
         let mut buf = Vec::new();
         crate::lambda::printlambda::print_lambda(&lowered_arena.export(lowered_root), &mut buf);
         buf.push(b'\n');
-        let mut stderr = std::io::stderr();
+        let stderr = &mut attempt_output.stderr;
         let _ = stderr.write_all(&buf);
-        let _ = stderr.flush();
+
         if std::env::var_os("RUST_RAWLAMBDA_ONLY").is_some() {
+            attempt_output.publish(type_ctx)?;
             std::process::exit(0);
         }
     }
@@ -6863,17 +6938,15 @@ fn compile_source_to_js_with_options_inner(
     if options.dump_lambda_sexp || options.dump_lambda_sexp_locs {
         let lowered_lambda = lowered_arena.export(lowered_root);
         if options.dump_lambda_sexp {
-            use std::io::Write;
-            let mut stderr = std::io::stderr();
-            let _ = crate::lambda::sexp_lambda::print_lambda(&lowered_lambda, &mut stderr);
-            let _ = stderr.flush();
+            let stderr = &mut attempt_output.stderr;
+            let _ = crate::lambda::sexp_lambda::print_lambda(&lowered_lambda, stderr);
+
         }
         if options.dump_lambda_sexp_locs {
-            use std::io::Write;
-            let mut stderr = std::io::stderr();
+            let stderr = &mut attempt_output.stderr;
             let _ =
-                crate::lambda::sexp_lambda::print_lambda_with_locs(&lowered_lambda, &mut stderr);
-            let _ = stderr.flush();
+                crate::lambda::sexp_lambda::print_lambda_with_locs(&lowered_lambda, stderr);
+
         }
     }
 
@@ -6922,7 +6995,7 @@ fn compile_source_to_js_with_options_inner(
         all_possible_required_modules, options, options.jsx_preserve, filename,
     )?;
     #[cfg(test)]
-    if let Some(trace) = discriminator_trace {
+    if let Some(trace) = discriminator_trace.as_deref_mut() {
         trace.js_program = format!("{program:#?}");
     }
     if let Some(error) = compiler.take_shadow_error() {
@@ -6976,6 +7049,8 @@ fn compile_source_to_js_with_options_inner(
         options.output_path.as_deref(),
         std::sync::Arc::new(compiler.take_lam_locs()),
     );
+    attempt_output.publish(type_ctx)?;
+    print!("{}", apply_gentype_outcome(pending_gentype, "", source_file_for_interface)?);
     if let Some(output_path) = options.output_path.as_deref() {
         let map_path = PathBuf::from(format!("{}.map", output_path.display()));
         if let Some(source_map) = source_map {
@@ -6999,12 +7074,17 @@ fn compile_source_to_js_with_options_inner(
         std::mem::forget(final_env);
         std::mem::forget(env);
         std::mem::forget(tctx);
+    }
+
+    Ok(js)
+        },
+    );
+    if result.is_ok() && SKIP_CLI_CLEANUP.load(Ordering::Relaxed) {
         std::mem::forget(type_ctx);
         std::mem::forget(structure);
         std::mem::forget(parser);
     }
-
-    Ok(js)
+    result
 }
 
 /// Build a structural module coercion by matching interface items to implementation
@@ -7708,44 +7788,21 @@ pub fn typecheck_interface_source(
     };
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
-    // Type check
-    let type_ctx = fresh_type_context();
-    type_ctx.set_location_namespace(&options.location_identity(filename));
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
-    let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
-    tctx.experimental_let_unwrap = experimental_let_unwrap;
-    tctx.transparent_modules = options.transparent_modules;
-    apply_warning_options(&mut tctx, options);
-    // Ppx_entry.rewrite_* (ppx_entry.ml:28, 47) applies the leading warning
-    // attributes; compiling a preprocessed `.ast` does not run it again.
-    if !options.frontend_already_reported {
-        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
-    }
-    apply_file_config_warning_options(&mut tctx, &file_config);
-    let mut pers_env = PersistentEnv::new();
-    let (load_path, load_path_display) = shared_load_path_with_display(options);
-    type_ctx.set_load_paths_shared(load_path.clone());
-    pers_env.set_load_path_shared(load_path.clone(), load_path_display);
-    pers_env.set_open_modules(options.open_modules.clone());
-    pers_env.set_jsx_version(options.jsx_version);
-    pers_env.set_experimental_let_unwrap(options.experimental_let_unwrap);
-    pers_env.set_jsx_module(options.jsx_module.clone());
     let current_unit_name = options.current_unit_name();
-    pers_env.set_compiling_module(current_unit_name.clone());
-
-    tctx.set_persistent_env(pers_env);
-
-    let typed = initial_type_env(
-        &mut tctx,
-        &file_config.open_modules(options),
-        file_config.nopervasives(options),
-        current_unit_name.as_deref(),
-    )
-    .and_then(|env| {
-        offer_unit_to_checker(options.checker, filename);
-        transl_signature(&mut tctx, &env, parser.arena(), &signature)
-            .map(|typed_signature| (typed_signature, env))
-    });
+    type_structure_two_modes(
+        CheckUnit { filename, options, registry: None,
+            module_name: current_unit_name.as_deref(), file_config: &file_config,
+            frontend_warning_specs: &frontend_warning_specs, derived_plans: true,
+            mode: crate::types::context::CheckMode::from_env() },
+        // An interface has no derived item that can fall back.
+        UnitSyntax::new(parser.arena(), &signature, options),
+        None,
+        |tctx, env, syntax| {
+            tctx.experimental_let_unwrap = experimental_let_unwrap;
+            transl_signature(tctx, env, syntax.arena, syntax.tree)
+        },
+        |type_ctx, mut tctx, typed, _, attempt_output| {
     let (typed_signature, env) = match typed {
         Ok(typed) => typed,
         Err(e) => {
@@ -7753,7 +7810,7 @@ pub fn typecheck_interface_source(
             tctx.drain_open_slot_uses();
             let suppress_info_style =
                 !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
-            emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+            attempt_output.warnings(parser.arena(), source, filename, &tctx.warnings);
             if let Some(error) = tctx
                 .persistent_env
                 .as_ref()
@@ -7763,7 +7820,7 @@ pub fn typecheck_interface_source(
             }
             return Err(type_mod_error_to_anyhow(
                 e,
-                &type_ctx,
+                type_ctx,
                 parser.arena(),
                 source,
                 filename,
@@ -7784,17 +7841,17 @@ pub fn typecheck_interface_source(
         &tctx.typed,
         &typed_signature,
         parser.arena(),
-        &type_ctx,
+        type_ctx,
     );
     // js_implementation.ml `after_parsing_sig`: `Typemod.check_js_names
     // ~toplevel:true sg` before the self-inclusion.
-    if let Err(e) = crate::types::typemod::check_js_names(&type_ctx, true, &sig_type) {
+    if let Err(e) = crate::types::typemod::check_js_names(type_ctx, true, &sig_type) {
         let suppress_info_style =
             !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
-        emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+        attempt_output.warnings(parser.arena(), source, filename, &tctx.warnings);
         return Err(type_mod_error_to_anyhow(
             e,
-            &type_ctx,
+            type_ctx,
             parser.arena(),
             source,
             filename,
@@ -7804,15 +7861,15 @@ pub fn typecheck_interface_source(
     // js_implementation.ml:56: `ignore (Includemod.signatures initial_env sg
     // sg)` drops the coercion; a payload reader's error escapes it.
     let self_inclusion = crate::types::includemod::compunit(
-        &type_ctx, &env, filename, &sig_type, filename, &sig_type,
+        type_ctx, &env, filename, &sig_type, filename, &sig_type,
     );
-    if let Err(e) = crate::types::includemod::escaped(&type_ctx, self_inclusion) {
+    if let Err(e) = crate::types::includemod::escaped(type_ctx, self_inclusion) {
         let suppress_info_style =
             !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
-        emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+        attempt_output.warnings(parser.arena(), source, filename, &tctx.warnings);
         return Err(type_mod_error_to_anyhow(
             e.into(),
-            &type_ctx,
+            type_ctx,
             parser.arena(),
             source,
             filename,
@@ -7821,34 +7878,36 @@ pub fn typecheck_interface_source(
     }
     // js_implementation.ml:64 `Delayed_checks.force_delayed_checks ()`.
     tctx.flush_value_usage_checks();
-    emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+    attempt_output.warnings(parser.arena(), source, filename, &tctx.warnings);
     if ppx_warnings_have_errors || type_warnings_have_errors(&tctx.warnings) {
         return Err(UserDiagnostic::new(String::new(), 2).into());
     }
 
     // Print typed tree if requested
     if options.dump_typed_sexp {
-        let mut stderr = std::io::stderr();
+        let stderr = &mut attempt_output.stderr;
         let _ = print_typed_signature(
             parser.arena(),
-            &type_ctx,
+            type_ctx,
             &tctx.typed,
             &typed_signature,
-            &mut stderr,
+            stderr,
         );
     }
     if options.dump_typed_sexp_locs {
-        let mut stderr = std::io::stderr();
+        let stderr = &mut attempt_output.stderr;
         let _ = print_typed_signature_with_locs(
             parser.arena(),
-            &type_ctx,
+            type_ctx,
             &tctx.typed,
             &typed_signature,
-            &mut stderr,
+            stderr,
         );
     }
 
     Ok(())
+        },
+    ).1
 }
 
 /// Type-check an interface file and dump typed sexp if requested.
@@ -8435,6 +8494,10 @@ pub struct FileConfigOverrides {
     pub jsx_preserve: bool,
     /// `-bs-noassertfalse` (`Clflags.no_assert_false`, translcore.ml:1555).
     pub no_assert_false: bool,
+    /// `-bs-no-bin-annot` (`Clflags.binary_annotations`): OCaml writes no
+    /// `.cmt` or `.cmti` for the file, so tools that read those do not see
+    /// it. A build writes neither; `reanalyze` reads this to skip the file.
+    pub no_bin_annot: bool,
     /// `-noassert` (`Clflags.noassert`, translcore.ml:1558).
     pub noassert: bool,
     /// `-bs-no-check-div-by-zero` (`Js_config.check_div_by_zero`,
@@ -8681,6 +8744,7 @@ fn run_file_level_flags(
                 "-bs-g" => overrides.debug = true,
                 "-bs-jsx-preserve" => overrides.jsx_preserve = true,
                 "-bs-noassertfalse" => overrides.no_assert_false = true,
+                "-bs-no-bin-annot" => overrides.no_bin_annot = true,
                 "-noassert" => overrides.noassert = true,
                 "-bs-no-check-div-by-zero" => overrides.no_check_div_by_zero = true,
                 "-bs-no-version-header" => overrides.no_version_header = true,
@@ -9449,6 +9513,9 @@ pub struct InProcessPreJsCompileResult {
     /// general forms of its derived items; the JS backend runs on both and
     /// compares what they produce.
     pub derived_reference: Option<Box<InProcessPreJsCompileResult>>,
+    /// The collector the check of this unit reports to
+    /// ([`CompilerOptions::derived_differences`]).
+    pub derived_differences: Option<DerivedDifferences>,
 }
 
 /// The `.cmj` metadata of an in-process compile, available after the JS
@@ -9743,13 +9810,40 @@ pub fn compile_source_in_process(
     let structure = frontend.structure;
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
-    let effective_options = if options.experimental_let_unwrap == experimental_let_unwrap {
+    let mut effective_options = if options.experimental_let_unwrap == experimental_let_unwrap {
         std::borrow::Cow::Borrowed(options)
     } else {
         let mut options = options.clone();
         options.experimental_let_unwrap = experimental_let_unwrap;
         std::borrow::Cow::Owned(options)
     };
+    if options.derived_path == DerivedPath::Check && parser.arena().plans().item_count() > 0 {
+        let source = source.to_owned();
+        let filename = filename.to_owned();
+        let mut general_options = options.clone();
+        general_options.derived_path = DerivedPath::General;
+        general_options.derived_census = None;
+        general_options.derived_reference = None;
+        effective_options.to_mut().derived_reference = Some(std::sync::Arc::new(move || {
+            let mut parser = Parser::new(&filename, &source);
+            let structure = module::parse_structure(&mut parser);
+            let frontend = run_implementation_frontend(
+                &mut parser,
+                structure,
+                &source,
+                &filename,
+                &general_options,
+                &mut String::new(),
+            )
+            .map_err(|error| anyhow::anyhow!("the frontend failed on {filename}: {error}"))?;
+            crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
+            Ok((parser.into_arena(), frontend.structure))
+        }));
+    }
+
+    // Borrow source/options for the duration of this synchronous compile.
+    // No owned fallback inputs are built unless the attempt requests them.
+    let fallback = general_syntax_provider(source, filename, options);
 
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let result = compile_preprocessed_structure_in_process_with_signature_hook(
@@ -9763,6 +9857,7 @@ pub fn compile_source_in_process(
         gentype_interface,
         None,
         None,
+        Some(&fallback),
     )?;
     // Like the direct compile: a frontend warning configured as an error fails
     // the compilation once type checking has reported its own diagnostics.
@@ -10167,6 +10262,7 @@ pub fn compile_preprocessed_structure_in_process(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -10189,6 +10285,7 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
     gentype_interface: Option<crate::gentype::main::InterfaceRead>,
     signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
     before_js: Option<&mut InProcessBeforeJsHook<'_>>,
+    fallback: Option<DerivedFallback<'_>>,
 ) -> Result<InProcessCompileResult> {
     let pre_js = compile_preprocessed_structure_in_process_until_js(
         arena,
@@ -10201,6 +10298,7 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
         gentype_interface,
         signature_ready,
         SignaturePublicationMode::Eager,
+        fallback,
     )?;
 
     let refreshed_registry = if let Some(hook) = before_js {
@@ -10213,6 +10311,7 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
 }
 
 /// A fresh type context with the stamp counter where OCaml's starts.
+/// Cost: one context allocation/setup per unit attempt.
 fn fresh_type_context() -> TypeContext {
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
@@ -10229,16 +10328,13 @@ fn fresh_type_context() -> TypeContext {
 /// module cannot be found; report it like a type error of the unit.
 fn in_process_type_check_context<'a>(
     type_ctx: &'a TypeContext,
-    arena: &'a crate::parse_arena::ParseArena,
-    options: &CompilerOptions,
-    registry: &ModuleRegistry,
-    module_name: &str,
-    file_config: &FileConfigOverrides,
-    frontend_warning_specs: &[ppx::WarningAttributeSpec],
-) -> (
-    TypeCheckContext<'a>,
-    crate::types::typemod::TypeModResult<Env>,
-) {
+    unit: &CheckUnit<'a>,
+    arena: &'a ParseArena,
+    mode: crate::types::context::CheckMode,
+) -> (TypeCheckContext<'a>, crate::types::typemod::TypeModResult<Env>) {
+    let CheckUnit { options, registry, module_name, file_config,
+        frontend_warning_specs, .. } = *unit;
+    type_ctx.set_explain_mode(mode);
     let effective_options = file_config.apply(options);
     let options = &*effective_options;
     let mut tctx = TypeCheckContext::new(type_ctx, arena);
@@ -10251,7 +10347,7 @@ fn in_process_type_check_context<'a>(
         apply_leading_warning_attribute_options(&mut tctx, frontend_warning_specs);
     }
     apply_file_config_warning_options(&mut tctx, file_config);
-    let mut pers_env = PersistentEnv::from_registry(registry);
+    let mut pers_env = registry.map_or_else(PersistentEnv::new, PersistentEnv::from_registry);
     pers_env.set_visible_package_roots(options.visible_package_roots.clone());
     let (load_path, load_path_display) = shared_load_path_with_display(options);
     type_ctx.set_load_paths_shared(load_path.clone());
@@ -10261,15 +10357,284 @@ fn in_process_type_check_context<'a>(
     pers_env.set_experimental_let_unwrap(options.experimental_let_unwrap);
     pers_env.set_jsx_module(options.jsx_module.clone());
     pers_env.set_nopervasives(options.nopervasives);
-    pers_env.set_compiling_module(Some(module_name.to_string()));
+    pers_env.set_compiling_module(module_name.map(str::to_owned));
     tctx.set_persistent_env(pers_env);
     let env = initial_type_env(
         &mut tctx,
         &file_config.open_modules(options),
         file_config.nopervasives(options),
-        Some(module_name),
+        module_name,
     );
     (tctx, env)
+}
+
+/// Borrowed inputs prepared once per unit, not passed down a node walk.
+/// Cost: copying 80 bytes on 64-bit targets; no allocation.
+#[derive(Clone, Copy)]
+struct CheckUnit<'a> {
+    filename: &'a str,
+    options: &'a CompilerOptions,
+    registry: Option<&'a ModuleRegistry>,
+    module_name: Option<&'a str>,
+    file_config: &'a FileConfigOverrides,
+    frontend_warning_specs: &'a [ppx::WarningAttributeSpec],
+    derived_plans: bool,
+    mode: crate::types::context::CheckMode,
+}
+
+/// The syntax one attempt of a unit is checked from: the unit's first tree,
+/// or its general form once a plan could not be used. Cost: three words
+/// copied per attempt, never per node.
+struct UnitSyntax<'a, S> {
+    arena: &'a ParseArena,
+    tree: &'a S,
+    /// See [`CompilerOptions::warning_locations`]: the located parse of
+    /// this syntax.
+    warning_locations: Option<&'a WarningLocations>,
+}
+
+impl<S> Clone for UnitSyntax<'_, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<S> Copy for UnitSyntax<'_, S> {}
+
+impl<'a, S> UnitSyntax<'a, S> {
+    /// A first tree with the options' located parse. O(1).
+    fn new(arena: &'a ParseArena, tree: &'a S, options: &'a CompilerOptions) -> Self {
+        Self { arena, tree, warning_locations: options.warning_locations.as_ref() }
+    }
+}
+
+/// Settings of one whole-unit attempt, owned by the unit's single attempt
+/// loop ([`type_structure_two_modes`]): every retry reason changes these and
+/// nothing else. Cost: two bytes copied per attempt, never per node.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct CheckAttempt {
+    mode: crate::types::context::CheckMode,
+    /// The checker may discharge the plans of derived items. Cleared, once,
+    /// when a plan could not be used: the attempt after it runs on the
+    /// unit's general syntax.
+    derived_plans: bool,
+}
+
+/// Why an attempt is discarded and the unit checked again.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AttemptRetry {
+    /// A plan of a derived item could not be used.
+    DerivedFallback,
+    /// A Success attempt failed: explain the failure.
+    Explain,
+}
+
+impl CheckAttempt {
+    /// The settings of the attempt after one discarded for `reason`, or
+    /// `None` when that reason cannot apply again. Each reason applies at
+    /// most once per unit, so a unit has at most three attempts. O(1).
+    fn after(self, reason: AttemptRetry) -> Option<Self> {
+        use crate::types::context::CheckMode;
+        match reason {
+            AttemptRetry::DerivedFallback if self.derived_plans => Some(Self { derived_plans: false, ..self }),
+            AttemptRetry::Explain if self.mode == CheckMode::Success => Some(Self { mode: CheckMode::Explain, ..self }),
+            AttemptRetry::DerivedFallback | AttemptRetry::Explain => None,
+        }
+    }
+}
+
+/// Output is private until the attempt crosses its publication boundary.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum AttemptPublication { Pending, Committed }
+
+/// One byte buffer per unit, allocated only when there are reports to print.
+/// This is not stored per node or passed down a checker walk.
+struct AttemptOutput {
+    stderr: Vec<u8>,
+    publication: AttemptPublication,
+    mode: crate::types::context::CheckMode,
+    signature_report: Option<Box<crate::cmi::signature_check::PreparedReport>>,
+    #[cfg(feature = "test-hooks")]
+    force_unexplained_failure: bool,
+}
+
+impl AttemptOutput {
+    /// O(1), no allocation until the first diagnostic or requested dump.
+    fn new(mode: crate::types::context::CheckMode) -> Self {
+        Self {
+            stderr: Vec::new(), publication: AttemptPublication::Pending, mode, signature_report: None,
+            #[cfg(feature = "test-hooks")]
+            force_unexplained_failure: false,
+        }
+    }
+
+    /// No allocation on the default path. Check mode retains report bytes until
+    /// publication; a mismatch still participates in pre-publication validation.
+    fn signature_report(&mut self, report: Option<crate::cmi::signature_check::PreparedReport>) -> Result<()> {
+        let Some(report) = report else { return Ok(()) };
+        if self.publication == AttemptPublication::Committed {
+            return report.publish();
+        }
+        let result = report.validate();
+        self.signature_report = Some(Box::new(report));
+        result
+    }
+
+    /// O(report bytes), only on a diagnostic path. Discarded reports are never emitted.
+    fn warnings(&mut self, arena: &ParseArena, source: &str, filename: &str, warnings: &[TypeCoreWarning]) {
+        if !warnings.is_empty() {
+            self.stderr.extend_from_slice(format_type_warnings(arena, source, filename, warnings).as_bytes());
+        }
+    }
+
+    /// O(1) without diagnostics; otherwise O(report bytes). Called before the
+    /// first externally visible artifact/signature, after every fallible check.
+    fn publish(&mut self, ctx: &TypeContext) -> Result<()> {
+        if self.publication == AttemptPublication::Pending {
+            // Test-only: fail after private freezing and continuation work,
+            // before anything can escape. Explain then checks the same unit.
+            #[cfg(feature = "test-hooks")]
+            if self.force_unexplained_failure {
+                ctx.note_unexplained_unify_failure();
+                self.force_unexplained_failure = false;
+            }
+            if self.mode == crate::types::context::CheckMode::Success && ctx.unexplained_unify_failure() {
+                return Err(anyhow!("unit requires an explanatory check"));
+            }
+            ctx.keep_attempt_counters();
+            self.publication = AttemptPublication::Committed;
+        }
+        if let Some(report) = self.signature_report.take() {
+            report.publish()?;
+        }
+        if !self.stderr.is_empty() {
+            let mut stderr = std::io::stderr();
+            let _ = std::io::Write::write_all(&mut stderr, &self.stderr);
+            let _ = std::io::Write::flush(&mut stderr);
+            self.stderr.clear();
+        }
+        Ok(())
+    }
+}
+
+/// The one attempt loop of a unit: check it with diagnostic-only snapshots
+/// elided, continue on its general syntax when a plan of a derived item
+/// cannot be used, and explain it if the check fails. Every retry reason
+/// changes the loop's [`CheckAttempt`] settings, so the reasons compose: a
+/// unit that falls back keeps its check mode, and one that then fails is
+/// explained once, on its general syntax. Cost: one check on success, one
+/// more for a fallback (plus the frontend run `fallback` makes) and one
+/// more to explain a failure; O(1) dispatch.
+///
+/// `fallback` makes the unit's general syntax; without it a fallback fails
+/// the compile with [`DerivedRetry`]. The continuation validates the checked
+/// unit while its output stays private. Its publication boundary commits the
+/// attempt before external artifacts or callbacks become observable; all
+/// errors before that boundary get Explain. Returning the owned context
+/// separately keeps tooling's typed handles valid without a self-referential
+/// context or retaining the discarded type graph.
+fn type_structure_two_modes<S, T, R>(
+    unit: CheckUnit<'_>,
+    first: UnitSyntax<'_, S>,
+    fallback: Option<&dyn Fn() -> Result<GeneralSyntax<S>>>,
+    check: impl for<'a> Fn(&mut TypeCheckContext<'a>, &Env, UnitSyntax<'a, S>)
+        -> crate::types::typemod::TypeModResult<T>,
+    mut finish: impl for<'a> FnMut(&'a TypeContext, TypeCheckContext<'a>,
+        crate::types::typemod::TypeModResult<(T, Env)>, UnitSyntax<'a, S>, &mut AttemptOutput) -> Result<R>,
+) -> (TypeContext, Result<R>) {
+    use crate::types::context::CheckMode;
+    let CheckUnit { filename, options, .. } = unit;
+    offer_unit_to_checker(options.checker, filename);
+    let mut attempt = CheckAttempt { mode: unit.mode, derived_plans: unit.derived_plans };
+    // Owned here once made, so every later attempt borrows it.
+    let mut general: Option<GeneralSyntax<S>> = None;
+    loop {
+        let syntax = match &general {
+            Some(general) => UnitSyntax {
+                arena: &general.arena,
+                tree: &general.tree,
+                warning_locations: general.warning_locations.as_ref(),
+            },
+            None => first,
+        };
+        crate::perf_counters::record_check_attempt();
+        let type_ctx = fresh_type_context();
+        type_ctx.set_location_namespace(&options.location_identity(filename));
+        type_ctx.defer_attempt_counters();
+        let (mut tctx, env) = crate::timing::measure(crate::timing::Phase::EnvSetup, || {
+            in_process_type_check_context(&type_ctx, &unit, syntax.arena, attempt.mode)
+        });
+        // Census ownership follows the syntax, including its general form
+        // after fallback; it is not conditional on using derived plans.
+        tctx.derived_census = syntax.arena.derived_census.clone();
+        let typed = crate::timing::measure(crate::timing::Phase::Typecheck, || {
+            env.and_then(|env| check(&mut tctx, &env, syntax).map(|typed| (typed, env)))
+        });
+        if tctx.derived_fallback {
+            // Dropped in dependency order: nothing of this attempt survives.
+            drop(typed);
+            drop(tctx);
+            let (Some(next), Some(fallback)) = (attempt.after(AttemptRetry::DerivedFallback), fallback) else {
+                return (type_ctx, Err(DerivedRetry.into()));
+            };
+            // The frontend's own errors were reported with the first tree;
+            // one here is the compile's error, not a check to explain.
+            match fallback() {
+                Ok(syntax) => general = Some(syntax),
+                Err(error) => return (type_ctx, Err(error)),
+            }
+            drop(type_ctx);
+            attempt = next;
+            continue;
+        }
+        if attempt.mode == CheckMode::Success
+            && (typed.is_err() || type_ctx.unexplained_unify_failure())
+        {
+            // Dropped in dependency order before constructing the next attempt.
+            drop(typed);
+            drop(tctx);
+            drop(type_ctx);
+            crate::perf_counters::record_explain_rerun();
+            attempt = attempt.after(AttemptRetry::Explain).expect("a Success attempt can be explained");
+            continue;
+        }
+        let mut reports = AttemptOutput::new(attempt.mode);
+        #[cfg(feature = "test-hooks")]
+        {
+            reports.force_unexplained_failure = attempt.mode == CheckMode::Success
+                && std::env::var("RESCRIPT_TEST_DISCARD_UNIT").ok().is_some_and(|unit| {
+                    FsPath::new(filename).file_stem().and_then(|s| s.to_str()) == Some(unit.as_str())
+                });
+        }
+        let output = finish(&type_ctx, tctx, typed, syntax, &mut reports);
+        // Location retries request another parse, not an explanation of this
+        // check. Leave its reports and counters private; the located compile
+        // will explain any actual failure on its own syntax.
+        if reports.publication == AttemptPublication::Pending
+            && output.as_ref().is_err_and(|error| error.is::<LocationRetry>())
+        {
+            return (type_ctx, output);
+        }
+        if reports.publication == AttemptPublication::Pending && attempt.mode == CheckMode::Success
+            && (output.is_err() || type_ctx.unexplained_unify_failure())
+        {
+            drop(output);
+            drop(type_ctx);
+            crate::perf_counters::record_explain_rerun();
+            attempt = attempt.after(AttemptRetry::Explain).expect("a Success attempt can be explained");
+            continue;
+        }
+        let output = reports.publish(&type_ctx).and(output);
+        // Common final context use for all six entry points, after their
+        // continuation (including lowering, GenType and signature hooks).
+        // One Cell read per published Success unit, never per node.
+        if reports.publication == AttemptPublication::Committed && attempt.mode == CheckMode::Success {
+            assert!(!type_ctx.unexplained_unify_failure(),
+                "{filename}: unexplained unification failure after Success publication");
+        }
+        return (type_ctx, output);
+    }
 }
 
 /// The typed tree of one module, type-checked on demand for editor tooling,
@@ -10281,6 +10646,9 @@ pub struct ToolingTypedModule {
     pub typed: ToolingTyped,
     /// Node storage of `typed`.
     pub typed_arena: crate::types::typedtree::TypedArena,
+    /// Whether the file's `@@config` leaves binary annotations on: with
+    /// `-bs-no-bin-annot` OCaml writes no `.cmt` or `.cmti` for it.
+    pub binary_annotations: bool,
 }
 
 /// What type-checking a module for editor tooling produced.
@@ -10303,27 +10671,43 @@ pub fn typecheck_structure_for_tooling(
     module_name: &str,
     options: &CompilerOptions,
     registry: &ModuleRegistry,
+    has_interface: bool,
 ) -> ToolingTypedModule {
     let file_config = extract_file_config_from_structure(structure, arena);
     // The frontend raised on any payload these cannot read.
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_attribute_specs(structure, arena)
             .expect("the frontend read these attributes");
-    let type_ctx = fresh_type_context();
-    type_ctx.set_location_namespace(&options.location_identity(filename));
-    let (typed, typed_arena) = {
-        let (mut tctx, env) = in_process_type_check_context(
-            &type_ctx,
-            arena,
-            options,
-            registry,
-            module_name,
-            &file_config,
-            &frontend_warning_specs,
-        );
-        offer_unit_to_checker(options.checker, filename);
-        let typed = match env.and_then(|env| type_structure(&mut tctx, &env, arena, structure)) {
-            Ok((typed_structure, _final_env)) => ToolingTyped::Implementation(typed_structure),
+    let (type_ctx, output) = type_structure_two_modes(
+        CheckUnit { filename, options, registry: Some(registry),
+            module_name: Some(module_name), file_config: &file_config,
+            frontend_warning_specs: &frontend_warning_specs, derived_plans: true,
+            mode: crate::types::context::CheckMode::from_env() },
+        // Tooling parses derived code as syntax: nothing to fall back from.
+        UnitSyntax::new(arena, structure, options),
+        None,
+        |tctx, env, syntax| type_structure(tctx, env, syntax.arena, syntax.tree),
+        |type_ctx, mut tctx, result, UnitSyntax { arena, .. }, _attempt_output| {
+        let typed = match result {
+
+            Ok(((typed_structure, _final_env), env)) => {
+                // typemod.ml:1742-1758: an implementation is checked against
+                // its interface, which records the values the interface
+                // exports (`Cmt_format.record_value_dependency`). The build
+                // reported a mismatch already.
+                if has_interface {
+                    drop(check_compunit_inclusion_for_errors(
+                        &mut tctx,
+                        &env,
+                        &typed_structure,
+                        filename,
+                        &|| read_in_process_source(filename),
+                        filename,
+                        options.current_unit_name().as_deref(),
+                    ));
+                }
+                ToolingTyped::Implementation(typed_structure)
+            }
             Err(e) => {
                 let source = read_in_process_source(filename);
                 let report = match tctx
@@ -10332,17 +10716,20 @@ pub fn typecheck_structure_for_tooling(
                     .and_then(|env| env.last_error())
                 {
                     Some(error) => persistent_env_error_to_anyhow(error, filename),
-                    None => type_mod_error_to_anyhow(e, &type_ctx, arena, &source, filename, false),
+                    None => type_mod_error_to_anyhow(e, type_ctx, arena, &source, filename, false),
                 };
                 ToolingTyped::Failed(format!("{report:#}"))
             }
         };
-        (typed, tctx.take_typed_arena())
-    };
+        Ok((typed, tctx.take_typed_arena()))
+        },
+    );
+    let (typed, typed_arena) = output.expect("tooling represents errors as ToolingTyped::Failed");
     ToolingTypedModule {
         type_ctx,
         typed,
         typed_arena,
+        binary_annotations: !file_config.no_bin_annot,
     }
 }
 
@@ -10361,21 +10748,18 @@ pub fn typecheck_signature_for_tooling(
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena)
             .expect("the frontend read these attributes");
-    let type_ctx = fresh_type_context();
-    type_ctx.set_location_namespace(&options.location_identity(filename));
-    let (typed, typed_arena) = {
-        let (mut tctx, env) = in_process_type_check_context(
-            &type_ctx,
-            arena,
-            options,
-            registry,
-            module_name,
-            &file_config,
-            &frontend_warning_specs,
-        );
-        offer_unit_to_checker(options.checker, filename);
-        let typed = match env.and_then(|env| transl_signature(&mut tctx, &env, arena, signature)) {
-            Ok(typed_signature) => ToolingTyped::Interface(typed_signature),
+    let (type_ctx, output) = type_structure_two_modes(
+        CheckUnit { filename, options, registry: Some(registry),
+            module_name: Some(module_name), file_config: &file_config,
+            frontend_warning_specs: &frontend_warning_specs, derived_plans: true,
+            mode: crate::types::context::CheckMode::from_env() },
+        UnitSyntax::new(arena, signature, options),
+        None,
+        |tctx, env, syntax| transl_signature(tctx, env, syntax.arena, syntax.tree),
+        |type_ctx, mut tctx, result, UnitSyntax { arena, .. }, _attempt_output| {
+        let typed = match result {
+
+            Ok((typed_signature, _env)) => ToolingTyped::Interface(typed_signature),
             Err(e) => {
                 let source = read_in_process_source(filename);
                 let report = match tctx
@@ -10384,17 +10768,20 @@ pub fn typecheck_signature_for_tooling(
                     .and_then(|env| env.last_error())
                 {
                     Some(error) => persistent_env_error_to_anyhow(error, filename),
-                    None => type_mod_error_to_anyhow(e, &type_ctx, arena, &source, filename, false),
+                    None => type_mod_error_to_anyhow(e, type_ctx, arena, &source, filename, false),
                 };
                 ToolingTyped::Failed(format!("{report:#}"))
             }
         };
-        (typed, tctx.take_typed_arena())
-    };
+        Ok((typed, tctx.take_typed_arena()))
+        },
+    );
+    let (typed, typed_arena) = output.expect("tooling represents errors as ToolingTyped::Failed");
     ToolingTypedModule {
         type_ctx,
         typed,
         typed_arena,
+        binary_annotations: !file_config.no_bin_annot,
     }
 }
 
@@ -10417,6 +10804,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     gentype_interface: Option<crate::gentype::main::InterfaceRead>,
     signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
     publication: SignaturePublicationMode,
+    fallback: Option<DerivedFallback<'_>>,
 ) -> Result<InProcessPreJsCompileResult> {
     let unit = UntilJs {
         arena,
@@ -10426,15 +10814,17 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         registry,
         has_interface,
         publication,
+        fallback,
     };
     // O(1): one comparison per unit; only `check` compiles a unit twice.
     if options.derived_path == DerivedPath::Check && arena.plans().item_count() > 0 {
         return derived_check::until_js(&unit, options, gentype_interface, signature_ready);
     }
-    compile_until_js(&unit, options, gentype_interface, signature_ready, true)
+    compile_until_js(&unit, options, gentype_interface, signature_ready)
 }
 
 /// The unit an in-process compile works on.
+#[derive(Clone, Copy)]
 struct UntilJs<'a> {
     arena: &'a crate::parse_arena::ParseArena,
     structure: &'a Structure,
@@ -10443,18 +10833,16 @@ struct UntilJs<'a> {
     registry: &'a ModuleRegistry,
     has_interface: bool,
     publication: SignaturePublicationMode,
+    fallback: Option<DerivedFallback<'a>>,
 }
 
-/// [`compile_preprocessed_structure_in_process_until_js`] for one path of
-/// the unit's derived items: from their plans (`derived_plans`), or, for the
-/// reference compile of `RESCRIPT_DERIVED_PATH=check`, from their general
-/// forms.
+/// [`compile_preprocessed_structure_in_process_until_js`] for one tree of
+/// the unit.
 fn compile_until_js(
     unit: &UntilJs<'_>,
     options: &CompilerOptions,
     gentype_interface: Option<crate::gentype::main::InterfaceRead>,
     mut signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
-    derived_plans: bool,
 ) -> Result<InProcessPreJsCompileResult> {
     let UntilJs {
         arena,
@@ -10464,6 +10852,7 @@ fn compile_until_js(
         registry,
         has_interface,
         publication,
+        fallback,
     } = *unit;
     if !arena.stores_locations()
         && (options.source_map != crate::js_ir::source_map::SourceMapMode::None
@@ -10500,41 +10889,21 @@ fn compile_until_js(
         "[compile_source_in_process] {} type-check start",
         module_name
     );
-    let env_setup_span = info_span!("compiler.env_setup").entered();
-    let env_setup_start = crate::timing::enabled().then(std::time::Instant::now);
-    let type_ctx = fresh_type_context();
-    type_ctx.set_location_namespace(&options.location_identity(filename));
-    let (mut tctx, env) = in_process_type_check_context(
-        &type_ctx,
-        arena,
-        options,
-        registry,
-        module_name,
-        &file_config,
-        &frontend_warning_specs,
-    );
-    tctx.derived_plans = derived_plans;
-    // The reference compile of a check is not part of the census.
-    if derived_plans {
-        tctx.derived_census = arena.derived_census.clone();
-    }
-    drop(env_setup_span);
-    if let Some(start) = env_setup_start {
-        crate::timing::record(crate::timing::Phase::EnvSetup, start.elapsed());
-    }
-
-    // Diagnostics are reported against the source file, read only when
-    // there is something to report.
+    // Read source only when retained diagnostics need it.
     let source_cell = std::cell::OnceCell::new();
     let source = || -> &str { source_cell.get_or_init(|| read_in_process_source(filename)) };
-
-    let typed = crate::timing::measure(crate::timing::Phase::Typecheck, || {
-        let _phase = info_span!("compiler.type_structure").entered();
-        env.and_then(|env| {
-            offer_unit_to_checker(options.checker, filename);
-            type_structure(&mut tctx, &env, arena, structure).map(|typed| (typed, env))
-        })
-    });
+    let result = type_structure_two_modes(
+        CheckUnit { filename, options, registry: Some(registry),
+            module_name: Some(module_name), file_config: &file_config,
+            frontend_warning_specs: &frontend_warning_specs,
+            derived_plans: options.derived_path.plans_off().is_none(),
+            mode: crate::types::context::CheckMode::from_env() },
+        UnitSyntax::new(arena, structure, options),
+        fallback,
+        |tctx, env, syntax| type_structure(tctx, env, syntax.arena, syntax.tree),
+        |type_ctx, mut tctx, typed, syntax, attempt_output| {
+    // A unit that fell back is finished from its general syntax.
+    let UnitSyntax { arena, tree: structure, warning_locations } = syntax;
     let ((typed_structure, final_env), env) = match typed {
         Ok(result) => result,
         Err(e) => {
@@ -10558,7 +10927,7 @@ fn compile_until_js(
                 &warnings,
                 type_mod_error_to_anyhow(
                     e,
-                    &type_ctx,
+                    type_ctx,
                     arena,
                     source(),
                     filename,
@@ -10578,10 +10947,10 @@ fn compile_until_js(
     {
         let _ = print_typed_structure(
             arena,
-            &type_ctx,
+            type_ctx,
             &tctx.typed,
             &typed_structure,
-            &mut std::io::stderr(),
+            &mut attempt_output.stderr,
         );
     }
 
@@ -10595,7 +10964,7 @@ fn compile_until_js(
         if has_interface {
             apply_moregen_constraints(
                 &mut tctx,
-                &type_ctx,
+                type_ctx,
                 &typed_structure,
                 options,
                 has_interface,
@@ -10608,7 +10977,7 @@ fn compile_until_js(
             // typemod.ml `type_implementation_more`: `check_js_names
             // ~toplevel:true simple_sg` before the inferred-signature inclusion.
             if let Err(e) =
-                crate::types::typemod::check_js_names(&type_ctx, true, &simple_signature)
+                crate::types::typemod::check_js_names(type_ctx, true, &simple_signature)
             {
                 if !arena.stores_locations() {
                     return Err(LocationRetry::Diagnostic.into());
@@ -10620,7 +10989,7 @@ fn compile_until_js(
                     &warnings,
                     type_mod_error_to_anyhow(
                         e,
-                        &type_ctx,
+                        type_ctx,
                         arena,
                         source(),
                         filename,
@@ -10629,7 +10998,7 @@ fn compile_until_js(
                 ));
             }
             let inferred_inclusion = coerce_to_inferred_signature(
-                &type_ctx,
+                type_ctx,
                 &env,
                 filename,
                 &typed_structure.str_type,
@@ -10637,10 +11006,10 @@ fn compile_until_js(
             );
             // A payload reader's error escapes the inclusion (includecore.ml:45).
             let inferred_inclusion =
-                crate::types::includemod::escaped(&type_ctx, inferred_inclusion).map_err(|e| {
+                crate::types::includemod::escaped(type_ctx, inferred_inclusion).map_err(|e| {
                     in_process_typed_unit_error(
                         e.into(),
-                        &type_ctx,
+                        type_ctx,
                         arena,
                         &source,
                         filename,
@@ -10652,7 +11021,7 @@ fn compile_until_js(
                     .map_err(|e| anyhow!("Inferred signature inclusion failed: {e:?}"))?,
             );
             if let Err(e) = crate::types::typemod::check_nongen_schemes(
-                &type_ctx,
+                type_ctx,
                 &final_env,
                 &simple_signature,
             ) {
@@ -10663,7 +11032,7 @@ fn compile_until_js(
                     &warnings,
                     type_mod_error_to_anyhow(
                         e,
-                        &type_ctx,
+                        type_ctx,
                         arena,
                         source(),
                         filename,
@@ -10671,14 +11040,14 @@ fn compile_until_js(
                     ),
                 ));
             }
-            normalize_signature(&type_ctx, &final_env, &simple_signature);
+            normalize_signature(type_ctx, &final_env, &simple_signature);
         }
 
         // `Env.save_signature` (typemod.ml:1779-1788) renames the bound
         // identifiers of a copy of the signature (env.ml:1886-1892). In-process
         // builds write no `.cmi`, but the copy still takes its stamps.
         if !has_interface {
-            saved_signature_copy(&type_ctx, &simple_signature);
+            saved_signature_copy(type_ctx, &simple_signature);
         }
 
         simple_signature
@@ -10711,7 +11080,7 @@ fn compile_until_js(
     // translation, as the file compile does.
     tctx.flush_value_usage_checks();
     let mut located_warnings = None;
-    if !place_location_free_warnings(arena, options, &mut located_warnings, &mut tctx.warnings) {
+    if !place_location_free_warnings(arena, warning_locations, &mut located_warnings, &mut tctx.warnings) {
         return Err(LocationRetry::Warning.into());
     }
     let post_type_warning_start = tctx.warnings.len();
@@ -10726,7 +11095,7 @@ fn compile_until_js(
             let _ = if kind == DumpKind::TypedTree {
                 crate::types::sexp_typedtree::print_typed_structure(
                     arena,
-                    &type_ctx,
+                    type_ctx,
                     &tctx.typed,
                     &typed_structure,
                     &mut buf,
@@ -10734,7 +11103,7 @@ fn compile_until_js(
             } else {
                 crate::types::sexp_typedtree::print_typed_structure_with_locs(
                     arena,
-                    &type_ctx,
+                    type_ctx,
                     &tctx.typed,
                     &typed_structure,
                     &mut buf,
@@ -10746,7 +11115,7 @@ fn compile_until_js(
 
     let unit_reads = if options.collect_unit_reads {
         crate::types::unit_reads::structure_reads(
-            &type_ctx,
+            type_ctx,
             &tctx.typed,
             &typed_structure,
             &options.open_modules,
@@ -10761,15 +11130,8 @@ fn compile_until_js(
     // the already-published interface remains the target signature for
     // `Translmod.transl_implementation`; do not replace it with the
     // implementation signature or the export coercion becomes identity.
-    let mut publication_guard =
-        (!has_interface).then(crate::perf_counters::SignaturePublication::begin);
     let (mut pers_struct, persistent_env_after_signature) = if has_interface {
-        (
-            None,
-            tctx.persistent_env
-                .take()
-                .unwrap_or_else(PersistentEnv::new),
-        )
+        (None, tctx.persistent_env.take().unwrap_or_else(PersistentEnv::new))
     } else {
         let _phase = info_span!("compiler.signature_extract").entered();
         let signature_publish_start = crate::timing::enabled().then(std::time::Instant::now);
@@ -10795,21 +11157,21 @@ fn compile_until_js(
         // signature that compiler/gentype/TranslateStructure.ml:174-183 reads
         // through Env.scrape_alias.
         let current_raw_sig = std::sync::Arc::new(
-            crate::types::typecore::copy_lookup_signature_for_subst(&signature_for_save, &type_ctx),
+            crate::types::typecore::copy_lookup_signature_for_subst(&signature_for_save, type_ctx),
         );
         // `save_signature` saves a copy (`Subst.signature (Subst.for_saving
         // Subst.identity) sg`, env.ml:1949-1952): finalizing the saved paths
         // (`t` -> `Current.t`) must not reach the typed tree's type nodes,
         // which Lambda translation reads next (Typeopt expansions).
         let signature_for_save =
-            crate::types::typecore::copy_lookup_signature_for_subst(&signature_for_save, &type_ctx);
+            crate::types::typecore::copy_lookup_signature_for_subst(&signature_for_save, type_ctx);
         // typemod.ml:1825: `Builtin_attributes.deprecated_of_str ast`, raising
         // where `string_of_payload` raises.
         let deprecated =
             crate::types::typemod::deprecated_of_str(arena, structure).map_err(|error| {
                 in_process_typed_unit_error(
                     payload_type_error(error),
-                    &type_ctx,
+                    type_ctx,
                     arena,
                     &source,
                     filename,
@@ -10818,14 +11180,14 @@ fn compile_until_js(
             })?;
         if type_ctx.compiler_counters_enabled() {
             crate::perf_counters::census_exported_signature(
-                &type_ctx,
+                type_ctx,
                 module_name,
                 &current_raw_sig,
             );
         }
         if options.dumps.contains(&DumpKind::Sig) {
             dumps.push(canonical_signature_dump(
-                &type_ctx,
+                type_ctx,
                 module_name,
                 &current_raw_sig,
                 deprecated.as_deref(),
@@ -10838,7 +11200,7 @@ fn compile_until_js(
             filename,
             deprecated,
             Vec::new(),
-            &type_ctx,
+            type_ctx,
         );
         // OCaml saves the current unit into the persistent table before
         // lambda translation (compiler/ml/typemod.ml:1779-1788). That save
@@ -10852,44 +11214,30 @@ fn compile_until_js(
         type_ctx.register_gentype_raw_module_sig(module_name, current_raw_sig.clone());
         type_ctx.register_raw_module_sig(module_name, current_raw_sig);
 
+        // Freeze the inferred signature before raw translation mutates type
+        // nodes, but keep the result private until all validation has passed.
         let pers_struct = if options.publish_in_process_signature {
-            publish_signature(
-                &internal_env,
-                options,
-                module_name,
-                filename,
-                &type_ctx,
-                arena,
-                publication,
-            )?
-        } else {
-            None
-        };
-        // Keep the just-saved current unit visible through raw-lambda
-        // conversion. OCaml saves the inferred signature in the no-interface
-        // branch before translation (compiler/ml/typemod.ml:1779-1788), and
-        // optional-pattern lowering can still expand current-unit aliases via
-        // Env.find_type while choosing Pval_from_option_not_nest
-        // (compiler/ml/typeopt.ml:40-88; compiler/ml/matching.ml:1259-1267).
-        // `finish_preprocessed_structure_in_process_from_js_boundary` hides it
-        // again before JS module-path probing.
+            let _publication_guard = crate::perf_counters::SignaturePublication::begin();
+            let (signature, report) = publish_signature(&internal_env, options, module_name, filename, type_ctx, arena, publication)?;
+            attempt_output.signature_report(report)?;
+            signature
+        } else { None };
         if let Some(start) = signature_publish_start {
             crate::timing::record(crate::timing::Phase::SignaturePublish, start.elapsed());
         }
         (pers_struct, internal_env)
     };
-    // A location-free attempt must not publish a signature before Lambda
-    // translation has ruled out a diagnostic or a location-valued constant.
-    if !has_interface
-        && arena.stores_locations()
-        && let Some(hook) = signature_ready.take()
-    {
-        drop(publication_guard.take());
-        let _ = hook(InProcessSignatureReady {
-            pers_struct: pers_struct.take(),
-        })?;
-    }
     tctx.persistent_env = Some(persistent_env_after_signature);
+
+    // Neither a frozen signature nor a unit result is handed to another worker
+    // until every validation that uses the checker context has completed.
+    let mut publish_checked = || -> Result<_> {
+        attempt_output.publish(type_ctx)?;
+        if !has_interface && let Some(hook) = signature_ready.as_deref_mut() {
+            hook(InProcessSignatureReady { pers_struct: pers_struct.take() })?;
+        }
+        Ok(pers_struct.take())
+    };
 
     if options.check_only {
         if let Some(inclusion) = interface_inclusion {
@@ -10898,7 +11246,7 @@ fn compile_until_js(
         // The earlier typing warnings already carry located parse slots.
         // Only inclusion warnings appended since then still need placement.
         if !place_location_free_warnings(
-            arena, options, &mut located_warnings,
+            arena, warning_locations, &mut located_warnings,
             &mut tctx.warnings[post_type_warning_start..],
         ) {
             return Err(LocationRetry::Warning.into());
@@ -10912,12 +11260,7 @@ fn compile_until_js(
         if type_warnings_have_errors(&tctx.warnings) {
             return Err(UserDiagnostic::new(warnings, 2).into());
         }
-        if !has_interface && let Some(hook) = signature_ready {
-            drop(publication_guard.take());
-            let _ = hook(InProcessSignatureReady {
-                pers_struct: pers_struct.take(),
-            })?;
-        }
+        let pers_struct = publish_checked()?;
         return Ok(InProcessPreJsCompileResult {
             signature: published_signature,
             pers_struct,
@@ -10937,7 +11280,7 @@ fn compile_until_js(
         let mut buf = Vec::new();
         let _ = crate::types::sexp_typedtree::print_typed_structure_with_locs(
             arena,
-            &type_ctx,
+            type_ctx,
             &tctx.typed,
             &typed_structure,
             &mut buf,
@@ -10955,12 +11298,12 @@ fn compile_until_js(
     let gentype = if !has_interface || gentype_interface.is_some() {
         process_gentype_typed_artifact_if_enabled(
             options,
-            gentype_interface,
+            gentype_interface.clone(),
             GentypeUnit {
                 annots: crate::gentype::main::TypedArtifactAnnots::Implementation(&typed_structure),
                 arena,
                 ta: &tctx.typed,
-                type_ctx: &type_ctx,
+                type_ctx,
                 source: &|| source().to_string(),
                 filename,
                 module_name,
@@ -10975,7 +11318,7 @@ fn compile_until_js(
         return Err(LocationRetry::Warning.into());
     }
 
-    let lambda_start_stamp = synchronize_lambda_start_stamp(&type_ctx);
+    let lambda_start_stamp = synchronize_lambda_start_stamp(type_ctx);
 
     let unit_name = options.current_unit_name().unwrap_or_default();
     let (
@@ -10998,7 +11341,7 @@ fn compile_until_js(
             }
             (None, None) => compute_raw_implementation_coercion(
                 &mut tctx,
-                &type_ctx,
+                type_ctx,
                 &env,
                 &typed_structure,
                 options,
@@ -11010,7 +11353,7 @@ fn compile_until_js(
             crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
                 arena,
                 &tctx.typed,
-                &type_ctx,
+                type_ctx,
                 &env,
                 lambda_start_stamp,
                 unit_name,
@@ -11041,7 +11384,7 @@ fn compile_until_js(
         let final_signature = if has_interface {
             implementation_interface_signature(
                 &mut tctx.persistent_env,
-                &type_ctx,
+                type_ctx,
                 filename,
                 options.current_unit_name().as_deref(),
             )
@@ -11050,7 +11393,7 @@ fn compile_until_js(
         };
         let flat_make_paths = flat_make_paths_of_signature(
             &mut tctx.persistent_env,
-            &type_ctx,
+            type_ctx,
             &final_env,
             final_signature.as_deref().map(Vec::as_slice),
         );
@@ -11101,12 +11444,12 @@ fn compile_until_js(
         }
         if !place_location_free_warnings(
             arena,
-            options,
+            warning_locations,
             &mut located_warnings,
             &mut tctx.warnings[post_type_warning_start..],
         ) || !place_location_free_warnings(
             arena,
-            options,
+            warning_locations,
             &mut located_warnings,
             &mut raw_warnings,
         ) {
@@ -11238,12 +11581,7 @@ fn compile_until_js(
         String::new()
     };
 
-    if !has_interface && let Some(hook) = signature_ready {
-        drop(publication_guard.take());
-        let _ = hook(InProcessSignatureReady {
-            pers_struct: pers_struct.take(),
-        })?;
-    }
+    let pers_struct = publish_checked()?;
     if let (Some(census), Some(timing)) = (&mut tctx.derived_census, &census_timing) {
         census.account_pre_js(timing.snapshot());
         if let Some(warnings) = located_warnings.as_ref().and_then(|a| a.derived_census.as_ref()) {
@@ -11256,8 +11594,8 @@ fn compile_until_js(
         possible_required_modules,
         flat_make_paths,
         ident_stamp_at_js_boundary,
-        file_directives,
-        file_config,
+        file_directives: Vec::new(),
+        file_config: Default::default(),
         signature: published_signature,
         pers_struct,
         lam_locs,
@@ -11274,6 +11612,14 @@ fn compile_until_js(
             .map(PersistentEnv::loaded_units)
             .unwrap_or_default(),
         derived_reference: None,
+        derived_differences: None,
+    })
+        },
+    ).1;
+    result.map(|mut result| {
+        result.file_directives = file_directives;
+        result.file_config = file_config;
+        result
     })
 }
 
@@ -11303,19 +11649,24 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
     let Some(reference) = pre_js.derived_reference.take() else {
         return finish_from_js_boundary(pre_js, options, registry, metadata_ready);
     };
+    let differences = pre_js.derived_differences.take();
+    let differences = differences.as_ref();
     let unit = options.module_name.as_deref().unwrap_or("");
     let reference = finish_from_js_boundary(*reference, options, registry, None)?;
     let result = match metadata_ready {
         // The hook takes the export summary: compare what it is handed.
         Some(forward) => {
             let mut hook = |metadata: InProcessJsMetadataReady| {
-                derived_check::compare_exports(
-                    unit,
-                    metadata.is_pure,
-                    &metadata.cmj_export_constants,
-                    &metadata.cmj_export_arities,
-                    &metadata.cmj_export_lambdas,
-                    &reference,
+                derived_check::settle(
+                    differences,
+                    derived_check::compare_exports(
+                        unit,
+                        metadata.is_pure,
+                        &metadata.cmj_export_constants,
+                        &metadata.cmj_export_arities,
+                        &metadata.cmj_export_lambdas,
+                        &reference,
+                    ),
                 )?;
                 forward(metadata)
             };
@@ -11323,18 +11674,21 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         }
         None => {
             let result = finish_from_js_boundary(pre_js, options, registry, None)?;
-            derived_check::compare_exports(
-                unit,
-                result.is_pure,
-                &result.cmj_export_constants,
-                &result.cmj_export_arities,
-                &result.cmj_export_lambdas,
-                &reference,
+            derived_check::settle(
+                differences,
+                derived_check::compare_exports(
+                    unit,
+                    result.is_pure,
+                    &result.cmj_export_constants,
+                    &result.cmj_export_arities,
+                    &result.cmj_export_lambdas,
+                    &reference,
+                ),
             )?;
             result
         }
     };
-    derived_check::compare_js(unit, &result, &reference)?;
+    derived_check::settle(differences, derived_check::compare_js(unit, &result, &reference))?;
     Ok(result)
 }
 
@@ -11613,31 +11967,18 @@ pub fn typecheck_preprocessed_signature_in_process(
         ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena)
             .expect("the frontend read these attributes");
 
-    let type_ctx = fresh_type_context();
-    type_ctx.set_location_namespace(&options.location_identity(filename));
-    let (mut tctx, env) = in_process_type_check_context(
-        &type_ctx,
-        arena,
-        options,
-        registry,
-        module_name,
-        &file_config,
-        &frontend_warning_specs,
-    );
-
-    // Diagnostics are reported against the source file, read only when
-    // there is something to report.
     let source_cell = std::cell::OnceCell::new();
     let source = || -> &str { source_cell.get_or_init(|| read_in_process_source(filename)) };
-
-    let typed = crate::timing::measure(crate::timing::Phase::Typecheck, || {
-        let _phase = info_span!("compiler.type_signature").entered();
-        env.and_then(|env| {
-            offer_unit_to_checker(options.checker, filename);
-            transl_signature(&mut tctx, &env, arena, signature)
-                .map(|typed_signature| (typed_signature, env))
-        })
-    });
+    type_structure_two_modes(
+        CheckUnit { filename, options, registry: Some(registry),
+            module_name: Some(module_name), file_config: &file_config,
+            frontend_warning_specs: &frontend_warning_specs, derived_plans: true,
+            mode: crate::types::context::CheckMode::from_env() },
+        // An interface has no derived item that can fall back.
+        UnitSyntax::new(arena, signature, options),
+        None,
+        |tctx, env, syntax| transl_signature(tctx, env, syntax.arena, syntax.tree),
+        |type_ctx, mut tctx, typed, UnitSyntax { arena, warning_locations, .. }, attempt_output| {
     let (typed_signature, env) = match typed {
         Ok(typed_signature) => typed_signature,
         Err(e) => {
@@ -11664,7 +12005,7 @@ pub fn typecheck_preprocessed_signature_in_process(
                 &warnings,
                 type_mod_error_to_anyhow(
                     e,
-                    &type_ctx,
+                    type_ctx,
                     arena,
                     source(),
                     filename,
@@ -11675,7 +12016,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     };
     let unit_reads = if options.collect_unit_reads {
         crate::types::unit_reads::signature_reads(
-            &type_ctx,
+            type_ctx,
             &tctx.typed,
             &typed_signature,
             &options.open_modules,
@@ -11689,11 +12030,11 @@ pub fn typecheck_preprocessed_signature_in_process(
         &tctx.typed,
         &typed_signature,
         arena,
-        &type_ctx,
+        type_ctx,
     );
     // js_implementation.ml `after_parsing_sig`: `Typemod.check_js_names
     // ~toplevel:true sg` before the self-inclusion.
-    if let Err(e) = crate::types::typemod::check_js_names(&type_ctx, true, &sig_type) {
+    if let Err(e) = crate::types::typemod::check_js_names(type_ctx, true, &sig_type) {
         if !arena.stores_locations() {
             return Err(LocationRetry::Diagnostic.into());
         }
@@ -11702,18 +12043,18 @@ pub fn typecheck_preprocessed_signature_in_process(
             !tctx.warnings.is_empty() && !crate::parser::code_frame::should_enable_color();
         return Err(prefix_diagnostic(
             &warnings,
-            type_mod_error_to_anyhow(e, &type_ctx, arena, source(), filename, suppress_info_style),
+            type_mod_error_to_anyhow(e, type_ctx, arena, source(), filename, suppress_info_style),
         ));
     }
     // js_implementation.ml:56: `ignore (Includemod.signatures initial_env sg
     // sg)` drops the coercion; a payload reader's error escapes it.
     let self_inclusion = crate::types::includemod::compunit(
-        &type_ctx, &env, filename, &sig_type, filename, &sig_type,
+        type_ctx, &env, filename, &sig_type, filename, &sig_type,
     );
-    if let Err(e) = crate::types::includemod::escaped(&type_ctx, self_inclusion) {
+    if let Err(e) = crate::types::includemod::escaped(type_ctx, self_inclusion) {
         return Err(in_process_typed_unit_error(
             e.into(),
-            &type_ctx,
+            type_ctx,
             arena,
             &source,
             filename,
@@ -11723,7 +12064,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     // js_implementation.ml:64 `Delayed_checks.force_delayed_checks ()`.
     tctx.flush_value_usage_checks();
     let mut located_warnings = None;
-    if !place_location_free_warnings(arena, options, &mut located_warnings, &mut tctx.warnings) {
+    if !place_location_free_warnings(arena, warning_locations, &mut located_warnings, &mut tctx.warnings) {
         return Err(LocationRetry::Warning.into());
     }
     let warnings = format_type_warnings_lazy(
@@ -11740,11 +12081,11 @@ pub fn typecheck_preprocessed_signature_in_process(
         if options.dumps.contains(&kind) {
             let mut buf = Vec::new();
             let _ = if kind == DumpKind::TypedTree {
-                print_typed_signature(arena, &type_ctx, &tctx.typed, &typed_signature, &mut buf)
+                print_typed_signature(arena, type_ctx, &tctx.typed, &typed_signature, &mut buf)
             } else {
                 print_typed_signature_with_locs(
                     arena,
-                    &type_ctx,
+                    type_ctx,
                     &tctx.typed,
                     &typed_signature,
                     &mut buf,
@@ -11761,7 +12102,7 @@ pub fn typecheck_preprocessed_signature_in_process(
             annots: crate::gentype::main::TypedArtifactAnnots::Interface(&typed_signature),
             arena,
             ta: &tctx.typed,
-            type_ctx: &type_ctx,
+            type_ctx,
             source: &|| source().to_string(),
             filename,
             module_name,
@@ -11775,7 +12116,7 @@ pub fn typecheck_preprocessed_signature_in_process(
         &tctx.typed,
         &typed_signature,
         arena,
-        &type_ctx,
+        type_ctx,
     );
 
     let typed_module_type = crate::types::typedtree::ModuleType {
@@ -11803,7 +12144,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     // the copy still takes its stamps, as in OCaml.
     if let crate::types::typedtree::ModuleTypeDesc::Tmty_signature(_) = &typed_module_type.mty_desc
     {
-        saved_signature_copy(&type_ctx, &published_signature);
+        saved_signature_copy(type_ctx, &published_signature);
     }
 
     let mut internal_env = tctx
@@ -11820,7 +12161,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     let raw_signature = {
         let mut raw = crate::types::typecore::copy_lookup_signature_for_subst(
             &published_signature,
-            &type_ctx,
+            type_ctx,
         );
         // The check reads the signature as saved in the `.cmi`
         // (env.ml:1949-1952 reads the file back), so drop the same locations.
@@ -11839,19 +12180,20 @@ pub fn typecheck_preprocessed_signature_in_process(
         crate::types::typemod::deprecated_of_sig(arena, signature).map_err(|error| {
             in_process_typed_unit_error(
                 payload_type_error(error),
-                &type_ctx,
+                type_ctx,
                 arena,
                 &source,
                 filename,
                 &tctx.warnings,
             )
         })?;
+    attempt_output.publish(type_ctx)?;
     if type_ctx.compiler_counters_enabled() {
-        crate::perf_counters::census_exported_signature(&type_ctx, module_name, &raw_signature);
+        crate::perf_counters::census_exported_signature(type_ctx, module_name, &raw_signature);
     }
     if options.dumps.contains(&DumpKind::Sig) {
         dumps.push(canonical_signature_dump(
-            &type_ctx,
+            type_ctx,
             module_name,
             &raw_signature,
             deprecated.as_deref(),
@@ -11864,20 +12206,21 @@ pub fn typecheck_preprocessed_signature_in_process(
         filename,
         deprecated,
         crcs,
-        &type_ctx,
+        type_ctx,
     );
     type_ctx.register_raw_module_sig(module_name, raw_signature);
 
     // The implementation reads its own interface even when the module is a leaf.
-    let pers_struct = publish_signature(
+    let (pers_struct, signature_report) = publish_signature(
         &internal_env,
         options,
         module_name,
         filename,
-        &type_ctx,
+        type_ctx,
         arena,
         SignaturePublicationMode::Eager,
     )?;
+    attempt_output.signature_report(signature_report)?;
 
     if let (Some(mut census), Some(timing)) = (arena.derived_census.clone(), &census_timing) {
         census.account_pre_js(timing.snapshot());
@@ -11895,10 +12238,499 @@ pub fn typecheck_preprocessed_signature_in_process(
         loaded_units: internal_env.loaded_units(),
         unit_reads,
     })
+        },
+    ).1
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn two_mode_attempts_keep_only_the_final_check() {
+        assert_eq!(std::mem::size_of::<super::CheckAttempt>(), 2);
+        assert_eq!(std::mem::size_of::<super::AttemptOutput>(), 5 * std::mem::size_of::<usize>());
+        assert_eq!(std::mem::size_of::<super::CheckUnit<'_>>(), 10 * std::mem::size_of::<usize>());
+        assert_eq!(std::mem::size_of::<super::UnitSyntax<'_, super::Structure>>(), 3 * std::mem::size_of::<usize>());
+        for (source, attempts) in [("let x = 1", 1), ("let x: bool = 1", 2)] {
+            let mut parser = super::Parser::new("Attempt.res", source);
+            let structure = super::module::parse_structure(&mut parser);
+            crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
+            let options = super::CompilerOptions { nopervasives: true, ..Default::default() };
+            let calls = std::cell::Cell::new(0);
+            let finishes = std::cell::Cell::new(0);
+            let (_, result) = super::type_structure_two_modes(
+                super::CheckUnit { filename: "Attempt.res", options: &options,
+                    registry: Some(&super::ModuleRegistry::new()), module_name: Some("Attempt"),
+                    file_config: &Default::default(), frontend_warning_specs: &[], derived_plans: true,
+                    mode: crate::types::context::CheckMode::Success },
+                super::UnitSyntax::new(parser.arena(), &structure, &options),
+                None,
+                |tctx, env, syntax| {
+                    calls.set(calls.get() + 1);
+                    super::type_structure(tctx, env, syntax.arena, syntax.tree)
+                },
+                |_, _, result, _, _reports| {
+                    finishes.set(finishes.get() + 1);
+                    assert_eq!(result.is_ok(), attempts == 1);
+                    Ok(())
+                },
+            );
+            result.unwrap();
+            assert_eq!(calls.get(), attempts);
+            assert_eq!(finishes.get(), 1);
+        }
+    }
+    #[test]
+    fn a_unit_of_ten_thousand_items_that_fails_in_its_last_item_is_checked_exactly_twice() {
+        std::thread::Builder::new().stack_size(64 * 1024 * 1024).spawn(|| {
+            use crate::types::context::CheckMode;
+            use std::fmt::Write;
+            let mut source = String::new();
+            for n in 0..10_000 {
+                writeln!(source, "let x{n} = {n}").unwrap();
+            }
+            source.push_str("let bad: bool = 1\n");
+            let mut reports = Vec::new();
+            // Explicit Explain is the mode selected by RESCRIPT_CHECK_MODE=explain;
+            // do not mutate process environment in parallel unit tests.
+            for first_mode in [CheckMode::Success, CheckMode::Explain] {
+                let mut parser = super::Parser::new("TenThousand.res", &source);
+                let structure = super::module::parse_structure(&mut parser);
+                crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
+                let options = super::CompilerOptions { nopervasives: true, ..Default::default() };
+                let attempts = std::cell::RefCell::new(Vec::new());
+                let (_, result) = super::type_structure_two_modes(
+                    super::CheckUnit {
+                        filename: "TenThousand.res", options: &options, registry: None,
+                        module_name: None, file_config: &Default::default(),
+                        frontend_warning_specs: &[], derived_plans: true, mode: first_mode,
+                    },
+                    super::UnitSyntax::new(parser.arena(), &structure, &options), None,
+                    |tctx, env, syntax| {
+                        let mode = if tctx.type_ctx.unify_takes_snapshot() {
+                            CheckMode::Explain
+                        } else { CheckMode::Success };
+                        attempts.borrow_mut().push(mode);
+                        let result = super::type_structure(tctx, env, syntax.arena, syntax.tree);
+                        if mode == CheckMode::Success {
+                            assert_eq!(tctx.type_ctx.journal_entries_for_test(), 0);
+                        }
+                        result
+                    },
+                    |ctx, _, typed, syntax, _| -> super::Result<()> {
+                        typed.map(|_| ()).map_err(|error| super::type_mod_error_to_anyhow(
+                            error, ctx, syntax.arena, &source, "TenThousand.res", false,
+                        ))
+                    },
+                );
+                assert_eq!(*attempts.borrow(), if first_mode == CheckMode::Success {
+                    vec![CheckMode::Success, CheckMode::Explain]
+                } else { vec![CheckMode::Explain] });
+                reports.push(format!("{:#}", result.unwrap_err()));
+            }
+            assert_eq!(reports[0], reports[1]);
+            assert!(reports[0].contains("bool"));
+        }).unwrap().join().unwrap();
+    }
+
+    /// The settings of the one attempt loop: each retry reason applies once,
+    /// a fallback keeps the check mode and an explanation keeps the path.
+    #[test]
+    fn attempt_settings_compose_each_reason_once() {
+        use super::{AttemptRetry, CheckAttempt};
+        use crate::types::context::CheckMode;
+        let first = CheckAttempt { mode: CheckMode::Success, derived_plans: true };
+        let general = first.after(AttemptRetry::DerivedFallback).unwrap();
+        assert_eq!(general, CheckAttempt { mode: CheckMode::Success, derived_plans: false });
+        let explained = general.after(AttemptRetry::Explain).unwrap();
+        assert_eq!(explained, CheckAttempt { mode: CheckMode::Explain, derived_plans: false });
+        assert_eq!(explained.after(AttemptRetry::Explain), None);
+        assert_eq!(explained.after(AttemptRetry::DerivedFallback), None);
+        assert_eq!(
+            first.after(AttemptRetry::Explain).unwrap().after(AttemptRetry::DerivedFallback),
+            Some(explained),
+        );
+    }
+
+    /// A unit whose plan cannot be used continues, in the same attempt loop
+    /// and check mode, on its general syntax, made once. A Success unit
+    /// that then type-checks has no explanation; one with a type error is
+    /// explained once, on the general syntax, and reports what a forced
+    /// Explain check reports.
+    #[test]
+    fn a_derived_fallback_and_an_explanation_share_one_attempt_loop() {
+        use crate::binary_ast::derive::fixtures::{CURRIED_LIBRARY, derive_source};
+        use crate::types::context::CheckMode;
+        for (error, success_checks) in [(false, 2), (true, 3)] {
+            let source = if error {
+                format!("{CURRIED_LIBRARY}\nlet bad: bool = 1")
+            } else {
+                CURRIED_LIBRARY.to_owned()
+            };
+            let mut reports = Vec::new();
+            for mode in [CheckMode::Success, CheckMode::Explain] {
+                let (parser, structure) = derive_source(&source, true);
+                assert!(parser.arena().plans().item_count() > 0);
+                let options = super::CompilerOptions { nopervasives: true, ..Default::default() };
+                let regenerated = std::cell::Cell::new(0);
+                let fallback = || {
+                    regenerated.set(regenerated.get() + 1);
+                    let (mut parser, tree) = derive_source(&source, false);
+                    parser.arena_mut().derived_census = Some(Box::new(
+                        crate::derived_census::Census::new(std::path::Path::new("unused-census.jsonl"), "General.res"),
+                    ));
+                    Ok(super::GeneralSyntax { arena: parser.into_arena(), tree, warning_locations: None })
+                };
+                // The syntax and mode of each check, in order.
+                let checks = std::cell::RefCell::new(Vec::new());
+                let finishes = std::cell::Cell::new(0);
+                let first_arena: *const super::ParseArena = parser.arena();
+                let (_, result) = super::type_structure_two_modes(
+                    super::CheckUnit {
+                        filename: "Fallback.res", options: &options, registry: None,
+                        module_name: Some("Fallback"), file_config: &Default::default(),
+                        frontend_warning_specs: &[], derived_plans: true, mode,
+                    },
+                    super::UnitSyntax::new(parser.arena(), &structure, &options),
+                    Some(&fallback),
+                    |tctx, env, syntax| {
+                        // Outside any speculation only an Explain check snapshots.
+                        let mode = if tctx.type_ctx.unify_takes_snapshot() { CheckMode::Explain } else { CheckMode::Success };
+                        let first = std::ptr::eq(syntax.arena, first_arena);
+                        checks.borrow_mut().push((first, mode));
+                        assert_eq!(tctx.derived_census.is_some(), !first,
+                            "fallback attempts retain the general syntax's census");
+                        super::type_structure(tctx, env, syntax.arena, syntax.tree)
+                    },
+                    |ctx, _, typed, syntax, _| -> super::Result<()> {
+                        finishes.set(finishes.get() + 1);
+                        assert!(!std::ptr::eq(syntax.arena, first_arena), "finished from the general syntax");
+                        match typed {
+                            Ok(_) => Ok(()),
+                            Err(error) => Err(super::type_mod_error_to_anyhow(
+                                error, ctx, syntax.arena, "", "Fallback.res", false,
+                            )),
+                        }
+                    },
+                );
+                assert_eq!(regenerated.get(), 1, "the general syntax is made once");
+                assert_eq!(finishes.get(), 1, "only the final attempt is finished");
+                let checks = checks.into_inner();
+                let expected: Vec<(bool, CheckMode)> = match (mode, error) {
+                    (CheckMode::Success, false) => vec![(true, CheckMode::Success), (false, CheckMode::Success)],
+                    (CheckMode::Success, true) => vec![
+                        (true, CheckMode::Success), (false, CheckMode::Success), (false, CheckMode::Explain),
+                    ],
+                    (CheckMode::Explain, _) => vec![(true, CheckMode::Explain), (false, CheckMode::Explain)],
+                };
+                assert_eq!(checks, expected);
+                if mode == CheckMode::Success {
+                    assert_eq!(checks.len(), success_checks);
+                }
+                assert_eq!(result.is_err(), error);
+                reports.push(result.err().map(|error| format!("{error:#}")));
+            }
+            assert_eq!(reports[0], reports[1], "Success and forced Explain report the same");
+        }
+    }
+
+    /// Without a way to make the general syntax, a fallback fails the
+    /// compile with `DerivedRetry` and nothing is finished.
+    #[test]
+    fn a_derived_fallback_without_general_syntax_is_a_derived_retry() {
+        let (parser, structure) =
+            crate::binary_ast::derive::fixtures::derive_source(crate::binary_ast::derive::fixtures::CURRIED_LIBRARY, true);
+        let options = super::CompilerOptions { nopervasives: true, ..Default::default() };
+        let (_, result) = super::type_structure_two_modes(
+            super::CheckUnit {
+                filename: "Fallback.res", options: &options, registry: None, module_name: None,
+                file_config: &Default::default(), frontend_warning_specs: &[], derived_plans: true,
+                mode: crate::types::context::CheckMode::Success,
+            },
+            super::UnitSyntax::new(parser.arena(), &structure, &options),
+            None,
+            |tctx, env, syntax| super::type_structure(tctx, env, syntax.arena, syntax.tree),
+            |_, _, _, _, _| -> super::Result<()> { panic!("an abandoned attempt is not finished") },
+        );
+        assert!(result.unwrap_err().is::<super::DerivedRetry>());
+    }
+
+    /// A codec with an optional parameter fails its plan's arity
+    /// obligation; the general form, which applies it to one argument,
+    /// types.
+    const FALLING_BACK: &str = "type plain = int\nlet plain_encode = Spice.intToJson\nlet plain_encodeJson = (x: plain, ~extra=1) => {\n  let _ = extra\n  plain_encode(x)\n}\nlet plain_decode = Spice.intFromJson\n@spice type t = {a: plain}\n";
+
+    /// The in-process compile of a unit whose plan cannot be used gives its
+    /// attempt loop the general syntax: it compiles as the general path
+    /// does, and a type error after the fallback is the general path's.
+    #[test]
+    fn an_in_process_compile_falls_back_within_its_attempt_loop() {
+        use super::{CompilerOptions, DerivedPath, compile_source_in_process};
+        let compile = |extra: &str, derived_path| {
+            let source = format!("{}{FALLING_BACK}{extra}", crate::binary_ast::derive::fixtures::RECORD_LIBRARY);
+            let options = CompilerOptions { spice_ppx: true, derived_path, ..Default::default() };
+            compile_source_in_process(
+                &source, "Fallback.res", "Fallback", &options,
+                &crate::cmi::persistent_env::ModuleRegistry::new(), false, None,
+            )
+        };
+        let planned = compile("", DerivedPath::Plans).expect("the unit falls back and compiles");
+        let general = compile("", DerivedPath::General).unwrap();
+        assert_eq!(planned.js_outputs.len(), general.js_outputs.len());
+        for (planned, general) in planned.js_outputs.iter().zip(&general.js_outputs) {
+            assert_eq!(planned.code, general.code);
+        }
+        assert_eq!(planned.warnings, general.warnings);
+        let planned = compile("let bad: bool = 1\n", DerivedPath::Plans).err().expect("a type error");
+        assert!(!planned.is::<super::DerivedRetry>());
+        let general = compile("let bad: bool = 1\n", DerivedPath::General).err().expect("a type error");
+        assert_eq!(format!("{planned:#}"), format!("{general:#}"));
+        assert!(format!("{planned:#}").contains("bool"));
+    }
+
+    /// The fixture falls back: its plan is abandoned once, and with a type
+    /// error after it the Success check explains once, on the general
+    /// syntax, reporting what a forced Explain check reports.
+    #[test]
+    fn a_frontend_fallback_then_a_type_error_is_explained_once() {
+        use crate::binary_ast::derive::fixtures::frontend_source;
+        use crate::types::context::CheckMode;
+        let source = format!("{FALLING_BACK}let bad: bool = 1\n");
+        let mut reports = Vec::new();
+        for mode in [CheckMode::Success, CheckMode::Explain] {
+            let (parser, structure) = frontend_source(&source, true);
+            let options = super::CompilerOptions { nopervasives: true, ..Default::default() };
+            let regenerated = std::cell::Cell::new(0);
+            let checks = std::cell::Cell::new(0);
+            let fallback = || {
+                regenerated.set(regenerated.get() + 1);
+                let (parser, tree) = frontend_source(&source, false);
+                Ok(super::GeneralSyntax { arena: parser.into_arena(), tree, warning_locations: None })
+            };
+            let (_, result) = super::type_structure_two_modes(
+                super::CheckUnit {
+                    filename: "Fallback.res", options: &options, registry: None, module_name: None,
+                    file_config: &Default::default(), frontend_warning_specs: &[], derived_plans: true, mode,
+                },
+                super::UnitSyntax::new(parser.arena(), &structure, &options),
+                Some(&fallback),
+                |tctx, env, syntax| {
+                    checks.set(checks.get() + 1);
+                    super::type_structure(tctx, env, syntax.arena, syntax.tree)
+                },
+                |ctx, _, typed, syntax, _| -> super::Result<()> {
+                    typed.map(|_| ()).map_err(|error| {
+                        super::type_mod_error_to_anyhow(error, ctx, syntax.arena, &source, "Fallback.res", false)
+                    })
+                },
+            );
+            assert_eq!(regenerated.get(), 1);
+            assert_eq!(checks.get(), if mode == CheckMode::Success { 3 } else { 2 });
+            reports.push(format!("{:#}", result.unwrap_err()));
+        }
+        assert_eq!(reports[0], reports[1]);
+    }
+
+    #[test]
+    #[should_panic(expected = "unexplained unification failure after Success publication")]
+    fn a_caught_failure_after_publication_is_asserted_at_the_unit_exit() {
+        let mut parser = super::Parser::new("Published.res", "let x = 1");
+        let structure = super::module::parse_structure(&mut parser);
+        crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
+        let options = super::CompilerOptions { nopervasives: true, ..Default::default() };
+        super::type_structure_two_modes(
+            super::CheckUnit {
+                filename: "Published.res", options: &options, registry: None, module_name: None,
+                file_config: &Default::default(), frontend_warning_specs: &[], derived_plans: true,
+                mode: crate::types::context::CheckMode::Success,
+            },
+            super::UnitSyntax::new(parser.arena(), &structure, &options), None,
+            |tctx, env, syntax| super::type_structure(tctx, env, syntax.arena, syntax.tree),
+            |ctx, mut tctx, typed, _, output| -> super::Result<()> {
+                typed.unwrap();
+                output.publish(ctx)?;
+                let int = ctx.new_constr(crate::types::predef::path_int(), vec![]);
+                let string = ctx.new_constr(crate::types::predef::path_string(), vec![]);
+                assert!(crate::types::ctype::unify(ctx, &mut tctx.unify_state, int, string).is_err());
+                Ok(())
+            },
+        ).1.unwrap();
+    }
+
+    #[test]
+    fn a_successful_planned_unit_allocates_nothing_for_its_borrowed_fallback() {
+        let source = "@spice type t = array<A.t>";
+        let (parser, structure) = crate::binary_ast::derive::fixtures::derive_source(source, true);
+        assert!(parser.arena().plans().item_count() > 0);
+        let options = super::CompilerOptions {
+            nopervasives: true, publish_in_process_signature: false, ..Default::default()
+        };
+        // Measure production fallback preparation, not the unrelated checker
+        // and backend allocations or shared-store growth of compiling a unit.
+        let mut provider = None;
+        let setup = allocation_counter::measure(|| {
+            provider = Some(super::general_syntax_provider(source, "Allocation.res", &options));
+        });
+        assert_eq!(setup.count_total, 0);
+        assert_eq!(setup.bytes_total, 0);
+        let calls = std::cell::Cell::new(0);
+        let fallback = || {
+            calls.set(calls.get() + 1);
+            provider.as_ref().unwrap()()
+        };
+        super::compile_preprocessed_structure_in_process_until_js(
+            parser.arena(), &structure, "Allocation.res", "Allocation", &options,
+            &super::ModuleRegistry::new(), false, None, None,
+            super::SignaturePublicationMode::Eager, Some(&fallback),
+        ).unwrap();
+        assert_eq!(calls.get(), 0, "the unit's first attempt must succeed");
+    }
+
+    #[test]
+    fn a_discarded_attempt_writes_no_signature_report() {
+        use crate::cmi::signature_check::{Comparison, SignatureCheck};
+        let directory = std::env::temp_dir().join(format!("discarded-report-{}", std::process::id()));
+        assert!(!directory.exists());
+        let check = SignatureCheck::for_test(directory.clone());
+        let comparison = Comparison::not_applicable("test", "no shared graph");
+        let mut discarded = super::AttemptOutput::new(crate::types::context::CheckMode::Success);
+        discarded.signature_report(Some(check.prepare("Discarded.res", &comparison).unwrap())).unwrap();
+        assert!(!directory.exists());
+        drop(discarded);
+        assert!(!directory.exists(), "discarding must not create a report or directory");
+        let ctx = super::fresh_type_context();
+        let mut retained = super::AttemptOutput::new(crate::types::context::CheckMode::Explain);
+        retained.signature_report(Some(check.prepare("Retained.res", &comparison).unwrap())).unwrap();
+        retained.publish(&ctx).unwrap();
+        let files: Vec<_> = std::fs::read_dir(&directory).unwrap().map(Result::unwrap).collect();
+        assert_eq!(files.len(), 1);
+        assert!(std::fs::read_to_string(files[0].path()).unwrap().contains("Retained.res"));
+        std::fs::remove_file(files[0].path()).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn location_retries_do_not_explain_or_publish_the_unlocated_attempt() {
+        use crate::types::context::CheckMode;
+        for retry in [super::LocationRetry::Warning, super::LocationRetry::Output,
+                      super::LocationRetry::Diagnostic] {
+            let mut parser = super::Parser::new("Locations.res", "let x = 1");
+            let structure = super::module::parse_structure(&mut parser);
+            crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
+            let options = super::CompilerOptions { nopervasives: true, ..Default::default() };
+            let finishes = std::cell::Cell::new(0);
+            let (_, result) = super::type_structure_two_modes(
+                super::CheckUnit {
+                    filename: "Locations.res", options: &options, registry: None,
+                    module_name: None, file_config: &Default::default(),
+                    frontend_warning_specs: &[], derived_plans: true, mode: CheckMode::Success,
+                },
+                super::UnitSyntax::new(parser.arena(), &structure, &options), None,
+                |tctx, env, syntax| super::type_structure(tctx, env, syntax.arena, syntax.tree),
+                |_, _, typed, _, reports| -> super::Result<()> {
+                    typed.unwrap();
+                    finishes.set(finishes.get() + 1);
+                    // Publishing this deliberately invalid Success report would fail.
+                    reports.stderr.extend_from_slice(b"discarded location-free report");
+                    Err(retry.into())
+                },
+            );
+            assert_eq!(finishes.get(), 1);
+            assert_eq!(result.unwrap_err().downcast_ref::<super::LocationRetry>(), Some(&retry));
+        }
+    }
+
+    #[test]
+    fn post_structure_validation_is_rechecked_before_publication() {
+        use crate::types::context::CheckMode;
+        let source = "let identity = x => x\nlet applied = identity(identity)";
+        let mut reports = Vec::new();
+        for mode in [CheckMode::Success, CheckMode::Explain] {
+            let mut parser = super::Parser::new("NonGeneralizable.res", source);
+            let structure = super::module::parse_structure(&mut parser);
+            crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
+            let options = super::CompilerOptions { nopervasives: true, ..Default::default() };
+            let attempts = std::cell::Cell::new(0);
+            let (_, result) = super::type_structure_two_modes(
+                super::CheckUnit {
+                    filename: "NonGeneralizable.res", options: &options,
+                    registry: None, module_name: None, file_config: &Default::default(),
+                    frontend_warning_specs: &[], derived_plans: true, mode,
+                },
+                super::UnitSyntax::new(parser.arena(), &structure, &options),
+                None,
+                |tctx, env, syntax| super::type_structure(tctx, env, syntax.arena, syntax.tree),
+                |ctx, _, typed, _, output| -> super::Result<()> {
+                    attempts.set(attempts.get() + 1);
+                    assert!(output.stderr.is_empty(), "discarded reports must not enter the retry");
+                    let ((structure, env), _) = typed.expect("structure typing succeeds");
+                    let signature = crate::types::includemod::simplify_signature(&structure.str_type);
+                    let error = crate::types::typemod::check_nongen_schemes(ctx, &env, &signature)
+                        .expect_err("validation, not structure typing, rejects this unit");
+                    Err(super::type_mod_error_to_anyhow(
+                        error, ctx, parser.arena(), source, "NonGeneralizable.res", false,
+                    ))
+                },
+            );
+            assert_eq!(attempts.get(), if mode == CheckMode::Success { 2 } else { 1 });
+            reports.push(format!("{:#}", result.unwrap_err()));
+        }
+        assert_eq!(reports[0], reports[1]);
+        assert!(reports[0].contains("cannot be generalized"));
+    }
+
+    #[test]
+    fn discarded_attempt_warnings_match_explain() {
+        use crate::types::context::CheckMode;
+        for recovered in [false, true] {
+            let source = if recovered {
+                "let f = x => switch x { | true => 1 }"
+            } else {
+                "let f = x => switch x { | true => 1 }\nlet bad: bool = 1"
+            };
+            let mut reports = Vec::new();
+            for mode in [CheckMode::Success, CheckMode::Explain] {
+                let mut parser = super::Parser::new("Warnings.res", source);
+                let structure = super::module::parse_structure(&mut parser);
+                crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
+                let options = super::CompilerOptions { nopervasives: true, ..Default::default() };
+                let (_, report) = super::type_structure_two_modes(
+                    super::CheckUnit {
+                        filename: "Warnings.res", options: &options,
+                        registry: None, module_name: Some("Warnings"), file_config: &Default::default(),
+                        frontend_warning_specs: &[], derived_plans: true, mode,
+                    },
+                    super::UnitSyntax::new(parser.arena(), &structure, &options),
+                    None,
+                    |tctx, env, syntax| {
+                        if recovered {
+                            // Model a caller that catches a failed unification, then
+                            // continues checking an expression that emits a warning.
+                            let ctx = tctx.type_ctx;
+                            let left = ctx.new_constr(crate::types::predef::path_bool(), vec![]);
+                            let right = ctx.new_constr(crate::types::predef::path_string(), vec![]);
+                            assert!(crate::types::ctype::unify(ctx, &mut tctx.unify_state, left, right).is_err());
+                        }
+                        let result = super::type_structure(tctx, env, syntax.arena, syntax.tree);
+                        tctx.flush_value_usage_checks();
+                        result
+                    },
+                    |ctx, tctx, typed, _, _reports| {
+                        assert!(!tctx.warnings.is_empty(), "fixture must exercise a warning");
+                        let mut report = super::format_type_warnings(parser.arena(), source, "Warnings.res", &tctx.warnings);
+                        if let Err(error) = typed {
+                            report.push_str(&format!("{:#}", super::type_mod_error_to_anyhow(
+                                error, ctx, parser.arena(), source, "Warnings.res", false,
+                            )));
+                        }
+                        Ok(report)
+                    },
+                );
+                reports.push(report.unwrap());
+            }
+            assert_eq!(reports[0], reports[1]);
+        }
+    }
+
     /// `-bs-cross-module-opt` and `-bs-no-cross-module-opt` in `@@config`
     /// set `Js_config.cross_module_inline` for the file, the last one given
     /// winning, over the command line's.

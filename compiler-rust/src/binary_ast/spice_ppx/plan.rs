@@ -16,10 +16,15 @@
 
 use super::*;
 use crate::binary_ast::derive::plan::{
-    Binding, BodyIdx, BodyNode, DerivedIdx, ExprLoc, Obligation, SkeletonNode, Span,
+    Binding, BodyIdx, BodyNode, Case, CasePattern, DerivedIdx, ExprLoc, LabelUse, NO_VAR,
+    Obligation, ObligationIdx, OptionalArg, Owner, Predef, Site, SkeletonIdx, SkeletonNode, Span,
+    TypeSource,
 };
-use crate::binary_ast::derive::{Classification, GeneralReason, Scope};
-use crate::parse_arena::{TypeList, VbList};
+use crate::binary_ast::derive::{Classification, GeneralReason, UnplannedForm};
+use crate::parse_arena::TypeList;
+
+mod record;
+mod variant;
 
 /// Whether an attribute payload is a constant: a literal, or a template
 /// without interpolation. Anything else is a user expression typed among the
@@ -63,17 +68,20 @@ fn find_attributes(attrs: &[Attribute], names: &[&str], arena: &ParseArena) -> (
 struct TypeFacts {
     /// A `@spice.codec` on a type.
     custom_codec: bool,
+    /// A syntactic JSON identity codec, including the legacy spelling.
+    json_identity: bool,
     /// A tuple or a polymorphic variant.
     unmeasured: bool,
     /// A type whose codec is not a plain name applied to codecs: `JSON.t`,
-    /// whose codec is a function literal, or a type the derive rejects.
-    unplanned: bool,
+    /// whose codec is a function literal, a user's type applied to
+    /// arguments, or a type the derive rejects.
+    unplanned: Option<UnplannedForm>,
 }
 
 /// Collect the facts of one type and the types under it.
 /// Cost: O(type nodes), one visit each; recursion depth is the type's depth;
 /// no allocation.
-fn type_facts(typ_idx: CoreTypeIdx, arena: &ParseArena, facts: &mut TypeFacts) {
+fn type_facts(typ_idx: CoreTypeIdx, arena: &ParseArena, facts: &mut TypeFacts, scope: super::super::derive::Scope<'_>) {
     let typ = arena.get_core_type(typ_idx);
     facts.custom_codec |= typ
         .ptyp_attributes
@@ -81,16 +89,28 @@ fn type_facts(typ_idx: CoreTypeIdx, arena: &ParseArena, facts: &mut TypeFacts) {
         .any(|attr| arena.get_string(attr.0.txt) == "spice.codec");
     match &typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr((lid, args)) => {
-            facts.unplanned |= is_json_identifier(lid.txt, arena)
-                || matches!(arena.get_longident(lid.txt), Longident::Lapply(_, _));
+            facts.json_identity |= scope.is_json_identity(lid.txt, arena);
+            // The codec of a user's type that takes arguments takes their
+            // codecs one at a time (`t_encode(a)(b)(v)`); a plan describes
+            // the library's, which take them at once.
+            let unplanned = if matches!(arena.get_longident(lid.txt), Longident::Lapply(_, _)) {
+                Some(UnplannedForm::AppliedModulePath)
+            } else if !args.is_empty()
+                && library_codec(EncodeContext::Value, Side::Encode, lid.txt, arena).is_none()
+            {
+                Some(UnplannedForm::AppliedUserCodec)
+            } else {
+                None
+            };
+            facts.unplanned = facts.unplanned.or(unplanned);
             for i in 0..args.len() {
-                type_facts(arena.type_list(*args)[i], arena, facts);
+                type_facts(arena.type_list(*args)[i], arena, facts, scope);
             }
         }
         CoreTypeDesc::Ptyp_tuple(items) => {
             facts.unmeasured = true;
             for i in 0..items.len() {
-                type_facts(arena.type_list(*items)[i], arena, facts);
+                type_facts(arena.type_list(*items)[i], arena, facts, scope);
             }
         }
         CoreTypeDesc::Ptyp_variant(_) => facts.unmeasured = true,
@@ -101,17 +121,19 @@ fn type_facts(typ_idx: CoreTypeIdx, arena: &ParseArena, facts: &mut TypeFacts) {
         | CoreTypeDesc::Ptyp_alias(_)
         | CoreTypeDesc::Ptyp_poly(_)
         | CoreTypeDesc::Ptyp_package(_)
-        | CoreTypeDesc::Ptyp_extension(_) => facts.unplanned = true,
+        | CoreTypeDesc::Ptyp_extension(_) => {
+            facts.unplanned.get_or_insert(UnplannedForm::UnsupportedType);
+        }
     }
 }
 
 /// The facts of every field of a record, and whether a `@spice.default` or
 /// `@spice.key` holds a user expression.
 /// Cost: O(fields + their type nodes and attributes); no allocation.
-fn label_facts(labels: &[LabelDeclaration], arena: &ParseArena, facts: &mut TypeFacts) -> bool {
+fn label_facts(labels: &[LabelDeclaration], arena: &ParseArena, facts: &mut TypeFacts, scope: super::super::derive::Scope<'_>) -> bool {
     let mut user_expression = false;
     for label in labels {
-        type_facts(label.pld_type, arena, facts);
+        type_facts(label.pld_type, arena, facts, scope);
         user_expression |=
             find_attributes(&label.pld_attributes, &["spice.default", "spice.key"], arena).1;
     }
@@ -160,16 +182,19 @@ pub(in crate::binary_ast) fn classify(
     decl: &TypeDeclaration,
     rec_flag: RecFlag,
     shares_names: bool,
-    scope: Scope,
+) -> Classification {
+    classify_in_scope(arena, decl, rec_flag, shares_names, crate::binary_ast::derive::Scope::default())
+}
+
+pub(in crate::binary_ast) fn classify_in_scope(
+    arena: &ParseArena,
+    decl: &TypeDeclaration,
+    rec_flag: RecFlag,
+    shares_names: bool,
+    scope: super::super::derive::Scope<'_>,
 ) -> Classification {
     use GeneralReason::*;
     let general = Classification::General;
-    if !arena.derived_plans_enabled() {
-        return general(Switch);
-    }
-    if scope == Scope::Nested {
-        return general(Nested);
-    }
     if rec_flag == RecFlag::Recursive {
         return general(RecursiveGroup);
     }
@@ -188,20 +213,20 @@ pub(in crate::binary_ast) fn classify(
     let (has_fallback, mut user_expression) =
         find_attributes(&decl.ptype_attributes, &["spice.fallback"], arena);
     if let Some(manifest) = decl.ptype_manifest {
-        type_facts(manifest, arena, &mut facts);
+        type_facts(manifest, arena, &mut facts, scope);
     }
     match &decl.ptype_kind {
-        TypeKind::Ptype_record(labels) => user_expression |= label_facts(labels, arena, &mut facts),
+        TypeKind::Ptype_record(labels) => user_expression |= label_facts(labels, arena, &mut facts, scope),
         TypeKind::Ptype_variant(constructors) => {
             for constructor in constructors {
                 match &constructor.pcd_args {
                     ConstructorArguments::Pcstr_tuple(args) => {
                         for arg in args {
-                            type_facts(*arg, arena, &mut facts);
+                            type_facts(*arg, arena, &mut facts, scope);
                         }
                     }
                     ConstructorArguments::Pcstr_record(labels) => {
-                        user_expression |= label_facts(labels, arena, &mut facts);
+                        user_expression |= label_facts(labels, arena, &mut facts, scope);
                     }
                 }
             }
@@ -225,18 +250,72 @@ pub(in crate::binary_ast) fn classify(
     });
     if facts.unmeasured
         || has("spice.serde")
-        || (decl.ptype_manifest.is_some() && !manifest_is_application && !facts.unplanned)
+        || (decl.ptype_manifest.is_some() && !manifest_is_application && facts.unplanned.is_none())
     {
         return general(UnmeasuredShape);
     }
-    // Records and variants are slices 2 and 3; a constant fallback and the
-    // identity codec of `JSON.t` need body nodes this slice does not lower.
-    if !matches!(decl.ptype_kind, TypeKind::Ptype_abstract)
-        || !manifest_is_application
-        || has_fallback
-        || facts.unplanned
+    // A constant fallback still needs a planned codec-composition form.
+    // A record takes a plan when it has a field
+    // and its keys and defaults are literal constants; a variant when
+    // `variant::planned` admits its constructors.
+    let planned_shape = match &decl.ptype_kind {
+        TypeKind::Ptype_abstract => manifest_is_application,
+        TypeKind::Ptype_record(labels) => {
+            decl.ptype_manifest.is_none() && record::planned(labels, arena)
+        }
+        TypeKind::Ptype_variant(constructors) => {
+            decl.ptype_manifest.is_none() && variant::planned(constructors, arena)
+        }
+        TypeKind::Ptype_open => false,
+    };
+    if !planned_shape || has_fallback || facts.unplanned.is_some() {
+        return general(if matches!(decl.ptype_kind, TypeKind::Ptype_variant(_)) {
+            UnsupportedVariant
+        } else {
+            NotYetPlanned(facts.unplanned.unwrap_or_else(|| {
+                if has_fallback {
+                    UnplannedForm::ConstantFallback
+                } else if let TypeKind::Ptype_record(labels) = &decl.ptype_kind {
+                    if labels.is_empty() {
+                        UnplannedForm::EmptyRecord
+                    } else if decl.ptype_manifest.is_none() {
+                        UnplannedForm::TemplateLiteral
+                    } else {
+                        UnplannedForm::DeclarationShape
+                    }
+                } else {
+                    UnplannedForm::DeclarationShape
+                }
+            }))
+        });
+    }
+    // Only a manifest exposes the codec argument in the binding's scheme;
+    // records and variants expose their declared type instead. Application
+    // inference expands a generic callee's return while lowering its levels
+    // (compiler/ml/typecore.ml:2503-2514, 2826-2828), so nested codec instances
+    // may share its JSON abbreviation. A direct identity has no callee; a
+    // single option's first encoder returns option<JSON.t>, not JSON.t.
+    // Cost: O(1) beyond the existing type-facts walk, no extra traversal.
+    if facts.json_identity
+        && (has("spice") || has("spice.encode"))
+        && let Some(manifest) = decl.ptype_manifest
+        && let CoreTypeDesc::Ptyp_constr((lid, args)) = &arena.get_core_type(manifest).ptyp_desc
     {
-        return general(NotYetPlanned);
+        let direct_identity = scope.is_json_identity(lid.txt, arena);
+        let direct_option_identity = longident_matches(arena, lid.txt, &["option"])
+            && arena.type_list(*args).len() == 1
+            && matches!(
+                &arena.get_core_type(arena.type_list(*args)[0]).ptyp_desc,
+                CoreTypeDesc::Ptyp_constr((inner, inner_args))
+                    if inner_args.is_empty() && scope.is_json_identity(inner.txt, arena)
+            );
+        if !direct_identity && !direct_option_identity {
+            return general(JsonIdentityArgument);
+        }
+    }
+    // A declaration that could take a plan, in a tree that is not planned.
+    if let Some(reason) = arena.derived_plans_off() {
+        return general(reason);
     }
     Classification::Plan
 }
@@ -249,6 +328,10 @@ enum Spec {
     /// `Spice.optionToJson(codec)` or `Spice.optionFromJson(codec)` for the
     /// values of a dictionary of options (`codecs_generate_dict_codecs`).
     OptionOf(CoreTypeIdx),
+    /// `Spice.optionToJson(codec)` or `Spice.optionalFieldFromJson(codec)`
+    /// for a record field that may be absent
+    /// (`records_make_omittable_codecs`).
+    Omittable(CoreTypeIdx),
 }
 
 /// Where the skeleton of a codec's head finds the type it is used at.
@@ -301,12 +384,50 @@ struct Builder<'a> {
     side: Side,
     /// Next free skeleton variable of the binding.
     vars: u32,
-    /// The slots of the arguments of the heads being emitted, innermost last:
-    /// one buffer for a whole item.
-    slots: &'a mut Vec<Slot>,
+    /// Buffers for a whole item.
+    scratch: &'a mut Scratch,
+}
+
+/// The buffers of a builder, made once per item and used as stacks: a user
+/// takes the slots from the length it found, and truncates them back.
+#[derive(Default)]
+struct Scratch {
+    /// Reused spelling buffer for generated binders and argument paths.
+    name: String,
+    /// The slots of the arguments of the heads being emitted, innermost last.
+    slots: Vec<Slot>,
+    /// Body nodes gathered for an argument range: the components of an
+    /// array or a tuple whose own nodes are pushed in between.
+    nodes: Vec<BodyIdx>,
+    /// The per-field state of the record decoders being built.
+    decoded: Vec<record::Decoded>,
+    /// The cases of the matches being built, whose bodies are filled in
+    /// after all their patterns were pushed.
+    cases: Vec<Case>,
+    /// The first variable of each case's pattern variables, while the bodies
+    /// of the cases are built.
+    vars: Vec<u32>,
 }
 
 impl Builder<'_> {
+    /// Intern a generated argument name without allocating a temporary string.
+    /// Cost: O(decimal digits), using the item's one spelling buffer.
+    fn indexed_name(&mut self, prefix: &str, index: usize, suffix: &str) -> StrIdx {
+        use std::fmt::Write;
+        self.scratch.name.clear();
+        write!(self.scratch.name, "{prefix}{index}{suffix}").unwrap();
+        self.arena.intern_string(&self.scratch.name)
+    }
+
+    /// Intern a field binder using the same item-wide spelling buffer.
+    /// Cost: O(field name bytes); no temporary string per field.
+    fn field_name(&mut self, name: StrIdx) -> StrIdx {
+        self.scratch.name.clear();
+        self.scratch.name.push_str("spice_field_");
+        self.scratch.name.push_str(self.arena.get_string(name));
+        self.arena.intern_string(&self.scratch.name)
+    }
+
     fn fresh(&mut self) -> u32 {
         self.vars += 1;
         self.vars - 1
@@ -316,7 +437,7 @@ impl Builder<'_> {
     /// Cost: O(1), plus O(path depth) comparisons for a one-argument type.
     fn arity(&self, spec: Spec) -> usize {
         match spec {
-            Spec::OptionOf(_) => 1,
+            Spec::OptionOf(_) | Spec::Omittable(_) => 1,
             Spec::Type(typ, _) => match &self.arena.get_core_type(typ).ptyp_desc {
                 CoreTypeDesc::Ptyp_constr((_, args)) => args.len(),
                 _ => unreachable!("the classifier admits constructor applications only"),
@@ -343,6 +464,13 @@ impl Builder<'_> {
                 let name = match self.side {
                     Side::Encode => "optionToJson",
                     Side::Decode => "optionFromJson",
+                };
+                return self.library(name, Args::One(Spec::Type(inner, EncodeContext::Value)));
+            }
+            Spec::Omittable(inner) => {
+                let name = match self.side {
+                    Side::Encode => "optionToJson",
+                    Side::Decode => "optionalFieldFromJson",
                 };
                 return self.library(name, Args::One(Spec::Type(inner, EncodeContext::Value)));
             }
@@ -386,6 +514,76 @@ impl Builder<'_> {
         }
     }
 
+    /// Push the skeleton of a parameter that takes the codec of `spec`, and
+    /// give the slot that codec is then emitted with: a variable for a plain
+    /// name, a function of one parameter for an application.
+    /// Cost: O(1): one or three skeleton nodes.
+    fn arg_slot(&mut self, spec: Spec) -> Slot {
+        if self.arity(spec) == 0 {
+            let var = self.fresh();
+            self.arena.plans_mut().push_skeleton(SkeletonNode::Var(var));
+            Slot::Plain(var)
+        } else {
+            let (param, result) = (self.fresh(), self.fresh());
+            let plans = self.arena.plans_mut();
+            plans.push_skeleton(SkeletonNode::Arrow { params: 1 });
+            plans.push_skeleton(SkeletonNode::Var(param));
+            plans.push_skeleton(SkeletonNode::Var(result));
+            Slot::Applied(param, result)
+        }
+    }
+
+    /// Cost: O(type path depth), one type node read; no allocation.
+    fn identity_location(&self, spec: Spec) -> Option<LocIdx> {
+        let Spec::Type(typ, _) = spec else { return None; };
+        let CoreTypeDesc::Ptyp_constr((lid, args)) = &self.arena.get_core_type(typ).ptyp_desc
+            else { return None; };
+        (args.is_empty() && is_json_identifier(lid.txt, self.arena)).then_some(lid.loc)
+    }
+
+    /// A closed identity encoder or result constructor decoder, with the
+    /// equation imposed by its surrounding expected type. Cost: O(1) pool
+    /// appends and one equation, plus one constructor obligation for decoding;
+    /// no allocation outside pool growth. The local is relative to this function
+    /// rather than to its embedding record or variant's binders.
+    fn identity_codec(&mut self, slot: Slot, loc: LocIdx) -> (BodyIdx, SkeletonIdx) {
+        let (param, result) = match slot {
+            Slot::Applied(param, result) => (param, result),
+            Slot::Root | Slot::Plain(_) => (self.fresh(), self.fresh()),
+        };
+        let actual = self.sk(SkeletonNode::Arrow { params: 1 });
+        self.var(param);
+        self.var(match self.side { Side::Encode => param, Side::Decode => result });
+        let expected = match slot {
+            Slot::Plain(var) => self.var(var),
+            Slot::Root | Slot::Applied(..) => {
+                let arrow = self.sk(SkeletonNode::Arrow { params: 1 });
+                self.var(param);
+                self.var(result);
+                arrow
+            }
+        };
+        // The expected function shape is established before typing its body.
+        self.arena.plans_mut().push_obligation(Obligation::Equal { expected, actual });
+        let local = self.node(BodyNode::LocalFromEnd(0));
+        let body = match self.side {
+            Side::Encode => local,
+            Side::Decode => {
+                let name = lident_path_static(self.arena, &["Ok"]);
+                let skeleton = self.var(param);
+                self.var(result);
+                let ctor = self.constructor(name, Owner::Result, Site::ConstructAt, 1, skeleton);
+                self.arena.plans_mut().set_constructor_loc(ctor, loc);
+                let body = self.node(BodyNode::Construct { constructor: ctor, arg: local });
+                self.node(BodyNode::At { loc, body })
+            }
+        };
+        let name = self.arena.intern_string("v");
+        let body = self.node(BodyNode::Function { param: name, body });
+        let body = self.node(BodyNode::At { loc, body });
+        (body, expected)
+    }
+
     /// Emit the codec of `spec`: its obligation and skeleton, then those of
     /// its arguments, and the body node that applies the head to each
     /// argument's codec in turn.
@@ -393,9 +591,12 @@ impl Builder<'_> {
     /// and one application per argument, and two or three skeleton nodes per
     /// argument; no allocation beyond the pools' growth.
     fn codec(&mut self, spec: Spec, slot: Slot) -> BodyIdx {
+        if let Some(loc) = self.identity_location(spec) {
+            return self.identity_codec(slot, loc).0;
+        }
         let parts = self.parts(spec);
         let arity = parts.args.len();
-        let first_slot = self.slots.len();
+        let first_slot = self.scratch.slots.len();
         let skeleton = match slot {
             Slot::Plain(var) => self.arena.plans_mut().push_skeleton(SkeletonNode::Var(var)),
             Slot::Root | Slot::Applied(..) => {
@@ -404,19 +605,8 @@ impl Builder<'_> {
                 });
                 for i in 0..arity {
                     let arg = parts.args.get(i, self.arena);
-                    let arg_slot = if self.arity(arg) == 0 {
-                        let var = self.fresh();
-                        self.arena.plans_mut().push_skeleton(SkeletonNode::Var(var));
-                        Slot::Plain(var)
-                    } else {
-                        let (param, result) = (self.fresh(), self.fresh());
-                        let plans = self.arena.plans_mut();
-                        plans.push_skeleton(SkeletonNode::Arrow { params: 1 });
-                        plans.push_skeleton(SkeletonNode::Var(param));
-                        plans.push_skeleton(SkeletonNode::Var(result));
-                        Slot::Applied(param, result)
-                    };
-                    self.slots.push(arg_slot);
+                    let arg_slot = self.arg_slot(arg);
+                    self.scratch.slots.push(arg_slot);
                 }
                 let (param, result) = match slot {
                     Slot::Applied(param, result) => (param, result),
@@ -442,36 +632,83 @@ impl Builder<'_> {
         let mut funct = plans.push_body(BodyNode::Free(obligation));
         for i in 0..arity {
             let arg = parts.args.get(i, self.arena);
-            let arg = self.codec(arg, self.slots[first_slot + i]);
+            let arg = self.codec(arg, self.scratch.slots[first_slot + i]);
             funct = self.arena.plans_mut().push_apply(funct, &[arg], true);
         }
-        self.slots.truncate(first_slot);
+        self.scratch.slots.truncate(first_slot);
         funct
     }
+}
+
+/// Visit exposed manifest arguments once; positions use one reusable stack.
+/// Cost: O(type nodes + emitted position lengths), no per-node allocation.
+fn identity_guards(
+    arena: &mut ParseArena, typ: CoreTypeIdx, scope: super::super::derive::Scope<'_>,
+    path: &mut Vec<u32>, positions: &mut Vec<Span>,
+) {
+    let CoreTypeDesc::Ptyp_constr((lid, args)) = arena.get_core_type(typ).ptyp_desc.clone() else { return };
+    if args.is_empty() {
+        if !path.is_empty() && scope.identity_fact(lid.txt, arena).is_none() {
+            positions.push(arena.plans_mut().push_guard_position(path));
+        }
+        return;
+    }
+    // A single option identity agrees with general inference; nested codec
+    // applications do not share this exception.
+    if path.is_empty() && longident_matches(arena, lid.txt, &["option"])
+        && args.len() == 1
+        && matches!(&arena.get_core_type(arena.type_list(args)[0]).ptyp_desc,
+            CoreTypeDesc::Ptyp_constr((_, inner)) if inner.is_empty())
+    { return; }
+    for i in 0..args.len() {
+        let child = arena.type_list(args)[i];
+        path.push(i as u32);
+        identity_guards(arena, child, scope, path, positions);
+        path.pop();
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ManifestBinding<'a> {
+    name: StrIdx,
+    guards: &'a [Span],
 }
 
 /// Append the binding `<type><suffix> = v => codec(v)`.
 /// Cost: O(codecs of the type); see [`Builder::codec`].
 fn binding(
     arena: &mut ParseArena,
-    type_name: &str,
+    declaration: ManifestBinding<'_>,
     suffix: &str,
     side: Side,
     spec: Spec,
     attributes: Attributes,
-    slots: &mut Vec<Slot>,
+    scratch: &mut Scratch,
 ) {
     let first = arena.plans().next_obligation();
     let mut builder = Builder {
         arena,
         side,
         vars: 0,
-        slots,
+        scratch,
     };
     let applied = builder.arity(spec) as u32;
-    let codec = builder.codec(spec, Slot::Root);
+    let (codec, stated) = if let Some(loc) = builder.identity_location(spec) {
+        let (codec, ty) = builder.identity_codec(Slot::Root, loc);
+        (codec, Some(ty))
+    } else {
+        (builder.codec(spec, Slot::Root), None)
+    };
     let vars = builder.vars;
-    let name = arena.push_string(format!("{type_name}{suffix}"));
+    if !declaration.guards.is_empty() {
+        for &position in declaration.guards {
+            arena.plans_mut().push_obligation(Obligation::NotJsonIdentity { declaration: declaration.name, position });
+        }
+        if let Some(census) = arena.derived_census.as_mut() {
+            census.not_json_identity_emitted += declaration.guards.len() as u64;
+        }
+    }
+    let name = arena.push_string(format!("{}{suffix}", arena.get_string(declaration.name)));
     let param = arena.spice_runtime_v();
     let plans = arena.plans_mut();
     let local = plans.push_body(BodyNode::Local(0));
@@ -490,8 +727,7 @@ fn binding(
         obligations,
         body,
         vars,
-        result_of: first,
-        applied,
+        ty: stated.map_or(TypeSource::ResultOf { obligation: first, applied }, TypeSource::Stated),
     });
 }
 
@@ -499,23 +735,37 @@ fn binding(
 /// each, the bindings `generate_codec_decls` makes, in its order.
 /// Cost: O(codecs of the manifests); one string per binding name and codec
 /// name, as the generator allocates them.
-pub(in crate::binary_ast) fn build(
+pub(super) fn build(
     arena: &mut ParseArena,
     group: &[TypeDeclaration],
-    general: VbList,
-) -> SpiceResult<DerivedIdx> {
+    settings: &[Option<GeneratorSettings>],
+    scope: super::super::derive::Scope<'_>,
+) -> DerivedIdx {
     let first = arena.plans().next_binding();
-    let mut slots = Vec::new();
-    for decl in group {
-        let Some(settings) = get_generator_settings_from_attributes(&decl.ptype_attributes, arena)?
-        else {
+    let mut scratch = Scratch::default();
+    for (decl, settings) in group.iter().zip(settings) {
+        let Some(settings) = *settings else {
             continue;
         };
-        let manifest = decl.ptype_manifest.expect("a planned declaration has a manifest");
         let type_name = arena.get_string(decl.ptype_name.txt).to_string();
+        match &decl.ptype_kind {
+            TypeKind::Ptype_record(labels) => {
+                record::bindings(arena, &type_name, labels, settings, &mut scratch);
+                continue;
+            }
+            TypeKind::Ptype_variant(constructors) => {
+                variant::bindings(arena, &type_name, constructors, settings, &mut scratch);
+                continue;
+            }
+            TypeKind::Ptype_abstract | TypeKind::Ptype_open => {}
+        }
+        let manifest = decl.ptype_manifest.expect("a planned declaration has a manifest");
         if settings.do_encode {
+            let mut guards = Vec::new();
+            identity_guards(arena, manifest, scope, &mut Vec::new(), &mut guards);
+            let guarded = ManifestBinding { name: decl.ptype_name.txt, guards: &guards };
             let encoder = Spec::Type(manifest, EncodeContext::Optional);
-            binding(arena, &type_name, ENCODER_FUNC_SUFFIX, Side::Encode, encoder, Attributes::new(), &mut slots);
+            binding(arena, guarded, ENCODER_FUNC_SUFFIX, Side::Encode, encoder, Attributes::new(), &mut scratch);
             // `manifest_value_encoder`: only a top-level `option` encodes its
             // value differently from its optional form.
             let value_encoder = match default_option_inner_type(arena.get_core_type(manifest), arena) {
@@ -523,14 +773,14 @@ pub(in crate::binary_ast) fn build(
                 None => encoder,
             };
             let attributes = vec![unused_value_warning_attribute(arena)].into();
-            binding(arena, &type_name, VALUE_ENCODER_FUNC_SUFFIX, Side::Encode, value_encoder, attributes, &mut slots);
+            binding(arena, guarded, VALUE_ENCODER_FUNC_SUFFIX, Side::Encode, value_encoder, attributes, &mut scratch);
         }
         if settings.do_decode {
             let decoder = Spec::Type(manifest, EncodeContext::Optional);
-            binding(arena, &type_name, DECODER_FUNC_SUFFIX, Side::Decode, decoder, Attributes::new(), &mut slots);
+            binding(arena, ManifestBinding { name: decl.ptype_name.txt, guards: &[] }, DECODER_FUNC_SUFFIX, Side::Decode, decoder, Attributes::new(), &mut scratch);
         }
     }
-    Ok(arena.plans_mut().push_item(first, general))
+    arena.plans_mut().push_item(first)
 }
 
 #[cfg(test)]
@@ -538,27 +788,38 @@ mod tests {
     use super::*;
     use crate::binary_ast::derive;
 
-    /// Parse `source` and run the derive over its top-level items.
-    fn expand(source: &str, scope: Scope) -> (Vec<StructureItem>, ParseArena) {
+    /// Parse `source` and run the derive over its top-level items, with
+    /// plans.
+    fn expand(source: &str) -> (Vec<StructureItem>, ParseArena) {
+        expand_on(source, None)
+    }
+
+    /// [`expand`], with plans or with every item as syntax.
+    fn expand_on(
+        source: &str,
+        plans_off: Option<GeneralReason>,
+    ) -> (Vec<StructureItem>, ParseArena) {
         let mut parser = crate::parser::Parser::new("Test.res", source);
         let items = crate::parser::module::parse_structure(&mut parser);
         assert!(!parser.has_errors(), "{source}");
         let mut arena = parser.into_arena();
+        arena.set_derived_plans(plans_off);
         let expanded = items
             .iter()
             .flat_map(|item| {
-                derive::expand_structure_item_with_mapper(item, &mut arena, true, scope).unwrap()
+                derive::expand_structure_item_with_mapper(item, &mut arena, true).unwrap()
             })
             .collect();
         (expanded, arena)
     }
 
     /// The classification of the last type declaration of `source`.
-    fn classification(source: &str, scope: Scope) -> Classification {
+    fn classification(source: &str) -> Classification {
         let mut parser = crate::parser::Parser::new("Test.res", source);
         let items = crate::parser::module::parse_structure(&mut parser);
         assert!(!parser.has_errors(), "{source}");
-        let arena = parser.into_arena();
+        let mut arena = parser.into_arena();
+        arena.set_derived_plans(None);
         let (rec_flag, decls) = items
             .iter()
             .rev()
@@ -568,14 +829,63 @@ mod tests {
             })
             .expect("a type declaration");
         let shares_names = group_shares_names(decls, &arena);
-        classify(&arena, decls.last().unwrap(), rec_flag, shares_names, scope)
+        classify(&arena, decls.last().unwrap(), rec_flag, shares_names)
+    }
+
+    #[test]
+    fn exposed_json_identity_arguments_are_classified_before_planning() {
+        for shape in [
+            "array<JSON.t>", "list<JSON.t>", "dict<JSON.t>",
+            "array<option<JSON.t>>", "option<option<JSON.t>>",
+            "option<array<JSON.t>>", "result<JSON.t, string>",
+            "result<string, JSON.t>", "Null.t<JSON.t>",
+            "array<Js.Json.t>", "list<Js.Json.t>", "dict<Js.Json.t>",
+        ] {
+            for annotation in ["spice", "spice.encode"] {
+                assert_eq!(
+                    classification(&format!("@{annotation} type t = {shape}")),
+                    Classification::General(GeneralReason::JsonIdentityArgument),
+                    "{annotation}: {shape}",
+                );
+            }
+            assert_eq!(
+                classification(&format!("@spice.decode type t = {shape}")),
+                Classification::Plan,
+                "decode: {shape}",
+            );
+        }
+        for shape in [
+            "JSON.t", "Js.Json.t", "option<JSON.t>", "option<Js.Json.t>",
+            "{field: array<JSON.t>}", "A(array<JSON.t>)",
+        ] {
+            assert_eq!(classification(&format!("@spice type t = {shape}")), Classification::Plan);
+        }
+    }
+
+    #[test]
+    fn a_constructor_can_have_more_than_255_arguments() {
+        let args = vec!["int"; 256].join(", ");
+        let source = format!("@spice type t = C({args})");
+        assert_eq!(classification(&source), Classification::Plan);
+        let (_, arena) = expand(&source);
+        let plans = arena.plans();
+        let mut declared = 0;
+        for binding in plans.bindings(plans.item(DerivedIdx(0))) {
+            for i in binding.obligations.range() {
+                if let Obligation::Constructor { of: Owner::Declared, args, .. } =
+                    plans.obligation(ObligationIdx(i as u32)) {
+                    assert_eq!(args, 256);
+                    declared += 1;
+                }
+            }
+        }
+        assert_eq!(declared, 3);
     }
 
     #[test]
     fn every_reason_of_the_general_path() {
         use GeneralReason::*;
-        let top = Scope::TopLevel;
-        let general = |source| match classification(source, top) {
+        let general = |source| match classification(source) {
             Classification::General(reason) => reason,
             Classification::Plan => panic!("{source} takes a plan"),
         };
@@ -592,16 +902,21 @@ mod tests {
         assert_eq!(general("@spice type t = [#a | #b]"), UnmeasuredShape);
         assert_eq!(general("@spice.serde type t = A | B"), UnmeasuredShape);
         assert_eq!(general("@spice @unboxed type t = A(int)"), Unboxed);
-        assert_eq!(general("@spice type t = {x: int}"), NotYetPlanned);
-        assert_eq!(general("@spice type t = {@spice.default(0) x: int}"), NotYetPlanned);
-        assert_eq!(general("@spice type t = A | B(int)"), NotYetPlanned);
-        assert_eq!(general("@spice type t = JSON.t"), NotYetPlanned);
-        assert_eq!(general("@spice type t = array<Js.Json.t>"), NotYetPlanned);
-        assert_eq!(general("@spice @spice.fallback(\"x\") type t = string"), NotYetPlanned);
-        assert_eq!(
-            classification("@spice type t = string", Scope::Nested),
-            Classification::General(Nested)
-        );
+        assert_eq!(general("@spice type t = {}"), NotYetPlanned(UnplannedForm::EmptyRecord));
+        assert_eq!(general("@spice type t = {@spice.key(`k`) x: int}"), NotYetPlanned(UnplannedForm::TemplateLiteral));
+        assert_eq!(classification("@spice type t = {x: JSON.t}"), Classification::Plan);
+        assert_eq!(general("@spice type t = {x: pair<string, int>}"), NotYetPlanned(UnplannedForm::AppliedUserCodec));
+        assert_eq!(general("@spice type t = array<A.box<int>>"), NotYetPlanned(UnplannedForm::AppliedUserCodec));
+        assert_eq!(general("@spice type t = {x: (int, string)}"), UnmeasuredShape);
+        assert_eq!(general("@spice @unboxed type t = {x: int}"), Unboxed);
+        assert_eq!(general("@spice type rec t = {x: array<t>}"), RecursiveGroup);
+        assert_eq!(classification("@spice type t = A | B(int)"), Classification::Plan);
+        assert_eq!(general("@spice type t = @spice.as(\"A\") A(int)"), UnsupportedVariant);
+        assert_eq!(general("@spice type t = A(pair<string, int>)"), UnsupportedVariant);
+        assert_eq!(classification("@spice type t = A(JSON.t)"), Classification::Plan);
+        assert_eq!(classification("@spice type t = JSON.t"), Classification::Plan);
+        assert_eq!(general("@spice type t = array<Js.Json.t>"), JsonIdentityArgument);
+        assert_eq!(general("@spice @spice.fallback(\"x\") type t = string"), NotYetPlanned(UnplannedForm::ConstantFallback));
         for planned in [
             "@spice type t = string",
             "@spice type t = array<id>",
@@ -609,49 +924,73 @@ mod tests {
             "@spice.decode type t = result<a, B.c>",
             "@spice type t = dict<option<array<int>>>",
             "@spice type a = string @spice and b = array<a>",
+            "@spice type t = {x: int}",
+            "@spice type t = {@spice.default(0) x: int, @spice.key(\"k\") y?: string}",
+            "@spice.decode type t = {x: option<array<A.t>>}",
+            "@spice type a = {x: int} @spice and b = {y: int}",
         ] {
-            assert_eq!(classification(planned, top), Classification::Plan, "{planned}");
+            assert_eq!(classification(planned), Classification::Plan, "{planned}");
         }
     }
 
     /// Only a group whose derived declarations all take a plan becomes a
-    /// plan; a nested item never does.
+    /// plan.
     #[test]
     fn a_group_is_planned_as_a_whole() {
-        let derived = |source, scope| {
-            let (items, _) = expand(source, scope);
+        let derived = |source| {
+            let (items, _) = expand(source);
             matches!(items.last().unwrap().pstr_desc, StructureItemDesc::Pstr_derived(_))
         };
-        assert!(derived("@spice type a = string @spice and b = array<a>", Scope::TopLevel));
-        assert!(derived("type a = {x: int} @spice and b = array<int>", Scope::TopLevel));
-        assert!(!derived("@spice type a = {x: int} @spice and b = array<a>", Scope::TopLevel));
-        assert!(!derived("@spice type a = string", Scope::Nested));
+        assert!(derived("@spice type a = string @spice and b = array<a>"));
+        assert!(derived("type a = {x: int} @spice and b = array<int>"));
+        assert!(derived("@spice type a = {x: int} @spice and b = array<a>"));
+        assert!(derived("@spice type a = A | B(int) @spice and b = array<a>"));
     }
 
-    /// With plans switched off (`RESCRIPT_DERIVED_PATH=general`) the
-    /// classifier keeps every declaration on the general path, and the
-    /// seam emits the value group it emitted before plans.
+    /// With plans off, which a tree is unless the driver says it is compiled
+    /// in this process, the classifier keeps every declaration on the
+    /// general path, and the seam emits the value group it emitted before
+    /// plans.
     #[test]
     fn the_switch_keeps_every_declaration_general() {
         let source = "@spice type a = string @spice and b = array<a>";
         let mut parser = crate::parser::Parser::new("Test.res", source);
         let items = crate::parser::module::parse_structure(&mut parser);
         let mut arena = parser.into_arena();
-        arena.set_derived_plans(false);
         let StructureItemDesc::Pstr_type(inner) = &items[0].pstr_desc else {
             panic!("a type declaration")
         };
         for decl in &inner.1 {
             assert_eq!(
-                classify(&arena, decl, inner.0, false, Scope::TopLevel),
+                classify(&arena, decl, inner.0, false),
                 Classification::General(GeneralReason::Switch)
             );
         }
         let expanded =
-            derive::expand_structure_item_with_mapper(&items[0], &mut arena, true, Scope::TopLevel)
+            derive::expand_structure_item_with_mapper(&items[0], &mut arena, true)
                 .unwrap();
         assert!(matches!(expanded.last().unwrap().pstr_desc, StructureItemDesc::Pstr_value(..)));
         assert_eq!(arena.plans().item_count(), 0);
+    }
+
+    #[test]
+    fn a_planned_item_allocates_no_general_body() {
+        let mut parser = crate::parser::Parser::new("Test.res", "@spice type t = array<string>");
+        let items = crate::parser::module::parse_structure(&mut parser);
+        let mut arena = parser.into_arena();
+        arena.set_derived_plans(None);
+        let before = arena.reserve_pat();
+        let expanded = derive::expand_structure_item_with_mapper(
+            &items[0], &mut arena, true,
+        ).unwrap();
+        assert!(matches!(expanded[1].pstr_desc, StructureItemDesc::Pstr_derived(_)));
+        // Even a single general binding would allocate its parameter and
+        // binding patterns. The extra slot is only this test's reservation.
+        assert_eq!(arena.reserve_pat().0, before.0 + 1);
+        let mut counts = crate::binary_ast::derive::census::SyntaxCounts::default();
+        counts.item(&arena, &expanded[1]);
+        assert_eq!(counts.bindings, [3, 0]);
+        assert_eq!(counts.nodes, [1, 0]);
     }
 
     fn longident_text(arena: &ParseArena, lid: &Longident) -> String {
@@ -710,38 +1049,53 @@ mod tests {
             "@spice type r = result<array<option<int>>, dict<B.C.t>>",
             "@spice.decode type d = dict<option<list<id>>>\n@spice.encode type e = Null.t<float>",
         ] {
-            let (items, arena) = expand(source, Scope::TopLevel);
+            let (items, arena) = expand(source);
+            // The same parse with every item as syntax: the two trees have
+            // the same items, and the locations of the source are the same
+            // handles in both arenas.
+            let (syntax, syntax_arena) =
+                expand_on(source, Some(GeneralReason::Switch));
+            assert_eq!(items.len(), syntax.len());
             let mut plans = 0;
-            for item in &items {
+            for (item, syntax) in items.iter().zip(&syntax) {
                 let StructureItemDesc::Pstr_derived(idx) = item.pstr_desc else {
                     continue;
+                };
+                let StructureItemDesc::Pstr_value((_, general)) = syntax.pstr_desc else {
+                    panic!("the general form of a derived item is a value group")
                 };
                 plans += 1;
                 let plan = arena.plans();
                 let item = plan.item(idx);
-                let general = arena.vb_list(item.general);
+                let general = syntax_arena.vb_list(general);
                 assert_eq!(general.len(), plan.bindings(item).len(), "{source}");
                 for (binding, vb) in plan.bindings(item).iter().zip(general) {
-                    let PatternDesc::Ppat_var(name) = &arena.get_pat(vb.pvb_pat).ppat_desc else {
+                    let PatternDesc::Ppat_var(name) = &syntax_arena.get_pat(vb.pvb_pat).ppat_desc
+                    else {
                         panic!("a generated binding binds a variable")
                     };
-                    assert_eq!(arena.get_string(binding.name), arena.get_string(name.txt));
-                    let attribute_names = |attrs: &Attributes| {
-                        attrs.iter().map(|attr| arena.get_string(attr.0.txt)).collect::<Vec<_>>()
-                    };
+                    assert_eq!(arena.get_string(binding.name), syntax_arena.get_string(name.txt));
                     assert_eq!(
-                        attribute_names(&binding.attributes),
-                        attribute_names(&vb.pvb_attributes)
+                        binding
+                            .attributes
+                            .iter()
+                            .map(|attr| arena.get_string(attr.0.txt))
+                            .collect::<Vec<_>>(),
+                        vb.pvb_attributes
+                            .iter()
+                            .map(|attr| syntax_arena.get_string(attr.0.txt))
+                            .collect::<Vec<_>>()
                     );
                     let mut expected = Vec::new();
-                    identifiers(&arena, vb.pvb_expr, &mut Vec::new(), &mut expected);
+                    identifiers(&syntax_arena, vb.pvb_expr, &mut Vec::new(), &mut expected);
                     let actual: Vec<_> = binding
                         .obligations
                         .range()
-                        .map(|i| {
+                        .filter_map(|i| {
                             let obligation = plan.obligation(
                                 crate::binary_ast::derive::plan::ObligationIdx(i as u32),
                             );
+                            if matches!(obligation, Obligation::NotJsonIdentity { .. }) { return None; }
                             let Obligation::Value { name, name_loc, expr_loc, .. } = obligation
                             else {
                                 panic!("a constructor application has value obligations only")
@@ -750,7 +1104,7 @@ mod tests {
                                 ExprLoc::OfName => name_loc,
                                 ExprLoc::Dummy => arena.dummy_loc(),
                             };
-                            (longident_text(&arena, arena.get_longident(name)), name_loc, expr_loc)
+                            Some((longident_text(&arena, arena.get_longident(name)), name_loc, expr_loc))
                         })
                         .collect();
                     assert_eq!(actual, expected, "{source}: {}", arena.get_string(binding.name));
@@ -769,7 +1123,7 @@ mod tests {
         let source = format!("@spice.encode type t = {}int{}", "array<".repeat(depth), ">".repeat(depth));
         let (items, arena) = std::thread::Builder::new()
             .stack_size(256 << 20)
-            .spawn(move || expand(&source, Scope::TopLevel))
+            .spawn(move || expand(&source))
             .unwrap()
             .join()
             .unwrap();
@@ -781,10 +1135,443 @@ mod tests {
         assert_eq!(bindings.len(), 2);
         for binding in bindings {
             assert_eq!(binding.obligations.len as usize, depth + 1);
-            assert_eq!(binding.applied, 1);
+            assert!(matches!(binding.ty, TypeSource::ResultOf { applied: 1, .. }));
             // Root: p, r and the (p, r) of its argument; then two per level;
             // the innermost `int` is a plain name with one variable.
             assert_eq!(binding.vars as usize, 2 + 2 * (depth - 1) + 1);
         }
+    }
+
+    /// The plan of the last type declaration of `source`, built whatever the
+    /// classifier says, beside the same source expanded to syntax.
+    fn record_plan(source: &str) -> (DerivedIdx, ParseArena, Vec<StructureItem>, ParseArena) {
+        let mut parser = crate::parser::Parser::new("Test.res", source);
+        let items = crate::parser::module::parse_structure(&mut parser);
+        assert!(!parser.has_errors(), "{source}");
+        let mut arena = parser.into_arena();
+        let StructureItemDesc::Pstr_type(inner) = &items.last().unwrap().pstr_desc else {
+            panic!("a type declaration")
+        };
+        let settings: Vec<_> = inner
+            .1
+            .iter()
+            .map(|decl| get_generator_settings_from_attributes(&decl.ptype_attributes, &mut arena).unwrap())
+            .collect();
+        let idx = build(&mut arena, &inner.1, &settings, crate::binary_ast::derive::Scope::default());
+        let (syntax, syntax_arena) = expand_on(source, Some(GeneralReason::Switch));
+        (idx, arena, syntax, syntax_arena)
+    }
+
+    /// What inference meets in a generated expression, in its order: a
+    /// function's body; a callee, then its arguments; an annotation's type,
+    /// then its expression; a constructor, then its argument; a record, then
+    /// its label; the labels of a record expression, then its values; a
+    /// record update's base, its label, then its value; a condition, then
+    /// its branches; a `let`'s value, then its body; the scrutinee of a
+    /// match, the patterns of all its cases, then their bodies. A constant
+    /// with a source location is the user's; so is the constant `==`
+    /// compares, which the derive copies without one.
+    fn events(arena: &ParseArena, expr: ExprIdx, locals: &mut Vec<String>, out: &mut Vec<String>) {
+        let expr = arena.get_expr(expr);
+        let name = |lid: &Located<LidentIdx>| {
+            format!("{} {:?}", longident_text(arena, arena.get_longident(lid.txt)), lid.loc)
+        };
+        match &expr.pexp_desc {
+            ExpressionDesc::Pexp_fun(fun) => {
+                let PatternDesc::Ppat_var(param) = &arena.get_pat(fun.lhs).ppat_desc else {
+                    panic!("a generated function binds a variable")
+                };
+                locals.push(arena.get_string(param.txt).to_string());
+                events(arena, fun.rhs, locals, out);
+                locals.pop();
+            }
+            ExpressionDesc::Pexp_apply(apply) => {
+                events(arena, apply.funct, locals, out);
+                let equal = matches!(
+                    &arena.get_expr(apply.funct).pexp_desc,
+                    ExpressionDesc::Pexp_ident(lid)
+                        if longident_text(arena, arena.get_longident(lid.txt)) == "=="
+                );
+                for (i, (_, arg)) in arena.apply_args(apply.args).iter().enumerate() {
+                    if equal && i == 0 {
+                        out.push("literal eq".to_string());
+                    } else {
+                        events(arena, *arg, locals, out);
+                    }
+                }
+            }
+            ExpressionDesc::Pexp_ident(lid) => {
+                let text = longident_text(arena, arena.get_longident(lid.txt));
+                if !locals.contains(&text) {
+                    out.push(format!("value {text} {:?} {:?}", lid.loc, expr.pexp_loc));
+                }
+            }
+            ExpressionDesc::Pexp_constraint(inner) => {
+                out.push(type_event(arena, inner.1));
+                events(arena, inner.0, locals, out);
+            }
+            ExpressionDesc::Pexp_construct(lid, args) => {
+                out.push(format!("construct {}", name(lid)));
+                for arg in arena.expr_list(args.txt) {
+                    events(arena, *arg, locals, out);
+                }
+            }
+            ExpressionDesc::Pexp_field(record, lid) => {
+                events(arena, *record, locals, out);
+                out.push(format!("access {}", name(lid)));
+            }
+            ExpressionDesc::Pexp_record((fields, None)) => {
+                let fields = arena.expr_field_list(*fields);
+                for field in fields {
+                    out.push(format!("field {}", name(&field.lid)));
+                }
+                for field in fields {
+                    events(arena, field.expr, locals, out);
+                }
+            }
+            ExpressionDesc::Pexp_record((fields, Some(base))) => {
+                events(arena, *base, locals, out);
+                let fields = arena.expr_field_list(*fields);
+                for field in fields {
+                    out.push(format!("update {}", name(&field.lid)));
+                }
+                for field in fields {
+                    events(arena, field.expr, locals, out);
+                }
+            }
+            ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
+                for item in arena.expr_list(*items) {
+                    events(arena, *item, locals, out);
+                }
+            }
+            ExpressionDesc::Pexp_constant(_) => {
+                if expr.pexp_loc != arena.none_loc() && expr.pexp_loc != arena.dummy_loc() {
+                    let literal = format!("literal {:?}", expr.pexp_loc);
+                    if !out.contains(&literal) {
+                        out.push(literal);
+                    }
+                }
+            }
+            ExpressionDesc::Pexp_ifthenelse(inner) => {
+                let (cond, then, else_) = **inner;
+                events(arena, cond, locals, out);
+                events(arena, then, locals, out);
+                events(arena, else_.expect("a generated condition has two branches"), locals, out);
+            }
+            ExpressionDesc::Pexp_let((_, bindings, body)) => {
+                let bindings = arena.vb_list(*bindings);
+                let mut bound = Vec::new();
+                for vb in bindings {
+                    events(arena, vb.pvb_expr, locals, out);
+                    pattern_events(arena, vb.pvb_pat, &mut bound, out);
+                }
+                let count = bound.len();
+                locals.extend(bound);
+                events(arena, *body, locals, out);
+                locals.truncate(locals.len() - count);
+            }
+            ExpressionDesc::Pexp_match((scrutinee, cases)) => {
+                events(arena, *scrutinee, locals, out);
+                let cases = arena.case_list(*cases);
+                let mut binders = Vec::new();
+                for case in cases {
+                    let mut bound = Vec::new();
+                    pattern_events(arena, case.pc_lhs, &mut bound, out);
+                    binders.push(bound);
+                }
+                for (case, bound) in cases.iter().zip(binders) {
+                    let count = bound.len();
+                    locals.extend(bound);
+                    events(arena, case.pc_rhs, locals, out);
+                    locals.truncate(locals.len() - count);
+                }
+            }
+            other => panic!("unexpected node in a planned body: {other:?}"),
+        }
+    }
+
+    fn type_event(arena: &ParseArena, typ: CoreTypeIdx) -> String {
+        let CoreTypeDesc::Ptyp_constr((lid, _)) = &arena.get_core_type(typ).ptyp_desc else {
+            panic!("a generated annotation names a type")
+        };
+        format!("type {} {:?}", longident_text(arena, arena.get_longident(lid.txt)), lid.loc)
+    }
+
+    /// What inference meets in a generated pattern: a constructor, then its
+    /// arguments; an annotation's type, then its pattern; the labels of a
+    /// record pattern, then its fields. The variables are added to `bound`
+    /// left to right.
+    fn pattern_events(arena: &ParseArena, pat: PatIdx, bound: &mut Vec<String>, out: &mut Vec<String>) {
+        let name = |lid: &Located<LidentIdx>| {
+            format!("{} {:?}", longident_text(arena, arena.get_longident(lid.txt)), lid.loc)
+        };
+        match &arena.get_pat(pat).ppat_desc {
+            PatternDesc::Ppat_construct(lid, args) => {
+                out.push(format!("pattern {}", name(lid)));
+                for arg in arena.pat_list(args.txt) {
+                    pattern_events(arena, *arg, bound, out);
+                }
+            }
+            PatternDesc::Ppat_constraint(inner) => {
+                out.push(type_event(arena, inner.1));
+                pattern_events(arena, inner.0, bound, out);
+            }
+            PatternDesc::Ppat_var(var) => bound.push(arena.get_string(var.txt).to_string()),
+            PatternDesc::Ppat_tuple(items) | PatternDesc::Ppat_array(items) => {
+                for item in arena.pat_list(*items) {
+                    pattern_events(arena, *item, bound, out);
+                }
+            }
+            PatternDesc::Ppat_record(record) => {
+                let fields = arena.pat_field_list(record.0);
+                for field in fields {
+                    out.push(format!("pfield {}", name(&field.lid)));
+                }
+                for field in fields {
+                    pattern_events(arena, field.pat, bound, out);
+                }
+            }
+            PatternDesc::Ppat_any | PatternDesc::Ppat_constant(_) => {}
+            other => panic!("unexpected generated pattern: {other:?}"),
+        }
+    }
+
+    /// The obligations of a binding, written as [`events`] writes what
+    /// inference meets.
+    fn obligation_events(arena: &ParseArena, binding: &Binding) -> Vec<String> {
+        let plans = arena.plans();
+        let text = |name: LidentIdx| longident_text(arena, arena.get_longident(name));
+        let (none, dummy) = (arena.none_loc(), arena.dummy_loc());
+        let mut previous = None;
+        let mut out = Vec::new();
+        for i in binding.obligations.range() {
+            let obligation = plans.obligation(ObligationIdx(i as u32));
+            out.push(match obligation {
+                Obligation::Equal { .. } | Obligation::NotJsonIdentity { .. } => continue,
+                Obligation::Value { name, name_loc, expr_loc, .. } => {
+                    let expr_loc = match expr_loc {
+                        ExprLoc::OfName => name_loc,
+                        ExprLoc::Dummy => dummy,
+                    };
+                    format!("value {} {name_loc:?} {expr_loc:?}", text(name))
+                }
+                Obligation::Type { name, name_loc, .. } => {
+                    format!("type {} {name_loc:?}", text(name))
+                }
+                Obligation::Label { name, usage, .. } => match usage {
+                    LabelUse::Access => format!("access {} {none:?}", text(name)),
+                    LabelUse::AccessDummy => format!("access {} {dummy:?}", text(name)),
+                    LabelUse::Construct | LabelUse::ConstructInline => {
+                        format!("field {} {none:?}", text(name))
+                    }
+                    LabelUse::Pattern => format!("pfield {} {none:?}", text(name)),
+                    LabelUse::Update => format!("update {} {dummy:?}", text(name)),
+                },
+                Obligation::Constructor { name, site, .. } => match site {
+                    Site::Construct => format!("construct {} {dummy:?}", text(name)),
+                    Site::ConstructNone => format!("construct {} {none:?}", text(name)),
+                    Site::ConstructAt => format!("construct {} {:?}", text(name), plans.constructor_loc(ObligationIdx(i as u32))),
+                    Site::Pattern => format!("pattern {} {none:?}", text(name)),
+                    Site::PatternDummy => format!("pattern {} {dummy:?}", text(name)),
+                },
+                Obligation::Literal { expr, .. } => match previous.and_then(Obligation::name) {
+                    Some(name) if text(name) == "==" => "literal eq".to_string(),
+                    _ => format!("literal {:?}", arena.get_expr(expr).pexp_loc),
+                },
+            });
+            previous = Some(obligation);
+        }
+        out
+    }
+
+    #[test]
+    fn json_obligation_names_follow_general_typing_order() {
+        assert_obligations_follow_the_general_form("@spice type t = {value: JSON.t}");
+        assert_obligations_follow_the_general_form("@spice type t = {value: array<JSON.t>}");
+    }
+
+    /// The obligations of the plan of the last declaration of `source` are
+    /// what inference meets in its general form, binding by binding, in
+    /// typing order, with the same names and locations; and each binding's
+    /// type is stated.
+    fn assert_obligations_follow_the_general_form(source: &'static str) {
+        let run = move || {
+            let (idx, arena, syntax, syntax_arena) = record_plan(source);
+            let StructureItemDesc::Pstr_value((_, general)) = syntax.last().unwrap().pstr_desc
+            else {
+                panic!("the general form of a derived item is a value group")
+            };
+            let plans = arena.plans();
+            let bindings = plans.bindings(plans.item(idx));
+            let general = syntax_arena.vb_list(general);
+            assert_eq!(general.len(), bindings.len(), "{source}");
+            for (binding, vb) in bindings.iter().zip(general) {
+                let PatternDesc::Ppat_var(name) = &syntax_arena.get_pat(vb.pvb_pat).ppat_desc
+                else {
+                    panic!("a generated binding binds a variable")
+                };
+                assert_eq!(arena.get_string(binding.name), syntax_arena.get_string(name.txt));
+                assert_eq!(binding.attributes.len(), vb.pvb_attributes.len());
+                assert!(matches!(binding.ty, TypeSource::Stated(_)));
+                let mut expected = Vec::new();
+                events(&syntax_arena, vb.pvb_expr, &mut Vec::new(), &mut expected);
+                let actual = obligation_events(&arena, binding);
+                assert_eq!(actual, expected, "{source}: {}", arena.get_string(binding.name));
+            }
+        };
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(run)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// The obligations of a record's plan are what inference meets in its
+    /// general form, binding by binding, in typing order, with the same
+    /// names and locations.
+    #[test]
+    fn record_obligations_follow_the_general_form() {
+        for source in [
+            "@spice type t = {x: int}",
+            "@spice type t = {label: string, value: array<option<A.t>>}",
+            "@spice type t = {a: option<string>, b?: int, c: Null.t<float>}",
+            "@spice type t = {@spice.key(\"k\") a: int, @spice.default(0) b: int, @spice.default(1.5) c: float, d?: bool}",
+            "@spice.decode type d = {@spice.key(\"other\") x: dict<id>, y?: array<int>}",
+        ] {
+            assert_obligations_follow_the_general_form(source);
+        }
+    }
+
+    /// The obligations of a variant's plan are what inference meets in its
+    /// general form: constant constructors, constructors of one and of
+    /// several arguments, inline records with optional, keyed and defaulted
+    /// fields, and `@spice.as` literals of strings and numbers.
+    #[test]
+    fn variant_obligations_follow_the_general_form() {
+        for source in [
+            "@spice type t = A | B(int) | C(string, array<float>)",
+            "@spice type t = R({x: int, @spice.key(\"k\") y?: string}) | S",
+            "@spice type t = @spice.as(\"a\") A | @spice.as(\"b\") B",
+            "@spice type t = @spice.as(1.5) One | @spice.as(\"two\") Two",
+            "@spice.decode type t = P(option<A.t>) | Q({@spice.default(0) n: int, m: option<string>}) | Z(dict<int>, bool, B.c)",
+        ] {
+            assert_obligations_follow_the_general_form(source);
+        }
+    }
+
+    /// The constructors a variant's plan admits; the rest is classified
+    /// general by the derive's own errors or by the Q5 table.
+    #[test]
+    fn which_variants_a_plan_describes() {
+        let planned = |source: &str| {
+            let mut parser = crate::parser::Parser::new("Test.res", source);
+            let items = crate::parser::module::parse_structure(&mut parser);
+            assert!(!parser.has_errors(), "{source}");
+            let arena = parser.into_arena();
+            let StructureItemDesc::Pstr_type(inner) = &items[0].pstr_desc else {
+                panic!("a type declaration")
+            };
+            let TypeKind::Ptype_variant(constructors) = &inner.1[0].ptype_kind else {
+                panic!("a variant")
+            };
+            variant::planned(constructors, &arena)
+        };
+        for source in [
+            "type t = A",
+            "type t = A | B(int, string) | R({x: int})",
+            "type t = @spice.as(\"a\") A | @spice.as(2.5) B",
+            "type t = R({@spice.default(0) x: int, @spice.key(\"k\") y?: string})",
+        ] {
+            assert!(planned(source), "{source}");
+        }
+        for source in [
+            // Partial `@spice.as`, an alias with arguments, an integer or a
+            // non-constant alias: the derive reports them.
+            "type t = @spice.as(\"a\") A | B",
+            "type t = @spice.as(\"a\") A(int) | @spice.as(\"b\") B",
+            "type t = @spice.as(1) A | @spice.as(2) B",
+            "type t = @spice.as(x) A | @spice.as(\"b\") B",
+            "type t = @spice.as(`a`) A | @spice.as(\"b\") B",
+            "type t = @spice.as(\"a\") @spice.as(\"b\") A",
+            // Flags that need `@spice.serde`.
+            "type t = @spice.other A | B",
+            // An inline record without a field, or with a non-constant key.
+            "type t = R({@spice.key(k) x: int})",
+        ] {
+            assert!(!planned(source), "{source}");
+        }
+    }
+
+    /// The plan of a group of `count` constructors that `constructor(i)`
+    /// writes: per binding its obligations, then the body nodes and pattern
+    /// nodes of the whole plan.
+    fn variant_counts(count: usize, constructor: fn(usize) -> String) -> (Vec<usize>, usize, usize) {
+        let source = format!(
+            "@spice type t = {}",
+            (0..count).map(constructor).collect::<Vec<_>>().join(" | ")
+        );
+        let mut parser = crate::parser::Parser::new("Test.res", &source);
+        let items = crate::parser::module::parse_structure(&mut parser);
+        assert!(!parser.has_errors());
+        let mut arena = parser.into_arena();
+        let StructureItemDesc::Pstr_type(inner) = &items[0].pstr_desc else {
+            panic!("a type declaration")
+        };
+        let settings =
+            [get_generator_settings_from_attributes(&inner.1[0].ptype_attributes, &mut arena).unwrap()];
+        let idx = build(&mut arena, &inner.1, &settings, crate::binary_ast::derive::Scope::default());
+        let plans = arena.plans();
+        let obligations = plans
+            .bindings(plans.item(idx))
+            .iter()
+            .map(|binding| binding.obligations.len as usize)
+            .collect();
+        (obligations, plans.body_count(), plans.pattern_count())
+    }
+
+    /// A variant of 10,000 constructors of one argument: per constructor
+    /// four obligations, seven body nodes and two pattern nodes in an
+    /// encoder, fifteen obligations, twenty-nine body nodes and six pattern
+    /// nodes in its decoder, beside a fixed number per binding.
+    #[test]
+    fn a_variant_plan_is_linear_in_its_constructors() {
+        let n = 10_000;
+        let (obligations, body, patterns) = variant_counts(n, |i| format!("C{i}(int)"));
+        assert_eq!(obligations, [1 + 4 * n, 1 + 4 * n, 8 + 15 * n]);
+        assert_eq!(body, 2 * (6 + 8 * n) + 26 + 29 * n);
+        assert_eq!(patterns, 2 * 2 * n + 2 + 6 * n);
+        // Constant constructors: no argument and no match on one.
+        let (obligations, body, patterns) = variant_counts(n, |i| format!("C{i}"));
+        assert_eq!(obligations, [1 + 3 * n, 1 + 3 * n, 8 + 6 * n]);
+        assert_eq!(body, 2 * (6 + 4 * n) + 26 + 13 * n);
+        assert_eq!(patterns, 2 * n + 2 + 2 * n);
+    }
+
+    /// A record of 10,000 fields: per field three obligations and seven body
+    /// nodes in an encoder, sixteen obligations and thirty-two body nodes in
+    /// its decoder, beside a fixed number per binding.
+    #[test]
+    fn a_record_plan_is_linear_in_its_fields() {
+        let fields = 10_000;
+        let source = format!(
+            "@spice type t = {{{}}}",
+            (0..fields).map(|i| format!("f{i}: int")).collect::<Vec<_>>().join(", ")
+        );
+        let mut parser = crate::parser::Parser::new("Test.res", &source);
+        let items = crate::parser::module::parse_structure(&mut parser);
+        assert!(!parser.has_errors());
+        let mut arena = parser.into_arena();
+        let StructureItemDesc::Pstr_type(inner) = &items[0].pstr_desc else {
+            panic!("a type declaration")
+        };
+        let settings =
+            [get_generator_settings_from_attributes(&inner.1[0].ptype_attributes, &mut arena).unwrap()];
+        let idx = build(&mut arena, &inner.1, &settings, crate::binary_ast::derive::Scope::default());
+        let plans = arena.plans();
+        let bindings = plans.bindings(plans.item(idx));
+        let obligations: Vec<_> = bindings.iter().map(|binding| binding.obligations.len as usize).collect();
+        assert_eq!(obligations, [4 + 3 * fields, 4 + 3 * fields, 4 + 16 * fields]);
+        assert_eq!(plans.body_count(), 2 * (10 + 7 * fields) + 12 + 32 * fields);
     }
 }

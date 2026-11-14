@@ -402,6 +402,26 @@ impl Node {
     pub(super) fn set_flags(&mut self, flags: NodeFlags) {
         self.flags = flags;
     }
+    /// The site of a `Var` in the lowering arena (`lower::scope::Site`), kept
+    /// in the leaf's unused second word so that it moves with the node's
+    /// content. O(1).
+    pub(super) fn var_site(self) -> u32 {
+        assert_eq!(self.op, Op::Var);
+        self.words[1]
+    }
+    pub(super) fn set_var_site(&mut self, site: u32) {
+        assert_eq!(self.op, Op::Var);
+        self.words[1] = site;
+    }
+    /// The reference prints as `globalThis.name` (`lower::globals`). O(1).
+    pub(super) fn var_qualified(self) -> bool {
+        assert_eq!(self.op, Op::Var);
+        self.aux & 1 != 0
+    }
+    pub(super) fn set_var_qualified(&mut self) {
+        assert_eq!(self.op, Op::Var);
+        self.aux |= 1;
+    }
     pub(super) fn kill_value(&mut self) {
         assert_eq!(self.op, Op::Let);
         self.words[1] = u32::MAX;

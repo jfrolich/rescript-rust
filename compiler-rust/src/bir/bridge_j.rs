@@ -985,6 +985,8 @@ struct Exporter<'a> {
     stmts: Vec<j::Stmt>,
     props: Vec<(j::PropName, j::Expr)>,
     ids: Vec<Ident>,
+    /// The exported references the lowering marked (`lower::globals`).
+    qualified: Vec<j::Expr>,
 }
 impl Exporter<'_> {
     fn ident(&self, v: VarId) -> Result<Ident, Unsupported> {
@@ -1493,12 +1495,45 @@ impl Exporter<'_> {
             | View::Break
             | View::Continue => return Err(Unsupported("node not produced by J import")),
         };
-        Ok(Output::Expr(self.a.expr_with(expr, cold)))
+        let exported = self.a.expr_with(expr, cold);
+        if b.node(id).op() == Op::Var && b.global_qualified(id) {
+            self.qualified.push(exported);
+        }
+        Ok(Output::Expr(exported))
+    }
+}
+
+/// The exported program and the references to JavaScript globals the
+/// lowering decided to qualify (THREE_TREES 11.4, "T5 design").
+pub(crate) struct Exported {
+    pub program: j::JsDepsProgram,
+    pub qualified: Vec<j::Expr>,
+}
+
+/// Rewrite each marked reference `name` to `globalThis.name`, as the legacy
+/// external-shadow pass writes it (a fresh static index without the
+/// reference's comment or location). One write per marked reference; no
+/// statement is read.
+pub(crate) fn qualify(program: &mut j::JsDepsProgram, qualified: &[j::Expr]) {
+    let a = &mut program.program.arena;
+    for &reference in qualified {
+        let j::ExprKind::Var(id) = a.ek(reference) else { unreachable!("marked reference") };
+        let name = a.ident(id).name_atom();
+        let global = crate::js_ir::build::exp::var(Ident::create_persistent("globalThis"), a);
+        let field = a.str(name.as_str());
+        a.overwrite_expr(reference, j::ExprKind::StaticIndex(global, field, j::FieldPos::new(None)));
     }
 }
 
 /// Export to a fresh JS arena without running any smart constructors.
 pub fn export_js(p: &Imported) -> Result<j::JsDepsProgram, Unsupported> {
+    export_lowered(p).map(|exported| exported.program)
+}
+
+/// [`export_js`], with the handles of the references the lowering marked.
+/// The program has them as plain variables: the first comparison point of
+/// check mode prints it before any pass.
+pub(crate) fn export_lowered(p: &Imported) -> Result<Exported, Unsupported> {
     enum Work {
         Enter(NodeId),
         Finish(NodeId, usize),
@@ -1510,6 +1545,7 @@ pub fn export_js(p: &Imported) -> Result<j::JsDepsProgram, Unsupported> {
         stmts: Vec::new(),
         props: Vec::new(),
         ids: Vec::new(),
+        qualified: Vec::new(),
     };
     let mut work = vec![Work::Enter(p.root)];
     let mut values = Vec::new();
@@ -1529,7 +1565,8 @@ pub fn export_js(p: &Imported) -> Result<j::JsDepsProgram, Unsupported> {
         }
     }
     let block = e.a.stmts(values[0].block()?).to_vec();
-    Ok(j::JsDepsProgram {
+    let qualified = e.qualified;
+    Ok(Exported { qualified, program: j::JsDepsProgram {
         program: j::JsProgram {
             arena: e.a,
             block,
@@ -1539,7 +1576,7 @@ pub fn export_js(p: &Imported) -> Result<j::JsDepsProgram, Unsupported> {
         },
         modules: p.modules.clone(),
         side_effect: p.side_effect.clone(),
-    })
+    } })
 }
 
 #[cfg(test)]

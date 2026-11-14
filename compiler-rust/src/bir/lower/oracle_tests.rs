@@ -419,44 +419,38 @@ fn located_functions_match_mapping_sequences() {
     } else {
         source.function_(0, &[], body, FunctionAttribute::default(), loc)
     };
-    let input = bridge::import_lambda(&source, root).unwrap();
-    let lowered = super::lower(input, Some(&locations), false).unwrap();
-    let actual = bridge_j::export_js(&lowered.program).unwrap();
+    // The unit exports the value, so that it is printed. The gate compares
+    // both texts and their mapping sequences.
+    let root = source.prim_raw(
+        crate::lambda::lam_primitive::Primitive::Pmakeblock(
+            crate::lambda::TagInfo::ModuleExport(vec![Ident::new("value", 11, IdentFlags::NONE)]),
+            crate::lambda::lam_primitive::Mutable::Immutable,
+        ),
+        &[root],
+        crate::lambda::LamLoc::NONE,
+    );
     let mut compiler = LambdaCompiler::new();
     compiler.set_source_map_enabled(true);
     compiler.set_lam_locs(locations.clone());
-    let compiled = compiler.bir_lower_oracle(
-        &mut source,
-        root,
-        Cx::value().cont,
-        Ident::new("unused", 1, IdentFlags::NONE),
-    );
-    let stmt = compiler.j.stmt(StmtKind::Exp(compiled.expr));
-    let expected = JsDepsProgram {
-        program: JsProgram::new_in(vec![stmt], vec![], compiler.j),
-        modules: vec![],
-        side_effect: None,
-    };
+    let (deps, check) = compiler.compile_deps_program_with_lower_check::<true>(source, root, Default::default());
+    let check = check.unwrap();
+    assert!(matches!(check, crate::bir::shadow::LowerCheck::Supported(_)));
+    crate::bir::shadow::check_lower(check, "Mapping.res", false).unwrap();
     let locations = Arc::new(locations);
-    let print = |p| {
-        crate::js_ir::print_deps_program_with_source_map(
-            p,
-            None,
-            &[],
-            false,
-            false,
-            false,
-            std::path::Path::new("Mapping.js"),
-            std::path::Path::new("Mapping.res"),
-            SourceMapMode::Hidden,
-            false,
-            "",
-            locations.clone(),
-        )
-    };
-    let expected = print(&expected);
-    let actual = print(&actual);
-    assert_eq!(actual, expected);
+    let actual = crate::js_ir::print_deps_program_with_source_map(
+        &deps,
+        None,
+        &[],
+        false,
+        false,
+        false,
+        std::path::Path::new("Mapping.js"),
+        std::path::Path::new("Mapping.res"),
+        SourceMapMode::Hidden,
+        false,
+        "",
+        locations.clone(),
+    );
     let map: serde_json::Value = serde_json::from_str(actual.1.as_ref().unwrap()).unwrap();
     assert_ne!(map["mappings"], "");
     }
@@ -833,9 +827,41 @@ fn cross_module_inline_after_lowering_a_closure_with_assignment() {
     compare_oracle(a, root, Some(&resolver), true, &[0,1,2,3,4], None, true);
 }
 
+#[test]
+fn cross_module_inline_of_a_body_that_holds_a_function() {
+    // The function inside the inlined body gets its header while the fragment
+    // is imported, after the unit's own header (the closure's). The lowering
+    // reads headers from its own arena, so that header must be made there: a
+    // header left in the source's table is read out of bounds, or as the
+    // closure's.
+    use crate::cmi::persistent_env::CmjExportArity;
+    use crate::js_ir::ModulePathResolver;
+    use crate::lambda::{ApInfo, ApplyStatus, FieldDbgInfo, LamLoc, Lambda, lam_arity::Arity, lam_primitive::Primitive};
+    let resolver = ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+    let param = Ident::new("arg", 100, IdentFlags::NONE);
+    let first = Ident::new("first", 101, IdentFlags::NONE);
+    let second = Ident::new("second", 102, IdentFlags::NONE);
+    let inner = Lambda::function_(2, vec![first, second], Lambda::var(param), Default::default(), LamLoc::NONE);
+    resolver.set_bir_test_export("Other", "run", CmjExportArity::Single(Arity::info(vec![1], false)),
+        Some(Lambda::function_(1, vec![param], inner, Default::default(), LamLoc::NONE)));
+    let mut a = LamArena::new();
+    let global = a.global_module(Ident::create_persistent("Other"));
+    let callee = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Module { name: crate::name::Name::new("run") }), &[global], LamLoc::NONE);
+    let arg = a.const_(C::JsNull);
+    let call = a.apply_raw(callee, &[arg], ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE });
+    let mutable = Ident::new("mutable", 10, IdentFlags::NONE);
+    let assignment = a.assign(mutable, arg);
+    let unit = Ident::new("unit", 11, IdentFlags::NONE);
+    let attr = crate::lambda::FunctionAttribute { one_unit_arg: true, ..Default::default() };
+    let closure = a.function_(1, &[unit], assignment, attr, LamLoc::NONE);
+    let root = a.seq_raw(closure, call);
+    compare_oracle(a, root, Some(&resolver), true, &[0,1,2,3,4], None, true);
+}
+
 /// The legacy pipeline on one function bound to an exported `run`, with the
-/// passes `order` names (1 flatten, 3 tail-call inlining, 5 substitution and
-/// dead marks, 6 shake), printed. For the T4 ordering findings below.
+/// passes `order` names (1 flatten, 2 external shadow, 3 tail-call inlining,
+/// 4 record rest, 5 substitution and dead marks, 6 shake), printed. For the T4
+/// ordering findings below.
 fn legacy_text(build: impl Fn(&mut LamArena) -> Lam, order: &[u8]) -> String {
     use crate::lambda::js_pass_flatten_and_mark_dead::{apply_js_flatten_and_mark_dead_pass as dead, apply_js_flatten_pass as flatten};
     use crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass as inline;
@@ -849,7 +875,9 @@ fn legacy_text(build: impl Fn(&mut LamArena) -> Lam, order: &[u8]) -> String {
     for pass in order {
         program = match pass {
             1 => flatten(program),
+            2 => crate::lambda::js_pass_external_shadow::apply_external_shadow_pass(program),
             3 => inline(program),
+            4 => crate::lambda::js_pass_record_rest::apply_js_record_rest_pass(program),
             5 => dead(program, false),
             6 => shake(program),
             _ => unreachable!("pass number"),
@@ -956,4 +984,817 @@ fn a_declaration_the_tail_call_pass_finds_dead_is_not_materialised() {
     // Materialising where the declaration is lowered hoists the fields.
     let early = legacy_text(build, &[1, 5, 6]);
     assert!(early.contains("  let x_0 = ext(1);\n  let x_1 = ext(2);\n  return 3;\n"), "{early}");
+}
+
+#[test]
+fn export_coercion_consumes_the_export_tuple_occurrence() {
+    // Reduced from Dom_storage.getItem. The output tuple carries one
+    // reference, which export coercion consumes before P1/P2. While the
+    // lowering left coercion to the legacy code, `built` kept that reference
+    // (1 against the tail-call pass's 0: the drift the T4b count experiment
+    // met). With coercion on rows (T4a) the lowering releases the reference
+    // itself, so `built` is the count the tail-call pass reads.
+    use crate::lambda::{LamLoc, TagInfo};
+    use crate::lambda::lam_primitive::{Mutable, Primitive};
+    use crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_pass;
+    use crate::lambda::js_pass_external_shadow::apply_external_shadow_pass;
+    use crate::lambda::js_pass_tailcall_inline::UseCounts;
+    use crate::bir::shadow::LowerCheck;
+    let mut a = LamArena::new();
+    let f = Ident::new("f", 10, IdentFlags::NONE);
+    let one = a.const_(C::Int { i: 1, comment: None });
+    let function = a.function_(0, &[], one, Default::default(), LamLoc::NONE);
+    let reference = a.var(f);
+    let exports = a.prim_raw(Primitive::Pmakeblock(TagInfo::ModuleExport(vec![f]), Mutable::Immutable), &[reference], LamLoc::NONE);
+    let root = a.let_(LetKind::Strict, f, function, exports);
+    // The lowering reads the variables the importer records for an export
+    // block, so the unit is imported the way the gate imports it.
+    let input = bridge::import_for_lowering(&a, root).0.unwrap();
+    let lowered = lower(input, None, false).unwrap();
+    let var = lowered.program.idents.iter().position(|&id| id == f).unwrap();
+    let built = lowered.program.arena.js_scope.as_ref().unwrap().uses[var].built;
+    assert_eq!(built, 0);
+
+    let mut compiler = LambdaCompiler::new();
+    let (_, check) = compiler.compile_deps_program_with_lower_check::<true>(a, root, Default::default());
+    let Some(LowerCheck::Supported(pair)) = check else { panic!("supported export tuple") };
+    let legacy = apply_external_shadow_pass(apply_js_flatten_pass(pair.before[0].clone()));
+    let mut counts = UseCounts::default();
+    crate::js_ir::walk::walk_block(&mut counts, &legacy.program.arena, &legacy.program.block);
+    assert_eq!(counts.counts.get(&f).copied().unwrap_or(0), 0);
+    let print = |p: &JsDepsProgram| crate::js_ir::print_deps_program_with_directives_and_options(p, None, &[], false, false, false);
+    let expected = "\n\n\nfunction f() {\n  return 1;\n}\n\nexport {\n  f,\n}\n/* No side effect */\n";
+    assert_eq!(print(&pair.after[0]), expected);
+    assert_eq!(print(&pair.after[1]), expected);
+}
+
+#[test]
+fn flattening_a_copied_return_branch_changes_the_simplify_if_head_reader() {
+    // Reduced from Primitive_object.res, lower mismatch at line 75. A one-case
+    // string switch lowers via State::if_statement: take_list, then J-S3.
+    // R5 changes its last then-statement from Return(Cond) to If. The
+    // simplify_if_head exit test stops recognizing it as a return and keeps
+    // the else branch, whereas the legacy order moves that branch after it.
+    use crate::js_ir::arena::ExprKind;
+    use crate::js_ir::build::stmt;
+    use crate::lambda::{LamLoc, lam_primitive::Primitive};
+    use crate::lambda::js_pass_flatten_and_mark_dead::{apply_js_flatten_pass as flatten, apply_js_flatten_and_mark_dead_pass as dead};
+    use crate::lambda::js_pass_external_shadow::apply_external_shadow_pass as shadow;
+    use crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass as inline;
+    use crate::lambda::js_pass_record_rest::apply_js_record_rest_pass as rest;
+    use crate::lambda::js_shake::apply_js_shake_pass as shake;
+    let mut a = LamArena::new();
+    let x = Ident::new("x", 10, IdentFlags::NONE);
+    let y = Ident::new("y", 11, IdentFlags::NONE);
+    let exported = Ident::new("run", 900, IdentFlags::NONE);
+    let test = a.var(y);
+    let one = a.const_(C::Int { i: 1, comment: None });
+    let two = a.const_(C::Int { i: 2, comment: None });
+    let yes = a.if_(test, one, two);
+    let effect = a.prim_raw(Primitive::PinitMod, &[], LamLoc::NONE);
+    let three = a.const_(C::Int { i: 3, comment: None });
+    let no = a.seq_raw(effect, three);
+    let test = a.var(x);
+    let switch = a.string_switch(test, &[("a", yes)], Some(no));
+    let root = a.function_(2, &[x, y], switch, Default::default(), LamLoc::NONE);
+    let mut compiler = LambdaCompiler::new();
+    let compiled = compiler.bir_lower_oracle(&mut a, root, Cont::Declare(LetKind::Strict, VarId(0)), exported);
+    let raw = JsDepsProgram { program: JsProgram::new_in(compiled.prelude, vec![exported], compiler.j), modules: vec![], side_effect: None };
+    let mut early = raw.clone();
+    let j = &early.program.arena;
+    let StmtKind::Variable(declaration) = j.sk(early.program.block[0]) else { panic!("run declaration") };
+    let mut declaration = j.var(declaration).clone();
+    let ExprKind::Fun(function) = j.ek(declaration.value.unwrap()) else { panic!("run function") };
+    let mut function = j.fun(function);
+    let mut body = j.stmts(function.body).to_vec();
+    while let [statement] = body.as_slice() {
+        let StmtKind::Block(inner) = j.sk(*statement) else { break; };
+        body = j.stmts(inner).to_vec();
+    }
+    let StmtKind::If(test, yes, no) = j.sk(body[0]) else { panic!("switch guard") };
+    assert!(j.stmts(no).is_empty());
+    let &[returned] = j.stmts(yes) else { panic!("one returned conditional") };
+    let StmtKind::Return(value) = j.sk(returned) else { panic!("R5 input") };
+    assert!(matches!(j.ek(value), ExprKind::Cond(..)));
+    assert_eq!(body.len(), 3);
+
+    // Recreate exactly the copied-branch boundary, not a new production path.
+    // The legacy Flatten is the oracle for R5; all other input is unchanged.
+    early.program.block = j.stmts(yes).to_vec();
+    early = flatten(early);
+    let yes = std::mem::take(&mut early.program.block);
+    assert!(matches!(early.program.arena.sk(yes[0]), StmtKind::If(..)));
+    let j = &mut early.program.arena;
+    let statement = stmt::if_(test, &yes, &body[1..], j);
+    function.body = j.stmt_list(&[statement]);
+    let function = j.fun_id(function);
+    declaration.value = Some(j.expr(ExprKind::Fun(function)));
+    let declaration = j.var_id(declaration);
+    early.program.block = vec![j.stmt(StmtKind::Variable(declaration))];
+    let finish = |p| shake(dead(rest(inline(shadow(p))), false));
+    let legacy = finish(flatten(raw));
+    let moved = finish(early);
+    let print = |p: &JsDepsProgram| crate::js_ir::print_deps_program_with_directives_and_options(p, None, &[], false, false, false);
+    assert_eq!(print(&legacy), "\n\n\nfunction run(x, y) {\n  if (x === \"a\") {\n    if (y) {\n      return 1;\n    } else {\n      return 2;\n    }\n  }\n  Primitive_module.init();\n  return 3;\n}\n\nexport {\n  run,\n}\n/* No side effect */\n");
+    assert_eq!(print(&moved), "\n\n\nfunction run(x, y) {\n  if (x === \"a\") {\n    if (y) {\n      return 1;\n    } else {\n      return 2;\n    }\n  } else {\n    Primitive_module.init();\n    return 3;\n  }\n}\n\nexport {\n  run,\n}\n/* No side effect */\n");
+}
+
+#[test]
+fn inlining_before_the_external_shadow_pass_hides_the_binding_that_shadows_a_global() {
+    // THREE_TREES.md 11.4, "T4c design" (c), first counterexample.
+    // `run = a => { let g = location => ext(location, <global location>); return g(a) }`.
+    // P2 qualifies a global that a binding of its scope shadows. With P3 after
+    // it, P2 sees the parameter `location` around the reference. With the
+    // splice before it, the parameter was renamed to `a` and is gone.
+    use crate::lambda::LamLoc;
+    let build = |a: &mut LamArena| {
+        let (g, p, arg) = (Ident::new("g", 10, IdentFlags::NONE), Ident::new("location", 11, IdentFlags::NONE), Ident::new("a", 12, IdentFlags::NONE));
+        let ext = a.var(Ident::new("ext", 13, IdentFlags::NONE));
+        let (read, global) = (a.var(p), a.var(Ident::create_js("location")));
+        let body = call(a, ext, &[read, global]);
+        let function = a.function_(1, &[p], body, Default::default(), LamLoc::NONE);
+        let callee = a.var(g);
+        let x = a.var(arg);
+        let applied = call(a, callee, &[x]);
+        let inner = a.let_(LetKind::Strict, g, function, applied);
+        a.function_(1, &[arg], inner, Default::default(), LamLoc::NONE)
+    };
+    let text = |value: &str| format!("\n\n\nfunction run(a) {{\n  return ext(a, {value});\n}}\n\nexport {{\n  run,\n}}\n/* No side effect */\n");
+    // The legacy order.
+    assert_eq!(legacy_text(build, &[1, 2, 3, 4, 5, 6]), text("globalThis.location"));
+    // Step A in the lowering: the inlining decided before P1 and P2 run.
+    assert_eq!(legacy_text(build, &[3, 1, 2, 4, 5, 6]), text("location"));
+}
+
+#[test]
+fn flattening_after_a_site_in_a_returned_conditional_was_spliced_maps_its_predicate() {
+    // THREE_TREES.md 11.4, "T4c design" (c), second counterexample.
+    // `run = c => { let f = p => ext(p, p); return ext(z => z ? 1 : 2) ? f(c) : 3 }`.
+    // The site is inside a returned conditional, so the statement has to
+    // become an `if` before the callee's statements can stand in a branch.
+    // P1's own rule for a returned conditional leaves the predicate as it
+    // is; P1 run on the `if` maps the predicate and flattens the callback.
+    use crate::lambda::LamLoc;
+    let build = |a: &mut LamArena| {
+        let (f, p, c, z) = (Ident::new("f", 10, IdentFlags::NONE), Ident::new("p", 11, IdentFlags::NONE), Ident::new("c", 12, IdentFlags::NONE), Ident::new("z", 14, IdentFlags::NONE));
+        let ext = Ident::new("ext", 13, IdentFlags::NONE);
+        let callee = a.var(ext);
+        let (p1, p2) = (a.var(p), a.var(p));
+        let body = call(a, callee, &[p1, p2]);
+        let function = a.function_(1, &[p], body, Default::default(), LamLoc::NONE);
+        let one = a.const_(C::Int { i: 1, comment: None });
+        let two = a.const_(C::Int { i: 2, comment: None });
+        let three = a.const_(C::Int { i: 3, comment: None });
+        let test = a.var(z);
+        let chosen = a.if_(test, one, two);
+        let callback = a.function_(1, &[z], chosen, Default::default(), LamLoc::NONE);
+        let callee = a.var(ext);
+        let test = call(a, callee, &[callback]);
+        let callee = a.var(f);
+        let arg = a.var(c);
+        let applied = call(a, callee, &[arg]);
+        let branch = a.if_(test, applied, three);
+        let inner = a.let_(LetKind::Strict, f, function, branch);
+        a.function_(1, &[c], inner, Default::default(), LamLoc::NONE)
+    };
+    assert!(legacy_text(build, &[]).contains("  return ext(z => z ? 1 : 2) ? f(c) : 3;\n"));
+    let text = |predicate: &str| format!("\n\n\nfunction run(c) {{\n  if (ext({predicate})) {{\n    return ext(c, c);\n  }} else {{\n    return 3;\n  }}\n}}\n\nexport {{\n  run,\n}}\n/* No side effect */\n");
+    // The legacy order: the callback keeps its returned conditional.
+    assert_eq!(legacy_text(build, &[1, 2, 3, 4, 5, 6]), text("z => z ? 1 : 2"));
+    // The `if` exists before P1 runs: the first flatten stands for the
+    // reshaping of the path to the site, the second is P1 after step A.
+    assert_eq!(
+        legacy_text(build, &[1, 3, 1, 2, 4, 5, 6]),
+        text("z => {\n      if (z) {\n        return 1;\n      } else {\n        return 2;\n      }\n    }"),
+    );
+}
+
+/// Step A's decisions for one Lambda (not simplified first) against the
+/// legacy tail-call pass on the same program after P1 and P2: the comparison
+/// counters, and `(name, status, inline, built)` per decided declaration.
+fn step_a(build: impl Fn(&mut LamArena) -> Lam) -> (DecisionStats, Vec<(String, crate::js_ir::op::UsedStats, bool, u32)>) {
+    use crate::js_ir::op::UsedStats;
+    use crate::lambda::js_pass_external_shadow::apply_external_shadow_pass as shadow;
+    use crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_pass as flatten;
+    let mut a = LamArena::new();
+    let root = build(&mut a);
+    let input = bridge::import_lambda(&a, root).unwrap();
+    let source_root = input.root;
+    let mut state = State::new(input);
+    let probed = state.probe(Cx::value(), source_root).unwrap();
+    let lowered = state.complete(Cx::value(), probed);
+    let program = shadow(flatten(bridge_j::export_js(&lowered.program).unwrap()));
+    let scope = lowered.program.arena.js_scope.as_ref().unwrap();
+    let decisions: Vec<_> = scope.decisions.iter().map(|decision| (lowered.program.idents[decision.var.index()], *decision)).collect();
+    let stats = crate::bir::shadow::compare_decisions(&decisions, &program.program);
+    let status = |bits| [UsedStats::DeadPure, UsedStats::DeadNonPure, UsedStats::Exported, UsedStats::OncePure, UsedStats::Used]
+        .into_iter().find(|status| *status as u32 == bits).unwrap();
+    let rows = decisions.iter().map(|(ident, d)| (ident.name().to_string(), status(d.status()), d.inline(), d.built())).collect();
+    (stats, rows)
+}
+
+fn agrees(stats: &DecisionStats) {
+    assert_eq!(
+        (stats.decision_extra, stats.decision_missing, stats.decision_copied, stats.decision_count_differences, stats.decision_status_differences, stats.decision_site_differences),
+        (0, 0, 0, 0, 0, 0)
+    );
+    assert_eq!(stats.decision_rows, stats.decision_legacy);
+    assert_eq!(stats.decision_inline, stats.decision_legacy_inline);
+}
+
+/// `c => { let f = p => ext(p, p); <body(f, c)> }`.
+fn with_local_function(a: &mut LamArena, body: impl Fn(&mut LamArena, Ident, Ident) -> Lam) -> Lam {
+    use crate::lambda::LamLoc;
+    let (f, p, c) = (Ident::new("f", 10, IdentFlags::NONE), Ident::new("p", 11, IdentFlags::NONE), Ident::new("c", 12, IdentFlags::NONE));
+    let ext = a.var(Ident::new("ext", 13, IdentFlags::NONE));
+    let (p1, p2) = (a.var(p), a.var(p));
+    let value = call(a, ext, &[p1, p2]);
+    let function = a.function_(1, &[p], value, Default::default(), LamLoc::NONE);
+    let body = body(a, f, c);
+    let inner = a.let_(LetKind::Strict, f, function, body);
+    a.function_(1, &[c], inner, Default::default(), LamLoc::NONE)
+}
+
+#[test]
+fn step_a_decides_as_the_tail_call_pass_does() {
+    // THREE_TREES.md 11.4, "T4c design" (a) and (b): the decisions only.
+    use crate::js_ir::op::UsedStats;
+    use crate::lambda::LamLoc;
+    use crate::lambda::lam_primitive::Primitive;
+    let int = |a: &mut LamArena, i| a.const_(C::Int { i, comment: None });
+    let apply_f = |a: &mut LamArena, f: Ident, i: i32| {
+        let callee = a.var(f);
+        let arg = a.const_(C::Int { i, comment: None });
+        call(a, callee, &[arg])
+    };
+    let row = |rows: &[(String, UsedStats, bool, u32)], name: &str| rows.iter().find(|row| row.0 == name).cloned().unwrap();
+    // A function called once, by the `return` that ends its scope.
+    let (stats, rows) = step_a(|a| with_local_function(a, |a, f, _| apply_f(a, f, 1)));
+    agrees(&stats);
+    assert_eq!(row(&rows, "f"), ("f".into(), UsedStats::OncePure, true, 1));
+    // The same call in a branch of a returned conditional (finding 1).
+    let (stats, rows) = step_a(|a| with_local_function(a, |a, f, c| {
+        let applied = apply_f(a, f, 1);
+        let (test, two) = (a.var(c), int(a, 2));
+        a.if_(test, applied, two)
+    }));
+    agrees(&stats);
+    assert_eq!(row(&rows, "f"), ("f".into(), UsedStats::OncePure, true, 1));
+    // Below two conditionals and as the last operand of a sequence.
+    let (stats, rows) = step_a(|a| with_local_function(a, |a, f, c| {
+        let applied = apply_f(a, f, 1);
+        let effect = a.prim_raw(Primitive::PinitMod, &[], LamLoc::NONE);
+        let sequence = a.seq_raw(effect, applied);
+        let (test, two) = (a.var(c), int(a, 2));
+        let inner = a.if_(test, sequence, two);
+        let (test, three) = (a.var(c), int(a, 3));
+        a.if_(test, three, inner)
+    }));
+    agrees(&stats);
+    assert_eq!(row(&rows, "f"), ("f".into(), UsedStats::OncePure, true, 1));
+    // Two calls: used, no candidate.
+    let (stats, rows) = step_a(|a| with_local_function(a, |a, f, c| {
+        let (first, second, test) = (apply_f(a, f, 1), apply_f(a, f, 2), a.var(c));
+        a.if_(test, first, second)
+    }));
+    agrees(&stats);
+    assert_eq!(row(&rows, "f"), ("f".into(), UsedStats::Used, false, 2));
+    // One use that is no tail call: an argument.
+    let (stats, rows) = step_a(|a| with_local_function(a, |a, f, _| {
+        let (ext, argument) = (a.var(Ident::new("ext", 13, IdentFlags::NONE)), a.var(f));
+        call(a, ext, &[argument])
+    }));
+    agrees(&stats);
+    assert_eq!(row(&rows, "f"), ("f".into(), UsedStats::OncePure, false, 1));
+    // The call is a predicate, or the head of a sequence: no site.
+    let (stats, rows) = step_a(|a| with_local_function(a, |a, f, _| {
+        let (test, one, two) = (apply_f(a, f, 1), int(a, 1), int(a, 2));
+        a.if_(test, one, two)
+    }));
+    agrees(&stats);
+    assert_eq!(row(&rows, "f"), ("f".into(), UsedStats::OncePure, false, 1));
+    // Never used: dead and pure.
+    let (stats, rows) = step_a(|a| with_local_function(a, |a, _, _| int(a, 3)));
+    agrees(&stats);
+    assert_eq!(row(&rows, "f"), ("f".into(), UsedStats::DeadPure, false, 0));
+}
+
+#[test]
+fn step_a_finds_a_dead_block_binding_and_no_site_in_the_boundary_shape() {
+    use crate::js_ir::op::UsedStats;
+    use crate::lambda::{LamLoc, TagInfo};
+    use crate::lambda::lam_compat::FieldDbgInfo;
+    use crate::lambda::lam_primitive::{Mutable, Primitive};
+    // Finding 5: `() => { let x = (ext(1), ext(2)); 3 }`.
+    let (stats, rows) = step_a(|a| {
+        let x = Ident::new("x", 10, IdentFlags::NONE);
+        let ext = Ident::new("ext", 13, IdentFlags::NONE);
+        let (one, two) = (a.const_(C::Int { i: 1, comment: None }), a.const_(C::Int { i: 2, comment: None }));
+        let (e1, e2) = (a.var(ext), a.var(ext));
+        let (first, second) = (call(a, e1, &[one]), call(a, e2, &[two]));
+        let block = a.prim_raw(Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable), &[first, second], LamLoc::NONE);
+        let three = a.const_(C::Int { i: 3, comment: None });
+        let body = a.let_(LetKind::Strict, x, block, three);
+        a.function_(0, &[], body, Default::default(), LamLoc::NONE)
+    });
+    agrees(&stats);
+    assert_eq!(rows, vec![("x".to_string(), UsedStats::DeadNonPure, false, 0)]);
+    // The boundary shape: `() => { let pair = (x => x, 1); pair[0](2) }`.
+    let (stats, rows) = step_a(|a| {
+        let (pair, x) = (Ident::new("pair", 10, IdentFlags::NONE), Ident::new("x", 11, IdentFlags::NONE));
+        let read = a.var(x);
+        let function = a.function_(1, &[x], read, Default::default(), LamLoc::NONE);
+        let one = a.const_(C::Int { i: 1, comment: None });
+        let block = a.prim_raw(Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable), &[function, one], LamLoc::NONE);
+        let target = a.var(pair);
+        let field = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Tuple), &[target], LamLoc::NONE);
+        let two = a.const_(C::Int { i: 2, comment: None });
+        let applied = call(a, field, &[two]);
+        let body = a.let_(LetKind::Strict, pair, block, applied);
+        a.function_(0, &[], body, Default::default(), LamLoc::NONE)
+    });
+    agrees(&stats);
+    assert_eq!(rows, vec![("pair".to_string(), UsedStats::OncePure, false, 1)]);
+    assert_eq!(stats.decision_inline, 0);
+}
+
+#[test]
+fn step_a_reads_the_export_set_at_the_top_level() {
+    // The unit path: `let f = () => 1` exported, and `g` called once by the
+    // exported `h`. Lambda simplification is skipped by lowering directly.
+    use crate::bir::shadow::LowerCheck;
+    use crate::lambda::{LamLoc, TagInfo};
+    use crate::lambda::lam_primitive::{Mutable, Primitive};
+    let mut a = LamArena::new();
+    let f = Ident::new("f", 10, IdentFlags::NONE);
+    let one = a.const_(C::Int { i: 1, comment: None });
+    let function = a.function_(0, &[], one, Default::default(), LamLoc::NONE);
+    let reference = a.var(f);
+    let exports = a.prim_raw(Primitive::Pmakeblock(TagInfo::ModuleExport(vec![f]), Mutable::Immutable), &[reference], LamLoc::NONE);
+    let root = a.let_(LetKind::Strict, f, function, exports);
+    let mut compiler = LambdaCompiler::new();
+    let (_, check) = compiler.compile_deps_program_with_lower_check::<true>(a, root, Default::default());
+    let Some(LowerCheck::Supported(pair)) = check else { panic!("supported unit") };
+    let stats = pair.stats.decisions;
+    agrees(&stats);
+    assert_eq!((stats.decision_rows, stats.decision_inline), (1, 0));
+}
+
+#[test]
+fn ten_thousand_declarations_close_in_three_steps_each() {
+    // A run of 10,000 declarations: `f_i = p => ext(p)` and
+    // `g_i = () => f_i(1)`, alternating; every `f_i` has one use, the tail
+    // call of `g_i`. `close::decide` takes one step per declaration and two
+    // per function body (its `return` and the call it returns).
+    use crate::lambda::LamLoc;
+    let mut a = LamArena::new();
+    let mut root = a.const_(C::JsNull);
+    for i in (0..5_000).rev() {
+        let (f, g, p) = (Ident::new("f", 3 * i + 1, IdentFlags::NONE), Ident::new("g", 3 * i + 2, IdentFlags::NONE), Ident::new("p", 3 * i + 3, IdentFlags::NONE));
+        let (ext, read) = (a.var(Ident::new("ext", 20_000, IdentFlags::NONE)), a.var(p));
+        let value = call(&mut a, ext, &[read]);
+        let callee_function = a.function_(1, &[p], value, Default::default(), LamLoc::NONE);
+        let (callee, one) = (a.var(f), a.const_(C::Int { i: 1, comment: None }));
+        let applied = call(&mut a, callee, &[one]);
+        let caller = a.function_(0, &[], applied, Default::default(), LamLoc::NONE);
+        root = a.let_(LetKind::Strict, g, caller, root);
+        root = a.let_(LetKind::Strict, f, callee_function, root);
+    }
+    let input = bridge::import_lambda(&a, root).unwrap();
+    let source_root = input.root;
+    let mut state = State::new(input);
+    let probed = state.probe(Cx::value(), source_root).unwrap();
+    let lowered = state.complete(Cx::value(), probed);
+    let scope = lowered.program.arena.js_scope.as_ref().unwrap();
+    assert_eq!(scope.decisions.len(), 10_000);
+    assert_eq!(scope.decisions.iter().filter(|decision| decision.inline()).count(), 5_000);
+    // 10,000 declarations and the sentinel statement, 10,000 bodies.
+    assert_eq!(lowered.switch_stats.close_steps, 10_001 + 2 * 10_000);
+}
+
+#[test]
+fn a_pure_branch_the_flatten_pass_drops_takes_an_occurrence_built_still_counts() {
+    // THREE_TREES.md 11.4, "T4c design" (b), first hazard.
+    // `c => { let x = ext(); ignore(c ? x : ext()); 3 }`: the lowering writes
+    // the expression statement `c ? x : ext();`. P1 drops the branch `x`
+    // (`if (!c) { ext(); }`), so P3 counts no use of `x` and makes the
+    // declaration an expression statement; `built` is still one.
+    use crate::js_ir::op::UsedStats;
+    use crate::lambda::LamLoc;
+    use crate::lambda::lam_primitive::Primitive;
+    let build = |a: &mut LamArena| {
+        let (c, x) = (Ident::new("c", 12, IdentFlags::NONE), Ident::new("x", 14, IdentFlags::NONE));
+        let ext = Ident::new("ext", 13, IdentFlags::NONE);
+        let callee = a.var(ext);
+        let effect = call(a, callee, &[]);
+        let (test, read) = (a.var(c), a.var(x));
+        let chosen = a.if_(test, read, effect);
+        let ignored = a.prim_raw(Primitive::Pignore, &[chosen], LamLoc::NONE);
+        let three = a.const_(C::Int { i: 3, comment: None });
+        let body = a.seq_raw(ignored, three);
+        let callee = a.var(ext);
+        let value = call(a, callee, &[]);
+        let body = a.let_(LetKind::Strict, x, value, body);
+        a.function_(1, &[c], body, Default::default(), LamLoc::NONE)
+    };
+    assert!(legacy_text(build, &[]).contains("  let x = ext();\n  c ? x : ext();\n  return 3;\n"));
+    assert!(legacy_text(build, &[1, 2, 3, 4, 5, 6]).contains("  ext();\n  if (!c) {\n    ext();\n  }\n  return 3;\n"));
+    let (stats, rows) = step_a(build);
+    // The lowering's decision, from `built`: used once (and not pure).
+    assert_eq!(rows, vec![("x".to_string(), UsedStats::Used, false, 1)]);
+    // The legacy pass counts zero after P1: one count and one status differ.
+    assert_eq!((stats.decision_count_differences, stats.decision_status_differences), (1, 1));
+}
+
+#[test]
+fn a_copied_function_doubles_the_legacy_count_of_the_variables_declared_inside_it() {
+    // THREE_TREES.md 11.4, "T4c design" (b), second hazard.
+    // `() => { let g = p => ext(p); g(1) }`, then the function value copied
+    // as the J normaliser copies a repeated pure function (`copy_j`): the
+    // copy's `g` is a variable of its own that prints as the original. The
+    // run inside the function closed before the copy: `g` was decided an
+    // inline candidate with `built` one. P3 counts the identifier: two.
+    use crate::js_ir::op::UsedStats;
+    use crate::lambda::LamLoc;
+    use crate::lambda::js_pass_external_shadow::apply_external_shadow_pass as shadow;
+    use crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_pass as flatten;
+    let mut a = LamArena::new();
+    let (g, p) = (Ident::new("g", 10, IdentFlags::NONE), Ident::new("p", 11, IdentFlags::NONE));
+    let (ext, read) = (a.var(Ident::new("ext", 13, IdentFlags::NONE)), a.var(p));
+    let value = call(&mut a, ext, &[read]);
+    let function = a.function_(1, &[p], value, Default::default(), LamLoc::NONE);
+    let (callee, one) = (a.var(g), a.const_(C::Int { i: 1, comment: None }));
+    let applied = call(&mut a, callee, &[one]);
+    let body = a.let_(LetKind::Strict, g, function, applied);
+    let root = a.function_(0, &[], body, Default::default(), LamLoc::NONE);
+    let input = bridge::import_lambda(&a, root).unwrap();
+    let source_root = input.root;
+    let mut state = State::new(input);
+    let probed = state.probe(Cx::value(), source_root).unwrap();
+    let out = state.realize(Cx::value(), probed);
+    let copy = crate::bir::j::logic::copy_j(&mut state.arena, out.value.unwrap());
+    let statement = state.arena.new_node(View::SExp { value: copy }, 0);
+    state.statements.push(statement);
+    let lowered = state.complete(Cx::value(), Probed::Out(out));
+    lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
+    let scope = lowered.program.arena.js_scope.as_ref().unwrap();
+    let origin = |var: usize| lowered.program.arena.vars.j_origin[var].index();
+    let copies: Vec<usize> = (0..scope.uses.len()).filter(|&var| lowered.program.idents[origin(var)] == g).collect();
+    // Two variables print as `g`; each has one occurrence.
+    assert_eq!(copies.len(), 2);
+    assert!(copies.iter().all(|&var| scope.uses[var].built == 1));
+    // One decision, taken before the copy: an inline candidate.
+    let decisions: Vec<_> = scope.decisions.iter().map(|decision| (lowered.program.idents[origin(decision.var.index())], *decision)).collect();
+    assert_eq!(decisions.len(), 1);
+    assert_eq!((decisions[0].1.status(), decisions[0].1.inline(), decisions[0].1.built()), (UsedStats::OncePure as u32, true, 1));
+    // The legacy pass on the same program: `g` is used twice, no candidate.
+    let program = shadow(flatten(bridge_j::export_js(&lowered.program).unwrap()));
+    let legacy = crate::lambda::js_pass_tailcall_inline::decisions(&program.program);
+    assert_eq!(legacy[&g], (UsedStats::Used, 2, false));
+    let stats = crate::bir::shadow::compare_decisions(&decisions, &program.program);
+    assert_eq!((stats.decision_count_differences, stats.decision_status_differences, stats.decision_inline, stats.decision_legacy_inline), (1, 1, 1, 0));
+}
+
+#[test]
+fn ten_thousand_return_sites_are_read_in_two_steps_each() {
+    // One `return` of 10,000 nested conditionals, each with a call of its own
+    // callee in one branch: `scope::return_sites` takes one step per
+    // conditional and one per call, and records every callee's site.
+    use crate::lambda::LamLoc;
+    let mut a = LamArena::new();
+    let callee = a.var(Ident::new("f", 1, IdentFlags::NONE));
+    let mut root = call(&mut a, callee, &[]);
+    for i in 0..10_000 {
+        let test = a.var(Ident::new("c", 20_000, IdentFlags::NONE));
+        let callee = a.var(Ident::new("f", i + 2, IdentFlags::NONE));
+        let applied = call(&mut a, callee, &[]);
+        root = a.if_(test, applied, root);
+    }
+    let root = a.function_(0, &[], root, Default::default(), LamLoc::NONE);
+    let input = bridge::import_lambda(&a, root).unwrap();
+    let source_root = input.root;
+    let mut state = State::new(input);
+    let probed = state.probe(Cx::value(), source_root).unwrap();
+    let lowered = state.complete(Cx::value(), probed);
+    let scope = lowered.program.arena.js_scope.as_ref().unwrap();
+    let sites = scope.facts.iter().filter(|facts| facts.site != super::scope::VarFacts::NO_SITE).count();
+    assert_eq!(sites, 10_001);
+    // 10,000 conditionals and 10,001 calls, the `return`, the sentinel.
+    assert_eq!(lowered.switch_stats.close_steps, 10_000 + 10_001 + 2);
+    assert_eq!(lowered.switch_stats.statements_copied, 2);
+}
+
+#[test]
+fn a_declaration_is_decided_once_per_copy_of_its_statement() {
+    // `close::decide` runs where a list is copied, so a statement the
+    // lowering moves and copies again is decided again: the number of
+    // decisions is bounded by `StatementStack::copied`, not by the number of
+    // declarations. 10,000 nested `if c { let y = ext(); y } else { ... }`:
+    // every declaration is copied, and decided, once here.
+    use crate::lambda::LamLoc;
+    let mut a = LamArena::new();
+    let ext = Ident::new("ext", 6, IdentFlags::NONE);
+    let mut root = a.const_(C::Int { i: 1, comment: None });
+    for i in 0..10_000 {
+        let test = a.var(Ident::new("c", 5, IdentFlags::NONE));
+        let callee = a.var(ext);
+        let effect = call(&mut a, callee, &[]);
+        let y = Ident::new("y", 1000 + i, IdentFlags::NONE);
+        let read = a.var(y);
+        let yes = a.let_(LetKind::Strict, y, effect, read);
+        root = a.if_(test, yes, root);
+    }
+    let root = a.function_(0, &[], root, Default::default(), LamLoc::NONE);
+    let input = bridge::import_lambda(&a, root).unwrap();
+    let source_root = input.root;
+    let mut state = State::new(input);
+    let probed = state.probe(Cx::value(), source_root).unwrap();
+    let lowered = state.complete(Cx::value(), probed);
+    let scope = lowered.program.arena.js_scope.as_ref().unwrap();
+    let stats = lowered.switch_stats;
+    assert_eq!(scope.decisions.len(), 10_000);
+    assert!(scope.decisions.len() <= stats.statements_copied);
+    // One step per copied statement and one per returned value.
+    assert!(stats.close_steps <= 2 * stats.statements_copied, "{} steps, {} copied", stats.close_steps, stats.statements_copied);
+}
+
+/// The new side of the gate on the function `build` gives, bound to an
+/// exported `run`: lowered, the references the lowering marked written as
+/// `globalThis.name` (`bridge_j::qualify`), then the legacy passes `order`
+/// names (as `legacy_text`), printed. `order` never holds pass 2 here: the
+/// new side runs no external-shadow pass (THREE_TREES 11.4, "T5 design").
+fn new_text(build: impl Fn(&mut LamArena) -> Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, order: &[u8]) -> (String, usize) {
+    use crate::lambda::js_pass_flatten_and_mark_dead::{apply_js_flatten_and_mark_dead_pass as dead, apply_js_flatten_pass as flatten};
+    let mut a = LamArena::new();
+    let root = build(&mut a);
+    let exported = Ident::new("run", 900, IdentFlags::NONE);
+    let mut input = bridge::import_lambda(&a, root).unwrap();
+    let var = input.arena.new_var_id(exported.name_atom(), exported.stamp() as u32);
+    input.idents.push(exported);
+    let source_root = input.root;
+    let mut state = State::new(input);
+    state.resolver = resolver.cloned();
+    let cx = Cx::declare(LetKind::Strict, var);
+    let probed = state.probe(cx, source_root).unwrap();
+    // As `bir_lower_oracle`: the statements, without a value.
+    let out = state.realize(cx, probed);
+    let run = state.statements.since(Span { start: out.stmts.start, len: 0 });
+    let list = state.statements.take_list(&mut state.arena, run);
+    let lowered = state.finish(list, out.finished, Default::default());
+    lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
+    let bridge_j::Exported { mut program, qualified } = bridge_j::export_lowered(&lowered.program).unwrap();
+    bridge_j::qualify(&mut program, &qualified);
+    let mut program = JsDepsProgram { program: JsProgram::new_in(program.program.block, vec![exported], program.program.arena), modules: vec![], side_effect: None };
+    for pass in order {
+        program = match pass {
+            1 => flatten(program),
+            3 => crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass(program),
+            4 => crate::lambda::js_pass_record_rest::apply_js_record_rest_pass(program),
+            5 => dead(program, false),
+            6 => crate::lambda::js_shake::apply_js_shake_pass(program),
+            _ => unreachable!("pass number"),
+        };
+    }
+    (crate::js_ir::print_deps_program_with_directives_and_options(&program, None, &[], false, false, false), qualified.len())
+}
+
+/// The oracle form of one external-shadow rule: the new side without pass 2
+/// prints what the legacy side prints with it, after the flatten pass alone
+/// and after all passes. Returns the final text and the number of
+/// references the lowering marked.
+fn shadow_rule(build: impl Fn(&mut LamArena) -> Lam + Copy) -> (String, usize) {
+    assert_eq!(new_text(build, None, &[1]).0, legacy_text(build, &[1, 2]));
+    let (text, marked) = new_text(build, None, &[1, 3, 4, 5, 6]);
+    assert_eq!(text, legacy_text(build, &[1, 2, 3, 4, 5, 6]));
+    (text, marked)
+}
+
+fn js_global(a: &mut LamArena, name: &str) -> Lam {
+    a.var(Ident::create_js(name))
+}
+
+fn ext_call(a: &mut LamArena, args: &[Lam]) -> Lam {
+    let ext = a.var(Ident::new("ext", 13, IdentFlags::NONE));
+    call(a, ext, args)
+}
+
+#[test]
+fn the_lowering_decides_the_shadowed_global_the_tail_call_pass_would_hide() {
+    // THREE_TREES.md 11.4, "T4c design" (c), first counterexample, on the
+    // new side: lowered, then P1, P3, P4, P5, P6 and no P2. The parameter
+    // `location` is around the reference when the lowering decides, so the
+    // reference is qualified although P3 then removes the parameter.
+    use crate::lambda::LamLoc;
+    let build = |a: &mut LamArena| {
+        let (g, p, arg) = (Ident::new("g", 10, IdentFlags::NONE), Ident::new("location", 11, IdentFlags::NONE), Ident::new("a", 12, IdentFlags::NONE));
+        let (read, global) = (a.var(p), js_global(a, "location"));
+        let body = ext_call(a, &[read, global]);
+        let function = a.function_(1, &[p], body, Default::default(), LamLoc::NONE);
+        let callee = a.var(g);
+        let x = a.var(arg);
+        let applied = call(a, callee, &[x]);
+        let inner = a.let_(LetKind::Strict, g, function, applied);
+        a.function_(1, &[arg], inner, Default::default(), LamLoc::NONE)
+    };
+    let (text, marked) = new_text(build, None, &[1, 3, 4, 5, 6]);
+    assert_eq!(text, "\n\n\nfunction run(a) {\n  return ext(a, globalThis.location);\n}\n\nexport {\n  run,\n}\n/* No side effect */\n");
+    assert_eq!(marked, 1);
+    assert_eq!(text, legacy_text(build, &[1, 2, 3, 4, 5, 6]));
+}
+
+#[test]
+fn a_declaration_the_tail_call_pass_moves_into_the_list_of_a_global_reference_leaves_it_plain() {
+    // The reverse case: `run = a => { let g = p => { let location = ext(p);
+    // ext(location, p) }; ext(<global location>); return g(a) }`. When the
+    // lowering decides, `let location` is in the callee's list and the
+    // caller's reference is not below it: plain. P3 then moves the
+    // declaration into the caller's list; the reference stays plain, as in
+    // the legacy order.
+    use crate::lambda::LamLoc;
+    let build = |a: &mut LamArena| {
+        let (g, p, arg, local) = (Ident::new("g", 10, IdentFlags::NONE), Ident::new("p", 11, IdentFlags::NONE), Ident::new("a", 12, IdentFlags::NONE), Ident::new("location", 14, IdentFlags::NONE));
+        let read = a.var(p);
+        let value = ext_call(a, &[read]);
+        let (first, second) = (a.var(local), a.var(p));
+        let result = ext_call(a, &[first, second]);
+        let body = a.let_(LetKind::Strict, local, value, result);
+        let function = a.function_(1, &[p], body, Default::default(), LamLoc::NONE);
+        let global = js_global(a, "location");
+        let effect = ext_call(a, &[global]);
+        let callee = a.var(g);
+        let x = a.var(arg);
+        let applied = call(a, callee, &[x]);
+        let rest = a.seq_raw(effect, applied);
+        let inner = a.let_(LetKind::Strict, g, function, rest);
+        a.function_(1, &[arg], inner, Default::default(), LamLoc::NONE)
+    };
+    let (text, marked) = shadow_rule(build);
+    assert_eq!(marked, 0);
+    assert_eq!(text, "\n\n\nfunction run(a) {\n  ext(location);\n  let location$1 = ext(a);\n  return ext(location$1, a);\n}\n\nexport {\n  run,\n}\n/* No side effect */\n");
+}
+
+#[test]
+fn a_declaration_after_the_reference_in_the_same_list_shadows_it() {
+    // `run = () => { ext(<global location>); let location = ext(); return ext(location) }`.
+    use crate::lambda::LamLoc;
+    let build = |a: &mut LamArena| {
+        let local = Ident::new("location", 14, IdentFlags::NONE);
+        let global = js_global(a, "location");
+        let effect = ext_call(a, &[global]);
+        let value = ext_call(a, &[]);
+        let read = a.var(local);
+        let result = ext_call(a, &[read]);
+        let declared = a.let_(LetKind::Strict, local, value, result);
+        let body = a.seq_raw(effect, declared);
+        a.function_(0, &[], body, Default::default(), LamLoc::NONE)
+    };
+    let (text, marked) = shadow_rule(build);
+    assert_eq!(marked, 1);
+    assert!(text.contains("  ext(globalThis.location);\n  let location = ext();\n"), "{text}");
+}
+
+#[test]
+fn a_parameter_shadows_the_global_in_the_function_and_not_beside_it() {
+    // `run = () => { ext(location => ext(location, <global location>)); return ext(<global location>) }`.
+    use crate::lambda::LamLoc;
+    let build = |a: &mut LamArena| {
+        let p = Ident::new("location", 11, IdentFlags::NONE);
+        let (read, global) = (a.var(p), js_global(a, "location"));
+        let inner = ext_call(a, &[read, global]);
+        let function = a.function_(1, &[p], inner, Default::default(), LamLoc::NONE);
+        let effect = ext_call(a, &[function]);
+        let global = js_global(a, "location");
+        let result = ext_call(a, &[global]);
+        let body = a.seq_raw(effect, result);
+        a.function_(0, &[], body, Default::default(), LamLoc::NONE)
+    };
+    let (text, marked) = shadow_rule(build);
+    assert_eq!(marked, 1);
+    assert!(text.contains("ext(location, globalThis.location)"), "{text}");
+    assert!(text.contains("  return ext(location);\n"), "{text}");
+}
+
+#[test]
+fn a_loop_variable_shadows_the_global_in_the_loop() {
+    // `run = () => { for location = 0 to ext(<global location>) { ext(<global location>) }; return ext(<global location>) }`.
+    use crate::lambda::{DirectionFlag, LamLoc};
+    let build = |a: &mut LamArena| {
+        let index = Ident::new("location", 11, IdentFlags::NONE);
+        let start = a.const_(C::Int { i: 0, comment: None });
+        let bound = js_global(a, "location");
+        let finish = ext_call(a, &[bound]);
+        let inside = js_global(a, "location");
+        let effect = ext_call(a, &[inside]);
+        let looped = a.for_(index, start, finish, DirectionFlag::Upto, effect);
+        let after = js_global(a, "location");
+        let result = ext_call(a, &[after]);
+        let body = a.seq_raw(looped, result);
+        a.function_(0, &[], body, Default::default(), LamLoc::NONE)
+    };
+    let (text, marked) = shadow_rule(build);
+    assert!(marked >= 1, "{text}");
+    assert!(text.contains("    ext(globalThis.location);\n"), "{text}");
+    assert!(text.contains("  return ext(location);\n"), "{text}");
+}
+
+#[test]
+fn a_catch_variable_shadows_the_global_in_the_handler() {
+    // `run = () => { try { ext(<global location>) } catch location { ext(location, <global location>) } }`.
+    use crate::lambda::LamLoc;
+    let build = |a: &mut LamArena| {
+        let exception = Ident::new("location", 11, IdentFlags::NONE);
+        let tried = js_global(a, "location");
+        let body = ext_call(a, &[tried]);
+        let (read, global) = (a.var(exception), js_global(a, "location"));
+        let handler = ext_call(a, &[read, global]);
+        let whole = a.try_(body, exception, handler);
+        a.function_(0, &[], whole, Default::default(), LamLoc::NONE)
+    };
+    let (text, marked) = shadow_rule(build);
+    assert_eq!(marked, 1);
+    assert!(text.contains("ext(location);\n"), "{text}");
+    assert!(text.contains(", globalThis.location)"), "{text}");
+}
+
+#[test]
+fn a_declaration_in_one_case_of_a_switch_shadows_the_global_in_its_sibling_cases_and_not_in_the_discriminant() {
+    // `run = x => switch ext(x, <global location>) { | 0 => { let location = ext(); ext(location, location) }
+    // | 1 => ext(<global location>) | 2 => 2 | 3 => 3 }`.
+    use crate::lambda::{LamLoc, SwitchDispatch, SwitchKey};
+    let build = |a: &mut LamArena| {
+        let (x, local) = (Ident::new("x", 10, IdentFlags::NONE), Ident::new("location", 14, IdentFlags::NONE));
+        let (read, global) = (a.var(x), js_global(a, "location"));
+        let scrutinee = ext_call(a, &[read, global]);
+        let value = ext_call(a, &[]);
+        let (first, second) = (a.var(local), a.var(local));
+        let used = ext_call(a, &[first, second]);
+        let zero = a.let_(LetKind::Strict, local, value, used);
+        let sibling = js_global(a, "location");
+        let one = ext_call(a, &[sibling]);
+        let two = a.const_(C::Int { i: 2, comment: None });
+        let three = a.const_(C::Int { i: 3, comment: None });
+        let actions = a.add_list(&[zero, one, two, three]);
+        let info = a.add_switch(true, (0..4).map(SwitchKey::Int), false, std::iter::empty(), false, SwitchDispatch::Direct);
+        let body = a.switch_raw(scrutinee, actions, info);
+        a.function_(1, &[x], body, Default::default(), LamLoc::NONE)
+    };
+    let (text, marked) = shadow_rule(build);
+    assert_eq!(marked, 1, "{text}");
+    assert!(text.contains("switch (ext(x, location)) {"), "{text}");
+    assert!(text.contains("return ext(globalThis.location);"), "{text}");
+}
+
+#[test]
+fn an_imported_module_shadows_the_global_of_its_name_everywhere() {
+    // `run = () => ext(Other.run, <global Other>)`.
+    use crate::cmi::persistent_env::CmjExportArity;
+    use crate::js_ir::ModulePathResolver;
+    use crate::lambda::{FieldDbgInfo, LamLoc, lam_arity::Arity, lam_primitive::Primitive};
+    let resolver = ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+    resolver.set_bir_test_export("Other", "run", CmjExportArity::Single(Arity::info(vec![1], false)), None);
+    let build = |a: &mut LamArena| {
+        let module = a.global_module(Ident::create_persistent("Other"));
+        let field = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Module { name: crate::name::Name::new("run") }), &[module], LamLoc::NONE);
+        let global = js_global(a, "Other");
+        let body = ext_call(a, &[field, global]);
+        a.function_(0, &[], body, Default::default(), LamLoc::NONE)
+    };
+    let (text, marked) = new_text(build, Some(&resolver), &[1, 3, 4, 5, 6]);
+    assert_eq!(marked, 1);
+    assert!(text.contains("return ext(Other.run, globalThis.Other);"), "{text}");
+}
+
+#[test]
+fn a_module_whose_only_reference_the_flatten_pass_drops_still_shadows_the_global_of_its_name() {
+    // THREE_TREES.md 11.4, "T5 design" (a), the hazard: `run = c => {
+    // ignore(c ? Other.run : ext()); return ext(<global Other>) }`. The
+    // lowering counts one live reference to the module `Other` and
+    // qualifies the global; P1 drops the pure branch `Other.run`, so the
+    // legacy external-shadow pass, after P1, sees no reference to the
+    // module and leaves the global plain. Both texts are pinned.
+    use crate::cmi::persistent_env::CmjExportArity;
+    use crate::js_ir::ModulePathResolver;
+    use crate::lambda::{FieldDbgInfo, LamLoc, lam_arity::Arity, lam_primitive::Primitive};
+    let resolver = ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+    resolver.set_bir_test_export("Other", "run", CmjExportArity::Single(Arity::info(vec![1], false)), None);
+    let build = |a: &mut LamArena| {
+        let c = Ident::new("c", 12, IdentFlags::NONE);
+        let module = a.global_module(Ident::create_persistent("Other"));
+        let field = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Module { name: crate::name::Name::new("run") }), &[module], LamLoc::NONE);
+        let test = a.var(c);
+        let other = ext_call(a, &[]);
+        let chosen = a.if_(test, field, other);
+        let ignored = a.prim_raw(Primitive::Pignore, &[chosen], LamLoc::NONE);
+        let global = js_global(a, "Other");
+        let result = ext_call(a, &[global]);
+        let body = a.seq_raw(ignored, result);
+        a.function_(1, &[c], body, Default::default(), LamLoc::NONE)
+    };
+    let (new, marked) = new_text(build, Some(&resolver), &[1, 3, 4, 5, 6]);
+    let legacy = legacy_text(build, &[1, 2, 3, 4, 5, 6]);
+    assert_eq!(marked, 1);
+    // The new side: qualified.
+    assert_eq!(new, "\n\n\nfunction run(c) {\n  if (!c) {\n    ext();\n  }\n  return ext(globalThis.Other);\n}\n\nexport {\n  run,\n}\n/* No side effect */\n");
+    // The legacy side: the global stays plain.
+    assert_eq!(legacy, "\n\n\nfunction run(c) {\n  if (!c) {\n    ext();\n  }\n  return ext(Other);\n}\n\nexport {\n  run,\n}\n/* No side effect */\n");
 }

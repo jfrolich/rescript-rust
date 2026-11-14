@@ -319,6 +319,31 @@ mod tests {
         assert!(parse(&["rescript", "watch", "--check-only"]).is_err());
     }
 
+    #[test]
+    fn doc_takes_one_source_file() {
+        let cli = parse(&["rescript", "doc", "src/A.res"]).unwrap();
+        assert!(matches!(cli.command, Command::Doc { path } if path == "src/A.res"));
+        assert!(parse(&["rescript", "doc"]).is_err());
+        assert!(parse(&["rescript", "doc", "rescript.json"]).is_err());
+        // One file, as the OCaml tool takes.
+        assert!(parse(&["rescript", "doc", "src/A.res", "src/B.res"]).is_err());
+    }
+
+    #[test]
+    fn reanalyze_takes_the_options_of_the_tool() {
+        let cli = parse(&["rescript", "reanalyze", "-config", "-suppress", "src", "-json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Reanalyze { args } if args == ["-config", "-suppress", "src", "-json"]
+        ));
+        for option in ["-version", "-help", "--help", "-debug"] {
+            let cli = parse(&["rescript", "reanalyze", option]).unwrap();
+            assert!(matches!(cli.command, Command::Reanalyze { args } if args == [option]));
+        }
+        let cli = parse(&["rescript", "reanalyze"]).unwrap();
+        assert!(matches!(cli.command, Command::Reanalyze { args } if args.is_empty()));
+    }
+
     // Default command behaviour.
     #[test]
     fn no_subcommand_defaults_to_build() {
@@ -662,6 +687,24 @@ pub enum Command {
         /// Path to a ReScript source file (.res or .resi)
         #[arg(value_parser = parse_source_path)]
         path: String,
+    },
+    /// Print the documentation of a ReScript module as JSON (what
+    /// `rescript-tools doc` prints). Type-checks the project without writing
+    /// files first.
+    #[command(hide = true)]
+    Doc {
+        /// Path to a ReScript source file (.res or .resi)
+        #[arg(value_parser = parse_source_path)]
+        path: String,
+    },
+    /// Run the dead code, exception and termination analyses of the project
+    /// (what `rescript-tools reanalyze` prints). Type-checks the project
+    /// without writing files first.
+    #[command(hide = true, disable_help_flag = true)]
+    Reanalyze {
+        /// The arguments of `rescript-tools reanalyze`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Run an editor tooling command in the project's running `rescript watch`.
     ///

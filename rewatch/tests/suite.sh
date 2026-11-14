@@ -94,12 +94,15 @@ fi
 ./compile/24-location-free-retry.sh &&
 ./compile/27-warning-build-modes.sh &&
 ./compile/28-runtime-compiled-once.sh &&
+./compile/29-otel-console-verbosity.sh &&
+./compile/30-nested-package-warnings.sh &&
 ./compile/25-deterministic-records.sh &&
 ./compile/26-external-ppx-rejected.sh &&
 ./compile/14-no-testrepo-changes.sh &&
 # After 14, which builds the testrepo again: 17 ends with a clean, and
 # check-only requires an unchanged, built testrepo.
 ./compile/26-check-only.sh &&
+./compile/31-check-only-incremental.sh &&
 ./compile/15-no-new-files.sh &&
 ./compile/16-snapshots-unchanged.sh &&
 

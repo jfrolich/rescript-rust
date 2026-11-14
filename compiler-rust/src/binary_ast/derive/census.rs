@@ -5,6 +5,8 @@ use serde::Serialize;
 use crate::parse_arena::ParseArena;
 use crate::parser::ast::{StructureItem, StructureItemDesc};
 
+static OUTPUT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Exact item attribution or an explicitly labelled whole-module estimate.
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 pub struct Pair {
@@ -52,6 +54,10 @@ pub struct Census {
     pub frontend: Pair,
     /// Item-exclusive type checking; residual module overhead is charged to other.
     pub typecheck: Pair,
+    /// Subset of derived type checking charged to bindings on a plan.
+    pub planned_typecheck_ns: u64,
+    /// Subset of derived conversion charged to bindings on a plan.
+    pub planned_conversion_ns: u64,
     /// Translation of value groups to raw Lambda.
     pub conversion: Pair,
     /// Remaining Lambda lowering, including conversion overhead outside value groups.
@@ -74,7 +80,7 @@ pub struct Census {
     pub js_lines: Pair,
     /// Derived/other deltas: fresh variables, top-level unifications, instance
     /// copied nodes, lazy environment hits+misses. Null unless counters are
-    /// enabled and RAYON_NUM_THREADS=1; counters are process-global.
+    /// enabled; counts belong to this attempt, independently of worker count.
     pub checker_counters: Option<[[u64; 4]; 2]>,
     /// Base shape class per generated binding, in generation order.
     pub shape_classes: Vec<&'static str>,
@@ -89,6 +95,19 @@ pub struct Census {
     /// Derived bindings per path: plans, each reason of the general path,
     /// and plans the checker fell back from.
     pub paths: super::PathCounts,
+    /// Value obligations by scheme level before instance: non-generic, generic.
+    pub value_schemes: [u64; 2],
+    /// Guard obligations emitted during planning.
+    pub not_json_identity_emitted: u64,
+    /// Guard obligations whose failure requests a general retry.
+    pub not_json_identity_failed: u64,
+    /// General-path generated body nodes by `GeneralReason::census_index`.
+    pub general_syntax_nodes: [u64; 13],
+    /// General-path item-exclusive typecheck time by the same reason index.
+    pub general_typecheck_ns: [u64; 13],
+    /// Census-only reason table indexed by parse value-list start.
+    #[serde(skip)]
+    pub(crate) general_groups: Vec<Option<super::GeneralReason>>,
     #[serde(skip)]
     pub(crate) observer_ns: u64,
     #[serde(skip)]
@@ -104,7 +123,8 @@ impl Census {
             source_kind: if std::path::Path::new(module).extension().is_some_and(|s| s == "resi") { "interface" } else { "implementation" },
             output: path.into(), bindings: [0; 2],
             syntax_nodes: [0; 2], parse_other: Pair::default(), generation: Pair::default(), frontend: Pair::default(),
-            typecheck: Pair::default(), conversion: Pair::default(), lambda_lowering: Pair::default(),
+            typecheck: Pair::default(), conversion: Pair::default(),
+            planned_typecheck_ns: 0, planned_conversion_ns: 0, lambda_lowering: Pair::default(),
             lambda_passes: Pair::default(), lowering: Pair::default(), printing: Pair::default(),
             environment: Pair::default(), signature: Pair::default(), gentype: Pair::default(),
             js_bytes: Pair::default(), js_lines: Pair::default(), checker_counters: (crate::perf_counters::enabled()
@@ -112,7 +132,22 @@ impl Census {
                 .then_some([[0; 4]; 2]),
             typed_groups: Vec::new(), shape_classes: Vec::new(), shape_nodes: Vec::new(),
             shape_parameterised: Vec::new(), shape_recursive: Vec::new(), templates: Vec::new(),
-            paths: super::PathCounts::default(), observer_ns: 0 }
+            paths: super::PathCounts::default(), value_schemes: [0; 2], not_json_identity_emitted: 0, not_json_identity_failed: 0, general_syntax_nodes: [0; 13],
+            general_typecheck_ns: [0; 13], general_groups: Vec::new(), observer_ns: 0 }
+    }
+    /// O(new slots) on growth, O(1) otherwise. Each slot is initialized once
+    /// across monotonic value-pool growth; one byte per slot, census only.
+    pub(crate) fn set_general_group(&mut self, start: u32, reason: super::GeneralReason) {
+        self.general_groups.resize(self.general_groups.len().max(start as usize + 1), None);
+        self.general_groups[start as usize] = Some(reason);
+    }
+    /// O(1): read a reason using the value-list handle, no hashing.
+    pub(crate) fn general_group(&self, item: &StructureItem) -> Option<super::GeneralReason> {
+        if let StructureItemDesc::Pstr_value((_, group)) = item.pstr_desc {
+            self.general_groups.get(group.start() as usize).copied().flatten()
+        } else {
+            None
+        }
     }
     /// O(new words) on growth, O(1) otherwise; one bit per typed binding-pool slot.
     pub fn mark_typed_group(&mut self, start: u32) {
@@ -125,15 +160,17 @@ impl Census {
         let i = start as usize;
         self.typed_groups.get(i / 64).is_some_and(|w| w & (1 << (i % 64)) != 0)
     }
-    /// O(1): snapshot only the already enabled, single-worker counters.
-    pub fn counter_snapshot(&self) -> Option<([u64; 4], [u64; 4])> {
-        self.checker_counters.map(|counts| (crate::perf_counters::derived_snapshot(),
+    /// O(1): snapshot the enabled attempt-local counters before retention.
+    pub fn counter_snapshot(&self, ctx: &crate::types::TypeContext)
+        -> Option<([u64; 4], [u64; 4])> {
+        self.checker_counters.map(|counts| (crate::perf_counters::derived_snapshot(ctx),
             std::array::from_fn(|i| counts[0][i] + counts[1][i])))
     }
     /// O(1): subtract nested items so every counter increment is charged once.
-    pub fn account_counters(&mut self, derived: bool, before: Option<([u64; 4], [u64; 4])>) {
+    pub fn account_counters(&mut self, ctx: &crate::types::TypeContext, derived: bool,
+        before: Option<([u64; 4], [u64; 4])>) {
         if let (Some(counts), Some((before, charged))) = (&mut self.checker_counters, before) {
-            let now = crate::perf_counters::derived_snapshot();
+            let now = crate::perf_counters::derived_snapshot(ctx);
             for i in 0..4 {
                 let children = counts[0][i] + counts[1][i] - charged[i];
                 counts[usize::from(!derived)][i] += now[i].saturating_sub(before[i]).saturating_sub(children);
@@ -154,6 +191,24 @@ impl Census {
         self.printing = Pair::estimate(print_ns, self.syntax_nodes);
         self.lowering = Pair::estimate(nanos(s.codegen).saturating_sub(print_ns), self.syntax_nodes);
     }
+    /// O(module name bytes): append one failure event, not a second module
+    /// census. Called once per abandoned unit, never per successful obligation.
+    pub(crate) fn failed_obligation(&self, kind: &'static str, shape: &'static str) {
+        use std::io::Write;
+        let event = serde_json::json!({"version": 1, "event": "failed_obligation",
+            "module": self.module, "obligation": kind, "type_shape": shape,
+            "not_json_identity_emitted": self.not_json_identity_emitted,
+            "not_json_identity_failed": self.not_json_identity_failed});
+        let mut encoded = serde_json::to_vec(&event).expect("failure census is serializable");
+        encoded.push(b'\n');
+        let _guard = OUTPUT.lock().unwrap_or_else(|e| e.into_inner());
+        match std::fs::OpenOptions::new().create(true).append(true).open(&self.output)
+            .and_then(|mut output| output.write_all(&encoded))
+        {
+            Ok(()) => {},
+            Err(error) => eprintln!("derived census: {error}"),
+        }
+    }
     /// O(output bytes): count bytes/lines without allocating per line, then append
     /// one JSON line under a process-wide output lock (one acquisition per module).
     pub fn finish(&mut self, outputs: impl Iterator<Item = impl AsRef<str>>) -> std::io::Result<()> {
@@ -168,7 +223,6 @@ impl Census {
         self.js_lines = Pair::estimate(lines, self.syntax_nodes);
         let mut encoded = serde_json::to_vec(self)?;
         encoded.push(b'\n');
-        static OUTPUT: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _guard = OUTPUT.lock().unwrap_or_else(|e| e.into_inner());
         std::fs::OpenOptions::new().create(true).append(true).open(&self.output)?.write_all(&encoded)
     }
@@ -239,6 +293,19 @@ impl SyntaxCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reason_table_growth_initializes_ten_thousand_slots_once() {
+        assert_eq!(std::mem::size_of::<Option<super::super::GeneralReason>>(), 1);
+        let mut census = Census::new(std::path::Path::new("unused"), "test.res");
+        let mut initialized = 0;
+        for slot in 0..10_000 {
+            let before = census.general_groups.len();
+            census.set_general_group(slot, super::super::GeneralReason::UserExpression);
+            initialized += census.general_groups.len() - before;
+        }
+        assert_eq!(initialized, 10_000);
+        assert!(census.general_groups.iter().all(|r| *r == Some(super::super::GeneralReason::UserExpression)));
+    }
     #[test]
     fn splits_preserve_totals_at_ten_thousand_sizes() {
         for n in 0..10_000 {

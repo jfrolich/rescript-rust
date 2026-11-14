@@ -349,6 +349,15 @@ jobs:
       - name: Test the worker-count determinism gate
         run: python3 -m unittest discover -s scripts -p test_worker_determinism_test.py
 
+      - name: Test the derived-code census summary
+        run: python3 -m unittest discover -s scripts -p test_derived_census_summary.py
+
+      - name: Test the sequential instruction comparison
+        run: python3 -m unittest discover -s scripts -p test_compare_build_instructions.py
+
+      - name: Test the check-mode comparison rule
+        run: python3 -m unittest discover -s scripts -p test_check_modes_gate.py
+
   compiler-tests:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 40
@@ -437,6 +446,12 @@ jobs:
         run: |
           python3 -m unittest discover -s scripts -p test_backend_coverage_test.py
           python3 scripts/test_backend_coverage.py
+      # Units the rewritten type checker declines, per corpus and reason:
+      # a count may fall, never rise.
+      - name: Check checker coverage ratchet
+        run: |
+          python3 scripts/test_tc_coverage.py
+          python3 scripts/tc_coverage.py --rescript rewatch/target/release/rescript
 
   # Fingerprint, item digests and encoded bytes computed from the frozen
   # shared graph must equal those of the portable form, unit by unit.
@@ -471,6 +486,16 @@ jobs:
           rewatch/target/release/rescript clean tests/ppx_spice
           RESCRIPT_DERIVED_PATH=check \
             rewatch/target/release/rescript build tests/ppx_spice
+      # A unit of a package below the build root, compiled again with
+      # locations: the reference compile needs the unit's source.
+      - name: Compile derived items of a monorepo package both ways and compare
+        run: |
+          export RESCRIPT_RUNTIME="$PWD/packages/@rescript/runtime"
+          mkdir -p tests/ppx_spice_monorepo/node_modules/@derived-code-monorepo
+          ln -sfn ../../packages/shared tests/ppx_spice_monorepo/node_modules/@derived-code-monorepo/shared
+          rewatch/target/release/rescript clean tests/ppx_spice_monorepo
+          RESCRIPT_DERIVED_PATH=check \
+            rewatch/target/release/rescript build tests/ppx_spice_monorepo
       # The diagnostics and warnings of derived code, from plans, from the
       # general form, and compared both ways.
       - name: Diagnostics of derived code
@@ -575,10 +600,14 @@ jobs:
               RUST_BSC="$PWD/rewatch/target/release/bsc" \
                 ./scripts/test_gentype_output_parity.sh
           - suite: analysis
-            # The Rust editor analysis against the OCaml analysis snapshots.
+            # The Rust editor analysis against the OCaml analysis snapshots,
+            # and `rescript-tools doc` and `rescript-tools reanalyze` against
+            # the OCaml doc and reanalyze snapshots.
             run: |
               ./tests/analysis_tests/no-watcher.sh
               ./tests/analysis_tests/test-rust.sh
+              ./tests/tools_tests/test-doc-rust.sh
+              ./tests/analysis_tests/tests-reanalyze/test-rust.sh
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-node

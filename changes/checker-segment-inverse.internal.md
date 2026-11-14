@@ -1,0 +1,1 @@
+- Rebuild old checker signatures from immutable segments while preserving type sharing, field-cell identity, and declaration metadata.

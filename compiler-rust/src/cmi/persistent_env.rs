@@ -5032,7 +5032,7 @@ pub(crate) fn freshened_signature_bound_idents_from_kind(
     // first build the global binder substitution, then copy each component
     // through that substitution with its renamed binder.
     if ctx.compiler_counters_enabled() {
-        crate::perf_counters::record_signature_freshen(kind, sig_items.len());
+        crate::perf_counters::record_signature_freshen(ctx, kind, sig_items.len());
     }
     let (new_idents, local_maps, has_nested_module_types) =
         freshened_signature_ident_plan(sig_items, ctx);

@@ -8,8 +8,13 @@ mod try_;
 mod ffi_args;
 mod external;
 mod call;
+mod close;
 mod cond;
 mod exit;
+mod export;
+mod globals;
+#[cfg(test)]
+pub(crate) mod names;
 mod expr;
 mod konst;
 mod prim;
@@ -286,8 +291,6 @@ impl SourceProbe {
     }
 }
 
-/// N1: C:663 compile_deps_program_in_arena. The final statement is a plain
-/// SExp carrying Out::value for the migration exporter, not an emitted effect.
 #[derive(Clone, Copy, Default, serde::Serialize)]
 pub(crate) struct SwitchStats {
     pub source_visits: usize,
@@ -295,11 +298,62 @@ pub(crate) struct SwitchStats {
     pub comparisons: usize,
     pub compared_pairs: usize,
     pub location_visits: usize,
+    /// Steps of `close::decide` over every copied run.
+    pub close_steps: usize,
+    /// Statements copied into lists (`StatementStack::copied`): a moved
+    /// statement is copied, and decided, once per move.
+    pub statements_copied: usize,
+    /// References to JavaScript globals the lowering marked to print as
+    /// `globalThis.name`, and the steps of that decision
+    /// (`globals::decide`).
+    pub globals_qualified: usize,
+    pub global_steps: usize,
+    /// Step A against the legacy tail-call pass (`shadow::compare_decisions`),
+    /// zero until check mode compares.
+    #[serde(flatten)]
+    pub decisions: DecisionStats,
+}
+
+/// The decisions of step A (`close::decide`) compared with those of the
+/// legacy tail-call pass on the same program after the flatten and
+/// external-shadow passes, by declared identifier (THREE_TREES 11.4, "T4c
+/// design" (a) and (b)).
+#[derive(Clone, Copy, Default, serde::Serialize)]
+pub(crate) struct DecisionStats {
+    /// Declarations the lowering decided, each counted once.
+    pub decision_rows: usize,
+    /// Decisions replaced by a later one of the same variable: its
+    /// statement was moved out of a copied list and copied again.
+    pub decision_reclosed: usize,
+    /// Identifiers the legacy pass gives a status.
+    pub decision_legacy: usize,
+    /// Rows whose identifier the legacy pass does not see declared.
+    pub decision_extra: usize,
+    /// Identifiers of the legacy pass without a row.
+    pub decision_missing: usize,
+    /// Identifiers with more than one row: copies that print alike.
+    pub decision_copied: usize,
+    /// Identifiers whose `built`, summed over their rows, is not the count
+    /// the legacy pass reads.
+    pub decision_count_differences: usize,
+    /// Rows whose status is not the legacy status of their identifier.
+    pub decision_status_differences: usize,
+    /// Rows with the legacy status whose inline candidacy (a recorded site)
+    /// is not the legacy pass's.
+    pub decision_site_differences: usize,
+    /// Rows the lowering would inline, and identifiers the legacy pass
+    /// keeps for inlining.
+    pub decision_inline: usize,
+    pub decision_legacy_inline: usize,
 }
 
 pub(crate) struct Lowered {
     pub program: super::bridge_j::Imported,
+    /// Read by the rule tests against the legacy output's flag.
+    #[cfg(test)]
     pub finished: Finished,
+    /// The exports after coercion and the names they reserve (`export.rs`).
+    pub coerced: export::Coerced,
     pub dynamic_imports: Vec<crate::js_ir::ModuleId>,
     pub switch_stats: SwitchStats,
 }
@@ -307,7 +361,7 @@ pub(crate) struct Lowered {
 /// N1: C:663 compile_deps_program_in_arena; one fresh J arena for this migration cut.
 #[cfg(test)]
 pub(crate) fn lower(
-    input: super::bridge::Imported,
+    input: super::bridge::ForLowering,
     locations: Option<&crate::lambda::LamLocTable>,
     direct: bool,
 ) -> Result<Lowered, Unsupported> {
@@ -316,7 +370,7 @@ pub(crate) fn lower(
 
 /// H2: C:1266 compile_external_field_apply; summaries are read-only inputs.
 pub(crate) fn lower_with_resolver(
-    input: super::bridge::Imported,
+    input: super::bridge::ForLowering,
     locations: Option<&crate::lambda::LamLocTable>,
     direct: bool,
     resolver: Option<&crate::js_ir::ModulePathResolver>,
@@ -403,6 +457,10 @@ struct State {
     catch_flag_reads: usize,
     /// Handler nodes read to find the label of an exit (4.1 step 1).
     catch_walk_steps: usize,
+    /// The variables of the export blocks, as the importer recorded them.
+    export_vars: Vec<u32>,
+    /// The tables of the export fold (`export.rs`).
+    coercion: export::Tables,
 }
 impl State {
     /// N1: C:481 new. Transfer cold pools, while source hot nodes/list operands
@@ -411,7 +469,9 @@ impl State {
         let mut arena = Bir::default();
         arena.begin_bulk();
         arena.pools = std::mem::take(&mut input.arena.pools);
-        arena.func_owners.resize(arena.pools.funcs.len(), None);
+        arena.vars.funcs = std::mem::take(&mut input.arena.vars.funcs);
+        arena.vars.function_params = std::mem::take(&mut input.arena.vars.function_params);
+        arena.func_owners.resize(arena.vars.funcs.len(), None);
         for i in 0..input.arena.vars.len() {
             let var = VarId(i as u32);
             let made = arena.new_var_id(input.arena.vars.name(var), input.arena.vars.order(var));
@@ -478,6 +538,8 @@ impl State {
             catch_work: Vec::new(),
             catch_flag_reads: 0,
             catch_walk_steps: 0,
+            export_vars: input.export_vars,
+            coercion: Default::default(),
         }
     }
     /// K1: C:1529 compile_expr. Direct mode is the bounded P1 oracle: convert
@@ -521,8 +583,34 @@ impl State {
         self.statements.append(first, second, value)
     }
 
-    /// N1: C:663 compile_deps_program_in_arena. Export transports the last value
-    /// in a plain sentinel SExp removed before export extraction and coercion.
+    /// N1: C:663 compile_deps_program_in_arena, the unit: the last value is
+    /// read for the exports (`export.rs`). Cost: that of `extract_exports`
+    /// and of `finish`.
+    fn complete_unit(mut self, probed: Probed) -> Lowered {
+        let out = self.realize(Cx::value(), probed);
+        let exports = self.extract_exports(out.value, out.finished);
+        let run = self.statements.since(Span {
+            start: out.stmts.start,
+            len: 0,
+        });
+        let (list, coerced) = match exports {
+            Some(exports) if !exports.is_empty() => {
+                let coerced = self.coerce_exports(run, exports, out.finished);
+                let list = self.coerced_list(run);
+                self.statements.close(&mut self.arena, list);
+                (list, coerced)
+            }
+            _ => (
+                self.statements.take_list(&mut self.arena, run),
+                export::Coerced::default(),
+            ),
+        };
+        self.finish(list, out.finished, coerced)
+    }
+
+    /// The output of one construct in `cx`, for the rule tests: the value is
+    /// carried by a plain sentinel SExp after the statements.
+    #[cfg(test)]
     fn complete(mut self, cx: Cx, probed: Probed) -> Lowered {
         let out = self.realize(cx, probed);
         let value = out
@@ -535,6 +623,18 @@ impl State {
             len: 0,
         });
         let list = self.statements.take_list(&mut self.arena, run);
+        self.finish(list, out.finished, export::Coerced::default())
+    }
+
+    /// The root block over the top-level list. One step per statement of
+    /// the list and one write per catch of the unit.
+    fn finish(mut self, list: crate::bir::ListId, _finished: Finished, coerced: export::Coerced) -> Lowered {
+        #[cfg(test)]
+        let coerced = export::Coerced {
+            steps: self.coercion.steps,
+            site_visits: self.coercion.site_visits,
+            ..coerced
+        };
         let root = self.arena.block_from_list(list);
         // The headers keep their labels and parameters; the exits they count
         // stay in the source, which reads the counts while a function of
@@ -543,9 +643,16 @@ impl State {
             header.uses = 0;
         }
         self.arena.finish_bulk(root);
+        // THREE_TREES 11.4, "T5 design": every list is the one the flatten
+        // pass receives, so the bindings around a reference are final.
+        globals::decide(&mut self.arena, &self.idents);
+        let (close_steps, globals_qualified, global_steps) = self.arena.js_scope.as_ref()
+            .map_or((0, 0, 0), |scope| (scope.close_steps, scope.globals.qualified, scope.globals.steps));
         Lowered {
             program: super::bridge_j::Imported::from_lowering(self.arena, root, self.idents),
-            finished: out.finished,
+            #[cfg(test)]
+            finished: _finished,
+            coerced,
             dynamic_imports: self.dynamic_imports,
             switch_stats: SwitchStats {
                 source_visits: self.source_steps,
@@ -553,6 +660,11 @@ impl State {
                 comparisons: self.switch_comparisons,
                 compared_pairs: self.switch_compared,
                 location_visits: self.location_steps,
+                close_steps,
+                statements_copied: self.statements.copied,
+                globals_qualified,
+                global_steps,
+                decisions: DecisionStats::default(),
             },
         }
     }

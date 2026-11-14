@@ -17,7 +17,7 @@
 use anyhow::Result;
 
 use super::{
-    CompilerOptions, DumpKind, InProcessCompileResult, InProcessPreJsCompileResult,
+    CompilerOptions, DerivedDifferences, DerivedRetry, DumpKind, InProcessCompileResult, InProcessPreJsCompileResult,
     InProcessSignatureReadyHook, LocationRetry, UntilJs, UserDiagnostic, compile_until_js,
 };
 
@@ -30,6 +30,30 @@ fn differs(unit: &str, what: &str, detail: String) -> anyhow::Error {
         2,
     )
     .into()
+}
+
+/// The check could not run on `unit`: its general form is missing.
+fn no_general_form(unit: &str, error: &anyhow::Error) -> anyhow::Error {
+    UserDiagnostic::new(
+        format!(
+            "RESCRIPT_DERIVED_PATH=check: internal error: {unit} was not checked, its general form could not be made: {error}\n"
+        ),
+        2,
+    )
+    .into()
+}
+
+/// What a comparison found goes to the build's collector when there is one,
+/// and the unit goes on; else it fails the unit.
+/// Cost: O(1) for a unit that passes; one lock per difference.
+pub(super) fn settle(differences: Option<&DerivedDifferences>, found: Result<()>) -> Result<()> {
+    match (found, differences) {
+        (Err(difference), Some(differences)) => {
+            differences.lock().unwrap().push(difference.to_string());
+            Ok(())
+        }
+        (found, _) => found,
+    }
 }
 
 /// The first line at which two texts differ: its number from 1, and the
@@ -137,42 +161,88 @@ pub(super) fn until_js(
     both.collect_unit_reads = true;
     let mut reference_options = both.clone();
     reference_options.derived_census = None;
+    // The general form has no plan to fall back from.
 
+    // The general form of the unit is what the frontend makes of its source
+    // with plans off.
+    // Not having it is a failure of the check itself, never a difference.
+    let differences = options.derived_differences.as_ref();
+    let general_form = match &options.derived_reference {
+        Some(frontend) => frontend(),
+        None => Err(anyhow::anyhow!("the build gave no source to make it from")),
+    };
+    let (general_arena, general_structure) = match general_form {
+        Ok(general_form) => general_form,
+        Err(error) => {
+            settle(differences, Err(no_general_form(name, &error)))?;
+            return compile_until_js(unit, options, gentype_interface, signature_ready);
+        }
+    };
+    let general = UntilJs {
+        arena: &general_arena,
+        structure: &general_structure,
+        fallback: None,
+        ..*unit
+    };
     // The reference first: it publishes nothing, and what the plans publish
     // is compared with it.
-    let reference = compile_until_js(
-        unit,
-        &reference_options,
-        gentype_interface.clone(),
-        None,
-        false,
-    );
-    let result = compile_until_js(unit, &both, gentype_interface, signature_ready, true);
+    let reference = compile_until_js(&general, &reference_options, gentype_interface.clone(), None);
+    let result = compile_until_js(unit, &both, gentype_interface, signature_ready);
 
+    let restore = |result: &mut InProcessPreJsCompileResult| {
+        if !wants_signature {
+            result.dumps.retain(|(kind, _)| *kind != DumpKind::Sig);
+        }
+        if !options.collect_unit_reads {
+            result.unit_reads.clear();
+        }
+    };
     let (mut result, reference) = match (result, reference) {
         (Ok(result), Ok(reference)) => (result, reference),
         // A compile that needs locations is retried with them, and checked
-        // then.
-        (Err(error), _) if error.is::<LocationRetry>() => return Err(error),
+        // then. A unit whose plans cannot be used continues on its general
+        // form in its attempt loop, and is compared like any other; only a
+        // compile with no general syntax to continue on stops here.
+        (Err(error), _) if error.is::<LocationRetry>() || error.is::<DerivedRetry>() => {
+            return Err(error);
+        }
         (_, Err(error)) if error.is::<LocationRetry>() => return Err(error),
         (Err(error), Err(reference)) => {
-            same_text(name, "the diagnostics", &error.to_string(), &reference.to_string())?;
+            settle(
+                differences,
+                same_text(name, "the diagnostics", &error.to_string(), &reference.to_string()),
+            )?;
             return Err(error);
         }
         (Err(error), Ok(_)) => {
-            return Err(differs(name, "the diagnostics", format!("  plans:   {error}\n  general: (none)")));
+            let difference =
+                differs(name, "the diagnostics", format!("  plans:   {error}\n  general: (none)"));
+            settle(differences, Err(difference))?;
+            return Err(error);
         }
-        (Ok(_), Err(reference)) => {
-            return Err(differs(name, "the diagnostics", format!("  plans:   (none)\n  general: {reference}")));
+        // The unit goes on with what its plans gave, with nothing more to
+        // compare.
+        (Ok(mut result), Err(reference)) => {
+            let difference = differs(
+                name,
+                "the diagnostics",
+                format!("  plans:   (none)\n  general: {reference}"),
+            );
+            settle(differences, Err(difference))?;
+            restore(&mut result);
+            return Ok(result);
         }
     };
 
-    same_text(name, "the warnings", &result.warnings, &reference.warnings)?;
-    same_text(
-        name,
-        "the signature",
-        signature_dump(&result.dumps),
-        signature_dump(&reference.dumps),
+    settle(differences, same_text(name, "the warnings", &result.warnings, &reference.warnings))?;
+    settle(
+        differences,
+        same_text(
+            name,
+            "the signature",
+            signature_dump(&result.dumps),
+            signature_dump(&reference.dumps),
+        ),
     )?;
     let reads = |result: &InProcessPreJsCompileResult| {
         let mut reads: Vec<String> = result
@@ -184,15 +254,11 @@ pub(super) fn until_js(
         reads.dedup();
         reads.join("\n")
     };
-    same_text(name, "the unit reads", &reads(&result), &reads(&reference))?;
+    settle(differences, same_text(name, "the unit reads", &reads(&result), &reads(&reference)))?;
 
-    if !wants_signature {
-        result.dumps.retain(|(kind, _)| *kind != DumpKind::Sig);
-    }
-    if !options.collect_unit_reads {
-        result.unit_reads.clear();
-    }
+    restore(&mut result);
     result.derived_reference = Some(Box::new(reference));
+    result.derived_differences = differences.cloned();
     Ok(result)
 }
 
@@ -289,6 +355,32 @@ pub(super) fn compare_exports(
 mod tests {
     use super::*;
     use crate::driver::JsOutput;
+
+    /// With a collector a difference is kept and the unit goes on; without
+    /// one it fails the unit. A unit that passes adds nothing.
+    #[test]
+    fn a_collector_keeps_every_difference() {
+        let differences = DerivedDifferences::default();
+        let difference = |unit: &str| Err(differs(unit, "the JavaScript", "  line 1".to_string()));
+        assert!(settle(Some(&differences), difference("A")).is_ok());
+        assert!(settle(Some(&differences), Ok(())).is_ok());
+        assert!(settle(Some(&differences), difference("B")).is_ok());
+        let kept = differences.lock().unwrap();
+        assert_eq!(kept.len(), 2);
+        assert!(kept[0].contains("in A,") && kept[1].contains("in B,"));
+        assert!(settle(None, difference("C")).is_err());
+    }
+
+    /// A general form that could not be made is an internal error of the
+    /// check that names the cause, not a difference.
+    #[test]
+    fn a_missing_general_form_is_an_internal_error() {
+        let error = no_general_form("Unit", &anyhow::anyhow!("parsing src/Unit.res again failed"));
+        let message = error.to_string();
+        assert!(message.contains("internal error: Unit was not checked"), "{message}");
+        assert!(message.contains("parsing src/Unit.res again failed"));
+        assert!(!message.contains("differ"));
+    }
 
     fn output(code: &str) -> InProcessCompileResult {
         InProcessCompileResult {

@@ -508,7 +508,9 @@ fn verified(
         if std::fs::read(path).ok().as_deref() == Some(key.as_bytes()) { return Ok(true); }
     }
     if digest()? != expected { return Ok(false); }
-    if let Some((path, key)) = memo {
+    if let Some((path, key)) = memo
+        && store.is_some_and(|store| store.writable)
+    {
         // Persistence is an optimization; an unwritable build directory must not
         // change whether an otherwise valid snapshot can be used.
         let persist = || -> Result<()> {
@@ -917,7 +919,7 @@ mod tests {
         std::fs::write(&source, "let x = 1").unwrap();
         let paths = vec![source.clone()];
         let expected = blake3::hash(b"let x = 1");
-        let store = compile::RuntimeStore { db: dir.path().join("build/rescript.sqlite"), compiler_hash: "compiler".into() };
+        let store = compile::RuntimeStore { db: dir.path().join("build/rescript.sqlite"), compiler_hash: "compiler".into(), writable: true };
         let reads = std::cell::Cell::new(0);
         let digest = || { reads.set(reads.get() + 1); Ok(blake3::hash(&std::fs::read(&source)?)) };
         assert!(verified(expected, &paths, Some(&store), "runtime", digest).unwrap());
@@ -1055,7 +1057,6 @@ pub(crate) fn prepare_belt(state: &mut super::build_types::BuildCommandState) ->
         fallback("@rescript/belt", &mode, reason).map(|_| ())
     };
     if mode == "off" { return mismatch("disabled by RESCRIPT_SNAPSHOT=off"); }
-    if state.check_only { return mismatch("check-only is not supported"); }
     if state.diagnostic_locations { return mismatch("the diagnostic retry requires source declaration locations"); }
     if state.dump.is_some() { return mismatch("dump flags are not supported"); }
     if let Some(option) = alternate_backend_option() { return mismatch(option); }
@@ -1085,7 +1086,8 @@ pub(crate) fn prepare_belt(state: &mut super::build_types::BuildCommandState) ->
     let provider = std::sync::Arc::new(BeltPackage {
         index, package: package.clone(), root_config: state.get_root_config().clone(),
     });
-    provider.write_javascript()?;
+    // A check writes no files.
+    if !state.check_only { provider.write_javascript()?; }
     state.module_registry.lock().unwrap().register_snapshot(provider);
     state.build_state.packages.get_mut("@rescript/belt").unwrap().prebuilt = true;
     Ok(())

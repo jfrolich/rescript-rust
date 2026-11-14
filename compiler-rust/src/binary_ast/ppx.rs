@@ -9688,12 +9688,74 @@ fn rewrite_structure_impl(
     structure: &[StructureItem],
     arena: &mut ParseArena,
     apply_spice: bool,
-    mut warnings: Option<&mut Vec<PpxWarning>>,
+    warnings: Option<&mut Vec<PpxWarning>>,
 ) -> PpxResult<Vec<StructureItem>> {
-    // Context for tracking already-created module type names (per-structure scope)
+    // This detection already belongs to the mapper. One new O(1) dispatch
+    // erases all result-scope work for a structure with no derived items.
+    let first = apply_spice.then(|| derive::first_spice_item(structure, arena)).flatten();
+    if let Some(first) = first {
+        rewrite_structure_scoped::<true>(structure, arena, apply_spice, warnings, first)
+    } else {
+        rewrite_structure_scoped::<false>(structure, arena, apply_spice, warnings, 0)
+    }
+}
+
+/// Lazily collect source-order scope at the first mapped item that derives.
+/// Cost: zero steps when disabled; otherwise one O(items + constructors)
+/// prefix scan, irrespective of the frontend's reverse mapping order.
+/// Presence through `first` was already learned by the whole-structure scan:
+/// earlier items are false and `first` is true. Only later items need inspection;
+/// their attributes were not visited by that scan.
+fn result_shadow_for<'scope, const ENABLED: bool>(
+    structure: &[StructureItem],
+    index: usize,
+    first: usize,
+    arena: &mut ParseArena,
+    prefix: &'scope mut Option<derive::PrefixScope<'static>>,
+    step: impl FnMut(),
+) -> derive::Scope<'scope> {
+    if !ENABLED || index < first
+        || (index > first && !derive::structure_uses_spice_mapper(&structure[index..=index], arena))
+    {
+        return derive::Scope::default();
+    }
+    extend_result_prefix(structure, index, arena, prefix, step)
+}
+
+/// Extend source-order facts for ordinary items and private payloads.
+/// Cost: O(new prefix items + their constructors/declarations + name bytes),
+/// plus alias-version/scope depth when resolving an alias manifest. Each slot
+/// is visited at most once across calls; dense buffers grow amortized linearly.
+/// Already collected positions cost O(1), including reverse-order queries.
+fn extend_result_prefix<'scope>(
+    structure: &[StructureItem],
+    index: usize,
+    arena: &mut ParseArena,
+    prefix: &'scope mut Option<derive::PrefixScope<'static>>,
+    mut step: impl FnMut(),
+) -> derive::Scope<'scope> {
+    let prefix = prefix.get_or_insert_with(derive::PrefixScope::default);
+    while prefix.len() <= index {
+        step();
+        prefix.push(&structure[prefix.len()], arena);
+    }
+    prefix.at(index)
+}
+
+/// Map the scheduled structure items using the mapper-presence fact.
+/// Cost: O(items + visited attributes + mapped syntax and generated codecs),
+/// plus the lazy prefix work documented on `extend_result_prefix` when enabled.
+/// The disabled specialization allocates no prefix or alias buffers and does
+/// no scope traversal; the existing schedule/output buffers remain O(items).
+fn rewrite_structure_scoped<const RESULT_SCOPE: bool>(
+    structure: &[StructureItem],
+    arena: &mut ParseArena,
+    apply_spice: bool,
+    mut warnings: Option<&mut Vec<PpxWarning>>,
+    first_spice_item: usize,
+) -> PpxResult<Vec<StructureItem>> {
     let mut await_context = std::collections::HashSet::new();
-    let spice_mapper_active =
-        apply_spice && derive::structure_uses_spice_mapper(structure, arena);
+    let spice_mapper_active = RESULT_SCOPE;
 
     // OCaml `Bs_builtin_ppx.structure_mapper` (bs_builtin_ppx.ml:676-802)
     // recurses as `head :: structure_mapper rest`. Constructor arguments are
@@ -9747,6 +9809,7 @@ fn rewrite_structure_impl(
         }
     }
 
+    let mut result_prefix = None;
     let mut slots: Vec<Vec<StructureItem>> = (0..units.len()).map(|_| Vec::new()).collect();
     for event in order {
         match event {
@@ -9760,11 +9823,15 @@ fn rewrite_structure_impl(
                     warnings.append(&mut checker.warnings);
                 }
                 result?;
+                let result_shadowed = result_shadow_for::<RESULT_SCOPE>(
+                    structure, index, first_spice_item, arena, &mut result_prefix, || {},
+                );
                 slots[unit_index] = rewrite_structure_unit(
                     &structure[index],
                     arena,
                     apply_spice,
                     spice_mapper_active,
+                    result_shadowed,
                     &mut await_context,
                 )?;
             }
@@ -9781,6 +9848,10 @@ fn rewrite_structure_impl(
                     result?;
                 }
                 let mut mapped = Vec::new();
+                let mut private_shadow = if RESULT_SCOPE {
+                    // A private payload inherits only the preceding outer scope.
+                    extend_result_prefix(structure, start, arena, &mut result_prefix, || {})
+                } else { derive::Scope::default() };
                 for item in &structure[start..end] {
                     let StructureItemDesc::Pstr_extension(inner) = &item.pstr_desc else {
                         unreachable!("%%private run holds extensions")
@@ -9791,6 +9862,9 @@ fn rewrite_structure_impl(
                     // here they stay extensions (and `Typemod_hide.check`
                     // rejects them).
                     for work in private_extension_structure_items(payload, ext_name.loc)? {
+                        if RESULT_SCOPE {
+                            private_shadow.result_shadowed |= derive::shadows_result(work, arena);
+                        }
                         if is_structure_mapper_extension(work, arena) {
                             mapped.push(work.clone());
                         } else if apply_spice {
@@ -9799,7 +9873,7 @@ fn rewrite_structure_impl(
                                 work,
                                 arena,
                                 spice_mapper_active,
-                                derive::Scope::Nested,
+                                private_shadow,
                             )?);
                         } else {
                             mapped.extend(rewrite_structure_item_no_spice(work, arena));
@@ -9832,6 +9906,7 @@ fn rewrite_structure_unit(
     arena: &mut ParseArena,
     apply_spice: bool,
     spice_mapper_active: bool,
+    result_shadowed: derive::Scope<'_>,
     await_context: &mut std::collections::HashSet<String>,
 ) -> PpxResult<Vec<StructureItem>> {
     let mut result = Vec::new();
@@ -9846,7 +9921,7 @@ fn rewrite_structure_unit(
                     item,
                     arena,
                     spice_mapper_active,
-                    derive::Scope::TopLevel,
+                    result_shadowed,
                 )?);
             } else {
                 result.extend(rewrite_structure_item_no_spice(item, arena));
@@ -9872,7 +9947,7 @@ fn rewrite_structure_unit(
                     item,
                     arena,
                     spice_mapper_active,
-                    derive::Scope::TopLevel,
+                    result_shadowed,
                 )?);
             } else {
                 result.extend(rewrite_structure_item_no_spice(item, arena));
@@ -9885,7 +9960,7 @@ fn rewrite_structure_unit(
                     item,
                     arena,
                     spice_mapper_active,
-                    derive::Scope::TopLevel,
+                    result_shadowed,
                 )?);
             } else {
                 result.extend(rewrite_structure_item_no_spice(item, arena));
@@ -10361,11 +10436,11 @@ fn try_rewrite_structure_item(
     item: &StructureItem,
     arena: &mut ParseArena,
     spice_mapper_active: bool,
-    scope: derive::Scope,
+    result_shadowed: derive::Scope<'_>,
 ) -> PpxResult<Vec<StructureItem>> {
     let mut result = Vec::new();
     for expanded in
-        derive::expand_structure_item_with_mapper(item, arena, spice_mapper_active, scope)
+        derive::expand_structure_item_in_scope(item, arena, spice_mapper_active, result_shadowed)
         .map_err(PpxError::message)?
     {
         if let StructureItemDesc::Pstr_primitive(vd) = &expanded.pstr_desc {
@@ -10381,8 +10456,7 @@ fn try_rewrite_structure_item(
 fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<StructureItem> {
     let spice_mapper_active =
         derive::structure_uses_spice_mapper(std::slice::from_ref(item), arena);
-    // Reached for the items of a module expression only.
-    try_rewrite_structure_item(item, arena, spice_mapper_active, derive::Scope::Nested)
+    try_rewrite_structure_item(item, arena, spice_mapper_active, derive::Scope::default())
         .unwrap_or_else(|error| {
         arena.defer_ppx_error(error);
         rewrite_structure_item_no_spice(item, arena)
@@ -10397,10 +10471,16 @@ fn rewrite_structure_item_no_spice(
     arena: &mut ParseArena,
 ) -> Vec<StructureItem> {
     let derived = derive::is_derived_item(item, arena);
+    let reason = arena.derived_census.as_ref().and_then(|c| c.general_group(item));
     let rewritten = rewrite_structure_item_body(item, arena);
     if derived {
         for item in &rewritten {
             derive::mark_generated_item(item, arena);
+            if let (Some(census), Some(reason), StructureItemDesc::Pstr_value((_, group))) =
+                (&mut arena.derived_census, reason, &item.pstr_desc)
+            {
+                census.set_general_group(group.start(), reason);
+            }
         }
     }
     rewritten
@@ -10521,16 +10601,8 @@ fn rewrite_structure_item_body(
                 }]
             }
         }
-        // A derived item keeps its plan; its general form is rewritten as the
-        // value group it is, which rewrites to one value group.
-        StructureItemDesc::Pstr_derived(idx) => {
-            let general = derive::general_item(arena, item.pstr_loc, *idx);
-            let [rewritten] = rewrite_structure_item_body(&general, arena).try_into().unwrap_or_else(
-                |_| unreachable!("a `let` group of generated bindings rewrites to one item"),
-            );
-            derive::set_general_form(arena, *idx, &rewritten.pstr_desc);
-            vec![item.clone()]
-        }
+        // A plan holds no syntax to rewrite.
+        StructureItemDesc::Pstr_derived(_) => vec![item.clone()],
         // Handle value bindings - need to rewrite expressions and patterns
         // Also handle @inline transformation
         StructureItemDesc::Pstr_value(inner) => {
@@ -11562,13 +11634,143 @@ let e = () =>
     }
 
     #[test]
+    fn ten_thousand_items_without_derives_do_no_result_scope_work() {
+        let source = (0..10_000).map(|i| format!("type t{i} = C{i}\n")).collect::<String>();
+        let (mut arena, items) = parse_structure(&source);
+        let mapped = rewrite_structure_impl(&items, &mut arena, true, None).unwrap();
+        assert_eq!(mapped.len(), 10_000);
+        assert_eq!(arena.derived_scope_steps.get(), derive::ScopeSteps {
+            presence_items: items.len(), ..derive::ScopeSteps::default()
+        });
+    }
+
+    #[test]
+    fn ten_thousand_derived_items_visit_each_prefix_slot_once() {
+        let source = (0..10_000).map(|i| format!("@spice type t{i} = int\n")).collect::<String>();
+        let (mut arena, items) = parse_structure(&source);
+        let mut prefix = None;
+        let mut steps = 0;
+        for index in (0..items.len()).rev() {
+            result_shadow_for::<true>(&items, index, 0, &mut arena, &mut prefix, || steps += 1);
+        }
+        assert_eq!(steps, items.len());
+        assert_eq!(arena.derived_scope_steps.get().prefix_items, items.len());
+    }
+
+    #[test]
+    fn ten_thousand_variant_constructors_take_ten_thousand_scope_steps() {
+        let constructors = (0..10_000).map(|i| format!("C{i}")).collect::<Vec<_>>().join(" | ");
+        let (arena, items) = parse_structure(&format!("type t = {constructors}"));
+        assert!(!derive::shadows_result(&items[0], &arena));
+        assert_eq!(arena.derived_scope_steps.get().constructors, 10_000);
+    }
+
+    #[test]
+    fn scope_presence_does_not_rescan_the_known_prefix() {
+        let source = (0..10_000).map(|i| {
+            let attr = if i == 5_000 { "@spice " } else { "" };
+            format!("{attr}type t{i} = int\n")
+        }).collect::<String>();
+        let (mut arena, items) = parse_structure(&source);
+        let first = derive::first_spice_item(&items, &arena).unwrap();
+        assert_eq!(first, 5_000);
+        assert_eq!(arena.derived_scope_steps.get().presence_items, 5_001);
+        let mut prefix = None;
+        for index in (0..items.len()).rev() {
+            result_shadow_for::<true>(&items, index, first, &mut arena, &mut prefix, || {});
+        }
+        assert_eq!(arena.derived_scope_steps.get().presence_items, items.len());
+    }
+
+    #[test]
+    fn result_scope_is_lazy_and_scans_the_prefix_once() {
+        let (mut arena, items) = parse_structure("type mine = Error\n@spice type t = {x: int}");
+        let mut prefix = None;
+        let mut steps = 0;
+        assert!(!result_shadow_for::<true>(&items, 0, 1, &mut arena, &mut prefix, || steps += 1).result_shadowed);
+        assert_eq!(steps, 0);
+        for _ in 0..10_000 {
+            assert!(result_shadow_for::<true>(&items, 1, 1, &mut arena, &mut prefix, || steps += 1).result_shadowed);
+        }
+        assert_eq!(steps, items.len());
+    }
+
+    #[test]
+    fn import_epochs_invalidate_aliases_and_builtins_in_source_order() {
+        for import in ["open Owner", "include Owner"] {
+            let (mut arena, items) = parse_structure(&format!(
+                "type j = int\n{import}\ntype j = {{value: int}}\n{import}\nlet marker = 0"
+            ));
+            let j = arena.push_lident("j");
+            let int = arena.push_lident("int");
+            let mut prefix = derive::PrefixScope::default();
+            for item in &items { prefix.push(item, &mut arena); }
+            // Query backwards after both imports have been collected.
+            for (position, expected) in [(3, None), (2, Some(false)), (1, None), (0, Some(false))] {
+                assert_eq!(prefix.at(position).identity_fact(j, &arena), expected);
+                let mut nested = derive::PrefixScope::new(prefix.at(position));
+                nested.push(&items[4], &mut arena);
+                assert_eq!(nested.at(0).identity_fact(j, &arena), expected);
+            }
+            assert_eq!(prefix.at(0).identity_fact(int, &arena), Some(false));
+            assert_eq!(prefix.at(1).identity_fact(int, &arena), None);
+            let mut nested = derive::PrefixScope::new(prefix.at(1));
+            nested.push(&items[2], &mut arena);
+            assert_eq!(nested.at(0).identity_fact(j, &arena), Some(false));
+        }
+    }
+
+    #[test]
+    fn json_alias_scope_survives_reverse_mapping_and_nested_modules() {
+        let (mut arena, source) = parse_structure(
+            "@spice type j = JSON.t\n@spice type a = array<j>\n@spice type b = option<j>\nmodule M = {@spice type c = array<j>}"
+        );
+        arena.set_derived_plans(None);
+        arena.derived_census = Some(Box::new(derive::census::Census::new(std::path::Path::new("unused"), "alias.res")));
+        rewrite_structure_with_warnings(&source, &mut arena, false).0.unwrap();
+        let counts = &arena.derived_census.as_ref().unwrap().paths;
+        assert_eq!(counts.json_identity_argument, 6);
+        assert_eq!(counts.plan, 6);
+    }
+
+    #[test]
+    fn exception_and_type_extension_shadow_result_constructors() {
+        for declaration in ["exception Error(string)", "exception Ok", "type t += Ok | Error(string)"] {
+            let (arena, items) = parse_structure(declaration);
+            assert!(derive::shadows_result(&items[0], &arena), "{declaration}");
+        }
+    }
+
+    #[test]
+    fn result_shadow_scope_follows_source_order_not_mapping_order() {
+        let (mut arena, source) = parse_structure(
+            "@spice type before = {x: int}\ntype mine = Error\n@spice type after = {y: int}\n@spice.encode type encoder = {z: int}",
+        );
+        arena.set_derived_plans(None);
+        let rewritten = rewrite_structure_with_warnings(&source, &mut arena, false).0.unwrap();
+        assert_eq!(rewritten.iter().filter(|item| matches!(item.pstr_desc, StructureItemDesc::Pstr_derived(_))).count(), 2);
+    }
+
+    #[test]
+    fn result_shadow_is_inherited_by_nested_modules() {
+        let (mut arena, source) = parse_structure(
+            "type mine = Error\nmodule M = { @spice type t = {x: int} }",
+        );
+        arena.set_derived_plans(None);
+        let rewritten = rewrite_structure_with_warnings(&source, &mut arena, false).0.unwrap();
+        let StructureItemDesc::Pstr_module(module) = &rewritten[1].pstr_desc else { panic!("module") };
+        let ModuleExprDesc::Pmod_structure(items) = &arena.get_mod_expr(module.pmb_expr).pmod_desc else { panic!("structure") };
+        assert!(!items.iter().any(|item| matches!(item.pstr_desc, StructureItemDesc::Pstr_derived(_))));
+    }
+
+    #[test]
     fn derived_value_groups_survive_frontend_rewriting() {
         let (mut arena, source) = parse_structure(
             "let before = 1\n@spice type a = {x: int}\n@spice type b = string\nlet after = 2\n",
         );
         assert!(source.iter().all(|item| !derive::is_derived_item(item, &arena)));
         let expanded: Vec<_> = source.iter().flat_map(|item|
-            derive::expand_structure_item_with_mapper(item, &mut arena, true, derive::Scope::TopLevel).unwrap()
+            derive::expand_structure_item_with_mapper(item, &mut arena, true).unwrap()
         ).collect();
         assert_eq!(expanded.iter().map(|item| derive::is_derived_item(item, &arena))
             .collect::<Vec<_>>(), vec![false, false, true, false, true, false]);

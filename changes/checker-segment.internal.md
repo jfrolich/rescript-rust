@@ -1,0 +1,1 @@
+- Add immutable export-table storage for the new type checker, with bounded binary-search lookup.
