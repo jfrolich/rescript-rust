@@ -15,13 +15,21 @@ pub(super) struct ObjectField {
     pub mutable: bool,
 }
 
-/// Sparse pair relation over dense node indices. A left node indexes a
-/// collision-free chain of right nodes; storage grows only by pool capacity.
-/// Insertion is O(previous partners of the left node), not O(all pairs).
+/// Dense left-node roots into compressed binary radix trees of right indices.
+/// Each probe follows at most 32 branching bits, independent of the number of
+/// previous partners. Each distinct pair uses at most two 16-byte pool entries;
+/// Vec growth is amortized, with no per-pair heap allocation or hashing.
 #[derive(Default)]
 struct Pairs {
     heads: Vec<u32>,
-    entries: Vec<(N, u32)>,
+    entries: Vec<PairNode>,
+}
+
+#[derive(Clone, Copy)]
+struct PairNode {
+    children: [u32; 2],
+    key: u32,
+    bit: u32,
 }
 
 impl Pairs {
@@ -31,17 +39,57 @@ impl Pairs {
         if index >= self.heads.len() {
             self.heads.resize((index + 1).next_power_of_two(), NONE);
         }
-        let head = self.heads[index];
-        let mut current = head;
-        while current != NONE {
-            let (right, next) = self.entries[current as usize];
-            if right == b {
-                return false;
-            }
-            current = next;
+        let root = self.heads[index];
+        let leaf = PairNode {
+            children: [NONE; 2],
+            key: b.0,
+            bit: 32,
+        };
+        if root == NONE {
+            self.heads[index] = self.entries.len() as u32;
+            self.entries.push(leaf);
+            return true;
         }
-        self.heads[index] = self.entries.len() as u32;
-        self.entries.push((b, head));
+        let side = |bit| ((b.0 >> (31 - bit)) & 1) as usize;
+        let mut current = root;
+        loop {
+            #[cfg(test)]
+            crate::tc::steps::tick();
+            let node = self.entries[current as usize];
+            if node.bit == 32 {
+                break;
+            }
+            current = node.children[side(node.bit)];
+        }
+        let difference = (self.entries[current as usize].key ^ b.0).leading_zeros();
+        if difference == 32 {
+            return false;
+        }
+        let fresh = self.entries.len() as u32;
+        self.entries.push(leaf);
+        let mut parent = NONE;
+        let mut parent_side = 0;
+        current = root;
+        while self.entries[current as usize].bit < difference {
+            #[cfg(test)]
+            crate::tc::steps::tick();
+            parent = current;
+            parent_side = side(self.entries[current as usize].bit);
+            current = self.entries[current as usize].children[parent_side];
+        }
+        let mut children = [current; 2];
+        children[side(difference)] = fresh;
+        let branch = self.entries.len() as u32;
+        self.entries.push(PairNode {
+            children,
+            key: 0,
+            bit: difference,
+        });
+        if parent == NONE {
+            self.heads[index] = branch;
+        } else {
+            self.entries[parent as usize].children[parent_side] = branch;
+        }
         true
     }
 }
@@ -250,8 +298,8 @@ impl<'s> Graph<'s> {
         self.set_row(ty, index);
     }
 
-    /// O(pairs + field comparisons/sorts + sum of squared partner counts),
-    /// with dense-indexed assumed-pair chains and an explicit pair stack.
+    /// O(reachable pairs + merged fields + any sorting of unnormalized fields),
+    /// with at most 64 radix probes per assumed pair and an explicit pair stack.
     /// Only conjunctions of two or more types reach this walk: `Ctype.equal Env.empty false [a] [b]`
     /// (ctype.rs:11043). With an empty environment no abbreviation expands.
     /// Package types compare paths and constraint names; OCaml's completion
@@ -262,6 +310,8 @@ impl<'s> Graph<'s> {
         let mut left_fields = Vec::new();
         let mut right_fields = Vec::new();
         while let Some((a, b)) = work.pop() {
+            #[cfg(test)]
+            crate::tc::steps::tick();
             if a == b {
                 continue;
             }
@@ -365,37 +415,73 @@ impl<'s> Graph<'s> {
         true
     }
 
-    /// O(left fields × right fields + field types): ctype.rs `equal_rows_without_renaming`, queuing the pairs.
+    /// O(fields) for normalized rows; O(fields log fields) only if equality
+    /// is reached from a conjunction before its child rows are normalized.
+    /// Borrow sorted runs; otherwise sort a temporary copy without mutating
+    /// the row. Labels compare by text, not by string-pool index.
+    fn sorted_row_fields(&self, range: Range) -> std::borrow::Cow<'_, [FieldV]> {
+        let fields = &self.fields[range.start as usize..(range.start + range.len) as usize];
+        let compare = |a: &FieldV, b: &FieldV| {
+            #[cfg(test)]
+            crate::tc::steps::tick();
+            self.v.str(a.label).cmp(self.v.str(b.label))
+        };
+        if fields
+            .windows(2)
+            .all(|pair| !compare(&pair[0], &pair[1]).is_gt())
+        {
+            std::borrow::Cow::Borrowed(fields)
+        } else {
+            let mut sorted = fields.to_vec();
+            sorted.sort_by(compare);
+            std::borrow::Cow::Owned(sorted)
+        }
+    }
+
+    /// O(left fields + right fields + field types) after normalization:
+    /// ctype.ml:3147-3180 / `equal_rows_without_renaming` merges label runs.
+    /// Before normalization only the temporary sorting above is non-linear.
+    /// Unequal-length Reither conjunctions retain ctype's first-against-rest
+    /// rule below; that rule also queues only a linear number of pairs.
     fn equal_rows(&mut self, left_node: N, left: Row, right: Row, work: &mut Vec<(N, N)>) -> bool {
         if left.closed != right.closed {
             return false;
         }
-        let mut matched: SmallVec<[bool; 16]> =
-            smallvec::smallvec![false; right.fields.len as usize];
-        let mut pairs: SmallVec<[(FieldV, FieldV); 8]> = SmallVec::new();
-        for i in 0..left.fields.len {
-            let l = self.field(left.fields, i);
-            match (0..right.fields.len).find(|&j| self.field(right.fields, j).label == l.label) {
-                Some(j) => {
-                    matched[j as usize] = true;
-                    pairs.push((l, self.field(right.fields, j)));
-                }
-                None => {
-                    if !left.closed || l.kind != RowFieldKind::Absent {
-                        return false;
-                    }
-                }
-            }
-        }
-        for j in 0..right.fields.len {
-            if !matched[j as usize]
-                && (!left.closed || self.field(right.fields, j).kind != RowFieldKind::Absent)
-            {
-                return false;
-            }
-        }
         if !self.static_row(left_node) {
             work.push((left.more, right.more));
+        }
+        let left_fields = self.sorted_row_fields(left.fields);
+        let right_fields = self.sorted_row_fields(right.fields);
+        let (mut i, mut j) = (0, 0);
+        let mut pairs: SmallVec<[(FieldV, FieldV); 8]> = SmallVec::new();
+        while i < left_fields.len() || j < right_fields.len() {
+            #[cfg(test)]
+            crate::tc::steps::tick();
+            let ordering = match (left_fields.get(i), right_fields.get(j)) {
+                (Some(l), Some(r)) => self.v.str(l.label).cmp(self.v.str(r.label)),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => unreachable!("at least one field remains"),
+            };
+            match ordering {
+                std::cmp::Ordering::Less => {
+                    if !left.closed || left_fields[i].kind != RowFieldKind::Absent {
+                        return false;
+                    }
+                    i += 1;
+                }
+                std::cmp::Ordering::Greater => {
+                    if !left.closed || right_fields[j].kind != RowFieldKind::Absent {
+                        return false;
+                    }
+                    j += 1;
+                }
+                std::cmp::Ordering::Equal => {
+                    pairs.push((left_fields[i], right_fields[j]));
+                    i += 1;
+                    j += 1;
+                }
+            }
         }
         for (l, r) in pairs {
             let ty = |field: FieldV, k: u32| self.ns_at(field.types, k);
@@ -512,4 +598,82 @@ pub(super) fn is_row_name(s: &str) -> bool {
 /// O(1): a range of `indices`.
 fn indices(p: &crate::tc::segment::SignaturePools, range: Range) -> &[u32] {
     &p.indices[range.start as usize..(range.start + range.len) as usize]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::view::View;
+    use super::*;
+    use crate::tc::{
+        graph::{GENERIC, NONE},
+        segment::Segment,
+        steps,
+    };
+
+    #[test]
+    fn ten_thousand_sorted_row_fields_compare_linearly() {
+        let mut segment = Segment::default();
+        let mut bytes = Vec::new();
+        let mut strings = Vec::new();
+        // Deliberately reverse pool order: merging must compare label text.
+        for i in (0..10_000).rev() {
+            let name = format!("field{i:05}");
+            strings.push(Range {
+                start: bytes.len() as u32,
+                len: name.len() as u32,
+            });
+            bytes.extend_from_slice(name.as_bytes());
+        }
+        segment.signature.bytes = bytes.into_boxed_slice();
+        segment.signature.strings = strings.into_boxed_slice();
+        let mut graph = Graph::new(View::new(&segment));
+        for _ in 0..2 {
+            for label in (0..10_000).rev() {
+                graph.fields.push(FieldV {
+                    label,
+                    types: Range::default(),
+                    kind: RowFieldKind::Present,
+                });
+            }
+        }
+        let row = Row {
+            fields: Range {
+                start: 0,
+                len: 10_000,
+            },
+            name_args: Range::default(),
+            more: N(0),
+            name: NONE,
+            closed: true,
+            fixed: false,
+        };
+        let l = graph.push_row(row);
+        let r = graph.push_row(Row {
+            fields: Range {
+                start: 10_000,
+                len: 10_000,
+            },
+            ..row
+        });
+        let left = graph.make_variant(l, GENERIC);
+        let right = graph.make_variant(r, GENERIC);
+        let count = steps::scope(|| assert!(graph.equal(left, right)));
+        assert!(count <= 3 * 10_000, "{count} comparisons/visits");
+    }
+
+    #[test]
+    fn ten_thousand_partners_have_bounded_radix_probes() {
+        assert_eq!(std::mem::size_of::<PairNode>(), 16);
+        let mut pairs = Pairs::default();
+        let count = steps::scope(|| {
+            for i in 0..10_000 {
+                assert!(pairs.insert(N(7), N(i)));
+            }
+            for i in (0..10_000).rev() {
+                assert!(!pairs.insert(N(7), N(i)));
+            }
+        });
+        assert!(count <= 64 * 20_000, "{count} radix probes");
+        assert_eq!(pairs.entries.len(), 19_999);
+    }
 }
