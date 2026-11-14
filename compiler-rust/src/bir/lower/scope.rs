@@ -114,6 +114,7 @@ impl Scope {
     }
 
     /// Allocate zeroed rows once at lowering entry. Cost: O(variables).
+    #[cfg(test)]
     pub(crate) fn new(variables: usize) -> Self {
         Self::with_capacity(variables, variables)
     }

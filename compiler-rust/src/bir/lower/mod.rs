@@ -531,6 +531,7 @@ impl State {
             + 16 * arena.pools.switches.len() + 8;
         // Mixed dispatch can emit both literal and payload clause runs.
         arena.pools.switch_clauses.reserve_exact(2 * switch_arms);
+        arena.pools.switch_keys.reserve_exact(switch_arms + 16 * arena.pools.switches.len());
         arena.lists.reserve_slots(2 * source_operands + 4 * arena.pools.switch_keys.len() + 8);
         arena.nodes.reserve_exact(output_nodes);
         arena.parents.reserve_exact(output_nodes);
