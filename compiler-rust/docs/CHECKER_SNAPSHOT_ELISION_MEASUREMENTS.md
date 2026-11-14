@@ -1,4 +1,142 @@
-# Snapshot-elision candidate measurements
+# Snapshot-elision final implementation measurements
+
+Candidate `913faa5ed` (including composed retries and the location-retry fix)
+versus base `be1b3a482`, on the same Linux machine. Both used release fat LTO
+and one codegen unit. Later documentation-only commits do not change these
+binaries. The earlier measurements below remain revision-pinned history.
+
+## Commands
+
+`ROOT` is the candidate checkout, `BASE_ROOT` the base source archive, and
+`APP` the directory of the 3,735-module application. No project path was passed
+to `build`: each measured command ran from the project's own directory.
+
+```sh
+CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
+  cargo build --locked --release --manifest-path "$ROOT/rewatch/Cargo.toml"
+CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
+  cargo build --locked --release --manifest-path "$BASE_ROOT/rewatch/Cargo.toml"
+BASE="$BASE_ROOT/rewatch/target/release/rescript"
+CANDIDATE="$ROOT/rewatch/target/release/rescript"
+```
+
+For each side, set `BIN` to its executable and `RUNTIME` to its matching
+`packages/@rescript/runtime`. For each project (`$APP` and `$ROOT/tests/tests`),
+run the following five times. Counters were disabled for these measurements.
+
+```sh
+cd "$PROJECT"
+export RAYON_NUM_THREADS=1 RESCRIPT_FULL_BUILD=1 RESCRIPT_RUNTIME="$RUNTIME"
+unset RESCRIPT_COMPILER_COUNTERS RESCRIPT_CHECK_MODE
+"$BIN" clean
+valgrind --tool=cachegrind --cache-sim=no --branch-sim=no \
+  --cachegrind-out-file="$RESULT.cachegrind" "$BIN" build
+```
+
+## Instructions
+
+All runs completed successfully. The summary compares the minimum of five.
+
+### 3,735-module application
+
+| Run | Base instructions | Candidate instructions |
+| --- | ---: | ---: |
+| 1 | 67,833,108,969 | 67,443,864,344 |
+| 2 | 67,807,158,079 | 67,303,921,893 |
+| 3 | 67,805,456,282 | 67,319,613,657 |
+| 4 | 67,821,062,623 | 67,321,608,494 |
+| 5 | 67,810,454,456 | 67,334,303,567 |
+| Minimum | 67,805,456,282 | 67,303,921,893 |
+
+Change: **-0.740%**.
+
+### tests/tests
+
+| Run | Base instructions | Candidate instructions |
+| --- | ---: | ---: |
+| 1 | 4,992,695,709 | 4,873,336,315 |
+| 2 | 4,904,256,652 | 4,873,182,639 |
+| 3 | 4,906,026,731 | 4,873,487,909 |
+| 4 | 4,903,493,317 | 4,875,406,139 |
+| 5 | 4,902,048,912 | 4,871,669,914 |
+| Minimum | 4,902,048,912 | 4,871,669,914 |
+
+Change: **-0.620%**.
+
+## Attempts and the default build
+
+These are separate counter-enabled runs of the candidate, not the instruction
+runs. Counts include dependency/runtime units and location retries, not just
+project modules.
+
+```sh
+cd "$PROJECT" # once for "$ROOT/tests/tests", once for "$APP"
+export RAYON_NUM_THREADS=1 RESCRIPT_FULL_BUILD=1
+export RESCRIPT_RUNTIME="$ROOT/packages/@rescript/runtime"
+"$CANDIDATE" clean
+RESCRIPT_COMPILER_COUNTERS=1 "$CANDIDATE" build
+```
+
+| Project | check_attempts | explain_reruns | Exit |
+| --- | ---: | ---: | ---: |
+| tests/tests | 944 | 0 | 0 |
+| 3,735-module application | 4,005 | 0 | 0 |
+
+The ordinary default build also succeeded, reporting **743 modules**:
+
+```sh
+cd "$ROOT/tests/tests"
+unset RAYON_NUM_THREADS RESCRIPT_FULL_BUILD RESCRIPT_COMPILER_COUNTERS RESCRIPT_CHECK_MODE
+export RESCRIPT_RUNTIME="$ROOT/packages/@rescript/runtime"
+"$CANDIDATE" clean
+"$CANDIDATE" build
+```
+
+## Output comparison
+
+```sh
+cd "$ROOT"
+RAYON_NUM_THREADS=1 python3 scripts/compare_checker_builds.py "$PROJECT" \
+  "$BASE" "$CANDIDATE" \
+  --base-runtime "$BASE_ROOT/packages/@rescript/runtime" \
+  --candidate-runtime "$ROOT/packages/@rescript/runtime"
+```
+
+| Project | Signatures | Diagnostic files | Generated files | Differences |
+| --- | ---: | ---: | ---: | ---: |
+| tests/tests | 743 | 1 | 737 | 0 |
+| 3,735-module application | 3,735 | 18 | 3,980 | 0 |
+
+Both sides exited zero. The application emitted 32 diagnostics in 18 files.
+The comparison includes canonical signatures, diagnostic text/order/locations,
+JavaScript, generated TypeScript and source maps.
+
+## Application wall time
+
+From `$APP`, a wrapper `run-side.sh SIDE ACTION` selects the matching executable
+and runtime and runs `ACTION`, exporting `RAYON_NUM_THREADS=1` and
+`RESCRIPT_FULL_BUILD=1`, with counters and forced Explain unset:
+
+```sh
+cd "$APP"
+hyperfine --warmup 1 --runs 5 --export-json application-wall.json \
+  --prepare './run-side.sh {side} clean' -L side base,candidate \
+  './run-side.sh {side} build'
+```
+
+| Revision | Mean | Standard deviation | Minimum | Maximum |
+| --- | ---: | ---: | ---: | ---: |
+| Base | 12.999 s | 0.840 s | 11.869 s | 14.103 s |
+| Candidate | 13.094 s | 0.511 s | 12.239 s | 13.465 s |
+
+The candidate mean is 0.73% slower, with overlapping ranges. This does **not**
+establish a wall-time improvement; the instruction reduction is the supported
+performance result. The failed-unit harness below was not rerun on this final
+revision and must not be presented as final-head evidence.
+
+---
+
+## Snapshot-elision candidate measurements
 
 These measurements compare `5cda5eb4b` with its then-current trunk base,
 `474bbcf02`. They are **not** measurements of later merges or the final retry
@@ -6,7 +144,7 @@ composition. Both binaries were built from separate source archives on the same
 Linux machine, sequentially, with release fat LTO and one codegen unit. Compiler
 counters were disabled for timing and instruction measurements.
 
-## Whole-project output
+### Whole-project output
 
 `scripts/compare_checker_builds.py` ran each executable against the same project,
 with its matching runtime and `RAYON_NUM_THREADS=1`. Both sides exited zero.
@@ -20,7 +158,7 @@ The comparison covers canonical signatures, diagnostic text/order/locations,
 JavaScript, generated TypeScript and source maps. The application produced 32
 diagnostics in those 18 files on each side.
 
-## Application instructions
+### Application instructions
 
 Each run cleaned the application first, then ran a full build with one worker
 under `valgrind --tool=cachegrind --cache-sim=no --branch-sim=no`. All listed runs
@@ -37,7 +175,7 @@ completed successfully; an interrupted run was discarded and repeated.
 
 The minimum-of-five instruction reduction is **0.669%**.
 
-## Application wall time
+### Application wall time
 
 Hyperfine used one warmup and five measured runs per executable, cleaning before
 each run. Builds used `RESCRIPT_FULL_BUILD=1` and `RAYON_NUM_THREADS=1`.
@@ -50,7 +188,7 @@ each run. Builds used `RESCRIPT_FULL_BUILD=1` and `RAYON_NUM_THREADS=1`.
 The means improve by approximately 2.2%, but the ranges overlap. These are
 single-worker Linux measurements, not a multicore throughput claim.
 
-## Failed-unit cost
+### Failed-unit cost
 
 A separate release harness called `driver::compile_source_to_js_with_options`
 directly with `nopervasives: true`, avoiding CLI dependency preparation. Its
