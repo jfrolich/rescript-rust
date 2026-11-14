@@ -15,8 +15,8 @@
 //! (`simple_abbrevs`, compiler/ml/ctype.ml:197-202), and slot 0 of a nullary
 //! node stays `NONE`.
 
-use super::graph::{Node, Ty};
-use super::segment::Segment;
+use super::graph::{NONE, Node, Ty};
+use super::segment::{DeclarationKind, PathRow, Segment, SignatureKind};
 use super::template::Template;
 use super::unify::{Checker, Clash};
 
@@ -99,15 +99,121 @@ impl TypeTable {
     /// whose template is the declaration's item template
     /// (bridge/from_old.rs, "Schemes"). Templates stay in the segment's
     /// graph (`Segment::graph`). (R3b)
+    ///
+    /// A `paths` row names one of the unit's own declarations when it is an
+    /// identifier whose scope is the `ordered_items` index of a type item
+    /// (`IdentRow::scope`; equal stamps, compiler/ext/ident.ml:75). Every
+    /// other row (predefined types, other units' types, a path through a
+    /// module) is an abstract type here. The scope is 0 for every row: a
+    /// segment's types are bound before any level a check reaches.
     pub fn from_segment(segment: &Segment) -> TypeTable {
-        todo!("R3b")
+        let pools = &segment.signature;
+        let mut table = TypeTable {
+            rows: Vec::with_capacity(pools.paths.len()),
+            ..TypeTable::default()
+        };
+        for path in pools.paths.iter() {
+            #[cfg(test)]
+            super::steps::tick();
+            let row = match own_declaration(segment, *path) {
+                Some(declaration) => table.declaration_row(segment, declaration),
+                None => ABSTRACT,
+            };
+            table.rows.push(row);
+        }
+        table
+    }
+
+    /// O(arity): the row of type declaration `declaration` of the segment,
+    /// appending its manifest and its parameter roots. A manifest expands
+    /// publicly unless the type is private and abstract
+    /// (`Env.find_type_expansion`, compiler/ml/env.ml:944-957; a private row
+    /// type, `Btype.has_constr_row`, is R3f's).
+    fn declaration_row(&mut self, segment: &Segment, declaration: u32) -> TypeInfo {
+        let pools = &segment.signature;
+        let decl = segment.type_declarations[declaration as usize];
+        let mut flags = 0;
+        if decl.kind != DeclarationKind::Abstract {
+            flags |= DATATYPE;
+        }
+        let newtype = if decl.flags & DECL_NEWTYPE != 0 {
+            let details = pools.type_details[declaration as usize];
+            self.newtypes.push(Newtype {
+                level: details.newtype_level,
+                expansion_level: details.scope_level,
+            });
+            flags |= NEWTYPE;
+            self.newtypes.len() as u32 - 1
+        } else {
+            NONE
+        };
+        let manifest = if decl.manifest == NONE {
+            NONE
+        } else {
+            let private = decl.flags & DECL_PRIVATE != 0;
+            flags |= if private && decl.kind == DeclarationKind::Abstract {
+                PRIVATE
+            } else {
+                ABBREV
+            };
+            let body = pools.roots[decl.manifest as usize];
+            let params = self.roots.len() as u32;
+            for index in 0..u32::from(decl.arity) {
+                #[cfg(test)]
+                super::steps::tick();
+                self.roots.push(pools.roots[(decl.params + index) as usize].ty);
+            }
+            self.manifests.push(Manifest {
+                template: segment.templates[body.template as usize],
+                params,
+                body: body.ty,
+            });
+            self.manifests.len() as u32 - 1
+        };
+        TypeInfo {
+            manifest,
+            scope: 0,
+            newtype,
+            arity: decl.arity,
+            flags,
+            reserved: 0,
+        }
     }
 
     /// O(1): one bounds test and one 16-byte load. (R3b)
     #[inline]
     pub fn info(&self, type_index: u32) -> TypeInfo {
-        todo!("R3b")
+        match self.rows.get(type_index as usize) {
+            Some(&row) => row,
+            None => ABSTRACT,
+        }
     }
+}
+
+/// The row of a type with no manifest and no scope.
+const ABSTRACT: TypeInfo = TypeInfo {
+    manifest: NONE,
+    scope: 0,
+    newtype: NONE,
+    arity: 0,
+    flags: 0,
+    reserved: 0,
+};
+
+/// `TypeDecl::flags` bits (bridge/from_old.rs, "Metadata").
+const DECL_PRIVATE: u8 = 1;
+const DECL_NEWTYPE: u8 = 8;
+
+/// O(1): the `type_declarations` row a `paths` row names, when it is an
+/// identifier bound by a type item of the segment.
+fn own_declaration(segment: &Segment, path: PathRow) -> Option<u32> {
+    let pools = &segment.signature;
+    let PathRow::Ident(ident) = path else {
+        return None;
+    };
+    let scope = pools.identifiers[ident as usize].scope;
+    let item = pools.ordered_items.get(scope as usize)?;
+    (item.kind == SignatureKind::Type).then_some(item.declaration)
 }
 
 /// The memo of nullary constructors: one row per type index.
@@ -293,7 +399,165 @@ pub(crate) fn link_node(node: Node, target: Ty) -> Node {
 
 #[cfg(test)]
 mod tests {
+    use super::super::segment::{
+        IdentRow, ItemStatus, SchemeRoot, SignatureItemRow, SignaturePools, TypeDecl,
+    };
+    use super::super::steps;
     use super::*;
+
+    const RELATIVE: u32 = 1 << 30;
+
+    /// `from_segment` is one pass: one step per `paths` row and one per
+    /// parameter root of a manifest, on 10,000 declarations.
+    #[test]
+    fn table_from_ten_thousand_declarations_is_one_pass() {
+        let n = 10_000u32;
+        let (mut identifiers, mut paths, mut items, mut decls, mut roots) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for i in 0..n {
+            identifiers.push(IdentRow {
+                name: 0,
+                stamp: i as i32 + 1,
+                flags: 0,
+                scope: i,
+            });
+            paths.push(PathRow::Ident(i));
+            items.push(SignatureItemRow {
+                ident: i,
+                declaration: i,
+                kind: SignatureKind::Type,
+                status: ItemStatus::Ordinary,
+            });
+            let params = roots.len() as u32;
+            roots.push(SchemeRoot {
+                template: 0,
+                ty: Ty(RELATIVE | 1),
+            });
+            roots.push(SchemeRoot {
+                template: 0,
+                ty: Ty(RELATIVE | 2),
+            });
+            // Declaration 0 is private and abstract, 1 a private record.
+            decls.push(TypeDecl {
+                kind: if i == 1 {
+                    DeclarationKind::Record
+                } else {
+                    DeclarationKind::Abstract
+                },
+                flags: 16 | u8::from(i < 2),
+                arity: 1,
+                params,
+                manifest: params + 1,
+                members: 0,
+                member_len: 0,
+                path: i,
+                loc: NONE,
+                variance: 0,
+            });
+        }
+        // A path bound outside the segment.
+        identifiers.push(IdentRow {
+            name: 0,
+            stamp: 0,
+            flags: 0,
+            scope: NONE,
+        });
+        paths.push(PathRow::Ident(n));
+        let template = Template {
+            nodes: 0,
+            node_len: 3,
+            pools: 0,
+            list_len: 2,
+        };
+        let segment = Segment {
+            templates: Box::new([template]),
+            type_declarations: decls.into(),
+            signature: SignaturePools {
+                identifiers: identifiers.into(),
+                paths: paths.into(),
+                ordered_items: items.into(),
+                roots: roots.into(),
+                ..SignaturePools::default()
+            },
+            ..Segment::default()
+        };
+        let mut table = TypeTable::default();
+        let count = steps::scope(|| table = TypeTable::from_segment(&segment));
+        assert_eq!(count, 2 * u64::from(n) + 1);
+        assert_eq!(table.rows.len(), n as usize + 1);
+        assert_eq!(table.scoped, 0);
+        assert_eq!(
+            table.info(5),
+            TypeInfo {
+                manifest: 5,
+                scope: 0,
+                newtype: NONE,
+                arity: 1,
+                flags: ABBREV,
+                reserved: 0,
+            }
+        );
+        let manifest = table.manifests[5];
+        assert_eq!(table.roots[manifest.params as usize], Ty(RELATIVE | 1));
+        assert_eq!(manifest.body, Ty(RELATIVE | 2));
+        assert_eq!(table.info(0).flags, PRIVATE);
+        assert_eq!(table.info(1).flags, ABBREV | DATATYPE);
+        assert_eq!(table.info(n), ABSTRACT);
+        assert_eq!(table.info(n + 100), ABSTRACT);
+    }
+
+    /// On a compiled program: the paths of the unit's own types carry their
+    /// declaration; a predefined type is abstract.
+    #[test]
+    fn table_from_a_compiled_unit_names_its_declarations() {
+        use super::super::differential::{New, Tier, compile};
+        let program = compile(
+            "type t0\ntype t1<'a>\ntype a0 = int\ntype a1<'a> = ('a, t0)\n\
+             type r = {n: int}\n\
+             external v: (a0, a1<string>, t1<r>) = \"v\"\n"
+                .to_string(),
+        );
+        let new = New::convert(&program, Tier::Kernel);
+        let table = TypeTable::from_segment(&new.segment);
+        let pools = &new.segment.signature;
+        let mut seen = Vec::new();
+        for (index, path) in pools.paths.iter().enumerate() {
+            let PathRow::Ident(ident) = *path else { continue };
+            let range = pools.strings[pools.identifiers[ident as usize].name as usize];
+            let name = &pools.bytes[range.start as usize..(range.start + range.len) as usize];
+            let name = std::str::from_utf8(name).unwrap();
+            let info = table.info(index as u32);
+            let (arity, flags) = (info.arity, info.flags);
+            match name {
+                "t0" => assert_eq!((arity, flags, info.manifest), (0, 0, NONE)),
+                "t1" => assert_eq!((arity, flags, info.manifest), (1, 0, NONE)),
+                "a0" => assert_eq!((arity, flags), (0, ABBREV)),
+                "a1" => assert_eq!((arity, flags), (1, ABBREV)),
+                "r" => assert_eq!((arity, flags), (0, DATATYPE)),
+                "int" | "string" => assert_eq!(info, ABSTRACT),
+                _ => continue,
+            }
+            seen.push(name.to_string());
+        }
+        for name in ["t1", "a0", "a1", "r", "int", "string"] {
+            assert!(seen.iter().any(|seen| seen == name), "{name} not in {seen:?}");
+        }
+        let a1 = pools
+            .paths
+            .iter()
+            .position(|path| match *path {
+                PathRow::Ident(ident) => {
+                    let range = pools.strings[pools.identifiers[ident as usize].name as usize];
+                    &pools.bytes[range.start as usize..(range.start + range.len) as usize] == b"a1"
+                }
+                _ => false,
+            })
+            .unwrap();
+        let manifest = table.manifests[table.info(a1 as u32).manifest as usize];
+        // The parameter and the body are nodes of the item's template.
+        assert_ne!(table.roots[manifest.params as usize].0 & RELATIVE, 0);
+        assert_ne!(manifest.body.0 & RELATIVE, 0);
+    }
 
     #[test]
     fn sizes() {
