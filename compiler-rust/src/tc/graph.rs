@@ -48,18 +48,20 @@ pub enum Mode {
     Explain,
 }
 
-/// Linear token: close speculations in reverse opening order.
+/// Linear token: close speculations in reverse opening order. The fields
+/// are readable inside `tc` so that `unify::Checker::undo_compress` can walk
+/// the trail back to `mark` (compiler/ml/btype.ml:792).
 #[derive(Debug)]
 pub struct Speculation {
-    mark: usize,
-    depth: usize,
+    pub(crate) mark: usize,
+    pub(crate) depth: usize,
 }
 
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct Change {
-    ty: Ty,
-    before: Node,
+    pub(crate) ty: Ty,
+    pub(crate) before: Node,
 }
 
 pub struct Graph {

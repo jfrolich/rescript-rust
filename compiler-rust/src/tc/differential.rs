@@ -35,7 +35,6 @@ use std::sync::Arc;
 use super::bridge::from_old::{Input, from_old};
 use super::expand::{ExpandMode, TypeTable};
 use super::graph::{ARROW, CONSTR, GENERIC, NONE, TUPLE, Ty, VAR};
-use super::rows::Extras;
 use super::unify::Checker;
 use super::segment::{PathRow, SchemeRoot, Segment, SignatureKind};
 use crate::cmi::persistent_env::{InMemoryModuleInfo, ModuleRegistry, PersistentEnv};
@@ -91,8 +90,26 @@ impl Tier {
     }
 
     /// O(1): whether the form prints variable names (see the module text).
+    /// False below `Expand` until R3b's first commit makes R1's instance drop
+    /// names; that commit makes this true for every tier.
     fn names(self) -> bool {
         true
+    }
+
+    /// O(1): whether the new side takes instances and copies through the
+    /// memo-aware `Checker::instance` and `Checker::copy` (R3b) and reads the
+    /// declaration table. Below `Expand` a program has no abbreviation, so
+    /// R1's `Graph::instance` and `Graph::copy` are the same operations and
+    /// the structural tier needs nothing of R3b.
+    fn memo_aware(self) -> bool {
+        self >= Tier::Expand
+    }
+
+    /// O(1): whether `Op::Lower` runs the scoped `Checker::lower` (R3d). Only
+    /// the full tier does: R3c depends on R3d. Generated programs have no
+    /// scoped type, so in the lower tiers R1's `Graph::lower` is the same walk.
+    fn scoped_lower(self) -> bool {
+        self == Tier::Full
     }
 }
 
@@ -507,9 +524,11 @@ impl New {
             .collect();
         assert_eq!(roots.len(), program.values.len(), "{}", program.source);
         let mut checker = Checker::new(segment.graph(), TypeTable::default());
-        if tier != Tier::Kernel {
+        // No generated program has an object, a variant row, a universal
+        // variable or a package, so the descriptor pools stay empty; the
+        // tiers of R3e to R3j fill them with `Extras::from_segment`.
+        if tier.memo_aware() {
             checker.types = TypeTable::from_segment(&segment);
-            checker.extras = Extras::from_segment(&segment);
         }
         New {
             first: vec![None; roots.len()],
@@ -525,10 +544,10 @@ impl New {
     pub(crate) fn instance(&mut self, value: usize) -> Ty {
         let root = self.roots[value];
         let template = self.segment.templates[root.template as usize];
-        let base = if self.tier == Tier::Kernel {
-            self.checker.g.instance(template)
-        } else {
+        let base = if self.tier.memo_aware() {
             self.checker.instance(template)
+        } else {
+            self.checker.g.instance(template)
         };
         if root.ty.0 & RELATIVE != 0 {
             Ty(base.0 + (root.ty.0 & !RELATIVE))
@@ -554,10 +573,10 @@ impl New {
             }
             Op::Copy(operand) => {
                 let source = self.operands[operand as usize];
-                let ty = if self.tier == Tier::Kernel {
-                    self.checker.g.copy(source)
-                } else {
+                let ty = if self.tier.memo_aware() {
                     self.checker.copy(source)
+                } else {
+                    self.checker.g.copy(source)
                 };
                 self.operands.push(ty);
             }
@@ -577,7 +596,7 @@ impl New {
                     if node.level > level {
                         self.checker.g.nodes[ty.0 as usize].level = level;
                     }
-                } else if self.tier == Tier::Kernel {
+                } else if !self.tier.scoped_lower() {
                     self.checker.g.lower(ty, level);
                 } else {
                     // The old side lowers without an environment

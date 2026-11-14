@@ -2602,3 +2602,35 @@ contradicts the OCaml lines its doc comment cites, the builder reports the
 test with those lines and the test is corrected, as `link_directions` was
 in review (the survivor of two nullary constructors ends at the left
 node's level, ctype.ml:2256).
+
+Corrections after the first builder (R3a) stopped at three gaps of the
+skeleton; all three were the skeleton's, not the builder's.
+
+- `Checker::undo_compress` reads the trail: `graph::Change` and
+  `graph::Speculation` have their fields readable inside `tc`.
+- The tiers of the harness call only what their slice's dependencies
+  have built. Below `Expand` the new side uses R1's `Graph::instance`,
+  `Graph::copy` and `Graph::lower` and an empty declaration table (a
+  structural program has no abbreviation); only the full tier calls the
+  scoped `Checker::lower`; no tier of R3a to R3d fills the descriptor
+  pools. Names are compared from `Expand` up until R3b's first commit, which
+  turns them on for every tier; the slice of R3a and R3b that merges second
+  merges trunk first, so its structural tier runs with names.
+- `link_directions`: the test's checker is one definition deep, so the two
+  nullary constructors are at levels 2 and 3 and the survivor ends at 2.
+  The review's own correction above had the levels wrong.
+
+6. **In `Mode::Explain` a binding checks occurrence before it writes a
+   level**, as `unify1_var` does (`occur` first, then `link_type`, then
+   `update_level`, ctype.ml:2216-2225): two walks. The combined walk of
+   `Checker::binding_walk` is for `Mode::Success` and for a binding inside
+   a speculation whose owner restores, where what a failed walk lowered is
+   either never observed or undone. In `Explain` a failed top-level
+   unification undoes path compression only, so a level lowered before the
+   variable was found would stay and could reach a printed type or a later
+   generalization. `Explain` runs on failing units only; its cost is not
+   gated.
+7. **For R3c**: a `Linked` frame records the expanded left head and the
+   right node, which is the trace pair only while the left head is its own
+   expansion. With expansion the frame records the original pair, and the
+   swapped side of ctype.ml:2299.
