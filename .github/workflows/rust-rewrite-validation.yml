@@ -358,6 +358,16 @@ jobs:
       - name: Test the check-mode comparison rule
         run: python3 -m unittest discover -s scripts -p test_check_modes_gate.py
 
+      # Every lowering function a change adds or rewrites states its cost.
+      # The base is the pull request's, or the trunk commit before the push;
+      # the checkout has neither, so it is fetched first.
+      - name: Check cost notes of changed lowering functions
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE"
+          python3 scripts/check_lowering_cost_docs.py --self-test --base "$BASE"
+
   compiler-tests:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 40
@@ -468,6 +478,40 @@ jobs:
         run: |
           python3 -m unittest discover -s scripts -p test_signature_equality_test.py
           python3 scripts/test_signature_equality.py
+
+      # The names replay of RESCRIPT_CHECKER=both runs only in a build with
+      # debug assertions; a release one compares the published signatures
+      # alone. No job has such a build, and this one is short.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - name: Build the debug rescript
+        run: cargo build --locked --manifest-path rewatch/Cargo.toml
+
+      # Both checkers on every unit of the runtime and tests/tests, with every
+      # name lookup of the old checker replayed on the new scope tables. Last,
+      # as it rebuilds what prepare-parity built.
+      - name: Compare the old and new checkers and replay their name lookups
+        run: |
+          root="$PWD"
+          rescript="$root/rewatch/target/debug/rescript"
+          export RESCRIPT_RUNTIME="$root/packages/@rescript/runtime"
+          export RESCRIPT_CHECKER=both RAYON_NUM_THREADS=1
+          log="$RUNNER_TEMP/checker-both.log"
+          : > "$log"
+          for project in "$RESCRIPT_RUNTIME" "$root/tests/tests"; do
+            if ! (cd "$project" && "$rescript" clean . && "$rescript" -vv build .) >> "$log" 2>&1; then
+              grep -v -e 'tc-names-replayed ' -e 'tc-declined ' "$log" | tail -n 100
+              echo "::error::The RESCRIPT_CHECKER=both build of $project failed"
+              exit 1
+            fi
+          done
+          read -r units lookups < <(awk '$2 == "tc-names-replayed" { n++; s += $NF } END { print n + 0, s + 0 }' "$log")
+          echo "Names replayed for $units units, $lookups lookups"
+          if (( units == 0 )); then
+            echo "::error::No unit was replayed: the rescript executable has no debug assertions"
+            exit 1
+          fi
 
   # A derived declaration compiled from its plan must give what its general
   # form gives: diagnostics, warnings, signature, JavaScript and exports.
@@ -589,7 +633,11 @@ jobs:
               python3 scripts/test_worker_determinism.py
           - suite: diagnostics
             # Compare normal user-facing errors, not runtime-specific backtraces.
-            run: env -u OCAMLRUNPARAM -u RUST_BACKTRACE ./scripts/test_error_output_parity.sh --release
+            # Then each super_errors fixture checked as usual (with a recheck
+            # after an error) must report what forced Explain mode reports.
+            run: |
+              env -u OCAMLRUNPARAM -u RUST_BACKTRACE ./scripts/test_error_output_parity.sh --release
+              python3 scripts/test_check_modes.py --rescript rewatch/target/release/rescript --runtime packages/@rescript/runtime
           - suite: stdlib
             run: RUST_TARGET=release ./scripts/test_stdlib_output_parity.sh
           - suite: gentype
