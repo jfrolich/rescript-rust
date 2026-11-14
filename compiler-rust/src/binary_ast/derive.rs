@@ -261,6 +261,12 @@ pub fn structure_uses_spice_mapper(items: &[StructureItem], arena: &ParseArena) 
     super::spice_ppx::structure_uses_spice_mapper(items, arena)
 }
 
+/// Index learned by the existing mapper-presence scan; stops at the first
+/// deriving item. O(visited items and attributes), no allocation.
+pub(crate) fn first_spice_item(items: &[StructureItem], arena: &ParseArena) -> Option<usize> {
+    super::spice_ppx::first_spice_item(items, arena)
+}
+
 /// Detect derives in a signature. O(items and visited attributes), delegating to
 /// the existing mapper scan; no additional traversal.
 pub fn signature_uses_spice_mapper(items: &[SignatureItem], arena: &ParseArena) -> bool {
@@ -281,6 +287,7 @@ pub(crate) struct ScopeSteps {
     pub shadow_items: usize,
     pub constructors: usize,
     pub nested_items: usize,
+    pub presence_items: usize,
 }
 
 /// Borrowed source-order facts. A position is necessary because the frontend

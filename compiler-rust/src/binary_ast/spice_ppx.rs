@@ -4386,6 +4386,12 @@ fn signature_item_contains_spice_type_decl(item: &SignatureItem, arena: &ParseAr
 }
 
 fn structure_item_contains_spice_type_decl(item: &StructureItem, arena: &ParseArena) -> bool {
+    #[cfg(test)]
+    {
+        let mut steps = arena.derived_scope_steps.get();
+        steps.presence_items += 1;
+        arena.derived_scope_steps.set(steps);
+    }
     match &item.pstr_desc {
         StructureItemDesc::Pstr_type(inner) => {
             let (_, decls) = &**inner;
@@ -5861,6 +5867,12 @@ fn signature_contains_spice_type_decl(signature: &[SignatureItem], arena: &Parse
     signature
         .iter()
         .any(|item| signature_item_contains_spice_type_decl(item, arena))
+}
+
+/// First item containing a derive, including nested module declarations.
+/// Cost: O(visited items and attributes), stopping on the first match.
+pub(crate) fn first_spice_item(structure: &[StructureItem], arena: &ParseArena) -> Option<usize> {
+    structure.iter().position(|item| structure_item_contains_spice_type_decl(item, arena))
 }
 
 /// Returns true when the Spice mapper should be applied over the whole structure.

@@ -9692,24 +9692,31 @@ fn rewrite_structure_impl(
 ) -> PpxResult<Vec<StructureItem>> {
     // This detection already belongs to the mapper. One new O(1) dispatch
     // erases all result-scope work for a structure with no derived items.
-    if apply_spice && derive::structure_uses_spice_mapper(structure, arena) {
-        rewrite_structure_scoped::<true>(structure, arena, apply_spice, warnings)
+    let first = apply_spice.then(|| derive::first_spice_item(structure, arena)).flatten();
+    if let Some(first) = first {
+        rewrite_structure_scoped::<true>(structure, arena, apply_spice, warnings, first)
     } else {
-        rewrite_structure_scoped::<false>(structure, arena, apply_spice, warnings)
+        rewrite_structure_scoped::<false>(structure, arena, apply_spice, warnings, 0)
     }
 }
 
 /// Lazily collect source-order scope at the first mapped item that derives.
 /// Cost: zero steps when disabled; otherwise one O(items + constructors)
 /// prefix scan, irrespective of the frontend's reverse mapping order.
+/// Presence through `first` was already learned by the whole-structure scan:
+/// earlier items are false and `first` is true. Only later items need inspection;
+/// their attributes were not visited by that scan.
 fn result_shadow_for<'scope, const ENABLED: bool>(
     structure: &[StructureItem],
     index: usize,
+    first: usize,
     arena: &mut ParseArena,
     prefix: &'scope mut Option<derive::PrefixScope<'static>>,
     step: impl FnMut(),
 ) -> derive::Scope<'scope> {
-    if !ENABLED || !derive::structure_uses_spice_mapper(&structure[index..=index], arena) {
+    if !ENABLED || index < first
+        || (index > first && !derive::structure_uses_spice_mapper(&structure[index..=index], arena))
+    {
         return derive::Scope::default();
     }
     extend_result_prefix(structure, index, arena, prefix, step)
@@ -9737,6 +9744,7 @@ fn rewrite_structure_scoped<const RESULT_SCOPE: bool>(
     arena: &mut ParseArena,
     apply_spice: bool,
     mut warnings: Option<&mut Vec<PpxWarning>>,
+    first_spice_item: usize,
 ) -> PpxResult<Vec<StructureItem>> {
     let mut await_context = std::collections::HashSet::new();
     let spice_mapper_active = RESULT_SCOPE;
@@ -9808,7 +9816,7 @@ fn rewrite_structure_scoped<const RESULT_SCOPE: bool>(
                 }
                 result?;
                 let result_shadowed = result_shadow_for::<RESULT_SCOPE>(
-                    structure, index, arena, &mut result_prefix, || {},
+                    structure, index, first_spice_item, arena, &mut result_prefix, || {},
                 );
                 slots[unit_index] = rewrite_structure_unit(
                     &structure[index],
@@ -11621,10 +11629,11 @@ let e = () =>
     fn ten_thousand_items_without_derives_do_no_result_scope_work() {
         let source = (0..10_000).map(|i| format!("type t{i} = C{i}\n")).collect::<String>();
         let (mut arena, items) = parse_structure(&source);
-        assert!(!derive::structure_uses_spice_mapper(&items, &arena));
         let mapped = rewrite_structure_impl(&items, &mut arena, true, None).unwrap();
         assert_eq!(mapped.len(), 10_000);
-        assert_eq!(arena.derived_scope_steps.get(), derive::ScopeSteps::default());
+        assert_eq!(arena.derived_scope_steps.get(), derive::ScopeSteps {
+            presence_items: items.len(), ..derive::ScopeSteps::default()
+        });
     }
 
     #[test]
@@ -11634,7 +11643,7 @@ let e = () =>
         let mut prefix = None;
         let mut steps = 0;
         for index in (0..items.len()).rev() {
-            result_shadow_for::<true>(&items, index, &mut arena, &mut prefix, || steps += 1);
+            result_shadow_for::<true>(&items, index, 0, &mut arena, &mut prefix, || steps += 1);
         }
         assert_eq!(steps, items.len());
         assert_eq!(arena.derived_scope_steps.get().prefix_items, items.len());
@@ -11649,14 +11658,31 @@ let e = () =>
     }
 
     #[test]
+    fn scope_presence_does_not_rescan_the_known_prefix() {
+        let source = (0..10_000).map(|i| {
+            let attr = if i == 5_000 { "@spice " } else { "" };
+            format!("{attr}type t{i} = int\n")
+        }).collect::<String>();
+        let (mut arena, items) = parse_structure(&source);
+        let first = derive::first_spice_item(&items, &arena).unwrap();
+        assert_eq!(first, 5_000);
+        assert_eq!(arena.derived_scope_steps.get().presence_items, 5_001);
+        let mut prefix = None;
+        for index in (0..items.len()).rev() {
+            result_shadow_for::<true>(&items, index, first, &mut arena, &mut prefix, || {});
+        }
+        assert_eq!(arena.derived_scope_steps.get().presence_items, items.len());
+    }
+
+    #[test]
     fn result_scope_is_lazy_and_scans_the_prefix_once() {
         let (mut arena, items) = parse_structure("type mine = Error\n@spice type t = {x: int}");
         let mut prefix = None;
         let mut steps = 0;
-        assert!(!result_shadow_for::<true>(&items, 0, &mut arena, &mut prefix, || steps += 1).result_shadowed);
+        assert!(!result_shadow_for::<true>(&items, 0, 1, &mut arena, &mut prefix, || steps += 1).result_shadowed);
         assert_eq!(steps, 0);
         for _ in 0..10_000 {
-            assert!(result_shadow_for::<true>(&items, 1, &mut arena, &mut prefix, || steps += 1).result_shadowed);
+            assert!(result_shadow_for::<true>(&items, 1, 1, &mut arena, &mut prefix, || steps += 1).result_shadowed);
         }
         assert_eq!(steps, items.len());
     }

@@ -944,3 +944,10 @@ locks or TLS). Run each with `cargo test --manifest-path compiler-rust/Cargo.tom
 | `ten_thousand_derived_items_visit_each_prefix_slot_once` | one 10,000-derived-item structure, 10,000 prefix steps in reverse query order |
 | `ten_thousand_variant_constructors_take_ten_thousand_scope_steps` | one variant, 10,000 constructor-name checks |
 | `ten_thousand_nested_items_take_one_scope_visit_each` | nested module mapper, 10,000 items and exactly 10,000 `shadows_result` visits |
+
+The whole-structure presence scan now returns its first deriving item's index.
+The per-item scope query reuses the known-false preceding range and that
+known-true item; it examines attributes only for later items that the first
+scan never visited. `scope_presence_does_not_rescan_the_known_prefix` places the
+first derive halfway through 10,000 items and asserts exactly 10,000 presence
+visits total across detection and reverse mapping queries.
