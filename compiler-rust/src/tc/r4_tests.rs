@@ -1264,7 +1264,6 @@ fn path(s: &mut Scopes, components: &[&str]) -> Vec<Name> {
 /// `module N = A; module O = N; O.B.v` is `A.B.v`, and the modules the path
 /// went through are reported for their usage.
 #[test]
-#[ignore = "R4e build"]
 fn a_path_through_two_local_aliases() {
     let mut s = unit_scopes();
     let mut source = Units {
@@ -1418,7 +1417,6 @@ fn a_path_through_two_local_aliases() {
 /// table for `A.B`, and aliases inside a dependency are followed in its
 /// segment.
 #[test]
-#[ignore = "R4e build"]
 fn a_path_through_aliases_of_another_unit() {
     let old = old_checker(&READS_CHAIN);
     let dep = segment_of("Dep", &old.deps[0].1);
@@ -1526,7 +1524,6 @@ fn a_path_through_aliases_of_another_unit() {
 /// Reaches: R4a to R4e. A path of 10,000 components and a chain of 10,000
 /// aliases are linear and fit a 2 MB stack.
 #[test]
-#[ignore = "R4e build"]
 fn long_paths_and_alias_chains_are_linear() {
     std::thread::Builder::new()
         .stack_size(2 * 1024 * 1024)

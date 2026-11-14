@@ -1,0 +1,1 @@
+- Type checker rewrite R4e: paths resolve through local and imported modules, following aliases and named module types in a loop.
