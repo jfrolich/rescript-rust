@@ -14,11 +14,19 @@ use super::graph::{
 use super::rows::Extras;
 use super::segment::{EXTENDED, ExtraDescriptor};
 
-/// Flag of a binding-walk stack entry reached through an object or a
-/// variant row: `occur_rec` does not enter those (compiler/ml/ctype.ml:1403)
-/// and `update_level` does, so below them the walk only lowers. Local
-/// handles stay below bit 30 (`Graph::push`).
+/// The three kinds of a binding-walk stack entry, in the two bits above a
+/// local handle (local handles stay below bit 30, `Graph::push`):
+/// - [`LOWERS`]: occurrence test, and lowering allowed. The root, and the
+///   children of a node this walk lowered: `update_level` reaches them
+///   (compiler/ml/ctype.ml:586).
+/// - no flag: occurrence test only. The children of a node that was not
+///   lowered: `update_level` does not look below it.
+/// - [`LEVEL_ONLY`]: lowering only. Below an object or a variant row, which
+///   `occur_rec` does not enter (ctype.ml:1403) and `update_level` does,
+///   and below a node lowered after it was already tested.
 const LEVEL_ONLY: u32 = 1 << 30;
+/// See [`LEVEL_ONLY`].
+const LOWERS: u32 = 1 << 31;
 
 /// A failed unification. It carries nothing: in `Mode::Explain` the trace is
 /// [`Checker::trace`]; in `Mode::Success` there is none.
@@ -295,21 +303,25 @@ impl Checker {
         let lower = self.types.scoped == 0;
         let generation = self.fresh_marks();
         self.g.work.clear();
-        self.g.work.push(ty);
+        self.g.work.push(Ty(ty.0 | LOWERS));
         while let Some(entry) = self.g.work.pop() {
-            let ty = self.g.repr(Ty(entry.0 & !LEVEL_ONLY));
+            let ty = self.g.repr(Ty(entry.0 & !(LEVEL_ONLY | LOWERS)));
             let node = self.g.nodes[ty.0 as usize];
             let above = lower && node.level > level;
-            if entry.0 & LEVEL_ONLY != 0 {
+            let marked = self.marks[ty.0 as usize] == generation;
+            // A level-only entry, or a lowering entry on a node already
+            // tested on a path that did not lower it: lower only, pruning
+            // at a node that is not above, as `update_level` does.
+            if entry.0 & LEVEL_ONLY != 0 || (marked && entry.0 & LOWERS != 0) {
                 if above {
                     #[cfg(test)]
                     super::steps::tick();
                     self.g.write(ty, Node { level, ..node });
-                    self.push_level_only(node);
+                    self.push_flagged(node, LEVEL_ONLY);
                 }
                 continue;
             }
-            if self.marks[ty.0 as usize] == generation {
+            if marked {
                 continue;
             }
             #[cfg(test)]
@@ -319,15 +331,16 @@ impl Checker {
                 return Err(Clash);
             }
             self.marks[ty.0 as usize] = generation;
-            if above {
+            let lowered = above && entry.0 & LOWERS != 0;
+            if lowered {
                 self.g.write(ty, Node { level, ..node });
             }
             if self.stops_occurrence(node) {
-                if above {
-                    self.push_level_only(node);
+                if lowered {
+                    self.push_flagged(node, LEVEL_ONLY);
                 }
             } else {
-                self.g.children(node, false);
+                self.push_flagged(node, if lowered { LOWERS } else { 0 });
             }
         }
         Ok(())
@@ -656,13 +669,15 @@ impl Checker {
             )
     }
 
-    /// O(arity): push the children of `node` on the walk's stack, flagged
-    /// [`LEVEL_ONLY`].
-    fn push_level_only(&mut self, node: Node) {
+    /// O(arity): push the children of `node` on the walk's stack, each
+    /// entry carrying `flag` ([`LEVEL_ONLY`], [`LOWERS`] or none).
+    fn push_flagged(&mut self, node: Node, flag: u32) {
         let start = self.g.work.len();
         self.g.children(node, false);
-        for entry in &mut self.g.work[start..] {
-            entry.0 |= LEVEL_ONLY;
+        if flag != 0 {
+            for entry in &mut self.g.work[start..] {
+                entry.0 |= flag;
+            }
         }
     }
 
