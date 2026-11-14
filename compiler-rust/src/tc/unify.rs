@@ -1164,7 +1164,10 @@ impl Checker {
             // `Tpoly (t1, []), Tpoly (t2, []) -> unify env t1 t2`: push the
             // pair of the two slots 0 and return `Ok(())`.
             (ExtraDescriptor::Poly, ExtraDescriptor::Poly) if left.arity() == 1 && right.arity() == 1 => {
-                todo!("R3e")
+                let body1 = self.g.lists[left.b as usize];
+                let body2 = self.g.lists[right.b as usize];
+                self.push_pair(body1, body2);
+                Ok(())
             }
             (ExtraDescriptor::Poly, ExtraDescriptor::Poly) => self.enter_poly(t1x, t2x),
             (ExtraDescriptor::Variant(_), ExtraDescriptor::Variant(_)) => self.unify_row(t1x, t2x),

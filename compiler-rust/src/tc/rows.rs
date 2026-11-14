@@ -9,10 +9,16 @@
 //! starts with the segment's rows copied ([`Extras::from_segment`]), so the
 //! indices of frozen nodes stay valid; rows made during a check are appended.
 
-use super::graph::{Graph, LINK, NONE, Node, Ty, VAR};
-use super::segment::{ExtraDescriptor, PackageRow, Range, RowFieldRow, Segment, VariantRow};
+use super::graph::{Graph, LINK, Mode, NONE, Node, Ty, VAR};
+use super::segment::{
+    EXTENDED, ExtraDescriptor, PackageRow, Range, RowFieldRow, Segment, VariantRow,
+};
 use super::template::Template;
-use super::unify::{Checker, Clash, Frame};
+use super::unify::{Checker, Clash, Frame, FrameKind};
+
+/// Bit 31 of [`FieldRef::name`] in [`Checker::unify_fields`]'s scratch:
+/// the name is on both sides. Name indices stay below it.
+const COMMON: u32 = 1 << 31;
 
 /// Worker-local descriptor pools, cleared between units.
 #[derive(Default)]
@@ -165,7 +171,36 @@ impl Checker {
     /// allocates nothing. O(fields) loads, one step a field, and
     /// O(fields log fields) name comparisons. (R3e)
     pub fn flatten_fields(&mut self, fields: Ty, out: &mut Vec<FieldRef>) -> Ty {
-        todo!("R3e")
+        let start = out.len();
+        let mut at = self.g.repr(fields);
+        loop {
+            let node = self.g.nodes[at.0 as usize];
+            let ExtraDescriptor::Field { name, .. } = self.field_descriptor(node) else {
+                break;
+            };
+            #[cfg(test)]
+            super::steps::tick();
+            out.push(FieldRef {
+                name,
+                at: at.0,
+                ty: self.g.lists[node.b as usize],
+            });
+            at = self.g.repr(self.g.lists[node.b as usize + 1]);
+        }
+        let names = &self.extras.names;
+        out[start..].sort_unstable_by(|f, g| names.text(f.name).cmp(names.text(g.name)));
+        at
+    }
+
+    /// O(1): the descriptor row of an extended node, or `Nil` for a node
+    /// that is not extended (what ends a list either way).
+    #[inline]
+    fn field_descriptor(&self, node: Node) -> ExtraDescriptor {
+        if node.head & EXTENDED != 0 {
+            self.extras.descriptors[node.a as usize]
+        } else {
+            ExtraDescriptor::Nil
+        }
     }
 
     /// `unify_fields env ty1 ty2` (compiler/ml/ctype.ml:2467-2518) for two
@@ -203,7 +238,90 @@ impl Checker {
     /// (CHECKER_REWRITE 8.6, decision 27). `extras.fields` is cleared
     /// before it returns. (R3e)
     pub fn unify_fields(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
-        todo!("R3e")
+        // 1. Flatten, left first; the scratch is taken so that
+        //    `flatten_fields` can read the names (it keeps its capacity).
+        let mut fields = std::mem::take(&mut self.extras.fields);
+        debug_assert!(fields.is_empty());
+        let rest1 = self.flatten_fields(left, &mut fields);
+        let n1 = fields.len();
+        let rest2 = self.flatten_fields(right, &mut fields);
+        let (left, right) = (self.g.repr(left), self.g.repr(right));
+        let l1 = self.g.nodes[left.0 as usize].level;
+        let l2 = self.g.nodes[right.0 as usize].level;
+        let open1 = self.g.nodes[rest1.0 as usize].tag() == VAR;
+        let open2 = self.g.nodes[rest2.0 as usize].tag() == VAR;
+        // 2. `let d1 = rest1.desc and d2 = rest2.desc` (ctype.ml:2479).
+        if self.g.mode == Mode::Explain {
+            let extra = self.saved.len() as u32;
+            self.saved.push(self.g.nodes[rest1.0 as usize]);
+            self.saved.push(self.g.nodes[rest2.0 as usize]);
+            self.frames.push(Frame {
+                left: rest1,
+                right: rest2,
+                kind: FrameKind::Fields,
+                extra,
+            });
+        }
+        // `associate_fields` (ctype.ml:330-342), from the last names to the
+        // first. Its first half decides which names are common, pushing
+        // the `Field` frames (last name first, so they are popped in name
+        // order) and marking both sides with `COMMON`: `make_rowvar` needs
+        // to know whether a side lacks anything before a field is built.
+        let open = u32::from(open1) | u32::from(open2) << 1;
+        let (mut i, mut j) = (n1, fields.len());
+        let mut common = 0;
+        while i > 0 && j > n1 {
+            #[cfg(test)]
+            super::steps::tick();
+            let (f1, f2) = (fields[i - 1], fields[j - 1]);
+            if f1.name == f2.name {
+                fields[i - 1].name |= COMMON;
+                fields[j - 1].name |= COMMON;
+                self.frames.push(Frame {
+                    left: Ty(f1.at),
+                    right: Ty(f2.at),
+                    kind: FrameKind::Field,
+                    extra: open,
+                });
+                common += 1;
+                i -= 1;
+                j -= 1;
+            } else if self.extras.names.text(f1.name) > self.extras.names.text(f2.name) {
+                i -= 1;
+            } else {
+                j -= 1;
+            }
+        }
+        // 3. `make_rowvar (min l1 l2) (miss2 = []) rest1 (miss1 = []) rest2`.
+        let miss1 = n1 - common;
+        let miss2 = fields.len() - n1 - common;
+        let va = self.make_rowvar(l1.min(l2), miss2 == 0, rest1, miss1 == 0, rest2);
+        // 4. The second half: `build_fields l1 miss1 va` and `build_fields
+        //    l2 miss2 va`, each list built from its last field.
+        let mut built = [va, va];
+        for (at, field) in fields.iter().enumerate().rev() {
+            if field.name & COMMON == 0 {
+                let (side, level) = if at < n1 { (0, l1) } else { (1, l2) };
+                built[side] = self.build_field(level, Ty(field.at), built[side]);
+            }
+        }
+        fields.clear();
+        self.extras.fields = fields;
+        // 5. Popped first: `unify (build_fields l1 miss1 va) rest2`, then
+        //    `unify rest1 (build_fields l2 miss2 va)` (ctype.ml:2485-2486).
+        self.frames.push(Frame {
+            left: rest1,
+            right: built[1],
+            kind: FrameKind::Pair,
+            extra: 0,
+        });
+        self.frames.push(Frame {
+            left: built[0],
+            right: rest2,
+            kind: FrameKind::Pair,
+            extra: 0,
+        });
+        Ok(())
     }
 
     /// `make_rowvar level use1 rest1 use2 rest2` (compiler/ml/ctype.ml:
@@ -217,7 +335,34 @@ impl Checker {
     /// name (the `set_name rest2 name` of that arm changes nothing: `rest2`
     /// already has it). O(1). (R3e)
     pub fn make_rowvar(&mut self, level: u32, use1: bool, rest1: Ty, use2: bool, rest2: Ty) -> Ty {
-        todo!("R3e")
+        let n1 = self.g.nodes[rest1.0 as usize];
+        let n2 = self.g.nodes[rest2.0 as usize];
+        let named = |node: Node| node.tag() == VAR && node.a != NONE;
+        let name = match (named(n1), named(n2)) {
+            (true, true) if n1.level <= n2.level => n1.a,
+            (true, true) => n2.a,
+            (true, false) => {
+                // `if use2 then set_name rest2 name`: `Tvar None` only.
+                if use2 && n2.tag() == VAR {
+                    self.g.write(rest2, Node { a: n1.a, ..n2 });
+                }
+                n1.a
+            }
+            (false, true) => n2.a,
+            (false, false) => NONE,
+        };
+        if use1 {
+            rest1
+        } else if use2 {
+            rest2
+        } else {
+            self.g.push(Node {
+                head: VAR,
+                level,
+                a: name,
+                b: 0,
+            })
+        }
     }
 
     /// One field of `build_fields` (compiler/ml/ctype.ml:325-328): a new
@@ -226,7 +371,13 @@ impl Checker {
     /// and not written), the type `source` has (its slot 0) and `rest`.
     /// One node, two list slots. (R3e)
     pub fn build_field(&mut self, level: u32, source: Ty, rest: Ty) -> Ty {
-        todo!("R3e")
+        #[cfg(test)]
+        super::steps::tick();
+        let node = self.g.nodes[source.0 as usize];
+        let b = self.g.lists.len() as u32;
+        let ty = self.g.lists[node.b as usize];
+        self.g.lists.extend_from_slice(&[ty, rest]);
+        self.g.push(Node { level, b, ..node })
     }
 
     /// The pop of a [`FrameKind::Field`] frame: one common field
@@ -240,7 +391,28 @@ impl Checker {
     /// [`Checker::unify_pair`], whose clash is `Err([left, right])`.
     /// O(1) plus the callee. (R3e)
     pub fn unify_field(&mut self, frame: Frame) -> Result<(), [Ty; 2]> {
-        todo!("R3e")
+        let (f1, f2) = (frame.left, frame.right);
+        let (open1, open2) = (frame.extra & 1 != 0, frame.extra & 2 != 0);
+        if self.unify_mutability(open1, open2, f1, f2).is_err() {
+            return Err([Ty(NONE), Ty(NONE)]);
+        }
+        if self.g.mode == Mode::Explain {
+            self.frames.push(Frame {
+                kind: FrameKind::FieldEnd,
+                ..frame
+            });
+        }
+        // The pair of the two types goes on the stack and `run_frames` pops
+        // it next: the representatives, nothing when they are one node,
+        // else `unify_pair`, whose one call site stays in `run_frames`.
+        let (n1, n2) = (self.g.nodes[f1.0 as usize], self.g.nodes[f2.0 as usize]);
+        self.frames.push(Frame {
+            left: self.g.lists[n1.b as usize],
+            right: self.g.lists[n2.b as usize],
+            kind: FrameKind::Pair,
+            extra: 0,
+        });
+        Ok(())
     }
 
     /// `unify_mutability ~open1 ~open2 f1 f2` (compiler/ml/ctype.ml:
@@ -255,7 +427,36 @@ impl Checker {
     /// undone by its restore. No descriptor row is written. O(class
     /// links). (R3e)
     pub fn unify_mutability(&mut self, open1: bool, open2: bool, f1: Ty, f2: Ty) -> Result<(), Clash> {
-        todo!("R3e")
+        let r1 = cell_repr(&self.g, self.cell_of(f1));
+        let r2 = cell_repr(&self.g, self.cell_of(f2));
+        if r1 == r2 {
+            return Ok(());
+        }
+        match (cell_mutable(&self.g, r1), cell_mutable(&self.g, r2)) {
+            (false, true) if open1 => self.promote(r1),
+            (true, false) if open2 => self.promote(r2),
+            (false, true) | (true, false) => return Err(Clash),
+            _ => {}
+        }
+        self.g.link(r2, r1);
+        Ok(())
+    }
+
+    /// O(1): `set_mutability r (Mutability_value Mutable)`, logged in a
+    /// speculation like any node write.
+    fn promote(&mut self, cell: Ty) {
+        let node = self.g.nodes[cell.0 as usize];
+        self.g.write(cell, Node { b: 1, ..node });
+    }
+
+    /// O(1): the cell of field node `field`.
+    #[inline]
+    fn cell_of(&self, field: Ty) -> Ty {
+        let node = self.g.nodes[field.0 as usize];
+        match self.extras.descriptors[node.a as usize] {
+            ExtraDescriptor::Field { mutability, .. } => Ty(mutability),
+            _ => unreachable!("a field node"),
+        }
     }
 
     /// The trace pair of a common field whose types clashed

@@ -1640,7 +1640,6 @@ fn class(c: &Checker, field: Ty) -> Ty {
 /// ctype.ml:2331) and no field node is.
 /// Reaches: R3e.
 #[test]
-#[ignore = "R3e build"]
 fn fields_a_side_lacks_are_built_on_one_row_variable() {
     let mut c = checker(Mode::Success);
     let int = constr(&mut c, INT, &[]);
@@ -1676,7 +1675,6 @@ fn fields_a_side_lacks_are_built_on_one_row_variable() {
 /// (`_, _ -> raise (Unify [])`, ctype.ml:2424).
 /// Reaches: R3e.
 #[test]
-#[ignore = "R3e build"]
 fn a_closed_row_takes_no_field() {
     let mut c = checker(Mode::Success);
     let int = constr(&mut c, INT, &[]);
@@ -1762,7 +1760,6 @@ fn common_fields_unify_in_name_order_and_a_failure_restores_the_rests() {
 /// (`differential::tests::old_checker_duplicates_the_cells_of_an_open_row`).
 /// Reaches: R3e.
 #[test]
-#[ignore = "R3e build"]
 fn mutability_is_promoted_on_the_open_side_and_classes_merge() {
     // (left open, left mutable, right open, right mutable) -> unifies
     let cases = [
@@ -1807,7 +1804,6 @@ fn mutability_is_promoted_on_the_open_side_and_classes_merge() {
 /// (ctype.ml:2242-2243).
 /// Reaches: R3e.
 #[test]
-#[ignore = "R3e build"]
 fn the_row_variable_keeps_a_name() {
     let mut c = checker(Mode::Success);
     let int = constr(&mut c, INT, &[]);
@@ -1829,7 +1825,6 @@ fn the_row_variable_keeps_a_name() {
 /// object against a tuple, and a field against `Tnil`, clash.
 /// Reaches: R3e.
 #[test]
-#[ignore = "R3e build"]
 fn the_other_arms_of_objects() {
     let mut c = checker(Mode::Success);
     let int = constr(&mut c, INT, &[]);
