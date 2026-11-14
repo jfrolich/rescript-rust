@@ -316,7 +316,7 @@ pub(crate) fn run_old(program: &Program, ops: &[Op]) -> Outcome {
         match item {
             SignatureItem::SigValue(_, value) => values.push(value.val_type),
             SignatureItem::SigType(id, declaration, _) => {
-                env.add_type(id.clone(), declaration.clone());
+                env.add_type(*id, declaration.clone());
             }
             _ => {}
         }
@@ -455,7 +455,7 @@ pub(crate) struct New {
 
 impl New {
     /// O(the unit): convert the program's publication with `from_old`.
-    pub(crate) fn new(program: &Program) -> New {
+    pub(crate) fn convert(program: &Program) -> New {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let segment = program
             .unit
@@ -511,7 +511,9 @@ impl New {
                     (Fault::ReuseInstance, Some(first)) => first,
                     _ => self.instance(value),
                 };
-                self.first[value].get_or_insert(ty);
+                if self.first[value].is_none() {
+                    self.first[value] = Some(ty);
+                }
                 self.operands.push(ty);
             }
             Op::Copy(operand) => {
@@ -549,9 +551,10 @@ impl New {
         let mut form = String::new();
         let mut seen = vec![NONE; self.graph.nodes.len()];
         let mut count = 0;
-        for index in 0..self.operands.len() {
+        let operands = self.operands.clone();
+        for (index, operand) in operands.into_iter().enumerate() {
             let _ = write!(form, "{index} = ");
-            self.node_form(self.operands[index], &mut seen, &mut count, &mut form);
+            self.node_form(operand, &mut seen, &mut count, &mut form);
             form.push('\n');
         }
         form
@@ -646,7 +649,7 @@ impl New {
 
 /// O(operations + printed nodes): the new graph's side of a case.
 pub(crate) fn run_new(program: &Program, ops: &[Op], fault: Fault) -> Outcome {
-    let mut new = New::new(program);
+    let mut new = New::convert(program);
     for (index, &op) in ops.iter().enumerate() {
         if new.apply(op, fault).is_err() {
             return Outcome {
