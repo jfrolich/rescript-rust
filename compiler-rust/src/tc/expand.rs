@@ -38,12 +38,19 @@ pub const DATATYPE: u8 = 16;
 /// The manifest's template has a constructor with arguments whose type has
 /// [`ABBREV`], [`PRIVATE`] or [`ALIAS`]: an expansion of this type makes
 /// nodes that inherit memo entries ([`Chains`]; CHECKER_REWRITE 8.6,
-/// decision 25). Set on every row of the type (the identifier's and the
+/// decision 26). Set on every row of the type (the identifier's and the
 /// path's through the unit) once the rows of its recursive group exist
-/// ([`TypeTable::mark_inheriting`]). A type without it never reads or
+/// ([`TypeTable::mark_manifests`]). A type without it never reads or
 /// writes [`Chains`]: the test of this bit, on the row an expansion has
 /// already loaded, is all it pays.
 pub const INHERITS: u8 = 32;
+/// The manifest's template has an object field whose row ends in a
+/// variable of the template (`rows::template_has_open_row`): an expansion
+/// of this type duplicates mutability cells (`dup_mutability`,
+/// compiler/ml/btype.ml:462-472; CHECKER_REWRITE 8.6, decision 27). Set
+/// with [`INHERITS`], in the same pass over the template
+/// ([`TypeTable::mark_manifests`]). (R3e)
+pub const OPEN_ROW: u8 = 64;
 /// Head flag of a constructor node whose slot 0 holds a private expansion
 /// (`Mcons (Private, ..)`, compiler/ml/btype.ml:612). Bit 4 is
 /// `segment::EXTENDED`.
@@ -195,17 +202,23 @@ impl TypeTable {
         }
     }
 
-    /// Set [`INHERITS`] on the rows of a segment's table: one pass over the
-    /// rows that have a manifest, and for each one pass over the nodes of
-    /// its template (`Segment::template_nodes`, `Template::nodes` and
-    /// `node_len`), stopping at the first constructor with arguments whose
-    /// row has [`ABBREV`], [`PRIVATE`] or [`ALIAS`]. O(rows + nodes of the
-    /// manifests' templates), one `TypeInfo` load per constructor with
-    /// arguments, no allocation. Called once, at the end of
+    /// Set [`INHERITS`] (R3m) and [`OPEN_ROW`] (R3e) on the rows of a
+    /// segment's table: one pass over the rows that have a manifest (not
+    /// an [`ALIAS`]), and for each one pass over the nodes of its template
+    /// (`Segment::template_nodes`, `Template::nodes` and `node_len`).
+    /// `INHERITS`: a constructor with arguments whose row has [`ABBREV`],
+    /// [`PRIVATE`] or [`ALIAS`]. `OPEN_ROW`: a field node (`TUPLE |
+    /// EXTENDED` whose `Segment::signature.descriptor_extras` row is a
+    /// field) whose slot 1 in `Segment::template_lists` is a reference
+    /// with bit 30 to a `VAR` node of the template. The pass over one
+    /// template stops when it has both. O(rows + nodes of the manifests'
+    /// templates), one `TypeInfo` load per constructor with arguments, one
+    /// list load per field, no allocation. Called once, at the end of
     /// [`TypeTable::from_segment`], when every row exists: a manifest names
-    /// later declarations of its recursive group. (R3m)
+    /// later declarations of its recursive group. R3m builds it for
+    /// `INHERITS`; R3e adds `OPEN_ROW` to the same loop.
     #[allow(dead_code, unused_variables)]
-    pub fn mark_inheriting(&mut self, segment: &Segment) {
+    pub fn mark_manifests(&mut self, segment: &Segment) {
         todo!("R3m")
     }
 
@@ -329,7 +342,7 @@ pub struct ChainRow {
 pub const ENTRY_PRIVATE: u32 = 1 << 31;
 
 /// The inherited memo entries (slice R3m; CHECKER_REWRITE 8.6, decisions
-/// 16, 19 and 25): a pool of [`ChainRow`]s and the dense table that finds a
+/// 16, 19 and 26): a pool of [`ChainRow`]s and the dense table that finds a
 /// row from a constructor's slot 0. Empty, with no allocation, until the
 /// first expansion of an [`INHERITS`] type.
 ///
@@ -651,6 +664,11 @@ impl Checker {
     /// `Unif` that runs under a speculation opened at that parameter, and a
     /// clash restores it: `Safe` then does not expand (`try_expand_safe`,
     /// ctype.ml:1251) and `Opt` returns the clash to [`Checker::expand_head`].
+    /// A clash this function swallows (`Safe`, and `Opt` through
+    /// [`Checker::expand_head`]) must also cut [`Checker::trace`] back to
+    /// its length before the call that clashed (CHECKER_REWRITE 8.6,
+    /// decision 25): not done yet; the slice that first generates a
+    /// constrained type parameter adds it here with a test.
     /// For an [`INHERITS`] type the entry is also written to the node's row
     /// of [`Chains`] ([`Checker::chain_entry`], O(1)) and the pass over the
     /// instance's nodes gives each copied constructor with arguments its
@@ -681,8 +699,9 @@ impl Checker {
         self.g.level = node.level;
         let first = self.g.nodes.len();
         self.g.instance(manifest.template);
-        if self.memo.live != 0 || chain != NONE {
-            self.link_memorized(first, chain);
+        let cells = info.flags & OPEN_ROW != 0;
+        if self.memo.live != 0 || chain != NONE || cells {
+            self.link_memorized(first, chain, cells);
         }
         self.g.level = level;
         let mut speculation = None;
@@ -775,7 +794,7 @@ impl Checker {
         }
         let first = self.g.nodes.len();
         let root = self.g.instance(template);
-        self.link_memorized(first, NONE);
+        self.link_memorized(first, NONE, false);
         root
     }
 
@@ -788,7 +807,7 @@ impl Checker {
         }
         let first = self.g.nodes.len();
         let copied = self.g.copy(root);
-        self.link_memorized(first, NONE);
+        self.link_memorized(first, NONE, false);
         copied
     }
 
@@ -805,12 +824,29 @@ impl Checker {
     /// arguments to [`Checker::inherit`]; with `NONE` (an instance or a
     /// copy outside an expansion, `abbreviations = ref Mnil`) such a node
     /// costs the one test it cost before.
-    fn link_memorized(&mut self, first: usize, chain: u32) {
-        for index in first..self.g.nodes.len() {
+    ///
+    /// With `cells` (the copy has a field whose cell it must duplicate: an
+    /// [`OPEN_ROW`] expansion, `Checker::instance_open`, a copy of a graph
+    /// that has fields) each field node goes to `Checker::dup_cell`, and
+    /// the session ends after the pass; a node that is not a constructor
+    /// costs one more test, a constructor nothing. (R3e)
+    pub(super) fn link_memorized(&mut self, first: usize, chain: u32, cells: bool) {
+        // The pass makes nodes (duplicated cells): they are not visited.
+        let end = self.g.nodes.len();
+        for index in first..end {
             #[cfg(test)]
             super::steps::tick();
             let node = self.g.nodes[index];
             if node.tag() != CONSTR {
+                if cells
+                    && node.head & super::segment::EXTENDED != 0
+                    && matches!(
+                        self.extras.descriptors[node.a as usize],
+                        super::segment::ExtraDescriptor::Field { .. }
+                    )
+                {
+                    self.dup_cell(Ty(index as u32), node, first as u32);
+                }
                 continue;
             }
             if node.arity() != 0 {
@@ -823,6 +859,9 @@ impl Checker {
             if target.0 != NONE {
                 self.g.nodes[index] = link_node(node, target);
             }
+        }
+        if cells {
+            self.end_cell_session();
         }
     }
 
@@ -1491,7 +1530,7 @@ mod tests {
             list_len: 2,
         };
         // The template's nodes: the tuple of the parameter and the body,
-        // both variables. `mark_inheriting` (R3m) reads them.
+        // both variables. `mark_manifests` (R3m) reads them.
         let generic = |head: u32| Node {
             head,
             level: GENERIC,
