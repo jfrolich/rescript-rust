@@ -3734,6 +3734,11 @@ JavaScript only where the old loop probe differed from the OCaml reference.
 
 ## 11. Allocation audit correction
 
+**Historical correction record.** The zero-at-entry criterion below was replaced
+by constant allocations per unit across source sizes. See
+[the completed scaling proof and final measurements](LOWERING_ALLOCATION_SCALING.md)
+for the current assertions, attribution and review status.
+
 ### Scope correction — step 1
 
 | Source file (under `compiler-rust/src`) | Disposition | Named lowering caller and necessity |

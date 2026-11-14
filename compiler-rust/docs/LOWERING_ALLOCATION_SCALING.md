@@ -125,3 +125,139 @@ rg -n 'is_pure_primitive_with_properties' compiler-rust/src/bir
 
 Build reference artifacts using the commands in `BACKEND_LOWERING.md` §11 before
 rerunning the file-backed corpus test. A missing artifact is not a skipped case.
+
+## Final validation and measurements
+
+Measured head: `7fbf98419` (functional code `0e696cbf0`; subsequent changes are
+reports only). Control: integrated trunk snapshot `be1b3a482`. Both use release
+fat LTO and **one codegen unit**, one worker, and separate identical copies of
+the pinned `e5ada1df93` corpus. Complete path sets and hashes match for **925**
+runtime/project source files; each build compiles **738 modules**. These are new
+measurements, not the earlier candidate's numbers.
+
+| Mode | Control minimum instructions | Head minimum instructions | Change |
+| --- | ---: | ---: | ---: |
+| Default, backend variable unset | 4,053,902,681 | 4,052,604,641 | −0.032020% |
+| Check | 20,588,118,253 | 20,074,343,029 | −2.495494% |
+
+The default result passes the **+0.02%** gate without a waiver. Minimum of five
+Cachegrind runs; each row below lists those runs in order:
+
+- Default control: 4,055,058,651; 4,054,447,486; 4,055,651,142; 4,053,902,681; 4,055,824,607.
+- Default head: 4,054,823,670; 4,052,604,641; 4,056,301,067; 4,055,920,444; 4,054,716,032.
+- Check control: 20,598,311,868; 20,588,118,253; 20,603,852,298; 20,603,623,122; 20,591,330,693.
+- Check head: 20,091,875,420; 20,083,081,386; 20,109,527,126; 20,117,282,106; 20,074,343,029.
+
+Hyperfine: ten runs after two warmups, cleaning before every run:
+
+| Mode / binary | Mean ± standard deviation, seconds | Minimum–maximum, seconds |
+| --- | ---: | ---: |
+| Default control | 1.650361 ± 0.084561 | 1.468943–1.805150 |
+| Default head | 1.673740 ± 0.132318 | 1.474251–1.879854 |
+| Check control | 4.535693 ± 0.244672 | 4.183661–4.868758 |
+| Check head | 4.377297 ± 0.192919 | 3.927784–4.642459 |
+
+The default wall-time mean is slightly slower, with overlapping variation.
+**No wall-time speedup, profile-independent improvement or RSS reduction is
+claimed.** Eager capacity reservations can increase peak live storage even
+while reducing allocation calls and total allocated bytes. The earlier
+16-codegen-unit results in `BACKEND_LOWERING.md` are historical, not this gate.
+
+### Performance commands
+
+Use the archived control checkout and the separate corpus copies described in
+`BACKEND_LOWERING.md` §11. Do not extract a revision over another source tree:
+extra files invalidate comparisons. Hash-check both complete source path sets,
+not just paths from a preexisting manifest.
+
+```sh
+export CARGO_INCREMENTAL=0
+CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 cargo build --release --manifest-path temp/lowering-trunk-control/rewatch/Cargo.toml
+CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 cargo build --release --manifest-path rewatch/Cargo.toml
+BASE="$PWD/temp/lowering-trunk-control/rewatch/target/release/rescript"
+HEAD="$PWD/rewatch/target/release/rescript"
+B_CORPUS="$PWD/temp/lowering-correction-base-corpus"
+H_CORPUS="$PWD/temp/lowering-candidate-corpus"
+export B_CORPUS H_CORPUS
+python3 - <<'PY'
+from pathlib import Path
+import hashlib, os
+def sources(root):
+    return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
+            for sub in ['tests/tests', 'packages/@rescript/runtime']
+            for p in (root/sub).rglob('*') if p.suffix in ('.res', '.resi')}
+a,b = (sources(Path(os.environ[key])) for key in ['B_CORPUS','H_CORPUS'])
+assert a == b
+print(len(a))
+PY
+env -u RESCRIPT_BACKEND python3 scripts/compare_build_instructions.py \
+  --base "$BASE" "$B_CORPUS" --head "$HEAD" "$H_CORPUS" \
+  --runs 5 --threshold 0.02 --work-dir temp/scaling-final-default
+RESCRIPT_BACKEND=check python3 scripts/compare_build_instructions.py \
+  --base "$BASE" "$B_CORPUS" --head "$HEAD" "$H_CORPUS" \
+  --runs 5 --threshold 0.02 --work-dir temp/scaling-final-check
+PREPARE="'$BASE' clean '$B_CORPUS/tests/tests' && '$HEAD' clean '$H_CORPUS/tests/tests'"
+for MODE in default check; do
+  if [ "$MODE" = default ]; then BACKEND='-u RESCRIPT_BACKEND'; else BACKEND='RESCRIPT_BACKEND=check'; fi
+  hyperfine --warmup 2 --runs 10 --prepare "$PREPARE" \
+    --export-json "temp/scaling-final-$MODE-hyperfine.json" \
+    "env $BACKEND RAYON_NUM_THREADS=1 RESCRIPT_RUNTIME='$B_CORPUS/packages/@rescript/runtime' '$BASE' build '$B_CORPUS/tests/tests'" \
+    "env $BACKEND RAYON_NUM_THREADS=1 RESCRIPT_RUNTIME='$H_CORPUS/packages/@rescript/runtime' '$HEAD' build '$H_CORPUS/tests/tests'"
+done
+```
+
+The instruction script sets one worker and each side's runtime, prepares that
+runtime outside measurement, cleans before each build and prints every count
+and module total. Reject results with unequal module counts.
+
+### Validation results and commands
+
+| Gate | Result |
+| --- | --- |
+| Full serial compiler unit suite | 2,465 passed; 25 existing ignores |
+| BIR tests within that suite | 774 passed |
+| Compiler integration tests | 4 passed |
+| Compiler doctests | 5 passed; 7 existing ignores |
+| Four pinned unit-entry tests, debug and release | All passed in both profiles |
+| Rewatch tests | 210 unit + 9 integration passed |
+| Strict all-target compiler clippy | Passed |
+| Exact focused JS / canonical snapshots | 472/472 and 737/737 |
+| Exact stdlib / in-repository GenType | 113/113 and 2/2 |
+| Backend coverage ratchet | Passed, no baseline changes |
+
+No new ignores or fixture changes. The external application comparison was not
+run. Regenerate reference artifacts after clean/benchmark commands, which can
+remove dependency artifacts:
+
+```sh
+export CARGO_INCREMENTAL=0 TMPDIR=/tmp
+opam exec --switch=rescript -- dune build --root . compiler/bsc/rescript_compiler_main.exe compiler/syntax/cli/res_cli.exe
+export OCAML_BSC="$PWD/_build/default/compiler/bsc/rescript_compiler_main.exe"
+export RESCRIPT_RUNTIME="$PWD/packages/@rescript/runtime"
+export RESCRIPT_CLI="$PWD/rewatch/target/debug/rescript"
+cargo build --manifest-path compiler-rust/Cargo.toml
+cargo build --manifest-path rewatch/Cargo.toml
+"$RESCRIPT_CLI" build-reference --bsc "$OCAML_BSC" packages/@rescript/runtime
+"$RESCRIPT_CLI" build-reference --bsc "$OCAML_BSC" tests/dependencies/rescript-react
+"$RESCRIPT_CLI" build-reference --bsc "$OCAML_BSC" tests/tests
+cargo test --manifest-path compiler-rust/Cargo.toml -- --test-threads=1
+cargo test --manifest-path compiler-rust/Cargo.toml bir:: -- --test-threads=1
+cargo test --release --manifest-path compiler-rust/Cargo.toml full_unit_allocation_boundary -- --nocapture --test-threads=1
+cargo test --manifest-path rewatch/Cargo.toml
+cargo clippy --manifest-path compiler-rust/Cargo.toml --all-targets -- -D warnings
+./scripts/test_js_output_parity.sh
+./scripts/test_stdlib_output_parity.sh
+GENTYPE_PARITY_WITHOUT_TELLA=1 ./scripts/test_gentype_output_parity.sh
+GENTYPE_PARITY_WITHOUT_TELLA=1 python3 scripts/test_backend_coverage.py --target debug
+```
+
+## Requested completion status
+
+| Step | Status | Evidence |
+| --- | --- | --- |
+| 1. Pinned assertions | Done | Four independent tests pin equality across both sizes and their numeric constants; debug and release pass. |
+| 2. Attribution | Done | Complete owner totals, retained reasons, removed sites and reproducible allocator backtraces above. |
+| 3. Shared-file scope | Done | All nine files have named lowering consumers; unchanged default emitter; 453-declaration differential. |
+| 4. Final validation/report | Done | Fresh tests, parity, coverage and both instruction/wall-time comparisons; default instruction gate passes. |
+
+The PR remains **draft** for review. No approval or merge is implied.
