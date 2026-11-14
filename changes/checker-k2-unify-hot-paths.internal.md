@@ -1,0 +1,1 @@
+- Checker rewrite K2: the hot paths of unification in the new checker's kernel (no lowering when nothing is above the target, one level write for a variable bound to a variable, no frame for the root pair, no walk for a node without a child), with no change of behaviour.

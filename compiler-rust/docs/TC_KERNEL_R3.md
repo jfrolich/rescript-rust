@@ -921,3 +921,269 @@ ignored, the same as its base; this branch adds, removes and ignores no test
 (the merged trunk brings the difference). `tc` is not on a compiler build's path, so
 no application or `tests/tests` saving is claimed; the CI `Instruction
 count` check reports the build's figures.
+
+## K2
+
+The hot paths of unification (CHECKER_REWRITE.md section 8.7), with no
+change of behaviour. Same machine and method as "K1": Valgrind 3.22
+cachegrind, pinned toolchain, fat LTO, one codegen unit, line tables, one
+million operations minus the zero-iteration run of the same program;
+unification minus its `build_*` twin, the other operations as in "K1".
+
+The bench gained `bind_ground1` and `bind_ground1_local`, a fresh variable
+unified with a fresh nullary constructor (generic and local level), with
+their twins `build_bind_ground1` and `build_bind_ground1_local`
+(`bbb4c39a9`, no change under `src`). They take the path of item (d).
+
+### Per commit
+
+Measured before the merge with trunk, on `0b175b7d0` with the bench
+(`bbb4c39a9`); each column is a whole build and run of that commit.
+(c) `034ae28c6`, (b) `c93cb0f78`, (a) `751e311c3`, (b) 2 `4ac02619b`,
+(c) 2 `b3b746bc3`, (d) `9473631be`.
+
+| Operation | Before | (c) | (b) | (a) | (b) 2 | (c) 2 | (d) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `unify_vars` | 203.00 | 208.00 | 198.00 | 161.00 | 113.00 | 113.00 | 118.00 |
+| `unify_ground1` | 155.00 | 155.00 | 155.00 | 121.00 | 121.00 | 121.00 | 119.00 |
+| `unify_ground3` | 940.95 | 937.95 | 937.95 | 914.95 | 920.95 | 903.95 | 902.95 |
+| `unify_vars_local` | 280.00 | 223.00 | 198.00 | 161.00 | 113.00 | 113.00 | 118.00 |
+| `unify_ground1_local` | 231.00 | 158.00 | 158.00 | 124.00 | 124.00 | 121.00 | 119.00 |
+| `unify_ground3_local` | 1253.95 | 968.95 | 968.95 | 945.95 | 951.95 | 903.95 | 902.95 |
+| `bind_ground1` | 339.18 | 342.17 | 341.17 | 303.17 | 309.17 | 309.17 | 122.00 |
+| `bind_ground1_local` | 339.18 | 342.17 | 341.17 | 303.17 | 309.17 | 309.17 | 122.00 |
+| `instance1` | 137.06 | 137.06 | 137.06 | 137.06 | 137.06 | 137.06 | 137.06 |
+| `instance3` | 217.31 | 217.31 | 217.31 | 217.31 | 217.31 | 217.31 | 217.31 |
+| `instance5` | 305.34 | 305.34 | 305.34 | 305.34 | 305.34 | 305.34 | 305.34 |
+| `instance7` | 325.27 | 325.27 | 325.27 | 325.27 | 325.27 | 325.27 | 325.27 |
+| `checker_instance1` | 126.06 | 126.06 | 126.06 | 126.06 | 126.06 | 126.06 | 126.06 |
+| `checker_instance3` | 207.31 | 207.31 | 207.31 | 207.31 | 207.31 | 207.31 | 207.31 |
+| `checker_instance5` | 294.34 | 294.34 | 294.34 | 294.34 | 294.34 | 294.34 | 294.34 |
+| `checker_instance7` | 314.27 | 314.27 | 314.27 | 314.27 | 314.27 | 314.27 | 314.27 |
+| `generalize7` | 449.00 | 449.00 | 449.00 | 449.00 | 449.00 | 449.00 | 449.00 |
+| `lower7` | 422.00 | 422.00 | 422.00 | 422.00 | 422.00 | 422.00 | 422.00 |
+| `copy7` | 1709.58 | 1709.58 | 1709.58 | 1709.58 | 1709.58 | 1709.58 | 1709.58 |
+| `repr` | 9.00 | 9.00 | 9.00 | 9.00 | 9.00 | 9.00 | 9.00 |
+| `restore` | 63.00 | 63.00 | 63.00 | 63.00 | 63.00 | 63.00 | 63.00 |
+| `keep` | 44.00 | 44.00 | 44.00 | 44.00 | 44.00 | 44.00 | 44.00 |
+
+- (c) `lower_to` takes the representative and returns when it is not
+  above the target.
+- (b) two variables: the link, then one level write.
+- (a) the root pair goes to `unify_pair` without a frame. `run_frames`
+  takes the root pair and keeps one call site of `unify_pair`: a first
+  form with a second call in `unify_distinct` made LLVM call `unify_pair`
+  out of line (`unify_ground3` +22 over (b)).
+- (b) 2: the two-variable arm out of `bind_routed` (whose entry and exit
+  save six registers: 61 instructions a binding) into an always-inline
+  helper called from `unify_pair`. Out of line it cost 47.
+- (c) 2: the level tests of the nullary shortcut and of `unify_expanded`
+  read the descriptors they hold. Without it `unify_ground3_local` was 25
+  over `unify_ground3` for four level tests (24 allowed), all 25 in the
+  two `lower_to` calls of `unify_expanded`. When neither head expanded and
+  no type has a scope, at most one side is above the lower level and the
+  four `repr` calls after the lowering returned the heads; they are not
+  made. A form with the level test alone cost `unify_ground3` +12 in
+  register pressure.
+- (d) no walk for a node without a child: `bind_leaf` binds a variable to
+  a variable or (no scoped types) to a childless node, one call site in
+  `unify_pair`; `unify3` skips `occur` for a childless `t2'`. Two forms
+  were dropped: a test at the start of `reaches` and `binding_scan` (11
+  instructions on every walk of a node with children: `unify_ground3`
+  +11), and three inlined binding bodies in `unify_pair` (+12 to +42 on
+  every unification in spills).
+
+### Merged head
+
+Before: trunk `2f5d0c3b8` with only the bench file of this branch. After:
+the merge `19226b5e1`. Trunk's new frame kinds (`Fields`, `Field`,
+`FieldEnd`) and their arms in `run_frames` moved the figures on both
+sides: on trunk alone `unify_ground3` went from 940.95 to 963.95. Against
+this branch before the merge (column (d) above), the merged head is
+`unify_vars` +1, `unify_ground1` +3, `unify_ground3` +12,
+`bind_ground1` +2, each `_local` form the same; trunk's arms are as trunk
+has them.
+
+| Operation | Before (trunk) | After (merged) | Change |
+|---|---:|---:|---:|
+| `unify_vars` | 209.00 | 119.00 | -90.00 |
+| `unify_ground1` | 161.00 | 122.00 | -39.00 |
+| `unify_ground3` | 963.95 | 914.95 | -49.00 |
+| `unify_vars_local` | 288.00 | 119.00 | -169.00 |
+| `unify_ground1_local` | 239.00 | 122.00 | -117.00 |
+| `unify_ground3_local` | 1284.95 | 914.95 | -370.00 |
+| `bind_ground1` | 345.18 | 124.00 | -221.18 |
+| `bind_ground1_local` | 345.18 | 124.00 | -221.18 |
+| `instance1` | 137.06 | 137.06 | 0.00 |
+| `instance3` | 217.31 | 217.31 | 0.00 |
+| `instance5` | 305.34 | 305.34 | 0.00 |
+| `instance7` | 325.27 | 325.27 | 0.00 |
+| `checker_instance1` | 126.06 | 126.06 | 0.00 |
+| `checker_instance3` | 207.31 | 207.31 | 0.00 |
+| `checker_instance5` | 294.34 | 294.34 | 0.00 |
+| `checker_instance7` | 314.27 | 314.27 | 0.00 |
+| `generalize7` | 449.00 | 449.00 | 0.00 |
+| `lower7` | 422.00 | 422.00 | 0.00 |
+| `copy7` | 1709.58 | 1709.58 | 0.00 |
+| `repr` | 9.00 | 9.00 | 0.00 |
+| `restore` | 63.00 | 63.00 | 0.00 |
+| `keep` | 44.00 | 44.00 | 0.00 |
+
+Relations of section 8.7 on the merged head:
+
+| Relation | Figure | Met |
+|---|---|---|
+| `_local` at most 6 over generic per level test | 0 for vars, ground1, ground3 | yes |
+| `unify_vars` at most 150 | 119 | yes |
+| `bind` inside `unify_vars` at most 20 | 26 executed (+7 to choose the side) | no |
+| `bind_ground1` within 25 of `unify_vars` | 124 against 119 | yes |
+| Operations that are not unification move at most 2 | 0 | yes |
+
+**The binding inside `unify_vars`.** Counted per instruction (callgrind
+`--dump-instr`, the addresses mapped to source lines). `Graph::link` is
+16 of the 26: the `from == to` test 2, the slot load and the link store 8,
+the speculation and name test 6. The other 10 are the bounds check of the
+side chosen to be the variable (one call site serves both sides, so LLVM
+does not know it was checked), reloading the vector pointer after the
+link, the target's level load and the compare. A form with its own arm
+for two variables measured 22 (`unify_vars` 114) but cost `bind_ground1`
++9, `unify_ground1` +3 and `unify_ground3` +2, so it was not kept. The 16
+of the link are in `graph.rs`, which K2 does not change; the bounds checks
+stay without `unsafe`.
+
+**Targets of the table in 8.7.** They were arithmetic on the K1 figures;
+trunk has since moved (the "before" here is above K1's: `unify_ground3`
+963.95 against K1's 701). `unify_vars` (≤ 150), `unify_ground1` (≤ 125),
+`unify_vars_local` (≤ 155) and `unify_ground1_local` (≤ 130) are met.
+`unify_ground3` 914.95 (≤ 640) and `unify_ground3_local` 914.95 (≤ 660)
+are not: 214 of them are `Checker::reaches`, the occurrence walk of the
+right side of the structure pair, which stays (item (d) skips only a
+side without a child, and the deferred check is K2b); 261 are
+`unify_distinct` with the inlined loop, 132 `unify3`, 121
+`unify_expanded`, 92 `expand_once`, 70 `push_lists`.
+
+Function attribution on the merged head (net of the twin):
+
+| Operation | `unify_distinct` | `reaches` | `unify3` | `unify_expanded` | `expand_once` | `push_lists` | bench `main` |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `unify_vars` | 94 | — | — | — | — | — | 25 |
+| `unify_ground1` | 97 | — | — | — | — | — | 25 |
+| `bind_ground1` | 99 | — | — | — | — | — | 25 |
+| `unify_ground3` | 261 | 214.05 | 132 | 121 | 92 | 70 | 25 |
+
+On trunk `unify_ground3_local` also spent 200 in `Graph::lower` and 88 in
+`Checker::lower`, and `bind_ground1` 165.06 in `bind_routed` and 33 in
+`push_flagged`; none of those run in these operations now.
+
+### Raw output
+
+```text
+revision operation zero full raw
+base empty 332891 19335163 19.002272
+base instance1 332911 156393784 156.060873
+base instance3 332945 236642294 236.309349
+base instance5 332979 324671009 324.338030
+base instance7 333013 344605243 344.272230
+base generalize7 332973 793605175 793.272202
+base lower7 332923 766605139 766.272216
+base copy7 332931 1728913930 1728.580999
+base repr 332911 165393770 165.060859
+base restore 332953 219394178 219.061225
+base keep 332951 200394190 200.061239
+base checker_instance1 333068 145393937 145.060869
+base checker_instance3 333102 226642447 226.309345
+base checker_instance5 333136 313671162 313.338026
+base checker_instance7 333170 333605396 333.272226
+base build_vars 333201 78403662 78.070461
+base unify_vars 333235 281403904 281.070669
+base build_ground1 333235 98411226 98.077991
+base unify_ground1 333269 253411468 253.078199
+base build_ground3 333303 200774422 200.441119
+base unify_ground3 333337 1141728428 1141.395091
+base build_vars_local 333142 78403603 78.070461
+base unify_vars_local 333176 358403845 358.070669
+base build_ground1_local 333190 98411153 98.077963
+base unify_ground1_local 333224 329411395 329.078171
+base build_ground3_local 333258 200774349 200.441091
+base unify_ground3_local 333292 1454728355 1454.395063
+base build_bind_ground1 333234 88425486 88.092252
+base bind_ground1 333336 427602896 427.269560
+base build_bind_ground1_local 333315 88425567 88.092252
+base bind_ground1_local 333278 427602838 427.269560
+trunk empty 328580 19330838 19.002258
+trunk instance1 328600 156389459 156.060859
+trunk instance3 328634 236637969 236.309335
+trunk instance5 328668 324666684 324.338016
+trunk instance7 328702 344600918 344.272216
+trunk generalize7 328652 793600868 793.272216
+trunk lower7 328592 766600822 766.272230
+trunk copy7 328628 1728909613 1728.580985
+trunk repr 328594 165389439 165.060845
+trunk restore 328628 219389867 219.061239
+trunk keep 328633 200389858 200.061225
+trunk checker_instance1 328777 145389632 145.060855
+trunk checker_instance3 328817 226638148 226.309331
+trunk checker_instance5 328859 313666871 313.338012
+trunk checker_instance7 328895 333601107 333.272212
+trunk build_vars 328882 78399357 78.070475
+trunk unify_vars 328920 287399603 287.070683
+trunk build_ground1 328948 98406925 98.077977
+trunk unify_ground1 328981 259407166 259.078185
+trunk build_ground3 329014 200770119 200.441105
+trunk unify_ground3 329048 1164724125 1164.395077
+trunk build_vars_local 328843 78399290 78.070447
+trunk unify_vars_local 328872 366399527 366.070655
+trunk build_ground1_local 328885 98406862 98.077977
+trunk unify_ground1_local 328925 337407110 337.078185
+trunk build_ground3_local 328954 200770059 200.441105
+trunk unify_ground3_local 328988 1485724065 1485.395077
+trunk build_bind_ground1 328909 88421175 88.092266
+trunk bind_ground1 329031 433598577 433.269546
+trunk build_bind_ground1_local 329016 88421254 88.092238
+trunk bind_ground1_local 328958 433598532 433.269574
+merged empty 330904 19333176 19.002272
+merged instance1 330920 156391793 156.060873
+merged instance3 330957 236640306 236.309349
+merged instance5 330994 324669024 324.338030
+merged instance7 331027 344603257 344.272230
+merged generalize7 330978 793603180 793.272202
+merged lower7 330928 766603144 766.272216
+merged copy7 330951 1728911950 1728.580999
+merged repr 330916 165391775 165.060859
+merged restore 330966 219392191 219.061225
+merged keep 330956 200392195 200.061239
+merged checker_instance1 331093 145391962 145.060869
+merged checker_instance3 331127 226640472 226.309345
+merged checker_instance5 331167 313669193 313.338026
+merged checker_instance7 331209 333603435 333.272226
+merged build_vars 331226 78401687 78.070461
+merged unify_vars 331260 197401721 197.070461
+merged build_ground1 331260 98409251 98.077991
+merged unify_ground1 331298 220409289 220.077991
+merged build_ground3 331331 200772450 200.441119
+merged unify_ground3 331364 1115726452 1115.395088
+merged build_vars_local 331173 78401634 78.070461
+merged unify_vars_local 331202 197401663 197.070461
+merged build_ground1_local 331215 98409178 98.077963
+merged unify_ground1_local 331255 220409218 220.077963
+merged build_ground3_local 331290 200772381 200.441091
+merged unify_ground3_local 331319 1115726379 1115.395060
+merged build_bind_ground1 331253 88423505 88.092252
+merged bind_ground1 331361 212423613 212.092252
+merged build_bind_ground1_local 331346 88423598 88.092252
+merged bind_ground1_local 331302 212423554 212.092252
+```
+
+### Checks
+
+```text
+cargo test --manifest-path compiler-rust/Cargo.toml --lib tc::
+test result: ok. 192 passed; 0 failed; 17 ignored; 0 measured; 2621 filtered out
+```
+
+That is the merged head. Each commit before the merge ran 181 passed and
+6 ignored, as its base did; this branch adds, removes and ignores no test,
+and no step count changed an assertion (the unification step tests bound
+the count from above). `tc` is not on a compiler build's path (the driver's
+default checker is the old one), so no application or `tests/tests` saving
+is claimed; the CI `Instruction count` check reports the build's figures.
