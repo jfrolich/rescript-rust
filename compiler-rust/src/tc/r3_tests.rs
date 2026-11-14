@@ -429,7 +429,6 @@ fn unify_of_equal_deep_types_fits_the_stack() {
 }
 
 #[test]
-#[ignore = "R3a build"]
 fn binding_a_variable_is_one_walk_of_the_type() {
     std::thread::Builder::new()
         .stack_size(2 * 1024 * 1024)
@@ -472,7 +471,6 @@ fn binding_a_variable_is_one_walk_of_the_type() {
 /// `end_def` around a variable of the definition): the binding must fail
 /// (O13), so the occurrence test cannot stop at a lower level.
 #[test]
-#[ignore = "R3a build"]
 fn binding_finds_the_variable_under_a_lower_root() {
     let mut c = checker(Mode::Success);
     c.g.begin_def();

@@ -8,8 +8,15 @@
 //! recursive calls would run.
 
 use super::expand::{Memo, TypeTable};
-use super::graph::{Graph, Mode, Node, Speculation, Ty};
+use super::graph::{CONSTR, GENERIC, Graph, Mode, NONE, Node, Speculation, Ty, VAR};
 use super::rows::Extras;
+use super::segment::{EXTENDED, ExtraDescriptor};
+
+/// Flag of a binding-walk stack entry reached through an object or a
+/// variant row: `occur_rec` does not enter those (compiler/ml/ctype.ml:1403)
+/// and `update_level` does, so below them the walk only lowers. Local
+/// handles stay below bit 30 (`Graph::push`).
+const LEVEL_ONLY: u32 = 1 << 30;
 
 /// A failed unification. It carries nothing: in `Mode::Explain` the trace is
 /// [`Checker::trace`]; in `Mode::Success` there is none.
@@ -125,7 +132,12 @@ impl Checker {
     /// [`Checker::unify_distinct`]. (R3a)
     #[inline]
     pub fn unify(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
-        todo!("R3a")
+        let left = self.g.repr(left);
+        let right = self.g.repr(right);
+        if left == right {
+            return Ok(());
+        }
+        self.unify_distinct(left, right)
     }
 
     /// The outer `unify` (compiler/ml/ctype.ml:2732-2737) and the loop over
@@ -135,7 +147,24 @@ impl Checker {
     /// sets `unexplained_failure`. Cost: O(pairs popped), each pair one
     /// [`Checker::unify_pair`]. (R3a)
     pub fn unify_distinct(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
-        todo!("R3a")
+        let top = self.depth == 0;
+        let base = self.frames.len();
+        self.depth += 1;
+        self.frames.push(Frame {
+            left,
+            right,
+            kind: FrameKind::Pair,
+            extra: 0,
+        });
+        let result = self.run_frames(base);
+        self.depth -= 1;
+        if result.is_err() {
+            self.frames.truncate(base);
+            if top && self.g.speculation_depth == 0 {
+                self.unexplained_failure = true;
+            }
+        }
+        result.map_err(|_| Clash)
     }
 
     /// One pair of distinct representatives: the first step of `unify`
@@ -145,7 +174,36 @@ impl Checker {
     /// (ctype.ml:2248-2257); everything else goes to
     /// [`Checker::unify_expanded`]. O(1) plus the callee. (R3a)
     pub fn unify_pair(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
-        todo!("R3a")
+        #[cfg(test)]
+        super::steps::tick();
+        let l = self.g.nodes[left.0 as usize];
+        let r = self.g.nodes[right.0 as usize];
+        // `Tvar _, _` before `_, Tvar _`: of two variables the left one is
+        // bound (ctype.ml:2242-2243). A variable in a constructor goes to
+        // the binding walk, whose expansion retry (R3c) stands for the
+        // `deep_occur` cases of ctype.ml:2240-2241.
+        if l.tag() == VAR {
+            return self.bind(left, right);
+        }
+        if r.tag() == VAR {
+            return self.bind(right, left);
+        }
+        // Two universal variables (ctype.ml:2244) are extended nodes: R3g.
+        // Two locally abstract types (ctype.ml:2258) need equations: R3h.
+        if l.tag() == CONSTR
+            && r.tag() == CONSTR
+            && l.a == r.a
+            && l.arity() == 0
+            && r.arity() == 0
+            && !self.has_cached_expansion(left)
+            && !self.has_cached_expansion(right)
+        {
+            // `update_level !env t1.level t2; link_type t1 t2`.
+            self.lower_to(right, l.level)?;
+            self.g.link(left, right);
+            return Ok(());
+        }
+        self.unify_expanded(left, right)
     }
 
     /// `unify1_var` (compiler/ml/ctype.ml:2216-2225): the occurrence check,
@@ -155,7 +213,24 @@ impl Checker {
     /// when no type has a scope; with scoped types the level update is a
     /// separate [`Checker::lower`]. (R3a)
     pub fn bind(&mut self, var: Ty, ty: Ty) -> Result<(), Clash> {
-        todo!("R3a")
+        let before = self.g.nodes[var.0 as usize];
+        let target_is_var = self.g.nodes[ty.0 as usize].tag() == VAR;
+        // Of two variables, `link_type` picks the surviving name by the
+        // levels before `update_level` (compiler/ml/btype.ml:727,
+        // ctype.ml:2221-2222): link first, then lower the one node. A
+        // variable cannot hold another, so the occurrence walk is skipped.
+        if !target_is_var {
+            self.binding_walk(var, ty)?;
+        }
+        self.g.link(var, ty);
+        if (target_is_var || self.types.scoped != 0)
+            && let Err(clash) = self.lower_to(ty, before.level)
+        {
+            // `t1.desc <- d1` (ctype.ml:2224).
+            self.g.write(var, before);
+            return Err(clash);
+        }
+        Ok(())
     }
 
     /// The walk a binding makes over `ty`: every node reachable without
@@ -169,7 +244,47 @@ impl Checker {
     /// walk gives up (ctype.ml:1396-1402). Explicit stack. (R3a; the
     /// expansion retry R3c)
     pub fn binding_walk(&mut self, var: Ty, ty: Ty) -> Result<(), Clash> {
-        todo!("R3a")
+        let level = self.g.nodes[var.0 as usize].level;
+        // With scoped types the level update is `bind`'s Checker::lower.
+        let lower = self.types.scoped == 0;
+        let generation = self.fresh_marks();
+        self.g.work.clear();
+        self.g.work.push(ty);
+        while let Some(entry) = self.g.work.pop() {
+            let ty = self.g.repr(Ty(entry.0 & !LEVEL_ONLY));
+            let node = self.g.nodes[ty.0 as usize];
+            let above = lower && node.level > level;
+            if entry.0 & LEVEL_ONLY != 0 {
+                if above {
+                    #[cfg(test)]
+                    super::steps::tick();
+                    self.g.write(ty, Node { level, ..node });
+                    self.push_level_only(node);
+                }
+                continue;
+            }
+            if self.marks[ty.0 as usize] == generation {
+                continue;
+            }
+            #[cfg(test)]
+            super::steps::tick();
+            if ty == var {
+                self.g.work.clear();
+                return Err(Clash);
+            }
+            self.marks[ty.0 as usize] = generation;
+            if above {
+                self.g.write(ty, Node { level, ..node });
+            }
+            if self.stops_occurrence(node) {
+                if above {
+                    self.push_level_only(node);
+                }
+            } else {
+                self.g.children(node, false);
+            }
+        }
+        Ok(())
     }
 
     /// `occur` of one structure node in another (compiler/ml/ctype.ml:1488),
@@ -177,14 +292,18 @@ impl Checker {
     /// `ty`, one step a node, giving up on nothing. This is one walk per
     /// structure pair, as in OCaml; see "R3 as designed", decision 6. (R3a)
     pub fn occur(&mut self, node: Ty, ty: Ty) -> Result<(), Clash> {
-        todo!("R3a")
+        if self.reaches(node, ty, false) {
+            Err(Clash)
+        } else {
+            Ok(())
+        }
     }
 
     /// `deep_occur` (compiler/ml/ctype.ml:1775): whether `node` is reachable
     /// from `ty`, crossing rows and objects too. O(nodes of `ty`), marks,
     /// explicit stack. (R3a)
     pub fn deep_occur(&mut self, node: Ty, ty: Ty) -> bool {
-        todo!("R3a")
+        self.reaches(node, ty, true)
     }
 
     /// `unify2` and `unify3` (compiler/ml/ctype.ml:2276-2438): expand both
@@ -237,6 +356,118 @@ impl Checker {
     /// before and after. (R3h)
     pub fn unify_gadt(&mut self, newtype_level: u32, left: Ty, right: Ty) -> Result<(), Clash> {
         todo!("R3h")
+    }
+
+    /// O(1) frame pops each plus the callee: the loop of
+    /// [`Checker::unify_distinct`] over the frames above `base`. A pair whose
+    /// two sides are one node is skipped (`unify_eq`, ctype.ml:2233). On a
+    /// clash returns the failing pair, as it stood, and leaves the frames.
+    fn run_frames(&mut self, base: usize) -> Result<(), [Ty; 2]> {
+        while self.frames.len() > base {
+            let Some(frame) = self.frames.pop() else { break };
+            match frame.kind {
+                FrameKind::Pair => {
+                    let left = self.g.repr(frame.left);
+                    let right = self.g.repr(frame.right);
+                    if left != right && self.unify_pair(left, right).is_err() {
+                        return Err([left, right]);
+                    }
+                }
+                FrameKind::Linked => self.saved.truncate(frame.extra as usize),
+                FrameKind::LeavePoly => todo!("R3g"),
+                FrameKind::Recursion => todo!("R3c"),
+            }
+        }
+        Ok(())
+    }
+
+    /// O(1) when no nullary memo row is live; otherwise one
+    /// [`Checker::find_expansion`]. Whether a nullary constructor node has a
+    /// memorized expansion, public or private (`has_cached_expansion`,
+    /// compiler/ml/ctype.ml:2251).
+    #[inline]
+    fn has_cached_expansion(&self, ty: Ty) -> bool {
+        self.memo.live != 0 && self.find_expansion(ty, true).0 != NONE
+    }
+
+    /// `update_level` of `ty` to `level`: [`Graph::lower`] when no type has a
+    /// scope (what [`Checker::lower`] reduces to then), else
+    /// [`Checker::lower`]. O(1) for the generic level, which nothing is
+    /// above; otherwise the callee's cost.
+    #[inline]
+    fn lower_to(&mut self, ty: Ty, level: u32) -> Result<(), Clash> {
+        if level == GENERIC {
+            return Ok(());
+        }
+        if self.types.scoped == 0 {
+            self.g.lower(ty, level);
+            Ok(())
+        } else {
+            self.lower(ty, level)
+        }
+    }
+
+    /// O(1): an object or a polymorphic variant row, which `occur_rec`
+    /// does not enter (compiler/ml/ctype.ml:1403).
+    #[inline]
+    fn stops_occurrence(&self, node: Node) -> bool {
+        node.head & EXTENDED != 0
+            && matches!(
+                self.extras.descriptors[node.a as usize],
+                ExtraDescriptor::Object | ExtraDescriptor::Variant(_)
+            )
+    }
+
+    /// O(arity): push the children of `node` on the walk's stack, flagged
+    /// [`LEVEL_ONLY`].
+    fn push_level_only(&mut self, node: Node) {
+        let start = self.g.work.len();
+        self.g.children(node, false);
+        for entry in &mut self.g.work[start..] {
+            entry.0 |= LEVEL_ONLY;
+        }
+    }
+
+    /// Amortized O(1): a fresh generation of `marks`, which grows to the
+    /// graph's length; a wrap of the counter clears the marks once.
+    fn fresh_marks(&mut self) -> u32 {
+        if self.marks.len() < self.g.nodes.len() {
+            self.marks.resize(self.g.nodes.len(), 0);
+        }
+        if self.mark_generation == u32::MAX {
+            self.marks.fill(0);
+            self.mark_generation = 0;
+        }
+        self.mark_generation += 1;
+        self.mark_generation
+    }
+
+    /// Whether `node` is reachable from `ty`: one step a node, each node
+    /// once (marks), explicit stack. With `deep` objects and variant rows
+    /// are crossed (`deep_occur`, ctype.ml:1775), otherwise not
+    /// (`occur_rec`, ctype.ml:1403). No level cut.
+    fn reaches(&mut self, node: Ty, ty: Ty, deep: bool) -> bool {
+        let generation = self.fresh_marks();
+        self.g.work.clear();
+        self.g.work.push(ty);
+        while let Some(ty) = self.g.work.pop() {
+            let ty = self.g.repr(ty);
+            if self.marks[ty.0 as usize] == generation {
+                continue;
+            }
+            #[cfg(test)]
+            super::steps::tick();
+            if ty == node {
+                self.g.work.clear();
+                return true;
+            }
+            self.marks[ty.0 as usize] = generation;
+            let descriptor = self.g.nodes[ty.0 as usize];
+            if deep || !self.stops_occurrence(descriptor) {
+                self.g.children(descriptor, false);
+            }
+        }
+        false
     }
 
     /// O(1): the checking mode, fixed for the unit (CHECKER_REWRITE 3.4).
