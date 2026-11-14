@@ -1817,6 +1817,30 @@ fn the_row_variable_keeps_a_name() {
     assert_eq!(c.g.nodes[rest2.0 as usize].level, 2);
 }
 
+/// What a failure leaves of the name `make_rowvar` gave (ctype.ml:2477-2482,
+/// 2512-2517): `let d1 = rest1.desc and d2 = rest2.desc` is read after
+/// `make_rowvar`, so the descriptor a failure puts back on the right rest
+/// is the named one (`set_name rest2 name`, ctype.ml:2458). `{x: int, ..}`
+/// with a named rest against `{x: string, ..}` in `Mode::Explain`: the
+/// left rest, linked to the right one by the tail unification, is a
+/// variable of its own again, and the right rest keeps the name.
+/// Reaches: R3e.
+#[test]
+#[ignore = "R3e build"]
+fn a_failure_keeps_the_name_the_row_variable_was_given() {
+    let mut c = checker(Mode::Explain);
+    let (int, string) = (constr(&mut c, INT, &[]), constr(&mut c, STRING, &[]));
+    let (rest1, rest2) = (var_at(&mut c, 3), var(&mut c));
+    c.g.nodes[rest1.0 as usize].a = 7;
+    let (left, _) = obj(&mut c, &[("x", false, int)], rest1);
+    let (right, _) = obj(&mut c, &[("x", false, string)], rest2);
+    assert!(c.unify(left, right).is_err());
+    assert_eq!(c.g.repr(rest1), rest1);
+    assert_eq!(c.g.nodes[rest1.0 as usize].a, 7);
+    assert_eq!(c.g.repr(rest2), rest2);
+    assert_eq!(c.g.nodes[rest2.0 as usize].a, 7);
+}
+
 /// The arms of unify3 beside the object's (ctype.ml:2322-2324, 2412-2413,
 /// 2424). Two field nodes go to `unify_fields` with no link of their own
 /// (`Tfield _, Tfield _ -> unify_fields env t1' t2'`): the rests are

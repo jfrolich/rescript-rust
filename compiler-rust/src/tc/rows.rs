@@ -212,12 +212,17 @@ impl Checker {
     ///    two rests; `l1`, `l2` are the levels of `repr(left)`,
     ///    `repr(right)`; `open1`, `open2` whether each rest is a variable,
     ///    read now (ctype.ml:2476).
-    /// 2. In `Mode::Explain` push a [`FrameKind::Fields`] frame: `left`,
-    ///    `right` the two rests, `extra` the index in `saved` of their two
-    ///    descriptors (`rest1.desc <- d1; rest2.desc <- d2`,
-    ///    ctype.ml:2513-2517).
+    /// 2. In `Mode::Explain` push a [`FrameKind::Fields`] frame below the
+    ///    frames of steps 4 and 5: `left`, `right` the two rests, `extra`
+    ///    the index in `saved` of their two descriptors as they are AFTER
+    ///    step 3: `let d1 = rest1.desc and d2 = rest2.desc` (ctype.ml:2482)
+    ///    follows `make_rowvar`, whose `set_name` may have named the right
+    ///    rest, and that named descriptor is the one a failure puts back
+    ///    (`rest1.desc <- d1; rest2.desc <- d2`, ctype.ml:2513-2517).
     /// 3. `va` = [`Checker::make_rowvar`] at `min(l1, l2)` with `use1` =
-    ///    the right list lacks nothing, `use2` = the left lacks nothing.
+    ///    the left list lacks nothing of the right (`miss2 = []`), `use2` =
+    ///    the right lacks nothing of the left (`miss1 = []`),
+    ///    ctype.ml:2477-2481.
     /// 4. One merge of the two sorted lists from their last names to their
     ///    first (`associate_fields`, ctype.ml:330-342): a field only on the
     ///    left goes on top of the list being built at `l1` from `va`

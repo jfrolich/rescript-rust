@@ -2603,13 +2603,7 @@ mod tests {
             ("R3j", &["R3m", "R3e", "R3f", "R3g"]),
         ];
         // Method name -> slice, from the bodies that are still `todo!`.
-        let mut methods: Vec<(String, String)> = Vec::new();
-        for source in [
-            include_str!("rows.rs"),
-            include_str!("relate.rs"),
-            include_str!("unify.rs"),
-            include_str!("expand.rs"),
-        ] {
+        fn scan(source: &str, methods: &mut Vec<(String, String)>) {
             let mut name = String::new();
             for line in source.lines() {
                 let line = line.trim_start();
@@ -2621,7 +2615,20 @@ mod tests {
                 }
             }
         }
-        assert!(methods.iter().any(|(name, slice)| name == "unify_fields" && slice == "R3e"));
+        // The scanner is checked on a body of its own and not on a method
+        // of a slice: every slice removes its own `todo!`.
+        let mut sample = Vec::new();
+        scan("    pub fn sample<T>(&self) -> T {\n        todo!(\"R3z\")\n    }", &mut sample);
+        assert_eq!(sample, [("sample".to_string(), "R3z".to_string())]);
+        let mut methods: Vec<(String, String)> = Vec::new();
+        for source in [
+            include_str!("rows.rs"),
+            include_str!("relate.rs"),
+            include_str!("unify.rs"),
+            include_str!("expand.rs"),
+        ] {
+            scan(source, &mut methods);
+        }
         // Every ignored test of the two files is checked: an `ignore` that
         // does not name its slice as "R3x build" is not skipped silently.
         // The number itself is not pinned: each slice removes its own.
