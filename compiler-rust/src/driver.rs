@@ -295,17 +295,16 @@ fn publish_signature(
     type_ctx: &TypeContext,
     arena: &ParseArena,
     publication: SignaturePublicationMode,
-) -> Result<Option<std::sync::Arc<PortablePersStruct>>> {
+) -> Result<(Option<std::sync::Arc<PortablePersStruct>>, Option<crate::cmi::signature_check::PreparedReport>)> {
     let Some(check) = &options.signature_check else {
-        return Ok(env.extract_module_update(module_name, type_ctx, Some(arena), publication));
+        return Ok((env.extract_module_update(module_name, type_ctx, Some(arena), publication), None));
     };
     let Some((pers_struct, comparison)) =
         env.extract_module_update_checked(module_name, type_ctx, Some(arena), publication)
     else {
-        return Ok(None);
+        return Ok((None, None));
     };
-    check.report(filename, &comparison)?;
-    Ok(Some(pers_struct))
+    Ok((Some(pers_struct), Some(check.prepare(filename, &comparison)?)))
 }
 
 /// The path derived items take: the switch `RESCRIPT_DERIVED_PATH`
@@ -10439,12 +10438,25 @@ struct AttemptOutput {
     stderr: Vec<u8>,
     publication: AttemptPublication,
     mode: crate::types::context::CheckMode,
+    signature_report: Option<Box<crate::cmi::signature_check::PreparedReport>>,
 }
 
 impl AttemptOutput {
     /// O(1), no allocation until the first diagnostic or requested dump.
     fn new(mode: crate::types::context::CheckMode) -> Self {
-        Self { stderr: Vec::new(), publication: AttemptPublication::Pending, mode }
+        Self { stderr: Vec::new(), publication: AttemptPublication::Pending, mode, signature_report: None }
+    }
+
+    /// No allocation on the default path. Check mode retains report bytes until
+    /// publication; a mismatch still participates in pre-publication validation.
+    fn signature_report(&mut self, report: Option<crate::cmi::signature_check::PreparedReport>) -> Result<()> {
+        let Some(report) = report else { return Ok(()) };
+        if self.publication == AttemptPublication::Committed {
+            return report.publish();
+        }
+        let result = report.validate();
+        self.signature_report = Some(Box::new(report));
+        result
     }
 
     /// O(report bytes), only on a diagnostic path. Discarded reports are never emitted.
@@ -10463,6 +10475,9 @@ impl AttemptOutput {
             }
             ctx.keep_attempt_counters();
             self.publication = AttemptPublication::Committed;
+        }
+        if let Some(report) = self.signature_report.take() {
+            report.publish()?;
         }
         if !self.stderr.is_empty() {
             let mut stderr = std::io::stderr();
@@ -11167,7 +11182,9 @@ fn compile_until_js(
         // nodes, but keep the result private until all validation has passed.
         let pers_struct = if options.publish_in_process_signature {
             let _publication_guard = crate::perf_counters::SignaturePublication::begin();
-            publish_signature(&internal_env, options, module_name, filename, type_ctx, arena, publication)?
+            let (signature, report) = publish_signature(&internal_env, options, module_name, filename, type_ctx, arena, publication)?;
+            attempt_output.signature_report(report)?;
+            signature
         } else { None };
         if let Some(start) = signature_publish_start {
             crate::timing::record(crate::timing::Phase::SignaturePublish, start.elapsed());
@@ -12153,7 +12170,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     type_ctx.register_raw_module_sig(module_name, raw_signature);
 
     // The implementation reads its own interface even when the module is a leaf.
-    let pers_struct = publish_signature(
+    let (pers_struct, signature_report) = publish_signature(
         &internal_env,
         options,
         module_name,
@@ -12162,6 +12179,7 @@ pub fn typecheck_preprocessed_signature_in_process(
         arena,
         SignaturePublicationMode::Eager,
     )?;
+    attempt_output.signature_report(signature_report)?;
 
     if let (Some(mut census), Some(timing)) = (arena.derived_census.clone(), &census_timing) {
         census.account_pre_js(timing.snapshot());
@@ -12188,7 +12206,7 @@ mod tests {
     #[test]
     fn two_mode_attempts_keep_only_the_final_check() {
         assert_eq!(std::mem::size_of::<super::CheckAttempt>(), 2);
-        assert_eq!(std::mem::size_of::<super::AttemptOutput>(), 4 * std::mem::size_of::<usize>());
+        assert_eq!(std::mem::size_of::<super::AttemptOutput>(), 5 * std::mem::size_of::<usize>());
         assert_eq!(std::mem::size_of::<super::CheckUnit<'_>>(), 10 * std::mem::size_of::<usize>());
         assert_eq!(std::mem::size_of::<super::UnitSyntax<'_, super::Structure>>(), 3 * std::mem::size_of::<usize>());
         for (source, attempts) in [("let x = 1", 1), ("let x: bool = 1", 2)] {
@@ -12494,7 +12512,30 @@ mod tests {
                 assert!(crate::types::ctype::unify(ctx, &mut tctx.unify_state, int, string).is_err());
                 Ok(())
             },
-        );
+        ).1.unwrap();
+    }
+
+    #[test]
+    fn a_discarded_attempt_writes_no_signature_report() {
+        use crate::cmi::signature_check::{Comparison, SignatureCheck};
+        let directory = std::env::temp_dir().join(format!("discarded-report-{}", std::process::id()));
+        assert!(!directory.exists());
+        let check = SignatureCheck::for_test(directory.clone());
+        let comparison = Comparison::not_applicable("test", "no shared graph");
+        let mut discarded = super::AttemptOutput::new(crate::types::context::CheckMode::Success);
+        discarded.signature_report(Some(check.prepare("Discarded.res", &comparison).unwrap())).unwrap();
+        assert!(!directory.exists());
+        drop(discarded);
+        assert!(!directory.exists(), "discarding must not create a report or directory");
+        let ctx = super::fresh_type_context();
+        let mut retained = super::AttemptOutput::new(crate::types::context::CheckMode::Explain);
+        retained.signature_report(Some(check.prepare("Retained.res", &comparison).unwrap())).unwrap();
+        retained.publish(&ctx).unwrap();
+        let files: Vec<_> = std::fs::read_dir(&directory).unwrap().map(Result::unwrap).collect();
+        assert_eq!(files.len(), 1);
+        assert!(std::fs::read_to_string(files[0].path()).unwrap().contains("Retained.res"));
+        std::fs::remove_file(files[0].path()).unwrap();
+        std::fs::remove_dir(directory).unwrap();
     }
 
     #[test]
