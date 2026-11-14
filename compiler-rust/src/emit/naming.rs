@@ -652,7 +652,6 @@ impl Names {
 /// which keys names by `Ident` (equal when the nonzero stamps are equal,
 /// `Ident::same`), and two names here, which key them by slot. That does
 /// not occur: a positive stamp is created for one identifier only.
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Subject {
     pub(crate) slot: u32,
@@ -666,7 +665,6 @@ pub(crate) struct Subject {
 /// the current depth, otherwise it reads as empty. A name `base$k` of this
 /// base is taken when the group exists, `k < next` and `(group, k)` is not
 /// in `Tables::skipped`; `k` zero is the base itself.
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GroupRow {
     next: u32,
@@ -676,7 +674,6 @@ struct GroupRow {
 }
 
 /// A group row as it was before the current scope changed it.
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Saved {
     group: u32,
@@ -684,7 +681,6 @@ struct Saved {
 }
 
 /// Where the current scope's part of each undo stack starts.
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Level {
     saved: u32,
@@ -704,7 +700,6 @@ struct Level {
 /// (the row before is saved, then reset). `leave` restores the saved rows
 /// last to first, forgets the names assigned in the scope and truncates the
 /// skipped candidates.
-#[cfg(test)]
 #[derive(Default)]
 pub(crate) struct Tables {
     groups: Vec<GroupRow>,
@@ -748,11 +743,9 @@ pub(crate) struct Tables {
 }
 
 /// No entry: an empty pointer of `Marks`, or no prefix group.
-#[cfg(test)]
 const NONE: u32 = u32::MAX;
 
 /// What the suffix rule reads of one group besides its `GroupRow`.
-#[cfg(test)]
 #[derive(Clone, Copy)]
 struct Marks {
     /// The base the group is the suffix table of.
@@ -771,7 +764,6 @@ struct Marks {
     suffix: u32,
 }
 
-#[cfg(test)]
 impl Tables {
     /// Empty the tables for a unit of `slots` slots without releasing their
     /// storage, with the program as the current scope. Cost: one step per
@@ -1102,7 +1094,6 @@ impl Tables {
 
 /// The part of `name` before a final `$` and the number after it, when that
 /// is a positive decimal without leading zeros that fits a suffix.
-#[cfg(test)]
 fn canonical_suffix(name: &str) -> Option<(&str, u32)> {
     let (prefix, suffix) = name.rsplit_once('$')?;
     if suffix.starts_with(|c: char| ('1'..='9').contains(&c))
@@ -1115,7 +1106,6 @@ fn canonical_suffix(name: &str) -> Option<(&str, u32)> {
 }
 
 /// Append `value` in decimal, without allocating.
-#[cfg(test)]
 fn push_decimal(out: &mut String, value: u32) {
     let mut digits = [0u8; 10];
     let mut start = digits.len();
@@ -1134,7 +1124,6 @@ fn push_decimal(out: &mut String, value: u32) {
 }
 
 /// The names of one unit, by what they name. Reused between units.
-#[cfg(test)]
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Printed {
     /// Dense by variable (a copy has an entry of its own).
@@ -1147,7 +1136,6 @@ pub(crate) struct Printed {
 
 /// The free lists of a unit's functions as identifiers, back to back;
 /// `ends[i]` is where list `i` ends.
-#[cfg(test)]
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct FreeLists {
     pub(crate) idents: Vec<Ident>,
@@ -1155,7 +1143,6 @@ pub(crate) struct FreeLists {
 }
 
 /// The names of the replay against the names of the pass.
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct NameStats {
     /// Identifiers the pass names, other than stamp-zero identifiers
@@ -1183,7 +1170,6 @@ pub(crate) struct NameStats {
 /// comparison). Check mode only. One hash lookup per named variable and
 /// module and one per entry of the pass's tables (the pass is keyed by
 /// identifier); two sorts for the cached bounds and two for the free lists.
-#[cfg(test)]
 pub(crate) fn compare_with_pass(
     printed: &Printed,
     idents: &[Ident],
@@ -1251,7 +1237,6 @@ pub(crate) fn compare_with_pass(
 
 /// The entries one sorted side has and the other has not, as multisets.
 /// Sorts both. One step per entry after the sorts.
-#[cfg(test)]
 fn multiset_difference<T: Ord>(left: &mut [T], right: &mut [T]) -> usize {
     left.sort_unstable();
     right.sort_unstable();

@@ -886,10 +886,26 @@ impl LambdaCompiler {
             let deps = self.finish_lowered_output(deps, &possible_required_modules);
             let checked = candidate.map(|candidate| match candidate {
                 Ok(candidate) => {
-                    let crate::bir::shadow::LowerCandidate { arena: j, block, exports, reservations, dynamic_imports: dynamic, mut stats, decisions, qualified } = candidate;
+                    let crate::bir::shadow::LowerCandidate { arena: j, block, exports, reservations, dynamic_imports: dynamic, mut stats, decisions, qualified, names } = candidate;
                     // The lowering extracted, coerced and resolved the
                     // exports (bir/lower/export.rs): no legacy export code.
-                    let new_before = coerced_program(j, block, exports, reservations, shadow_side_effect);
+                    let mut new_before = coerced_program(j, block, exports, reservations, shadow_side_effect);
+                    // THREE_TREES 11.4, "T5 part B as redesigned" (d): the
+                    // naming log's names against the pass on the same
+                    // program, its module list filled in. Counted in the
+                    // report; the names are not printed.
+                    new_before.modules = names.imports;
+                    let resolver = self.module_path_resolver.clone().unwrap_or_else(|| {
+                        ModulePathResolver::from_compile_options(None, None, None, None, None, None, false)
+                    });
+                    match crate::emit::compare_with_pass(&names.printed, &names.idents, &names.modules, &names.free, &new_before, &resolver, self.jsx_preserve) {
+                        Ok(compared) => {
+                            stats.names = compared;
+                            stats.names_compared = 1;
+                        }
+                        Err(_) => stats.names_uncompared = 1,
+                    }
+                    new_before.modules = vec![];
                     self.dynamic_import_modules = dynamic;
                     // THREE_TREES 11.4, "T5 design": the lowering decided
                     // which references to JavaScript globals are shadowed;

@@ -72,6 +72,20 @@ def lower_counts(directory, prefix=None):
     return dict(sorted(totals.items()))
 
 
+# THREE_TREES 11.4, "T5 part B as redesigned" (d): what the naming log's
+# replay gets wrong against the naming pass. The gate requires zero.
+NAME_DIFFERENCES = ("name_differences", "finish_differences", "free_differences",
+                    "ambiguous_orders", "unnamed_references")
+
+
+def naming_counts(work):
+    """The naming gate of one corpus from its summed lowering work."""
+    return {"compared": work.get("names_compared", 0),
+            "uncompared": work.get("names_uncompared", 0),
+            "adopted_nodes": work.get("adopted_nodes", 0),
+            "differences": sum(work.get(key, 0) for key in NAME_DIFFERENCES)}
+
+
 def rule_counts(directory, prefix=None):
     """Rows of the normalising-rule table fired per corpus (not ratcheted)."""
     totals = {"calls": 0, "replayed": collections.Counter(),
@@ -215,11 +229,19 @@ def main():
     print("lambda-alias binders compared with the legacy table, per kind (not ratcheted):")
     print(json.dumps(alias_facts, indent=2, sort_keys=True))
     print("Lowering work (successful units only): " + json.dumps(lowering_work, indent=2, sort_keys=True))
+    naming = {corpus: naming_counts(work) for corpus, work in lowering_work.items()}
+    for corpus, counts in naming.items():
+        print(f"Naming log against the pass: {corpus}: compared {counts['compared']}, "
+              f"uncompared {counts['uncompared']}, adopted_nodes {counts['adopted_nodes']}, "
+              f"sum of (d) {counts['differences']}")
     if args.record:
         RATCHET.write_text(text)
     else:
         check(results, json.loads(RATCHET.read_text()))
         print("Backend coverage ratchet passed")
+    differing = {corpus: counts["differences"] for corpus, counts in naming.items() if counts["differences"]}
+    if differing:
+        raise RuntimeError(f"the naming log differs from the pass: {differing}")
 
 
 if __name__ == "__main__":

@@ -329,6 +329,24 @@ pub(crate) struct SwitchStats {
     /// zero until check mode compares.
     #[serde(flatten)]
     pub decisions: DecisionStats,
+    /// The naming log's replay against the naming pass on the lowering's
+    /// program (THREE_TREES 11.4, "T5 part B as redesigned" (d)), zero
+    /// until check mode compares.
+    #[serde(flatten)]
+    pub names: crate::emit::NameStats,
+    /// What the replay did.
+    #[serde(flatten)]
+    pub replayed: names::Replayed,
+    /// Nodes `names::adopt` read (`Log::adopted_nodes`).
+    pub adopted_nodes: usize,
+    /// The steps of the naming log (`Log::steps`) and of its replay
+    /// (`Replayed::steps`), without those of the tables.
+    pub name_log_steps: usize,
+    pub name_replay_steps: usize,
+    /// One when check mode compared the names, one in `names_uncompared`
+    /// when the pass does not support the unit.
+    pub names_compared: usize,
+    pub names_uncompared: usize,
 }
 
 /// The decisions of step A (`close::decide`) compared with those of the
@@ -375,12 +393,9 @@ pub(crate) struct Lowered {
     pub switch_stats: SwitchStats,
     /// The names of the naming log's replay (`names::replay`), by variable
     /// and by import; compared with the pass in check mode, not printed.
-    #[cfg(test)]
+    /// What the replay did is in `SwitchStats::replayed`.
     pub printed: crate::emit::Printed,
-    #[cfg(test)]
-    pub replayed: names::Replayed,
     /// The imports the replay named in the program, in its order.
-    #[cfg(test)]
     pub name_imports: Vec<crate::bir::ImportId>,
 }
 
@@ -807,10 +822,10 @@ impl State {
         // THREE_TREES 11.4, "T5 design": every list is the one the flatten
         // pass receives, so the bindings around a reference are final.
         globals::decide(&mut self.arena, &self.idents);
-        #[cfg(test)]
         let mut printed = crate::emit::Printed::default();
-        #[cfg(test)]
         let (replayed, name_imports) = self.replay_names(root, &coerced, &mut printed);
+        let (adopted_nodes, name_log_steps) = self.arena.js_scope.as_ref()
+            .map_or((0, 0), |scope| (scope.names.adopted_nodes, scope.names.steps));
         let (close_steps, globals_qualified, global_steps) = self.arena.js_scope.as_ref()
             .map_or((0, 0, 0), |scope| (scope.close_steps, scope.globals.qualified, scope.globals.steps));
         Lowered {
@@ -830,12 +845,15 @@ impl State {
                 globals_qualified,
                 global_steps,
                 decisions: DecisionStats::default(),
+                names: crate::emit::NameStats::default(),
+                replayed,
+                adopted_nodes,
+                name_log_steps,
+                name_replay_steps: replayed.steps(),
+                names_compared: 0,
+                names_uncompared: 0,
             },
-            #[cfg(test)]
             printed,
-            #[cfg(test)]
-            replayed,
-            #[cfg(test)]
             name_imports,
         }
     }
@@ -847,7 +865,6 @@ impl State {
     /// dynamic nor unresolved, in the order of the module list
     /// (`lam_compile::module_sort_cmp`). Cost: one step per import and a
     /// sort of the named ones, one per reservation, and `names::replay`.
-    #[cfg(test)]
     fn replay_names(&self, root: NodeId, coerced: &export::Coerced, printed: &mut crate::emit::Printed) -> (names::Replayed, Vec<crate::bir::ImportId>) {
         let scope = self.arena.js_scope.as_ref().expect("lowering scope");
         let modules = &self.arena.pools.j_modules;

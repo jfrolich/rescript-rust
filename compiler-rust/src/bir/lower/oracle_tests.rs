@@ -1874,7 +1874,7 @@ fn names_of(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePa
     program.modules = lowered.name_imports.iter().map(|import| bir.pools.j_modules[import.index()].clone()).collect();
     let stats = crate::emit::compare_with_pass(&lowered.printed, &idents, &modules, &free, &program, resolver, false)
         .expect("the pass supports the unit");
-    (stats, lowered.replayed)
+    (stats, lowered.switch_stats.replayed)
 }
 
 /// `root` lowered as a unit (`lower_with_resolver`), as `names_of` and
