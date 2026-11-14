@@ -772,7 +772,6 @@ fn reset_returns_to_the_frozen_prefix() {
 /// Reaches: R4a, R4c. A table of 10,000 members is built in 10,000 steps
 /// and searched in at most floor(log2 10,000) + 1 = 14 comparisons.
 #[test]
-#[ignore = "R4c build"]
 fn a_table_of_ten_thousand_members_is_searched_in_fourteen_steps() {
     let mut s = unit_scopes();
     let mut members = Vec::new();

@@ -654,7 +654,17 @@ impl Scopes {
     /// member table of `(key, binder)` pairs. The sort is stable: members
     /// of one key keep the order given, which must be candidate order.
     pub fn table_from(&mut self, members: &[(Key, Binder)]) -> TableId {
-        todo!("R4c")
+        let first = self.members.len() as u32;
+        for &(key, binder) in members {
+            #[cfg(test)]
+            super::steps::tick();
+            self.members.push(Member {
+                key: key.0,
+                target: binder.0,
+                origin: LOCAL,
+            });
+        }
+        self.close_table(first)
     }
 
     /// O(n log n) comparisons, n steps for the n log entries since `from`:
@@ -682,13 +692,67 @@ impl Scopes {
     /// members, no allocation: the first row of `key` in `table`, as an
     /// index into `members` or `imported_members`, or `None`.
     pub fn search(&self, table: TableId, key: Key) -> Option<u32> {
-        todo!("R4c")
+        let (pool, first) = self.rows(table);
+        let rows = &pool[first..];
+        // The lower bound of `key`: `hi` is always a row whose key is at
+        // least `key` (or the end), and `hit` says whether the comparison
+        // that last moved `hi` saw `key` itself, so the bound is known to
+        // hold the key without one more comparison.
+        let (mut lo, mut hi, mut hit) = (0usize, rows.len(), false);
+        while lo < hi {
+            #[cfg(test)]
+            super::steps::tick();
+            let mid = lo + (hi - lo) / 2;
+            match rows[mid].key.cmp(&key.0) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                order => {
+                    hi = mid;
+                    hit = order == std::cmp::Ordering::Equal;
+                }
+            }
+        }
+        hit.then_some((first + lo) as u32)
     }
 
     /// O(1): the row `search` or a [`Resolved`] names, from the pool
     /// `table` selects.
     pub fn member(&self, table: TableId, row: u32) -> Member {
-        todo!("R4c")
+        if table.0 & IMPORTED != 0 {
+            self.imported_members[row as usize]
+        } else {
+            self.members[row as usize]
+        }
+    }
+
+    /// O(n log n) comparisons for the n rows of `members` from `first` on,
+    /// no step: sort that run by key with a stable sort (rows of one key
+    /// keep the order they were appended in) and push it as a local
+    /// [`Table`].
+    fn close_table(&mut self, first: u32) -> TableId {
+        self.members[first as usize..].sort_by_key(|member| member.key);
+        let id = self.tables.len() as u32;
+        debug_assert!(id < IMPORTED, "more than 2^31 local tables");
+        self.tables.push(Table {
+            first,
+            len: self.members.len() as u32 - first,
+            unit: NONE,
+        });
+        TableId(id)
+    }
+
+    /// O(1), no step: the pool `table` lives in, cut at the table's last
+    /// row, and the index of the table's first row in it.
+    fn rows(&self, table: TableId) -> (&[Member], usize) {
+        let (pool, row) = if table.0 & IMPORTED != 0 {
+            (
+                &self.imported_members,
+                self.imported_tables[(table.0 & !IMPORTED) as usize],
+            )
+        } else {
+            (&self.members, self.tables[table.0 as usize])
+        };
+        let first = row.first as usize;
+        (&pool[..first + row.len as usize], first)
     }
 
     /// The binding a lookup of `key` finds (`IdTbl.find_name`,
