@@ -2543,7 +2543,6 @@ mod tests {
     /// names the same type. Reaches: R3m. Today 89 of 10,000 cases differ
     /// with objects, 159 with variants.
     #[test]
-    #[ignore = "R3m build"]
     fn expand_tier_agrees_on_recursive_abbreviations() {
         let program = compile(RECURSIVE.to_string());
         let plan = Plan::new(Tier::Expand, OBJECTS | VARIANTS);

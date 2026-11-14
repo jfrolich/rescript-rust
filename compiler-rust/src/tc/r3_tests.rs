@@ -1379,7 +1379,6 @@ fn element(c: &mut Checker, ty: Ty, index: u32) -> (Ty, Node) {
 /// whose row continues with `c3`'s.
 /// Reaches: R3m.
 #[test]
-#[ignore = "R3m build"]
 fn an_inherited_entry_is_found_past_a_forgotten_one() {
     for forget in [false, true] {
         let mut c = checker(Mode::Success);
@@ -1423,7 +1422,6 @@ fn an_inherited_entry_is_found_past_a_forgotten_one() {
 /// `by_slot` no longer than the list pool.
 /// Reaches: R3m.
 #[test]
-#[ignore = "R3m build"]
 fn expanding_the_heads_down_nested_recursive_nodes_is_linear() {
     let run = |n: u32| {
         let mut c = checker(Mode::Success);
