@@ -1454,6 +1454,25 @@ mod counterexample_tests {
     }
 
     #[test]
+    fn a_function_inherits_the_names_of_what_an_expression_moved_into_it_reads() {
+        // G10: `let f = param => { return param' => g(param, param') }`,
+        // the eta-expansion of a partial application whose argument reads
+        // the local `param`: the fresh parameter is `param$1`.
+        let (f, param, fresh, g) = (id("f", 1), id("param", 2), id("param", 3), id("g", 10));
+        let mut a = JsArena::new();
+        let callee = var(&mut a, g);
+        let args = [var(&mut a, param), var(&mut a, fresh)];
+        let call = crate::js_ir::build::exp::call(callee, &args, Default::default(), &mut a);
+        let result = ret(&mut a, call);
+        let expansion = fun(&mut a, &[fresh], &[result], false);
+        let result = ret(&mut a, expansion);
+        let f_value = fun(&mut a, &[param], &[result], false);
+        let declare_f = define(&mut a, f, f_value);
+        let names = collect(a, vec![declare_f], vec![f]);
+        assert_eq!((names.get(&param), names.get(&fresh)), ("param", "param$1"));
+    }
+
+    #[test]
     fn a_recursive_inner_function_is_not_free_in_the_function_that_declares_it() {
         // Gap 1 (b): `let f = () => { let g = () => [g]; return [g] }; let g' = 1`.
         // `g` is free in itself and bound in `f`: `f` reserves nothing in
