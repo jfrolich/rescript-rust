@@ -585,7 +585,7 @@ impl State {
             arena,
             idents: input.idents,
             statements: StatementStack::default(),
-            free: FreePool::default(),
+            free: FreePool::with_source_capacity(source_nodes),
             traversal: SourceProbe {
                 work: Vec::with_capacity(source_nodes),
                 values: Vec::with_capacity(source_nodes),

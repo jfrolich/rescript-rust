@@ -407,6 +407,13 @@ enum RealizeWork {
     Cond(NodeId, Cx),
 }
 impl FreePool {
+    /// Deferred expressions and their iterative realization share the source
+    /// occurrence bound; no separate allocation is needed for each expression.
+    pub(super) fn with_source_capacity(nodes: usize) -> Self {
+        Self { nodes: Vec::with_capacity(nodes), work: Vec::with_capacity(nodes),
+            outputs: Vec::with_capacity(nodes), ..Self::default() }
+    }
+
     #[cfg(test)]
     pub(super) fn reserve_repeat(&mut self) {
         self.nodes.reserve(self.nodes.len());
