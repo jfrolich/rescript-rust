@@ -1,0 +1,1 @@
+- Verify the actual cross-module checker identity fixture through segment instantiation and its complete diagnostic snapshot.

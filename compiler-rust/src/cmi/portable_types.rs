@@ -225,6 +225,41 @@ enum PublishedSignature {
     Shared(super::shared_reader::PublishedGraph),
 }
 
+impl PortablePersStruct {
+    /// Read the old frozen unit for the checker bridge. The common source-built
+    /// case borrows its existing graph. A stored unit materializes its graph
+    /// only when this reader explicitly asks, never at registration.
+    pub(crate) fn with_published_graph<R>(
+        self: &Arc<Self>,
+        ctx: &TypeContext,
+        read: impl FnOnce(&super::shared_reader::PublishedGraph) -> R,
+    ) -> Result<R, String> {
+        let decoded = self.decoded.lock().unwrap();
+        if let Some((PublishedSignature::Shared(graph), _)) = decoded.as_ref() {
+            return Ok(read(graph));
+        }
+        drop(decoded);
+        let ps = internalize_pers_struct(self.clone(), ctx);
+        let (graph, _) = signature_builder::build(&ps, ctx, None, &PublicationStamps::new(ctx))
+            .ok_or_else(|| format!("checker bridge cannot freeze published unit {}", self.ps_name))?;
+        Ok(read(&graph))
+    }
+}
+
+#[cfg(test)]
+impl PortablePersStruct {
+    /// O(1) plus `f`: the frozen graph of a unit published as one.
+    pub(crate) fn with_shared_graph<R>(
+        &self,
+        f: impl FnOnce(&super::shared_reader::PublishedGraph) -> R,
+    ) -> Option<R> {
+        match self.decoded.lock().unwrap().as_ref() {
+            Some((PublishedSignature::Shared(graph), _)) => Some(f(graph)),
+            _ => None,
+        }
+    }
+}
+
 impl PublishedSignature {
     fn portable(&self) -> std::borrow::Cow<'_, PortableSignature> {
         match self {
@@ -2162,6 +2197,20 @@ fn shared_pers_struct_at(
         ps_view: Default::default(),
     };
     Some((Arc::new(ps), base))
+}
+
+/// Read a detached checker-bridge publication through the ordinary shared
+/// graph relocation, without serializing a portable intermediate.
+pub(crate) fn import_checker_publication(
+    graph: &mut super::shared_reader::PublishedGraph,
+    unit: &str,
+    ctx: &TypeContext,
+) -> Result<Arc<Signature>, String> {
+    let pool = ctx.thread_store().shared_pool();
+    assert!(std::ptr::eq(graph.names.as_ref(), pool.names_ref()));
+    signature_builder::promote(graph, unit, pool)
+        .map(|published| published.signature)
+        .ok_or_else(|| format!("checker bridge cannot publish rebuilt unit {unit}"))
 }
 
 /// Load a PortablePersStruct for the current compilation.

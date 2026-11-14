@@ -225,6 +225,7 @@ pub struct Template {
 /// Cold ranges read once per instance, not per node. Parameter metadata and
 /// external references are pools separate from the four-byte list slots.
 #[derive(Clone, Copy)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 #[repr(C)]
 pub(crate) struct TemplatePools {
     lists: u32,
