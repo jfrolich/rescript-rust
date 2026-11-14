@@ -127,7 +127,7 @@ rg -n 'is_pure_primitive_with_properties' compiler-rust/src/bir
 Build reference artifacts using the commands in `BACKEND_LOWERING.md` §11 before
 rerunning the file-backed corpus test. A missing artifact is not a skipped case.
 
-## Final validation and measurements
+## Historical validation and measurements (not the default-path gate)
 
 Measured head: `7fbf98419` (functional code `0e696cbf0`; subsequent changes are
 reports only). Control: integrated trunk snapshot `be1b3a482`. Both use release
@@ -468,3 +468,130 @@ Compiler/rewatch builds and strict compiler clippy pass. The JS, stdlib, GenType
 and unchanged coverage commands above also pass on the merged candidate. Older
 instruction/wall-time measurements remain tied to their explicitly named head;
 they do not measure this new merge or attribute upstream changes to this audit.
+
+## Default-path regression reproduction at a42524ae0e
+
+The CI default-path regressions are authoritative. The earlier local negative
+result above does not establish that this PR is free of default-path cost. This
+new reproduction uses base `7ba19b2a63916ae28741c1ccb7f3720edc68e81a` (the merge
+base with trunk), head `a42524ae0e`, fat LTO and one codegen unit, with the same
+base corpus at equal-depth, equal-length `base`/`head` paths. Heavy builds and
+measurements run sequentially; no backend environment variable is set.
+
+Build each archived revision, one at a time, with:
+
+```sh
+CARGO_INCREMENTAL=0 CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 cargo build --release --locked --manifest-path rewatch/Cargo.toml
+```
+
+Both archives use `yarn install --immutable`; their `tests/tests` and
+`tests/dependencies` trees are identical. Preserve the resulting executables as
+`temp/default-audit/bin/base` and `temp/default-audit/bin/head`.
+
+```sh
+env -u RESCRIPT_BACKEND python3 scripts/compare_build_instructions.py \
+  --base temp/default-audit/bin/base temp/default-audit/base \
+  --head temp/default-audit/bin/head temp/default-audit/head \
+  --runs 5 --sequential --threshold 0.02 --work-dir temp/default-audit/initial
+```
+
+Raw output (each row is base then head):
+
+```text
+run 1: base 4,037,079,330  head 4,038,088,190
+run 2: base 4,034,549,049  head 4,037,503,269
+run 3: base 4,033,861,338  head 4,037,472,100
+run 4: base 4,034,129,439  head 4,037,183,445
+run 5: base 4,035,266,750  head 4,037,791,277
+| base | 4,033,861,338 | 4,037.1, 4,034.5, 4,033.9, 4,034.1, 4,035.3 | 743 |
+| head | 4,037,183,445 | 4,038.1, 4,037.5, 4,037.5, 4,037.2, 4,037.8 | 743 |
+| change | +3,322,107 (+0.082%) | | |
+```
+
+### Callgrind attribution before changing code
+
+One clean build per binary, one worker, default backend. For each side:
+
+```sh
+SIDE=base # then head
+EXE="$PWD/temp/default-audit/bin/$SIDE"
+CORPUS="$PWD/temp/default-audit/$SIDE"
+env -u RESCRIPT_BACKEND RAYON_NUM_THREADS=1 RESCRIPT_RUNTIME="$CORPUS/packages/@rescript/runtime" "$EXE" clean "$CORPUS/tests/tests"
+env -u RESCRIPT_BACKEND RAYON_NUM_THREADS=1 RESCRIPT_RUNTIME="$CORPUS/packages/@rescript/runtime" \
+  valgrind --tool=callgrind --cache-sim=no --callgrind-out-file="temp/default-audit/callgrind/$SIDE.out" \
+  "$EXE" build "$CORPUS/tests/tests"
+callgrind_annotate --inclusive=yes --show-percs=no --auto=no --threshold=100 "temp/default-audit/callgrind/$SIDE.out"
+```
+
+Raw totals: base `I refs: 4,030,611,688`; head `I refs: 4,033,057,860`.
+The callgrind pair differs by **2,446,172**. The separate cachegrind minima
+differ by **3,322,107**: the additional **875,935** is an unexplained
+measurement/tool/run difference, not assigned to a source change.
+
+Inclusive rows below are deliberately **not additive**: parent entries include
+callee entries. LTO inlines several requested functions, so a missing separate
+frame is not reported as zero work. The adjacent disjoint ledger uses exclusive
+instructions and reconciles the callgrind difference exactly.
+
+| Inclusive entry | Base | Head | Delta / limitation |
+| --- | ---: | ---: | --- |
+| `Sw::untagged_plan` (emitter entry, including plan) | 2,621,287 | 3,503,821 | +882,534 |
+| `LamArena::decide_switch` (constant entry, including plan/select) | 1,311,537 | 2,050,343 | +738,806 |
+| `untagged_plan_with` / `plan` | inlined into callers | 3,571,230 | Not separately comparable |
+| `reserve_layout` | absent | 1,300,438 | Added; 403 calls |
+| `reserve_literals`, `reserve_kinds` | absent | inlined into plan entry | Not separately recoverable |
+| `FactPool::import` | absent | 425,073 | Includes metadata imports |
+| `FactPool::reserve` | absent | 76,897 | Added |
+| `Metadata::import_literal` | absent | 340,273 | Includes interning/key encoding |
+| `Metadata::import_kind` | absent | 134,122 | Includes name interning |
+| `Metadata::intern` | absent | 216,850 | Includes AVL insertion |
+| AVL insert and rotate entries | absent | 142,157 | Nested entries, not additive |
+| Payload graph construction | 1,101,081 | 395,859 | -705,222 |
+| Simplification entries | 476,705 | 207,509 | -269,196 |
+| `select` / `select_tree` emitted entries | 547,418 | inlined into callers | Not separately comparable |
+| `lam_compile_variant` emitted symbols | 440 | inlined into compile_expr | Not separately comparable |
+| `Plan::test` | inlined | 27,646 | Includes lazy materialization |
+| Instance cell initialization | absent | 14,347 | Included in Plan::test |
+| Float parsing | 73,698 | 71,593 | -2,105 |
+| Hex/number key | 531,453 | 225,119 | -306,334; hex formatting is inlined |
+| Bigint parser entries | 98,047 | 80,471 | -17,576 |
+| Literal value key entry | 1,223,664 | 971,331 | -252,333 |
+| String escape decoder outer entry | 10,001,689 | 10,272,252 | +270,563 |
+| String escape encoder outer entry | 1,484,536 | 1,514,214 | +29,678 |
+| Semantic normalization | 400,260 | 400,260 | 0 |
+| Identifier conversion | 14,095,804 | 13,803,746 | -292,058 |
+| Identifier append helper | inlined | 620,140 | Nested in conversion; not an added total |
+| Primitive purity entry | 1,231,982 | 1,231,387 | -595 |
+| `mi_malloc_aligned` | 212,424,129 | 212,452,916 | +28,787 |
+| `mi_realloc_aligned` | 117,147,876 | 117,226,743 | +78,867 |
+| `mi_free` | 89,188,343 | 89,439,647 | +251,304 |
+| memcpy entries | 192,571,086 | 192,796,784 | +225,698 |
+| memset entries | 16,362,356 | 16,368,297 | +5,941 |
+
+The planner reserve entry accounts for a substantial directly measured cost;
+the metadata and encoder rows show additional work, not a license to attribute
+all allocator changes to those callers.
+
+| Disjoint exclusive bucket | Base | Head | Delta |
+| --- | ---: | ---: | ---: |
+| Planner symbols, including monomorphized helper names | 1,074,694 | 1,981,382 | +906,688 |
+| Rust allocation plumbing | 70,076,535 | 70,794,022 | +717,487 |
+| Allocator internals | 350,247,213 | 350,645,794 | +398,581 |
+| compile_expr symbols (including inlined work) | 10,436,996 | 10,802,996 | +366,000 |
+| string_literal symbols | 11,014,336 | 11,307,279 | +292,943 |
+| Memory operations | 208,933,552 | 209,165,191 | +231,639 |
+| Literal keys | 122,600 | 178,232 | +55,632 |
+| Primitive purity | 99,924 | 99,567 | -357 |
+| Float/hex helpers | 37,890 | 35,602 | -2,288 |
+| Bigint parser | 49,147 | 46,164 | -2,983 |
+| Identifier conversion helpers | 9,803,872 | 9,117,594 | -686,278 |
+| Other/unexplained exclusive instructions | 3,368,714,929 | 3,368,884,037 | +169,108 |
+| **Total** | **4,030,611,688** | **4,033,057,860** | **+2,446,172** |
+
+Each function's own cost is its non-call cost lines in the callgrind file; a
+`calls=` line marks the next cost line as an inclusive call edge, excluded from
+this ledger. Group precedence is planner, strings, floats, bigint, literal keys,
+printer conversion, purity, allocator, memory operations, Rust allocation
+plumbing, compile_expr, then residual. Summing own costs reproduces each summary.
+The unexplained residual within this pair is below the requested tolerance;
+it is not concealed by summing overlapping inclusive entries.
