@@ -303,7 +303,7 @@ impl Checker {
     /// it writes a level (decision 6 of "R3 as designed"): in
     /// `Mode::Explain` outside a speculation whose owner restores.
     #[inline]
-    fn occur_first(&self) -> bool {
+    pub(super) fn occur_first(&self) -> bool {
         let own = usize::from(self.g.mode == Mode::Explain && self.depth > 0);
         self.g.mode == Mode::Explain && self.g.speculation_depth <= own
     }
