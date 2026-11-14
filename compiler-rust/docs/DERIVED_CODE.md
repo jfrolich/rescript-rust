@@ -779,8 +779,7 @@ application with its runtime; sum the JSONL `value_schemes` pair in
 `[non_generic, generic]` order. Thus this corpus offers no root-level
 non-generic instance-copy shortcut. The observation belongs to the census
 observer only, is erased for `Steps = ()`, and changes no inference operation.
- These
-are children of the Value total, not additional costs. The first two perform
+These are children of the Value total, not additional costs. The first two perform
 required inference work; no lookup, instance, usage mark or unification was
 removed to improve a measurement.
 
@@ -794,6 +793,12 @@ the two-field total and dividing by 9,998 gives the marginal inclusive cost:
 | Constructor | 63,241.52 |
 | Label | 61,593.54 |
 | Type | 4,820.99 |
+
+Per-variant-constructor inclusive instruction attribution: **not measured**.
+The constructor row above is a per-record-field marginal cost, not a cost per
+variant constructor. Collect the two warmed record builds with the same
+Callgrind wrapper command, annotate with `callgrind_annotate --inclusive=yes`,
+and compute each arm's `(instructions_10000 - instructions_2) / 9998`.
 
 The existing constructor-description sharing change removes repeated metadata
 copies without skipping any inference operations; its isolated measurement
@@ -821,7 +826,8 @@ The frontend lazily computes dense prefix flags at the first mapped item that
 derives (scanning each preceding item at most once), despite its reverse schedule;
 nested modules inherit the flag and keep their local additions within their
 own scope. Encoder-only groups remain eligible for plans. This handles direct
-local variant declarations, not arbitrary constructor exports from an `open`
+local variant declarations, exceptions and type extensions, not arbitrary
+constructor exports from an `open`
 or an external module; any obligation failure outside the covered form remains
 visible rather than being guessed away.
 
@@ -831,7 +837,7 @@ rescript build`, run from the application with its runtime): 6,534 plans,
 the 21 retry bindings in two units; no binding remains to name as a retry.
 Spice and application check-mode builds finish successfully. The original
 constructor-shadow diagnostic and a new nested-scope diagnostic agree in all
-three modes; all 17 diagnostic fixtures pass without changing old expectations.
+three modes; all 19 diagnostic fixtures pass without changing old expectations.
 
 
 #### Census-off instruction gate: CI release profile
@@ -847,11 +853,24 @@ The workflow builds each revision with
 and runs `python3 scripts/compare_build_instructions.py --base <base-binary>
 <base-checkout> --head <head-binary> <head-checkout>` (five runs by default).
 
-For a unit with no derives, `binary_ast/ppx.rs:9695` uses the existing mapper
-presence scan to select `rewrite_structure_scoped::<false>`: one new O(1)
-dispatch, no constructor-scope traversal, no prefix allocation, no JSON identity
-classification. The disabled const-generic branch erases per-item scope work.
-The expansion entry point no longer rescans constructors unconditionally.
+A unit with no derives still executes these additions over trunk:
+
+- `binary_ast/ppx.rs:9695`: retain the first-presence result and dispatch once
+  to `rewrite_structure_scoped::<false>` (O(1) beyond the existing scan).
+- `binary_ast/ppx.rs:9812`: initialize `result_prefix = None` (O(1), no allocation).
+- `binary_ast/ppx.rs:10474`: probe the optional census per rewritten structure
+  item; when disabled, no general-group lookup runs.
+- `binary_ast/spice_ppx.rs:5632`: probe the optional census per type declaration
+  when the builtin derive mapper is enabled; when disabled, no shape walk runs.
+
+Constant empty scope arguments are also passed through the expansion seam.
+There is no constructor/alias prefix traversal, buffer allocation or JSON-identity
+classification in the no-derive specialization. This is zero **scope** work,
+not a claim of zero total added work. The derive-seam census probe itself
+predates this slice. CI for reviewed head `d306a20b68` measured base
+4,050,478,354 versus head 4,049,915,981 (**-0.014%**) using the command above:
+https://github.com/jfrolich/rescript-rust/actions/runs/43543824916/job/132292186553.
+The final correction-head result is tracked separately in the PR body.
 `ten_thousand_items_without_derives_do_no_result_scope_work` asserts zero scope
 steps and no prefix allocation; `result_scope_is_lazy_and_scans_the_prefix_once`
 checks lazy activation and reuse. Run both with

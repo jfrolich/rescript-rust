@@ -879,33 +879,42 @@ Checks to paste: the same list as slice 2, plus a fixture (with and without
 codecs, asserting no unused-constructor warning in either mode.
 ```
 
-### Slice 3b as built (in progress)
+### Slice 3b as built
 
-The census now separates successful planned binding typechecking and conversion
-from general bindings, counts the first unsupported form with a closed enum, and
-reports general body-node counts and exclusive checker time by effective group
-reason. Reasons are stored only with the census, in a dense table indexed by the
-parse value-list handle and transferred through frontend rewrites. Retry events
-record the last obligation kind and expected owner shape without double-counting
-completed bindings. They do not yet identify the resolved conflicting type.
+The census separates successful planned typechecking/conversion from general
+bindings, reports a closed unsupported-form census and inclusive costs for all
+six obligation kinds. General group reasons use dense parse-value-list tables.
+Retry events identify the last obligation and expected owner, not the resolved
+conflicting type; the retry remains the safety net.
 
-The dated application and Spice summaries are in `DERIVED_CODE.md`. All 136
-application `not_yet_planned` bindings stop at JSON identity codecs. Both retried
-application units last visit a result-constructor obligation. User expressions
-remain general by Q5.
+JSON identity plans remove the application's 136 formerly unplanned bindings.
+The final application census is 6,534 plans, 21 upfront
+`shadowed_result_constructor`, zero `failed_obligation` and zero
+`json_identity_argument`. Local JSON aliases are resolved syntactically in the
+same lazy prefix scan; the unchanged oracle fixture covers direct and nested
+containers, alias uses, records and variants. Exposed encoder applications whose
+sharing differs take the named general reason before planning. No linking-only
+inference or application-callee lowering is retained.
 
-Constructor descriptions for unqualified names are stored once per name per
-binding, with a dense string-handle table and binding epochs. All ordered lookups,
-usage marking, instantiation and unification remain. The isolated application
-instruction change is −0.0302945%; generated output, signatures and diagnostics
-match. A 10,000-field record retains seven descriptions rather than one clone per
-constructor obligation.
+Constructor descriptions use a dense name table keyed by binding epoch and
+`Owner`, owned by a fresh typed arena per unit. All lookups, usage marks,
+instantiation and unification remain. The isolated sharing experiment saved
+0.0302945%; a 10,000-field record retains seven descriptions. Inclusive profile
+and measured marginal per-field costs are in `DERIVED_CODE.md`; marginal
+per-variant-constructor instruction attribution was **not measured**.
 
-Still required before this slice is complete: inclusive instruction attribution
-by obligation kind and per field/constructor; the census-disabled +0.02% gate
-against trunk; planning JSON identity codecs; upfront classification eliminating
-the two application retries with fixtures; final census and instruction comparison.
-The oracle switch is retained.
+Source-prefix scope is lazy and tested on 10,000 distinct derived items,
+10,000 constructors, and 10,000 nested items. The no-derive test exercises the
+real dispatch and observes zero scope work. No-derive units still execute the
+constant-time dispatch, empty prefix initialization, and disabled census probes
+per rewritten item and per type declaration; this is not zero total overhead.
+
+Spice/application check builds and 19 diagnostic fixtures in all three modes
+pass. The census-off gate is CI's fat-LTO, one-codegen-unit comparison; the
+separate local default-16-unit table is not substituted for it. The reviewed
+`d306a20b68` CI comparison was -0.014%; subsequent correction-head CI is reported
+in the PR body rather than claimed from this historical measurement.
+`RESCRIPT_DERIVED_PATH` and the oracle remain; slice 4 is held below.
 
 ### Slice 4. Remove the switch
 
@@ -925,7 +934,10 @@ The oracle switch is retained.
 Polymorphic variants, tuples, `@spice.serde`, custom codecs and parameterised
 types are not sliced. Each needs a census first that shows its share.
 
-## Risks and what was not measured
+## Risks and what was not measured in the original projection
+
+The following are historical limits of the initial projection, not the status
+of the implemented slices described above.
 
 - **Nothing was prototyped.** Every removal fraction is extrapolated. The
   type-checking range rests on counter ratios from `tests/ppx_spice`, whose mix
