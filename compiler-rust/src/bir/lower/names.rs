@@ -406,4 +406,642 @@ mod tests {
         assert_eq!(program.imports.len() + program.reservations.len() + program.exports.len() + program.raw.len(), 0);
         assert_eq!(Replayed::default().steps(), 0);
     }
+
+    #[test]
+    #[ignore = "T5b-1 build"]
+    fn a_new_log_has_the_program_row_and_no_home() {
+        let mut log = Log::new(2);
+        assert_eq!(log.rows.len(), 1);
+        assert_eq!((log.home(VarId(0)), log.home(VarId(1))), (ScopeId::NONE, ScopeId::NONE));
+        // A variable created later, bound while no function is open.
+        log.variable();
+        log.bind(VarId(2));
+        assert_eq!(log.home(VarId(2)), ScopeId::PROGRAM);
+        // A function of the source arena has no row to copy.
+        assert_eq!(log.copied(FuncId(0), FuncId(1)), None);
+        assert_eq!(log.steps, 0);
+    }
+
+    use crate::bir::lower::scope::Scope;
+    use crate::bir::{VarSpan, View};
+    use crate::ident::{Ident, IdentFlags};
+    use crate::lambda::LamLoc;
+    use crate::lambda::lam_compat::LetKind;
+
+    /// A lowering arena under construction and its identifier table. The
+    /// arena's hooks feed the log (`Log::variable`, `bind`, `copied`; the
+    /// sites); a test calls `open` and `close` as the lowering does.
+    struct Unit {
+        b: Bir,
+        idents: Vec<Ident>,
+    }
+    impl Unit {
+        fn new() -> Self {
+            let mut b = Bir::default();
+            b.begin_bulk();
+            b.js_scope = Some(Scope::new(0));
+            Self { b, idents: Vec::new() }
+        }
+        /// A variable with order and stamp `index + 1`.
+        fn local(&mut self, name: &str) -> VarId {
+            let stamp = self.idents.len() as u32 + 1;
+            self.idents.push(Ident::new(name, stamp as i32, IdentFlags::NONE));
+            self.b.new_var_id(Name::new(name), stamp)
+        }
+        /// `[vars]`: an expression that reads its operands and is no call.
+        fn read(&mut self, vars: &[VarId]) -> NodeId {
+            let values: Vec<NodeId> = vars.iter().map(|&var| self.b.new_node(View::Var { var }, 0)).collect();
+            self.b.new_node(View::JArray { values: &values }, 0)
+        }
+        fn declare(&mut self, var: VarId, value: NodeId) -> NodeId {
+            self.b.new_node(View::SDecl { var, value: Some(value) }, LetKind::Strict as u16)
+        }
+        fn ret(&mut self, value: NodeId) -> NodeId {
+            self.b.new_node(View::SReturn { value }, 0)
+        }
+        fn effect(&mut self, value: NodeId) -> NodeId {
+            self.b.new_node(View::SExp { value }, 0)
+        }
+        fn block(&mut self, statements: &[NodeId]) -> NodeId {
+            self.b.new_node(View::SBlock { statements }, 0)
+        }
+        /// The header of a function whose parameters are the `len`
+        /// variables from `first`.
+        fn header(&mut self, first: Option<VarId>, len: u32) -> FuncId {
+            let params = VarSpan { start: first.map_or(0, |var| var.0), len };
+            self.b.function_header(params, Default::default(), LamLoc::NONE)
+        }
+        /// The literal over `statements`, closed.
+        fn function(&mut self, header: FuncId, statements: &[NodeId]) -> (NodeId, ScopeId) {
+            let body = self.block(statements);
+            let function = self.b.new_node(View::JFun { body, header }, 0);
+            (function, close(&mut self.b, header))
+        }
+        fn log(&self) -> &Log {
+            &self.b.js_scope.as_ref().unwrap().names
+        }
+        fn log_mut(&mut self) -> &mut Log {
+            &mut self.b.js_scope.as_mut().unwrap().names
+        }
+        fn free(&self, scope: ScopeId) -> Vec<FreeRef> {
+            self.log().free(scope).to_vec()
+        }
+        fn flags(&self, scope: ScopeId) -> u32 {
+            self.log().rows[scope.0 as usize].flags
+        }
+        /// The names of the unit whose top-level statements are
+        /// `statements`, with `raw` as the program's raw JavaScript names,
+        /// by variable; and what the replay did.
+        fn names(&mut self, statements: &[NodeId], raw: &[&str]) -> (Vec<Option<String>>, Replayed) {
+            let root = self.block(statements);
+            let raw: Vec<Name> = raw.iter().map(|name| Name::new(name)).collect();
+            let program = Program { imports: &[], reservations: &[], exports: &[], raw: &raw };
+            let mut printed = Printed::default();
+            let replayed = replay(&self.b, root, &self.idents, &program, &mut Tables::default(), &mut Scratch::default(), &mut printed);
+            (printed.names.iter().map(|name| name.map(|name| name.to_string())).collect(), replayed)
+        }
+    }
+    fn name(names: &[Option<String>], var: VarId) -> Option<&str> {
+        names[var.index()].as_deref()
+    }
+
+    /// `let f = p => { let v = [p]; let g = () => { let v' = [captured]; return [v'] }; return [g] }`
+    /// (`emit::naming`, `nested`): the unit, its top-level statement, `f`'s
+    /// and `g`'s rows, and `v`, `v'`.
+    fn nested(capture_outer_local: bool) -> (Unit, NodeId, [ScopeId; 2], [VarId; 2]) {
+        let mut u = Unit::new();
+        let (f, p, v, g, inner) = (u.local("f"), u.local("p"), u.local("v"), u.local("g"), u.local("v"));
+        let outer_header = u.header(Some(p), 1);
+        open(&mut u.b);
+        let value = u.read(&[p]);
+        let declare_v = u.declare(v, value);
+        let inner_header = u.header(None, 0);
+        open(&mut u.b);
+        let captured = u.read(&[if capture_outer_local { v } else { p }]);
+        let declare_inner = u.declare(inner, captured);
+        let result = u.read(&[inner]);
+        let result = u.ret(result);
+        let (g_value, g_scope) = u.function(inner_header, &[declare_inner, result]);
+        let declare_g = u.declare(g, g_value);
+        let result = u.read(&[g]);
+        let result = u.ret(result);
+        let (f_value, f_scope) = u.function(outer_header, &[declare_v, declare_g, result]);
+        let declare_f = u.declare(f, f_value);
+        (u, declare_f, [f_scope, g_scope], [v, inner])
+    }
+
+    #[test]
+    #[ignore = "T5b-1 build"]
+    fn a_function_nested_in_a_function_captures_a_local_of_the_outer_one() {
+        // Gap 1 (a). The sites of `g` are read at `g`'s close, whatever the
+        // enclosing function saw before.
+        let (u, _, [f, g], [v, inner]) = nested(true);
+        assert_eq!(u.free(g), [FreeRef::var(v)]);
+        assert_eq!(u.free(f), []);
+        assert_eq!((u.log().home(v), u.log().home(inner)), (f, g));
+        let (u, _, [f, g], _) = nested(false);
+        // `p` is a parameter of `f`: free in `g`, bound in `f`.
+        assert_eq!(u.free(g), [FreeRef::var(VarId(1))]);
+        assert_eq!(u.free(f), []);
+    }
+
+    #[test]
+    #[ignore = "T5b-1 build"]
+    fn a_function_that_returns_no_call_is_closed_and_not_eta() {
+        let (u, statement, [f, g], _) = nested(true);
+        let View::SDecl { value: Some(function), .. } = u.b.view(statement) else { unreachable!() };
+        assert!(!eta_shape(&u.b, function));
+        for scope in [f, g] {
+            assert_eq!(u.flags(scope) & (ScopeRow::CLOSED | ScopeRow::ETA), ScopeRow::CLOSED);
+        }
+    }
+
+    #[test]
+    #[ignore = "T5b-3 build"]
+    fn the_free_lists_of_a_unit_are_listed_by_row() {
+        // `f` (nothing free), then `g` (`v`).
+        let (u, _, _, [v, _]) = nested(true);
+        let lists = free_lists(&u.b, &u.idents);
+        assert_eq!(lists.idents, [u.idents[v.index()]]);
+        assert_eq!(lists.ends, [0, 1]);
+    }
+
+    #[test]
+    #[ignore = "T5b-2 build"]
+    fn a_function_nested_in_a_function_inherits_the_names_of_the_outer_local_it_captures() {
+        let (mut u, statement, _, [v, inner]) = nested(true);
+        let (names, replayed) = u.names(&[statement], &[]);
+        assert_eq!((name(&names, v), name(&names, inner)), (Some("v"), Some("v$1")));
+        assert_eq!((replayed.ambiguous_orders, replayed.unnamed_references), (0, 0));
+        let (mut u, statement, _, [v, inner]) = nested(false);
+        let (names, _) = u.names(&[statement], &[]);
+        assert_eq!((name(&names, v), name(&names, inner)), (Some("v"), Some("v")));
+    }
+
+    /// `let f = () => { let g = () => [g]; return [g] }; let g' = 1`: the
+    /// unit, its two statements, the rows of `f` and `g`, and `g`, `g'`.
+    fn recursive() -> (Unit, [NodeId; 2], [ScopeId; 2], [VarId; 2]) {
+        let mut u = Unit::new();
+        let (f, g, top) = (u.local("f"), u.local("g"), u.local("g"));
+        let outer_header = u.header(None, 0);
+        open(&mut u.b);
+        let inner_header = u.header(None, 0);
+        open(&mut u.b);
+        let itself = u.read(&[g]);
+        let itself = u.ret(itself);
+        let (g_value, g_scope) = u.function(inner_header, &[itself]);
+        let declare_g = u.declare(g, g_value);
+        let result = u.read(&[g]);
+        let result = u.ret(result);
+        let (f_value, f_scope) = u.function(outer_header, &[declare_g, result]);
+        let declare_f = u.declare(f, f_value);
+        let one = u.b.new_node(View::JNull, 0);
+        let declare_top = u.declare(top, one);
+        (u, [declare_f, declare_top], [f_scope, g_scope], [g, top])
+    }
+
+    #[test]
+    #[ignore = "T5b-1 build"]
+    fn a_recursive_inner_function_is_free_in_itself_and_bound_where_it_is_declared() {
+        // Gap 1 (b): the home of `g` is written when its declaration is,
+        // after `g`'s own scope closed, and belongs to `f` alone.
+        let (u, _, [f, g_scope], [g, top]) = recursive();
+        assert_eq!(u.free(g_scope), [FreeRef::var(g)]);
+        assert_eq!(u.free(f), []);
+        assert_eq!((u.log().home(g), u.log().home(top)), (f, ScopeId::PROGRAM));
+    }
+
+    #[test]
+    #[ignore = "T5b-2 build"]
+    fn a_recursive_inner_function_reserves_nothing_in_the_program() {
+        let (mut u, statements, _, [g, top]) = recursive();
+        let (names, _) = u.names(&statements, &[]);
+        assert_eq!((name(&names, g), name(&names, top)), (Some("g"), Some("g")));
+    }
+
+    #[test]
+    #[ignore = "T5b-1 build"]
+    fn a_reference_released_before_the_close_is_not_free() {
+        // Section 2: a capture the constructors fold away. `x` is read in
+        // the function and the read is released before the close; `y` is
+        // read twice and one read is released.
+        let mut u = Unit::new();
+        let (x, y) = (u.local("x"), u.local("y"));
+        let header = u.header(None, 0);
+        open(&mut u.b);
+        let folded = u.read(&[x, y]);
+        u.b.release(folded);
+        let kept = u.read(&[y]);
+        let kept = u.ret(kept);
+        let (_, scope) = u.function(header, &[kept]);
+        assert_eq!(u.free(scope), [FreeRef::var(y)]);
+    }
+
+    #[test]
+    #[ignore = "T5b-1 build"]
+    fn the_this_of_a_method_is_recorded_as_read_only_when_the_body_reads_it() {
+        // Gap 3.
+        for used in [false, true] {
+            let mut u = Unit::new();
+            let (this, x) = (u.local("o"), u.local("x"));
+            let header = u.b.method_header(VarSpan { start: this.0, len: 2 }, Default::default(), LamLoc::NONE);
+            open(&mut u.b);
+            let result = u.read(&[if used { this } else { x }]);
+            let result = u.ret(result);
+            let (_, scope) = u.function(header, &[result]);
+            assert_eq!(u.flags(scope) & ScopeRow::THIS_USED != 0, used);
+            assert_eq!(u.free(scope), []);
+        }
+    }
+
+    #[test]
+    #[ignore = "T5b-2 build"]
+    fn the_this_of_a_method_is_named_only_when_the_body_reads_it() {
+        for used in [false, true] {
+            let mut u = Unit::new();
+            let (m, this, x) = (u.local("m"), u.local("o"), u.local("x"));
+            let header = u.b.method_header(VarSpan { start: this.0, len: 2 }, Default::default(), LamLoc::NONE);
+            open(&mut u.b);
+            let result = u.read(&[if used { this } else { x }]);
+            let result = u.ret(result);
+            let (value, _) = u.function(header, &[result]);
+            let declare = u.declare(m, value);
+            let (names, _) = u.names(&[declare], &[]);
+            assert_eq!(name(&names, this), used.then_some("o"));
+            assert_eq!(name(&names, x), Some("x"));
+        }
+    }
+
+    #[test]
+    #[ignore = "T5b-1 build"]
+    fn a_header_replaced_after_the_body_is_the_header_of_the_row() {
+        // Gap 2 (`one_unit_arg`, `finish_expression`): the body is built
+        // under the header with the unit parameter, the literal with a new
+        // header without parameters.
+        let mut u = Unit::new();
+        let unit = u.local("param");
+        let first = u.header(Some(unit), 1);
+        open(&mut u.b);
+        let null = u.b.new_node(View::JNull, 0);
+        let result = u.ret(null);
+        let replacement = u.header(None, 0);
+        let (_, scope) = u.function(replacement, &[result]);
+        assert_eq!(u.log().rows[scope.0 as usize].function, replacement);
+        assert_eq!((u.log().scope(replacement), u.log().scope(first)), (Some(scope), None));
+        // The dropped parameter is bound nowhere and gets no name.
+        assert_eq!(u.log().home(unit), ScopeId::NONE);
+    }
+
+    #[test]
+    #[ignore = "T5b-1 build"]
+    fn the_aliases_of_a_tail_call_loop_are_bound_in_their_function() {
+        // Gap 2 (`loop_function_body`): after the body was lowered the
+        // header's parameter becomes the copy `_x`, and `let x = _x` is
+        // written in front of the body. Both belong to the function: the
+        // declaration by its binder, the copy as a parameter at the close.
+        let mut u = Unit::new();
+        let x = u.local("x");
+        open(&mut u.b);
+        let result = u.read(&[x]);
+        let result = u.ret(result);
+        let copy = u.local("_x");
+        let header = u.header(Some(copy), 1);
+        let alias = u.b.new_node(View::Var { var: copy }, 0);
+        let alias = u.declare(x, alias);
+        let (_, scope) = u.function(header, &[alias, result]);
+        assert_eq!((u.log().home(x), u.log().home(copy)), (scope, scope));
+        assert_eq!(u.free(scope), []);
+    }
+
+    #[test]
+    #[ignore = "T5b-2 build"]
+    fn a_statement_is_named_where_it_stands_at_the_end() {
+        // Gap 2 and section 2's second hard example: two declarations of
+        // one base, built first then second. Names follow the final list,
+        // not the order of construction; a statement in no list names
+        // nothing.
+        let build = || {
+            let mut u = Unit::new();
+            let (first, second) = (u.local("x"), u.local("x"));
+            let (a, b) = (u.b.new_node(View::JNull, 0), u.b.new_node(View::JNull, 0));
+            let statements = [u.declare(first, a), u.declare(second, b)];
+            (u, statements, [first, second])
+        };
+        let (mut u, [one, two], [first, second]) = build();
+        let (names, replayed) = u.names(&[one, two], &[]);
+        assert_eq!((name(&names, first), name(&names, second)), (Some("x"), Some("x$1")));
+        assert_eq!(replayed.statements, 2);
+        let (mut u, [one, two], [first, second]) = build();
+        let (names, _) = u.names(&[two, one], &[]);
+        assert_eq!((name(&names, first), name(&names, second)), (Some("x$1"), Some("x")));
+        let (mut u, [one, two], [first, second]) = build();
+        u.b.release(one);
+        let (names, replayed) = u.names(&[two], &[]);
+        assert_eq!((name(&names, first), name(&names, second)), (None, Some("x")));
+        assert_eq!(replayed.statements, 1);
+    }
+
+    #[test]
+    #[ignore = "T5b-2 build"]
+    fn a_local_takes_the_name_of_an_outer_variable_the_function_does_not_capture() {
+        // Section 2, first hard example:
+        // `let y = null; let k = a => { let y' = [a]; return [y'] };
+        //  let k2 = a => { let y'' = [a, y]; return [y''] }`.
+        let mut u = Unit::new();
+        let (y, k, a, y1, k2, a2, y2) = (u.local("y"), u.local("k"), u.local("a"), u.local("y"), u.local("k2"), u.local("a"), u.local("y"));
+        let null = u.b.new_node(View::JNull, 0);
+        let declare_y = u.declare(y, null);
+        let mut statements = vec![declare_y];
+        for (binder, param, local, captures) in [(k, a, y1, false), (k2, a2, y2, true)] {
+            let header = u.header(Some(param), 1);
+            open(&mut u.b);
+            let value = if captures { u.read(&[param, y]) } else { u.read(&[param]) };
+            let declare = u.declare(local, value);
+            let result = u.read(&[local]);
+            let result = u.ret(result);
+            let (value, _) = u.function(header, &[declare, result]);
+            statements.push(u.declare(binder, value));
+        }
+        let (names, _) = u.names(&statements, &[]);
+        assert_eq!((name(&names, y), name(&names, y1), name(&names, y2)), (Some("y"), Some("y"), Some("y$1")));
+        assert_eq!((name(&names, a), name(&names, a2)), (Some("a"), Some("a")));
+    }
+
+    /// `[() => [left], () => [right]]; let a = null; let a' = null`, where
+    /// the literals capture the two `a`s declared after them. Returns the
+    /// names of `left` and `right` and what the replay did.
+    fn two_literals(swapped: bool) -> ([Option<String>; 2], Replayed) {
+        let mut u = Unit::new();
+        let (first, second) = (u.local("a"), u.local("a"));
+        let (left, right) = if swapped { (first, second) } else { (second, first) };
+        let mut literals = Vec::new();
+        for captured in [left, right] {
+            let header = u.header(None, 0);
+            open(&mut u.b);
+            let body = u.read(&[captured]);
+            let body = u.ret(body);
+            literals.push(u.function(header, &[body]).0);
+        }
+        let both = u.b.new_node(View::JArray { values: &literals }, 0);
+        let effect = u.effect(both);
+        let (a, b) = (u.b.new_node(View::JNull, 0), u.b.new_node(View::JNull, 0));
+        let statements = [effect, u.declare(first, a), u.declare(second, b)];
+        let (names, replayed) = u.names(&statements, &[]);
+        ([names[left.index()].clone(), names[right.index()].clone()], replayed)
+    }
+
+    #[test]
+    #[ignore = "T5b-2 build"]
+    fn two_function_literals_of_one_statement_are_replayed_in_closing_order_and_counted() {
+        // The literal that closed first names its variable `a` (the pass:
+        // the literal printed first, `emit::naming`,
+        // `two_function_literals_of_one_statement_name_what_they_capture_in_print_order`).
+        // Both reservations name a variable for the first time in a
+        // statement with two literals: both are counted, so a unit where
+        // closing order and print order could differ is visible.
+        for swapped in [false, true] {
+            let (names, replayed) = two_literals(swapped);
+            assert_eq!(names, [Some("a".to_string()), Some("a$1".to_string())]);
+            assert_eq!(replayed.ambiguous_orders, 2);
+        }
+    }
+
+    #[test]
+    #[ignore = "T5b-2 build"]
+    fn two_variables_first_named_by_one_reservation_are_named_in_order() {
+        // Section 2, third hard example: `let f = () => [v', v]; let v =
+        // null; let v' = null`. The reservation of `f` names both, in
+        // `Ident`'s order, whatever the order of the reads.
+        let mut u = Unit::new();
+        let (v, later, f) = (u.local("v"), u.local("v"), u.local("f"));
+        let header = u.header(None, 0);
+        open(&mut u.b);
+        let body = u.read(&[later, v]);
+        let body = u.ret(body);
+        let (value, scope) = u.function(header, &[body]);
+        assert_eq!(u.free(scope), [FreeRef::var(v), FreeRef::var(later)]);
+        let (a, b) = (u.b.new_node(View::JNull, 0), u.b.new_node(View::JNull, 0));
+        let statements = [u.declare(f, value), u.declare(v, a), u.declare(later, b)];
+        let (names, replayed) = u.names(&statements, &[]);
+        assert_eq!((name(&names, v), name(&names, later), name(&names, f)), (Some("v"), Some("v$1"), Some("f")));
+        // One literal in the statement: its order is not in question.
+        assert_eq!(replayed.ambiguous_orders, 0);
+    }
+
+    #[test]
+    #[ignore = "T5b-2 build"]
+    fn a_suffix_skips_a_raw_javascript_name_of_the_program() {
+        // Gap 3.
+        let mut u = Unit::new();
+        let (first, second) = (u.local("x"), u.local("x"));
+        let (a, b) = (u.b.new_node(View::JNull, 0), u.b.new_node(View::JNull, 0));
+        let statements = [u.declare(first, a), u.declare(second, b)];
+        let (names, _) = u.names(&statements, &["x$1"]);
+        assert_eq!((name(&names, first), name(&names, second)), (Some("x"), Some("x$2")));
+    }
+
+    #[test]
+    #[ignore = "T5b-1 build"]
+    fn a_copied_function_gets_a_row_that_shares_the_free_list_of_its_source() {
+        // (c): `copy_j` copies a closed literal. The copy's header is new;
+        // its row shares the run and is marked, and the source's row stays.
+        let mut u = Unit::new();
+        let x = u.local("x");
+        let header = u.header(None, 0);
+        open(&mut u.b);
+        let body = u.read(&[x]);
+        let body = u.ret(body);
+        let (function, scope) = u.function(header, &[body]);
+        let rows = u.log().rows.len();
+        let copy = crate::bir::j::logic::copy_j(&mut u.b, function);
+        let View::JFun { header: copied, .. } = u.b.view(copy) else { unreachable!() };
+        assert_ne!(copied, header);
+        let copy_scope = u.log().scope(copied).expect("the copy has a row");
+        assert_eq!(u.log().rows.len(), rows + 1);
+        assert_eq!(u.free(copy_scope), [FreeRef::var(x)]);
+        assert_eq!(u.flags(copy_scope) & ScopeRow::COPY, ScopeRow::COPY);
+        assert_eq!(u.flags(scope) & ScopeRow::COPY, 0);
+        let (source, copied) = (u.log().rows[scope.0 as usize], u.log().rows[copy_scope.0 as usize]);
+        assert_eq!((source.free_start, source.free_len), (copied.free_start, copied.free_len));
+    }
+
+    #[test]
+    #[ignore = "T5b-1 build"]
+    fn an_imported_module_is_free_in_every_function_around_its_reference() {
+        // The pass counts a module reference as a use (naming.rs
+        // `analyze_expr`, `Qualified`). The hook is called as
+        // `Bir::register_kind` calls it for a `JQualified`.
+        let mut u = Unit::new();
+        let outer = u.header(None, 0);
+        open(&mut u.b);
+        let inner = u.header(None, 0);
+        open(&mut u.b);
+        u.log_mut().import_reference(ImportId(3));
+        u.log_mut().import_reference(ImportId(3));
+        let null = u.b.new_node(View::JNull, 0);
+        let result = u.ret(null);
+        let (value, inner_scope) = u.function(inner, &[result]);
+        let result = u.ret(value);
+        let (_, outer_scope) = u.function(outer, &[result]);
+        assert_eq!(u.free(inner_scope), [FreeRef::import(ImportId(3))]);
+        assert_eq!(u.free(outer_scope), [FreeRef::import(ImportId(3))]);
+    }
+
+    /// The steps of the log for one function with `references` reads of one
+    /// outer variable.
+    fn steps_of_references(references: usize) -> usize {
+        let mut u = Unit::new();
+        let x = u.local("x");
+        let header = u.header(None, 0);
+        open(&mut u.b);
+        let reads = vec![x; references];
+        let body = u.read(&reads);
+        let body = u.ret(body);
+        let (_, scope) = u.function(header, &[body]);
+        assert_eq!(u.free(scope), [FreeRef::var(x)]);
+        u.log().steps
+    }
+
+    #[test]
+    #[ignore = "T5b-1 build"]
+    fn ten_thousand_references_cost_one_step_each_at_the_close() {
+        // No work where a reference is built; one step per site at the
+        // close of the scope it was built in.
+        let (small, large) = (steps_of_references(10_000), steps_of_references(20_000));
+        assert_eq!(large - small, 10_000);
+        assert!(small <= 10_000 + 8, "{small}");
+    }
+
+    /// The steps of the log for `depth` functions nested in one another,
+    /// each reading `direct` times a local of its own, the innermost also
+    /// the outermost variable `x`.
+    fn steps_of_nesting(depth: usize, direct: usize) -> usize {
+        let mut u = Unit::new();
+        let x = u.local("x");
+        let mut locals = Vec::new();
+        let mut headers = Vec::new();
+        for _ in 0..depth {
+            headers.push(u.header(None, 0));
+            open(&mut u.b);
+            locals.push(u.local("v"));
+        }
+        let mut inner: Option<NodeId> = None;
+        for level in (0..depth).rev() {
+            let null = u.b.new_node(View::JNull, 0);
+            let mut statements = vec![u.declare(locals[level], null)];
+            let reads = vec![locals[level]; direct];
+            let value = u.read(&reads);
+            statements.push(u.effect(value));
+            let value = match inner { Some(function) => function, None => u.read(&[x]) };
+            statements.push(u.ret(value));
+            let (function, scope) = u.function(headers[level], &statements);
+            assert_eq!(u.free(scope), [FreeRef::var(x)]);
+            inner = Some(function);
+        }
+        u.log().steps
+    }
+
+    #[test]
+    #[ignore = "T5b-1 build"]
+    fn ten_thousand_nested_functions_read_each_site_at_one_close() {
+        // A site inside a closed function is skipped with that function's
+        // range: one step per child, not one per site of the child. So the
+        // cost per function does not depend on the depth below it, and a
+        // function's own sites cost one step each.
+        let (small, large) = (steps_of_nesting(5_000, 1), steps_of_nesting(10_000, 1));
+        assert!(large <= 2 * small + 8, "{small} -> {large}");
+        assert!(large <= 10_000 * 8, "{large}");
+        let more_sites = steps_of_nesting(10_000, 3);
+        assert_eq!(more_sites - large, 2 * 10_000);
+    }
+
+    /// A unit of `count` declarations `let k = () => { let v = [v0]; return
+    /// [v] }` after `let v0 = null`: every function captures the outer `v`,
+    /// so every local is `v$1`. Returns the unit and its statements.
+    fn functions(count: usize) -> (Unit, Vec<NodeId>) {
+        let mut u = Unit::new();
+        let outer = u.local("v");
+        let null = u.b.new_node(View::JNull, 0);
+        let mut statements = vec![u.declare(outer, null)];
+        for _ in 0..count {
+            let (binder, local) = (u.local("k"), u.local("v"));
+            let header = u.header(None, 0);
+            open(&mut u.b);
+            let value = u.read(&[outer]);
+            let declare = u.declare(local, value);
+            let result = u.read(&[local]);
+            let result = u.ret(result);
+            let (value, _) = u.function(header, &[declare, result]);
+            statements.push(u.declare(binder, value));
+        }
+        (u, statements)
+    }
+
+    #[test]
+    #[ignore = "T5b-2 build"]
+    fn the_replay_is_linear_in_statements_and_rows() {
+        let run = |count: usize| {
+            let (mut u, statements) = functions(count);
+            let (names, replayed) = u.names(&statements, &[]);
+            assert_eq!(name(&names, VarId(2)), Some("v$1"));
+            replayed
+        };
+        let (small, large) = (run(5_000), run(10_000));
+        // Per function: its declaration and the two statements of its body;
+        // one row; the free variable and the binder reserved; one ancestor
+        // (the declaration the literal is the value of).
+        assert_eq!(large.statements - small.statements, 3 * 5_000);
+        assert_eq!(large.scopes - small.scopes, 5_000);
+        assert_eq!(large.reserved - small.reserved, 2 * 5_000);
+        assert_eq!((small.ancestors, large.ancestors), (5_000, 10_000));
+        assert_eq!(large.steps() - small.steps(), 7 * 5_000);
+    }
+
+    #[test]
+    #[ignore = "T5b-2 build"]
+    fn a_warm_replay_of_a_unit_with_functions_allocates_nothing() {
+        // Gap 3: entering a function and assigning a suffixed name in an
+        // inherited group allocate nothing once the tables are warm.
+        let (mut u, statements) = functions(10_000);
+        let root = u.block(&statements);
+        let program = Program { imports: &[], reservations: &[], exports: &[], raw: &[] };
+        let (mut tables, mut scratch, mut printed) = (Tables::default(), Scratch::default(), Printed::default());
+        let first = replay(&u.b, root, &u.idents, &program, &mut tables, &mut scratch, &mut printed);
+        let allocations = allocation_counter::measure(|| {
+            let second = replay(&u.b, root, &u.idents, &program, &mut tables, &mut scratch, &mut printed);
+            assert_eq!(second, first);
+        });
+        assert_eq!(allocations.count_total, 0, "{allocations:?}");
+        assert_eq!(printed.names[2].map(|name| name.to_string()).as_deref(), Some("v$1"));
+    }
+
+    #[test]
+    #[ignore = "T5b-2 build"]
+    fn ten_thousand_literals_on_one_spine_read_each_ancestor_at_most_twice() {
+        // `[f1, [f2, [f3, ...]]]` in one statement: literal `k` is `k`
+        // arrays below its statement. Each array is read once on the way up
+        // and at most once more by the literal that stops at it.
+        let run = |count: usize| {
+            let mut u = Unit::new();
+            let mut literals = Vec::new();
+            for _ in 0..count {
+                let header = u.header(None, 0);
+                open(&mut u.b);
+                let null = u.b.new_node(View::JNull, 0);
+                let body = u.ret(null);
+                literals.push(u.function(header, &[body]).0);
+            }
+            let mut spine = u.b.new_node(View::JNull, 0);
+            for literal in literals.into_iter().rev() {
+                spine = u.b.new_node(View::JArray { values: &[literal, spine] }, 0);
+            }
+            let statement = u.effect(spine);
+            u.names(&[statement], &[]).1
+        };
+        let (small, large) = (run(5_000), run(10_000));
+        assert!(large.ancestors <= 3 * 10_000, "{}", large.ancestors);
+        assert!(large.ancestors <= 2 * small.ancestors + 8, "{} -> {}", small.ancestors, large.ancestors);
+        // Nothing is named for the first time by a reservation.
+        assert_eq!(large.ambiguous_orders, 0);
+    }
 }

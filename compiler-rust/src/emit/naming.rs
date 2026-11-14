@@ -1220,6 +1220,167 @@ mod replay_tests {
         let level = Level { saved: 0, assigned: 0, skipped: 0 };
         assert_eq!(level.saved + level.assigned + level.skipped, 0);
     }
+
+    #[test]
+    #[ignore = "T5b-2 build"]
+    fn a_module_with_stamp_zero_is_named_like_any_other() {
+        let mut t = tables(2, &[]);
+        assert_eq!(t.add_module(subject("Foo", 0, 0)).as_str(), "Foo");
+        assert_eq!(t.add(subject("Foo", 5, 1)).as_str(), "Foo$1");
+    }
+
+    fn subject(name: &str, stamp: i32, slot: u32) -> Subject {
+        Subject { slot, stamp, name: Name::new(name) }
+    }
+    fn tables(slots: usize, raw: &[&str]) -> Tables {
+        let raw: Vec<Name> = raw.iter().map(|name| Name::new(name)).collect();
+        let mut tables = Tables::default();
+        tables.begin(slots, &raw);
+        tables
+    }
+
+    #[test]
+    #[ignore = "T5b-2 build"]
+    fn the_tables_skip_other_bases_and_raw_names() {
+        // `suffixes_respect_other_bases_and_raw_globals`, on the tables.
+        let mut t = tables(4, &["x$2"]);
+        assert_eq!(t.add(subject("x$1", 1, 0)).as_str(), "x$1");
+        assert_eq!(t.add(subject("x", 2, 1)).as_str(), "x");
+        // `x$1` is another base's name, `x$2` a raw name.
+        assert_eq!(t.add(subject("x", 3, 2)).as_str(), "x$3");
+        assert_eq!(t.add(subject("default", 4, 3)).as_str(), "$$default");
+        // A visible identifier keeps its name.
+        assert_eq!(t.add(subject("x", 3, 2)).as_str(), "x$3");
+    }
+
+    #[test]
+    #[ignore = "T5b-2 build"]
+    fn the_tables_inherit_whole_groups_and_siblings_do_not_leak() {
+        // `captures_inherit_whole_groups_but_siblings_do_not_leak`, on the
+        // tables.
+        let mut t = tables(5, &[]);
+        let (a, b, c, d, e) = (subject("x", 1, 0), subject("x", 2, 1), subject("x", 3, 2), subject("x", 4, 3), subject("x", 5, 4));
+        assert_eq!((t.add(a).as_str(), t.add(b).as_str()), ("x", "x$1"));
+        assert!(!t.reserve(a));
+        t.enter(&[a]);
+        assert_eq!(t.add(c).as_str(), "x$2");
+        t.leave();
+        t.enter(&[]);
+        assert_eq!(t.add(d).as_str(), "x");
+        // The outer identifier is visible whatever the scope inherited.
+        assert_eq!(t.add(a).as_str(), "x");
+        t.enter(&[a]);
+        assert_eq!(t.add(e).as_str(), "x$1");
+        t.leave();
+        t.leave();
+        assert_eq!(t.add(b).as_str(), "x$1");
+        // The name `c` had in the first function is free again there, not
+        // in the program: the program's next `x` is `x$2`.
+        assert_eq!(t.add(c).as_str(), "x$2");
+    }
+
+    #[test]
+    #[ignore = "T5b-2 build"]
+    fn a_reservation_reports_a_first_name_and_stamp_zero_reserves_its_base() {
+        let mut t = tables(3, &[]);
+        assert!(t.reserve(subject("x", 1, 0)));
+        assert!(!t.reserve(subject("x", 1, 0)));
+        // Stamp zero prints as it is spelled and takes the base.
+        assert!(!t.reserve(subject("y", 0, 1)));
+        assert_eq!(t.add(subject("y", 0, 1)).as_str(), "y");
+        assert_eq!(t.add(subject("y", 7, 2)).as_str(), "y$1");
+    }
+
+    #[test]
+    #[ignore = "T5b-2 build"]
+    fn a_synthetic_name_takes_a_suffix_in_its_scope() {
+        // `the_cached_bound_of_a_range_loop_takes_a_name_in_its_scope`.
+        let mut t = tables(2, &[]);
+        assert_eq!(t.add(subject("i", 1, 0)).as_str(), "i");
+        assert_eq!(t.synthetic(Name::new("i_finish")).as_str(), "i_finish");
+        assert_eq!(t.synthetic(Name::new("i_finish")).as_str(), "i_finish$1");
+        assert_eq!(t.add(subject("i_finish", 2, 1)).as_str(), "i_finish$2");
+    }
+
+    /// The steps of naming `count` variables of one base, then `count`
+    /// times entering a function that inherits the base and names one more.
+    fn steps_of(count: u32) -> usize {
+        let mut t = tables(2 * count as usize, &[]);
+        let first = subject("x", 1, 0);
+        for index in 0..count {
+            t.add(subject("x", index as i32 + 1, index));
+        }
+        for index in count..2 * count {
+            t.enter(&[first]);
+            t.add(subject("x", index as i32 + 1, index));
+            t.leave();
+        }
+        t.steps
+    }
+
+    #[test]
+    #[ignore = "T5b-2 build"]
+    fn ten_thousand_names_and_scopes_cost_a_constant_number_of_steps_each() {
+        // Entering a function that inherits a group of 10,000 names costs
+        // what entering one that inherits a group of 5,000 costs.
+        let (small, large) = (steps_of(5_000), steps_of(10_000));
+        assert_eq!(large, 2 * small);
+        assert!(large <= 10_000 * 8, "{large}");
+    }
+
+    #[test]
+    #[ignore = "T5b-2 build"]
+    fn warm_tables_allocate_nothing() {
+        let run = |t: &mut Tables| {
+            t.begin(20_000, &[]);
+            let first = subject("x", 1, 0);
+            for index in 0..10_000u32 {
+                t.add(subject("x", index as i32 + 1, index));
+            }
+            for index in 10_000..20_000u32 {
+                t.enter(&[first]);
+                t.add(subject("x", index as i32 + 1, index));
+                t.leave();
+            }
+        };
+        let mut t = Tables::default();
+        run(&mut t);
+        let allocations = allocation_counter::measure(|| run(&mut t));
+        assert_eq!(allocations.count_total, 0, "{allocations:?}");
+    }
+
+    #[test]
+    #[ignore = "T5b-3 build"]
+    fn the_comparison_counts_what_the_replay_gets_wrong() {
+        // `let x = 1`, exported: the pass names it `x`, has no cached bound
+        // and no function.
+        let mut a = JsArena::new();
+        let x = Ident::new("x", 1, crate::ident::IdentFlags::NONE);
+        let one = crate::js_ir::build::exp::int(1, &mut a);
+        let declaration = crate::js_ir::build::stmt::define(x, Some(one), crate::lambda::lam_compat::LetKind::Strict, &mut a);
+        let program = JsDepsProgram {
+            program: crate::js_ir::arena::JsProgram::new_in(vec![declaration], vec![x], a),
+            modules: vec![],
+            side_effect: None,
+        };
+        let resolver = ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+        let compare = |name: Option<&str>, finishes: &[&str], free: FreeLists| {
+            let printed = Printed {
+                names: vec![name.map(Name::new)],
+                modules: vec![],
+                finishes: finishes.iter().map(|name| Name::new(name)).collect(),
+            };
+            compare_with_pass(&printed, &[x], &[], &free, &program, &resolver, false).unwrap()
+        };
+        let equal = compare(Some("x"), &[], FreeLists::default());
+        assert_eq!(equal, NameStats { names_pass: 1, names_replayed: 1, ..NameStats::default() });
+        assert_eq!(compare(Some("x$1"), &[], FreeLists::default()).name_differences, 1);
+        // Named by the pass only.
+        assert_eq!(compare(None, &[], FreeLists::default()).name_differences, 1);
+        assert_eq!(compare(Some("x"), &["i_finish"], FreeLists::default()).finish_differences, 1);
+        let extra = FreeLists { idents: vec![x], ends: vec![1] };
+        assert_eq!(compare(Some("x"), &[], extra).free_differences, 1);
+    }
 }
 
 /// The names the pass gives on the programs the naming log of the backend

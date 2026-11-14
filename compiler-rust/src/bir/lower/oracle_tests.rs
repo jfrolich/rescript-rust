@@ -1798,3 +1798,106 @@ fn a_module_whose_only_reference_the_flatten_pass_drops_still_shadows_the_global
     // The legacy side: the global stays plain.
     assert_eq!(legacy, "\n\n\nfunction run(c) {\n  if (!c) {\n    ext();\n  }\n  return ext(Other);\n}\n\nexport {\n  run,\n}\n/* No side effect */\n");
 }
+
+/// THREE_TREES 11.4, "T5 part B as redesigned": the naming log of the unit
+/// `root` against the pass. Lowers the Lambda as a unit (`inline` as
+/// `compare_oracle` takes it), replays the log (`names::replay`, at
+/// `State::finish`), and compares with `emit::naming::compare_with_pass` on
+/// the lowering's own exported program. Returns the comparison and what the
+/// replay did. Panics when the lowering or the pass does not support the
+/// unit.
+fn names_of(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, inline: bool) -> (crate::emit::NameStats, names::Replayed) {
+    let _ = (arena, root, resolver, inline);
+    todo!("T5b-3")
+}
+
+/// The log and the pass agree on `root`: every name, every cached bound,
+/// every free list; no reservation whose order is in question, no
+/// reference the replay left unnamed.
+fn names_agree(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, inline: bool) -> crate::emit::NameStats {
+    let (stats, replayed) = names_of(arena, root, resolver, inline);
+    assert_eq!((stats.name_differences, stats.finish_differences, stats.free_differences), (0, 0, 0), "{stats:?}");
+    assert_eq!((replayed.ambiguous_orders, replayed.unnamed_references), (0, 0), "{replayed:?}");
+    assert_eq!(stats.names_replayed, stats.names_pass, "{stats:?}");
+    stats
+}
+
+#[test]
+#[ignore = "T5b-3 build"]
+fn the_naming_log_agrees_on_a_function_whose_unit_parameter_is_dropped() {
+    // Gap 2: `let f = (unit) => { mutable = null }` with `one_unit_arg`: the
+    // literal gets a header without the parameter after its body was
+    // lowered (`finish_expression`). `f` and nothing else is named.
+    use crate::lambda::LamLoc;
+    let mut a = LamArena::new();
+    let (f, unit, mutable) = (Ident::new("f", 1, IdentFlags::NONE), Ident::new("unit", 2, IdentFlags::NONE), Ident::new("mutable", 3, IdentFlags::NONE));
+    let null = a.const_(C::JsNull);
+    let assignment = a.assign(mutable, null);
+    let attr = crate::lambda::FunctionAttribute { one_unit_arg: true, ..Default::default() };
+    let function = a.function_(1, &[unit], assignment, attr, LamLoc::NONE);
+    let end = a.var(f);
+    let body = a.let_(LetKind::Strict, f, function, end);
+    let initial = a.const_(C::JsNull);
+    let root = a.let_(LetKind::Variable, mutable, initial, body);
+    let stats = names_agree(a, root, None, false);
+    assert_eq!(stats.names_pass, 2);
+}
+
+#[test]
+#[ignore = "T5b-3 build"]
+fn the_naming_log_agrees_on_the_aliases_of_a_tail_call_loop() {
+    // Gap 2: `let rec loop = (i, acc) => { later(() => i + acc); loop(i + 1, acc) }`.
+    // The closure captures the parameters, so the tail-call rewrite gives
+    // the header copies of them and declares the originals inside the loop
+    // (`loop_function_body`), after the body was lowered.
+    use crate::lambda::lam_primitive::Primitive as P;
+    use crate::lambda::LamLoc;
+    let mut a = LamArena::new();
+    let ident = |name: &str, stamp: i32| Ident::new(name, stamp, IdentFlags::NONE);
+    let (f, i, acc, later) = (ident("loop", 1), ident("i", 2), ident("acc", 3), ident("later", 4));
+    let (left, right) = (a.var(i), a.var(acc));
+    let captured = a.prim_raw(P::Paddint, &[left, right], LamLoc::NONE);
+    let closure = a.function_(0, &[], captured, Default::default(), LamLoc::NONE);
+    let callee = a.var(later);
+    let effect = call(&mut a, callee, &[closure]);
+    let (left, one) = (a.var(i), a.const_(C::Int { i: 1, comment: None }));
+    let next = a.prim_raw(P::Paddint, &[left, one], LamLoc::NONE);
+    let (callee, same) = (a.var(f), a.var(acc));
+    let again = call(&mut a, callee, &[next, same]);
+    let body = a.seq_raw(effect, again);
+    let function = a.function_(2, &[i, acc], body, Default::default(), LamLoc::NONE);
+    let end = a.var(f);
+    let root = a.letrec(&[(f, function)], end);
+    names_agree(a, root, None, false);
+}
+
+#[test]
+#[ignore = "T5b-3 build"]
+fn the_naming_log_agrees_on_a_body_imported_from_another_module() {
+    // (c): `Other.run(null)` with `run = arg => (first, second) => arg`
+    // inlined: the function inside the imported body is lowered here, after
+    // a closure of the unit, with variables and a header made during the
+    // import (`inline_external_function`, `swap_fragment_tables`).
+    use crate::cmi::persistent_env::CmjExportArity;
+    use crate::js_ir::ModulePathResolver;
+    use crate::lambda::{ApInfo, ApplyStatus, FieldDbgInfo, LamLoc, Lambda, lam_arity::Arity, lam_primitive::Primitive};
+    let resolver = ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+    let param = Ident::new("arg", 100, IdentFlags::NONE);
+    let first = Ident::new("first", 101, IdentFlags::NONE);
+    let second = Ident::new("second", 102, IdentFlags::NONE);
+    let inner = Lambda::function_(2, vec![first, second], Lambda::var(param), Default::default(), LamLoc::NONE);
+    resolver.set_bir_test_export("Other", "run", CmjExportArity::Single(Arity::info(vec![1], false)),
+        Some(Lambda::function_(1, vec![param], inner, Default::default(), LamLoc::NONE)));
+    let mut a = LamArena::new();
+    let global = a.global_module(Ident::create_persistent("Other"));
+    let callee = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Module { name: crate::name::Name::new("run") }), &[global], LamLoc::NONE);
+    let arg = a.const_(C::JsNull);
+    let call = a.apply_raw(callee, &[arg], ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE });
+    let mutable = Ident::new("mutable", 10, IdentFlags::NONE);
+    let assignment = a.assign(mutable, arg);
+    let unit = Ident::new("unit", 11, IdentFlags::NONE);
+    let attr = crate::lambda::FunctionAttribute { one_unit_arg: true, ..Default::default() };
+    let closure = a.function_(1, &[unit], assignment, attr, LamLoc::NONE);
+    let root = a.seq_raw(closure, call);
+    names_agree(a, root, Some(&resolver), true);
+}
