@@ -51,7 +51,18 @@ pub mod rows;
 #[allow(dead_code, unused_variables, clippy::ptr_arg)]
 pub mod unify;
 
+// The old environment's report of its bindings, opens and lookups, for the
+// R4 oracle. Not compiled without debug assertions.
+#[cfg(debug_assertions)]
+pub(crate) mod scope_trace;
+
 #[cfg(test)]
 mod differential;
 #[cfg(test)]
 mod r3_tests;
+// The R4 tests read the old environment's trace, which exists with debug
+// assertions only.
+#[cfg(all(test, debug_assertions))]
+mod r4_tests;
+#[cfg(all(test, debug_assertions))]
+mod scope_oracle;
