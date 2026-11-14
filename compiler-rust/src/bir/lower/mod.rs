@@ -525,6 +525,7 @@ impl State {
         // the output's parallel node columns together; switch arms can emit
         // assignment, block and break nodes in addition to their source body.
         // Inlining/FFI expansion may exceed this initial capacity.
+        let switch_arms = arena.pools.switch_keys.len() + arena.pools.switches.len();
         let output_nodes = input.arena.nodes.len() + 4 * arena.pools.switch_keys.len() + 8;
         arena.lists.reserve_slots(2 * source_operands + 4 * arena.pools.switch_keys.len() + 8);
         arena.nodes.reserve_exact(output_nodes);
@@ -571,8 +572,10 @@ impl State {
             rec_members: Vec::new(), rec_steps: 0,
             switch_facts: vec![switch::Facts::default(); input.arena.nodes.len()],
             switches: Vec::new(), variants: Vec::new(), named_metadata, switch_spelling: String::new(), untagged: Vec::new(), untagged_storage, untagged_dispatch, switch_work: Vec::new(), switch_pairs: Vec::new(),
-            group_indices: Vec::new(), group_nodes: Vec::new(), group_table: hashbrown::HashTable::new(),
-            group_order: Vec::new(), group_heads: Vec::new(),
+            group_indices: Vec::with_capacity(2 * switch_arms),
+            group_nodes: Vec::with_capacity(switch_arms),
+            group_table: hashbrown::HashTable::with_capacity(switch_arms),
+            group_order: Vec::with_capacity(switch_arms), group_heads: Vec::with_capacity(switch_arms),
             switch_output_nodes: Vec::new(), switch_output_clauses: Vec::new(), switch_group_steps: 0,
             switch_hash_bytes: Vec::new(), switch_constant_work: Vec::new(),
             switch_primitive_hashes: Vec::new(), switch_constant_hashes: Vec::new(),
