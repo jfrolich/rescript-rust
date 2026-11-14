@@ -72,11 +72,8 @@ pub(super) struct Plan {
     handler_empty: bool,
     /// More than one handler: the groups of equal handlers (3.9 step 2), as
     /// `State::group_switch_cases` returns them, and their lowered clauses.
-    groups: Vec<usize>,
-    next: Vec<usize>,
-    bodies: Vec<NodeId>,
-    output: Vec<NodeId>,
-    clauses: Vec<ClauseMeta>,
+    groups: super::switch::Groups,
+    output: Span,
 }
 
 impl State {
@@ -269,7 +266,7 @@ impl State {
                 self.declare_empty(LetKind::Variable, var);
             }
         }
-        let (groups, next, bodies) = if len > 1 {
+        let groups = if len > 1 {
             // C: compile_grouped_staticcatch_handlers.
             let mut handlers = std::mem::take(&mut self.scratch);
             handlers.extend(self.catch_table[table..].iter().map(|&(handler, _)| handler));
@@ -279,8 +276,9 @@ impl State {
             self.prepare_switch_hashes();
             self.group_switch_cases(list, len, None)
         } else {
-            (Vec::new(), Vec::new(), Vec::new())
+            super::switch::Groups::default()
         };
+        let output = self.reserve_switch_outputs(groups.bodies.len as usize);
         let frame = Catch(self.catches.len() as u32);
         self.catches.push(Some(Plan {
             start,
@@ -295,10 +293,7 @@ impl State {
             handler_finished: Finished::False,
             handler_empty: true,
             groups,
-            next,
-            bodies,
-            output: Vec::new(),
-            clauses: Vec::new(),
+            output,
         }));
         frame
     }
@@ -324,7 +319,7 @@ impl State {
         } else if plan.len == 1 {
             into.push((inner, self.catch_table[plan.table as usize].0));
         } else {
-            into.extend(plan.bodies.iter().map(|&handler| (inner, handler)));
+            into.extend(self.grouped_bodies(&plan.groups).iter().map(|&handler| (inner, handler)));
         }
     }
 
@@ -349,7 +344,7 @@ impl State {
             plan.handler_finished = finished;
             plan.handler_empty = run.len == 0;
         } else {
-            let handler = plan.bodies[index - 1];
+            let handler = self.group_nodes[plan.groups.bodies.start as usize + index - 1];
             // C: compile_exit_dispatch: a return continuation keeps the
             // break only when the handler holds an exit (4.2 invariant 5).
             let should_break = finished != Finished::True
@@ -357,8 +352,9 @@ impl State {
             let list = self.statements.take_list(&mut self.arena, run);
             let block = self.arena.block_from_list(list);
             let plan = self.catches[frame.0 as usize].as_mut().expect("live catch frame");
-            plan.output.push(block);
-            plan.clauses.push(ClauseMeta { should_break, comment: None, loc: None });
+            let slot = plan.output.start as usize + index - 1;
+            self.switch_output_nodes[slot] = block;
+            self.switch_output_clauses[slot] = ClauseMeta { should_break, comment: None, loc: None };
         }
         Probed::Out(Out { stmts: self.statements.mark(), value: None, finished })
     }
@@ -380,8 +376,8 @@ impl State {
             // Js_output.append_output: nothing follows a finished output.
             let dropped = self.statements.since(after_body);
             self.release_run(dropped);
-            for &block in &plan.output {
-                self.arena.release(block);
+            for i in 0..plan.output.len {
+                self.arena.release(self.switch_output_nodes[(plan.output.start + i) as usize]);
             }
             Finished::True
         } else if plan.exit.is_none() {
@@ -433,39 +429,37 @@ impl State {
             self.statements.push(statement);
             return;
         }
-        let mut keys = Vec::with_capacity(plan.len as usize);
-        let mut clauses = Vec::with_capacity(plan.len as usize);
-        let mut actions = Vec::with_capacity(plan.len as usize);
-        for (group, &head) in plan.groups.iter().enumerate() {
-            let mut case = head;
+        let keys = crate::bir::KeySpan { start: self.arena.pools.switch_keys.len() as u32, len: plan.len };
+        let clauses = crate::bir::ClauseSpan { start: self.arena.pools.switch_clauses.len() as u32, len: plan.len };
+        let actions = self.arena.lists.push_iter(plan.len as usize,
+            std::iter::repeat_n(NodeId(u32::MAX), plan.len as usize));
+        let mut slot = 0;
+        for group in 0..plan.groups.heads.len as usize {
+            let mut case = self.group_indices[plan.groups.heads.start as usize + group];
             loop {
-                keys.push(CaseKey::Lambda(crate::lambda::SwitchKey::Int(plan.first + case as i32)));
-                if plan.next[case] == super::switch::NONE {
-                    actions.push(plan.output[group]);
-                    clauses.push(plan.clauses[group]);
-                    break;
-                }
-                let empty = self.arena.lists.push(&[]);
-                actions.push(self.arena.block_from_list(empty));
-                clauses.push(ClauseMeta { should_break: false, comment: None, loc: None });
-                case = plan.next[case];
+                self.arena.pools.switch_keys.push(CaseKey::Lambda(crate::lambda::SwitchKey::Int(plan.first + case as i32)));
+                let next = self.group_indices[plan.groups.next.start as usize + case];
+                let (action, clause) = if next == super::switch::NONE {
+                    (self.switch_output_nodes[plan.output.start as usize + group],
+                     self.switch_output_clauses[plan.output.start as usize + group])
+                } else {
+                    let empty = self.arena.lists.push(&[]);
+                    (self.arena.block_from_list(empty), ClauseMeta { should_break: false, comment: None, loc: None })
+                };
+                self.arena.lists.set(actions, slot, action);
+                self.arena.pools.switch_clauses.push(clause);
+                slot += 1;
+                if next == super::switch::NONE { break; }
+                case = next;
             }
         }
-        let header = self.arena.switch_header(crate::bir::SwitchHeader {
-            constants: keys.len() as u32,
-            keys,
-            clauses,
-            has_default: false,
-            consts_full: false,
-            blocks_full: false,
-            dispatch: crate::lambda::SwitchDispatch::Direct,
+        assert_eq!(slot, plan.len as usize);
+        let header = self.arena.switch_record(crate::bir::SwitchRecord {
+            constants: plan.len, keys, clauses, has_default: false, consts_full: false,
+            blocks_full: false, dispatch: crate::lambda::SwitchDispatch::Direct,
         });
         let scrutinee = self.pure_expression(View::Var { var: exit }, 0);
-        let statement = plain::node(
-            &mut self.arena,
-            View::SSwitch { scrutinee, actions: &actions, header },
-            0,
-        );
+        let statement = self.arena.switch_from_list(scrutinee, actions, header, 0);
         self.statements.push(statement);
     }
 
@@ -1305,6 +1299,59 @@ mod tests {
     }
 
     #[test]
+    fn ten_thousand_nested_catches_lower_without_allocations() {
+        let mut a = LamArena::new();
+        let mut root = x(&mut a);
+        for label in 1..=10_000 {
+            let handler = int(&mut a, label);
+            root = a.static_catch(root, label, &[], handler);
+        }
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let run = |s: &mut State| {
+            let output = s.probe(Cx::effect(), root).unwrap();
+            let output = s.realize(Cx::effect(), output);
+            for node in s.statements.statements(output.stmts) { s.arena.release(node); }
+            if let Some(value) = output.value { s.arena.release(value); }
+            s.statements.kill(output.stmts);
+        };
+        let lists = state.arena.lists.storage_shape().0;
+        let source_lists = state.source.lists.storage_shape().0;
+        run(&mut state);
+        state.arena.lists.reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
+        state.source.lists.reserve_test_growth(state.source.lists.storage_shape().0 - source_lists);
+        state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
+        state.group_indices.reserve(state.group_indices.len());
+        state.group_nodes.reserve(state.group_nodes.len());
+        state.switch_output_nodes.reserve(state.switch_output_nodes.len());
+        state.switch_output_clauses.reserve(state.switch_output_clauses.len());
+        state.arena.pools.switch_keys.reserve(state.arena.pools.switch_keys.len());
+        state.arena.pools.switch_clauses.reserve(state.arena.pools.switch_clauses.len());
+        let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.lists.storage_shape().1,
+            s.source.lists.storage_shape().1, s.group_indices.capacity(), s.group_nodes.capacity(),
+            s.switch_output_nodes.capacity(), s.switch_output_clauses.capacity(),
+            s.arena.pools.switch_keys.capacity(), s.arena.pools.switch_clauses.capacity(),
+            s.arena.pools.const_key_bytes.capacity(), s.arena.pools.const_key_scratch.capacity(),
+            s.traversal.work.capacity(), s.traversal.values.capacity(), s.traversal.children.capacity(),
+            s.catches.capacity(), s.catch_table.capacity(), s.arena.vars.name.capacity(), s.idents.capacity()];
+        let before = capacities(&state);
+        let visits = state.source_steps;
+        let flags = state.catch_flag_reads;
+        let groups = state.switch_group_steps;
+        let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
+        let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
+        println!("whole flattened catches: {allocations:?}");
+        assert_eq!(allocations.count_total, 0);
+        assert_eq!(capacities(&state), before);
+        assert_eq!(state.source_steps - visits, 20_001);
+        assert_eq!(state.catch_flag_reads - flags, 9_999);
+        assert_eq!(state.switch_group_steps - groups, 20_000);
+    }
+
+    #[test]
     fn ten_thousand_nested_catches_that_do_not_flatten() {
         const N: usize = 10_000;
         let mut a = LamArena::new();
@@ -1363,6 +1410,6 @@ mod tests {
         assert_eq!(size_of::<Jump>(), 8);
         assert_eq!(size_of::<Catch>(), 4);
         assert_eq!(size_of::<Exit>(), 16);
-        assert_eq!(size_of::<Plan>(), 168);
+        assert_eq!(size_of::<Plan>(), 80);
     }
 }

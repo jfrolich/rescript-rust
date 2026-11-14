@@ -37,12 +37,12 @@ impl State {
     /// the callee, create copies in parameter order, then emit assignments in
     /// reverse order. Table growth and names are paid once per variable/copy.
     /// Arguments read iteration bindings, not the copies being assigned.
-    pub(super) fn finish_self_call(&mut self, frame: LoopRef, statements: Span, values: smallvec::SmallVec<[NodeId; 4]>) -> Probed {
+    pub(super) fn finish_self_call(&mut self, frame: LoopRef, statements: Span, values: &[NodeId]) -> Probed {
         let params = self.tail_frames[frame.0 as usize].params;
         self.tail_frames[frame.0 as usize].triggered = true;
         self.tail_copies.resize(self.arena.vars.len(), None);
         let mut assignments = std::mem::take(&mut self.tail_assignments);
-        for (i, value) in values.into_iter().enumerate() {
+        for (i, &value) in values.iter().enumerate() {
             self.tail_arguments += 1;
             if i == 0 || i > params.len() { self.arena.release(value); continue; }
             let param = VarId(params.start + i as u32 - 1);
@@ -51,8 +51,13 @@ impl State {
                 continue;
             }
             let copy = if let Some(copy) = self.tail_copies[param.index()] { copy } else {
-                let name = format!("_{}", self.arena.vars.name(param).as_str());
+                let mut name = std::mem::take(&mut self.tail_name);
+                name.clear();
+                name.push('_');
+                name.push_str(self.arena.vars.name(param).as_str());
                 let copy = self.fresh_variable(&name);
+                name.clear();
+                self.tail_name = name;
                 self.tail_copies[param.index()] = Some(copy);
                 copy
             };
@@ -117,7 +122,30 @@ impl State {
 mod tests {
     use super::*;
     #[test]
-    fn frame_size() { assert_eq!(std::mem::size_of::<Frame>(), 16); }
+    fn tail_copy_spelling_discards_preexisting_scratch() {
+        let mut a = crate::lambda::arena::LamArena::new();
+        let f = ident("f", 1);
+        let x = ident("x", 2);
+        let arg = a.const_(crate::lambda::lam_constant::Constant::JsNull);
+        let body = call(&mut a, f, &[arg]);
+        let root = wrap(&mut a, f, &[x], body);
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        state.tail_name.push_str("stale_field");
+        let output = state.probe(Cx::value(), root).unwrap();
+        assert!(state.tail_name.is_empty());
+        assert!(state.idents.iter().any(|id| id.name() == "_x"));
+        let lowered = state.complete(Cx::value(), output);
+        lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
+    }
+
+    #[test]
+    fn frame_size() {
+        assert_eq!(std::mem::size_of::<Frame>(), 16);
+        assert_eq!(std::mem::size_of::<super::super::call::Call>(), 4);
+        assert_eq!(std::mem::size_of::<super::super::call::Plan>(), 40);
+    }
 
     #[test]
     fn self_tail_calls_sequence_condition_and_argument_counts() {
@@ -429,6 +457,59 @@ mod tests {
         let body = call(&mut a, f, &[first, second]);
         let root = wrap(&mut a, f, &[x, y], body);
         super::super::oracle_tests::compare(a, root);
+    }
+
+    #[test]
+    fn ten_thousand_self_call_arguments_lower_without_allocations() {
+        use crate::lambda::arena::LamArena;
+        let mut a = LamArena::new();
+        let f = ident("f", 1);
+        let params: Vec<_> = (0..10_000).map(|i| ident("p", i + 2)).collect();
+        let args: Vec<_> = params.iter().rev().map(|&p| a.var(p)).collect();
+        let body = call(&mut a, f, &args);
+        let root = wrap(&mut a, f, &params, body);
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let View::LetRec { values, first, .. } = state.source.view(root) else { unreachable!() };
+        let function = values[0];
+        let View::Fun { body, .. } = state.source.view(function) else { unreachable!() };
+        // Establish the enclosing function, then lower the entire Lambda call,
+        // including every argument, holding, sequencing, assignments and release.
+        state.register_tail_function(function, first);
+        let cx = Cx { cont: Cont::Effect(Tail::Return(Ret::Named { loop_: Some(LoopRef(0)), in_catch: false })), ..Cx::returning() };
+        let run = |s: &mut State| {
+            let output = s.probe(cx, body).unwrap();
+            let output = s.realize(cx, output);
+            for node in s.statements.statements(output.stmts) { s.arena.release(node); }
+            if let Some(value) = output.value { s.arena.release(value); }
+            s.statements.kill(output.stmts);
+        };
+        let lists = state.arena.lists.storage_shape().0;
+        let source_lists = state.source.lists.storage_shape().0;
+        run(&mut state);
+        state.source.lists.reserve_test_growth(state.source.lists.storage_shape().0 - source_lists);
+        state.arena.lists.reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
+        state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
+        state.tail_copies.reserve(state.arena.vars.len() - state.tail_copies.len());
+        let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(),
+            s.arena.free_nodes.capacity(), s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1,
+            s.traversal.work.capacity(), s.traversal.values.capacity(), s.traversal.children.capacity(),
+            s.tail_assignments.capacity(), s.tail_copies.capacity(), s.tail_name.capacity(),
+            s.call_reversed.capacity(), s.source.lists.storage_shape().1, s.calls.capacity(),
+            s.argument_outputs.capacity(), s.argument_values.capacity(), s.arena.vars.name.capacity()];
+        let before = capacities(&state);
+        let visits = state.source_steps;
+        let arguments = state.tail_arguments;
+        let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
+        let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
+        println!("whole self call: {allocations:?}");
+        assert_eq!(allocations.count_total, 0);
+        assert_eq!(capacities(&state), before);
+        assert_eq!(state.source_steps - visits, 10_002);
+        assert_eq!(state.tail_arguments - arguments, 10_001);
     }
 
     #[test]

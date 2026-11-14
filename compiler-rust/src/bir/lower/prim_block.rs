@@ -10,35 +10,60 @@ impl State {
     /// source-node table, so nested make misses never rescan an earlier spine.
     /// A successful path replaces the entire spine without visiting it again.
     pub(super) fn flat_make_field(&mut self, mut source: NodeId) -> Option<NodeId> {
-        let mut segments = smallvec::SmallVec::<[&str; 4]>::new();
-        let mut visited = smallvec::SmallVec::<[NodeId; 4]>::new();
-        loop {
+        // This synchronous probe shares the unit's empty node/name scratch;
+        // neither name construction nor the J constructors reenter lowering.
+        let mut visited = std::mem::take(&mut self.scratch);
+        debug_assert!(visited.is_empty());
+        let mut name = std::mem::take(&mut self.tail_name);
+        name.clear();
+        let (result, invalid) = loop {
             self.primitive_steps += 1;
-            if self.invalid_module_paths[source.index()] { break; }
+            if self.invalid_module_paths[source.index()] { break (None, true); }
             match self.source.view(source) {
                 View::Prim { primitive, args: [parent] } => {
-                    let crate::lambda::lam_primitive::Primitive::Pfield(_, FieldDbgInfo::Module { name }) = self.arena.primitive(primitive).primitive else { break };
-                    segments.push(name.as_str());
+                    let crate::lambda::lam_primitive::Primitive::Pfield(_, FieldDbgInfo::Module { .. }) = self.arena.primitive(primitive).primitive else { break (None, true) };
                     visited.push(source);
                     source = *parent;
                 }
-                View::Global { module } => {
-                    segments.reverse();
-                    let name = crate::lambda::flat_make_name(&segments)?;
-                    let member = Some(self.arena.intern_text(&name));
-                    return Some(plain::node(&mut self.arena, View::JQualified { module, member }, 0));
+                View::Global { .. } | View::Var { .. } => {
+                    let base = self.source.view(source);
+                    if !matches!(base, View::Global { .. })
+                        && !matches!(base, View::Var { var } if self.awaited_units[var.index()]) {
+                        break (None, true);
+                    }
+                    let field = |node| {
+                        let View::Prim { primitive, .. } = self.source.view(node) else { unreachable!() };
+                        let crate::lambda::lam_primitive::Primitive::Pfield(_, FieldDbgInfo::Module { name }) = self.arena.primitive(primitive).primitive else { unreachable!() };
+                        name.as_str()
+                    };
+                    if visited.len() < 2 || field(visited[0]) != "make" {
+                        break (None, false);
+                    }
+                    super::flat_export_name_into(visited.iter().rev().map(|&node| field(node)), &mut name);
+                    let value = match base {
+                        View::Global { module } => {
+                            let member = Some(self.arena.intern_text(&name));
+                            plain::node(&mut self.arena, View::JQualified { module, member }, 0)
+                        }
+                        View::Var { var } => {
+                            let object = self.pure_expression(View::Var { var }, 0);
+                            self.static_member(object, &name)
+                        }
+                        _ => unreachable!(),
+                    };
+                    break (Some(value), false);
                 }
-                View::Var { var } if self.awaited_units[var.index()] => {
-                    segments.reverse();
-                    let name = crate::lambda::flat_make_name(&segments)?;
-                    let object = self.pure_expression(View::Var { var }, 0);
-                    return Some(self.static_member(object, &name));
-                }
-                _ => break,
+                _ => break (None, true),
             }
+        };
+        if invalid {
+            for &node in &visited { self.invalid_module_paths[node.index()] = true; }
         }
-        for node in visited { self.invalid_module_paths[node.index()] = true; }
-        None
+        visited.clear();
+        self.scratch = visited;
+        name.clear();
+        self.tail_name = name;
+        result
     }
 
     /// K: resolve_cmj_module_field_constant / compile_field_access.
@@ -109,34 +134,41 @@ impl State {
         ) {
             return value;
         }
-        let field = match info {
+        let mut field = std::mem::take(&mut self.tail_name);
+        field.clear();
+        let property = match info {
             FieldDbgInfo::Module { name } => {
-                crate::js_ir::printer::convert_ident_cow(name).into_owned()
+                crate::js_ir::printer::convert_ident_into(name, &mut field);
+                self.arena.intern_text(&field)
             }
             FieldDbgInfo::Record { name }
             | FieldDbgInfo::RecordInline { name }
-            | FieldDbgInfo::RecordExtension { name } => name.to_string(),
-            FieldDbgInfo::Extension | FieldDbgInfo::Variant => format!("_{idx}"),
-            FieldDbgInfo::Cons => match idx {
-                0 => "hd".into(),
-                1 => "tl".into(),
-                _ => format!("_{idx}"),
-            },
-            FieldDbgInfo::VariantTag => "TAG".into(),
+            | FieldDbgInfo::RecordExtension { name } => self.arena.intern_text(name),
+            FieldDbgInfo::Extension | FieldDbgInfo::Variant | FieldDbgInfo::Cons => {
+                match (info, idx) {
+                    (FieldDbgInfo::Cons, 0) => field.push_str("hd"),
+                    (FieldDbgInfo::Cons, 1) => field.push_str("tl"),
+                    _ => {
+                        use std::fmt::Write;
+                        write!(&mut field, "_{idx}").unwrap();
+                    }
+                }
+                self.arena.intern_text(&field)
+            }
+            FieldDbgInfo::VariantTag => self.arena.intern_text("TAG"),
             FieldDbgInfo::Tuple => {
+                self.tail_name = field;
                 let index = plain::int(&mut self.arena, idx);
                 return plain::node(
                     &mut self.arena,
-                    View::JIndex {
-                        object: target,
-                        index,
-                    },
+                    View::JIndex { object: target, index },
                     0,
                 );
             }
             FieldDbgInfo::PolyVarTag | FieldDbgInfo::PolyVarContent => unreachable!(),
         };
-        let property = self.arena.intern_text(&field);
+        field.clear();
+        self.tail_name = field;
         let position = FieldPos::new(if matches!(info, FieldDbgInfo::VariantTag) {
             None
         } else {
@@ -392,6 +424,95 @@ mod tests {
         assert_eq!(state.primitive_steps, 10_001);
         let lowered = state.complete(Cx::value(), out);
         lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
+    }
+
+    #[test]
+    fn ten_thousand_module_fields_lower_without_allocations() {
+        for valid in [false, true] {
+            let mut a = LamArena::new();
+            let mut root = if valid {
+                a.global_module(Ident::create_persistent("Other"))
+            } else {
+                a.var(Ident::new("local", 10, crate::ident::IdentFlags::NONE))
+            };
+            for i in 0..10_000 {
+                let field = if !valid || i == 9_999 { "make" } else { "Inner" };
+                root = a.prim_raw(P::Pfield(0, FieldDbgInfo::Module { name: Name::new(field) }), &[root], LamLoc::NONE);
+            }
+            let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+            let root = input.root;
+            let mut state = State::new(input);
+            let run = |s: &mut State| {
+                // Exercise the entire failed-spine walk, not just warmed misses.
+                s.invalid_module_paths.fill(false);
+                let out = s.probe(Cx::value(), root).unwrap();
+                let out = s.realize(Cx::value(), out);
+                for node in s.statements.statements(out.stmts) { s.arena.release(node); }
+                if let Some(value) = out.value { s.arena.release(value); }
+                s.statements.kill(out.stmts);
+            };
+            let lists = state.arena.lists.storage_shape().0;
+            run(&mut state);
+            state.arena.lists.reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
+            state.free.reserve_repeat();
+        state.arena.js_scope.as_mut().unwrap().reserve_repeat();
+            state.labels.reserve_repeat();
+            #[cfg(debug_assertions)]
+            state.arena.checked_children.reserve(state.arena.nodes.len() - state.arena.checked_children.len());
+            let capacities = |s: &State| [
+                s.scratch.capacity(), s.tail_name.capacity(), s.invalid_module_paths.capacity(),
+                s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
+                s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1,
+                s.traversal.work.capacity(), s.traversal.values.capacity(), s.traversal.children.capacity(),
+                s.argument_outputs.capacity(), s.argument_values.capacity(),
+                #[cfg(debug_assertions)]
+                s.arena.checked_children.capacity(),
+            ];
+            let before = (capacities(&state), state.labels.capacities(), state.free.capacities());
+            let visits = state.source_steps;
+            let steps = state.primitive_steps;
+            let scope_before = state.arena.js_scope.as_ref().unwrap().capacities();
+        let allocations = allocation_counter::measure(|| run(&mut state));
+        assert_eq!(state.arena.js_scope.as_ref().unwrap().capacities(), scope_before);
+            assert_eq!((capacities(&state), state.labels.capacities(), state.free.capacities()), before, "valid={valid}: {allocations:?}");
+            assert_eq!(allocations.count_total, 0, "valid={valid}: {allocations:?}");
+            assert_eq!(state.source_steps - visits, if valid { 1 } else { 10_001 });
+            assert_eq!(state.primitive_steps - steps, if valid { 10_001 } else { 40_000 });
+        }
+    }
+
+    #[test]
+    fn field_spelling_does_not_prefix_tail_parameter_names() {
+        for flat in [false, true] {
+            let mut a = LamArena::new();
+            let f = Ident::new("loop", 10, crate::ident::IdentFlags::NONE);
+            let x = Ident::new("x", 11, crate::ident::IdentFlags::NONE);
+            let argument = if flat {
+                let global = a.global_module(Ident::create_persistent("Other"));
+                let inner = a.prim_raw(P::Pfield(0, FieldDbgInfo::Module { name: Name::new("Inner") }), &[global], LamLoc::NONE);
+                a.prim_raw(P::Pfield(0, FieldDbgInfo::Module { name: Name::new("make") }), &[inner], LamLoc::NONE)
+            } else {
+                let value = a.var(x);
+                a.prim_raw(P::Pfield(1, FieldDbgInfo::Cons), &[value], LamLoc::NONE)
+            };
+            let callee = a.var(f);
+            let body = a.apply_raw(callee, &[argument], crate::lambda::ApInfo {
+                status: crate::lambda::ApplyStatus::InferFull, loc: LamLoc::NONE,
+            });
+            let function = a.function_(1, &[x], body, Default::default(), LamLoc::NONE);
+            let end = a.var(f);
+            let root = a.letrec(&[(f, function)], end);
+            super::super::oracle_tests::compare(a, root);
+        }
+    }
+
+    #[test]
+    fn retained_identifier_conversion_matches_owned_conversion() {
+        let mut output = String::new();
+        for name in ["make", "default", "-foo.bar", "π", "", r#"\"Upper.name""#, "a'b", "{x}"] {
+            crate::js_ir::printer::convert_ident_into(name, &mut output);
+            assert_eq!(output, crate::js_ir::printer::convert_ident_name(name));
+        }
     }
 
     #[test]

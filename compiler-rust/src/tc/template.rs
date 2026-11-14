@@ -60,7 +60,9 @@ impl Graph {
             let target = Ty(self.forward[source.0 as usize].target);
             node.level = self.level;
             match node.tag() {
-                VAR => {}
+                // A copy forgets the variable's name: `copy_type_desc`,
+                // compiler/ml/btype.ml:510 (`Tvar _ -> Tvar None`).
+                VAR => node.a = NONE,
                 ARROW => {
                     node.a = self.copy_ref(Ty(node.a)).0;
                     let start = self.params.len() as u32;
@@ -357,7 +359,8 @@ impl Graph {
     /// Validate external references once, then copy each node and slot once.
     /// Exact-size iterators reserve each pool once: no per-node growth check,
     /// placeholder write, forwarding lookup or recursive call. Each use gets
-    /// distinct generic nodes (compiler/ml/ctype.ml:747-780).
+    /// distinct generic nodes (compiler/ml/ctype.ml:747-780), and a copied
+    /// variable has no name (compiler/ml/btype.ml:510).
     pub fn instance(&mut self, template: Template) -> Ty {
         if template.node_len == 0 {
             let root = self.repr(Ty(template.nodes));
@@ -445,6 +448,10 @@ impl Graph {
         // Tag order is VAR, LINK (never captured), CONSTR, TUPLE, ARROW.
         // Capture validates descriptors before publishing template nodes.
         let b_addend = [0, 0, list_base, list_base, param_base];
+        // A copied variable has no name (`copy_type_desc`,
+        // compiler/ml/btype.ml:510: `Tvar _ -> Tvar None`): an OR by tag,
+        // no branch. An arrow's `a` is rewritten below.
+        let a_mask = [NONE, 0, 0, 0, 0];
         let source =
             &template_nodes[template.nodes as usize..(template.nodes + template.node_len) as usize];
         nodes.extend(source.iter().map(|&original| {
@@ -454,6 +461,7 @@ impl Graph {
                 level: *level,
                 ..original
             };
+            node.a |= a_mask[node.tag() as usize];
             node.b += b_addend[node.tag() as usize];
             if node.tag() == ARROW {
                 node.a = at(Ty(node.a)).0;
