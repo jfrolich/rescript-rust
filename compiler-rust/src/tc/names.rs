@@ -177,9 +177,17 @@ impl Scopes {
     /// - Found through a layer: set `OPEN_USED` on its open. Unless the
     ///   open is `OPEN_OVERRIDE`, and when [`Scopes::find_below`] finds
     ///   something the layer hides, and the open has no [`ShadowNote`] for
-    ///   `key` yet: add the note and push `OpenShadows` at the open's
-    ///   location. The note list of the open is scanned: O(names this open
-    ///   was reported to shadow), as OCaml's `List.mem`.
+    ///   `key` yet: for a value, type, module or module type, add the note
+    ///   and push `OpenShadows` at the open's location. For a constructor
+    ///   or a label nothing is reported here: the open shadows only when
+    ///   the two result types are different type constructors after head
+    ///   expansion (`check_shadowing` and `same_constr`,
+    ///   compiler/ml/env.ml:415-420), which names cannot see. The hidden
+    ///   item is returned; the walk compares the two result types and calls
+    ///   [`Scopes::shadows`] when they differ. No note is written until
+    ///   then, so a later use asks again, as OCaml does. The note list of
+    ///   the open is scanned: O(names this open was reported to shadow), as
+    ///   OCaml's `List.mem`.
     /// - A deprecated item (`DEPRECATED` of a binder, `MEMBER_DEPRECATED`
     ///   of an imported member): push `Deprecated` at `loc`
     ///   (compiler/ml/typetexp.ml:98-123).
@@ -188,7 +196,22 @@ impl Scopes {
     /// It does not set a binder's used bits: that is [`Scopes::mark`], by
     /// the walk's rules. 1 step, plus `find_below` when the item came
     /// through a layer that can report shadowing.
-    pub fn use_found(&mut self, found: Found, key: Key, loc: u32) {
+    ///
+    /// Returns `Some(hidden)` only for a constructor or label found through
+    /// an open that can still report shadowing of `key` and hides `hidden`;
+    /// `None` in every other case.
+    pub fn use_found(&mut self, found: Found, key: Key, loc: u32) -> Option<Found> {
+        todo!("R4f")
+    }
+
+    /// O(1), no step: the walk found that the constructor or label `key`
+    /// used through open `layer` has another result type than the one it
+    /// hides. Adds the open's [`ShadowNote`] for `key` and pushes
+    /// `OpenShadows` at the open's location (`Open_shadow_label_constructor`,
+    /// compiler/ml/env.ml:1897-1906). Called only with a `layer` and `key`
+    /// for which [`Scopes::use_found`] just returned `Some`: the note list
+    /// is not scanned again.
+    pub fn shadows(&mut self, layer: u32, key: Key) {
         todo!("R4f")
     }
 

@@ -393,8 +393,9 @@ pub enum WarningKind {
     /// Warning 3, raised by `Scopes::deprecated` at the use.
     Deprecated,
     /// Warnings 44 (value, type, module, module type) and 45 (constructor,
-    /// label), raised by `Scopes::use_found` at the first use that goes
-    /// through the open and hides something.
+    /// label). 44 is raised by `Scopes::use_found` at the first use that
+    /// goes through the open and hides something; 45 by `Scopes::shadows`,
+    /// when the walk found that the two result types differ.
     OpenShadows,
     /// Warnings 26, 27, 32, 34, 37, 60 by the binder's kind, raised by
     /// `Scopes::finish`.

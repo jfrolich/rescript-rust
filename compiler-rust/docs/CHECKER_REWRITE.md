@@ -2788,7 +2788,11 @@ is raised.
   `using` callback the first time a lookup goes through the layer and finds
   something older that it hides, once per name and open, not for `open!`
   (env.ml:279-288, 1881-1908). `Scopes::use_found` and `use_modules` raise
-  both. Finding raises nothing: `find`, `candidates` and `lookup_path`
+  both, with one exception (9.7, decision 6): for a constructor or a label
+  the open shadows only when the two result types differ
+  (`check_shadowing`, env.ml:415-420), so `use_found` hands the hidden item
+  back and the walk reports through `Scopes::shadows`. Finding raises
+  nothing: `find`, `candidates` and `lookup_path`
   write no flag and no warning, so a lookup that disambiguation or a
   speculative typing abandons leaves no trace (2.4, idea 5).
 - *Armed at the declaration, raised at the end of the unit*: unused value,
@@ -3002,9 +3006,10 @@ path; marking or warning in a lookup; resolving an alias when it is bound
 instead of when its members are needed.
 
 **R4f.** Functions: `Scopes::{arm, arm_open, disarm, mark, use_found,
-use_modules, finish}`. End state: `rg -n 'todo!\("R4f"\)' src/tc` is
-empty; tests `marking_ten_thousand_uses_is_ten_thousand_steps`,
+shadows, use_modules, finish}`. End state: `rg -n 'todo!\("R4f"\)' src/tc`
+is empty; tests `marking_ten_thousand_uses_is_ten_thousand_steps`,
 `an_open_is_used_or_unused_and_reports_shadowing_once`,
+`the_walk_decides_whether_an_opened_constructor_shadows`,
 `unused_binders_are_reported_in_the_order_armed`,
 `a_deprecated_item_warns_at_each_use`. Commits: (1) arm, mark, finish; (2)
 opens: usage and shadowing; (3) deprecation and `use_modules`. Failure: a
@@ -3190,9 +3195,13 @@ two paths that end at one imported item return the same Resolved.
 R4f. First edit: Scopes::mark in src/tc/names.rs, then arm, arm_open,
 disarm and finish, then use_found. use_found for an item found through
 layer L: set OPEN_USED on opens[L]; when the open is not OPEN_OVERRIDE and
-find_below(key, L) is Some and no ShadowNote of this open has the key,
-push the note and the warning OpenShadows at the open's loc with a = the
-key and b = L. Then, for any item: when the binder has DEPRECATED or the
+find_below(key, L) is Some and no ShadowNote of this open has the key:
+for a Value, Type, Module or ModuleType key push the note and the warning
+OpenShadows at the open's loc with a = the key and b = L; for a
+Constructor or Label key push nothing and return what find_below found
+(the walk calls shadows(L, key), which pushes that note and warning
+without scanning). Every other case returns None. Then, for any item: when
+the binder has DEPRECATED or the
 imported member has MEMBER_DEPRECATED, push Deprecated at `loc` with a =
 the Resolved. finish walks `armed` once, in order: a binder is unused when
 its `used` byte has none of USED, POSITIVE, PATTERN, PRIVATIZE. Commits as
@@ -3285,3 +3294,52 @@ number and the annotated lines; do not change the shape measured.
    environment), which makes a scope's own binders the run from
    `first_binder` to its first child's; R8a states what the printer needs
    before anything is added to a binder.
+
+### 9.7 Decided in review
+
+These bind the builders of R4 and the designers of R5.
+
+1. **The export table of a dependency is imported per worker** (question
+   1). No build-wide name table: it would put a lock on every new name and
+   scheduling-dependent numbers into a published segment. R5c reports, on
+   an application of several thousand units, the imported members per
+   worker and the instructions of `import_table`; a build-wide table is
+   designed only when that is above 1% of a build.
+2. **A name of the syntax tree becomes a `Name` by one hash in R5b**
+   (question 2), and R5b reports that hash per source line on real units.
+   The gate of 80 excludes it; the gate of R5c (covered units at most 60%
+   of the old checker's cost) includes it. A dense table from the parser's
+   string index is designed only on that figure.
+3. **Qualified paths are not replayed** (question 3). The pinned programs
+   cover them until R5c's oracle compares the resolved row of every
+   expression.
+4. **The names check of `both` mode runs in a build with debug
+   assertions** (question 4). R4i reports the time of a debug `rescript`
+   on `tests/tests` under `both`; the coordinator wires it into CI.
+5. **Nothing is added to a binder for "what is visible here"** (question
+   5). R5b enters a scope where OCaml makes a new environment that a
+   continuation must not see past; R8a states what the printer needs.
+6. **An open shadows a constructor or a label only when the result types
+   differ.** `check_shadowing` (compiler/ml/env.ml:415-420) reports
+   `Constructor` and `Label` only when `same_constr` says the two result
+   types are different type constructors after head expansion; a value,
+   type, module or module type is reported whenever something is hidden.
+   The skeleton's `use_found` reported every hidden name. Witness, the
+   same output from the OCaml compiler and a release build of trunk: with
+   `type t = A | B` and `module M = { type t2 = t = A | B }`, `open M`
+   followed by a use of `A` reports nothing; with `type t2 = A | C` it
+   reports warning 45. Names have no types, so `use_found` returns the
+   hidden item for a constructor or label and the walk (R5b), which has
+   both descriptions, compares the result types' head constructors and
+   calls `Scopes::shadows`. No note is written before the walk's verdict:
+   OCaml adds to `shadowed` only what it reports. Tests:
+   `old_checker_open_of_the_same_type_reports_no_shadowing` (runs today)
+   and `the_walk_decides_whether_an_opened_constructor_shadows` (R4f).
+7. **`open!` is never armed.** OCaml gives an `open!` no slot at all
+   (env.ml:1884): no usage, no shadowing, no unused-open warning. R5b
+   calls `arm_open` only for an `open` without `!` whose location is not a
+   ghost.
+8. **`segment_of` in the tests reads a published unit through a fresh
+   `TypeContext`.** That is a conversion, not a check: nothing is unified
+   in it. A test that unifies or lowers on the old checker builds its
+   context as the driver does (8.6, the harness's start level).

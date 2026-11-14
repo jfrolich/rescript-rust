@@ -339,6 +339,30 @@ fn old_checker_lookup_warnings_are_pinned() {
     }
 }
 
+/// An open whose constructor and label hide older ones of the same type
+/// (`type t2 = t = A | B`): no shadowing is reported, where
+/// `OPEN_SHADOWS_MEMBERS`, with two different types, reports both
+/// (`check_shadowing`, compiler/ml/env.ml:415-420). Not in `PROGRAMS`: the
+/// replay counts are pinned on those thirteen.
+const OPEN_SHADOWS_THE_SAME_TYPE: Program = Program {
+    deps: &[],
+    source: "type t = A | B\ntype r = {lbl: int}\nmodule M = {\n  type t2 = t = A | B\n  type r2 = r = {lbl: int}\n}\nopen M\nlet k = A\nlet l = v => v.lbl\n",
+    lines: &[],
+    warnings: &[],
+};
+
+/// Decision 2, constructors and labels: the shadowing warning of an open
+/// depends on the two result types, not only on the names.
+#[test]
+fn old_checker_open_of_the_same_type_reports_no_shadowing() {
+    let old = old_checker(&OPEN_SHADOWS_THE_SAME_TYPE);
+    let (_, reports) = reported(&OPEN_SHADOWS_THE_SAME_TYPE, &old.warnings);
+    assert_eq!(reports, 0, "warnings are\n{}", old.warnings);
+    let differ = old_checker(&OPEN_SHADOWS_MEMBERS);
+    let (found, reports) = reported(&OPEN_SHADOWS_MEMBERS, &differ.warnings);
+    assert_eq!((found.len(), reports), (2, 2));
+}
+
 /// Decision 4. The trace of a program is not empty and names what the
 /// program binds: the capture sees the compile of the unit.
 #[test]
@@ -1742,6 +1766,70 @@ fn an_open_is_used_or_unused_and_reports_shadowing_once() {
     s.finish();
     assert!(s.warnings.is_empty());
     assert_eq!(s.opens[open as usize].flags, OPEN_USED | OPEN_OVERRIDE);
+}
+
+/// Reaches: R4a, R4b, R4c, R4f. A constructor used through an open that
+/// hides an older one: `use_found` reports nothing and hands back the
+/// hidden item, because whether the open shadows depends on the two result
+/// types (`old_checker_open_of_the_same_type_reports_no_shadowing`). The
+/// walk's verdict is `shadows`, once per name and open. A value never asks.
+#[test]
+#[ignore = "R4f build"]
+fn the_walk_decides_whether_an_opened_constructor_shadows() {
+    // type t = A; let x = 1; module M = { type u = A; let x = 2 }; open M
+    let mut s = unit_scopes();
+    let older = bind(&mut s, "A", Namespace::Constructor, 0);
+    bind(&mut s, "x", Namespace::Value, 0);
+    let (_, m) = module(
+        &mut s,
+        "M",
+        &[("A", Namespace::Constructor, 0), ("x", Namespace::Value, 0)],
+    );
+    let open = s.open(m, 77, 5, 0);
+    let a = key(&mut s, "A", Namespace::Constructor);
+    let mut candidates = Vec::new();
+    s.candidates(a, &mut candidates);
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates[0].layer, open);
+    let hidden = Some(Found {
+        item: Resolved::binder(older),
+        layer: NONE,
+    });
+    assert_eq!(s.use_found(candidates[0], a, 100), hidden);
+    assert_eq!(s.opens[open as usize].flags & OPEN_USED, OPEN_USED);
+    assert!(s.warnings.is_empty(), "the walk has not compared the types");
+    // The same result type: nothing is said, and the next use asks again.
+    assert_eq!(s.use_found(candidates[0], a, 101), hidden);
+    assert!(s.warnings.is_empty());
+    // Different result types: reported at the open, once.
+    s.shadows(open, a);
+    assert_eq!(s.warnings.len(), 1);
+    let warning = s.warnings[0];
+    assert_eq!(
+        (warning.kind, warning.loc, warning.a, warning.b),
+        (WarningKind::OpenShadows, 77, a.0, open)
+    );
+    assert_eq!(s.use_found(candidates[0], a, 102), None);
+    assert_eq!(s.warnings.len(), 1);
+    // The older constructor was not found through the open.
+    assert_eq!(s.use_found(candidates[1], a, 103), None);
+    // A value is reported by `use_found` itself and returns nothing.
+    let x = key(&mut s, "x", Namespace::Value);
+    let found = s.find(x).unwrap();
+    assert_eq!(found.layer, open);
+    assert_eq!(s.use_found(found, x, 104), None);
+    assert_eq!(s.warnings.len(), 2);
+    // `open!` never asks.
+    let mut s = unit_scopes();
+    bind(&mut s, "A", Namespace::Constructor, 0);
+    let (_, m) = module(&mut s, "M", &[("A", Namespace::Constructor, 0)]);
+    let open = s.open(m, 77, 5, OPEN_OVERRIDE);
+    let a = key(&mut s, "A", Namespace::Constructor);
+    let mut candidates = Vec::new();
+    s.candidates(a, &mut candidates);
+    assert_eq!(candidates[0].layer, open);
+    assert_eq!(s.use_found(candidates[0], a, 100), None);
+    assert!(s.warnings.is_empty());
 }
 
 /// Reaches: R4a, R4b, R4f. The unused warnings of `UNUSED_DECLARATIONS`:
