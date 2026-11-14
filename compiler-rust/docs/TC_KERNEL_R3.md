@@ -238,3 +238,397 @@ diagnostics: no difference (18 compared)
 javascript: no difference (3980 compared)
 no differences
 ```
+
+## Attribution
+
+These are exclusive instruction counts grouped by the function name in
+Cachegrind debug information, including inlined library lines attributed to
+that function. They are not inclusive call costs or independent experiments
+turning individual instructions off. Shares use the raw full-minus-zero total,
+before harness subtraction. Every function above 2 instructions/operation is
+listed; all remaining functions (including negative startup differences) are
+summed into `other`. Line tables use the same function-specific full-minus-zero
+counts, **not** the file-wide sum across functions. Lines strictly above 2
+instructions/operation are listed for the two largest functions.
+
+The original executable survived, but the temporary profiles did not survive
+the workspace restart. These profiles were rerun from that exact retained
+executable (build ID `011a0efb770d84e6f53c2bbd042618b958209217`), before
+adding the local-level cases. Same machine, tool and profile as above. Raw
+counts differ from the first run by at most 0.000108 instructions/operation;
+all displayed two-decimal results are unchanged. This rerun is not substituted
+silently for the original raw counts.
+
+```sh
+# Original BENCH, for each operation and its control:
+valgrind --tool=cachegrind --cache-sim=no --cachegrind-out-file=OP.zero.cg "$BENCH" OP 0
+valgrind --tool=cachegrind --cache-sim=no --cachegrind-out-file=OP.full.cg "$BENCH" OP 1000000
+cg_annotate --diff --auto=yes --threshold=0 --show-percs=no OP.zero.cg OP.full.cg
+rustup component add rust-src
+```
+
+The tables aggregate the `cg_annotate` Function:file summary; line counts are
+read from those same Cachegrind records by `(function, file, line)` to avoid
+charging a file's other functions to the selected one. `rust/library/...`
+denotes the pinned toolchain's rust-src, not repository code. Repository
+line numbers below are at `ac3416c1f` (before the local-level additions).
+Values retain six decimals so that the function totals sum exactly.
+
+### `unify_vars`
+
+| Function | Instructions/operation | Share of raw |
+|---|---:|---:|
+| `tc_kernel::main` | 147.002036 | 48.3447% |
+| `<tc::graph::Graph>::link` | 55.000000 | 18.0879% |
+| `tc_kernel::main::{closure#2}` | 54.000063 | 17.7591% |
+| `<tc::unify::Checker>::bind` | 48.000000 | 15.7858% |
+| other | 0.068435 | 0.0225% |
+| **Raw total** | **304.070534** | **100%** |
+
+Subtract `build_vars` **79.070340**: 304.070534 − 79.070340 = **225.000194** instructions/operation, matching the results table after rounding.
+
+#### `tc_kernel::main`: source lines above 2 instructions/operation
+
+| File:line | Source text | Instructions/operation |
+|---|---|---:|
+| `compiler-rust/benches/tc_kernel.rs:115` | `if i & 0xfff == 0 {` | 2.000490 |
+| `compiler-rust/benches/tc_kernel.rs:133` | `sink += left.0 as u64 + right.0 as u64;` | 6.000000 |
+| `compiler-rust/src/tc/graph.rs:0` | `<no source line>` | 3.000000 |
+| `compiler-rust/src/tc/graph.rs:29` | `self.head & 15` | 8.000000 |
+| `compiler-rust/src/tc/graph.rs:211` | `Self::repr_parts(&mut self.nodes, &mut self.trail, self.speculation_depth, ty)` | 4.000000 |
+| `compiler-rust/src/tc/graph.rs:224` | `while nodes[root.0 as usize].tag() == LINK {` | 29.000000 |
+| `compiler-rust/src/tc/unify.rs:0` | `<no source line>` | 7.000000 |
+| `compiler-rust/src/tc/unify.rs:160` | `let top = self.depth == 0;` | 4.000000 |
+| `compiler-rust/src/tc/unify.rs:164` | `let token = if top && explain {` | 3.000000 |
+| `compiler-rust/src/tc/unify.rs:173` | `self.depth += 1;` | 3.000000 |
+| `compiler-rust/src/tc/unify.rs:217` | `if l.tag() == VAR {` | 6.000000 |
+| `compiler-rust/src/tc/unify.rs:624` | `match frame.kind {` | 3.000000 |
+| `compiler-rust/src/tc/unify.rs:628` | `if left != right && self.unify_pair(left, right).is_err() {` | 3.000000 |
+| `rust/library/alloc/src/raw_vec/mod.rs:635` | `self.ptr.cast()` | 3.000000 |
+| `rust/library/alloc/src/vec/mod.rs:3160` | `let len = self.len;` | 7.000000 |
+| `rust/library/core/src/hint.rs:491` | `crate::intrinsics::black_box(dummy)` | 5.000000 |
+| `rust/library/core/src/iter/range.rs:0` | `<no source line>` | 3.000015 |
+| `rust/library/core/src/ptr/mod.rs:1754` | `crate::intrinsics::read_via_copy(src)` | 4.000000 |
+| `rust/library/core/src/ptr/mod.rs:1962` | `intrinsics::write_via_move(dst, src)` | 3.000000 |
+| `rust/library/core/src/slice/index.rs:238` | `&(*slice)[self]` | 4.000000 |
+
+#### `<tc::graph::Graph>::link`: source lines above 2 instructions/operation
+
+| File:line | Source text | Instructions/operation |
+|---|---|---:|
+| `compiler-rust/src/tc/graph.rs:140` | `self.nodes[ty.0 as usize] = node;` | 5.000000 |
+| `compiler-rust/src/tc/graph.rs:145` | `pub fn link(&mut self, from: Ty, to: Ty) {` | 7.000000 |
+| `compiler-rust/src/tc/graph.rs:149` | `let source = self.nodes[from.0 as usize];` | 8.000000 |
+| `compiler-rust/src/tc/graph.rs:150` | `let target = self.nodes[to.0 as usize];` | 8.000000 |
+| `compiler-rust/src/tc/graph.rs:160` | `if source.tag() == VAR` | 4.000000 |
+| `compiler-rust/src/tc/graph.rs:173` | `}` | 8.000000 |
+| `rust/library/core/src/slice/index.rs:238` | `&(*slice)[self]` | 6.000000 |
+
+
+### `unify_ground1`
+
+| Function | Instructions/operation | Share of raw |
+|---|---:|---:|
+| `tc_kernel::main` | 173.002036 | 57.2707% |
+| `tc_kernel::main::{closure#2}` | 74.000108 | 24.4970% |
+| `<tc::graph::Graph>::link` | 55.000000 | 18.2072% |
+| other | 0.075799 | 0.0251% |
+| **Raw total** | **302.077943** | **100%** |
+
+Subtract `build_ground1` **99.077749**: 302.077943 − 99.077749 = **203.000194** instructions/operation, matching the results table after rounding.
+
+#### `tc_kernel::main`: source lines above 2 instructions/operation
+
+| File:line | Source text | Instructions/operation |
+|---|---|---:|
+| `compiler-rust/benches/tc_kernel.rs:115` | `if i & 0xfff == 0 {` | 2.000490 |
+| `compiler-rust/benches/tc_kernel.rs:133` | `sink += left.0 as u64 + right.0 as u64;` | 6.000000 |
+| `compiler-rust/src/tc/graph.rs:0` | `<no source line>` | 3.000000 |
+| `compiler-rust/src/tc/graph.rs:29` | `self.head & 15` | 8.000000 |
+| `compiler-rust/src/tc/graph.rs:211` | `Self::repr_parts(&mut self.nodes, &mut self.trail, self.speculation_depth, ty)` | 4.000000 |
+| `compiler-rust/src/tc/graph.rs:224` | `while nodes[root.0 as usize].tag() == LINK {` | 29.000000 |
+| `compiler-rust/src/tc/unify.rs:0` | `<no source line>` | 13.000000 |
+| `compiler-rust/src/tc/unify.rs:160` | `let top = self.depth == 0;` | 4.000000 |
+| `compiler-rust/src/tc/unify.rs:164` | `let token = if top && explain {` | 3.000000 |
+| `compiler-rust/src/tc/unify.rs:173` | `self.depth += 1;` | 3.000000 |
+| `compiler-rust/src/tc/unify.rs:217` | `if l.tag() == VAR {` | 6.000000 |
+| `compiler-rust/src/tc/unify.rs:220` | `if r.tag() == VAR {` | 5.000000 |
+| `compiler-rust/src/tc/unify.rs:225` | `if l.tag() == CONSTR` | 9.000000 |
+| `compiler-rust/src/tc/unify.rs:235` | `self.g.link(left, right);` | 4.000000 |
+| `compiler-rust/src/tc/unify.rs:624` | `match frame.kind {` | 3.000000 |
+| `rust/library/alloc/src/raw_vec/mod.rs:635` | `self.ptr.cast()` | 3.000000 |
+| `rust/library/alloc/src/vec/mod.rs:3160` | `let len = self.len;` | 7.000000 |
+| `rust/library/core/src/hint.rs:491` | `crate::intrinsics::black_box(dummy)` | 5.000000 |
+| `rust/library/core/src/iter/range.rs:0` | `<no source line>` | 3.000015 |
+| `rust/library/core/src/ptr/mod.rs:1754` | `crate::intrinsics::read_via_copy(src)` | 4.000000 |
+| `rust/library/core/src/ptr/mod.rs:1962` | `intrinsics::write_via_move(dst, src)` | 3.000000 |
+| `rust/library/core/src/slice/index.rs:238` | `&(*slice)[self]` | 4.000000 |
+
+#### `tc_kernel::main::{closure#2}`: source lines above 2 instructions/operation
+
+| File:line | Source text | Instructions/operation |
+|---|---|---:|
+| `compiler-rust/benches/tc_kernel.rs:0` | `<no source line>` | 4.000000 |
+| `compiler-rust/benches/tc_kernel.rs:118` | `let mut operand = &#124;&#124; match shape {` | 18.000000 |
+| `compiler-rust/benches/tc_kernel.rs:127` | `};` | 12.000000 |
+| `compiler-rust/src/tc/graph.rs:126` | `assert!(self.nodes.len() < (1 << 30));` | 4.000000 |
+| `rust/library/alloc/src/raw_vec/mod.rs:635` | `self.ptr.cast()` | 4.000000 |
+| `rust/library/alloc/src/vec/mod.rs:1002` | `if len == self.buf.capacity() {` | 8.000000 |
+| `rust/library/alloc/src/vec/mod.rs:1009` | `self.len = len + 1;` | 4.000000 |
+| `rust/library/alloc/src/vec/mod.rs:3160` | `let len = self.len;` | 4.000000 |
+| `rust/library/core/src/ptr/mod.rs:1962` | `intrinsics::write_via_move(dst, src)` | 10.000000 |
+| `rust/library/core/src/ptr/mut_ptr.rs:978` | `unsafe { intrinsics::offset(self, count) }` | 4.000000 |
+
+
+### `unify_ground3`
+
+| Function | Instructions/operation | Share of raw |
+|---|---:|---:|
+| `tc_kernel::main` | 409.002036 | 37.8216% |
+| `<tc::unify::Checker>::reaches` | 214.049256 | 19.7937% |
+| `tc_kernel::main::{closure#2}` | 178.000155 | 16.4602% |
+| `<tc::graph::Graph>::link` | 165.000000 | 15.2580% |
+| `<tc::unify::Checker>::push_lists` | 70.000000 | 6.4731% |
+| `<tc::unify::Checker>::push_children` | 45.000000 | 4.1613% |
+| other | 0.347389 | 0.0321% |
+| **Raw total** | **1081.398836** | **100%** |
+
+Subtract `build_ground3` **203.440878**: 1081.398836 − 203.440878 = **877.957958** instructions/operation, matching the results table after rounding.
+
+#### `tc_kernel::main`: source lines above 2 instructions/operation
+
+| File:line | Source text | Instructions/operation |
+|---|---|---:|
+| `compiler-rust/benches/tc_kernel.rs:115` | `if i & 0xfff == 0 {` | 2.000490 |
+| `compiler-rust/benches/tc_kernel.rs:133` | `sink += left.0 as u64 + right.0 as u64;` | 6.000000 |
+| `compiler-rust/src/tc/graph.rs:0` | `<no source line>` | 8.000000 |
+| `compiler-rust/src/tc/graph.rs:11` | `#[derive(Clone, Copy, Debug, PartialEq, Eq)]` | 5.000000 |
+| `compiler-rust/src/tc/graph.rs:29` | `self.head & 15` | 21.000000 |
+| `compiler-rust/src/tc/graph.rs:211` | `Self::repr_parts(&mut self.nodes, &mut self.trail, self.speculation_depth, ty)` | 9.000000 |
+| `compiler-rust/src/tc/graph.rs:224` | `while nodes[root.0 as usize].tag() == LINK {` | 70.000000 |
+| `compiler-rust/src/tc/unify.rs:0` | `<no source line>` | 39.000000 |
+| `compiler-rust/src/tc/unify.rs:160` | `let top = self.depth == 0;` | 4.000000 |
+| `compiler-rust/src/tc/unify.rs:164` | `let token = if top && explain {` | 3.000000 |
+| `compiler-rust/src/tc/unify.rs:173` | `self.depth += 1;` | 3.000000 |
+| `compiler-rust/src/tc/unify.rs:211` | `let l = self.g.nodes[left.0 as usize];` | 3.000000 |
+| `compiler-rust/src/tc/unify.rs:212` | `let r = self.g.nodes[right.0 as usize];` | 3.000000 |
+| `compiler-rust/src/tc/unify.rs:217` | `if l.tag() == VAR {` | 18.000000 |
+| `compiler-rust/src/tc/unify.rs:220` | `if r.tag() == VAR {` | 15.000000 |
+| `compiler-rust/src/tc/unify.rs:225` | `if l.tag() == CONSTR` | 21.000000 |
+| `compiler-rust/src/tc/unify.rs:235` | `self.g.link(left, right);` | 8.000000 |
+| `compiler-rust/src/tc/unify.rs:354` | `if self.reaches(node, ty, false) {` | 3.000000 |
+| `compiler-rust/src/tc/unify.rs:392` | `let l = self.g.nodes[left.0 as usize];` | 3.000000 |
+| `compiler-rust/src/tc/unify.rs:393` | `let r = self.g.nodes[right.0 as usize];` | 3.000000 |
+| `compiler-rust/src/tc/unify.rs:395` | `if l.tag() == VAR {` | 4.000000 |
+| `compiler-rust/src/tc/unify.rs:400` | `if r.tag() == VAR {` | 3.000000 |
+| `compiler-rust/src/tc/unify.rs:405` | `if l.head & r.head & EXTENDED != 0 {` | 3.000000 |
+| `compiler-rust/src/tc/unify.rs:415` | `self.g.link(left, right);` | 3.000000 |
+| `compiler-rust/src/tc/unify.rs:429` | `let pushed = self.push_children(l, r);` | 5.000000 |
+| `compiler-rust/src/tc/unify.rs:620` | `while self.frames.len() > base {` | 6.000000 |
+| `compiler-rust/src/tc/unify.rs:624` | `match frame.kind {` | 9.000000 |
+| `compiler-rust/src/tc/unify.rs:628` | `if left != right && self.unify_pair(left, right).is_err() {` | 5.000000 |
+| `compiler-rust/src/tc/unify.rs:646` | `self.memo.live != 0 && self.find_expansion(ty, true).0 != NONE` | 4.000000 |
+| `compiler-rust/src/tc/unify.rs:656` | `if level == GENERIC {` | 6.000000 |
+| `rust/library/alloc/src/raw_vec/mod.rs:635` | `self.ptr.cast()` | 6.000000 |
+| `rust/library/alloc/src/vec/mod.rs:1784` | `&*core::intrinsics::aggregate_raw_ptr::<*const [T], _, _>(self.as_ptr(), self.len)` | 4.000000 |
+| `rust/library/alloc/src/vec/mod.rs:1823` | `&mut *core::intrinsics::aggregate_raw_ptr::<*mut [T], _, _>(self.as_mut_ptr(), self.len)` | 4.000000 |
+| `rust/library/alloc/src/vec/mod.rs:2925` | `self.len -= 1;` | 6.000000 |
+| `rust/library/alloc/src/vec/mod.rs:3160` | `let len = self.len;` | 9.000000 |
+| `rust/library/core/src/hint.rs:491` | `crate::intrinsics::black_box(dummy)` | 5.000000 |
+| `rust/library/core/src/iter/range.rs:0` | `<no source line>` | 3.000015 |
+| `rust/library/core/src/ptr/const_ptr.rs:879` | `unsafe { intrinsics::offset(self, count) }` | 6.000000 |
+| `rust/library/core/src/ptr/mod.rs:1754` | `crate::intrinsics::read_via_copy(src)` | 12.000000 |
+| `rust/library/core/src/ptr/mod.rs:1962` | `intrinsics::write_via_move(dst, src)` | 3.000000 |
+| `rust/library/core/src/result.rs:2182` | `match self {` | 3.000000 |
+| `rust/library/core/src/slice/index.rs:0` | `<no source line>` | 3.000000 |
+| `rust/library/core/src/slice/index.rs:238` | `&(*slice)[self]` | 19.000000 |
+
+#### `<tc::unify::Checker>::reaches`: source lines above 2 instructions/operation
+
+| File:line | Source text | Instructions/operation |
+|---|---|---:|
+| `compiler-rust/src/tc/graph.rs:0` | `<no source line>` | 3.000000 |
+| `compiler-rust/src/tc/graph.rs:11` | `#[derive(Clone, Copy, Debug, PartialEq, Eq)]` | 3.000000 |
+| `compiler-rust/src/tc/graph.rs:29` | `self.head & 15` | 9.000000 |
+| `compiler-rust/src/tc/graph.rs:33` | `self.head >> 8` | 3.000000 |
+| `compiler-rust/src/tc/graph.rs:211` | `Self::repr_parts(&mut self.nodes, &mut self.trail, self.speculation_depth, ty)` | 3.000000 |
+| `compiler-rust/src/tc/graph.rs:224` | `while nodes[root.0 as usize].tag() == LINK {` | 21.000000 |
+| `compiler-rust/src/tc/level.rs:0` | `<no source line>` | 3.000000 |
+| `compiler-rust/src/tc/level.rs:22` | `match node.tag() {` | 15.000000 |
+| `compiler-rust/src/tc/level.rs:38` | `self.work.push(self.lists[(node.b + 1 + i) as usize]);` | 4.000000 |
+| `compiler-rust/src/tc/unify.rs:705` | `if self.marks.len() < self.g.nodes.len() {` | 3.000000 |
+| `compiler-rust/src/tc/unify.rs:708` | `if self.mark_generation == u32::MAX {` | 3.000000 |
+| `compiler-rust/src/tc/unify.rs:720` | `fn reaches(&mut self, node: Ty, ty: Ty, deep: bool) -> bool {` | 10.000000 |
+| `compiler-rust/src/tc/unify.rs:726` | `if self.marks[ty.0 as usize] == generation {` | 6.000000 |
+| `compiler-rust/src/tc/unify.rs:731` | `if ty == node {` | 3.000000 |
+| `compiler-rust/src/tc/unify.rs:735` | `self.marks[ty.0 as usize] = generation;` | 3.000000 |
+| `compiler-rust/src/tc/unify.rs:736` | `let descriptor = self.g.nodes[ty.0 as usize];` | 12.000000 |
+| `compiler-rust/src/tc/unify.rs:737` | `if deep &#124;&#124; !self.stops_occurrence(descriptor) {` | 3.000000 |
+| `compiler-rust/src/tc/unify.rs:742` | `}` | 8.000000 |
+| `rust/library/alloc/src/raw_vec/mod.rs:635` | `self.ptr.cast()` | 14.000000 |
+| `rust/library/alloc/src/vec/mod.rs:1002` | `if len == self.buf.capacity() {` | 7.000000 |
+| `rust/library/alloc/src/vec/mod.rs:1009` | `self.len = len + 1;` | 4.000000 |
+| `rust/library/alloc/src/vec/mod.rs:1784` | `&*core::intrinsics::aggregate_raw_ptr::<*const [T], _, _>(self.as_ptr(), self.len)` | 8.000000 |
+| `rust/library/alloc/src/vec/mod.rs:1823` | `&mut *core::intrinsics::aggregate_raw_ptr::<*mut [T], _, _>(self.as_mut_ptr(), self.len)` | 3.000000 |
+| `rust/library/alloc/src/vec/mod.rs:2922` | `if self.len == 0 {` | 9.000000 |
+| `rust/library/alloc/src/vec/mod.rs:2925` | `self.len -= 1;` | 6.000000 |
+| `rust/library/alloc/src/vec/mod.rs:3160` | `let len = self.len;` | 2.000026 |
+| `rust/library/core/src/cmp.rs:2201` | `fn lt(&self, other: &Self) -> bool { *self <  *other }` | 4.000000 |
+| `rust/library/core/src/iter/range.rs:1103` | `if self.start < self.end {` | 5.000000 |
+| `rust/library/core/src/ptr/mod.rs:1754` | `crate::intrinsics::read_via_copy(src)` | 3.000000 |
+| `rust/library/core/src/ptr/mod.rs:1962` | `intrinsics::write_via_move(dst, src)` | 7.000000 |
+| `rust/library/core/src/slice/index.rs:238` | `&(*slice)[self]` | 19.000000 |
+
+
+### `instance7`
+
+| Function | Instructions/operation | Share of raw |
+|---|---:|---:|
+| `<tc::graph::Graph>::instance` | 351.000307 | 94.0335% |
+| `tc_kernel::main` | 22.002030 | 5.8944% |
+| other | 0.269284 | 0.0721% |
+| **Raw total** | **373.271621** | **100%** |
+
+Subtract `empty` **18.002260**: 373.271621 − 18.002260 = **355.269361** instructions/operation, matching the results table after rounding.
+
+#### `<tc::graph::Graph>::instance`: source lines above 2 instructions/operation
+
+| File:line | Source text | Instructions/operation |
+|---|---|---:|
+| `compiler-rust/src/tc/graph.rs:29` | `self.head & 15` | 12.000000 |
+| `compiler-rust/src/tc/template.rs:0` | `<no source line>` | 8.000000 |
+| `compiler-rust/src/tc/template.rs:364` | `pub fn instance(&mut self, template: Template) -> Ty {` | 9.000000 |
+| `compiler-rust/src/tc/template.rs:365` | `if template.node_len == 0 {` | 4.000000 |
+| `compiler-rust/src/tc/template.rs:373` | `let pools = self.template_pools[template.pools as usize];` | 6.000000 |
+| `compiler-rust/src/tc/template.rs:374` | `if pools.external_len == 0 {` | 5.000000 |
+| `compiler-rust/src/tc/template.rs:379` | `}` | 9.000000 |
+| `compiler-rust/src/tc/template.rs:406` | `assert!(nodes.len() + (template.node_len as usize) < (1 << 30));` | 3.000000 |
+| `compiler-rust/src/tc/template.rs:421` | `if ty.0 == NONE {` | 39.000000 |
+| `compiler-rust/src/tc/template.rs:426` | `Ty(base + (ty.0 & !RELATIVE))` | 4.000000 |
+| `compiler-rust/src/tc/template.rs:430` | `&template_lists[pools.lists as usize..(pools.lists + template.list_len) as usize];` | 3.000000 |
+| `compiler-rust/src/tc/template.rs:439` | `params.extend(arguments.iter().map(&#124;&param&#124; {` | 6.000000 |
+| `compiler-rust/src/tc/template.rs:450` | `let b_addend = [0, 0, list_base, list_base, param_base];` | 4.000000 |
+| `compiler-rust/src/tc/template.rs:454` | `let a_mask = [NONE, 0, 0, 0, 0];` | 4.000000 |
+| `compiler-rust/src/tc/template.rs:464` | `node.a &#124;= a_mask[node.tag() as usize];` | 41.000000 |
+| `compiler-rust/src/tc/template.rs:465` | `node.b += b_addend[node.tag() as usize];` | 6.000000 |
+| `compiler-rust/src/tc/template.rs:466` | `if node.tag() == ARROW {` | 12.000000 |
+| `rust/library/alloc/src/raw_vec/mod.rs:640` | `if elem_size == 0 { usize::MAX } else { self.cap.as_inner() }` | 3.000000 |
+| `rust/library/alloc/src/raw_vec/mod.rs:695` | `if self.needs_to_grow(len, additional, elem_layout) {` | 3.000000 |
+| `rust/library/alloc/src/raw_vec/mod.rs:795` | `additional > self.capacity(elem_layout.size()).wrapping_sub(len)` | 3.000000 |
+| `rust/library/alloc/src/vec/mod.rs:1784` | `&*core::intrinsics::aggregate_raw_ptr::<*const [T], _, _>(self.as_ptr(), self.len)` | 5.000000 |
+| `rust/library/alloc/src/vec/set_len_on_drop.rs:19` | `self.local_len += increment;` | 6.000000 |
+| `rust/library/alloc/src/vec/set_len_on_drop.rs:31` | `*self.len = self.local_len;` | 7.000000 |
+| `rust/library/core/src/num/uint_macros.rs:1192` | `if self < rhs {` | 9.000000 |
+| `rust/library/core/src/num/uint_macros.rs:2784` | `intrinsics::wrapping_sub(self, rhs)` | 4.000000 |
+| `rust/library/core/src/ptr/const_ptr.rs:738` | `unsafe { intrinsics::ptr_offset_from_unsigned(self, origin) }` | 4.000000 |
+| `rust/library/core/src/ptr/mod.rs:1962` | `intrinsics::write_via_move(dst, src)` | 34.000000 |
+| `rust/library/core/src/slice/index.rs:90` | `let ptr = unsafe { crate::intrinsics::offset(ptr, offset) };` | 6.000000 |
+| `rust/library/core/src/slice/index.rs:238` | `&(*slice)[self]` | 3.000000 |
+| `rust/library/core/src/slice/iter/macros.rs:0` | `<no source line>` | 9.000000 |
+| `rust/library/core/src/slice/iter/macros.rs:25` | `($this:ident, $len:ident => $zst_body:expr, $end:ident => $other_body:expr,) => {{` | 8.000000 |
+| `rust/library/core/src/slice/iter/macros.rs:274` | `acc = f(acc, unsafe { & $( $mut_ )? *self.ptr.add(i).as_ptr() });` | 4.000000 |
+| `rust/library/core/src/slice/iter/macros.rs:279` | `if i == len {` | 54.000000 |
+
+#### `tc_kernel::main`: source lines above 2 instructions/operation
+
+| File:line | Source text | Instructions/operation |
+|---|---|---:|
+| `compiler-rust/benches/tc_kernel.rs:0` | `<no source line>` | 5.000000 |
+| `compiler-rust/benches/tc_kernel.rs:154` | `match index {` | 7.000000 |
+| `compiler-rust/benches/tc_kernel.rs:158` | `3 => sink += g.instance(black_box(scheme7)).0 as u64,` | 3.000000 |
+| `rust/library/core/src/hint.rs:491` | `crate::intrinsics::black_box(dummy)` | 3.000000 |
+
+
+### `checker_instance7`
+
+| Function | Instructions/operation | Share of raw |
+|---|---:|---:|
+| `<tc::graph::Graph>::instance` | 351.000307 | 96.0930% |
+| `tc_kernel::main` | 14.002024 | 3.8333% |
+| other | 0.269298 | 0.0737% |
+| **Raw total** | **365.271629** | **100%** |
+
+Subtract `empty` **18.002260**: 365.271629 − 18.002260 = **347.269369** instructions/operation, matching the results table after rounding.
+
+#### `<tc::graph::Graph>::instance`: source lines above 2 instructions/operation
+
+| File:line | Source text | Instructions/operation |
+|---|---|---:|
+| `compiler-rust/src/tc/graph.rs:29` | `self.head & 15` | 12.000000 |
+| `compiler-rust/src/tc/template.rs:0` | `<no source line>` | 8.000000 |
+| `compiler-rust/src/tc/template.rs:364` | `pub fn instance(&mut self, template: Template) -> Ty {` | 9.000000 |
+| `compiler-rust/src/tc/template.rs:365` | `if template.node_len == 0 {` | 4.000000 |
+| `compiler-rust/src/tc/template.rs:373` | `let pools = self.template_pools[template.pools as usize];` | 6.000000 |
+| `compiler-rust/src/tc/template.rs:374` | `if pools.external_len == 0 {` | 5.000000 |
+| `compiler-rust/src/tc/template.rs:379` | `}` | 9.000000 |
+| `compiler-rust/src/tc/template.rs:406` | `assert!(nodes.len() + (template.node_len as usize) < (1 << 30));` | 3.000000 |
+| `compiler-rust/src/tc/template.rs:421` | `if ty.0 == NONE {` | 39.000000 |
+| `compiler-rust/src/tc/template.rs:426` | `Ty(base + (ty.0 & !RELATIVE))` | 4.000000 |
+| `compiler-rust/src/tc/template.rs:430` | `&template_lists[pools.lists as usize..(pools.lists + template.list_len) as usize];` | 3.000000 |
+| `compiler-rust/src/tc/template.rs:439` | `params.extend(arguments.iter().map(&#124;&param&#124; {` | 6.000000 |
+| `compiler-rust/src/tc/template.rs:450` | `let b_addend = [0, 0, list_base, list_base, param_base];` | 4.000000 |
+| `compiler-rust/src/tc/template.rs:454` | `let a_mask = [NONE, 0, 0, 0, 0];` | 4.000000 |
+| `compiler-rust/src/tc/template.rs:464` | `node.a &#124;= a_mask[node.tag() as usize];` | 41.000000 |
+| `compiler-rust/src/tc/template.rs:465` | `node.b += b_addend[node.tag() as usize];` | 6.000000 |
+| `compiler-rust/src/tc/template.rs:466` | `if node.tag() == ARROW {` | 12.000000 |
+| `rust/library/alloc/src/raw_vec/mod.rs:640` | `if elem_size == 0 { usize::MAX } else { self.cap.as_inner() }` | 3.000000 |
+| `rust/library/alloc/src/raw_vec/mod.rs:695` | `if self.needs_to_grow(len, additional, elem_layout) {` | 3.000000 |
+| `rust/library/alloc/src/raw_vec/mod.rs:795` | `additional > self.capacity(elem_layout.size()).wrapping_sub(len)` | 3.000000 |
+| `rust/library/alloc/src/vec/mod.rs:1784` | `&*core::intrinsics::aggregate_raw_ptr::<*const [T], _, _>(self.as_ptr(), self.len)` | 5.000000 |
+| `rust/library/alloc/src/vec/set_len_on_drop.rs:19` | `self.local_len += increment;` | 6.000000 |
+| `rust/library/alloc/src/vec/set_len_on_drop.rs:31` | `*self.len = self.local_len;` | 7.000000 |
+| `rust/library/core/src/num/uint_macros.rs:1192` | `if self < rhs {` | 9.000000 |
+| `rust/library/core/src/num/uint_macros.rs:2784` | `intrinsics::wrapping_sub(self, rhs)` | 4.000000 |
+| `rust/library/core/src/ptr/const_ptr.rs:738` | `unsafe { intrinsics::ptr_offset_from_unsigned(self, origin) }` | 4.000000 |
+| `rust/library/core/src/ptr/mod.rs:1962` | `intrinsics::write_via_move(dst, src)` | 34.000000 |
+| `rust/library/core/src/slice/index.rs:90` | `let ptr = unsafe { crate::intrinsics::offset(ptr, offset) };` | 6.000000 |
+| `rust/library/core/src/slice/index.rs:238` | `&(*slice)[self]` | 3.000000 |
+| `rust/library/core/src/slice/iter/macros.rs:0` | `<no source line>` | 9.000000 |
+| `rust/library/core/src/slice/iter/macros.rs:25` | `($this:ident, $len:ident => $zst_body:expr, $end:ident => $other_body:expr,) => {{` | 8.000000 |
+| `rust/library/core/src/slice/iter/macros.rs:274` | `acc = f(acc, unsafe { & $( $mut_ )? *self.ptr.add(i).as_ptr() });` | 4.000000 |
+| `rust/library/core/src/slice/iter/macros.rs:279` | `if i == len {` | 54.000000 |
+
+#### `tc_kernel::main`: source lines above 2 instructions/operation
+
+| File:line | Source text | Instructions/operation |
+|---|---|---:|
+| `compiler-rust/src/tc/expand.rs:669` | `return self.g.instance(template);` | 3.000000 |
+
+### What changed since R1's instance7
+
+`git diff 3ce75c9b4 d1a9d3a5c -- compiler-rust/src/tc/template.rs`
+and `git blame -L 447,470 compiler-rust/src/tc/template.rs` identify two
+new executable source lines in `instance_inner`: the mask declaration at
+454 and its application at 464. Blame assigns both to the squashed R3b
+commit `d1a9d3a5c`; the original change is `774b8a2a7`, **Checker rewrite
+R3b: instances drop variable names**. The `Graph::copy` VAR arm also changed,
+but does not execute in this instance benchmark. The other changes to this
+file since R1 are comments and a test-only derive.
+
+| New source | Attributed instructions/call | Per copied node (six nodes) |
+|---|---:|---:|
+| `template.rs:454`, `let a_mask = [NONE, 0, 0, 0, 0];` | 4.00 | 0.666667 amortized |
+| `template.rs:464`, `node.a \|= a_mask[node.tag() as usize];` | 41.00 | 6.833333 average |
+| Total charged to these source lines | 45.00 | 7.500000 average |
+
+There are **six**, not seven, distinct nodes in scheme7. The mask is applied
+to all six, not only its two variables. Declaration cost is once per call;
+per-node figures divide the observed line totals by six, not a claim that
+each node executes identical machine instructions.
+
+R1 publishes 327.27 net (327 rounded); this executable measures 355.269361
+net for Graph::instance7, approximately **28.00 more per call** (4.67 per
+copied node). **45 is a source-attribution charge, not the marginal cost of
+the change.** Optimized code combines and redistributes work between lines;
+45 cannot be added to 327 to predict this executable. Relative to that
+published total, all other attributed code and harness differences net to
+about −17.00. R1's per-line raw profiles are not available in this report,
+so that residual is not asserted to be a measured line-by-line R1 comparison.
+No counterfactual compiler edit or tuning was used to assign causality.
+
+Both instance paths have exactly the same measured Graph::instance body
+(351.000307 raw instructions/call). The eight-instruction difference between
+their totals is in the benchmark caller (22.002030 vs 14.002024), not a faster
+Graph implementation. Thus their net figures depend on the specified common
+empty-loop subtraction; they should not be read as an isolated eight-instruction
+saving from Checker::instance's memo test.
