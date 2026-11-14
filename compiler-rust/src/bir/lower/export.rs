@@ -1503,14 +1503,6 @@ impl State {
         }
     }
 
-    /// compile_main.ml `declare_undeclared_exports` (C:801) and O:30
-    /// resolve_export_aliases, on the rows of the final block: the
-    /// declarations after the top level are statements now. A finished top
-    /// level gets `let export;` for every export no top-level statement
-    /// declares. Each export then resolves in the order of O:42-47: a kept
-    /// function alias, the self-alias target, a reusable same-name binding,
-    /// the alias chain. Cost: one step per export, per declaration carrying
-    /// its name and per declaration on its alias chains.
     /// Record the reservation `ident` of the export variable `export` for
     /// the naming log's replay, as the subject the naming tables take
     /// (`State::replay_names`). One push.
@@ -1522,6 +1514,14 @@ impl State {
         });
     }
 
+    /// compile_main.ml `declare_undeclared_exports` (C:801) and O:30
+    /// resolve_export_aliases, on the rows of the final block: the
+    /// declarations after the top level are statements now. A finished top
+    /// level gets `let export;` for every export no top-level statement
+    /// declares. Each export then resolves in the order of O:42-47: a kept
+    /// function alias, the self-alias target, a reusable same-name binding,
+    /// the alias chain. Cost: one step per export, per declaration carrying
+    /// its name and per declaration on its alias chains.
     fn resolve_exports(&mut self, finished: Finished) -> Vec<Ident> {
         self.coercion.folding = false;
         let mut selected = std::mem::take(&mut self.coercion.selected);

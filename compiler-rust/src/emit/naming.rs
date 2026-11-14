@@ -938,7 +938,7 @@ impl Tables {
         self.assign(group, false)
     }
 
-    /// The depth of the current scope; the program is zero.
+    /// The depth of the current scope; the program is zero. Constant.
     fn depth(&self) -> u32 {
         self.levels.len() as u32 - 1
     }
@@ -995,7 +995,7 @@ impl Tables {
         group
     }
 
-    /// Push the row of `group` on the undo stack.
+    /// Push the row of `group` on the undo stack. One push.
     fn save(&mut self, group: u32) {
         self.saved.push(Saved {
             group,
@@ -1005,12 +1005,13 @@ impl Tables {
     }
 
     /// Whether `entry` of `skipped` is one of `group`'s current row.
+    /// Constant.
     fn current_skip(&self, entry: u32, group: u32) -> bool {
         entry != NONE && entry >= self.marks[group as usize].born
     }
 
     /// Whether the base of `group` itself is taken in the current scope
-    /// (`Names::used` of a name that is the base of its group).
+    /// (`Names::used` of a name that is the base of its group). Constant.
     fn base_taken(&self, group: u32, depth: u32) -> bool {
         let row = self.groups[group as usize];
         row.scope == depth
@@ -1090,7 +1091,8 @@ impl Tables {
 
     /// Record that `(group, suffix)` was passed over, pointing the marks
     /// of `target` (the group itself for suffix zero, else the group spelled
-    /// like the candidate, or `NONE`) at the entry.
+    /// like the candidate, or `NONE`) at the entry. Two pushes and one
+    /// write.
     fn skip(&mut self, group: u32, suffix: u32, target: u32) {
         let entry = self.skipped.len() as u32;
         self.skipped.push([group, suffix]);
@@ -1110,7 +1112,8 @@ impl Tables {
 }
 
 /// The part of `name` before a final `$` and the number after it, when that
-/// is a positive decimal without leading zeros that fits a suffix.
+/// is a positive decimal without leading zeros that fits a suffix. Cost:
+/// the bytes of `name`.
 fn canonical_suffix(name: &str) -> Option<(&str, u32)> {
     let (prefix, suffix) = name.rsplit_once('$')?;
     if suffix.starts_with(|c: char| ('1'..='9').contains(&c))
@@ -1122,7 +1125,8 @@ fn canonical_suffix(name: &str) -> Option<(&str, u32)> {
     }
 }
 
-/// Append `value` in decimal, without allocating.
+/// Append `value` in decimal, without allocating once `out` has room. Cost:
+/// one step per digit (at most ten).
 fn push_decimal(out: &mut String, value: u32) {
     let mut digits = [0u8; 10];
     let mut start = digits.len();

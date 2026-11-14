@@ -766,8 +766,11 @@ impl Replayed {
 /// Cost: one step per statement of the final lists, one per row, one per
 /// reserved entry, one per ancestor between a literal and its statement (a
 /// node is read at most twice), plus the cost of each `Tables` call. `marks`
-/// is cleared once per unit (four bytes a node). Nothing is allocated once
-/// `scratch`, `tables` and `printed` have held a unit of this size.
+/// is cleared once per unit (four bytes a node). Then one load per variable
+/// of the unit (its use count, for `unnamed_references`), and for a
+/// referenced variable left unnamed its subject and `eta_parameter`, both
+/// constant. Nothing is allocated once `scratch`, `tables` and `printed`
+/// have held a unit of this size.
 pub(crate) fn replay(
     bir: &Bir,
     root: NodeId,
@@ -886,7 +889,9 @@ impl Replay<'_, '_> {
     }
 
     /// The statements of the block `root` and everything below them, one
-    /// frame per open list.
+    /// frame per open list. Cost: one step per statement of the lists and
+    /// per frame, plus `literal` per attached row and `statement` per
+    /// statement; nothing is allocated once `frames` has its capacity.
     fn statements(&mut self, root: NodeId) {
         self.scratch.frames.clear();
         self.scratch.frames.push(Frame { statement: root, at: 0, leave: ScopeId::NONE.0 });
@@ -946,7 +951,9 @@ impl Replay<'_, '_> {
     }
 
     /// Reach `statement`: name its binders and open its frame, which reads
-    /// its function literals, then its child lists.
+    /// its function literals, then its child lists. Cost: one `Tables::add`
+    /// per binder (one per field of a rest declaration), `finish` for a
+    /// range loop, one push.
     fn statement(&mut self, statement: NodeId) {
         use crate::bir::View;
         let bir = self.bir;
@@ -1037,7 +1044,7 @@ impl Replay<'_, '_> {
         row.flags & ScopeRow::ETA != 0 && self.bir.function(row.function).flags & crate::bir::FuncHeader::METHOD == 0
     }
 
-    /// Whether `node` is a function literal with a closed row.
+    /// Whether `node` is a function literal with a closed row. Constant.
     fn closed_literal(&self, node: NodeId) -> bool {
         use crate::bir::View;
         let View::JFun { header, .. } = self.bir.view(node) else { return false };
@@ -1045,7 +1052,9 @@ impl Replay<'_, '_> {
     }
 
     /// The cached bound of a range loop over `var`, when the bound `end` is
-    /// neither a number nor a reference (`walk::finish_binding`).
+    /// neither a number nor a reference (`walk::finish_binding`). Cost: one
+    /// read of the bound's op; when cached, the bytes of the name, one
+    /// interning and one `Tables::synthetic`.
     fn finish(&mut self, var: VarId, end: NodeId) {
         if matches!(self.bir.nodes[end.index()].op(), Op::JNumber | Op::Var | Op::JQualified) {
             return;
@@ -1060,7 +1069,10 @@ impl Replay<'_, '_> {
     }
 
     /// The function literal of `row`, standing in `statement`: its
-    /// reservation, its scope, its parameters and its body's frame.
+    /// reservation, its scope, its parameters and its body's frame. Cost:
+    /// `reserve` per entry of the free list (and the binder), one
+    /// `Tables::add` per parameter and for the binder, `Tables::enter`, one
+    /// push.
     fn literal(&mut self, row: u32, statement: NodeId) {
         use crate::bir::View;
         let bir = self.bir;
@@ -1145,21 +1157,22 @@ impl Replay<'_, '_> {
         }
     }
 
-    /// Name the binder `var` in the current scope (`Tables::add`).
+    /// Name the binder `var` in the current scope. Cost: one `Tables::add`.
     fn name(&mut self, var: VarId) {
         if let Some(subject) = self.subject(var) {
             self.printed.names[var.index()] = Some(self.tables.add(subject));
         }
     }
 
-    /// Name an imported module in the program (`Tables::add_module`).
+    /// Name an imported module in the program. Cost: one
+    /// `Tables::add_module`.
     fn name_import(&mut self, import: ImportId) {
         let subject = self.import_subject(import);
         self.printed.modules[import.index()] = Some(self.tables.add_module(subject));
     }
 
     /// The identifier `var` prints as: its origin's. None for a variable
-    /// without an identifier.
+    /// without an identifier. Constant.
     fn subject(&self, var: VarId) -> Option<Subject> {
         let origin = self.bir.vars.j_origin[var.index()];
         let ident = self.idents.get(origin.index())?;
@@ -1167,7 +1180,7 @@ impl Replay<'_, '_> {
     }
 
     /// The identifier of an imported module; its slot follows the
-    /// variables'.
+    /// variables'. Constant.
     fn import_subject(&self, import: ImportId) -> Subject {
         let id = &self.bir.pools.j_modules[import.index()].id;
         Subject { slot: index(self.bir.vars.len() + import.index()), stamp: id.stamp(), name: id.name_atom() }
@@ -1256,6 +1269,8 @@ mod tests {
         assert_eq!(std::mem::size_of::<Frame>(), 12);
         assert_eq!(std::mem::size_of::<Program<'_>>(), 64);
         assert_eq!(std::mem::size_of::<Replayed>(), 48);
+        assert_eq!(std::mem::size_of::<Declaration>(), 1);
+        assert_eq!(std::mem::size_of::<super::super::jsx::PrintedForm>(), 1);
     }
 
     #[test]

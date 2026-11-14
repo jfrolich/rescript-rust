@@ -921,7 +921,6 @@ pub(crate) struct LowerPair {
     pub locations: Option<std::sync::Arc<crate::lambda::LamLocTable>>,
 }
 
-/// What the new lowering hands to the shared tail of the gate.
 /// The naming log's replay of one unit, for `emit::compare_with_pass`.
 pub(crate) struct NameInput {
     pub printed: crate::emit::Printed,
@@ -935,6 +934,7 @@ pub(crate) struct NameInput {
     pub imports: Vec<crate::js_ir::ModuleId>,
 }
 
+/// What the new lowering hands to the shared tail of the gate.
 pub(crate) struct LowerCandidate {
     pub arena: crate::js_ir::arena::JsArena,
     /// The top-level statements, effects of the last value included.
