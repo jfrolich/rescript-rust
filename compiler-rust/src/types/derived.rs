@@ -115,6 +115,26 @@ pub struct Bound {
     pub obligations: Span,
 }
 
+/// One dense name-cache entry. Owner is part of the key: the same spelling
+/// can denote the declaration's constructor and a predefined constructor.
+#[derive(Debug, Clone, Copy)]
+struct ConstructorName {
+    epoch: u32,
+    slot: u32,
+    owner: Owner,
+}
+
+impl Default for ConstructorName {
+    fn default() -> Self { Self { epoch: 0, slot: 0, owner: Owner::Option } }
+}
+
+impl ConstructorName {
+    // O(1); zero is the vacant slot, otherwise slots are stored one-based.
+    fn get(self, epoch: u32, owner: Owner) -> Option<u32> {
+        (self.slot != 0 && self.epoch == epoch && self.owner == owner).then(|| self.slot - 1)
+    }
+}
+
 /// The tables of one typed arena. `reserve` sizes them once per compilation.
 #[derive(Debug, Default)]
 pub struct DerivedTable {
@@ -136,9 +156,9 @@ pub struct DerivedTable {
     labels: Vec<Arc<LabelDescription>>,
     /// The descriptions `Resolved::Constructor` names.
     constructors: Vec<Arc<ConstructorDescription>>,
-    /// Unqualified names: (binding obligation start, description slot + 1).
+    /// Unqualified names keyed by binding obligation start and owner.
     /// A binding has one immutable environment; epochs prevent cross-binding reuse.
-    constructor_names: Vec<(u32, u32)>,
+    constructor_names: Vec<ConstructorName>,
     /// The constants `Resolved::Literal` names.
     constants: Vec<crate::types::typedtree::Constant>,
     /// The instances of the argument types of the constructors
@@ -430,7 +450,7 @@ pub fn discharge_counting(
     let bindings = plans.bindings(item);
     tctx.typed.derived.reserve(plans);
     // One dense name table per unit, not per binding or constructor visit.
-    tctx.typed.derived.constructor_names.resize(arena.string_count(), (0, 0));
+    tctx.typed.derived.constructor_names.resize(arena.string_count(), ConstructorName::default());
 
     // `Typecore.type_binding` starts with `Typetexp.reset_type_variables`.
     tctx.reset_type_variables();
@@ -887,16 +907,15 @@ fn discharge_binding(
                     crate::parser::Longident::Lident(name) => Some(name.raw() as usize),
                     crate::parser::Longident::Ldot(..) | crate::parser::Longident::Lapply(..) => None,
                 };
-                let cached = name_slot.map(|slot| table.constructor_names[slot]);
-                let desc_slot = if let Some((epoch, slot)) = cached
-                    && epoch == binding.obligations.start && slot != 0
-                {
-                    slot - 1
+                let cached = name_slot.and_then(|slot|
+                    table.constructor_names[slot].get(binding.obligations.start, of));
+                let desc_slot = if let Some(slot) = cached {
+                    slot
                 } else {
                     let slot = table.constructors.len() as u32;
                     table.constructors.push(Arc::new(desc.into_owned()));
                     if let Some(name_slot) = name_slot {
-                        table.constructor_names[name_slot] = (binding.obligations.start, slot + 1);
+                        table.constructor_names[name_slot] = ConstructorName { epoch: binding.obligations.start, slot: slot + 1, owner: of };
                     }
                     slot
                 };
@@ -1483,8 +1502,32 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn constructor_name_cache_is_keyed_by_owner_and_binding() {
+        let declared = ConstructorName { epoch: 7, slot: 3, owner: Owner::Declared };
+        assert_eq!(declared.get(7, Owner::Declared), Some(2));
+        assert_eq!(declared.get(7, Owner::Result), None);
+        assert_eq!(declared.get(8, Owner::Declared), None);
+        let result = ConstructorName { epoch: 7, slot: 4, owner: Owner::Result };
+        assert_eq!(result.get(7, Owner::Result), Some(3));
+        assert_eq!(result.get(7, Owner::Declared), None);
+        assert_eq!(ConstructorName::default().get(0, Owner::Option), None);
+    }
+
+    #[test]
+    fn constructor_name_cache_starts_empty_in_each_unit() {
+        for _ in 0..2 {
+            with_record(1, |tctx, env, item, _| {
+                assert!(tctx.typed.derived.constructor_names.is_empty());
+                assert!(tctx.typed.derived.constructors.is_empty());
+                discharge_counting(tctx, env, item, &mut ()).unwrap();
+                assert!(!tctx.typed.derived.constructors.is_empty());
+            });
+        }
+    }
+
+    #[test]
     fn constructor_descriptions_are_shared_within_each_binding() {
-        assert_eq!(std::mem::size_of::<(u32, u32)>(), 8);
+        assert_eq!(std::mem::size_of::<ConstructorName>(), 12);
         let mut sizes = Vec::new();
         for fields in [1, 2, 10_000] {
             with_record(fields, |tctx, env, item, _| {

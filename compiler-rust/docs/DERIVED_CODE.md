@@ -922,3 +922,14 @@ Constructor exports through `open` remain guarded by the obligation retry.
 Constructor exports through `include` remain guarded by the obligation retry.
 The `%%private` route through `handle_private_extension` remains guarded by the
 obligation retry, not claimed as syntactically classified.
+
+
+The constructor-description cache key is now `(interned name, binding obligation
+start, Owner)`; switching between a declared constructor and predefined result
+constructor cannot reuse the wrong description. The owner/epoch unit test and
+the two-unit fresh-cache test run with
+`cargo test --manifest-path compiler-rust/Cargo.toml constructor_name_cache`.
+A `DerivedTable` belongs to a fresh typed arena per unit: `driver.rs:10360`
+constructs `TypeCheckContext::new`, `types/typecore.rs:1669` initializes
+`typed: TypedArena::new()`, and `types/tast_arena.rs:455` returns `Self::default()`.
+It is not reset and reused across units; no cache-clearing convention is needed.
