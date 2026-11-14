@@ -1,0 +1,1 @@
+- Checker rewrite R4i: under `RESCRIPT_CHECKER=both`, a build with debug assertions replays every lookup by name of the old environment on the new scope structure and fails a unit whose replay differs; `tc_kernel` measures the R4 name operations.
