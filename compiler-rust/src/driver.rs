@@ -451,6 +451,25 @@ mod checker_choice_tests {
         assert_eq!(CheckerChoice::parse("other"), None);
     }
 
+    /// The names check starts a capture under `Both` only, and a panic in the
+    /// checked unit leaves no capture running.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn only_both_captures_the_names_of_a_unit() {
+        use super::names_replayed;
+        use crate::tc::scope_trace::on;
+        for choice in [CheckerChoice::Old, CheckerChoice::New] {
+            assert_eq!(names_replayed(choice, "Unit", on), Ok(false));
+        }
+        assert_eq!(names_replayed(CheckerChoice::Both, "Unit", on), Ok(true));
+        assert!(!on());
+        let panicked = std::panic::catch_unwind(|| {
+            names_replayed(CheckerChoice::Both, "Unit", || panic!("unit failed"))
+        });
+        assert!(panicked.is_err());
+        assert!(!on());
+    }
+
     #[test]
     fn both_compares_fake_observations_but_does_not_force_declined_ones() {
         use super::checker_results_agree;
@@ -10503,6 +10522,35 @@ impl AttemptOutput {
     }
 }
 
+/// The names check of `RESCRIPT_CHECKER=both` (CHECKER_REWRITE.md, "R4 as
+/// designed", decision 4): with `Both`, `type_check` runs under
+/// `tc::scope_trace::capture` and every lookup by name the old environment
+/// made is replayed on a new `tc::scope::Scopes`; the first lookup it
+/// answers with another item fails the unit with the mismatch and the
+/// unit's name. With `Old` or `New` no capture starts. Builds with debug
+/// assertions only. Cost: `type_check`'s plus, under `Both`, the replay
+/// (O(events x depth of the version tree + lookups x items of the trace));
+/// O(1) otherwise.
+#[cfg(debug_assertions)]
+fn names_replayed<T>(
+    choice: CheckerChoice,
+    unit: &str,
+    type_check: impl FnOnce() -> T,
+) -> std::result::Result<T, String> {
+    use crate::tc::scope_oracle::{OnScopes, replay};
+    if choice != CheckerChoice::Both {
+        return Ok(type_check());
+    }
+    let (checked, events) = crate::tc::scope_trace::capture(type_check);
+    match replay(&events, &mut OnScopes::new()) {
+        Ok(done) => {
+            log::debug!(target: "rescript_checker", "tc-names-replayed {unit} {}", done.lookups);
+            Ok(checked)
+        }
+        Err(mismatch) => Err(format!("{unit}: the names replay differs from the old checker: {mismatch:?}")),
+    }
+}
+
 /// The one attempt loop of a unit: check it with diagnostic-only snapshots
 /// elided, continue on its general syntax when a plan of a derived item
 /// cannot be used, and explain it if the check fails. Every retry reason
@@ -10547,15 +10595,25 @@ fn type_structure_two_modes<S, T, R>(
         let type_ctx = fresh_type_context();
         type_ctx.set_location_namespace(&options.location_identity(filename));
         type_ctx.defer_attempt_counters();
-        let (mut tctx, env) = crate::timing::measure(crate::timing::Phase::EnvSetup, || {
-            in_process_type_check_context(&type_ctx, &unit, syntax.arena, attempt.mode)
-        });
-        // Census ownership follows the syntax, including its general form
-        // after fallback; it is not conditional on using derived plans.
-        tctx.derived_census = syntax.arena.derived_census.clone();
-        let typed = crate::timing::measure(crate::timing::Phase::Typecheck, || {
-            env.and_then(|env| check(&mut tctx, &env, syntax).map(|typed| (typed, env)))
-        });
+        let type_check = || {
+            let (mut tctx, env) = crate::timing::measure(crate::timing::Phase::EnvSetup, || {
+                in_process_type_check_context(&type_ctx, &unit, syntax.arena, attempt.mode)
+            });
+            // Census ownership follows the syntax, including its general form
+            // after fallback; it is not conditional on using derived plans.
+            tctx.derived_census = syntax.arena.derived_census.clone();
+            let typed = crate::timing::measure(crate::timing::Phase::Typecheck, || {
+                env.and_then(|env| check(&mut tctx, &env, syntax).map(|typed| (typed, env)))
+            });
+            (tctx, typed)
+        };
+        #[cfg(not(debug_assertions))]
+        let (tctx, typed) = type_check();
+        #[cfg(debug_assertions)]
+        let (tctx, typed) = match names_replayed(options.checker, unit.module_name.unwrap_or(filename), type_check) {
+            Ok(checked) => checked,
+            Err(mismatch) => return (type_ctx, Err(anyhow::Error::msg(mismatch))),
+        };
         if tctx.derived_fallback {
             // Dropped in dependency order: nothing of this attempt survives.
             drop(typed);
