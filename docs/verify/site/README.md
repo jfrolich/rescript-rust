@@ -25,7 +25,8 @@ for the sentence shown above the report. Set `VITE_PULL_REQUEST` to link the
 pages to a pull request.
 
 There is one page per document: `index.html` is `README.md`, `pure.html` is
-`pure.md`, `law.html` is `law.md` and `spec.html` is `spec.md`. A host that serves `pure.html` as
+`pure.md`, `law.html` is `law.md`, `spec.html` is `spec.md` and `proof.html` is
+`proof.md`. A host that serves `pure.html` as
 `/pure` works as well: every URL in the pages is relative.
 
 An example marked `"checks": true` is also verified: the compiler module

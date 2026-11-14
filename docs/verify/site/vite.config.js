@@ -14,6 +14,6 @@ export default defineConfig({
   build: {
     target: "esnext",
     // One page per document of docs/verify.
-    rollupOptions: { input: ["index.html", "pure.html", "law.html", "spec.html"] },
+    rollupOptions: { input: ["index.html", "pure.html", "law.html", "proof.html", "spec.html"] },
   },
 });
