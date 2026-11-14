@@ -2147,3 +2147,27 @@ fn the_naming_log_agrees_on_a_function_the_printer_eta_reduces() {
     let stats = names_agree(a, root, None, false);
     assert_eq!(stats.names_pass, 1);
 }
+
+#[test]
+#[ignore = "design gap: an import released before its function closes stays in the free list (THREE_TREES 11.4, T5 part B as built)"]
+fn the_naming_log_agrees_on_a_function_whose_module_reference_folds_away() {
+    // `let f = (left, right) => Primitive_int.compare(left, right) == 0`
+    // prints `left === right`: the comparison builds a reference to
+    // `Primitive_int`, which the constructor of `===` releases before `f`
+    // closes. Imports have a count and no sites, so `f`'s free list keeps
+    // `Primitive_int` and the pass's has nothing: `free_differences: 2`.
+    // Reduced from `prim_cmp::tests::integer_comparison_strips_runtime_compare_before_zero`.
+    use crate::lambda::lam_compat::Comparison;
+    use crate::lambda::lam_primitive::Primitive as P;
+    use crate::lambda::LamLoc;
+    let mut a = LamArena::new();
+    let (f, left, right) = (Ident::new("f", 1, IdentFlags::NONE), Ident::new("left", 2, IdentFlags::NONE), Ident::new("right", 3, IdentFlags::NONE));
+    let (l, r) = (a.var(left), a.var(right));
+    let order = a.prim_raw(P::Pintorder, &[l, r], LamLoc::NONE);
+    let zero = a.const_(C::Int { i: 0, comment: None });
+    let equal = a.prim_raw(P::Pintcomp(Comparison::Eq), &[order, zero], LamLoc::NONE);
+    let function = a.function_(2, &[left, right], equal, Default::default(), LamLoc::NONE);
+    let end = a.var(f);
+    let root = a.let_(LetKind::Strict, f, function, end);
+    names_agree(a, root, None, false);
+}
