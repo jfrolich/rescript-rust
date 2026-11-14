@@ -10575,6 +10575,13 @@ fn type_structure_two_modes<S, T, R>(
             continue;
         }
         let output = reports.publish(&type_ctx).and(output);
+        // Common final context use for all six entry points, after their
+        // continuation (including lowering, GenType and signature hooks).
+        // One Cell read per published Success unit, never per node.
+        if reports.publication == AttemptPublication::Committed && attempt.mode == CheckMode::Success {
+            assert!(!type_ctx.unexplained_unify_failure(),
+                "{filename}: unexplained unification failure after Success publication");
+        }
         return (type_ctx, output);
     }
 }
@@ -12462,6 +12469,32 @@ mod tests {
             reports.push(format!("{:#}", result.unwrap_err()));
         }
         assert_eq!(reports[0], reports[1]);
+    }
+
+    #[test]
+    #[should_panic(expected = "unexplained unification failure after Success publication")]
+    fn a_caught_failure_after_publication_is_asserted_at_the_unit_exit() {
+        let mut parser = super::Parser::new("Published.res", "let x = 1");
+        let structure = super::module::parse_structure(&mut parser);
+        crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
+        let options = super::CompilerOptions { nopervasives: true, ..Default::default() };
+        super::type_structure_two_modes(
+            super::CheckUnit {
+                filename: "Published.res", options: &options, registry: None, module_name: None,
+                file_config: &Default::default(), frontend_warning_specs: &[], derived_plans: true,
+                mode: crate::types::context::CheckMode::Success,
+            },
+            super::UnitSyntax::new(parser.arena(), &structure, &options), None,
+            |tctx, env, syntax| super::type_structure(tctx, env, syntax.arena, syntax.tree),
+            |ctx, mut tctx, typed, _, output| -> super::Result<()> {
+                typed.unwrap();
+                output.publish(ctx)?;
+                let int = ctx.new_constr(crate::types::predef::path_int(), vec![]);
+                let string = ctx.new_constr(crate::types::predef::path_string(), vec![]);
+                assert!(crate::types::ctype::unify(ctx, &mut tctx.unify_state, int, string).is_err());
+                Ok(())
+            },
+        );
     }
 
     #[test]
