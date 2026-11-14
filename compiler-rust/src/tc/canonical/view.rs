@@ -342,7 +342,10 @@ impl<'s> View<'s> {
             (self.seg.nodes[n.0 as usize], NONE)
         } else {
             let index = (n.0 - self.shared) as usize;
-            (self.seg.template_nodes[index], self.owner[index])
+            (
+                crate::tc::template::descriptor(self.seg.template_nodes[index]),
+                self.owner[index],
+            )
         }
     }
 

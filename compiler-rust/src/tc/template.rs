@@ -212,6 +212,23 @@ mod tests {
     }
 }
 
+/// O(1), no allocation: the descriptor a stored template node stands for.
+/// Every template node is generic, so its level field is free: a variable
+/// keeps its scheme name there and NONE in `a`, which is what an instance
+/// copies (compiler/ml/btype.ml:510). Readers that print or convert a scheme
+/// (tc/canonical/view.rs, tc/bridge/to_old.rs) read the name through this.
+pub(crate) fn descriptor(node: Node) -> Node {
+    if node.tag() == VAR {
+        Node {
+            level: GENERIC,
+            a: node.level,
+            ..node
+        }
+    } else {
+        node
+    }
+}
+
 /// Four words, with a pool-range index, avoiding a 65,535-node scheme limit.
 /// References use bit 30 for instance-relative indices; bit 31 stays reserved
 /// for frozen handles. A zero-node template holds an external root in nodes.
@@ -306,7 +323,15 @@ impl Graph {
             let target = base + (self.forward[source.0 as usize].target & !RELATIVE);
             let mut node = self.nodes[source.0 as usize];
             match node.tag() {
-                VAR => {}
+                // The instance source holds no name: an instance copies the
+                // node as it is stored, nameless (`copy_type_desc`,
+                // compiler/ml/btype.ml:510: `Tvar _ -> Tvar None`), and
+                // overwrites the level. The scheme's name moves to the
+                // level field, which no instance reads ([`descriptor`]).
+                VAR => {
+                    node.level = node.a;
+                    node.a = NONE;
+                }
                 ARROW => {
                     node.a = self.capture_ref(Ty(node.a), base).0;
                     let start = self.template_params.len() as u32;
@@ -447,11 +472,9 @@ impl Graph {
         }
         // Tag order is VAR, LINK (never captured), CONSTR, TUPLE, ARROW.
         // Capture validates descriptors before publishing template nodes.
+        // A stored variable is already nameless; the level written here
+        // replaces the name the level field holds ([`descriptor`]).
         let b_addend = [0, 0, list_base, list_base, param_base];
-        // A copied variable has no name (`copy_type_desc`,
-        // compiler/ml/btype.ml:510: `Tvar _ -> Tvar None`): an OR by tag,
-        // no branch. An arrow's `a` is rewritten below.
-        let a_mask = [NONE, 0, 0, 0, 0];
         let source =
             &template_nodes[template.nodes as usize..(template.nodes + template.node_len) as usize];
         nodes.extend(source.iter().map(|&original| {
@@ -461,7 +484,6 @@ impl Graph {
                 level: *level,
                 ..original
             };
-            node.a |= a_mask[node.tag() as usize];
             node.b += b_addend[node.tag() as usize];
             if node.tag() == ARROW {
                 node.a = at(Ty(node.a)).0;

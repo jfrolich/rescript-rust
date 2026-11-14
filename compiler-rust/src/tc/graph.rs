@@ -75,6 +75,8 @@ pub struct Graph {
     pub(crate) work: Vec<Ty>,
     pub(crate) forward: Vec<super::template::Forward>,
     pub(crate) copy_generation: u32,
+    /// Instance sources: a variable's name is in the level field, not `a`
+    /// (tc/template.rs `descriptor`).
     pub(crate) template_nodes: Vec<Node>,
     pub(crate) template_lists: Vec<Ty>,
     pub(crate) template_params: Vec<Param>,

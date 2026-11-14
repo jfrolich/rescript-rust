@@ -77,6 +77,7 @@ pub struct Segment {
     pub lists: Box<[Ty]>,
     pub params: Box<[Param]>,
     pub templates: Box<[Template]>,
+    /// A variable's name is in the level field (tc/template.rs `descriptor`).
     pub(crate) template_nodes: Box<[Node]>,
     pub(crate) template_lists: Box<[Ty]>,
     pub(crate) template_params: Box<[Param]>,
