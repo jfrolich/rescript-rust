@@ -753,8 +753,8 @@ pub(crate) fn decide_switch_on(
         );
         let value = shallow_legacy_const(b, cst).and_then(|c| crate::lambda::untagged_value(&c));
         return match (plan, value) {
-            (Some(plan), Some(value)) => {
-                match crate::lambda::untagged_dispatch::select(&plan, &value, &mut |_| ()) {
+            (Some(mut plan), Some(value)) => {
+                match crate::lambda::untagged_dispatch::select(&mut plan, &value, &mut |_| ()) {
                     crate::lambda::untagged_dispatch::Outcome::Arm(action) => Some(action),
                     crate::lambda::untagged_dispatch::Outcome::Default => fail,
                     crate::lambda::untagged_dispatch::Outcome::Nothing => None,

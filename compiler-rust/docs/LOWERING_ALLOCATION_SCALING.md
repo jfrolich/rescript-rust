@@ -311,3 +311,67 @@ test result: ok. 774 passed; 0 failed; 0 ignored; 0 measured; 1719 filtered out;
 
 The pinned allocation constants are unchanged. Strict all-target compiler
 clippy also passes (`cargo clippy --manifest-path compiler-rust/Cargo.toml --all-targets -- -D warnings`).
+
+## Review extension: owned planner boundary
+
+`select` now takes `&mut Plan`, lending its retained canonical-key encoder and
+iterative selector worklist. It constructs no Metadata table. A warmed string
+selection, including actual test-stack traversal, allocates nothing. The owned
+`plan` entry reserves graph, grouping, clause, fact, metadata and scratch pools
+from the layout and arm counts; these are growth estimates, not rejection bounds.
+
+Command: `CARGO_INCREMENTAL=0 cargo test --manifest-path compiler-rust/Cargo.toml warmed_string_selection -- --nocapture --test-threads=1`
+
+```text
+warmed string select: calls=10000; allocations=0; instances materialized before emission=0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2493 filtered out; finished in 0.00s
+```
+
+The same test verifies layout-derived test/tree capacities, empty compatibility
+cells after planning and selection, and one stable cached instance when an
+emitter explicitly requests its test. Cells are `std::cell::OnceCell`, not
+synchronized cells or per-node reference counts.
+
+The previous planner did **not** allocate fresh shape identities during plan
+construction: it cloned the input instances. Command:
+
+```sh
+git show origin/ocaml-to-rust-rewrite:compiler-rust/src/lambda/untagged_dispatch.rs | nl -ba | sed -n '331,358p'
+```
+
+Relevant raw lines:
+
+```text
+   335                  BlockType::Instance(i) => Some(i.clone()),
+   351          match arm(&BlockType::Instance(i.clone())) {
+   353                  let check = p.add_test(Test::Instance(i.clone()));
+   357                  let check = p.add_test(Test::Instance(i.clone()));
+```
+
+The rewritten eager compatibility materializer did more: `ShapeAllocation::fresh`
+for an array, or `ClassBlocks::fresh(0)` for a class (two fresh identities inside
+that function). Those calls now run only in the compatibility cell's initializer
+when `Plan::test` is asked for an owned instance. Planning and constant selection
+do not initialize the cells. Inspect the exact identity allocator with:
+
+```sh
+sed -n '90,106p' compiler-rust/src/types/variant_runtime.rs
+```
+
+Additional adapter disposition: `lambda/arena.rs::LamArena::decide_switch` and
+`lambda/mod.rs::Lambda::switch` must lend their local plan mutably to the shared
+selector, as does `bir/l/norm.rs::decide_switch_on` (reached from lowering's inline
+beta reduction). The arena edit is only the required selector-signature adapter,
+not an independent default-path optimization; it has no direct bir/lower caller.
+
+Command: `CARGO_INCREMENTAL=0 cargo test --manifest-path compiler-rust/Cargo.toml untagged_dispatch -- --nocapture --test-threads=1`
+
+```text
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 2466 filtered out; finished in 9.50s
+```
+
+Command: `CARGO_INCREMENTAL=0 cargo test --manifest-path compiler-rust/Cargo.toml bir:: -- --test-threads=1`
+
+```text
+test result: ok. 774 passed; 0 failed; 0 ignored; 0 measured; 1720 filtered out; finished in 87.79s
+```

@@ -184,6 +184,29 @@ pub(crate) struct Metadata {
     instance_index: Index,
 }
 impl Metadata {
+    /// Cost: O(B + A) to count class name bytes and ancestors; reserves their
+    /// text, instance and ancestry pools before importing the layout's K kinds.
+    pub(crate) fn reserve_kinds<'a>(&mut self, kinds: impl Iterator<Item = &'a BlockType>) {
+        let (mut instances, mut names, mut bytes, mut ancestors) = (0, 0, 0, 0);
+        for kind in kinds {
+            if let BlockType::Instance(instance) = kind {
+                instances += 1;
+                if let Instance::Class { name, ancestors: parents, .. } = instance {
+                    names += 1 + parents.len();
+                    bytes += name.len() + parents.iter().map(String::len).sum::<usize>();
+                    ancestors += parents.len();
+                }
+            }
+        }
+        let text_rows = self.texts.capacity() + names;
+        self.text.reserve_exact(self.text.capacity() + bytes - self.text.len());
+        self.texts.reserve_exact(text_rows - self.texts.len());
+        self.text_index.reserve_exact(text_rows - self.text_index.nodes.len());
+        self.instances.reserve_exact(instances);
+        self.instance_index.reserve_exact(instances);
+        self.ancestors.reserve_exact(ancestors);
+    }
+
     /// O(source literal bytes/counts), no interning: reserve the known import
     /// domain before visiting its literals. Bounds include both source spelling
     /// and canonical equality spelling; float hex keys fit in forty bytes.

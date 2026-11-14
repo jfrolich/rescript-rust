@@ -319,7 +319,7 @@ enum SelectOp {
 pub(crate) struct Plan<A> {
     pub(crate) metadata: Metadata,
     legacy_literals: Vec<LiteralTag>,
-    legacy_instances: Vec<crate::types::variant_runtime::Instance>,
+    legacy_instances: Vec<std::cell::OnceCell<crate::types::variant_runtime::Instance>>,
     legacy_typeof: Vec<(BlockType, Clause<A>)>,
     tests: Vec<StoredTest>,
     trees: Vec<Tree<A>>,
@@ -335,6 +335,7 @@ pub(crate) struct Plan<A> {
     equal_trees: Vec<(TreeId, TreeId)>,
     equal_tests: Vec<(TestId, TestId)>,
     selector_work: Vec<SelectOp>,
+    selector_key: crate::types::variant_runtime::LiteralKeyScratch,
 }
 
 impl<A> Default for Plan<A> {
@@ -346,6 +347,35 @@ impl<A> Default for Plan<A> {
 }
 
 impl<A> Plan<A> {
+    /// Cost: O(existing pool rows) on relocation; reserves O(L + K) slots per
+    /// pool from L literal and K payload occurrences in the source layout/arms.
+    /// Bounds cover construction plus simplification copies, not rejection limits.
+    fn reserve_layout(&mut self, literals: usize, payloads: usize) {
+        let cases = literals + payloads + 1;
+        let graph = 16 * cases;
+        self.tests.reserve_exact(8 * cases);
+        self.reserve_trees(graph);
+        self.reserve_simplification(graph);
+        self.reserve_groups(cases);
+        self.reserve_literal_clauses(literals);
+        self.typeof_clauses.reserve_exact(payloads);
+        self.equal_trees.reserve_exact(graph);
+        self.equal_tests.reserve_exact(8 * cases);
+        self.selector_work.reserve_exact(8 * cases);
+        self.scratch.arms.reserve_exact(payloads);
+        self.scratch.all.reserve_exact(cases);
+        self.scratch.primitive.reserve_exact(cases);
+        self.scratch.other.reserve_exact(cases);
+        self.scratch.instances.reserve_exact(payloads);
+        self.scratch.ordered.reserve_exact(payloads);
+        self.scratch.entries.reserve_exact(cases);
+        self.scratch.merged.reserve_exact(cases);
+        self.scratch.missing.reserve_exact(payloads);
+        self.scratch.literals.reserve_exact(literals);
+        self.scratch.unnamed.reserve_exact(literals);
+        self.scratch.membership.reserve_exact(literals);
+    }
+
     /// O(1): reserve pending trees and dense memo rows before planning.
     pub(crate) fn reserve_simplification(&mut self, trees: usize) {
         self.simplify_work.reserve_exact(trees);
@@ -393,6 +423,7 @@ impl<A> Plan<A> {
             equal_trees: Vec::new(),
             equal_tests: Vec::new(),
             selector_work: Vec::new(),
+            selector_key: crate::types::variant_runtime::LiteralKeyScratch::default(),
         }
     }
 
@@ -412,7 +443,7 @@ impl<A> Plan<A> {
         match self.stored_test(id) {
             StoredTest::Equals(literal) => Test::Equals(&self.legacy_literals[literal.0 as usize]),
             StoredTest::Typeof(kind) => Test::Typeof(borrowed_typeof(*kind)),
-            StoredTest::Instance(instance) => Test::Instance(&self.legacy_instances[instance.0 as usize]),
+            StoredTest::Instance(instance) => Test::Instance(self.legacy_instances[instance.0 as usize].get_or_init(|| self.metadata.owned_instance(*instance))),
             StoredTest::NotNull => Test::NotNull,
             StoredTest::Not(test) => Test::Not(test),
             StoredTest::And(a, b) => Test::And(a, b),
@@ -845,20 +876,30 @@ fn selected_literal(metadata: &Metadata, id: LiteralId) -> SelectedValue<'_> {
     }
 }
 
-/// The owned constant-folding boundary imports its value key once; the selector
-/// below borrows keys, including when planning tests unnamed imported literals.
-/// Cost: O(value spelling import + tests/clauses visited); temporary storage is linear in value bytes and test depth.
+/// Constant folding compares canonical keys without constructing an interner.
+/// Cost: O(value bytes + visited test/clauses and key comparisons); retains the
+/// key encoder and O(test depth) work stack in the caller's plan across calls.
 pub(crate) fn select<A: Copy>(
-    plan: &Plan<A>,
+    plan: &mut Plan<A>,
     value: &Value,
     on_test: &mut impl FnMut(&StoredTest),
 ) -> Outcome<A> {
-    let mut metadata = Metadata::default();
+    let mut key = std::mem::take(&mut plan.selector_key);
+    let mut work = std::mem::take(&mut plan.selector_work);
     let value = match value {
-        Value::Literal(tag) => {
-            let id = metadata.import_literal(tag);
-            selected_literal(&metadata, id)
-        }
+        Value::Literal(tag) => SelectedValue {
+            key: Some(key.encode(tag)),
+            kind: match tag {
+                LiteralTag::String(_) => Some(Kind::String),
+                LiteralTag::Int(_) | LiteralTag::Float(_) => Some(Kind::Number),
+                LiteralTag::BigInt(_) => Some(Kind::Bigint),
+                LiteralTag::Bool(_) => Some(Kind::Boolean),
+                LiteralTag::Null => Some(Kind::Object),
+                LiteralTag::Undefined => None,
+            },
+            array: false,
+            null: matches!(tag, LiteralTag::Null),
+        },
         Value::Object | Value::Array => SelectedValue {
             key: None,
             kind: Some(Kind::Object),
@@ -866,7 +907,10 @@ pub(crate) fn select<A: Copy>(
             null: false,
         },
     };
-    select_tree(plan, plan.root, &value, on_test, &mut Vec::new())
+    let result = select_tree(plan, plan.root, &value, on_test, &mut work);
+    plan.selector_key = key;
+    plan.selector_work = work;
+    result
 }
 /// Cost: O(tests and clauses visited, including key comparisons); O(test depth) retained scratch.
 fn select_tree<A: Copy>(
@@ -1199,7 +1243,13 @@ fn simplify<A: Copy>(p: &mut Plan<A>, same: &impl Fn(&A, &A) -> bool, root: Tree
 /// Cost: O(metadata import + grouping + simplification + unique compatibility payload bytes); one owned plan.
 pub(crate) fn plan<A: Copy>(same: impl Fn(&A, &A) -> bool, input: Input<'_, A>) -> Plan<A> {
     let mut p = Plan::new();
+    let literal_count = input.facts.literal_tags.len() + input.literal_arms.len();
+    let payload_count = input.facts.block_types.len() + input.payload_arms.len();
+    p.reserve_layout(literal_count, payload_count);
+    p.metadata.reserve_literals(input.facts.literal_tags.iter().chain(input.literal_arms.iter().map(|(tag, _)| tag)));
+    p.metadata.reserve_kinds(input.facts.block_types.iter().chain(input.payload_arms.iter().map(|(kind, _)| kind)));
     let mut fact_pool = FactPool::default();
+    fact_pool.reserve(input.facts.literal_tags.len(), input.facts.block_types.len());
     let facts = fact_pool.import(&mut p.metadata, input.facts);
     let literal_arms: Vec<_> = input
         .literal_arms
@@ -1228,7 +1278,7 @@ pub(crate) fn plan<A: Copy>(same: impl Fn(&A, &A) -> bool, input: Input<'_, A>) 
     p.legacy_literals = (0..p.metadata.literal_count())
         .map(|i| p.metadata.owned_literal(LiteralId(i as u32))).collect();
     p.legacy_instances = (0..p.metadata.instance_count())
-        .map(|i| p.metadata.owned_instance(InstanceId(i as u32))).collect();
+        .map(|_| std::cell::OnceCell::new()).collect();
     p.legacy_typeof = p.typeof_clauses.iter()
         .map(|(kind, clause)| (kind.block_type(), *clause)).collect();
     p
@@ -1538,6 +1588,41 @@ mod tests {
     }
 
     #[test]
+    fn warmed_string_selection_reuses_keys_and_defers_instance_materialization() {
+        let c = class("C", &[]);
+        let d = class("D", &[]);
+        let literals = vec![s("hit")];
+        let kinds = vec![c.clone(), d, BlockType::Number];
+        let literal_arms = vec![(s("hit"), "literal")];
+        let payload_arms = vec![(c, "class"), (BlockType::Number, "number")];
+        let cases = literals.len() + kinds.len() + literal_arms.len() + payload_arms.len() + 1;
+        let mut p = plan_of(literals, kinds, Some("default"), literal_arms, payload_arms);
+        assert!(p.tests.capacity() >= 8 * cases);
+        assert!(p.trees.capacity() >= 16 * cases);
+        assert!(!p.legacy_instances.is_empty());
+        assert!(p.legacy_instances.iter().all(|cell| cell.get().is_none()));
+        let value = Value::Literal(s("hit"));
+        let mut visited = 0;
+        assert!(matches!(select(&mut p, &value, &mut |_| visited += 1), Outcome::Arm("literal")));
+        assert!(visited > 0, "exercise the selector work stack, not just a Run leaf");
+        let measured = allocation_counter::measure(|| {
+            for _ in 0..10_000 {
+                assert!(matches!(select(&mut p, &value, &mut |_| {}), Outcome::Arm("literal")));
+            }
+        });
+        assert_eq!(measured.count_total, 0, "{measured:?}");
+        assert!(p.legacy_instances.iter().all(|cell| cell.get().is_none()));
+        let test = p.tests.iter().position(|t| matches!(t, StoredTest::Instance(_))).unwrap();
+        let id = TestId(test as u32);
+        match (p.test(id), p.test(id)) {
+            (Test::Instance(first), Test::Instance(second)) => assert!(std::ptr::eq(first, second)),
+            _ => unreachable!(),
+        }
+        assert_eq!(p.legacy_instances.iter().filter(|cell| cell.get().is_some()).count(), 1);
+        println!("warmed string select: calls=10000; allocations={}; instances materialized before emission=0", measured.count_total);
+    }
+
+    #[test]
     fn deep_tests_and_blocks_use_iterative_selector_and_simplifier() {
         let mut p = Plan::default();
         let mut first = p.add_test(StoredTest::NotNull);
@@ -1564,7 +1649,7 @@ mod tests {
         }
         p.root = simplify(&mut p, &|a, b| a == b, root);
         assert!(matches!(
-            select(&p, &Value::Object, &mut |_| {}),
+            select(&mut p, &Value::Object, &mut |_| {}),
             Outcome::Arm(1)
         ));
         assert_eq!(std::mem::size_of::<TreeId>(), 4);
@@ -1888,7 +1973,7 @@ mod tests {
             let (literals, kinds, literal_arms, payload_arms) = case.clone();
             let complete =
                 literal_arms.len() == literals.len() && payload_arms.len() == kinds.len();
-            let tree = plan_of(
+            let mut tree = plan_of(
                 literals.clone(),
                 kinds.clone(),
                 (!complete).then_some("default"),
@@ -1897,8 +1982,9 @@ mod tests {
             );
             for value in values(&literals, &kinds) {
                 let mut class_checks = 0;
-                let outcome = select(&tree, &value, &mut |test: &StoredTest| {
-                    if matches!(test, StoredTest::Instance(id) if tree.metadata.is_class(*id)) {
+                let classes: Vec<_> = (0..tree.metadata.instance_count()).map(|i| tree.metadata.is_class(InstanceId(i as u32))).collect();
+                let outcome = select(&mut tree, &value, &mut |test: &StoredTest| {
+                    if matches!(test, StoredTest::Instance(id) if classes[id.0 as usize]) {
                         class_checks += 1;
                     }
                 });

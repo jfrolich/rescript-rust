@@ -763,8 +763,8 @@ impl Lambda {
             && !facts.block_types.is_empty()
         {
             let outcome = match (untagged_plan(&switch), untagged_value(cst)) {
-                (Some(plan), Some(value)) => Some(
-                    match untagged_dispatch::select(&plan, &value, &mut |_| ()) {
+                (Some(mut plan), Some(value)) => Some(
+                    match untagged_dispatch::select(&mut plan, &value, &mut |_| ()) {
                         untagged_dispatch::Outcome::Arm(action) => Some(Some(action.clone())),
                         untagged_dispatch::Outcome::Default => Some(None),
                         untagged_dispatch::Outcome::Nothing => None,
