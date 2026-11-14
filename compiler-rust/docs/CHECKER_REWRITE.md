@@ -2521,6 +2521,9 @@ cases. If a seed fails and OCaml's source supports your code, stop and
 report the seed: do not copy the old checker's order.
 ```
 
+The last prompt is superseded by decision 5 of 8.6: no builder starts R3e
+to R3j from it.
+
 ```text
 R3e..R3j. First commit, before any body: extend
 differential::program_source and differential::type_text with your
@@ -2557,3 +2560,45 @@ family a commit, in the order of the signatures in the file.
 5. **R3e to R3j have no acceptance tests in this pull request.**
    Recommended: accept, with the first-commit rule of 8.4; or run a second
    skeleton turn for them once R3c's `Full` tier runs.
+
+### 8.6 The open questions as decided
+
+Decided in review, before this section was merged.
+
+1. **The occurrence walk per structure pair stays in R3, as OCaml has
+   it.** The candidate to measure at R5c is named now, so that it is not
+   rediscovered: in `Mode::Success` a failure only has to be detected, not
+   located, because the unit is checked again in `Mode::Explain`. One
+   acyclicity walk at the end of a top-level unification could therefore
+   replace the walks per pair in that mode. Before it is built it needs a
+   proof that unification terminates on the graph an omitted check leaves
+   behind, the same expansion rule as `occur_rec` (a constructor that holds
+   the node is expanded before the check gives up, ctype.ml:1396-1402), and
+   the share of `Checker::occur` in the profile of real units. Until then
+   the bounds of decision 6 hold and `Mode::Explain` never changes.
+2. **The memo of a module-alias expansion follows the current checker**
+   until R8c deletes it, because `both` mode compares shared nodes with it.
+   The `ALIAS` flag's doc comment cites both sources. Whether the
+   difference from OCaml's source is visible in a diagnostic is not known:
+   a search for a program that shows it is a task of its own, and if one is
+   found the current checker is corrected first and this rule follows it.
+3. **Inherited memo entries are decided by a test, in R3f**: its generator
+   includes a recursive abbreviation through a variant and one through an
+   object. If the `Full` tier differs, slot 0 becomes an index into a pool
+   of memo lists in that slice.
+4. **Which scope changes clean the memos is R5b's**, judged by `both`
+   mode. The harness keeps one environment.
+5. **R3e to R3j get a second skeleton turn**, not a generator written by
+   their builder: the tests of a slice are written by the designer. It runs
+   when R3c's `Full` tier passes, extends the generator and the two forms
+   tier by tier, proves each extension not vacuous on the current checker's
+   side, and writes one prompt per slice.
+
+Two notes for that turn. The forms of the harness print a constructor by
+the last component of its path, which is enough while a generated program
+is one unit; a tier that generates a second module prints the whole path.
+And the ignored acceptance tests of R3a to R3d have not run: where one
+contradicts the OCaml lines its doc comment cites, the builder reports the
+test with those lines and the test is corrected, as `link_directions` was
+in review (the survivor of two nullary constructors ends at the left
+node's level, ctype.ml:2256).

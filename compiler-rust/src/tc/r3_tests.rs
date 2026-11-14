@@ -506,13 +506,16 @@ fn link_directions() {
     c.unify(l, r).unwrap();
     assert_eq!(c.g.repr(l), r);
     // Two nullary constructors of one type: left to right, and the right
-    // one is lowered to the left one's level (ctype.ml:2248-2257).
+    // one is lowered to the left one's level (`update_level !env t1.level
+    // t2; link_type t1 t2`, ctype.ml:2248-2257). The left node is made at
+    // level 1 and the right one at level 2, so the survivor ends at 1.
     let l = constr(&mut c, INT, &[]);
     c.g.begin_def();
     let r = constr(&mut c, INT, &[]);
+    assert_eq!(c.g.nodes[r.0 as usize].level, 2);
     c.unify(l, r).unwrap();
     assert_eq!(c.g.repr(l), r);
-    assert_eq!(c.g.nodes[r.0 as usize].level, 2);
+    assert_eq!(c.g.nodes[r.0 as usize].level, 1);
     // Structures: left to right, before the children: the children of the
     // right node are the survivors.
     let (li, ri) = (constr(&mut c, INT, &[]), constr(&mut c, INT, &[]));
