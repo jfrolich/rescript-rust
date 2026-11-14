@@ -2171,12 +2171,30 @@ it stops and reports a reproduction.
 | R3b | Declaration facts by type index, expansion, both memos and their cleanup, the memo-aware `instance` and `copy`, `restore` | `expand.rs` | R1, R2 | R3a | 600 |
 | R3d | The level walk with scopes and the expanding retry, `lower_args` | `expand.rs` | R3b | R3a | 300 |
 | R3c | Abbreviations in unification: `unify2`, `unify3`, the relink to the original node, the recursion repair, `unify_var` | `unify.rs` | R3a, R3b, R3d | nothing | 450 |
-| R3e | Worker-local descriptor pools; objects and fields | `rows.rs` | R3c | nothing | 500 |
+| R3k | In the explaining mode a lowering whose retry clashes keeps its levels and adds the escaping pair to the trace (8.6, decision 14) | `expand.rs` | R3d | R3m | 60 |
+| R3m | Inherited memo entries: a constructor with arguments copied by an expansion links to the expanding node of the same type (8.6, decision 16) | `expand.rs` | R3b | R3k | 150 |
+| R3e | Worker-local descriptor pools; objects and fields | `rows.rs` | R3c, R3m | nothing | 500 |
 | R3f | Polymorphic variant rows | `rows.rs` | R3e | R3g | 600 |
 | R3g | Universal variables, polymorphic types, packages | `rows.rs` | R3e | R3f | 500 |
 | R3h | Pattern mode, equations, `reify`, `mcomp` | `rows.rs`, `unify.rs` | R3f, R3g | R3i, R3j | 600 |
-| R3i | `moregeneral`, `equal`, `matches` | `relate.rs` | R3g | R3h, R3j | 600 |
-| R3j | Subtyping without the declaration-directed coercions | `relate.rs` | R3g | R3h, R3i | 600 |
+| R3i | `moregeneral`, `equal`, `matches` | `relate.rs` | R3f, R3g | R3h, R3j | 600 |
+| R3j | Subtyping without the declaration-directed coercions | `relate.rs` | R3f, R3g | R3h, R3i | 600 |
+| K2 | The hot paths of unification, no behaviour change (8.7) | `unify.rs` | R3c | every slice above | 150 |
+
+State after the second skeleton turn. Merged: R3a, R3b, R3d, R3c, and K1
+(the kernel's hot paths, TC_KERNEL_R3.md). Designed in the second turn, with
+acceptance tests that are ignored until the slice is built: R3k, R3m, and
+the generated-case acceptance tests of R3e and R3f (the harness prints
+objects, fields, variants, polymorphic types and universal variables on
+both sides; `Extras::from_segment` is built, because the harness needs the
+pools to print). Designed as text with a build prompt: K2 (8.7). Not done
+in the second turn: the hand-built acceptance tests, step relations, size
+tests and build prompts of R3e and R3f, and all of R3g to R3j; 8.6 ends
+with what the second turn learned that their designer needs. R3i and R3j
+now depend on R3f: `matches` unifies, and a generated program for them has
+variants. `differential::tests::ignored_tests_name_the_slices_they_reach`
+checks, from the text of every ignored test, that it says which slices it
+reaches and reaches none that is built after its own.
 
 Each slice is one pull request that removes the `ignore` of its own tests
 and the `#[allow(...)]` of a module once the module has no `todo!` left.
@@ -2796,6 +2814,254 @@ additions are `differential::Plan` bits; every number below is one run of
     `Mode::Success`. A new side that lowers every node above the variable's
     level, with no cut (`Fault::UnprunedBinding`, what the first build of
     R3a did), is reported by 111 of them.
+
+16. **Inherited memo entries are observable: slice R3m** (decision 3,
+    decided by a test as it asked). The harness prints objects and
+    variants (`Plan` bits `OBJECTS`, `VARIANTS`) and generates the four
+    recursive abbreviations `ro`, `po<'a>`, `rv`, `pv<'a>`. Instance, copy,
+    generalize and lower agree on 10,000 cases with such types
+    (`kernel_tier_agrees_on_objects_and_variants`). Expansion does not: 89
+    of 10,000 cases differ with objects and 159 with variants, all read so
+    far one cause. Observed on the old checker
+    (`old_checker_links_a_recursive_occurrence_to_the_node_being_expanded`):
+
+    ```text
+    ro          expand: obj{hd: poly(int;); tl: poly(@0;); nil}     both sides
+    po<string>  expand: obj{hd: poly(@1;); tl: poly(@0;); nil}      old
+                        obj{hd: poly(@1;); tl: poly(po<@1>;); nil}  new
+    rv          expand: [closed #Nil #Cons((int, @0)) | nil]        both sides
+    pv<string>  expand: [closed #Nil #Cons((@1, @0)) | nil]         old
+                        [closed #Nil #Cons((@1, pv<@1>)) | nil]     new
+    ```
+
+    `@0` is the node being expanded. The nullary cases agree because the
+    memo all nullary constructors share already does it (decision 3 of
+    8.2). With a parameter, `subst` memorizes the expanding node in its own
+    memo before the body is copied and sets `abbreviations` to that memo
+    (ctype.ml:1113-1126); the copy of a constructor then asks `find_repr p
+    !abbrevs` and becomes a link to the node found (ctype.ml:780-782); a
+    constructor that is not found gets a memo that continues with the
+    expanding node's (`Mlink !abbreviations`, ctype.ml:793-799). So the
+    entries a node sees are its own and those of the chain of nodes whose
+    expansions made it.
+    R3m, in `expand.rs`: `Memo::parents`, a dense `Vec<Ty>` by node handle,
+    grown only when written, `NONE` by default. `subst` writes, for every
+    constructor with arguments its instance made, the expanding node as
+    parent, unless that constructor names the type of a node on the
+    expanding node's chain whose slot 0 is live, in which case the new node
+    becomes a link to that node (`link_node`). The chain of a node is the
+    node, then its parent, and so on; a node whose memo was cleaned ends
+    the chain (`cleanup_abbrev` clears its parent with its slot 0, as
+    `abbr := Mnil` cuts the list, btype.ml:623-627) and a node whose entry
+    was forgotten does not (`forget_abbrev` removes one entry and keeps the
+    tail, btype.ml:636-647). Cost: nothing for a body without a
+    constructor with arguments (the pass over the instance's nodes runs
+    only when the manifest has one: a bit in `Manifest`, set by
+    `TypeTable::from_segment`); otherwise one step per node of the
+    instance and one step per chain entry per such constructor. Acceptance:
+    `expand_tier_agrees_on_recursive_abbreviations` (ignored, `R3m build`),
+    and a step relation the builder adds as a reviewed first commit: the
+    expansion of a chain of n nested `po` nodes is linear (n = 1,000 against
+    n = 10,000 within a factor of 11).
+17. **The forms of extended nodes.** An object prints `obj{fields}`, a
+    field `name: type; rest` (`name!` when mutable), the end of a list
+    `nil`, a variant `[closed fixed #tag(type) #tag?cm(types) #tag- |
+    more as name<arguments>]` with the fields of a chain of rows outermost
+    first and the innermost row's flags (`row_repr`, btype.ml:126-135), a
+    polymorphic type `poly(body; variables)`, a universal variable
+    `!name`. Every node is numbered as before, so sharing below a row is
+    compared. Not printed: which mutability *cell* a field has. Two fields
+    that share a cell and two that have equal cells print alike.
+18. **What the designer of R3e to R3j needs from this turn** (their
+    hand-built tests and prompts were not written; see 8.1).
+    - *Descriptor rows are shared by every instance of a scheme* (a node's
+      `a` is copied as stored). Unification must therefore never write a
+      descriptor row in place. A field built for the fields one side lacks
+      (`build_fields`, ctype.ml:325) has the name and the cell of the
+      field it copies, so it reuses that field node's descriptor index and
+      needs no new row. A row changed by `unify_row` is a new `variants`
+      row and a new descriptor.
+    - *Mutability cells are duplicated by an instance* when the row ends in
+      a generic variable (`dup_mutability`, `row_terminator_generic`,
+      btype.ml:457-530), one duplicate per class per copy. A template
+      instance copies nodes as stored and so shares the scheme's cells.
+      The kernel tier does not see this (decision 17). R3e has to decide
+      where the duplicate is made (a pass over an instance's field nodes,
+      run only for a template that has one, or cells as nodes of the
+      graph), and its harness has to print cell classes before that
+      decision can be tested. A promotion (`unify_mutability`,
+      ctype.ml:2520-2539) needs a mutable field in a generated program;
+      which surface syntax gives one was not established.
+    - *An object's field is a `Tpoly` with no variables* in every generated
+      type (`poly(int;)` above), so R3e's generator already reaches
+      `Tpoly (t1, []), Tpoly (t2, [])` (ctype.ml:2413), which is R3g's
+      arm. Either that arm moves to R3e or R3e depends on R3g.
+    - *Decision 9* (bit 31 on the binding walk's stack): nothing built or
+      designed in R3 puts a frozen handle in a child list; `Extras` rows
+      name children by slot, and `from_segment` copies rows, not nodes. It
+      stays with the slice that first shares a segment's nodes without
+      copying them (R5a at the earliest).
+    - *The old checker is not the judge everywhere.* Decisions 12 and 13
+      list seeds where it departs from ctype.ml. A slice whose differential
+      test differs must read the OCaml arm before it follows either side.
+
+### 8.7 The hot paths of unification (K2)
+
+K1 (TC_KERNEL_R3.md, "K1") left unification at these figures, in
+instructions per operation, net of the build-only twin:
+
+| Operation | K1 | K2 target | What is removed |
+|---|---:|---:|---|
+| `unify_vars` | 192 | ≤ 150 | root frame (a), `bind` (b) |
+| `unify_ground1` | 157 | ≤ 125 | root frame (a) |
+| `unify_ground3` | 701 | ≤ 640 | root frame (a); the walk stays (d) |
+| `unify_vars_local` | 267 | ≤ 155 | (a), (b), no-op lowering (c) |
+| `unify_ground1_local` | 235 | ≤ 130 | (a), (c) |
+| `unify_ground3_local` | 1014 | ≤ 660 | (a), (c) four times |
+
+The targets are arithmetic on the K1 table and the attribution of
+TC_KERNEL_R3.md, not measurements: the builder measures first and reports
+where a target was wrong. A local form may cost at most 6 instructions more
+than its generic form per lowering it does not need (one load and one
+compare each): that relation is the gate, the absolute figures follow.
+
+(a) **The frame push and pop of the root pair.** `unify_distinct` pushes
+the pair it was given as a `Frame` and `run_frames` pops it at once
+(16 bytes written and read, a length update each way, the `match
+frame.kind`). The root pair goes to `unify_pair` directly; `run_frames`
+runs only when that call left frames above `base`. The lines that go:
+`self.push_pair(left, right)` in `unify_distinct`. The trace of a failure
+at the root is unchanged: `explain_failure` receives the root pair as the
+failing pair when no frame is above `base`. About 30 instructions on every
+top-level unification.
+
+(b) **`Checker::bind`'s 48 instructions for two variables.** For a target
+that is a variable `bind_routed` links and then calls `lower_to`, which
+calls `Checker::lower`, which calls `Graph::lower`: a work list cleared,
+pushed and popped for one node. OCaml's is one compare
+(`if ty.level > level`, ctype.ml:586, after `link_type`,
+ctype.ml:2221-2222). The variable-to-variable arm becomes: link, then
+`if target.level > var.level` one `Graph::write` of the level. No call.
+Target for `bind` in `unify_vars`: at most 20 instructions.
+
+(c) **A lowering that lowers nothing.** `lower_to` tests only for the
+generic level. Every other call pays `Graph::lower`'s set-up, which is the
+60 to 78 instructions a `_local` form costs over its generic form (two
+calls in unify2, one in the nullary shortcut, one in a binding to a
+variable). `lower_to` first reads the representative's level and returns
+when it is not above the target, as the outer `update_level` does
+(ctype.ml:635). One load and one compare.
+
+(d) **No walk for a right side without children.** `Checker::occur` and the
+binding walk start a mark generation and a work list for a node that has
+no child (a nullary constructor that is not the shortcut's: two different
+paths about to clash, an abbreviation's expanded head, a binding of a
+variable to `int`). When the right node's arity is 0 and it is not a
+variable, the answer is "does not occur" without a walk; a binding still
+lowers that one node (c). None of the six bench operations takes this
+path: the builder adds `bind_ground1` and `bind_ground1_local` (a variable
+against a nullary constructor) with their build-only twins, measures them
+before the change, and reports both. Target: within 25 instructions of
+`unify_vars`.
+
+**The deferred occurrence check (decision 1 of 8.6): designed, and not
+part of K2's gate.** It removes no instruction from the six operations:
+for a three-node pair the walk before the root link visits the two children
+of the right node, and a walk after the unification would visit the same
+nodes with a costlier mark (three states in place of two). It pays only
+where the per-pair walks add up: the `n(n+1)/2` of a deep equal pair
+(decision 6 of 8.2). So it is a slice of its own, K2b, built only when a
+profile of real units (R5c) shows `Checker::occur` above 2% of checking.
+The design, so that it is not rediscovered:
+
+- *When.* `Mode::Success` only, and only at the end of a top-level
+  `unify_distinct` (`depth == 0`) that linked at least one structure pair
+  (a counter in `Checker`, reset at the top). `Mode::Explain` never
+  changes. The walk of a binding (`binding_walk`) stays: it lowers levels
+  in the same pass and is not what is quadratic.
+- *What it visits.* Every node reachable from the right node of the root
+  pair without entering an object or a variant row (`stops_occurrence`,
+  ctype.ml:1403), each once, with the three marks of `occur_expanding`
+  (free of a cycle, on the path, done). A graph was acyclic in this sense
+  before the unification, and every structure pair linked during it is
+  below the root pair, so a cycle made by a missed occurrence is reachable
+  from there.
+- *The expansion rule.* A node met again while on the path is a cycle. As
+  in `occur_rec` (ctype.ml:1396-1402), the innermost constructor on the
+  path between the two meetings is expanded (`expand_head`, `Unif`) and the
+  walk goes on in its expansion in place of its arguments; when no
+  constructor on that stretch expands, the unification fails. This is what
+  keeps the cycle through an abbreviation's argument that
+  `create_recursion` accepts (ctype.ml:2308, 2428-2436).
+- *Termination before the walk.* With the per-pair check gone the loop of
+  `run_frames` runs on a graph that may hold a cycle. Every pair it pops
+  either has one representative on both sides (skipped) or links one
+  representative to another, and a link is never undone in `Mode::Success`;
+  an abbreviation node expands once per memo. So the number of pairs that
+  do work is bounded by the nodes and the expansions, and every walk
+  inside (`binding_scan`, `reaches`, `closed_over`, `lower_scoped`) uses
+  marks or stops at a level it has written.
+- *What a failure leaves.* What any failure in `Mode::Success` leaves:
+  `unexplained_failure` outside a speculation, the owner's restore inside
+  one. The index of the failing operation is that of the same top-level
+  unification.
+- *Cost.* One step per node reachable from the root, once per top-level
+  unification that linked a structure pair, in place of one walk per
+  linked pair: never more steps than the walk of the root pair costs today.
+- *Tests it must pass before it merges.*
+  `unify_of_equal_deep_types_fits_the_stack` with its bound replaced by a
+  relation (n = 10,000 at most 11 times n = 1,000);
+  `build_plan_agrees_on_generated_cases`, whose operations unify a type
+  with a tuple or a child of itself (10,000 cases, the same failing
+  indices); `occurrence_through_an_abbreviation`.
+- *What is not proven.* That the final graph has a cycle exactly when one
+  of OCaml's checks at the time of a link would have failed. The argument:
+  a link only identifies two nodes whose children are then unified pair by
+  pair, so a path that existed stays, and an expansion is a function of the
+  declaration. It is an argument, not a proof, and it is why K2b waits for
+  a profile that needs it.
+
+The build prompt of K2 (the common part of 6.0 is prepended):
+
+```text
+You build K2: the hot paths of unification, with no change of behaviour.
+Read AGENTS.md; compiler-rust/docs/CHECKER_REWRITE.md section 8.7;
+compiler-rust/docs/TC_KERNEL_R3.md ("Machine and method", "Attribution",
+"K1"); compiler-rust/src/tc/unify.rs and expand.rs whole;
+compiler-rust/benches/tc_kernel.rs.
+
+First edit, before any change to src/tc: add the bench operations
+bind_ground1 and bind_ground1_local with their build-only twins, and
+measure all eight unification operations on the base as TC_KERNEL_R3.md
+does. That table is your "before".
+
+Then one commit per item of section 8.7, in the order (c), (b), (a), (d),
+each measured whole: (c) lower_to returns when the representative is not
+above the target; (b) a binding of a variable to a variable links and
+writes one level; (a) the root pair goes to unify_pair without a frame;
+(d) no walk for a node without children. You do not build the deferred
+occurrence check.
+
+Your oracle is the bench and the tests. No test changes, none is ignored,
+and these pass on every commit:
+  cargo test --manifest-path compiler-rust/Cargo.toml --lib tc::
+which includes the Full tier and the plans of the differential harness
+(explaining mode, scoped types, made nodes) at 10,000 cases each. A step
+count in a test that goes DOWN is reported, not edited: stop and say which.
+
+Relations to hold: each _local operation costs at most 6 instructions more
+than its generic form per level test it makes; unify_vars is at most 150
+and bind inside it at most 20; no operation of the K1 table that is not a
+unification moves by more than 2. Shortcuts that count as failure: a level
+test that reads a node that is not a representative; skipping a lowering
+when types.scoped != 0 without the scope test of Checker::lower; a walk
+skipped for a node WITH children; a change in src/tc/graph.rs, level.rs or
+template.rs; any change of what Mode::Explain does.
+
+Report the table before and after per commit, and the instruction count
+of the CI check (tc is not on a compiler build's path: say so if it is
+unchanged).
+```
 
 ## 9. R4 as designed
 
