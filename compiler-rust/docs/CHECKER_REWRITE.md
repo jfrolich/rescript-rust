@@ -2944,6 +2944,49 @@ additions are `differential::Plan` bits; every number below is one run of
       list seeds where it departs from ctype.ml. A slice whose differential
       test differs must read the OCaml arm before it follows either side.
 
+Decided in the review of the second skeleton turn (trunk `0b175b7d0d`).
+They bind the builders and the third skeleton turn.
+
+19. **R3m's layout is the pool** (the first of the two layouts of decision
+    16). Rows of 16 bytes, found from a constructor through a dense table;
+    slot 0 holds a node and nothing else, the kernel (`graph.rs`,
+    `level.rs`, `template.rs`) is not changed, and a generalization pays
+    nothing for it. Left to the third turn and fixed there (decision 25):
+    the key of the dense table, the memory per unit as a formula, and the
+    step relation of decision 16 as a test. A manifest whose body has no
+    constructor with arguments pays nothing.
+20. **The three places where the old checker departs from `ctype.ml` are a
+    task of their own**, not part of a slice: the nullary shortcut lowers
+    without the environment (decision 13, seed 16000145); a binding lowers
+    before its occurrence check fails (decision 12, the seven `BUILD`
+    seeds); the retry of a lowering does not forget the memos (decision 13,
+    seeds 49000200, 49000205, 49000183). The old checker is changed for one
+    of them only after a source program is found on which the OCaml
+    compiler and this one differ in a diagnostic or in acceptance; a
+    departure for which no such program is found is recorded and left as it
+    is. When one is fixed its seeds leave the pinned lists of
+    `run_cases_except`. A pinned list only ever shrinks.
+21. **Seeds 35000137 and 81000306 stay pinned and unclassified.** Telling
+    which side OCaml agrees with needs the harness's operations run on the
+    OCaml compiler, which is a second harness; it is not built now. Both
+    are read again when `both` mode runs on real programs (R5c) and shows
+    whether either pattern occurs in one.
+22. **Two polymorphic types without variables are R3e's**
+    (`Tpoly (t1, []), Tpoly (t2, [])`, ctype.ml:2413): the type of every
+    object field is one (decision 18), so R3e cannot pass its own tests
+    without the arm. R3g keeps the arm with variables (`enter_poly`,
+    ctype.ml:2414-2415).
+23. **K2b is designed and not built** (8.7, "The deferred occurrence
+    check"): one acyclicity check per top-level unification. It waits for a
+    profile of real units at R5c that shows the occurrence walk above 2% of
+    checking. This closes decision 1.
+24. **Step counts under K2.** A step test whose pinned count goes *down*
+    because item (a) or (d) of 8.7 removed work is lowered to the count
+    observed, in the commit of that item; the pull request lists the test,
+    the old count, the new count and the item. A count that goes up, a
+    relation between two sizes that changes, or any other assertion that
+    fails: the builder stops and reports.
+
 ### 8.7 The hot paths of unification (K2)
 
 K1 (TC_KERNEL_R3.md, "K1") left unification at these figures, in
