@@ -32,8 +32,9 @@ pub(super) fn compare_mapped(arena: LamArena, root: Lam, locations: &crate::lamb
 
 fn compare_oracle(mut arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, checks: bool, contexts: &[u8], locations: Option<&crate::lambda::LamLocTable>, inline: bool) {
     // THREE_TREES 11.4, "T5 part B as redesigned": the naming log against
-    // the pass, on the root lowered as a unit.
-    names_agree(arena.clone(), root, resolver, inline);
+    // the pass, on the root lowered as a unit (`unit_of`).
+    let (unit, unit_root) = unit_of(arena.clone(), root);
+    names_agree(unit, unit_root, resolver, inline);
     let target = Ident::new("result", arena.ident_stamp_bound() + 1, IdentFlags::NONE);
     for direct in [false, true] {
         for &context in contexts {
@@ -1874,7 +1875,38 @@ fn names_of(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePa
     program.modules = lowered.name_imports.iter().map(|import| bir.pools.j_modules[import.index()].clone()).collect();
     let stats = crate::emit::compare_with_pass(&lowered.printed, &idents, &modules, &free, &program, resolver, false)
         .expect("the pass supports the unit");
+    // Shown when an assertion of the caller fails: the text the pass names
+    // and the replay's names by variable and by import.
+    println!("{}", crate::js_ir::print_deps_program_with_directives_and_options(&program, None, &[], false, false, false));
+    for (var, name) in lowered.printed.names.iter().enumerate() {
+        println!("replay: {:?} -> {name:?}", idents[var]);
+    }
+    for (import, name) in lowered.printed.modules.iter().enumerate() {
+        println!("replay: {:?} -> {name:?}", modules[import]);
+    }
     (stats, lowered.switch_stats.replayed)
+}
+
+/// `root` as a unit: a rule test's root reads variables it does not bind,
+/// which no unit does (the pass names such a variable where it is used;
+/// the replay names binders only, `names::replay`). The root becomes the
+/// body of `let unit = (free...) => root`, its free variables with a stamp
+/// (in `Ident`'s order) the parameters; a root without one is a unit as it
+/// is. Stamp zero (JavaScript globals, modules) stays free.
+fn unit_of(mut arena: LamArena, root: Lam) -> (LamArena, Lam) {
+    let mut free: Vec<Ident> = crate::lambda::lam_analysis::free_variables(&arena, root)
+        .into_iter()
+        .filter(|ident| ident.stamp() != 0)
+        .collect();
+    if free.is_empty() {
+        return (arena, root);
+    }
+    free.sort();
+    let unit = Ident::new("unit", arena.ident_stamp_bound() + 2, IdentFlags::NONE);
+    let function = arena.function_(free.len() as i32, &free, root, Default::default(), crate::lambda::LamLoc::NONE);
+    let end = arena.var(unit);
+    let closed = arena.let_(LetKind::Strict, unit, function, end);
+    (arena, closed)
 }
 
 /// `root` lowered as a unit (`lower_with_resolver`), as `names_of` and
@@ -2031,8 +2063,10 @@ fn the_naming_log_agrees_on_a_dispatch_function_whose_scrutinee_reads_a_local() 
 #[test]
 fn a_partial_application_whose_argument_reads_a_local_reaches_the_adoption() {
     // The input of `the_naming_log_agrees_on_a_partial_application_whose_argument_reads_a_local`:
-    // the eta-expansion is built, so `names::adopt` reads the callee and
-    // the argument.
+    // with `ApplyStatus::Na` the eta-expansion is built (`apply_with_arity`),
+    // so `names::adopt` reads the callee and the argument. `InferFull` and
+    // `Uncurry` build the call without consulting the arity (`call.rs`,
+    // `application`): those two inputs do not reach the site.
     use crate::cmi::persistent_env::CmjExportArity;
     use crate::js_ir::ModulePathResolver;
     use crate::lambda::{ApInfo, ApplyStatus, FieldDbgInfo, LamLoc, lam_arity::Arity, lam_primitive::Primitive};
@@ -2048,7 +2082,8 @@ fn a_partial_application_whose_argument_reads_a_local_reaches_the_adoption() {
         let function = a.function_(1, &[param], applied, Default::default(), LamLoc::NONE);
         let end = a.var(f);
         let root = a.let_(LetKind::Strict, f, function, end);
-        assert!(adopted_nodes_of(a, root, Some(&resolver)) > 0, "{status:?}");
+        let adopted = adopted_nodes_of(a, root, Some(&resolver));
+        assert_eq!(adopted > 0, status == ApplyStatus::Na, "{status:?}: {adopted}");
     }
 }
 

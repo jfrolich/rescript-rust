@@ -1002,6 +1002,20 @@ pub(crate) fn free_lists(bir: &Bir, idents: &[crate::ident::Ident]) -> crate::em
 mod tests {
     use super::*;
 
+    impl Log {
+        /// Room for a repeat of what the log holds, for the tests that
+        /// lower the same input twice and count the second run's
+        /// allocations (`Scope::reserve_repeat`).
+        pub(crate) fn reserve_repeat(&mut self) {
+            self.rows.reserve(self.rows.len());
+            self.free.reserve(self.free.len());
+            self.of_function.reserve(self.of_function.len());
+            self.home.reserve(self.home.len());
+            self.seen.reserve(self.seen.len());
+            self.seen_import.reserve(self.seen_import.len());
+        }
+    }
+
     #[test]
     fn row_sizes() {
         assert_eq!(std::mem::size_of::<ScopeId>(), 4);

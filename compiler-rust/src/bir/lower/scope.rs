@@ -114,6 +114,7 @@ impl Scope {
         self.uses.reserve(self.uses.len());
         self.facts.reserve(self.facts.len());
         self.decisions.reserve(self.decisions.len());
+        self.names.reserve_repeat();
     }
     #[cfg(test)]
     pub(super) fn capacities(&self) -> [usize; 6] {
