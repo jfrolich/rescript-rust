@@ -164,8 +164,11 @@ impl Checker {
     /// the explicit stack. At depth 0 in `Mode::Explain` it opens a
     /// speculation and, on failure, [`Checker::undo_compress`]es it; in
     /// `Mode::Success` it opens none and, on failure outside a speculation,
-    /// sets `unexplained_failure`. Cost: O(pairs popped), each pair one
-    /// [`Checker::unify_pair`]. (R3a)
+    /// sets `unexplained_failure`. `left` and `right` are two distinct
+    /// representatives ([`Checker::unify`] makes them so). The root pair goes
+    /// to [`Checker::unify_pair`] without a frame; the loop runs only when
+    /// that call left frames. Cost: one [`Checker::unify_pair`], then
+    /// O(pairs popped), each pair one [`Checker::unify_pair`]. (R3a)
     pub fn unify_distinct(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
         let top = self.depth == 0;
         let explain = self.g.mode == Mode::Explain;
@@ -181,8 +184,7 @@ impl Checker {
         let saved_base = self.saved.len();
         let trace_base = self.trace.len();
         self.depth += 1;
-        self.push_pair(left, right);
-        let result = self.run_frames(base);
+        let result = self.run_frames(base, left, right);
         self.depth -= 1;
         match result {
             Ok(()) => {
@@ -1037,35 +1039,51 @@ impl Checker {
         }
     }
 
-    /// O(1) frame pops each plus the callee: the loop of
-    /// [`Checker::unify_distinct`] over the frames above `base`. A pair whose
-    /// two sides are one node is skipped (`unify_eq`, ctype.ml:2233). On a
-    /// clash returns the failing pair, as it stood, and leaves the frames.
-    fn run_frames(&mut self, base: usize) -> Result<(), [Ty; 2]> {
-        while self.frames.len() > base {
-            let Some(frame) = self.frames.pop() else {
-                break;
-            };
-            match frame.kind {
-                FrameKind::Pair => {
-                    let left = self.g.repr(frame.left);
-                    let right = self.g.repr(frame.right);
-                    if left != right && self.unify_pair(left, right).is_err() {
-                        return Err([left, right]);
-                    }
+    /// The loop of [`Checker::unify_distinct`]: the root pair `left`,
+    /// `right` (two distinct representatives) goes to
+    /// [`Checker::unify_pair`] without a frame, then the frames that call
+    /// left above `base` are popped, O(1) each plus the callee. A popped
+    /// pair whose two sides are one node is skipped (`unify_eq`,
+    /// ctype.ml:2233). One call site of `unify_pair`, so that it stays
+    /// inline. On a clash returns the failing pair, as it stood, and leaves
+    /// the frames: for the root pair, the frames its call left, as when the
+    /// root was a popped frame.
+    fn run_frames(&mut self, base: usize, left: Ty, right: Ty) -> Result<(), [Ty; 2]> {
+        let [mut left, mut right] = [left, right];
+        loop {
+            if self.unify_pair(left, right).is_err() {
+                return Err([left, right]);
+            }
+            // The next pair whose sides differ, running the other frames.
+            loop {
+                if self.frames.len() <= base {
+                    return Ok(());
                 }
-                FrameKind::Linked => self.saved.truncate((frame.extra & !SWAPPED) as usize),
-                FrameKind::LeavePoly => todo!("R3g"),
-                FrameKind::Recursion => {
-                    // A clash here is the enclosing pair's: it adds no
-                    // pair of its own to the trace (`Unify []`).
-                    if self.repair_recursion(frame.left, frame.right).is_err() {
-                        return Err([Ty(NONE), Ty(NONE)]);
+                let Some(frame) = self.frames.pop() else {
+                    return Ok(());
+                };
+                match frame.kind {
+                    FrameKind::Pair => {
+                        left = self.g.repr(frame.left);
+                        right = self.g.repr(frame.right);
+                        if left != right {
+                            break;
+                        }
+                    }
+                    FrameKind::Linked => {
+                        self.saved.truncate((frame.extra & !SWAPPED) as usize)
+                    }
+                    FrameKind::LeavePoly => todo!("R3g"),
+                    FrameKind::Recursion => {
+                        // A clash here is the enclosing pair's: it adds no
+                        // pair of its own to the trace (`Unify []`).
+                        if self.repair_recursion(frame.left, frame.right).is_err() {
+                            return Err([Ty(NONE), Ty(NONE)]);
+                        }
                     }
                 }
             }
         }
-        Ok(())
     }
 
     /// `update_level` of `ty` to `level`: [`Checker::lower`]. O(1) for the
