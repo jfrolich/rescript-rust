@@ -2172,8 +2172,8 @@ it stops and reports a reproduction.
 | R3d | The level walk with scopes and the expanding retry, `lower_args` | `expand.rs` | R3b | R3a | 300 |
 | R3c | Abbreviations in unification: `unify2`, `unify3`, the relink to the original node, the recursion repair, `unify_var` | `unify.rs` | R3a, R3b, R3d | nothing | 450 |
 | R3k | In the explaining mode a lowering whose retry clashes keeps its levels and adds the escaping pair to the trace (8.6, decision 14) | `expand.rs` | R3d | R3m | 60 |
-| R3m | Inherited memo entries: a constructor with arguments copied by an expansion links to the expanding node of the same type (8.6, decision 16) | `expand.rs` | R3b | R3k | 150 |
-| R3e | Worker-local descriptor pools; objects and fields | `rows.rs` | R3c, R3m | nothing | 500 |
+| R3m | Inherited memo entries: a constructor with arguments copied by an expansion links to the expanding node of the same type, through a pool of rows found by slot 0 (8.6, decisions 16 and 26) | `expand.rs` | R3b | R3k | 150 |
+| R3e | Objects and fields; mutability cells as nodes and their duplicate at an instance; two polymorphic types without variables (8.6, decision 27) | `rows.rs`, `unify.rs`, `expand.rs` | R3c, R3m | nothing | 600 |
 | R3f | Polymorphic variant rows | `rows.rs` | R3e | R3g | 600 |
 | R3g | Universal variables, polymorphic types, packages | `rows.rs` | R3e | R3f | 500 |
 | R3h | Pattern mode, equations, `reify`, `mcomp` | `rows.rs`, `unify.rs` | R3f, R3g | R3i, R3j | 600 |
@@ -2181,7 +2181,8 @@ it stops and reports a reproduction.
 | R3j | Subtyping without the declaration-directed coercions | `relate.rs` | R3f, R3g | R3h, R3i | 600 |
 | K2 | The hot paths of unification, no behaviour change (8.7) | `unify.rs` | R3c | every slice above | 150 |
 
-State after the second skeleton turn. Merged: R3a, R3b, R3d, R3c, and K1
+State after the second skeleton turn (kept for the record; the third
+turn's state follows it). Merged: R3a, R3b, R3d, R3c, and K1
 (the kernel's hot paths, TC_KERNEL_R3.md). Designed in the second turn, with
 acceptance tests that are ignored until the slice is built: R3k (with its
 prompt in 8.4), R3m (its rule and test; its layout is still open, 8.6,
@@ -2196,6 +2197,32 @@ now depend on R3f: `matches` unifies, and a generated program for them has
 variants. `differential::tests::ignored_tests_name_the_slices_they_reach`
 checks, from the text of every ignored test, that it says which slices it
 reaches and reaches none that is built after its own.
+
+State after the third skeleton turn. Merged: R3a, R3b, R3d, R3c, K1.
+Building beside this turn: R3k and K2. Designed in this turn, with
+acceptance tests that are ignored until the slice is built and a prompt in
+8.4:
+
+| Slice | Decision | Tests | Run in this turn |
+|---|---|---|---|
+| R3m | 26 | five ignored (three hand-built, two against the old checker), two that run today | every ignored test passed with a prototype of the five bodies, which is not on trunk |
+| R3e | 27 | eleven ignored (nine hand-built, two against the old checker), three that run today | the old checker's side of every fact it can show; the hand-built tests were not run |
+
+R3m's line count is 150 and its file `expand.rs`. R3e grew to 600 lines:
+it owns the duplicate of mutability cells at an instance and at a copy
+(`rows.rs`, the pass of `expand.rs`), the three frames of `unify_fields`
+and two edits of the binding walk in `unify.rs`, and the arm of two
+polymorphic types without variables (decision 22). R3f is not designed
+(decision 28): its row in the table stands, its generated-case test
+exists, and it has no prompt. R3g to R3j are not started.
+
+The ignored tests are checked mechanically
+(`differential::tests::ignored_tests_name_the_slices_they_reach`): each
+names the slices it reaches, reaches its own, and reaches none that is
+built after its own; what a test reaches is read from its text (a plan
+bit with a tier, a hand-built object, a type marked `INHERITS`, a call of
+a method whose body is `todo!`). It counts the `#[ignore` lines and pins
+no number.
 
 Each slice is one pull request that removes the `ignore` of its own tests
 and the `#[allow(...)]` of a module once the module has no `todo!` left.
@@ -2461,7 +2488,7 @@ arm; (3) the route crosses rows; (4) the duplicate of an instance and of
 a copy. Failure: recursion; a descriptor row written in place; a pass
 over an instance nobody asked for.
 
-**R3e to R3j.** Functions: every signature of `rows.rs` and `relate.rs`
+**R3f to R3j.** Functions: every signature of `rows.rs` and `relate.rs`
 carrying the slice's name. End state for each: no `todo!` with its name;
 its generator extension and old-side vacuity test (first commit); the
 `Full` tier at 10,000 cases with the extension on. R3e: fields in OCaml's
@@ -3336,6 +3363,73 @@ from this turn.
       `todo!`: their expectations are read from the OCaml lines each one
       quotes, and where the old checker can show the same fact it does, in
       a test that runs today. No prototype of R3e was built.
+28. **R3f is not designed in this turn.** The turn ended at R3e; R3f has
+    its generated-case test and no hand-built tests, step relations or
+    prompt, and no builder starts it. What its designer needs, read from
+    the source and not run:
+    - *The arms, in OCaml's order* (ctype.ml:2541-2641). `unify_row`:
+      `row_repr` of both; nothing when the two `row_more` are one node;
+      `merge_row_fields` (sorted by tag text unless one side has one tag
+      the other lacks, ctype.ml:380-386); `more` is `rm1` when row 1 is
+      fixed, else `rm2` when row 2 is, else a new variable at the lower of
+      the two levels; `closed` is either row closed; the empty-type clash
+      (ctype.ml:2565-2573); the name (ctype.ml:2574-2586); `set_more row2
+      r1` then `set_more row1 r2`, each of which filters the other side's
+      fields when `closed`, clashes when a closed or fixed row would gain
+      a field, and links the row's `more` to a **new generic variant
+      node** holding the fields it lacked (ctype.ml:2596-2616); then
+      `unify_row_field` per common tag in merged order; then a static row
+      1 gets `Tnil` as its `more`. On any failure `rm1` and `rm2` get
+      their descriptors back.
+    - *What a changed row allocates* (decision 18): one node at the
+      generic level, one descriptor row (12 bytes), one `variants` row (28
+      bytes), one `row_fields` row (20 bytes) and the list slots of its
+      types for each field the other side had and this one lacked, plus
+      the slot of `more` and of the name's arguments. Nothing when the
+      other side had no such field and the row is fixed.
+    - *The fact that blocks the layout.* A field `Reither (c, tl, m, e)`
+      holds a reference `e` that is **shared**: by the two fields
+      `unify_row_field` makes for one tag (`let e = ref None`,
+      ctype.ml:2700-2704; the one `f` of PR#7496, ctype.ml:2659-2662), and
+      by a copy of a row whose row variable is not generic (`let e = if
+      keep then e else ref None`, btype.ml:374, with `keep = more.level <>
+      generic_level`, ctype.ml:806), which is every instance of an
+      annotation's type (`generalize_structure` leaves the variables at
+      their level, O10). And `row_field_repr` reads through it: the
+      children of a variant node are those of the *resolved* field, with
+      the types met on the way (`row_field_repr_aux`, btype.ml:112-119).
+      So: (1) a resolution cannot be a write to a `row_fields` row
+      (`RowFieldRow::link`), because rows are shared by every instance of
+      a scheme and a generic row's instance must have references of its
+      own; (2) it cannot be a cell that no node has as a child, as a
+      mutability cell is, because resolving `Reither (false, [], _, e)`
+      with `Rpresent (Some t)` (ctype.ml:2710-2716) or with another
+      `Reither` gives every variant node that shares `e` a child that is
+      not among its list slots, and the level walk, generalization and
+      `deep_occur` must reach it; (3) a field resolved to `Rabsent` stops
+      being a parent of its types, which the slots of the node still
+      name.
+    - *The two layouts that remain*, neither tried. (a) The reference is
+      a node the variant node has as a slot: unresolved, it has no child;
+      a resolution writes it (a link to the reference it now equals, or a
+      descriptor with the resolved types as its slots). Walks then reach
+      what OCaml reaches, sharing is node identity, the trail undoes it,
+      and an instance copies it when it is generic. What must be shown:
+      that "generic" for such a node coincides with `keep` (the level of
+      `more`), in particular under `generalize_structure`, which must
+      treat it as a variable. (b) References in a side pool with the
+      resolution's types, and the variant node rewritten (`Graph::write`:
+      new slots, new descriptor) at every resolution, with the sharers of
+      a reference found through a list kept in the pool. Recommended
+      first step of the next turn: print reference classes in the
+      harness's variant form (as `CELLS` does for cells), generate an
+      annotation instantiated twice, and observe on the old checker
+      whether two instances share a resolution; then choose.
+    - *The duplicate at an instance* follows from it and uses R3e's pass
+      (`link_memorized` with `cells`): a variant node with an `Reither`
+      field whose `more` the session made needs references of its own
+      (`copy_row`, btype.ml:366-392), exactly as a field of an open row
+      needs a cell of its own. `template_has_open_row` grows that case.
 
 ### 8.7 The hot paths of unification (K2)
 
