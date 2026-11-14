@@ -84,3 +84,44 @@ The debugger records allocator calls only between the test-only entry/completion
 markers. It writes `temp/lowering-allocation-sites.json`, including both widths,
 full source-frame stacks and owner totals. It changes no production allocator
 or compiler code. The table above is the profiler's printed owner table.
+
+## Shared files outside BIR
+
+These changes are kept to avoid per-construct ownership in the named lowering
+paths without duplicating the existing algorithms. “Allocation-free” here means
+the retained inner path; the complete unit entry has the constants above.
+
+| Source file (under `compiler-rust/src`) | Disposition | Named lowering caller and necessity |
+| --- | --- | --- |
+| `js_ir/printer.rs` | Kept | `lower::import::State::compile_import` and `lower::prim_block::State::primitive_field` call `convert_ident_into` to avoid temporary owned spellings. |
+| `lambda/lam_analysis.rs` | Kept | `lower::call::State::inline_external_function` reaches `is_pure_primitive_with_properties` through `beta::reduce` and `bir::l::flatten`; scalar properties avoid reconstructing owned bigint constants. |
+| `lambda/lam_compile_variant.rs` | Reverted | No BIR lowering caller. Restored byte-for-byte to trunk; the shared planner now exposes borrowed compatibility views for the unchanged emitter. |
+| `lambda/mod.rs` | Kept | `lower::prim_block::State::flat_make_field` and `lower::import::State::compile_import` call `flat_export_name_into`; returning an owned export name would allocate per construct. |
+| `lambda/untagged_dispatch.rs` | Kept | `lower::untagged::State::untagged_switch` calls `append_bucketed` on retained graph/planning storage; trunk's owned-input planner allocates for each switch. |
+| `lambda/untagged_dispatch/metadata.rs` | Kept | `lower::untagged::prepare` imports handles; `State::untagged_test` and `State::untagged_instance` borrow those payloads instead of cloning strings/instance ancestry per emitted test. |
+| `ocaml_float.rs` | Kept | `lower::untagged::prepare` reaches `float_of_string_in` via metadata canonical-key encoding; retained separator removal avoids a vector per literal. |
+| `string_literal.rs` | Kept | `lower::prim::State::finish_primitive_values` reaches retained `TemplateBuffer` through `jm12_interpolated_template`, avoiding per-template encoding/normalization vectors. |
+| `types/typecore.rs` | Kept | `lower::konst::State::constant` and `lower::variant::State::switch_key_expression` call `parse_bigint_literal_into` directly, avoiding per-bigint spelling strings. |
+| `types/variant_runtime.rs` | Kept | `lower::untagged::prepare` reaches `LiteralKeyScratch::encode` through `Metadata::import_literal`, retaining canonical equality-key buffers rather than allocating intermediate strings per literal. |
+
+The `prepare` metadata work is inside the full-unit interval. It was outside the
+earlier probe-only interval. `types/typecore.rs` has direct lowerer callers;
+`types/variant_runtime.rs` is reached by `lower::untagged::prepare` →
+`Metadata::import_literal` → `LiteralKeyScratch::encode`. Neither is unexplained
+or merely a default-path cleanup.
+
+The differential compares **453 declarations from 850 implementation files**,
+with sixteen completeness/sharing/fallback configurations per declaration. Both
+`differential.rs` and the verbatim `legacy_planner.rs` are test-only. Reproduce:
+
+```sh
+CARGO_INCREMENTAL=0 cargo test --manifest-path compiler-rust/Cargo.toml \
+  corpus_declarations_match_trunk -- --nocapture --test-threads=1
+git show be1b3a482:compiler-rust/src/lambda/untagged_dispatch.rs | \
+  cmp - compiler-rust/src/lambda/untagged_dispatch/legacy_planner.rs
+rg -n 'parse_bigint_literal_into|convert_ident_into|flat_export_name_into|jm12_interpolated_template' compiler-rust/src/bir/lower
+rg -n 'is_pure_primitive_with_properties' compiler-rust/src/bir
+```
+
+Build reference artifacts using the commands in `BACKEND_LOWERING.md` §11 before
+rerunning the file-backed corpus test. A missing artifact is not a skipped case.
