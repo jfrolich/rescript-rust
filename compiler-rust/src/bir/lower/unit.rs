@@ -109,18 +109,35 @@ mod tests {
     use crate::lambda::lam_constant::Constant;
     use crate::lambda::lam_tag_info::TagInfo;
 
-    /// Cold unit ownership is deliberately included here, unlike the retained
-    /// probe proofs. This characterizes the real entry; it does not assert zero.
     #[test]
-    fn full_unit_allocation_boundary_for_four_construct_families() {
+    fn full_unit_allocation_boundary_conditionals() {
+        assert_unit_allocation_count("conditionals", 68);
+    }
+    #[test]
+    fn full_unit_allocation_boundary_switches() {
+        assert_unit_allocation_count("switches", 85);
+    }
+    #[test]
+    fn full_unit_allocation_boundary_applications() {
+        assert_unit_allocation_count("applications", 68);
+    }
+    #[test]
+    fn full_unit_allocation_boundary_untagged() {
+        assert_unit_allocation_count("untagged", 140);
+    }
+
+    /// Import is outside measurement; fresh state construction, lowering,
+    /// export coercion and owned completion are inside it. Warm the entry once
+    /// per size, then pin the per-unit count, not zero bytes or zero allocations.
+    fn assert_unit_allocation_count(shape: &str, expected: u64) {
         use crate::lambda::{LamLoc, ApInfo, ApplyStatus};
         use crate::lambda::lam_primitive::{Primitive as P, Mutable};
         use crate::lambda::{SwitchDispatch, SwitchKey};
         use crate::types::{VariantBlock, VariantBlockType, VariantConstructorCase as Case,
             VariantMatchingFacts, VariantTag};
         use crate::types::VariantLiteralTag as Literal;
-        for shape in ["conditionals", "switches", "applications", "untagged"] {
-            for width in [1_000, 10_000] {
+        let mut counts = [0; 2];
+        for (run, width) in [1_000, 10_000].into_iter().enumerate() {
             let mut a = LamArena::new();
             let x = Ident::new("x", 1, crate::ident::IdentFlags::NONE);
             let root = match shape {
@@ -190,9 +207,13 @@ mod tests {
             assert!(visits >= width as usize);
             assert_eq!(result.coerced.exports.len(), 1);
             result.program.arena.validate(Some(result.program.root)).unwrap();
+            counts[run] = allocations.count_total;
             println!("full-unit {shape} width={width}: source={source_counts:?}, output_nodes={}, visits={visits}, {allocations:?}", result.program.arena.nodes.len());
-            }
         }
+        assert_eq!(counts[0], counts[1], "{shape}: allocation count must not scale with visited nodes");
+        // Release builds omit the debug-only child-uniqueness table.
+        let expected = expected - u64::from(!cfg!(debug_assertions));
+        assert_eq!(counts, [expected; 2], "{shape}: per-unit allocation budget changed");
     }
 
     #[inline(never)]
