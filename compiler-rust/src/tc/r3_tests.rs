@@ -1712,7 +1712,6 @@ fn a_closed_row_takes_no_field() {
 /// (`t1'.desc <- d1`, ctype.ml:2437).
 /// Reaches: R3e.
 #[test]
-#[ignore = "R3e build"]
 fn common_fields_unify_in_name_order_and_a_failure_restores_the_rests() {
     let mut c = checker(Mode::Explain);
     let (int, string, unit) = (constr(&mut c, INT, &[]), constr(&mut c, STRING, &[]), constr(&mut c, UNIT, &[]));
@@ -1826,7 +1825,6 @@ fn the_row_variable_keeps_a_name() {
 /// variable of its own again, and the right rest keeps the name.
 /// Reaches: R3e.
 #[test]
-#[ignore = "R3e build"]
 fn a_failure_keeps_the_name_the_row_variable_was_given() {
     let mut c = checker(Mode::Explain);
     let (int, string) = (constr(&mut c, INT, &[]), constr(&mut c, STRING, &[]));

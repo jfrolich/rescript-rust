@@ -9,7 +9,9 @@
 //! starts with the segment's rows copied ([`Extras::from_segment`]), so the
 //! indices of frozen nodes stay valid; rows made during a check are appended.
 
-use super::graph::{Graph, LINK, Mode, NONE, Node, Ty, VAR};
+use std::cmp::Ordering;
+
+use super::graph::{Graph, LINK, Mode, NONE, Node, TUPLE, Ty, VAR};
 use super::segment::{
     EXTENDED, ExtraDescriptor, PackageRow, Range, RowFieldRow, Segment, VariantRow,
 };
@@ -255,9 +257,11 @@ impl Checker {
         let l2 = self.g.nodes[right.0 as usize].level;
         let open1 = self.g.nodes[rest1.0 as usize].tag() == VAR;
         let open2 = self.g.nodes[rest2.0 as usize].tag() == VAR;
-        // 2. `let d1 = rest1.desc and d2 = rest2.desc` (ctype.ml:2479).
+        // 2. The `Fields` frame goes below everything else; its two saved
+        //    descriptors are filled after step 3.
+        let saved = self.saved.len();
         if self.g.mode == Mode::Explain {
-            let extra = self.saved.len() as u32;
+            let extra = saved as u32;
             self.saved.push(self.g.nodes[rest1.0 as usize]);
             self.saved.push(self.g.nodes[rest2.0 as usize]);
             self.frames.push(Frame {
@@ -279,7 +283,14 @@ impl Checker {
             #[cfg(test)]
             super::steps::tick();
             let (f1, f2) = (fields[i - 1], fields[j - 1]);
-            if f1.name == f2.name {
+            // Two indices may spell one name (8.6, decision 32): differing
+            // indices compare their texts once.
+            let order = if f1.name == f2.name {
+                Ordering::Equal
+            } else {
+                self.extras.names.text(f1.name).cmp(self.extras.names.text(f2.name))
+            };
+            if order == Ordering::Equal {
                 fields[i - 1].name |= COMMON;
                 fields[j - 1].name |= COMMON;
                 self.frames.push(Frame {
@@ -291,7 +302,7 @@ impl Checker {
                 common += 1;
                 i -= 1;
                 j -= 1;
-            } else if self.extras.names.text(f1.name) > self.extras.names.text(f2.name) {
+            } else if order == Ordering::Greater {
                 i -= 1;
             } else {
                 j -= 1;
@@ -301,6 +312,12 @@ impl Checker {
         let miss1 = n1 - common;
         let miss2 = fields.len() - n1 - common;
         let va = self.make_rowvar(l1.min(l2), miss2 == 0, rest1, miss1 == 0, rest2);
+        // `let d1 = rest1.desc and d2 = rest2.desc` (ctype.ml:2482), after
+        // `make_rowvar` may have named the right rest.
+        if self.g.mode == Mode::Explain {
+            self.saved[saved] = self.g.nodes[rest1.0 as usize];
+            self.saved[saved + 1] = self.g.nodes[rest2.0 as usize];
+        }
         // 4. The second half: `build_fields l1 miss1 va` and `build_fields
         //    l2 miss2 va`, each list built from its last field.
         let mut built = [va, va];
@@ -471,7 +488,18 @@ impl Checker {
     /// (one `Nil` descriptor row appended per call). Failure path of
     /// `Mode::Explain` only: four nodes, four list slots. (R3e)
     pub fn field_trace_pair(&mut self, f1: Ty, f2: Ty) -> [Ty; 2] {
-        todo!("R3e")
+        let level = self.g.level;
+        let nil = self.extras.descriptors.len() as u32;
+        self.extras.descriptors.push(ExtraDescriptor::Nil);
+        [f1, f2].map(|field| {
+            let rest = self.g.push(Node {
+                head: TUPLE | EXTENDED,
+                level,
+                a: nil,
+                b: self.g.lists.len() as u32,
+            });
+            self.build_field(level, field, rest)
+        })
     }
 
     /// An instance of a template that has an open row
