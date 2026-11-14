@@ -382,7 +382,7 @@ fn unify_of_equal_wide_types_is_linear() {
     assert!(count <= 8 * pairs, "{count} steps for {pairs} pairs");
     assert_eq!(c.g.nodes.len(), nodes, "unification of equal types makes no node");
     assert_eq!(c.g.repr(left), c.g.repr(right));
-    // The link was written left to right (compiler/ml/ctype.ml:2338).
+    // The link was written left to right (compiler/ml/ctype.ml:2331).
     assert_eq!(c.g.repr(left), right);
     // Again: one link to follow, nothing else.
     assert!(steps::scope(|| c.unify(left, right).unwrap()) <= 1);
@@ -391,7 +391,7 @@ fn unify_of_equal_wide_types_is_linear() {
 
 /// A chain 10,000 deep runs on a 2 MB stack. Its cost is OCaml's: one
 /// occurrence walk per structure pair over the right side
-/// (compiler/ml/ctype.ml:2337), so the sum of the subtree sizes, plus at
+/// (compiler/ml/ctype.ml:2330), so the sum of the subtree sizes, plus at
 /// most 260 steps a pair for everything else.
 #[test]
 #[ignore = "R3a build"]
@@ -490,7 +490,7 @@ fn link_directions() {
     c.unify(l, r).unwrap();
     assert_eq!(c.g.repr(l), r);
     // Two nullary constructors of one type: left to right, and the right
-    // one is lowered to the left one's level (ctype.ml:2247-2257).
+    // one is lowered to the left one's level (ctype.ml:2248-2257).
     let l = constr(&mut c, INT, &[]);
     c.g.begin_def();
     let r = constr(&mut c, INT, &[]);
@@ -837,7 +837,7 @@ fn an_application_memorizes_the_result_node() {
 
 /// Fixture 1, `let g = a => { ignore(a + 1); takesMyInt(a); a }`:
 /// `myint => myint`. A plain node becomes the unexpanded abbreviation node,
-/// whichever side it is on (compiler/ml/ctype.ml:2299-2303, 2338).
+/// whichever side it is on (compiler/ml/ctype.ml:2299-2303, 2331).
 #[test]
 #[ignore = "R3c build"]
 fn fixture_1_plain_node_takes_the_abbreviation() {
@@ -946,7 +946,7 @@ fn fixture_9_ground_node_gains_a_variable() {
 /// `let g = v => { takesA(v); takesB(v); v }` is `a => a`, and `b => b`
 /// with the calls swapped. The first link names the node; unifying the two
 /// abbreviation nodes links the *expansion* of the left one to the right
-/// node (compiler/ml/ctype.ml:2299, 2338: `link_type t1' t2`), so the two
+/// node (compiler/ml/ctype.ml:2299, 2331: `link_type t1' t2`), so the two
 /// nodes stay two nodes.
 #[test]
 #[ignore = "R3c build"]

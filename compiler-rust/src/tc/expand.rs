@@ -30,10 +30,10 @@ pub const PRIVATE: u8 = 2;
 /// with the same arguments (compiler/ml/ctype.ml:1211-1214).
 pub const ALIAS: u8 = 4;
 /// A locally abstract type that an equation may refine (`is_newtype`,
-/// `is_instantiable`; compiler/ml/ctype.ml:1803). Read by R3h.
+/// `is_instantiable`; compiler/ml/ctype.ml:1862-1880). Read by R3h.
 pub const NEWTYPE: u8 = 8;
 /// A record, a variant or an open type (`expands_to_datatype`,
-/// compiler/ml/ctype.ml:2372). Read by R3h.
+/// compiler/ml/ctype.ml:1887). Read by R3h.
 pub const DATATYPE: u8 = 16;
 /// Head flag of a constructor node whose slot 0 holds a private expansion
 /// (`Mcons (Private, ..)`, compiler/ml/btype.ml:612). Bit 4 is
@@ -71,7 +71,7 @@ pub struct Manifest {
     pub body: Ty,
 }
 
-/// `type_newtype_level` of a locally abstract type (compiler/ml/ctype.ml:1806).
+/// `type_newtype_level` of a locally abstract type (compiler/ml/ctype.ml:562-569).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct Newtype {
@@ -244,7 +244,7 @@ impl Checker {
     /// and one untaken branch; otherwise one more pass over the new nodes,
     /// one `find_repr` per nullary constructor, each hit rewriting the new
     /// node into a link (`Some ty when repr ty != t -> Tlink ty`,
-    /// compiler/ml/ctype.ml:781). (R3b)
+    /// compiler/ml/ctype.ml:782). (R3b)
     pub fn instance(&mut self, template: Template) -> Ty {
         todo!("R3b")
     }

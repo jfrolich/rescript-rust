@@ -16,7 +16,7 @@ use super::rows::Extras;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Clash;
 
-/// `umode` (compiler/ml/ctype.ml:157).
+/// `umode` (compiler/ml/ctype.ml:252).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum UnifyMode {
@@ -33,12 +33,12 @@ pub enum FrameKind {
     /// The children of the node `left` were all unified: nothing to undo.
     /// In `Mode::Explain`, `extra` indexes [`Checker::saved`], the
     /// descriptor to put back into `left` if a later frame above this one
-    /// fails (`t1'.desc <- d1`, compiler/ml/ctype.ml:2435).
+    /// fails (`t1'.desc <- d1`, compiler/ml/ctype.ml:2437).
     Linked,
     /// Leave the universal-variable scope `extra` (R3g).
     LeavePoly,
     /// After the children: the `create_recursion` repair of
-    /// compiler/ml/ctype.ml:2426-2433 for the pair (R3c).
+    /// compiler/ml/ctype.ml:2428-2436 for the pair (R3c).
     Recursion,
 }
 
@@ -70,7 +70,7 @@ pub struct Checker {
     pub extras: Extras,
     pub umode: UnifyMode,
     /// `generate_equations` and `assume_injective`
-    /// (compiler/ml/ctype.ml:158-159).
+    /// (compiler/ml/ctype.ml:253).
     pub generate_equations: bool,
     pub assume_injective: bool,
     /// Set by a top-level unification that failed in `Mode::Success` outside
@@ -92,7 +92,7 @@ pub struct Checker {
     pub marks: Vec<u32>,
     pub mark_generation: u32,
     pub pairs: PairSet,
-    /// `univar_pairs` (compiler/ml/ctype.ml:1540), innermost last (R3g).
+    /// `univar_pairs` (compiler/ml/ctype.ml:1681), innermost last (R3g).
     pub univars: Vec<[Ty; 2]>,
 }
 
@@ -142,7 +142,7 @@ impl Checker {
     /// (compiler/ml/ctype.ml:2239-2268). A variable goes to
     /// [`Checker::bind`]; two nullary constructors of one type with no
     /// memorized expansion are lowered and linked, left to right
-    /// (ctype.ml:2247-2257); everything else goes to
+    /// (ctype.ml:2248-2257); everything else goes to
     /// [`Checker::unify_expanded`]. O(1) plus the callee. (R3a)
     pub fn unify_pair(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
         todo!("R3a")
@@ -173,7 +173,7 @@ impl Checker {
     }
 
     /// `occur` of one structure node in another (compiler/ml/ctype.ml:1488),
-    /// run before a structure pair is linked (ctype.ml:2337): a walk of
+    /// run before a structure pair is linked (ctype.ml:2330): a walk of
     /// `ty`, one step a node, giving up on nothing. This is one walk per
     /// structure pair, as in OCaml; see "R3 as designed", decision 6. (R3a)
     pub fn occur(&mut self, node: Ty, ty: Ty) -> Result<(), Clash> {
@@ -202,8 +202,8 @@ impl Checker {
 
     /// Push the child pairs of two structure nodes of the same shape, last
     /// child first: arrows with equal parameter counts and compatible labels
-    /// (compiler/ml/ctype.ml:2341-2353), tuples of equal length, constructors
-    /// of one type (ctype.ml:2355-2358, expression mode). Anything else is a
+    /// (compiler/ml/ctype.ml:2335-2347), tuples of equal length, constructors
+    /// of one type (ctype.ml:2348-2351, expression mode). Anything else is a
     /// clash or belongs to R3e-R3h. O(children). (R3a)
     pub fn push_children(&mut self, left: Node, right: Node) -> Result<(), Clash> {
         todo!("R3a")
