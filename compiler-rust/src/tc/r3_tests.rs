@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use super::differential::{Fault, Op, Tier, compare, compile};
-use super::expand::{ABBREV, ALIAS, ExpandMode, Manifest, TypeInfo};
+use super::expand::{ABBREV, ALIAS, ExpandMode, INHERITS, Manifest, TypeInfo};
 use super::graph::{ARROW, CONSTR, GENERIC, Graph, LINK, Mode, NONE, Node, Param, TUPLE, Ty, VAR};
 use super::steps;
 use super::template::Template;
@@ -1311,4 +1311,216 @@ fn unify_var_lowers_before_it_links() {
     assert_eq!(c.g.repr(v), v);
     assert!(c.unify_var(v, p).is_err());
     assert_eq!(c.g.repr(v), v);
+}
+
+// ---------------------------------------------------------------------------
+// R3m: inherited memo entries (section 8.6, decisions 16, 19 and 25).
+// ---------------------------------------------------------------------------
+
+/// Append to the table four abbreviations with a parameter whose bodies
+/// name each other, all marked [`INHERITS`]:
+/// `q<'a> = ('a, q<'a>)`, `m1<'a> = ('a, m2<'a>)`, `m2<'a> = ('a, m3<'a>)`,
+/// `m3<'a> = (m1<'a>, m2<'a>)`. (ReScript accepts such a cycle only through
+/// an object or a variant; the graph does not care, and a tuple keeps these
+/// tests on R3m alone.) Returns `[q, m1, m2, m3]`.
+fn inheriting(c: &mut Checker) -> [u32; 4] {
+    let first = c.types.rows.len() as u32;
+    let types = [first, first + 1, first + 2, first + 3];
+    for _ in types {
+        c.types.rows.push(c.types.rows[PHANTOM as usize]);
+    }
+    let [q, m1, m2, m3] = types;
+    for (ty, bodies) in [(q, [NONE, q]), (m1, [NONE, m2]), (m2, [NONE, m3]), (m3, [m1, m2])] {
+        let param = var_at(c, GENERIC);
+        let elements = bodies.map(|element| match element {
+            NONE => param,
+            element => constr_at(c, GENERIC, element, &[param]),
+        });
+        let body = tuple_at(c, GENERIC, &elements);
+        abbreviation(c, ty, &[param], body);
+        c.types.rows[ty as usize].flags |= INHERITS;
+    }
+    types
+}
+
+/// The representative of element `index` of the tuple `ty`, and its
+/// descriptor.
+fn element(c: &mut Checker, ty: Ty, index: u32) -> (Ty, Node) {
+    let at = child(c, ty, index);
+    let at = c.g.repr(at);
+    (at, c.g.nodes[at.0 as usize])
+}
+
+/// The rule of R3m, by hand, where the harness cannot go (`forget_abbrev`
+/// is no operation of it). `e1 = m1<int>` expands to `(int, c2)`, `c2 =
+/// m2<int>` to `(int, c3)`, and `c3 = m3<int>` to `(m1<int>, m2<int>)`.
+/// The copy of a constructor asks `find_repr p !abbrevs`
+/// (compiler/ml/ctype.ml:780-782):
+///
+/// ```text
+/// let rec find_repr p1 = function
+///   | Mnil -> None
+///   | Mcons (Public, p2, ty, _, _) when Path.same p1 p2 -> Some ty
+///   | Mcons (_, _, _, _, rem) -> find_repr p1 rem
+///   | Mlink {contents = rem} -> find_repr p1 rem
+/// ```
+///
+/// and `c3`'s list is `c3`'s entry, then `c2`'s, then `e1`'s
+/// (`Mlink !abbreviations`, ctype.ml:796-798). So with every entry in
+/// place both elements are links: to `e1` and to `c2`. The same two
+/// answers are observed on the old checker through objects
+/// (`differential::tests::old_checker_inherits_entries_along_the_chain`).
+///
+/// A forgotten entry is taken out of the list and the tail stays
+/// (`forget_abbrev_rec`, compiler/ml/btype.ml:636-644: `Mcons (_, path',
+/// _, _, rem) when Path.same path path' -> rem`): after
+/// `forget_abbrev(c2)` the walk from `c3` passes `c2`'s row and still
+/// finds `e1`, and the copy of `m2<int>` finds nothing and is a new node
+/// whose row continues with `c3`'s.
+/// Reaches: R3m.
+#[test]
+#[ignore = "R3m build"]
+fn an_inherited_entry_is_found_past_a_forgotten_one() {
+    for forget in [false, true] {
+        let mut c = checker(Mode::Success);
+        let [_, m1, m2, m3] = inheriting(&mut c);
+        let int = constr(&mut c, INT, &[]);
+        let e1 = constr(&mut c, m1, &[int]);
+        let x1 = c.expand_head(e1, ExpandMode::Unif).unwrap();
+        let (c2, node) = element(&mut c, x1, 1);
+        assert_eq!((node.tag(), node.a), (CONSTR, m2));
+        let x2 = c.expand_head(c2, ExpandMode::Unif).unwrap();
+        let (c3, node) = element(&mut c, x2, 1);
+        assert_eq!((node.tag(), node.a), (CONSTR, m3));
+        if forget {
+            c.forget_abbrev(c2);
+        }
+        let made = c.g.nodes.len() as u32;
+        let x3 = c.expand_head(c3, ExpandMode::Unif).unwrap();
+        assert_eq!(element(&mut c, x3, 0).0, e1, "forget: {forget}");
+        let (second, node) = element(&mut c, x3, 1);
+        if forget {
+            assert!(second.0 >= made, "a node of this expansion");
+            assert_eq!((node.tag(), node.a), (CONSTR, m2));
+            // Its row continues with c3's: expanding it links `m3<int>`
+            // to c3 (`Mlink`, ctype.ml:796-798).
+            let x4 = c.expand_head(second, ExpandMode::Unif).unwrap();
+            assert_eq!(element(&mut c, x4, 1).0, c3);
+        } else {
+            assert_eq!(second, c2);
+        }
+    }
+}
+
+/// The step relation of decision 16, and the memory formula of decision
+/// 25. `q<q<...q<int>>>`, n deep: expanding the head of each node from the
+/// outside in is, per node, one instance of the four-node template, one
+/// row, and a chain walk of one row (the copy of `q<'a>` finds the node
+/// being expanded first, `find_repr`, compiler/ml/ctype.ml:720-724, and
+/// becomes a link to it, ctype.ml:782). So the steps at n = 10,000 are at
+/// most 11 times those at n = 1,000, there is one row per expanded node and
+/// none for a copy, and the pool is `16 * rows + 4 * by_slot` bytes with
+/// `by_slot` no longer than the list pool.
+/// Reaches: R3m.
+#[test]
+#[ignore = "R3m build"]
+fn expanding_the_heads_down_nested_recursive_nodes_is_linear() {
+    let run = |n: u32| {
+        let mut c = checker(Mode::Success);
+        let [q, ..] = inheriting(&mut c);
+        let mut nodes = vec![constr(&mut c, INT, &[])];
+        for _ in 0..n {
+            let inner = *nodes.last().unwrap();
+            nodes.push(constr(&mut c, q, &[inner]));
+        }
+        let count = steps::scope(|| {
+            for index in (1..=n as usize).rev() {
+                let expansion = c.expand_head(nodes[index], ExpandMode::Unif).unwrap();
+                assert_eq!(element(&mut c, expansion, 1).0, nodes[index]);
+                assert_eq!(element(&mut c, expansion, 0).0, nodes[index - 1]);
+            }
+        });
+        let chains = &c.memo.chains;
+        assert_eq!(chains.rows.len(), n as usize);
+        assert!(chains.by_slot.len() <= c.g.lists.len());
+        let bytes = 16 * chains.rows.len() + 4 * chains.by_slot.len();
+        assert!(bytes <= 16 * n as usize + 4 * c.g.lists.len(), "{bytes}");
+        count
+    };
+    let (small, large) = (run(1_000), run(10_000));
+    assert!(large <= 11 * small, "{small} {large}");
+}
+
+/// A manifest that inherits nothing pays the test of one flag: expanding
+/// `pa<int>` (`type pa<'x> = ('x, int)`, not [`INHERITS`]) takes the steps
+/// it takes today (observed, before R3m: 12) and reads or
+/// writes no row of the pool, which stays unallocated. Runs today and
+/// stays as it is when R3m is built.
+#[test]
+fn an_abbreviation_that_inherits_nothing_reads_no_row() {
+    let mut c = checker(Mode::Success);
+    let int = constr(&mut c, INT, &[]);
+    let node = constr(&mut c, PA, &[int]);
+    let count = steps::scope(|| {
+        c.expand_head(node, ExpandMode::Unif).unwrap();
+    });
+    assert_eq!(count, 12);
+    assert_eq!(c.memo.chains.rows.capacity(), 0);
+    assert_eq!(c.memo.chains.by_slot.capacity(), 0);
+    // And with the nullary memo live (the other reader of the pass over an
+    // instance's nodes): the same pool, still unallocated.
+    let myint = constr(&mut c, MYINT, &[]);
+    c.expand_head(myint, ExpandMode::Unif).unwrap();
+    let node = constr(&mut c, PA, &[int]);
+    c.expand_head(node, ExpandMode::Unif).unwrap();
+    assert_eq!(c.memo.chains.rows.capacity(), 0);
+    assert_eq!(c.memo.chains.by_slot.capacity(), 0);
+}
+
+/// Which types `TypeTable::from_segment` marks [`INHERITS`]: those whose
+/// manifest has a constructor with arguments of a type that expands, on
+/// the identifier's row and on the row of the path through the unit alike.
+/// `a1` names only an abstract type with arguments and `ro` only nullary
+/// constructors: an expansion of either copies no constructor that could
+/// be linked or expanded, and pays nothing (decision 19). `m1` names `m2`,
+/// declared after it: the marks are made when every row exists.
+/// Reaches: R3m.
+#[test]
+#[ignore = "R3m build"]
+fn the_table_marks_the_types_whose_expansions_inherit() {
+    let program = compile(
+        "type t1<'a>\n\
+         type a1<'a> = ('a, t1<'a>)\n\
+         type a2<'a> = (a1<'a>, int)\n\
+         type r<'a> = {f: a1<'a>}\n\
+         type rec ro = {\"hd\": int, \"tl\": ro}\n\
+         type rec po<'a> = {\"hd\": 'a, \"tl\": po<'a>}\n\
+         type rec m1<'a> = {\"a\": 'a, \"n\": m2<'a>}\n\
+         and m2<'a> = {\"a\": 'a, \"n\": m1<'a>}\n\
+         external v: (a1<int>, a2<int>, r<int>, ro, po<int>, m1<int>, m2<int>) = \"v\"\n"
+            .to_string(),
+    );
+    let new = super::differential::New::convert(&program, Tier::Kernel);
+    let table = super::expand::TypeTable::from_segment(&new.segment);
+    let pools = &new.segment.signature;
+    let mut seen = 0;
+    for (index, row) in pools.paths.iter().enumerate() {
+        let name = match *row {
+            super::segment::PathRow::Ident(ident) => pools.identifiers[ident as usize].name,
+            super::segment::PathRow::Dot { name, .. } => name,
+            super::segment::PathRow::Apply { .. } => continue,
+        };
+        let range = pools.strings[name as usize];
+        let name = &pools.bytes[range.start as usize..(range.start + range.len) as usize];
+        let inherits = match name {
+            b"a2" | b"po" | b"m1" | b"m2" => true,
+            b"t1" | b"a1" | b"r" | b"ro" | b"int" => false,
+            _ => continue,
+        };
+        let flags = table.info(index as u32).flags;
+        assert_eq!(flags & INHERITS != 0, inherits, "{}", String::from_utf8_lossy(name));
+        seen += 1;
+    }
+    // Every declared type has two rows: its identifier and `Case.name`.
+    assert!(seen >= 17, "{seen}");
 }

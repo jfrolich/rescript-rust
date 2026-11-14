@@ -2434,6 +2434,19 @@ the expansion to the original, the recursion repair; (3) `unify_var`.
 Failure: linking the abbreviation node instead of its expansion; linking
 after the children; a pair set.
 
+**R3m.** Functions: `TypeTable::mark_inheriting`, `Checker::{chain_entry,
+inherit, inherited_expansion, cut_chain}`. End state:
+`rg -n 'todo!\("R3m"\)' src/tc` is empty; tests
+`the_table_marks_the_types_whose_expansions_inherit`,
+`an_inherited_entry_is_found_past_a_forgotten_one`,
+`expanding_the_heads_down_nested_recursive_nodes_is_linear`,
+`an_abbreviation_that_inherits_nothing_reads_no_row` (runs before and
+after), `differential::tests::{expand_tier_agrees_on_recursive_
+abbreviations, a_chain_of_inherited_entries_agrees}`. Commits: (1) the
+marks; (2) the entry and the copy's place in the chain; (3) the cleanup's
+cut and the lookup through the chain. Failure: a row for a type without
+`INHERITS`; a pool cleared by a cleanup; a second pass over an instance.
+
 **R3e to R3j.** Functions: every signature of `rows.rs` and `relate.rs`
 carrying the slice's name. End state for each: no `todo!` with its name;
 its generator extension and old-side vacuity test (first commit); the
@@ -2563,8 +2576,46 @@ differential::tests::a_failed_retry_keeps_its_levels_in_the_explaining_
 mode and of no other test.
 ```
 
-R3m has no prompt yet: its rule, evidence and acceptance test are fixed
-(8.6, decision 16) and its layout is not.
+```text
+R3m. Read section 8.6, decisions 16, 19 and 25; compiler/ml/ctype.ml
+720-724, 778-799, 1100-1130; compiler/ml/btype.ml 606-647; in
+src/tc/expand.rs the types ChainRow and Chains and the five functions
+whose body is todo!("R3m"). Everything else is wired: subst, expand_once,
+link_memorized and cleanup_abbrev already call them, behind the INHERITS
+bit or a non-empty pool.
+
+First edit: the body of TypeTable::mark_inheriting, then its call as the
+last statement before `table` is returned in TypeTable::from_segment, and
+in the same commit the count of expand::tests::table_from_ten_thousand_
+declarations_is_one_pass from `2 * n + 1` to `5 * n + 1` (the pass reads
+the three template nodes of each manifest; this is the one test line you
+change, decision 25). Remove the `#[allow(dead_code, ...)]` above
+mark_inheriting. r3_tests::the_table_marks_the_types_whose_expansions_
+inherit passes after this commit.
+
+Commits, in order: (1) the marks; (2) chain_entry and inherit: the two
+tests of r3_tests.rs and differential::tests::expand_tier_agrees_on_
+recursive_abbreviations pass; (3) cut_chain and inherited_expansion:
+differential::tests::a_chain_of_inherited_entries_agrees passes. Remove
+each `#[allow(unused_variables)]` with its todo!, and the five
+`#[ignore = "R3m build"]`.
+
+Each body is what its doc comment says, step for step. One
+`#[cfg(test)] super::steps::tick()` per row visited in a walk, one in
+chain_entry, one per template node read in mark_inheriting, one at the
+top of inherited_expansion.
+
+Relations to hold: r3_tests::an_abbreviation_that_inherits_nothing_reads_
+no_row passes unchanged (it runs today); every other tc:: test passes
+unchanged, with the same pinned seeds; the steps of expanding the heads
+down 10,000 nested nodes are at most 11 times those of 1,000.
+Shortcuts that count as failure: a row or a table entry for a node of a
+type without INHERITS; a hash map; a row keyed by a node handle; clearing
+or truncating the pool in cleanup_abbrev or in restore; a second pass
+over an instance's nodes; reading a node's head to learn whether its
+entry is private (the node may have been linked since: the bit is in the
+row); a change in graph.rs, level.rs or template.rs. At most 150 lines.
+```
 
 The prompt of K2 is in section 8.7. The last prompt below is superseded by
 decision 5 of 8.6: no builder starts R3e to R3j from it, and the second
@@ -2986,6 +3037,106 @@ They bind the builders and the third skeleton turn.
     the old count, the new count and the item. A count that goes up, a
     relation between two sizes that changes, or any other assertion that
     fails: the builder stops and reports.
+
+Decided in the third skeleton turn (trunk `0b175b7d0d`), each with what
+was run. "Prototype" means bodies written to try a design against its
+tests and taken out again before the commit: no slice body is on trunk
+from this turn.
+
+25. **R3m as designed** (`expand::Chains`; decisions 16 and 19).
+    - *What a row is.* One memo reference of a constructor with arguments
+      (OCaml's `abbrev_memo ref`), reduced to what a copy reads: the one
+      entry slot 0 holds (`node`, `type_index` with a bit for a private
+      expansion) and the reference the list continues with (`parent`, the
+      `Mlink` of ctype.ml:796-798), plus its own `slot`. 16 bytes
+      (`expand::tests::sizes`).
+    - *The key of the dense table is the list index of slot 0, not the
+      node handle.* Slot 0 *is* the reference: two nodes that share a list
+      share it. A node of a type written through a module alias and the
+      node it expands to share one list (`expand_alias`; `newty2 level
+      (Tconstr (path', args, abbrev))`, ctype.ml:1214). Keyed by node, the
+      target node would have no row: expanding it would start a new chain,
+      and a constructor of an outer type copied by that expansion would not
+      link to the outer node, where OCaml, reading the shared `abbrev`,
+      links it. `Memo::memorized` holds slot indices for the same reason.
+    - *The flag.* `expand::INHERITS` in `TypeInfo::flags`: the manifest's
+      template has a constructor with arguments whose type expands
+      (`ABBREV`, `PRIVATE` or `ALIAS`). Only such a copy can be linked (an
+      entry exists for an expanded node only) or be expanded later (and
+      read its chain). It is narrower than "a constructor with arguments"
+      of decision 19: `type t<'a> = array<'a>` pays nothing either. The
+      test of the bit is on the row `expand_once` has already loaded. It
+      is set by `TypeTable::mark_inheriting` when every row exists (a
+      manifest names later declarations of its recursive group), one pass
+      over the manifests' template nodes.
+    - *When a row is made.* By `subst` for the node of an `INHERITS` type
+      that has none (`chain_entry`, which also writes the entry); and in
+      the pass over the instance's nodes for each constructor with
+      arguments of a type that expands and that no chain entry links
+      (`inherit`), with `parent` the expanding node's row. Nowhere else:
+      an instance or a copy outside an expansion starts no chain
+      (`abbreviations = ref Mnil`, ctype.ml:1128).
+    - *When the chain ends.* An entry is live while its slot 0 holds a
+      node. `forget_abbrev` empties the slot and nothing else: the walk
+      passes the row and goes on (`forget_abbrev_rec` returns the tail,
+      btype.ml:636-644). A cleanup empties the slot *and* sets the row's
+      `parent` to none (`abbr := Mnil`, btype.ml:626: the whole list of
+      that reference is gone). The row itself stays, because a copy names
+      the reference, not its content: when the node is expanded again, the
+      copies of its first expansion see the new entry. Observed on the old
+      checker with three abbreviations through objects
+      (`old_checker_inherits_entries_along_the_chain`): with every entry
+      in place the `m3` node's expansion links `m1<'a>` and `m2<'a>` to the
+      two nodes above it; after a cleanup and a second expansion of the
+      `m2` node it links `m2<'a>` and makes a new `m1` node.
+    - *What a restore does.* Nothing of its own. `Graph::restore` puts
+      descriptors back and truncates no pool, so every row still names a
+      node and a slot that exist; `Checker::restore` then runs the cleanup
+      above, as `backtrack` does (btype.ml:779). Rows are not logged in the
+      trail.
+    - *A lookup of an expansion reads the chain too* (`find_expans` goes
+      through `Mlink`, btype.ml:618), which decision 16 did not say. It
+      can only find something for a node whose own slot is empty and whose
+      chain has a live entry of its own type: a private entry (which
+      `find_repr` skips, so the copy was not linked), or an entry written
+      after the copy was made (the revival above). `expand_once` asks
+      `inherited_expansion` only on a miss, for an `INHERITS` type.
+    - *Memory per unit*: `16 * rows + 4 * (S + 1)` bytes, `S` the highest
+      slot-0 list index that has a row; `rows` = the expanded nodes of
+      `INHERITS` types that had none + the constructors with arguments of
+      expanding types that those expansions copied and did not link. Zero,
+      with no allocation, for a unit that expands no `INHERITS` type. Rows
+      are freed when the worker resets the checker, not by a cleanup.
+    - *Cost.* A type without the flag: nothing beyond the bit test. With
+      it, per expansion: one row write, one pass over the instance's nodes
+      (the pass the nullary memo already makes when it is live; the two
+      share one loop, `link_memorized`), one `TypeInfo` load per copied
+      constructor with arguments, and for each of those that expands a
+      walk of the chain. A chain is as long as the number of expansions
+      above the copy that did not link it, which is at most the number of
+      `INHERITS` types on that path while entries are live; OCaml's
+      `find_repr` walks the same list. The regular recursive case is one
+      row: `expanding_the_heads_down_nested_recursive_nodes_is_linear`.
+    - *Changes to the skeleton, all in `expand.rs`.* `Memo::chains`;
+      `subst` takes the `TypeInfo` row in place of the manifest index and
+      calls `Graph::instance` and the pass itself; `link_memorized` takes
+      the chain; `expand_once` loads the row before the memo-hit branch on
+      a miss; `cleanup_abbrev` indexes its loop to call `cut_chain`. Every
+      new call is behind `INHERITS` or a non-empty pool, neither of which
+      exists until R3m is built: `an_abbreviation_that_inherits_nothing_
+      reads_no_row` (runs today) pins the steps of an expansion at the
+      count observed before the change.
+    - *One test of the skeleton changes when R3m is built*:
+      `expand::tests::table_from_ten_thousand_declarations_is_one_pass`
+      pins `2n + 1` steps for `from_segment`; the marking pass reads the
+      three template nodes of each of its n manifests, so the count becomes
+      `5n + 1`. Its hand-built segment had no template nodes; it has them
+      now.
+    - *Run.* With a prototype of the five bodies: the two hand-written
+      chain cases, `expand_tier_agrees_on_recursive_abbreviations` (10,000
+      cases; 248 differed before), the three hand-built tests of
+      `r3_tests.rs`, and every other `tc::` test unchanged (the full tier
+      and the five plans with their pinned seeds).
 
 ### 8.7 The hot paths of unification (K2)
 

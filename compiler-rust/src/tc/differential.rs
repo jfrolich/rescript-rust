@@ -199,6 +199,13 @@ pub(crate) enum Op {
     /// `iter_type_expr`'s order (compiler/ml/btype.ml:250-257), or the
     /// operand itself when it has no child. [`BUILD`].
     Child(u16, u8),
+    /// A new operand: list slot `n mod arity` of an operand's representative
+    /// when that is an object, a field or a polymorphic type (an object:
+    /// its field list; a field: its type, then the rest; a polymorphic
+    /// type: its body, then its variables), otherwise what `Child` gives.
+    /// Never generated: hand-written cases use it to reach a node inside an
+    /// object.
+    Slot(u16, u8),
 }
 
 /// A deliberately wrong new side, for the tests that prove the harness sees
@@ -531,7 +538,7 @@ pub(crate) fn operations(rng: &mut Rng, plan: impl Into<Plan>, values: usize) ->
         };
         match op {
             Op::Instance(_) | Op::Copy(_) | Op::Expand(_) => operands += 1,
-            Op::Var | Op::Tuple(..) | Op::Child(..) => operands += 1,
+            Op::Var | Op::Tuple(..) | Op::Child(..) | Op::Slot(..) => operands += 1,
             Op::BeginDef => depth += 1,
             Op::EndDef => {
                 depth -= 1;
@@ -776,6 +783,24 @@ pub(crate) fn run_old(program: &Program, plan: impl Into<Plan>, ops: &[Op]) -> O
             Op::Child(operand, n) => {
                 let ty = operands[operand as usize];
                 let children = old_children(ctx, ty);
+                operands.push(match children.len() {
+                    0 => ty,
+                    len => children[n as usize % len],
+                });
+            }
+            Op::Slot(operand, n) => {
+                let ty = operands[operand as usize];
+                let desc: TypeDesc = *ctx.get_desc(ctx.repr(ty));
+                let children = match desc {
+                    TypeDesc::Tobject { fields } => vec![fields],
+                    TypeDesc::Tfield { typ, rest, .. } => vec![typ, rest],
+                    TypeDesc::Tpoly { body, vars } => {
+                        let mut slots = vec![body];
+                        slots.extend(ctx.type_list(vars).iter());
+                        slots
+                    }
+                    _ => old_children(ctx, ty),
+                };
                 operands.push(match children.len() {
                     0 => ty,
                     len => children[n as usize % len],
@@ -1231,6 +1256,28 @@ impl New {
                     0 => ty,
                     len => children[n as usize % len],
                 });
+            }
+            Op::Slot(operand, n) => {
+                use super::segment::{EXTENDED, ExtraDescriptor};
+                let ty = self.operands[operand as usize];
+                let at = self.checker.g.repr(ty);
+                let node = self.checker.g.nodes[at.0 as usize];
+                let listed = node.head & EXTENDED != 0
+                    && node.arity() != 0
+                    && matches!(
+                        self.checker.extras.descriptors[node.a as usize],
+                        ExtraDescriptor::Object | ExtraDescriptor::Field { .. } | ExtraDescriptor::Poly
+                    );
+                let slot = if listed {
+                    self.checker.g.lists[(node.b + u32::from(n) % node.arity()) as usize]
+                } else {
+                    let children = self.children(ty);
+                    match children.len() {
+                        0 => ty,
+                        len => children[n as usize % len],
+                    }
+                };
+                self.operands.push(slot);
             }
         }
         Ok(())
@@ -2157,6 +2204,49 @@ mod tests {
         external v2: rv = \"v2\"\n\
         external v3: pv<string> = \"v3\"\n";
 
+    /// Three abbreviations with a parameter that reach each other through
+    /// objects: the chain of inherited memo entries has more than one row.
+    const MUTUAL: &str = "type rec m1<'a> = {\"a\": 'a, \"n\": m2<'a>}\n\
+        and m2<'a> = {\"a\": 'a, \"n\": m3<'a>}\n\
+        and m3<'a> = {\"p\": m1<'a>, \"q\": m2<'a>}\n\
+        external v0: m1<string> = \"v0\"\n";
+
+    /// Operand 0 is an `m1<string>` node, 5 the `m2` node its expansion
+    /// made, 10 the `m3` node the expansion of 5 made; then 10 is expanded.
+    const CHAIN_KEPT: [Op; 12] = [
+        Op::Instance(0),
+        Op::Expand(0),
+        Op::Slot(1, 0),
+        Op::Slot(2, 1),
+        Op::Slot(3, 0),
+        Op::Slot(4, 0),
+        Op::Expand(5),
+        Op::Slot(6, 0),
+        Op::Slot(7, 1),
+        Op::Slot(8, 0),
+        Op::Slot(9, 0),
+        Op::Expand(10),
+    ];
+
+    /// As [`CHAIN_KEPT`], with every memo cleaned and 5 expanded again
+    /// before 10 is expanded.
+    const CHAIN_CLEANED: [Op; 14] = [
+        Op::Instance(0),
+        Op::Expand(0),
+        Op::Slot(1, 0),
+        Op::Slot(2, 1),
+        Op::Slot(3, 0),
+        Op::Slot(4, 0),
+        Op::Expand(5),
+        Op::Slot(6, 0),
+        Op::Slot(7, 1),
+        Op::Slot(8, 0),
+        Op::Slot(9, 0),
+        Op::Cleanup,
+        Op::Expand(5),
+        Op::Expand(10),
+    ];
+
     /// What the old checker shows for a recursive abbreviation today
     /// (observed). The copy an expansion makes of the abbreviation's own
     /// constructor is a link to the node being expanded: for a nullary one
@@ -2190,6 +2280,48 @@ mod tests {
             if value % 2 == 0 {
                 compare(0, &program, plan, &ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
             }
+        }
+    }
+
+    /// What the old checker shows for a chain of inherited entries today
+    /// (observed). With every entry in place, the copies the expansion of
+    /// the `m3` node makes of `m1<'a>` and `m2<'a>` are links to the two
+    /// nodes whose expansions led to it (`@0`, `@7`): `find_repr` goes on
+    /// through `Mlink` (compiler/ml/ctype.ml:720-724, 796-798). After a
+    /// cleanup the list of the `m2` node is empty (`abbr := Mnil`,
+    /// compiler/ml/btype.ml:626) and so ends there; the `m3` node still
+    /// names that list, so when the `m2` node is expanded again its new
+    /// entry is found (`@7`) and the `m1` node's is not (a new `m1` node).
+    #[test]
+    fn old_checker_inherits_entries_along_the_chain() {
+        let program = compile(MUTUAL.to_string());
+        let plan = Plan::new(Tier::Expand, OBJECTS);
+        let kept = run_old(&program, plan, &CHAIN_KEPT).form;
+        assert!(
+            kept.ends_with(
+                "11 = &16[0]obj{&17[0]p: &18[0]poly(@0;); &19[0]q: &20[0]poly(@7;); &21[0]nil}\n"
+            ),
+            "{kept}"
+        );
+        let cleaned = run_old(&program, plan, &CHAIN_CLEANED).form;
+        assert!(
+            cleaned.ends_with(
+                "12 = &23[0]obj{&24[0]p: &25[0]poly(&26[0]m1<@1>;); &27[0]q: &28[0]poly(@7;); &29[0]nil}\n"
+            ),
+            "{cleaned}"
+        );
+    }
+
+    /// The same two cases on both sides: the acceptance of the chain, of
+    /// what a cleanup cuts and of what a later expansion revives (section
+    /// 8.6, decision 25). Reaches: R3m.
+    #[test]
+    #[ignore = "R3m build"]
+    fn a_chain_of_inherited_entries_agrees() {
+        let program = compile(MUTUAL.to_string());
+        let plan = Plan::new(Tier::Expand, OBJECTS);
+        for ops in [&CHAIN_KEPT[..], &CHAIN_CLEANED[..]] {
+            compare(0, &program, plan, ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
         }
     }
 
@@ -2292,6 +2424,7 @@ mod tests {
             include_str!("rows.rs"),
             include_str!("relate.rs"),
             include_str!("unify.rs"),
+            include_str!("expand.rs"),
         ] {
             let mut name = String::new();
             for line in source.lines() {
@@ -2366,6 +2499,11 @@ mod tests {
                 if rows && (full || body.contains("Tier::Expand")) {
                     reaches.push("R3m");
                 }
+                // A hand-built test: a type marked INHERITS, or the marks
+                // themselves, is R3m's.
+                if body.contains("inheriting(") || body.contains("INHERITS") {
+                    reaches.push("R3m");
+                }
                 if body.contains("EXPLAIN") && body.contains("SCOPED") {
                     reaches.push("R3k");
                 }
@@ -2380,6 +2518,6 @@ mod tests {
                 checked += 1;
             }
         }
-        assert_eq!(checked, 4, "ignored R3 tests checked");
+        assert_eq!(checked, 8, "ignored R3 tests checked");
     }
 }
