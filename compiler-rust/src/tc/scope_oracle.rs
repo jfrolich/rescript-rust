@@ -13,8 +13,10 @@
 //! backwards, with nothing clever in it. It runs today and proves that the
 //! trace carries enough to reproduce the old checker's answers. [`Skewed`] is
 //! the same with one rule wrong (a local binding always wins over an opened
-//! layer); the oracle must report it. `tc::scope::Scopes` is the third, from
-//! slice R4c on (`r4_tests::scopes_answer_what_the_old_environment_answered`).
+//! layer); the oracle must report it. [`OnScopes`] is the third: it asks
+//! `tc::scope::Scopes` (`r4_tests::scopes_answer_what_the_old_environment_answered`),
+//! and under `RESCRIPT_CHECKER=both` the driver replays every unit it checks
+//! on it.
 //!
 //! What the oracle covers: every lookup by an unqualified name in the six
 //! tables of `Env`, under every binding and every `open` of the unit. What it
@@ -23,10 +25,13 @@
 //! slice R4c), and a qualified path is not a lookup of `Env`'s tables
 //! (`r4_tests`, slice R4d, on pinned programs; whole units from R5c on).
 //!
-//! Nothing here is on a compile path; the oracle allocates freely.
+//! The module exists in builds with debug assertions only. It is on a compile
+//! path only under `RESCRIPT_CHECKER=both` in such a build, where the oracle
+//! allocates freely.
 
 use std::collections::HashMap;
 
+use super::scope::{Binder, BinderKind, Found, Key, Namespace, ResolvedKind, Scopes};
 use super::scope_trace::{Event, Ns};
 
 /// A scope structure under test. An item is a number the replay chose; the
@@ -229,6 +234,7 @@ pub(crate) fn replay(events: &[Event], resolver: &mut dyn Resolver) -> Result<Re
     Ok(done)
 }
 
+#[cfg(test)]
 enum Entry {
     Bind(Ns, String, u32),
     Open(Vec<(Ns, String, u32)>),
@@ -236,11 +242,13 @@ enum Entry {
 
 /// The reference resolver: frames of entries in the order they were added,
 /// scanned from the last to the first. A lookup costs O(everything in scope).
+#[cfg(test)]
 #[derive(Default)]
 pub(crate) struct Model {
     frames: Vec<Vec<Entry>>,
 }
 
+#[cfg(test)]
 impl Resolver for Model {
     fn enter(&mut self) {
         self.frames.push(Vec::new());
@@ -300,9 +308,11 @@ impl Resolver for Model {
 
 /// [`Model`] with one rule wrong: an opened layer never hides a binding,
 /// however old the binding is.
+#[cfg(test)]
 #[derive(Default)]
 pub(crate) struct Skewed(Model);
 
+#[cfg(test)]
 impl Resolver for Skewed {
     fn enter(&mut self) {
         self.0.enter();
@@ -354,6 +364,106 @@ impl Resolver for Skewed {
                 );
             }
         }
+    }
+}
+
+/// [`Scopes`] as a resolver of the oracle. An item is a binder's payload.
+pub(crate) struct OnScopes {
+    pub(crate) scopes: Scopes,
+    pub(crate) out: Vec<Found>,
+}
+
+/// O(1): the namespace of `tc::scope` an old table corresponds to.
+pub(crate) fn namespace(ns: Ns) -> Namespace {
+    match ns {
+        Ns::Value => Namespace::Value,
+        Ns::Type => Namespace::Type,
+        Ns::Module => Namespace::Module,
+        Ns::ModuleType => Namespace::ModuleType,
+        Ns::Constructor => Namespace::Constructor,
+        Ns::Label => Namespace::Label,
+    }
+}
+
+/// O(length of `name`): intern `name` and make its key.
+fn key(s: &mut Scopes, name: &str, ns: Namespace) -> Key {
+    Key::new(s.names.intern(name), ns)
+}
+
+/// O(length of `name`): a binder of `name` that is not in scope yet, with
+/// `payload` and the kind the namespace's declarations have.
+fn push(s: &mut Scopes, name: &str, ns: Namespace, payload: u32) -> Binder {
+    let key = key(s, name, ns);
+    let kind = match ns {
+        Namespace::Value => BinderKind::Let,
+        Namespace::Type => BinderKind::Type,
+        Namespace::Module => BinderKind::Module,
+        Namespace::ModuleType => BinderKind::ModuleType,
+        Namespace::Constructor => BinderKind::Constructor,
+        Namespace::Label => BinderKind::Label,
+    };
+    s.binders.push(key, payload, 0, kind)
+}
+
+/// O(length of `name`): a binder of `name` in the current scope.
+fn bind(s: &mut Scopes, name: &str, ns: Namespace, payload: u32) -> Binder {
+    let binder = push(s, name, ns, payload);
+    s.bind(binder);
+    binder
+}
+
+impl OnScopes {
+    /// An empty structure with no scope entered.
+    pub(crate) fn new() -> OnScopes {
+        OnScopes {
+            scopes: Scopes::new(),
+            out: Vec::new(),
+        }
+    }
+
+    fn item(&self, found: Found) -> u32 {
+        match found.item.kind() {
+            ResolvedKind::Binder(binder) => self.scopes.binders.payload[binder.0 as usize],
+            other => panic!("the replay binds nothing imported: {other:?}"),
+        }
+    }
+}
+
+impl Resolver for OnScopes {
+    fn enter(&mut self) {
+        self.scopes.enter();
+    }
+
+    fn leave(&mut self) {
+        self.scopes.leave();
+    }
+
+    fn bind(&mut self, ns: Ns, name: &str, item: u32) {
+        bind(&mut self.scopes, name, namespace(ns), item);
+    }
+
+    fn open(&mut self, members: &[(Ns, &str, u32)]) {
+        let rows: Vec<(Key, Binder)> = members
+            .iter()
+            .map(|&(ns, name, item)| {
+                let binder = push(&mut self.scopes, name, namespace(ns), item);
+                (Key(self.scopes.binders.key[binder.0 as usize]), binder)
+            })
+            .collect();
+        let table = self.scopes.table_from(&rows);
+        self.scopes.open(table, 0, 0, 0);
+    }
+
+    fn first(&mut self, ns: Ns, name: &str) -> Option<u32> {
+        let key = key(&mut self.scopes, name, namespace(ns));
+        self.scopes.find(key).map(|found| self.item(found))
+    }
+
+    fn all(&mut self, ns: Ns, name: &str, out: &mut Vec<u32>) {
+        let key = key(&mut self.scopes, name, namespace(ns));
+        self.out.clear();
+        self.scopes.candidates(key, &mut self.out);
+        out.extend(self.out.iter().map(|&found| self.item(found)));
     }
 }
 

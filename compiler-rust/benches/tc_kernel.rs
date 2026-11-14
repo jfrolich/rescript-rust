@@ -3,11 +3,14 @@
 //! Run: cargo bench --manifest-path compiler-rust/Cargo.toml --bench tc_kernel -- instance7 1000000
 //! For instructions use cachegrind at N and zero, subtract empty; subtract
 //! instance7 from generalize7. For unification subtract its `build_*` twin.
-//! Names belong to R4.
+//! The R4 operations (`binder` to `intern`, CHECKER_REWRITE.md section 9.3,
+//! decision 5) take an interned `Name`; subtract the empty loop.
 //! `checker_instance1..7` are `instance1..7` through `Checker::instance`
 //! with an empty nullary memo (R3b).
 use rescript_compiler::tc::expand::TypeTable;
 use rescript_compiler::tc::graph::{ARROW, CONSTR, GENERIC, Graph, NONE, Node, Param, Ty, VAR};
+use rescript_compiler::tc::name_table::Name;
+use rescript_compiler::tc::scope::{Binder, BinderKind, Key, Namespace, Scopes};
 use rescript_compiler::tc::unify::Checker;
 use std::hint::black_box;
 
@@ -54,6 +57,112 @@ fn var_at(g: &mut Graph, level: u32) -> Ty {
         a: NONE,
         b: 0,
     })
+}
+
+/// O(layers x members): setup only. Scope 0 entered, then `layers` opened
+/// tables of `members` values each, outermost first: layer `l` holds
+/// `{l}{i}` for `i` below `members` (`a` is the outermost).
+fn layered(layers: u8, members: u32) -> Scopes {
+    let mut s = Scopes::new();
+    s.enter();
+    let mut rows = Vec::new();
+    for l in 0..layers {
+        rows.clear();
+        for i in 0..members {
+            let key = Key::new(
+                s.names.intern(&format!("{}{i}", (b'a' + l) as char)),
+                Namespace::Value,
+            );
+            rows.push((key, s.binders.push(key, i, 0, BinderKind::Let)));
+        }
+        let table = s.table_from(&rows);
+        s.open(table, 0, 0, 0);
+    }
+    s
+}
+/// O(1): the value key of a name the setup interned.
+fn value(s: &Scopes, text: &str) -> Key {
+    Key::new(
+        s.names.find(text).expect("interned by the setup"),
+        Namespace::Value,
+    )
+}
+/// The R4 operations; see the module comment.
+fn names(op: &str, index: usize, n: u64) {
+    let mut sink = 0u64;
+    match index {
+        // `binders.payload[b]` for a binder in an array of 1,000.
+        27 => {
+            let mut s = layered(0, 0);
+            let key = Key::new(s.names.intern("x"), Namespace::Value);
+            for i in 0..1_000 {
+                s.binders.push(key, i, 0, BinderKind::Let);
+            }
+            for _ in 0..n {
+                let b: Binder = black_box(Binder(537));
+                sink += s.binders.payload[b.0 as usize] as u64;
+            }
+        }
+        // `find` of a name bound after two opened layers of 256 members;
+        // the name is also a member of the inner layer, which it hides.
+        28 => {
+            let mut s = layered(2, 256);
+            let key = value(&s, "b100");
+            let b = s.binders.push(key, 7, 0, BinderKind::Let);
+            s.bind(b);
+            for _ in 0..n {
+                let found = s.find(black_box(key)).expect("bound");
+                sink += found.item.0 as u64;
+            }
+        }
+        // `find` of a name with no binding, in the inner of two layers.
+        29 => {
+            let s = layered(2, 256);
+            let key = value(&s, "b100");
+            for _ in 0..n {
+                let found = s.find(black_box(key)).expect("a member");
+                sink += found.item.0 as u64;
+            }
+        }
+        // `find` of a name in the third layer after missing two.
+        30 => {
+            let s = layered(3, 256);
+            let key = value(&s, "a100");
+            for _ in 0..n {
+                let found = s.find(black_box(key)).expect("a member");
+                sink += found.item.0 as u64;
+            }
+        }
+        // `enter`, `push`, `bind`, `leave`; the per-unit rows are reset to
+        // the frozen prefix every 4,096 iterations, as instances are cleared.
+        31 => {
+            let mut s = layered(0, 0);
+            let key = Key::new(s.names.intern("x"), Namespace::Value);
+            s.freeze();
+            for i in 0..n {
+                if i & 0xfff == 0 {
+                    s.reset();
+                }
+                s.enter();
+                let b = s.binders.push(black_box(key), 0, 0, BinderKind::Let);
+                s.bind(b);
+                s.leave();
+                sink += b.0 as u64;
+            }
+        }
+        // `NameTable::intern` of an 8-byte name already in the table.
+        32 => {
+            let mut s = layered(1, 256);
+            let text = "abcdefgh";
+            s.names.intern(text);
+            for _ in 0..n {
+                let name: Name = s.names.intern(black_box(text));
+                sink += name.0 as u64;
+            }
+        }
+        _ => unreachable!(),
+    }
+    println!("{op} n={n} sink={}", black_box(sink));
 }
 
 fn main() {
@@ -109,6 +218,12 @@ fn main() {
         "unify_ground1_local",
         "build_ground3_local",
         "unify_ground3_local",
+        "binder",
+        "find_local",
+        "find_open",
+        "find_miss2",
+        "bind_leave",
+        "intern",
     ];
     let Some(index) = ops.iter().position(|&s| s == op) else {
         eprintln!(
@@ -118,6 +233,10 @@ fn main() {
         std::process::exit(2);
     };
     let index = black_box(index);
+    if index >= 27 {
+        names(op, index, n);
+        return;
+    }
     let mut sink = 0u64;
     if index >= 15 {
         let local = index >= 21;
