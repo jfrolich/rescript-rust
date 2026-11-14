@@ -3872,7 +3872,8 @@ fn compile_with_location_retry<T>(
     ast: &StoredAst,
     build: &BuildCommandState,
     options: &rescript_compiler::driver::CompilerOptions,
-    mut compile: impl FnMut(&StoredAst, &rescript_compiler::driver::CompilerOptions) -> Result<T>,
+    mut compile: impl FnMut(&StoredAst, &rescript_compiler::driver::CompilerOptions,
+        Option<rescript_compiler::driver::DerivedFallback<'_>>) -> Result<T>,
 ) -> Result<T> {
     use rescript_compiler::driver::{DerivedPath, LocationRetry};
     // Set up for each tree compiled, `tree` being the parse and `source`
@@ -3886,9 +3887,6 @@ fn compile_with_location_retry<T>(
         if tree.arena().plans().item_count() == 0 {
             return;
         }
-        if matches!(tree, StoredAst::Structure(_)) {
-            options.derived_fallback = Some(derived_fallback(ast, tree.arena().stores_locations()));
-        }
         if options.derived_path == DerivedPath::Check {
             let (source, locations) = (source.clone(), tree.arena().stores_locations());
             options.derived_reference =
@@ -3896,8 +3894,12 @@ fn compile_with_location_retry<T>(
             options.derived_differences = Some(build.derived_differences.clone());
         }
     };
+    let fallback = || derived_fallback(ast, ast.arena().stores_locations());
+    let fallback = matches!(ast, StoredAst::Structure(_)).then_some(
+        &fallback as rescript_compiler::driver::DerivedFallback<'_>);
     let result = match ast.retry_source() {
-        Some(source) if !ast.arena().stores_locations() || ast.arena().plans().item_count() > 0 => {
+        Some(source) if !ast.arena().stores_locations()
+            || (options.derived_path == DerivedPath::Check && ast.arena().plans().item_count() > 0) => {
             let mut options = options.clone();
             // A location-free compile places its warnings in a located
             // parse of the same source; it returns
@@ -3906,9 +3908,9 @@ fn compile_with_location_retry<T>(
                 options.warning_locations = Some(warning_locations(source));
             }
             per_tree(ast, source, &mut options);
-            compile(ast, &options)
+            compile(ast, &options, fallback)
         }
-        _ => compile(ast, options),
+        _ => compile(ast, options, fallback),
     };
     let local_retry = !ast.arena().stores_locations()
         && matches!(
@@ -3934,7 +3936,10 @@ fn compile_with_location_retry<T>(
         if let Some(source) = ast.retry_source() {
             per_tree(&located, source, &mut options);
         }
-        return compile(&located, &options);
+        let fallback = || derived_fallback(ast, true);
+        let fallback = matches!(located, StoredAst::Structure(_)).then_some(
+            &fallback as rescript_compiler::driver::DerivedFallback<'_>);
+        return compile(&located, &options, fallback);
     }
     if !build.parses_with_locations() && result.is_err() {
         // Type errors can quote declarations from dependency interfaces.
@@ -3957,29 +3962,27 @@ fn warning_locations(
 }
 
 /// The general syntax of the implementation `ast`
-/// (`CompilerOptions::derived_fallback`): its source parsed again with
+/// (`DerivedFallback`): its source parsed again with
 /// derived code as syntax, with locations when `locations` (the tree being
-/// compiled has them). Cost: one reference count now; one frontend run of
-/// the unit when it falls back.
-fn derived_fallback(ast: &StoredAst, locations: bool) -> rescript_compiler::driver::DerivedFallback {
-    let ast = ast.clone();
-    Arc::new(move || {
-        let StoredAst::Structure(general) = super::parse::reparse_without_plans(&ast, locations)? else {
-            anyhow::bail!("a parse without plans changed the kind of the unit")
-        };
-        let warning_locations = match &general.retry_source {
-            Some(source) if !general.arena.stores_locations() => Some(warning_locations(source)),
-            _ => None,
-        };
-        let general =
-            Arc::try_unwrap(general).map_err(|_| anyhow::anyhow!("a new parse without plans is shared"))?;
-        Ok(rescript_compiler::driver::GeneralSyntax {
-            arena: general.arena,
-            tree: general.structure,
-            warning_locations,
-        })
+/// compiled has them). Cost: one frontend run, only after fallback is requested.
+fn derived_fallback(ast: &StoredAst, locations: bool) -> Result<rescript_compiler::driver::GeneralSyntax<rescript_compiler::parser::ast::Structure>> {
+    let StoredAst::Structure(general) = super::parse::reparse_without_plans(ast, locations)? else {
+        anyhow::bail!("a parse without plans changed the kind of the unit")
+    };
+    let warning_locations = match &general.retry_source {
+        Some(source) if !general.arena.stores_locations() => Some(warning_locations(source)),
+        _ => None,
+    };
+    let general =
+        Arc::try_unwrap(general).map_err(|_| anyhow::anyhow!("a new parse without plans is shared"))?;
+    Ok(rescript_compiler::driver::GeneralSyntax {
+        arena: general.arena,
+        tree: general.structure,
+        warning_locations,
     })
 }
+
+
 
 fn compile_module_in_process_to_js_boundary(
     package: &packages::Package,
@@ -4070,7 +4073,7 @@ fn compile_module_in_process_to_js_boundary(
         let intf_key = format!("{module_name}:intf");
         let intf_result = match stored_asts.get(&intf_key) {
             Some(ast @ StoredAst::Signature(_)) => {
-                compile_with_location_retry(ast, build_command_state, &options, |ast, options| {
+                compile_with_location_retry(ast, build_command_state, &options, |ast, options, _fallback| {
                     let StoredAst::Signature(stored) = ast else {
                         unreachable!("interface retry changed AST kind")
                     };
@@ -4230,7 +4233,7 @@ fn compile_module_in_process_to_js_boundary(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match stored_asts.get(&impl_key) {
                 Some(ast @ StoredAst::Structure(_)) => {
-                    compile_with_location_retry(ast, build_command_state, &options, |ast, options| {
+                    compile_with_location_retry(ast, build_command_state, &options, |ast, options, fallback| {
                         let StoredAst::Structure(stored) = ast else {
                             unreachable!("implementation retry changed AST kind")
                         };
@@ -4252,6 +4255,7 @@ fn compile_module_in_process_to_js_boundary(
                             gentype_interface.clone(),
                             signature_hook,
                             publication,
+                            fallback,
                         )
                     })
                 }

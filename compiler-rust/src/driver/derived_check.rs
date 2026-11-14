@@ -162,7 +162,6 @@ pub(super) fn until_js(
     let mut reference_options = both.clone();
     reference_options.derived_census = None;
     // The general form has no plan to fall back from.
-    reference_options.derived_fallback = None;
 
     // The general form of the unit is what the frontend makes of its source
     // with plans off.
@@ -182,6 +181,7 @@ pub(super) fn until_js(
     let general = UntilJs {
         arena: &general_arena,
         structure: &general_structure,
+        fallback: None,
         ..*unit
     };
     // The reference first: it publishes nothing, and what the plans publish

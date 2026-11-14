@@ -73,7 +73,7 @@ pub enum LocationRetry {
 
 /// An obligation of a derived item's plan failed in the checker, which
 /// abandoned the unit before publishing anything, and the compile had no
-/// [`CompilerOptions::derived_fallback`] to continue the unit's attempt loop
+/// [`DerivedFallback`] to continue the unit's attempt loop
 /// on. Whoever holds the unit's source makes that general syntax with
 /// [`DerivedPath::Fallback`].
 #[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
@@ -389,9 +389,9 @@ pub struct GeneralSyntax<S> {
     pub warning_locations: Option<WarningLocations>,
 }
 
-/// See [`CompilerOptions::derived_fallback`].
-pub type DerivedFallback =
-    std::sync::Arc<dyn Fn() -> Result<GeneralSyntax<Structure>> + Send + Sync>;
+/// Borrowed general-syntax provider, called only after a derived plan fails.
+/// O(1) to pass; no ownership or allocation on the successful first attempt.
+pub type DerivedFallback<'a> = &'a dyn Fn() -> Result<GeneralSyntax<Structure>>;
 
 /// See [`CompilerOptions::derived_differences`].
 pub type DerivedDifferences = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
@@ -500,12 +500,6 @@ pub struct CompilerOptions {
     /// or why the frontend could not give it (the error names the source it
     /// read). The reference compile of a check runs on it.
     pub derived_reference: Option<DerivedReference>,
-    /// For an implementation with planned derived items: the unit's syntax
-    /// with its derived code as syntax. When the checker cannot use a plan,
-    /// the unit's attempt loop continues on it, keeping the attempt's check
-    /// mode; nothing of the abandoned attempt is published. Without it the
-    /// compile fails with [`DerivedRetry`].
-    pub derived_fallback: Option<DerivedFallback>,
     /// For `RESCRIPT_DERIVED_PATH=check`: where a build collects what the
     /// check found, to report every unit before it fails. With it a unit
     /// that differs goes on with the result of its plans; without it the
@@ -806,7 +800,6 @@ impl Default for CompilerOptions {
             derived_census: Self::derived_census_from_env(),
             derived_path: DerivedPath::from_env(),
             derived_reference: None,
-            derived_fallback: None,
             derived_differences: None,
             backend: crate::bir::shadow::BackendMode::from_env(),
             signature_check: crate::cmi::signature_check::SignatureCheck::from_env(),
@@ -6263,8 +6256,15 @@ pub fn compile_source_to_js_with_options(
     )
 }
 
+/// Borrow the inputs of a possible fallback. O(1), no heap allocation.
+fn general_syntax_provider<'a>(
+    source: &'a str, filename: &'a str, options: &'a CompilerOptions,
+) -> impl Fn() -> Result<GeneralSyntax<Structure>> + 'a {
+    move || general_implementation_syntax(source, filename, options)
+}
+
 /// The general syntax of an implementation whose plan could not be used
-/// ([`CompilerOptions::derived_fallback`]): the frontend run again on its
+/// ([`DerivedFallback`]): the frontend run again on its
 /// source with [`DerivedPath::Fallback`]. Its reports were printed with the
 /// first tree and are not printed again. Cost: one parse and frontend run
 /// of the unit and one copy of the options, only for a unit that falls back.
@@ -6275,7 +6275,6 @@ fn general_implementation_syntax(
 ) -> Result<GeneralSyntax<Structure>> {
     let mut options = options.clone();
     options.derived_path = DerivedPath::Fallback;
-    options.derived_fallback = None;
     let mut parser = Parser::new(filename, source);
     let structure = module::parse_structure(&mut parser);
     let frontend =
@@ -9805,7 +9804,6 @@ pub fn compile_source_in_process(
         general_options.derived_path = DerivedPath::General;
         general_options.derived_census = None;
         general_options.derived_reference = None;
-        general_options.derived_fallback = None;
         effective_options.to_mut().derived_reference = Some(std::sync::Arc::new(move || {
             let mut parser = Parser::new(&filename, &source);
             let structure = module::parse_structure(&mut parser);
@@ -9823,15 +9821,9 @@ pub fn compile_source_in_process(
         }));
     }
 
-    // The unit's attempt loop continues on the general syntax when a plan
-    // cannot be used. Cost: one copy of the source and options for a unit
-    // with plans.
-    if parser.arena().plans().item_count() > 0 {
-        let (source, filename, options) = (source.to_owned(), filename.to_owned(), options.clone());
-        effective_options.to_mut().derived_fallback = Some(std::sync::Arc::new(move || {
-            general_implementation_syntax(&source, &filename, &options)
-        }));
-    }
+    // Borrow source/options for the duration of this synchronous compile.
+    // No owned fallback inputs are built unless the attempt requests them.
+    let fallback = general_syntax_provider(source, filename, options);
 
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let result = compile_preprocessed_structure_in_process_with_signature_hook(
@@ -9845,6 +9837,7 @@ pub fn compile_source_in_process(
         gentype_interface,
         None,
         None,
+        Some(&fallback),
     )?;
     // Like the direct compile: a frontend warning configured as an error fails
     // the compilation once type checking has reported its own diagnostics.
@@ -10249,6 +10242,7 @@ pub fn compile_preprocessed_structure_in_process(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -10271,6 +10265,7 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
     gentype_interface: Option<crate::gentype::main::InterfaceRead>,
     signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
     before_js: Option<&mut InProcessBeforeJsHook<'_>>,
+    fallback: Option<DerivedFallback<'_>>,
 ) -> Result<InProcessCompileResult> {
     let pre_js = compile_preprocessed_structure_in_process_until_js(
         arena,
@@ -10283,6 +10278,7 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
         gentype_interface,
         signature_ready,
         SignaturePublicationMode::Eager,
+        fallback,
     )?;
 
     let refreshed_registry = if let Some(hook) = before_js {
@@ -10768,6 +10764,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     gentype_interface: Option<crate::gentype::main::InterfaceRead>,
     signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
     publication: SignaturePublicationMode,
+    fallback: Option<DerivedFallback<'_>>,
 ) -> Result<InProcessPreJsCompileResult> {
     let unit = UntilJs {
         arena,
@@ -10777,6 +10774,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         registry,
         has_interface,
         publication,
+        fallback,
     };
     // O(1): one comparison per unit; only `check` compiles a unit twice.
     if options.derived_path == DerivedPath::Check && arena.plans().item_count() > 0 {
@@ -10795,6 +10793,7 @@ struct UntilJs<'a> {
     registry: &'a ModuleRegistry,
     has_interface: bool,
     publication: SignaturePublicationMode,
+    fallback: Option<DerivedFallback<'a>>,
 }
 
 /// [`compile_preprocessed_structure_in_process_until_js`] for one tree of
@@ -10813,6 +10812,7 @@ fn compile_until_js(
         registry,
         has_interface,
         publication,
+        fallback,
     } = *unit;
     if !arena.stores_locations()
         && (options.source_map != crate::js_ir::source_map::SourceMapMode::None
@@ -10852,18 +10852,14 @@ fn compile_until_js(
     // Read source only when retained diagnostics need it.
     let source_cell = std::cell::OnceCell::new();
     let source = || -> &str { source_cell.get_or_init(|| read_in_process_source(filename)) };
-    let checking_config = file_config.clone();
-    type_structure_two_modes(
+    let result = type_structure_two_modes(
         CheckUnit { filename, options, registry: Some(registry),
-            module_name: Some(module_name), file_config: &checking_config,
+            module_name: Some(module_name), file_config: &file_config,
             frontend_warning_specs: &frontend_warning_specs,
             derived_plans: options.derived_path.plans_off().is_none(),
             mode: crate::types::context::CheckMode::from_env() },
         UnitSyntax::new(arena, structure, options),
-        options
-            .derived_fallback
-            .as_deref()
-            .map(|fallback| fallback as &dyn Fn() -> Result<GeneralSyntax<Structure>>),
+        fallback,
         |tctx, env, syntax| type_structure(tctx, env, syntax.arena, syntax.tree),
         |type_ctx, mut tctx, typed, syntax, attempt_output| {
     // A unit that fell back is finished from its general syntax.
@@ -11558,8 +11554,8 @@ fn compile_until_js(
         possible_required_modules,
         flat_make_paths,
         ident_stamp_at_js_boundary,
-        file_directives: file_directives.clone(),
-        file_config: file_config.clone(),
+        file_directives: Vec::new(),
+        file_config: Default::default(),
         signature: published_signature,
         pers_struct,
         lam_locs,
@@ -11579,7 +11575,12 @@ fn compile_until_js(
         derived_differences: None,
     })
         },
-    ).1
+    ).1;
+    result.map(|mut result| {
+        result.file_directives = file_directives;
+        result.file_config = file_config;
+        result
+    })
 }
 
 /// Run the JS backend on the result of
@@ -12513,6 +12514,35 @@ mod tests {
                 Ok(())
             },
         ).1.unwrap();
+    }
+
+    #[test]
+    fn a_successful_planned_unit_allocates_nothing_for_its_borrowed_fallback() {
+        let source = "@spice type t = array<A.t>";
+        let (parser, structure) = crate::binary_ast::derive::fixtures::derive_source(source, true);
+        assert!(parser.arena().plans().item_count() > 0);
+        let options = super::CompilerOptions {
+            nopervasives: true, publish_in_process_signature: false, ..Default::default()
+        };
+        // Measure production fallback preparation, not the unrelated checker
+        // and backend allocations or shared-store growth of compiling a unit.
+        let mut provider = None;
+        let setup = allocation_counter::measure(|| {
+            provider = Some(super::general_syntax_provider(source, "Allocation.res", &options));
+        });
+        assert_eq!(setup.count_total, 0);
+        assert_eq!(setup.bytes_total, 0);
+        let calls = std::cell::Cell::new(0);
+        let fallback = || {
+            calls.set(calls.get() + 1);
+            provider.as_ref().unwrap()()
+        };
+        super::compile_preprocessed_structure_in_process_until_js(
+            parser.arena(), &structure, "Allocation.res", "Allocation", &options,
+            &super::ModuleRegistry::new(), false, None, None,
+            super::SignaturePublicationMode::Eager, Some(&fallback),
+        ).unwrap();
+        assert_eq!(calls.get(), 0, "the unit's first attempt must succeed");
     }
 
     #[test]
