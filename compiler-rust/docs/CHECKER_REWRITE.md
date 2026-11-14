@@ -3234,8 +3234,8 @@ imported_tables and store its id with the IMPORTED bit in table_index.
 The deprecated bit: a value's attributes are signature.values[payload]
 .attributes, a type's signature.type_details[payload].attributes, a
 module's or module type's signature.modules[payload].attributes; a member
-is deprecated when one attribute's payload row is
-AttributePayloadRow::Deprecated. Constructors and labels get no bit in
+is deprecated by its first attribute named `deprecated`, as 9.7,
+decision 9 says. Constructors and labels get no bit in
 this slice. Commits as in section 9.4. Relations to hold: the second
 import of a table is 1 step and writes nothing; importing table s of a
 unit imports no other table; the source is asked once per name and worker.
@@ -3413,3 +3413,14 @@ These bind the builders of R4 and the designers of R5.
    `TypeContext`.** That is a conversion, not a check: nothing is unified
    in it. A test that unifies or lowers on the old checker builds its
    context as the driver does (8.6, the harness's start level).
+9. **Which declaration is deprecated** (review of R4d; the builder
+   followed the test and OCaml where the build prompt named a narrower
+   rule). `Builtin_attributes.check_deprecated`
+   (compiler/ml/builtin_attributes.ml:68-125) reads the first attribute
+   named `deprecated` and no later one. A plain payload (`@deprecated`,
+   `@deprecated("why")`) is deprecated. The record form is deprecated only
+   when it has a `reason` field that is a string; a segment keeps the
+   record form as an `AttributePayloadRow::Deprecated` row, whose reason
+   is then not `Missing`. A reason that is an error when read counts as
+   deprecated, so that the use reports it. R4f reads the text and the
+   migration templates from the same attribute when it warns.

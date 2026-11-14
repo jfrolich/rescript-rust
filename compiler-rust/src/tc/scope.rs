@@ -34,7 +34,7 @@
 use std::sync::Arc;
 
 use super::name_table::{Name, NameTable};
-use super::segment::{ExportItem, Segment};
+use super::segment::{AttributePayloadRow, ExportItem, ExportKind, Segment, SemanticStringValue};
 
 pub use super::graph::NONE;
 
@@ -917,7 +917,27 @@ impl Scopes {
     /// `unit_heads[name]` at it. Returns its index. One `Arc` clone per
     /// worker and unit, never per lookup. Panics at 2^24 units.
     pub fn add_unit(&mut self, name: Name, segment: Arc<Segment>) -> u32 {
-        todo!("R4d")
+        let unit = self.units.len() as u32;
+        assert!(unit <= UNIT_MASK, "more than 2^24 units");
+        let tables = self.table_index.len() as u32;
+        let slots = self.table_index.len() + segment.children.len();
+        self.table_index.resize(slots, NONE);
+        self.units.push(UnitSlot {
+            segment,
+            name,
+            tables,
+        });
+        self.grow_unit_heads(name);
+        self.unit_heads[name.0 as usize] = unit;
+        unit
+    }
+
+    /// Amortized O(1), no step: make `unit_heads` cover `name`, growing it
+    /// to the name table's size with [`NONE`] (every name is below it).
+    fn grow_unit_heads(&mut self, name: Name) {
+        if name.0 as usize >= self.unit_heads.len() {
+            self.unit_heads.resize(self.names.len() as usize, NONE);
+        }
     }
 
     /// 1 step, one load when the name was asked before (from R4g on, one
@@ -926,7 +946,21 @@ impl Scopes {
     /// when no unit has the name (`find_pers_struct`, compiler/ml/env.ml:
     /// 646-691).
     pub fn unit_by_name(&mut self, name: Name, source: &mut dyn UnitSource) -> Option<u32> {
-        todo!("R4d")
+        self.grow_unit_heads(name);
+        match self.unit_heads[name.0 as usize] {
+            NONE => match source.segment(self.names.text(name)) {
+                Some(segment) => Some(self.add_unit(name, segment)),
+                None => {
+                    self.unit_heads[name.0 as usize] = MISSING;
+                    None
+                }
+            },
+            known => {
+                #[cfg(test)]
+                super::steps::tick();
+                (known != MISSING).then_some(known)
+            }
+        }
     }
 
     /// The imported table of export table `signature` of `unit`
@@ -938,14 +972,109 @@ impl Scopes {
     /// An item's namespace is its `ExportKind`; items of one key keep the
     /// segment's order.
     pub fn import_table(&mut self, unit: u32, signature: u32) -> TableId {
-        todo!("R4d")
+        let slot = (self.units[unit as usize].tables + signature) as usize;
+        let known = self.table_index[slot];
+        if known != NONE {
+            #[cfg(test)]
+            super::steps::tick();
+            return TableId(known | IMPORTED);
+        }
+        let Scopes {
+            names,
+            units,
+            imported_tables,
+            imported_members,
+            table_index,
+            ..
+        } = self;
+        let segment = &*units[unit as usize].segment;
+        let range = segment.children[signature as usize];
+        let first = imported_members.len() as u32;
+        imported_members.reserve(range.len as usize);
+        for index in range.start..range.start + range.len {
+            #[cfg(test)]
+            super::steps::tick();
+            let item = segment.items[index as usize];
+            let name = names.intern(segment_string(segment, item.name));
+            // `ExportKind`'s discriminants are `Namespace`'s.
+            imported_members.push(Member {
+                key: name.0 << 3 | item.kind as u32,
+                target: index,
+                origin: unit | deprecated_bit(segment, item),
+            });
+        }
+        // Stable: items of one key keep the segment's order.
+        imported_members[first as usize..].sort_by_key(|member| member.key);
+        let id = imported_tables.len() as u32;
+        debug_assert!(id < IMPORTED, "more than 2^31 imported tables");
+        imported_tables.push(Table {
+            first,
+            len: range.len,
+            unit,
+        });
+        table_index[slot] = id;
+        TableId(id | IMPORTED)
     }
 
     /// O(1), three loads: the segment and export item a row of
     /// `imported_members` names.
     pub fn item(&self, row: u32) -> (&Segment, &ExportItem) {
-        todo!("R4d")
+        let member = self.imported_members[row as usize];
+        let segment = &*self.units[(member.origin & UNIT_MASK) as usize].segment;
+        (segment, &segment.items[member.target as usize])
     }
+}
+
+/// O(len), no allocation: the text of string `index` of a segment's string
+/// pool. Names are written from Rust strings, so the bytes are UTF-8.
+fn segment_string(segment: &Segment, index: u32) -> &str {
+    std::str::from_utf8(segment_bytes(segment, index)).expect("a segment string is UTF-8")
+}
+
+/// O(attributes of the item's declaration), no step, no allocation:
+/// [`MEMBER_DEPRECATED`] when the declaration an export item names is
+/// deprecated, else 0. Constructors and labels get no bit here.
+///
+/// `Builtin_attributes.check_deprecated` (compiler/ml/builtin_attributes.ml:
+/// 61-125) reads the first attribute named `deprecated` of `val_attributes`,
+/// `type_attributes`, `md_attributes` or `mtd_attributes`: a plain payload
+/// (`@deprecated("why")`, `@deprecated`) is deprecated; the record form is
+/// deprecated only when it has a `reason` field that is a string
+/// (`deprecated_of_attrs_with_migrate`, lines 68-108), which the segment
+/// keeps as a `DeprecatedRow` whose reason is not `Missing`. A reason that
+/// raises when read counts as deprecated: the use reports it.
+fn deprecated_bit(segment: &Segment, item: ExportItem) -> u32 {
+    let pools = &segment.signature;
+    let range = match item.kind {
+        ExportKind::Value => pools.values[item.payload as usize].attributes,
+        ExportKind::Type => pools.type_details[item.payload as usize].attributes,
+        ExportKind::Module | ExportKind::ModuleType => {
+            pools.modules[item.payload as usize].attributes
+        }
+        ExportKind::Constructor | ExportKind::Label => return 0,
+    };
+    let attributes = &pools.attributes[range.start as usize..(range.start + range.len) as usize];
+    let Some(attribute) = attributes
+        .iter()
+        .find(|attribute| segment_bytes(segment, attribute.name) == b"deprecated")
+    else {
+        return 0;
+    };
+    match pools.attribute_payloads[attribute.payload as usize] {
+        AttributePayloadRow::Deprecated(row)
+            if pools.deprecations[row as usize].reason == SemanticStringValue::Missing =>
+        {
+            0
+        }
+        _ => MEMBER_DEPRECATED,
+    }
+}
+
+/// O(1), no allocation: the bytes of string `index` of a segment's string
+/// pool.
+fn segment_bytes(segment: &Segment, index: u32) -> &[u8] {
+    let range = segment.signature.strings[index as usize];
+    &segment.signature.bytes[range.start as usize..(range.start + range.len) as usize]
 }
 
 #[cfg(test)]

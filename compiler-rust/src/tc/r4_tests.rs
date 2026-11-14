@@ -1174,7 +1174,6 @@ fn scopes_answer_what_the_old_environment_answered() {
 /// of 10,000 items is 10,000 steps once and 1 step afterwards; a unit is
 /// asked for once per worker.
 #[test]
-#[ignore = "R4d build"]
 fn an_export_table_is_imported_once() {
     let mut s = unit_scopes();
     let mut source = Units {
@@ -1230,7 +1229,6 @@ fn an_export_table_is_imported_once() {
 /// of the layer the old checker opens for the same unit: the same names in
 /// the same namespaces. (`OPENED_UNIT_UNUSED` opens `Dep`.)
 #[test]
-#[ignore = "R4d build"]
 fn an_import_lists_the_members_of_the_old_layer() {
     let old = old_checker(&OPENED_UNIT_UNUSED);
     let mut expected: Vec<(u32, String)> = old
@@ -1282,7 +1280,6 @@ fn an_import_lists_the_members_of_the_old_layer() {
 /// Reaches: R4a, R4c, R4d. `@deprecated` on a declaration of a dependency
 /// is a bit of its imported member.
 #[test]
-#[ignore = "R4d build"]
 fn an_import_knows_what_is_deprecated() {
     let segment = compiled_segment(
         "Old",

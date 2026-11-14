@@ -55,7 +55,6 @@ pub mod unify;
 pub mod name_table;
 #[allow(dead_code, unused_variables, clippy::ptr_arg)]
 pub mod names;
-#[allow(dead_code, unused_variables, clippy::ptr_arg)]
 pub mod scope;
 
 // The old environment's report of its bindings, opens and lookups, for the
