@@ -498,7 +498,7 @@ impl Checker {
             // of the level is update_level's own first one (ctype.ml:586).
             let expansion = self.g.repr(memorized);
             if node.level != GENERIC && self.g.nodes[expansion.0 as usize].level > node.level {
-                match self.update_level(expansion, node.level) {
+                match self.lower(expansion, node.level) {
                     Ok(()) | Err(Clash) => {}
                 }
             }
@@ -537,19 +537,6 @@ impl Checker {
             self.memorize(ty, expansion, false);
         }
         expansion
-    }
-
-    /// `update_level` as expansion runs it: [`Checker::lower`] when a type
-    /// has a scope, otherwise `Graph::lower`, which is the whole of
-    /// `Checker::lower` then (CHECKER_REWRITE 8.2, decision 4: with
-    /// `scoped == 0` the walk is R1's). Called directly so that expansion
-    /// and the `Expand` tier do not depend on R3d. One compare plus the walk.
-    fn update_level(&mut self, root: Ty, level: u32) -> Result<(), Clash> {
-        if self.types.scoped == 0 {
-            self.g.lower(root, level);
-            return Ok(());
-        }
-        self.lower(root, level)
     }
 
     /// `subst` (compiler/ml/ctype.ml:1100-1123) for constructor node `ty`
@@ -591,7 +578,7 @@ impl Checker {
             if fresh {
                 self.g.link(param, argument);
                 if self.g.nodes[argument.0 as usize].level > node.level {
-                    result = self.update_level(argument, node.level);
+                    result = self.lower(argument, node.level);
                 }
             } else {
                 if mode != ExpandMode::Unif && speculation.is_none() {
