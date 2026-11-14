@@ -346,6 +346,15 @@ impl<A> Default for Plan<A> {
 }
 
 impl<A> Plan<A> {
+    /// O(1) reservations from imported arms/fallbacks; grouping does not grow
+    /// its dense links while visiting a unit's cases.
+    pub(crate) fn reserve_groups(&mut self, arms: usize) {
+        self.groups.heads.reserve_exact(arms);
+        self.groups.next.reserve_exact(arms);
+        self.groups.bucket_links.reserve_exact(arms);
+        self.groups.buckets.reserve_exact(arms);
+    }
+
     /// Cost: O(1), amortized for a pool push; no traversal.
     fn new() -> Self {
         Plan {

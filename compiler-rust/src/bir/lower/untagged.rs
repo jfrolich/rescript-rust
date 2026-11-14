@@ -175,9 +175,10 @@ struct LiteralEmission {
 pub(super) fn prepare(arena: &mut Bir) -> (Storage, dispatch::Plan<u32>) {
     let mut storage = Storage::default();
     let mut graph = dispatch::Plan::default();
-    let (mut literals, mut payloads, mut fact_count, mut kind_count) = (0, 0, 0, 0);
+    let (mut literals, mut payloads, mut fact_count, mut kind_count, mut variants) = (0, 0, 0, 0, 0);
     for header in &arena.pools.switches {
         if let SwitchDispatch::Variant(facts) = &header.dispatch {
+            variants += 1;
             literals += header.constants as usize;
             payloads += (header.keys.len - header.constants) as usize;
             fact_count += facts.literal_tags.len();
@@ -188,6 +189,7 @@ pub(super) fn prepare(arena: &mut Bir) -> (Storage, dispatch::Plan<u32>) {
     storage.imported_literals.values.reserve_exact(literals);
     storage.imported_payloads.values.reserve_exact(payloads);
     storage.facts.reserve(fact_count, kind_count);
+    graph.reserve_groups(literals + payloads + variants);
     let fact_literals = arena.pools.switches.iter().filter_map(|header| {
         if let SwitchDispatch::Variant(facts) = &header.dispatch { Some(facts.literal_tags.iter()) }
         else { None }
