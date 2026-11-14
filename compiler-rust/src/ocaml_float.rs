@@ -15,7 +15,16 @@
 /// OCaml `float_of_string_opt`.
 /// Cost: O(input bytes), with separator-removal storage.
 pub fn float_of_string(s: &str) -> Option<f64> {
-    float_of_string_in(s, &mut Vec::new())
+    let buf: Vec<u8> = s.bytes().filter(|&c| c != b'_').collect();
+    if buf.is_empty() {
+        return None;
+    }
+    let (negative, rest) = split_sign(&buf);
+    if let Some(digits) = strip_hex_prefix(rest) {
+        let d = caml_float_of_hex(digits)?;
+        return Some(if negative { -d } else { d });
+    }
+    strtod(&buf)
 }
 
 /// Parse using retained separator-removal storage.

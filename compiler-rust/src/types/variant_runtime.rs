@@ -496,6 +496,15 @@ pub enum LiteralTag {
     Undefined,
 }
 
+/// Cost: O(1): the unchanged owned key entry for legacy callers.
+fn number_key(x: f64) -> String {
+    if x == 0.0 {
+        "number:0".to_string()
+    } else {
+        format!("number:{}", ocaml_hex_float(x))
+    }
+}
+
 /// variant_runtime.ml `number_key`: `-0.` and `0.` are equal for `===`;
 /// `%h` is exact for every other number.
 /// Cost: O(1): bounded floating-point formatting.
@@ -507,12 +516,35 @@ fn number_key_into(x: f64, out: &mut String) {
 /// OCaml's `Printf.sprintf "%h"` (`caml_hexstring_of_float`): `0x1p+0`,
 /// `-0x1.8p-1`, `0x0.0000000000001p-1022` for a subnormal, `infinity`,
 /// `nan`, and `-nan` for a NaN with its sign bit set.
-#[cfg(test)]
 /// Cost: O(1): bounded floating-point formatting.
 pub(crate) fn ocaml_hex_float(x: f64) -> String {
-    let mut out = String::new();
-    hex_float_into(x, &mut out);
-    out
+    if x.is_nan() {
+        return if x.is_sign_negative() { "-nan" } else { "nan" }.to_string();
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { "infinity" } else { "-infinity" }.to_string();
+    }
+    let bits = x.to_bits();
+    let sign = if bits >> 63 == 1 { "-" } else { "" };
+    let biased_exp = ((bits >> 52) & 0x7ff) as i64;
+    let mantissa = bits & ((1u64 << 52) - 1);
+    let (lead, exp) = if biased_exp == 0 {
+        // Zero or subnormal.
+        (0, if mantissa == 0 { 0 } else { -1022 })
+    } else {
+        (1, biased_exp - 1023)
+    };
+    let mut frac = format!("{mantissa:013x}");
+    while frac.ends_with('0') {
+        frac.pop();
+    }
+    let frac = if frac.is_empty() {
+        String::new()
+    } else {
+        format!(".{frac}")
+    };
+    let exp_sign = if exp < 0 { "-" } else { "+" };
+    format!("{sign}0x{lead}{frac}p{exp_sign}{}", exp.abs())
 }
 
 /// Cost: O(1): at most thirteen mantissa nibbles.
@@ -582,9 +614,23 @@ impl LiteralTag {
     /// `4294967297` share one, while `1n` is a bigint.
     /// Cost: O(literal spelling bytes), producing one owned key.
     pub fn value_key(&self) -> String {
-        let mut scratch = LiteralKeyScratch::default();
-        scratch.encode(self);
-        scratch.output
+        match self {
+            Self::Int(i) => number_key(f64::from(*i as i32)),
+            Self::Float(f) => match crate::ocaml_float::float_of_string(f) {
+                Some(x) => number_key(x),
+                None => format!("number:{f}"),
+            },
+            Self::BigInt(i) => {
+                let (positive, digits) = crate::types::typecore::parse_bigint_literal(i);
+                // Bigint_utils.to_string
+                let sign = if positive || digits == "0" { "" } else { "-" };
+                format!("bigint:{sign}{digits}")
+            }
+            Self::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+            Self::Null => "null".to_string(),
+            Self::Undefined => "undefined".to_string(),
+            Self::String(s) => format!("string:{s}"),
+        }
     }
 }
 

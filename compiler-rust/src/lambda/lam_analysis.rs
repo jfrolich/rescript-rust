@@ -14,10 +14,164 @@ use crate::lambda::{InlineAttribute, TagInfo};
 /// Check if a primitive operation is pure (no side effects).
 /// Cost: O(1): classify a primitive using scalar properties of its second argument.
 pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Constant>) -> bool {
-    is_pure_primitive_with_properties(prim, ConstantProperties {
-        nonzero: second_constant.is_some_and(not_zero_constant),
-        nonnegative_bigint: matches!(second_constant, Some(Constant::BigInt { negative: false, .. })),
-    })
+    match prim {
+        Primitive::Pidentity | Primitive::Pignore => true,
+        // Division can raise division by zero.
+        Primitive::Pmodint | Primitive::Pdivint | Primitive::Pdivbigint | Primitive::Pmodbigint => {
+            second_constant.is_some_and(not_zero_constant)
+        }
+        // lam_analysis.ml: raises on a negative exponent, so pure only when
+        // the exponent is a nonnegative constant.
+        Primitive::Ppowbigint => {
+            matches!(second_constant, Some(Constant::BigInt { negative: false, .. }))
+        }
+
+        // Creation and type checking primitives
+        Primitive::PcreateExtension(_)
+        | Primitive::PextensionSlotEq
+        | Primitive::Ptypeof
+        | Primitive::PisNull
+        | Primitive::PisNotNone
+        | Primitive::Psome
+        | Primitive::PsomeNotNest
+        | Primitive::PisUndefined
+        | Primitive::PisNullUndefined
+        | Primitive::PnullToOpt
+        | Primitive::PnullUndefinedToOpt
+        | Primitive::PjsObjectCreate(_)
+        | Primitive::Pimport(_) => true,
+
+        // Block operations
+        Primitive::Pmakeblock(_, _)
+        | Primitive::Pfield(_, _)
+        | Primitive::PvalFromOption
+        | Primitive::PvalFromOptionNotNest
+        | Primitive::Pduprecord
+        | Primitive::PrecordRest(_) => true,
+
+        // Object primitives
+        Primitive::Pobjcomp(_)
+        | Primitive::Pobjorder
+        | Primitive::Pobjmin
+        | Primitive::Pobjmax
+        | Primitive::Pobjtag
+        | Primitive::Pobjsize => true,
+
+        // Boolean primitives
+        Primitive::Psequand
+        | Primitive::Psequor
+        | Primitive::Pnot
+        | Primitive::Pboolcomp(_)
+        | Primitive::Pboolorder
+        | Primitive::Pboolmin
+        | Primitive::Pboolmax => true,
+
+        // Integer primitives
+        Primitive::Pnegint
+        | Primitive::Paddint
+        | Primitive::Psubint
+        | Primitive::Pmulint
+        | Primitive::Ppowint
+        | Primitive::Pnotint
+        | Primitive::Pandint
+        | Primitive::Porint
+        | Primitive::Pxorint
+        | Primitive::Plslint
+        | Primitive::Plsrint
+        | Primitive::Pasrint
+        | Primitive::Pintcomp(_)
+        | Primitive::Pintorder
+        | Primitive::Pintmin
+        | Primitive::Pintmax => true,
+
+        // Float primitives
+        Primitive::Pintoffloat
+        | Primitive::Pfloatofint
+        | Primitive::Pnegfloat
+        | Primitive::Paddfloat
+        | Primitive::Psubfloat
+        | Primitive::Pmulfloat
+        | Primitive::Ppowfloat
+        | Primitive::Pdivfloat
+        | Primitive::Pmodfloat
+        | Primitive::Pfloatcomp(_)
+        | Primitive::Pjscomp(_)
+        | Primitive::Pfloatorder
+        | Primitive::Pfloatmin
+        | Primitive::Pfloatmax => true,
+
+        // BigInt primitives
+        Primitive::Pnegbigint
+        | Primitive::Paddbigint
+        | Primitive::Psubbigint
+        | Primitive::Pmulbigint
+        | Primitive::Pnotbigint
+        | Primitive::Pandbigint
+        | Primitive::Porbigint
+        | Primitive::Pxorbigint
+        | Primitive::Plslbigint
+        | Primitive::Pasrbigint
+        | Primitive::Pbigintcomp(_)
+        | Primitive::Pbigintorder
+        | Primitive::Pbigintmin
+        | Primitive::Pbigintmax => true,
+
+        // String primitives
+        Primitive::Pstringlength
+        | Primitive::Pstringcomp(_)
+        | Primitive::Pstringorder
+        | Primitive::Pstringmin
+        | Primitive::Pstringmax => true,
+
+        // Array primitives (read-only)
+        Primitive::Pmakearray
+        | Primitive::Parraylength
+        | Primitive::Parrayrefu => true,
+
+        // List and dict primitives
+        Primitive::Pmakelist | Primitive::Pmakedict | Primitive::PdictHas => true,
+
+        // Type testing primitives
+        Primitive::PisPolyVarBlock => true,
+
+        // Offset and misc
+        Primitive::Pstringadd
+        | Primitive::Ptemplate(_)
+        | Primitive::PfnArity
+        | Primitive::Phash
+        | Primitive::PhashMixstring
+        | Primitive::PhashMixint
+        | Primitive::PhashFinalmix => true,
+
+        // Raw JS code - check if it's a pure expression
+        Primitive::PrawJsCode(info) => raw_js_is_pure(info),
+
+        // Impure primitives
+        Primitive::PtaggedTemplate(_)
+        | Primitive::PjsApply
+        | Primitive::PjsCall(_)
+        | Primitive::Pjsx(_)
+        | Primitive::PinitMod
+        | Primitive::PupdateMod
+        // A spread reads the source's properties, which may run getters or
+        // proxy traps.
+        | Primitive::PdictSpread
+        | Primitive::PjsObjectGet(_)
+        | Primitive::PjsObjectSet(_)
+        | Primitive::Pdebugger
+        // Runtime calls, like the `Lapply` they were parsed into.
+        | Primitive::ParraySpread
+        | Primitive::PlistSpread
+        | Primitive::PjsFnMethod
+        | Primitive::Pawait
+        | Primitive::Parraysetu
+        | Primitive::Praise
+        | Primitive::Psetfield(_, _)
+        // Bounds-checked reads throw when the index is out of range.
+        | Primitive::Parrayrefs
+        | Primitive::Pstringrefs
+        | Primitive::Pstringrefu => false,
+    }
 }
 
 /// Scalar constant facts needed by primitive purity; no owned payload required.

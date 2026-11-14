@@ -2409,9 +2409,53 @@ fn parse_int_literal(s: &str) -> Option<i64> {
 ///
 /// Cost: O(input bytes), producing the owned normalized spelling.
 pub(crate) fn parse_bigint_literal(s: &str) -> (bool, String) {
-    let mut digits = String::new();
-    let positive = parse_bigint_literal_into(s, &mut digits);
-    (positive, digits)
+    fn remove_leading_sign(s: &str) -> (bool, &str) {
+        if s.is_empty() {
+            (false, s)
+        } else if let Some(rest) = s.strip_prefix('-') {
+            (false, rest)
+        } else if let Some(rest) = s.strip_prefix('+') {
+            (true, rest)
+        } else {
+            (true, s)
+        }
+    }
+
+    fn remove_leading_zeros(s: &str) -> String {
+        // OCaml removes separators before any zero/sign logic.
+        let without_underscores: String = s.chars().filter(|c| *c != '_').collect();
+        let starts_with_minus = without_underscores.starts_with('-');
+        let without_sign = without_underscores
+            .strip_prefix('-')
+            .or_else(|| without_underscores.strip_prefix('+'))
+            .unwrap_or(&without_underscores);
+
+        let processed = if without_sign.is_empty() {
+            String::new()
+        } else {
+            let bytes = without_sign.as_bytes();
+            let mut idx = 0usize;
+            while idx < bytes.len() && bytes[idx] == b'0' {
+                idx += 1;
+            }
+            if idx >= bytes.len() {
+                "0".to_string()
+            } else if bytes[idx].is_ascii_digit() {
+                without_sign[idx..].to_string()
+            } else {
+                without_sign.to_string()
+            }
+        };
+
+        if starts_with_minus {
+            format!("-{processed}")
+        } else {
+            processed
+        }
+    }
+
+    let (sign, digits) = remove_leading_sign(s);
+    (sign, remove_leading_zeros(digits))
 }
 
 /// The same normalization into caller-owned scratch; no per-literal strings.
