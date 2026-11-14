@@ -1,0 +1,1 @@
+- `rescript-tools reanalyze` type-checks each module once: the analyses read the typed trees of its check-only build as the build checks them, instead of parsing and checking every module a second time.

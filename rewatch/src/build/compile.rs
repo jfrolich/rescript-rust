@@ -2041,6 +2041,7 @@ pub(crate) fn build_compiler_options(
     if let Some(dump) = &build_command_state.dump {
         options.dumps = dump.kinds.clone();
     }
+    options.typed_trees = build_command_state.typed_trees.clone();
 
     // Source filename for interface constraint and JS import resolution. OCaml
     // computes output_dir from the package output prefix before rebasing module

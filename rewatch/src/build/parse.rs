@@ -104,9 +104,7 @@ pub fn generate_asts(
                                 state,
                                 state.get_warn_error_override(),
                                 &parse_span,
-                                ParseFor::Build {
-                                    omit_locations: !state.parses_with_locations(),
-                                },
+                                ParseFor::build(state),
                             )
                             .map_err(|e| e.to_string());
 
@@ -118,9 +116,7 @@ pub fn generate_asts(
                                         state,
                                         state.get_warn_error_override(),
                                         &parse_span,
-                                        ParseFor::Build {
-                                            omit_locations: !state.parses_with_locations(),
-                                        },
+                                        ParseFor::build(state),
                                     ) {
                                         Ok(v) => Ok(Some(v)),
                                         Err(e) => Err(e.to_string()),
@@ -362,6 +358,18 @@ enum ParseFor {
     /// Editor tooling reads the tree and its typed bodies: locations are
     /// kept and derived code is syntax.
     Tooling,
+}
+
+impl ParseFor {
+    /// What a build of `state` parses its modules for.
+    fn build(state: &BuildCommandState) -> ParseFor {
+        if state.typed_trees.is_some() {
+            return ParseFor::Tooling;
+        }
+        ParseFor::Build {
+            omit_locations: !state.parses_with_locations(),
+        }
+    }
 }
 
 fn generate_ast(

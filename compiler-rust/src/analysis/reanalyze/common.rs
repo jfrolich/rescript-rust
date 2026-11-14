@@ -411,7 +411,7 @@ impl<'a> Tree<'a> {
 
     /// A declaration's location, in this file or in the file another
     /// module declares it in. The project is built with source locations
-    /// (see [`super::run`]), so every declaration carries its position, as in
+    /// (see [`super::Analysis`]), so every declaration carries its position, as in
     /// OCaml's `.cmi`.
     pub fn decl_loc(&self, loc: DeclLoc) -> Loc {
         let location = self.types.resolve_loc(loc);

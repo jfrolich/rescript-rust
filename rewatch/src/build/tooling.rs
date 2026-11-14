@@ -10,7 +10,8 @@ use super::build_types::{BuildCommandState, SourceType, StoredAst, StoredSignatu
 use super::{compile, packages, parse};
 use crate::{config, helpers};
 use anyhow::{Result, anyhow};
-use rescript_compiler::analysis::session::{LocalModule, LocalPackage, Project, SourcePaths, TypedSource};
+use rescript_compiler::analysis::reanalyze;
+use rescript_compiler::analysis::session::{Project, SourcePaths, TypedSource};
 use rescript_compiler::cmi::persistent_env::ModuleRegistry;
 use rescript_compiler::parse_arena::ParseArena;
 use std::collections::BTreeMap;
@@ -181,7 +182,6 @@ impl<'a> WatchProject<'a> {
                     source.module_name,
                     &options,
                     self.registry(),
-                    source.interface.is_some(),
                 );
                 TypedSource {
                     parsed: ast,
@@ -257,7 +257,6 @@ impl<'a> WatchProject<'a> {
                 module_name,
                 &options,
                 self.registry(),
-                Runtime::interface(implementation).is_some(),
             );
             TypedSource {
                 parsed: Arc::new(RuntimeParsed(arena)),
@@ -366,61 +365,6 @@ impl Project for WatchProject<'_> {
         compile::namespace_aliases(package).map(|(_, aliases)| aliases)
     }
 
-    fn local_packages(&self) -> Vec<LocalPackage> {
-        let root = self.build_state.packages.values().find(|package| package.is_root);
-        let mut packages: Vec<LocalPackage> = self
-            .build_state
-            .packages
-            .values()
-            .filter(|package| package.is_local_dep)
-            // OCaml writes no `.cmt` files for a package compiled with
-            // `-bs-no-bin-annot`, so its tool reads none of its modules.
-            .filter(|package| {
-                !config::flatten_flags(&package.config.compiler_flags)
-                    .iter()
-                    .any(|flag| flag == "-bs-no-bin-annot")
-            })
-            .map(|package| {
-                let modules: Vec<LocalModule> = self
-                    .build_state
-                    .modules
-                    .iter()
-                    .filter(|(_, module)| module.package_name == package.name)
-                    .filter_map(|(name, module)| match &module.source_type {
-                        SourceType::SourceFile(source) => Some(LocalModule {
-                            name: name.clone(),
-                            artifact: helpers::file_path_to_compiler_asset_basename(
-                                &source.implementation.path,
-                                &package.namespace,
-                            ),
-                        }),
-                        SourceType::MlMap(_) => None,
-                    })
-                    .collect();
-                LocalPackage {
-                    build_root: package.get_build_path().to_string_lossy().into_owned(),
-                    modules,
-                }
-            })
-            .collect();
-        // The order of the build directories relative to the project root.
-        let relative = |package: &LocalPackage| {
-            let path = Path::new(&package.build_root);
-            root.and_then(|root| path.strip_prefix(&root.path).ok())
-                .unwrap_or(path)
-                .to_string_lossy()
-                .into_owned()
-        };
-        packages.sort_by_key(relative);
-        packages
-    }
-
-    fn run_jobs(&self, count: usize, job: &(dyn Fn(usize) + Sync)) {
-        use rayon::prelude::*;
-        // The pool a build compiles `count` modules in.
-        super::pools::with_pool_for(count, || (0..count).into_par_iter().for_each(job));
-    }
-
     fn typecheck(&self, module_name: &str, interface: bool) -> Option<TypedSource> {
         let result = match self.project_source(module_name) {
             Some(source) => self.typecheck_project_module(&source, interface),
@@ -520,20 +464,69 @@ pub fn doc(cwd: &Path, path: &str, plain_output: bool) -> Result<Vec<u8>> {
     docs
 }
 
+/// The packages `reanalyze` reads: the project's own and the local packages
+/// it depends on, in the order of their build directories.
+fn reanalyze_packages(build_state: &BuildCommandState) -> Vec<reanalyze::Package> {
+    let root = build_state.packages.values().find(|package| package.is_root);
+    let mut packages: Vec<reanalyze::Package> = build_state
+        .packages
+        .values()
+        .filter(|package| package.is_local_dep)
+        // OCaml writes no `.cmt` files for a package compiled with
+        // `-bs-no-bin-annot`, so its tool reads none of its modules.
+        .filter(|package| {
+            !config::flatten_flags(&package.config.compiler_flags)
+                .iter()
+                .any(|flag| flag == "-bs-no-bin-annot")
+        })
+        .map(|package| {
+            let modules: Vec<reanalyze::Module> = build_state
+                .modules
+                .iter()
+                .filter(|(_, module)| module.package_name == package.name)
+                .filter_map(|(name, module)| match &module.source_type {
+                    SourceType::SourceFile(source) => Some(reanalyze::Module {
+                        name: name.clone(),
+                        artifact: helpers::file_path_to_compiler_asset_basename(
+                            &source.implementation.path,
+                            &package.namespace,
+                        ),
+                        has_interface: source.interface.is_some(),
+                    }),
+                    SourceType::MlMap(_) => None,
+                })
+                .collect();
+            reanalyze::Package {
+                build_root: package.get_build_path().to_string_lossy().into_owned(),
+                modules,
+            }
+        })
+        .collect();
+    // The order of the build directories relative to the project root.
+    let relative = |package: &reanalyze::Package| {
+        let path = Path::new(&package.build_root);
+        root.and_then(|root| path.strip_prefix(&root.path).ok())
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned()
+    };
+    packages.sort_by_key(relative);
+    packages
+}
+
 /// `rescript-tools reanalyze <args>`: the dead code, exception and
 /// termination analyses of the project `cwd` is in. `color` says standard
 /// output is a terminal.
 ///
 /// The OCaml tool reads the `.cmt` files of a build, which builds do not
 /// write. Instead the project is type-checked here, writing no files, and
-/// the analyses read the Rust typed trees. They refer to the declarations of
-/// other modules by position, so this build keeps source locations, as the
-/// diagnostic rebuild does. The build keeps no typed trees, so each module
-/// is type-checked again to read its tree, on the workers a build compiles
-/// with.
+/// the analyses read each module's typed tree as the build checks it, on
+/// the build's workers: the build keeps no typed trees. The analyses refer
+/// to the declarations of other modules by position, so this build keeps
+/// source locations, as the diagnostic rebuild does.
 pub fn reanalyze(cwd: &Path, args: &[String], plain_output: bool, color: bool) -> Result<Vec<u8>> {
     // The version and the list of options need no project.
-    if let Some(text) = rescript_compiler::analysis::reanalyze::output_without_project(args) {
+    if let Some(text) = reanalyze::output_without_project(args) {
         return Ok(text.into_bytes());
     }
     let project_root = helpers::get_nearest_config(cwd)
@@ -554,8 +547,15 @@ pub fn reanalyze(cwd: &Path, args: &[String], plain_output: bool, color: bool) -
         /* check_only */ true,
     )
     .map_err(|err| failed(&format!("{err:#}")))?;
+    let analysis = match reanalyze::start(cwd, args, color, &reanalyze_packages(&build_state))
+        .map_err(|err| anyhow!(err))?
+    {
+        reanalyze::Start::Analyze(analysis) => analysis,
+        reanalyze::Start::Print(text) => return Ok(text),
+    };
     build_state.print_warnings = false;
     build_state.diagnostic_locations = true;
+    build_state.typed_trees = Some(analysis.clone());
     super::incremental_build_without_lock(
         &mut build_state,
         /* no_timing */ true,
@@ -566,10 +566,7 @@ pub fn reanalyze(cwd: &Path, args: &[String], plain_output: bool, color: bool) -
         super::CompilerInfoWrite::WithRecord,
     )
     .map_err(|err| failed(&err))?;
-    let report = on_tooling_thread(|| {
-        let project = WatchProject::new(&build_state, cwd, &[]);
-        rescript_compiler::analysis::reanalyze(cwd, args, color, &project)
-    });
+    let report = analysis.report().map_err(|err| anyhow!(err));
     // A one-shot command: let the OS reclaim the build graph at exit.
     std::mem::forget(build_state);
     report
