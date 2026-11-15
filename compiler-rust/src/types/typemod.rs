@@ -2428,9 +2428,16 @@ fn nondep_sig(
                 result.push(SignatureItem::SigValue(*id, new_vd));
             }
             SignatureItem::SigType(id, decl, rs) => {
-                // OCaml: Ctype.nondep_type_decl env mid id (va = Co) d
-                let new_decl =
-                    crate::types::ctype::nondep_type_decl(ctx, env, mid, id, true, decl)?;
+                // compiler/ml/mtype.ml:139-140: only a covariant position
+                // may drop a manifest or kind that keeps the parameter.
+                let new_decl = crate::types::ctype::nondep_type_decl(
+                    ctx,
+                    env,
+                    mid,
+                    id,
+                    va == NondepVariance::Co,
+                    decl,
+                )?;
                 result.push(SignatureItem::SigType(
                     *id,
                     std::sync::Arc::new(new_decl),
