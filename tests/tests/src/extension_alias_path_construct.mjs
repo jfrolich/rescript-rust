@@ -155,6 +155,26 @@ let M = {
   r: r$1
 };
 
+let E$4 = /* @__PURE__ */Primitive_exceptions.create("Extension_alias_path_construct.RI.E");
+
+let RI = {
+  E: E$4
+};
+
+let ri = {
+  RE_EXN_ID: E$4,
+  a: 1,
+  b: "x"
+};
+
+function fi(exn) {
+  if (exn.RE_EXN_ID === E$4) {
+    return exn.a;
+  } else {
+    return 0;
+  }
+}
+
 let A;
 
 let B;
@@ -164,6 +184,8 @@ let x = 1;
 let AT;
 
 let AP;
+
+let AI;
 
 export {
   R,
@@ -188,5 +210,9 @@ export {
   i,
   F,
   M,
+  RI,
+  AI,
+  ri,
+  fi,
 }
 /* No side effect */

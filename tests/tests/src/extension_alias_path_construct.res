@@ -60,3 +60,14 @@ module F = (X: {exception E(int)}) => {
 module M = F({
   exception E(int)
 })
+
+module RI = {
+  exception E({a: int, b: string})
+}
+module AI = RI
+let ri = AI.E({a: 1, b: "x"})
+let fi = exn =>
+  switch exn {
+  | AI.E({a}) => a
+  | _ => 0
+  }
