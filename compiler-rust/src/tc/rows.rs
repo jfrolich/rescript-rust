@@ -58,6 +58,11 @@ pub struct Extras {
     /// [`Checker::unify_row_field`]; both false in unification proper.
     pub passive_variants: bool,
     pub rigid_variants: bool,
+    /// How many `descriptors` rows are `Univar`: zero means the graph has
+    /// no universal variable, and [`Checker::occur_univar`] returns on
+    /// this one read. Kept by [`Extras::from_segment`] and
+    /// [`Extras::univar`], the only two makers of such a row. (R3g)
+    pub univars: u32,
 }
 
 /// Names as text: one buffer and a span per name index. For a graph made
@@ -360,6 +365,10 @@ impl Extras {
                 *mutability += first;
             }
         }
+        let univars = descriptors
+            .iter()
+            .filter(|descriptor| matches!(descriptor, ExtraDescriptor::Univar(_)))
+            .count() as u32;
         // A published `Either` field has no reference (`link` is `NONE`,
         // tc/segment.rs): here it gets the slot its reference will have
         // once a node of the row is opened, after the published slots.
@@ -390,7 +399,21 @@ impl Extras {
             copying: false,
             passive_variants: false,
             rigid_variants: false,
+            univars,
         }
+    }
+
+    /// O(1) amortized: a new `Univar` descriptor row with `name` (a name
+    /// index or `NONE`), counted in `univars`; its index is the `a` of a
+    /// universal variable's node (`TUPLE | EXTENDED`, no slot). Every
+    /// maker of a universal variable outside a segment calls this, so
+    /// that the count stays the gate of [`Checker::occur_univar`]. A copy
+    /// of a universal variable makes no row: it keeps the `a` of its
+    /// source (`Tunivar _ as ty -> ty`, compiler/ml/btype.ml:536). (R3g)
+    pub fn univar(&mut self, name: u32) -> u32 {
+        self.univars += 1;
+        self.descriptors.push(ExtraDescriptor::Univar(name));
+        self.descriptors.len() as u32 - 1
     }
 }
 
@@ -2157,6 +2180,15 @@ impl Checker {
             let slot = next.b + self.extras.variants[next_row as usize].more;
             more = self.g.repr(self.g.lists[slot as usize]);
         }
+        // `let m = if row.row_fixed then fixed else m` (btype.ml:376, with
+        // `fixed = true` from `Ctype.copy`, ctype.ml:868) is not built:
+        // nothing through R3g makes a fixed row with a `Reither` field
+        // that is not matched (CHECKER_REWRITE 8.6, decision 47). The
+        // slice that makes one (R3h's `reify`) builds the rule here.
+        debug_assert!(
+            !self.fixed_with_unmatched(node, row, more),
+            "a fixed row with an unmatched `Reither` field is copied: btype.ml:376"
+        );
         // `let keep = more.level <> generic_level` (ctype.ml:806).
         let keep = more.0 < first;
         let source = self.g.work[(copy.0 - first) as usize];
@@ -2242,6 +2274,30 @@ impl Checker {
         }
     }
 
+    /// Whether the row of variant node `node` is fixed by its flag
+    /// (`row.row_fixed` of the flattened row: the `VariantRow` of the last
+    /// variant node on the way to `more`, the row variable) and has, in
+    /// `node`, a `Reither` field that is not matched. Debug builds only:
+    /// the assertion of [`Checker::copy_refs`]. O(fields + chain).
+    fn fixed_with_unmatched(&mut self, node: Node, row: VariantRow, more: Ty) -> bool {
+        let mut last = row;
+        let mut at = self.g.repr(self.g.lists[(node.b + row.more) as usize]);
+        while at != more {
+            let next = self.g.nodes[at.0 as usize];
+            let ExtraDescriptor::Variant(index) = self.extras.descriptors[next.a as usize] else {
+                break;
+            };
+            last = self.extras.variants[index as usize];
+            at = self.g.repr(self.g.lists[(next.b + last.more) as usize]);
+        }
+        let fields = row.fields.start as usize..(row.fields.start + row.fields.len) as usize;
+        last.fixed
+            && self.extras.row_fields[fields].iter().any(|&field| {
+                let now = field_repr(&self.g, node.b, node.arity(), field);
+                matches!(now.kind, RowFieldKind::Either { matched: false, .. })
+            })
+    }
+
     /// O(1): make chain node `chain` a holder of the unresolved reference
     /// `reference`: one 8-byte [`Holder`] row and one logged write of the
     /// reference's `b`.
@@ -2297,6 +2353,16 @@ impl Checker {
             self.g.lists[(b + field.link) as usize] = slot;
         }
         self.g.nodes[copy.0 as usize] = Node { head: (node.head & 0xff) | arity << 8, b, ..node };
+    }
+
+    /// O(1): whether the node `ty` (a representative) is a universal
+    /// variable (`is_Tunivar`, compiler/ml/btype.ml:53-55). One node load
+    /// and, for an extended node, one descriptor load.
+    #[inline]
+    pub fn is_univar(&self, ty: Ty) -> bool {
+        let node = self.g.nodes[ty.0 as usize];
+        node.head & EXTENDED != 0
+            && matches!(self.extras.descriptors[node.a as usize], ExtraDescriptor::Univar(_))
     }
 
     /// `unify_univar` (compiler/ml/ctype.ml:1544-1561): two universal

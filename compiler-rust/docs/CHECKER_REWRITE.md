@@ -3888,6 +3888,149 @@ that follow.
     of R3f) and says so. No slice adds a target for a `tc_kernel`
     figure.
 
+Decided in the fifth skeleton turn (trunk `de646dffcb`), each with what
+was run. Every test named here is in `differential::tests` and runs today
+unless it says "ignored".
+
+47. **The fixed-row rule of `copy_row` is not reachable through R3g, and
+    is built by the slice that makes it reachable.** The rule
+    (btype.ml:376, 388): a copy of a row whose `row_fixed` flag is set
+    gives every `Reither` field `m = fixed` and keeps the flag only when
+    `fixed`. The callers and what they pass:
+
+    | Caller | `fixed` | What the rule does there |
+    |---|---|---|
+    | `Ctype.copy` (ctype.ml:868), which is `instance` and the copy of an expansion | `true` | a field that is not matched becomes matched; the flag stays |
+    | `copy_sep` (ctype.ml:1067-1068), which is `instance_poly` | `fixed && is_Tvar (repr more')` | with `~fixed:false` every field becomes unmatched and the row is no longer fixed; with `~fixed:true` as `copy` |
+    | `nondep_type_rec` (ctype.ml:4463), `Subst.typexp` (subst.ml:213) | `true` | as `copy`; neither is in R3 |
+
+    Observed on the old checker with a row built by hand
+    (`old_checker_matches_the_fields_of_a_fixed_row_it_copies`): the
+    copy's fields print `?m` and `?cm` where the source's print `?` and
+    `?c`, with references of its own when the row variable is generic and
+    the source's when it is not.
+    For `copy` the rule changes something only for a fixed row that has
+    a `Reither` field with `m` false. Read from the source, such a row is
+    made in three places: `make_fixed_univars` sets `m` when it sets the
+    flag (typetexp.ml:684-696), so a row whose row variable is bound by a
+    polymorphic type has matched fields (observed: `[closed fixed #A?m(int)
+    #B?cm() | !a]`); `unify_row` gives a row that gains from a fixed one
+    the flag (`row0`, ctype.ml:2590-2596), but then every common
+    `Reither` pair is joined with `m1 || m2` (ctype.ml:2659, 2703-2704)
+    and a tag only the unfixed row has is a clash or is made absent
+    (ctype.ml:2597-2604, 388-397); and `reify` and `rigidify_rec` put a
+    fixed empty row under a row that keeps its unmatched fields
+    (ctype.ml:1841-1855, 3139-3147). Only the last is a source of such a
+    row, and it is R3h's and R3i's. `instance_poly` reaches the rule from
+    a program as soon as it exists (a field `'a. ([< #A | #B] as 'a) =>
+    int` read from a record), and it is not a function of R3g (decision
+    50, "Not in R3g").
+    So: nothing is built now. `Checker::copy_refs` asserts in debug builds
+    that the row it copies is not a fixed row with an unmatched field
+    (`rows::Checker::fixed_with_unmatched`), and
+    `no_generated_case_has_a_fixed_row_with_an_unmatched_field` scans the
+    old side's form of 4,000 generated cases with variants and universal
+    variables for one (547 print a fixed row, none with such a field).
+    The slice that first makes such a row (R3h, `reify`) builds the rule
+    in `copy_refs` as its first commit: for a row whose last variant
+    node's `VariantRow::fixed` is set, each `Reither` field of the copy
+    reads matched (a `RES_EITHER` chain node with `RES_MATCHED` in front
+    of the field's chain, or that bit set in the chain node the session
+    made), with the hand-built row above as its test. The slice that
+    builds `instance_poly` owns the other two lines of the table.
+48. **`Op::GeneralizeStructure` is in the object plan, and it found
+    nothing.** The operation is drawn under `CELLS` as it is under `REFS`
+    (one operation in six, and after an `EndDef` the newest operand is
+    made an annotation's type and copied twice). The plans with `CELLS`
+    draw different sequences than before; no pinned list existed for
+    them. `object_plan_agrees_on_generated_cases` passes with the new
+    sequences, in both modes and with `BUILD`: 10,000 + 10,000 + 2,000
+    cases, no seed differs. The case decision 40 asked for is
+    `old_checker_shares_the_cells_of_an_annotation`: the two copies of an
+    annotation's open row share its cells (`a^0 x^1` three times), a
+    promotion through one copy is seen by the annotation and the other
+    copy, and both sides agree; some generated case of the first 300
+    sequences draws that pattern.
+49. **The harness of R3g: `Plan` bit `UNIVARS`, and what the old checker
+    shows.**
+    - *The generator.* An object field is polymorphic one time in two:
+      `'p. ('p, T)`, `'p 'q. ('p, 'q, T)`, `'q 'p. ('q, 'p, T)`, with `T`
+      over the bound variables and the variables in scope, so a binder
+      inside a binder names the outer variable and two fields bind the
+      same names in the other order. With `VARIANTS` the body is one time
+      in four an arrow from a row whose row variable is the first bound
+      variable. The body names every bound variable because a variable
+      the body does not name is not bound: `'a 'b. 'a => 'a` is `poly(fn(
+      !a) => !a; !a)`, and in `'a. {"g": 'a. 'a => 'a}` the outer type
+      has no variable (typetexp.ml:563-568; observed). So two binder
+      lists of different lengths over bodies that unify do not come from
+      a program.
+    - *The operations.* `Op::Univar` (a universal variable at the current
+      level), `Op::Poly(body, variable)` (a polymorphic type of any
+      operand over any universal variable, also one an enclosing type
+      binds already) and `Op::Slot` (the body of a polymorphic type as an
+      operand, where its variables are outside their binder) are drawn
+      one operation in four. `Extras::univar` makes the descriptor row of
+      a universal variable and counts it.
+    - *The forms* print `poly(body; variables)` with the binder list in
+      order and a universal variable as a numbered node, on both sides
+      (they did since the second turn). Self-test:
+      `the_two_sides_agree_on_universal_variables` (the kernel tier agrees
+      on instances, copies, generalizations and hand-made nodes of a
+      fixed program, and on 10,000 generated cases:
+      `kernel_tier_agrees_on_universal_variables`). The deliberately
+      wrong new side is `Fault::SwappedBinders`, an instance whose
+      polymorphic types have their first two variables in the other
+      order: reported on the fixed case and by 819 of 1,000 generated
+      cases (`a_swapped_binder_is_reported`). The old side of the full
+      tier is not vacuous (`old_side_of_the_univar_plan_is_not_vacuous`:
+      of 1,200 cases 222 have a failed unification, 822 print a universal
+      variable, 299 a fixed row).
+    - *Observed on the old checker.*
+
+      | Question | Observed | Test |
+      |---|---|---|
+      | Are universal variables paired by name or by position? | By position: `'a. 'a => 'a` unifies with `'b. 'b => 'b`, `'a 'b. ('a, 'b) => 'a` with `'b 'a. ('b, 'a) => 'b`; `'a 'b. ('a, 'b) => 'a` against `'a 'b. ('a, 'b) => 'b` fails at the result, and the last pair of the trace is the two universal variables | `old_checker_pairs_universal_variables_by_position` |
+      | What does `unify_univar` answer for a variable of an outer scope? | The scopes are searched innermost first. A pair neither list of a scope holds goes on to the next scope and pairs there. A variable of the outer scope against one the inner scope binds is refused at the inner scope (one found, one not: `| _ -> raise (Unify [])`, ctype.ml:1557) | `old_checker_searches_the_scopes_innermost_first` |
+      | When does a universal variable escape, and what is the trace? | When an inner type binds again a variable an open scope has paired, and the other inner type names a variable of that family outside a binder of the family (ctype.ml:1612-1653). The trace is the pairs down to the two inner polymorphic types and nothing below them (`raise (Unify [])`, ctype.ml:1669), and the failure leaves the graph as it was | `old_checker_tests_escape_before_the_bodies` |
+      | Is the escape test before or after the bodies? | Before the scopes are pushed and before the bodies (ctype.ml:1664-1674): with a left body that cannot unify with the right one the trace is still the escape's. See below | same |
+      | What do an instance and a copy of a polymorphic type share? | Nothing generic: each has bound variables of its own, named by its body; a row whose row variable is bound ends in the copy of that variable. `generalize_structure` makes a universal variable generic. A type that is not generic is shared whole | `old_checker_copies_the_bound_variables_with_their_type` |
+      | What does a failed unification of two polymorphic types leave? | The levels unify2 lowered and every pair of universal variables unified before the clash, linked. The same unification the other way round then succeeds: the two binder lists are one pair of nodes, and `!a` meets `!b` free in their scope | `old_checker_keeps_the_links_of_a_failed_polymorphic_unification` |
+      | What happens to a universal variable outside its binder? | A variable against it, or against a type that holds it free, is refused by `occur_univar` with the pair of the universal variable and a new variable after the pair of the unification (ctype.ml:1586); two universal variables with no scope open are refused with one pair (ctype.ml:1559); a variable against the whole polymorphic type is bound | `old_checker_refuses_a_free_universal_variable` |
+
+    - *The order question.* The skeleton's doc comment of `enter_poly`
+      said "check afterwards". OCaml tests escape first
+      (ctype.ml:1664-1669), then pushes the two directions of the scope,
+      then runs the bodies. The two orders give the same answer
+      (success or failure) on every case, by this argument: the escape
+      walk reads the other polymorphic type for a universal variable of
+      the family outside a binder of the family; unifying the bodies can
+      only bind variables of that type, and a variable is never bound to
+      a type that holds a universal variable outside its binder
+      (`occur_univar` in `unify1_var` and in unify3, ctype.ml:2219, 2318,
+      2322); so the walk finds the same after the bodies as before. They
+      differ in what is left and in the trace: tested first, a failure
+      leaves the graph as it was and the trace ends at the two
+      polymorphic types; tested afterwards, the links and levels of the
+      bodies stay (the row above) and, when the bodies clash too, the
+      trace is the bodies'. The witness is the second case of
+      `old_checker_tests_escape_before_the_bodies`: left `poly(poly((u,
+      fn('x) => 'x); u); u)`, right `poly(poly((w', u'); w'); u')`; the
+      trace is `outer ~ outer'`, `inner ~ inner'`, where a test after the
+      bodies would add the pair of the arrow and `u'`. The design tests
+      first (decision 50).
+    - *A difference of the old checker, reported and not fixed.* The pair
+      `occur_univar` raises is `(ty, newgenvar ())` (ctype.ml:1586): the
+      new variable is generic. The old checker makes it at the current
+      level (`ctx.new_var(None)` in `occur_univar`, types/ctype.rs), so
+      its trace prints `[0]` where OCaml's would print `[G]`. Smallest
+      case: a variable unified with a universal variable outside its
+      binder (`old_checker_refuses_a_free_universal_variable`). The
+      printed diagnostic is the same either way (a new variable with no
+      name); the new side follows OCaml, and the generated cases of the
+      explaining mode with `UNIVARS` are not part of R3g's acceptance
+      until the old checker is corrected (decision 50, "Acceptance").
+
 ### 8.7 The hot paths of unification (K2)
 
 K1 (TC_KERNEL_R3.md, "K1") left unification at these figures, in

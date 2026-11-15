@@ -163,6 +163,27 @@ pub(crate) const CELLS: u16 = 1 << 6;
 /// (`keep`, compiler/ml/ctype.ml:806; btype.ml:374).
 pub(crate) const REFS: u16 = 1 << 7;
 
+/// [`Plan::with`]: polymorphic types with bound variables and universal
+/// variables (slice R3g; section 8.6, decision 49). With [`OBJECTS`] a
+/// position that is not a leaf is a row one time in two, and a field of a
+/// generated object type is polymorphic one time in two: `"x": 'p. ('p,
+/// T)`, `"x": 'p 'q. ('p, 'q, T)` or `"x": 'q 'p. ('q, 'p, T)`, with `T`
+/// over the bound variables and the variables in scope (so an inner
+/// binder's body names an outer binder's variable, and two fields bind
+/// the same names in a different order); with [`VARIANTS`] too, the body
+/// is one time in four an arrow from a row whose row variable is the
+/// first bound variable (`([> #A(int)] as 'p) => (T)`, `([< #A(int) | #B]
+/// as 'p) => ('q, T)`). The operations get [`Op::Univar`], [`Op::Poly`] and [`Op::Slot`]:
+/// a polymorphic type made of any operand over any universal variable
+/// (also one that an enclosing type binds already), and the body of a
+/// polymorphic type as an operand of its own, where its variables are
+/// outside their binder. Both forms print a polymorphic type as
+/// `poly(body; variables)`, the variables in the order of the binder
+/// list, and a universal variable as `!name`, each numbered as a node:
+/// two types whose binders pair by position and not by name print
+/// different names at one position and the same back references.
+pub(crate) const UNIVARS: u16 = 1 << 8;
+
 /// A tier and what a case adds to it. 4 bytes, passed by value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Plan {
@@ -227,8 +248,20 @@ pub(crate) enum Op {
     /// `generalize_structure` of an operand at the current level
     /// (compiler/ml/ctype.ml:524-544, 672): the structure above the current
     /// level becomes generic, a variable above it comes down to it. What
-    /// an annotation's type is after `Typetexp` made it. [`REFS`].
+    /// an annotation's type is after `Typetexp` made it. [`REFS`],
+    /// [`CELLS`].
     GeneralizeStructure(u16),
+    /// A new operand: a universal variable with no name at the current
+    /// level (`newty (Tunivar None)`). [`UNIVARS`].
+    Univar,
+    /// A new operand: `newty (Tpoly (body, [variable]))` at the current
+    /// level, of the operand `body` and the operand `variable` when that
+    /// one's representative is a universal variable; otherwise `Tpoly
+    /// (body, [])`. Nothing checks that the variable is free of another
+    /// binder: a case binds one variable twice, which is how a binder is
+    /// already known when `enter_poly` meets it (compiler/ml/ctype.ml:
+    /// 1656-1669). [`UNIVARS`].
+    Poly(u16, u16),
 }
 
 /// A deliberately wrong new side, for the tests that prove the harness sees
@@ -260,6 +293,10 @@ pub(crate) enum Fault {
     /// that is not: what the binding walk did before decision 8 of 8.6
     /// (`update_level` stops there, compiler/ml/ctype.ml:586). [`BUILD`].
     UnprunedBinding,
+    /// An instance of a value has the first two bound variables of every
+    /// polymorphic type in the other order: what pairing by name instead
+    /// of by position looks like in the form. [`UNIVARS`].
+    SwappedBinders,
 }
 
 /// What one side reports for one case.
@@ -324,8 +361,10 @@ fn type_text_with(
     out: &mut String,
 ) {
     let rows = with & (OBJECTS | VARIANTS);
-    if rows != 0 && depth != 0 && rng.below(4) == 0 {
-        let object = rows == OBJECTS || (rows != VARIANTS && rng.below(2) == 0);
+    // [`UNIVARS`]: a row one position in two, an object three rows in four.
+    let (share, objects) = if with & UNIVARS != 0 { (2, 4) } else { (4, 2) };
+    if rows != 0 && depth != 0 && rng.below(share) == 0 {
+        let object = rows == OBJECTS || (rows != VARIANTS && rng.below(objects) != 0);
         let members: Vec<usize> = (0..3).filter(|_| rng.below(2) == 0).collect();
         let members = if members.is_empty() { vec![0] } else { members };
         if object {
@@ -343,7 +382,42 @@ fn type_text_with(
                     out.push_str("@set ");
                 }
                 let _ = write!(out, "\"{}\": ", ["x", "y", "z"][member]);
-                type_text_with(rng, with, depth - 1, vars, nullary, unary, out);
+                if with & UNIVARS != 0 && rng.below(2) == 0 {
+                    // [`UNIVARS`]: a polymorphic field. The body names
+                    // every bound variable (one that it does not name is
+                    // not bound: compiler/ml/typetexp.ml:563-568 keeps the
+                    // variables that are still universal and occur), then
+                    // a type over the variables in scope and the bound
+                    // ones; a name bound again shadows.
+                    let bound: &[&str] = [&["'p"][..], &["'p", "'q"], &["'q", "'p"]][rng.below(3)];
+                    let mut scope: Vec<&str> = vars.to_vec();
+                    for name in bound {
+                        out.push_str(name);
+                        out.push(' ');
+                        if !scope.contains(name) {
+                            scope.push(name);
+                        }
+                    }
+                    out.pop();
+                    out.push_str(". ");
+                    let mut named = 0;
+                    if with & VARIANTS != 0 && rng.below(4) == 0 {
+                        // A row whose row variable is the first bound
+                        // variable, on the left of an arrow.
+                        let row = ["[> #A(int)]", "[< #A(int) | #B]"][rng.below(2)];
+                        let _ = write!(out, "({row} as {}) => ", bound[0]);
+                        named = 1;
+                    }
+                    out.push('(');
+                    for name in &bound[named..] {
+                        out.push_str(name);
+                        out.push_str(", ");
+                    }
+                    type_text_with(rng, with, depth - 1, &scope, nullary, unary, out);
+                    out.push(')');
+                } else {
+                    type_text_with(rng, with, depth - 1, vars, nullary, unary, out);
+                }
             }
             out.push('}');
         } else {
@@ -536,14 +610,34 @@ pub(crate) fn operations(rng: &mut Rng, plan: impl Into<Plan>, values: usize) ->
     // unification, so that a binding meets a node above a node that is not
     // above the variable (decision 8 of 8.6).
     let mut follow: Vec<Op> = Vec::new();
+    // [`UNIVARS`]: the operands made by `Op::Univar`.
+    let mut univars: Vec<u16> = Vec::new();
     for _ in 0..4 + rng.below(13) {
         let operand = |rng: &mut Rng| rng.below(operands) as u16;
         let op = if let Some(op) = follow.pop() {
             op
         } else if operands == 0 {
             Op::Instance(rng.below(values) as u16)
-        } else if plan.has(REFS) && rng.below(6) == 0 {
+        } else if (plan.has(REFS) || plan.has(CELLS)) && rng.below(6) == 0 {
             Op::GeneralizeStructure(operand(rng))
+        } else if plan.has(UNIVARS) && rng.below(4) == 0 {
+            // [`UNIVARS`]: a universal variable, a polymorphic type over
+            // one (three times in four over an operand that is a
+            // universal variable, when there is one), a slot of an
+            // operand (the body of a polymorphic type, its variables).
+            match rng.below(4) {
+                0 => Op::Univar,
+                1 => {
+                    let body = operand(rng);
+                    let variable = if !univars.is_empty() && rng.below(4) != 0 {
+                        univars[rng.below(univars.len())]
+                    } else {
+                        operand(rng)
+                    };
+                    Op::Poly(body, variable)
+                }
+                _ => Op::Slot(operand(rng), rng.below(3) as u8),
+            }
         } else if plan.has(BUILD) && rng.below(4) == 0 {
             match rng.below(4) {
                 0 => Op::Var,
@@ -568,7 +662,11 @@ pub(crate) fn operations(rng: &mut Rng, plan: impl Into<Plan>, values: usize) ->
         };
         match op {
             Op::Instance(_) | Op::Copy(_) | Op::Expand(_) => operands += 1,
-            Op::Var | Op::Tuple(..) | Op::Child(..) | Op::Slot(..) => operands += 1,
+            Op::Var | Op::Tuple(..) | Op::Child(..) | Op::Slot(..) | Op::Poly(..) => operands += 1,
+            Op::Univar => {
+                univars.push(operands as u16);
+                operands += 1;
+            }
             Op::BeginDef => depth += 1,
             Op::EndDef => {
                 depth -= 1;
@@ -580,11 +678,11 @@ pub(crate) fn operations(rng: &mut Rng, plan: impl Into<Plan>, values: usize) ->
                         Op::Unify(tuple, var)
                     };
                     follow = vec![unify, Op::Var, Op::Tuple(operand(rng), operand(rng))];
-                } else if plan.has(REFS) && operands != 0 && rng.below(2) == 0 {
-                    // [`REFS`]: what follows an `EndDef`, last first: the
-                    // newest operand becomes an annotation's type (a
-                    // generic row over a row variable that is not), and
-                    // is copied twice.
+                } else if (plan.has(REFS) || plan.has(CELLS)) && operands != 0 && rng.below(2) == 0 {
+                    // [`REFS`], [`CELLS`]: what follows an `EndDef`, last
+                    // first: the newest operand becomes an annotation's
+                    // type (a generic row over a row variable that is
+                    // not), and is copied twice.
                     let newest = operands as u16 - 1;
                     follow = vec![
                         Op::Copy(newest),
@@ -844,6 +942,13 @@ pub(crate) fn run_old(program: &Program, plan: impl Into<Plan>, ops: &[Op]) -> O
                     0 => ty,
                     len => children[n as usize % len],
                 });
+            }
+            Op::Univar => operands.push(ctx.new_univar(None)),
+            Op::Poly(body, variable) => {
+                let variable = operands[variable as usize];
+                let bound = matches!(*ctx.get_desc(ctx.repr(variable)), TypeDesc::Tunivar(_));
+                let variables = if bound { vec![variable] } else { Vec::new() };
+                operands.push(ctx.new_poly(operands[body as usize], variables));
             }
             Op::Slot(operand, n) => {
                 let ty = operands[operand as usize];
@@ -1109,7 +1214,7 @@ impl New {
         // Without a plan bit no generated program has an object, a variant
         // row, a universal variable or a package, and the descriptor pools
         // stay empty.
-        if plan.with & (OBJECTS | VARIANTS) != 0 {
+        if plan.with & (OBJECTS | VARIANTS | UNIVARS) != 0 {
             checker.extras = super::rows::Extras::from_segment(&segment, &mut checker.g);
         }
         if tier.memo_aware() {
@@ -1191,6 +1296,24 @@ impl New {
         }
     }
 
+    /// O(nodes made since `first`): [`Fault::SwappedBinders`]: exchange
+    /// the first two bound variables of every polymorphic type among them.
+    fn swap_binders(&mut self, first: usize) {
+        for index in first..self.checker.g.nodes.len() {
+            let node = self.checker.g.nodes[index];
+            let poly = node.head & super::segment::EXTENDED != 0
+                && node.tag() == TUPLE
+                && node.arity() >= 3
+                && matches!(
+                    self.checker.extras.descriptors[node.a as usize],
+                    super::segment::ExtraDescriptor::Poly
+                );
+            if poly {
+                self.checker.g.lists.swap(node.b as usize + 1, node.b as usize + 2);
+            }
+        }
+    }
+
     /// O(nodes): [`Fault::UnprunedBinding`]: lower every node reachable from
     /// `ty` that is above `level`, with no cut.
     fn lower_unpruned(&mut self, ty: Ty, level: u32) {
@@ -1256,10 +1379,14 @@ impl New {
         match op {
             Op::Instance(value) => {
                 let value = value as usize;
+                let made = self.checker.g.nodes.len();
                 let ty = match (fault, self.first[value]) {
                     (Fault::ReuseInstance, Some(first)) => first,
                     _ => self.instance(value),
                 };
+                if fault == Fault::SwappedBinders {
+                    self.swap_binders(made);
+                }
                 if self.first[value].is_none() {
                     self.first[value] = Some(ty);
                 }
@@ -1370,6 +1497,36 @@ impl New {
                     0 => ty,
                     len => children[n as usize % len],
                 });
+            }
+            Op::Univar => {
+                let a = self.checker.extras.univar(NONE);
+                let (level, b) = (self.checker.g.level, self.checker.g.lists.len() as u32);
+                let ty = self.checker.g.push(Node {
+                    head: TUPLE | super::segment::EXTENDED,
+                    level,
+                    a,
+                    b,
+                });
+                self.operands.push(ty);
+            }
+            Op::Poly(body, variable) => {
+                let (body, variable) = (self.operands[body as usize], self.operands[variable as usize]);
+                let variable_root = self.checker.g.repr(variable);
+                let bound = self.checker.is_univar(variable_root);
+                let a = self.checker.extras.descriptors.len() as u32;
+                self.checker.extras.descriptors.push(super::segment::ExtraDescriptor::Poly);
+                let (level, b) = (self.checker.g.level, self.checker.g.lists.len() as u32);
+                self.checker.g.lists.push(body);
+                if bound {
+                    self.checker.g.lists.push(variable);
+                }
+                let ty = self.checker.g.push(Node {
+                    head: TUPLE | super::segment::EXTENDED | (1 + u32::from(bound)) << 8,
+                    level,
+                    a,
+                    b,
+                });
+                self.operands.push(ty);
             }
             Op::Slot(operand, n) => {
                 use super::segment::{EXTENDED, ExtraDescriptor};
@@ -2948,7 +3105,7 @@ mod tests {
             ("R3e", &["R3m"]),
             ("R3f", &["R3m", "R3e"]),
             ("R3n", &["R3m", "R3e", "R3f"]),
-            ("R3g", &["R3m", "R3e"]),
+            ("R3g", &["R3m", "R3e", "R3f", "R3n"]),
             ("R3h", &["R3m", "R3e", "R3f", "R3n", "R3g"]),
             ("R3i", &["R3m", "R3e", "R3f", "R3n", "R3g"]),
             ("R3j", &["R3m", "R3e", "R3f", "R3n", "R3g"]),
@@ -3039,7 +3196,7 @@ mod tests {
                 let mut reaches: Vec<&str> = Vec::new();
                 let full = body.contains("Tier::Full");
                 let rows = body.contains("OBJECTS") || body.contains("VARIANTS");
-                for (needle, reached) in [("OBJECTS", "R3e"), ("VARIANTS", "R3f")] {
+                for (needle, reached) in [("OBJECTS", "R3e"), ("VARIANTS", "R3f"), ("UNIVAR", "R3g")] {
                     if full && body.contains(needle) {
                         reaches.push(reached);
                     }
@@ -3090,4 +3247,586 @@ mod tests {
         }
         assert_eq!(checked, ignored, "an ignored R3 test does not name its slice");
     }
+
+    /// A mutability cell shared under an annotation (section 8.6, decision
+    /// 48; observed). `generalize_structure` leaves the row variable of an
+    /// open row below its generic fields (`&8[0]'`), so the row's last
+    /// node is not generic and a copy shares the cells
+    /// (`row_terminator_generic`, compiler/ml/btype.ml:478-506; `^0 ^1`
+    /// three times). One copy unified with a row whose `x` is mutable
+    /// promotes the one class (compiler/ml/ctype.ml:2530-2532): the
+    /// annotation and the other copy have `x!` too. Both sides agree
+    /// today, in both modes.
+    #[test]
+    fn old_checker_shares_the_cells_of_an_annotation() {
+        let program = compile(CELL_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, OBJECTS | CELLS);
+        let ops = [
+            Op::BeginDef,
+            Op::Instance(0),
+            Op::EndDef,
+            Op::GeneralizeStructure(0),
+            Op::Copy(0),
+            Op::Copy(0),
+            Op::Instance(2),
+            Op::Unify(1, 3),
+        ];
+        assert_eq!(
+            run_old(&program, plan, &ops).form,
+            "0 = &0[G]fn(&1[G]obj{&2[G]a^0: &3[G]poly(&4[G]int;); &5[G]x!^1: &6[G]poly(&7[G]int;); &8[0]'}) => &9[G]unit\n\
+             1 = &10[0]fn(&11[0]obj{&12[0]a^0: &13[0]poly(&14[0]int;); &15[0]x!^1: &16[0]poly(&17[0]int;); @8}) => &18[0]unit\n\
+             2 = &19[0]fn(&20[0]obj{&21[0]a^0: &22[0]poly(&23[0]int;); &24[0]x!^1: &25[0]poly(&26[0]int;); @8}) => &27[0]unit\n\
+             3 = @10\n"
+        );
+        compare(0, &program, plan, &ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
+        let explain = Plan::new(Tier::Full, OBJECTS | CELLS | EXPLAIN);
+        compare(1, &program, explain, &ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
+        // The generated cases of the object plan make such an annotation
+        // and copy it: some seed of the first 300 draws the three
+        // operations in that order on one operand.
+        let reached = (0..300u64).any(|sequence| {
+            let (_, ops) = case(plan, 1_000_003 + sequence);
+            ops.windows(3).any(|w| {
+                matches!(w, [Op::GeneralizeStructure(a), Op::Copy(b), Op::Copy(c)] if a == b && b == c)
+            })
+        });
+        assert!(reached, "no generated case copies an annotation twice");
+    }
+
+    /// The fixed-row rule of `copy_row` on the old checker (section 8.6,
+    /// decision 47; observed). The row is built by hand: closed, `row_fixed`,
+    /// two `Reither` fields that are not matched. `Ctype.copy` passes
+    /// `fixed = true` (`copy_row copy true row keep more'`,
+    /// compiler/ml/ctype.ml:868), so each copied field is matched
+    /// (`let m = if row.row_fixed then fixed else m`, compiler/ml/btype.ml:
+    /// 376: `?m`, `?cm`) and the copy stays fixed (`row_fixed =
+    /// row.row_fixed && fixed`, btype.ml:388). With a generic row variable
+    /// the copy has references of its own (`^2 ^3`); with one that is not
+    /// generic it shares the source's (`^0 ^1`, `keep`, btype.ml:374) and
+    /// the source's own fields stay unmatched.
+    #[test]
+    fn old_checker_matches_the_fields_of_a_fixed_row_it_copies() {
+        use crate::types::type_expr::{RowDesc, RowField};
+        let program = compile(REF_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, VARIANTS | REFS);
+        let old = old_context(&program, plan);
+        let ctx = &old.ctx;
+        let mut forms = Vec::new();
+        for generic in [true, false] {
+            let more = if generic { ctx.new_generic_var(None) } else { ctx.new_var(None) };
+            let either = |constant: bool, types: Vec<TypeExprRef>| RowField::Reither {
+                constant,
+                types,
+                matched: false,
+                link: ctx.alloc_row_field(None),
+            };
+            let fields = vec![
+                ("A".into(), either(false, vec![ctx.new_generic_var(None)])),
+                ("B".into(), either(true, Vec::new())),
+            ];
+            let row = ctx.new_generic_type(TypeDesc::Tvariant(ctx.new_row_desc(RowDesc {
+                row_fields: fields.into(),
+                row_more: more,
+                row_closed: true,
+                row_fixed: true,
+                row_name: None,
+            })));
+            let copy = ctype::instance(ctx, row);
+            forms.push(old_forms(&old, plan, &[row, copy], &[]).0);
+        }
+        assert_eq!(
+            forms[0],
+            "0 = &0[G][closed fixed #A?^0(&1[G]' ) #B?c^1() | &2[G]']\n\
+             1 = &3[0][closed fixed #A?m^2(&4[0]' ) #B?cm^3() | &5[0]']\n"
+        );
+        assert_eq!(
+            forms[1],
+            "0 = &0[G][closed fixed #A?^0(&1[G]' ) #B?c^1() | &2[0]']\n\
+             1 = &3[0][closed fixed #A?m^0(&4[0]' ) #B?cm^1() | @2]\n"
+        );
+    }
+
+    /// O(text): whether a form prints a fixed row with a `Reither` field
+    /// that is not matched (`#A?^`, `#A?c^`, `#A?(`, `#A?c(` inside
+    /// `[fixed ...]` or `[closed fixed ...]`).
+    fn fixed_row_with_an_unmatched_field(form: &str) -> bool {
+        let bytes = form.as_bytes();
+        let mut fixed: Vec<bool> = Vec::new();
+        for (at, &byte) in bytes.iter().enumerate() {
+            match byte {
+                b'[' => {
+                    let rest = &form[at + 1..];
+                    fixed.push(rest.starts_with("fixed ") || rest.starts_with("closed fixed "));
+                }
+                b']' => {
+                    fixed.pop();
+                }
+                b'?' if fixed.last() == Some(&true) => {
+                    let rest = form[at + 1..].trim_start_matches('c');
+                    if rest.starts_with('^') || rest.starts_with('(') {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// What would notice that the fixed-row rule of `copy_row` became
+    /// reachable (section 8.6, decision 47): no generated case of the
+    /// plans with variants and universal variables prints, on the old
+    /// side, a fixed row with a `Reither` field that is not matched; so no
+    /// copy of such a case can change a field's `m`. A row is fixed with
+    /// such a field only after `reify` (compiler/ml/ctype.ml:1841-1855,
+    /// R3h) or `rigidify` (ctype.ml:3139-3147, R3i), or when `instance_poly
+    /// ~fixed:false` copies it (ctype.ml:1061-1069). The scanner is
+    /// checked on the hand-built row of the test above. Observed: 547 of
+    /// the 4,000 cases print a fixed row.
+    #[test]
+    fn no_generated_case_has_a_fixed_row_with_an_unmatched_field() {
+        assert!(fixed_row_with_an_unmatched_field(
+            "0 = &0[G][closed fixed #A?^0(&1[G]' ) #B?c^1() | &2[G]']\n"
+        ));
+        assert!(!fixed_row_with_an_unmatched_field(
+            "1 = &3[0][closed fixed #A?m^2(&4[0]' ) #B?cm^3() | &5[0]'] &6[0][closed #A?^4() | &7[0]']\n"
+        ));
+        let mut fixed_rows = 0;
+        for with in [VARIANTS | REFS, OBJECTS | VARIANTS | REFS | UNIVARS] {
+            let plan = Plan::new(Tier::Full, with);
+            for seed in 1..=20u64 {
+                for sequence in 0..100u64 {
+                    let (program, ops) = case(plan, seed * 1_000_003 + sequence);
+                    let form = run_old(&program, plan, &ops).form;
+                    assert!(
+                        !fixed_row_with_an_unmatched_field(&form),
+                        "seed {}\n{}{form}",
+                        seed * 1_000_003 + sequence,
+                        program.source
+                    );
+                    fixed_rows += usize::from(form.contains("fixed "));
+                }
+            }
+        }
+        // Not vacuous: the cases do print fixed rows.
+        println!("fixed rows: {fixed_rows}");
+        assert!(fixed_rows >= 50, "{fixed_rows}");
+    }
+
+    /// The program of the fixed cases with universal variables: one bound
+    /// variable under two names (`v0`, `v1`), two in each order and with
+    /// each as the result (`v2`, `v3`, `v4`), a binder inside a binder
+    /// whose body names the outer variable (`v5`, `v6`), a row whose row
+    /// variable is bound (`v7` open, `v8` with two `Reither` tags), and an
+    /// arrow without any (`v9`).
+    const UNIVAR_PROGRAM: &str = "external v0: {\"f\": 'a. 'a => 'a} => unit = \"v0\"\n\
+        external v1: {\"f\": 'b. 'b => 'b} => unit = \"v1\"\n\
+        external v2: {\"f\": 'a 'b. ('a, 'b) => 'a} => unit = \"v2\"\n\
+        external v3: {\"f\": 'b 'a. ('b, 'a) => 'b} => unit = \"v3\"\n\
+        external v4: {\"f\": 'a 'b. ('a, 'b) => 'b} => unit = \"v4\"\n\
+        external v5: {\"f\": 'a. {\"g\": 'b. ('a, 'b) => 'a}} => unit = \"v5\"\n\
+        external v6: {\"f\": 'a. {\"g\": 'b. ('b, 'a) => 'b}} => unit = \"v6\"\n\
+        external v7: {\"f\": 'a. ([> #A(int)] as 'a) => 'a} => unit = \"v7\"\n\
+        external v8: {\"f\": 'a. ([< #A(int) | #B] as 'a) => 'a} => unit = \"v8\"\n\
+        external v9: 'a => 'a = \"v9\"\n";
+
+    /// The plan of the fixed cases with universal variables.
+    const UNIVAR_PLAN: u16 = OBJECTS | VARIANTS | REFS | UNIVARS;
+
+    /// O(text): the pairs of the trace of failed operation `index` of an
+    /// [`EXPLAIN`] form.
+    fn trace_of(form: &str, index: usize) -> Vec<&str> {
+        let header = format!("! {index} trace");
+        form.lines()
+            .skip_while(|line| *line != header)
+            .skip(1)
+            .take_while(|line| line.starts_with("  "))
+            .map(str::trim)
+            .collect()
+    }
+
+    /// Two instances of the values `left` and `right`, unified.
+    fn two(left: u16, right: u16) -> [Op; 3] {
+        [Op::Instance(left), Op::Instance(right), Op::Unify(0, 1)]
+    }
+
+    /// Hand-made polymorphic types of [`UNIVAR_PROGRAM`] whose inner
+    /// binder is already known when `enter_poly` meets it. Left: a
+    /// universal variable `u` (operand 0), `inner = poly((u, second); u)`
+    /// (3), `outer = poly(inner; u)` (4): `u` is bound twice. Right: `u'`
+    /// (5), `w'` (6), `inner' = poly((first, second'); w')` (8), `outer' =
+    /// poly(inner'; u')` (9). Operand 1 is an arrow, for a body that
+    /// clashes. Then `outer` is unified with `outer'`.
+    fn known_binder(left_second: u16, right: [u16; 2]) -> [Op; 11] {
+        [
+            Op::Univar,
+            Op::Instance(9),
+            Op::Tuple(0, left_second),
+            Op::Poly(2, 0),
+            Op::Poly(3, 0),
+            Op::Univar,
+            Op::Univar,
+            Op::Tuple(right[0], right[1]),
+            Op::Poly(7, 6),
+            Op::Poly(8, 5),
+            Op::Unify(4, 9),
+        ]
+    }
+
+    /// The self-test of [`UNIVARS`] (section 8.6, decision 49): the form
+    /// prints the binder list in order and each universal variable as a
+    /// node, so `v2` and `v3`, whose binders pair by position and not by
+    /// name, print the names at the positions they have (observed), and
+    /// the two sides agree today on what needs no unification: instances,
+    /// copies, generalizations, a universal variable and a polymorphic
+    /// type made by hand, the body of one as an operand.
+    #[test]
+    fn the_two_sides_agree_on_universal_variables() {
+        let program = compile(UNIVAR_PROGRAM.to_string());
+        assert_eq!(program.values.len(), 10);
+        let plan = Plan::new(Tier::Kernel, OBJECTS | VARIANTS | UNIVARS);
+        let old = |value: u16| run_old(&program, plan, &[Op::Instance(value)]).form;
+        assert_eq!(
+            old(2),
+            "0 = &0[0]fn(&1[0]obj{&2[0]f: &3[0]poly(&4[0]fn(&5[0]!a, &6[0]!b) => @5; @5 @6); &7[0]nil}) => &8[0]unit\n"
+        );
+        assert_eq!(
+            old(3),
+            "0 = &0[0]fn(&1[0]obj{&2[0]f: &3[0]poly(&4[0]fn(&5[0]!b, &6[0]!a) => @5; @5 @6); &7[0]nil}) => &8[0]unit\n"
+        );
+        // The row variable of `v7` is its bound variable (`@7` twice), and
+        // such a row is fixed with matched fields (`make_fixed_univars`,
+        // compiler/ml/typetexp.ml:677-703).
+        assert_eq!(
+            old(7),
+            "0 = &0[0]fn(&1[0]obj{&2[0]f: &3[0]poly(&4[0]fn(&5[0][fixed #A(&6[0]int) | &7[0]!]) => @5; @7); &8[0]nil}) => &9[0]unit\n"
+        );
+        assert!(old(8).contains("[closed fixed #A?m(&6[0]int ) #B?cm() | &7[0]!]"), "{}", old(8));
+        for value in 0..10u16 {
+            let ops = [
+                Op::BeginDef,
+                Op::Instance(value),
+                Op::Instance(value),
+                Op::EndDef,
+                Op::Generalize(0),
+                Op::Copy(0),
+                Op::GeneralizeStructure(1),
+                Op::Copy(1),
+                Op::Univar,
+                Op::Poly(2, 4),
+                Op::Slot(0, 0),
+                Op::Slot(6, 0),
+                Op::Slot(7, 0),
+                Op::Slot(8, 0),
+                Op::Poly(9, 9),
+                Op::Lower(5, 0),
+            ];
+            compare(u64::from(value), &program, plan, &ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
+        }
+    }
+
+    /// The deliberately wrong new side of [`UNIVARS`]: an instance whose
+    /// polymorphic types have their first two bound variables in the other
+    /// order is reported on the fixed case and by generated cases
+    /// (observed: 819 of 1,000), so the order of a binder list is compared.
+    #[test]
+    fn a_swapped_binder_is_reported() {
+        let program = compile(UNIVAR_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Kernel, OBJECTS | VARIANTS | UNIVARS);
+        let report = compare(5, &program, plan, &[Op::Instance(2)], Fault::SwappedBinders)
+            .expect_err("the swapped binders must be seen");
+        assert!(report.contains("seed 5") && report.contains("; @6 @5)"), "{report}");
+        // One bound variable: nothing to swap, nothing reported.
+        compare(6, &program, plan, &[Op::Instance(0)], Fault::SwappedBinders)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut found = 0;
+        for seed in 1..=10u64 {
+            for sequence in 0..100u64 {
+                let case_seed = seed * 1_000_003 + sequence;
+                let (program, ops) = case(plan, case_seed);
+                found += usize::from(compare(case_seed, &program, plan, &ops, Fault::SwappedBinders).is_err());
+            }
+        }
+        println!("swapped binders found: {found}");
+        assert!(found >= 20, "{found}");
+    }
+
+    /// Instance, copy, generalize, lower and the hand-made nodes of
+    /// [`UNIVARS`] on programs with polymorphic fields: 10,000 cases on
+    /// what exists on both sides today.
+    #[test]
+    fn kernel_tier_agrees_on_universal_variables() {
+        let coverage = run_cases(Plan::new(Tier::Kernel, OBJECTS | VARIANTS | UNIVARS), 1, 100, 100);
+        assert_eq!(coverage.cases, 10_000);
+        assert!(coverage.sharing * 4 > coverage.cases * 3, "{coverage:?}");
+    }
+
+    /// The old side of the plan with universal variables runs today and is
+    /// not vacuous (observed, 1,200 cases: 978 without a failed
+    /// unification and 222 with one; 822 print a universal variable, 299 a
+    /// fixed row; in 239 a case that prints a universal variable unifies
+    /// and nothing fails).
+    #[test]
+    fn old_side_of_the_univar_plan_is_not_vacuous() {
+        let plan = Plan::new(Tier::Full, UNIVAR_PLAN);
+        let (mut ok, mut failed, mut bound, mut rows, mut unified) = (0, 0, 0, 0, 0);
+        for seed in 1..=12u64 {
+            for sequence in 0..100u64 {
+                let (program, ops) = case(plan, seed * 1_000_003 + sequence);
+                let outcome = run_old(&program, plan, &ops);
+                match outcome.failed {
+                    Some(_) => failed += 1,
+                    None => ok += 1,
+                }
+                // A polymorphic type with a bound variable, and a row whose
+                // row variable is a universal variable.
+                let polymorphic = outcome.form.contains('!');
+                bound += usize::from(polymorphic);
+                rows += usize::from(outcome.form.contains("fixed "));
+                unified += usize::from(
+                    polymorphic && outcome.failed.is_none() && ops.iter().any(|op| matches!(op, Op::Unify(..))),
+                );
+            }
+        }
+        println!("univar plan, old side: {ok} {failed} {bound} {rows} {unified}");
+        assert!(ok >= 500 && failed >= 200 && bound >= 300 && rows >= 20 && unified >= 100, "{ok} {failed} {bound} {rows} {unified}");
+    }
+
+    /// Universal variables are paired by position in the binder lists,
+    /// never by name (observed; `enter_poly` pairs `tl1` with `tl2` as
+    /// lists, compiler/ml/ctype.ml:1670-1672, and `unify_univar` accepts a
+    /// pair only when both are found in the two lists of one scope and are
+    /// each other's partner or both free, ctype.ml:1544-1559). `'a. 'a =>
+    /// 'a` unifies with `'b. 'b => 'b`, and `'a 'b. ('a, 'b) => 'a` with
+    /// `'b 'a. ('b, 'a) => 'b`: the left variables are links to the right
+    /// ones afterwards (`link_type t1 t2`, ctype.ml:2247). `'a 'b. ('a,
+    /// 'b) => 'a` against `'a 'b. ('a, 'b) => 'b` fails at the result,
+    /// where the first variable meets the second: the last pair of the
+    /// trace is the two universal variables. A type of one variable
+    /// against one of two fails at the bodies, an arrow of one parameter
+    /// against one of two: two binder lists of different lengths with
+    /// bodies that unify do not come from a program, because a variable
+    /// its body does not name is not bound (`'a 'b. 'a => 'a` is `poly(fn(
+    /// !a) => !a; !a)`, compiler/ml/typetexp.ml:563-568).
+    #[test]
+    fn old_checker_pairs_universal_variables_by_position() {
+        let program = compile(UNIVAR_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, UNIVAR_PLAN | EXPLAIN);
+        let old = |ops: &[Op]| run_old(&program, plan, ops);
+        assert_eq!(
+            old(&two(0, 1)).form,
+            "0 = &0[0]fn(&1[0]obj{&2[0]f: &3[0]poly(&4[0]fn(&5[0]!b) => @5; @5); &6[0]nil}) => &7[0]unit\n1 = @0\n"
+        );
+        assert_eq!(
+            old(&two(2, 3)).form,
+            "0 = &0[0]fn(&1[0]obj{&2[0]f: &3[0]poly(&4[0]fn(&5[0]!b, &6[0]!a) => @5; @5 @6); &7[0]nil}) => &8[0]unit\n1 = @0\n"
+        );
+        let clash = old(&two(2, 4));
+        assert_eq!(clash.failed, Some(2));
+        assert_eq!(
+            trace_of(&clash.form, 2),
+            [
+                "@0 ~ @9",
+                "@1 ~ @10",
+                "&16[0]f: @3; &17[0]nil ~ &18[0]f: @12; &19[0]nil",
+                "@3 ~ @12",
+                "@4 ~ @13",
+                "@5 ~ @6",
+            ]
+        );
+        let lengths = old(&two(0, 2));
+        assert_eq!(lengths.failed, Some(2));
+        assert_eq!(trace_of(&lengths.form, 2).last(), Some(&"@4 ~ @12"));
+    }
+
+    /// What `unify_univar` answers for a variable bound in an outer scope
+    /// (observed; compiler/ml/ctype.ml:1544-1559). The scopes are searched
+    /// innermost first; a pair found in neither list of a scope goes on to
+    /// the next (`None, None -> unify_univar t1 t2 rem`), so the outer
+    /// variables of two instances of `v5` pair in the outer scope from
+    /// inside the inner one. A variable of the outer scope against one the
+    /// inner scope binds is refused at the inner scope (`| _ -> raise
+    /// (Unify [])`: one found, the other not): `v5` against `v6`, at the
+    /// first parameter, `!a` of the left against `!b` of the right.
+    #[test]
+    fn old_checker_searches_the_scopes_innermost_first() {
+        let program = compile(UNIVAR_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, UNIVAR_PLAN | EXPLAIN);
+        let same = run_old(&program, plan, &two(5, 5));
+        assert_eq!(
+            same.form,
+            "0 = &0[0]fn(&1[0]obj{&2[0]f: &3[0]poly(&4[0]obj{&5[0]g: &6[0]poly(&7[0]fn(&8[0]!a, &9[0]!b) => @8; @9); &10[0]nil}; @8); &11[0]nil}) => &12[0]unit\n1 = @0\n"
+        );
+        let crossed = run_old(&program, plan, &two(5, 6));
+        assert_eq!(crossed.failed, Some(2));
+        let trace = trace_of(&crossed.form, 2);
+        assert_eq!(trace.len(), 9, "{trace:?}");
+        assert_eq!(trace[6..], ["@6 ~ @19", "@7 ~ @20", "@8 ~ @21"]);
+        assert!(crossed.form.contains("&19[0]poly(&20[0]fn(&21[0]!b, &22[0]!a) => @21; @21)"), "{}", crossed.form);
+    }
+
+    /// The order question of `enter_poly` (section 8.6, decision 49;
+    /// observed): the escape test comes BEFORE the scopes are pushed and
+    /// before the bodies are unified (`if ... univars_escape ... then
+    /// raise (Unify [])`, then `univar_pairs := ...`, then `f t1 t2`,
+    /// compiler/ml/ctype.ml:1664-1674). In [`known_binder`] the left inner
+    /// type binds `u` again, which the outer scope has paired with `u'`.
+    /// - The right inner body names `u'`: the family of `u` (`u` and its
+    ///   partner's list, ctype.ml:1612-1623) escapes. The trace is the two
+    ///   outer types and the two inner types and nothing below them, and
+    ///   the failure leaves the graph as it was.
+    /// - The same with a left body that could not unify with the right
+    ///   one (an arrow against `u'`): the same trace. A test after the
+    ///   bodies would end at the pair of the arrow and `u'`.
+    /// - The right inner body names only its own variable: no escape, the
+    ///   bodies unify, and `u`, `u'` and `w'` are one node.
+    #[test]
+    fn old_checker_tests_escape_before_the_bodies() {
+        let program = compile(UNIVAR_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, UNIVAR_PLAN | EXPLAIN);
+        for ops in [known_binder(0, [6, 5]), known_binder(1, [6, 5]), known_binder(0, [5, 6])] {
+            let escaped = run_old(&program, plan, &ops);
+            assert_eq!(escaped.failed, Some(10));
+            assert_eq!(trace_of(&escaped.form, 10), ["@5 ~ @10", "@4 ~ @9"]);
+            assert_eq!((escaped.unchanged, escaped.changed), (1, 0), "{}", escaped.form);
+        }
+        let paired = run_old(&program, plan, &known_binder(0, [6, 6]));
+        assert_eq!(paired.failed, None);
+        assert!(
+            paired.form.ends_with("4 = &5[0]poly(@4; &6[0]!)\n5 = @6\n6 = @0\n7 = @3\n8 = @4\n9 = @5\n"),
+            "{}",
+            paired.form
+        );
+    }
+
+    /// What an instance and a copy of a polymorphic type share and
+    /// duplicate (observed). Every instance and every copy of a generic
+    /// polymorphic type has bound variables of its own, and the body names
+    /// them: `Tunivar` is copied like any generic node and keeps its name
+    /// (`Tunivar _ as ty -> ty`, compiler/ml/btype.ml:536), the binders
+    /// before the body (btype.ml:537-539). A row whose row variable is a
+    /// bound variable ends in the copy of that variable (`@17`, `@27`),
+    /// whichever of the row and the binder list is copied first
+    /// (`Tsubst ty -> ty`, compiler/ml/ctype.ml:816; `norm_univar`,
+    /// btype.ml:396-401). `generalize_structure` makes a universal
+    /// variable generic (it is not a `Tvar`, ctype.ml:532-537), so a copy
+    /// of an annotation's type duplicates it too. A copy of a type that is
+    /// not generic is the type.
+    #[test]
+    fn old_checker_copies_the_bound_variables_with_their_type() {
+        let program = compile(UNIVAR_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, UNIVAR_PLAN);
+        let ops = [
+            Op::BeginDef,
+            Op::Instance(7),
+            Op::Copy(0),
+            Op::EndDef,
+            Op::Generalize(0),
+            Op::Copy(0),
+            Op::Copy(0),
+        ];
+        assert_eq!(
+            run_old(&program, plan, &ops).form,
+            "0 = &0[G]fn(&1[G]obj{&2[G]f: &3[G]poly(&4[G]fn(&5[G][fixed #A(&6[G]int) | &7[G]!]) => @5; @7); &8[G]nil}) => &9[G]unit\n\
+             1 = @0\n\
+             2 = &10[0]fn(&11[0]obj{&12[0]f: &13[0]poly(&14[0]fn(&15[0][fixed #A(&16[0]int) | &17[0]!]) => @15; @17); &18[0]nil}) => &19[0]unit\n\
+             3 = &20[0]fn(&21[0]obj{&22[0]f: &23[0]poly(&24[0]fn(&25[0][fixed #A(&26[0]int) | &27[0]!]) => @25; @27); &28[0]nil}) => &29[0]unit\n"
+        );
+        let ops = [Op::BeginDef, Op::Instance(7), Op::EndDef, Op::GeneralizeStructure(0), Op::Copy(0)];
+        assert_eq!(
+            run_old(&program, plan, &ops).form,
+            "0 = &0[G]fn(&1[G]obj{&2[G]f: &3[G]poly(&4[G]fn(&5[G][fixed #A(&6[G]int) | &7[G]!]) => @5; @7); &8[G]nil}) => &9[G]unit\n\
+             1 = &10[0]fn(&11[0]obj{&12[0]f: &13[0]poly(&14[0]fn(&15[0][fixed #A(&16[0]int) | &17[0]!]) => @15; @17); &18[0]nil}) => &19[0]unit\n"
+        );
+        // Both sides agree on these today: no unification.
+        compare(0, &program, Plan::new(Tier::Kernel, OBJECTS | VARIANTS | UNIVARS), &ops, Fault::None)
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// What a failed unification of two polymorphic types leaves
+    /// (observed, in the explaining mode). `'a 'b. ('a, 'b) => 'a` (at the
+    /// starting level) against `'a 'b. ('a, 'b) => 'b` (one definition
+    /// up) fails at the result. Left behind: the levels unify2 lowered
+    /// before the clash (the right type prints `[0]` everywhere,
+    /// `update_level !env lv t2`, compiler/ml/ctype.ml:2284), and the two
+    /// pairs of universal variables that were unified before it, linked
+    /// (`link_type t1 t2`, ctype.ml:2247: the binder list of the right
+    /// type is `@5 @6`, the left one's nodes). A failure puts back the
+    /// descriptors of the linked structure nodes only (ctype.ml:2437). So
+    /// the same unification the other way round then SUCCEEDS: the two
+    /// binder lists are one pair of nodes, `!a` and `!b` are both free in
+    /// their scope and pair (`set_univar r1 t2; set_univar r2 t1`,
+    /// ctype.ml:1554-1556), and the type ends as `poly(fn(!a, !a) => !a;
+    /// !a !a)`.
+    #[test]
+    fn old_checker_keeps_the_links_of_a_failed_polymorphic_unification() {
+        let program = compile(UNIVAR_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, UNIVAR_PLAN | EXPLAIN);
+        let ops = [Op::Instance(2), Op::BeginDef, Op::Instance(4), Op::Unify(0, 1), Op::Unify(1, 0)];
+        let old = run_old(&program, plan, &ops);
+        assert_eq!(failed_traces(&old.form), [(3, 6)]);
+        assert_eq!(trace_of(&old.form, 3).last(), Some(&"@5 ~ @6"));
+        assert!(
+            old.form.contains(
+                "! 3 left\n\
+                 0 = &0[0]fn(&1[0]obj{&2[0]f: &3[0]poly(&4[0]fn(&5[0]!a, &6[0]!b) => @5; @5 @6); &7[0]nil}) => &8[0]unit\n\
+                 1 = &9[0]fn(&10[0]obj{&11[0]f: &12[0]poly(&13[0]fn(@5, @6) => @6; @5 @6); &14[0]nil}) => &15[0]unit\n"
+            ),
+            "{}",
+            old.form
+        );
+        assert!(
+            old.form.ends_with(
+                "0 = &0[0]fn(&1[0]obj{&2[0]f: &3[0]poly(&4[0]fn(&5[0]!a, @5) => @5; @5 @5); &6[0]nil}) => &7[0]unit\n1 = @0\n"
+            ),
+            "{}",
+            old.form
+        );
+    }
+
+    /// A universal variable outside its binder (observed, in the
+    /// explaining mode). Operand 5 is the body of `'a. 'a => 'a`, where
+    /// `!a` is free; operand 7 is `!a` itself.
+    /// - A variable against the body, in either order, and against `!a`:
+    ///   refused by `occur_univar` (`unify1_var`, compiler/ml/ctype.ml:
+    ///   2216-2219), whose pair is the universal variable and a new
+    ///   variable (`raise (Unify [(ty, newgenvar ())])`, ctype.ml:1586),
+    ///   after the pair of the unification. (The old checker makes that
+    ///   variable at the current level, `[0]`; OCaml's is generic.)
+    /// - `!a` against another universal variable with no scope open:
+    ///   `unify_univar` has no list to search (`[] -> raise (Unify [])`,
+    ///   ctype.ml:1559): one pair.
+    /// - A variable against the polymorphic type itself (operand 4) is
+    ///   bound: every universal variable of it is under its binder.
+    #[test]
+    fn old_checker_refuses_a_free_universal_variable() {
+        let program = compile(UNIVAR_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, UNIVAR_PLAN | EXPLAIN);
+        let old = run_old(&program, plan, &FREE_UNIVAR);
+        assert_eq!(failed_traces(&old.form), [(7, 2), (8, 2), (10, 2), (12, 1)]);
+        assert_eq!(trace_of(&old.form, 7), ["@8 ~ @4", "@5 ~ &9[0]'"]);
+        assert_eq!(trace_of(&old.form, 8), ["@4 ~ @8", "@5 ~ &9[0]'"]);
+        assert_eq!(trace_of(&old.form, 10), ["@8 ~ @5", "@5 ~ &9[0]'"]);
+        assert_eq!(trace_of(&old.form, 12), ["@5 ~ @9"]);
+        assert!(old.form.ends_with("8 = &9[0]!\n9 = @3\n"), "{}", old.form);
+    }
+
+    /// The operations of `old_checker_refuses_a_free_universal_variable`.
+    const FREE_UNIVAR: [Op; 15] = [
+        Op::Instance(0),
+        Op::Slot(0, 0),
+        Op::Child(0, 0),
+        Op::Slot(2, 0),
+        Op::Slot(3, 0),
+        Op::Slot(4, 0),
+        Op::Var,
+        Op::Unify(6, 5),
+        Op::Unify(5, 6),
+        Op::Slot(5, 1),
+        Op::Unify(6, 7),
+        Op::Univar,
+        Op::Unify(7, 8),
+        Op::Var,
+        Op::Unify(9, 4),
+    ];
 }
