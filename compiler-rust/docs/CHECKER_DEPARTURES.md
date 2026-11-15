@@ -5460,21 +5460,55 @@ Smallest witness found: **U8-8 (off-path)** (full source and both outputs below)
   run only when the translation universalized a variable (fixtures
   super_errors and tests/tests `universal_pairing_fixed_row`, U8-6 and
   U8-1/U8-9).
-- The nominated residual split (PR#6744, `ctype.ml:2685-2703`) is a
-  separate difference: U8-10 and U8-11 below show it (Rust keeps a payload
-  holding a free universal variable in the `Reither` conjunction and
-  reports a different type and location). A fix that partitions the
-  payloads with `occur_univar` as OCaml does makes both agree and keeps
-  every other candidate agreeing; it adds one `occur_univar` quick walk per
-  residual payload on the default path (2 calls and 8 nodes in a build of
-  tests/tests), so it is held for review of that cost and is not part of
-  this change. Open.
-- U8-12 and U8-13 below differ in a different way: OCaml rejects the
-  program's own inferred signature ("does not match the interface
-  (inferred signature)"), Rust accepts it; with the residual split U8-12
-  still differs. The payload of the shared row names the universal
-  variable of the first method in the second (see OCaml's expected
-  declaration); the cause was not traced. Open.
+- U8-10 and U8-11, the nominated residual split (PR#6744,
+  `compiler/ml/ctype.ml:2685-2703`): the Rust `unify_row_field` lowered and
+  kept every residual payload in the merged `Reither` conjunction, so a
+  universal variable entered it (`#A(int) & ('a0)`) and escaped later, at
+  another location and with another type in the report. Fixed by
+  `c51da5f56`: the residual payloads are tested with `occur_univar` once
+  each and split only when one holds a universal variable (those of both
+  sides unified, one on a single side rejected, the rest lowered), as OCaml
+  does (`compiler-rust/src/types/ctype.rs`, `unify_row_field`). Fixtures:
+  super_errors `universal_pairing_residual_escape` (U8-10) and
+  `universal_pairing_residual_swap` (U8-11), tests/tests
+  `universal_pairing_residual_payload` (agreed before).
+- U8-12 and U8-13, open. OCaml rejects the program's own inferred
+  signature; Rust accepts it. Traced on the reduction
+  `let f = (x: {"f": 'a. [< #A('a)] => int}) => x` (OCaml rejects, Rust
+  accepts; U8-13 and `[> ...]`, `(x, x)` variants behave the same), with
+  temporary dumps of the two value types `moregeneral` receives on both
+  sides. Three causes, all needed:
+  1. The order of the copy of an arrow. `copy_type_cached` and
+     `subst_identity_copy_rec` (`ctype.rs:13947` and the `Tarrow` arm of
+     `subst_identity_copy_rec`) copy the parameters before the result;
+     OCaml's `copy_type_desc` builds `Tarrow (List.map .. params, f ret)`
+     (`compiler/ml/btype.ml:511-512`), whose arguments OCaml evaluates
+     right to left, so the result is copied first. In `f` both object
+     types share one row variable, and the row copy keeps whichever
+     variant it reaches first (`ctype.ml:806-810`, `subst.ml:185-189`).
+     OCaml's expected type therefore shares one variant whose payload is
+     the second method's universal variable, inside the first method;
+     Rust's kept each method's own payload, so `moregen` succeeded.
+     With the order reversed (an experiment, not committed) the Rust
+     expected type has OCaml's shape and `moregen` fails at the pair of
+     universal variables, as OCaml's does (`MOREGEN FAIL ... Tunivar vs
+     Tunivar` on the OCaml side, `univars.unify` false on the Rust side).
+  2. `inferred_signature_coercion`
+     (`compiler-rust/src/types/includemod.rs:2207`) answers the inclusion
+     of a unit in its inferred signature without comparing anything, on
+     the premise that a value type is always more general than its own
+     copy. These programs show the premise is false; OCaml always runs
+     `Includemod.compunit` (`compiler/ml/typemod.ml:1814-1815`). With the
+     shortcut disabled as well, Rust rejects the program.
+  3. The driver reports a failure of that inclusion as an internal
+     message (`Inferred signature inclusion failed: ValueTypeMismatch
+     ...`, `compiler-rust/src/driver.rs:6706, 10738`) instead of OCaml's
+     "The implementation ... does not match the interface (inferred
+     signature)" diagnostic.
+  The first cause alone changes no output (the shortcut still accepts),
+  so it is not committed; the second and third are outside the functions
+  of this change and need a decision on the cost of the inclusion check
+  for every unit without an interface.
 
 #### U8-1 — WITNESS
 
@@ -5982,7 +6016,7 @@ stderr:
 
 ```
 
-Open (see "Fixed and open").
+Fixed by `c51da5f56`: after it the Rust output is OCaml's, byte for byte.
 
 #### U8-11 — WITNESS (added after the search)
 
@@ -6043,7 +6077,7 @@ stderr:
 
 ```
 
-Open (see "Fixed and open").
+Fixed by `c51da5f56`: after it the Rust output is OCaml's, byte for byte.
 
 #### U8-12 — WITNESS (added after the search)
 
