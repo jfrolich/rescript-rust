@@ -1,0 +1,21 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/functor_parameter_modtype_contravariant.res[0m:[2m10:12-23[0m
+
+   8 [2m│[0m module type P = {module type T}
+   9 [2m│[0m let m = module(A: P)
+  [1;31m10[0m [2m│[0m module R = [1;31mF(unpack(m))[0m
+  11 [2m│[0m 
+
+  This functor has type
+  (
+    X: {
+      module type T =
+    },
+    Y: {
+      module type U = X.T
+    },
+  ) => {
+    let v: int
+  } The parameter cannot be eliminated in the result type.
+   Bind the argument to a module identifier.
