@@ -9702,6 +9702,48 @@ fn unify_row_field(
             let tl2_prime = remq(&tl2, &tl1);
             let tl1_prime = remq(&tl1, &tl2);
 
+            // ctype.ml:2685-2701 (PR#6744): a payload holding a free
+            // universal variable is neither lowered nor kept in the new
+            // conjunction; those of the two sides are unified with each
+            // other, and one on a single side cannot be matched. Costs one
+            // `occur_univar` per payload (its bounded quick walk when the
+            // payload holds no universal variable) and allocates only when
+            // one does.
+            let empty_env;
+            let env = match state.env() {
+                Some(env) => env,
+                None => {
+                    empty_env = Env::empty();
+                    &empty_env
+                }
+            };
+            let holds_univar = |ty: &TypeExprRef| {
+                #[cfg(test)]
+                crate::tc::steps::tick();
+                occur_univar(ctx, env, *ty).is_err()
+            };
+            let (tl1_prime, tl2_prime) =
+                if tl1_prime.iter().chain(tl2_prime.iter()).any(holds_univar) {
+                    let (tlu1, tl1_prime): (Vec<_>, Vec<_>) =
+                        tl1_prime.into_iter().partition(holds_univar);
+                    let (tlu2, tl2_prime): (Vec<_>, Vec<_>) =
+                        tl2_prime.into_iter().partition(holds_univar);
+                    match (tlu1.split_first(), tlu2.first()) {
+                        (Some((tu1, rest1)), Some(_)) => {
+                            if !ctx.passive_variants() {
+                                for ty in rest1.iter().chain(tlu2.iter()) {
+                                    unify(ctx, state, *tu1, *ty)?;
+                                }
+                            }
+                        }
+                        (Some((tu, _)), None) | (None, Some(tu)) => occur_univar(ctx, env, *tu)?,
+                        (None, None) => {}
+                    }
+                    (tl1_prime, tl2_prime)
+                } else {
+                    (tl1_prime, tl2_prime)
+                };
+
             let more_level = ctx.get_level(ctx.repr(more));
             for ty in tl1_prime.iter().chain(tl2_prime.iter()) {
                 update_level(ctx, more_level, *ty);
@@ -15762,6 +15804,34 @@ mod tests {
         univars.leave(mark.expect("no binder escapes"));
         assert!(univars.pairs.is_empty() && univars.slots.is_empty());
         assert!(!univars.unify(&ctx, left[1], right[1]));
+    }
+
+    #[test]
+    fn residual_split_tests_each_of_ten_thousand_payloads_once() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let either = |types: Vec<TypeExprRef>| RowField::Reither {
+            constant: false,
+            types,
+            matched: false,
+            link: ctx.alloc_row_field(None),
+        };
+        let left = either((0..5_000).map(|_| ctx.new_var(None)).collect());
+        let right = either((0..5_000).map(|_| ctx.new_var(None)).collect());
+        let more = ctx.new_var(None);
+        let mut state = UnifyState::new();
+        let mut result = Ok(());
+        // No payload holds a universal variable: one test each, no split.
+        let steps = crate::tc::steps::scope(|| {
+            result = unify_row_field(&ctx, &mut state, false, false, more, &left, &right)
+        });
+        assert!(result.is_ok());
+        assert_eq!(steps, 10_000);
+        let RowField::Reither { types, .. } = btype::row_field_repr(&ctx, &left) else {
+            panic!("a conjunction");
+        };
+        // `row_field_repr` joins the conjunctions along the link
+        // (btype.ml `row_field_repr_aux`): both sides' 5,000 payloads.
+        assert_eq!(types.len(), 10_000);
     }
 
     #[test]
