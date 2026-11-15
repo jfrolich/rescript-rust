@@ -58,6 +58,10 @@ pub struct Extras {
     /// [`Checker::unify_row_field`]; both false in unification proper.
     pub passive_variants: bool,
     pub rigid_variants: bool,
+    /// Scratch of one [`Checker::free_univar`] walk: per polymorphic type
+    /// the walk entered, whether it is still open. Empty between walks; it
+    /// keeps its capacity. (R3g)
+    pub open_polys: Vec<bool>,
     /// How many `descriptors` rows are `Univar`: zero means the graph has
     /// no universal variable, and [`Checker::occur_univar`] returns on
     /// this one read. Kept by [`Extras::from_segment`] and
@@ -209,6 +213,102 @@ pub const ROW_AGAIN: u32 = 4;
 /// In the `b` of a record: a reference was resolved to a present field
 /// and its holders are settled once the types are unified.
 pub const ROW_SETTLE: u32 = 8;
+
+/// In the `b` of a record: [`Checker::split_univars`] pushed the pairs of
+/// the types that hold a universal variable (PR#6744,
+/// compiler/ml/ctype.ml:2696-2699); [`Checker::row_field_end`] runs
+/// [`Checker::join_either`] again when they are unified, and that second
+/// run does not split. (R3g)
+pub const ROW_UNIVARS: u32 = 16;
+
+/// One open scope of universal variables: what `enter_poly` puts on
+/// `univar_pairs` for two polymorphic types (`(cl1, cl2) :: (cl2, cl1)`,
+/// compiler/ml/ctype.ml:1670-1672), once, for both directions. 20 bytes.
+///
+/// The bound variables are not copied: `left` and `right` are the list
+/// indices of the first bound variable of each type (slot 1 of the node:
+/// lists never move), `left_len` and `right_len` how many each has. OCaml
+/// keeps `List.map repr tl` and takes `repr` again at every lookup
+/// (`find_univ`, ctype.ml:1546-1551); reading the slot and taking `repr`
+/// at the lookup finds the same node.
+///
+/// `partners` is the first of `left_len + right_len` consecutive *partner
+/// nodes*, one per bound variable, left ones first: the `ref None` of
+/// `(t, ref None)` (ctype.ml:1670). A partner node is a node of the graph
+/// that no node has as a child ([`partner_node`]), as a mutability cell
+/// is, so that `set_univar` (compiler/ml/btype.ml:748-750, which logs
+/// `Cuniv`) is `Graph::write`: logged inside a speculation and undone by
+/// its restore, with no log of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct PolyScope {
+    pub left: u32,
+    pub right: u32,
+    pub left_len: u32,
+    pub right_len: u32,
+    pub partners: Ty,
+}
+
+/// The partner of a bound variable in an open scope (`Tunivar` `option
+/// ref`, compiler/ml/ctype.ml:1670): a `VAR` at level 0 whose `a` is the
+/// partner's handle, or `NONE` while it has none. No node has it as a
+/// child, so no walk of a type meets it. O(1).
+pub fn partner_node(partner: Ty) -> Node {
+    Node {
+        head: VAR,
+        level: 0,
+        a: partner.0,
+        b: 0,
+    }
+}
+
+/// What a module type answers for one type name a package of it does not
+/// list (`complete_type_list`, compiler/ml/ctype.ml:2135-2169).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Completion {
+    /// A public abstract type without parameters that has a manifest: an
+    /// instance of the manifest, free of the module type's own names, at
+    /// the level asked for (`(n, nondep_instance env' lv2 id2 t2)`,
+    /// ctype.ml:2152).
+    Type(Ty),
+    /// A public abstract type without parameters and without a manifest
+    /// (ctype.ml:2153-2160): skipped with `allow_absent` (subtyping, R3j),
+    /// incompatible otherwise.
+    Abstract,
+    /// The module type has no type of that name (`Not_found`, ctype.ml:
+    /// 2163): skipped with `allow_absent`, incompatible otherwise.
+    Missing,
+    /// Any other declaration, or a manifest that cannot be freed of the
+    /// module type's own names (`raise Exit`, ctype.ml:2161, 2164):
+    /// incompatible.
+    Other,
+}
+
+/// What [`Checker::unify_package`] asks of the declarations, which the
+/// kernel does not have (CHECKER_REWRITE 8.6, decision 52). R5a supplies
+/// it over its module types; the tests of R3p supply one built by hand.
+/// Three questions and no state the kernel reads: the names of a package
+/// are ordered by `Longident.cmp`, which is on the declarations' side.
+pub trait PackageDecls {
+    /// `Longident.cmp` (compiler/ml/longident.ml:17-28) of two names of
+    /// package rows. A name is a POSITION in the pool that
+    /// `PackageRow::longidents` ranges over (`SignaturePools::indices` for
+    /// the rows of a segment): `row.longidents.start + i` for the `i`-th
+    /// name. The kernel never reads that pool. O(components).
+    fn compare(&self, left: u32, right: u32) -> Ordering;
+    /// The answer of module type `path` (a `PackageRow::path`) for the
+    /// type name `name`, as [`Completion`]; an instance is made in `c` at
+    /// `level`. Called once per name one package lists and the other
+    /// does not.
+    fn complete(&mut self, c: &mut Checker, path: u32, name: u32, level: u32) -> Completion;
+    /// For two packages of different paths, after their completed lists
+    /// are unified: `eq_package_path env p1 p2 || (!package_subtype env p1
+    /// n1 tl1 p2 n2 tl2 && !package_subtype env p2 n2 tl2 p1 n1 tl1)`
+    /// (ctype.ml:2175-2180), without the `Path.same` the kernel has
+    /// already tested. `left` and `right` are the two descriptors; the
+    /// arguments are their slots.
+    fn compatible(&mut self, c: &mut Checker, left: Node, right: Node) -> bool;
+}
 
 /// O(1): the `a` of a [`RES_EITHER`] node with `c` and `m`.
 #[inline]
@@ -399,6 +499,7 @@ impl Extras {
             copying: false,
             passive_variants: false,
             rigid_variants: false,
+            open_polys: Vec::new(),
             univars,
         }
     }
@@ -1747,7 +1848,9 @@ impl Checker {
     /// current length ([`field_types`], the `ty` of a [`FieldRef`]) and
     /// taken off before the function returns. O(types of the two fields)
     /// plus the callees. PR#6744's split of the types that hold a
-    /// universal variable (ctype.ml:2688-2702) is R3g's. (R3f)
+    /// universal variable (ctype.ml:2685-2699) is
+    /// [`Checker::split_univars`], called by [`Checker::join_either`].
+    /// (R3f)
     #[inline(never)]
     pub fn unify_row_field(&mut self, frame: Frame) -> Result<(), [Ty; 2]> {
         const UNIFY: [Ty; 2] = [Ty(NONE), Ty(NONE)];
@@ -1981,6 +2084,24 @@ impl Checker {
         let gained1 = end..self.extras.row_scratch.len();
         missing(self, base..middle, middle..end);
         let gained2 = gained1.end..self.extras.row_scratch.len();
+        // PR#6744 (ctype.ml:2685-2699), on one load when the graph has no
+        // universal variable; not on the second run, after the types that
+        // hold one were unified.
+        let (gained1, gained2) = if self.extras.univars != 0 && record.b & ROW_UNIVARS == 0 {
+            match self.split_univars(frame, [gained1, gained2]) {
+                Ok(Some([gained1, gained2])) => (gained1, gained2),
+                Ok(None) => {
+                    self.extras.row_scratch.truncate(base);
+                    return Ok(());
+                }
+                Err(clash) => {
+                    self.extras.row_scratch.truncate(base);
+                    return Err(clash);
+                }
+            }
+        } else {
+            (gained1, gained2)
+        };
         // `List.iter (update_level !env (repr more).level) (tl1' @ tl2')`.
         let level = self.more_level(record);
         if level != GENERIC {
@@ -2031,6 +2152,15 @@ impl Checker {
                 self.frames.push(Frame { kind: FrameKind::RowField, ..frame });
                 return Ok(());
             }
+            self.join_either(frame)?;
+            // The join pushed the pairs of the types that hold a universal
+            // variable ([`ROW_UNIVARS`], set just now): the record stays
+            // for the `RowFieldEnd` frame below them.
+            if self.saved[extra].b & ROW_UNIVARS != 0 {
+                return Ok(());
+            }
+        } else if record.b & ROW_UNIVARS != 0 {
+            // Those pairs are unified: the join again, without the split.
             self.join_either(frame)?;
         } else if record.b & ROW_SETTLE != 0 {
             let holders = self.saved[extra + 1].a;
@@ -2362,37 +2492,287 @@ impl Checker {
     pub fn is_univar(&self, ty: Ty) -> bool {
         let node = self.g.nodes[ty.0 as usize];
         node.head & EXTENDED != 0
-            && matches!(self.extras.descriptors[node.a as usize], ExtraDescriptor::Univar(_))
+            && matches!(
+                self.extras.descriptors[node.a as usize],
+                ExtraDescriptor::Univar(_)
+            )
     }
 
-    /// `unify_univar` (compiler/ml/ctype.ml:1544-1561): two universal
-    /// variables are equal only when the innermost scope that binds either
-    /// pairs them. O(scopes × bound variables). (R3g)
-    pub fn unify_univar(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
+    /// `unify_univar t1 t2 !univar_pairs` (compiler/ml/ctype.ml:1544-1559)
+    /// for two distinct representatives that are universal variables: `Ok`
+    /// when the innermost scope that holds either pairs them, a clash
+    /// otherwise. It links nothing: the caller does
+    /// ([`Checker::unify_pair`], `unify3`).
+    ///
+    /// The scopes of [`Checker::scopes`] from the last (innermost) to the
+    /// first; each scope twice, as OCaml's two entries `(cl1, cl2) ::
+    /// (cl2, cl1)`: first with `a` its left list and `b` its right list,
+    /// then with `a` its right list and `b` its left one. For one entry:
+    /// `i` is the first position in `a` whose slot's representative is
+    /// `t1` and `j` the first in `b` whose slot's representative is `t2`
+    /// (`find_univ`: `t == repr t'`, ctype.ml:1546-1551), each a scan of
+    /// the whole list.
+    /// - Both found. When the partner node of `a[i]` holds a handle whose
+    ///   representative is `t2`: `Ok` (ctype.ml:1553). When both partner
+    ///   nodes hold `NONE`: `Graph::write` of the partner node of `a[i]`
+    ///   to [`partner_node`]`(t2)` and of that of `b[j]` to
+    ///   `partner_node(t1)`, `Ok` (`set_univar r1 t2; set_univar r2 t1`,
+    ///   ctype.ml:1554-1556). Otherwise a clash (ctype.ml:1558).
+    /// - Neither found: the next entry (ctype.ml:1557).
+    /// - One found: a clash (ctype.ml:1558).
+    ///
+    /// No entry left: a clash (`[] -> raise (Unify [])`, ctype.ml:1559).
+    /// A clash pushes nothing on the trace. The partner node of position
+    /// `i` of the left list is `scope.partners + i`, of position `j` of
+    /// the right list `scope.partners + scope.left_len + j`.
+    /// O(scopes × bound variables): one step and one `repr` per slot
+    /// compared, at most `2 × (left_len + right_len)` a scope; no
+    /// allocation. (R3g)
+    pub fn unify_univar(&mut self, t1: Ty, t2: Ty) -> Result<(), Clash> {
         todo!("R3g")
     }
 
-    /// `enter_poly` (compiler/ml/ctype.ml:1656-1686): pair the bound
-    /// variables of two polymorphic types for the unification of their
-    /// bodies, and check afterwards that none escaped
-    /// (`univars_escape`, ctype.ml:1626). Pushes the body pair and a
-    /// `LeavePoly` frame. O(bound variables) plus the escape walk. (R3g)
-    pub fn enter_poly(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
+    /// `enter_poly env univar_pairs t1 tl1 t2 tl2 (unify env)`
+    /// (compiler/ml/ctype.ml:1656-1679) for two polymorphic types that
+    /// have a bound variable, after the link of unify3: `left` and
+    /// `right` are the descriptors the two nodes had (the left node is a
+    /// link by now, so both types are read from their descriptors: body
+    /// in slot 0, bound variables in the slots after it).
+    ///
+    /// 1. When a scope is open: one fresh generation of marks; the
+    ///    representative of every bound-variable slot of every open scope,
+    ///    both lists, is marked (`known_univars`, ctype.ml:1658-1662).
+    ///    `known1`: some bound variable of `left` (its representative) is
+    ///    marked; `known2` the same for `right`. Both are read before
+    ///    step 2, which takes marks of its own.
+    /// 2. The escape test, BEFORE anything is pushed (ctype.ml:1664-1669;
+    ///    CHECKER_REWRITE 8.6, decision 49): `known1 &&`
+    ///    [`Checker::univars_escape`]`(left, right)`, or else `known2 &&
+    ///    univars_escape(right, left)`: a clash, with nothing on the
+    ///    trace (`raise (Unify [])`) and nothing pushed. With no scope
+    ///    open neither can hold and nothing of steps 1 and 2 runs.
+    /// 3. `left_len + right_len` new partner nodes
+    ///    ([`partner_node`]`(Ty(NONE))`, consecutive handles), and a
+    ///    [`PolyScope`] pushed on [`Checker::scopes`]
+    ///    (`univar_pairs := (cl1, cl2) :: (cl2, cl1) :: old_univars`).
+    /// 4. A [`FrameKind::LeavePoly`] frame whose `extra` is the number of
+    ///    scopes before step 3, then the pair of the two bodies above it
+    ///    (`f t1 t2`), so that the scope is left when the bodies are
+    ///    unified.
+    ///
+    /// Like [`Checker::push_children`], it pushes nothing when it fails.
+    /// Cost: with no scope open, `left_len + right_len` nodes of 16 bytes,
+    /// one 20-byte scope and two frames; with `s` scopes open that hold
+    /// `B` bound variables in all, one step per slot marked or tested (`B
+    /// + left_len + right_len`), and the escape walk only when a bound
+    /// variable is already known. OCaml rebuilds `known_univars` at every
+    /// entry too. (R3g)
+    pub fn enter_poly(&mut self, left: Node, right: Node) -> Result<(), Clash> {
         todo!("R3g")
     }
 
-    /// `occur_univar` (compiler/ml/ctype.ml:1563-1624): no universal
-    /// variable of `ty` is free of its binder. O(nodes), marks, explicit
-    /// stack; O(1) when the unit has made no universal variable. (R3g)
+    /// `univars_escape env old_univars tl (newty (Tpoly (t, tl')))`
+    /// (compiler/ml/ctype.ml:1610-1653): whether a universal variable of
+    /// the family of `binder`'s bound variables occurs in the polymorphic
+    /// type `other` outside a binder of the family. `binder` and `other`
+    /// are descriptors of polymorphic types; the scopes are those open
+    /// now (the caller has not pushed its own).
+    ///
+    /// The family (`get_univar_family`, ctype.ml:1612-1623), as one
+    /// generation of marks on the representatives: the bound variables of
+    /// `binder`; then one pass over the scopes from the innermost to the
+    /// outermost, each scope twice (left list as `cl1` and right as
+    /// `cl2`, then the other way round): when `cl2` is not empty and some
+    /// slot of `cl1` is marked, every slot of `cl2` is marked. One pass,
+    /// not a closure.
+    ///
+    /// The walk (`occur`, ctype.ml:1630-1648), with a second generation
+    /// for the nodes visited, on `g.work`, starting as for a polymorphic
+    /// node with `other`'s slots: a universal variable in the family is
+    /// an escape (`true`, the work list cleared); a polymorphic type one
+    /// of whose bound variables is in the family is not entered, any
+    /// other is entered through its body only (slot 0); a constructor
+    /// without arguments is a leaf; a constructor with arguments pushes
+    /// the arguments [`TypeTable::may_occur`] allows; any other node
+    /// pushes every child (`Graph::children`). A universal variable is
+    /// tested and not marked as visited (the two generations share one
+    /// table). O(bound variables of the open scopes + nodes of `other`),
+    /// one step a slot of the family pass and one a node visited; no
+    /// allocation. (R3g)
+    pub fn univars_escape(&mut self, binder: Node, other: Node) -> bool {
+        todo!("R3g")
+    }
+
+    /// The walk of `occur_univar` (compiler/ml/ctype.ml:1563-1607): the
+    /// first universal variable of `ty` that no polymorphic type on the
+    /// way to it binds, or `NONE`. "First" is in the order below, which
+    /// is `iter_type_expr`'s; it is the variable a diagnostic names.
+    ///
+    /// *Contexts.* The walk numbers the polymorphic types it enters:
+    /// context 0 is the root (nothing bound), context `k` the k-th entry.
+    /// Context `k` has the mark generation `g0 + k`, where `g0` is the
+    /// generation taken at the start; the walk takes one generation per
+    /// entry and nothing else takes one meanwhile (it expands nothing and
+    /// makes no node). `extras.open_polys[k]` says the context is still
+    /// open. A mark `m` is *live* when `m >= g0 && open_polys[m - g0]`.
+    /// Before the walk: when `mark_generation > u32::MAX / 2`, the marks
+    /// are filled with 0 and the counter reset, so that the generations
+    /// of one walk are consecutive.
+    ///
+    /// *The loop*, on `g.work`, depth first; `current` is the generation
+    /// of the innermost open context. An entry `NONE` leaves a context:
+    /// the entry below it is the generation to return to; the context
+    /// left is closed (`open_polys[current - g0] = false`). Any other
+    /// entry is a node, taken as its representative `t`:
+    /// - a universal variable: when its mark is live it is bound
+    ///   (`Type_set.mem ty bound`); otherwise it is the answer (the work
+    ///   list and `open_polys` are cleared);
+    /// - a node whose mark is live: skipped. It was visited in a context
+    ///   that is still open, whose bound variables are among the current
+    ///   ones (ctype.ml:1572-1581: visited with `bound'`, not visited
+    ///   again while `bound'` is within `bound`). A node visited in the
+    ///   root context is never visited again (ctype.ml:1569-1571); one
+    ///   visited in a context that has closed is visited again;
+    /// - otherwise the node is marked with `current`, one step, and:
+    ///   - a polymorphic type (ctype.ml:1587-1589): a new generation `g`
+    ///     and `open_polys.push(true)`; each bound variable's
+    ///     representative whose mark is not live is marked `g` (one that
+    ///     an enclosing open type binds keeps that mark, so that leaving
+    ///     this context does not unbind it); pushed: `current`, `NONE`,
+    ///     then the body (slot 0) on top; `current = g`. The bound
+    ///     variables are not children;
+    ///   - a constructor without arguments: nothing (ctype.ml:1590); with
+    ///     arguments, those [`TypeTable::may_occur`] allows, in order
+    ///     (ctype.ml:1591-1599);
+    ///   - a variant row: its slots in order except its `more` slot, then
+    ///     its `more` slot (`iter_row` visits the fields and the name's
+    ///     arguments, `iter_type_expr` the row variable after them,
+    ///     compiler/ml/btype.ml:229-241, 263-266);
+    ///   - any other node: its children in `Checker::child`'s order.
+    ///   Children are pushed last first, so that they are visited in
+    ///   order.
+    ///
+    /// Cost: one step per visit; a node is visited once, plus once per
+    /// closed context it was first visited in (as OCaml's `visited` map,
+    /// which the source calls "way too expensive"); O(nodes) for a type
+    /// without a polymorphic type that shares a node with the outside.
+    /// No allocation: `g.work` and `open_polys` keep their capacity.
+    /// Never called when [`Extras::univars`] is 0. (R3g)
+    pub fn free_univar(&mut self, ty: Ty) -> Ty {
+        todo!("R3g")
+    }
+
+    /// `occur_univar env ty` (compiler/ml/ctype.ml:1563-1607): a clash
+    /// when [`Checker::free_univar`] finds a universal variable; in
+    /// `Mode::Explain` its pair, the variable and a new variable at the
+    /// generic level, goes on the trace (`raise (Unify [(ty, newgenvar
+    /// ())])`, ctype.ml:1586). Out of line: its callers test
+    /// [`Extras::univars`] first, one load, and a unit without a
+    /// universal variable never calls it. O(1) plus the walk.
+    #[inline(never)]
     pub fn occur_univar(&mut self, ty: Ty) -> Result<(), Clash> {
+        let free = self.free_univar(ty);
+        if free.0 == NONE {
+            return Ok(());
+        }
+        if self.g.mode == Mode::Explain {
+            let var = self.g.push(Node {
+                head: VAR,
+                level: GENERIC,
+                a: NONE,
+                b: 0,
+            });
+            self.trace.push([free, var]);
+        }
+        Err(Clash)
+    }
+
+    /// PR#6744 (compiler/ml/ctype.ml:2685-2699), called by
+    /// [`Checker::join_either`] when the graph has a universal variable:
+    /// `gained[0]` and `gained[1]` are the ranges of `extras.row_scratch`
+    /// that hold `tl1'` and `tl2'` (what row 1 and row 2 gain,
+    /// representatives), `frame` the pair's [`FrameKind::RowField`] or
+    /// [`FrameKind::RowFieldEnd`] frame.
+    ///
+    /// `tlu1` and `tlu2` are the types of each range in which
+    /// [`Checker::free_univar`] finds a variable (`split_univars`: the
+    /// trace is not touched by the test).
+    /// - Both empty: `Ok(Some(gained))`, unchanged.
+    /// - Both not empty and `extras.passive_variants`: each range is
+    ///   compacted in place to the types that hold none, in order, and
+    ///   the two new ranges are returned (they may leave a gap in the
+    ///   scratch between them).
+    /// - Both not empty otherwise (`List.iter (unify env tu1) (tlu1 @
+    ///   tlu2)`): [`ROW_UNIVARS`] is set in the pair's record
+    ///   (`saved[frame.extra]`); when the frame on top of `frames` is not
+    ///   this pair's `RowFieldEnd` frame (the caller is
+    ///   [`Checker::row_field_end`], which popped it) one is pushed; then
+    ///   the pairs of the first type of `tlu1` with each other type of
+    ///   `tlu1` and each type of `tlu2`, pushed so that they are popped
+    ///   in that order. `Ok(None)`: the join is run again when they are
+    ///   unified, and then every such type is on both sides and gained
+    ///   by neither.
+    /// - One empty (`occur_univar !env tu`): [`Checker::occur_univar`] of
+    ///   the first type of the other, which fails and pushes its pair in
+    ///   `Mode::Explain`: `Err([NONE, NONE])`.
+    ///
+    /// O(types gained) walks, each [`Checker::free_univar`]'s cost; no
+    /// allocation. (R3g)
+    pub fn split_univars(
+        &mut self,
+        frame: Frame,
+        gained: [std::ops::Range<usize>; 2],
+    ) -> Result<Option<[std::ops::Range<usize>; 2]>, [Ty; 2]> {
         todo!("R3g")
     }
 
-    /// `unify_package` (compiler/ml/ctype.ml:2172-2203): two packages of
-    /// one module type path unify their type arguments by name. O(arguments
-    /// log arguments). (R3g)
-    pub fn unify_package(&mut self, left: Ty, right: Ty) -> Result<(), Clash> {
-        todo!("R3g")
+    /// `Tpackage (p1, n1, tl1), Tpackage (p2, n2, tl2)` of unify3
+    /// (compiler/ml/ctype.ml:2416-2423) with `unify_package`
+    /// (ctype.ml:2172-2181), after the link: `[t1x, t2x]` are the two
+    /// nodes and `left`, `right` the descriptors they had. The levels
+    /// `lv1` and `lv2` are both `min(left.level, right.level)`: OCaml
+    /// reads `t1.level` and `t2.level` after `unify2` lowered both to the
+    /// lower of the two expansions' levels (ctype.ml:2283-2285).
+    ///
+    /// One merge of the two name lists (`PackageRow::longidents`, each
+    /// sorted by `Longident.cmp`; [`PackageDecls::compare`]), which is
+    /// `complete_type_list` in both directions (ctype.ml:2135-2169): a
+    /// name both list gives the pair of the two arguments; a name only
+    /// the left lists asks [`PackageDecls::complete`] of the RIGHT
+    /// package's path at `lv2` and pairs the left argument with the
+    /// answer; a name only the right lists asks the left path at `lv1`.
+    /// An answer that is not [`Completion::Type`] is a clash (`Not_found`
+    /// in expression mode, ctype.ml:2420-2421), as is a missing
+    /// [`Checker::packages`]. First `left` goes on `saved` and a
+    /// [`FrameKind::PackageEnd`] frame of `t1x`, `t2x` with that index as
+    /// its `extra` is pushed; then one pair a name as the merge meets
+    /// them; when the merge is complete the pairs' part of `frames` is
+    /// reversed in place, so that they are popped in name order
+    /// (`unify_list`, ctype.ml:2175). A clash during the merge cuts
+    /// `frames` and `saved` back to where they were: nothing stays
+    /// pushed. The supplier is taken out of [`Checker::packages`] for the
+    /// calls and put back, also on a clash. Pattern mode (`List.iter
+    /// (reify env) (tl1 @ tl2)`) is R3h's. O(names of both), one step a
+    /// name; no allocation beyond the frames. (R3p)
+    pub fn unify_package(
+        &mut self,
+        [t1x, t2x]: [Ty; 2],
+        left: Node,
+        right: Node,
+    ) -> Result<(), Clash> {
+        todo!("R3p")
+    }
+
+    /// The pop of a [`FrameKind::PackageEnd`] frame: the completed lists
+    /// are unified, and the two paths decide (`if eq_package_path env p1
+    /// p2 || ... then () else raise Not_found`, compiler/ml/ctype.ml:
+    /// 2176-2181). Equal `PackageRow::path` indices: `Ok` (`Path.same`).
+    /// Otherwise [`PackageDecls::compatible`] with the left descriptor
+    /// (`saved[frame.extra]`) and the right node's; `false` is a clash
+    /// with no pair of its own. `saved` is cut back to the frame's
+    /// `extra`. O(1) plus the supplier. (R3p)
+    pub fn package_end(&mut self, frame: Frame) -> Result<(), Clash> {
+        todo!("R3p")
     }
 
     /// `reify` (compiler/ml/ctype.ml:1813-1870): replace the variables of a

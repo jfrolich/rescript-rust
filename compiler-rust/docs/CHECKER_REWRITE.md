@@ -2176,7 +2176,8 @@ it stops and reports a reproduction.
 | R3e | Objects and fields; mutability cells as nodes and their duplicate at an instance; two polymorphic types without variables (8.6, decision 27) | `rows.rs`, `unify.rs`, `expand.rs` | R3c, R3m | nothing | 600 |
 | R3f | Polymorphic variant rows: the references of `Reither` fields as slots of the variant node, `unify_row`, `unify_row_field` (8.6, decision 34) | `rows.rs` | R3e | R3g | 600 |
 | R3n | The references of a copied variant row: shared when the row variable is, new otherwise (8.6, decision 34) | `rows.rs`, `expand.rs` | R3e, R3f | R3g | 150 |
-| R3g | Universal variables, polymorphic types, packages | `rows.rs` | R3e | R3f | 500 |
+| R3g | Universal variables and polymorphic types with variables: the scopes, `unify_univar`, `enter_poly`, the escape test, `occur_univar`, PR#6744 in `unify_row_field` (8.6, decisions 49 to 51; 8.8) | `rows.rs` | R3e, R3f, R3n | R3p | 600 |
+| R3p | Packages: the merge of two name lists, completed through `PackageDecls` (8.6, decision 52; 8.8) | `rows.rs` | R3e | R3g | 150 |
 | R3h | Pattern mode, equations, `reify`, `mcomp` | `rows.rs`, `unify.rs` | R3n, R3g | R3i, R3j | 600 |
 | R3i | `moregeneral`, `equal`, `matches` | `relate.rs` | R3n, R3g | R3h, R3j | 600 |
 | R3j | Subtyping without the declaration-directed coercions | `relate.rs` | R3n, R3g | R3h, R3i | 600 |
@@ -2240,6 +2241,17 @@ R3b, R3d, R3c, K1, R3k, R3m, K2, R3e, R3f, R3n, K3, K4. `cargo test --lib
 tc::` on that trunk: 236 passed, 0 ignored. The decisions of the reviews
 between the two turns are 35 to 46 of 8.6. What the fifth turn designed
 is listed after them, in 8.6 ("Decided in the fifth skeleton turn").
+Designed in the fifth turn with tests and a prompt, not built:
+
+| Slice | Decisions | Tests | Run in this turn |
+|---|---|---|---|
+| R3g | 49, 50, 51 | twelve ignored: nine hand-built and a step test in `r3_tests.rs`, the fixed cases and 20,000 generated cases against the old checker in `differential.rs`; thirteen that run today (the harness and the old checker's side, decision 49; `sizes_of_universal_variables`) | all twelve passed against a prototype of the five bodies (about 270 lines), which was removed before the commit; the tree as committed has `todo!("R3g")` in each |
+| R3p | 52 | three ignored, hand-built with a supplier written in the test file | all three passed against a prototype of the two bodies (about 80 lines), removed before the commit |
+
+Packages are R3p and not part of R3g: no generated case can judge them
+(the differential program has no module types), their one caller is an
+arm that is already wired, and they ask the declarations three questions
+that R5a answers. R3h was not started in this turn.
 
 The ignored tests are checked mechanically
 (`differential::tests::ignored_tests_name_the_slices_they_reach`): each
@@ -2531,13 +2543,25 @@ node; recursion.
 commit. Failure: a pass over a copy when the graph has no descriptor
 row; a hash map from a reference to its copy.
 
-**R3g to R3j.** Functions: every signature of `rows.rs` and `relate.rs`
+**R3g.** Functions: `Checker::{unify_univar, enter_poly, univars_escape,
+free_univar, split_univars}` in `rows.rs`. Everything that calls them is
+wired and built (8.8, "What is wired"). End state: no `todo!("R3g")`; the
+twelve ignored tests pass with their `ignore` removed; no other test
+changes. Commits: 8.8, "Commit order". Failure: a scope left open after a
+failed unification; a pairing that outlives a restore; a walk that
+allocates; a hash set of bound variables.
+
+**R3p.** Functions: `Checker::{unify_package, package_end}` in `rows.rs`.
+End state: no `todo!("R3p")`; the three ignored tests pass. One commit.
+Failure: a frame or a saved descriptor left after a clash in the merge; a
+supplier not put back; a `Vec` of pairs.
+
+**R3h to R3j.** Functions: every signature of `rows.rs` and `relate.rs`
 carrying the slice's name. End state for each: no `todo!` with its name;
 its generator extension and old-side vacuity test (first commit); the
 `Full` tier at 10,000 cases with the extension on. R3e: fields in OCaml's
 order, the mutability cells. R3f: the fresh row for the missing tags is
-made once; closedness and the row name as ctype.ml:2560-2600. R3g: scopes
-of universal variables are a stack, not a map. R3h: the pair set only
+made once; closedness and the row name as ctype.ml:2560-2600. R3h: the pair set only
 here; an equation writes one `TypeTable` row and cleans the memos. R3i:
 every relation restores its speculation. R3j: the constraints are
 returned, not unified inside the walk.
@@ -2852,9 +2876,118 @@ fields of one copied row when `more` was generic; a new reference when
 a change in graph.rs, level.rs or template.rs. At most 150 lines.
 ```
 
+```text
+R3g. Read section 8.8 whole and section 8.6, decisions 49 to 51;
+compiler/ml/ctype.ml 1544-1679 (unify_univar, occur_univar,
+univars_escape, enter_poly), 2216-2247, 2299-2331, 2413-2415 and
+2685-2704; compiler/ml/btype.ml 229-272 and 748-750; in src/tc/rows.rs
+the doc comments of PolyScope, partner_node, unify_univar, enter_poly,
+univars_escape, free_univar, occur_univar and split_univars, and
+join_either and row_field_end, which call split_univars; in
+src/tc/unify.rs unify_univars, free_of_univars, leave_scopes, the
+LeavePoly arm of run_frames and the universal variable arm of unify3.
+Those callers are built: do not change them. R3e, R3f and R3n are
+merged.
+
+You write five bodies in src/tc/rows.rs, each where its
+`todo!("R3g")` is, and nothing else under src/tc except removing
+`#[ignore = "R3g build"]` lines. The doc comment above each body lists
+its steps; follow them in that order.
+
+First edit: the body of Checker::free_univar. Then run
+  cargo test --manifest-path compiler-rust/Cargo.toml --lib \
+    tc::r3_tests::the_first_free -- --include-ignored
+and go on only when it passes.
+
+Commits, in this order (each one's tests are named; a test that calls a
+body of a later commit stays ignored until that commit):
+1. free_univar. Un-ignore the_first_free_universal_variable_is_found_
+   in_order, a_free_universal_variable_is_refused and a_free_universal_
+   variable_below_a_swapped_unify3_is_reversed.
+2. unify_univar and enter_poly, whole: enter_poly calls univars_escape
+   as step 2 of its comment says. That body is still todo! and the call
+   is not reached: no test of this commit has a known binder.
+   Un-ignore universal_variables_pair_by_position, a_variable_of_an_
+   outer_scope_pairs_in_its_scope, a_failure_leaves_no_scope_and_a_
+   restore_undoes_the_pairings and a_clash_in_the_bodies_below_a_
+   swapped_unify3_is_reversed.
+3. univars_escape. Un-ignore a_known_binder_escapes_before_the_bodies.
+4. split_univars. Un-ignore the_types_that_hold_a_universal_variable_
+   are_unified_not_gained, universal_variables_at_ten_thousand, and in
+   differential.rs universal_variables_agree_on_fixed_cases and
+   univar_plan_agrees_on_generated_cases.
+End your turn after commit 4 is pushed and the whole of
+  cargo test --manifest-path compiler-rust/Cargo.toml --lib tc::
+has been seen to pass with no test ignored for "R3g build". The tests of
+commit 4 are the ones no prototype of yours has seen: if one fails, fix
+the body, not the test.
+
+Steps: one `#[cfg(test)] super::steps::tick()` per list slot read in
+unify_univar, enter_poly and univars_escape, and per node visited in
+free_univar and in the walk of univars_escape. None in split_univars
+(free_univar counts).
+
+Relations to hold: every tc:: test that passed before passes unchanged;
+universal_variables_at_ten_thousand as written (11 times for bound
+variables and for the row, 110 times for nested scopes); no descriptor
+row is written in place (assert_rows_kept in the tests); `scopes`,
+`frames` and `saved` are empty after every unification, failed or not.
+
+Report, before and after, the instructions of the tc_kernel bench
+operations unify_vars, unify_ground1, unify_ground3, unify_datatype2
+and unify_abbrev2 (compiler-rust/docs/TC_KERNEL_R3.md, "Machine and
+method"). None may move by more than 2: your bodies are reached only
+through functions that are already out of line. If one moves, mark the
+body `#[inline(never)]` and say so; do not tune anything else.
+
+If a generated case differs, read the ctype.ml lines above first. If
+your code does what they say, stop and report the seed with the lines:
+do not copy the old checker, and do not pin the seed yourself.
+
+Shortcuts that count as failure: a hash set or a `Vec` allocated per
+call for the bound variables (use Checker::marks with a new generation,
+and Extras::open_polys); a recursive walk (use g.work); partners kept
+anywhere but in the partner nodes, or written without Graph::write;
+pushing the scope before the escape test; cutting the scopes back
+anywhere but in leave_scopes and the LeavePoly arm; a name compared; a
+change in unify.rs, expand.rs, graph.rs, level.rs or template.rs; a
+change under src/types. At most 600 lines; the prototype of the design
+turn took about 270.
+```
+
+```text
+R3p. Read section 8.8 ("Packages") and section 8.6, decision 52;
+compiler/ml/ctype.ml 2135-2181 and 2416-2423; in src/tc/rows.rs the doc
+comments of Completion, PackageDecls, unify_package and package_end; in
+src/tc/unify.rs the Package arm of extended_children and the PackageEnd
+arm of run_frames, which are built: do not change them. R3e is merged.
+
+One commit: the bodies of Checker::unify_package and
+Checker::package_end in src/tc/rows.rs, each where its `todo!("R3p")`
+is, following the steps of its doc comment in order, and the three
+`#[ignore = "R3p build"]` lines of src/tc/r3_tests.rs removed. First
+edit: unify_package. End your turn after the commit is pushed and
+  cargo test --manifest-path compiler-rust/Cargo.toml --lib tc::
+has been seen to pass with no test ignored for "R3p build".
+
+Steps: one `#[cfg(test)] super::steps::tick()` per turn of the merge.
+
+Relations to hold: every tc:: test that passed before passes unchanged;
+packages_of_ten_thousand_names_are_linear as written; after a clash
+`frames` and `saved` are as long as before the call and
+`Checker::packages` is `Some` again.
+
+Shortcuts that count as failure: a `Vec` of pairs (push the frames and
+reverse that part of `frames` in place); comparing names in the kernel
+(PackageDecls::compare is the only order); reading the pool the names
+are positions of; calling `compatible` before the lists are unified, or
+for two equal paths; a change in unify.rs or outside rows.rs and the
+three ignore lines. At most 150 lines.
+```
+
 The prompt of K2 is in section 8.7. The last prompt below is superseded by
-decision 5 of 8.6: no builder starts R3e to R3j from it, and the second
-skeleton turn did not write theirs (8.1).
+decision 5 of 8.6: no builder starts a slice from it. R3e, R3f, R3n, R3g
+and R3p have their own prompts above it; R3h to R3j have none yet.
 
 ```text
 R3e..R3j. First commit, before any body: extend
@@ -3930,7 +4063,7 @@ unless it says "ignored".
     (`rows::Checker::fixed_with_unmatched`), and
     `no_generated_case_has_a_fixed_row_with_an_unmatched_field` scans the
     old side's form of 4,000 generated cases with variants and universal
-    variables for one (547 print a fixed row, none with such a field).
+    variables for one (546 print a fixed row, none with such a field).
     The slice that first makes such a row (R3h, `reify`) builds the rule
     in `copy_refs` as its first commit: for a row whose last variant
     node's `VariantRow::fixed` is set, each `Reither` field of the copy
@@ -3968,7 +4101,7 @@ unless it says "ignored".
     - *The operations.* `Op::Univar` (a universal variable at the current
       level), `Op::Poly(body, variable)` (a polymorphic type of any
       operand over any universal variable, also one an enclosing type
-      binds already) and `Op::Slot` (the body of a polymorphic type as an
+      binds already) and `Op::Inside` (the body of a polymorphic type as an
       operand, where its variables are outside their binder) are drawn
       one operation in four. `Extras::univar` makes the descriptor row of
       a universal variable and counts it.
@@ -3984,7 +4117,7 @@ unless it says "ignored".
       order: reported on the fixed case and by 819 of 1,000 generated
       cases (`a_swapped_binder_is_reported`). The old side of the full
       tier is not vacuous (`old_side_of_the_univar_plan_is_not_vacuous`:
-      of 1,200 cases 222 have a failed unification, 822 print a universal
+      of 1,200 cases 222 have a failed unification, 821 print a universal
       variable, 299 a fixed row).
     - *Observed on the old checker.*
 
@@ -4030,6 +4163,109 @@ unless it says "ignored".
       name); the new side follows OCaml, and the generated cases of the
       explaining mode with `UNIVARS` are not part of R3g's acceptance
       until the old checker is corrected (decision 50, "Acceptance").
+    - *A second difference of the old checker, reported and not fixed.*
+      `Tpoly (t, [])` against a type that is not polymorphic is a clash
+      in OCaml (`_, _ -> raise (Unify [])`, ctype.ml:2424). The old
+      checker unifies the body with the other type ("Tpoly with empty
+      vars: unwrap and retry", types/ctype.rs, the two arms after the
+      package arm of its unify3). Smallest case: `newty (Tpoly (t, []))`
+      unified with `t`, for `t` an arrow: OCaml refuses, the old checker
+      accepts. The typer makes `Tpoly (t, [])` only where the other side
+      is one too (a method or a field), which is why no program shows
+      it. Found by the prototype of R3g on a generated case (seed
+      1000058 of the plan as it then was); the generator no longer makes
+      the pair: `Op::Poly` gives the body itself when its second operand
+      is not a universal variable, and `Op::Inside` steps through a
+      polymorphic type without variables. The new side follows OCaml.
+
+50. **R3g as designed.** The design is section 8.8; this entry is what
+    was decided.
+    - *Storage.* A universal variable is one node with a descriptor row
+      `ExtraDescriptor::Univar(name)`; a polymorphic type is one node
+      whose slots are the body and then the bound variables. No new
+      node kind and no new pool. The pairs of `univar_pairs` are a
+      stack of 20-byte `PolyScope` records in `Checker::scopes`, and the
+      partner references (`ref None` per bound variable) are graph
+      nodes, so that `set_univar` is a logged `Graph::write` and a
+      restore undoes a pairing with no log of its own.
+    - *Order.* `enter_poly` tests escape before it pushes the scope, as
+      OCaml does (decision 49).
+    - *Who leaves a scope.* A `LeavePoly` frame below the bodies' pair on
+      success; `unify_distinct`'s error path on failure (decision 51).
+    - *What a unit without universal variables pays.* Nothing in
+      `unify_pair` (one `and` of two heads already in registers and a
+      branch not taken); one load of `Extras::univars` per binding of a
+      variable to a type with children, per variable arm of unify3 and
+      per joined `Reither` pair; one load of `scopes.len()` on a failed
+      unification.
+    - *Nested scopes are quadratic, as in OCaml* (`known_univars` is
+      rebuilt at every entry, ctype.ml:1658-1662). The step test states
+      it: at most 110 times the steps for ten times the depth.
+    - *Not in R3g.* `instance_poly` (ctype.ml:1081-1095) and with it the
+      lines of `copy_row` that only `instance_poly ~fixed` reaches
+      (decision 47): they need an owner (8.8, open question 1).
+      Packages: R3p (decision 52). Pattern mode: R3h.
+    - *Acceptance.* The twelve tests ignored for "R3g build". The
+      generated cases run in `Mode::Success` only; the fixed cases run
+      the explaining mode too, except those whose trace has the pair
+      `occur_univar` raises (decision 49).
+
+51. **`LeavePoly` carries no pair and no swap, and a failure cuts the
+    scopes back in one place.** OCaml's `enter_poly` restores
+    `univar_pairs` in a handler and re-raises (ctype.ml:1677-1679), and
+    unify3's handler reverses the whole trace of a swapped call
+    (ctype.ml:2299-2303; decision 42). In the kernel:
+    - A `LeavePoly` frame holds the number of scopes to cut back to in
+      its `extra`, and `NONE` for both types. Popped, it truncates
+      `Checker::scopes`. It adds nothing to a trace.
+    - On a failure, `unify_distinct` calls `leave_scopes(base)` when
+      `scopes` is not empty: it finds the lowest `LeavePoly` frame above
+      `base` in `frames` and truncates `scopes` to its `extra`. One
+      place, both modes; the partner nodes written since are undone by
+      the caller's restore, as every other write.
+    - The entries of a clash in the bodies below a swapped unify3 are
+      reversed by the `Linked` frame of the two polymorphic types, which
+      is below the `LeavePoly` frame: the `LeavePoly` frame needs no
+      swap bit. Witness: `a_clash_in_the_bodies_below_a_swapped_unify3_
+      is_reversed`.
+    - The pair of `occur_univar` is pushed by the callee and reversed at
+      its three call sites when unify3 ran swapped (`free_of_univars(ty,
+      swapped)`): the two variable arms of unify3 and, through
+      `bind_routed`, never swapped. Witness: `a_free_universal_variable_
+      below_a_swapped_unify3_is_reversed`.
+
+52. **Packages are their own slice, R3p, behind one trait.** The kernel
+    has the two name lists and the arguments of a package; it does not
+    have module types. `complete_type_list` needs `Env.lookup_type` in a
+    module type and `nondep_instance`, and the last test needs
+    `package_subtype`, which is `Includemod` (ctype.ml:2135-2181).
+    - *The seam* is `rows::PackageDecls`, held in `Checker::packages`:
+      `compare` (the order of two names, `Longident.cmp`), `complete`
+      (the answer of one module type for one name, as `Completion`: a
+      type, abstract, missing, other) and `compatible` (the last test
+      for two different paths). R5a supplies it over its module types
+      and installs it before the first unification of a unit; with none
+      installed two packages that need a completion are a clash.
+    - *A name is a position* in the pool that `PackageRow::longidents`
+      ranges over. The kernel passes positions and never reads the pool.
+    - *The levels* `lv1` and `lv2` are both the lower of the two nodes'
+      levels. OCaml passes `t1.level` and `t2.level` after `unify2`
+      lowered both sides to the lower of the two expansions' levels
+      (ctype.ml:2283-2285); the two readings differ only when one side
+      is an abbreviation that sits above its memorized expansion, which
+      `expand_head` does not produce (the expansion is made at the
+      abbreviation's level, and a lowering of one reaches the other).
+      Stated as an assumption; R5a's tests on real module types are
+      where a difference would show.
+    - *No differential judge.* The differential program has no module
+      types and the old checker's `unify_package` is not reached by it.
+      R3p is accepted on three hand-built tests with a supplier written
+      in the test file, each quoting the OCaml lines it follows. R5a
+      owns the comparison with the old checker on real packages.
+    - `allow_absent` (subtyping) is R3j's: `Completion::Abstract` and
+      `Completion::Missing` are separate answers so that R3j can skip
+      them without a second trait.
+
 
 ### 8.7 The hot paths of unification (K2)
 
@@ -4188,6 +4424,156 @@ Report the table before and after per commit, and the instruction count
 of the CI check (tc is not on a compiler build's path: say so if it is
 unchanged).
 ```
+
+### 8.8 Universal variables, polymorphic types and packages (R3g, R3p)
+
+Decisions 49 to 52 of 8.6 are what was decided and observed; this section
+is the design a builder reads. Every function named is in `tc/rows.rs`
+unless it says otherwise, and its doc comment lists its steps.
+
+**What the data is.**
+
+| Thing | Stored as | Bytes |
+|---|---|---:|
+| Universal variable (`Tunivar name`) | one node, `TUPLE \| EXTENDED`, arity 0, `a` the row of `ExtraDescriptor::Univar(name)`; no slot | 16 |
+| Polymorphic type (`Tpoly (body, tl)`) of `k` variables | one node, arity `1 + k`: slot 0 the body, slots 1 to `k` the bound variables in the order of `tl`; `a` a row `ExtraDescriptor::Poly` | 16 + 4 × (1 + k) |
+| Descriptor row | one per variable or polymorphic type MADE (a segment's, the typer's); a copy shares the row of its source | 12 |
+| Scope (`(cl1, cl2) :: (cl2, cl1)` of `univar_pairs`) | `PolyScope { left, right, left_len, right_len, partners }`: the two binder lists by list index and length, and the first of `left_len + right_len` consecutive partner nodes | 20 |
+| Partner (`ref None` beside a bound variable) | one node `partner_node(partner)`: a variable at level 0 whose `a` is the partner or `NONE` | 16 |
+
+For a unit with `U` universal variables and `P` polymorphic types of `K`
+bound variables in all, made or copied: `16 × (U + P) + 4 × (P + K)`
+bytes of nodes and slots, and at most `12 × (U + P)` of rows. Each entry
+into two polymorphic types of `k1` and `k2` variables adds `16 × (k1 +
+k2)` bytes of partner nodes, which stay until the graph is cut back
+(open question 2), and 20 bytes of scope for the time the bodies are
+unified. Pinned by `r3_tests::sizes_of_universal_variables`, which runs
+today.
+
+`Extras::univars` counts the rows `Extras::univar` made. It is the one
+read that decides whether a walk for universal variables can find
+anything: 0 means no node of the worker is a universal variable.
+`TypeTable::variances` and `TypeTable::occurs` hold, per type and
+parameter, whether the parameter may occur in the type's definition
+(`May_pos` or `May_neg`); `TypeTable::may_occur` reads them and answers
+true for a type without a declaration row.
+
+**What is wired** (built in the skeleton, not to be changed by the
+builder). `unify_pair`: two heads with `EXTENDED` that are both universal
+variables go to `unify_univars` (out of line): `unify_univar`, the right
+node's level lowered to the left's, the link (ctype.ml:2244-2247).
+`bind_routed` and the two variable arms of unify3 call `free_of_univars`,
+which returns at once when `Extras::univars` is 0 and otherwise calls
+`occur_univar` (ctype.ml:2216-2219, 2316-2323). unify3 has the arm of two
+universal variables before `create_recursion`. `extended_children` calls
+`enter_poly` for two polymorphic types of which one has a variable.
+`run_frames` pops `LeavePoly`. `unify_distinct` calls `leave_scopes` on a
+failure. `join_either` calls `split_univars` when `Extras::univars` is
+not 0 and the record does not have `ROW_UNIVARS`; `row_field_end` runs
+the join again when it has. `occur_univar` itself is built: it calls
+`free_univar` and makes the pair.
+
+**The five bodies of R3g.**
+
+| Function | OCaml | Cost |
+|---|---|---|
+| `unify_univar(t1, t2)` | ctype.ml:1544-1559 | per scope from the innermost, a scan of both binder lists, twice: O(scopes × bound variables), one step a slot |
+| `enter_poly(left, right)` | ctype.ml:1656-1679 | no scope open: `k1 + k2` partner nodes, one scope, two frames. `s` scopes open with `B` bound variables: `B + k1 + k2` marks, and the escape walk only when a bound variable is already known |
+| `univars_escape(binder, other)` | ctype.ml:1612-1652 | the family: one pass over the scopes; then one walk of `other`, each node once, with `g.work` as its stack |
+| `free_univar(ty)` | ctype.ml:1563-1607 | one walk with `g.work`; a node is visited once per context it is met in after the one that marked it closed, as OCaml's `visited` map |
+| `split_univars(frame, gained)` | ctype.ml:2685-2697 | one `free_univar` per gained type; the types that hold one are unified pairwise through the frame stack, in two phases |
+
+`free_univar` keeps no set of bound variables. A context is a generation
+of `Checker::marks`: entering a polymorphic type takes a new generation,
+marks its bound variables with it and pushes two entries on `g.work`
+that close it again; `Extras::open_polys[generation - first]` says
+whether a generation is still open. A node whose mark is an open
+generation was visited in a context that still holds (skip it, or for a
+universal variable: bound); any other mark is stale. So a node first seen
+inside a polymorphic type is seen again outside it, which is what OCaml's
+`visited` map of bound sets does, without a set per node.
+
+`split_univars` is two-phase because the unifications it asks for run on
+the frame stack. First run: the gained types that hold a universal
+variable move out of the two gained lists; when both sides have one, the
+record gets `ROW_UNIVARS`, a `RowFieldEnd` frame goes below the pairs
+`(tu1, each other)`, and the join is put off. Second run, from
+`row_field_end`: the join, without splitting. One side only: a clash with
+the pair of `occur_univar`.
+
+**The order of a copy** (btype.ml:504-541; `copy_type_desc` maps `tl`
+before the body). `Graph::instance`, `Graph::copy` and `Checker::copy`
+copy a polymorphic node's slots in slot order: the body, then the
+variables. No case can tell the two orders apart: a copy visits each
+node once whichever slot reaches it first, the level of a copy is read
+from its source, and the forms number nodes in their own traversal. The
+kernel tier agrees with the old checker on 10,000 generated cases of
+instances and copies of polymorphic types
+(`kernel_tier_agrees_on_universal_variables`). `Subst` is not in the
+kernel. A copy of a polymorphic node of `k` variables costs one node and
+`1 + k` slots, as any node of that arity; neither `instance` nor `copy`
+tests for a polymorphic type.
+
+**Commit order**, checked against what is wired: `free_univar` first (its
+callers are `occur_univar` and, later, `split_univars`); then
+`unify_univar` and `enter_poly` together (`unify_univars` and the unify3
+arm call the first, `extended_children` the second, and a body pair
+inside a scope reaches `unify_univar` at once); then `univars_escape`
+(reached from `enter_poly` only with a known binder); then
+`split_univars` (reached from `join_either` as soon as a unit has a
+universal variable, so every generated case with a variant waits for
+it). The generated cases are un-ignored with the last commit.
+
+**Packages (R3p).** `unify_package` merges the two name lists of the two
+`PackageRow`s once: a name both have gives the pair of the two arguments;
+a name one side has asks `PackageDecls::complete` of the OTHER side's
+module type, and an answer that is not a type is a clash. It saves the
+left descriptor, pushes a `PackageEnd` frame and then one pair a name,
+reverses the pairs' part of `frames` so that they pop in name order, and
+on a clash cuts `frames` and `saved` back. `package_end`: equal paths are
+done; otherwise `PackageDecls::compatible` decides. What R5a must supply
+is the trait's three functions (decision 52) and the installation of the
+supplier in `Checker::packages`.
+
+**Tests.** In `r3_tests.rs`, ignored for "R3g build":
+`universal_variables_pair_by_position`,
+`a_variable_of_an_outer_scope_pairs_in_its_scope`,
+`a_failure_leaves_no_scope_and_a_restore_undoes_the_pairings`,
+`a_known_binder_escapes_before_the_bodies`,
+`a_free_universal_variable_is_refused`,
+`the_first_free_universal_variable_is_found_in_order`,
+`a_free_universal_variable_below_a_swapped_unify3_is_reversed`,
+`a_clash_in_the_bodies_below_a_swapped_unify3_is_reversed`,
+`the_types_that_hold_a_universal_variable_are_unified_not_gained`,
+`universal_variables_at_ten_thousand`; in `differential.rs`:
+`universal_variables_agree_on_fixed_cases`,
+`univar_plan_agrees_on_generated_cases`. Ignored for "R3p build":
+`packages_of_one_module_type_unify_name_by_name`,
+`a_package_is_completed_from_the_other_module_type`,
+`packages_of_ten_thousand_names_are_linear`. Each quotes the OCaml lines
+it follows and names its witness.
+
+**Open questions**, each with the answer recommended.
+
+1. *Who builds `instance_poly`* (ctype.ml:1081-1095) and the lines of
+   `copy_row` that only it reaches (decision 47)? Its callers are the
+   typer's (a polymorphic record field, a method), not R3i or R3j.
+   Recommended: a slice of its own designed with R3h in the next
+   skeleton turn, built before R5.
+2. *Partner nodes stay in the graph* after their scope is left: 16 bytes
+   per bound variable per unification of two polymorphic types.
+   Recommended: accept; a separate pool would need an undo log of its
+   own. R5c measures it on a 3,735-module application.
+3. *The explaining mode is not part of R3g's generated cases* because of
+   the old checker's `occur_univar` (decision 49). Recommended: correct
+   the old checker in a pull request of its own (the new variable at the
+   generic level; `Tpoly (t, [])` against another type a clash), then add
+   `EXPLAIN` to `univar_plan_agrees_on_generated_cases`.
+4. *The levels of a package's completions* are the lower of the two
+   nodes' levels (decision 52). Recommended: accept; R5a's tests judge.
+5. *Nested scopes are quadratic*, as in OCaml. Recommended: accept: a
+   binder nested in a binder is a method inside a polymorphic field, and
+   the depth is the nesting of the source.
 
 ## 9. R4 as designed
 

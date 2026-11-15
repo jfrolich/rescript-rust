@@ -173,7 +173,8 @@ pub(crate) const REFS: u16 = 1 << 7;
 /// the same names in a different order); with [`VARIANTS`] too, the body
 /// is one time in four an arrow from a row whose row variable is the
 /// first bound variable (`([> #A(int)] as 'p) => (T)`, `([< #A(int) | #B]
-/// as 'p) => ('q, T)`). The operations get [`Op::Univar`], [`Op::Poly`] and [`Op::Slot`]:
+/// as 'p) => ('q, T)`). The operations get [`Op::Univar`], [`Op::Poly`] and
+/// [`Op::Inside`]:
 /// a polymorphic type made of any operand over any universal variable
 /// (also one that an enclosing type binds already), and the body of a
 /// polymorphic type as an operand of its own, where its variables are
@@ -256,12 +257,19 @@ pub(crate) enum Op {
     Univar,
     /// A new operand: `newty (Tpoly (body, [variable]))` at the current
     /// level, of the operand `body` and the operand `variable` when that
-    /// one's representative is a universal variable; otherwise `Tpoly
-    /// (body, [])`. Nothing checks that the variable is free of another
-    /// binder: a case binds one variable twice, which is how a binder is
-    /// already known when `enter_poly` meets it (compiler/ml/ctype.ml:
-    /// 1656-1669). [`UNIVARS`].
+    /// one's representative is a universal variable; otherwise the
+    /// operand `body` itself. Nothing checks that the variable is free of
+    /// another binder: a case binds one variable twice, which is how a
+    /// binder is already known when `enter_poly` meets it
+    /// (compiler/ml/ctype.ml:1656-1669). [`UNIVARS`].
     Poly(u16, u16),
+    /// A new operand: what [`Op::Slot`] gives, and while that is a
+    /// polymorphic type without variables, its body. So the operand is
+    /// never a `Tpoly (t, [])`: against a type that is not polymorphic
+    /// OCaml refuses one (`_, _ -> raise (Unify [])`, compiler/ml/ctype.ml:
+    /// 2424) and the old checker unifies its body (section 8.6, decision
+    /// 49), and no generated case is to meet that. [`UNIVARS`].
+    Inside(u16, u8),
 }
 
 /// A deliberately wrong new side, for the tests that prove the harness sees
@@ -623,7 +631,7 @@ pub(crate) fn operations(rng: &mut Rng, plan: impl Into<Plan>, values: usize) ->
         } else if plan.has(UNIVARS) && rng.below(4) == 0 {
             // [`UNIVARS`]: a universal variable, a polymorphic type over
             // one (three times in four over an operand that is a
-            // universal variable, when there is one), a slot of an
+            // universal variable, when there is one), what is inside an
             // operand (the body of a polymorphic type, its variables).
             match rng.below(4) {
                 0 => Op::Univar,
@@ -636,7 +644,7 @@ pub(crate) fn operations(rng: &mut Rng, plan: impl Into<Plan>, values: usize) ->
                     };
                     Op::Poly(body, variable)
                 }
-                _ => Op::Slot(operand(rng), rng.below(3) as u8),
+                _ => Op::Inside(operand(rng), rng.below(3) as u8),
             }
         } else if plan.has(BUILD) && rng.below(4) == 0 {
             match rng.below(4) {
@@ -662,7 +670,12 @@ pub(crate) fn operations(rng: &mut Rng, plan: impl Into<Plan>, values: usize) ->
         };
         match op {
             Op::Instance(_) | Op::Copy(_) | Op::Expand(_) => operands += 1,
-            Op::Var | Op::Tuple(..) | Op::Child(..) | Op::Slot(..) | Op::Poly(..) => operands += 1,
+            Op::Var
+            | Op::Tuple(..)
+            | Op::Child(..)
+            | Op::Slot(..)
+            | Op::Poly(..)
+            | Op::Inside(..) => operands += 1,
             Op::Univar => {
                 univars.push(operands as u16);
                 operands += 1;
@@ -678,7 +691,8 @@ pub(crate) fn operations(rng: &mut Rng, plan: impl Into<Plan>, values: usize) ->
                         Op::Unify(tuple, var)
                     };
                     follow = vec![unify, Op::Var, Op::Tuple(operand(rng), operand(rng))];
-                } else if (plan.has(REFS) || plan.has(CELLS)) && operands != 0 && rng.below(2) == 0 {
+                } else if (plan.has(REFS) || plan.has(CELLS)) && operands != 0 && rng.below(2) == 0
+                {
                     // [`REFS`], [`CELLS`]: what follows an `EndDef`, last
                     // first: the newest operand becomes an annotation's
                     // type (a generic row over a row variable that is
@@ -819,6 +833,27 @@ fn old_children(ctx: &TypeContext, ty: TypeExprRef) -> Vec<TypeExprRef> {
     }
 }
 
+/// O(arity): [`Op::Slot`] on the old side: slot `n mod arity` of an
+/// object, a field or a polymorphic type, otherwise the child
+/// [`old_children`] gives, or the type itself when it has none.
+fn old_slot(ctx: &TypeContext, ty: TypeExprRef, n: u8) -> TypeExprRef {
+    let desc: TypeDesc = *ctx.get_desc(ctx.repr(ty));
+    let children = match desc {
+        TypeDesc::Tobject { fields } => vec![fields],
+        TypeDesc::Tfield { typ, rest, .. } => vec![typ, rest],
+        TypeDesc::Tpoly { body, vars } => {
+            let mut slots = vec![body];
+            slots.extend(ctx.type_list(vars).iter());
+            slots
+        }
+        _ => old_children(ctx, ty),
+    };
+    match children.len() {
+        0 => ty,
+        len => children[n as usize % len],
+    }
+}
+
 /// What a form has numbered so far on the old side: the nodes, and under
 /// [`CELLS`] the classes of mutability cells.
 struct OldSeen {
@@ -945,28 +980,23 @@ pub(crate) fn run_old(program: &Program, plan: impl Into<Plan>, ops: &[Op]) -> O
             }
             Op::Univar => operands.push(ctx.new_univar(None)),
             Op::Poly(body, variable) => {
-                let variable = operands[variable as usize];
+                let (body, variable) = (operands[body as usize], operands[variable as usize]);
                 let bound = matches!(*ctx.get_desc(ctx.repr(variable)), TypeDesc::Tunivar(_));
-                let variables = if bound { vec![variable] } else { Vec::new() };
-                operands.push(ctx.new_poly(operands[body as usize], variables));
-            }
-            Op::Slot(operand, n) => {
-                let ty = operands[operand as usize];
-                let desc: TypeDesc = *ctx.get_desc(ctx.repr(ty));
-                let children = match desc {
-                    TypeDesc::Tobject { fields } => vec![fields],
-                    TypeDesc::Tfield { typ, rest, .. } => vec![typ, rest],
-                    TypeDesc::Tpoly { body, vars } => {
-                        let mut slots = vec![body];
-                        slots.extend(ctx.type_list(vars).iter());
-                        slots
-                    }
-                    _ => old_children(ctx, ty),
-                };
-                operands.push(match children.len() {
-                    0 => ty,
-                    len => children[n as usize % len],
+                operands.push(if bound {
+                    ctx.new_poly(body, vec![variable])
+                } else {
+                    body
                 });
+            }
+            Op::Slot(operand, n) => operands.push(old_slot(ctx, operands[operand as usize], n)),
+            Op::Inside(operand, n) => {
+                let mut ty = old_slot(ctx, operands[operand as usize], n);
+                while let TypeDesc::Tpoly { body, vars } = *ctx.get_desc(ctx.repr(ty))
+                    && ctx.type_list(vars).iter().next().is_none()
+                {
+                    ty = body;
+                }
+                operands.push(ty);
             }
         }
         if let Some(trace) = failure {
@@ -1309,7 +1339,10 @@ impl New {
                     super::segment::ExtraDescriptor::Poly
                 );
             if poly {
-                self.checker.g.lists.swap(node.b as usize + 1, node.b as usize + 2);
+                self.checker
+                    .g
+                    .lists
+                    .swap(node.b as usize + 1, node.b as usize + 2);
             }
         }
     }
@@ -1352,6 +1385,27 @@ impl New {
                 .map(|index| g.lists[(node.b + index) as usize])
                 .collect(),
             _ => Vec::new(),
+        }
+    }
+
+    /// O(arity): [`Op::Slot`] on the new side; see `old_slot`.
+    fn slot(&mut self, ty: Ty, n: u8) -> Ty {
+        use super::segment::{EXTENDED, ExtraDescriptor};
+        let at = self.checker.g.repr(ty);
+        let node = self.checker.g.nodes[at.0 as usize];
+        let listed = node.head & EXTENDED != 0
+            && node.arity() != 0
+            && matches!(
+                self.checker.extras.descriptors[node.a as usize],
+                ExtraDescriptor::Object | ExtraDescriptor::Field { .. } | ExtraDescriptor::Poly
+            );
+        if listed {
+            return self.checker.g.lists[(node.b + u32::from(n) % node.arity()) as usize];
+        }
+        let children = self.children(ty);
+        match children.len() {
+            0 => ty,
+            len => children[n as usize % len],
         }
     }
 
@@ -1510,18 +1564,24 @@ impl New {
                 self.operands.push(ty);
             }
             Op::Poly(body, variable) => {
-                let (body, variable) = (self.operands[body as usize], self.operands[variable as usize]);
+                let (body, variable) = (
+                    self.operands[body as usize],
+                    self.operands[variable as usize],
+                );
                 let variable_root = self.checker.g.repr(variable);
-                let bound = self.checker.is_univar(variable_root);
-                let a = self.checker.extras.descriptors.len() as u32;
-                self.checker.extras.descriptors.push(super::segment::ExtraDescriptor::Poly);
-                let (level, b) = (self.checker.g.level, self.checker.g.lists.len() as u32);
-                self.checker.g.lists.push(body);
-                if bound {
-                    self.checker.g.lists.push(variable);
+                if !self.checker.is_univar(variable_root) {
+                    self.operands.push(body);
+                    return Ok(());
                 }
+                let a = self.checker.extras.descriptors.len() as u32;
+                self.checker
+                    .extras
+                    .descriptors
+                    .push(super::segment::ExtraDescriptor::Poly);
+                let (level, b) = (self.checker.g.level, self.checker.g.lists.len() as u32);
+                self.checker.g.lists.extend_from_slice(&[body, variable]);
                 let ty = self.checker.g.push(Node {
-                    head: TUPLE | super::segment::EXTENDED | (1 + u32::from(bound)) << 8,
+                    head: TUPLE | super::segment::EXTENDED | 2 << 8,
                     level,
                     a,
                     b,
@@ -1529,26 +1589,27 @@ impl New {
                 self.operands.push(ty);
             }
             Op::Slot(operand, n) => {
-                use super::segment::{EXTENDED, ExtraDescriptor};
-                let ty = self.operands[operand as usize];
-                let at = self.checker.g.repr(ty);
-                let node = self.checker.g.nodes[at.0 as usize];
-                let listed = node.head & EXTENDED != 0
-                    && node.arity() != 0
-                    && matches!(
-                        self.checker.extras.descriptors[node.a as usize],
-                        ExtraDescriptor::Object | ExtraDescriptor::Field { .. } | ExtraDescriptor::Poly
-                    );
-                let slot = if listed {
-                    self.checker.g.lists[(node.b + u32::from(n) % node.arity()) as usize]
-                } else {
-                    let children = self.children(ty);
-                    match children.len() {
-                        0 => ty,
-                        len => children[n as usize % len],
-                    }
-                };
+                let slot = self.slot(self.operands[operand as usize], n);
                 self.operands.push(slot);
+            }
+            Op::Inside(operand, n) => {
+                use super::segment::{EXTENDED, ExtraDescriptor};
+                let mut ty = self.slot(self.operands[operand as usize], n);
+                loop {
+                    let at = self.checker.g.repr(ty);
+                    let node = self.checker.g.nodes[at.0 as usize];
+                    let bare = node.head & EXTENDED != 0
+                        && node.arity() == 1
+                        && matches!(
+                            self.checker.extras.descriptors[node.a as usize],
+                            ExtraDescriptor::Poly
+                        );
+                    if !bare {
+                        break;
+                    }
+                    ty = self.checker.g.lists[node.b as usize];
+                }
+                self.operands.push(ty);
             }
         }
         Ok(())
@@ -3099,7 +3160,8 @@ mod tests {
     /// R3x.
     #[test]
     fn ignored_tests_name_the_slices_they_reach() {
-        let before: [(&str, &[&str]); 9] = [
+        let before: [(&str, &[&str]); 10] = [
+            ("R3p", &["R3m", "R3e"]),
             ("R3k", &[]),
             ("R3m", &[]),
             ("R3e", &["R3m"]),
@@ -3196,7 +3258,9 @@ mod tests {
                 let mut reaches: Vec<&str> = Vec::new();
                 let full = body.contains("Tier::Full");
                 let rows = body.contains("OBJECTS") || body.contains("VARIANTS");
-                for (needle, reached) in [("OBJECTS", "R3e"), ("VARIANTS", "R3f"), ("UNIVAR", "R3g")] {
+                for (needle, reached) in
+                    [("OBJECTS", "R3e"), ("VARIANTS", "R3f"), ("UNIVAR", "R3g")]
+                {
                     if full && body.contains(needle) {
                         reaches.push(reached);
                     }
@@ -3313,7 +3377,11 @@ mod tests {
         let ctx = &old.ctx;
         let mut forms = Vec::new();
         for generic in [true, false] {
-            let more = if generic { ctx.new_generic_var(None) } else { ctx.new_var(None) };
+            let more = if generic {
+                ctx.new_generic_var(None)
+            } else {
+                ctx.new_var(None)
+            };
             let either = |constant: bool, types: Vec<TypeExprRef>| RowField::Reither {
                 constant,
                 types,
@@ -3381,7 +3449,7 @@ mod tests {
     /// such a field only after `reify` (compiler/ml/ctype.ml:1841-1855,
     /// R3h) or `rigidify` (ctype.ml:3139-3147, R3i), or when `instance_poly
     /// ~fixed:false` copies it (ctype.ml:1061-1069). The scanner is
-    /// checked on the hand-built row of the test above. Observed: 547 of
+    /// checked on the hand-built row of the test above. Observed: 546 of
     /// the 4,000 cases print a fixed row.
     #[test]
     fn no_generated_case_has_a_fixed_row_with_an_unmatched_field() {
@@ -3501,7 +3569,11 @@ mod tests {
             old(7),
             "0 = &0[0]fn(&1[0]obj{&2[0]f: &3[0]poly(&4[0]fn(&5[0][fixed #A(&6[0]int) | &7[0]!]) => @5; @7); &8[0]nil}) => &9[0]unit\n"
         );
-        assert!(old(8).contains("[closed fixed #A?m(&6[0]int ) #B?cm() | &7[0]!]"), "{}", old(8));
+        assert!(
+            old(8).contains("[closed fixed #A?m(&6[0]int ) #B?cm() | &7[0]!]"),
+            "{}",
+            old(8)
+        );
         for value in 0..10u16 {
             let ops = [
                 Op::BeginDef,
@@ -3521,7 +3593,8 @@ mod tests {
                 Op::Poly(9, 9),
                 Op::Lower(5, 0),
             ];
-            compare(u64::from(value), &program, plan, &ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
+            compare(u64::from(value), &program, plan, &ops, Fault::None)
+                .unwrap_or_else(|e| panic!("{e}"));
         }
     }
 
@@ -3535,7 +3608,10 @@ mod tests {
         let plan = Plan::new(Tier::Kernel, OBJECTS | VARIANTS | UNIVARS);
         let report = compare(5, &program, plan, &[Op::Instance(2)], Fault::SwappedBinders)
             .expect_err("the swapped binders must be seen");
-        assert!(report.contains("seed 5") && report.contains("; @6 @5)"), "{report}");
+        assert!(
+            report.contains("seed 5") && report.contains("; @6 @5)"),
+            "{report}"
+        );
         // One bound variable: nothing to swap, nothing reported.
         compare(6, &program, plan, &[Op::Instance(0)], Fault::SwappedBinders)
             .unwrap_or_else(|e| panic!("{e}"));
@@ -3544,7 +3620,9 @@ mod tests {
             for sequence in 0..100u64 {
                 let case_seed = seed * 1_000_003 + sequence;
                 let (program, ops) = case(plan, case_seed);
-                found += usize::from(compare(case_seed, &program, plan, &ops, Fault::SwappedBinders).is_err());
+                found += usize::from(
+                    compare(case_seed, &program, plan, &ops, Fault::SwappedBinders).is_err(),
+                );
             }
         }
         println!("swapped binders found: {found}");
@@ -3556,15 +3634,20 @@ mod tests {
     /// what exists on both sides today.
     #[test]
     fn kernel_tier_agrees_on_universal_variables() {
-        let coverage = run_cases(Plan::new(Tier::Kernel, OBJECTS | VARIANTS | UNIVARS), 1, 100, 100);
+        let coverage = run_cases(
+            Plan::new(Tier::Kernel, OBJECTS | VARIANTS | UNIVARS),
+            1,
+            100,
+            100,
+        );
         assert_eq!(coverage.cases, 10_000);
         assert!(coverage.sharing * 4 > coverage.cases * 3, "{coverage:?}");
     }
 
     /// The old side of the plan with universal variables runs today and is
     /// not vacuous (observed, 1,200 cases: 978 without a failed
-    /// unification and 222 with one; 822 print a universal variable, 299 a
-    /// fixed row; in 239 a case that prints a universal variable unifies
+    /// unification and 222 with one; 821 print a universal variable, 299 a
+    /// fixed row; in 238 a case that prints a universal variable unifies
     /// and nothing fails).
     #[test]
     fn old_side_of_the_univar_plan_is_not_vacuous() {
@@ -3584,12 +3667,17 @@ mod tests {
                 bound += usize::from(polymorphic);
                 rows += usize::from(outcome.form.contains("fixed "));
                 unified += usize::from(
-                    polymorphic && outcome.failed.is_none() && ops.iter().any(|op| matches!(op, Op::Unify(..))),
+                    polymorphic
+                        && outcome.failed.is_none()
+                        && ops.iter().any(|op| matches!(op, Op::Unify(..))),
                 );
             }
         }
         println!("univar plan, old side: {ok} {failed} {bound} {rows} {unified}");
-        assert!(ok >= 500 && failed >= 200 && bound >= 300 && rows >= 20 && unified >= 100, "{ok} {failed} {bound} {rows} {unified}");
+        assert!(
+            ok >= 500 && failed >= 200 && bound >= 300 && rows >= 20 && unified >= 100,
+            "{ok} {failed} {bound} {rows} {unified}"
+        );
     }
 
     /// Universal variables are paired by position in the binder lists,
@@ -3662,7 +3750,13 @@ mod tests {
         let trace = trace_of(&crossed.form, 2);
         assert_eq!(trace.len(), 9, "{trace:?}");
         assert_eq!(trace[6..], ["@6 ~ @19", "@7 ~ @20", "@8 ~ @21"]);
-        assert!(crossed.form.contains("&19[0]poly(&20[0]fn(&21[0]!b, &22[0]!a) => @21; @21)"), "{}", crossed.form);
+        assert!(
+            crossed
+                .form
+                .contains("&19[0]poly(&20[0]fn(&21[0]!b, &22[0]!a) => @21; @21)"),
+            "{}",
+            crossed.form
+        );
     }
 
     /// The order question of `enter_poly` (section 8.6, decision 49;
@@ -3679,21 +3773,33 @@ mod tests {
     ///   one (an arrow against `u'`): the same trace. A test after the
     ///   bodies would end at the pair of the arrow and `u'`.
     /// - The right inner body names only its own variable: no escape, the
-    ///   bodies unify, and `u`, `u'` and `w'` are one node.
+    ///   bodies unify and `u` is a link to `w'`; `u'`, which no body
+    ///   names, stays a node of its own.
     #[test]
     fn old_checker_tests_escape_before_the_bodies() {
         let program = compile(UNIVAR_PROGRAM.to_string());
         let plan = Plan::new(Tier::Full, UNIVAR_PLAN | EXPLAIN);
-        for ops in [known_binder(0, [6, 5]), known_binder(1, [6, 5]), known_binder(0, [5, 6])] {
+        for ops in [
+            known_binder(0, [6, 5]),
+            known_binder(1, [6, 5]),
+            known_binder(0, [5, 6]),
+        ] {
             let escaped = run_old(&program, plan, &ops);
             assert_eq!(escaped.failed, Some(10));
             assert_eq!(trace_of(&escaped.form, 10), ["@5 ~ @10", "@4 ~ @9"]);
-            assert_eq!((escaped.unchanged, escaped.changed), (1, 0), "{}", escaped.form);
+            assert_eq!(
+                (escaped.unchanged, escaped.changed),
+                (1, 0),
+                "{}",
+                escaped.form
+            );
         }
         let paired = run_old(&program, plan, &known_binder(0, [6, 6]));
         assert_eq!(paired.failed, None);
         assert!(
-            paired.form.ends_with("4 = &5[0]poly(@4; &6[0]!)\n5 = @6\n6 = @0\n7 = @3\n8 = @4\n9 = @5\n"),
+            paired
+                .form
+                .ends_with("4 = &5[0]poly(@4; &6[0]!)\n5 = @6\n6 = @0\n7 = @3\n8 = @4\n9 = @5\n"),
             "{}",
             paired.form
         );
@@ -3732,15 +3838,27 @@ mod tests {
              2 = &10[0]fn(&11[0]obj{&12[0]f: &13[0]poly(&14[0]fn(&15[0][fixed #A(&16[0]int) | &17[0]!]) => @15; @17); &18[0]nil}) => &19[0]unit\n\
              3 = &20[0]fn(&21[0]obj{&22[0]f: &23[0]poly(&24[0]fn(&25[0][fixed #A(&26[0]int) | &27[0]!]) => @25; @27); &28[0]nil}) => &29[0]unit\n"
         );
-        let ops = [Op::BeginDef, Op::Instance(7), Op::EndDef, Op::GeneralizeStructure(0), Op::Copy(0)];
+        let ops = [
+            Op::BeginDef,
+            Op::Instance(7),
+            Op::EndDef,
+            Op::GeneralizeStructure(0),
+            Op::Copy(0),
+        ];
         assert_eq!(
             run_old(&program, plan, &ops).form,
             "0 = &0[G]fn(&1[G]obj{&2[G]f: &3[G]poly(&4[G]fn(&5[G][fixed #A(&6[G]int) | &7[G]!]) => @5; @7); &8[G]nil}) => &9[G]unit\n\
              1 = &10[0]fn(&11[0]obj{&12[0]f: &13[0]poly(&14[0]fn(&15[0][fixed #A(&16[0]int) | &17[0]!]) => @15; @17); &18[0]nil}) => &19[0]unit\n"
         );
         // Both sides agree on these today: no unification.
-        compare(0, &program, Plan::new(Tier::Kernel, OBJECTS | VARIANTS | UNIVARS), &ops, Fault::None)
-            .unwrap_or_else(|e| panic!("{e}"));
+        compare(
+            0,
+            &program,
+            Plan::new(Tier::Kernel, OBJECTS | VARIANTS | UNIVARS),
+            &ops,
+            Fault::None,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
     }
 
     /// What a failed unification of two polymorphic types leaves
@@ -3762,7 +3880,13 @@ mod tests {
     fn old_checker_keeps_the_links_of_a_failed_polymorphic_unification() {
         let program = compile(UNIVAR_PROGRAM.to_string());
         let plan = Plan::new(Tier::Full, UNIVAR_PLAN | EXPLAIN);
-        let ops = [Op::Instance(2), Op::BeginDef, Op::Instance(4), Op::Unify(0, 1), Op::Unify(1, 0)];
+        let ops = [
+            Op::Instance(2),
+            Op::BeginDef,
+            Op::Instance(4),
+            Op::Unify(0, 1),
+            Op::Unify(1, 0),
+        ];
         let old = run_old(&program, plan, &ops);
         assert_eq!(failed_traces(&old.form), [(3, 6)]);
         assert_eq!(trace_of(&old.form, 3).last(), Some(&"@5 ~ @6"));
@@ -3829,4 +3953,81 @@ mod tests {
         Op::Var,
         Op::Unify(9, 4),
     ];
+
+    /// The fixed cases of [`UNIVAR_PROGRAM`] on both sides: every case
+    /// the tests `old_checker_*` above observe, in `Mode::Success` and, for
+    /// those whose trace has no pair of `occur_univar`, in the explaining
+    /// mode (the old checker makes that pair's variable at the current
+    /// level, OCaml and the new side at the generic level: section 8.6,
+    /// decision 49).
+    /// Reaches: R3m, R3e, R3f, R3n, R3g.
+    #[test]
+    #[ignore = "R3g build"]
+    fn universal_variables_agree_on_fixed_cases() {
+        let program = compile(UNIVAR_PROGRAM.to_string());
+        let mut cases: Vec<Vec<Op>> = Vec::new();
+        for (left, right) in [
+            (0, 1),
+            (2, 3),
+            (2, 4),
+            (0, 2),
+            (5, 5),
+            (5, 6),
+            (7, 7),
+            (7, 8),
+            (8, 8),
+        ] {
+            cases.push(two(left, right).to_vec());
+            cases.push(two(right, left).to_vec());
+        }
+        for (second, right) in [(0, [6, 5]), (1, [6, 5]), (0, [5, 6]), (0, [6, 6])] {
+            cases.push(known_binder(second, right).to_vec());
+        }
+        cases.push(vec![
+            Op::Instance(2),
+            Op::BeginDef,
+            Op::Instance(4),
+            Op::Unify(0, 1),
+            Op::Unify(1, 0),
+        ]);
+        // The seven operations that make the operands of `FREE_UNIVAR`,
+        // then one unification each: a variable bound to the whole
+        // polymorphic type, two universal variables with no scope open.
+        let base = &FREE_UNIVAR[..7];
+        cases.push(then(base, &[Op::Var, Op::Unify(7, 4)]));
+        cases.push(then(base, &[Op::Slot(5, 1), Op::Univar, Op::Unify(7, 8)]));
+        let explained = cases.len();
+        // Each refusal of `occur_univar`, as the last operation.
+        cases.push(then(base, &[Op::Unify(6, 5)]));
+        cases.push(then(base, &[Op::Unify(5, 6)]));
+        cases.push(then(base, &[Op::Slot(5, 1), Op::Unify(6, 7)]));
+        for (index, ops) in cases.iter().enumerate() {
+            let plan = Plan::new(Tier::Full, UNIVAR_PLAN);
+            compare(index as u64, &program, plan, ops, Fault::None)
+                .unwrap_or_else(|e| panic!("{e}"));
+            if index < explained {
+                let plan = Plan::new(Tier::Full, UNIVAR_PLAN | EXPLAIN);
+                compare(index as u64, &program, plan, ops, Fault::None)
+                    .unwrap_or_else(|e| panic!("{e}"));
+            }
+        }
+    }
+
+    /// 10,000 cases of everything on programs with polymorphic fields,
+    /// universal variables, rows whose row variable is bound and
+    /// hand-made polymorphic types, and 10,000 more with made nodes: the
+    /// acceptance test of R3g. A case that differs is read against the
+    /// OCaml arm before either side is followed (decision 18); a seed
+    /// where the old checker departs from ctype.ml is pinned with
+    /// `run_cases_except` and its cause by the reviewer, not by the
+    /// builder.
+    /// Reaches: R3m, R3e, R3f, R3n, R3g.
+    #[test]
+    #[ignore = "R3g build"]
+    fn univar_plan_agrees_on_generated_cases() {
+        let coverage = run_cases(Plan::new(Tier::Full, UNIVAR_PLAN), 1, 100, 100);
+        assert_eq!(coverage.cases, 10_000);
+        assert!(coverage.failures * 10 > coverage.cases, "{coverage:?}");
+        run_cases(Plan::new(Tier::Full, UNIVAR_PLAN | BUILD), 1, 100, 100);
+    }
 }

@@ -103,6 +103,14 @@ pub struct TypeTable {
     pub manifests: Vec<Manifest>,
     pub roots: Vec<Ty>,
     pub newtypes: Vec<Newtype>,
+    /// Per row of `rows`: the first of its `arity` bytes of `occurs`, or
+    /// `NONE` for a type whose declaration the table does not have.
+    pub variances: Vec<u32>,
+    /// One byte per parameter of a declared type: 1 when the parameter
+    /// may occur positively or negatively (`Variance.(mem May_pos v ||
+    /// mem May_neg v)`, compiler/ml/ctype.ml:1596), 0 for a parameter the
+    /// type does not use.
+    pub occurs: Vec<u8>,
     /// Number of rows with a non-zero `scope`: when 0, lowering never tests a
     /// scope ([`Checker::lower`]).
     pub scoped: u32,
@@ -137,11 +145,30 @@ impl TypeTable {
         for path in pools.paths.iter() {
             #[cfg(test)]
             super::steps::tick();
-            let row = match own_declaration(segment, &by_name, *path) {
+            let declaration = own_declaration(segment, &by_name, *path);
+            let row = match declaration {
                 Some(declaration) => table.declaration_row(segment, declaration),
                 None => ABSTRACT,
             };
             table.rows.push(row);
+            // The variance of the declaration's parameters, for the two
+            // walks that read it ([`TypeTable::may_occur`]).
+            let details =
+                declaration.and_then(|declaration| pools.type_details.get(declaration as usize));
+            let variance = match details {
+                Some(details) if row.arity != 0 => {
+                    let range = details.variance;
+                    let start = table.occurs.len() as u32;
+                    let bytes =
+                        &pools.variance[range.start as usize..(range.start + range.len) as usize];
+                    table
+                        .occurs
+                        .extend(bytes.iter().map(|&bits| u8::from(bits & MAY_OCCUR != 0)));
+                    start
+                }
+                _ => NONE,
+            };
+            table.variances.push(variance);
         }
         table.mark_manifests(segment);
         table
@@ -261,6 +288,21 @@ impl TypeTable {
         }
     }
 
+    /// O(1): whether `occur_univar` and `univars_escape` visit argument
+    /// `parameter` of a constructor of type `type_index`
+    /// (`Variance.(mem May_pos v || mem May_neg v)`, compiler/ml/ctype.ml:
+    /// 1591-1599, 1639-1647): true for a type whose declaration the table
+    /// does not have (`with Not_found -> List.iter (occur_rec bound) tl`),
+    /// which is every type of another unit until R5a fills its rows. Two
+    /// bounds tests and two loads. (R3g)
+    #[inline]
+    pub fn may_occur(&self, type_index: u32, parameter: u32) -> bool {
+        match self.variances.get(type_index as usize) {
+            Some(&start) if start != NONE => self.occurs[(start + parameter) as usize] != 0,
+            _ => true,
+        }
+    }
+
     /// O(1): one bounds test and one 16-byte load. (R3b)
     #[inline]
     pub fn info(&self, type_index: u32) -> TypeInfo {
@@ -270,6 +312,12 @@ impl TypeTable {
         }
     }
 }
+
+/// The bits of a stored variance that say the parameter may occur
+/// positively or negatively (`Variance::bits`, types/variance.rs:
+/// `MayPos` is 1 and `MayNeg` is 2; `tests::sizes` checks it against
+/// `Variance::get_upper`).
+const MAY_OCCUR: u8 = 1 | 2;
 
 /// The row of a type with no manifest and no scope.
 const ABSTRACT: TypeInfo = TypeInfo {
@@ -1939,6 +1987,11 @@ mod tests {
 
     #[test]
     fn sizes() {
+        let upper = |bits: u8| crate::types::Variance::from_bits(bits).get_upper();
+        assert_eq!(
+            (upper(MAY_OCCUR), upper(!MAY_OCCUR)),
+            ((true, true), (false, false))
+        );
         assert_eq!(std::mem::size_of::<TypeInfo>(), 16);
         assert_eq!(std::mem::size_of::<Manifest>(), 24);
         assert_eq!(std::mem::size_of::<Newtype>(), 8);
