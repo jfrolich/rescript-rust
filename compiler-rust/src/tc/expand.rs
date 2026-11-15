@@ -16,8 +16,8 @@
 //! node stays `NONE`.
 
 use super::graph::{ARROW, CONSTR, GENERIC, LINK, NONE, Node, TUPLE, Ty, VAR};
-use super::segment::{DeclarationKind, PathRow, Segment, SignatureKind, UNIT_SCOPE};
-use super::template::Template;
+use super::segment::{DeclarationKind, EXTENDED, PathRow, Segment, SignatureKind, UNIT_SCOPE};
+use super::template::{Template, slots};
 use super::unify::{Checker, Clash, Frame, FrameKind};
 
 /// [`TypeInfo::flags`]: the type has a manifest that expands publicly.
@@ -227,14 +227,34 @@ impl TypeTable {
             }
             let template = self.manifests[row.manifest as usize].template;
             let start = template.nodes as usize;
-            for node in &segment.template_nodes[start..start + template.node_len as usize] {
+            let nodes = &segment.template_nodes[start..start + template.node_len as usize];
+            let descriptors = &segment.signature.descriptor_extras;
+            // The template's slots, taken at its first extended node: a
+            // manifest without one reads no slot.
+            let mut own = None;
+            for &node in nodes {
                 #[cfg(test)]
                 super::steps::tick();
-                if node.tag() == CONSTR
-                    && node.arity() != 0
-                    && self.info(node.a).flags & (ABBREV | PRIVATE | ALIAS) != 0
+                let flag = if node.tag() == CONSTR {
+                    let inherits = node.arity() != 0
+                        && self.info(node.a).flags & (ABBREV | PRIVATE | ALIAS) != 0;
+                    if inherits { INHERITS } else { 0 }
+                } else if node.head & EXTENDED != 0
+                    && super::rows::ends_open_row(
+                        nodes,
+                        *own.get_or_insert_with(|| {
+                            slots(&segment.template_lists, &segment.template_pools, template)
+                        }),
+                        descriptors,
+                        node,
+                    )
                 {
-                    self.rows[index].flags |= INHERITS;
+                    OPEN_ROW
+                } else {
+                    0
+                };
+                self.rows[index].flags |= flag;
+                if self.rows[index].flags & (INHERITS | OPEN_ROW) == INHERITS | OPEN_ROW {
                     break;
                 }
             }

@@ -1951,7 +1951,6 @@ fn object_scheme(c: &mut Checker, open: bool, fields: u32) -> (Template, Vec<Ty>
 /// checker: `old_checker_duplicates_the_cells_of_an_open_row`.
 /// Reaches: R3e.
 #[test]
-#[ignore = "R3e build"]
 fn an_instance_duplicates_the_cells_of_an_open_row() {
     let field_of = |c: &mut Checker, root: Ty, index: u32| {
         let object = child(c, root, 0);

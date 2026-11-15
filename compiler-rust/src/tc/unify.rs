@@ -1094,11 +1094,18 @@ impl Checker {
                 let target = Ty(self.saved[slot + 1].a);
                 self.g.write(target, descriptor);
             } else if frame.kind == FrameKind::Fields {
-                // `rest1.desc <- d1; rest2.desc <- d2` (ctype.ml:2513-2517).
+                // `rest1.desc <- d1; rest2.desc <- d2` (ctype.ml:2513-2517):
+                // the descriptor only. A rest lowered before the clash (by
+                // unify2's `update_level`, ctype.ml:2283-2285) keeps its level.
                 let slot = frame.extra as usize;
-                let (d1, d2) = (self.saved[slot], self.saved[slot + 1]);
-                self.g.write(frame.left, d1);
-                self.g.write(frame.right, d2);
+                for (rest, saved) in [(frame.left, slot), (frame.right, slot + 1)] {
+                    let level = self.g.nodes[rest.0 as usize].level;
+                    let descriptor = Node {
+                        level,
+                        ..self.saved[saved]
+                    };
+                    self.g.write(rest, descriptor);
+                }
             }
         }
     }

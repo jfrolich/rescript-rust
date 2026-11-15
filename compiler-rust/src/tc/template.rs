@@ -323,7 +323,6 @@ pub(crate) struct TemplatePools {
 /// a stored constructor or tuple node counts from the start of this slice,
 /// not from the start of the pool: a reader of a stored node's children
 /// goes through here. A zero-node template has no slots.
-#[allow(dead_code)] // R3e removes this line with the first production reader
 pub(crate) fn slots<'a>(lists: &'a [Ty], pools: &[TemplatePools], template: Template) -> &'a [Ty] {
     let start = pools.get(template.pools as usize).map_or(0, |row| row.lists as usize);
     &lists[start..start + template.list_len as usize]

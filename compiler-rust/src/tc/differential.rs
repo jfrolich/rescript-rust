@@ -2492,7 +2492,6 @@ mod tests {
     /// instance and of a copy, the promotion, the clash of a closed row.
     /// Reaches: R3m, R3e.
     #[test]
-    #[ignore = "R3e build"]
     fn cells_agree_on_fixed_cases() {
         let program = compile(CELL_PROGRAM.to_string());
         let plan = Plan::new(Tier::Full, OBJECTS | CELLS);

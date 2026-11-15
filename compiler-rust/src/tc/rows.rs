@@ -151,14 +151,38 @@ impl Extras {
 /// the answer in its own row (a `TypeInfo` flag for a manifest; the
 /// harness per value) and calls [`Checker::instance_open`] or
 /// [`Checker::instance`] by it. (R3e)
-#[allow(unused_variables)]
 pub fn template_has_open_row(
     nodes: &[Node],
     lists: &[Ty],
     descriptors: &[ExtraDescriptor],
     template: Template,
 ) -> bool {
-    todo!("R3e")
+    let nodes = &nodes[template.nodes as usize..(template.nodes + template.node_len) as usize];
+    nodes.iter().any(|&node| {
+        #[cfg(test)]
+        super::steps::tick();
+        ends_open_row(nodes, lists, descriptors, node)
+    })
+}
+
+/// O(1): whether stored node `node` of a template is a field whose rest
+/// is a variable of the template (a reference with bit 30 to a `VAR` node).
+/// `nodes` are the template's own nodes, `lists` its own slots
+/// (`template::slots`). One descriptor load, and one list load for a field.
+pub(super) fn ends_open_row(
+    nodes: &[Node],
+    lists: &[Ty],
+    descriptors: &[ExtraDescriptor],
+    node: Node,
+) -> bool {
+    const RELATIVE: u32 = 1 << 30;
+    if node.head & EXTENDED == 0
+        || !matches!(descriptors[node.a as usize], ExtraDescriptor::Field { .. })
+    {
+        return false;
+    }
+    let rest = lists[node.b as usize + 1];
+    rest.0 != NONE && rest.0 & RELATIVE != 0 && nodes[(rest.0 & !RELATIVE) as usize].tag() == VAR
 }
 
 impl Checker {
