@@ -310,7 +310,10 @@ fn a_list_constructor_takes_the_operands_since_its_mark() {
         |u| {
             let callee = var(&mut u.b, u.f);
             let x = var(&mut u.b, u.x);
-            built(plain::node(&mut u.b, View::JNew { callee, args: &[x] }, 0));
+            // As `external.rs` builds it today: `aux` 1, the argument
+            // list is present (`new F()`, not `new F`).
+            let args = u.b.lists.push(&[x]);
+            built(u.b.call_from_list(callee, args, None));
         },
     );
     for mutability in [0, 1] {
@@ -800,6 +803,126 @@ fn steps(build: fn(&mut Rows, &mut Unit, usize) -> E, size: usize) -> u64 {
 }
 
 #[test]
+fn a_node_is_read_by_its_id() {
+    let mut u = unit();
+    let mut r = Rows::default();
+    let a = &mut u.b;
+    // `f(x, "s")`, `new f(y)` and a flat call: the callee is what its owner
+    // calls, an argument is not.
+    let f = r.var(a, u.f);
+    let callee = r.id(a, Rows::of(&f));
+    let mark = r.mark();
+    let x = r.var(a, u.x);
+    let argument = r.id(a, Rows::of(&x));
+    r.push(x);
+    let text = r.str(a, u.name);
+    assert_eq!(r.str_of(a, Rows::of(&text)), Some(u.name));
+    r.push(text);
+    assert_eq!((r.owner(a, callee), r.is_callee(a, callee)), (None, false));
+    let call = r.call(a, f, mark, u.call);
+    let id = r.id(a, Rows::of(&call));
+    assert_eq!((r.owner(a, callee), r.owner(a, argument), r.owner(a, id)), (Some(id), Some(id), None));
+    assert!(r.is_callee(a, callee) && !r.is_callee(a, argument));
+    assert_eq!((r.kind_of(a, id), r.kind_of(a, callee)), (Kind::Call, Kind::Var));
+    for flat in [false, true] {
+        let f = r.var(a, u.f);
+        let callee = r.id(a, Rows::of(&f));
+        let y = r.var(a, u.y);
+        let argument = r.id(a, Rows::of(&y));
+        let built = if flat {
+            r.flat_call(a, f, y)
+        } else {
+            let mark = r.mark();
+            r.push(y);
+            r.new_(a, f, mark)
+        };
+        assert!(r.is_callee(a, callee) && !r.is_callee(a, argument));
+        assert_eq!(r.owner(a, argument), Some(r.id(a, Rows::of(&built))));
+    }
+    // An operand of anything else is not a callee, the first one neither.
+    let (l, right) = (r.var(a, u.x), r.var(a, u.y));
+    let first = r.id(a, Rows::of(&l));
+    let sum = r.bin_plain(a, BinOp::Plus, l, right);
+    assert!(!r.is_callee(a, first));
+    assert_eq!(r.owner(a, first), Some(r.id(a, Rows::of(&sum))));
+    // Only a string literal has an interned text to give.
+    let template = r.mark();
+    let template = r.template(a, &[crate::string_literal::template_from_semantic("ab")], template);
+    let number = r.int_literal(a, 1);
+    for other in [&template, &number, &sum] {
+        assert_eq!(r.str_of(a, Rows::of(other)), None);
+    }
+    // The owner of a statement's value is the statement, and the id of a
+    // statement has a kind.
+    let value = a.new_node(View::SExp { value: Rows::node(sum) }, 0);
+    assert_eq!(r.kind_of(a, value.0), Kind::Exp);
+}
+
+#[test]
+fn a_pool_list_of_operands_is_pushed_in_order() {
+    same(
+        |r, u| {
+            let f = r.var(&mut u.b, u.f);
+            let nodes = [var(&mut u.b, u.x), plain::int(&mut u.b, 1), var(&mut u.b, u.y)];
+            let list = u.b.lists.push(&nodes);
+            let steps = r.steps();
+            let mark = r.mark();
+            r.push_list(&u.b, list);
+            assert_eq!((r.mark(), r.steps()), (Mark(mark.0 + 3), steps));
+            done(r.call(&mut u.b, f, mark, u.call));
+        },
+        |u| {
+            let callee = var(&mut u.b, u.f);
+            let args = [var(&mut u.b, u.x), plain::int(&mut u.b, 1), var(&mut u.b, u.y)];
+            let _list = u.b.lists.push(&args);
+            built(plain::node(&mut u.b, View::JCall { callee, args: &args, info: u.call }, 0));
+        },
+    );
+}
+
+/// Releasing costs one step per node released, whichever function
+/// releases: `release` of a nest, `keep_operand` on a comma of the nest
+/// and a variable (the nest is the operand not kept), and `drop_operands`
+/// with the nest on the operand stack.
+#[test]
+fn releasing_ten_thousand_nodes_costs_ten_times_a_thousand() {
+    type Release = fn(&mut Rows, &mut Unit, E);
+    let ways: [Release; 3] = [
+        |r, u, nest| r.release(&mut u.b, nest),
+        |r, u, nest| {
+            let x = r.var(&mut u.b, u.x);
+            let comma = r.seq(&mut u.b, nest, x);
+            let before = r.steps();
+            let kept = r.keep_operand(&mut u.b, comma, 1);
+            // The comma, and every node of the nest.
+            assert!(r.steps() - before > 1);
+            r.release(&mut u.b, kept);
+        },
+        |r, u, nest| {
+            let mark = r.mark();
+            r.push(nest);
+            r.drop_operands(&mut u.b, mark);
+        },
+    ];
+    for (way, release) in ways.iter().enumerate() {
+        let released = |calls: usize| {
+            let mut u = unit();
+            let mut r = Rows::default();
+            let nest = nest(&mut r, &mut u, calls);
+            let nodes = u.b.nodes.len() as u64;
+            let before = r.steps();
+            release(&mut r, &mut u, nest);
+            // At least one step per node of the nest.
+            assert!(r.steps() - before >= nodes, "way {way}: {} steps, {nodes} nodes", r.steps() - before);
+            r.steps() - before
+        };
+        let (one, two, ten) = (released(1_000), released(2_000), released(10_000));
+        assert_eq!(ten - one, 9 * (two - one), "way {way}: {one} {two} {ten}");
+        assert!(two > one);
+    }
+}
+
+#[test]
 fn ten_thousand_nodes_cost_ten_times_a_thousand() {
     for build in [nest, wide] {
         let (one, two, ten) = (steps(build, 1_000), steps(build, 2_000), steps(build, 10_000));
@@ -848,5 +971,101 @@ fn the_operand_stack_is_the_one_allocation_of_rows() {
     for width in [1_000, 10_000] {
         let (through, direct) = allocations(width);
         assert!(through < direct, "width {width}: {through} through the interface, {direct} direct");
+    }
+}
+
+#[test]
+fn a_node_keeps_its_row_over_other_operands() {
+    // `args.rs` holds the operands of a literal or of a member callee in
+    // variables and builds the node again over the variables: the same
+    // kind, `aux`, information and location, a new row.
+    for shape in 0..5u8 {
+        let arity = if matches!(shape, 0 | 4) { 1 } else { 2 };
+        same(
+            |r, u| {
+                let a = &mut u.b;
+                let (x, y) = (r.var(a, u.x), r.var(a, u.y));
+                let mark = r.mark();
+                let mut old = match shape {
+                    0 => {
+                        r.release(a, y);
+                        r.optional(a, x, true)
+                    }
+                    4 => {
+                        r.release(a, y);
+                        r.dot(a, x, u.name, FieldPos::new(Some(1)), false)
+                    }
+                    _ => {
+                        r.push(x);
+                        r.push(y);
+                        match shape {
+                            1 => r.array(a, mark, 1),
+                            2 => r.block(a, mark, u.tuple, 1),
+                            _ => r.object(a, mark, u.keys),
+                        }
+                    }
+                };
+                r.locate(a, &mut old, crate::lambda::LamLoc::NONE);
+                let before = r.steps();
+                assert_eq!(r.take_operands(a, &mut old), arity);
+                assert_eq!(r.steps() - before, 1 + u64::from(arity));
+                for _ in 0..arity {
+                    let operand = r.pop();
+                    r.release(a, operand);
+                }
+                let mark = r.mark();
+                for _ in 0..arity {
+                    let f = r.var(a, u.f);
+                    r.push(f);
+                }
+                let kind = r.kind(a, Rows::of(&old));
+                let new = r.refill(a, old, mark);
+                assert_eq!(r.kind(a, Rows::of(&new)), kind);
+                assert!(r.located(a, Rows::of(&new)));
+                assert_eq!(r.arity(a, Rows::of(&new)), arity);
+                done(new);
+            },
+            |u| {
+                let (tuple, keys, name) = (u.tuple, u.keys, u.name);
+                let b = &mut u.b;
+                let (x, y) = (var(b, u.x), var(b, u.y));
+                fn view(shape: u8, values: &[NodeId], tuple: JsId, keys: JsId, property: StrId) -> (u16, View<'_>) {
+                    match shape {
+                        0 => (1, View::JOptional { value: values[0] }),
+                        1 => (1, View::JArray { values }),
+                        2 => (1, View::JBlockLit { values, info: tuple }),
+                        3 => (0, View::JObject { values, info: keys }),
+                        _ => (0, View::JDot { object: values[0], property, position: FieldPos::new(Some(1)) }),
+                    }
+                }
+                let view = |values| view(shape, values, tuple, keys, name);
+                let operands = [x, y];
+                if arity == 1 {
+                    b.release(y);
+                }
+                let (aux, old_view) = view(&operands[..arity as usize]);
+                let old = plain::node(b, old_view, aux);
+                b.set_cold(old, crate::bir::Cold { loc: crate::lambda::LamLoc::NONE, comment: None });
+                let mut flags = b.node(old).flags();
+                flags.0 |= crate::bir::NodeFlags::JS_LOC_PRESENT;
+                b.nodes[old.index()].set_flags(flags);
+                for &operand in &operands[..arity as usize] {
+                    b.detach(operand);
+                }
+                for &operand in &operands[..arity as usize] {
+                    b.release(operand);
+                }
+                let first = var(b, u.f);
+                let fresh = [first, if arity == 2 { var(b, u.f) } else { first }];
+                let (aux, new_view) = view(&fresh[..arity as usize]);
+                let new = plain::node(b, new_view, aux);
+                b.set_cold(new, crate::bir::Cold { loc: crate::lambda::LamLoc::NONE, comment: None });
+                let mut flags = b.node(new).flags();
+                flags.0 |= crate::bir::NodeFlags::JS_LOC_PRESENT;
+                b.nodes[new.index()].set_flags(flags);
+                b.release(old);
+                built(new);
+            },
+        );
     }
 }

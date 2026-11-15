@@ -41,7 +41,7 @@
 //! the flip). It is a parameter of every function, beside the
 //! implementation, so that a call borrows two fields of the lowering's
 //! state and not the state.
-use crate::bir::{Bir, ConstId, FuncId, ImportId, JsId, NodeId, StrId, VarId};
+use crate::bir::{Bir, ConstId, FuncId, ImportId, JsId, ListId, NodeId, StrId, VarId};
 use crate::emit::row::Kind;
 use crate::js_ir::BinOp;
 use crate::js_ir::arena::FieldPos;
@@ -80,10 +80,11 @@ pub trait Js {
     /// Room for `operands` pending operands: at most one allocation, none
     /// when the capacity is there.
     fn reserve(&mut self, operands: usize);
-    /// Unit operations so far: one per function of this trait that builds,
-    /// takes apart, copies or releases, and one per operand of a list
-    /// constructor, of [`Js::unpack_rev`], and per node [`Js::copy`] and
-    /// [`Js::release`] visit. A reader counts nothing. O(1).
+    /// Unit operations so far: one per function of this trait that builds
+    /// or takes apart, one per operand of a list constructor and of
+    /// [`Js::unpack_rev`], one per node [`Js::copy`] copies, and one per
+    /// node released ([`Js::release`], [`Js::drop_operands`],
+    /// [`Js::keep_operand`]). A reader counts nothing. O(1).
     fn steps(&self) -> u64;
 
     // ---- Reading ----
@@ -113,9 +114,7 @@ pub trait Js {
     /// them (`+12`, `-0`). O(1).
     fn bigint<'r>(&self, a: &'r Pools, r: Self::Ref<'r>) -> Option<&'r str>;
     /// The text of a string literal, or of a template literal without
-    /// interpolation (its cooked text; `None` when it has none, as
-    /// `State::primitive_string` reads it today).
-    /// O(1).
+    /// interpolation (its cooked text; `None` when it has none). O(1).
     fn text<'r>(&self, a: &'r Pools, r: Self::Ref<'r>) -> Option<&'r str>;
     /// The variable of a reference. O(1).
     fn var_of(&self, a: &Pools, r: Self::Ref<'_>) -> Option<VarId>;
@@ -139,6 +138,24 @@ pub trait Js {
     /// A:90 `runs_no_code`. One step per member of a chain of field reads
     /// with a position, to its base.
     fn runs_no_code(&self, a: &Pools, r: Self::Ref<'_>) -> bool;
+    /// The interned text of a string literal; `None` for any other node, a
+    /// template too. O(1): no text is read or interned. (T6m: the key of
+    /// a pair in `Pmakedict` becomes a property key.)
+    fn str_of(&self, a: &Pools, r: Self::Ref<'_>) -> Option<StrId>;
+
+    // ---- Reading by id (T6q: `export.rs` climbs from a site) ----
+
+    /// The id of the node that `id` is an operand of, or of the statement
+    /// that holds it; `None` for a node nothing holds. `id` is an
+    /// expression's or a statement's ([`Js::id`], a site's node, a
+    /// variable's binder). O(1).
+    fn owner(&self, a: &Pools, id: u32) -> Option<u32>;
+    /// The kind of the node `id`, an expression's or a statement's. O(1).
+    fn kind_of(&self, a: &Pools, id: u32) -> Kind;
+    /// Whether the node `id` is what its owner calls: the callee of a
+    /// call, of a `new` or of a flat call, or the tag of a tagged
+    /// template. O(1): one read of the owner, no scan of its operands.
+    fn is_callee(&self, a: &Pools, id: u32) -> bool;
 
     // ---- Leaves (plain; O(1) unless said) ----
 
@@ -201,10 +218,17 @@ pub trait Js {
     fn push(&mut self, operand: Self::E);
     /// The last operand pushed. O(1). Panics on an empty stack.
     fn pop(&mut self) -> Self::E;
+    /// Transition (deleted by T6x with its last call): the nodes of a pool
+    /// list of detached J expressions that a caller that is not converted
+    /// built, pushed as operands in order. One move per node; counts no
+    /// step, as [`Js::push`] counts none. (T6p: `external.rs` gets the
+    /// operands of a call from `prim.rs` as a pool list.)
+    fn push_list(&mut self, a: &Pools, list: ListId);
     /// `callee(operands since mark)` with the call information `info`. One
     /// step per operand.
     fn call(&mut self, a: &mut Pools, callee: Self::E, mark: Mark, info: JsId) -> Self::E;
-    /// `new callee(operands since mark)`. One step per operand.
+    /// `new callee(operands since mark)`: the argument list is present,
+    /// with no operand too. One step per operand.
     fn new_(&mut self, a: &mut Pools, callee: Self::E, mark: Mark) -> Self::E;
     /// `tag` applied to the template `info` with the operands since mark.
     /// One step per operand.
@@ -228,8 +252,23 @@ pub trait Js {
     fn keep_operand(&mut self, a: &mut Pools, e: Self::E, index: u32) -> Self::E;
     /// The operands of `e` pushed onto the operand stack last operand
     /// first, so that [`Js::pop`] gives them in order; the node itself is
-    /// released. Returns their number. One step per operand.
+    /// released. Returns their number. One step, and one per operand.
     fn unpack_rev(&mut self, a: &mut Pools, e: Self::E) -> u32;
+    /// The operands of `e` moved onto the operand stack last operand
+    /// first, as [`Js::unpack_rev`], but the node stays: `e` is a node
+    /// without operands, to be given to [`Js::refill`] or released and to
+    /// nothing else. Returns their number. One step, and one per operand.
+    /// (T6p: `args.rs`, a literal or a member callee whose operands are
+    /// held in variables.)
+    fn take_operands(&mut self, a: &mut Pools, e: &mut Self::E) -> u32;
+    /// The node `e` over the operands pushed since `mark` in place of the
+    /// ones [`Js::take_operands`] took: the same kind, `aux`, call
+    /// information, location, comment and character; plain (no rule), its
+    /// facts those the plain constructor of its kind computes. `e` is
+    /// released. One step. Defined for an `Optional`, an `Array`, a
+    /// `BlockLit`, an `Object` and a `Dot`; panics on any other kind and
+    /// when the number of operands differs from the number taken.
+    fn refill(&mut self, a: &mut Pools, e: Self::E, mark: Mark) -> Self::E;
     /// A copy of the node `r` and everything below it
     /// (`Bir::copy_subtree` without a renaming: the binders inside it are
     /// fresh). One step per node copied.

@@ -1,0 +1,1 @@
+- Three trees T6: the lowering's interface gains the functions that probes of the next three conversion slices (T6m, T6n, T6p) needed, each with its body on rows and a test, and `THREE_TREES.md` 11.9 gains their build prompts with the rules for slices built side by side.

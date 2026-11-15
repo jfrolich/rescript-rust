@@ -73,7 +73,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// O(s) for the child's emitted statements: seal them once into a list.
     /// For loops the end and start are lowered in allocation order, then their
-    /// saved blocks are attached in execution order without moving statements.
+    /// saved lists are attached in execution order without moving statements.
     pub(super) fn loop_child(&mut self, cx: Cx, frame: Loop, index: usize, child: Probed) -> Probed {
         let mut out = self.realize(cx, child);
         let body_index = if self.loops[frame.0 as usize].nodes[2].is_some() { 2 } else { 1 };

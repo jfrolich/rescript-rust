@@ -17,18 +17,24 @@
 //! | a leaf | `plain::node` with the leaf's view (`int_literal`: `plain::int`; `string`: `plain::string`; `boolean`: `plain::boolean`); `aux` is the unit bit of `undefined` and the statement bit of `raw`, 0 otherwise |
 //! | `bin_plain`, `seq` | `plain::bin`, `plain::seq` |
 //! | the other plain functions | `plain::node` with the view of the same name; `aux` is the tag bit of `dot`, the identity bit of `optional`, 0 otherwise |
-//! | a list constructor | `plain::node` with `&self.operands[mark..]` as the list (the callee or tag is not on the stack), then the stack is cut back to the mark; `aux` is the mutability of `array` and `block` and the children bit of `jsx` |
+//! | a list constructor | `plain::node` with `&self.operands[mark..]` as the list (the callee or tag is not on the stack), then the stack is cut back to the mark; `aux` is the mutability of `array` and `block`, the children bit of `jsx`, and 1 for `new_` (its argument list is present, as `Bir::call_from_list` without call information writes it) |
 //! | a rule function | the function of `norm.rs` named in THREE_TREES 11.4, "T6: the interface" (c); `template` gives `jm12_interpolated_template` the operands since the mark and cuts the stack back; `project` returns `Err(value)` when `jm11_projection` returns `None` (it has consumed nothing then) |
+//! | `id` | the row's id (`NodeId::0`) |
 //! | `kind` | `kind_of` of the node's operation |
 //! | `has` | `NodeFlags` has `PURE` 1, `STRICT` 8, `DELAY_SAFE` 16, `J_SUBEXPR` 32; the interface's bits are 1, 2, 4, 8: `(f & 1) \| ((f >> 2) & 0b1110)`. `DUPLICABLE` is `Bir::j_duplicable` of the node, read only when the flag is asked for |
 //! | `aux` | the node's `aux`, truncated to 8 bits |
 //! | `int` | `plain::int_of` |
-//! | `text` | the text of a `JStr`; for a `JTemplate` whose `aux` is 1, the cooked text of its one part, `None` when the part has none (the body of `State::primitive_string` today; `plain::string_of` differs: it gives the empty string) |
+//! | `text` | the text of a `JStr`; for a `JTemplate` whose `aux` is 1, the cooked text of its one part, `None` when the part has none (`plain::string_of` differs: it gives the empty string) |
 //! | `is_float`, `bigint` | the constant of a `JNumber`: `Constant::Float`; the text of `Constant::BigInt` |
 //! | `var_of`, `qualified_of`, `member_of`, `function_of`, `info_of` | the fields of the view of that kind; `None` for any other kind |
 //! | `arity`, `operand` | `View::child_count`, `View::child_at` |
 //! | `located` | `NodeFlags::JS_LOC_PRESENT` |
 //! | `runs_no_code` | `facts::runs_no_code` |
+//! | `str_of` | the `text` of a `JStr`; `None` otherwise |
+//! | `owner` | `Bir::parents` of the node |
+//! | `kind_of` (by id) | `kind_of` of the node's operation |
+//! | `is_callee` | the owner is a `JCall`, `JFlatCall` or `JNew` whose `callee` is the node, or a `JTagged` whose `tag` is |
+//! | `push_list` | `Rows::operands` extended by `Lists::get(list)` |
 //! | `keep_operand` | `child_at`, `Bir::detach` of the operand, `Bir::release` of the node |
 //! | `unpack_rev` | for the operands from the last to the first: `detach`, push; then `release` of the node |
 //! | `copy` | `Bir::copy_subtree(r, &[])` |
@@ -37,19 +43,24 @@
 //! | `assume_strict` | `NodeFlags::STRICT` set on the node |
 //! | `locate` | `Bir::set_cold` with `loc` and the comment the node has, and `JS_LOC_PRESENT` set |
 //! | `comment` | `Bir::set_cold` with the comment and the location the node has (`LamLoc::NONE` when it has none); the flags are not touched |
+//! | `take_operands` | each child `Bir::detach`ed and pushed on `Rows::operands`, last first; the node stays |
+//! | `refill` | `plain::node` of the view of `e`'s operation (`JOptional`, `JArray`, `JBlockLit`, `JObject`, `JDot`) over the operands since the mark with `e`'s `aux`, information, property and position; `plain::copy_cold` from `e`; `Bir::release` of `e` |
 //! | `copy_cold` | `plain::copy_cold`, then the character of `from` (`Node::js_char`) set on `to` when `from` has one |
 //!
-//! Steps (`Js::steps`): one for every function that builds a node, takes
-//! one apart or releases one (`without_pure` and `project` too, whatever
-//! they return); a list constructor, `template` and `drop_operands` one
-//! more per operand since the mark; `unpack_rev` one more per operand;
-//! `copy` one per node the arena grew by, at least one. A reader, `mark`,
+//! Steps (`Js::steps`): one for every function that builds a node or takes
+//! one apart (`without_pure` and `project` too, whatever they return); a
+//! list constructor and `template` one more per operand since the mark;
+//! `unpack_rev` one more per operand; `copy` one per node the arena grew
+//! by, at least one. Releasing costs one step per node released, which is
+//! the number `Bir::release` returns: `release` counts that number,
+//! `drop_operands` the sum of it over the operands since the mark, and
+//! `keep_operand` one and that number for the node it takes apart. A reader, `mark`,
 //! `push`, `pop`, `reserve`, and the four functions of cold data and
 //! `assume_strict` count nothing.
 use crate::bir::j::{facts, norm, plain};
 use crate::bir::lower::js::{Js, Mark, Pools};
 use crate::bir::{
-    Cold, ConstId, Constant, FuncId, ImportId, JsId, JsPayload, NodeFlags, NodeId, Op, StrId,
+    Cold, ConstId, Constant, FuncId, ImportId, JsId, JsPayload, ListId, NodeFlags, NodeId, Op, StrId,
     VarId, View,
 };
 use crate::emit::row::{Kind, flag};
@@ -271,6 +282,33 @@ impl Js for Rows {
     fn runs_no_code(&self, a: &Pools, r: NodeId) -> bool {
         facts::runs_no_code(a, r)
     }
+    #[inline]
+    fn str_of(&self, a: &Pools, r: NodeId) -> Option<StrId> {
+        match a.view(r) {
+            View::JStr { text } => Some(text),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn owner(&self, a: &Pools, id: u32) -> Option<u32> {
+        a.parents[id as usize].map(|owner| owner.0)
+    }
+    #[inline]
+    fn kind_of(&self, a: &Pools, id: u32) -> Kind {
+        kind_of(a.node(NodeId(id)).op())
+    }
+    #[inline]
+    fn is_callee(&self, a: &Pools, id: u32) -> bool {
+        let Some(owner) = a.parents[id as usize] else { return false };
+        match a.view(owner) {
+            View::JCall { callee, .. } | View::JFlatCall { callee, .. } | View::JNew { callee, .. } => {
+                callee.0 == id
+            }
+            View::JTagged { tag, .. } => tag.0 == id,
+            _ => false,
+        }
+    }
 
     #[inline]
     fn var(&mut self, a: &mut Pools, var: VarId) -> E {
@@ -415,6 +453,10 @@ impl Js for Rows {
     fn pop(&mut self) -> E {
         E(self.operands.pop().expect("an operand"))
     }
+    #[inline]
+    fn push_list(&mut self, a: &Pools, list: ListId) {
+        self.operands.extend_from_slice(a.lists.get(list));
+    }
     fn call(&mut self, a: &mut Pools, callee: E, mark: Mark, info: JsId) -> E {
         let start = self.since(mark);
         let id = plain::node(
@@ -436,7 +478,8 @@ impl Js for Rows {
                 callee: callee.0,
                 args: &self.operands[start..],
             },
-            0,
+            // The argument list is present, with no argument too.
+            1,
         );
         self.cut(start, id)
     }
@@ -502,10 +545,9 @@ impl Js for Rows {
     }
 
     fn keep_operand(&mut self, a: &mut Pools, e: E, index: u32) -> E {
-        self.steps += 1;
         let kept = a.view(e.0).child_at(index as usize);
         a.detach(kept);
-        a.release(e.0);
+        self.steps += 1 + u64::from(a.release(e.0));
         E(kept)
     }
     fn unpack_rev(&mut self, a: &mut Pools, e: E) -> u32 {
@@ -518,6 +560,35 @@ impl Js for Rows {
         }
         a.release(e.0);
         count as u32
+    }
+    fn take_operands(&mut self, a: &mut Pools, e: &mut E) -> u32 {
+        let count = a.view(e.0).child_count();
+        self.steps += 1 + count as u64;
+        for index in (0..count).rev() {
+            let operand = a.view(e.0).child_at(index);
+            a.detach(operand);
+            self.operands.push(operand);
+        }
+        count as u32
+    }
+    fn refill(&mut self, a: &mut Pools, e: E, mark: Mark) -> E {
+        self.steps += 1;
+        let start = self.since(mark);
+        let aux = a.node(e.0).aux();
+        let values = &self.operands[start..];
+        assert_eq!(values.len(), a.view(e.0).child_count(), "as many operands as were taken");
+        let view = match a.view(e.0) {
+            View::JOptional { .. } => View::JOptional { value: values[0] },
+            View::JArray { .. } => View::JArray { values },
+            View::JBlockLit { info, .. } => View::JBlockLit { values, info },
+            View::JObject { info, .. } => View::JObject { values, info },
+            View::JDot { property, position, .. } => View::JDot { object: values[0], property, position },
+            _ => panic!("refill of a kind that is not a literal or a member read"),
+        };
+        let id = plain::node(a, view, aux);
+        plain::copy_cold(a, e.0, id);
+        a.release(e.0);
+        self.cut(start, id)
     }
     fn copy(&mut self, a: &mut Pools, r: NodeId) -> E {
         let before = a.nodes.len();
@@ -543,14 +614,12 @@ impl Js for Rows {
         self.leaf(a, view, aux)
     }
     fn release(&mut self, a: &mut Pools, e: E) {
-        self.steps += 1;
-        a.release(e.0);
+        self.steps += u64::from(a.release(e.0));
     }
     fn drop_operands(&mut self, a: &mut Pools, mark: Mark) {
         let start = self.since(mark);
-        self.steps += 1 + (self.operands.len() - start) as u64;
         for &operand in &self.operands[start..] {
-            a.release(operand);
+            self.steps += u64::from(a.release(operand));
         }
         self.operands.truncate(start);
     }

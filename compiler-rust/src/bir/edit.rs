@@ -1283,24 +1283,32 @@ impl Bir {
     }
 
     /// Release a detached subtree. Attached nodes must be edited with `replace`.
-    pub fn release(&mut self, root: NodeId) {
+    /// Returns the number of nodes of the subtree it freed, counted by the
+    /// one walk that frees them (a level-L `Let` that dies of it is freed
+    /// by the cascade and is not in the count). One step per node freed.
+    pub fn release(&mut self, root: NodeId) -> u32 {
         self.node(root);
         assert!(
             self.parents[root.index()].is_none(),
             "release requires a detached root"
         );
-        self.release_nodes(root, None, true);
+        let freed = self.release_nodes(root, None, true);
         self.drain_dead();
+        freed
     }
-    fn release_nodes(&mut self, root: NodeId, keep: Option<NodeId>, free_root: bool) {
+    /// Returns the number of nodes it visited: those it freed, and the
+    /// root when `free_root` is false.
+    fn release_nodes(&mut self, root: NodeId, keep: Option<NodeId>, free_root: bool) -> u32 {
         let root_weight = if self.bulk { 1 } else { self.weight(root) };
         let mut stack = std::mem::take(&mut self.release_stack);
         debug_assert!(stack.is_empty());
         stack.push((root, root_weight));
+        let mut visited = 0;
         while let Some((id, weight)) = stack.pop() {
             if Some(id) == keep {
                 continue;
             }
+            visited += 1;
             for i in 0..self.view(id).child_count() {
                 let child = self.view(id).child_at(i);
                 // A child detached from this node, or adopted by another,
@@ -1331,6 +1339,7 @@ impl Bir {
             }
         }
         self.release_stack = stack;
+        visited
     }
     fn drain_dead(&mut self) {
         // A worklist avoids recursive cascades when releasing one value kills another.
