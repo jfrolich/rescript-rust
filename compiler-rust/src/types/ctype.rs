@@ -38,7 +38,7 @@ use crate::ident::Ident;
 use crate::types::path::PathView;
 use std::sync::Arc;
 
-fn in_process_module_resolution_env(
+pub(crate) fn in_process_module_resolution_env(
     ctx: &TypeContext,
 ) -> Option<crate::cmi::persistent_env::PersistentEnv> {
     // OCaml compiler/ml/env.ml:1000-1007 resolves persistent units through

@@ -1,0 +1,15 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/modtype_abbreviation_alias_missing_value.res[0m:[2m14:5[0m
+
+  12 [2m│[0m   let x: int
+  13 [2m│[0m   let y: int
+  [1;31m14[0m [2m│[0m } = [1;31mM[0m
+  15 [2m│[0m 
+
+  Signature mismatch:
+  
+  The value `y` is required but not provided.
+  
+  Expected declaration ([36m/.../fixtures/modtype_abbreviation_alias_missing_value.res[0m:[2m13:3-12[0m):
+    let y: int
