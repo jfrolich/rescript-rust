@@ -2174,11 +2174,12 @@ it stops and reports a reproduction.
 | R3k | In the explaining mode a lowering whose retry clashes keeps its levels and adds the escaping pair to the trace (8.6, decision 14) | `expand.rs` | R3d | R3m | 60 |
 | R3m | Inherited memo entries: a constructor with arguments copied by an expansion links to the expanding node of the same type, through a pool of rows found by slot 0 (8.6, decisions 16 and 26) | `expand.rs` | R3b | R3k | 150 |
 | R3e | Objects and fields; mutability cells as nodes and their duplicate at an instance; two polymorphic types without variables (8.6, decision 27) | `rows.rs`, `unify.rs`, `expand.rs` | R3c, R3m | nothing | 600 |
-| R3f | Polymorphic variant rows | `rows.rs` | R3e | R3g | 600 |
+| R3f | Polymorphic variant rows: the references of `Reither` fields as slots of the variant node, `unify_row`, `unify_row_field` (8.6, decision 34) | `rows.rs` | R3e | R3g | 600 |
+| R3n | The references of a copied variant row: shared when the row variable is, new otherwise (8.6, decision 34) | `rows.rs`, `expand.rs` | R3e, R3f | R3g | 150 |
 | R3g | Universal variables, polymorphic types, packages | `rows.rs` | R3e | R3f | 500 |
-| R3h | Pattern mode, equations, `reify`, `mcomp` | `rows.rs`, `unify.rs` | R3f, R3g | R3i, R3j | 600 |
-| R3i | `moregeneral`, `equal`, `matches` | `relate.rs` | R3f, R3g | R3h, R3j | 600 |
-| R3j | Subtyping without the declaration-directed coercions | `relate.rs` | R3f, R3g | R3h, R3i | 600 |
+| R3h | Pattern mode, equations, `reify`, `mcomp` | `rows.rs`, `unify.rs` | R3n, R3g | R3i, R3j | 600 |
+| R3i | `moregeneral`, `equal`, `matches` | `relate.rs` | R3n, R3g | R3h, R3j | 600 |
+| R3j | Subtyping without the declaration-directed coercions | `relate.rs` | R3n, R3g | R3h, R3i | 600 |
 | K2 | The hot paths of unification, no behaviour change (8.7) | `unify.rs` | R3c | every slice above | 150 |
 
 State after the second skeleton turn (kept for the record; the third
@@ -2215,6 +2216,24 @@ and two edits of the binding walk in `unify.rs`, and the arm of two
 polymorphic types without variables (decision 22). R3f is not designed
 (decision 28): its row in the table stands, its generated-case test
 exists, and it has no prompt. R3g to R3j are not started.
+
+State after the fourth skeleton turn (trunk `c4e9326eba`). Merged: R3a,
+R3b, R3d, R3c, K1, R3k, R3m, K2. Designed with tests and a prompt, not
+built: R3e (third turn), and in this turn:
+
+| Slice | Decision | Tests | Run in this turn |
+|---|---|---|---|
+| R3f | 34 | ten ignored (nine hand-built, one of fixed cases against the old checker), three that run today (`rows::tests`) | the old checker's side of every fact it can show (five tests that run today); the ignored tests were **not** run: no prototype of R3f was built |
+| R3n | 34 | one ignored (fixed cases and 30,000 generated cases against the old checker) | the old checker's side; the new side was not run |
+
+R3f was cut in two where the work divides: R3f is everything a
+unification does to a row, R3n is what a copy does to the references of
+one (a slice name has three characters, which the check of ignored tests
+reads, so the second part is R3n and not "R3f-2"). The generated cases
+are R3n's acceptance, not R3f's: every generated sequence copies, and a
+copy of an opened row is wrong until R3n. R3f is accepted on its
+hand-built tests and on fixed cases that make no copy. R3g to R3j are
+not designed; R3g was not started in this turn.
 
 The ignored tests are checked mechanically
 (`differential::tests::ignored_tests_name_the_slices_they_reach`): each
@@ -2488,7 +2507,25 @@ arm; (3) the route crosses rows; (4) the duplicate of an instance and of
 a copy. Failure: recursion; a descriptor row written in place; a pass
 over an instance nobody asked for.
 
-**R3f to R3j.** Functions: every signature of `rows.rs` and `relate.rs`
+**R3f.** Functions: `Checker::{open_row, flatten_row, merge_rows,
+unify_row, row_is_fixed, set_more, resolve, settle, resolve_either,
+unify_row_field, join_either, row_field_end, row_end, trace_row,
+row_trace_pair}`. End state: no `todo!("R3f")`; the nine tests of
+`r3_tests.rs` under "R3f"; `differential::tests::variant_rows_agree_on_
+fixed_cases`. Commits: (1) opening, flattening, merging; (2) `unify_row`
+with `set_more`, the resolution to absent, the static row, the trace
+rows; (3) `unify_row_field` and what it needs. Failure: a `variants`,
+`row_fields` or descriptor row written in place; a reference in a pool
+of its own; a resolution that is not a `Graph::write` of a reference
+node; recursion.
+
+**R3n.** Functions: `Checker::copy_refs`, and two lines of
+`Checker::copy`. End state: no `todo!("R3n")`;
+`differential::tests::variant_plan_agrees_on_generated_cases`. One
+commit. Failure: a pass over a copy when the graph has no descriptor
+row; a hash map from a reference to its copy.
+
+**R3g to R3j.** Functions: every signature of `rows.rs` and `relate.rs`
 carrying the slice's name. End state for each: no `todo!` with its name;
 its generator extension and old-side vacuity test (first commit); the
 `Full` tier at 10,000 cases with the extension on. R3e: fields in OCaml's
@@ -2714,6 +2751,99 @@ field; a pass over an instance's nodes when the caller did not ask for
 one; sorting by name index; an allocation per field (the scratch vectors
 of Extras keep their capacity); a change in graph.rs, level.rs or
 template.rs. At most 600 lines.
+```
+
+```text
+R3f. Read section 8.6, decisions 17, 18, 28 and 34; compiler/ml/ctype.ml
+366-397, 1704-1713, 2541-2730; compiler/ml/btype.ml 112-170, 229-241,
+742-744; src/tc/rows.rs whole (the comment "The reference of a variant
+field" is the layout; field_repr, field_types and published_slots are
+built and tested: use them, do not write a second reader); in
+src/tc/unify.rs unify3, extended_children, run_frames, explain_failure.
+R3e is merged before you start.
+
+First edit: Checker::open_row in src/tc/rows.rs; after it
+r3_tests::opening_a_row_gives_each_reither_field_a_reference passes.
+Each body is what its doc comment says, step for step, in that order.
+
+Commits, in order; remove the `#[ignore = "R3f build"]` of a test in the
+commit after which it passes, and no other ignore:
+(1) open_row, flatten_row, merge_rows, row_is_fixed.
+    Passes: opening_a_row_gives_each_reither_field_a_reference.
+(2) unify_row, set_more, resolve, settle, row_end, trace_row.
+    Passes: an_open_row_takes_the_tags_it_lacks,
+    a_closed_row_refuses_a_tag_and_the_empty_type_is_a_clash (neither
+    has a common tag, so neither reaches a body of commit 3).
+(3) unify_row_field, resolve_either, join_either, row_field_end,
+    row_trace_pair. Passes: the six other tests of r3_tests.rs under
+    "R3f" and differential::tests::variant_rows_agree_on_fixed_cases.
+Remove `#[allow(unused_imports)]` above `use super::unify::FrameKind` in
+rows.rs when you first use it.
+
+Steps: one `#[cfg(test)] super::steps::tick()` per field in open_row and
+flatten_row, per step of the merge, per field of a rest in set_more, per
+holder in settle and in resolve_either, per field in row_end. Name
+comparisons of the sort are not steps.
+
+Relations to hold: every tc:: test that passed before passes unchanged,
+with the same pinned seeds; rows_of_ten_thousand_tags_are_linear; a
+changed row that is not fixed makes exactly one node whatever it gains;
+no descriptor, variant or row-field row that existed before an operation
+differs after it (run_new asserts it on every generated case, the
+hand-built tests with assert_rows_kept); unifying a pair of variant
+nodes a second time makes no node.
+
+Do NOT run or un-ignore differential::tests::variant_plan_agrees_on_
+generated_cases: it is R3n's (a generated case copies a row). If a fixed
+case of variant_rows_agree_on_fixed_cases or a hand-built test differs
+from what your code does, read the OCaml arm the test quotes. If your
+code does what the arm says, stop and report the test with the arm's
+lines: do not bend the code to the test, and do not change the test.
+
+Shortcuts that count as failure: a write to a `variants`, `row_fields`
+or descriptor row that exists; a reference kept anywhere but in a slot
+of the variant node; resolving by anything but Graph::write of the
+reference node (the trail must undo it); a new list for a node that is
+already opened; opening a node that has no Reither field; a recursive
+call of unify, unify_row or unify_row_field (push frames); an
+allocation per field (Extras::row_scratch keeps its capacity); a hash
+map; sorting by name index; walking the holders of a reference when it
+is resolved to Reither more than once; a change in graph.rs, level.rs
+or template.rs. At most 600 lines.
+```
+
+```text
+R3n. Read section 8.6, decision 34 ("What a copy does"); compiler/ml/
+btype.ml 366-392; compiler/ml/ctype.ml 800-870; src/tc/rows.rs: the
+comment "The reference of a variant field", open_row and copy_refs; in
+src/tc/expand.rs Checker::copy and link_memorized; in src/tc/template.rs
+Graph::copy (its queue `work` holds, in order, the node each new node
+was copied from). R3e and R3f are merged before you start.
+
+One commit. First edit: in Checker::copy (src/tc/expand.rs), around the
+call of link_memorized that R3e left there, set `self.extras.copying =
+true;` before it and `self.extras.copying = false;` after it. Then the
+body of Checker::copy_refs, case by case as its doc comment lists them.
+Remove the `#[ignore = "R3n build"]` of differential::tests::
+variant_plan_agrees_on_generated_cases and no other.
+
+Steps: one `#[cfg(test)] super::steps::tick()` per field of the node.
+
+Relations to hold: every tc:: test that passed before passes unchanged,
+with the same pinned seeds; a copy of a graph that has no descriptor row
+takes the steps of Graph::copy; Checker::instance is not changed.
+
+If a generated case differs, read btype.ml:366-392 and ctype.ml:800-870
+first. If your code does what they say, stop and report the seed with
+the lines: do not copy the old checker, and do not pin the seed
+yourself.
+
+Shortcuts that count as failure: a hash map from a reference to its
+copy (the session's nodes are a dense range: use Checker::marks and
+g.work); touching g.work inside the pass; a reference shared by two
+fields of one copied row when `more` was generic; a new reference when
+`more` was not generic; holder rows of the source reused for the copy;
+a change in graph.rs, level.rs or template.rs. At most 150 lines.
 ```
 
 The prompt of K2 is in section 8.7. The last prompt below is superseded by
@@ -3430,6 +3560,209 @@ from this turn.
       field whose `more` the session made needs references of its own
       (`copy_row`, btype.ml:366-392), exactly as a field of an open row
       needs a cell of its own. `template_has_open_row` grows that case.
+
+Decided in the review of the third skeleton turn (trunk `2f5d0c3b8a`).
+They bind the builders and the fourth skeleton turn.
+
+29. **R3f gets a design turn of its own, and it starts in the harness.**
+    The forms of both sides print the class of every `Reither` reference;
+    the old checker is then asked whether two instances of an annotation's
+    type share a resolution. Only after that is the layout chosen, in the
+    direction decision 28 recommends: the reference is a slot of the
+    variant node. No builder starts R3f before that turn is merged. The
+    turn is decision 34.
+30. **The hand-built tests of R3e were not run, and that is accepted**
+    with the rule its prompt has: a test that contradicts the OCaml lines
+    it quotes is reported with those lines, and the reviewer reads them.
+    The R3e builder's first commit is reviewed against the tests before
+    the second is opened.
+31. **`{..@set "x": int}` is printed and not parsed.** It is not part of
+    R3. It is a task of its own only where this compiler and the OCaml
+    compiler differ on it, or as a syntax fix upstream; it is noted for a
+    later check with both compilers.
+32. **Where the text of a field name comes from while a unit is checked
+    is R5a's decision** (the worker's name table, or a copy in
+    `Extras::names`). Nothing in R3 depends on which.
+33. **A chain through n distinct abbreviations costs a walk of up to n
+    rows per copy**, as `find_repr` costs OCaml (ctype.ml:720-724). It is
+    left as it is; chain lengths are read when `both` mode runs on real
+    programs (R5c).
+
+On record for R5 from the same review: mutability cells live in the
+worker's graph, so the publication of a unit writes each field's cell as
+the value of its class representative; the names replay of `both` mode
+does not see cells, and R5c's comparison of signatures is where a wrong
+class shows.
+
+Decided in the fourth skeleton turn (trunk `2f5d0c3b8a`, merged with
+`c4e9326eba`), each with what was run. No prototype of R3f or R3n was
+built in this turn: the expectations of their ignored tests are read from
+the OCaml lines each quotes, and wherever the old checker can show the
+same fact it does, in a test that runs today.
+
+34. **R3f and R3n as designed: variant rows and their references.**
+    - *The harness prints reference classes* (`Plan` bit `REFS`): a field
+      that is still `Reither` prints `#A?^k(types)`, `k` numbering the
+      references at first visit across the operands, on both sides. The
+      operations get `Op::GeneralizeStructure`
+      (`generalize_structure`, ctype.ml:524-544), which is what makes an
+      annotation's type: a generic row over a row variable that is not
+      generic. Self-test: `rows::tests::a_field_is_read_through_its_
+      references`. The deliberately wrong new side is the kernel tier,
+      whose copy is R1's and knows no reference:
+      `reference_classes_show_a_missing_share` (it agrees where
+      references are new, differs on the fixed annotation case, and
+      differs on 70 of 10,000 generated cases).
+    - *Observed on the old checker*, each in a test of
+      `differential::tests` that runs today:
+
+      | Question | Observed | Test |
+      |---|---|---|
+      | Do two instances of a scheme share a reference? | No: `^0 ^1`, then `^2 ^3` | `old_checker_shares_the_references_of_an_annotation` |
+      | Do two copies of a generalized value's type? | No: every copy has its own | same |
+      | Do two copies of an annotation's type? | Yes: both print the source's `^0 ^1` and its row variable; each has its own copy of the argument types | same |
+      | What does a resolution do to the sharers? | Every holder sees it: `#A` becomes present in the source and in the other copy too, each with its *own* argument (`Rpresent (Some (List.hd tl))`, btype.ml:117); with `[#B]`, `#A` is absent for all three and the shared row variable is `Tnil` | `old_checker_resolves_a_shared_reference_for_every_holder` |
+      | What does a copy taken after a resolution have? | The resolved field, and it shares what is still `Reither` | same |
+      | What does a failed unification leave resolved? | Everything it resolved before the clash: `set_row_field` logs `Crow` (btype.ml:742-744) and a failure undoes compression and the linked node's descriptor only | `old_checker_keeps_a_resolution_after_a_failed_unification` |
+      | Is a field resolved to absent still a parent of its types? | No, for any holder: lowering the *other* copy's row leaves the variable `#A` named where it was | `old_checker_does_not_reach_the_types_of_an_absent_field` |
+
+      This is `keep = more.level <> generic_level` (ctype.ml:806) with
+      `let e = if keep then e else ref None` (btype.ml:374), and
+      `iter_row` visiting what `row_field_repr` gives (btype.ml:229-236).
+    - *The layout: the reference is a slot of the variant node, and what
+      it names is a node* (`rows.rs`, "The reference of a variant
+      field"). A published row has no references: a node of one is
+      *unopened* and each `Reither` field stands for a reference nothing
+      else holds. `RowFieldRow::link`, which was always `NONE`, is the
+      slot the reference will have, after the published slots
+      (`rows::published_slots`; `Extras::from_segment` fills it in its
+      own copy of the rows). `Checker::open_row` gives a node those
+      slots, in a new list (the node is written once; its descriptor
+      index and its rows are untouched). From then on the field is a
+      chain of *reference nodes* from that slot: an unresolved reference
+      is a variable with no name (`rows::ref_node`); a resolved one is a
+      `TUPLE` node that is not `EXTENDED` whose `a` says `Rabsent`,
+      `Rpresent` (no slot, or the type) or `Reither` with `c` and `m`
+      (the types, then the next reference). The field's own types are
+      the first link of the chain: opening moves them into a `Reither`
+      node of the node's own, and the node's published type slots for
+      that field then name that node. `rows::field_repr` is
+      `row_field_repr`: one loop, no write.
+    - *Why that shape.* (1) Nothing shared is written: rows stay as
+      published, and what differs between two instances is in their
+      nodes. (2) A resolution is `Graph::write` of one reference node:
+      the trail undoes it inside a speculation with no log of its own,
+      and `graph.rs`, `level.rs` and `template.rs` are **not changed**.
+      (3) The children of a variant node are those of the resolved
+      field: every walk reaches the chain as ordinary children, so a
+      type a resolution added is lowered, generalized and found by
+      `deep_occur`. (4) A field resolved to absent stops being a parent
+      of its types because the types hang under the field's own chain
+      node, not under the variant node: `Checker::settle` rewrites that
+      node (one write per holder of the reference, found through
+      `Extras::holders`, 8 bytes each; a present field keeps its first
+      type only). (5) Sharing is node identity: two fields share a
+      reference when their chains end in one node.
+    - *"Generic" coincides with `keep`.* A reference is a variable, so
+      `generalize_structure` leaves it at the level it leaves the row
+      variable at, and `Graph::copy` shares a node that is not generic:
+      the copies of an annotation's type share its references with no
+      code. The two cases where the levels of the reference and of
+      `more` differ, and the unopened source, are `Checker::copy_refs`
+      (R3n), whose rule is `keep` read from `more`, not from the
+      reference.
+    - *What each walk pays.* An unopened node: what it paid as
+      published, one push per slot. An opened node with `k` `Reither`
+      fields of which `t` have types: `k` more pushes, and `k + t` more
+      nodes visited once each (lower, generalize, the occurrence tests,
+      a copy). A row without a `Reither` field is never opened and pays
+      nothing; that is every row of a closed variant type written in a
+      declaration. An instance of a template pays nothing: a template
+      made from a segment has unopened rows.
+    - *Sizes* (`rows::tests::sizes`, `segment::schema_tests`): `Holder`
+      8, `FieldRepr` 16, `FieldRef` 12, `VariantRow` 28, `RowFieldRow`
+      20, `ExtraDescriptor` 12, a reference node 16.
+    - *Memory per variant node.* Unopened: `16 + 4·S` bytes, `S` its
+      published slots; its rows (`12 + 28 + 20·F` for `F` fields) exist
+      once per scheme. Opened: `4·(S + k)` more for the new list (the
+      old `4·S` are dead until the unit ends), `16` per `Reither` field
+      without types, `32 + 4·(n + 1) + 8` per field with `n` types. A
+      resolution: nothing (absent, constant), one slot (present with a
+      type), or for two `Reither` that stay so one reference node, the
+      slots of the types each side gains plus one, and 8 bytes per
+      holder moved.
+    - *What a changed row allocates* (decisions 18 and 28), in
+      `set_more`: for a row that is not fixed, one node at the generic
+      level (then lowered to the level of the variable it replaces), one
+      descriptor row (12), one `VariantRow` (28), one `RowFieldRow` (20)
+      per field gained, and one slot per present type, per `Reither`
+      field (its reference slot, holding the chain the source field
+      has), for `more` and per argument of the name. Nothing for a fixed
+      row. One step a field gained. A gained `Reither` field shares the
+      source's chain: the two rows then hold one field, as in OCaml.
+    - *The arms of `unify_row` on the explicit stack.* `unify3` opens
+      both nodes before the link (the left one is a link afterwards, and
+      the descriptor a failure puts back must be the opened one).
+      `unify_row` then links nothing by recursion: it flattens, merges,
+      decides `more`, `closed` and the name, runs both `set_more`, and
+      pushes a `RowEnd` frame (the static row) below one `RowField`
+      frame per common tag. Two corrections of decision 28, read from
+      the source: the pairs of `merge_rf` are unified in **descending**
+      tag order (each pair is consed, ctype.ml:374), and the static-row
+      test reads row 1 *again* (`static_row` calls `row_repr`,
+      btype.ml:162-170), so it sees the merged row: it is closed exactly
+      when either row was. `unify_row_field` runs as frames too: the
+      `redo` of two `Reither` (ctype.ml:2663-2675) is a bit in the
+      pair's record that `row_field_end` reads after the types were
+      unified.
+    - *Changes to the skeleton.* `rows.rs`: `unify_row` takes the pair
+      and the two opened descriptors; `unify_row_field` takes a frame;
+      thirteen new signatures and `copy_refs`; `Extras::{holders, row_scratch, copying,
+      passive_variants, rigid_variants}`; `from_segment` fills `link`.
+      `unify.rs`, three edits and no other: `FrameKind::{RowField,
+      RowFieldEnd, RowEnd}` with their arms in `run_frames` and
+      `explain_failure`; `unify3` opens two variant nodes
+      (`both_variants`); the variant arm of `extended_children` passes
+      the descriptors. `expand.rs`, one edit: the pass of
+      `link_memorized` hands a variant node of a copy to `copy_refs`
+      while `Extras::copying` is set (never, until R3n). `differential.rs`:
+      `REFS`, `Op::GeneralizeStructure`, the variant form reads fields
+      through `field_repr`.
+    - *Not in R3f.* The split of the types that hold a universal
+      variable (PR#6744, ctype.ml:2688-2702) is R3g's. `passive_variants`
+      and `rigid_variants` are fields that nothing sets yet (R5b's
+      `with_passive_variants`, R3i's `expand_head_rigid`). The GADT
+      instance trace of `set_more` (ctype.ml:2607-2608) is R3h's.
+
+Open after the fourth turn, each with the recommended answer.
+
+1. *An instance of a template captured from an opened row.* A template
+   made from a segment has unopened rows. A template R5a captures from a
+   binder's type may hold an opened generic row: its instance would copy
+   the chains as stored, so two fields that share a chain in the scheme
+   would share one in the instance (OCaml gives each a `ref None`), and
+   a copied reference would name the scheme's holder rows. Recommended:
+   R5a keeps one bit per template ("has an opened row", as `OPEN_ROW`
+   for cells) and runs the fourth case of `copy_refs` over such an
+   instance; no kernel change.
+2. *The order of `unify env rm more` for a fixed row whose `more` is not
+   a variable.* OCaml runs it inside `set_more`, before the other row's
+   `set_more`; the skeleton pushes it as a frame, popped before the
+   common tags. They differ only in which of two clashes is reported
+   first. Recommended: accept, and let the generated cases of R3n show
+   whether the trace differs.
+3. *R3f's tests were not run against a prototype.* Recommended: the
+   rule of decision 30: a test that contradicts the lines it quotes is
+   reported with those lines; R3f's commit 1 and 2 are reviewed against
+   the tests before commit 3 is opened.
+4. *`Op::GeneralizeStructure` is generated only under `REFS`.* The
+   plans of R3a to R3e keep their seeds. Recommended: R3e's generated
+   test stays as it is; a later turn may add the operation to the
+   object plan, where a shared mutability cell under an annotation is
+   the analogous case.
+5. *R3g is not designed.* Recommended: a fifth skeleton turn, started
+   from `enter_poly` and `unify_univar` and from the PR#6744 split that
+   R3f leaves to it.
 
 ### 8.7 The hot paths of unification (K2)
 

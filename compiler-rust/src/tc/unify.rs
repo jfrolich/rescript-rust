@@ -77,6 +77,19 @@ pub enum FrameKind {
     /// trace when a frame above fails (compiler/ml/ctype.ml:2493-2510).
     /// Popped: nothing. (R3e)
     FieldEnd,
+    /// One common tag of two variant rows: `left` and `right` are the list
+    /// indices of slot 0 of the two homes, `extra` indexes
+    /// [`Checker::saved`]: one record ([`Checker::unify_row`], step 9).
+    /// Popped: [`Checker::unify_row_field`]. (R3f)
+    RowField,
+    /// Below the frames of a common tag, in every mode: popped,
+    /// [`Checker::row_field_end`]; when a frame above fails in
+    /// `Mode::Explain`, the pair of the two fields goes into the trace
+    /// (compiler/ml/ctype.ml:2622-2628). (R3f)
+    RowFieldEnd,
+    /// Below the common tags of a closed row 1: `left` is the right node
+    /// of the pair. Popped: [`Checker::row_end`]. (R3f)
+    RowEnd,
 }
 
 /// Bit 31 of a [`FrameKind::Linked`] frame's `extra`: `unify2` ran `unify3`
@@ -785,6 +798,15 @@ impl Checker {
             // `add_type_equality` in place of the link (ctype.ml:2329).
             todo!("R3h")
         }
+        // Two variant nodes get the slots of their references while both
+        // are nodes (`Checker::open_row`): the left one is a link after
+        // this, and what `unify_row` resolves in it must be in the
+        // descriptor a failure puts back (`t1'.desc <- d1`).
+        let (d1, d2) = if extended && self.both_variants(d1, d2) {
+            (self.open_row(t1x), self.open_row(t2x))
+        } else {
+            (d1, d2)
+        };
         // `occur !env t1' t2'; link_type t1' t2` (ctype.ml:2330-2331),
         // before the children. A `t2'` without a child is not `t1'` (they
         // are distinct representatives) and holds nothing: no walk.
@@ -1076,6 +1098,12 @@ impl Checker {
                 let entry = self.field_trace_pair(frame.left, frame.right);
                 self.trace
                     .push(if swapped { [entry[1], entry[0]] } else { entry });
+            } else if frame.kind == FrameKind::RowFieldEnd {
+                // `(mkvariant [(l, f1)] true, mkvariant [(l, f2)] true) ::
+                // trace` (ctype.ml:2624-2628).
+                let entry = self.row_trace_pair(frame);
+                self.trace
+                    .push(if swapped { [entry[1], entry[0]] } else { entry });
             }
         }
         if left.0 != NONE {
@@ -1148,6 +1176,15 @@ impl Checker {
         field(left) && field(right)
     }
 
+    /// O(1): whether two extended descriptors are both variant rows.
+    #[inline]
+    fn both_variants(&self, left: Node, right: Node) -> bool {
+        let variant = |node: Node| {
+            matches!(self.extras.descriptors[node.a as usize], ExtraDescriptor::Variant(_))
+        };
+        variant(left) && variant(right)
+    }
+
     /// The children of two extended descriptors, after the link of unify3
     /// (compiler/ml/ctype.ml:2400-2424): `[t1x, t2x]` are the two nodes,
     /// `left` and `right` the descriptors they had. Two objects:
@@ -1179,7 +1216,9 @@ impl Checker {
                 Ok(())
             }
             (ExtraDescriptor::Poly, ExtraDescriptor::Poly) => self.enter_poly(t1x, t2x),
-            (ExtraDescriptor::Variant(_), ExtraDescriptor::Variant(_)) => self.unify_row(t1x, t2x),
+            (ExtraDescriptor::Variant(_), ExtraDescriptor::Variant(_)) => {
+                self.unify_row([t1x, t2x], left, right)
+            }
             (ExtraDescriptor::Package(_), ExtraDescriptor::Package(_)) => self.unify_package(t1x, t2x),
             (ExtraDescriptor::Univar(_), ExtraDescriptor::Univar(_)) => todo!("R3g"),
             _ => Err(Clash),
@@ -1222,6 +1261,9 @@ impl Checker {
                     FrameKind::Fields => self.saved.truncate(frame.extra as usize),
                     FrameKind::Field => self.unify_field(frame)?,
                     FrameKind::FieldEnd => {}
+                    FrameKind::RowField => self.unify_row_field(frame)?,
+                    FrameKind::RowFieldEnd => self.row_field_end(frame)?,
+                    FrameKind::RowEnd => self.row_end(frame),
                     FrameKind::Recursion => {
                         // A clash here is the enclosing pair's: it adds no
                         // pair of its own to the trace (`Unify []`).

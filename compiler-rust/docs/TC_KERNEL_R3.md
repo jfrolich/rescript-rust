@@ -1187,3 +1187,721 @@ and no step count changed an assertion (the unification step tests bound
 the count from above). `tc` is not on a compiler build's path (the driver's
 default checker is the old one), so no application or `tests/tests` saving
 is claimed; the CI `Instruction count` check reports the build's figures.
+
+## K3a: where unification's instructions go
+
+### 1. Now: trunk `c4e9326eb`
+
+Measured on x86-64 Linux (AMD Ryzen 9 9950X, eight virtual CPUs) with
+Valgrind 3.22.0 and the pinned
+`rustc 1.102.0-nightly (ac8310ba6 2026-11-09)`. R1 method: fat LTO,
+one codegen unit, line tables, 1,000,000 iterations minus zero, then
+subtract the operation's own build-only twin. No compiler source changed.
+The reference script was run first and reproduced R1's raw figures
+(in particular `empty 18`, `unify_ground1 318`, `unify_ground3 746`).
+
+```sh
+CARGO_TARGET_DIR=/tmp/checker-reference cargo build --release \
+  --manifest-path compiler-rust/docs/prototypes/checker-kernel/Cargo.toml
+bash compiler-rust/docs/prototypes/checker-kernel/measure.sh \
+  /tmp/checker-reference/release/checker-kernel
+CARGO_PROFILE_BENCH_CODEGEN_UNITS=1 CARGO_PROFILE_BENCH_DEBUG=line-tables-only \
+  cargo bench --manifest-path compiler-rust/Cargo.toml --bench tc_kernel --no-run
+# Finished `bench` profile [optimized + debuginfo] target(s) in 3m 32s
+# For every operation, retain and annotate both files:
+valgrind --tool=cachegrind --cache-sim=no --cachegrind-out-file=OP.zero.cg BENCH OP 0
+valgrind --tool=cachegrind --cache-sim=no --cachegrind-out-file=OP.full.cg BENCH OP 1000000
+cg_annotate --auto=yes --threshold=0 OP.full.cg
+cg_annotate --auto=yes --threshold=0 OP.zero.cg
+```
+
+All operations, including controls. A dash means the row is a control,
+not an additional subtraction. R4's `binder` is cheaper than the common
+empty loop; its negative adjusted result is a control mismatch, not negative
+execution cost. Use its raw column for the absolute loop measurement.
+
+| Operation | Raw (full − zero)/million | Subtract | Net |
+|---|---:|---|---:|
+| `instance1` | 156.060859 | `empty` | 137.058573 |
+| `instance3` | 236.309335 | `empty` | 217.307049 |
+| `instance5` | 324.338016 | `empty` | 305.335730 |
+| `instance7` | 344.272216 | `empty` | 325.269930 |
+| `generalize7` | 793.272216 | `instance7` | 449.000000 |
+| `empty` | 19.002286 | — | 19.002286 |
+| `lower7` | 766.272202 | `instance7` | 421.999986 |
+| `copy7` | 1728.581013 | `empty` | 1709.578727 |
+| `repr` | 165.060901 | `instance1` | 9.000042 |
+| `restore` | 219.061239 | `instance1` | 63.000380 |
+| `keep` | 200.061281 | `instance1` | 44.000422 |
+| `checker_instance1` | 145.060825 | `empty` | 126.058539 |
+| `checker_instance3` | 226.309301 | `empty` | 207.307015 |
+| `checker_instance5` | 313.337982 | `empty` | 294.335696 |
+| `checker_instance7` | 333.272182 | `empty` | 314.269896 |
+| `build_vars` | 78.070447 | — | 78.070447 |
+| `unify_vars` | 197.070447 | `build_vars` | 119.000000 |
+| `build_ground1` | 98.077977 | — | 98.077977 |
+| `unify_ground1` | 220.077977 | `build_ground1` | 122.000000 |
+| `build_ground3` | 200.441105 | — | 200.441105 |
+| `unify_ground3` | 1117.395074 | `build_ground3` | 916.953969 |
+| `build_vars_local` | 78.070445 | — | 78.070445 |
+| `unify_vars_local` | 197.070445 | `build_vars_local` | 119.000000 |
+| `build_ground1_local` | 98.077947 | — | 98.077947 |
+| `unify_ground1_local` | 220.077947 | `build_ground1_local` | 122.000000 |
+| `build_ground3_local` | 200.441075 | — | 200.441075 |
+| `unify_ground3_local` | 1117.395044 | `build_ground3_local` | 916.953969 |
+| `binder` | 11.000245 | `empty` | -8.002041 |
+| `find_local` | 66.000251 | `empty` | 46.997965 |
+| `find_open` | 243.000267 | `empty` | 223.997981 |
+| `find_miss2` | 643.000253 | `empty` | 623.997967 |
+| `bind_leave` | 191.184379 | `empty` | 172.182093 |
+| `intern` | 179.000246 | `empty` | 159.997960 |
+| `build_bind_ground1` | 88.092208 | — | 88.092208 |
+| `bind_ground1` | 212.092266 | `build_bind_ground1` | 124.000058 |
+| `build_bind_ground1_local` | 88.092266 | — | 88.092266 |
+| `bind_ground1_local` | 212.092208 | `build_bind_ground1_local` | 123.999942 |
+
+Raw output (I refs, including startup):
+
+```text
+operation zero full raw
+instance1 330998 156391857 156.060859
+instance3 331035 236640370 236.309335
+instance5 331072 324669088 324.338016
+instance7 331105 344603321 344.272216
+generalize7 331042 793603258 793.272216
+empty 330954 19333240 19.002286
+lower7 330992 766603194 766.272202
+copy7 331001 1728912014 1728.581013
+repr 330938 165391839 165.060901
+restore 331030 219392269 219.061239
+keep 330978 200392259 200.061281
+checker_instance1 331171 145391996 145.060825
+checker_instance3 331205 226640506 226.309301
+checker_instance5 331245 313669227 313.337982
+checker_instance7 331287 333603469 333.272182
+build_vars 331290 78401737 78.070447
+unify_vars 331324 197401771 197.070447
+build_ground1 331338 98409315 98.077977
+unify_ground1 331376 220409353 220.077977
+build_ground3 331409 200772514 200.441105
+unify_ground3 331442 1117726516 1117.395074
+build_vars_local 331223 78401668 78.070445
+unify_vars_local 331252 197401697 197.070445
+build_ground1_local 331279 98409226 98.077947
+unify_ground1_local 331313 220409260 220.077947
+build_ground3_local 331347 200772422 200.441075
+unify_ground3_local 331381 1117726425 1117.395044
+binder 421253 11421498 11.000245
+find_local 913190 66913441 66.000251
+find_open 890467 243890734 243.000267
+find_miss2 1112031 644112284 643.000253
+bind_leave 332865 191517244 191.184379
+intern 625677 179625923 179.000246
+build_bind_ground1 331317 88423525 88.092208
+bind_ground1 331407 212423673 212.092266
+build_bind_ground1_local 331360 88423626 88.092266
+bind_ground1_local 331366 212423574 212.092208
+```
+
+### 2–3. Existing operations: function and source attribution
+
+For each `(file, function, line)` recorded by cachegrind and displayed by
+`cg_annotate --auto=yes --threshold=0`, compute
+`(operation.full − operation.zero − twin.full + twin.zero) / 1,000,000`.
+The same subtraction is applied to runtime and benchmark instructions;
+negative runtime entries are retained, not rounded away. The tables sum to
+the measured net, with no unassigned instructions (rounding <0.0001).
+`unify_ground3` is **916.953969**, not the older K2 executable's 914.95;
+`expand_once` is 94 here rather than 92. This is a new measurement, not a
+reuse of the K2 table. `unify_pair` and `run_frames` inline into
+`unify_distinct`; `expand_head` and `lower_to` inline into callers;
+`occur` calls `reaches`; `Graph::link` is inlined. There is no separate
+out-of-line charge for these functions. `lower_to` executes no attributed
+instructions in these four generic operations.
+
+Classes refer to the work, not an assertion that its machine sequence is
+minimal. REQUIRED means OCaml performs the corresponding test/traversal or
+write on this input. OVERHEAD is limited to work with an established
+redundancy or representation-only dispatch. UNSURE means that the profile
+cannot separate required work from avoidable machine implementation cost.
+In particular, for every UNSURE library, line-zero, prologue/epilogue,
+representative or caller bucket, instruction-address inline stacks and a
+separately measured candidate would be needed to price a safe removal.
+For the target reload after a link, the named-variable rule must first be
+proved not to affect the reused descriptor. The explicit stack replaces
+OCaml recursion: its *entire* cost is not declared removable.
+
+The occurrence traversal is REQUIRED: ctype.ml:2330 calls `occur` for this
+structure pair, and :1488–1490 selects the reachability shortcut. However,
+the current OCaml shortcut (:1432–1465) uses a 256-node budget and **no
+marks**. Generation setup and mark loads/stores are OVERHEAD on these
+small successful walks, not proof that marking can be deleted on arbitrary
+cyclic or shared graphs. Library costs for those marks remain UNSURE,
+because inline line tables mix them with stack and descriptor indexing. Likewise
+an attempted expansion on an unexpandable constructor is not automatically
+overhead: :2279–2282 explicitly asks for the head expansions. A declaration
+eligibility test may implement that request cheaply, but cannot be removed
+merely because this particular input does not expand.
+
+Function totals (all source files, including inlined library code):
+
+| Function | unify_ground3 | unify_ground1 | unify_vars | bind_ground1 |
+|---|---:|---:|---:|---:|
+| `unify_distinct` | 261.000000 | 97.000000 | 94.000000 | 99.000000 |
+| `reaches` | 214.045160 | 0.000000 | 0.000000 | 0.000000 |
+| `unify3` | 132.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_expanded` | 121.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `expand_once` | 94.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `push_lists` | 70.000004 | 0.000000 | 0.000000 | 0.000000 |
+| `tc_kernel::main` | 25.000000 | 25.000000 | 25.000000 | 25.000000 |
+| `__memcpy_avx_unaligned_erms` | -0.141984 | 0.000000 | 0.000000 | 0.000000 |
+| `__memset_avx2_unaligned_erms` | 0.045056 | 0.000000 | 0.000000 | 0.000000 |
+| Other runtime | 0.005733 | 0.000000 | 0.000000 | 0.000058 |
+| **Total** | 916.953969 | 122.000000 | 119.000000 | 124.000058 |
+
+Disjoint source-line groups. Function names are machine-code owners; inline
+function names are in the work column. `0` is DWARF line zero, not source
+line one. Library groups retain their individual source lines rather than
+pretending a bounds check can be assigned uniquely to a Rust call site.
+All citations below are `compiler/ml/ctype.ml` unless explicitly marked.
+
+| Machine function / source lines | Work | Class; OCaml lines | unify_ground3 | unify_ground1 | unify_vars | bind_ground1 |
+|---|---|---|---:|---:|---:|---:|
+| `expand_once` / `alloc/src/raw_vec/mod.rs:635` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `expand_once` / `alloc/src/vec/mod.rs:1784` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `expand_once` / `core/src/slice/index.rs:0` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `expand_once` / `core/src/slice/index.rs:184` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `expand_once` / `core/src/slice/index.rs:238` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 10.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `expand_once` / `expand.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 16.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `expand_once` / `expand.rs:532–555` | find_expansion: arity/private test and memo lookup | REQUIRED; 2279–2282; 1193–1196 | 6.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `expand_once` / `expand.rs:631–631` | expand_once: function entry | UNSURE; 2279–2282; 1187 | 16.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `expand_once` / `expand.rs:632–646` | expand_once: tag, memo miss and declaration lookup | REQUIRED; 2279–2282; 1188–1216 | 12.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `expand_once` / `expand.rs:647–674` | expand_once: memo hit, eligibility, arity, result/return | REQUIRED; 2279–2282; 1196–1223 | 16.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `expand_once` / `graph.rs:28–36` | Node tag/arity extraction | REQUIRED; 2239; 2308; 2347–2350 | 6.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `push_lists` / `alloc/src/raw_vec/mod.rs:635` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `push_lists` / `alloc/src/vec/mod.rs:1002` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `push_lists` / `alloc/src/vec/mod.rs:1009` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `push_lists` / `alloc/src/vec/mod.rs:1784` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `push_lists` / `alloc/src/vec/mod.rs:999` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `push_lists` / `core/src/cmp.rs:2201` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 3.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `push_lists` / `core/src/iter/range.rs:0` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 3.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `push_lists` / `core/src/iter/range.rs:1145` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 7.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `push_lists` / `core/src/ptr/mod.rs:1962` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 6.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `push_lists` / `core/src/ptr/mut_ptr.rs:978` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `push_lists` / `core/src/slice/index.rs:238` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 8.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `push_lists` / `unify.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 2.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `push_lists` / `unify.rs:1106–1122` | push_lists/push_pair: iterate children and save pairs | UNSURE; 2347–2350; 2440–2445 | 23.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `alloc/src/raw_vec/mod.rs:635` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 14.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `alloc/src/raw_vec/mod.rs:640` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.004096 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `alloc/src/raw_vec/mod.rs:695` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.004096 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `alloc/src/raw_vec/mod.rs:795` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.004096 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `alloc/src/vec/mod.rs:0` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.004096 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `alloc/src/vec/mod.rs:1002` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 6.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `alloc/src/vec/mod.rs:1009` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `alloc/src/vec/mod.rs:1784` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 8.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `alloc/src/vec/mod.rs:1823` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 3.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `alloc/src/vec/mod.rs:2922` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 9.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `alloc/src/vec/mod.rs:2925` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 6.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `alloc/src/vec/mod.rs:3141` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 1.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `alloc/src/vec/mod.rs:3160` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000026 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `alloc/src/vec/mod.rs:999` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `alloc/src/vec/spec_extend_with.rs:100` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.004096 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `alloc/src/vec/spec_extend_with.rs:86` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.004096 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `core/src/cmp.rs:2201` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `core/src/iter/range.rs:0` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `core/src/iter/range.rs:1103` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 5.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `core/src/num/uint_macros.rs:2784` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.004096 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `core/src/ptr/mod.rs:1754` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 3.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `core/src/ptr/mod.rs:1962` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 5.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `core/src/ptr/mod.rs:570` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.008192 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `core/src/ptr/mut_ptr.rs:978` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.008192 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `core/src/slice/index.rs:0` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 1.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `core/src/slice/index.rs:238` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 19.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `graph.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 3.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `graph.rs:13` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 3.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `graph.rs:234–252` | Graph::repr: representative loads/tests (inlined) | UNSURE; 2231–2233; 2278–2288 | 21.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `graph.rs:28–36` | Node tag/arity extraction | REQUIRED; 2239; 2308; 2347–2350 | 9.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `level.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 3.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `level.rs:1–200` | Graph::children: occurrence child traversal | REQUIRED; 2330; 1384–1408 | 19.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `unify.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 6.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `unify.rs:1280–1290` | fresh_marks: generation and storage checks | OVERHEAD; 2330; 1432–1465 (bounded walk has no marks) | 7.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `unify.rs:1296–1301` | reaches: entry, work stack and representative | UNSURE; 2330; 1432–1465 | 11.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `unify.rs:1302–1306` | reaches: visited-mark test | OVERHEAD; 2330; 1432–1465 (bounded walk has no marks) | 6.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `unify.rs:1307–1310` | reaches: occurrence identity test | REQUIRED; 2330; 1436 | 3.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `unify.rs:1311–1311` | reaches: visited-mark store | OVERHEAD; 2330; 1432–1465 (bounded walk has no marks) | 3.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `reaches` / `unify.rs:1312–1318` | reaches: descriptors, row exclusion, children and exit | REQUIRED; 2330; 1439–1458 | 26.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify3` / `alloc/src/raw_vec/mod.rs:635` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 1.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify3` / `alloc/src/vec/mod.rs:1784` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 1.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify3` / `alloc/src/vec/mod.rs:1823` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 1.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify3` / `core/src/slice/index.rs:0` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 6.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify3` / `core/src/slice/index.rs:238` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify3` / `core/src/slice/index.rs:245` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify3` / `graph.rs:13` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 5.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify3` / `graph.rs:154–156` | Graph::link: repeated identity guard | OVERHEAD; 2233; 2257; 2331 (distinct pair already established) | 1.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify3` / `graph.rs:157–164` | Graph::link: load source, write link | REQUIRED; 2221; 2257; 2331 | 7.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify3` / `graph.rs:165–167` | Graph::link: speculation/name-rule guard | REQUIRED; 2221; 2257; 2331 (btype.ml:713–731) | 4.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify3` / `graph.rs:28–36` | Node tag/arity extraction | REQUIRED; 2239; 2308; 2347–2350 | 2.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify3` / `graph.rs:47` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 1.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify3` / `unify.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 21.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify3` / `unify.rs:1334–1337` | childless: prove occurrence walk unnecessary | REQUIRED; 2218; 2330 | 3.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify3` / `unify.rs:37` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 1.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify3` / `unify.rs:502–510` | occur: call reaches and test its answer | REQUIRED; 2330; 1488–1490 | 11.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify3` / `unify.rs:740–748` | unify3: entry and descriptor loads | UNSURE; 2305–2308 | 8.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify3` / `unify.rs:749–785` | unify3: variable/field/mode and create_recursion tests | REQUIRED; 2309–2332 | 16.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify3` / `unify.rs:789–793` | unify3: occurrence and link routing | REQUIRED; 2330–2331 | 1.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify3` / `unify.rs:794–834` | unify3: explain/repair continuations, children and result | UNSURE; 2333–2438 | 16.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify3` / `unify.rs:909–944` | push_children: shape, arity, path match and child ranges | REQUIRED; 2334–2350 | 20.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_distinct` / `alloc/src/raw_vec/mod.rs:635` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 1.000000 | 1.000000 | 1.000000 |
+| `unify_distinct` / `alloc/src/vec/mod.rs:0` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 2.000000 | 2.000000 | 2.000000 |
+| `unify_distinct` / `alloc/src/vec/mod.rs:1784` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 3.000000 | 1.000000 | 1.000000 | 1.000000 |
+| `unify_distinct` / `alloc/src/vec/mod.rs:1823` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 6.000000 | 2.000000 | 0.000000 | 0.000000 |
+| `unify_distinct` / `alloc/src/vec/mod.rs:2925` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_distinct` / `alloc/src/vec/mod.rs:3160` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 8.000000 | 6.000000 | 6.000000 | 6.000000 |
+| `unify_distinct` / `core/src/ptr/const_ptr.rs:879` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_distinct` / `core/src/ptr/mod.rs:1754` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 12.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_distinct` / `core/src/slice/index.rs:0` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 3.000000 | 1.000000 | 1.000000 | 1.000000 |
+| `unify_distinct` / `core/src/slice/index.rs:238` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 18.000000 | 6.000000 | 9.000000 | 9.000000 |
+| `unify_distinct` / `core/src/slice/index.rs:245` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 2.000000 | 3.000000 | 3.000000 |
+| `unify_distinct` / `graph.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 4.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_distinct` / `graph.rs:13` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 4.000000 | 1.000000 | 2.000000 | 2.000000 |
+| `unify_distinct` / `graph.rs:154–156` | Graph::link: repeated identity guard | OVERHEAD; 2233; 2257; 2331 (distinct pair already established) | 2.000000 | 1.000000 | 0.000000 | 0.000000 |
+| `unify_distinct` / `graph.rs:157–164` | Graph::link: load source, write link | REQUIRED; 2221; 2257; 2331 | 16.000000 | 8.000000 | 8.000000 | 8.000000 |
+| `unify_distinct` / `graph.rs:165–167` | Graph::link: speculation/name-rule guard | REQUIRED; 2221; 2257; 2331 (btype.ml:713–731) | 8.000000 | 4.000000 | 6.000000 | 6.000000 |
+| `unify_distinct` / `graph.rs:234–252` | Graph::repr: representative loads/tests (inlined) | UNSURE; 2231–2233; 2278–2288 | 28.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_distinct` / `graph.rs:47` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 2.000000 | 2.000000 | 2.000000 | 2.000000 |
+| `unify_distinct` / `unify.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 24.000000 | 8.000000 | 8.000000 | 8.000000 |
+| `unify_distinct` / `unify.rs:1186–1199` | run_frames: pair result, loop bound and pop | UNSURE; 2347–2350; 2440–2445 | 8.000000 | 2.000000 | 2.000000 | 2.000000 |
+| `unify_distinct` / `unify.rs:1200–1201` | run_frames: tagged continuation dispatch | OVERHEAD; 2347–2350 (recursive calls, no FrameKind) | 6.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_distinct` / `unify.rs:1202–1223` | run_frames: child identity test and other continuations | REQUIRED; 2231–2233; 2428–2438 | 4.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_distinct` / `unify.rs:1334–1337` | childless: prove occurrence walk unnecessary | REQUIRED; 2218; 2330 | 0.000000 | 0.000000 | 0.000000 | 4.000000 |
+| `unify_distinct` / `unify.rs:187–227` | unify_distinct: depth, explain/snapshot entry and exit | UNSURE; 2271–2274; 2732–2737 | 30.000000 | 30.000000 | 30.000000 | 30.000000 |
+| `unify_distinct` / `unify.rs:238–258` | unify_pair: load descriptors, choose variable side | REQUIRED; 2239–2243 | 27.000000 | 9.000000 | 6.000000 | 6.000000 |
+| `unify_distinct` / `unify.rs:268–280` | unify_pair: nullary same-head shortcut and level test | REQUIRED; 2248–2257 | 29.000000 | 11.000000 | 0.000000 | 0.000000 |
+| `unify_distinct` / `unify.rs:281–282` | unify_pair: route to unify2 | REQUIRED; 2270 | 3.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_distinct` / `unify.rs:337–339` | binds_leaf: prove binding needs no walk | REQUIRED; 2218–2222; 2240–2243 | 0.000000 | 0.000000 | 4.000000 | 5.000000 |
+| `unify_distinct` / `unify.rs:359–371` | bind_leaf: reload target and compare level after link | UNSURE; 2221–2222 | 0.000000 | 0.000000 | 3.000000 | 3.000000 |
+| `unify_expanded` / `alloc/src/raw_vec/mod.rs:635` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_expanded` / `alloc/src/vec/mod.rs:1823` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_expanded` / `core/src/cmp.rs:2289` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 5.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_expanded` / `core/src/result.rs:0` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_expanded` / `core/src/slice/index.rs:0` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 1.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_expanded` / `core/src/slice/index.rs:238` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 6.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_expanded` / `expand.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 1.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_expanded` / `expand.rs:792–820` | expand_head: repr, expansion loop and stop tests | REQUIRED; 2279–2282; 1267–1280 | 15.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_expanded` / `graph.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 11.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_expanded` / `graph.rs:13` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 4.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_expanded` / `graph.rs:234–252` | Graph::repr: representative loads/tests (inlined) | UNSURE; 2231–2233; 2278–2288 | 25.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_expanded` / `unify.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 7.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_expanded` / `unify.rs:671–676` | unify_expanded: function entry | UNSURE; 2276 | 9.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_expanded` / `unify.rs:677–683` | unify_expanded: expansion/re-expansion decision | REQUIRED; 2278–2282 | 2.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_expanded` / `unify.rs:684–716` | unify_expanded: levels, identity and lowering | REQUIRED; 2283–2288 | 9.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `unify_expanded` / `unify.rs:717–728` | unify_expanded: choose direction, call unify3 and return | REQUIRED; 2299–2303 | 18.000000 | 0.000000 | 0.000000 | 0.000000 |
+| `runtime` / `other:—` | Allocation, bulk memory, startup and twin-layout remainder | UNSURE; 2227–2438 (allocator cost not specified) | -0.092257 | 0.000000 | 0.000000 | 0.000058 |
+| `tc_kernel::main` / `alloc/src/vec/mod.rs:1823` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 1.000000 | 1.000000 | 1.000000 | 1.000000 |
+| `tc_kernel::main` / `core/src/result.rs:1182` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 2.000000 | 2.000000 | 2.000000 |
+| `tc_kernel::main` / `graph.rs:13` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 1.000000 | 1.000000 | 1.000000 | 1.000000 |
+| `tc_kernel::main` / `graph.rs:234–252` | Graph::repr: representative loads/tests (inlined) | UNSURE; 2231–2233; 2278–2288 | 14.000000 | 14.000000 | 14.000000 | 14.000000 |
+| `tc_kernel::main` / `tc_kernel.rs:282` | Benchmark call-site / result consumption difference | UNSURE; 2227 (harness has no OCaml counterpart) | 2.000000 | 2.000000 | 2.000000 | 2.000000 |
+| `tc_kernel::main` / `unify.rs:169–176` | unify: identity test and call | REQUIRED; 2229–2233 | 5.000000 | 5.000000 | 5.000000 | 5.000000 |
+| Sub-millithreshold groups | Startup/library attribution below 0.001 each | UNSURE; 2227–2438 | 0.001144 | 0.000000 | 0.000000 | 0.000000 |
+| **Total including remainder** | | | 916.953969 | 122.000000 | 119.000000 | 124.000058 |
+
+### 4. Declared datatype and parameterised abbreviation
+
+The existing `unify_ground3` uses an **empty** `TypeTable`; its constructor
+indices take the out-of-range abstract-type default. It is therefore not
+the requested populated declaration-table case. Added four operations in
+`benches/tc_kernel.rs::constructor_application`:
+
+- `unify_datatype2` / `build_datatype2`: fresh `c<a,b>` on both sides;
+  `a`, `b` have distinct indices and DATATYPE rows; `c` has a DATATYPE row
+  with arity 2. No manifest or memo exists.
+- `unify_abbrev2` / `build_abbrev2`: the same operands, but `c<x,y> = (x,y)`.
+  One captured template contains the parameters and tuple body. Relative
+  references are recovered by a setup-only instance through the public API.
+  Both heads expand; the post-loop assertion verifies exactly two memo
+  entries per unification in the final reset batch. Datatype/control runs
+  assert zero entries. Nothing is pre-expanded.
+
+All nodes remain GENERIC, as in the original ground3 operation. Every 4096
+iterations both twins clear the instance pools and memo-entry vector; this
+avoids retaining stale slot indices. No inherited or nullary memo is made
+by this template. The per-operation operands are fresh; expansion nodes
+are additional work on the unification side, never charged to the control.
+The sink consumes both handles on both sides; its numeric value differs
+for abbreviation runs because expansion allocates nodes between operands.
+The same loop, arithmetic and construction instructions run in both twins.
+The assertion runs outside the loop; its measured constant cost is retained.
+
+Measured the final formatted bench, same flags and tool as section 1.
+The four original unification/control pairs were rerun too: their net
+figures are unchanged to 0.0001. Thus the new measurements are not silently
+substituted for the original executable's source attribution.
+
+| Operation | Raw | Twin raw | Net |
+|---|---:|---:|---:|
+| `unify_datatype2` | 1147.398252 | 186.443838 | **960.954414** |
+| `unify_abbrev2` | 3012.710757 | 186.441869 | **2826.268888** |
+
+The populated datatype row adds **44.000445** over `unify_ground3`:
+`expand_once` rises from 94 to 138, while the other major function totals
+stay fixed. The empty-table case skips the flags loaded from an actual row.
+That is declaration lookup/eligibility work OCaml also needs, not 44
+instructions proven removable. The abbreviation case spends 798 in
+`expand_once` (including inlined `subst`), 458 in template instances, 306
+in link compression and 82 in memo writes. `reaches` rises to 434 because
+`create_recursion` also asks whether the expanded left occurs in the
+original right (:2309); it is not a second accidental `occur` call.
+
+Raw output:
+
+```text
+operation zero full raw
+build_datatype2 319583 186763421 186.443838
+unify_datatype2 319588 1147717840 1147.398252
+build_abbrev2 325112 186766981 186.441869
+unify_abbrev2 325118 3013035875 3012.710757
+build_vars 331399 78401846 78.070447
+unify_vars 331433 197401880 197.070447
+build_ground1 331458 98409435 98.077977
+unify_ground1 331492 220409469 220.077977
+build_ground3 331526 200772631 200.441105
+unify_ground3 331560 1117726634 1117.395074
+build_bind_ground1 331426 88423664 88.092238
+bind_ground1 331520 212423786 212.092266
+```
+
+Function totals (all source files, including inlined library code):
+
+| Function | unify_datatype2 | unify_abbrev2 |
+|---|---:|---:|
+| `expand_once` | 138.000000 | 798.000000 |
+| `instance` | 0.000000 | 458.000169 |
+| `reaches` | 214.045163 | 434.045160 |
+| `compress` | 0.000000 | 306.000000 |
+| `unify_distinct` | 261.000000 | 281.000000 |
+| `unify_expanded` | 121.000000 | 251.000000 |
+| `unify3` | 132.000000 | 191.000005 |
+| `memorize` | 0.000000 | 82.000072 |
+| `push_lists` | 70.000004 | 0.000000 |
+| `tc_kernel::main` | 25.000000 | 25.000000 |
+| `__memcpy_avx_unaligned_erms` | -0.141888 | 0.160316 |
+| `__memset_avx2_unaligned_erms` | 0.045056 | 0.049152 |
+| Other runtime | 0.006079 | 0.014014 |
+| **Total** | 960.954414 | 2826.268888 |
+
+Disjoint source-line groups. Function names are machine-code owners; inline
+function names are in the work column. `0` is DWARF line zero, not source
+line one. Library groups retain their individual source lines rather than
+pretending a bounds check can be assigned uniquely to a Rust call site.
+All citations below are `compiler/ml/ctype.ml` unless explicitly marked.
+
+| Machine function / source lines | Work | Class; OCaml lines | unify_datatype2 | unify_abbrev2 |
+|---|---|---|---:|---:|
+| `compress` / `graph.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 0.000000 | 48.000000 |
+| `compress` / `graph.rs:13` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 0.000000 | 12.000000 |
+| `compress` / `graph.rs:254–330` | Graph::compress: follow and compress parameter links | REQUIRED; 2231–2232; 2278–2288 | 0.000000 | 234.000000 |
+| `compress` / `graph.rs:28–36` | Node tag/arity extraction | REQUIRED; 2239; 2308; 2347–2350 | 0.000000 | 12.000000 |
+| `instance` / `alloc/src/raw_vec/mod.rs:0` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 2.000000 |
+| `instance` / `alloc/src/raw_vec/mod.rs:635` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 4.000000 |
+| `instance` / `alloc/src/raw_vec/mod.rs:640` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 4.000000 |
+| `instance` / `alloc/src/raw_vec/mod.rs:695` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 4.000000 |
+| `instance` / `alloc/src/raw_vec/mod.rs:795` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 4.000000 |
+| `instance` / `alloc/src/vec/mod.rs:1384` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 2.000000 |
+| `instance` / `alloc/src/vec/mod.rs:1784` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 6.000000 |
+| `instance` / `alloc/src/vec/mod.rs:3160` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 2.000000 |
+| `instance` / `alloc/src/vec/set_len_on_drop.rs:19` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 10.000000 |
+| `instance` / `alloc/src/vec/set_len_on_drop.rs:31` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 10.000000 |
+| `instance` / `core/src/num/uint_macros.rs:1113` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 2.000000 |
+| `instance` / `core/src/num/uint_macros.rs:1192` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 12.000000 |
+| `instance` / `core/src/num/uint_macros.rs:2784` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 6.000000 |
+| `instance` / `core/src/ptr/const_ptr.rs:738` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 6.000000 |
+| `instance` / `core/src/ptr/mod.rs:1962` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 44.000000 |
+| `instance` / `core/src/ptr/non_null.rs:1709` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 2.000000 |
+| `instance` / `core/src/slice/index.rs:238` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 6.000000 |
+| `instance` / `core/src/slice/index.rs:90` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 4.000000 |
+| `instance` / `core/src/slice/iter/macros.rs:0` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 18.000000 |
+| `instance` / `core/src/slice/iter/macros.rs:25` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 2.000000 |
+| `instance` / `core/src/slice/iter/macros.rs:274` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 12.000000 |
+| `instance` / `core/src/slice/iter/macros.rs:279` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 80.000000 |
+| `instance` / `core/src/slice/iter/macros.rs:28` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 10.000000 |
+| `instance` / `graph.rs:28–36` | Node tag/arity extraction | REQUIRED; 2239; 2308; 2347–2350 | 0.000000 | 16.000000 |
+| `instance` / `template.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 0.000000 | 16.000000 |
+| `instance` / `template.rs:1–1000` | Graph::instance: relocate and copy manifest template | REQUIRED; 2279–2282; 1100–1123 | 0.000000 | 174.000000 |
+| `expand_once` / `alloc/src/raw_vec/mod.rs:635` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 28.000000 |
+| `expand_once` / `alloc/src/vec/mod.rs:1784` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 28.000000 |
+| `expand_once` / `alloc/src/vec/mod.rs:1823` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 14.000000 |
+| `expand_once` / `alloc/src/vec/mod.rs:3160` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 6.000000 |
+| `expand_once` / `core/src/cmp.rs:2201` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 28.000000 |
+| `expand_once` / `core/src/iter/range.rs:0` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 2.000000 |
+| `expand_once` / `core/src/iter/range.rs:1103` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 6.000000 |
+| `expand_once` / `core/src/slice/index.rs:0` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 4.000000 |
+| `expand_once` / `core/src/slice/index.rs:184` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 4.000000 |
+| `expand_once` / `core/src/slice/index.rs:186` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 4.000000 |
+| `expand_once` / `core/src/slice/index.rs:238` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 10.000000 | 82.000000 |
+| `expand_once` / `expand.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 18.000000 | 44.000000 |
+| `expand_once` / `expand.rs:245–250` | TypeTable::info: declaration facts | REQUIRED; 2279–2282; 1207–1216 | 12.000000 | 12.000000 |
+| `expand_once` / `expand.rs:532–555` | find_expansion: arity/private test and memo lookup | REQUIRED; 2279–2282; 1193–1196 | 10.000000 | 16.000000 |
+| `expand_once` / `expand.rs:631–631` | expand_once: function entry | UNSURE; 2279–2282; 1187 | 16.000000 | 64.000000 |
+| `expand_once` / `expand.rs:632–646` | expand_once: tag, memo miss and declaration lookup | REQUIRED; 2279–2282; 1188–1216 | 22.000000 | 50.000000 |
+| `expand_once` / `expand.rs:647–674` | expand_once: memo hit, eligibility, arity, result/return | REQUIRED; 2279–2282; 1196–1223 | 26.000000 | 82.000000 |
+| `expand_once` / `expand.rs:717–746` | subst: manifest relocation, memo and instance | REQUIRED; 2279–2282; 1100–1123 | 0.000000 | 84.000000 |
+| `expand_once` / `expand.rs:747–784` | subst: parameter binding and result | REQUIRED; 2279–2282; 1100–1123 | 0.000000 | 50.000000 |
+| `expand_once` / `graph.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 0.000000 | 4.000000 |
+| `expand_once` / `graph.rs:13` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 0.000000 | 4.000000 |
+| `expand_once` / `graph.rs:154–156` | Graph::link: repeated identity guard | OVERHEAD; 1100–1123; 2216–2222 (fresh parameter distinct from argument) | 0.000000 | 4.000000 |
+| `expand_once` / `graph.rs:157–164` | Graph::link: load source, write link | REQUIRED; 2221; 2257; 2331 | 0.000000 | 28.000000 |
+| `expand_once` / `graph.rs:165–167` | Graph::link: speculation/name-rule guard | REQUIRED; 2221; 2257; 2331 (btype.ml:713–731) | 0.000000 | 24.000000 |
+| `expand_once` / `graph.rs:234–252` | Graph::repr: representative loads/tests (inlined) | UNSURE; 2231–2233; 2278–2288 | 0.000000 | 100.000000 |
+| `expand_once` / `graph.rs:28–36` | Node tag/arity extraction | REQUIRED; 2239; 2308; 2347–2350 | 6.000000 | 26.000000 |
+| `memorize` / `alloc/src/raw_vec/mod.rs:635` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 6.000000 |
+| `memorize` / `alloc/src/vec/mod.rs:1002` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 4.000000 |
+| `memorize` / `alloc/src/vec/mod.rs:1009` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 4.000000 |
+| `memorize` / `alloc/src/vec/mod.rs:1784` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 2.000000 |
+| `memorize` / `alloc/src/vec/mod.rs:1823` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 2.000000 |
+| `memorize` / `alloc/src/vec/mod.rs:999` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 2.000000 |
+| `memorize` / `core/src/ptr/mod.rs:1962` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 2.000000 |
+| `memorize` / `core/src/slice/index.rs:238` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 8.000000 |
+| `memorize` / `core/src/slice/index.rs:245` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 4.000000 |
+| `memorize` / `expand.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 0.000000 | 2.000000 |
+| `memorize` / `expand.rs:571–604` | memorize: save expansion in memo | REQUIRED; 2279–2282; 1113 | 0.000000 | 46.000000 |
+| `push_lists` / `alloc/src/raw_vec/mod.rs:635` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 0.000000 |
+| `push_lists` / `alloc/src/vec/mod.rs:1002` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 0.000000 |
+| `push_lists` / `alloc/src/vec/mod.rs:1009` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 0.000000 |
+| `push_lists` / `alloc/src/vec/mod.rs:1784` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 0.000000 |
+| `push_lists` / `alloc/src/vec/mod.rs:999` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 0.000000 |
+| `push_lists` / `core/src/cmp.rs:2201` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 3.000000 | 0.000000 |
+| `push_lists` / `core/src/iter/range.rs:0` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 3.000000 | 0.000000 |
+| `push_lists` / `core/src/iter/range.rs:1145` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 7.000000 | 0.000000 |
+| `push_lists` / `core/src/ptr/mod.rs:1962` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 6.000000 | 0.000000 |
+| `push_lists` / `core/src/ptr/mut_ptr.rs:978` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 0.000000 |
+| `push_lists` / `core/src/slice/index.rs:238` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 8.000000 | 0.000000 |
+| `push_lists` / `unify.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 2.000000 | 0.000000 |
+| `push_lists` / `unify.rs:1106–1122` | push_lists/push_pair: iterate children and save pairs | UNSURE; 2347–2350; 2440–2445 | 23.000000 | 0.000000 |
+| `reaches` / `alloc/src/raw_vec/mod.rs:635` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 14.000000 | 28.000000 |
+| `reaches` / `alloc/src/raw_vec/mod.rs:640` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.004096 | 0.004096 |
+| `reaches` / `alloc/src/raw_vec/mod.rs:695` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.004096 | 0.004096 |
+| `reaches` / `alloc/src/raw_vec/mod.rs:795` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.004096 | 0.004096 |
+| `reaches` / `alloc/src/vec/mod.rs:0` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.004096 | 0.004096 |
+| `reaches` / `alloc/src/vec/mod.rs:1002` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 6.000000 | 12.000000 |
+| `reaches` / `alloc/src/vec/mod.rs:1009` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 8.000000 |
+| `reaches` / `alloc/src/vec/mod.rs:1784` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 8.000000 | 16.000000 |
+| `reaches` / `alloc/src/vec/mod.rs:1823` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 3.000000 | 6.000000 |
+| `reaches` / `alloc/src/vec/mod.rs:2922` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 9.000000 | 18.000000 |
+| `reaches` / `alloc/src/vec/mod.rs:2925` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 6.000000 | 12.000000 |
+| `reaches` / `alloc/src/vec/mod.rs:3141` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 1.000000 | 2.000000 |
+| `reaches` / `alloc/src/vec/mod.rs:3160` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000026 | 4.000026 |
+| `reaches` / `alloc/src/vec/mod.rs:999` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 4.000000 |
+| `reaches` / `alloc/src/vec/spec_extend_with.rs:100` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.004096 | 0.004096 |
+| `reaches` / `alloc/src/vec/spec_extend_with.rs:86` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.004096 | 0.004096 |
+| `reaches` / `core/src/cmp.rs:2201` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 10.000000 |
+| `reaches` / `core/src/iter/range.rs:0` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 2.000000 |
+| `reaches` / `core/src/iter/range.rs:1103` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 5.000000 | 10.000000 |
+| `reaches` / `core/src/num/uint_macros.rs:2784` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.004096 | 0.004096 |
+| `reaches` / `core/src/ptr/mod.rs:1754` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 3.000000 | 6.000000 |
+| `reaches` / `core/src/ptr/mod.rs:1962` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 5.000000 | 10.000000 |
+| `reaches` / `core/src/ptr/mod.rs:570` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.008192 | 0.008192 |
+| `reaches` / `core/src/ptr/mut_ptr.rs:978` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.008192 | 0.008192 |
+| `reaches` / `core/src/slice/index.rs:0` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 1.000000 | 2.000000 |
+| `reaches` / `core/src/slice/index.rs:238` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 19.000000 | 38.000000 |
+| `reaches` / `graph.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 3.000000 | 4.000000 |
+| `reaches` / `graph.rs:13` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 3.000000 | 6.000000 |
+| `reaches` / `graph.rs:234–252` | Graph::repr: representative loads/tests (inlined) | UNSURE; 2231–2233; 2278–2288 | 21.000000 | 48.000000 |
+| `reaches` / `graph.rs:28–36` | Node tag/arity extraction | REQUIRED; 2239; 2308; 2347–2350 | 9.000000 | 18.000000 |
+| `reaches` / `level.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 3.000000 | 6.000000 |
+| `reaches` / `level.rs:1–200` | Graph::children: occurrence child traversal | REQUIRED; 2330; 1384–1408 | 19.000000 | 38.000000 |
+| `reaches` / `unify.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 6.000000 | 12.000000 |
+| `reaches` / `unify.rs:1280–1290` | fresh_marks: generation and storage checks | OVERHEAD; 2330; 1432–1465 (bounded walk has no marks) | 7.000000 | 14.000000 |
+| `reaches` / `unify.rs:1296–1301` | reaches: entry, work stack and representative | UNSURE; 2330; 1432–1465 | 11.000000 | 22.000000 |
+| `reaches` / `unify.rs:1302–1306` | reaches: visited-mark test | OVERHEAD; 2330; 1432–1465 (bounded walk has no marks) | 6.000000 | 14.000000 |
+| `reaches` / `unify.rs:1307–1310` | reaches: occurrence identity test | REQUIRED; 2330; 1436 | 3.000000 | 6.000000 |
+| `reaches` / `unify.rs:1311–1311` | reaches: visited-mark store | OVERHEAD; 2330; 1432–1465 (bounded walk has no marks) | 3.000000 | 6.000000 |
+| `reaches` / `unify.rs:1312–1318` | reaches: descriptors, row exclusion, children and exit | REQUIRED; 2330; 1439–1458 | 26.000000 | 52.000000 |
+| `unify3` / `alloc/src/raw_vec/mod.rs:635` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 1.000000 | 3.000000 |
+| `unify3` / `alloc/src/vec/mod.rs:1002` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 4.000000 |
+| `unify3` / `alloc/src/vec/mod.rs:1009` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 6.000000 |
+| `unify3` / `alloc/src/vec/mod.rs:1784` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 1.000000 | 3.000000 |
+| `unify3` / `alloc/src/vec/mod.rs:1823` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 1.000000 | 1.000000 |
+| `unify3` / `alloc/src/vec/mod.rs:999` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 2.000000 |
+| `unify3` / `core/src/cmp.rs:2201` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 3.000000 |
+| `unify3` / `core/src/iter/range.rs:1145` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 9.000000 |
+| `unify3` / `core/src/ptr/mod.rs:1962` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 6.000000 |
+| `unify3` / `core/src/ptr/mut_ptr.rs:978` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 4.000000 |
+| `unify3` / `core/src/slice/index.rs:0` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 6.000000 | 8.000000 |
+| `unify3` / `core/src/slice/index.rs:238` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 12.000000 |
+| `unify3` / `core/src/slice/index.rs:245` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 2.000000 |
+| `unify3` / `graph.rs:13` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 5.000000 | 5.000000 |
+| `unify3` / `graph.rs:154–156` | Graph::link: repeated identity guard | OVERHEAD; 2233; 2257; 2331 (distinct pair already established) | 1.000000 | 1.000000 |
+| `unify3` / `graph.rs:157–164` | Graph::link: load source, write link | REQUIRED; 2221; 2257; 2331 | 7.000000 | 7.000000 |
+| `unify3` / `graph.rs:165–167` | Graph::link: speculation/name-rule guard | REQUIRED; 2221; 2257; 2331 (btype.ml:713–731) | 4.000000 | 4.000000 |
+| `unify3` / `graph.rs:28–36` | Node tag/arity extraction | REQUIRED; 2239; 2308; 2347–2350 | 2.000000 | 2.000000 |
+| `unify3` / `graph.rs:47` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 1.000000 | 1.000000 |
+| `unify3` / `unify.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 21.000000 | 22.000000 |
+| `unify3` / `unify.rs:1106–1122` | push_lists/push_pair: iterate children and save pairs | UNSURE; 2347–2350; 2440–2445 | 0.000000 | 8.000000 |
+| `unify3` / `unify.rs:1334–1337` | childless: prove occurrence walk unnecessary | REQUIRED; 2218; 2330 | 3.000000 | 3.000000 |
+| `unify3` / `unify.rs:37` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 1.000000 | 1.000000 |
+| `unify3` / `unify.rs:502–510` | occur: call reaches and test its answer | REQUIRED; 2330; 1488–1490 | 11.000000 | 11.000000 |
+| `unify3` / `unify.rs:658–660` | deep_occur: reachability call | REQUIRED; 2309; 1775 | 0.000000 | 10.000000 |
+| `unify3` / `unify.rs:740–748` | unify3: entry and descriptor loads | UNSURE; 2305–2308 | 8.000000 | 8.000000 |
+| `unify3` / `unify.rs:749–785` | unify3: variable/field/mode and create_recursion tests | REQUIRED; 2309–2332 | 16.000000 | 15.000000 |
+| `unify3` / `unify.rs:789–793` | unify3: occurrence and link routing | REQUIRED; 2330–2331 | 1.000000 | 1.000000 |
+| `unify3` / `unify.rs:794–834` | unify3: explain/repair continuations, children and result | UNSURE; 2333–2438 | 16.000000 | 15.000000 |
+| `unify3` / `unify.rs:909–944` | push_children: shape, arity, path match and child ranges | REQUIRED; 2334–2350 | 20.000000 | 14.000000 |
+| `unify_distinct` / `alloc/src/raw_vec/mod.rs:635` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 6.000000 |
+| `unify_distinct` / `alloc/src/vec/mod.rs:0` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 2.000000 |
+| `unify_distinct` / `alloc/src/vec/mod.rs:1784` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 3.000000 | 3.000000 |
+| `unify_distinct` / `alloc/src/vec/mod.rs:1823` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 6.000000 | 8.000000 |
+| `unify_distinct` / `alloc/src/vec/mod.rs:2925` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 4.000000 |
+| `unify_distinct` / `alloc/src/vec/mod.rs:3160` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 8.000000 | 8.000000 |
+| `unify_distinct` / `core/src/ptr/const_ptr.rs:879` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 2.000000 |
+| `unify_distinct` / `core/src/ptr/mod.rs:1754` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 12.000000 | 12.000000 |
+| `unify_distinct` / `core/src/slice/index.rs:0` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 3.000000 | 3.000000 |
+| `unify_distinct` / `core/src/slice/index.rs:238` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 18.000000 | 18.000000 |
+| `unify_distinct` / `core/src/slice/index.rs:245` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 4.000000 |
+| `unify_distinct` / `graph.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 4.000000 | 2.000000 |
+| `unify_distinct` / `graph.rs:13` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 4.000000 | 4.000000 |
+| `unify_distinct` / `graph.rs:154–156` | Graph::link: repeated identity guard | OVERHEAD; 2233; 2257; 2331 (distinct pair already established) | 2.000000 | 2.000000 |
+| `unify_distinct` / `graph.rs:157–164` | Graph::link: load source, write link | REQUIRED; 2221; 2257; 2331 | 16.000000 | 16.000000 |
+| `unify_distinct` / `graph.rs:165–167` | Graph::link: speculation/name-rule guard | REQUIRED; 2221; 2257; 2331 (btype.ml:713–731) | 8.000000 | 8.000000 |
+| `unify_distinct` / `graph.rs:234–252` | Graph::repr: representative loads/tests (inlined) | UNSURE; 2231–2233; 2278–2288 | 28.000000 | 46.000000 |
+| `unify_distinct` / `graph.rs:47` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 2.000000 | 2.000000 |
+| `unify_distinct` / `unify.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 24.000000 | 24.000000 |
+| `unify_distinct` / `unify.rs:1186–1199` | run_frames: pair result, loop bound and pop | UNSURE; 2347–2350; 2440–2445 | 8.000000 | 8.000000 |
+| `unify_distinct` / `unify.rs:1200–1201` | run_frames: tagged continuation dispatch | OVERHEAD; 2347–2350 (recursive calls, no FrameKind) | 6.000000 | 6.000000 |
+| `unify_distinct` / `unify.rs:1202–1223` | run_frames: child identity test and other continuations | REQUIRED; 2231–2233; 2428–2438 | 4.000000 | 4.000000 |
+| `unify_distinct` / `unify.rs:187–227` | unify_distinct: depth, explain/snapshot entry and exit | UNSURE; 2271–2274; 2732–2737 | 30.000000 | 30.000000 |
+| `unify_distinct` / `unify.rs:238–258` | unify_pair: load descriptors, choose variable side | REQUIRED; 2239–2243 | 27.000000 | 27.000000 |
+| `unify_distinct` / `unify.rs:268–280` | unify_pair: nullary same-head shortcut and level test | REQUIRED; 2248–2257 | 29.000000 | 29.000000 |
+| `unify_distinct` / `unify.rs:281–282` | unify_pair: route to unify2 | REQUIRED; 2270 | 3.000000 | 3.000000 |
+| `unify_expanded` / `alloc/src/raw_vec/mod.rs:635` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 8.000000 |
+| `unify_expanded` / `alloc/src/vec/mod.rs:1784` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 0.000000 | 2.000000 |
+| `unify_expanded` / `alloc/src/vec/mod.rs:1823` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 4.000000 | 10.000000 |
+| `unify_expanded` / `core/src/cmp.rs:2289` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 5.000000 | 5.000000 |
+| `unify_expanded` / `core/src/result.rs:0` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 0.000000 |
+| `unify_expanded` / `core/src/slice/index.rs:0` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 1.000000 | 1.000000 |
+| `unify_expanded` / `core/src/slice/index.rs:238` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 6.000000 | 6.000000 |
+| `unify_expanded` / `expand.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 1.000000 | 2.000000 |
+| `unify_expanded` / `expand.rs:792–820` | expand_head: repr, expansion loop and stop tests | REQUIRED; 2279–2282; 1267–1280 | 15.000000 | 62.000000 |
+| `unify_expanded` / `graph.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 11.000000 | 21.000000 |
+| `unify_expanded` / `graph.rs:13` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 4.000000 | 9.000000 |
+| `unify_expanded` / `graph.rs:234–252` | Graph::repr: representative loads/tests (inlined) | UNSURE; 2231–2233; 2278–2288 | 25.000000 | 76.000000 |
+| `unify_expanded` / `unify.rs:0` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 7.000000 | 10.000000 |
+| `unify_expanded` / `unify.rs:1232–1241` | lower_to: generic/level guard and lower | REQUIRED; 2284–2285; 633–640 | 0.000000 | 2.000000 |
+| `unify_expanded` / `unify.rs:671–676` | unify_expanded: function entry | UNSURE; 2276 | 9.000000 | 9.000000 |
+| `unify_expanded` / `unify.rs:677–683` | unify_expanded: expansion/re-expansion decision | REQUIRED; 2278–2282 | 2.000000 | 1.000000 |
+| `unify_expanded` / `unify.rs:684–716` | unify_expanded: levels, identity and lowering | REQUIRED; 2283–2288 | 9.000000 | 6.000000 |
+| `unify_expanded` / `unify.rs:717–728` | unify_expanded: choose direction, call unify3 and return | REQUIRED; 2299–2303 | 18.000000 | 21.000000 |
+| `runtime` / `other:—` | Allocation, bulk memory, startup and twin-layout remainder | UNSURE; 2227–2438 (allocator cost not specified) | -0.091886 | 0.221425 |
+| `tc_kernel::main` / `alloc/src/vec/mod.rs:1823` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 1.000000 | 1.000000 |
+| `tc_kernel::main` / `core/src/result.rs:1182` | Inlined standard-library indexing, vector or control support | UNSURE; 2239–2438 | 2.000000 | 2.000000 |
+| `tc_kernel::main` / `graph.rs:13` | Unlocated/generated code or inlined support | UNSURE; 2239–2438 | 1.000000 | 1.000000 |
+| `tc_kernel::main` / `graph.rs:234–252` | Graph::repr: representative loads/tests (inlined) | UNSURE; 2231–2233; 2278–2288 | 14.000000 | 14.000000 |
+| `tc_kernel::main` / `tc_kernel.rs:443` | Benchmark call-site / result consumption difference | UNSURE; 2227 (harness has no OCaml counterpart) | 2.000000 | 2.000000 |
+| `tc_kernel::main` / `unify.rs:169–176` | unify: identity test and call | REQUIRED; 2229–2233 | 5.000000 | 5.000000 |
+| Sub-millithreshold groups | Startup/library attribution below 0.001 each | UNSURE; 2227–2438 | 0.001218 | 0.002381 |
+| **Total including remainder** | | | 960.954414 | 2826.268888 |
+
+Verification so far (real output):
+
+```text
+cargo build --manifest-path compiler-rust/Cargo.toml
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 34s
+cargo test --manifest-path compiler-rust/Cargo.toml --lib tc::
+test result: ok. 197 passed; 0 failed; 12 ignored; 0 measured; 2621 filtered out; finished in 262.88s
+CARGO_PROFILE_BENCH_CODEGEN_UNITS=1 CARGO_PROFILE_BENCH_DEBUG=line-tables-only cargo bench --manifest-path compiler-rust/Cargo.toml --bench tc_kernel --no-run
+Finished `bench` profile [optimized + debuginfo] target(s) in 9.97s
+# timeout 10 BENCH OP 4097, for each added operation:
+build_datatype2 n=4097 sink=100667399
+unify_datatype2 n=4097 sink=100667399
+build_abbrev2 n=4097 sink=100667399
+unify_abbrev2 n=4097 sink=234852359
+```
+
+An initial bench build tried to read the private forwarding table and failed
+with E0616; it was replaced by public setup instantiation. No visibility or
+compiler-source change was made. The full compiler suite is left to CI;
+only the requested `tc::` slice ran locally.
+
+### 5. Ranked removals to investigate (not implemented)
+
+**Measured charge is not measured saving.** Each number below is the
+executed instruction charge of the listed OVERHEAD groups, from the tables
+above. It is the gross work a removal targets, not a promise that the
+whole operation gets that much cheaper: replacement checks, register
+allocation and inlining can offset it. A realized saving requires building
+and measuring the proposed source edit; that would violate this task's
+no-compiler-source-change constraint. No such figure is invented here.
+The ranking is by measured target charge, with risk stated separately.
+
+| Rank | OVERHEAD groups / smallest candidate edit | Ground3 | Ground1 | Vars | Bind ground1 | Datatype2 | Abbrev2 | What could go wrong / gate |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| 1 | `unify.rs:1280–1290,1302,1311`: generation/storage check + visited test + mark store. Replace marking for a bounded occurrence probe with an explicit remaining-node budget as in `ctype.ml:1432–1465`; preserve the marked walk for an undecided/cyclic/shared case. No removal of the actual occurrence test. Charges split as **7+6+3** in ground3/datatype2 and **14+14+6** in abbrev2. | 16 | 0 | 0 | 0 | 16 | 34 | Simply deleting marks can loop or revisit a shared DAG exponentially. A budget needs an undecided result, not false. Check `expand_tier_agrees_on_recursive_abbreviations`, `kernel_tier_agrees_on_generated_cases`, `structural_tier_agrees_on_generated_cases`, and deep/wide step bounds; include a cyclic non-occurring graph and heavily shared DAG. Budget tests cost instructions; **net saving unknown**. |
+| 2 | `unify.rs:1200`: tagged continuation dispatch. Have the child-pair producer (`push_lists:1116–1122`) hand its first pair directly to `run_frames:1186–1223`, leaving the remaining work in order on the stack; only residual/general continuations use the kind switch. Removing both child dispatches in these flat cases targets the shown 6; forwarding only the first targets a subset, not all 6. | 6 | 0 | 0 | 0 | 6 | 6 | This is representation overhead compared with recursive `unify_list` (`ctype.ml:2347–2350,2440–2445`), but ordinary recursion has its own costs. Do not reorder children or bypass Linked/Recursion/Field frames. Check `unify_of_equal_deep_types_fits_the_stack`, `unify_of_equal_wide_types_is_linear`, `explain_plan_agrees_on_generated_cases`, `explain_reaches_the_reversed_trace_below_a_swapped_unify3`, and `explain_reaches_a_clash_with_the_recursion_repair_pending`. New pair-return plumbing costs instructions; **net saving unknown**. |
+| 3 | `graph.rs:154`: repeated `from == to` guard. Factor `link`'s distinct-node body (`:157–167`) into a private helper; keep the public guard, but use the helper where the caller already proves distinctness. Start at the nullary shortcut (`unify.rs:268–278`), then prove the structure/substitution call sites separately. | 3 | 1 | 0 | 0 | 3 | 7 | `ctype.ml:2233` already rejects identical heads before `:2257`; `unify3` and substitution need stronger proofs because originals and expanded heads differ. A self-link never terminates. Check `link_directions`, `representative_chain_cost`, `expansion_is_memorized_per_node_and_per_nullary_type`, expansion/scoped/explain differential plans and the existing same-node case. Ground3's 3 and abbrev2's 7 include sites beyond the simplest nullary edit; **net saving and eligible subset unknown until those proofs and a build**. |
+
+These rows cover **every** group classified OVERHEAD. Their gross sums
+are 25, 1, 0, 0, 25 and 47 instructions respectively, not projected whole-
+operation savings. In particular, the absence of a line-154 charge for
+variables does not prove the guard is absent from assembly: optimized
+instructions can be attributed to other lines. No hidden savings are
+assigned to those lines.
+
+The larger, explicitly UNSURE opportunities are:
+
+- `unify_expanded`'s representative calls (`graph.rs:234–252`, 25 source-
+  attributed instructions in ground3, 76 in abbrev2): some are after a
+  potentially mutating expansion, so `ctype.ml:2278–2288` requires them.
+  Separate entry calls on already-known representatives from post-mutation
+  calls before proposing an edit. Do not remove all of this bucket.
+- Out-of-line `expand_once` entry/return and `unify3` call plumbing: source
+  line attribution includes spills and return/result work. OCaml also calls
+  functions here; neither a blanket overhead label nor an inline attribute
+  guarantees a saving. K2's own experiments show inlining can cost more.
+- Bounds checks and Vec traffic: preserving safe Rust, frame order and
+  linear step bounds is part of the contract. A load charged to a shared
+  standard-library line cannot be called a second row load without following
+  its instruction addresses and the optimizer's dataflow.
+
+No source under `compiler-rust/src` was edited. These are kernel costs;
+no application speedup is inferred, and no optimization is submitted.
+
+### Final application repeatability check
+
+A 3,735-module application was checked with **two copies of the same
+release executable**, because this change touches no production compiler
+code. This is an output/repeatability sanity check, not independently built
+before/after binaries and not evidence of an optimization. Both executable
+SHA-256 hashes were
+`504d39684aeba51cb754f4b1955ec1a3c95d249d8a850775d759792c231ea3d1`.
+
+```sh
+cargo build --release --manifest-path rewatch/Cargo.toml
+# Finished `release` profile [optimized] target(s) in 4m 57s
+# BASE and CANDIDATE are copies of that executable; APP is outside the checkout.
+scripts/bench_project.sh "$APP" "$BASE" "$CANDIDATE" --runtime-from "$PWD"
+RESCRIPT_RUNTIME="$PWD/packages/@rescript/runtime" \
+  python3 scripts/compare_checker_builds.py "$APP" "$BASE" "$CANDIDATE"
+```
+
+Sanitized output (both scripts exited 0):
+
+```text
+base: instructions=63919897203 source_lines=656677 instructions_per_line=97338.413
+candidate: instructions=63913772174 source_lines=656677 instructions_per_line=97329.086
+Outputs identical
+Instructions difference: -0.0096%
+base: exit code 0, 3735 signatures, 32 diagnostics in 18 files, 3980 generated files
+candidate: exit code 0, 3735 signatures, 32 diagnostics in 18 files, 3980 generated files
+outcome: both exit with 0
+signatures: no difference (3735 compared)
+diagnostics: no difference (18 compared)
+javascript: no difference (3980 compared)
+no differences
+```
+
+All 23 PR checks passed at `f270e0b60`, including output parity and instruction
+count. This final update only records validation and clarifies the machine
+and the fresh-parameter link citation; it changes no benchmark or compiler
+code. The source-group totals were independently resummed from the Markdown:
+916.953969, 122, 119, 124.000058, 960.954414 and 2826.268888, matching their
+operation measurements within 0.0001 instruction.

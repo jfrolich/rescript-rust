@@ -891,7 +891,8 @@ impl Checker {
     ///
     /// With `cells` (the copy has a field whose cell it must duplicate: an
     /// [`OPEN_ROW`] expansion, `Checker::instance_open`, a copy of a graph
-    /// that has fields) each field node goes to `Checker::dup_cell`, and
+    /// that has fields) each field node goes to `Checker::dup_cell`, each
+    /// variant node of a copy to `Checker::copy_refs` (R3n), and
     /// the session ends after the pass; a node that is not a constructor
     /// costs one more test, a constructor nothing. (R3e)
     pub(super) fn link_memorized(&mut self, first: usize, chain: u32, cells: bool) {
@@ -905,14 +906,17 @@ impl Checker {
             super::steps::tick();
             let node = self.g.nodes[index];
             if node.tag() != CONSTR {
-                if cells
-                    && node.head & super::segment::EXTENDED != 0
-                    && matches!(
-                        self.extras.descriptors[node.a as usize],
-                        super::segment::ExtraDescriptor::Field { .. }
-                    )
-                {
-                    self.dup_cell(Ty(index as u32), node, first as u32);
+                if cells && node.head & super::segment::EXTENDED != 0 {
+                    match self.extras.descriptors[node.a as usize] {
+                        super::segment::ExtraDescriptor::Field { .. } => {
+                            self.dup_cell(Ty(index as u32), node, first as u32)
+                        }
+                        // The references of a copied variant row (R3n).
+                        super::segment::ExtraDescriptor::Variant(_) if self.extras.copying => {
+                            self.copy_refs(Ty(index as u32), node, first as u32)
+                        }
+                        _ => {}
+                    }
                 }
                 continue;
             }

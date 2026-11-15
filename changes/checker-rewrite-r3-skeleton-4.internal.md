@@ -1,0 +1,1 @@
+- Checker rewrite R3: design of polymorphic variant rows (slice R3f), with its acceptance tests and build prompt.
