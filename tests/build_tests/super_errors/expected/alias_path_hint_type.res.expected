@@ -1,0 +1,13 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/alias_path_hint_type.res[0m:[2m17:8-19[0m
+
+  15 [2m│[0m   module A = R
+  16 [2m│[0m }
+  [1;31m17[0m [2m│[0m let v: [1;31mOuter.A.frut[0m = 1
+  18 [2m│[0m 
+
+  This type constructor, `Outer.A.frut`, can't be found.
+  
+  
+  [1;33mHint: Did you mean fruit?[0m

@@ -1,0 +1,17 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/alias_path_hint_exception.res[0m:[2m17:9-20[0m
+
+  15 [2m│[0m   module A = R
+  16 [2m│[0m }
+  [1;31m17[0m [2m│[0m let v = [1;31mOuter.A.Meln[0m(1)
+  18 [2m│[0m 
+
+  [1;33mThe variant constructor Outer.A.Meln can't be found.[0m
+  
+  - If it's defined in another module or file, bring it into scope by:
+    - Prefixing it with said module name: [1;33mTheModule.Outer.A.Meln[0m
+    - Or specifying its type: [1;33mlet theValue: TheModule.theType = Outer.A.Meln[0m
+  - Constructors and modules are both capitalized. Did you want the latter?
+    Then instead of [2mlet foo = Bar[0m, try [1;33mmodule Foo = Bar[0m.
+Hint: Did you mean Melon?
