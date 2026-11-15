@@ -1,0 +1,13 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/package_type_subtype_other_path_mismatch.res[0m:[2m5:46-80[0m
+
+  3 [2m│[0m module type T = {type t
+  4 [2m│[0m let x: t}
+  [1;31m5[0m [2m│[0m let f = (x: module(S with type t = int)) => ([1;31mx :> module(T with type t =[0m
+    [2m│[0m [1;31m string))[0m
+  6 [2m│[0m 
+
+  Type module(S with type t = int) is not a subtype of
+    module(T with type t = string) 
+  Type int is not compatible with type string

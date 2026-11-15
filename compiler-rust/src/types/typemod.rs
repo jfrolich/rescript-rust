@@ -8469,8 +8469,6 @@ pub fn modtype_of_package(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
 ) -> Option<crate::types::decl::ModuleType> {
-    use crate::types::decl::ModuleType as DeclMty;
-
     if package_lids.len() != package_args.len() {
         return None;
     }
@@ -8480,6 +8478,55 @@ pub fn modtype_of_package(
         .zip(package_args.iter())
         .map(|(lid, ty)| (flatten_package_constraint_path(lid, arena, ctx), *ty))
         .collect();
+    modtype_of_package_constraints(env, package_path, &constraints, pers_env, ctx)
+}
+
+/// OCaml `Typemod.package_subtype` (compiler/ml/typemod.ml:1224-1236): the
+/// module type of the package `p1` with the constraints of `nl1`/`tl1`
+/// whose types have no free variable is included in that of `p2` without a
+/// coercion. Cost: building both module types and one module inclusion check.
+pub(crate) fn package_subtype(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    (p1, nl1, tl1): (&Path, &[Longident], crate::types::type_expr::TypeSlice<'_>),
+    (p2, nl2, tl2): (&Path, &[Longident], crate::types::type_expr::TypeSlice<'_>),
+) -> bool {
+    let mut pers_env = ctx.persistent_env_clone();
+    let mut mkmty =
+        |path: &Path, lids: &[Longident], args: crate::types::type_expr::TypeSlice<'_>| {
+            let constraints: Option<Vec<PackageConstraint>> = lids
+                .iter()
+                .zip(args.iter())
+                .filter(|&(_, ty)| crate::types::ctype::is_closed_type(ctx, ty))
+                .map(|(lid, ty)| {
+                    let names = lid
+                        .flatten_idx()
+                        .into_iter()
+                        .map(|idx| ctx.resolve_any_longident_component(idx))
+                        .collect::<Option<Vec<_>>>()?;
+                    Some((names, ty))
+                })
+                .collect();
+            modtype_of_package_constraints(env, path, &constraints?, &mut pers_env, ctx)
+        };
+    let (Some(mty1), Some(mty2)) = (mkmty(p1, nl1, tl1), mkmty(p2, nl2, tl2)) else {
+        return false;
+    };
+    matches!(
+        crate::types::includemod::modtypes(ctx, env, &mty1, &mty2),
+        Ok(crate::types::typedtree::ModuleCoercion::Tcoerce_none)
+    )
+}
+
+/// `modtype_of_package` on constraints already flattened to names.
+fn modtype_of_package_constraints(
+    env: &Env,
+    package_path: &Path,
+    constraints: &[PackageConstraint],
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &crate::types::context::TypeContext,
+) -> Option<crate::types::decl::ModuleType> {
+    use crate::types::decl::ModuleType as DeclMty;
 
     let base_mty = match package_path.view() {
         PathView::Pident(_) => env.lookup_modtype(package_path).ok()?.mtd_type.clone()?,
@@ -8496,7 +8543,7 @@ pub fn modtype_of_package(
         }
         PathView::Papply(_, _) => return None,
     };
-    if package_lids.is_empty() {
+    if constraints.is_empty() {
         // OCaml compiler/ml/typemod.ml:1176-1183 calls Env.find_modtype
         // before returning `Mty_ident p` for unconstrained packages. Preserve
         // that force point so package unpacking observes local module-type
@@ -8507,7 +8554,7 @@ pub fn modtype_of_package(
     apply_package_constraints_to_module_type(
         env,
         &base_mty,
-        &constraints,
+        constraints,
         package_parent_path.as_ref(),
         pers_env,
         ctx,
@@ -10920,7 +10967,7 @@ pub(crate) fn scrape_alias_module_type(
 
 /// `Env.find_modtype_expansion` (env.ml): the manifest of a module type path,
 /// or `None` for an abstract or unknown module type.
-fn find_modtype_expansion(
+pub(crate) fn find_modtype_expansion(
     path: &Path,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,

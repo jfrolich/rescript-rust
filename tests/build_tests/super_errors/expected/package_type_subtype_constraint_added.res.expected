@@ -1,0 +1,9 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/package_type_subtype_constraint_added.res[0m:[2m2:28-59[0m
+
+  1 [2m│[0m module type S = {type t}
+  [1;31m2[0m [2m│[0m let f = (x: module(S)) => ([1;31mx :> module(S with type t = int)[0m)
+  3 [2m│[0m 
+
+  Type module(S) is not a subtype of module(S with type t = int)
