@@ -308,9 +308,8 @@ impl Checker {
     /// a constructor and the variable occurs in the constructor, `unify2` of
     /// that pair ([`Checker::unify_expanded`]; `deep_occur`,
     /// compiler/ml/ctype.ml:2240-2241). The occurrence found by the binding
-    /// walk is the `deep_occur` test: a generated node of R3c has no object
-    /// or variant row, below which the two differ (R3e adds the rows). The
-    /// cost is [`Checker::bind`]'s, or one walk and the callee.
+    /// walk is the `deep_occur` test: on this route it crosses objects and
+    /// variant rows, which `occur_rec` does not enter. The cost is [`Checker::bind`]'s, or one walk and the callee.
     fn bind_routed(&mut self, var: Ty, ty: Ty, route: Option<[Ty; 2]>) -> Result<(), Clash> {
         let before = self.g.nodes[var.0 as usize];
         let target = self.g.nodes[ty.0 as usize];
@@ -410,12 +409,12 @@ impl Checker {
     ) -> Result<bool, Clash> {
         if !occur_first {
             if routed {
-                return Ok(self.binding_scan(var, ty));
+                return Ok(self.binding_scan(var, ty, true));
             }
             self.binding_walk(var, ty)?;
             return Ok(false);
         }
-        if !self.reaches(var, ty, false) {
+        if !self.reaches(var, ty, routed) {
             return Ok(false);
         }
         if routed {
@@ -444,7 +443,7 @@ impl Checker {
     /// walk gives up (ctype.ml:1396-1402). Explicit stack. (R3a; the
     /// expansion retry R3c)
     pub fn binding_walk(&mut self, var: Ty, ty: Ty) -> Result<(), Clash> {
-        if self.binding_scan(var, ty) {
+        if self.binding_scan(var, ty, false) {
             // The walk went on to the end, so every level `update_level`
             // writes is written; what is left is `occur_rec`'s retry.
             return self.occur_expanding(var, ty);
@@ -456,8 +455,11 @@ impl Checker {
     /// whether `var` was reached. It does not stop at `var`: it lowers
     /// everything `update_level` lowers either way, so that a retry that
     /// finds no occurrence leaves the levels of a successful binding. At
-    /// most 2 steps a node, explicit stack, marks.
-    fn binding_scan(&mut self, var: Ty, ty: Ty) -> bool {
+    /// most 2 steps a node, explicit stack, marks. With `deep` (the route
+    /// of a variable against a constructor, `deep_occur`,
+    /// compiler/ml/ctype.ml:1735, 2240) the occurrence test crosses objects
+    /// and variant rows too.
+    fn binding_scan(&mut self, var: Ty, ty: Ty, deep: bool) -> bool {
         let level = self.g.nodes[var.0 as usize].level;
         // With scoped types the level update is `bind`'s Checker::lower.
         let lower = self.types.scoped == 0;
@@ -497,7 +499,7 @@ impl Checker {
             if lowered {
                 self.g.write(ty, Node { level, ..node });
             }
-            if self.stops_occurrence(node) {
+            if !deep && self.stops_occurrence(node) {
                 if lowered {
                     self.push_flagged(node, LEVEL_ONLY);
                 }
@@ -1120,11 +1122,18 @@ impl Checker {
                 let target = Ty(self.saved[slot + 1].a);
                 self.g.write(target, descriptor);
             } else if frame.kind == FrameKind::Fields {
-                // `rest1.desc <- d1; rest2.desc <- d2` (ctype.ml:2513-2517).
+                // `rest1.desc <- d1; rest2.desc <- d2` (ctype.ml:2513-2517):
+                // the descriptor only. A rest lowered before the clash (by
+                // unify2's `update_level`, ctype.ml:2283-2285) keeps its level.
                 let slot = frame.extra as usize;
-                let (d1, d2) = (self.saved[slot], self.saved[slot + 1]);
-                self.g.write(frame.left, d1);
-                self.g.write(frame.right, d2);
+                for (rest, saved) in [(frame.left, slot), (frame.right, slot + 1)] {
+                    let level = self.g.nodes[rest.0 as usize].level;
+                    let descriptor = Node {
+                        level,
+                        ..self.saved[saved]
+                    };
+                    self.g.write(rest, descriptor);
+                }
             }
         }
     }
@@ -1201,7 +1210,10 @@ impl Checker {
             // `Tpoly (t1, []), Tpoly (t2, []) -> unify env t1 t2`: push the
             // pair of the two slots 0 and return `Ok(())`.
             (ExtraDescriptor::Poly, ExtraDescriptor::Poly) if left.arity() == 1 && right.arity() == 1 => {
-                todo!("R3e")
+                let body1 = self.g.lists[left.b as usize];
+                let body2 = self.g.lists[right.b as usize];
+                self.push_pair(body1, body2);
+                Ok(())
             }
             (ExtraDescriptor::Poly, ExtraDescriptor::Poly) => self.enter_poly(t1x, t2x),
             (ExtraDescriptor::Variant(_), ExtraDescriptor::Variant(_)) => {
