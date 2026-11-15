@@ -1,0 +1,17 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/alias_path_hint_one_alias.res[0m:[2m5:9-14[0m
+
+  3 [2m│[0m }
+  4 [2m│[0m module A = R
+  [1;31m5[0m [2m│[0m let v = [1;31mA.Aple[0m
+  6 [2m│[0m 
+
+  [1;33mThe variant constructor A.Aple can't be found.[0m
+  
+  - If it's defined in another module or file, bring it into scope by:
+    - Prefixing it with said module name: [1;33mTheModule.A.Aple[0m
+    - Or specifying its type: [1;33mlet theValue: TheModule.theType = A.Aple[0m
+  - Constructors and modules are both capitalized. Did you want the latter?
+    Then instead of [2mlet foo = Bar[0m, try [1;33mmodule Foo = Bar[0m.
+Hint: Did you mean Apple?

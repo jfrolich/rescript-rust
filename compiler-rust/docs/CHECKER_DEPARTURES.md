@@ -7785,6 +7785,109 @@ difference in the exit status, the diagnostics or the JavaScript:
   The witnesses of this place no longer reach it; whether any program
   still needs it was not measured, and it was not removed.
 
+### H1 - spelling hints through a module path that ends in an alias
+
+The witness: a misspelled constructor read through a module path of two
+components whose last module is an alias.
+
+```rescript
+module Outer = {
+  module R = {
+    type t = Apple | Banana
+  }
+  module A = R
+}
+let v = Outer.A.Aple
+```
+
+Both compilers reject it with "The variant constructor Outer.A.Aple can't be
+found."; OCaml ends the report with "Hint: Did you mean Apple?", Rust printed
+no hint. The same for values, exception constructors, record labels, types,
+modules and module types, through `Outer.A`, through an alias `O.A` of
+`Outer`, and through another unit. `R.Aple` and `A.Aple` with `A = R` at the
+top got the hint in both. OCaml's hint is `Typetexp.spellcheck` /
+`super_spellcheck` (`compiler/ml/typetexp.ml:779-797`, called for values at
+895, modules at 938, constructors at 953, labels at 997, module types at
+1000, types at 817) over a fold of the names of that kind: for `Ldot (r, s)`
+the folds `find_all`, `find_all_simple_list` and `fold_modules`
+(`compiler/ml/env.ml:1985-2056`, `fold_values` ... `fold_modtypes` at
+2045-2056) read the component table of the descriptor
+`lookup_module_descr r env` returns (env.ml:952-972), the descriptor the
+failed lookup itself read, which follows the aliases of the path; the
+candidates are matched against the last component `s`.
+
+Commands as in "Scope, calibration and reproducibility"; each program is
+`Main.res` compiled by both with `-w +A -bs-jsx 4 -color never -I . -I
+packages/@rescript/runtime/lib/rescript` (and `-I` the OCaml-built package
+holding `Lib.res` for the paths through another unit), and stderr and the
+exit status compared byte for byte.
+
+#### Fixed
+
+- `116817ed9`: the report of an unbound module type
+  (`format_unbound_modtype_report`, `compiler-rust/src/driver.rs:4478`)
+  spellchecked the whole dotted name (`R.Sigg`) against the candidates,
+  where `Typetexp.spellcheck` matches the last component
+  (typetexp.ml:790-797); a qualified module type never got a hint, alias or
+  not. It now passes the last component (driver.rs:4489), as the report of
+  an unbound module does. Fixtures: super_errors
+  `alias_path_hint_modtype_qualified`, `alias_path_hint_modtype_unqualified`
+  (agreed before).
+- `db1a96289`: the candidates for a qualified name
+  (`unbound_name_alternatives`, `compiler-rust/src/types/typecore.rs:18141`,
+  for values, constructors, labels, types and modules) resolved the prefix
+  with `Env::resolve_module_lid_raw`, and those for a module type
+  (`unbound_modtype_alternatives`, `typemod.rs:7665`) with
+  `lookup_module_type_by_lid`: two roads beside the descriptor lookup the
+  failed lookup took, and neither reached the signature of `Outer.A`. Both
+  now read the table `with_resolved_module_components_for_lid` gives for the
+  prefix, the road of the lookups (the module type candidates are collected
+  by `unbound_name_alternatives` too). It runs only after a lookup has
+  failed. Fixtures: super_errors `alias_path_hint_constructor`, `_value`,
+  `_exception`, `_label`, `_label_pattern`, `_field`, `_type`, `_module`,
+  `_modtype_alias`, `_tie`, `_too_far`, `_alias_outside` and `_one_alias`
+  (the last three agreed before), super_errors_multi `alias_path_hint_unit`.
+
+Programs run through both compilers, before (trunk `299927cd2`) / after
+`db1a96289`, the whole diagnostic and the exit status compared byte for
+byte (OCaml rejects every one). Columns are the kinds: a value `aple`,
+constructor `Aple`, exception `Meln(1)`, label `{P.aple: 1, banana: 2}`,
+field read `r.P.aple`, record pattern `{P.aple: a}`, type `P.frut`, module
+`P.Subb.x`, module type `P.Sigg`, `P.Gear` (two candidates at distance 1:
+OCaml prints "Bear or Pear"), and three names OCaml gives no hint
+(`Zzzzzzzz`, too far; `Ap`, two letters; `X`, one letter). Rows are the
+paths: `Outer.A`; `O.A` with `module O = Outer`; `Q.A` with `Q = O`, `O =
+Outer` (a chain of three); `O.A` with `A` an alias of a module `Top` outside
+`Outer`; `I.A` with `module I = {include Outer}`; `X.A` inside a functor
+whose parameter holds `module A = R`; `Lib.A` and `O.A` with `module O = Lib`
+in a second unit.
+
+| Path | value | constructor | exception | label | field | labelpat | type | module | modtype | tie | nohint_far | nohint_short | nohint_one |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `Outer.A` | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | agree / agree | agree / agree | agree / agree |
+| `O.A` | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | agree / agree | agree / agree | agree / agree |
+| `Q.A` (three) | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | agree / agree | agree / agree | agree / agree |
+| `O.A`, A = Top | agree / agree | agree / agree | agree / agree | agree / agree | agree / agree | agree / agree | agree / agree | agree / agree | DIFFER / agree | agree / agree | agree / agree | agree / agree | agree / agree |
+| `I.A` (include) | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | agree / agree | agree / agree | agree / agree |
+| `X.A` (functor) | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | agree / agree | agree / agree | agree / agree |
+| `Lib.A` | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | agree / agree | agree / agree | agree / agree |
+| `O.A`, O = Lib | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | DIFFER / agree | agree / agree | agree / agree | agree / agree |
+
+Controls, agree before and after: `R.Aple` with `R` at the top, `A.Aple`
+with `module A = R` at the top, `Outer.R.Aple` with no alias, and the
+unqualified module type `Sigg`.
+
+The path through an alias of a module outside `Outer` agreed before except
+for the module type: `resolve_module_lid_raw` reached `Top`'s signature, but
+the module type report spellchecked `O.A.Sigg` whole.
+
+#### Open
+
+Nothing of this place. The value lookup's own fallback through
+`resolve_module_lid_raw` (`typecore.rs:9923`, after the descriptor road and
+the access-path road fail) is a lookup, not a candidate fold, and was left
+as it is.
+
 ### X1 - a constructor of an extensible type two modules deep, with a functor application in the unit
 
 The witness (the one found under C1):

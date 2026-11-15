@@ -1,0 +1,15 @@
+We've found a bug for you!
+  /.../fixtures/alias_path_hint_unit/Main.res:2:9-16
+
+  1 │ module O = Lib
+  2 │ let v = O.A.Aple
+  3 │ 
+
+  The variant constructor O.A.Aple can't be found.
+  
+  - If it's defined in another module or file, bring it into scope by:
+    - Prefixing it with said module name: TheModule.O.A.Aple
+    - Or specifying its type: let theValue: TheModule.theType = O.A.Aple
+  - Constructors and modules are both capitalized. Did you want the latter?
+    Then instead of let foo = Bar, try module Foo = Bar.
+Hint: Did you mean Apple?

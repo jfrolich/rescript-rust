@@ -18127,9 +18127,18 @@ fn narrowed_module_lookup_error(
 }
 
 /// Spelling-hint candidates for an unbound name: the local env table for
-/// `Lident`, or the matching items of the prefix module's signature in
-/// `Tbl.fold` order for `Ldot`.
-fn unbound_name_alternatives(
+/// `Lident`, or the names of that kind in the component table of the prefix
+/// module for `Ldot`, in `Tbl.fold` order.
+///
+/// OCaml's folds (`find_all`, `find_all_simple_list`, `fold_modules`,
+/// compiler/ml/env.ml:1985-2056) read the table of the descriptor
+/// `lookup_module_descr` returns for the prefix (env.ml:952-972), the one the
+/// failed lookup read, which follows the aliases of the path. This takes the
+/// same descriptor road (`with_resolved_module_components_for_lid`).
+///
+/// Called only after a lookup has failed. Cost: the prefix lookup, already
+/// forced by the failed lookup, and one pass over the table's signature.
+pub(crate) fn unbound_name_alternatives(
     arena: &ParseArena,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
@@ -18141,15 +18150,21 @@ fn unbound_name_alternatives(
     match lid {
         Longident::Lident(_) => local_names(env),
         Longident::Ldot(prefix, _) => tbl_fold_names_list(
-            env.resolve_module_lid_raw(prefix, arena, pers_env, ctx)
-                .map(|(_, sig)| {
+            with_resolved_module_components_for_lid(
+                prefix,
+                arena,
+                env,
+                pers_env,
+                ctx,
+                |components| {
                     let mut names = Vec::new();
-                    for item in sig.iter() {
+                    for item in components.signature() {
                         item_names(item, &mut names);
                     }
                     names
-                })
-                .unwrap_or_default(),
+                },
+            )
+            .unwrap_or_default(),
         ),
         Longident::Lapply(_, _) => Vec::new(),
     }

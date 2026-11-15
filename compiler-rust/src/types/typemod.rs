@@ -7669,33 +7669,21 @@ pub(crate) fn unbound_modtype_alternatives(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
 ) -> Vec<String> {
-    match lid {
-        crate::parser::longident::Longident::Lident(_) => env.fold_modtype_names(),
-        crate::parser::longident::Longident::Ldot(prefix, _) => {
-            let mut names: Vec<String> =
-                lookup_module_type_by_lid(prefix, arena, env, pers_env, ctx)
-                    .and_then(|mty| match mty {
-                        crate::types::decl::ModuleType::MtySignature(sig) => Some(
-                            sig.iter()
-                                .filter_map(|item| match item {
-                                    crate::types::decl::SignatureItem::SigModtype(id, _) => {
-                                        Some(id.name().to_string())
-                                    }
-                                    _ => None,
-                                })
-                                .collect(),
-                        ),
-                        _ => None,
-                    })
-                    .unwrap_or_default();
-            // `Tbl.fold` visits the components in ascending name order and
-            // conses them (compiler/ml/env.ml:1938-1945).
-            names.sort_unstable_by(|a, b| b.as_bytes().cmp(a.as_bytes()));
-            names.dedup();
-            names
-        }
-        crate::parser::longident::Longident::Lapply(_, _) => Vec::new(),
-    }
+    // `fold_modtypes` (compiler/ml/env.ml:2055-2056) over the prefix's
+    // component table, as for every other kind of name.
+    crate::types::typecore::unbound_name_alternatives(
+        arena,
+        env,
+        pers_env,
+        ctx,
+        lid,
+        Env::fold_modtype_names,
+        |item, names| {
+            if let crate::types::decl::SignatureItem::SigModtype(id, _) = item {
+                names.push(id.name().to_string());
+            }
+        },
+    )
 }
 
 fn alias_of_module_type(
