@@ -8046,7 +8046,7 @@ fn repair_recursion(ctx: &TypeContext, env: &Env, t2: TypeExprRef, t2_expanded: 
     };
     ctx.forget_abbrev(abbrev, &path);
     let expansion = expand_head_unif(ctx, env, t2);
-    if !closed_parameterized_type(ctx, ctx.type_list(&args).iter(), expansion) {
+    if !closed_parameterized_type(ctx, ctx.type_list(args).iter(), expansion) {
         link_type(ctx, ctx.repr(t2), ctx.repr(t2_expanded));
     }
 }
@@ -15353,7 +15353,7 @@ mod tests {
         let memo = ctx.alloc_abbrev_nil();
         let ty = ctx.new_var(None);
         let paths: Vec<_> = (0..10_000)
-            .map(|i| Path::pident(crate::ident::Ident::create_persistent(&format!("t{i}"))))
+            .map(|i| Path::pident(crate::ident::Ident::create_persistent(format!("t{i}"))))
             .collect();
         for path in &paths {
             ctx.memorize_abbrev_expansion(memo, PrivateFlag::Public, *path, ty, ty);
