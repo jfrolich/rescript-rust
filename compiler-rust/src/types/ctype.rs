@@ -13360,13 +13360,20 @@ fn subst_identity_copy_rec(
                 TypeDesc::Tpoly { body, vars } => {
                     let body = *body;
                     let vars = *vars;
-                    let body_copy =
-                        subst_identity_copy_rec(ctx, body, mode, seen, row_more_markers);
+                    // btype.ml:537-539: the binders are copied before the body
+                    // (see the `Poly` arm of `copy_type_cached`).
                     let vars_copy: Vec<_> = ctx
                         .type_list(vars)
                         .iter()
-                        .map(|t| subst_identity_copy_rec(ctx, t, mode, seen, row_more_markers))
+                        .map(|t| {
+                            norm_univar(
+                                ctx,
+                                subst_identity_copy_rec(ctx, t, mode, seen, row_more_markers),
+                            )
+                        })
                         .collect();
+                    let body_copy =
+                        subst_identity_copy_rec(ctx, body, mode, seen, row_more_markers);
                     TypeDesc::Tpoly {
                         body: body_copy,
                         vars: ctx.new_type_list(&vars_copy),
@@ -13576,6 +13583,21 @@ fn subst_identity_copy_rec(
 /// OCaml `Ctype.copy` only duplicates nodes at `generic_level` and returns
 /// non-generic nodes unchanged (`partial = None` case used by `instance`).
 /// For duplicated generic nodes, sharing is preserved across the copied graph.
+/// OCaml `Btype.norm_univar` (compiler/ml/btype.ml:396-401): the copy of a
+/// binder, which is the first element when the copy is the `Ttuple [more';
+/// ty']` marker a row copy leaves on its tail. O(1) per link followed.
+fn norm_univar(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
+    let ty = ctx.repr(ty);
+    let first = match &*ctx.get_desc(ty) {
+        TypeDesc::Ttuple(items) => ctx.type_list(items).iter().next(),
+        _ => None,
+    };
+    match first {
+        Some(first) => norm_univar(ctx, first),
+        None => ty,
+    }
+}
+
 pub(crate) fn copy_type_cached(
     ctx: &TypeContext,
     ty: TypeExprRef,
@@ -13875,12 +13897,16 @@ pub(crate) fn copy_type_cached(
                 }
                 CopyAction::Nil => TypeDesc::Tnil,
                 CopyAction::Poly { body, vars } => {
-                    let body_copy = copy_type_cached(ctx, body, cache);
+                    // btype.ml:537-539 copies the binders before the body: a
+                    // binder that is also the tail of a variant row in the
+                    // body is then copied as itself, not as the marker the
+                    // row copy leaves on it.
                     let vars_copy: super::type_expr::TypeRefList = ctx.new_type_list_from(
                         ctx.type_list(vars)
                             .iter()
-                            .map(|v| copy_type_cached(ctx, v, cache)),
+                            .map(|v| norm_univar(ctx, copy_type_cached(ctx, v, cache))),
                     );
+                    let body_copy = copy_type_cached(ctx, body, cache);
                     TypeDesc::Tpoly {
                         body: body_copy,
                         vars: vars_copy,
@@ -13894,7 +13920,12 @@ pub(crate) fn copy_type_cached(
                     let more = ctx.repr(row.row_more);
                     let more_level = ctx.get_level(more);
                     let keep = more_level != GENERIC_LEVEL;
+                    // ctype.ml:816 `Tsubst ty -> ty`: a tail copied before
+                    // the row (a binder of an enclosing `Tpoly`) keeps its
+                    // copy.
+                    let copied_more = cache.nodes.get(more).copied();
                     let mut more_copy = match ctx.get_desc(more).into_desc() {
+                        _ if let Some(copied) = copied_more => copied,
                         TypeDesc::Tconstr { .. } | TypeDesc::Tnil => {
                             copy_type_cached(ctx, more, cache)
                         }

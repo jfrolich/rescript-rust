@@ -1,0 +1,1 @@
+- Copying a polymorphic type keeps a type variable that is bound by the polymorphic type and is also the row variable of a polymorphic variant in it, so such types unify, are compared and print as with the OCaml compiler.
