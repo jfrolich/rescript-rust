@@ -2720,7 +2720,9 @@ branch's `PURE` flag is in the handle then). This corrects "T4c design",
   `compiler-rust/tests/printer_coverage.json`. From T6f on the emitter of
   trunk writes through the builder, so every builder constructor is under
   that suite.
-- *From the flip (T6s)* check mode compares the builder's text with the
+- (This bullet and the next are withdrawn by "T6: the order of the flip":
+  the decision slices land before the flip and nothing is given up.)
+  *From the flip (T6s)* check mode compares the builder's text with the
   legacy program after the passes that have left the new side: the legacy
   side keeps a copy of its program after P1 and P2, prints it with the
   legacy printer, reformats it once in process (`js_reformat::reformat`,
@@ -2855,6 +2857,9 @@ A slice "deletes what it replaces": in A (but T6f) and B nothing is
 replaced yet, and what is added cannot be reached outside tests; T6f, each
 slice of C, and T6s delete in the same pull request.
 
+(The rows T6e and T6k to T6t are replaced by "T6: the cut of the
+interface, revisited".)
+
 | Slice | What | Files | Depends on | May run beside | Lines |
 | --- | --- | --- | --- | --- | ---: |
 | T6a | `Row`, `J`, `Kind`, the table, leaves, operators, calls, members, with their flags | `emit/builder.rs`, `emit/builder_tests.rs` | - | T6k | 450 |
@@ -2899,6 +2904,212 @@ What is designed to the level of a build prompt in this turn: T6a and T6b
 and end state fixed here and get their skeleton and tests from the next
 design turn. T6k to T6r need the interface designed first (open question
 3).
+
+#### T6: the order of the flip
+
+Status: design, answered from the code of trunk `127f3d89c8`. It answers
+decision 5 of the review of "T6 design" and replaces the second and third
+bullet of "The gate" and the rows T6k to T6t of "T6: the cut" (the new rows
+are in "T6: the cut of the interface, revisited"). Nothing in it was run:
+every statement is "read", and the two places where a claim rests on a
+slice that is not designed yet say so.
+
+**The question.** Can T4g, T4d, T4e and T4f be written against the
+interface of phase C and land before the flip, so that check mode's
+comparison through the remaining legacy passes never stops?
+
+**The answer is (A): yes, in this order: T6k to T6r, T6u, T4g, T4d, T4e,
+T4f, T6v, T6s.** The flip (T6s) is the last slice that changes what check
+mode runs, and at the flip the two texts compared are both final texts.
+Two things have to be true for that, and both are decided here:
+
+1. the flatten rules (pass P1) leave the new side before the flip, as a
+   slice of their own (T6u), written once above the interface;
+2. a decision slice edits JavaScript it has built in one of three places
+   only, each of which exists behind the interface on `Bir` rows today and
+   on oxc nodes after the flip.
+
+**What the new side runs today** (`LambdaCompiler::
+compile_deps_program_with_lower_check`, `lambda/lam_compile.rs`):
+`shadow::prepare_lower` (the lowering, `bridge_j::export_lowered`), then
+`bridge_j::qualify`, `apply_js_flatten_pass` (P1),
+`shadow::compare_decisions`, and `finish_flattened_output`: P3
+`apply_js_tailcall_inline_pass`, P4 `apply_js_record_rest_pass`, P5
+`apply_js_flatten_and_mark_dead_pass`, P6 `apply_js_shake_pass`.
+`shadow::check_lower` compares two pairs of texts, both through the legacy
+printer: `before` (the legacy program after export coercion against the
+lowering's program) and `after` (both after their passes), and their
+mappings.
+
+**Why P1 has to leave first, and can.** "T4c design" showed that P3 cannot
+leave the new side while P1 runs after the lowering (the two tests of (c),
+and the dropped-branch term of (b)). P1 on the new side is a pass over a
+`JsArena`; nothing of it is in the lowering. "T6 design" (e) puts its rules
+F1 to F8 at the seal, and the cut put the seal in `emit/builder_seal.rs`
+(T6e), so P1 could only leave at the flip. But the seal is a walk the
+replay already makes: `names::replay` (`bir/lower/names.rs`,
+`Replay::statements`, `child`, `statement`) visits every statement of the
+final lists once, top down, with one frame per open list, and T6r puts
+that walk behind the statement interface. F1 to F8 read a statement the
+walk holds and write the statements that replace it (take the value of an
+expression statement or a `return` apart, build an `if`, a `return`, an
+expression statement, negate a test, release a branch). Each of those is a
+function of the interface that the lowering needs anyway (`cond.rs` takes
+sequences and conditionals apart, `expr.rs` and `export.rs` split a
+sequence into statements). So the rules are written once, over the
+interface, in the replay's walk (T6u, `bir/lower/seal.rs`), run on `Bir`
+rows until the flip and on the builder after it, and the new side stops
+running `apply_js_flatten_pass` when T6u lands. What stays in T6e is what
+only the oxc tree needs: the print forms of "T6 design" (c), the descent
+below `HAS_FUN` and `SEAL`, `Builder::release` and `Builder::copy`. This
+is a change of the cut of T6e, recorded below.
+
+T4b's RESULT B is not touched: nothing is flattened where a list is
+copied. `simplify_if_head` keeps reading `Return(Cond)` in a copied
+branch, because the walk of T6u runs when the unit is complete.
+
+**Where a decision can edit built JavaScript, under the interface.** A
+handle of the interface is not `Copy` and names no parent ("T6 design",
+findings 2 and 4). "The design" of 11.4 was written for `NodeId`: "the
+splice rewrites the `return` node in place", "marks its declaration in
+place". Under the interface the same decisions are taken with these three
+means, and no other:
+
+| Means | What it reaches | On `Bir` rows | On the builder |
+| --- | --- | --- | --- |
+| E1: a statement of the run being closed is in flight | The statements `StatementStack::take_list` is about to copy: the lowering owns their handles, so it can take one, take its value apart, replace it or drop it | the slot's `NodeId` | the slot's `S` |
+| E2: a mark by id | One bit or the payload of the row of a node that is already inside a parent (the dead mark of a declaration in a closed list, the late mark of a leaf, "the test of this `if` is not entered", "this `return` is the site of parked body `k`") | `Node::aux`, one store | `Builder::rows[id]`, one store |
+| E3: the walk of the seal | Every statement of the final lists, once, top down, as an owned handle; an expression only below a flag (`HAS_FUN`, `SEAL`) | the walk of T6u | the same walk |
+
+A value taken out at E1 that is put back at E3 waits in a pool of the
+lowering (`Js::park`, one slot per parked body, 24 bytes after the flip).
+What cannot be done is what the legacy passes do freely: rewrite a node
+found from the side (through a site, a use count or a map from identifier
+to expression). Every such rewrite below is restated as "decide at the
+close from the tables, mark, and let the walk of the seal write it".
+Counts are never read from the tree: `Uses::built` and `Uses::remaining`
+(`bir/lower/scope.rs`) are tables of the lowering, above the interface.
+
+**The four slices.** "Reads" and "writes" name the legacy pass; "through
+the interface" says what the lowering uses instead. None of the four is
+designed here beyond this: each has a design step of its own (T4g's is
+commit 1 of 11.6), and what this section decides is that the design can be
+written against the interface and gated before the flip.
+
+| Slice | Reads and writes today | Through the interface, before the builder is behind it | Cost of the move |
+| --- | --- | --- | --- |
+| T4g, P3 | `lambda/js_pass_tailcall_inline.rs`. Reads: `UseCounts` (occurrences by identifier, purity of each declaration's value), the export set, `collect_tail_callees`, the site test of `TailcallInlineState::try_inline_single_return_statement` (last statement of a list, `return f(args)`, `f` a variable or a function literal), `inline_function_decl_from_variable` (not a method, not `async`, no directive), `inline_named_call` (`active_decls`, the arity), `immutable_param_mask` (`block_assigns_ident`: a walk of the body), `is_substitutable_constant` of each argument. Writes: `inline_tailcall_call` (a `let p = arg` per parameter that is not substituted, then `SubstituteInline` over the body: renamed or replaced parameters, pruned conditionals, shadowing), the status of every declaration (`transform_statement`: a dead pure one is dropped, a dead impure one becomes its value) | Reads, all above the interface or one row: `Uses::built`; the `STRICT` flag and `aux` (the `LetKind`) of the declaration's row; the function's header through the row's payload (`FuncId`); the site as `scope::return_sites` records it today, read through the interface's by-reference operand reads; a parameter is assigned: `VarFlags::ASSIGNED`, which the lowering maintains (no walk). Writes: the callee's declaration is a statement of the run being closed (E1): it is taken, the function literal taken apart (`Js::into_function`), and the body parked. The substitution runs over the owned body (`Js::substitute`: one step per node of a body that is inlined, each body once). The site: when its `return` is a statement of the same run, E1; when it is inside a list that closed earlier, E2 (the `return`'s row gets the parked slot) and E3 writes the body there, with the `if` of F5 when the site is under a returned conditional, marked "test not entered" | The slice itself (11.6 gives its size). Below the interface: `park`, `into_function` and `substitute`, each with a body for `Bir` rows (deleted by T6s) and one for the builder (T6v, or T4g when T6v has landed). 11.6 changes in three places, listed below |
+| T4d, P4 | `lambda/js_pass_record_rest.rs`: `RecordRest::block_items` (last statement first), `materialize_fields`, `replace_source_fields`, `map_statement`. Reads: a declaration or a `return` whose value is a record rest; the statements after it in the same list, through blocks, declarations, expression statements and `return`s, and through ten expression kinds (`map_expr`); every `source.label` (`source_field`). Writes: `let x = source.label` is deleted and `x` becomes the binder; other reads become a fresh identifier (`field_ident_name`); `__unused<i>`; for a returned record rest a fresh `rest` and its declaration | The declaration and the statements after it are statements of the run being closed (E1). Each is taken, its value walked through the kinds `map_expr` enters by taking it apart and rebuilding it with the plain constructors, and put back. P4 runs after P1, so the walk reads through the reshaping as `return_sites` does: a conditional or a sequence in statement or `return` position is an `if` or several statements for P4, which does not enter an `if`; the rule is stated on the statement the lowering wrote. It runs only in a run that holds a record rest (one bit of the run, set where `record.rs` builds one) | The slice (about 300 lines and its rule tests). Nothing below the interface that T6k to T6q do not already need. Its fresh identifiers are created at the close, not after the lowering: risk 1 of section 12 |
+| T4e, P5 | `lambda/js_pass_flatten_and_mark_dead.rs`: `Substitute::{statement, expression, try_substitute_caml_block_projection, substituted_caml_block_item}`, `should_materialize_block_binding_items`, `is_simple_block_binding_item`, `mark_dead_code`, `collect_mark_dead_states_*`, `apply_mark_dead_states_*`. Reads: the status P3 gave a declaration; a lexical declaration of an immutable block literal with two or more fields; whether each field is simple; every later `x[i]` and `x.f` of the variable, anywhere after it in program order (the map is not scoped); for the dead marks, occurrences after or before a declaration, one level. Writes: `x_0`, `x_1` declared before `x`; a read replaced by a simple field; statuses the printer reads | The declaration is in the run being closed (E1): materialising takes the literal apart and stages the fresh declarations before it. The reads are already recorded as sites (11.4, "Facts recorded while lowering"); the decision and its effect on `remaining` are taken from that chain at the close, by id, without touching a node. A read is rewritten by the walk of the seal (E3): its row carries `SEAL` from the moment it is built over a variable that has a block-literal fact, so the descent the seal already makes finds it. A dead declaration of the run is dropped or made its value at E1; one whose list closed earlier (finding 3, the late zero) is marked (E2) and omitted by the walk | The slice. Below the interface: nothing new. It needs T6u (the walk rewrites) and the `SEAL` flag settable by the lowering on a field read (`Js::index`, `Js::dot`) |
+| T4f, P6 | `lambda/js_shake.rs`: `shake_program`, `flatten_toplevel_block`, `live_idents`, `free_variables_of_expression`, `free_variables_of_statement`, `js_statement_no_side_effects`. Reads: the top-level list with nested blocks spliced and dead declarations dropped; the export set; per declaration the free variables of its value and whether it is strictly pure; per other statement whether it has an effect and its free variables. Writes: a filter of the list | The rows of the top level exist (`export::Row`, T4a). Strict purity of a declaration's value is its row's flag; of a compound statement it is the `STRICT` flag of the statement's row, which the interface gives every statement (changes T6b: see D2 (a)). The references of a top-level statement are the sites of the top-level variables, each mapped to its row through the owner of its node (`export::row_of` today; `Js::owner` under the interface, D2 (f)). The worklist of `live_idents` runs over rows; statements that are not live are not written | The slice (about 250 lines). Below the interface: `Js::owner`, which T6q needs for `export.rs` in any case |
+
+**What has to hold for each T4 slice to be gated before the flip**, and
+what was not shown:
+
+- *Storage.* All four run on `Bir` rows through the interface, and
+  `bridge_j::export_lowered` still gives the remaining legacy passes a
+  `JsArena`. So `after` stays "both sides through the passes that have not
+  left", unchanged in kind until T4f, and `before` moves once, at T6u, to
+  "the legacy program after P1 and P2 against the lowering's program".
+- *The splice at the seal changes when names and occurrences are final.*
+  Counts are tables, so D (the dead marks) reads `remaining` after the
+  effects of A to C were subtracted at the close; the walk of the seal only
+  writes. That the effects of a splice on `remaining` (a pruned branch, a
+  renamed parameter) can be computed at the close without the edit is
+  argued above from `SubstituteInline` (it reads only the body it is
+  given), not tested. T4g's design step has to show it or move the
+  substitution to the close and leave only the placement to the seal, which
+  E1 allows (the body is owned when its declaration's run closes).
+- *A run is closed more than once* ("T4c design", "as built"): unchanged by
+  the interface, and still T4g's first question.
+- *What is not possible in this order* and is not needed: running a legacy
+  pass on the builder's program. No slice after the flip needs one.
+
+**The order.** One row per slice from the first that touches the lowering.
+"Protects it" is what a pull request of the slice must show at zero
+differences; "corpora" are the runtime library, tests/tests and the
+fixtures through `scripts/test_backend_coverage.py`, and the application
+through a `RESCRIPT_BACKEND=check` build.
+
+| Slice | What it does | Depends on | What protects it |
+| --- | --- | --- | --- |
+| T6k to T6q | The lowering's files stop naming J opcodes, a group of files a slice; storage is `Bir` rows | T6k first | Check mode as today: `before` and `after`, texts and mappings, on the corpora; `compare_decisions`; the name comparison of T5b; the allocation pins of `bir/lower/unit.rs` |
+| T6r | `names.rs`, `globals.rs` behind the statement interface; the external-shadow decision in the replay's walk | T6k to T6q | The same; `globals_qualified` equal before and after on every corpus unit |
+| T6u | F1 to F8 in the replay's walk (`bir/lower/seal.rs`); the new side stops running `apply_js_flatten_pass` | T6r | `before` is now "legacy after P1 and P2" against the lowering's program; `after` unchanged; `compare_decisions` on the lowering's own program; the tests of "T4c design" (c) and of T4b keep both texts |
+| T4g | Step A with the splice | T6u | `after`: the new side runs P4, P5, P6; `before` moves to "legacy after P1, P2, P3"; `compare_decisions` stays (it compares what the lowering decided with what P3 decides on the legacy side) |
+| T4d | Step B | T4g | `after`: the new side runs P5, P6; `before` after P4 |
+| T4e | Steps C and D | T4d | `after`: the new side runs P6; `before` after P5 |
+| T4f | The shake over rows | T4e, T6q | `before` and `after` are the same comparison: both final. The new side runs no legacy pass |
+| T6v | The builder behind the interface, compiled for tests: the second implementation of `Js`; every rule test of `bir/lower/oracle_tests.rs` runs on both and compares the two texts after `js_reformat::reformat` | T6a to T6j, T6r; each T4 slice that landed before it | The tests; check mode is not touched |
+| T6s | The flip: check mode instantiates the lowering with the builder; `Bir` rows of J, `bir/j/`, `bridge_j.rs` and the first implementation of `Js` are deleted | all above | The legacy final text, reformatted once, against what `oxc_codegen` prints for the builder's program, and the mappings, on the corpora; `compare_decisions` |
+| T6t | Measurements, STATUS, the pins; the type parameter of the lowering is removed | T6s | - |
+
+T6v may land before any T4 slice; a T4 slice that lands after it gives its
+functions below the interface both bodies and runs its rule tests on both.
+Phases A and B (T6a to T6j) run beside all of it, as before.
+
+**The comparison is never suspended.** Until T6s the new side is the
+lowering on `Bir` rows followed by the legacy passes that have not left,
+compared with the legacy side before and after those passes: the check of
+today, which sees every fact a remaining pass reads because the pass reads
+it. At T6s no pass remains, the builder's program is the final program,
+and its text is compared with the legacy final text. There is no period in
+which the builder's program is compared with an intermediate legacy
+program. What the comparison at T6s cannot see is what no final text
+shows and no decision reads any more: nothing the passes read (they are
+all decisions of the lowering by then, and their results are in the text);
+only a fact that is wrong and unread, which is harmless until a later
+slice reads it.
+
+**The tail-call decision comparison stays across the flip.**
+`shadow::compare_decisions` reads the lowering's `Decision` rows
+(`scope.rs`, above the interface) and `js_pass_tailcall_inline::decisions`
+on the legacy side's program. Neither depends on the storage, so it runs
+unchanged after T4g and after T6s. Step 3 of 11.6 deletes both; that
+deletion is struck and moves to the slice that deletes the legacy pass.
+
+**`RESCRIPT_BACKEND=new`** keeps today's meaning through T6s. From T4f the
+lowering's program is the final program, and from T6s it is the builder's:
+the measurement "`new` below the default" and the switch of its meaning
+belong to the slice after T6t, not to this order.
+
+**Cost of this order against the one of "The gate"** (flip first, then
+T4g to T4f against a moving point of the legacy side):
+
+- Written twice: the functions below the interface that only a T4 slice
+  needs (`park`, `into_function`, `substitute`): a body for `Bir` rows that
+  T6s deletes. Estimated at 300 lines; not more, because the decisions,
+  the marks and the walk are above the interface.
+- Later: the flip waits for four decision slices, so check mode pays for
+  the J rows, `export_lowered` and one legacy printing until then.
+- Gained: every decision slice is compared through the legacy passes that
+  follow it, which is the only check of the facts those passes read; the
+  flip changes storage and printer and nothing else; `bridge_j.rs` is
+  deleted in the slice that stops needing it.
+
+**Changed against earlier statements.**
+
+- "The gate", second and third bullet ("From the flip check mode compares
+  the builder's text with the legacy program after the passes that have
+  left"; "What is given up between T6s and T4f"): withdrawn. Nothing is
+  given up; the point of `before` moves with each slice and the point of
+  `after` never does.
+- "T6 design" (e) and the row T6e of the cut: F1 to F8 are not part of the
+  seal of `emit/builder_seal.rs`. They are T6u, over the interface. T6e is
+  the print forms of (c), the descent, `release` and `copy`.
+- "T6 design", "What T4g gets": unchanged in content; the `if` of F5 that
+  the splice writes and its mark are E3 and E2 above.
+- The re-cut table of 11.4, rows T4g to T4f, column "Needs": T4g needs
+  T6u (not "T5, T6"); T4f needs T4e and T6q.
+- 11.6 (the prompt of T4g): the precondition "T5 and T6 are merged"
+  becomes "T6u is merged: `rg -n 'apply_js_flatten_pass'
+  src/lambda/lam_compile.rs` shows the legacy side only"; step 3's "the
+  callee's statements take the place of the `return`" is done with E1, E2
+  and E3; "`compare_decisions` and `js_pass_tailcall_inline::decisions`
+  are deleted" is struck. The prompt is reissued by the turn that designs
+  T4g; it is not to be issued as it stands.
+- 11.4, "The design", "A site in a closed list" and "Late zero": "in
+  place" reads "marked by id and written by the walk of the seal".
 
 ### 11.5 Worker prompt for T4b
 
