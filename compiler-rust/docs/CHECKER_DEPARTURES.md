@@ -7610,6 +7610,7 @@ status:
 | 26 | `type t += private B = A`, `\| B(n)`, under a signature | 38 `6:13-18` "extension constructor A is never used to build values." and `7:21-25` B | DIFFER ("unused extension constructor A") | DIFFER (same) | agree |
 | 27 | `type t += B = A`, `\| B(n)`, under a signature | 38 `7:13-17` for B only | DIFFER (also `6:13-18` "unused extension constructor A") | DIFFER (same) | agree |
 | 28 | item `K(int)` used only by item `L = K`, under a signature | 38 `5:3-17` for L only | DIFFER (also `4:3-18` "unused exception K") | DIFFER (same) | agree |
+
 ### C1 - constructors and labels through an alias of a module that holds an alias
 
 The witness: a constructor read through an alias (`O`) of a module that
@@ -7641,11 +7642,11 @@ module descriptor that `lookup_module_descr` (env.ml:952-972) returns for
 the prefix, the same descriptor a dotted value reads (`lookup`,
 env.ml:1017-1026). The Rust lookup
 (`lookup_constructor_in_module_with_ambiguity`,
-`compiler-rust/src/types/typecore.rs:23478`) takes the same descriptor
+`compiler-rust/src/types/typecore.rs:23271`) takes the same descriptor
 road as values (`with_resolved_module_components_for_lid_inner`,
-typecore.rs:26899); a trace showed that road failing for `O.A` for
+typecore.rs:26692); a trace showed that road failing for `O.A` for
 values too, which recovered through a second lookup by access path
-(`resolve_module_access_path_for_lid`, typecore.rs:22864) that
+(`resolve_module_access_path_for_lid`, typecore.rs:22657) that
 constructors and labels do not have.
 
 Commands as in "Scope, calibration and reproducibility" (OCaml `bsc` from
@@ -7779,6 +7780,6 @@ difference in the exit status, the diagnostics or the JavaScript:
   descriptions it re-roots name only that unit's paths, so no program was
   found on which it shows; it was left as it is.
 - The second lookup of qualified values by access path
-  (`resolve_module_access_path_for_lid`, typecore.rs:22864) is still there.
+  (`resolve_module_access_path_for_lid`, typecore.rs:22657) is still there.
   The witnesses of this place no longer reach it; whether any program
   still needs it was not measured, and it was not removed.
