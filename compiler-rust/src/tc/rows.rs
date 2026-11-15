@@ -11,7 +11,7 @@
 
 use std::cmp::Ordering;
 
-use super::graph::{CONSTR, GENERIC, Graph, LINK, Mode, NONE, Node, TUPLE, Ty, VAR};
+use super::graph::{ARROW, CONSTR, GENERIC, Graph, LINK, Mode, NONE, Node, TUPLE, Ty, VAR};
 use super::segment::{
     EXTENDED, ExtraDescriptor, PackageRow, Range, RowFieldKind, RowFieldRow, Segment, VariantRow,
 };
@@ -2659,7 +2659,125 @@ impl Checker {
     /// No allocation: `g.work` and `open_polys` keep their capacity.
     /// Never called when [`Extras::univars`] is 0. (R3g)
     pub fn free_univar(&mut self, ty: Ty) -> Ty {
-        todo!("R3g")
+        if self.mark_generation > u32::MAX / 2 {
+            self.marks.fill(0);
+            self.mark_generation = 0;
+        }
+        let first = self.fresh_marks();
+        let mut current = first;
+        self.extras.open_polys.push(true);
+        self.g.work.clear();
+        self.g.work.push(ty);
+        let mut found = Ty(NONE);
+        while let Some(entry) = self.g.work.pop() {
+            if entry.0 == NONE {
+                // Leave the context: the entry below is the one to return to.
+                self.extras.open_polys[(current - first) as usize] = false;
+                current = self.g.work.pop().expect("a context to return to").0;
+                continue;
+            }
+            let t = self.g.repr(entry);
+            let live = self.live_mark(t, first);
+            if self.is_univar(t) {
+                // `if not (Type_set.mem ty bound) then raise ...`.
+                if !live {
+                    found = t;
+                    break;
+                }
+                continue;
+            }
+            if !live {
+                self.marks[t.0 as usize] = current;
+                #[cfg(test)]
+                super::steps::tick();
+                let node = self.g.nodes[t.0 as usize];
+                self.push_free_univar_children(node, first, &mut current);
+            }
+        }
+        self.g.work.clear();
+        self.extras.open_polys.clear();
+        found
+    }
+
+    /// O(1): whether the mark of `t` is a generation of the current
+    /// [`Checker::free_univar`] walk (from `first`) whose context is still
+    /// open. One mark load and, for a mark of this walk, one flag load.
+    #[inline]
+    fn live_mark(&self, t: Ty, first: u32) -> bool {
+        let mark = self.marks[t.0 as usize];
+        mark >= first && self.extras.open_polys[(mark - first) as usize]
+    }
+
+    /// One visit of [`Checker::free_univar`] after `node` was marked: push
+    /// what the walk visits next, last first, so that the children are
+    /// popped in `iter_type_expr`'s order (compiler/ml/btype.ml:229-272).
+    /// A polymorphic type opens a context (a new generation, its bound
+    /// variables marked with it unless an open context binds them
+    /// already) and makes `current` that generation. O(arity) pushes and,
+    /// for a polymorphic type, one mark load and store per bound
+    /// variable; no allocation beyond `g.work`'s growth.
+    fn push_free_univar_children(&mut self, node: Node, first: u32, current: &mut u32) {
+        let arity = node.arity();
+        match node.tag() {
+            ARROW => {
+                self.g.work.push(Ty(node.a));
+                for i in (0..arity).rev() {
+                    let ty = self.g.params[(node.b + i) as usize].ty;
+                    self.g.work.push(ty);
+                }
+            }
+            // `Tconstr (_, [], _) -> ()`; the arguments the variances allow
+            // (compiler/ml/ctype.ml:1590-1599). The abbreviation memo is
+            // not a child (`iter_type_expr`).
+            CONSTR => {
+                for i in (0..arity).rev() {
+                    if self.types.may_occur(node.a, i) {
+                        let ty = self.g.lists[(node.b + 1 + i) as usize];
+                        self.g.work.push(ty);
+                    }
+                }
+            }
+            TUPLE if node.head & EXTENDED != 0 => match self.extras.descriptors[node.a as usize] {
+                // `Tpoly (ty, tyl)`: the body with the bound variables
+                // added to `bound` (compiler/ml/ctype.ml:1587-1589).
+                ExtraDescriptor::Poly => {
+                    let generation = self.fresh_marks();
+                    self.extras.open_polys.push(true);
+                    for i in 1..arity {
+                        let bound = self.g.repr(self.g.lists[(node.b + i) as usize]);
+                        if !self.live_mark(bound, first) {
+                            self.marks[bound.0 as usize] = generation;
+                        }
+                    }
+                    self.g.work.push(Ty(*current));
+                    self.g.work.push(Ty(NONE));
+                    self.g.work.push(self.g.lists[node.b as usize]);
+                    *current = generation;
+                }
+                // `iter_row` (the fields and the name's arguments), then
+                // the row variable (compiler/ml/btype.ml:229-241, 263-266).
+                ExtraDescriptor::Variant(index) => {
+                    let more = self.extras.variants[index as usize].more;
+                    self.g.work.push(self.g.lists[(node.b + more) as usize]);
+                    for i in (0..arity).rev() {
+                        if i != more {
+                            self.g.work.push(self.g.lists[(node.b + i) as usize]);
+                        }
+                    }
+                }
+                _ => {
+                    for i in (0..arity).rev() {
+                        self.g.work.push(self.g.lists[(node.b + i) as usize]);
+                    }
+                }
+            },
+            TUPLE => {
+                for i in (0..arity).rev() {
+                    self.g.work.push(self.g.lists[(node.b + i) as usize]);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// `occur_univar env ty` (compiler/ml/ctype.ml:1563-1607): a clash

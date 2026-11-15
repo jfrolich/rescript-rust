@@ -3063,7 +3063,6 @@ fn a_known_binder_escapes_before_the_bodies() {
 /// as one the type does not use, the variable is bound.
 /// Reaches: R3g.
 #[test]
-#[ignore = "R3g build"]
 fn a_free_universal_variable_is_refused() {
     for mode in [Mode::Success, Mode::Explain] {
         let mut c = checker(mode);
@@ -3131,7 +3130,6 @@ fn a_free_universal_variable_is_refused() {
 ///
 /// Reaches: R3g.
 #[test]
-#[ignore = "R3g build"]
 fn the_first_free_universal_variable_is_found_in_order() {
     let mut c = checker(Mode::Success);
     let [p, q, r, s] = [0; 4].map(|_| univar_at(&mut c, 2));
@@ -3201,7 +3199,6 @@ fn the_first_free_universal_variable_is_found_in_order() {
 /// the pair is `(u, the new variable)`.
 /// Reaches: R3g.
 #[test]
-#[ignore = "R3g build"]
 fn a_free_universal_variable_below_a_swapped_unify3_is_reversed() {
     for swapped in [true, false] {
         let mut c = checker(Mode::Explain);
