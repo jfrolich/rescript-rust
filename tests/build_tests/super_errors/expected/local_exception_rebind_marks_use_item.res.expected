@@ -1,0 +1,12 @@
+
+  [1;33mWarning number 38[0m
+  [36m/.../fixtures/local_exception_rebind_marks_use_item.res[0m:[2m6:3-17[0m
+
+  4 [2m│[0m } = {
+  5 [2m│[0m   exception L = E
+  [1;33m6[0m [2m│[0m   [1;33mexception M = L[0m
+  7 [2m│[0m   let f = x =>
+  8 [2m│[0m     switch x {
+
+  exception M is never used to build values.
+(However, this constructor appears in patterns.)
