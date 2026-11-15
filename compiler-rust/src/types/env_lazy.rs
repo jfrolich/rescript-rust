@@ -1149,16 +1149,21 @@ impl QualifiedModuleComponents {
                     // at this path (`O.R`, compiler/ml/env.ml:1369-1410,
                     // 1519) before env.ml:1504 scrapes the alias. Bare, `R` would
                     // name whatever identifier of the compiling unit has its
-                    // stamp. Cost: one name probe of the index per alias.
+                    // stamp. Cost: one name probe of the index per alias
+                    // of a module that is not a unit.
                     let head = alias_source.head();
-                    let alias_source = match index.module(head.name()) {
+                    let sibling = if head.is_persistent() {
+                        None
+                    } else {
+                        index.module(head.name())
+                    };
+                    let alias_source = match sibling {
                         Some((sibling, sibling_pos))
-                            if !head.is_persistent()
-                                && matches!(
-                                    &signature[sibling],
-                                    SignatureItem::SigModule(sibling_id, _, _)
-                                        if sibling_id.same(head) && sibling_id.equal(head)
-                                ) =>
+                            if matches!(
+                                &signature[sibling],
+                                SignatureItem::SigModule(sibling_id, _, _)
+                                    if sibling_id.same(head) && sibling_id.equal(head)
+                            ) =>
                         {
                             replace_path_head(
                                 alias_source,
