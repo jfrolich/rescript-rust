@@ -7773,6 +7773,7 @@ difference in the exit status, the diagnostics or the JavaScript:
   One module deep (`module R = {...}` at the top) agrees. It was not traced
   here; it lies in the typing of extension declarations or the check of
   the unit against its inferred signature.
+  Fixed under X1 below.
 - The world view of a unit (`describe_tables`,
   `compiler-rust/src/types/module_view.rs:819`) registers the same bare
   sibling target (`Lib.A` from `R`) as the alias source of its alias
@@ -7783,3 +7784,146 @@ difference in the exit status, the diagnostics or the JavaScript:
   (`resolve_module_access_path_for_lid`, typecore.rs:22657) is still there.
   The witnesses of this place no longer reach it; whether any program
   still needs it was not measured, and it was not removed.
+
+### X1 - a constructor of an extensible type two modules deep, with a functor application in the unit
+
+The witness (the one found under C1):
+
+```rescript
+module Outer = {
+  module R = {
+    type ext = ..
+    type ext += C(int)
+  }
+}
+module G = (X: {}) => {
+  module S = {}
+}
+module M = G({})
+```
+
+OCaml accepts it; Rust rejected it: "The implementation Main.res does not
+match the interface (inferred signature): In module Outer.R: Actual
+declaration `type \"Outer.R.ext" += C(int)`, Expected declaration
+`type ext += C(int)`". The same with `let x = 1` as the functor body and
+`let c = Outer.R.C(M.x)` after it.
+
+Two things met. (a) A unit without an interface whose inferred signature
+holds a functor (the declaration `G`, with or without an application: the
+program without `module M = G({})` differed as well) leaves the shortcut
+of `inferred_signature_coercion` (`compiler-rust/src/types/includemod.rs`,
+`includes_itself_plainly` answers `false` for `MtyFunctor`) and is checked
+against its own signature in full, as OCaml always does
+(`compiler/ml/typemod.ml:1812-1815`). That is as intended: the shortcut is
+taken only for signatures whose check cannot fail, and the full check is
+what OCaml runs. (b) The full check failed where OCaml's passes, for two
+causes, each fixed below.
+
+Commands as in "Scope, calibration and reproducibility" (OCaml `bsc` from
+`dune build`, Rust from the thin-LTO release build, the runtime built by
+`build-reference` with the OCaml `bsc`); each program is `Main.res`, with
+`Main.resi` where the table says so (compiled first by the OCaml `bsc`,
+then `Main.res` with `-bs-read-cmi`), compiled by both with `-w +A -bs-jsx
+4 -color never -I . -I packages/@rescript/runtime/lib/rescript`, and
+stdout (the JavaScript), stderr and the exit status compared byte for
+byte.
+
+#### Fixed
+
+- `71003f88f`: OCaml's `Includecore.extension_constructors` compares the
+  extended types as types, `Ctype.equal env true (ty1 :: ext1.ext_type_params)
+  (ty2 :: ext2.ext_type_params)` (`compiler/ml/includecore.ml:717-728`),
+  in the environment `signatures` extends with the implementation's items
+  (`compiler/ml/includemod.ml:388-390`), so a path that expands to the
+  other one matches it. The Rust `extension_constructors`
+  (`compiler-rust/src/types/includemod.rs:4965` before the fix) required
+  `Path::same` of the two paths. In the witness the implementation's
+  constructor extends `Outer.R.ext` (see the next cause) and the expected
+  one `ext`, whose strengthened declaration `type ext = Outer.R.ext` is in
+  that environment; `type t = A.ext = ..` with `type A.ext += C(int)`
+  against `type t += C(int)` was rejected for the same reason, one module
+  deep. The Rust comparison now builds the two constructor types and calls
+  `ctype::equal` as OCaml does (`includemod.rs:4965`). Fixtures:
+  `tests/tests/src/nested_extension_signature_functor` (the witness),
+  `nested_extension_signature_manifest` (the abbreviation, both
+  directions), `nested_extension_signature_one_deep` (agreed before),
+  super_errors `nested_extension_signature_argument` (a submodule with an
+  explicit signature whose argument type differs, agreed before) and
+  `nested_extension_signature_manifest_argument` (the abbreviation with a
+  differing argument type, agreed before).
+- `30651d2f6`: OCaml expands a module alias in an inclusion check with
+  `expand_module_alias`, `(Env.find_module path env).md_type`
+  (`compiler/ml/includemod.ml:99-101`, used at 228-234): for `Outer.R` that
+  is the declaration `Outer`'s components hold, under `Outer`'s
+  substitution only (`compiler/ml/env.ml:1555-1557`), so `R`'s own items
+  keep their identifiers; `Mtype.strengthen` then adds `type ext =
+  Outer.R.ext`. The Rust expansion (`expand_module_type_in_env` in
+  `modtypes_inner`, `includemod.rs:1273`) went for a dotted path through
+  `ctype::resolve_module_type_through_env`, which reads the components
+  view of `Outer.R` itself, whose items are prefixed with it: the
+  constructor extended `Outer.R.ext`, a value had type `Outer.R.t`. The
+  unit's own check strengthens `Outer` into a structure whose `R` is the
+  alias `Outer.R`, so every submodule two or more levels deep went this
+  way; against an interface or a signature the diagnostics printed
+  `type \"Outer.R.ext" += C(int)` and `let x: Outer.R.t` where OCaml
+  prints `type ext += C(int)` and `let x: t`. A dotted module path now
+  reads the parent's declaration (`expand_local`, which calls
+  `lookup_module_in_resolved_path`); module type paths keep the
+  components lookup. Fixtures: super_errors_multi
+  `nested_extension_signature_interface` (the interface whose argument
+  type differs), `tests/tests/src/nested_extension_signature_interface`
+  (an interface that matches), super_errors
+  `nested_extension_signature_value_path` (a value two levels deep against
+  a signature) and `nested_extension_signature_value_one_deep` (one level,
+  agreed before).
+
+Programs run through both compilers, before (trunk `299927cd2`), after
+`71003f88f` and after `30651d2f6`. Exit status of OCaml; DIFFER is a
+difference in the exit status, the diagnostics or the JavaScript:
+
+| Program | OCaml | Before | After `71003f88f` | After `30651d2f6` |
+| --- | --- | --- | --- | --- |
+| the witness, functor body `module S = {}` | 0 | DIFFER (Rust 2) | agree | agree |
+| the witness, `let x = 1`, then `Outer.R.C(M.x)` | 0 | DIFFER (Rust 2) | agree | agree |
+| one module deep, `R.C(1)` | 0 | agree | agree | agree |
+| three modules deep, `A.Outer.R.C(M.x)` | 0 | DIFFER (Rust 2) | agree | agree |
+| constructor without argument `C` | 0 | DIFFER (Rust 2) | agree | agree |
+| tuple `C(int, string)` | 0 | DIFFER (Rust 2) | agree | agree |
+| inline record `C({a: int, b: string})`, built and matched | 0 | DIFFER (Rust 2) | agree | agree |
+| GADT-style `C: ext<int>`, `D('a): ext<'a>` | 0 | DIFFER (Rust 2) | agree | agree |
+| type parameter `ext<'a> += C('a, list<'a>)` | 0 | DIFFER (Rust 2) | agree | agree |
+| rebind `type ext += D = C` in `R` | 0 | DIFFER (Rust 2) | agree | agree |
+| rebind one level up, `type R.ext += D = R.C` in `Outer` | 0 | DIFFER (Rust 2) | agree | agree |
+| `private C(int)`, matched | 0 | DIFFER (Rust 2) | agree | agree |
+| functor application before `Outer` | 0 | DIFFER (Rust 2) | agree | agree |
+| functor declared, never applied | 0 | DIFFER (Rust 2) | agree | agree |
+| functor taking `Outer.R` as its argument, `G(Outer.R)` | 0 | DIFFER (Rust 2) | agree | agree |
+| no functor at all | 0 | agree | agree | agree |
+| `exception C(int)` two deep, with the application | 0 | agree | agree | agree |
+| `Outer` with an explicit signature listing the extension | 0 | DIFFER (Rust 2) | agree | agree |
+| the same inside `module Top` | 0 | DIFFER (Rust 2) | agree | agree |
+| `type t = A.ext = ..` with `type A.ext += C(int)` against `type t += C(int)` | 0 | DIFFER (Rust 2) | agree | agree |
+| `type t = A.ext = ..` with `type t += D(int)` against `type A.ext += D(int)` | 0 | DIFFER (Rust 2) | agree | agree |
+| interface that matches (`Main.resi`) | 0 | DIFFER (Rust 2) | agree | agree |
+| interface, argument type differs (rejected) | 2 | DIFFER (`Outer.R.ext`) | DIFFER (`Outer.R.ext`) | agree |
+| interface, arity differs (rejected) | 2 | DIFFER (`Outer.R.ext`) | DIFFER (`Outer.R.ext`) | agree |
+| interface, a constructor missing in the implementation (rejected) | 2 | agree | agree | agree |
+| interface, private against public (rejected) | 2 | DIFFER (`Outer.R.ext`) | DIFFER (`Outer.R.ext`) | agree |
+| submodule signature, argument type differs (rejected) | 2 | agree | agree | agree |
+| submodule signature, private against public (rejected) | 2 | agree | agree | agree |
+| abbreviation, argument type differs (rejected) | 2 | agree | agree | agree |
+| `module S: {let x: int} = Outer.R` (rejected) | 2 | DIFFER (`Outer.R.t`) | DIFFER (`Outer.R.t`) | agree |
+| the same one level deep, `= R` (rejected) | 2 | agree | agree | agree |
+| interface, a value three levels deep differs (rejected) | 2 | DIFFER (`A.Outer.R.t`) | DIFFER | agree |
+| interface, a value two levels deep differs (rejected) | 2 | DIFFER (`Outer.R.t`) | DIFFER | agree |
+| `= Outer.R.S` against a signature, value type differs (rejected) | 2 | DIFFER (`Outer.R.S.u`) | DIFFER | agree |
+| `= Outer.R.S` against a signature that matches, and a constrained module | 0 | agree | agree | agree |
+| interface, `module S = Outer.R` against a signature (rejected) | 2 | DIFFER | DIFFER | agree |
+| `open Outer`, then `module S: {let x: int} = R` (rejected) | 2 | DIFFER (`Outer.R.t`) | DIFFER | agree |
+| `JSON.Encode`, `Int.Constants`, `Stdlib.Int.Constants` against signatures | 0 | agree | agree | agree |
+| `JSON.Encode` against a signature, argument type differs (rejected) | 2 | agree | agree | agree |
+| `open Stdlib`, `Int.Constants` against a signature (rejected) | 2 | agree | agree | agree |
+
+#### Open
+
+Nothing of this place.
