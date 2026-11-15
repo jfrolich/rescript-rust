@@ -242,7 +242,7 @@ impl TypeTable {
                 } else if node.head & EXTENDED != 0
                     && super::rows::ends_open_row(
                         nodes,
-                        *own.get_or_insert_with(|| {
+                        own.get_or_insert_with(|| {
                             slots(&segment.template_lists, &segment.template_pools, template)
                         }),
                         descriptors,
