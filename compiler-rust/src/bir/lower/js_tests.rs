@@ -139,7 +139,6 @@ fn every_j_operation_has_a_kind_of_its_own() {
 }
 
 #[test]
-#[ignore = "T6k build"]
 fn a_leaf_is_the_row_the_lowering_writes_today() {
     same(|r, u| done(r.var(&mut u.b, u.x)), |u| built(var(&mut u.b, u.x)));
     same(|r, u| done(r.int_literal(&mut u.b, -7)), |u| built(plain::int(&mut u.b, -7)));
@@ -184,7 +183,6 @@ fn a_leaf_is_the_row_the_lowering_writes_today() {
 }
 
 #[test]
-#[ignore = "T6k build"]
 fn a_plain_function_builds_the_node_it_is_asked_for() {
     same(
         |r, u| {
@@ -273,7 +271,6 @@ fn a_plain_function_builds_the_node_it_is_asked_for() {
 }
 
 #[test]
-#[ignore = "T6k build"]
 fn a_list_constructor_takes_the_operands_since_its_mark() {
     // An outer list is being collected while an inner one is built: the
     // inner constructor takes only its own operands.
@@ -353,7 +350,6 @@ fn descriptors(u: &mut Unit) -> (JsId, JsId) {
 }
 
 #[test]
-#[ignore = "T6k build"]
 fn the_constructors_with_a_descriptor_keep_it() {
     // A tagged template and a record rest.
     same(
@@ -492,7 +488,6 @@ fn operand(r: &mut Rows, u: &mut Unit, operand: Operand) -> E {
 }
 
 #[test]
-#[ignore = "T6k build"]
 fn a_rule_function_is_its_row_of_section_6() {
     let binary: [Binary; 22] = [
         (|r, a, x, y| r.append(a, x, y), norm::je1_string_append),
@@ -572,7 +567,6 @@ fn a_rule_function_is_its_row_of_section_6() {
 }
 
 #[test]
-#[ignore = "T6k build"]
 fn the_rules_that_may_decline_give_the_value_back() {
     // J-M11 on a strictly pure literal gives the field and releases the
     // rest; on a variable it gives the variable back.
@@ -619,7 +613,6 @@ fn the_rules_that_may_decline_give_the_value_back() {
 }
 
 #[test]
-#[ignore = "T6k build"]
 fn a_reader_reads_what_the_lowering_reads_today() {
     let mut u = unit();
     let mut r = Rows::default();
@@ -703,7 +696,6 @@ fn a_reader_reads_what_the_lowering_reads_today() {
 }
 
 #[test]
-#[ignore = "T6k build"]
 fn taking_a_node_apart_releases_what_is_not_kept() {
     let uses = |b: &Bir, v: VarId| b.js_scope.as_ref().unwrap().uses[v.index()].remaining;
     let mut u = unit();
@@ -743,7 +735,6 @@ fn taking_a_node_apart_releases_what_is_not_kept() {
 }
 
 #[test]
-#[ignore = "T6k build"]
 fn a_copy_is_a_second_node_and_cold_data_is_given_separately() {
     let mut u = unit();
     let mut r = Rows::default();
@@ -809,7 +800,6 @@ fn steps(build: fn(&mut Rows, &mut Unit, usize) -> E, size: usize) -> u64 {
 }
 
 #[test]
-#[ignore = "T6k build"]
 fn ten_thousand_nodes_cost_ten_times_a_thousand() {
     for build in [nest, wide] {
         let (one, two, ten) = (steps(build, 1_000), steps(build, 2_000), steps(build, 10_000));
@@ -833,7 +823,6 @@ fn ten_thousand_nodes_cost_ten_times_a_thousand() {
 }
 
 #[test]
-#[ignore = "T6k build"]
 fn the_operand_stack_is_the_one_allocation_of_rows() {
     // Warm: the stack has its capacity. The arena's own vectors grow, so
     // the count is taken as a difference between two widths: a wider call

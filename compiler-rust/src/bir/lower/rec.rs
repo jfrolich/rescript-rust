@@ -25,7 +25,7 @@ pub(super) struct Member {
     mode: Mode,
 }
 
-impl State<'_> {
+impl<B: super::js::Js> State<'_, B> {
     /// O(m + a + newly indexed source slots): stable function/value partition
     /// and one inspection of each makeblock's a direct arguments. Membership
     /// in the group is a VarId interval test, never a scan of other members.
@@ -136,7 +136,7 @@ impl State<'_> {
                     }
                     _ => unreachable!("self-init classification"),
                 };
-                let set = self.primitive_set_field(index as i32, field, target, field_value);
+                let set = B::node(self.primitive_set_field(index as i32, field, B::from_node(target), B::from_node(field_value)));
                 self.drop_pure_effect(set);
             }
             self.arena.release(value);

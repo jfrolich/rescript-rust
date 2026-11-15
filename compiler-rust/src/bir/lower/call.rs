@@ -29,7 +29,7 @@ pub(super) struct Plan {
     )>,
 }
 
-impl State<'_> {
+impl<B: super::js::Js> State<'_, B> {
     /// O(1): inspect cold call metadata without copying it down the walk.
     pub(super) fn call_plan(&self, call: Call) -> &Plan {
         self.calls[call.0 as usize].as_ref().expect("live call plan")

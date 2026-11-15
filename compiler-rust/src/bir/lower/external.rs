@@ -6,7 +6,7 @@ use crate::lambda::lam_primitive::{
     DeclKind, ExternalModuleName, JsCall, ModuleBindName, ModuleSource,
 };
 
-impl State<'_> {
+impl<B: super::js::Js> State<'_, B> {
     /// P:84 compile_js_object_get. O(receiver field spine), holding only
     /// receivers with a prelude that cannot be safely read in place.
     pub(super) fn hold_external_receiver(&mut self, _cx: Cx, mut arg: Out) -> Out {

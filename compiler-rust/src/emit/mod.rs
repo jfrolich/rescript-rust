@@ -8,7 +8,6 @@ pub(crate) use naming::{FreeLists, NameStats, Printed, Subject, Tables, compare_
 #[cfg(test)]
 pub(crate) use naming::pass_tables;
 mod program;
-#[cfg(test)]
 pub mod row;
 mod raw;
 pub use raw::RawSegment;

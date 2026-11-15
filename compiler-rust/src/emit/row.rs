@@ -3,8 +3,6 @@
 //! definition for the builder (`emit/builder.rs`), which writes a row per
 //! node, and for the lowering's interface (`bir/lower/js.rs`), which reads
 //! kinds and flags through it. Data only: nothing here builds a node.
-//!
-//! Compiled for tests until T6k is built, which compiles it always.
 /// The facts of one node, as bits of [`Row::flags`].
 pub mod flag {
     /// B:102 `expression_has_no_side_effects`.
@@ -240,7 +238,7 @@ impl Kind {
     ];
 }
 
-/// The facts of one node. 8 bytes: one per node in [`Builder::rows`], and
+/// The facts of one node. 8 bytes: one per node in `Builder::rows` (`emit/builder.rs`), and
 /// the same value travels in the handle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Row {
