@@ -2235,6 +2235,12 @@ copy of an opened row is wrong until R3n. R3f is accepted on its
 hand-built tests and on fixed cases that make no copy. R3g to R3j are
 not designed; R3g was not started in this turn.
 
+State after the fifth skeleton turn (trunk `de646dffcb`). Merged: R3a,
+R3b, R3d, R3c, K1, R3k, R3m, K2, R3e, R3f, R3n, K3, K4. `cargo test --lib
+tc::` on that trunk: 236 passed, 0 ignored. The decisions of the reviews
+between the two turns are 35 to 46 of 8.6. What the fifth turn designed
+is listed after them, in 8.6 ("Decided in the fifth skeleton turn").
+
 The ignored tests are checked mechanically
 (`differential::tests::ignored_tests_name_the_slices_they_reach`): each
 names the slices it reaches, reaches its own, and reaches none that is
@@ -3763,6 +3769,124 @@ Open after the fourth turn, each with the recommended answer.
 5. *R3g is not designed.* Recommended: a fifth skeleton turn, started
    from `enter_poly` and `unify_univar` and from the PR#6744 split that
    R3f leaves to it.
+
+Decided in the review of the fourth skeleton turn (trunk `411724224f`)
+and of the objects slice. They bind the builders and the fifth skeleton
+turn.
+
+35. **The cut of variant rows into R3f and R3n stands**, and R3h, R3i and
+    R3j depend on R3n: a generated case of any of them copies a row.
+36. **An instance of a template captured from an opened row is R5a's.**
+    One bit per template ("has an opened row", as `OPEN_ROW` is for
+    cells) and the fourth case of `copy_refs` over such an instance.
+    Nothing in R3 meets it: a template made from a segment has unopened
+    rows.
+37. **`unify env rm more` of a fixed row runs as a frame**, popped after
+    the other row's `set_more` where OCaml runs it before
+    (ctype.ml:2599-2606). The generated cases of R3n judge whether a
+    trace differs; a seed that differs is read against those lines before
+    anything is pinned.
+38. **R3f's hand-built tests were not run against a prototype**, so the
+    rule of decision 30 applies to it: the builder ends its turn after
+    commit (2) with a test-by-test report, the two commits are read
+    against the OCaml lines, and a test that contradicts the lines it
+    quotes is reported with those lines.
+39. **A tag is one name when the two indices are equal; when they differ
+    the two texts are compared once**, as field names are in R3e. Whether
+    two indices can spell one name stays open (decision 32). R3f's merge
+    does what R3e's does.
+40. **`Op::GeneralizeStructure` goes into the object plan in the fifth
+    turn**: a mutability cell shared under an annotation is the case
+    R3e's generated test does not reach. Done in this turn: decision 48.
+41. **unify3 links the expanded head it chose to the ORIGINAL other side
+    before the children** (`occur !env t1' t2'; link_type t1' t2`,
+    ctype.ml:2330-2331). The old checker unified the two expanded heads
+    first and linked afterwards unless the head occurred in the other
+    side, which is always so for an abbreviation that expands to its own
+    argument (`type id<'a> = 'a`). The difference shows in a diagnostic:
+    after two values of type `id<(int, int)>` are unified OCaml reports
+    the second as `id<id<(int, int)>>` where the old checker reported
+    `id<(int, int)>`, and a plain `(int, int)` unified with an
+    `id<(int, int)>` is reported as `id<(int, int)>` where the old
+    checker reported `(int, int)`. The four seeds of the object plan that
+    showed it (31000122, 31000191, 77000306, and 77000265 with `BUILD`)
+    were pinned with this cause, the new side was not changed, and the
+    old checker was corrected in a pull request of its own with the
+    witness programs as fixtures (decision 20); the pinned lists of
+    `object_plan_agrees_on_generated_cases` are empty since. Accepted
+    from the same review: `mark_manifests` takes a template's slots at
+    the first extended node of a manifest; the restore of a row's two
+    rests after a failure writes the saved descriptor at the node's
+    *current* level (`rest1.desc <- d1` restores the descriptor only,
+    ctype.ml:2513-2517).
+
+On record from the reviews of R3e, R3f, R3n, K3 and K4, for the turns
+that follow.
+
+42. **Every trace entry made below a swapped unify3 is reversed, at two
+    sites.** OCaml reverses the whole trace of a failure below
+    `unify3 env t2 t2' t1 t1'` (`List.map (fun (x, y) -> (y, x)) trace`,
+    ctype.ml:2301-2303). The checker reversed only the pairs
+    `explain_failure` builds itself; seed 2000082 of the variant plan
+    showed it. The two sites, each with a hand-built test that fails
+    without it: (a) the error branch of `Checker::unify3` reverses the
+    entries pushed since its start when the pair was swapped, because a
+    clash that is synchronous in unify3 (`set_more`'s, for one) pops the
+    frame that carries the swap before `explain_failure` runs
+    (`a_set_more_clash_below_a_swapped_unify3_is_reversed`); (b)
+    `explain_failure` reverses the entries already in the trace when the
+    parity of the `Linked` frames above `base` is swapped: an escaping
+    pair of a failed lowering in a child pair
+    (`an_escape_below_a_swapped_unify3_is_reversed`). Cost: one load of
+    the trace length per structure pair. **A slice that pushes a trace
+    pair of its own, or adds a frame kind below which a trace is made,
+    keeps both sites true and shows it with a test in the explaining
+    mode.** R3g's is decision 51.
+43. **The join of two `Reither` fields compares the two type lists
+    pairwise** (`Checker::join_either`, O(|tl1| × |tl2|) comparisons of
+    representatives, as `List.memq` in `remq`, ctype.ml:2678-2683), and
+    counts no step for it. Whether the order in which a reference is
+    settled can show between its resolution and the end of the field's
+    unifications is what the generated cases of R3n judge; none of
+    30,000 showed it.
+44. **K3 kept two of its four items** (TC_KERNEL_R3.md, "K3"). Kept:
+    the occurrence probe without marks (`unreached_within_budget`, the
+    256 nodes of `walk_budget`, ctype.ml:1424; -18, -18 and -34
+    instructions on `unify_ground3`, `unify_datatype2`,
+    `unify_abbrev2`), and the test in front of the expansion call
+    (`never_expands`: it answers only where the first `expand_once`
+    returns "does not expand" without a side effect; the row is read at
+    the time of the call). Reverted with their figures: items 3 and 4 (2
+    and 0 instructions), and one attempt to take back the test's cost on
+    a head that expands. On record from R3e's review, for R5c: a copy in
+    a unit that has any descriptor row runs the pass over the copied
+    nodes whether or not the copied type holds a field; and
+    `sort_unstable_by` in `flatten_fields` rests on a row having no two
+    fields of one name.
+45. **K4 kept one loop and left three things for R5c**
+    (TC_KERNEL_R3.md, "K4"). Kept: `expand_head_unif`, the loop of
+    `expand_head` for the unification mode with a clash returned as the
+    caller's. Left: (a) the target of 2822.27 instructions for
+    `unify_abbrev2` is missed by 65.79 and is not chased; what remains
+    is where the optimizer puts a function that every slice makes
+    larger. (b) Attempt (c3) (158 fewer instructions on a pair that
+    expands, 5 and 9 more on pairs that do not; commit `097f80d041`) is
+    the candidate when R5c knows how many structure pairs have a head
+    that expands: it pays above about one in eighteen. (c) The pass
+    over the nodes a substitution copied (cells and references of rows)
+    belongs out of line from `expand_once`, so that a unit without rows
+    does not carry its code on the expanding path.
+46. **The keep rule for a hot-path figure is a relation between
+    operations, not a constant, and the kernel bench is tuned once, at
+    R5c**, when the code under `tc/` is complete and a profile of real
+    units exists. A figure that moves by 30 instructions each time a
+    slice adds code is not a target for that slice. What a slice owes
+    instead: it states what a unit that does not use its feature pays
+    (as a number of reads), it reports the bench operations before and
+    after, and where a figure moved it puts its rare arms out of line
+    (`#[inline(never)]` on the functions of its frame kinds, the lesson
+    of R3f) and says so. No slice adds a target for a `tc_kernel`
+    figure.
 
 ### 8.7 The hot paths of unification (K2)
 
