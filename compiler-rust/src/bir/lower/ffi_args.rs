@@ -29,7 +29,7 @@ impl LaterLiteral {
     }
 }
 
-impl<B: super::js::Js> State<'_, B> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// X:60 duplicable. O(1), a dense cached fact computed on construction.
     fn duplicable(&self, _cx: Cx, root: NodeId) -> bool {
         self.arena.j_duplicable[root.index()]

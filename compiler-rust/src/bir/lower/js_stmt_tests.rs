@@ -175,7 +175,6 @@ fn the_transition_is_the_identity() {
 }
 
 #[test]
-#[ignore = "T6l build"]
 fn a_statement_is_the_row_the_lowering_writes_today() {
     for st in [St::Call, St::Return, St::Break, St::Throw] {
         same(|r, u| done(statement(r, u, st)), |u| built(statement_today(u, st)));
@@ -236,7 +235,6 @@ fn a_statement_is_the_row_the_lowering_writes_today() {
 }
 
 #[test]
-#[ignore = "T6l build"]
 fn a_list_is_the_pool_list_of_its_statements() {
     for shape in SHAPES {
         same(
@@ -273,7 +271,6 @@ fn a_list_is_the_pool_list_of_its_statements() {
 }
 
 #[test]
-#[ignore = "T6l build"]
 fn a_body_is_adopted_by_its_statement() {
     for shape in SHAPES {
         same(
@@ -437,7 +434,6 @@ fn a_body_is_adopted_by_its_statement() {
 /// `explicit_block` and `function` write for the list of the same
 /// statements, so the interface needs no constructor that takes a slice.
 #[test]
-#[ignore = "T6l build"]
 fn a_block_of_a_slice_is_the_block_of_its_list() {
     for shape in SHAPES {
         type Slice = fn(&mut Bir, &[NodeId]) -> NodeId;
@@ -602,7 +598,6 @@ fn value_today(u: &mut Unit, value: Value) -> NodeId {
 }
 
 #[test]
-#[ignore = "T6l build"]
 fn the_statement_rules_are_their_rows_of_section_6() {
     for operand in VALUES {
         // J-S1.
@@ -657,7 +652,6 @@ fn the_statement_rules_are_their_rows_of_section_6() {
 }
 
 #[test]
-#[ignore = "T6l build"]
 fn a_reader_reads_the_statement_in_hand() {
     let mut u = unit();
     let mut r = Rows::default();
@@ -859,7 +853,6 @@ fn effects(r: &mut Rows, u: &mut Unit, length: usize) -> S {
 }
 
 #[test]
-#[ignore = "T6l build"]
 fn ten_thousand_statements_cost_ten_times_a_thousand() {
     for build in [wide, nest, remade, effects] {
         let steps = |size: usize| {
@@ -876,7 +869,6 @@ fn ten_thousand_statements_cost_ten_times_a_thousand() {
 }
 
 #[test]
-#[ignore = "T6l build"]
 fn rows_allocates_what_the_calls_of_today_allocate() {
     // A list and its block: the interface is the same two calls, so the
     // two sides allocate alike (the arena's vectors grow on both).

@@ -18,7 +18,7 @@ pub(super) struct Scratch {
     pub(super) values: Vec<NodeId>,
 }
 
-impl<B: super::js::Js> State<'_, B> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// C: try_compile_record_spread / collect_record_spread_overrides.
     /// O(k + field-name bytes) for k consecutive writes, with one inspection
     /// per spine node. No initializer or override expression is walked here.

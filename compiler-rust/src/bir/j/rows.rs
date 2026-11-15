@@ -60,15 +60,15 @@ use crate::lambda::LamLoc;
 
 /// An expression in flight on J rows: the row's id. 4 bytes; not `Copy`.
 #[derive(Debug, PartialEq, Eq)]
-pub struct E(NodeId);
+pub struct E(pub(super) NodeId);
 
 /// The J rows behind the interface. 32 bytes.
 #[derive(Default)]
 pub struct Rows {
     /// Operands of the list constructors, pushed by the caller.
-    operands: Vec<NodeId>,
+    pub(super) operands: Vec<NodeId>,
     /// [`Js::steps`].
-    steps: u64,
+    pub(super) steps: u64,
 }
 
 /// The interface's kind of a J operation. O(1): one `match`. Panics on an
