@@ -693,18 +693,18 @@ impl Checker {
         // of the other side (ctype.ml:2278-2283). When neither side expanded
         // the second pair would read the same graph and return the same
         // nodes, so it is made only after an expansion.
+        // One test of both heads: when the left one may expand the right
+        // one's row is not read, and both take `expand_head` (which, for a
+        // head that cannot expand, returns it with no side effect).
         let left_head = self.g.repr(left);
-        let mut expanded_left = if self.never_expands(left_head) {
-            left_head
-        } else {
-            self.expand_head(left_head, ExpandMode::Unif)?
-        };
         let right_head = self.g.repr(right);
-        let mut expanded_right = if self.never_expands(right_head) {
-            right_head
-        } else {
-            self.expand_head(right_head, ExpandMode::Unif)?
-        };
+        let (mut expanded_left, mut expanded_right) =
+            if self.never_expands(left_head) && self.never_expands(right_head) {
+                (left_head, right_head)
+            } else {
+                let expanded_left = self.expand_head(left_head, ExpandMode::Unif)?;
+                (expanded_left, self.expand_head(right, ExpandMode::Unif)?)
+            };
         let unexpanded = expanded_left == self.g.repr(left) && expanded_right == self.g.repr(right);
         if !unexpanded {
             expanded_left = self.expand_head(left, ExpandMode::Unif)?;
