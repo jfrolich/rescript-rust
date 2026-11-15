@@ -868,7 +868,6 @@ mod statements {
     }
 
     #[test]
-    #[ignore = "T6b build"]
     fn plain_statements_print_as_the_legacy_printer_prints_them() {
         oracle(&[f("a"), f("b")], 0);
         oracle(&[St::Exp(bin(BinOp::Eq, dot(n("o"), "f"), T::Int(1)))], 0);
@@ -881,7 +880,6 @@ mod statements {
     }
 
     #[test]
-    #[ignore = "T6b build"]
     fn a_reference_and_a_binder_print_the_name_of_their_variable() {
         // The declaration's binder carries the symbol and a use carries the
         // reference of the same index: both print the table's name.
@@ -906,7 +904,6 @@ mod statements {
     }
 
     #[test]
-    #[ignore = "T6b build"]
     fn a_statement_is_written_in_the_form_the_rules_read() {
         let allocator = Allocator::default();
         let mut b = Builder::new(&allocator);
@@ -957,7 +954,6 @@ mod statements {
     }
 
     #[test]
-    #[ignore = "T6b build"]
     fn a_list_in_flight_is_read_and_taken_by_position() {
         let allocator = Allocator::default();
         let mut b = Builder::new(&allocator);
@@ -989,7 +985,6 @@ mod statements {
     }
 
     #[test]
-    #[ignore = "T6b build"]
     fn the_marks_of_a_statement_are_those_of_what_it_holds() {
         let allocator = Allocator::default();
         let mut b = Builder::new(&allocator);
@@ -1036,7 +1031,6 @@ mod statements {
     }
 
     #[test]
-    #[ignore = "T6b build"]
     fn ten_thousand_statements_cost_ten_times_a_thousand() {
         // Relations between two sizes: a statement is staged once, moved
         // into its list once and into its parent once, however long the
@@ -1060,7 +1054,6 @@ mod statements {
     }
 
     #[test]
-    #[ignore = "T6b build"]
     fn a_warm_builder_builds_statements_without_allocating() {
         let allocator = Allocator::with_capacity(64 << 20);
         let (nodes, statements) = {
