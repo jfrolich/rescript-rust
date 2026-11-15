@@ -3610,6 +3610,35 @@ label as `&str`. The interface takes the `StrId`; T6v's design says how
 the builder prints a label whose text is not known when the statement is
 built (the text is known when the unit is sealed).
 
+**For T6v: a dotted global, and `Kind::Named` in `optional_duplicable`.**
+A:69 `is_okay_to_duplicate` refuses a global whose name has a dot
+(`Intl.DateTimeFormat` reads a member each time it is evaluated). On
+rows such a reference is a `Var` whose variable has
+`VarFlags::JS_GLOBAL`, and `ffi_args.rs::optional_duplicable` tests the
+flag in its `Var` arm. The same function also accepts `Kind::Named`,
+which no row has (the arm came from the prompt of T6p, which wrote
+`Named` where the old code matched `JQualified`; the builder of T6p
+added `Qualified` and kept `Named`). Nothing changes today. On the
+builder `Js::var` of a global may write a row of kind `Named` (a name
+printed as written), and the `Named` arm would then call a dotted
+global duplicable. Decided for T6v, so that no test of the lowering
+depends on which kind an implementation gives a reference:
+
+- `var_of(a, r)` answers `Some(var)` for every row `Js::var` built,
+  whatever its kind. A `Named` row that no variable stands behind (the
+  builder writes none for the lowering today) answers `None`.
+- A test of the lowering that asks "is this a reference" reads
+  `var_of`, not `kind == Var`; what it then decides it reads from the
+  variable's flags, which are the pools' and the same on both
+  implementations. `optional_duplicable`, `duplicate_jsx_key` and
+  `hold_external_receiver` are the three chain walks that match on
+  `Kind::Var`: T6x's slice of `ffi_args.rs`, `jsx.rs` and `external.rs`
+  rewrites each as `if let Some(var) = var_of(r)` before the match on
+  the kind, and deletes the `Named` arm of `optional_duplicable`.
+- T6v's oracle tests include a dotted global as an optional argument of
+  an external: the two implementations must hold it in a variable
+  alike.
+
 #### T6m to T6x: what each slice adds
 
 Status: a survey, not a probe. For each slice the non-test code of its
@@ -4834,6 +4863,28 @@ Merging: another slice may land first. Merge trunk, do not rebase. A
 conflict in a file that is yours is yours to resolve; a conflict in any
 other file means one of the two slices broke the rule above: stop and
 report.
+
+Rulings of the reviews of T6m to T6p, part of every later conversion
+prompt:
+
+- A NEW private helper of a file that is yours may take or return a
+  handle when every caller is in that file. A function that exists on
+  trunk keeps its signature.
+- Where "leave the calls an earlier slice wrapped as they are" would
+  make a body turn a handle back and wrap it again, the outer wrapper
+  goes, and the pull request says where.
+- When your conversion removes the last production caller of a function
+  in a file that is not yours (`cargo clippy --all-targets -- -D
+  warnings` names it), delete exactly that function, and a helper only
+  it used, one level at a time; or put `#[cfg(test)]` on one that only
+  tests call. A commit of its own, listed in the pull request. No
+  `allow`.
+- `Instruction count` above +0.02%: rerun it once and report both
+  figures.
+- The check-mode figure: scripts/compare_build_instructions.py with its
+  default build and five runs a side, pasted with its command. The
+  script cleans tests/tests and removes the committed .mjs files for a
+  moment; they come back with the build: check `git status` after it.
 ```
 
 T6m (with both common blocks):
