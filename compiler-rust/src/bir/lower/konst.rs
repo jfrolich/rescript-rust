@@ -1,7 +1,7 @@
 //! H12: K:60 compile_constant, K:34 compile_some_constant, K:26 nested_some_none.
 use super::State;
-use crate::bir::{Cold, ConstId, Constant, JsPayload, NodeId, View};
-use crate::lambda::LamLoc;
+use crate::bir::{ConstId, Constant, JsPayload, NodeId};
+use crate::emit::row::Kind;
 use crate::lambda::lam_constant::{ConstructorRuntimeTag, PointerInfo};
 use crate::types::VariantLiteralTag;
 
@@ -154,34 +154,34 @@ fn leaf(arena: &crate::bir::Bir, id: ConstId, text: &mut String) -> Leaf {
 }
 impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// H12: K:60 compile_constant, numeric leaf with preserved spelling.
+    /// Cost: O(1) amortized: one constant interned, one leaf built.
     fn number(&mut self, value: Constant) -> NodeId {
         let value = self.arena.intern_const(value);
-        self.pure_expression(View::JNumber { value }, 0)
+        let number = self.js.number(&mut self.arena, value);
+        B::node(self.strict(number))
     }
     /// H12: K:60 compile_constant, float payload has already been validated by import.
+    /// Cost: O(spelling bytes): the spelling is parsed and interned; one leaf built.
     fn float(&mut self, spelling: &str) -> NodeId {
         let value = self
             .arena
             .intern_float(spelling)
             .expect("valid imported float");
-        self.pure_expression(View::JNumber { value }, 0)
+        let number = self.js.number(&mut self.arena, value);
+        B::node(self.strict(number))
     }
     /// H12: K:60 compile_constant, decoded string bytes are not re-escaped here.
+    /// Cost: O(text bytes): the text is interned; one leaf built.
     fn string(&mut self, text: &str) -> NodeId {
         let text = self.arena.intern_text(text);
-        self.pure_expression(View::JStr { text }, 0)
+        let string = self.js.str(&mut self.arena, text);
+        B::node(self.strict(string))
     }
-    /// N7: K:55 commented_number; decoration remains until the printer migration.
-    fn comment(&mut self, node: NodeId, text: &str) -> NodeId {
-        let comment = Some(self.arena.intern_text(text));
-        self.arena.set_cold(
-            node,
-            Cold {
-                loc: LamLoc::NONE,
-                comment,
-            },
-        );
-        node
+    /// H13: A:28 delay_safe. A constant is strictly pure by construction:
+    /// `e` with the fact asserted. O(1).
+    fn strict(&mut self, mut e: B::E) -> B::E {
+        self.js.assume_strict(&mut self.arena, &mut e);
+        e
     }
     /// H12: K:60 compile_constant. An explicit stack also handles deeply nested
     /// constant blocks and options; each constant occurrence is visited once.
@@ -218,19 +218,21 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     } = leaf(&self.arena, id, &mut text);
                     let mut value = match value {
                         LeafValue::Number(value) => {
-                            self.pure_expression(View::JNumber { value }, 0)
+                            let number = self.js.number(&mut self.arena, value);
+                            self.strict(number)
                         }
-                        LeafValue::Int(n) => self.number(Constant::Int(n)),
+                        LeafValue::Int(n) => B::from_node(self.number(Constant::Int(n))),
                         LeafValue::FloatInt(n) => {
                             use std::fmt::Write;
                             write!(&mut encoding, "{n}").unwrap();
-                            self.float(&encoding)
+                            B::from_node(self.float(&encoding))
                         }
-                        LeafValue::String(s) => self.string(s.get(&text)),
+                        LeafValue::String(s) => B::from_node(self.string(s.get(&text))),
                         LeafValue::InternedString(text) => {
-                            self.pure_expression(View::JStr { text }, 0)
+                            let string = self.js.str(&mut self.arena, text);
+                            self.strict(string)
                         }
-                        LeafValue::Float(s) => self.float(s.get(&text)),
+                        LeafValue::Float(s) => B::from_node(self.float(s.get(&text))),
                         LeafValue::BigInt(s, normalize) => {
                             if normalize {
                                 let positive = crate::types::typecore::parse_bigint_literal_into(
@@ -243,43 +245,52 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                                 encoding.push_str(s.get(&text));
                             }
                             let text = self.arena.intern_text(&encoding);
-                            self.number(Constant::BigInt(text))
+                            B::from_node(self.number(Constant::BigInt(text)))
                         }
-                        LeafValue::Bool(b) => self.pure_expression(View::JBool, u16::from(b)),
-                        LeafValue::Null => self.pure_expression(View::JNull, 0),
+                        LeafValue::Bool(b) => {
+                            let value = self.js.boolean(&mut self.arena, b);
+                            self.strict(value)
+                        }
+                        LeafValue::Null => {
+                            let null = self.js.null(&mut self.arena);
+                            self.strict(null)
+                        }
                         LeafValue::Undefined(unit) => {
-                            self.pure_expression(View::JUndefined, u16::from(unit))
+                            let undefined = self.js.undefined(&mut self.arena, unit);
+                            self.strict(undefined)
                         }
                     };
+                    // N7: K:55 commented_number; decoration remains until the printer migration.
                     if let Some(comment) = comment {
-                        value = self.comment(value, comment.get(&text));
+                        let comment = self.arena.intern_text(comment.get(&text));
+                        self.js.comment(&mut self.arena, &mut value, comment);
                     }
                     text.clear();
                     encoding.clear();
-                    values.push((value, none));
+                    values.push((B::node(value), none));
                 }
                 Work::Block(source, count) => {
                     let start = values.len() - count as usize;
                     children.extend(values.drain(start..).map(|(node, _)| node));
+                    let mark = self.js.mark();
+                    for node in children.drain(..) {
+                        self.js.push(B::from_node(node));
+                    }
                     let info = self.arena.js_info(JsPayload::ConstantBlock(source));
-                    let node = self.pure_expression(
-                        View::JBlockLit {
-                            values: &children,
-                            info,
-                        },
-                        2,
-                    );
-                    children.clear();
-                    values.push((node, false));
+                    let block = self.js.block(&mut self.arena, mark, info, 2);
+                    values.push((B::node(self.strict(block)), false));
                 }
                 Work::Some => {
-                    let (mut value, none) = values.pop().expect("constant option child");
-                    if none && self.arena.node(value).op() == crate::bir::Op::JUndefined {
-                        self.arena.release(value);
-                        value = self.pure_expression(View::JUndefined, 0);
-                    }
-                    let node = self.pure_expression(View::JOptional { value }, u16::from(!none));
-                    values.push((node, none));
+                    let (value, none) = values.pop().expect("constant option child");
+                    let value = if none && self.js.kind(&self.arena, B::at(value)) == Kind::Undefined {
+                        self.js.release(&mut self.arena, B::from_node(value));
+                        let undefined = self.js.undefined(&mut self.arena, false);
+                        self.strict(undefined)
+                    } else {
+                        B::from_node(value)
+                    };
+                    let optional = self.js.optional(&mut self.arena, value, !none);
+                    values.push((B::node(self.strict(optional)), none));
                 }
             }
         }
@@ -297,6 +308,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 #[cfg(test)]
 mod allocation_tests {
     use super::*;
+    use crate::lambda::LamLoc;
     use crate::bir::lower::Cx;
     use crate::lambda::{
         TagInfo,
