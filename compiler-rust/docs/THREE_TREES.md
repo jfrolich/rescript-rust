@@ -3767,7 +3767,8 @@ pins stay 86, 103, 86, 156.
 | T6m | `prim.rs`, `konst.rs`, `record.rs`, `import.rs` | 546 passed (`bir::lower`), 58 (`bir::j`); 589 lines changed | Nothing in the trait (`str_of` and `locate_stmt` were added before it). The operand-stack reserve above |
 | T6n | `cond.rs`, `expr.rs` | 546 and 58, on top of T6m's; 279 lines changed | `is_empty_block`, `branch_last_kind`, `release_stmt`, `if_blocks`, `take_if`, `function_of_block` |
 | T6p | `args.rs`, `call.rs`, `ffi_args.rs`, `external.rs`, `jsx.rs` | 550 and 58, on top of T6m's and T6n's; 703 lines changed | `take_operands`, `refill`; `new_` wrote the wrong `aux` |
-| T6o, T6w, T6q | | Not probed in this turn | See "Not done" below |
+| T6w | `tail.rs`, `rec.rs`, `exit.rs`, `label.rs` | 551 and 58, alone on trunk (no other probe in place); 139 lines changed | Nothing. `label.rs` builds no J node |
+PROBEROWS
 
 **What the functions of the survey became.** "T6m to T6x: what each
 slice adds" listed six expression-side functions to add once T6k had
@@ -5130,6 +5131,104 @@ carry it across a rebuild (that is `refill`); `new_` replaced by a call
 with invented information; a vector made per call or per case; the
 callee of a JSX element built before its properties (the order of the
 rows would change); converting `printed_form` or `jsx_tag`.
+```
+
+T6w (with both common blocks):
+
+```text
+Task T6w: tail.rs, rec.rs and exit.rs on the interface.
+Precondition, check it first and stop with a report if it fails: `rg -c
+'todo!\(' src/bir/j/rows.rs src/bir/j/rows_stmt.rs` prints nothing, and
+`cargo test --manifest-path compiler-rust/Cargo.toml --lib
+bir::lower::js` shows no test ignored.
+Yours: src/bir/lower/tail.rs, rec.rs and exit.rs whole; the changelog
+fragment. Nothing else. label.rs builds no J node (its one match of the
+search below reads a flag of the source tree) and is not edited.
+
+Do exactly this, one commit each, in this order, each pushed when made:
+
+1. tail.rs.
+   - `finish_self_call`: a value that is dropped is `self.js.release`;
+     the test for the parameter itself is `self.js.var_of(.., B::at(value))
+     == Some(param)`; an assignment is `self.js.assign`; the jump is
+     `self.js.continue_(.., None)`.
+   - `loop_function_body` keeps its signature: it takes and returns the
+     `NodeId` of a block statement (expr.rs calls it). The aliases are
+     `self.js.var` and `self.js.declare(.., LetKind::Alias, param,
+     Some(value))`. The body's statements move with one call:
+     `let (statements, moved) = (&mut self.statements, &mut
+     self.tail_body_statements);` and `self.js.unblock(..,
+     B::stmt_from_node(body), |s| { *moved += 1;
+     statements.push(B::stmt_node(s)); })`. Then `take_list`, the
+     condition `self.js.boolean(.., true)` (made before the loop),
+     `self.js.while_(.., condition, B::list_from(list), None)`,
+     `self.js.list(.., 1, std::iter::once(loop_))` and
+     `self.js.block_of`. No block is built from a list by hand.
+
+2. rec.rs.
+   - `recursive_dummy`: `let mark = self.js.mark();` then
+     `self.js.array(.., mark, 1)` or `self.js.object(.., mark, info)`,
+     and `self.js.assume_strict` on either.
+   - `recursive_block`, mode `Update`: `self.js.var`, and the
+     placeholder is `self.js.declare(.., LetKind::Variable, var,
+     Some(dummy))` stored as a `NodeId`.
+   - `recursive_block`, the self block: assert `kind == BlockLit`;
+     `let mut shell = B::from_node(value); let count =
+     self.js.take_operands(.., &mut shell);` then for each index
+     `self.js.pop()` is the field's value and `self.js.var` the target,
+     both given to `primitive_set_field` as handles; after the loop
+     `self.js.release(.., shell)`. Not `unpack_rev`: the block is
+     released after its fields are written, as today.
+   - `recursive_child`: the missing value is `self.js.undefined(..,
+     false)`. A member's code is read with `B::list_from(list)`,
+     `self.js.len` and `self.js.take_at`; a statement after a finished
+     member is `self.js.release_stmt`.
+
+3. exit.rs.
+   - `declare_empty`: `self.js.declare(.., kind, var, None)`.
+   - The exit variable: `self.js.int_literal(.., 0)` and `declare`.
+   - A handler's block: `self.js.block_of(.., B::list_from(list))`,
+     stored in `switch_output_nodes` as a `NodeId`. A dropped one is
+     `self.js.release_stmt`.
+   - `finish_catch`: `self.js.var` and `self.js.undefined(.., false)`.
+   - `exit_dispatch`, one handler: `self.js.var`, `int_literal`,
+     `self.js.bin(.., BinOp::EqEqEq, exit, order)`.
+   - `exit_dispatch`, several: the actions are collected in
+     `self.scratch` (taken and put back) in the order the loop visits
+     them, which is the order of the slots today; a shared case's empty
+     action is `self.js.list(.., 0, std::iter::empty())` and `block_of`.
+     Then `self.js.list(.., plan.len,
+     actions.drain(..).map(B::stmt_from_node))`, the scrutinee
+     `self.js.var`, and `self.js.switch(.., scrutinee, list, header,
+     false)`. No list is reserved and `slot` goes.
+   - `exit_child`: `int_literal` and `self.js.assign`; `undefined` and
+     `declare`.
+   The tests of the three files pass unchanged.
+
+4. The changelog fragment changes/lowering-interface-exits.internal.md.
+
+End state, to paste in the pull request with the output:
+- `rg -n 'View::J|Op::J|View::S[A-Z]|Op::S[A-Z]|plain::|norm::|\.arena\.(view|node|release|detach|replace|new_node|cold|set_cold|copy_subtree\w*|\w+_from_list)\(|pure_expression|bir::j::|arena\.nodes|arena\.lists'
+  src/bir/lower/tail.rs src/bir/lower/rec.rs src/bir/lower/exit.rs
+  src/bir/lower/label.rs` matches only below `mod tests` of each file.
+- `git diff --stat origin/ocaml-to-rust-rewrite` names the three files
+  and the fragment only.
+- `cargo test --manifest-path compiler-rust/Cargo.toml --lib bir::lower`
+  and `--lib bir::j`: the counts of the base.
+- The three CI numbers of the common block.
+
+Run by the design turn against a probe conversion of these three files
+on trunk: `--lib bir::lower` 551 passed, `--lib bir::j` 58 passed, the
+four pins unchanged. Every interface function the probe called had a
+caller before. Not run: the corpus gates, `Instruction count`, check
+mode.
+
+Shortcuts that count as failure, beside the common lists: a signature
+changed (`loop_function_body`, `finish_self_call`, `catch_children`,
+`exit_children` and `recursive_children` are called from expr.rs and
+call.rs); `unpack_rev` on the self block; a pool list reserved for the
+actions of the dispatch; `self.external_values` or a new vector as the
+scratch; an edit of label.rs.
 ```
 
 ## 12. Risks and what was not measured
