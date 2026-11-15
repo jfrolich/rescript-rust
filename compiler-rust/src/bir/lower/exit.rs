@@ -76,7 +76,7 @@ pub(super) struct Plan {
     output: Span,
 }
 
-impl<B: super::js::Js> State<'_, B> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     fn has_exit(&self, node: NodeId) -> bool {
         self.source.node(node).flags().contains(NodeFlags::HAS_EXIT)
     }

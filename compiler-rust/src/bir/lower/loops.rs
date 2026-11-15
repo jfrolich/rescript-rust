@@ -20,7 +20,7 @@ pub(super) struct Plan {
     needs_label: bool,
 }
 
-impl<B: super::js::Js> State<'_, B> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// O(1): decode loop operands; the upward exclusive-bound rule inspects
     /// only the end primitive and its literal operand (C:6390).
     pub(super) fn loop_statement(&mut self, cx: Cx, node: NodeId) -> Loop {

@@ -52,7 +52,7 @@ pub(super) struct Plan {
     pending_value: bool,
 }
 
-impl<B: super::js::Js> State<'_, B> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// C: compile_switch_*_block_inner. O(c + compared nodes), apart from
     /// fingerprint indexing. General string switches queue their default first.
     pub(super) fn integer_switch(
@@ -201,7 +201,7 @@ impl Facts {
     pub(super) fn comparable(&self) -> bool { self.comparable }
 }
 
-impl<B: super::js::Js> State<'_, B> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// V: stable_group_switch_cases, C: filtered_switch_case_refs. Expected
     /// O(c + reachable nodes + confirmed equal nodes); collision candidates
     /// are confirmed by eq_approx. Dense case-indexed links preserve the head
@@ -927,7 +927,7 @@ impl<B: super::js::Js> State<'_, B> {
     }
 }
 
-impl<B: super::js::Js> State<'_, B> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// O(spelling bytes): append one J case key, interning borrowed spellings.
     /// Scalar tags are copied; source constructor metadata is never cloned.
     fn append_switch_key(&mut self, index: usize) {
@@ -1093,7 +1093,7 @@ impl<B: super::js::Js> State<'_, B> {
     }
 }
 
-impl<B: super::js::Js> State<'_, B> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// V: compile_small_string_switch_assignment/return/effect, one Cx path.
     /// O(statements consumed by J-S3); the direct-body form copies no run.
     fn finish_small_switch(&mut self, cx: Cx, plan: &Plan) -> Probed {
