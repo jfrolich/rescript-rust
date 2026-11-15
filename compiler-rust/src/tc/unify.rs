@@ -28,6 +28,10 @@ const LEVEL_ONLY: u32 = 1 << 30;
 /// See [`LEVEL_ONLY`].
 const LOWERS: u32 = 1 << 31;
 
+/// The node budget of [`Checker::unreached_within_budget`]: `walk_budget`
+/// (compiler/ml/ctype.ml:1424).
+const PROBE_BUDGET: u32 = 256;
+
 /// A failed unification. It carries nothing: in `Mode::Explain` the trace is
 /// [`Checker::trace`]; in `Mode::Success` there is none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1343,11 +1347,17 @@ impl Checker {
         self.mark_generation
     }
 
-    /// Whether `node` is reachable from `ty`: one step a node, each node
-    /// once (marks), explicit stack. With `deep` objects and variant rows
-    /// are crossed (`deep_occur`, ctype.ml:1775), otherwise not
-    /// (`occur_rec`, ctype.ml:1403). No level cut.
+    /// Whether `node` is reachable from `ty`: first
+    /// [`Checker::unreached_within_budget`]; when that does not decide, one
+    /// step a node, each node once (marks), explicit stack. With `deep`
+    /// objects and variant rows are crossed (`deep_occur`, ctype.ml:1775),
+    /// otherwise not (`occur_rec`, ctype.ml:1403). No level cut. Cost: at
+    /// most [`PROBE_BUDGET`] + 1 steps of the probe, then, when it did not
+    /// decide, the marked walk's O(nodes of `ty`).
     fn reaches(&mut self, node: Ty, ty: Ty, deep: bool) -> bool {
+        if self.unreached_within_budget(node, ty, deep) {
+            return false;
+        }
         let generation = self.fresh_marks();
         self.g.work.clear();
         self.g.work.push(ty);
@@ -1369,6 +1379,38 @@ impl Checker {
             }
         }
         false
+    }
+
+    /// The probe of [`Checker::reaches`], `occur_reaches_budget`
+    /// (compiler/ml/ctype.ml:1432-1465): the same edges as the marked walk
+    /// in the same mode (objects and variant rows crossed only with `deep`,
+    /// [`Checker::stops_occurrence`]), explicit stack on `g.work`, no marks,
+    /// at most [`PROBE_BUDGET`] nodes. `true` only when the walk finished
+    /// within the budget without meeting `node`: then no path from `ty`
+    /// reaches it. `false` when it met `node` or the budget ran out (a large
+    /// type, a cycle or heavy sharing, which a walk without marks visits
+    /// once per path); the caller then decides with the marked walk. One
+    /// step a node visited, at most [`PROBE_BUDGET`] + 1; allocates nothing
+    /// beyond `g.work`'s growth.
+    fn unreached_within_budget(&mut self, node: Ty, ty: Ty, deep: bool) -> bool {
+        self.g.work.clear();
+        self.g.work.push(ty);
+        let mut budget = PROBE_BUDGET;
+        while let Some(ty) = self.g.work.pop() {
+            let ty = self.g.repr(ty);
+            #[cfg(test)]
+            super::steps::tick();
+            if ty == node || budget == 0 {
+                self.g.work.clear();
+                return false;
+            }
+            budget -= 1;
+            let descriptor = self.g.nodes[ty.0 as usize];
+            if deep || !self.stops_occurrence(descriptor) {
+                self.g.children(descriptor, false);
+            }
+        }
+        true
     }
 
     /// O(1): the checking mode, fixed for the unit (CHECKER_REWRITE 3.4).
