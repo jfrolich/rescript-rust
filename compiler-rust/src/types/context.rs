@@ -828,6 +828,11 @@ pub struct TypeContext {
 
     /// GADT instance tracking flag
     trace_gadt_instances: Cell<bool>,
+
+    /// Whether this unit created or copied a polymorphic type with at least
+    /// one bound variable (see [`Self::note_bound_universal`]). Only then
+    /// can the inclusion of the unit in its own inferred signature fail.
+    bound_universals: Cell<bool>,
     /// `Ctype.passive_variants` (ctype.ml:2060).
     passive_variants: Cell<bool>,
     /// `Ctype.rigid_variants` (ctype.ml:2013), set by `expand_head_rigid`.
@@ -1385,6 +1390,7 @@ impl TypeContext {
             global_level: Cell::new(1),
             saved_levels: RefCell::new(Vec::new()),
             trace_gadt_instances: Cell::new(false),
+            bound_universals: Cell::new(false),
             passive_variants: Cell::new(false),
             rigid_variants: Cell::new(false),
             simple_abbrevs: Cell::new(AbbrevMemoRef(1)),
@@ -2988,6 +2994,25 @@ impl TypeContext {
     /// Create a link type (for unification).
     pub fn new_link(&self, target: TypeExprRef) -> TypeExprRef {
         self.new_type(TypeDesc::Tlink(target))
+    }
+
+    /// Record that this unit created or copied a polymorphic type with at
+    /// least one bound variable: the translation of a `'a. t` annotation
+    /// that universalizes a variable, or the `Tpoly` arm of a type copy whose
+    /// binder list is not empty. One store; called only on those branches.
+    ///
+    /// A type without universal variables is always more general than its
+    /// own copy, so the inclusion of a unit in its inferred signature can
+    /// fail only when this was recorded (`moregen` fails at a pair of
+    /// universal variables, compiler/ml/ctype.ml:3048).
+    pub fn note_bound_universal(&self) {
+        self.bound_universals.set(true);
+    }
+
+    /// Whether [`Self::note_bound_universal`] was called for this unit. One
+    /// load.
+    pub fn has_bound_universals(&self) -> bool {
+        self.bound_universals.get()
     }
 
     /// Create a polymorphic type.
