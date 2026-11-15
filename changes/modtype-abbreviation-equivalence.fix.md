@@ -1,0 +1,1 @@
+- Accept a module constrained by a module type that abbreviates a module type of a submodule (`module type T = Y.T` inside `R`, then `module M: R.T`), as the OCaml compiler does.
