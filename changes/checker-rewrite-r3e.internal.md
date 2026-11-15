@@ -1,0 +1,1 @@
+- Type checker rewrite R3e: objects and their fields in the new checker's unification (flattening, the row variable, the fields a side lacks, mutability cells).
