@@ -1964,7 +1964,8 @@ fn an_instance_duplicates_the_cells_of_an_open_row() {
     let mut c = checker(Mode::Success);
     let (open, scheme_fields) = object_scheme(&mut c, true, 2);
     let has = |c: &Checker, template| {
-        super::rows::template_has_open_row(&c.g.template_nodes, &c.g.template_lists, &c.extras.descriptors, template)
+        let slots = super::template::slots(&c.g.template_lists, &c.g.template_pools, template);
+        super::rows::template_has_open_row(&c.g.template_nodes, slots, &c.extras.descriptors, template)
     };
     assert!(has(&c, open));
     let descriptors = c.extras.descriptors.len();

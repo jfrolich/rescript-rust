@@ -1073,14 +1073,15 @@ impl New {
         let open = roots
             .iter()
             .map(|root| {
+                let template = segment.templates[root.template as usize];
                 // The kernel tier is R1's instance: it has no duplicate.
                 plan.has(CELLS)
                     && tier != Tier::Kernel
                     && super::rows::template_has_open_row(
                         &segment.template_nodes,
-                        &segment.template_lists,
+                        super::template::slots(&segment.template_lists, &segment.template_pools, template),
                         &checker.extras.descriptors,
-                        segment.templates[root.template as usize],
+                        template,
                     )
             })
             .collect();

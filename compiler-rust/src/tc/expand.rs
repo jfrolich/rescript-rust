@@ -210,7 +210,8 @@ impl TypeTable {
     /// `INHERITS`: a constructor with arguments whose row has [`ABBREV`],
     /// [`PRIVATE`] or [`ALIAS`]. `OPEN_ROW`: a field node (`TUPLE |
     /// EXTENDED` whose `Segment::signature.descriptor_extras` row is a
-    /// field) whose slot 1 in `Segment::template_lists` is a reference
+    /// field) whose slot 1 in the template's own slots (`template::slots`
+    /// of `Segment::template_lists` and `template_pools`) is a reference
     /// with bit 30 to a `VAR` node of the template. The pass over one
     /// template stops when it has both. O(rows + nodes of the manifests'
     /// templates), one `TypeInfo` load per constructor with arguments, one

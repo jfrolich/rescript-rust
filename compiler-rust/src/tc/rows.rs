@@ -143,9 +143,10 @@ impl Extras {
 /// template has a field whose rest is a variable of the template itself
 /// (a reference with bit 30 to a `VAR` node of `nodes`), which is the last
 /// field of a row that ends in a generic variable
-/// (`row_terminator_generic`, compiler/ml/btype.ml:478-506). `nodes` and
-/// `lists` are the template pools the template indexes
-/// (`Segment::template_nodes`, `template_lists`). O(nodes of the template),
+/// (`row_terminator_generic`, compiler/ml/btype.ml:478-506). `nodes` is
+/// the pool the template indexes (`Segment::template_nodes`); `lists` is
+/// the template's own slots (`template::slots`), which the `b` of its
+/// nodes counts from. O(nodes of the template),
 /// one list load per field, no allocation. The caller of an instance keeps
 /// the answer in its own row (a `TypeInfo` flag for a manifest; the
 /// harness per value) and calls [`Checker::instance_open`] or
