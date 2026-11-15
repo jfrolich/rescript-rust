@@ -431,6 +431,59 @@ fn a_body_is_adopted_by_its_statement() {
     }
 }
 
+/// The lowering builds some blocks from a slice of statements and not
+/// from a pool list (`Bir::new_node`, `plain::node` or `plain::list` with
+/// `View::SBlock { statements }`). They are the rows `block_of`,
+/// `explicit_block` and `function` write for the list of the same
+/// statements, so the interface needs no constructor that takes a slice.
+#[test]
+#[ignore = "T6l build"]
+fn a_block_of_a_slice_is_the_block_of_its_list() {
+    for shape in SHAPES {
+        type Slice = fn(&mut Bir, &[NodeId]) -> NodeId;
+        let slices: [Slice; 3] = [
+            |b, statements| b.new_node(View::SBlock { statements }, 0),
+            |b, statements| plain::node(b, View::SBlock { statements }, 0),
+            plain::list,
+        ];
+        for slice in slices {
+            same(
+                |r, u| {
+                    let list = run(r, u, shape);
+                    done(r.block_of(&mut u.b, list));
+                },
+                |u| {
+                    let statements: Vec<NodeId> = shape.iter().map(|&st| statement_today(u, st)).collect();
+                    built(slice(&mut u.b, &statements));
+                },
+            );
+        }
+        same(
+            |r, u| {
+                let list = run(r, u, shape);
+                done(r.explicit_block(&mut u.b, list));
+            },
+            |u| {
+                let statements: Vec<NodeId> = shape.iter().map(|&st| statement_today(u, st)).collect();
+                built(u.b.new_node(View::SBlock { statements: &statements }, 1));
+            },
+        );
+        same(
+            |r, u| {
+                let list = run(r, u, shape);
+                let function = r.function(&mut u.b, u.header, list);
+                r.release(&mut u.b, function);
+            },
+            |u| {
+                let statements: Vec<NodeId> = shape.iter().map(|&st| statement_today(u, st)).collect();
+                let body = plain::node(&mut u.b, View::SBlock { statements: &statements }, 0);
+                let function = crate::bir::j::pure_expression(&mut u.b, View::JFun { body, header: u.header }, 0);
+                u.b.release(function);
+            },
+        );
+    }
+}
+
 /// The values the statement rules treat differently: a variable, a
 /// literal, a call, a negation, and commas of them.
 #[derive(Clone, Copy, Debug)]
@@ -667,6 +720,99 @@ fn a_reader_reads_the_statement_in_hand() {
         let switch = r.switch(a, scrutinee, actions, u.switch, string);
         assert_eq!((r.stmt_kind(a, &switch), r.stmt_aux(a, &switch)), (Kind::Switch, u8::from(string)));
         assert_eq!(r.value_of(a, &switch).and_then(|value| r.var_of(a, value)), Some(u.f));
+    }
+}
+
+// ---- Functions of later slices (each test is ignored for its slice) ----
+
+fn located_today(b: &mut Bir, statement: NodeId) {
+    let comment = b.cold(statement).and_then(|cold| cold.comment);
+    b.set_cold(statement, crate::bir::Cold { loc: crate::lambda::LamLoc::NONE, comment });
+    let mut flags = b.node(statement).flags();
+    flags.0 |= crate::bir::NodeFlags::JS_LOC_PRESENT;
+    b.nodes[statement.index()].set_flags(flags);
+}
+
+#[test]
+#[ignore = "T6m build"]
+fn a_located_statement_is_the_row_the_lowering_writes_today() {
+    for st in [St::Call, St::Throw] {
+        same(
+            |r, u| {
+                let mut statement = statement(r, u, st);
+                r.locate_stmt(&mut u.b, &mut statement, crate::lambda::LamLoc::NONE);
+            },
+            |u| {
+                let statement = statement_today(u, st);
+                located_today(&mut u.b, statement);
+            },
+        );
+    }
+}
+
+#[test]
+#[ignore = "T6o build"]
+fn a_statement_says_whether_it_is_located() {
+    let mut u = unit();
+    let r = Rows::default();
+    let node = statement_today(&mut u, St::Call);
+    let statement = Rows::stmt_from_node(node);
+    assert!(!r.stmt_located(&u.b, &statement));
+    located_today(&mut u.b, node);
+    assert!(r.stmt_located(&u.b, &statement));
+}
+
+#[test]
+#[ignore = "T6n build"]
+fn a_statement_gives_its_value_and_a_block_its_statements() {
+    // `f();`, `return y;` and `throw x;` give their value and are released.
+    for st in [St::Call, St::Return, St::Throw] {
+        same(
+            |r, u| {
+                let statement = statement(r, u, st);
+                let value = r.take_value(&mut u.b, statement);
+                let kind = if matches!(st, St::Call) { Kind::Call } else { Kind::Var };
+                assert_eq!(r.kind(&u.b, Rows::of(&value)), kind);
+            },
+            |u| {
+                let statement = statement_today(u, st);
+                let (View::SExp { value } | View::SReturn { value } | View::SThrow { value }) = u.b.view(statement)
+                else {
+                    unreachable!()
+                };
+                u.b.detach(value);
+                u.b.release(statement);
+            },
+        );
+    }
+    // A block gives its statements in order, and they make an equal list.
+    for shape in SHAPES {
+        same(
+            |r, u| {
+                let list = run(r, u, shape);
+                let block = r.block_of(&mut u.b, list);
+                let steps = r.steps();
+                let mut statements = Vec::new();
+                r.unblock(&mut u.b, block, |s| statements.push(s));
+                assert_eq!(statements.len(), shape.len());
+                assert_eq!(r.steps() - steps, 1 + shape.len() as u64);
+                assert_eq!(r.mark().0, 0);
+                let again = r.list(&mut u.b, shape.len() as u32, statements.into_iter());
+                done(r.explicit_block(&mut u.b, again));
+            },
+            |u| {
+                let list = run_today(u, shape);
+                let block = u.b.block_from_list(list);
+                let View::SBlock { statements } = u.b.view(block) else { unreachable!() };
+                let statements = statements.to_vec();
+                for &statement in &statements {
+                    u.b.detach(statement);
+                }
+                u.b.release(block);
+                let again = u.b.lists.push_iter(statements.len(), statements.into_iter());
+                built(u.b.explicit_block_from_list(again));
+            },
+        );
     }
 }
 

@@ -35,6 +35,16 @@
 //! | `if_` | `norm::js3_simplify_if` |
 //! | `effect`, `effect_if_impure` | `norm::jm14_push_effect_expression`, `norm::jm14_push_s_if_empty`, with `Rows::operands` as the vector the rule pushes to: the statements pushed above its length on entry are given to `sink` in order and the vector is cut back |
 //!
+//! Bodies of later slices (`todo!` with the slice's name; each is built by
+//! that slice, with its test in `js_stmt_tests.rs`):
+//!
+//! | Function | Slice | Body |
+//! | --- | --- | --- |
+//! | `locate_stmt` | T6m | `Bir::set_cold` with `loc` and the comment the node has, and `NodeFlags::JS_LOC_PRESENT` set |
+//! | `take_value` | T6n | the `value` of `SExp`, `SReturn` or `SThrow`: `Bir::detach` of it, `Bir::release` of the statement; a panic for any other; one step |
+//! | `unblock` | T6n | the statements of an `SBlock` copied above the length of `Rows::operands`; each `Bir::detach`ed and given to `sink` in order; the vector cut back; `Bir::release` of the block; one step and one per statement |
+//! | `stmt_located` | T6o | `NodeFlags::JS_LOC_PRESENT` |
+//!
 //! Steps (`Js::steps`): one for every function that builds a statement or
 //! a function literal, and one more per statement of each list it
 //! consumes; `list` one and one per statement; `take_at` one; `effect` and
@@ -44,6 +54,7 @@ use super::rows::{E, Rows};
 use crate::bir::lower::js::Pools;
 use crate::bir::lower::js_stmt::{JsStmt, Range};
 use crate::bir::{FuncId, ListId, NodeId, StrId, SwitchId, VarId};
+use crate::lambda::LamLoc;
 use crate::emit::row::Kind;
 use crate::lambda::lam_compat::LetKind;
 
@@ -86,6 +97,12 @@ impl JsStmt for Rows {
     fn value_of<'r>(&self, a: &'r Pools, s: &'r S) -> Option<NodeId> {
         let _inputs = (a, s);
         todo!("T6l")
+    }
+
+    #[inline]
+    fn stmt_located(&self, a: &Pools, s: &S) -> bool {
+        let _inputs = (a, s);
+        todo!("T6o")
     }
 
     fn list(&mut self, a: &mut Pools, len: u32, statements: impl Iterator<Item = S>) -> ListId {
@@ -185,6 +202,19 @@ impl JsStmt for Rows {
     fn function(&mut self, a: &mut Pools, header: FuncId, body: ListId) -> E {
         let _inputs = (a, header, body);
         todo!("T6l")
+    }
+
+    fn locate_stmt(&mut self, a: &mut Pools, s: &mut S, loc: LamLoc) {
+        let _inputs = (a, s, loc);
+        todo!("T6m")
+    }
+    fn take_value(&mut self, a: &mut Pools, s: S) -> E {
+        let _inputs = (a, s);
+        todo!("T6n")
+    }
+    fn unblock(&mut self, a: &mut Pools, s: S, sink: impl FnMut(S)) {
+        let _inputs = (a, s, sink);
+        todo!("T6n")
     }
 
     fn exp_rule(&mut self, a: &mut Pools, value: E) -> S {

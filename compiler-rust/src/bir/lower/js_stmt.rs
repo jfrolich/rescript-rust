@@ -37,6 +37,7 @@
 use super::js::{Js, Pools};
 use crate::bir::{FuncId, ListId, NodeId, StrId, SwitchId, VarId};
 use crate::emit::row::Kind;
+use crate::lambda::LamLoc;
 use crate::lambda::lam_compat::LetKind;
 
 /// The bounds of a range loop. `init` is `None` when the variable is
@@ -83,6 +84,9 @@ pub trait JsStmt: Js {
     /// of an `If`, the condition of a `While`, the scrutinee of a
     /// `Switch`. `None` for every other statement. O(1).
     fn value_of<'r>(&self, a: &'r Pools, s: &'r Self::S) -> Option<Self::Ref<'r>>;
+
+    /// Whether the statement has a source location. O(1). (T6o.)
+    fn stmt_located(&self, a: &Pools, s: &Self::S) -> bool;
 
     // ---- Lists ----
 
@@ -160,6 +164,23 @@ pub trait JsStmt: Js {
     /// whatever its body is (a literal runs nothing). One step per
     /// statement of the body: the list is adopted, not copied.
     fn function(&mut self, a: &mut Pools, header: FuncId, body: Self::L) -> Self::E;
+
+    // ---- What later slices add (each body is its slice's) ----
+
+    /// Give the statement the source location `loc`; a comment it has is
+    /// kept. O(1). (T6m: `prim.rs`, the statement of a `debugger` and of a
+    /// raise; T6o: `location.rs`, the first statement of a switch run.)
+    fn locate_stmt(&mut self, a: &mut Pools, s: &mut Self::S, loc: LamLoc);
+    /// The value of an `Exp`, a `Return` or a `Throw`, taken out; the
+    /// statement is released. One step. Panics on any other statement.
+    /// (T6n: `cond.rs`, a lone expression statement that becomes the value,
+    /// and the fold of `e1; e2; return v` into a comma.)
+    fn take_value(&mut self, a: &mut Pools, s: Self::S) -> Self::E;
+    /// The statements of a block statement, given to `sink` in order, each
+    /// moved once; the block is released. One step and one per statement.
+    /// Panics on a statement that is not a `Block`. (T6n: `cond.rs`,
+    /// `unnest`; T6o: `untagged.rs`, a cached run that is staged.)
+    fn unblock(&mut self, a: &mut Pools, s: Self::S, sink: impl FnMut(Self::S));
 
     // ---- Rules of BACKEND_LOWERING 6 ----
 
