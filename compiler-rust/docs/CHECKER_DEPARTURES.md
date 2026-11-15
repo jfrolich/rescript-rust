@@ -7124,6 +7124,87 @@ stderr:
 
 ## Third round: differences found while fixing
 
+### Q1 — a module type abbreviation of a module type in a submodule
+
+```rescript
+module type S = {let x: int}
+module R = {
+  module Y = {
+    module type T = S
+  }
+  module type T = Y.T
+}
+module M: R.T = {
+  let x = 2
+}
+```
+
+OCaml compiles the unit; Rust rejected it: "The implementation Main.res does
+not match the interface (inferred signature): In module M: Actual module
+type: Y.T Expected module type: R.T". The printed `Y.T` was the cause, not a
+printing matter: two places read the declaration of `R.T` from `R`'s own
+signature, where it is written `Y.T` with the `Y` bound inside `R`, instead
+of from `R`'s components, where OCaml's `Env` stores it prefixed as `R.Y.T`
+(`Subst.add_module id (Pdot (path, name))` in `components_of_module_maker`,
+`compiler/ml/env.ml:1555-1590`). Outside `R`, `Y.T` names nothing, so the
+expansion stopped there and the two paths compared unequal.
+
+#### Fixed
+
+- `1399d0e44`: `Mtype.strengthen` scrapes `Mty_ident p` with
+  `Env.find_modtype_expansion` (`compiler/ml/mtype.ml:21-25`). The Rust
+  scrape (`scrape_modtype_ident_for_strengthen` in
+  `strengthen_module_type_for_module_access_path`,
+  `compiler-rust/src/types/ctype.rs:3630`) used `Env::lookup_modtype`, whose
+  dotted case scans the parent module's raw signature. Strengthening `M`
+  when the unit is checked against its inferred signature
+  (`Includemod.compunit`, `compiler/ml/typemod.ml:1812-1815`, through
+  `module_declarations`, `includemod.ml:396-413`) gave `Y.T`. It now calls
+  `typemod::find_modtype_expansion` (`typemod.rs:11011`), which reads the
+  parent's components. Fixtures: `tests/tests/src/modtype_abbreviation_submodule`,
+  `modtype_abbreviation_submodule_interface`, super_errors
+  `modtype_abbreviation_value_mismatch` (agreed before).
+- `827faf1c4`: `Includemod.try_modtypes` expands an alias with
+  `Env.find_module` and a module type path with `Env.find_modtype_expansion`
+  (`includemod.ml:223-236`). The local expansion of the Rust check
+  (`expand_local` in `modtypes_inner`, `compiler-rust/src/types/includemod.rs:1287`,
+  dotted arm at 1316) scanned the parent's raw signature in the same way, so
+  `module N: R.Y.T = M` for `M: R.T` was rejected with "Actual module type:
+  Y.T", and a missing value in a constraint on such a module was reported
+  as that module type mismatch instead of "The value `y` is required but
+  not provided". The dotted arm now reads a module through
+  `lookup_module_in_resolved_path` and a module type through
+  `find_modtype_expansion`. Fixtures:
+  `tests/tests/src/modtype_abbreviation_constraint_target`, super_errors
+  `modtype_abbreviation_alias_missing_value` and
+  `modtype_abbreviation_abstract_implementation` (agreed before).
+
+Twenty programs around the witness were run through both compilers
+(commands as in "Scope, calibration and reproducibility"). Before / after:
+
+| Program | OCaml | Rust before | Rust after |
+| --- | --- | --- | --- |
+| the witness (one submodule) | accepts | rejects | accepts |
+| two submodules (`R.Y.Z.T`) | accepts | rejects | accepts |
+| submodule that is a module alias | accepts | rejects | accepts |
+| `R` a functor's result | accepts | rejects | accepts |
+| `Y.T` used in `R` before `T` is declared | accepts | rejects | accepts |
+| through `module type of R` | accepts | accepts | accepts |
+| abstract module type through an alias, functor parameter | accepts | accepts | accepts |
+| constrained by the abbreviation, its target, `S`, the abbreviation | accepts | rejects | accepts |
+| with an interface declaring `M: R.T` | accepts | rejects | accepts |
+| with an interface declaring `M: R.Y.T` | accepts | rejects | accepts |
+| abbreviation used inside `R` | accepts | accepts | accepts |
+| `module M: R.T` as an item of a module type | accepts | rejects | accepts |
+| functor parameter of type `R.T` | accepts | rejects | accepts |
+| `M: R.T` with `x: string` | rejects | same text | same text |
+| `M: R.T` without `x` | rejects | same text | same text |
+| interface `M: R.T`, implementation lacks `x` | rejects | same text | same text |
+| interface's `R.T` is another module type | rejects | same text | same text |
+| abstract `R.T` implemented by a structure | rejects | same text | same text |
+| `module N: {x, y} = M` for `M: R.T` | rejects | other text | same text |
+| `module N: U = M`, `U` with `x: string` | rejects | other text | same text |
+
 ### A3 — module aliases of a functor argument
 
 The witness: a module alias declared in a functor parameter's signature and
