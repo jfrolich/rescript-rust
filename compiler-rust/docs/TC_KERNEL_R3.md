@@ -2582,3 +2582,32 @@ trunk: `unify_abbrev2` +145.00, `unify_ground3` -1.00, `unify_datatype2` +1.00
 | `Checker::unify_expanded` | 195.00 | 224.00 | +29.00 |
 | every other function | 1745.06 | 1745.06 | +0.00 |
 | total | 2968.06 | 3113.06 | +145.00 |
+
+### Attempt (b): the `Unif` loop of `expand_head` on its own. Kept.
+
+`bca643d3b`, on the tree of trunk (after the revert of (a)).
+`Checker::expand_head_unif` (`pub(super)`) is `expand_head`'s loop in
+`ExpandMode::Unif` with a clash of a step returned as the caller's (`?`)
+and no mode test; `expand_head` hands `Unif` to it and its own loop serves
+`Safe`, `Opt` and `Rigid`. `unify_expanded` calls it at its four sites.
+LLVM inlines it there: the 212 of the out-of-line `expand_head` go, and
+`unify_expanded` gains 101 (the loop lines, `expand.rs:853-854` 26 and 16,
+and the `Result` of `?`, `result.rs:2182` 16). Against trunk:
+`unify_abbrev2` -111.00, `unify_ground3` -6.00, `unify_datatype2` -6.00,
+no operation dearer (the whole table is in "Per attempt" below).
+
+| Function | `838ccbca7` | Trunk | (b) |
+|---|---:|---:|---:|
+| `Checker::expand_once` | 798.00 | 816.00 | 816.00 |
+| `Checker::reaches` | 434.05 | 400.00 | 400.00 |
+| `Checker::unify_expanded` | 251.00 | 195.00 | 296.00 |
+| `Checker::expand_head` | 0.00 | 212.00 | 0.00 |
+| `Checker::unify_distinct` | 276.00 | 284.00 | 284.00 |
+| `Checker::unify3` | 192.00 | 190.00 | 190.00 |
+| `Graph::instance`, `Graph::compress`, `memorize`, `main` | 871.00 | 871.00 | 871.00 |
+| total | 2822.27 | 2968.06 | 2857.06 |
+
+What remains above `838ccbca7` after (b), 34.79: `unify_expanded` +45
+(K3's two tests and their registers), `expand_once` +18 (line 0 +20, the
+node and row loads of the two expanding heads +10), `unify_distinct` +8,
+against the probe's -34.05 in `reaches`.
