@@ -286,7 +286,6 @@ fn sizes() {
 }
 
 #[test]
-#[ignore = "T6a build"]
 fn leaves_print_as_the_legacy_printer_prints_them() {
     for t in [
         n("x"),
@@ -312,7 +311,6 @@ fn leaves_print_as_the_legacy_printer_prints_them() {
 }
 
 #[test]
-#[ignore = "T6a build"]
 fn every_binary_operator_prints_as_the_legacy_printer_prints_it() {
     use BinOp::*;
     for op in [
@@ -330,7 +328,6 @@ fn every_binary_operator_prints_as_the_legacy_printer_prints_it() {
 }
 
 #[test]
-#[ignore = "T6a build"]
 fn the_strict_flag_of_a_division_follows_its_right_operand() {
     use BinOp::*;
     for op in [Div, Mod, Pow] {
@@ -341,7 +338,6 @@ fn the_strict_flag_of_a_division_follows_its_right_operand() {
 }
 
 #[test]
-#[ignore = "T6a build"]
 fn zero_minus_a_value_prints_as_a_negation() {
     oracle(&bin(BinOp::Minus, T::Int(0), n("x")));
     oracle(&bin(BinOp::Minus, T::Float("0."), n("x")));
@@ -351,7 +347,6 @@ fn zero_minus_a_value_prints_as_a_negation() {
 }
 
 #[test]
-#[ignore = "T6a build"]
 fn the_two_strict_nullish_tests_of_one_name_print_as_one_loose_test() {
     let test = |name, null_first: bool| {
         let (a, b) = if null_first { (T::Null, T::Undefined(false)) } else { (T::Undefined(false), T::Null) };
@@ -378,7 +373,6 @@ fn the_two_strict_nullish_tests_of_one_name_print_as_one_loose_test() {
 }
 
 #[test]
-#[ignore = "T6a build"]
 fn two_nullish_tests_of_different_targets_have_no_rule() {
     let allocator = Allocator::default();
     let mut b = Builder::new(&allocator);
@@ -395,7 +389,6 @@ fn two_nullish_tests_of_different_targets_have_no_rule() {
 }
 
 #[test]
-#[ignore = "T6a build"]
 fn unary_and_conditional_forms_print_as_the_legacy_printer_prints_them() {
     let x = || Box::new(n("x"));
     for t in [
@@ -426,7 +419,6 @@ fn unary_and_conditional_forms_print_as_the_legacy_printer_prints_them() {
 }
 
 #[test]
-#[ignore = "T6a build"]
 fn members_calls_and_constructions_print_as_the_legacy_printer_prints_them() {
     let x = || Box::new(n("x"));
     for t in [
@@ -466,7 +458,6 @@ fn members_calls_and_constructions_print_as_the_legacy_printer_prints_them() {
 }
 
 #[test]
-#[ignore = "T6a build"]
 fn a_reference_carries_the_index_of_its_variable() {
     let allocator = Allocator::default();
     let mut b = Builder::new(&allocator);
@@ -498,7 +489,6 @@ fn a_reference_carries_the_index_of_its_variable() {
 }
 
 #[test]
-#[ignore = "T6a build"]
 fn the_facts_of_a_node_are_computed_from_the_rows_of_its_operands() {
     let allocator = Allocator::default();
     let mut b = Builder::new(&allocator);
@@ -534,7 +524,6 @@ fn the_facts_of_a_node_are_computed_from_the_rows_of_its_operands() {
 }
 
 #[test]
-#[ignore = "T6a build"]
 fn a_chain_or_a_sequence_that_is_not_in_print_form_is_marked_for_the_seal() {
     let allocator = Allocator::default();
     let mut b = Builder::new(&allocator);
@@ -603,7 +592,6 @@ fn concatenation<'a>(b: &mut Builder<'a>, terms: usize) -> (u64, usize) {
 }
 
 #[test]
-#[ignore = "T6a build"]
 fn ten_thousand_nodes_cost_ten_times_a_thousand() {
     // Relations between two sizes, not constants: the builder states one
     // step per node and one per operand of a list.
@@ -630,7 +618,6 @@ fn ten_thousand_nodes_cost_ten_times_a_thousand() {
 }
 
 #[test]
-#[ignore = "T6a build"]
 fn a_warm_builder_allocates_nothing_outside_the_arena() {
     // Warm: one arena chunk that holds the unit (a reset arena keeps its
     // largest chunk), and the table and the operand stack at the capacity a
@@ -654,7 +641,6 @@ fn a_warm_builder_allocates_nothing_outside_the_arena() {
 }
 
 #[test]
-#[ignore = "T6a build"]
 fn clearing_the_builder_keeps_its_capacity() {
     let allocator = Allocator::default();
     let mut b = Builder::new(&allocator);
