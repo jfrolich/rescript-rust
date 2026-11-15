@@ -2339,7 +2339,26 @@ fn nondep_mty(
         }
         DeclMty::MtyAlias(_, path) => {
             if path.is_free(mid) {
-                None
+                // compiler/ml/mtype.ml:114-117: an alias of a module of the
+                // parameter is replaced by that module's type, read through
+                // the argument bound to the parameter in `env` (so its items
+                // name the argument's modules, as Env components do).
+                let md_type = match path.view() {
+                    PathView::Pident(_) => env.lookup_module(path).ok()?.md_type.clone(),
+                    PathView::Pdot(parent, name, _) => {
+                        crate::types::typecore::lookup_module_in_resolved_path(
+                            parent,
+                            name.as_str(),
+                            env,
+                            &mut None,
+                            ctx,
+                        )?
+                        .2
+                        .md_type
+                    }
+                    PathView::Papply(_, _) => return None,
+                };
+                nondep_mty(ctx, env, mid, &md_type)
             } else {
                 Some(mty.clone())
             }
