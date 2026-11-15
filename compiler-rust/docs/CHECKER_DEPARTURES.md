@@ -6491,8 +6491,8 @@ are in `package_type_nondep`. An argument constrained to an abstract module
 type is rejected by both before and after (super_errors
 `package_type_nondep_abstract_argument`).
 
-Open: a functor result that declares `module type T = X.T` next to the
-value is still rejected by Rust; OCaml accepts it:
+A functor result that declares `module type T = X.T` next to the value
+was still rejected by Rust; OCaml accepts it:
 
 ```rescript
 module type S = {let x: int}
@@ -6506,12 +6506,61 @@ module M = {let x = 1}
 let p = module(M: T)})
 ```
 
-A temporary trace shows the failure comes from the `MtyIdent` arm of `nondep_mty` (`compiler-rust/src/types/typemod.rs:2331`):
-it returns `None` for `X.T`, where OCaml expands the path with
-`Env.find_modtype_expansion` (`compiler/ml/mtype.ml:110-113`) and, in a
-covariant position, falls back to an abstract module type declaration
-(`mtype.ml:148-158`). That function is `Mtype.nondep_supertype`, not the
-`nondep_type` of this place.
+The failure was in `Mtype.nondep_supertype`, not in the `nondep_type` of
+this place. Thirty-six programs around it (abbreviations of the
+parameter's module type in the result, nested, through an alias of the
+parameter, a functor returning a functor, a module type that mentions a
+type of the parameter, covariant, contravariant and strict positions,
+extension constructors, and programs OCaml rejects) were run through both
+compilers; four arms of the Rust `nondep_mty`/`nondep_sig`
+(`compiler-rust/src/types/typemod.rs:2336-2547`) lacked or shortened
+OCaml's (`compiler/ml/mtype.ml:107-162`).
+
+Fixed (`797b660e5`): the `MtyIdent` arm (`typemod.rs:2346`) returned `None`
+for a module type path of the parameter. OCaml replaces it by its expansion
+through the argument bound to the parameter (`mtype.ml:110-113`). The
+program above, the same with a result signature, the module type in a
+nested module, in a functor parameter of the result, and an expansion that
+mentions a type of the parameter now build with OCaml's JavaScript
+(`tests/tests/src/functor_parameter_modtype_expansion`).
+
+Fixed (`6b3de53ff`): a module type declaration whose manifest keeps the
+parameter failed the elimination. OCaml walks the manifest as strict and in
+a covariant position keeps the declaration abstract (`mtype.ml:147-160`);
+the walk now carries OCaml's variance (`mtype.ml:105`, flipped for a
+functor parameter at 119-123). Accepted programs are in
+`tests/tests/src/functor_parameter_modtype_abstract`; super_errors
+`functor_parameter_modtype_abstract_fallback` (a structure constrained to
+the abstract result) differed before, `functor_parameter_modtype_contravariant`
+agreed before and still does.
+
+Fixed (`5038035c3`): `nondep_sig` passed `is_covariant = true` to
+`nondep_type_decl` in every position; OCaml passes `va = Co`
+(`mtype.ml:139-140`, `ctype.ml:4489-4497`). super_errors
+`functor_parameter_modtype_type_contravariant` and
+`functor_parameter_modtype_type_strict` differed before;
+`functor_parameter_modtype_type_covariant` agreed before.
+
+Fixed (`7375247d4`): extension constructors kept the parameter in their
+arguments, result type and extended path; `nondep_extension_constructor`
+(`typemod.rs:2494`) ports OCaml's (`ctype.ml:4521-4552`).
+`tests/tests/src/functor_parameter_modtype_extension` builds with OCaml's
+JavaScript; super_errors `functor_parameter_modtype_extension_argument` and
+`functor_parameter_modtype_extension_path` were accepted by Rust before.
+
+Open: the `MtyAlias` arm (`typemod.rs:2359`, OCaml `mtype.ml:114-117`)
+still fails for an alias of the parameter. No program reached it with such
+a path (a temporary trace over all the programs fired once, for an alias to
+a top-level module): OCaml and Rust strengthen an alias of a functor
+argument instead of keeping it (`env.ml:926-933`). Two differences found on
+the way are outside this function group and differ on trunk without a
+functor application: `module R = {module Y = {module type T = S}  module
+type T = Y.T}` followed by `module M: R.T = ...` stops Rust with an
+internal "Inferred signature inclusion failed" (inferred signature
+coercion); `R.E({v: 1})` for `exception E({v: int})` in a module `R` is
+rejected by Rust ("v refers to a record field"). An alias `module M = N` in
+a functor parameter's signature used as `module Z = X.M` gives OCaml
+`Z: undefined` and Rust `Z: X.N` in the JavaScript, before and after.
 
 Unifying, comparing and including two package types had the same kind of
 fault as the U9 arm. Unification, `moregen`, `Ctype.equal` and the
