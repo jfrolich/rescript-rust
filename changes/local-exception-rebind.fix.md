@@ -1,0 +1,1 @@
+- A local exception that rebinds another (`exception L = E` in an expression) is the exception it rebinds, with its arguments, as in the OCaml compiler.
