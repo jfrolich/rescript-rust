@@ -3,8 +3,9 @@
 //! is the call of `plain.rs`, `norm.rs` or `Bir` that the lowering makes
 //! today, so the rows written are today's rows. Deleted by the flip (T6s).
 //!
-//! `Rows` holds the operand stack and the step count and nothing else: the
-//! nodes are the pools' (`Pools` is the lowering's `Bir`).
+//! `Rows` holds the operand stack, the step count and the storage of a
+//! copy (`copy_fresh`, `copy_stmt`) and nothing else: the nodes are the
+//! pools' (`Pools` is the lowering's `Bir`).
 //!
 //! The transition functions, `of`, `reserve`, `steps`, `mark`, `push`,
 //! `pop` and `kind_of` are the representation; every other body is the row
@@ -38,6 +39,7 @@
 //! | `keep_operand` | `child_at`, `Bir::detach` of the operand, `Bir::release` of the node |
 //! | `unpack_rev` | for the operands from the last to the first: `detach`, push; then `release` of the node |
 //! | `copy` | `Bir::copy_subtree(r, &[])` |
+//! | `copy_fresh` | `Bir::copy_subtree_with_scratch(r, &[], fresh, ..)` with the copy storage and the label vector of `Rows`; the label vector is cleared; one step per node the copy visited (`CopyScratch::copied`) |
 //! | `copy_leaf` | `plain::node` with the view and `aux` of `r`, for `Var`, `JQualified`, `JNumber`, `JStr`, `JJson`, `JRaw`, `JBool`, `JNull`, `JUndefined` and a `JTemplate` without values; a panic for any other |
 //! | `release`, `drop_operands` | `Bir::release` of the node; of each operand since the mark, then the stack is cut back |
 //! | `assume_strict` | `NodeFlags::STRICT` set on the node |
@@ -73,13 +75,44 @@ use crate::lambda::LamLoc;
 #[derive(Debug, PartialEq, Eq)]
 pub struct E(pub(super) NodeId);
 
-/// The J rows behind the interface. 32 bytes.
+/// The J rows behind the interface.
 #[derive(Default)]
 pub struct Rows {
     /// Operands of the list constructors, pushed by the caller.
     pub(super) operands: Vec<NodeId>,
     /// [`Js::steps`].
     pub(super) steps: u64,
+    /// The traversal order and the renaming tables of `copy_fresh` and
+    /// `copy_stmt`, kept between copies so that a copy in a warm unit
+    /// allocates nothing (`Bir::copy_subtree_with_scratch`).
+    copy: crate::bir::edit::CopyScratch,
+    /// Where a copy writes the static labels it freshened. The lowering
+    /// reads none of them (a label is renamed inside the copy); the vector
+    /// is cleared after each copy and exists so that a copy with labels
+    /// allocates nothing in a warm unit.
+    labels: Vec<(u32, u32)>,
+}
+
+impl Rows {
+    /// `Bir::copy_subtree_with_scratch` of `root` without a renaming, with
+    /// the storage of `Rows`. One step per node copied.
+    pub(super) fn copy_recording(&mut self, a: &mut Pools, root: NodeId, fresh: &mut Vec<(VarId, VarId)>) -> NodeId {
+        let copy = a.copy_subtree_with_scratch(root, &[], fresh, &mut self.labels, &mut self.copy);
+        self.labels.clear();
+        self.steps += self.copy.copied() as u64;
+        copy
+    }
+    /// The copy storage sized for the arena as it is, for a test that then
+    /// counts allocations.
+    #[cfg(test)]
+    pub(crate) fn reserve_copy(&mut self, a: &Pools) {
+        self.copy.reserve_arena(a);
+    }
+    /// The capacities of the copy storage and of the label vector.
+    #[cfg(test)]
+    pub(crate) fn copy_capacities(&self) -> ([usize; 13], usize) {
+        (self.copy.capacities(), self.labels.capacity())
+    }
 }
 
 /// The interface's kind of a J operation. O(1): one `match`. Panics on an
@@ -595,6 +628,9 @@ impl Js for Rows {
         let copy = a.copy_subtree(r, &[]);
         self.steps += (a.nodes.len() - before).max(1) as u64;
         E(copy)
+    }
+    fn copy_fresh(&mut self, a: &mut Pools, r: NodeId, fresh: &mut Vec<(VarId, VarId)>) -> E {
+        E(self.copy_recording(a, r, fresh))
     }
     fn copy_leaf(&mut self, a: &mut Pools, r: NodeId) -> E {
         let aux = a.node(r).aux();

@@ -80,7 +80,9 @@ fn sizes() {
     assert_eq!(std::mem::size_of::<E>(), 4);
     assert_eq!(std::mem::size_of::<Option<E>>(), 8);
     assert_eq!(std::mem::size_of::<Mark>(), 4);
-    assert_eq!(std::mem::size_of::<Rows>(), 32);
+    // The operand stack (24), the step count (8), the copy storage (336)
+    // and the label vector (24): one per unit, never passed down a walk.
+    assert_eq!(std::mem::size_of::<Rows>(), 392);
     assert_eq!(std::mem::size_of::<<Rows as Js>::Ref<'_>>(), 4);
 }
 
