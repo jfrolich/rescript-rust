@@ -2563,8 +2563,8 @@ impl Checker {
     /// Like [`Checker::push_children`], it pushes nothing when it fails.
     /// Cost: with no scope open, `left_len + right_len` nodes of 16 bytes,
     /// one 20-byte scope and two frames; with `s` scopes open that hold
-    /// `B` bound variables in all, one step per slot marked or tested (`B
-    /// + left_len + right_len`), and the escape walk only when a bound
+    /// `B` bound variables in all, one step per slot marked or tested
+    /// (`B + left_len + right_len`), and the escape walk only when a bound
     /// variable is already known. OCaml rebuilds `known_univars` at every
     /// entry too. (R3g)
     pub fn enter_poly(&mut self, left: Node, right: Node) -> Result<(), Clash> {
@@ -2649,8 +2649,8 @@ impl Checker {
     ///     arguments, `iter_type_expr` the row variable after them,
     ///     compiler/ml/btype.ml:229-241, 263-266);
     ///   - any other node: its children in `Checker::child`'s order.
-    ///   Children are pushed last first, so that they are visited in
-    ///   order.
+    ///
+    /// Children are pushed last first, so that they are visited in order.
     ///
     /// Cost: one step per visit; a node is visited once, plus once per
     /// closed context it was first visited in (as OCaml's `visited` map,

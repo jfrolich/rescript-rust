@@ -2815,6 +2815,7 @@ fn nodes_now(c: &Checker) -> Vec<Node> {
 /// - `poly((u, u, v); u v)` against `poly((u', v', v'); u' v')`: `u` has
 ///   `u'` as its partner when it meets `v'`: a clash (the first arm needs
 ///   `t2 == repr t'2`, the second two empty partners).
+///
 /// No descriptor row is written.
 /// Reaches: R3g.
 #[test]
@@ -2973,6 +2974,7 @@ fn a_failure_leaves_no_scope_and_a_restore_undoes_the_pairings() {
 /// - `inner' = poly((w', w'); w')`: no variable of the family in
 ///   `inner'`: the bodies unify, `u` is a link to `w'`, and `u'`, which
 ///   no body names, stays a node of its own.
+///
 /// Reaches: R3g.
 #[test]
 #[ignore = "R3g build"]
@@ -3126,6 +3128,7 @@ fn a_free_universal_variable_is_refused() {
 /// - `poly(poly((u, v); v); u)`: nothing; an inner type that binds `u`
 ///   again inside leaves `u` bound after it: `poly((poly(u; u), u); u)`.
 /// - A type without a universal variable: nothing.
+///
 /// Reaches: R3g.
 #[test]
 #[ignore = "R3g build"]
@@ -3309,6 +3312,7 @@ fn a_clash_in_the_bodies_below_a_swapped_unify3_is_reversed() {
 /// - `poly([< #A(u)]; u)` against `poly([< #A(int)]; u')`: only one side
 ///   holds a universal variable: a clash, in the explaining mode with the
 ///   pair of `u` and a new variable last.
+///
 /// No row is written.
 /// Reaches: R3f, R3g.
 #[test]
@@ -3372,6 +3376,7 @@ fn the_types_that_hold_a_universal_variable_are_unified_not_gained() {
 ///   universal variable, inside two polymorphic types: each joined tag
 ///   tests the types it gains with one walk of a node without children:
 ///   linear.
+///
 /// Reaches: R3f, R3g.
 #[test]
 #[ignore = "R3g build"]
@@ -3477,6 +3482,9 @@ use super::segment::PackageRow;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+/// The questions a [`Supplier`] was asked, shared with the test.
+type Calls = Rc<RefCell<Vec<(u32, &'static str, u32)>>>;
+
 /// What a hand-built module type answers for one name.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Answer {
@@ -3497,7 +3505,7 @@ struct Supplier {
     names: Vec<&'static str>,
     answers: Vec<(u32, &'static str, Answer)>,
     compatible: bool,
-    calls: Rc<RefCell<Vec<(u32, &'static str, u32)>>>,
+    calls: Calls,
 }
 
 impl PackageDecls for Supplier {
@@ -3545,13 +3553,12 @@ fn package_at(c: &mut Checker, level: u32, path: u32, first: u32, arguments: &[T
 
 /// A checker whose declarations are a [`Supplier`], and the calls it
 /// will record.
-#[allow(clippy::type_complexity)]
 fn with_supplier(
     mode: Mode,
     names: &[&'static str],
     answers: &[(u32, &'static str, Answer)],
     compatible: bool,
-) -> (Checker, Rc<RefCell<Vec<(u32, &'static str, u32)>>>) {
+) -> (Checker, Calls) {
     let mut c = checker(mode);
     let calls = Rc::new(RefCell::new(Vec::new()));
     c.packages = Some(Box::new(Supplier {
@@ -3594,6 +3601,7 @@ fn with_supplier(
 /// - `{t = int, u = int}` against `{t = string, u = string}`: a clash at
 ///   `t`, the first name: the trace is the two packages, then `int` and
 ///   `string` of `t`.
+///
 /// Reaches: R3p.
 #[test]
 #[ignore = "R3p build"]
@@ -3659,6 +3667,7 @@ fn packages_of_one_module_type_unify_name_by_name() {
 ///   unified FIRST and the declarations asked last whether the two are
 ///   compatible; a refusal is a clash with the two packages as the only
 ///   pair, after `x` was bound.
+///
 /// Reaches: R3p.
 #[test]
 #[ignore = "R3p build"]
