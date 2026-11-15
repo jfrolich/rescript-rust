@@ -1,7 +1,7 @@
 //! Assignment statements (BACKEND_LOWERING §3.11).
 use super::*;
 
-impl<B: super::js::Js> State<'_, B> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// C:2078 compile_expr, Assign arm. O(1) excluding realization of the
     /// already visited operand. Assignment facts are final on entry.
     pub(super) fn finish_assignment(&mut self, cx: Cx, var: VarId, child: Probed) -> Probed {
@@ -12,14 +12,14 @@ impl<B: super::js::Js> State<'_, B> {
             },
             child,
         );
-        let value = out
-            .value
-            .take()
-            .unwrap_or_else(|| self.pure_expression(View::JUndefined, 0));
-        let statement = super::super::j::assign(&mut self.arena, var, value);
-        self.statements.push(statement);
-        let unit = self.pure_expression(View::JUndefined, 0);
-        let tail = self.leaf(cx, unit);
+        let value = match out.value.take() {
+            Some(value) => B::from_node(value),
+            None => self.js.undefined(&mut self.arena, false),
+        };
+        let statement = self.js.assign(&mut self.arena, var, value);
+        self.statements.push(B::stmt_node(statement));
+        let unit = self.js.undefined(&mut self.arena, false);
+        let tail = self.leaf(cx, B::node(unit));
         out.stmts = self.statements.since(Span {
             start: out.stmts.start,
             len: 0,

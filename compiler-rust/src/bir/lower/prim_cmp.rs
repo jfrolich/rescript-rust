@@ -21,7 +21,7 @@ pub(super) fn comparison_op(cmp: Comparison, float: bool) -> BinOp {
         (Ge, true) => BinOp::FloatGe,
     }
 }
-impl<B: super::js::Js> State<'_, B> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// O(1): read a boolean leaf tag, for the two readers in `prim.rs`.
     pub(super) fn primitive_bool(&self, node: NodeId) -> Option<bool> {
         self.bool_of(B::at(node))

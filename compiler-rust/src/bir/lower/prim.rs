@@ -11,7 +11,7 @@ pub(super) struct Prim {
     pub operands: crate::bir::ListId,
 }
 
-impl<B: super::js::Js> State<'_, B> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// O(1): inspect a numeric leaf and its interned constant.
     pub(super) fn primitive_int(&self, node: NodeId) -> Option<i32> {
         if let View::JNumber { value } = self.arena.view(node) {
