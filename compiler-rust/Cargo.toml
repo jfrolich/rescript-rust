@@ -45,6 +45,7 @@ oxc_span = "=0.158.0"
 oxc_codegen = "=0.158.0"
 oxc_syntax = "=0.158.0"
 oxc_ast_visit = "=0.158.0"
+oxc_semantic = "=0.158.0"
 
 [dev-dependencies]
 allocation-counter = "0.8.1"
