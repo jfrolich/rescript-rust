@@ -1261,39 +1261,23 @@ impl Checker {
                         }
                     }
                     FrameKind::Linked => self.saved.truncate((frame.extra & !SWAPPED) as usize),
-                    _ => self.run_rare_frame(frame)?,
+                    FrameKind::LeavePoly => todo!("R3g"),
+                    FrameKind::Fields => self.saved.truncate(frame.extra as usize),
+                    FrameKind::Field => self.unify_field(frame)?,
+                    FrameKind::FieldEnd => {}
+                    FrameKind::RowField => self.unify_row_field(frame)?,
+                    FrameKind::RowFieldEnd => self.row_field_end(frame)?,
+                    FrameKind::RowEnd => self.row_end(frame),
+                    FrameKind::Recursion => {
+                        // A clash here is the enclosing pair's: it adds no
+                        // pair of its own to the trace (`Unify []`).
+                        if self.repair_recursion(frame.left, frame.right).is_err() {
+                            return Err([Ty(NONE), Ty(NONE)]);
+                        }
+                    }
                 }
             }
         }
-    }
-
-    /// One popped frame of [`Checker::run_frames`] of a kind other than
-    /// `Pair` and `Linked`: those of objects and variant rows, `LeavePoly`
-    /// and `Recursion`. Out of line so that the loop holds two arms and a
-    /// call; the arms are the loop's as they were. O(1) plus the callee.
-    #[cold]
-    #[inline(never)]
-    fn run_rare_frame(&mut self, frame: Frame) -> Result<(), [Ty; 2]> {
-        match frame.kind {
-            FrameKind::Pair | FrameKind::Linked => {
-                unreachable!("run_frames pops Pair and Linked frames itself")
-            }
-            FrameKind::LeavePoly => todo!("R3g"),
-            FrameKind::Fields => self.saved.truncate(frame.extra as usize),
-            FrameKind::Field => self.unify_field(frame)?,
-            FrameKind::FieldEnd => {}
-            FrameKind::RowField => self.unify_row_field(frame)?,
-            FrameKind::RowFieldEnd => self.row_field_end(frame)?,
-            FrameKind::RowEnd => self.row_end(frame),
-            FrameKind::Recursion => {
-                // A clash here is the enclosing pair's: it adds no
-                // pair of its own to the trace (`Unify []`).
-                if self.repair_recursion(frame.left, frame.right).is_err() {
-                    return Err([Ty(NONE), Ty(NONE)]);
-                }
-            }
-        }
-        Ok(())
     }
 
     /// `update_level` of `ty` to `level`: [`Checker::lower`]. O(1) for the
