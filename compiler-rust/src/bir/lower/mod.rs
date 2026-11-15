@@ -432,7 +432,7 @@ enum ModuleConstants {
 }
 
 /// The unit's lowering state. `'a` is the lifetime of the inputs the unit
-/// only reads and its caller owns: the location table.
+/// only reads and its caller owns: the location table and the module resolver.
 struct State<'a> {
     tail_arguments: usize,
     tail_parameters: usize,
@@ -520,7 +520,7 @@ struct State<'a> {
     direct: bool,
     located_functions: Vec<bool>,
     next_order: u32,
-    resolver: Option<crate::js_ir::ModulePathResolver>,
+    resolver: Option<&'a crate::js_ir::ModulePathResolver>,
     cross_module_inline: bool,
     check_div_by_zero: bool,
     locations: Option<&'a crate::lambda::LamLocTable>,
@@ -888,7 +888,7 @@ impl State<'_> {
                 let module = &modules[index];
                 scope.import_uses.get(index).is_some_and(|&uses| uses > 0)
                     && !module.dynamic_import
-                    && self.resolver.as_ref().is_none_or(|resolver| resolver.resolve_module_path(module).is_some())
+                    && self.resolver.is_none_or(|resolver| resolver.resolve_module_path(module).is_some())
             })
             .map(|index| crate::bir::ImportId(index as u32)));
         storage.imports.sort_by(|a, b| crate::lambda::lam_compile::module_sort_cmp(&modules[a.index()], &modules[b.index()]));

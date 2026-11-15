@@ -187,7 +187,7 @@ impl State<'_> {
             ImportSource::ImportModule { module_, path } => {
                 let (module, resolved) = if let Some(&cached) = self.import_storage.resolved.get(module_) { cached } else {
                     let module = crate::js_ir::ModuleId { id: *module_, kind: crate::js_ir::Kind::Ml, dynamic_import: true };
-                    let resolved = self.resolver.as_ref().and_then(|r| r.resolve_module_path(&module));
+                    let resolved = self.resolver.and_then(|r| r.resolve_module_path(&module));
                     let resolved = resolved.map(|path| self.arena.intern_text(&path));
                     let module = self.add_import_module(module);
                     self.import_storage.resolved.insert(*module_, (module, resolved));
@@ -345,7 +345,7 @@ mod tests {
             let imports: Vec<_> = (0..10_000).map(|_| a.prim_raw(Primitive::Pimport(Box::new(source.clone())), &[], LamLoc::NONE)).collect();
             let root = a.prim_raw(Primitive::Pmakearray, &imports, LamLoc::NONE);
             let input = crate::bir::bridge::import_lambda(&a, root).unwrap(); let root = input.root;
-            let mut state = State::new(input); state.resolver = Some(resolver);
+            let mut state = State::new(input); state.resolver = Some(&resolver);
             let run = |s: &mut State<'_>| {
                 let out = s.probe(Cx::returning(), root).unwrap(); let out = s.realize(Cx::returning(), out);
                 for node in s.statements.statements(out.stmts) { s.arena.release(node); }

@@ -85,7 +85,7 @@ impl State<'_> {
                 // Acquire each immutable summary once per compilation, indexed
                 // by ImportId. Fields have names but no export handles yet.
                 if matches!(self.module_constants[module.index()], ModuleConstants::Unread) {
-                    self.module_constants[module.index()] = match self.resolver.as_ref()
+                    self.module_constants[module.index()] = match self.resolver
                         .and_then(|r| r.module_cmj_export_constants(module_name)) {
                         Some(table) => ModuleConstants::Present(table),
                         None => ModuleConstants::Missing,

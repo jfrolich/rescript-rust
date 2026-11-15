@@ -81,7 +81,6 @@ impl State<'_> {
             if self.cross_module_inline {
                 if let Some(exports) = self
                     .resolver
-                    .as_ref()
                     .and_then(|r| r.module_cmj_export_lambdas(module_name))
                 {
                     if let Some(crate::lambda::Lambda::Lfunction(function)) = exports.get(name) {
@@ -349,7 +348,7 @@ impl State<'_> {
     ) -> Option<AritySpan> {
         if let Some(arity) = self.call_arity_index.get(&(module, field)) { return *arity; }
         let name = self.arena.pools.j_modules[module.index()].id.name();
-        let table = self.resolver.as_ref().and_then(|resolver| resolver.module_cmj_export_arities(name));
+        let table = self.resolver.and_then(|resolver| resolver.module_cmj_export_arities(name));
         let arity = match table.as_ref().and_then(|table| table.get(self.arena.text(field))) {
             Some(crate::cmi::persistent_env::CmjExportArity::Single(arity)) => self.store_call_arity(arity),
             _ => None,
@@ -552,7 +551,7 @@ mod allocation_tests {
         }).collect();
         let root = a.prim_raw(Primitive::Pmakearray, &calls, LamLoc::NONE);
         let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
-        let root = input.root; let mut state = State::new(input); state.resolver = Some(resolver);
+        let root = input.root; let mut state = State::new(input); state.resolver = Some(&resolver);
         let run = |s: &mut State<'_>| {
             let out = s.probe(Cx::returning(), root).unwrap(); let out = s.realize(Cx::returning(), out);
             for node in s.statements.statements(out.stmts) { s.arena.release(node); }
@@ -639,7 +638,7 @@ mod inline_allocation_tests {
             }
             let root = a.prim_raw(Primitive::Pmakearray, &roots, LamLoc::NONE);
             let input = crate::bir::bridge::import_lambda(&a, root).unwrap(); let root = input.root;
-            let mut state = State::new(input); state.resolver = Some(resolver); state.cross_module_inline = true;
+            let mut state = State::new(input); state.resolver = Some(&resolver); state.cross_module_inline = true;
             let View::Prim { args: [warm, measured], .. } = state.source.view(root) else { unreachable!() };
             let (warm, measured) = (*warm, *measured);
             let run = |s: &mut State<'_>, root| {
