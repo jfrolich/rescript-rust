@@ -3420,14 +3420,14 @@ changed lines without tests.
 | --- | --- | --- | --- | --- | ---: | --- |
 | T6e (changed) | `emit/builder_seal.rs` | The print forms of "T6 design" (c), the descent below `HAS_FUN`, `SEAL` and `JSX`, `Builder::release`, `Builder::copy`. Not F1 to F8 | T6d | T6g to T6j, phase C | 450 | no |
 | T6k | `bir/lower/js.rs`, `bir/j/rows.rs`, `emit/row.rs`; `bir/lower/prim_cmp.rs`, `prim_block.rs`; `State` | Every function of `Js` on `Rows`; `State<'a, B>` and the `impl` headers of every file of `bir/lower`; all of `prim_cmp.rs` and `prim_block.rs`; the 22 call expressions of their functions in `prim.rs`, `rec.rs` and `mod.rs` (wrapped, see "T6k: the skeleton") | - | phases A, B | 650 | no |
-| T6l | `bir/lower/js_stmt.rs`, `bir/j/rows_stmt.rs`; `assign.rs`, `loops.rs`, `try_.rs` | Every function of `JsStmt` on `Rows`; all of the three files | T6k | phases A, B | 600 | no |
+| T6l | `bir/lower/js_stmt.rs`, `bir/j/rows_stmt.rs`; `assign.rs`, `loops.rs`, `try_.rs` | Every function of `JsStmt` on `Rows` that "T6l: the skeleton" names; the bound `B: JsStmt` of `State` and of every `impl` header; all of the three files | T6k | phases A, B | 600 | no |
 | T6m | `prim.rs`, `konst.rs`, `record.rs`, `import.rs` | All of the four files | T6l | T6n, T6o, T6p, T6w, T6q | 600 | no |
 | T6n | `cond.rs`, `expr.rs` | All of the two files | T6l | T6m, T6o, T6p, T6w, T6q | 600 | no |
 | T6o | `switch.rs`, `variant.rs`, `untagged.rs`, `location.rs` | All of the four files | T6l | T6m, T6n, T6p, T6w, T6q | 600 | no |
 | T6p | `args.rs`, `call.rs`, `ffi_args.rs`, `external.rs`, `jsx.rs` | All of the five files | T6l | T6m, T6n, T6o, T6w, T6q | 600 | no |
 | T6w | `tail.rs`, `rec.rs`, `exit.rs`, `label.rs` | All of the four files | T6l | T6m, T6n, T6o, T6p, T6q | 400 | no |
 | T6q | `export.rs`, `close.rs`, `scope.rs` | All of the three files; `Js::owner`, `kind_of`, `operand_index` on `Rows` | T6l | T6m, T6n, T6o, T6p, T6w | 600 | no |
-| T6x | `out.rs`, `mod.rs`, `unit.rs` | `Out<B>`, `Probed<B>`, `Free<B>`, `StatementStack<B>`; `State::{leaf, seq, effect, complete_unit, complete, finish}`; deletes `from_node`, `node`, `at` and their statement twins from both traits and every call | T6m to T6q, T6w | - | 600 | no |
+| T6x | `out.rs`, `mod.rs`, `unit.rs`; the plan structs of the converted files | `Out<B>`, `Probed<B>`, `Free<B>`, `StatementStack<B>`; the `NodeId` and `ListId` fields of the plans (`loops::Plan`, `try_::Plan` and their like); `State::{leaf, seq, effect, complete_unit, complete, finish}`; deletes `from_node`, `node`, `at` and their statement twins from both traits and every call | T6m to T6q, T6w | - | 600 | no |
 | T6r | `names.rs`, `globals.rs` | Both files; `JsStmt::{bodies, body, set_body, functions, globals, binder, rest_fields}` on `Rows` | T6x | phases A, B | 600 | no |
 | T6u | `bir/lower/seal.rs`, `names.rs` (the call of the seal in `Replay::statements`), `lambda/lam_compile.rs` (the new side of `compile_deps_program_with_lower_check`), `bir/shadow.rs` (`prepare_lower`, `check_lower`) | F1 to F8; `JsStmt::seal` on `Rows` (the identity) | T6r | phases A, B | 450 | check mode only: needs the full output gate |
 | T4g, T4d, T4e, T4f | as their prompts will say | 11.4, "The order of the flip" | T6u, in this order | T6v | - | check mode only |
@@ -3529,6 +3529,81 @@ reason:
 literals with `>>` on the count as given, which overflows in a debug build
 for a negative count. The lowering does not produce one (the tests skip
 that pair); it is a note for the T6h slice, whose rule it becomes.
+
+#### T6l: the skeleton
+
+Status: skeleton and acceptance tests committed; bodies are T6l's
+(11.9). Files: `bir/lower/js_stmt.rs` (the trait `JsStmt: Js`, every
+function with its cost), `bir/j/rows_stmt.rs` (`impl JsStmt for Rows`, 29
+bodies `todo!("T6l")`, with a table in its header that says what each
+body is), `bir/lower/js_stmt_tests.rs` (10 tests, 7 ignored as "T6l
+build"). Compiled for tests only until T6l's second commit. T6k was being
+built while this was written: `rows.rs`, `js.rs` (no function added),
+`js_tests.rs`, `prim_cmp.rs`, `prim_block.rs`, `unit.rs` and `State` are
+untouched by it.
+
+**What ran, and against what.** The prototype of T6k's 85 bodies was put
+back locally, with a prototype of the 29 bodies of the statement half;
+the 10 tests passed against them. Both prototypes were taken out before
+the commit. With T6k's prototype present and the statement bodies out,
+each of the 7 ignored tests fails with `not yet implemented: T6l` and
+with nothing else: that is the check that an ignored test reaches no body
+of another slice (in the committed tree, where T6k's bodies are out too,
+they fail in T6k's `todo!` first, which is why the check needs the
+prototype). A throw-away probe then did the rest of T6l on the
+prototypes: `State<'a, B: JsStmt>` with every `impl` header, and
+`assign.rs`, `loops.rs` and `try_.rs` converted whole. With it
+`cargo test --lib bir::lower` gave 517 passed and 4 failed, the 4 being
+the allocation pins at exactly T6k's numbers (86, 103, 86, 156): T6l
+moves no pin. The probe is not committed.
+
+The probe changed the order in which two kinds of node are made: the
+block of a `try` is made when the `try` is built and no longer when its
+child returns, and the body block of a `while` with a prelude is made
+after its `true` condition. No test of the lowering changed its result.
+Rows are "today's rows" up to that numbering.
+
+**What the tests are.** The oracle form of T6k: two arenas, the interface
+on one, today's calls on the other, equal dumps. Every constructor is
+compared on six list shapes (empty, one statement, a `return`, a `break`,
+two, three ending in a `throw`); `if_plain` and J-S3 on every pair of
+them, J-S3 with 11 tests; J-S1 and both forms of J-M14 on the same 11
+values, with the statements given compared one by one. Steps at 10,000
+minus steps at 1,000 are nine times the step from 1,000 to 2,000, for a
+wide block, a nest of loops, a list taken apart and made again, and the
+effect statements of a comma. Allocation is a relation: a list and its
+block through the interface allocate exactly what today's two calls do,
+and J-M14 through a warm operand stack allocates less than with a vector
+taken empty.
+
+**Changes to "T6: the interface" that the skeleton made**, each with its
+reason:
+
+| Change | Reason |
+| --- | --- |
+| There is no `stage_mark` and `stage`; `list(a, len, statements)` takes the statements as an iterator | The lowering has a staging stack (`StatementStack`) and keeps it (`StatementStack<B>`, T6x). A second one behind the interface moves every statement twice: 8 bytes more a statement on rows, 24 on the builder, on what becomes the final path (review decision 5). `list` is `Lists::push_iter` on rows, the call `take_list` makes today, and needs no vector of `Rows`: no allocation pin moves. Until T6x `take_list` stays as it is and a converted file gets its list with `B::list_from` |
+| A constructor that has a body takes the list, not a block statement (`while_`, `for_range`, `for_of`, `try_`, `if_plain`, `if_`, `function`) | It is the builder's form (`Builder::while_` and `if_` take lists). The block is made inside, so the lowering never holds a block it has to take apart again |
+| The statement block is `block_of`; `block` stays the block literal of `Js` | Two functions of one name on one type are ambiguous at every call |
+| `assign(a, var, value)` is added | `bir::j::assign` writes the `=` with `Bir::new_node`; `bin_plain` writes it with `plain::node`, which sets the delay flag. A composition of `var`, `bin_plain` and `exp` would not be today's row |
+| `declare` takes `Option<E>` | `declare_empty` (`exit.rs`) is the same statement without a value |
+| `for_range` takes its bounds as `Range { init, end, direction }` | Eight parameters is over clippy's limit and the crate builds without `allow`. `Range<E>` is 16 bytes on rows |
+| `try_(a, body, handler: Option<(VarId, L)>, finaliser: Option<L>)` | A handler always has its exception variable and a `try` without a handler has a finaliser (`Bir::check_shape`). `try_.rs` stores the lists in the order its children return; the function takes them by what they are |
+| `effect` and `effect_if_impure` give their statements to a closure | J-M14 pushes to a vector. On rows the vector is the operand stack above its length on entry, cut back afterwards, so the rule gets a warm vector and `Rows` gets no second one |
+| `explicit_block` is added | `Bir::explicit_block_from_list` (`cond.rs`, `untagged.rs`) is a different statement: it keeps its braces |
+| `switch` is plain | No function of `bir/lower` calls J-S4 (`rg 'js4_normalize\|plain::statement' src/bir/lower` is empty); (c) said every statement constructor applies it |
+| `rest` and `for_range_existing` are not in the trait | No function of `bir/lower` builds an `SRest` or an `SForRangeExisting` outside the tests of `globals.rs`; the replay (T6r) reads them and adds what it needs |
+| `row_at` is `kind_at`; `stmt_has` and a flag reader by position are not in the trait | Rows has no `Row` to return. A statement of `Bir` has no strict flag today (`export::has_toplevel_effect` reads a compound statement until its first effect), so `stmt_has` cannot be O(1) on rows without a new flag: it is T6q's, with `export.rs` |
+| `stmt_aux` is added | The declaration kind, the string bit of a switch and the explicit bit of a block are read by the lowering (`cond.rs`, `tail.rs`) and by the replay |
+| `if_head` is not in the trait | It works on runs of the lowering's stack (`norm::simplify_if_head` over `IfLists`), which `out.rs` owns until T6x: see "T6m to T6x: what each slice adds" |
+| `State<'a, B: JsStmt = Rows>`: T6l changes the bound | `State` uses both halves. Every `impl` header changes once more, mechanically |
+| The plans keep `NodeId` and `ListId` (`loops::Plan`, `try_::Plan`) until T6x | They hold what `Out` holds. T6x converts them with `Out`: they are added to its row of the cut |
+
+**Found on the way, for T6v.** A loop's label is a symbolic `StrId` that
+gets its text after the loop is built (`label.rs`: `symbolic_label`,
+`finish_labels`). `Builder::while_`, `break_` and `continue_` take the
+label as `&str`. The interface takes the `StrId`; T6v's design says how
+the builder prints a label whose text is not known when the statement is
+built (the text is known when the unit is sealed).
 
 ### 11.5 Worker prompt for T4b
 
@@ -4282,6 +4357,107 @@ rows.rs that does something other than its row of the header's table
 step; `Rows` holding anything but the operand stack and the step count;
 an allocation pin moved by more than one; converting a function of
 prim.rs because a wrapper looked untidy.
+```
+
+T6l (with the common block of phase C; read also "T6l: the skeleton",
+src/bir/lower/js_stmt.rs and src/bir/j/rows_stmt.rs whole):
+
+```text
+Task T6l: the statement half of the lowering's interface on rows, and
+the first three files on it.
+Precondition, check it first and stop with a report if it fails: T6k is
+merged (`rg -c 'todo!\("T6k"\)' src/bir` prints nothing), `rg -c
+'todo!\("T6l"\)' src/bir/j/rows_stmt.rs` prints 29, and `cargo test
+--manifest-path compiler-rust/Cargo.toml --lib bir::lower::js_stmt::`
+shows 3 passed and 7 ignored.
+Yours: src/bir/j/rows_stmt.rs; in src/bir/j/rows.rs the visibility of
+three fields named in commit 1 and nothing else; src/bir/lower/assign.rs,
+loops.rs and try_.rs whole; the bound of `State` and of every `impl`
+header of src/bir/lower; the two module lines named in commit 2;
+src/bir/lower/js_stmt_tests.rs (removing ignore attributes only); the
+changelog fragment. Nothing else.
+
+Do exactly this, one commit each, in this order, each pushed when made:
+
+1. In src/bir/j/rows.rs: `pub struct E(NodeId)` becomes
+   `pub struct E(pub(super) NodeId)`, and the fields `operands` and
+   `steps` of `Rows` become `pub(super)`. Then every body marked
+   todo!("T6l") in src/bir/j/rows_stmt.rs, as the table in its header
+   says. Remove the ignore from the 7 tests of
+   `bir::lower::js_stmt::tests`: 10 pass. The modules stay compiled for
+   tests only in this commit.
+
+2. The lowering holds both halves.
+   - Remove `#[cfg(test)]` from `pub mod js_stmt;` (src/bir/lower/mod.rs)
+     and `pub mod rows_stmt;` (src/bir/j/mod.rs).
+   - Every `B: super::js::Js` in src/bir/lower becomes
+     `B: super::js_stmt::JsStmt`; in mod.rs every `B: js::Js` becomes
+     `B: js_stmt::JsStmt` (the struct `State` and its impls).
+   The four allocation counts of src/bir/lower/unit.rs stay 86, 103, 86,
+   156. No call site changes in this commit and no test changes its
+   result.
+
+3. assign.rs, loops.rs and try_.rs converted. No function of these files
+   takes or returns the `NodeId` of a J node, so no caller is wrapped.
+   What these files call in files that are not yours stays a `NodeId`
+   call, wrapped here: `self.leaf(cx, B::node(unit))`,
+   `self.if_statement(B::node(negated), yes, no)` (its result is pushed
+   as it is), `self.statements.push(B::stmt_node(statement))`. An
+   `out.value` is a `NodeId` until T6x: `B::from_node(value)` where it is
+   given to the interface; `self.drop_pure_effect(value)` and
+   `self.declare_empty(..)` are not touched.
+   - `self.pure_expression(View::JUndefined, 0)` is
+     `self.js.undefined(&mut self.arena, false)`; of a `View::Var` it is
+     `self.js.var`.
+   - assign.rs: `bir::j::assign` is `self.js.assign`.
+   - loops.rs: `loops::Plan` keeps its fields. `push_loop_list` is
+     `B::list_from`, `len` and `take_at` for every index, each statement
+     pushed. A list's emptiness is `len`. `finish_loop` builds `while_`,
+     `for_of` (its last argument is `op == Op::ForAwaitOf`) and
+     `for_range` with the list of the body (`B::list_from`), never a
+     block: there is no `block_from_list` left in the file. In the
+     `while` with a prelude the condition `true` is made before
+     `while_` is called. The range loop holds its start in a declaration
+     when the end has statements and the start does not have
+     `flag::DELAY_SAFE`; then `Range::init` is `None`.
+   - try_.rs: `try_::Plan::blocks` becomes `[Option<ListId>; 3]` and
+     `try_child` stores the list `take_list` returns (no block).
+     `finish_try`: the lists are stored in the order the children
+     returned, so with an exception variable the second is the handler
+     and the third, if any, the finaliser; without one the second is the
+     finaliser. `try_(body, handler with its variable, finaliser)`.
+   The tests of the three files pass unchanged.
+
+4. The changelog fragment
+   changes/lowering-interface-statements.internal.md.
+
+Relations to hold (asserted by the tests): through the interface and
+with today's calls the arena dumps alike, for every statement, for every
+constructor on six list shapes and for the three rules on 11 values;
+steps at 10,000 minus steps at 1,000 are nine times the step from 1,000
+to 2,000; a list and its block allocate exactly what today's two calls
+allocate; J-M14 through a warm operand stack allocates less than with an
+empty vector.
+
+End state, to paste in the pull request with the output:
+- `rg -c 'todo!\("T6l"\)' src/bir` prints nothing; `rg -n 'T6l build'
+  src` is empty.
+- `rg -n 'View::J|Op::J|View::S[A-Z]|Op::S[A-Z]|plain::|norm::|\.arena\.(view|node|release|detach|replace)\(|block_from_list|new_node\(|pure_expression|lists\.get'
+  src/bir/lower/assign.rs src/bir/lower/loops.rs src/bir/lower/try_.rs`
+  matches only below `mod tests` of each file.
+- `rg -n 'cfg\(test\)' -A1 src/bir/lower/mod.rs src/bir/j/mod.rs` shows
+  neither `mod js_stmt;` nor `mod rows_stmt;`.
+- `rg -c 'B::from_node|B::node\(|B::at\(|B::stmt_node|B::stmt_from_node|B::list_from|B::list_id'
+  src/bir/lower` pasted.
+- `cargo test --manifest-path compiler-rust/Cargo.toml --lib
+  bir::lower::js_stmt::`: 10 passed, 0 ignored.
+- The CI job `Instruction count` within +0.02%.
+
+Shortcuts that count as failure, beside the common list: a body of
+rows_stmt.rs that does something other than its row of the header's
+table; a second vector in `Rows`; a block built in a converted file; an
+allocation pin that moves; a field of `Rows` or of `E` made more visible
+than `pub(super)`; a reader that counts a step.
 ```
 
 ## 12. Risks and what was not measured

@@ -15,6 +15,8 @@ mod export;
 mod globals;
 #[cfg(test)]
 pub mod js;
+#[cfg(test)]
+pub mod js_stmt;
 pub(crate) mod names;
 mod expr;
 mod konst;
