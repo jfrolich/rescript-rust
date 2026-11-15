@@ -982,6 +982,18 @@ fn scan_child_component_from_signature(
     (found, scanned_items)
 }
 
+/// `path` with its head identifier replaced by the path `head`. Cost: one
+/// step per component of `path`.
+fn replace_path_head(path: &Path, head: Path) -> Path {
+    match path.view() {
+        PathView::Pident(_) => head,
+        PathView::Pdot(parent, name, pos) => {
+            Path::pdot_pos(replace_path_head(parent, head), name.clone(), *pos)
+        }
+        PathView::Papply(functor, arg) => Path::papply(replace_path_head(functor, head), *arg),
+    }
+}
+
 impl QualifiedModuleComponents {
     pub(crate) fn new(
         access_path: Path,
@@ -1132,6 +1144,33 @@ impl QualifiedModuleComponents {
                     | super::decl::ModuleType::MtyIdent(_) = &md.md_type
                 {
                     let alias_source = md.md_type.ident_or_alias_path().unwrap();
+                    // A unit's own signature names a sibling target by its
+                    // identifier (`module A = R`); `prefix_idents` puts it
+                    // at this path (`O.R`, env.ml:1454-1486, 1530-1538)
+                    // before env.ml:1517 scrapes the alias. Bare, `R` would
+                    // name whatever identifier of the compiling unit has its
+                    // stamp. Cost: one name probe of the index per alias.
+                    let head = alias_source.head();
+                    let alias_source = match index.module(head.name()) {
+                        Some((sibling, sibling_pos))
+                            if !head.is_persistent()
+                                && matches!(
+                                    &signature[sibling],
+                                    SignatureItem::SigModule(sibling_id, _, _)
+                                        if sibling_id.same(head) && sibling_id.equal(head)
+                                ) =>
+                        {
+                            replace_path_head(
+                                alias_source,
+                                ctx.dotted_from_ident(
+                                    shared_access_path.clone(),
+                                    *head,
+                                    sibling_pos as i32,
+                                ),
+                            )
+                        }
+                        _ => *alias_source,
+                    };
                     let component_path =
                         ctx.dotted_from_ident(shared_access_path.clone(), *id, runtime_pos as i32);
                     // OCaml compiler/ml/env.ml:1517 `scrape_alias` follows
@@ -1140,7 +1179,7 @@ impl QualifiedModuleComponents {
                     // stores thunks under the selected component path.
                     // Preserve the actual source path from the declaration
                     // instead of recovering it from flattened spelling.
-                    ctx.register_component_alias_source(component_path, *alias_source);
+                    ctx.register_component_alias_source(component_path, alias_source);
                 }
             } else {
                 let idx = *modtype_items.next().expect("peeked modtype item");
