@@ -2330,9 +2330,13 @@ fn nondep_mty(
     match mty {
         DeclMty::MtyIdent(path) => {
             if path.is_free(mid) {
-                // OCaml: nondep_mty env va (Env.find_modtype_expansion p env)
-                // For simplicity, return None (cannot eliminate)
-                None
+                // compiler/ml/mtype.ml:110-113: a module type path of the
+                // parameter is replaced by its expansion, found through the
+                // argument bound to the parameter in `env`; an abstract
+                // module type has none and the parameter is not eliminated.
+                let mut pers_env = ctx.persistent_env_clone();
+                let expansion = find_modtype_expansion(path, env, &mut pers_env, ctx)?;
+                nondep_mty(ctx, env, mid, &expansion)
             } else {
                 Some(mty.clone())
             }
