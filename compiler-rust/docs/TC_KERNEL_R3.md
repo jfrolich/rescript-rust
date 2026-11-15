@@ -2705,7 +2705,7 @@ Head: the merge (attempt (b) kept; (a) and (c1)-(c4) reverted). The step
 test added after it is `cfg(test)` code and does not change the bench
 binary. The final table of K4:
 
-| Operation | Merged trunk `d862f5d25` | Head  Change |
+| Operation | Merged trunk `d862f5d25` | Head | Change |
 |---|---:|---:|---:|
 | `instance1` | 137.06 | 137.06 | +0.00 |
 | `instance3` | 217.31 | 217.31 | +0.00 |
