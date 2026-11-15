@@ -2753,7 +2753,11 @@ impl Checker {
     /// pushed. The supplier is taken out of [`Checker::packages`] for the
     /// calls and put back, also on a clash. Pattern mode (`List.iter
     /// (reify env) (tl1 @ tl2)`) is R3h's. O(names of both), one step a
-    /// name; no allocation beyond the frames. (R3p)
+    /// name; no allocation beyond the frames. Cold and not inlined, as its
+    /// `todo!` was: packages are rare, and inlined it moves the code of
+    /// every unification. (R3p)
+    #[cold]
+    #[inline(never)]
     pub fn unify_package(
         &mut self,
         [t1x, t2x]: [Ty; 2],
@@ -2858,7 +2862,10 @@ impl Checker {
     /// Otherwise [`PackageDecls::compatible`] with the left descriptor
     /// (`saved[frame.extra]`) and the right node's; `false` is a clash
     /// with no pair of its own. `saved` is cut back to the frame's
-    /// `extra`. O(1) plus the supplier. (R3p)
+    /// `extra`. O(1) plus the supplier. Cold and not inlined, like
+    /// [`Checker::unify_package`]. (R3p)
+    #[cold]
+    #[inline(never)]
     pub fn package_end(&mut self, frame: Frame) -> Result<(), Clash> {
         let left = self.saved[frame.extra as usize];
         self.saved.truncate(frame.extra as usize);
