@@ -3003,6 +3003,31 @@ pub(crate) fn normalize_float_literal_for_js(float_str: &str) -> String {
     }
 }
 
+/// [`normalize_float_literal_for_js`], appended to `out`. O(length of the
+/// literal), no allocation when `out` has room for it, except for a
+/// hexadecimal literal: `js_number_to_string` has no buffer-writing variant,
+/// so that case calls the allocating function and copies its text. Built
+/// with the tests only while its one caller, `emit::builder`, is.
+#[cfg(test)]
+pub(crate) fn normalize_float_literal_for_js_into(float_str: &str, out: &mut String) {
+    if is_hex_float_literal(float_str) {
+        out.push_str(&normalize_float_literal_for_js(float_str));
+        return;
+    }
+    let bytes = float_str.as_bytes();
+    let len = bytes.len();
+    let mut start = 0;
+    while start + 1 < len && bytes[start] == b'0' && bytes[start + 1] != b'.' {
+        start += 1;
+    }
+    for (idx, byte) in bytes[start..].iter().copied().enumerate() {
+        if byte == b'_' || (byte == b'.' && start + idx == len - 1) {
+            continue;
+        }
+        out.push(byte as char);
+    }
+}
+
 fn is_hex_float_literal(float_str: &str) -> bool {
     let bytes = float_str.as_bytes();
     let mut cur = 0;
@@ -7280,5 +7305,63 @@ mod tests {
 
     fn latin1_encoded_utf8(s: &str) -> String {
         s.as_bytes().iter().map(|&byte| char::from(byte)).collect()
+    }
+
+    #[test]
+    fn the_buffer_writing_float_normalization_writes_the_same_text() {
+        let literals = [
+            "0",
+            "0.",
+            "0.0",
+            "0.5",
+            "1.",
+            "1.5",
+            "12.25",
+            "3.14159",
+            "100.",
+            "007.5",
+            "00.5",
+            "000",
+            "0001.",
+            "01e3",
+            "1_000.5",
+            "1_000_000.",
+            "0_1.5",
+            "1.0_0",
+            "1e21",
+            "1e-7",
+            "1.5e10",
+            "1.5E+10",
+            "2.5e-3",
+            "1_0e1_0",
+            "5.e3",
+            "-0.",
+            "-0.0",
+            "-1.",
+            "-1.5",
+            "-007.5",
+            "-1e21",
+            "-1_000.25",
+            "0x1p0",
+            "0x1.8p3",
+            "-0x1p-1074",
+            "0X1P4",
+            "0x_1p0",
+            "0xffp0",
+            "0x1.fffffffffffffp1023",
+            "0x1p",
+            "1.7976931348623157e308",
+            "5e-324",
+            "123456789012345678901234567890.",
+            "9.",
+            "0.000001",
+        ];
+        assert!(literals.len() >= 40);
+        let mut out = String::from("stale");
+        for literal in literals {
+            out.clear();
+            normalize_float_literal_for_js_into(literal, &mut out);
+            assert_eq!(out, normalize_float_literal_for_js(literal), "{literal}");
+        }
     }
 }

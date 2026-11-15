@@ -45,7 +45,7 @@
 //! A statement's row has no other flag.
 use super::{Unsupported, literal, walk};
 use crate::js_ir::op::{BinOp, Number};
-use crate::js_ir::printer::normalize_float_literal_for_js;
+use crate::js_ir::printer::normalize_float_literal_for_js_into;
 use oxc_allocator::{Allocator, GetAllocator, Vec as ArenaVec};
 use oxc_ast::{ast::*, builder::AstBuilder};
 use oxc_span::SPAN;
@@ -359,6 +359,10 @@ pub(crate) struct Builder<'a> {
     pool: Vec<Option<S<'a>>>,
     /// Unit operations: one per node built and one per operand of a list.
     pub steps: u64,
+    /// The normalized text of the float literal [`Builder::number`] reads,
+    /// cleared and reused: it grows to the longest literal of the builder's
+    /// life and allocates nothing after that.
+    float_text: String,
 }
 
 impl<'a> Builder<'a> {
@@ -372,6 +376,7 @@ impl<'a> Builder<'a> {
             staged: Vec::new(),
             pool: Vec::new(),
             steps: 0,
+            float_text: String::new(),
         }
     }
 
@@ -567,9 +572,10 @@ impl<'a> Builder<'a> {
                 Ok(self.attach(expr, row(aux, 0)))
             }
             Number::Float(f) => {
-                let value = normalize_float_literal_for_js(&f.f)
-                    .parse::<f64>()
-                    .map_err(|_| Unsupported("float literal"))?;
+                self.float_text.clear();
+                normalize_float_literal_for_js_into(&f.f, &mut self.float_text);
+                let value =
+                    self.float_text.parse::<f64>().map_err(|_| Unsupported("float literal"))?;
                 let literal = if value.is_nan() {
                     Expression::new_identifier(SPAN, "NaN", &self.ast)
                 } else if value.is_infinite() {

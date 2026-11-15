@@ -641,6 +641,26 @@ fn a_warm_builder_allocates_nothing_outside_the_arena() {
 }
 
 #[test]
+fn a_warm_builder_builds_float_literals_without_allocating() {
+    // Warm: the arena chunk, the table at the capacity of the unit, and the
+    // builder's float text grown by one literal of the longest text.
+    let texts = ["1.5", "0.25", "1_000.125", "3.", "1e21", "-0.5", "007.75", "0."];
+    let literals: Vec<Number> =
+        (0..10_000).map(|i| Number::Float(FloatLit { f: texts[i % texts.len()].into() })).collect();
+    let allocator = Allocator::with_capacity(64 << 20);
+    let mut b = Builder::new(&allocator);
+    b.reserve(10_001, 0);
+    b.number(&Number::Float(FloatLit { f: "1_000.125".into() })).unwrap();
+    let allocations = allocation_counter::measure(|| {
+        for literal in &literals {
+            b.number(literal).unwrap();
+        }
+    });
+    assert_eq!(allocations.count_total, 0, "{allocations:?}");
+    assert_eq!(b.nodes(), 10_001);
+}
+
+#[test]
 fn clearing_the_builder_keeps_its_capacity() {
     let allocator = Allocator::default();
     let mut b = Builder::new(&allocator);
