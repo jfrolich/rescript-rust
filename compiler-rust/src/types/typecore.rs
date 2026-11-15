@@ -2737,6 +2737,8 @@ pub fn transl_type_delayed(
 /// the same translation makes a row tail universal (a row of an earlier
 /// translation was fixed by that translation's own walk), so callers run it
 /// only when the translation universalized a variable.
+#[cold]
+#[inline(never)]
 fn make_fixed_univars(ctx: &TypeContext, ty: TypeExprRef) {
     let mut visited = crate::types::type_marks::visit_set();
     let mut work = vec![ty];

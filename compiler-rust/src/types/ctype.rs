@@ -1159,6 +1159,10 @@ impl UnivarPairs {
     /// otherwise the binders are paired and the mark to leave the scope with
     /// is returned. Costs what `enter_poly_univars` and
     /// [`push_univar_scope`] cost.
+    // Out of line: only polymorphic types reach it, and keeping it out of
+    // `moregen` and `eqtype` keeps their hot arms inlined.
+    #[cold]
+    #[inline(never)]
     fn enter(
         &mut self,
         ctx: &TypeContext,
@@ -1184,6 +1188,10 @@ impl UnivarPairs {
     /// OCaml `unify_univar t1 t2 !univar_pairs` (ctype.ml:1544-1559): whether
     /// the two (represented) universal variables are paired. Costs what
     /// `univars_unify` costs: one scan of the entered binder lists.
+    // Out of line: only polymorphic types reach it, and keeping it out of
+    // `moregen` and `eqtype` keeps their hot arms inlined.
+    #[cold]
+    #[inline(never)]
     fn unify(&mut self, ctx: &TypeContext, t1: TypeExprRef, t2: TypeExprRef) -> bool {
         univars_unify(ctx, &self.pairs, &mut self.slots, t1, t2)
     }
