@@ -872,7 +872,7 @@ impl Checker {
     /// [`Checker::expand_head`] in [`ExpandMode::Unif`] (`expand_head_unif`,
     /// compiler/ml/ctype.ml:1279): [`Checker::expand_head_unif_loaded`] of
     /// the representative and what [`Checker::load_head`] loads for it. (K4)
-    #[inline(always)]
+    #[inline(never)]
     pub(super) fn expand_head_unif(&mut self, ty: Ty) -> Result<Ty, Clash> {
         let head = self.g.repr(ty);
         let (node, info) = self.load_head(head);
