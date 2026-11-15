@@ -1,0 +1,12 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/local_exception_rebind_argument_count.res[0m:[2m5:6-11[0m
+
+  3 [2m┆[0m exception L = E
+  4 [2m┆[0m switch x {
+  [1;31m5[0m [2m┆[0m | L[1;31m(n, m)[0m => n + m
+  6 [2m┆[0m | _ => 0
+  7 [2m┆[0m }
+
+  This pattern matches values of type [1;31m('a, 'b)[0m
+  but a pattern was expected which matches values of type [1;33mint[0m

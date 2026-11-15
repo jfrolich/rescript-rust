@@ -1,7 +1,7 @@
 //! P: compile_primitive_js comparison helpers. Literal folds belong to lowering;
 //! constructor rewrites remain in the named section-6 J rules.
 use super::*;
-use crate::bir::j::{norm, plain};
+use crate::emit::row::{Kind, flag};
 use crate::js_ir::BinOp;
 use crate::lambda::lam_compat::Comparison;
 
@@ -21,57 +21,32 @@ pub(super) fn comparison_op(cmp: Comparison, float: bool) -> BinOp {
         (Ge, true) => BinOp::FloatGe,
     }
 }
-impl State<'_> {
-    /// O(1): read a boolean leaf tag.
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
+    /// O(1): read a boolean leaf tag, for the two readers in `prim.rs`.
     pub(super) fn primitive_bool(&self, node: NodeId) -> Option<bool> {
-        matches!(self.arena.view(node), View::JBool).then(|| self.arena.node(node).aux() != 0)
+        self.bool_of(B::at(node))
     }
-    /// O(1): borrow semantic literal text; no allocation or decoding.
-    pub(super) fn primitive_string(&self, node: NodeId) -> Option<&str> {
-        match self.arena.view(node) {
-            View::JStr { text } => Some(self.arena.text(text)),
-            View::JTemplate { info, .. } if self.arena.node(node).aux() == 1 => {
-                let crate::bir::JsPayload::Template(parts) = self.arena.javascript(info) else {
-                    unreachable!()
-                };
-                let parts = self.arena.template_parts(*parts);
-                parts[0].cooked.map(|s| self.arena.text(s))
-            }
-            _ => None,
-        }
-    }
-    /// O(1): borrow interned signed digits.
-    fn primitive_bigint(&self, node: NodeId) -> Option<&str> {
-        if let View::JNumber { value } = self.arena.view(node) {
-            if let crate::bir::Constant::BigInt(s) = self.arena.constant(value) {
-                return Some(self.arena.text(*s));
-            }
-        }
-        None
+    /// O(1): the value of a boolean literal: its kind and its `aux`.
+    fn bool_of(&self, r: B::Ref<'_>) -> Option<bool> {
+        (self.js.kind(&self.arena, r) == Kind::Bool).then(|| self.js.aux(&self.arena, r) != 0)
     }
     /// O(released operand nodes): consume both trees and build one boolean.
-    pub(super) fn comparison_constant(
-        &mut self,
-        left: NodeId,
-        right: NodeId,
-        value: bool,
-    ) -> NodeId {
-        self.arena.release(left);
-        self.arena.release(right);
-        plain::boolean(&mut self.arena, value)
+    pub(super) fn comparison_constant(&mut self, left: B::E, right: B::E, value: bool) -> B::E {
+        self.js.release(&mut self.arena, left);
+        self.js.release(&mut self.arena, right);
+        self.js.boolean(&mut self.arena, value)
     }
     /// P: compile_bool_comparison, including one-sided folds preserving effects.
     /// O(1) shape decisions, plus discarded-node release and J-rule work.
-    /// O(1): read a boolean leaf tag.
     pub(super) fn primitive_bool_comparison(
         &mut self,
         cmp: Comparison,
-        left: NodeId,
-        right: NodeId,
-    ) -> NodeId {
+        left: B::E,
+        right: B::E,
+    ) -> B::E {
         use Comparison::*;
-        let l = self.primitive_bool(left);
-        let r = self.primitive_bool(right);
+        let l = self.bool_of(B::of(&left));
+        let r = self.bool_of(B::of(&right));
         if let (Some(l), Some(r)) = (l, r) {
             return self.comparison_constant(
                 left,
@@ -96,89 +71,84 @@ impl State<'_> {
         };
         if let Some(value) = fold {
             let kept = if l.is_some() {
-                self.arena.release(left);
+                self.js.release(&mut self.arena, left);
                 right
             } else {
-                self.arena.release(right);
+                self.js.release(&mut self.arena, right);
                 left
             };
-            let value = plain::boolean(&mut self.arena, value);
-            return norm::jm1_js_seq(&mut self.arena, kept, value);
+            let value = self.js.boolean(&mut self.arena, value);
+            return self.js.seq_rule(&mut self.arena, kept, value);
         }
-        norm::je4_bin(&mut self.arena, comparison_op(cmp, false), left, right)
+        self.js
+            .bin(&mut self.arena, comparison_op(cmp, false), left, right)
+    }
+    /// O(1): whether `r` is `compare(l, r)` of a runtime module: a call of
+    /// three operands whose callee is the member `compare` of a module of
+    /// the runtime.
+    fn runtime_compare<'r>(&'r self, r: B::Ref<'r>) -> bool {
+        if self.js.kind(&self.arena, r) != Kind::Call || self.js.arity(&self.arena, r) != 3 {
+            return false;
+        }
+        let callee = self.js.operand(&self.arena, r, 0);
+        matches!(
+            self.js.qualified_of(&self.arena, callee),
+            Some((module, Some(member)))
+                if matches!(self.arena.pools.j_modules[module.index()].kind, crate::js_ir::Kind::Runtime)
+                    && self.arena.text(member) == "compare"
+        )
     }
     /// P: compile_int_comparison; compare-call stripping consumes shells once.
     /// O(compare-call spine length + discarded nodes), plus J-rule work.
     pub(super) fn primitive_int_comparison(
         &mut self,
         cmp: Comparison,
-        mut left: NodeId,
-        mut right: NodeId,
-    ) -> NodeId {
+        mut left: B::E,
+        mut right: B::E,
+    ) -> B::E {
         use Comparison::*;
         loop {
             self.primitive_steps += 1;
-            if let (Some(l), Some(r)) = (self.primitive_int(left), self.primitive_int(right)) {
+            let r = self.js.int(&self.arena, B::of(&right));
+            if let (Some(l), Some(r)) = (self.js.int(&self.arena, B::of(&left)), r) {
                 return self.comparison_constant(left, right, cmp.cmp_int32(l, r));
             }
-            let pair = if self.primitive_int(right) == Some(0) {
-                if let View::JCall {
-                    callee,
-                    args: [l, r],
-                    ..
-                } = self.arena.view(left)
-                {
-                    if let View::JQualified {
-                        module,
-                        member: Some(member),
-                    } = self.arena.view(callee)
-                    {
-                        (matches!(
-                            self.arena.pools.j_modules[module.index()].kind,
-                            crate::js_ir::Kind::Runtime
-                        ) && self.arena.text(member) == "compare")
-                            .then_some((*l, *r))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            if let Some((l, r)) = pair {
-                self.arena.detach(l);
-                self.arena.detach(r);
-                self.arena.release(left);
-                self.arena.release(right);
-                left = l;
-                right = r;
-            } else {
+            if r != Some(0) || !self.runtime_compare(B::of(&left)) {
                 break;
             }
+            self.js.release(&mut self.arena, right);
+            self.js.unpack_rev(&mut self.arena, left);
+            let callee = self.js.pop();
+            self.js.release(&mut self.arena, callee);
+            left = self.js.pop();
+            right = self.js.pop();
         }
-        let lv = self.arena.view(left);
-        let rv = self.arena.view(right);
+        let kinds = (
+            self.js.kind(&self.arena, B::of(&left)),
+            self.js.kind(&self.arena, B::of(&right)),
+        );
         let optional_undefined = matches!(
-            (lv, rv),
-            (View::JOptional { .. }, View::JUndefined) | (View::JUndefined, View::JOptional { .. })
+            kinds,
+            (Kind::Optional, Kind::Undefined) | (Kind::Undefined, Kind::Optional)
         );
         let block_number = matches!(
-            (lv, rv),
-            (View::JBlockLit { .. }, View::JNumber { .. })
-                | (View::JNumber { .. }, View::JBlockLit { .. })
+            kinds,
+            (Kind::BlockLit, Kind::Number) | (Kind::Number, Kind::BlockLit)
         );
         if (optional_undefined && matches!(cmp, Eq | Neq) || block_number && cmp == Neq)
-            && crate::bir::j::facts::strictly_pure(&self.arena, left)
-            && crate::bir::j::facts::strictly_pure(&self.arena, right)
+            && self.js.has(&self.arena, B::of(&left), flag::STRICT)
+            && self.js.has(&self.arena, B::of(&right), flag::STRICT)
         {
             return self.comparison_constant(left, right, cmp == Neq);
         }
         match cmp {
-            Eq => norm::jm2_int_equality(&mut self.arena, left, right),
-            Neq => plain::bin(&mut self.arena, BinOp::NotEqEq, left, right),
-            _ => norm::je4_bin(&mut self.arena, comparison_op(cmp, false), left, right),
+            Eq => self.js.int_eq(&mut self.arena, left, right),
+            Neq => self
+                .js
+                .bin_plain(&mut self.arena, BinOp::NotEqEq, left, right),
+            _ => self
+                .js
+                .bin(&mut self.arena, comparison_op(cmp, false), left, right),
         }
     }
     /// P: compile_string_comparison / compile_bigint_comparison.
@@ -186,13 +156,15 @@ impl State<'_> {
     pub(super) fn primitive_literal_comparison(
         &mut self,
         cmp: Comparison,
-        left: NodeId,
-        right: NodeId,
+        left: B::E,
+        right: B::E,
         bigint: bool,
-    ) -> NodeId {
+    ) -> B::E {
+        let (l, r) = (B::of(&left), B::of(&right));
         let equal = if bigint {
-            self.primitive_bigint(left)
-                .zip(self.primitive_bigint(right))
+            self.js
+                .bigint(&self.arena, l)
+                .zip(self.js.bigint(&self.arena, r))
                 .map(|(l, r)| {
                     l.as_bytes()[0] == r.as_bytes()[0]
                         && l[1..]
@@ -205,8 +177,9 @@ impl State<'_> {
                                 .skip_while(|c| *c == '0'))
                 })
         } else {
-            self.primitive_string(left)
-                .zip(self.primitive_string(right))
+            self.js
+                .text(&self.arena, l)
+                .zip(self.js.text(&self.arena, r))
                 .map(|(l, r)| l == r)
         };
         if let Some(equal) = equal {
@@ -214,23 +187,27 @@ impl State<'_> {
                 return self.comparison_constant(left, right, equal != (cmp == Comparison::Neq));
             }
         }
-        norm::je4_bin(&mut self.arena, comparison_op(cmp, false), left, right)
+        self.js
+            .bin(&mut self.arena, comparison_op(cmp, false), left, right)
     }
     /// P: compile_object_comparison. Only nullish equality bypasses the runtime.
     /// O(1) shape decisions, then J-M2 or runtime-constructor work.
     pub(super) fn primitive_object_comparison(
         &mut self,
         cmp: Comparison,
-        left: NodeId,
-        right: NodeId,
-    ) -> NodeId {
+        left: B::E,
+        right: B::E,
+    ) -> B::E {
         use Comparison::*;
         if matches!(cmp, Eq | Neq)
-            && [left, right]
-                .iter()
-                .any(|&n| matches!(self.arena.view(n), View::JNull | View::JUndefined))
+            && [&left, &right].into_iter().any(|n| {
+                matches!(
+                    self.js.kind(&self.arena, B::of(n)),
+                    Kind::Null | Kind::Undefined
+                )
+            })
         {
-            return norm::jm2_nullish_strict_comparison(&mut self.arena, cmp == Neq, left, right);
+            return self.js.nullish_eq(&mut self.arena, cmp == Neq, left, right);
         }
         let member = match cmp {
             Eq => "equal",
@@ -240,31 +217,17 @@ impl State<'_> {
             Gt => "greaterthan",
             Ge => "greaterequal",
         };
-        self.primitive_runtime("Primitive_object", member, &[left, right])
+        B::from_node(self.primitive_runtime(
+            "Primitive_object",
+            member,
+            &[B::node(left), B::node(right)],
+        ))
     }
     /// O(1): copy a literal leaf using existing payload handles, preserving cold
     /// decoration. No generic subtree copier, hash table or variable-use repair.
-    fn primitive_literal_copy(&mut self, node: NodeId) -> NodeId {
-        let view = match self.arena.view(node) {
-            View::JNumber { value } => View::JNumber { value },
-            View::JBool => View::JBool,
-            View::JStr { text } => View::JStr { text },
-            View::JTemplate { info, values: [] } => View::JTemplate { info, values: &[] },
-            _ => unreachable!("min/max only duplicates literal leaves"),
-        };
-        let aux = self.arena.node(node).aux();
-        let copy = plain::node(&mut self.arena, view, aux);
-        if let Some(cold) = self.arena.cold(node) {
-            self.arena.set_cold(copy, cold);
-        }
-        if let Some(code) = self.arena.node(node).js_char() {
-            self.arena.nodes[copy.index()].set_js_char(code);
-        }
-        if self.arena.node(node).flags().contains(crate::bir::NodeFlags::JS_LOC_PRESENT) {
-            let mut flags = self.arena.node(copy).flags();
-            flags.0 |= crate::bir::NodeFlags::JS_LOC_PRESENT;
-            self.arena.nodes[copy.index()].set_flags(flags);
-        }
+    fn primitive_literal_copy(&mut self, node: B::Ref<'_>) -> B::E {
+        let mut copy = self.js.copy_leaf(&mut self.arena, node);
+        self.js.copy_cold(&mut self.arena, node, &mut copy);
         copy
     }
 
@@ -275,29 +238,34 @@ impl State<'_> {
         &mut self,
         kind: &str,
         max: bool,
-        left: NodeId,
-        right: NodeId,
-    ) -> NodeId {
+        left: B::E,
+        right: B::E,
+    ) -> B::E {
+        let (l, r) = (B::of(&left), B::of(&right));
         let literals = match kind {
-            "bool" => self.primitive_bool(left).is_some() && self.primitive_bool(right).is_some(),
-            "int" => self.primitive_int(left).is_some() && self.primitive_int(right).is_some(),
-            "string" => self.primitive_string(left).is_some() && self.primitive_string(right).is_some(),
-            "bigint" => self.primitive_bigint(left).is_some() && self.primitive_bigint(right).is_some(),
-            "float" => [left, right].iter().all(|&n| matches!(self.arena.view(n), View::JNumber { value } if matches!(self.arena.constant(value), crate::bir::Constant::Float(_)))),
+            "bool" => self.bool_of(l).is_some() && self.bool_of(r).is_some(),
+            "int" => self.js.int(&self.arena, l).is_some() && self.js.int(&self.arena, r).is_some(),
+            "string" => {
+                self.js.text(&self.arena, l).is_some() && self.js.text(&self.arena, r).is_some()
+            }
+            "bigint" => {
+                self.js.bigint(&self.arena, l).is_some() && self.js.bigint(&self.arena, r).is_some()
+            }
+            "float" => self.js.is_float(&self.arena, l) && self.js.is_float(&self.arena, r),
             "object" => false,
             _ => unreachable!("comparison type"),
         };
         if literals {
-            let l = self.primitive_literal_copy(left);
-            let r = self.primitive_literal_copy(right);
+            let l = self.primitive_literal_copy(B::of(&left));
+            let r = self.primitive_literal_copy(B::of(&right));
             let op = comparison_op(
                 if max { Comparison::Gt } else { Comparison::Lt },
                 kind != "bigint",
             );
-            let test = norm::je4_bin(&mut self.arena, op, l, r);
-            norm::je7_cond(&mut self.arena, test, left, right)
+            let test = self.js.bin(&mut self.arena, op, l, r);
+            self.js.cond(&mut self.arena, test, left, right)
         } else {
-            self.primitive_runtime(
+            B::from_node(self.primitive_runtime(
                 match kind {
                     "bool" => "Primitive_bool",
                     "int" => "Primitive_int",
@@ -308,8 +276,8 @@ impl State<'_> {
                     _ => unreachable!("comparison type"),
                 },
                 if max { "max" } else { "min" },
-                &[left, right],
-            )
+                &[B::node(left), B::node(right)],
+            ))
         }
     }
 }

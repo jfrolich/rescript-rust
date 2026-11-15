@@ -1,0 +1,18 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/functor_parameter_modtype_extension_path.res[0m:[2m6:12-27[0m
+
+  4 [2m│[0m   type X.t += A
+  5 [2m│[0m }
+  [1;31m6[0m [2m│[0m module R = [1;31mF({type t = ..})[0m
+  7 [2m│[0m 
+
+  This functor has type
+  (
+    X: {
+      type t = ..
+    },
+  ) => {
+    type \"X.t" += A
+  } The parameter cannot be eliminated in the result type.
+   Bind the argument to a module identifier.

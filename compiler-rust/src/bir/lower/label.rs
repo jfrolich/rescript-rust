@@ -355,7 +355,7 @@ impl Schedule {
     }
 }
 
-impl State<'_> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// O(1): capture a source control event before its one lowering visit.
     pub(super) fn label_enter(&mut self, cx: Cx, node: NodeId) {
         let group_body = match self.source.view(node) {

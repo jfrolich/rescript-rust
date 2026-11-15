@@ -4,9 +4,7 @@ pub mod plain;
 pub(crate) mod logic;
 pub mod facts;
 pub mod equal;
-#[cfg(test)]
 pub mod rows;
-#[cfg(test)]
 pub mod rows_stmt;
 
 use super::{Bir, NodeFlags, NodeId, VarId, View};

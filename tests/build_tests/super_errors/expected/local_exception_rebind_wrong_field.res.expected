@@ -1,0 +1,11 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/local_exception_rebind_wrong_field.res[0m:[2m5:8[0m
+
+  3 [2m┆[0m exception L = E
+  4 [2m┆[0m switch x {
+  [1;31m5[0m [2m┆[0m | L({[1;31mc[0m}) => c
+  6 [2m┆[0m | _ => 0
+  7 [2m┆[0m }
+
+  The field c is not part of the record argument for the L constructor

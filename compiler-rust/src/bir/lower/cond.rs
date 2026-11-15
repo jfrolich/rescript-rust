@@ -83,7 +83,7 @@ impl norm::IfLists for super::out::StatementStack {
     fn take(&mut self, b: &mut Bir, span: Span) -> ListId { self.take_list(b, span) }
 }
 
-impl State<'_> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// K1: C:1812, rows R1 to R6 and section 3.7, on entering the node. One
     /// call is constant, including the two cached branch facts for R5 step 0.
     pub(super) fn conditional(

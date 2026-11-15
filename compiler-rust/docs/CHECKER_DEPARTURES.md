@@ -6529,8 +6529,8 @@ are in `package_type_nondep`. An argument constrained to an abstract module
 type is rejected by both before and after (super_errors
 `package_type_nondep_abstract_argument`).
 
-Open: a functor result that declares `module type T = X.T` next to the
-value is still rejected by Rust; OCaml accepts it:
+A functor result that declares `module type T = X.T` next to the value
+was still rejected by Rust; OCaml accepts it:
 
 ```rescript
 module type S = {let x: int}
@@ -6544,12 +6544,61 @@ module M = {let x = 1}
 let p = module(M: T)})
 ```
 
-A temporary trace shows the failure comes from the `MtyIdent` arm of `nondep_mty` (`compiler-rust/src/types/typemod.rs:2331`):
-it returns `None` for `X.T`, where OCaml expands the path with
-`Env.find_modtype_expansion` (`compiler/ml/mtype.ml:110-113`) and, in a
-covariant position, falls back to an abstract module type declaration
-(`mtype.ml:148-158`). That function is `Mtype.nondep_supertype`, not the
-`nondep_type` of this place.
+The failure was in `Mtype.nondep_supertype`, not in the `nondep_type` of
+this place. Thirty-six programs around it (abbreviations of the
+parameter's module type in the result, nested, through an alias of the
+parameter, a functor returning a functor, a module type that mentions a
+type of the parameter, covariant, contravariant and strict positions,
+extension constructors, and programs OCaml rejects) were run through both
+compilers; four arms of the Rust `nondep_mty`/`nondep_sig`
+(`compiler-rust/src/types/typemod.rs:2336-2547`) lacked or shortened
+OCaml's (`compiler/ml/mtype.ml:107-162`).
+
+Fixed (`797b660e5`): the `MtyIdent` arm (`typemod.rs:2346`) returned `None`
+for a module type path of the parameter. OCaml replaces it by its expansion
+through the argument bound to the parameter (`mtype.ml:110-113`). The
+program above, the same with a result signature, the module type in a
+nested module, in a functor parameter of the result, and an expansion that
+mentions a type of the parameter now build with OCaml's JavaScript
+(`tests/tests/src/functor_parameter_modtype_expansion`).
+
+Fixed (`6b3de53ff`): a module type declaration whose manifest keeps the
+parameter failed the elimination. OCaml walks the manifest as strict and in
+a covariant position keeps the declaration abstract (`mtype.ml:147-160`);
+the walk now carries OCaml's variance (`mtype.ml:105`, flipped for a
+functor parameter at 119-123). Accepted programs are in
+`tests/tests/src/functor_parameter_modtype_abstract`; super_errors
+`functor_parameter_modtype_abstract_fallback` (a structure constrained to
+the abstract result) differed before, `functor_parameter_modtype_contravariant`
+agreed before and still does.
+
+Fixed (`5038035c3`): `nondep_sig` passed `is_covariant = true` to
+`nondep_type_decl` in every position; OCaml passes `va = Co`
+(`mtype.ml:139-140`, `ctype.ml:4489-4497`). super_errors
+`functor_parameter_modtype_type_contravariant` and
+`functor_parameter_modtype_type_strict` differed before;
+`functor_parameter_modtype_type_covariant` agreed before.
+
+Fixed (`7375247d4`): extension constructors kept the parameter in their
+arguments, result type and extended path; `nondep_extension_constructor`
+(`typemod.rs:2494`) ports OCaml's (`ctype.ml:4521-4552`).
+`tests/tests/src/functor_parameter_modtype_extension` builds with OCaml's
+JavaScript; super_errors `functor_parameter_modtype_extension_argument` and
+`functor_parameter_modtype_extension_path` were accepted by Rust before.
+
+Open: the `MtyAlias` arm (`typemod.rs:2359`, OCaml `mtype.ml:114-117`)
+still fails for an alias of the parameter. No program reached it with such
+a path (a temporary trace over all the programs fired once, for an alias to
+a top-level module): OCaml and Rust strengthen an alias of a functor
+argument instead of keeping it (`env.ml:926-933`). Two differences found on
+the way are outside this function group and differ on trunk without a
+functor application: `module R = {module Y = {module type T = S}  module
+type T = Y.T}` followed by `module M: R.T = ...` stops Rust with an
+internal "Inferred signature inclusion failed" (inferred signature
+coercion); `R.E({v: 1})` for `exception E({v: int})` in a module `R` is
+rejected by Rust ("v refers to a record field"). An alias `module M = N` in
+a functor parameter's signature used as `module Z = X.M` gives OCaml
+`Z: undefined` and Rust `Z: X.N` in the JavaScript, before and after.
 
 Unifying, comparing and including two package types had the same kind of
 fault as the U9 arm. Unification, `moregen`, `Ctype.equal` and the
@@ -7072,3 +7121,492 @@ stderr:
 
 ```
 
+
+## Third round: differences found while fixing
+
+### Q5 — an inline record of an extension constructor through a module path
+
+Commands are the ones in "Scope, calibration and reproducibility". Each program
+was run with `bsc -w +A -bs-jsx 4 -color never Main.res` through both
+compilers; the program split across two units was built as a project with
+`rescript build-reference --bsc <OCaml bsc>` and `rescript build`. Verdicts
+before the fixes (trunk `a2777909d`) and after them:
+
+| Program | OCaml | Rust before | Rust after |
+| --- | --- | --- | --- |
+| `R.E({v: 1})`, `exception E({v: int})` in `R` | accepts | rejects (unbound label `v`) | agrees |
+| `R.C({v: 1})`, `type t += C({v: int})` in `R` | accepts | rejects | agrees |
+| `R.A({w: 1})`, `type u = A({w: int})` in `R` | accepts | agrees | agrees |
+| `E({v: 1})` inside `R` | accepts | agrees | agrees |
+| `open R` then `E({v: 1})` (also `open! R`) | accepts | rejects | agrees |
+| `open R` then `E(1)` | rejects ("expects an inlined record argument") | accepts, `_1: 1` | agrees |
+| `open R` then `E({v: 1, w: ""})` for two fields | accepts | rejects (arity 2) | agrees |
+| `module A = R` then `A.E({v: 1})` | accepts | rejects | accepted, JavaScript differs (open, below) |
+| `switch x { \| R.E({v}) => v }` | accepts | rejects | agrees |
+| `R.S.E({v: 1})` and `\| R.S.E({v})`, two levels | accepts | rejects | agrees |
+| punned `R.E({v, w})` | accepts | rejects | agrees |
+| optional field `w?: string`, `{v: 1}`, `w: "x"`, `w: ?Some("y")` | accepts | rejects | agrees |
+| spread `R.E({...r, v: 2})` of a matched `R.E(r)` | accepts | rejects | agrees |
+| field access `r.v` of a matched `R.E(r)` | accepts | rejects | agrees |
+| `R.E` next to a local `exception E({w: string})` | accepts | rejects | agrees |
+| another unit's `Lib.E({v: 1})`, `Lib.C({v: 2})`, `\| Lib.E({v})` | accepts | rejects | agrees |
+| wrong field `R.E({x: 1})` | rejects: "The field x is not part of the record argument for the R.E constructor" | rejects: "x refers to a record field, but no corresponding record type is in scope" | agrees |
+| extra field `R.C({v: 1, z: 2})` | rejects | rejects, other text | agrees |
+| missing field `R.C({w: 1})` | rejects at 5:13-18: "Some required record fields are missing: v." | rejects at 5:14, unbound label | agrees |
+| wrong field `R.A({x: 1})` of a variant | rejects: "...for the R.u.A constructor" | agrees | agrees |
+
+#### Fixed
+
+- `42865599f`: the record type of an inline record is named by the
+  constructor's path (`R.E`). OCaml's `Env.find_type_full`
+  (`compiler/ml/env.ml:773-811`) classifies that path with
+  `Path.constructor_typath` and reads the constructor from the variant's
+  declaration (`Cstr`), by exact identifier (`LocalExt`, `find_same`) or
+  from the components of the module (`Ext`). The Rust
+  `lookup_inline_record_decl_for_path`
+  (`compiler-rust/src/types/typecore.rs:16430`, before the fix 16496)
+  searched the constructors in scope by the bare name `E`, so through any
+  module path it found nothing, `extract_concrete_record_type_info` had no
+  record and every label was unbound. It now takes the three cases of
+  `find_type_full`; the name-based search it shared with
+  `with_record_labels` (typecore.rs:16348) is deleted. Fixtures:
+  `tests/tests/src/inline_record_extension_path`,
+  `inline_record_extension_second_unit` (with `inline_record_extension_lib`),
+  super_errors `inline_record_extension_wrong_field`,
+  `inline_record_extension_missing_field` and
+  `inline_record_extension_variant_wrong_field` (agreed before).
+- `62c757dc0`: `open` installs the module's component table
+  (`env.ml:1841-1877`), whose extension constructors come from
+  `Datarepr.extension_descr` (`env.ml:1560-1565`, `datarepr.ml:218-240`): an
+  inline record is one argument of the record type the constructor's path
+  names, with `cstr_inlined` set. The Rust open
+  (`add_signature_to_env_with_options_inner`,
+  `compiler-rust/src/cmi/persistent_env.rs:8432`) built its own description
+  that spread the fields into a tuple and dropped `cstr_inlined`. It now
+  uses the component table's `env_lazy::extension_constructor_description`
+  (`compiler-rust/src/types/env_lazy.rs:521`). Fixtures:
+  `tests/tests/src/inline_record_extension_open`, super_errors
+  `inline_record_extension_open_tuple_argument` and
+  `inline_record_extension_open_arity`.
+
+#### Open
+
+Through a module alias, `module A = R` then `A.E({v: 1})` is now accepted,
+but the JavaScript differs: Rust emits `let e_0 = A.E;` and
+`RE_EXN_ID: e_0`, OCaml `RE_EXN_ID: E`. The same difference exists before
+these fixes and without an inline record (`exception E(int)`, `A.E(1)`).
+Both typed trees hold `Texp_construct "A.E"`; the raw Lambda differs: OCaml
+`(makeblock ext (field:E/0 R/1001) 1)`, Rust `(field:E/0 A/1003)`. OCaml
+translates the constructor's path with `Transl_path.transl_extension_path`,
+which normalizes the prefix through the alias (`compiler/ml/transl_path.ml:43-46`,
+`Env.normalize_path_prefix`); the Rust `translate_extension_path_raw`
+(`compiler-rust/src/raw_lambda/convert.rs:3705`) does not reach the alias
+target for a local `module A = R`. That is the Lambda translation of
+modules, not constructor typing.
+
+Fixed under E1 below (`4be340ef5`): the translation now normalizes the path
+in the construction's environment; `A.E({v: 1})` through `module A = R`
+agrees after the merge of both.
+
+### Q1 — a module type abbreviation of a module type in a submodule
+
+```rescript
+module type S = {let x: int}
+module R = {
+  module Y = {
+    module type T = S
+  }
+  module type T = Y.T
+}
+module M: R.T = {
+  let x = 2
+}
+```
+
+OCaml compiles the unit; Rust rejected it: "The implementation Main.res does
+not match the interface (inferred signature): In module M: Actual module
+type: Y.T Expected module type: R.T". The printed `Y.T` was the cause, not a
+printing matter: two places read the declaration of `R.T` from `R`'s own
+signature, where it is written `Y.T` with the `Y` bound inside `R`, instead
+of from `R`'s components, where OCaml's `Env` stores it prefixed as `R.Y.T`
+(`Subst.add_module id (Pdot (path, name))` in `components_of_module_maker`,
+`compiler/ml/env.ml:1555-1590`). Outside `R`, `Y.T` names nothing, so the
+expansion stopped there and the two paths compared unequal.
+
+#### Fixed
+
+- `1399d0e44`: `Mtype.strengthen` scrapes `Mty_ident p` with
+  `Env.find_modtype_expansion` (`compiler/ml/mtype.ml:21-25`). The Rust
+  scrape (`scrape_modtype_ident_for_strengthen` in
+  `strengthen_module_type_for_module_access_path`,
+  `compiler-rust/src/types/ctype.rs:3630`) used `Env::lookup_modtype`, whose
+  dotted case scans the parent module's raw signature. Strengthening `M`
+  when the unit is checked against its inferred signature
+  (`Includemod.compunit`, `compiler/ml/typemod.ml:1812-1815`, through
+  `module_declarations`, `includemod.ml:396-413`) gave `Y.T`. It now calls
+  `typemod::find_modtype_expansion` (`typemod.rs:11011`), which reads the
+  parent's components. Fixtures: `tests/tests/src/modtype_abbreviation_submodule`,
+  `modtype_abbreviation_submodule_interface`, super_errors
+  `modtype_abbreviation_value_mismatch` (agreed before).
+- `827faf1c4`: `Includemod.try_modtypes` expands an alias with
+  `Env.find_module` and a module type path with `Env.find_modtype_expansion`
+  (`includemod.ml:223-236`). The local expansion of the Rust check
+  (`expand_local` in `modtypes_inner`, `compiler-rust/src/types/includemod.rs:1287`,
+  dotted arm at 1316) scanned the parent's raw signature in the same way, so
+  `module N: R.Y.T = M` for `M: R.T` was rejected with "Actual module type:
+  Y.T", and a missing value in a constraint on such a module was reported
+  as that module type mismatch instead of "The value `y` is required but
+  not provided". The dotted arm now reads a module through
+  `lookup_module_in_resolved_path` and a module type through
+  `find_modtype_expansion`. Fixtures:
+  `tests/tests/src/modtype_abbreviation_constraint_target`, super_errors
+  `modtype_abbreviation_alias_missing_value` and
+  `modtype_abbreviation_abstract_implementation` (agreed before).
+
+Twenty programs around the witness were run through both compilers
+(commands as in "Scope, calibration and reproducibility"). Before / after:
+
+| Program | OCaml | Rust before | Rust after |
+| --- | --- | --- | --- |
+| the witness (one submodule) | accepts | rejects | accepts |
+| two submodules (`R.Y.Z.T`) | accepts | rejects | accepts |
+| submodule that is a module alias | accepts | rejects | accepts |
+| `R` a functor's result | accepts | rejects | accepts |
+| `Y.T` used in `R` before `T` is declared | accepts | rejects | accepts |
+| through `module type of R` | accepts | accepts | accepts |
+| abstract module type through an alias, functor parameter | accepts | accepts | accepts |
+| constrained by the abbreviation, its target, `S`, the abbreviation | accepts | rejects | accepts |
+| with an interface declaring `M: R.T` | accepts | rejects | accepts |
+| with an interface declaring `M: R.Y.T` | accepts | rejects | accepts |
+| abbreviation used inside `R` | accepts | accepts | accepts |
+| `module M: R.T` as an item of a module type | accepts | rejects | accepts |
+| functor parameter of type `R.T` | accepts | rejects | accepts |
+| `M: R.T` with `x: string` | rejects | same text | same text |
+| `M: R.T` without `x` | rejects | same text | same text |
+| interface `M: R.T`, implementation lacks `x` | rejects | same text | same text |
+| interface's `R.T` is another module type | rejects | same text | same text |
+| abstract `R.T` implemented by a structure | rejects | same text | same text |
+| `module N: {x, y} = M` for `M: R.T` | rejects | other text | same text |
+| `module N: U = M`, `U` with `x: string` | rejects | other text | same text |
+
+### A3 — module aliases of a functor argument
+
+The witness: a module alias declared in a functor parameter's signature and
+re-exported from the functor body.
+
+```rescript
+module N = {let x = 1}
+module F = (X: {
+  module N: {let x: int}
+  module M = N
+}) => {module Z = X.M}
+module R = F({
+  module N = N
+  module M = N
+})
+let y = R.Z.x
+```
+
+OCaml emitted `Z: undefined` in the body of `F` and in `R`, and `let y = 1`;
+Rust emitted `Z: X.N`, `Z: N` and `let y = R.Z.x` read through `R`. Both
+compilers' `-drawlambda` show where it starts: OCaml binds
+`Z/1008 =a module_alias`, Rust `Z/1008 =a (field:N/0 X/1007)`. The
+translation of a module expression (`convert_module_expr_raw0`,
+`compiler-rust/src/raw_lambda/convert.rs:4196`, the counterpart of
+`transl_module0` at `compiler/ml/translmod.ml:257-261`) compiles any
+expression whose type is an alias to `module_alias`, as OCaml does for
+`Mty_alias (Mta_absent, _)`; the type of `X.M` was the difference.
+
+Commands as in "Scope, calibration and reproducibility" (OCaml `bsc` from
+`dune build`, Rust from the thin-LTO release build); each program is
+`Main.res` (plus `Main.resi` where noted) compiled by both with
+`-I . -I packages/@rescript/runtime/lib/rescript`, and stdout, stderr and the
+exit status compared byte for byte.
+
+#### Fixed
+
+- `5d4b69ea3`: eliminating the parameter from the result of a functor
+  applied to a structure (`Mtype.nondep_supertype`) replaces an alias of a
+  module of the parameter by that module's type, read through the argument
+  (`compiler/ml/mtype.ml:114-117`). The alias arm of the Rust `nondep_mty`
+  (`compiler-rust/src/types/typemod.rs:2340`) returned `None`, so Rust
+  rejected `include X` of a parameter with an alias ("The parameter cannot
+  be eliminated in the result type") where OCaml accepts it. It now reads the
+  module's type through the argument's component table
+  (`tests/tests/src/functor_argument_alias_include`).
+- `a5eda8581`: `module Z = path` strengthens the declared module type with
+  `Mtype.strengthen ~aliasable`, `aliasable` false for a path into a functor
+  parameter (`compiler/ml/typemod.ml:1238-1258`), and `strengthen` leaves an
+  alias as it is (`compiler/ml/mtype.ml:30-38`). The Rust call
+  (`compiler-rust/src/types/typemod.rs:14861`) scraped the alias to the
+  strengthened signature of `X.N` and always strengthened as if the path
+  were aliasable. `X.M` now keeps `Mty_alias (Mta_absent, X.N)` and compiles
+  to `module_alias`, and `module Z = X.N` keeps the strengthened types of
+  `N`'s submodules instead of aliases of the parameter's modules, which
+  could not be eliminated from the result. Fixtures:
+  `tests/tests/src/functor_argument_alias_module`,
+  `functor_argument_alias_interface` (with an interface) and super_errors
+  `functor_argument_alias_signature_mismatch`.
+
+Programs run through both compilers, before (at `a2777909d`) and after
+`a5eda8581` (exit status of OCaml; DIFFER lists Rust's when it differs):
+
+| Program | Before | After |
+| --- | --- | --- |
+| the witness | DIFFER (Rust `Z: X.N`) | agree, 0 |
+| alias not used in the body (`module Z = X.M` and a value) | DIFFER | agree, 0 |
+| alias used in the body (`Z.x`) | DIFFER | agree, 0 |
+| alias accessed as a value (`X.M.x`) | agree, 0 | agree, 0 |
+| re-exported under a signature (`: {module Z: {let x: int}}`) | agree, 0 | agree, 0 |
+| alias of a module outside the parameter (`module M = N`, top-level `N`) | DIFFER | agree, 0 |
+| an unused alias outside the parameter next to a value | DIFFER | agree, 0 |
+| two levels of alias (`L = M`, `M = N`) | DIFFER | agree, 0 |
+| functor applied to a named module | DIFFER | agree, 0 |
+| the same alias in an ordinary signature, no functor | agree, 0 | agree, 0 |
+| first-class module built from the alias (`module(X.M: T)`) | agree, 0 | agree, 0 |
+| interface exporting `F` and `R` | OCaml 2 (crash), Rust 0 | OCaml 2 (crash), Rust 0 |
+| interface exporting only `R` | DIFFER | agree, 0 |
+| a submodule of the parameter (`module Z = X.N`, `Z.K.x`) | DIFFER (Rust 2) | agree, 0 |
+| the parameter itself (`module Z = X`) | agree, 0 | agree, 0 |
+| an alias inside a nested functor of the body | DIFFER | agree, 0 |
+| `include X` | DIFFER (Rust 2) | agree, 0 |
+| `include X` of a named signature, then `M.x` | DIFFER (Rust 2) | agree, 0 |
+| parameter's `M` not an alias | agree, 0 | agree, 0 |
+| parameter typed `module type of A` | agree, 0 | agree, 0 |
+| nested functor with `module type of X` | agree, 0 | agree, 0 |
+| alias in a constrained argument inside another functor | DIFFER | agree, 0 |
+| argument's `M` not an alias of its `N` (rejected) | agree, 2 | agree, 2 |
+| wrong member through the result (`R.Z.z`, rejected) | agree, 2 | agree, 2 |
+| wrong type in the body (`let v: string = Z.x`, rejected) | agree, 2 | agree, 2 |
+| body against a mismatching result signature (rejected) | agree, 2 | agree, 2 |
+
+#### Open
+
+With an interface that exports `F` itself
+(`module F: (X: {module N: {let x: int}
+module M = N}) => {module Z: {let x: int}}`), OCaml prints warning 32 and
+then stops with `Fatal error: exception Failure("File
+\"compiler/core/lam_dce.ml\", line 33, characters 31-38X/1034 not found")`:
+the coercion of `Z` against the interface is `Tcoerce_alias (X.N, _)`
+(`compiler/ml/includemod.ml:224-237`), which names the parameter `X`
+outside the coerced functor's own parameter `funarg`. Rust prints the same
+warning, exits 0 and emits `Z: X.N` in `function F(funarg)`, a reference to
+an unbound `X`. This is a defect of both compilers, and the reference
+crashes; it was left as it is.
+
+### E1 - an extension constructor read through a module alias
+
+The witness: an extension constructor named through a local module alias.
+
+```rescript
+module R = { exception E(int) }
+module A = R
+let e = A.E(1)
+```
+
+OCaml emitted `let e = { RE_EXN_ID: E, _1: 1 }` followed by `let A;`; Rust
+emitted `let A;`, then `let e_0 = A.E; let e = { RE_EXN_ID: e_0, _1: 1 }`,
+a read of a field of `A`, which is undefined at runtime. `-drawlambda`:
+OCaml reads `field:E/0 R`, Rust `field:E/0 A`. A value read the same way
+(`A.x`) compiled as OCaml compiles it.
+
+Commands as in "Scope, calibration and reproducibility" (OCaml `bsc` from
+`dune build`, Rust from the thin-LTO release build, the runtime built by
+`build-reference` with the OCaml `bsc`); each program is `Main.res`
+compiled by both with `-I . -I packages/@rescript/runtime/lib/rescript`,
+and stdout, stderr, the exit status and the JavaScript compared byte for
+byte. The two-unit program is a project with `Other.res` and `Main.res`,
+built by `rescript build-reference --bsc <OCaml bsc>` and by
+`rescript build`, its JavaScript compared byte for byte.
+
+#### Fixed
+
+- `4be340ef5`: OCaml's `transl_extension_path` is `transl_value_path`
+  (`compiler/ml/transl_path.ml:43-46`), which normalizes the path's prefix
+  with `Env.normalize_path_prefix` in the environment it is given: the
+  construction's `e.exp_env` (`compiler/ml/translcore.ml:1417`), the
+  record's (`translcore.ml:1902`), a local exception's
+  (`translcore.ml:1551`), the declaring item's `item.str_env` for a rebind
+  (`compiler/ml/translmod.ml:373,381`, `translcore.ml:53`), the pattern's
+  `pat_env` (`compiler/ml/matching.ml:2363`). The Rust
+  `translate_extension_path_raw`
+  (`compiler-rust/src/raw_lambda/convert.rs:3705` before the fix) called
+  `translate_value_path_raw`, which normalizes in the converter's
+  unit-level environment, where an alias declared in the unit is not
+  bound; patterns already used `pat_env` (`raw_lambda/matching.rs:7427`),
+  which is why matching agreed. Constructions, records and local
+  exceptions now pass the expression's environment. Structure items never
+  recorded `str_env` (always `EnvRef(0)` in
+  `compiler-rust/src/types/typemod.rs`); an `exception` or `type +=` item
+  with a rebind now stores the environment before it
+  (`extension_item_env`, `typemod.rs:16484`), and the converter normalizes
+  the rebind there. Fixtures: `tests/tests/src/extension_alias_path_construct`,
+  `extension_alias_path_rebind`, `extension_alias_path_unit` with
+  `extension_alias_path_unit_alias` (an alias of another unit).
+
+Since the merge of trunk at `393969158` (Q5, an inline record of an
+extension constructor through a module path), `56053c43c` adds the inline
+record through an alias, `AI.E({a: 1, b: "x"})` and `| AI.E({a}) => a`, to
+`extension_alias_path_construct`; it needs Q5 to be accepted and this fix to
+read `RI`.
+
+Programs run through both compilers, before (at `112f68648`), after
+`4be340ef5`, and after the merge of trunk at `393969158` (`dcfa51c78`). OCaml
+accepts every one (exit 0); DIFFER is a difference in the JavaScript or the
+diagnostics:
+
+| Program | Before | After | After the merge |
+| --- | --- | --- | --- |
+| the witness, `A.E(1)` | DIFFER | agree | agree |
+| constant exception `A.E` | DIFFER | agree | agree |
+| `switch x { \| A.E(n) => n }` | agree | agree | agree |
+| `try g() catch { \| A.E(n) => n }` | agree | agree | agree |
+| extensible type `A.C(1)` | DIFFER | agree | agree |
+| extensible constant `A.C`, then `\| A.C =>` | DIFFER | agree | agree |
+| inline record `A.E({a: 1, b: "x"})` | DIFFER (Rust 2) | DIFFER (Rust 2) | agree |
+| two aliases `B = A`, `B.E(1)`, `\| B.E(n)` | DIFFER | agree | agree |
+| alias of a submodule `A = R.S` | DIFFER | agree | agree |
+| alias declared after `open O` | DIFFER | agree | agree |
+| `open A`, then `E(1)` | DIFFER | agree | agree |
+| alias of another unit (`A = Other`, `A.E`, `A.C`, `\| A.E(n)`) | DIFFER | agree | agree |
+| alias inside a functor body of a module outside it | DIFFER | agree | agree |
+| alias of the functor's parameter (`A = X`, `A.E(1)`, `\| A.E(n)`) | agree | agree | agree |
+| `throw(A.E(1))` | DIFFER | agree | agree |
+| `include R` in a third module, `I.E(1)` and `A.E(2)` | DIFFER | agree | agree |
+| rebind `exception F = A.E` | DIFFER | agree | agree |
+| value through the alias, `A.x` | agree | agree | agree |
+| `type R.t += D = A.C`, `D(1)` | DIFFER | agree | agree |
+| local `exception L = A.E` in a function, `L(1)` | DIFFER (Rust 2) | DIFFER (Rust 2), open | DIFFER (Rust 2), open |
+| inline record `R.E({a: 1, b: "x"})`, no alias | DIFFER (Rust 2) | DIFFER (Rust 2) | agree |
+| local `exception L = R.E`, no alias | DIFFER (Rust 2) | DIFFER (Rust 2), open | DIFFER (Rust 2), open |
+| local `exception L = E`, top-level `E`, no alias | DIFFER (Rust 2) | DIFFER (Rust 2), open | DIFFER (Rust 2), open |
+
+#### Open
+
+- A local `exception L = E` in an expression is typed by Rust as a
+  constructor without arguments ("This variant constructor L expects 0
+  arguments, but it's being passed 1"), alias or not. OCaml types it with
+  `Typedecl.transl_exception` (`compiler/ml/typecore.ml:3763`), whose
+  `Pext_rebind` arm reads the rebound constructor's arguments
+  (`compiler/ml/typedecl.ml:1694`). The Rust `type_letexception`
+  (`compiler-rust/src/types/typecore.rs:17753`) answers `Pext_rebind`
+  with no arguments (`typecore.rs:17892`) and builds a `Text_decl`, so it
+  also creates a new exception instead of rebinding. The fix is in
+  `typecore.rs`, outside this change.
+
+### L1 - a local exception that rebinds another
+
+The witness: a local exception in a function that rebinds a top-level one.
+
+```rescript
+exception E(int)
+let f = x => {
+  exception L = E
+  switch x {
+  | L(n) => n
+  | _ => 0
+  }
+}
+```
+
+OCaml accepted it with warning 38 ("exception L is never used to build
+values. (However, this constructor appears in patterns.)", `3:3-17`), and
+its JavaScript tests `x.RE_EXN_ID === E` and returns `x._1`. Rust rejected
+it at `5:5-8`: "This variant constructor L expects 0 arguments, but it's
+being passed 1."
+
+Commands as in "Scope, calibration and reproducibility": the OCaml `bsc`
+from `dune build`, Rust from thin-LTO release builds of `acf84ba17` (before)
+and of the fix (after), the runtime built by `build-reference` with the
+OCaml `bsc`; each program is `Main.res` compiled by both with
+`-I . -I packages/@rescript/runtime/lib/rescript`, and stdout (the
+JavaScript), stderr (the diagnostics), and the exit status compared byte for
+byte.
+
+#### Fixed
+
+- `cd3f30219`: OCaml types `Pexp_letexception` with
+  `Typedecl.transl_exception` (`compiler/ml/typecore.ml:3762-3763`), the
+  function an `exception` structure item uses
+  (`compiler/ml/typedecl.ml:1895-1911`); its `Pext_rebind` arm of
+  `transl_extension_constructor` takes the arguments, the result type, the
+  inline record and the path of the constructor it rebinds
+  (`typedecl.ml:1694-1749`). The Rust `type_letexception`
+  (`compiler-rust/src/types/typecore.rs:17753` before the fix) was a copy of
+  the item's translation whose `Pext_rebind` arm (`typecore.rs:17892`)
+  returned a constructor with no arguments and built a `Text_decl`, so a
+  rebind became a new exception without arguments: matching it with an
+  argument was rejected, and `exception L = E0` compiled to
+  `Primitive_exceptions.create("L")`. The copy also skipped what the item
+  checked (the duplicate-label and `@as` checks of an inline record, the
+  unbound type variable check, `reset_type_variables`, the lookup of the
+  rebound name). The item's translation is now `transl_exception`
+  (`compiler-rust/src/types/typemod.rs:16506`), called by the
+  `Pstr_exception` item (`typemod.rs:19152`) and by `type_letexception`
+  (`typecore.rs:17756`); the copy is deleted. Fixtures:
+  `tests/tests/src/local_exception_rebind_cases` (every accepted program
+  below in one module, with the controls), and the super_errors fixtures
+  `local_exception_rebind_not_exception`, `_unbound`, `_argument_count`,
+  `_wrong_field`, `_decl_unbound_type_var`, `_pattern_only` (warning 38 for
+  a constructor seen only in patterns) and `_unused` (agreed before).
+
+The three local-exception rows left open under E1 above (`exception L =
+A.E`, `= R.E`, `= E`, each with `L(1)`) are programs 8, 9 and 5 below and
+now agree.
+
+Programs run through both compilers. OCaml status 0 is accepted, 2
+rejected; DIFFER is a difference in the JavaScript, the diagnostics or the
+status:
+
+| # | Program | OCaml | Before (Rust) | After (Rust) |
+| --- | --- | --- | --- | --- |
+| 1 | the witness, one argument, used in a pattern | 0, warning 38 | DIFFER (2) | agree |
+| 2 | no argument, `\| L =>` | 0, warning 38 | DIFFER (0, a new exception `"L"`) | agree |
+| 3 | two arguments, `\| L(n, s)` | 0, warning 38 | DIFFER (2) | agree |
+| 4 | inline record, `\| L({a, b})` and `L({a: 1, b: "x"})` | 0, warning 38 | DIFFER (2) | agree |
+| 5 | used only to build, `L(1)` | 0 | DIFFER (2) | agree |
+| 6 | pattern and construction, `\| L(n) => L(n + 1)` | 0 | DIFFER (2) | agree |
+| 7 | not used at all | 0, warning 38 "unused exception L" | agree | agree |
+| 8 | through a module path, `exception L = M.E` | 0, warning 38 | DIFFER (2) | agree |
+| 9 | through a module alias, `exception L = A.E` | 0, warning 38 | DIFFER (2) | agree |
+| 10 | a local `exception K(int)` rebound by a local `exception L = K` | 0 | DIFFER (2) | agree |
+| 11 | control: local declaration `exception L(int, string)` | 0 | agree | agree |
+| 12 | in a function called twice, `throw(L(x))` caught as `E1(n)` | 0 | DIFFER (2) | agree |
+| 13 | rebind of the predefined `Failure`, `\| L(s)` | 0, warning 38 | DIFFER (2) | agree |
+| 14 | control: item rebind `exception F = E` | 0 | agree | agree |
+| 15 | rebind of a variant constructor `A` of `type t` | 2, `3:17` "The constructor A has type t but was expected to be of type exn" | DIFFER (0) | agree |
+| 16 | rebind of an unbound `Nope` | 2, `2:17-20` "The variant constructor Nope can't be found." | DIFFER (0) | agree |
+| 17 | `\| L(n, m)` for one argument | 2, `5:6-11` "This pattern matches values of type ('a, 'b)" | DIFFER (2, `5:5-11` "expects 0 arguments, but it's being passed 2") | agree |
+| 18 | `\| L({c})` for an inline record `{a, b}` | 2, `5:8` "The field c is not part of the record argument for the L constructor" | DIFFER (2, `5:5-10` "expects 0 arguments") | agree |
+| 19 | local declaration `exception L('a)` | 2, `2:16` "Unbound type parameter 'a" | DIFFER (0) | agree |
+| 20 | `L("x")` for an `int` argument | 2, `4:5-7` "This has type: string" | DIFFER (2, `4:3-8` "expects 0 arguments") | agree |
+| 21 | rebind of `Nope.E`, an unbound module | 2, `2:17-22` "The module or file Nope can't be found." | DIFFER (0, warning 38) | agree |
+
+#### Fixed: a rebind marks the constructor it rebinds as used
+
+- The commit that adds this paragraph: OCaml's `Pext_rebind` arm marks the constructor it rebinds
+  as used: `Env.mark_constructor usage env (Longident.last lid.txt) cdescr`
+  (`compiler/ml/typedecl.ml:1694-1700`). The usage is `Positive`, or
+  `Privatize` when the new constructor is private and the rebound one is
+  not. The Rust `lookup_rebind_constructor`
+  (`compiler-rust/src/types/typemod.rs:555`) did not mark it, so every
+  rebound constructor kept the warning 38 it would have had without the
+  rebind. This applied to exception items, local exceptions and
+  `type t += B = A` alike. It now calls `typecore::mark_constructor` with
+  that usage. The exception paths pass `Public`, and
+  `transl_type_extension` passes the extension's private flag. Fixtures:
+  super_errors `local_exception_rebind_marks_use`,
+  `local_exception_rebind_marks_use_item` and
+  `local_exception_rebind_marks_use_private_extension`. All 21 programs
+  above still agree, and every existing super_errors fixture keeps its
+  output.
+
+| # | Program | OCaml warnings | Trunk | Previous head | After |
+| --- | --- | --- | --- | --- | --- |
+| 22 | local `L = E`, local `M = L`, `\| L(n)` | 38 `4:3-17` "unused exception M" | DIFFER | DIFFER (also `3:3-17` "exception L is never used to build values") | agree |
+| 23 | item `L = E`, item `M = L` under a signature, `\| L(n)`, `\| M(_)` | 38 `6:3-17` "exception M is never used to build values" | DIFFER (also L, `5:3-17`) | DIFFER (also L, `5:3-17`) | agree |
+| 24 | local `L = E`, `M = L`, none used | 38 `4:3-17` "unused exception M" | DIFFER | DIFFER (also `3:3-17` "unused exception L") | agree |
+| 25 | local `K(int)` used only by `L = K`, `\| L(n)` | 38 `3:3-17` "exception L is never used to build values" | DIFFER | DIFFER (also `2:3-18` "unused exception K") | agree |
+| 26 | `type t += private B = A`, `\| B(n)`, under a signature | 38 `6:13-18` "extension constructor A is never used to build values." and `7:21-25` B | DIFFER ("unused extension constructor A") | DIFFER (same) | agree |
+| 27 | `type t += B = A`, `\| B(n)`, under a signature | 38 `7:13-17` for B only | DIFFER (also `6:13-18` "unused extension constructor A") | DIFFER (same) | agree |
+| 28 | item `K(int)` used only by item `L = K`, under a signature | 38 `5:3-17` for L only | DIFFER (also `4:3-18` "unused exception K") | DIFFER (same) | agree |

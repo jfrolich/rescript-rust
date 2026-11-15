@@ -1,5 +1,6 @@
 //! Exception regions, BACKEND_LOWERING §5.5.
 use super::*;
+use crate::bir::ListId;
 
 /// Dense exception-frame handle; O(1) access across child visits.
 #[derive(Clone, Copy)]
@@ -8,13 +9,13 @@ pub(super) struct Try(pub u32);
 /// Saved operands and completed blocks; no owned collection per source node.
 pub(super) struct Plan {
     nodes: [Option<NodeId>; 3],
-    blocks: [Option<NodeId>; 3],
+    blocks: [Option<ListId>; 3],
     exception: Option<VarId>,
     start: Span,
     target: Option<VarId>,
 }
 
-impl State<'_> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// C:1503 try_statement / C:3129 compile_return_output. O(1), with no
     /// inspection of the body or handler to select their form.
     pub(super) fn try_statement(
@@ -81,7 +82,7 @@ impl State<'_> {
     }
 
     /// C:2770 compile_effect_block_output / C:3129 compile_return_output.
-    /// O(s) for s emitted statements, copied once into their block; no L walk.
+    /// O(s) for s emitted statements, copied once into their list; no L walk.
     pub(super) fn try_child(&mut self, cx: Cx, frame: Try, index: usize, child: Probed) -> Probed {
         let mut out = self.realize(cx, child);
         if let Some(value) = out.value.take() {
@@ -92,8 +93,7 @@ impl State<'_> {
             len: 0,
         });
         let list = self.statements.take_list(&mut self.arena, span);
-        let block = self.arena.block_from_list(list);
-        self.tries[frame.0 as usize].blocks[index] = Some(block);
+        self.tries[frame.0 as usize].blocks[index] = Some(list);
         Probed::Out(Out {
             stmts: self.statements.mark(),
             value: None,
@@ -101,34 +101,30 @@ impl State<'_> {
         })
     }
 
-    /// C:1503 try_statement. O(1): at most three block handles, no body walk.
+    /// C:1503 try_statement. O(s) for the s statements of the saved lists,
+    /// each adopted once by its block; no body walk. The lists are stored in
+    /// the order the children returned: the body, then the handler when
+    /// there is an exception variable, then the finaliser.
     pub(super) fn finish_try(&mut self, cx: Cx, frame: Try) -> Probed {
         let plan = &self.tries[frame.0 as usize];
         let start = plan.start;
         let target = plan.target;
-        let parts = [
-            plan.blocks[0].unwrap(),
-            plan.blocks[1].unwrap(),
-            plan.blocks[2].unwrap_or(plan.blocks[0].unwrap()),
-        ];
-        let len = if plan.blocks[2].is_some() { 3 } else { 2 };
-        let statement = self.arena.new_node(
-            View::STry {
-                parts: &parts[..len],
-                exception: plan.exception,
-            },
-            0,
-        );
-        self.statements.push(statement);
+        let [body, second, third] = plan.blocks;
+        let body = B::list_from(body.unwrap());
+        let second = B::list_from(second.unwrap());
+        let (handler, finaliser) = match plan.exception {
+            Some(exception) => (Some((exception, second)), third.map(B::list_from)),
+            None => (None, Some(second)),
+        };
+        let statement = self.js.try_(&mut self.arena, body, handler, finaliser);
+        self.statements.push(B::stmt_node(statement));
         let value = if matches!(cx.cont, Cont::Value(_)) {
-            Some(self.pure_expression(
-                View::Var {
-                    var: target.expect("value temporary"),
-                },
-                0,
-            ))
+            let var = self
+                .js
+                .var(&mut self.arena, target.expect("value temporary"));
+            Some(B::node(var))
         } else if matches!(cx.cont, Cont::Effect(Tail::No)) {
-            Some(self.pure_expression(View::JUndefined, 0))
+            Some(B::node(self.js.undefined(&mut self.arena, false)))
         } else {
             None
         };

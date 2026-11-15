@@ -1,0 +1,17 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/local_exception_rebind_unbound.res[0m:[2m2:17-20[0m
+
+  1 [2m│[0m let f = () => {
+  [1;31m2[0m [2m│[0m   exception L = [1;31mNope[0m
+  3 [2m│[0m   1
+  4 [2m│[0m }
+
+  [1;33mThe variant constructor Nope can't be found.[0m
+  
+  - If it's defined in another module or file, bring it into scope by:
+    - Prefixing it with said module name: [1;33mTheModule.Nope[0m
+    - Or specifying its type: [1;33mlet theValue: TheModule.theType = Nope[0m
+  - Constructors and modules are both capitalized. Did you want the latter?
+    Then instead of [2mlet foo = Bar[0m, try [1;33mmodule Foo = Bar[0m.
+Hint: Did you mean None?

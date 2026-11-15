@@ -38,7 +38,7 @@ use crate::ident::Ident;
 use crate::types::path::PathView;
 use std::sync::Arc;
 
-fn in_process_module_resolution_env(
+pub(crate) fn in_process_module_resolution_env(
     ctx: &TypeContext,
 ) -> Option<crate::cmi::persistent_env::PersistentEnv> {
     // OCaml compiler/ml/env.ml:1000-1007 resolves persistent units through
@@ -3620,7 +3620,15 @@ fn strengthen_module_type_for_module_access_path(
 ) -> super::decl::ModuleType {
     use super::decl::ModuleType;
 
+    /// OCaml `Mtype.scrape` (compiler/ml/mtype.ml:21-25): follow `Mty_ident`
+    /// through `Env.find_modtype_expansion`. A dotted path is expanded
+    /// through its parent module's components, which carry that module's
+    /// prefix (`R.T = Y.T` declared inside `R` expands to `R.Y.T`, not to the
+    /// `Y.T` written in `R`'s own signature). Cost: one module type lookup
+    /// per abbreviation followed; nothing for a module type that is not a
+    /// path.
     fn scrape_modtype_ident_for_strengthen(
+        ctx: &TypeContext,
         env: &super::env::Env,
         mty: &super::decl::ModuleType,
         visiting: &mut HashSet<Path>,
@@ -3630,11 +3638,14 @@ fn strengthen_module_type_for_module_access_path(
                 if !visiting.insert(*path) {
                     return mty.clone();
                 }
-                let expanded = env
-                    .lookup_modtype(path)
-                    .ok()
-                    .and_then(|mtd| mtd.mtd_type.as_ref())
-                    .map(|expanded| scrape_modtype_ident_for_strengthen(env, expanded, visiting));
+                let mut persistent_env = in_process_module_resolution_env(ctx);
+                let expanded = crate::types::typemod::find_modtype_expansion(
+                    path,
+                    env,
+                    &mut persistent_env,
+                    ctx,
+                )
+                .map(|expanded| scrape_modtype_ident_for_strengthen(ctx, env, &expanded, visiting));
                 visiting.remove(path);
                 expanded.unwrap_or_else(|| mty.clone())
             }
@@ -3642,12 +3653,8 @@ fn strengthen_module_type_for_module_access_path(
         }
     }
 
-    // Match OCaml compiler/ml/mtype.ml:22-32: `strengthen` calls `scrape`
-    // first, and `scrape` expands `Mty_ident` with Env.find_modtype_expansion
-    // before signature strengthening, so strengthening sees the expanded
-    // module type.
     let mut visiting = HashSet::new();
-    let scraped = scrape_modtype_ident_for_strengthen(env, mty, &mut visiting);
+    let scraped = scrape_modtype_ident_for_strengthen(ctx, env, mty, &mut visiting);
 
     match &scraped {
         ModuleType::MtySignature(sig) => ModuleType::MtySignature(std::sync::Arc::new(
@@ -15219,6 +15226,77 @@ pub fn nondep_type_decl(
     })
 }
 
+/// OCaml `Ctype.nondep_extension_constructor` (compiler/ml/ctype.ml:4521-4552):
+/// the extended type's path and parameters, the arguments and the result type
+/// of an extension constructor, made independent of `mid`. An extended type
+/// of the parameter is replaced by the constructor its expansion names. All
+/// of the constructor's types are copied in one session with one cache, as
+/// OCaml's `with_nondep_copy_session` does, so a node two of them share stays
+/// one node. Cost: one visit per node reachable from the constructor's
+/// types, each node copied once.
+pub(crate) fn nondep_extension_constructor(
+    ctx: &TypeContext,
+    env: &Env,
+    mid: &Ident,
+    ext: &super::decl::ExtensionConstructor,
+) -> Option<super::decl::ExtensionConstructor> {
+    use super::decl::ConstructorArguments;
+    if ctx.counts_this_call() {
+        return ctx.counted_copy(crate::perf_counters::CopyCause::Nondep, || {
+            nondep_extension_constructor(ctx, env, mid, ext)
+        });
+    }
+    let mut cache: HashMap<TypeExprRef, TypeExprRef> = HashMap::new();
+    ctx.with_copy_session(|| {
+        let mut nondep = |ty: TypeExprRef| nondep_type_rec(ctx, env, mid, ty, &mut cache);
+        let (ext_type_path, ext_type_params) = if ext.ext_type_path.is_free(mid) {
+            let ty = ctx.new_generic_type(TypeDesc::Tconstr {
+                path: ext.ext_type_path,
+                args: ctx.new_type_list(&ext.ext_type_params),
+                abbrev: ctx.alloc_abbrev_nil(),
+            });
+            let ty = ctx.repr(nondep(ty)?);
+            match &*ctx.get_desc(ty) {
+                TypeDesc::Tconstr { path, args, .. } => (*path, ctx.type_list(args).to_vec()),
+                _ => return None,
+            }
+        } else {
+            let params: Option<Vec<_>> = ext.ext_type_params.iter().map(|ty| nondep(*ty)).collect();
+            (ext.ext_type_path, params?)
+        };
+        let ext_args = match &ext.ext_args {
+            ConstructorArguments::CstrTuple(args) => ConstructorArguments::CstrTuple(
+                args.iter().map(|ty| nondep(*ty)).collect::<Option<_>>()?,
+            ),
+            ConstructorArguments::CstrRecord(labels) => ConstructorArguments::CstrRecord(
+                labels
+                    .iter()
+                    .map(|label| {
+                        Some(LabelDeclaration {
+                            ld_type: nondep(label.ld_type)?,
+                            ..label.clone()
+                        })
+                    })
+                    .collect::<Option<_>>()?,
+            ),
+        };
+        let ext_ret_type = match ext.ext_ret_type {
+            Some(ty) => Some(nondep(ty)?),
+            None => None,
+        };
+        Some(super::decl::ExtensionConstructor {
+            ext_type_path,
+            ext_type_params,
+            ext_args,
+            ext_ret_type,
+            ext_private: ext.ext_private,
+            ext_loc: ext.ext_loc,
+            ext_attributes: ext.ext_attributes.clone(),
+            ext_is_exception: ext.ext_is_exception,
+        })
+    })
+}
+
 fn nondep_type_kind(
     ctx: &TypeContext,
     env: &Env,
@@ -15298,6 +15376,32 @@ mod tests {
     use crate::types::decl::{
         ModuleDeclaration, ModuleType, RecStatus, SignatureItem, TypeDeclaration, TypeKind,
     };
+
+    /// A node shared by a parameter and an argument of an extension
+    /// constructor is copied once (compiler/ml/ctype.ml:4520-4522).
+    #[test]
+    fn nondep_extension_constructor_keeps_a_shared_node_shared() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let env = Env::empty();
+        let mid = ctx.create_ident("X");
+        let shared = ctx.new_tuple(vec![ctx.new_var(None), ctx.new_var(None)]);
+        let ext = crate::types::decl::ExtensionConstructor {
+            ext_type_path: Path::pident(ctx.create_ident("t")),
+            ext_type_params: vec![shared],
+            ext_args: crate::types::decl::ConstructorArguments::CstrTuple(vec![shared]),
+            ext_ret_type: None,
+            ext_private: PrivateFlag::Public,
+            ext_loc: crate::types::DeclLoc::none(),
+            ext_attributes: vec![],
+            ext_is_exception: false,
+        };
+        let result = nondep_extension_constructor(&ctx, &env, &mid, &ext).unwrap();
+        let crate::types::decl::ConstructorArguments::CstrTuple(args) = &result.ext_args else {
+            panic!("tuple arguments expected");
+        };
+        assert_ne!(ctx.repr(result.ext_type_params[0]), ctx.repr(shared));
+        assert_eq!(ctx.repr(result.ext_type_params[0]), ctx.repr(args[0]));
+    }
 
     /// Pairs of types `subtype_list` compares.
     type TypePairs = Vec<(TypeExprRef, TypeExprRef)>;

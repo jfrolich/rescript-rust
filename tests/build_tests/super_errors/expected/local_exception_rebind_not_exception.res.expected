@@ -1,0 +1,11 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/local_exception_rebind_not_exception.res[0m:[2m3:17[0m
+
+  1 [2m│[0m type t = A(int)
+  2 [2m│[0m let f = () => {
+  [1;31m3[0m [2m│[0m   exception L = [1;31mA[0m
+  4 [2m│[0m   1
+  5 [2m│[0m }
+
+  The constructor A has type t but was expected to be of type exn

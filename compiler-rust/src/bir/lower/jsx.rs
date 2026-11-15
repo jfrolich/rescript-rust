@@ -96,7 +96,7 @@ fn jsx_tag(bir: &Bir, idents: &[Ident], tag: NodeId, spelling: &mut String, step
     }
 }
 
-impl State<'_> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// X: jsx_callee / translate_scoped_module_value / translate_scoped_global_value.
     /// O(module inventory + scopes + spelling bytes). Each scope is built once.
     fn jsx_callee(&mut self, decl: &ExternalDecl) -> NodeId {

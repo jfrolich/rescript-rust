@@ -342,7 +342,7 @@ pub(super) struct Plan {
     outputs: Run<Output>,
 }
 
-impl State<'_> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// V: compile_untagged_switch. O(planner work + its emitted plan + new
     /// fingerprint nodes). Stable source groups provide dense equality aliases;
     /// planner comparisons read those aliases without borrowing mutable state.

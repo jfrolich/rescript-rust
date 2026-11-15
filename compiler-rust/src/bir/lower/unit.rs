@@ -109,21 +109,25 @@ mod tests {
     use crate::lambda::lam_constant::Constant;
     use crate::lambda::lam_tag_info::TagInfo;
 
+    // Each count includes the operand stack of `Rows`, the implementation
+    // of the lowering's interface, reserved once in `State::new`: the one
+    // allocation the interface adds to a unit (THREE_TREES 11.4, "T6: the
+    // interface" (a)).
     #[test]
     fn full_unit_allocation_boundary_conditionals() {
-        assert_unit_allocation_count("conditionals", 85);
+        assert_unit_allocation_count("conditionals", 86);
     }
     #[test]
     fn full_unit_allocation_boundary_switches() {
-        assert_unit_allocation_count("switches", 102);
+        assert_unit_allocation_count("switches", 103);
     }
     #[test]
     fn full_unit_allocation_boundary_applications() {
-        assert_unit_allocation_count("applications", 85);
+        assert_unit_allocation_count("applications", 86);
     }
     #[test]
     fn full_unit_allocation_boundary_untagged() {
-        assert_unit_allocation_count("untagged", 155);
+        assert_unit_allocation_count("untagged", 156);
     }
 
     /// Import is outside measurement; fresh state construction, lowering,

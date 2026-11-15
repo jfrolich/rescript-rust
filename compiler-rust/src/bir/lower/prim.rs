@@ -11,7 +11,7 @@ pub(super) struct Prim {
     pub operands: crate::bir::ListId,
 }
 
-impl State<'_> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// O(1): inspect a numeric leaf and its interned constant.
     pub(super) fn primitive_int(&self, node: NodeId) -> Option<i32> {
         if let View::JNumber { value } = self.arena.view(node) {
@@ -304,9 +304,9 @@ impl State<'_> {
             Primitive::Pmakearray => {
                 plain::node(&mut self.arena, View::JArray { values }, 1)
             }
-            Primitive::Pfield(idx, info) => self.primitive_field(*idx, info, values[0]),
+            Primitive::Pfield(idx, info) => B::node(self.primitive_field(*idx, info, B::from_node(values[0]))),
             Primitive::Psetfield(idx, info) => {
-                self.primitive_set_field(*idx, info.name(), values[0], values[1])
+                B::node(self.primitive_set_field(*idx, info.name(), B::from_node(values[0]), B::from_node(values[1])))
             }
             Primitive::Pobjtag => {
                 let property = self.arena.intern_text("TAG");
@@ -492,19 +492,19 @@ impl State<'_> {
                 }
             }
             // P: compile_primitive_js, comparison arms.
-            Primitive::Pintcomp(cmp) => self.primitive_int_comparison(*cmp, values[0], values[1]),
-            Primitive::Pboolcomp(cmp) => self.primitive_bool_comparison(*cmp, values[0], values[1]),
+            Primitive::Pintcomp(cmp) => B::node(self.primitive_int_comparison(*cmp, B::from_node(values[0]), B::from_node(values[1]))),
+            Primitive::Pboolcomp(cmp) => B::node(self.primitive_bool_comparison(*cmp, B::from_node(values[0]), B::from_node(values[1]))),
             Primitive::Pstringcomp(cmp) => {
-                self.primitive_literal_comparison(*cmp, values[0], values[1], false)
+                B::node(self.primitive_literal_comparison(*cmp, B::from_node(values[0]), B::from_node(values[1]), false))
             }
             Primitive::Pbigintcomp(cmp) => {
-                self.primitive_literal_comparison(*cmp, values[0], values[1], true)
+                B::node(self.primitive_literal_comparison(*cmp, B::from_node(values[0]), B::from_node(values[1]), true))
             }
-            Primitive::Pobjcomp(cmp) => self.primitive_object_comparison(*cmp, values[0], values[1]),
+            Primitive::Pobjcomp(cmp) => B::node(self.primitive_object_comparison(*cmp, B::from_node(values[0]), B::from_node(values[1]))),
             Primitive::Pfloatcomp(
                 cmp @ (crate::lambda::lam_compat::Comparison::Eq
                 | crate::lambda::lam_compat::Comparison::Neq),
-            ) => self.primitive_int_comparison(*cmp, values[0], values[1]),
+            ) => B::node(self.primitive_int_comparison(*cmp, B::from_node(values[0]), B::from_node(values[1]))),
             Primitive::Pfloatcomp(cmp) | Primitive::Pjscomp(cmp) => norm::je4_bin(
                 &mut self.arena,
                 super::prim_cmp::comparison_op(*cmp, true),
@@ -512,8 +512,8 @@ impl State<'_> {
                 values[1],
             ),
             Primitive::Pobjorder => self.primitive_runtime("Primitive_object", "compare", values),
-            Primitive::Pobjmin => self.primitive_min_max("object", false, values[0], values[1]),
-            Primitive::Pobjmax => self.primitive_min_max("object", true, values[0], values[1]),
+            Primitive::Pobjmin => B::node(self.primitive_min_max("object", false, B::from_node(values[0]), B::from_node(values[1]))),
+            Primitive::Pobjmax => B::node(self.primitive_min_max("object", true, B::from_node(values[0]), B::from_node(values[1]))),
             Primitive::Pboolorder => {
                 if let (Some(l), Some(r)) = (
                     self.primitive_bool(values[0]),
@@ -526,24 +526,24 @@ impl State<'_> {
                     self.primitive_runtime("Primitive_bool", "compare", values)
                 }
             }
-            Primitive::Pboolmin => self.primitive_min_max("bool", false, values[0], values[1]),
-            Primitive::Pboolmax => self.primitive_min_max("bool", true, values[0], values[1]),
+            Primitive::Pboolmin => B::node(self.primitive_min_max("bool", false, B::from_node(values[0]), B::from_node(values[1]))),
+            Primitive::Pboolmax => B::node(self.primitive_min_max("bool", true, B::from_node(values[0]), B::from_node(values[1]))),
             Primitive::Pintorder => self.primitive_runtime("Primitive_int", "compare", values),
-            Primitive::Pintmin => self.primitive_min_max("int", false, values[0], values[1]),
-            Primitive::Pintmax => self.primitive_min_max("int", true, values[0], values[1]),
+            Primitive::Pintmin => B::node(self.primitive_min_max("int", false, B::from_node(values[0]), B::from_node(values[1]))),
+            Primitive::Pintmax => B::node(self.primitive_min_max("int", true, B::from_node(values[0]), B::from_node(values[1]))),
             Primitive::Pfloatorder => self.primitive_runtime("Primitive_float", "compare", values),
-            Primitive::Pfloatmin => self.primitive_min_max("float", false, values[0], values[1]),
-            Primitive::Pfloatmax => self.primitive_min_max("float", true, values[0], values[1]),
+            Primitive::Pfloatmin => B::node(self.primitive_min_max("float", false, B::from_node(values[0]), B::from_node(values[1]))),
+            Primitive::Pfloatmax => B::node(self.primitive_min_max("float", true, B::from_node(values[0]), B::from_node(values[1]))),
             Primitive::Pbigintorder => {
                 self.primitive_runtime("Primitive_bigint", "compare", values)
             }
-            Primitive::Pbigintmin => self.primitive_min_max("bigint", false, values[0], values[1]),
-            Primitive::Pbigintmax => self.primitive_min_max("bigint", true, values[0], values[1]),
+            Primitive::Pbigintmin => B::node(self.primitive_min_max("bigint", false, B::from_node(values[0]), B::from_node(values[1]))),
+            Primitive::Pbigintmax => B::node(self.primitive_min_max("bigint", true, B::from_node(values[0]), B::from_node(values[1]))),
             Primitive::Pstringorder => {
                 self.primitive_runtime("Primitive_string", "compare", values)
             }
-            Primitive::Pstringmin => self.primitive_min_max("string", false, values[0], values[1]),
-            Primitive::Pstringmax => self.primitive_min_max("string", true, values[0], values[1]),
+            Primitive::Pstringmin => B::node(self.primitive_min_max("string", false, B::from_node(values[0]), B::from_node(values[1]))),
+            Primitive::Pstringmax => B::node(self.primitive_min_max("string", true, B::from_node(values[0]), B::from_node(values[1]))),
             // P: compile_primitive_js, arithmetic arms; J-M3–M13 own the folds.
             Primitive::Paddint => {
                 norm::jm4_int32_add_sub(&mut self.arena, false, values[0], values[1])

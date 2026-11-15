@@ -13,7 +13,7 @@ pub(super) struct Evaluation {
     statements: Vec<NodeId>,
 }
 
-impl State<'_> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// A:28 delay_safe: a cached fact, never a subtree walk.
     fn delay_safe(&self, value: NodeId) -> bool {
         self.arena

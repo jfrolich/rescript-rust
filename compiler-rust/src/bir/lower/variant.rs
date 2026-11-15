@@ -147,7 +147,7 @@ pub(super) fn is_untagged(h: &SwitchHeader<'_>) -> bool {
         })
 }
 
-impl State<'_> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// V: compile_named_variant_switch_*_statements / uses_named_variant_switch.
     /// O(keys + fingerprint/grouping work), with two bounded side plans.
     pub(super) fn named_variant(

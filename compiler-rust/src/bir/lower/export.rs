@@ -193,7 +193,7 @@ pub(crate) enum Resolved {
     Chain(bool),
 }
 
-impl State<'_> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// O:209 extract_toplevel_exports and the finished case of
     /// compile_main.ml:390-395. Reads the unit's last value: an export
     /// block gives the export identifiers and leaves its values, detached, in

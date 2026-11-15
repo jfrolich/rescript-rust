@@ -1,0 +1,18 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/functor_parameter_modtype_abstract_fallback.res[0m:[2m12:17-27[0m
+
+  10 [2m│[0m let m = module(A: P)
+  11 [2m│[0m module R = F(unpack(m))
+  [1;31m12[0m [2m│[0m module M: R.U = [1;31m{let x = 1}[0m
+  13 [2m│[0m 
+
+  Signature mismatch:
+  
+  Actual module type:
+    {
+      let x: int
+    }
+  
+  Expected module type:
+    R.U

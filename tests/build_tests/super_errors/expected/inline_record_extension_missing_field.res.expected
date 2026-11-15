@@ -1,0 +1,10 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/inline_record_extension_missing_field.res[0m:[2m5:13-18[0m
+
+  3 [2m│[0m   type t += C({v: int, w: int})
+  4 [2m│[0m }
+  [1;31m5[0m [2m│[0m let c = R.C([1;31m{w: 1}[0m)
+  6 [2m│[0m 
+
+  Some required record fields are missing: v.

@@ -21,7 +21,7 @@ pub(super) struct Storage {
     resolved: std::collections::HashMap<Ident, (ImportId, Option<crate::bir::StrId>)>,
 }
 
-impl State<'_> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// M: is_awaited_unit / awaited_units. O(1), inspect two primitive headers
     /// at the binding on the existing walk; no second unit traversal.
     pub(super) fn record_awaited_unit(&mut self, var: VarId, value: NodeId) {

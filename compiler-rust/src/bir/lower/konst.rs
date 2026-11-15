@@ -152,7 +152,7 @@ fn leaf(arena: &crate::bir::Bir, id: ConstId, text: &mut String) -> Leaf {
         none,
     }
 }
-impl State<'_> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// H12: K:60 compile_constant, numeric leaf with preserved spelling.
     fn number(&mut self, value: Constant) -> NodeId {
         let value = self.arena.intern_const(value);
