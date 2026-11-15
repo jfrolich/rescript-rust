@@ -45,7 +45,7 @@
 //! A statement's row has no other flag.
 use super::{Unsupported, literal, walk};
 use crate::js_ir::op::{BinOp, Number};
-use crate::js_ir::printer::normalize_float_literal_for_js;
+use crate::js_ir::printer::normalize_float_literal_for_js_into;
 use oxc_allocator::{Allocator, GetAllocator, Vec as ArenaVec};
 use oxc_ast::{ast::*, builder::AstBuilder};
 use oxc_span::SPAN;
@@ -54,6 +54,7 @@ use oxc_syntax::{
     number::{BigintBase, NumberBase},
     operator::{AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator},
     reference::ReferenceId,
+    symbol::SymbolId,
 };
 
 /// The five facts a literal has (`Number`, `Str`).
@@ -359,6 +360,10 @@ pub(crate) struct Builder<'a> {
     pool: Vec<Option<S<'a>>>,
     /// Unit operations: one per node built and one per operand of a list.
     pub steps: u64,
+    /// The normalized text of the float literal [`Builder::number`] reads,
+    /// cleared and reused: it grows to the longest literal of the builder's
+    /// life and allocates nothing after that.
+    float_text: String,
 }
 
 impl<'a> Builder<'a> {
@@ -372,6 +377,7 @@ impl<'a> Builder<'a> {
             staged: Vec::new(),
             pool: Vec::new(),
             steps: 0,
+            float_text: String::new(),
         }
     }
 
@@ -567,9 +573,10 @@ impl<'a> Builder<'a> {
                 Ok(self.attach(expr, row(aux, 0)))
             }
             Number::Float(f) => {
-                let value = normalize_float_literal_for_js(&f.f)
-                    .parse::<f64>()
-                    .map_err(|_| Unsupported("float literal"))?;
+                self.float_text.clear();
+                normalize_float_literal_for_js_into(&f.f, &mut self.float_text);
+                let value =
+                    self.float_text.parse::<f64>().map_err(|_| Unsupported("float literal"))?;
                 let literal = if value.is_nan() {
                     Expression::new_identifier(SPAN, "NaN", &self.ast)
                 } else if value.is_infinite() {
@@ -915,14 +922,65 @@ impl<'a> Builder<'a> {
     /// staged ones: at most two allocations, none when the capacity is
     /// there.
     pub fn reserve_statements(&mut self, statements: usize, staged: usize) {
-        let _inputs = (statements, staged);
-        todo!("T6b")
+        self.pool.reserve(statements);
+        self.staged.reserve(staged);
     }
 
     /// The row of a statement that is inside a list of the tree. O(1).
     pub fn statement_row(&self, stmt: &Statement<'a>) -> Row {
-        let _inputs = stmt;
-        todo!("T6b")
+        self.rows[stmt.node_id().index()]
+    }
+
+    /// Give `stmt` the next `node_id`, push its row and count the step: the
+    /// statement twin of [`Builder::attach`]. O(1).
+    fn attach_statement(&mut self, stmt: Statement<'a>, row: Row) -> S<'a> {
+        stmt.set_node_id(NodeId::from_usize(self.rows.len()));
+        self.rows.push(row);
+        self.steps += 1;
+        S { stmt, row }
+    }
+
+    /// The statements of `list` moved out of the pool into an arena vector
+    /// of exactly that length, and the union of their rows' flags (read in
+    /// the pool, not the table). One step and one move of 24 bytes per
+    /// statement; panics on a statement taken before.
+    fn drain(&mut self, list: List) -> (ArenaVec<'a, Statement<'a>>, u16) {
+        let mut body = ArenaVec::with_capacity_in(list.len(), &self.ast);
+        let mut flags = 0;
+        let start = list.start as usize;
+        for slot in &mut self.pool[start..start + list.len()] {
+            let statement = slot.take().expect("a statement taken twice");
+            flags |= statement.row.flags;
+            body.push(statement.stmt);
+        }
+        self.steps += list.len() as u64;
+        (body, flags)
+    }
+
+    /// `{ list }` as a block statement of the print form, without a row of
+    /// its own (the row is that of the constructor that writes it), and the
+    /// union of its statements' flags. As [`Builder::drain`].
+    fn block_of(&mut self, list: List) -> (Statement<'a>, u16) {
+        let (body, flags) = self.drain(list);
+        (Statement::new_block_statement(SPAN, body, &self.ast), flags)
+    }
+
+    /// The label `name`. O(length of the name): copied into the arena.
+    fn label(&self, name: &str) -> LabelIdentifier<'a> {
+        LabelIdentifier::new(SPAN, self.ast.allocator().alloc_str(name), &self.ast)
+    }
+
+    /// The row of a statement of `kind` that holds what has `flags`: their
+    /// `HAS_FUN` and `SEAL`, and no other flag. O(1).
+    fn statement(kind: Kind, flags: u16) -> Row {
+        Row { flags: flags & INHERITED, kind, aux: 0, payload: 0 }
+    }
+
+    /// The slot of statement `index` of `list` in the pool. O(1). Panics
+    /// when the index is outside the list.
+    fn slot(&self, list: List, index: usize) -> &Option<S<'a>> {
+        assert!(index < list.len(), "statement {index} of a list of {}", list.len());
+        &self.pool[list.start as usize + index]
     }
 
     /// The statements staged from here on belong to the next
@@ -933,114 +991,151 @@ impl<'a> Builder<'a> {
 
     /// One statement of the list being collected. O(1): a move of 24 bytes.
     pub fn stage(&mut self, statement: S<'a>) {
-        let _inputs = statement;
-        todo!("T6b")
+        self.staged.push(statement);
     }
 
     /// The statements staged since `mark`, as a list in flight. One step
     /// and one move of 24 bytes per statement.
     pub fn list(&mut self, mark: Mark) -> List {
-        let _inputs = mark;
-        todo!("T6b")
+        let start = self.pool.len() as u32;
+        let len = (self.staged.len() - mark.0 as usize) as u32;
+        self.pool.extend(self.staged.drain(mark.0 as usize..).map(Some));
+        self.steps += u64::from(len);
+        List { start, len }
     }
 
     /// The row of statement `index` of `list`. O(1). Panics when the
     /// statement was taken.
     pub fn row_at(&self, list: List, index: usize) -> Row {
-        let _inputs = (list, index);
-        todo!("T6b")
+        self.statement_at(list, index).row
     }
 
     /// The row of the last statement of `list`: what "ends in `return`"
     /// reads (J-S3, rule 6). O(1).
     pub fn last_row(&self, list: List) -> Option<Row> {
-        let _inputs = list;
-        todo!("T6b")
+        (!list.is_empty()).then(|| self.row_at(list, list.len() - 1))
     }
 
     /// Statement `index` of `list`, by reference. O(1).
     pub fn statement_at(&self, list: List, index: usize) -> &S<'a> {
-        let _inputs = (list, index);
-        todo!("T6b")
+        self.slot(list, index).as_ref().expect("a statement taken twice")
     }
 
     /// Take statement `index` out of `list`. O(1): a move of 24 bytes.
     /// Panics when it was taken before.
     pub fn take(&mut self, list: List, index: usize) -> S<'a> {
-        let _inputs = (list, index);
-        todo!("T6b")
+        assert!(index < list.len(), "statement {index} of a list of {}", list.len());
+        self.pool[list.start as usize + index].take().expect("a statement taken twice")
     }
 
     /// The statements of `list` as the body of a program or a function,
     /// consuming the list. One step per statement.
     pub fn statements_of(&mut self, list: List) -> ArenaVec<'a, Statement<'a>> {
-        let _inputs = list;
-        todo!("T6b")
+        self.drain(list).0
     }
 
     /// The expression statement `value;`, as given (J-S1 is a rule). O(1).
     pub fn exp(&mut self, value: J<'a>) -> S<'a> {
-        let _inputs = value;
-        todo!("T6b")
+        let row = Self::statement(Kind::Exp, value.row.flags);
+        let stmt = Statement::new_expression_statement(SPAN, value.expr, &self.ast);
+        self.attach_statement(stmt, row)
     }
 
     /// `return value;`. The value is always written: a unit function's
     /// final `return` is dropped by the seal. O(1).
     pub fn return_(&mut self, value: J<'a>) -> S<'a> {
-        let _inputs = value;
-        todo!("T6b")
+        let row = Self::statement(Kind::Return, value.row.flags);
+        let stmt = Statement::new_return_statement(SPAN, Some(value.expr), &self.ast);
+        self.attach_statement(stmt, row)
     }
 
     /// `throw value;`. O(1).
     pub fn throw(&mut self, value: J<'a>) -> S<'a> {
-        let _inputs = value;
-        todo!("T6b")
+        let row = Self::statement(Kind::Throw, value.row.flags);
+        let stmt = Statement::new_throw_statement(SPAN, value.expr, &self.ast);
+        self.attach_statement(stmt, row)
     }
 
     /// `let variable = value;`, the binder printed through the name table
     /// (the symbol id is the variable's index). `kind` is the `LetKind`.
     /// Whether the declaration prints, and as what, is the seal's. O(1).
     pub fn declare(&mut self, variable: u32, kind: u8, value: Option<J<'a>>) -> S<'a> {
-        let _inputs = (variable, kind, value);
-        todo!("T6b")
+        let flags = value.as_ref().map_or(0, |value| value.row.flags);
+        let row = Row { aux: kind, payload: variable, ..Self::statement(Kind::Declare, flags) };
+        let binder = BindingIdentifier::new_with_symbol_id(
+            SPAN,
+            "",
+            SymbolId::from_usize(variable as usize),
+            &self.ast,
+        );
+        let declarator = VariableDeclarator::new(
+            SPAN,
+            BindingPattern::BindingIdentifier(oxc_allocator::Box::new_in(binder, &self.ast)),
+            None,
+            value.map(|value| value.expr),
+            false,
+            &self.ast,
+        );
+        let mut declarations = ArenaVec::with_capacity_in(1, &self.ast);
+        declarations.push(declarator);
+        let stmt = Statement::new_variable_declaration(
+            SPAN,
+            VariableDeclarationKind::Let,
+            declarations,
+            false,
+            &self.ast,
+        );
+        self.attach_statement(stmt, row)
     }
 
     /// `if (test) { then } else { otherwise }`, as given (J-S3 is a rule):
     /// both blocks are written, an empty one too. One step per statement
     /// of the two lists.
     pub fn if_(&mut self, test: J<'a>, then: List, otherwise: List) -> S<'a> {
-        let _inputs = (test, then, otherwise);
-        todo!("T6b")
+        let (consequent, then_flags) = self.block_of(then);
+        let (alternate, otherwise_flags) = self.block_of(otherwise);
+        let row = Self::statement(Kind::If, test.row.flags | then_flags | otherwise_flags);
+        let stmt =
+            Statement::new_if_statement(SPAN, test.expr, consequent, Some(alternate), &self.ast);
+        self.attach_statement(stmt, row)
     }
 
     /// The block statement `{ list }`. One step per statement.
     pub fn block(&mut self, list: List) -> S<'a> {
-        let _inputs = list;
-        todo!("T6b")
+        let (stmt, flags) = self.block_of(list);
+        self.attach_statement(stmt, Self::statement(Kind::Block, flags))
     }
 
     /// `while (test) { body }`, under `label` when given. One step per
     /// statement of the body.
     pub fn while_(&mut self, label: Option<&str>, test: J<'a>, body: List) -> S<'a> {
-        let _inputs = (label, test, body);
-        todo!("T6b")
+        let (body, body_flags) = self.block_of(body);
+        let row = Self::statement(Kind::While, test.row.flags | body_flags);
+        let mut stmt = Statement::new_while_statement(SPAN, test.expr, body, &self.ast);
+        if let Some(label) = label {
+            stmt = Statement::new_labeled_statement(SPAN, self.label(label), stmt, &self.ast);
+        }
+        self.attach_statement(stmt, row)
     }
 
     /// `break;` or `break label;`. O(length of the label).
     pub fn break_(&mut self, label: Option<&str>) -> S<'a> {
-        let _inputs = label;
-        todo!("T6b")
+        let label = label.map(|label| self.label(label));
+        let stmt = Statement::new_break_statement(SPAN, label, &self.ast);
+        self.attach_statement(stmt, Self::statement(Kind::Break, 0))
     }
 
     /// `continue;` or `continue label;`. O(length of the label).
     pub fn continue_(&mut self, label: Option<&str>) -> S<'a> {
-        let _inputs = label;
-        todo!("T6b")
+        let label = label.map(|label| self.label(label));
+        let stmt = Statement::new_continue_statement(SPAN, label, &self.ast);
+        self.attach_statement(stmt, Self::statement(Kind::Continue, 0))
     }
 
     /// `debugger;`. O(1).
     pub fn debugger(&mut self) -> S<'a> {
-        todo!("T6b")
+        let stmt = Statement::new_debugger_statement(SPAN, &self.ast);
+        self.attach_statement(stmt, Self::statement(Kind::Debugger, 0))
     }
 }
 

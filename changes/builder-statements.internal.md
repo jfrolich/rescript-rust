@@ -1,0 +1,1 @@
+- Build statements and statement lists as oxc nodes in the backend builder, and normalize its float literals into a reused buffer.
