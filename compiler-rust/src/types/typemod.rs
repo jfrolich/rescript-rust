@@ -546,10 +546,17 @@ fn force_poly_typed_core_type(
     }
 }
 
+/// Looks up the constructor a `Pext_rebind` names and marks it used as
+/// `Env.mark_constructor usage env (Longident.last lid.txt) cdescr` does
+/// (compiler/ml/typedecl.ml:1694-1700): `Positive` when the rebound
+/// constructor is private or the new one is public (`priv`, always `Public`
+/// for an exception), `Privatize` otherwise. Cost: one constructor lookup
+/// and one usage-table update.
 fn lookup_rebind_constructor<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     lid: &Located<LidentIdx>,
+    priv_: crate::types::PrivateFlag,
 ) -> TypeModResult<(Path, crate::types::decl::ConstructorDescription)> {
     let longident = tctx.resolve_lid(lid.txt).clone();
     let desc = match &longident {
@@ -573,6 +580,20 @@ fn lookup_rebind_constructor<'a>(
             tctx, env, lid.loc, &longident,
         ))
     })?;
+    let usage = if matches!(desc.cstr_private, crate::types::PrivateFlag::Private)
+        || matches!(priv_, crate::types::PrivateFlag::Public)
+    {
+        crate::types::usage::ConstructorUsage::Positive
+    } else {
+        crate::types::usage::ConstructorUsage::Privatize
+    };
+    crate::types::typecore::mark_constructor(
+        tctx.type_ctx,
+        env,
+        usage,
+        tctx.arena.get_string(longident.last_idx()),
+        &desc,
+    );
     // The path the rebound constructor is read at is the one its description
     // carries (compiler/ml/typedecl.ml:1745-1749): for `M.E` the field `E`
     // of `M`, not a name of its own. A constructor that is no extension is
@@ -16664,7 +16685,8 @@ pub(crate) fn transl_exception<'a>(
             )
         }
         crate::parser::ast::ExtensionConstructorKind::Pext_rebind(lid) => {
-            let (rebind_path, rebind_desc) = lookup_rebind_constructor(tctx, env, lid)?;
+            let (rebind_path, rebind_desc) =
+                lookup_rebind_constructor(tctx, env, lid, crate::types::PrivateFlag::Public)?;
             let (inst_args, cstr_res) = crate::types::instance_constructor(ctx, &rebind_desc);
             let (res, ret_type) = if rebind_desc.cstr_generalized {
                 let res = ctx.new_predef_constr(crate::types::predef::path_exn(), vec![]);
@@ -17071,7 +17093,8 @@ fn transl_type_extension<'a>(
                 )
             }
             crate::parser::ast::ExtensionConstructorKind::Pext_rebind(lid) => {
-                let (rebind_path, rebind_desc) = lookup_rebind_constructor(tctx, env, lid)?;
+                let (rebind_path, rebind_desc) =
+                    lookup_rebind_constructor(tctx, env, lid, ext_private)?;
                 let (inst_args, cstr_res) = crate::types::instance_constructor(ctx, &rebind_desc);
                 let (res, ret_type) = if rebind_desc.cstr_generalized {
                     let type_params = target_type_decl

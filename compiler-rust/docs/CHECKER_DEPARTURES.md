@@ -7581,3 +7581,32 @@ status:
 | 19 | local declaration `exception L('a)` | 2, `2:16` "Unbound type parameter 'a" | DIFFER (0) | agree |
 | 20 | `L("x")` for an `int` argument | 2, `4:5-7` "This has type: string" | DIFFER (2, `4:3-8` "expects 0 arguments") | agree |
 | 21 | rebind of `Nope.E`, an unbound module | 2, `2:17-22` "The module or file Nope can't be found." | DIFFER (0, warning 38) | agree |
+
+#### Fixed: a rebind marks the constructor it rebinds as used
+
+- The commit that adds this paragraph: OCaml's `Pext_rebind` arm marks the constructor it rebinds
+  as used: `Env.mark_constructor usage env (Longident.last lid.txt) cdescr`
+  (`compiler/ml/typedecl.ml:1694-1700`). The usage is `Positive`, or
+  `Privatize` when the new constructor is private and the rebound one is
+  not. The Rust `lookup_rebind_constructor`
+  (`compiler-rust/src/types/typemod.rs:555`) did not mark it, so every
+  rebound constructor kept the warning 38 it would have had without the
+  rebind. This applied to exception items, local exceptions and
+  `type t += B = A` alike. It now calls `typecore::mark_constructor` with
+  that usage. The exception paths pass `Public`, and
+  `transl_type_extension` passes the extension's private flag. Fixtures:
+  super_errors `local_exception_rebind_marks_use`,
+  `local_exception_rebind_marks_use_item` and
+  `local_exception_rebind_marks_use_private_extension`. All 21 programs
+  above still agree, and every existing super_errors fixture keeps its
+  output.
+
+| # | Program | OCaml warnings | Trunk | Previous head | After |
+| --- | --- | --- | --- | --- | --- |
+| 22 | local `L = E`, local `M = L`, `\| L(n)` | 38 `4:3-17` "unused exception M" | DIFFER | DIFFER (also `3:3-17` "exception L is never used to build values") | agree |
+| 23 | item `L = E`, item `M = L` under a signature, `\| L(n)`, `\| M(_)` | 38 `6:3-17` "exception M is never used to build values" | DIFFER (also L, `5:3-17`) | DIFFER (also L, `5:3-17`) | agree |
+| 24 | local `L = E`, `M = L`, none used | 38 `4:3-17` "unused exception M" | DIFFER | DIFFER (also `3:3-17` "unused exception L") | agree |
+| 25 | local `K(int)` used only by `L = K`, `\| L(n)` | 38 `3:3-17` "exception L is never used to build values" | DIFFER | DIFFER (also `2:3-18` "unused exception K") | agree |
+| 26 | `type t += private B = A`, `\| B(n)`, under a signature | 38 `6:13-18` "extension constructor A is never used to build values." and `7:21-25` B | DIFFER ("unused extension constructor A") | DIFFER (same) | agree |
+| 27 | `type t += B = A`, `\| B(n)`, under a signature | 38 `7:13-17` for B only | DIFFER (also `6:13-18` "unused extension constructor A") | DIFFER (same) | agree |
+| 28 | item `K(int)` used only by item `L = K`, under a signature | 38 `5:3-17` for L only | DIFFER (also `4:3-18` "unused exception K") | DIFFER (same) | agree |
