@@ -3767,7 +3767,9 @@ pins stay 86, 103, 86, 156.
 | T6m | `prim.rs`, `konst.rs`, `record.rs`, `import.rs` | 546 passed (`bir::lower`), 58 (`bir::j`); 589 lines changed | Nothing in the trait (`str_of` and `locate_stmt` were added before it). The operand-stack reserve above |
 | T6n | `cond.rs`, `expr.rs` | 546 and 58, on top of T6m's; 279 lines changed | `is_empty_block`, `branch_last_kind`, `release_stmt`, `if_blocks`, `take_if`, `function_of_block` |
 | T6p | `args.rs`, `call.rs`, `ffi_args.rs`, `external.rs`, `jsx.rs` | 550 and 58, on top of T6m's and T6n's; 703 lines changed | `take_operands`, `refill`; `new_` wrote the wrong `aux` |
-| T6o, T6w, T6q | | Not probed in this turn | See "Not done" below |
+| T6w | `tail.rs`, `rec.rs`, `exit.rs`, `label.rs` | 551 and 58, alone on trunk (no other probe in place); 139 lines changed | Nothing. `label.rs` builds no J node |
+| T6o | `switch.rs`, `variant.rs`, `untagged.rs`, `location.rs` | 550 and 58 with T6w's probe in place, the one failure being the size pin of `Rows` that this turn moves; 348 lines changed | `copy_stmt`, `copy_fresh`, and their storage in `Rows` |
+| T6q | | Not probed | See "Not done" below |
 
 **What the functions of the survey became.** "T6m to T6x: what each
 slice adds" listed six expression-side functions to add once T6k had
@@ -3830,18 +3832,84 @@ free functions over `&Bir` that `names.rs` (T6r) calls on the finished
 node; they are not the lowering building JavaScript and are converted
 with `names.rs`.
 
-**Not done in this turn.** T6o, T6w and T6q have no probe, no added
-function and no prompt. Open for their design turn, as the reviews left
-them: T6o states the fields `copy_stmt` needs in `Rows` and pins
-`size_of::<Rows>()` again (decision 7); T6q starts from the owner
-column (`owner`, `kind_of`, `is_callee` are in code) and says how the
-strictness of a statement is answered (decisions 4 and 9). The rules
-above already bind them: no signature change, no shared file. Known
-from the callers' table: `tail.rs::loop_function_body` keeps taking and
-returning a block statement (T6n calls it), `konst::number` is called
-from `label.rs`, `if_statement`, `unnest`, `place` and
-`drop_pure_effect` from `switch.rs`, `variant.rs`, `untagged.rs`,
-`exit.rs` and `rec.rs`.
+**T6w and T6o: the actions of a switch stay a pool list.** `exit.rs`,
+`switch.rs` and `untagged.rs` reserve a list of the arena's pool for
+the actions of a switch, write each action into its slot
+(`Lists::set`) and hand the list to the switch. The survey proposed to
+collect the actions in a scratch vector of the lowering and build the
+list with `list`. The probe of T6o did that with `State::scratch`: the
+allocation count of the untagged unit went from 156 to 164 at width
+1,000 and 168 at 10,000, because the vector grows with the widest
+switch where the pool is reserved once from the source's counts.
+Decided: the reserved list, `set` and `truncate` stay (storage, as the
+operand lists of T6p) and the switch takes it with `B::list_from`. The
+pins hold with it. T6x replaces the pool list when `StatementStack<B>`
+gives a list its statements. (`ffi_args.rs::external_dispatch`, T6p,
+collects in `State::scratch` as its prompt says: its dispatch is built
+inside a function literal and its cases are few; its allocation test
+held in the probe.)
+
+**T6o: the copy (decision 7 of the review of the T6l skeleton).**
+`untagged.rs` copies a statement (an action that the dispatch emits
+more than once, `copy_dispatch_output`) and an expression (a scrutinee
+that is not a variable), and gives each binder the copy freshened the
+identifier of its source. Two functions, one body on rows:
+`copy_stmt(a, &S, fresh) -> S` in `JsStmt` and `copy_fresh(a, Ref,
+fresh) -> E` in `Js`; each appends `(fresh, source)` per binder to the
+caller's vector, in the order the variables were made. `Js::copy` stays
+for the copies of T6p, whose operands have no binder. One step per node
+copied, read from the copy's own traversal (`CopyScratch::copied`): the
+growth of the node vector, which `Js::copy` counts, is not the number
+copied when freed slots are reused.
+
+`Rows` gains two fields and is 392 bytes (it was 32):
+
+| Field | Bytes | Why it is in `Rows` |
+| --- | --- | --- |
+| `copy: CopyScratch` | 336 | The traversal order and the five renaming tables of `Bir::copy_subtree_with_scratch`. Kept between copies so that a copy in a warm unit allocates nothing; `untagged::Storage::copy_scratch` holds it today and T6o deletes that field |
+| `labels: Vec<(u32, u32)>` | 24 | The copy writes each static label it freshened there. The lowering reads none (a label is renamed inside the copy), so the vector is cleared after every copy; it is a field so that a copy with labels allocates nothing in a warm unit. `untagged::Storage::copied_labels` today, deleted by T6o |
+
+The vector of fresh binders stays the lowering's
+(`untagged::Storage::copied_vars`): the lowering reads it. `Rows` is
+one value per unit and is never passed down a walk, so the 16-byte rule
+does not apply; `State` holds it inline. The test
+`a_copy_costs_one_step_per_node_and_allocates_nothing_in_a_warm_unit`
+copies a nest of 1,000, 2,000 and 10,000 statements: no allocation, the
+capacities of the storage unchanged, as many steps as releasing the copy
+counts, and exactly linear. The allocation test of `untagged.rs` reads
+the storage through two test-only functions of `Rows`
+(`reserve_copy`, `copy_capacities`).
+
+**Not done: T6q and the cut of T6x.** T6q (`export.rs`, `close.rs`,
+`scope.rs`) has no probe, no added function and no prompt; T6x is not
+cut. What reading the 117 J sites of the three files (a search, not a
+conversion) shows, for the turn that designs T6q:
+
+- `close.rs` and `scope.rs` are free functions over `&Bir`, called from
+  `out.rs` (T6x) and `globals.rs` (T6r) on finished lists, as
+  `jsx::printed_form` is. Whether they are T6q's at all is its first
+  decision.
+- `export.rs` is not a file that builds JavaScript and holds it: it
+  reads the finished top-level run into tables indexed by node id
+  (`row_of`), climbs parents, walks the children of compound statements
+  (`has_toplevel_effect`), replaces a reference in place
+  (`Bir::replace` in `substitute_after`) and moves statements between
+  rows. The probe has to decide what a row's statement is while it is in
+  the table (a `NodeId` until T6x, by the storage rule) before it can
+  say which readers are missing.
+- `is_callee` is the test `mentions` makes (the owner is a call, a flat
+  call or a `new` whose callee the site is, or a tagged template whose
+  tag it is): confirmed by reading, not by a caller.
+- **`equal` is needed after all.** `equivalent_later` calls
+  `bir::j::equal::equal` on an initialiser and a value. The third
+  turn's decision not to add `equal` looked only at
+  `same_reusable_value`. T6q adds `equal(a, r1, r2) -> bool` with the
+  cost of `bir/j/equal.rs` and a step test.
+- Also to settle there: an in-place replacement of a reference by a
+  copy (`replace`), the children of a compound statement for the
+  strictness walk (decisions 4 and 9: `stmt_has` or a walk in the
+  lowering over `stmt_kind` and a new reader of a statement's parts),
+  and `SRest`, which the statement half has no kind test for.
 
 **T6n: the guard merge (decision 6 of the review of the T6l skeleton).**
 `cond.rs::merge_tail_guard` takes a guard `if (c) { ..; jump }` whose
@@ -5130,6 +5198,249 @@ carry it across a rebuild (that is `refill`); `new_` replaced by a call
 with invented information; a vector made per call or per case; the
 callee of a JSX element built before its properties (the order of the
 rows would change); converting `printed_form` or `jsx_tag`.
+```
+
+T6w (with both common blocks):
+
+```text
+Task T6w: tail.rs, rec.rs and exit.rs on the interface.
+Precondition, check it first and stop with a report if it fails: `rg -c
+'todo!\(' src/bir/j/rows.rs src/bir/j/rows_stmt.rs` prints nothing, and
+`cargo test --manifest-path compiler-rust/Cargo.toml --lib
+bir::lower::js` shows no test ignored.
+Yours: src/bir/lower/tail.rs, rec.rs and exit.rs whole; the changelog
+fragment. Nothing else. label.rs builds no J node (its one match of the
+search below reads a flag of the source tree) and is not edited.
+
+Do exactly this, one commit each, in this order, each pushed when made:
+
+1. tail.rs.
+   - `finish_self_call`: a value that is dropped is `self.js.release`;
+     the test for the parameter itself is `self.js.var_of(.., B::at(value))
+     == Some(param)`; an assignment is `self.js.assign`; the jump is
+     `self.js.continue_(.., None)`.
+   - `loop_function_body` keeps its signature: it takes and returns the
+     `NodeId` of a block statement (expr.rs calls it). The aliases are
+     `self.js.var` and `self.js.declare(.., LetKind::Alias, param,
+     Some(value))`. The body's statements move with one call:
+     `let (statements, moved) = (&mut self.statements, &mut
+     self.tail_body_statements);` and `self.js.unblock(..,
+     B::stmt_from_node(body), |s| { *moved += 1;
+     statements.push(B::stmt_node(s)); })`. Then `take_list`, the
+     condition `self.js.boolean(.., true)` (made before the loop),
+     `self.js.while_(.., condition, B::list_from(list), None)`,
+     `self.js.list(.., 1, std::iter::once(loop_))` and
+     `self.js.block_of`. No block is built from a list by hand.
+
+2. rec.rs.
+   - `recursive_dummy`: `let mark = self.js.mark();` then
+     `self.js.array(.., mark, 1)` or `self.js.object(.., mark, info)`,
+     and `self.js.assume_strict` on either.
+   - `recursive_block`, mode `Update`: `self.js.var`, and the
+     placeholder is `self.js.declare(.., LetKind::Variable, var,
+     Some(dummy))` stored as a `NodeId`.
+   - `recursive_block`, the self block: assert `kind == BlockLit`;
+     `let mut shell = B::from_node(value); let count =
+     self.js.take_operands(.., &mut shell);` then for each index
+     `self.js.pop()` is the field's value and `self.js.var` the target,
+     both given to `primitive_set_field` as handles; after the loop
+     `self.js.release(.., shell)`. Not `unpack_rev`: the block is
+     released after its fields are written, as today.
+   - `recursive_child`: the missing value is `self.js.undefined(..,
+     false)`. A member's code is read with `B::list_from(list)`,
+     `self.js.len` and `self.js.take_at`; a statement after a finished
+     member is `self.js.release_stmt`.
+
+3. exit.rs.
+   - `declare_empty`: `self.js.declare(.., kind, var, None)`.
+   - The exit variable: `self.js.int_literal(.., 0)` and `declare`.
+   - A handler's block: `self.js.block_of(.., B::list_from(list))`,
+     stored in `switch_output_nodes` as a `NodeId`. A dropped one is
+     `self.js.release_stmt`.
+   - `finish_catch`: `self.js.var` and `self.js.undefined(.., false)`.
+   - `exit_dispatch`, one handler: `self.js.var`, `int_literal`,
+     `self.js.bin(.., BinOp::EqEqEq, exit, order)`.
+   - `exit_dispatch`, several: the reserved list of actions and its
+     `self.arena.lists.push_iter` and `set` stay (a list assembled in
+     the pool is storage, see the common block on operand lists; the
+     same holds for statements). A shared case's empty action is
+     `self.js.list(.., 0, std::iter::empty())` and `block_of`. The
+     scrutinee is `self.js.var`, and the statement is
+     `self.js.switch(.., scrutinee, B::list_from(actions), header,
+     false)`.
+   - `exit_child`: `int_literal` and `self.js.assign`; `undefined` and
+     `declare`.
+   The tests of the three files pass unchanged.
+
+4. The changelog fragment changes/lowering-interface-exits.internal.md.
+
+End state, to paste in the pull request with the output:
+- `rg -n 'View::J|Op::J|View::S[A-Z]|Op::S[A-Z]|plain::|norm::|\.arena\.(view|node|release|detach|replace|new_node|cold|set_cold|copy_subtree\w*|\w+_from_list)\(|pure_expression|bir::j::|arena\.nodes'
+  src/bir/lower/tail.rs src/bir/lower/rec.rs src/bir/lower/exit.rs
+  src/bir/lower/label.rs` matches only below `mod tests` of each file.
+- `rg -n 'arena\.lists' src/bir/lower/exit.rs`, outside `mod tests`,
+  shows the `push_iter` and the `set` of `exit_dispatch` and nothing
+  else; tail.rs and rec.rs have none.
+- `git diff --stat origin/ocaml-to-rust-rewrite` names the three files
+  and the fragment only.
+- `cargo test --manifest-path compiler-rust/Cargo.toml --lib bir::lower`
+  and `--lib bir::j`: the counts of the base.
+- The three CI numbers of the common block.
+
+Run by the design turn against a probe conversion of these three files
+on trunk: `--lib bir::lower` 551 passed, `--lib bir::j` 58 passed, the
+four pins unchanged. Every interface function the probe called had a
+caller before. Not run: the corpus gates, `Instruction count`, check
+mode.
+
+Shortcuts that count as failure, beside the common lists: a signature
+changed (`loop_function_body`, `finish_self_call`, `catch_children`,
+`exit_children` and `recursive_children` are called from expr.rs and
+call.rs); `unpack_rev` on the self block; a vector (a scratch of
+`State` or a new one) for the actions of the dispatch: it grows with
+the widest dispatch of the unit, which the reserved pool list does not;
+an edit of label.rs.
+```
+
+T6o (with both common blocks; read also "T6w and T6o: the actions of a
+switch stay a pool list" and "T6o: the copy"):
+
+```text
+Task T6o: switch.rs, variant.rs, untagged.rs and location.rs on the
+interface.
+Precondition, check it first and stop with a report if it fails: `rg -n
+'fn (copy_stmt|copy_fresh|copy_recording|reserve_copy|copy_capacities)'
+src/bir/j/rows.rs src/bir/j/rows_stmt.rs` shows five functions, none
+with a `todo!` body, and `cargo test --manifest-path
+compiler-rust/Cargo.toml --lib bir::lower::js_stmt::` shows
+`a_copy_costs_one_step_per_node_and_allocates_nothing_in_a_warm_unit`
+passing.
+Yours: src/bir/lower/switch.rs, variant.rs, untagged.rs and location.rs
+whole; the changelog fragment. Nothing else.
+
+Lists: `self.arena.lists.push_iter`, `set` and `truncate` on the
+reserved list of a switch's actions stay as they are (storage). The
+switch takes the list with `B::list_from(actions)`. Do not collect
+actions in a vector.
+
+Do exactly this, one commit each, in this order, each pushed when made:
+
+1. location.rs. `locate_switch_run`: the test is
+   `!self.js.stmt_located(.., &B::stmt_from_node(first))`; the location
+   is `self.js.locate_stmt` on a handle made from `first`. No read of
+   cold data or of a flag.
+
+2. variant.rs.
+   - A declaration without a value: `self.js.declare(.., kind, var,
+     None)`.
+   - `switch_key_expression`: `self.js.str(.., *text)` for a string key,
+     `self.js.number(.., value)` for a numeric constant,
+     `self.js.int_literal`, `self.js.string`, `self.js.boolean`,
+     `self.js.null`, `self.js.undefined(.., false)`. Its result stays a
+     `NodeId`.
+   - `bind_named_scrutinee`: the test is `kind != Kind::Var`; `declare`
+     with the value; `self.js.var`.
+   - `named_scrutinee`: `self.js.var_of(.., B::at(value))` and
+     `self.js.var`.
+   - `advance_variant`: the tag read is `self.js.dot(.., value,
+     plan.tag_name, FieldPos::NONE, false)`; a value that is not used is
+     `self.js.release`.
+   - `named_literal_test`: `null`, `undefined`, `self.js.bin` for every
+     comparison and disjunction, `self.js.typeof_plain`,
+     `self.js.string(.., "object")`.
+   - `finish_variant`: `self.js.is_empty_block`, `release_stmt` for the
+     statement, `release` for the scrutinee, `var`, `undefined`.
+
+3. switch.rs.
+   - Declarations without a value: `declare(.., None)`.
+   - `switch_child`: the explicit break is `self.js.break_(.., None)`;
+     the body's block is `self.js.block_of(.., B::list_from(list))`,
+     stored as a `NodeId`.
+   - `finish_switch`: the emptiness of the bodies is
+     `self.js.is_empty_block`; a dropped body is `release_stmt`; the
+     scrutinee alone is `self.js.exp_rule`; a shared case's empty action
+     is `self.js.list(.., 0, std::iter::empty())` and `block_of`; the
+     statement is `self.js.switch(.., scrutinee, B::list_from(actions),
+     header, plan.kind != Kind::Integer)`.
+   - `switch_result`: a lone assignment that becomes the declaration:
+     `let assignment = self.js.take_value(.., statement);` then
+     `self.js.keep_operand(.., assignment, 1)` and `declare` with it
+     (`single_assignment` is cond.rs's and keeps returning two
+     `NodeId`s; the second is not used here any more). `var`,
+     `undefined`.
+   - `finish_small_switch`: `release`, `self.js.bin(.., EqEqEq, ..)`,
+     `is_empty_block`, `release_stmt`.
+
+4. untagged.rs.
+   - Delete the fields `copy_scratch` and `copied_labels` of
+     `untagged::Storage`; `copied_vars` stays.
+   - `copy_dispatch_output` keeps its signature and copies a statement:
+     take `copied_vars`, `self.js.copy_stmt(..,
+     &B::stmt_from_node(root), &mut vars)`, then the loop that gives
+     each fresh variable its identifier and its order, unchanged; put
+     the vector back. Move that loop into a private function
+     `name_fresh(&mut self, vars: &mut Vec<(VarId, VarId)>)` (O(fresh
+     binders); it drains the vector).
+   - `untagged_scrutinee`: a variable is `var_of` and `var`; any other
+     value is `self.js.copy_fresh(.., B::at(value), &mut vars)` with the
+     same vector and `name_fresh`.
+   - `emit_cached_action`: the cached block is staged with
+     `self.js.unblock(.., root, |s| statements.push(B::stmt_node(s)))`.
+   - Blocks: `block_of` and `explicit_block` over `B::list_from(list)`.
+   - `untagged_clause`: the last statement is read with `stmt_kind`
+     (`Return`, `Throw`, `Continue`, `Break`).
+   - `untagged_switch` and `untagged_child`: a declaration without a
+     value is `declare(.., None)`; the scrutinee that is not a variable
+     is held with `declare` and read with `self.js.var` (the test is
+     `kind != Kind::Var`).
+   - `untagged_switch_statement`: `typeof_plain` for the scrutinee of a
+     typeof switch; `self.js.switch(.., scrutinee, B::list_from(actions),
+     header, true)`.
+   - `untagged_test` and its helpers: `typeof_plain`, `string`, `str`,
+     `number`, `boolean`, `null`, `undefined`, `bin`, `not`.
+   - `untagged_instance`: each member is `self.js.dot(.., class,
+     property, FieldPos::NONE, false)`; the `isArray` call is `mark`,
+     `push(value)`, `self.js.call(.., callee, mark, info)`.
+   - `finish_untagged`: `release`, `var`, `undefined`.
+   - In the test helper `assert_mixed_allocation_free` (the one that
+     reads `copy_scratch`): `state.untagged_storage.copy_scratch
+     .reserve_arena(&state.arena)` becomes
+     `state.js.reserve_copy(&state.arena)`; both reads of
+     `state.untagged_storage.copy_scratch.capacities()` become
+     `state.js.copy_capacities()`; the line `d.copied_labels.capacity(),`
+     of the capacity list goes. No expected number changes.
+   The other tests of the four files pass unchanged.
+
+5. The changelog fragment changes/lowering-interface-switches.internal.md.
+
+End state, to paste in the pull request with the output:
+- `rg -n 'View::J|Op::J|View::S[A-Z]|Op::S[A-Z]|plain::|norm::|\.arena\.(view|node|release|detach|replace|new_node|cold|set_cold|copy_subtree\w*|\w+_from_list)\(|pure_expression|bir::j::|arena\.nodes'
+  src/bir/lower/switch.rs src/bir/lower/variant.rs
+  src/bir/lower/untagged.rs src/bir/lower/location.rs` matches only
+  below `mod tests` of each file.
+- `rg -n 'copy_scratch|copied_labels' src/bir/lower` is empty.
+- `git diff --stat origin/ocaml-to-rust-rewrite` names the four files
+  and the fragment only.
+- `cargo test --manifest-path compiler-rust/Cargo.toml --lib bir::lower`
+  and `--lib bir::j`: the counts of the base.
+- The three CI numbers of the common block.
+
+Run by the design turn against a probe conversion of these four files
+(with T6w's probe in place): `--lib bir::lower` 550 passed and 1 failed,
+the failure being the pin of `size_of::<Rows>()` that the design turn
+then moved to 392; `--lib bir::j` 58 passed; the four allocation counts
+unchanged, the untagged one among them. The probe kept one
+`copy_dispatch_output` with a flag for statement or expression; the
+form above (`name_fresh` and `copy_fresh` in `untagged_scrutinee`) was
+not compiled. Not run: the corpus gates, `Instruction count`, check
+mode.
+
+Shortcuts that count as failure, beside the common lists: a signature
+changed (`switch_children`, `variant_children`, `untagged_children`,
+`group_switch_cases` and `grouped_bodies` are called from expr.rs and
+exit.rs); a vector for the actions of a switch; `Js::copy` where the
+copy has binders; a copy storage or a label vector kept in the
+lowering; a parameter that says "statement or expression".
 ```
 
 ## 12. Risks and what was not measured

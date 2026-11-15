@@ -1,0 +1,1 @@
+- Three trees T6: the lowering's interface gains a copy that reports its fresh binders (`copy_stmt`, `copy_fresh`), and `THREE_TREES.md` 11.9 gains the build prompts of the conversion slices T6w and T6o.

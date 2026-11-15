@@ -273,6 +273,13 @@ pub trait Js {
     /// (`Bir::copy_subtree` without a renaming: the binders inside it are
     /// fresh). One step per node copied.
     fn copy(&mut self, a: &mut Pools, r: Self::Ref<'_>) -> Self::E;
+    /// [`Js::copy`] that reports the binders it freshened: `(fresh,
+    /// source)` is appended to `fresh` for each, in the order the fresh
+    /// variables were made, so that the caller gives each fresh variable
+    /// its identifier. One step per node copied; allocates nothing once
+    /// the implementation's copy storage and `fresh` have their capacity.
+    /// (T6o: `untagged.rs`, a scrutinee that is not a variable.)
+    fn copy_fresh(&mut self, a: &mut Pools, r: Self::Ref<'_>, fresh: &mut Vec<(VarId, VarId)>) -> Self::E;
     /// A new leaf with the kind, `aux` and payload of the leaf `r` and none
     /// of its cold data ([`Js::copy_cold`] gives that). O(1). Panics when
     /// `r` has an operand.
