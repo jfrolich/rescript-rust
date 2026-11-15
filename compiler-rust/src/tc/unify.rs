@@ -267,9 +267,7 @@ impl Checker {
         };
         if let Some((var, before, ty, target)) = bound {
             if self.binds_leaf(target) {
-                // Distinct: `var` and `ty` are this call's two distinct
-                // representatives.
-                self.bind_leaf::<true>(var, before, ty);
+                self.bind_leaf(var, before, ty);
                 return Ok(());
             }
             let route = target.tag() == CONSTR;
@@ -294,8 +292,7 @@ impl Checker {
             if r.level > l.level {
                 self.lower(right, l.level)?;
             }
-            // Distinct: `unify_pair` takes two distinct representatives.
-            self.g.link_distinct(left, right);
+            self.g.link(left, right);
             return Ok(());
         }
         self.unify_expanded(left, right)
@@ -321,7 +318,7 @@ impl Checker {
         let before = self.g.nodes[var.0 as usize];
         let target = self.g.nodes[ty.0 as usize];
         if self.binds_leaf(target) {
-            self.bind_leaf::<false>(var, before, ty);
+            self.bind_leaf(var, before, ty);
             return Ok(());
         }
         // Decision 6 of "R3 as designed": in `Mode::Explain`, outside a
@@ -373,15 +370,10 @@ impl Checker {
     /// possibly named it; the rule leaves a target that is not a variable
     /// alone. Always inline (out of line, saving registers costs more than
     /// the body): one link, one node load, one compare and at most one
-    /// write. `DISTINCT` says the caller has proven `var != ty`: the link
-    /// is then `Graph::link_distinct`, without the identity test.
+    /// write.
     #[inline(always)]
-    fn bind_leaf<const DISTINCT: bool>(&mut self, var: Ty, before: Node, ty: Ty) {
-        if DISTINCT {
-            self.g.link_distinct(var, ty);
-        } else {
-            self.g.link(var, ty);
-        }
+    fn bind_leaf(&mut self, var: Ty, before: Node, ty: Ty) {
+        self.g.link(var, ty);
         let target = self.g.nodes[ty.0 as usize];
         if target.level > before.level {
             self.g.write(
@@ -775,14 +767,12 @@ impl Checker {
         // `occur_univar` of these two cases is R3g's.
         if d1.tag() == VAR {
             self.occur(t1x, t2)?;
-            // Distinct: `occur` clashes when `t2` is the representative `t1x`.
-            self.g.link_distinct(t1x, t2);
+            self.g.link(t1x, t2);
             return Ok(());
         }
         if d2.tag() == VAR {
             self.occur(t2x, t1)?;
-            // Distinct: `occur` clashes when `t1` is the representative `t2x`.
-            self.g.link_distinct(t2x, t1);
+            self.g.link(t2x, t1);
             return Ok(());
         }
         // `create_recursion` is computed before anything is linked
@@ -1063,8 +1053,7 @@ impl Checker {
             result = self.lower_to(ty, before.level);
         }
         if result.is_ok() {
-            // Distinct: `var == ty` returned at the top; neither changed.
-            self.g.link_distinct(var, ty);
+            self.g.link(var, ty);
             return Ok(());
         }
         // `raise (Unify ((t1, t2) :: trace))` (ctype.ml:2766-2768): the
