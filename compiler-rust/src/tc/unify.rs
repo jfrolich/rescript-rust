@@ -11,7 +11,7 @@ use super::expand::{ABBREV, ALIAS, ExpandMode, INHERITS, Memo, TypeTable, link_n
 use super::graph::{
     ARROW, CONSTR, Change, GENERIC, Graph, LINK, Mode, NONE, Node, Speculation, TUPLE, Ty, VAR,
 };
-use super::rows::Extras;
+use super::rows::{Extras, PolyScope};
 use super::segment::{EXTENDED, ExtraDescriptor};
 
 /// The three kinds of a binding-walk stack entry, in the two bits above a
@@ -61,7 +61,15 @@ pub enum FrameKind {
     /// `extra` (`SWAPPED`) says unify2 chose the right side
     /// (ctype.ml:2299-2303), whose trace entries come out swapped.
     Linked,
-    /// Leave the universal-variable scope `extra` (R3g).
+    /// Leave a scope of universal variables: [`Checker::scopes`] is cut
+    /// back to `extra` entries (`univar_pairs := old_univars`,
+    /// compiler/ml/ctype.ml:1675). Pushed by [`Checker::enter_poly`] below
+    /// the pair of the two bodies; `left` and `right` are `NONE`. It
+    /// carries no trace pair and no swap: the pair of the two polymorphic
+    /// types is the [`FrameKind::Linked`] frame below it, which is what
+    /// reverses the entries of a failure in the bodies. When a frame above
+    /// it fails, [`Checker::unify_distinct`] cuts the scopes back
+    /// (`Checker::leave_scopes`). (R3g)
     LeavePoly,
     /// After the children: the `create_recursion` repair of
     /// compiler/ml/ctype.ml:2428-2436 for the pair (R3c).
@@ -94,6 +102,11 @@ pub enum FrameKind {
     /// Below the common tags of a closed row 1: `left` is the right node
     /// of the pair. Popped: [`Checker::row_end`]. (R3f)
     RowEnd,
+    /// Below the pairs of the completed type lists of two packages:
+    /// `left` and `right` are the two package nodes, `extra` indexes
+    /// [`Checker::saved`]: the descriptor the left node had. Popped:
+    /// [`Checker::package_end`]. (R3p)
+    PackageEnd,
 }
 
 /// Bit 31 of a [`FrameKind::Linked`] frame's `extra`: `unify2` ran `unify3`
@@ -151,8 +164,14 @@ pub struct Checker {
     pub marks: Vec<u32>,
     pub mark_generation: u32,
     pub pairs: PairSet,
-    /// `univar_pairs` (compiler/ml/ctype.ml:1681), innermost last (R3g).
-    pub univars: Vec<[Ty; 2]>,
+    /// `univar_pairs` (compiler/ml/ctype.ml:1681): the open scopes of
+    /// universal variables, innermost last. Empty between top-level
+    /// unifications: [`FrameKind::LeavePoly`] pops a scope, a failure cuts
+    /// back to the scopes it found (`Checker::leave_scopes`). (R3g)
+    pub scopes: Vec<PolyScope>,
+    /// What [`Checker::unify_package`] asks about module types; `None`
+    /// until a caller that has declarations sets it (R5a). (R3p)
+    pub packages: Option<Box<dyn super::rows::PackageDecls>>,
 }
 
 impl Checker {
@@ -175,7 +194,8 @@ impl Checker {
             marks: Vec::new(),
             mark_generation: 0,
             pairs: PairSet::default(),
-            univars: Vec::new(),
+            scopes: Vec::new(),
+            packages: None,
         }
     }
 
@@ -229,6 +249,11 @@ impl Checker {
                 if explain {
                     self.explain_failure(base, trace_base, left, right);
                 }
+                // `univar_pairs := old_univars; raise exn` (ctype.ml:
+                // 1677-1679): one load when no scope is open.
+                if !self.scopes.is_empty() {
+                    self.leave_scopes(base);
+                }
                 self.frames.truncate(base);
                 self.saved.truncate(saved_base);
                 match token {
@@ -273,7 +298,6 @@ impl Checker {
             let route = target.tag() == CONSTR;
             return self.bind_routed(var, ty, route.then_some([left, right]));
         }
-        // Two universal variables (ctype.ml:2244) are extended nodes: R3g.
         // Two locally abstract types (ctype.ml:2258) need equations: R3h.
         //
         // `has_cached_expansion p1 !a1` reads the node's own memo
@@ -295,7 +319,74 @@ impl Checker {
             self.g.link(left, right);
             return Ok(());
         }
+        // `Tunivar _, Tunivar _` (ctype.ml:2244-2247). Both heads are in
+        // registers: one `and` and one untaken branch for any other pair,
+        // no load.
+        if l.head & r.head & EXTENDED != 0 && self.both_univars(l, r) {
+            return self.unify_univars([left, right], l, r);
+        }
         self.unify_expanded(left, right)
+    }
+
+    /// The first step of `unify` for two universal variables
+    /// (`unify_univar t1 t2 !univar_pairs; update_level !env t1.level t2;
+    /// link_type t1 t2`, compiler/ml/ctype.ml:2244-2247): `left` and
+    /// `right` are distinct representatives with descriptors `l` and `r`.
+    /// A universal variable has no child and no scope, so the level
+    /// update is one write when `right` is above `left`. Out of line: a
+    /// rare arm of [`Checker::unify_pair`]. O(1) plus
+    /// [`Checker::unify_univar`].
+    #[inline(never)]
+    fn unify_univars(&mut self, [left, right]: [Ty; 2], l: Node, r: Node) -> Result<(), Clash> {
+        self.unify_univar(left, right)?;
+        if r.level > l.level {
+            self.g.write(
+                right,
+                Node {
+                    level: l.level,
+                    ..r
+                },
+            );
+        }
+        self.g.link(left, right);
+        Ok(())
+    }
+
+    /// `univar_pairs := old_univars` on a failure (compiler/ml/ctype.ml:
+    /// 1677-1679): cut [`Checker::scopes`] back to what it held before the
+    /// first scope entered above frame index `base`, which the lowest
+    /// [`FrameKind::LeavePoly`] frame there records. Failure path only:
+    /// O(frames above `base`), no step.
+    #[cold]
+    fn leave_scopes(&mut self, base: usize) {
+        let lowest = self.frames[base..]
+            .iter()
+            .find(|frame| frame.kind == FrameKind::LeavePoly);
+        if let Some(frame) = lowest {
+            self.scopes.truncate(frame.extra as usize);
+        }
+    }
+
+    /// `occur_univar !env ty` where OCaml runs it before a variable is
+    /// linked (compiler/ml/ctype.ml:2219, 2318, 2322): nothing, on one
+    /// load of [`Extras::univars`], when the graph has no universal
+    /// variable; otherwise [`Checker::occur_univar`]. `swapped` says the
+    /// caller is `unify3` on the swapped pair: the pair a failure pushed
+    /// is then reversed, as every entry made below it is
+    /// (`List.map (fun (x, y) -> (y, x)) trace`, ctype.ml:2301-2303).
+    #[inline]
+    fn free_of_univars(&mut self, ty: Ty, swapped: bool) -> Result<(), Clash> {
+        if self.extras.univars == 0 {
+            return Ok(());
+        }
+        let mark = self.trace.len();
+        let result = self.occur_univar(ty);
+        if result.is_err() && swapped {
+            for entry in &mut self.trace[mark..] {
+                entry.swap(0, 1);
+            }
+        }
+        result
     }
 
     /// `unify1_var` (compiler/ml/ctype.ml:2216-2225): the occurrence check,
@@ -335,6 +426,10 @@ impl Checker {
             let [left, right] = route.expect("routed occurrence");
             return self.unify_expanded(left, right);
         }
+        // `occur_univar env t2` (ctype.ml:2219), after `occur` and before
+        // the link. A target without a child is not a universal variable
+        // (an extended node is never `childless`) and holds none.
+        self.free_of_univars(ty, false)?;
         self.g.link(var, ty);
         if (occur_first || self.types.scoped != 0)
             && let Err(clash) = self.lower_to(ty, before.level)
@@ -430,9 +525,8 @@ impl Checker {
 
     /// The walk a binding makes over `ty`: every node reachable without
     /// crossing an object or a variant row is visited once (marks), tested
-    /// against `var` (`occur_rec`, compiler/ml/ctype.ml:1384), tested for a
-    /// free universal variable (`occur_univar`, ctype.ml:1563; R3g fills the
-    /// test), and lowered to the variable's level exactly when `update_level`
+    /// against `var` (`occur_rec`, compiler/ml/ctype.ml:1384) and lowered
+    /// to the variable's level exactly when `update_level`
     /// would lower it: when it is above that level and is the root of the
     /// walk or a child of a node this walk lowered. `update_level` does not
     /// look below a node that is not above the target
@@ -658,9 +752,10 @@ impl Checker {
 
     /// O(1): child `index` of a representative descriptor in
     /// `iter_type_expr`'s order (compiler/ml/btype.ml:250-257: an arrow's
-    /// parameters, then its result), or `None` past the last.
+    /// parameters, then its result), or `None` past the last. An extended
+    /// node's children are its slots in order.
     #[inline]
-    fn child(&self, node: Node, index: u32) -> Option<Ty> {
+    pub(super) fn child(&self, node: Node, index: u32) -> Option<Ty> {
         let arity = node.arity();
         match node.tag() {
             ARROW if index < arity => Some(self.g.params[(node.b + index) as usize].ty),
@@ -802,21 +897,34 @@ impl Checker {
     ) -> Result<(), Clash> {
         let d1 = self.g.nodes[t1x.0 as usize];
         let d2 = self.g.nodes[t2x.0 as usize];
-        // `occur_univar` of these two cases is R3g's.
+        // `occur !env t1' t2; occur_univar !env t2; link_type t1' t2`
+        // (ctype.ml:2316-2319) and its mirror (ctype.ml:2320-2323).
         if d1.tag() == VAR {
             self.occur(t1x, t2)?;
+            self.free_of_univars(t2, swapped)?;
             self.g.link(t1x, t2);
             return Ok(());
         }
         if d2.tag() == VAR {
             self.occur(t2x, t1)?;
+            self.free_of_univars(t1, swapped)?;
             self.g.link(t2x, t1);
             return Ok(());
         }
-        // `create_recursion` is computed before anything is linked
-        // (ctype.ml:2308); the variable cases above do not read it.
-        let create_recursion = t2 != t2x && self.deep_occur(t1x, t2);
         let extended = d1.head & d2.head & EXTENDED != 0;
+        // `Tunivar _, Tunivar _ -> unify_univar t1' t2' !univar_pairs;
+        // link_type t1' t2'` (ctype.ml:2313-2315): the first arm of unify3,
+        // reached when a head expands to a universal variable. The link
+        // goes to the EXPANDED other side, there is no occurrence test,
+        // no `Linked` frame and no child.
+        if extended && self.both_univars(d1, d2) {
+            self.unify_univar(t1x, t2x)?;
+            self.g.link(t1x, t2x);
+            return Ok(());
+        }
+        // `create_recursion` is computed before anything is linked
+        // (ctype.ml:2308); the cases above do not read it.
+        let create_recursion = t2 != t2x && self.deep_occur(t1x, t2);
         // `Tfield _, Tfield _ -> unify_fields env t1' t2'` (ctype.ml:
         // 2322-2324): an arm of its own, before the link and without the
         // recursion repair. In `Mode::Explain` the pair is recorded as a
@@ -983,7 +1091,7 @@ impl Checker {
     pub fn push_children(&mut self, left: Node, right: Node) -> Result<(), Clash> {
         if (left.head | right.head) & EXTENDED != 0 {
             // An extended descriptor against another kind of node
-            // (`_, _ -> raise (Unify [])`, ctype.ml:2424).
+            // (`_, _ -> raise (Unify [])`, ctype.ml:2425).
             return Err(Clash);
         }
         let arity = left.arity();
@@ -1236,6 +1344,19 @@ impl Checker {
         field(left) && field(right)
     }
 
+    /// O(1): whether two extended descriptors are both universal
+    /// variables.
+    #[inline]
+    fn both_univars(&self, left: Node, right: Node) -> bool {
+        let univar = |node: Node| {
+            matches!(
+                self.extras.descriptors[node.a as usize],
+                ExtraDescriptor::Univar(_)
+            )
+        };
+        univar(left) && univar(right)
+    }
+
     /// O(1): whether two extended descriptors are both variant rows.
     #[inline]
     fn both_variants(&self, left: Node, right: Node) -> bool {
@@ -1252,8 +1373,12 @@ impl Checker {
     /// `Tnil`: nothing (ctype.ml:2412). Two polymorphic types without
     /// variables (arity 1): the pair of their bodies (ctype.ml:2413;
     /// decision 22 of 8.6). Two variants: [`Checker::unify_row`]. Two
-    /// polymorphic types with variables, two packages: R3g. Anything else
-    /// is a clash (`_, _ -> raise (Unify [])`, ctype.ml:2424). Like
+    /// polymorphic types with variables: [`Checker::enter_poly`]
+    /// (ctype.ml:2414-2415; R3g). Two packages:
+    /// [`Checker::unify_package`] (ctype.ml:2416-2423; R3p). Anything else,
+    /// a universal variable against another extended node included, is a
+    /// clash (`_, _ -> raise (Unify [])`, ctype.ml:2425; two universal
+    /// variables never come here: `unify3` takes them first). Like
     /// [`Checker::push_children`], it pushes nothing when it fails. O(1)
     /// plus the callee.
     fn extended_children(&mut self, [t1x, t2x]: [Ty; 2], left: Node, right: Node) -> Result<(), Clash> {
@@ -1275,12 +1400,13 @@ impl Checker {
                 self.push_pair(body1, body2);
                 Ok(())
             }
-            (ExtraDescriptor::Poly, ExtraDescriptor::Poly) => self.enter_poly(t1x, t2x),
+            (ExtraDescriptor::Poly, ExtraDescriptor::Poly) => self.enter_poly(left, right),
             (ExtraDescriptor::Variant(_), ExtraDescriptor::Variant(_)) => {
                 self.unify_row([t1x, t2x], left, right)
             }
-            (ExtraDescriptor::Package(_), ExtraDescriptor::Package(_)) => self.unify_package(t1x, t2x),
-            (ExtraDescriptor::Univar(_), ExtraDescriptor::Univar(_)) => todo!("R3g"),
+            (ExtraDescriptor::Package(_), ExtraDescriptor::Package(_)) => {
+                self.unify_package([t1x, t2x], left, right)
+            }
             _ => Err(Clash),
         }
     }
@@ -1317,13 +1443,19 @@ impl Checker {
                         }
                     }
                     FrameKind::Linked => self.saved.truncate((frame.extra & !SWAPPED) as usize),
-                    FrameKind::LeavePoly => todo!("R3g"),
+                    FrameKind::LeavePoly => self.scopes.truncate(frame.extra as usize),
                     FrameKind::Fields => self.saved.truncate(frame.extra as usize),
                     FrameKind::Field => self.unify_field(frame)?,
                     FrameKind::FieldEnd => {}
                     FrameKind::RowField => self.unify_row_field(frame)?,
                     FrameKind::RowFieldEnd => self.row_field_end(frame)?,
                     FrameKind::RowEnd => self.row_end(frame),
+                    FrameKind::PackageEnd => {
+                        // A clash here is the enclosing pair's (`Unify []`).
+                        if self.package_end(frame).is_err() {
+                            return Err([Ty(NONE), Ty(NONE)]);
+                        }
+                    }
                     FrameKind::Recursion => {
                         // A clash here is the enclosing pair's: it adds no
                         // pair of its own to the trace (`Unify []`).

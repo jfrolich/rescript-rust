@@ -1,0 +1,1 @@
+- Checker rewrite R3: design of universal variables, polymorphic types and packages (slice R3g), with its harness, acceptance tests and build prompt.
