@@ -181,6 +181,35 @@ pub trait JsStmt: Js {
     /// Panics on a statement that is not a `Block`. (T6n: `cond.rs`,
     /// `unnest`; T6o: `untagged.rs`, a cached run that is staged.)
     fn unblock(&mut self, a: &mut Pools, s: Self::S, sink: impl FnMut(Self::S));
+    /// Whether the statement is a block (explicit or not) without a
+    /// statement. O(1). (T6n: `cond.rs`, an empty block placed in a slot
+    /// is noted for the `if` above it; T6o: the empty action of a switch.)
+    fn is_empty_block(&self, a: &Pools, s: &Self::S) -> bool;
+    /// The kind of the last statement of the then-block of an `If`, or of
+    /// its else-block when `otherwise`; `None` when that block has no
+    /// statement or the `If` has no such block. O(1). Panics on a
+    /// statement that is not an `If`. (T6n: `cond.rs::merge_tail_guard`
+    /// reads whether a guard ends in a jump and has nothing in its else.)
+    fn branch_last_kind(&self, a: &Pools, s: &Self::S, otherwise: bool) -> Option<Kind>;
+    /// `s` is not used: its references and sites are given back. One step
+    /// per node released. (T6n: `cond.rs::release_run`, a discarded run.)
+    fn release_stmt(&mut self, a: &mut Pools, s: Self::S);
+    /// `if (test) yes else no` over two block statements the caller holds,
+    /// as given: both are kept and the test is not rewritten (not J-S3).
+    /// O(1): the blocks are moved in, their statements are not read.
+    /// (T6n: `cond.rs`, the guard of a tail conditional.)
+    fn if_blocks(&mut self, a: &mut Pools, test: Self::E, yes: Self::S, no: Self::S) -> Self::S;
+    /// An `If` taken apart: its test, its then-block and its else-block if
+    /// it has one, each moved out; the statement is released. One step;
+    /// O(1): no statement of a block is read. Panics on a statement that
+    /// is not an `If`. (T6n: `cond.rs::merge_tail_guard`.)
+    fn take_if(&mut self, a: &mut Pools, s: Self::S) -> (Self::E, Self::S, Option<Self::S>);
+    /// Transition (deleted by T6x, when `tail.rs::loop_function_body` takes
+    /// and returns a list): the function literal of `header` whose body is
+    /// the block statement `body`. Strictly pure, as [`JsStmt::function`].
+    /// O(1). (T6n: `expr.rs`, a function whose body went through the tail
+    /// loop of T6w as a block.)
+    fn function_of_block(&mut self, a: &mut Pools, header: FuncId, body: Self::S) -> Self::E;
 
     // ---- Rules of BACKEND_LOWERING 6 ----
 

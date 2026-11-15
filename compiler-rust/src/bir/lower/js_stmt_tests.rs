@@ -912,3 +912,104 @@ fn rows_allocates_what_the_calls_of_today_allocate() {
         assert!(through < direct, "length {length}: {through} through the interface, {direct} direct");
     }
 }
+
+#[test]
+fn a_guard_is_taken_apart_and_rebuilt_over_its_blocks() {
+    // `if (x) { ...; jump }` followed by other statements becomes
+    // `{ if (x) { ...; jump } else { the others } }`, as
+    // `cond.rs::merge_tail_guard` writes it today.
+    for guard in [&[St::Return][..], &[St::Call, St::Throw], &[St::Break]] {
+        for rest in SHAPES {
+            same(
+                |r, u| {
+                    let (yes, no) = (run(r, u, guard), run(r, u, &[]));
+                    let test = r.var(&mut u.b, u.x);
+                    let statement = r.if_plain(&mut u.b, test, yes, no);
+                    assert_eq!(r.stmt_kind(&u.b, &statement), Kind::If);
+                    assert!(!r.is_empty_block(&u.b, &statement));
+                    let last = match guard[guard.len() - 1] {
+                        St::Return => Kind::Return,
+                        St::Throw => Kind::Throw,
+                        St::Break => Kind::Break,
+                        St::Call => Kind::Exp,
+                    };
+                    assert_eq!(r.branch_last_kind(&u.b, &statement, false), Some(last));
+                    assert_eq!(r.branch_last_kind(&u.b, &statement, true), None);
+                    let before = r.steps();
+                    let (test, then_, else_) = r.take_if(&mut u.b, statement);
+                    assert_eq!(r.steps() - before, 1);
+                    let empty = else_.expect("built with an else");
+                    assert!(r.is_empty_block(&u.b, &empty));
+                    r.release_stmt(&mut u.b, empty);
+                    let rest = run(r, u, rest);
+                    let else_ = r.block_of(&mut u.b, rest);
+                    let statement = r.if_blocks(&mut u.b, test, then_, else_);
+                    let one = r.list(&mut u.b, 1, std::iter::once(statement));
+                    done(r.block_of(&mut u.b, one));
+                },
+                |u| {
+                    let (yes, no) = (run_today(u, guard), run_today(u, &[]));
+                    let condition = var(&mut u.b, u.x);
+                    let then_ = u.b.block_from_list(yes);
+                    let else_ = u.b.block_from_list(no);
+                    let statement = u.b.new_node(View::SIf { condition, then_, else_: Some(else_) }, 0);
+                    u.b.detach(condition);
+                    u.b.detach(then_);
+                    u.b.release(statement);
+                    let rest = run_today(u, rest);
+                    let else_ = u.b.block_from_list(rest);
+                    let statement = u.b.new_node(View::SIf { condition, then_, else_: Some(else_) }, 0);
+                    built(u.b.new_node(View::SBlock { statements: &[statement] }, 0));
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn an_if_without_an_else_has_no_last_statement_there() {
+    let mut u = unit();
+    let r = Rows::default();
+    let condition = var(&mut u.b, u.x);
+    let body = run_today(&mut u, &[St::Call, St::Return]);
+    let then_ = u.b.block_from_list(body);
+    let statement = Rows::stmt_from_node(u.b.new_node(View::SIf { condition, then_, else_: None }, 0));
+    assert_eq!(r.branch_last_kind(&u.b, &statement, true), None);
+    assert_eq!(r.branch_last_kind(&u.b, &statement, false), Some(Kind::Return));
+}
+
+#[test]
+fn a_function_over_a_block_is_the_function_over_its_list() {
+    for shape in SHAPES {
+        same(
+            |r, u| {
+                let body = run(r, u, shape);
+                let body = r.block_of(&mut u.b, body);
+                let function = r.function_of_block(&mut u.b, u.header, body);
+                assert!(r.has(&u.b, Rows::of(&function), crate::emit::row::flag::STRICT));
+            },
+            |u| {
+                let body = run_today(u, shape);
+                let body = u.b.block_from_list(body);
+                built(crate::bir::j::pure_expression(&mut u.b, View::JFun { body, header: u.header }, 0));
+            },
+        );
+    }
+}
+
+#[test]
+fn releasing_a_statement_costs_one_step_per_node() {
+    let steps = |size: usize| {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let statement = nest(&mut r, &mut u, size);
+        let live = u.b.nodes.len();
+        let before = r.steps();
+        r.release_stmt(&mut u.b, statement);
+        let steps = r.steps() - before;
+        assert!(steps as usize >= size && steps as usize <= live);
+        steps
+    };
+    let (one, two, ten) = (steps(1_000), steps(2_000), steps(10_000));
+    assert_eq!(ten - one, 9 * (two - one), "{one} {two} {ten}");
+}

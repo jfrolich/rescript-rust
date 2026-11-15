@@ -44,6 +44,12 @@
 //! | `take_value` | T6n | the `value` of `SExp`, `SReturn` or `SThrow`: `Bir::detach` of it, `Bir::release` of the statement; a panic for any other; one step |
 //! | `unblock` | T6n | the statements of an `SBlock` copied above the length of `Rows::operands`; each `Bir::detach`ed and given to `sink` in order; the vector cut back; `Bir::release` of the block; one step and one per statement |
 //! | `stmt_located` | T6o | `NodeFlags::JS_LOC_PRESENT` |
+//! | `is_empty_block` | T6n | an `SBlock` whose `statements` is empty |
+//! | `branch_last_kind` | T6n | of an `SIf`: `rows::kind_of` of the operation of the last entry of the `statements` of `then_`, or of `else_` when `otherwise`; `None` for no entry or no `else_` |
+//! | `release_stmt` | T6n | `Bir::release`; one step per node it frees |
+//! | `if_blocks` | T6n | `Bir::new_node(View::SIf { condition, then_, else_: Some(else_) }, 0)` over the two blocks; one step |
+//! | `take_if` | T6n | of an `SIf`: `Bir::detach` of `condition`, `then_` and of `else_` when there is one, `Bir::release` of the statement; one step |
+//! | `function_of_block` | T6n | `bir::j::pure_expression(View::JFun { body, header }, 0)`; one step; transition, deleted by T6x |
 //!
 //! Steps (`Js::steps`): one for every function that builds a statement or
 //! a function literal, and one more per statement of each list it
@@ -258,6 +264,41 @@ impl JsStmt for Rows {
         }
         a.release(s.0);
         self.give(start, sink);
+    }
+    #[inline]
+    fn is_empty_block(&self, a: &Pools, s: &S) -> bool {
+        matches!(a.view(s.0), View::SBlock { statements } if statements.is_empty())
+    }
+    fn branch_last_kind(&self, a: &Pools, s: &S, otherwise: bool) -> Option<Kind> {
+        let View::SIf { then_, else_, .. } = a.view(s.0) else { panic!("not an if statement") };
+        let block = if otherwise { else_? } else { then_ };
+        let View::SBlock { statements } = a.view(block) else { panic!("a branch is a block") };
+        statements.last().map(|&last| kind_of(a.node(last).op()))
+    }
+    #[inline]
+    fn release_stmt(&mut self, a: &mut Pools, s: S) {
+        self.steps += u64::from(a.release(s.0));
+    }
+    #[inline]
+    fn if_blocks(&mut self, a: &mut Pools, test: E, yes: S, no: S) -> S {
+        self.steps += 1;
+        S(a.new_node(View::SIf { condition: test.0, then_: yes.0, else_: Some(no.0) }, 0))
+    }
+    fn take_if(&mut self, a: &mut Pools, s: S) -> (E, S, Option<S>) {
+        let View::SIf { condition, then_, else_ } = a.view(s.0) else { panic!("not an if statement") };
+        self.steps += 1;
+        a.detach(condition);
+        a.detach(then_);
+        if let Some(else_) = else_ {
+            a.detach(else_);
+        }
+        a.release(s.0);
+        (E(condition), S(then_), else_.map(S))
+    }
+    #[inline]
+    fn function_of_block(&mut self, a: &mut Pools, header: FuncId, body: S) -> E {
+        self.steps += 1;
+        E(super::pure_expression(a, View::JFun { body: body.0, header }, 0))
     }
 
     fn exp_rule(&mut self, a: &mut Pools, value: E) -> S {
