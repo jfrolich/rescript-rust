@@ -1,0 +1,1 @@
+- An extension constructor in a signature matches one whose extended type is an abbreviation of the same type (`type t = A.ext = ..` with `type A.ext += C`), and a constructor of an extensible type declared two modules deep matches itself in a unit's inferred signature, as in OCaml.
