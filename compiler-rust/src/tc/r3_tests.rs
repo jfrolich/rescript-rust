@@ -2654,3 +2654,82 @@ fn rows_of_ten_thousand_tags_are_linear() {
     let (small, large) = (chain(1_000), chain(10_000));
     assert!(large <= 11 * small, "chain: {small} {large}");
 }
+
+/// A clash below a swapped `unify3` is reported reversed, also when
+/// `set_more` made it (compiler/ml/ctype.ml:2299-2303, 2600-2606):
+///
+/// ```text
+/// if unify_eq t1 t1' || not (unify_eq t2 t2') then unify3 env t1 t1' t2 t2'
+/// else
+///   try unify3 env t2 t2' t1 t1'
+///   with Unify trace ->
+///     raise (Unify (List.map (fun (x, y) -> (y, x)) trace))
+/// ...
+/// (if (rest <> [] && (row.row_closed || row_fixed row))
+///     || (closed && row_fixed row && not row.row_closed)
+///  then
+///    let t1 = mkvariant [] true and t2 = mkvariant rest false in
+///    raise (Unify [(if row == row1 then (t1, t2) else (t2, t1))]));
+/// ```
+///
+/// `pv` (an abbreviation of the closed `[#N]`) against `[> #C]` (the shape
+/// of generated seed 2000082): unify3 runs on `([> #C], [#N])`, so row 1 is
+/// the open one and `set_more row2 [C]` raises `([C], [closed])`; the
+/// reversal makes the last pair (the closed empty row, the row of `#C`).
+/// Reaches: R3f.
+#[test]
+fn a_set_more_clash_below_a_swapped_unify3_is_reversed() {
+    let mut c = checker(Mode::Explain);
+    let pv = c.types.rows.len() as u32;
+    c.types.rows.push(c.types.rows[MYINT as usize]);
+    let nil = nil_at(&mut c, GENERIC);
+    let body = variant_at(&mut c, GENERIC, &[("N", Tag::Present(None))], nil, true, NONE);
+    abbreviation(&mut c, pv, &[], body);
+    let left = constr(&mut c, pv, &[]);
+    let rm = var(&mut c);
+    let right = variant_at(&mut c, 2, &[("C", Tag::Present(None))], rm, false, NONE);
+    assert!(c.unify(left, right).is_err());
+    let trace = c.trace.clone();
+    assert_eq!(trace[0], [left, right]);
+    let last = trace[trace.len() - 1];
+    let pair = [shape(&mut c, last[0]), shape(&mut c, last[1])];
+    assert_eq!(pair, ["[closed | ']", "[C | ']"]);
+}
+
+/// An entry already in the trace when the enclosing pairs are added is
+/// reversed below a swapped `unify3` too (compiler/ml/ctype.ml:2301-2303,
+/// 600):
+///
+/// ```text
+/// try unify3 env t2 t2' t1 t1'
+/// with Unify trace ->
+///   raise (Unify (List.map (fun (x, y) -> (y, x)) trace))
+/// ...
+/// if level < get_level env p then raise (Unify [(ty, newvar2 level)]);
+/// ```
+///
+/// `pa<'x>` (`('x, int)`) with `'x` at level 1 against `(t, int)`, `t` of
+/// scope 2: unify3 runs on the tuple and the expansion, and the child pair
+/// `(t, 'x)` fails later, as a frame: lowering `t` to level 1 escapes with
+/// `(t, newvar)`. The reversal makes the pairs below the top one
+/// `('x, t)` and `(newvar, t)`.
+/// Reaches: R3d.
+#[test]
+fn an_escape_below_a_swapped_unify3_is_reversed() {
+    let mut c = checker(Mode::Explain);
+    c.types.rows[T as usize].scope = 2;
+    c.types.scoped = 2;
+    let x = var_at(&mut c, 1);
+    let left = constr(&mut c, PA, &[x]);
+    let t = constr(&mut c, T, &[]);
+    let int = constr(&mut c, INT, &[]);
+    let right = tuple(&mut c, &[t, int]);
+    assert!(c.unify(left, right).is_err());
+    let trace = c.trace.clone();
+    assert_eq!(trace.len(), 3);
+    assert_eq!(trace[0], [left, right]);
+    assert_eq!(trace[1], [x, t]);
+    assert_eq!(trace[2][1], t);
+    let escaped = c.g.nodes[trace[2][0].0 as usize];
+    assert_eq!((escaped.tag(), escaped.level), (VAR, 1));
+}

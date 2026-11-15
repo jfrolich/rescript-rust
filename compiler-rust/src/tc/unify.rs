@@ -790,7 +790,10 @@ impl Checker {
     /// in it (`create_recursion`, one [`Checker::deep_occur`]), a
     /// [`FrameKind::Recursion`] frame runs the repair after the children.
     /// O(1) plus one [`Checker::occur`], at most one `deep_occur` and one
-    /// push per child.
+    /// push per child. In `Mode::Explain` a clash met while the children
+    /// are pushed leaves its entries reversed when `swapped`, as unify2's
+    /// handler does (`List.map (fun (x, y) -> (y, x)) trace`, ctype.ml:
+    /// 2301-2303): one swap per entry, on the failure path only.
     fn unify3(
         &mut self,
         [t1, t1x, t2, t2x]: [Ty; 4],
@@ -877,6 +880,7 @@ impl Checker {
                 extra: 0,
             });
         }
+        let mark = self.trace.len();
         let pushed = if extended {
             self.extended_children([t1x, t2x], d1, d2)
         } else {
@@ -891,6 +895,13 @@ impl Checker {
                 self.frames.pop();
                 self.saved.truncate(self.saved.len() - 2);
                 self.g.write(t1x, d1);
+                // The entries of a clash below this swapped pair are
+                // reversed (ctype.ml:2301-2303).
+                if swapped {
+                    for entry in &mut self.trace[mark..] {
+                        entry.swap(0, 1);
+                    }
+                }
             }
         }
         pushed
@@ -1121,6 +1132,9 @@ impl Checker {
     /// Below a swapped `unify3` every entry is reversed
     /// (`List.map (fun (x, y) -> (y, x))`, ctype.ml:2303), twice swapped is
     /// as made. A clash of a recursion repair has no pair of its own (`NONE`).
+    /// The entries already in the trace (`inner`: a `set_more` pair, a
+    /// failed lowering's) were made below every frame, so they are reversed
+    /// when the frames' parity is swapped (ctype.ml:2303), one step each.
     #[cold]
     fn explain_failure(&mut self, base: usize, trace_base: usize, left: Ty, right: Ty) {
         let inner = self.trace.len() - trace_base;
@@ -1151,6 +1165,13 @@ impl Checker {
             } else {
                 [left, right]
             });
+        }
+        if swapped {
+            for entry in &mut self.trace[trace_base..trace_base + inner] {
+                #[cfg(test)]
+                super::steps::tick();
+                entry.swap(0, 1);
+            }
         }
         self.trace[trace_base..].rotate_left(inner);
         for index in (base..self.frames.len()).rev() {
