@@ -1,0 +1,1 @@
+- Three trees T6: design of the builder over oxc nodes (the handle and the facts table, where each printer decision and each flatten rule is taken, the cut into slices), with the skeleton, the acceptance tests and the build prompts of the first two slices.
