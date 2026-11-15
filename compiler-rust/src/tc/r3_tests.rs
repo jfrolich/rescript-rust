@@ -2819,7 +2819,6 @@ fn nodes_now(c: &Checker) -> Vec<Node> {
 /// No descriptor row is written.
 /// Reaches: R3g.
 #[test]
-#[ignore = "R3g build"]
 fn universal_variables_pair_by_position() {
     let mut c = checker(Mode::Success);
     let (left, [u, v]) = two_binders(&mut c, [0, 1, 0], [0, 1]);
@@ -2861,7 +2860,6 @@ fn universal_variables_pair_by_position() {
 /// against `b'`, the last pair of the trace.
 /// Reaches: R3g.
 #[test]
-#[ignore = "R3g build"]
 fn a_variable_of_an_outer_scope_pairs_in_its_scope() {
     let nested = |c: &mut Checker, swap: bool| {
         let (a, b) = (univar_at(c, 2), univar_at(c, 2));
@@ -2899,7 +2897,6 @@ fn a_variable_of_an_outer_scope_pairs_in_its_scope() {
 /// with no log of its own.
 /// Reaches: R3g.
 #[test]
-#[ignore = "R3g build"]
 fn a_failure_leaves_no_scope_and_a_restore_undoes_the_pairings() {
     let mut c = checker(Mode::Success);
     let (left, _) = two_binders(&mut c, [0, 1, 0], [0, 1]);
@@ -3249,7 +3246,6 @@ fn a_free_universal_variable_below_a_swapped_unify3_is_reversed() {
 /// No scope stays open.
 /// Reaches: R3g.
 #[test]
-#[ignore = "R3g build"]
 fn a_clash_in_the_bodies_below_a_swapped_unify3_is_reversed() {
     let mut c = checker(Mode::Explain);
     let ap = c.types.rows.len() as u32;

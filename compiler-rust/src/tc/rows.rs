@@ -2529,7 +2529,52 @@ impl Checker {
     /// compared, at most `2 × (left_len + right_len)` a scope; no
     /// allocation. (R3g)
     pub fn unify_univar(&mut self, t1: Ty, t2: Ty) -> Result<(), Clash> {
-        todo!("R3g")
+        for at in (0..self.scopes.len()).rev() {
+            let scope = self.scopes[at];
+            // `(cl1, cl2)`, then `(cl2, cl1)`: each list with the first
+            // partner node of its own positions.
+            let left = (scope.left, scope.left_len, scope.partners.0);
+            let right = (scope.right, scope.right_len, scope.partners.0 + scope.left_len);
+            for (a, b) in [(left, right), (right, left)] {
+                match (self.find_univ(t1, a), self.find_univ(t2, b)) {
+                    (Some(r1), Some(r2)) => {
+                        let (p1, p2) = (self.g.nodes[r1.0 as usize].a, self.g.nodes[r2.0 as usize].a);
+                        // `Some {contents = Some t'2}, Some _ when t2 == repr
+                        // t'2 -> ()`.
+                        if p1 != NONE && self.g.repr(Ty(p1)) == t2 {
+                            return Ok(());
+                        }
+                        // `Some ({contents = None} as r1), Some ({contents =
+                        // None} as r2) -> set_univar r1 t2; set_univar r2 t1`.
+                        if p1 == NONE && p2 == NONE {
+                            self.g.write(r1, partner_node(t2));
+                            self.g.write(r2, partner_node(t1));
+                            return Ok(());
+                        }
+                        return Err(Clash);
+                    }
+                    (None, None) => {}
+                    _ => return Err(Clash),
+                }
+            }
+        }
+        Err(Clash)
+    }
+
+    /// `find_univ t cl` of [`Checker::unify_univar`] (compiler/ml/ctype.ml:
+    /// 1546-1551): the partner node of the first slot of the binder list
+    /// `(start, len, partners)` whose representative is `t`, or `None`.
+    /// O(len): one step and one `repr` a slot read; no allocation.
+    #[inline]
+    fn find_univ(&mut self, t: Ty, (start, len, partners): (u32, u32, u32)) -> Option<Ty> {
+        for i in 0..len {
+            #[cfg(test)]
+            super::steps::tick();
+            if self.g.repr(self.g.lists[(start + i) as usize]) == t {
+                return Some(Ty(partners + i));
+            }
+        }
+        None
     }
 
     /// `enter_poly env univar_pairs t1 tl1 t2 tl2 (unify env)`
@@ -2568,7 +2613,66 @@ impl Checker {
     /// variable is already known. OCaml rebuilds `known_univars` at every
     /// entry too. (R3g)
     pub fn enter_poly(&mut self, left: Node, right: Node) -> Result<(), Clash> {
-        todo!("R3g")
+        let (left_len, right_len) = (left.arity() - 1, right.arity() - 1);
+        let base = self.scopes.len();
+        if base != 0 {
+            // `known_univars` (ctype.ml:1658-1662).
+            let known = self.fresh_marks();
+            for at in 0..base {
+                let scope = self.scopes[at];
+                self.mark_slots(scope.left, scope.left_len, known);
+                self.mark_slots(scope.right, scope.right_len, known);
+            }
+            let known1 = self.any_marked(left.b + 1, left_len, known);
+            let known2 = self.any_marked(right.b + 1, right_len, known);
+            // `raise (Unify [])`, before anything is pushed (ctype.ml:
+            // 1664-1669).
+            if known1 && self.univars_escape(left, right) || known2 && self.univars_escape(right, left) {
+                return Err(Clash);
+            }
+        }
+        // `let cl1 = List.map (fun t -> (t, ref None)) tl1 and cl2 = ...`;
+        // `univar_pairs := (cl1, cl2) :: (cl2, cl1) :: old_univars`.
+        let partners = Ty(self.g.nodes.len() as u32);
+        for _ in 0..left_len + right_len {
+            self.g.push(partner_node(Ty(NONE)));
+        }
+        self.scopes.push(PolyScope {
+            left: left.b + 1,
+            right: right.b + 1,
+            left_len,
+            right_len,
+            partners,
+        });
+        // `f t1 t2`, then `univar_pairs := old_univars` (ctype.ml:
+        // 1673-1676).
+        self.frames.push(Frame { left: Ty(NONE), right: Ty(NONE), kind: FrameKind::LeavePoly, extra: base as u32 });
+        let (body1, body2) = (self.g.lists[left.b as usize], self.g.lists[right.b as usize]);
+        self.push_row_pair(body1, body2);
+        Ok(())
+    }
+
+    /// O(len): mark the representative of each of the `len` slots from
+    /// list index `start` with `generation`; one step a slot read.
+    fn mark_slots(&mut self, start: u32, len: u32, generation: u32) {
+        for i in 0..len {
+            #[cfg(test)]
+            super::steps::tick();
+            let ty = self.g.repr(self.g.lists[(start + i) as usize]);
+            self.marks[ty.0 as usize] = generation;
+        }
+    }
+
+    /// O(len): whether the representative of one of the `len` slots from
+    /// list index `start` is marked with `generation`; one step a slot
+    /// read, stopping at the first.
+    fn any_marked(&mut self, start: u32, len: u32, generation: u32) -> bool {
+        (0..len).any(|i| {
+            #[cfg(test)]
+            super::steps::tick();
+            let ty = self.g.repr(self.g.lists[(start + i) as usize]);
+            self.marks[ty.0 as usize] == generation
+        })
     }
 
     /// `univars_escape env old_univars tl (newty (Tpoly (t, tl')))`
