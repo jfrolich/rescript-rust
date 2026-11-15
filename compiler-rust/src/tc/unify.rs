@@ -69,7 +69,7 @@ pub enum FrameKind {
     /// types is the [`FrameKind::Linked`] frame below it, which is what
     /// reverses the entries of a failure in the bodies. When a frame above
     /// it fails, [`Checker::unify_distinct`] cuts the scopes back
-    /// ([`Checker::leave_scopes`]). (R3g)
+    /// (`Checker::leave_scopes`). (R3g)
     LeavePoly,
     /// After the children: the `create_recursion` repair of
     /// compiler/ml/ctype.ml:2428-2436 for the pair (R3c).
@@ -167,7 +167,7 @@ pub struct Checker {
     /// `univar_pairs` (compiler/ml/ctype.ml:1681): the open scopes of
     /// universal variables, innermost last. Empty between top-level
     /// unifications: [`FrameKind::LeavePoly`] pops a scope, a failure cuts
-    /// back to the scopes it found ([`Checker::leave_scopes`]). (R3g)
+    /// back to the scopes it found (`Checker::leave_scopes`). (R3g)
     pub scopes: Vec<PolyScope>,
     /// What [`Checker::unify_package`] asks about module types; `None`
     /// until a caller that has declarations sets it (R5a). (R3p)
