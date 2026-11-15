@@ -286,7 +286,6 @@ fn sizes() {
 }
 
 #[test]
-#[ignore = "T6a build"]
 fn leaves_print_as_the_legacy_printer_prints_them() {
     for t in [
         n("x"),

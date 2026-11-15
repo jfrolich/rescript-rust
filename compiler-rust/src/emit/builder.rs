@@ -43,11 +43,27 @@
 //! [`Builder::bin`] for `&&`, `||` and `|` whose right operand is a `Bin` of
 //! the same operator, and by [`Builder::seq`] when an operand is a `Seq`.
 //! A statement's row has no other flag.
-use super::Unsupported;
+use super::{Unsupported, literal};
 use crate::js_ir::op::{BinOp, Number};
-use oxc_allocator::{Allocator, Vec as ArenaVec};
+use crate::js_ir::printer::normalize_float_literal_for_js;
+use oxc_allocator::{Allocator, GetAllocator, Vec as ArenaVec};
 use oxc_ast::{ast::*, builder::AstBuilder};
 use oxc_span::SPAN;
+use oxc_syntax::{
+    node::NodeId,
+    number::{BigintBase, NumberBase},
+    operator::UnaryOperator,
+    reference::ReferenceId,
+};
+
+/// The five facts a literal has (`Number`, `Str`).
+const LITERAL: u16 = flag::PURE | flag::STRICT | flag::DELAY_SAFE | flag::SUBEXPR | flag::DUPLICABLE;
+
+/// [`Row::payload`] of a float literal whose text is `0.`: the one float
+/// `0 - x` prints as `-x` for (`walk::negation_form`, OCaml
+/// `compiler/core/js_dump.ml`, `Bin (Minus, Number (Float {f = "0."}), e)`).
+/// The text is not in the row otherwise; every other float has payload 0.
+const FLOAT_ZERO_TEXT: u32 = 1;
 
 /// The facts of one node, as bits of [`Row::flags`].
 pub(crate) mod flag {
@@ -275,8 +291,8 @@ impl<'a> Builder<'a> {
     /// Room for `nodes` nodes and `operands` pending operands: at most two
     /// allocations, none when the capacity is there.
     pub fn reserve(&mut self, nodes: usize, operands: usize) {
-        let _inputs = (nodes, operands);
-        todo!("T6a")
+        self.rows.reserve(nodes);
+        self.operands.reserve(operands);
     }
 
     /// Start a unit with the capacity of the last one. O(1); no allocation.
@@ -296,15 +312,46 @@ impl<'a> Builder<'a> {
     /// The row of a node that is inside a parent. O(1): the node's
     /// `node_id` and one indexed read.
     pub fn row(&self, expr: &Expression<'a>) -> Row {
-        let _inputs = expr;
-        todo!("T6a")
+        self.rows[expr.node_id().index()]
+    }
+
+    /// Give `expr` the next `node_id`, push its row and count the step.
+    /// O(1): one store into the node and one push onto the table.
+    fn attach(&mut self, expr: Expression<'a>, row: Row) -> J<'a> {
+        expr.set_node_id(NodeId::from_usize(self.rows.len()));
+        self.rows.push(row);
+        self.steps += 1;
+        J { expr, row }
+    }
+
+    /// `-value`, a node of the printed form without a row of its own (the
+    /// row is that of the constructor that writes it). O(1).
+    fn negation(&self, value: Expression<'a>) -> Expression<'a> {
+        Expression::new_unary_expression(SPAN, UnaryOperator::UnaryNegation, value, &self.ast)
+    }
+
+    /// The numeric literal `value` (not negative). O(1).
+    fn numeric(&self, value: f64) -> Expression<'a> {
+        Expression::new_numeric_literal(SPAN, value, None, NumberBase::Decimal, &self.ast)
     }
 
     /// A reference to variable `var`, printed through the name table (the
     /// reference id is the variable's index). `known` is of [`var`]. O(1).
     pub fn reference(&mut self, variable: u32, known: u8) -> J<'a> {
-        let _inputs = (variable, known);
-        todo!("T6a")
+        let expr = Expression::new_identifier_with_reference_id(
+            SPAN,
+            "",
+            ReferenceId::from_usize(variable as usize),
+            &self.ast,
+        );
+        let mut flags = flag::PURE | flag::STRICT | flag::SUBEXPR;
+        if known & (var::ASSIGNED | var::GLOBAL) == 0 {
+            flags |= flag::DELAY_SAFE;
+        }
+        if known & var::GLOBAL == 0 {
+            flags |= flag::DUPLICABLE;
+        }
+        self.attach(expr, Row { flags, kind: Kind::Var, aux: known, payload: variable })
     }
 
     /// An identifier printed as `name`: a name the unit does not bind. `js`
@@ -312,45 +359,92 @@ impl<'a> Builder<'a> {
     /// stamp zero): B:164 reads it. O(length of the name): the name is
     /// copied into the arena.
     pub fn named(&mut self, name: &str, js: bool) -> J<'a> {
-        let _inputs = (name, js);
-        todo!("T6a")
+        let name = self.ast.allocator().alloc_str(name);
+        let expr = Expression::new_identifier(SPAN, name, &self.ast);
+        let flags = flag::PURE | flag::STRICT | flag::SUBEXPR;
+        self.attach(expr, Row { flags, kind: Kind::Named, aux: u8::from(js), payload: 0 })
     }
 
     /// `undefined`; `unit` marks the unit value. O(1).
     pub fn undefined(&mut self, unit: bool) -> J<'a> {
-        let _inputs = unit;
-        todo!("T6a")
+        let expr = Expression::new_identifier(SPAN, "undefined", &self.ast);
+        let flags = flag::PURE | flag::STRICT | flag::DELAY_SAFE | flag::DUPLICABLE;
+        self.attach(expr, Row { flags, kind: Kind::Undefined, aux: u8::from(unit), payload: 0 })
     }
 
     /// `null`. O(1).
     pub fn null(&mut self) -> J<'a> {
-        todo!("T6a")
+        let expr = Expression::new_null_literal(SPAN, &self.ast);
+        let flags = flag::PURE | flag::STRICT | flag::DELAY_SAFE;
+        self.attach(expr, Row { flags, kind: Kind::Null, aux: 0, payload: 0 })
     }
 
     /// A boolean literal. O(1).
     pub fn boolean(&mut self, value: bool) -> J<'a> {
-        let _inputs = value;
-        todo!("T6a")
+        let expr = Expression::new_boolean_literal(SPAN, value, &self.ast);
+        let flags = flag::PURE | flag::STRICT | flag::DELAY_SAFE | flag::DUPLICABLE;
+        self.attach(expr, Row { flags, kind: Kind::Bool, aux: u8::from(value), payload: 0 })
     }
 
     /// A string literal. O(length): the text is copied into the arena.
     pub fn string(&mut self, value: &str) -> J<'a> {
-        let _inputs = value;
-        todo!("T6a")
+        let text = literal::arena_string(value, self.ast.allocator());
+        let expr = Expression::new_string_literal(SPAN, text, None, &self.ast);
+        self.attach(expr, Row { flags: LITERAL, kind: Kind::Str, aux: 0, payload: 0 })
     }
 
     /// An integer literal; a negative one is `-n`. O(1).
     pub fn int(&mut self, value: i32) -> J<'a> {
-        let _inputs = value;
-        todo!("T6a")
+        let literal = self.numeric(f64::from(value.unsigned_abs()));
+        let expr = if value < 0 { self.negation(literal) } else { literal };
+        let aux = num::INT | if value != 0 { num::NONZERO } else { 0 };
+        self.attach(expr, Row { flags: LITERAL, kind: Kind::Number, aux, payload: value as u32 })
     }
 
     /// A number literal as the printer spells it (A.7, number spelling):
     /// `NaN`, `Infinity`, a leading `-` as a negation. O(length of the
     /// literal's text).
     pub fn number(&mut self, n: &Number) -> Result<J<'a>, Unsupported> {
-        let _inputs = n;
-        todo!("T6a")
+        let row = |aux, payload| Row { flags: LITERAL, kind: Kind::Number, aux, payload };
+        match n {
+            Number::Int { i, .. } => Ok(self.int(*i)),
+            Number::BigInt(n) => {
+                // Keep lexical radix normalization explicit rather than
+                // guessing from digits (`Build::number`).
+                if !n.value.chars().all(|c| c.is_ascii_digit()) {
+                    return Err(Unsupported("non-decimal bigint"));
+                }
+                let digits = self.ast.allocator().alloc_str(&n.value);
+                let literal =
+                    Expression::new_big_int_literal(SPAN, digits, None, BigintBase::Decimal, &self.ast);
+                let mut aux = num::BIGINT;
+                if n.value != "0" {
+                    aux |= num::NONZERO;
+                }
+                let expr = if n.positive {
+                    aux |= num::POSITIVE;
+                    literal
+                } else {
+                    self.negation(literal)
+                };
+                Ok(self.attach(expr, row(aux, 0)))
+            }
+            Number::Float(f) => {
+                let value = normalize_float_literal_for_js(&f.f)
+                    .parse::<f64>()
+                    .map_err(|_| Unsupported("float literal"))?;
+                let literal = if value.is_nan() {
+                    Expression::new_identifier(SPAN, "NaN", &self.ast)
+                } else if value.is_infinite() {
+                    Expression::new_identifier(SPAN, "Infinity", &self.ast)
+                } else {
+                    self.numeric(value.abs())
+                };
+                let expr = if value.is_sign_negative() { self.negation(literal) } else { literal };
+                let payload = if f.f == "0." { FLOAT_ZERO_TEXT } else { 0 };
+                Ok(self.attach(expr, row(num::FLOAT, payload)))
+            }
+        }
     }
 
     /// `!value`, as given (J-E8 is a rule, not this constructor). O(1).
