@@ -7493,3 +7493,175 @@ diagnostics:
   with no arguments (`typecore.rs:17892`) and builds a `Text_decl`, so it
   also creates a new exception instead of rebinding. The fix is in
   `typecore.rs`, outside this change.
+
+### C1 - constructors and labels through an alias of a module that holds an alias
+
+The witness: a constructor read through an alias (`O`) of a module that
+holds an alias (`A = R`).
+
+```rescript
+module Outer = {
+  module R = {
+    type t = A | B
+    type r = {f: int}
+    exception E(int)
+    let x = 1
+  }
+  module A = R
+}
+module O = Outer
+let v = O.A.A
+```
+
+OCaml accepts it; Rust rejected it: "The variant constructor O.A.A can't be
+found." The same for `O.A.E(1)`, `| O.A.A =>` and `{O.A.f: 1}`, while
+`Outer.A.A`, `let v: O.A.t = Outer.R.A`, `O.A.x`, `module P = O.A` then
+`P.A` and `open O` then `A.A` were accepted. OCaml looks up a dotted
+constructor or label (`Env.lookup_all_constructors`,
+`Env.lookup_all_labels`, `compiler/ml/env.ml:1057-1066`, through
+`lookup_all_simple`, env.ml:1028-1045) in the `comp_constrs` and
+`comp_labels` tables (env.ml:389-390, filled at env.ml:1544-1554) of the
+module descriptor that `lookup_module_descr` (env.ml:952-972) returns for
+the prefix, the same descriptor a dotted value reads (`lookup`,
+env.ml:1017-1026). The Rust lookup
+(`lookup_constructor_in_module_with_ambiguity`,
+`compiler-rust/src/types/typecore.rs:23478`) takes the same descriptor
+road as values (`with_resolved_module_components_for_lid_inner`,
+typecore.rs:26899); a trace showed that road failing for `O.A` for
+values too, which recovered through a second lookup by access path
+(`resolve_module_access_path_for_lid`, typecore.rs:22864) that
+constructors and labels do not have.
+
+Commands as in "Scope, calibration and reproducibility" (OCaml `bsc` from
+`dune build`, Rust from the thin-LTO release build, the runtime built by
+`build-reference` with the OCaml `bsc`); each program is `Main.res`
+compiled by both with `-w +A -bs-jsx 4 -color never -I . -I
+packages/@rescript/runtime/lib/rescript`, and stdout (the JavaScript),
+stderr and the exit status compared byte for byte. The programs of a
+second unit compile `Main.res` against a package holding `Lib.res`, built
+by `rescript build-reference --bsc <OCaml bsc>`; the projects of two units
+are built by `rescript build-reference` and `rescript build` and their
+JavaScript compared byte for byte.
+
+#### Fixed
+
+- `7762c22d7`: OCaml builds a child module's component table from the raw
+  declaration `md.md_type` and the parent's substitution `sub`, in the
+  environment the walk has extended with the raw declarations of the
+  earlier items (`components_of_module_maker`, env.ml:1556-1568); the
+  table's `scrape_alias` (env.ml:1504, 1350-1362) resolves `module A = R`
+  to the sibling `R` there, and `prefix_idents` (env.ml:1369-1410, 1519)
+  prefixes the result. For a parent read through an alias, the Rust
+  `build_local_module_components` (`compiler-rust/src/types/env_lazy.rs:2118`,
+  the child item at 2395 before the fix) gave the child and the evolving
+  environment the prefixed item, `Mty_alias O.R`; `O` is not bound in that
+  environment, so `resolve_module_type` failed, the child had no
+  components and the lookup found nothing. An alias child now keeps its
+  raw declaration (`env_lazy.rs:2427`); its components substitute the
+  parent's paths themselves, as a child of a parent that is no alias
+  already did. Fixtures: `tests/tests/src/alias_chain_constructor_local`,
+  `alias_chain_constructor_functor`, `alias_chain_constructor_direct`
+  (agreed before), super_errors `alias_chain_constructor_wrong_type`,
+  `alias_chain_constructor_misspelled`, `alias_chain_constructor_label_missing`
+  and `alias_chain_constructor_direct_missing` (the last three agreed
+  before).
+- `7ba334589`: through an alias of another unit (`module O = Lib`, `Lib`
+  holding `module A = R`), the constructors of `O.A` had the result type
+  `O.A.A.t` (OCaml: `O.A.t`), printed in error messages, and a match on
+  one stopped with `Fatal error: Parmatch.get_variant_constructors`, before
+  the fix above too. The components of an in-process unit read through an
+  alias share the unit's signature, where the alias names its sibling by
+  identifier; OCaml's `prefix_idents` puts it at `O.R` before the alias is
+  scraped. `QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix_inner`
+  (`env_lazy.rs:1054`, the registration at 1143 before the fix) registered
+  the bare `R` as the alias source of `O.A`. The unit's signature keeps the
+  stamps of its `.cmi`, `R` had the stamp of the compiling unit's `O`, and
+  re-rooting the constructors from `R` to `O.A`
+  (`reroot_constructor_descriptions`) rewrote `O.A.t` into `O.A.A.t`. The
+  source is now the target with its head put at the access path
+  (`env_lazy.rs:1154`, one name probe of the signature index per alias).
+  Fixtures: `tests/tests/src/alias_chain_constructor_unit` with
+  `alias_chain_constructor_unit_lib`, `alias_chain_constructor_unit_direct`
+  (agreed before), super_errors_multi `alias_chain_constructor_unit`.
+
+Programs run through both compilers, before (trunk `acf84ba17`), after
+`7762c22d7` and after `7ba334589`. Exit status of OCaml; DIFFER is a
+difference in the exit status, the diagnostics or the JavaScript:
+
+| Program | OCaml | Before | After `7762c22d7` | After `7ba334589` |
+| --- | --- | --- | --- | --- |
+| the witness, `O.A.A` | 0 | DIFFER (Rust 2) | agree | agree |
+| exception `O.A.E(1)` | 0 | DIFFER (Rust 2) | agree | agree |
+| pattern `\| O.A.A => 1 \| O.A.B => 2` | 0 | DIFFER (Rust 2) | agree | agree |
+| record `{O.A.f: 1}` | 0 | DIFFER (Rust 2) | agree | agree |
+| field access `r.O.A.f` | 0 | DIFFER (Rust 2) | agree | agree |
+| record pattern `{O.A.f: f}` | 0 | DIFFER (Rust 2) | agree | agree |
+| extensible type `O.A.C(1)`, `\| O.A.C(n)` | 0 | DIFFER (Rust 2) | agree | agree |
+| inline record `O.A.I({w: 1})`, `\| O.A.I({w})` | 0 | DIFFER (Rust 2) | agree | agree |
+| `try ... catch { \| O.A.E(n) => n }` | 0 | DIFFER (Rust 2) | agree | agree |
+| chain of three, `module P = O`, `P.A.A`, `P.A.E(1)`, `{P.A.f: 1}` | 0 | DIFFER (Rust 2) | agree | agree |
+| inner chain `B = A`, `A = R`: `O.B.A`, `O.B.E(1)`, `\| O.B.B` | 0 | DIFFER (Rust 2) | agree | agree |
+| inner alias of a module outside `Outer` | 0 | agree | agree | agree |
+| inner alias of a sibling's submodule, `A = R.S` | 0 | DIFFER (Rust 2) | agree | agree |
+| alias of a functor parameter holding an alias, `module Y = X`, `Y.A.A` | 0 | agree | agree | agree |
+| alias of a functor application holding an alias, `N.A.K` | 0 | DIFFER (Rust 2) | agree | agree |
+| through `include`: `module I = {include Inner}`, `module J = I`, `J.A.Q` | 0 | DIFFER (Rust 2) | agree | agree |
+| `Outer.A.A`, `Outer.A.E(1)`, `{Outer.A.f: 1}` (no outer alias) | 0 | agree | agree | agree |
+| type `let v: O.A.t = Outer.R.A` | 0 | agree | agree | agree |
+| value `O.A.x` | 0 | agree | agree | agree |
+| `module P = O.A` then `P.A`, `{P.f: 1}` | 0 | agree | agree | agree |
+| `open O` then `A.A`, `A.E(1)` | 0 | agree | agree | agree |
+| missing `O.A.Cc` (rejected) | 2 | agree | agree | agree |
+| misspelled `O.A.Bb` (rejected) | 2 | agree | agree | agree |
+| misspelled `O.A.Bb` with expected type `Outer.R.t` (rejected) | 2 | agree | agree | agree |
+| missing label `{O.A.g: 1}` (rejected) | 2 | agree | agree | agree |
+| misspelled label `{O.A.ff: 1}`, in an expression and a pattern (rejected) | 2 | agree | agree | agree |
+| misspelled field `r.O.A.ff` (rejected) | 2 | agree | agree | agree |
+| missing pattern `\| O.A.D =>` (rejected) | 2 | agree | agree | agree |
+| missing exception `O.A.Ex(1)` (rejected) | 2 | agree | agree | agree |
+| `let v: int = O.A.A` (rejected: "This has type: O.A.t") | 2 | DIFFER (unbound) | agree | agree |
+| wrong field `O.A.I({z: 1})` of an inline record (rejected) | 2 | DIFFER (unbound) | agree | agree |
+| other unit, `module O = Lib`, `let v: int = O.A.A` (rejected) | 2 | DIFFER (`O.A.A.t`) | DIFFER (`O.A.A.t`) | agree |
+| other unit, `\| O.A.B => 1` | 0 | DIFFER (Fatal error) | DIFFER (Fatal error) | agree |
+| other unit, constructors, exception, extension, record, field, pattern | 0 | DIFFER | DIFFER | agree |
+| other unit, `module P = O`, `P.Outer.A.A`, `\| P.Outer.A.B` | 0 | DIFFER (Rust 2) | agree | agree |
+| other unit, misspelled `O.A.Bb` (rejected) | 2 | agree | agree | agree |
+| other unit, missing label `{O.A.g: 1}` (rejected) | 2 | agree | agree | agree |
+| two-unit project (`Lib.res`, `Main.res`), JavaScript | 0 | DIFFER (Rust 1) | DIFFER | agree |
+
+#### Open
+
+- Not of this place, found while reducing a fixture: an extension of an
+  extensible type two modules deep and a functor application in the same
+  unit, with no alias at all, is rejected by Rust ("The implementation
+  Main.res does not match the interface (inferred signature): In module
+  Outer.R: Actual declaration type \"Outer.R.ext\" += C(int) Expected
+  declaration type ext += C(int)"); OCaml accepts it. Trunk `acf84ba17`
+  does the same:
+
+  ```rescript
+  module Outer = {
+    module R = {
+      type ext = ..
+      type ext += C(int)
+    }
+  }
+  module G = (X: {}) => {
+    module S = {}
+  }
+  module M = G({})
+  ```
+
+  One module deep (`module R = {...}` at the top) agrees. It was not traced
+  here; it lies in the typing of extension declarations or the check of
+  the unit against its inferred signature.
+- The world view of a unit (`describe_tables`,
+  `compiler-rust/src/types/module_view.rs:819`) registers the same bare
+  sibling target (`Lib.A` from `R`) as the alias source of its alias
+  children. There its access path is the unit itself, and the
+  descriptions it re-roots name only that unit's paths, so no program was
+  found on which it shows; it was left as it is.
+- The second lookup of qualified values by access path
+  (`resolve_module_access_path_for_lid`, typecore.rs:22864) is still there.
+  The witnesses of this place no longer reach it; whether any program
+  still needs it was not measured, and it was not removed.
