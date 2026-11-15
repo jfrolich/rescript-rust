@@ -1,0 +1,1 @@
+- Reject removal of an accepted lowering cost note even when the production function code is unchanged.
