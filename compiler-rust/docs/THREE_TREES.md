@@ -3111,6 +3111,364 @@ T4g to T4f against a moving point of the legacy side):
 - 11.4, "The design", "A site in a closed list" and "Late zero": "in
   place" reads "marked by id and written by the walk of the seal".
 
+#### T6: the interface
+
+Status: design. The skeleton of its first slice is `bir/lower/js.rs`
+(compiled for tests until T6k is built) with its tests in
+`bir/lower/js_tests.rs`; the functions and their costs are the doc
+comments there, and this section says why they are what they are. "Rows"
+is the first implementation (J rows of `Bir`, as today); "the builder" is
+the second (`emit/builder.rs` and the rules of phase B).
+
+**(a) What the lowering calls.**
+
+*The shape.* One trait, `Js` (`bir/lower/js.rs`), with the statement half
+in a second trait `JsStmt: Js` (`bir/lower/js_stmt.rs`, T6l). The lowering
+is generic over it: `State<'a, B: JsStmt>` holds `js: B` and keeps its
+pools (`arena`, which stays a `Bir` until the flip and is named `Pools` in
+every signature of the interface). A call is `self.js.bin(&mut self.arena,
+op, left, right)`: the implementation and the pools are two fields, so the
+borrow is of two fields and no wrapper type is needed. The pools are a
+parameter because the builder needs them too (a name is a `StrId`, a
+number a `ConstId`, a call's information a `JsId`), and because Rows keeps
+its nodes in the same `Bir`.
+
+*The handles.*
+
+| Type | Rows | The builder | Bytes (Rows / builder) |
+| --- | --- | --- | --- |
+| `B::E`, an expression in flight; not `Copy` | `rows::E(NodeId)` | `J<'a>` | 4 / 24 |
+| `B::S`, a statement in flight; not `Copy` (T6l) | `rows::S(NodeId)` | `S<'a>` | 4 / 24 |
+| `B::L`, a statement list in flight; `Copy` (T6l) | `ListId` | `List` | 4 / 8 |
+| `B::Ref<'r>`, a node read by reference; `Copy` | `NodeId` | `&'r Expression<'a>` with the builder | 4 / 8 |
+| `Mark`, where the operands of the next list constructor start | an index into `Rows::operands` | `builder::Mark` | 4 / 4 |
+| an id (`u32`): the row of a node, for a mark or a site | the `NodeId` | the `node_id` | 4 / 4 |
+
+A handle is consumed by the function it is given to. That is the whole
+ownership rule, and the compiler enforces it for both implementations
+because the generic code has no `Copy` bound to use. Rows keeps its
+run-time check (`Bir`'s "attached twice") until the flip.
+
+*Construction.* Every J and S operation the lowering builds today (the
+three construction tables of the inventory) has one function. Two
+families, as `bir/j/plain.rs` and `bir/j/norm.rs` are two families today:
+a **plain** function builds the node it is asked for (name without
+prefix: `seq`, `bin_plain`, `not_plain`); a **rule** function is a row of
+BACKEND_LOWERING 6 and may return an operand, a literal or another node
+(`bin` is J-E4, `not` J-E8, `cond` J-E7, `seq_rule` J-M1, and so on, named
+in (c)). The lowering chooses the family where it chooses today (`plain::`
+or `norm::`); the choice is the lowering's decision and is not moved.
+
+| Today | Function of `Js` | Cost |
+| --- | --- | --- |
+| `Var` | `var(a, var)` | O(1); counts the occurrence and records the site |
+| `JQualified` | `qualified(a, module, member)` | O(1); counts the import use, records the site |
+| `JNumber` | `int(a, i32)`, `number(a, ConstId)`, `char(a, ConstId, u32)` | O(1) |
+| `JStr`, `JBool`, `JNull`, `JUndefined`, `JJson`, `JRaw` | `string(a, &str)`, `str(a, StrId)`, `boolean`, `null`, `undefined(a, unit)`, `json(a, StrId)`, `raw(a, StrId, is_statement)` | O(1), `string` O(length) |
+| `JBin` | `bin_plain(a, op, l, r)`; rule `bin` | O(1); `bin`: (c) |
+| `JNot`, `JBnot`, `JTypeof`, `JIn`, `JIsNullish`, `JLength`, `JStrAppend`, `JAwait`, `JSpread` | `not_plain`, `bnot_plain`, `typeof_plain`, `in_`, `await_`, `spread`; rules `not`, `bnot`, `typeof_`, `is_nullish`, `length`, `append` | O(1); rules: (c) |
+| `JCond`, `JSeq` | `seq`; rules `cond`, `seq_rule` | O(1); (c) |
+| `JIndex`, `JDot` | `index(a, object, index)`, `dot(a, object, StrId, FieldPos, tag)`; rules `project`, `poly_var` (J-M11) | O(1) |
+| `JCall`, `JNew`, `JFlatCall`, `JTagged` | `call(a, callee, mark, JsId)`, `new_(a, callee, mark)`, `flat_call(a, callee, args)`, `tagged(a, tag, mark, JsId)` | one step per operand since the mark |
+| `JArray`, `JBlockLit`, `JObject`, `JTemplate`, `JJsx` | `array(a, mark, mutable)`, `block(a, mark, JsId, mutable)`, `object(a, mark, JsId)`, `jsx(a, mark, JsId, has_children)`; rule `template(a, segments, mark)` (J-M12) | one step per operand since the mark |
+| `JOptional`, `JRecordRest` | `optional(a, value, identity)`, `record_rest(a, value, JsId)` | O(1) |
+| `JFun` | `function(a, FuncId, body: B::L)` (T6l: it takes a list) | O(1); the list is consumed, not copied |
+| every `S` operation | `JsStmt` (T6l): `exp`, `exp_rule` (J-S1), `declare`, `rest`, `return_`, `throw`, `debugger`, `break_`, `continue_`, `block`, `if_plain`, `if_` (J-S3), `while_`, `for_range`, `for_range_existing`, `for_of`, `switch`, `try_`; lists `stage_mark`, `stage`, `list` | O(1), or one step per statement of the lists consumed; `if_`: (c) |
+
+Operand lists go through the operand stack of the implementation
+(`mark`, `push`), as in the builder: no `&[NodeId]` and no `Vec` per call.
+Rows needs one new vector for it (`Rows::operands`, reserved once where
+the unit's state is made); that is the one allocation this design adds to
+a unit, and it is why each of the four allocation pins of
+`bir/lower/unit.rs` rises by exactly one in T6k (85, 102, 85, 155 become
+86, 103, 86, 156). Read, not run: T6k's prompt makes any other movement of
+a pin a reason to stop.
+
+*Reading back.* The read-back table of the inventory has four kinds of
+read. None needs a walk, because each is one of these:
+
+| Read today | Read instead | Why no walk |
+| --- | --- | --- |
+| A flag of a node the lowering holds (`flags().contains(STRICT)`, `delay_safe`, `strictly_pure`, `PURE` of an argument; `args.rs`, `cond.rs`, `expr.rs`, `ffi_args.rs`, `mod.rs::seq`, `loops.rs`) | `has(a, r, flag)` on the handle's reference | The flag was computed where the node was built (Rows: the node's flags; the builder: the row in the handle) |
+| The kind of a node it holds, and a literal's value (`View::JUndefined`, `JOptional`, `JStr`, `primitive_int`, `primitive_bool`, `primitive_string`, `primitive_bigint`) | `kind(a, r)`, `aux(a, r)`, `int(a, r)`, `text(a, r)`, `bigint(a, r)`, `var_of(a, r)`, `qualified_of(a, r)` | O(1) each: the row, or one pool entry |
+| A child, or a child of a child (`JCall` of a `JQualified` in `primitive_int_comparison`; the elements of an array of pairs in `Pmakedict`; `JDot` chains in `jsx_tag`, `copy_replacement`; `JSeq` ends in `complete_unit`, `extract_exports`) | `operand(a, r, i)` gives the reference of operand `i`; `arity(a, r)` | Each step is one read chosen by the caller; the depth is the pattern's, which is fixed (two for the runtime `compare` call, three for a dictionary entry) or counted where it is a chain (`descent` steps of the JSX tag and of `copy_replacement`, as today) |
+| Taking a node apart to keep a part (`detach` then `release`: `positive`, `PvalFromOption`, `evaluate_now`, `fold_return_tail`, `hold_external_arg`, `primitive_int_comparison`) | `into_operand(a, e, i)` for one part of a node with a fixed number of operands (the rest is released); `unpack(a, e) -> Mark` for a list (its operands go onto the operand stack, in order; `take(a, mark, i)` moves one out, `drop_operands(a, mark)` releases what is left) | The parts are operands of the node in hand; releasing the rest is `release`'s cost, one step per node released |
+| A statement of a run or of a list (`single_return`, `terminal`, `merge_tail_guard`, `returns_after_effects`, empty blocks; `tail.rs`; `switch.rs`) | `JsStmt` (T6l): `stmt_kind(a, &S)`, `stmt_has`, `value_of(a, &S) -> Ref` and, for a list in flight, `len(l)`, `row_at(a, l, i)`, `take_at(a, l, i)` | The statement stack owns the handles of a run; a list in flight is read by position |
+| Equality of two expressions (`same_reusable_value` in `export.rs`; inside the rules) | `equal(a, r1, r2)`, with the cost of `bir/j/equal.rs` (stops at the first difference; pairs on an explicit stack) | It is a rule's read, already counted |
+| The parent of a node (`export::row_of`, `declared`; `globals::shadowed`, `binding_scope`; the prelude of `names::replay`) | `owner(a, id)`: (f). `globals.rs` and the prelude stop needing it: (d) | - |
+| Cold data: a location, a comment, a character (`set_cold`, `JS_LOC_PRESENT`, `js_char`) | `locate(a, &mut E, LamLoc)`, `located(a, r)`, `comment(a, &mut E, StrId)`, `copy_cold(a, from: Ref, &mut E)` | O(1). The builder sets the span and drops the comment (decoration comments stay dropped; the pure annotation is the `pure` bit of the call's `JsId`) |
+
+`release(a, e)` and `copy(a, r) -> E` are the two functions that enter an
+expression (one step per node released or copied, with the reference
+bookkeeping `Bir::release` does today). The lowering calls `copy` only
+where it calls `copy_j` or duplicates a leaf today.
+
+*What changes in "T6 design" because of (a).*
+
+- `Kind` gets the kinds of every J and S operation in this turn (it had
+  the 31 of T6a and T6b): the interface reads kinds the builder does not
+  build yet. T6c and T6d build constructors for kinds that exist; they
+  add none. `Kind`, `Row`, `flag`, `num` and `var` move to `emit/row.rs`,
+  which T6k compiles outside tests.
+- A statement's row carries `STRICT` (the statement has no effect as
+  `js_statement_no_side_effects` reads it), computed where the statement
+  is built from the rows of what it holds. "A statement's row has no
+  other flag" (T6b) is withdrawn for this one flag; T6v adds it to the
+  builder, with its test. `export::has_toplevel_effect` reads it today by
+  reading a compound statement until its first effect, and T4f reads it
+  for every top-level statement.
+- A flag `JSX` (bit 7): (e).
+
+**(b) One set of call sites, two implementations.**
+
+- *Before T6s* the lowering is instantiated once, `State<'_, Rows>`.
+  `Rows` (`bir/j/rows.rs`) is a struct with the operand stack and nothing
+  else; each function is the call of `bir/j/plain.rs`, `bir/j/norm.rs` or
+  `Bir` that the lowering makes today, so the J rows written are the same
+  rows and check mode cannot move.
+- *From T6v* a second implementation exists, `Oxc<'a>`
+  (`bir/lower/js_oxc.rs`: the `Builder`, the owner column of (f), the
+  parked bodies), compiled for tests. The oracle tests of the lowering are
+  then generic and run on both.
+- *At T6s* check mode instantiates `State<'_, Oxc<'_>>`, and `Rows`, the J
+  opcodes and `bir/j/` are deleted. T6t removes the type parameter (one
+  implementation is left; a trait with one implementation stays only as
+  long as it takes to delete it).
+
+What the compiler monomorphizes: every function of `bir/lower` once per
+implementation that is instantiated in the build: once (`Rows`) in a
+release build until T6s, once (`Oxc`) after it, twice in a test build
+from T6v to T6s. There is no `dyn Js`, no enum of implementations, and no
+branch on the implementation: a call of the interface is a direct call
+that the compiler can inline (every function of `Rows` is `#[inline]`
+over a call that exists today). The default build runs neither
+instantiation.
+
+*The transition inside phase C.* The output types (`Out`, `Probed`,
+`Free`, the slots of `StatementStack`) hold `NodeId` until T6x converts
+`out.rs`, so that the slices between can run in any order. A converted
+file crosses that boundary with three functions that only `Rows` can
+have: `B::from_node(NodeId) -> B::E`, `B::node(B::E) -> NodeId` and
+`B::at(NodeId) -> B::Ref<'static>` (and the statement twins in
+`JsStmt`). They are part of the trait until T6x deletes them and their
+last call; the end state of each slice counts them.
+
+**(c) The rules of BACKEND_LOWERING 6.** Every row is behind the
+interface: the lowering calls a function and does not know whether a rule
+fired. "After the flip" is the file of phase B.
+
+| Rule | Function of the interface | Rows calls | After the flip |
+| --- | --- | --- | --- |
+| J-E1 | `append` | `je1_string_append` | `emit/rules_e.rs` |
+| J-E2 | `length(a, e, LengthObject)` | `je2_length` | `rules_e.rs` |
+| J-E3 | `is_nullish` | `je3_is_null_or_undefined` | `rules_e.rs` |
+| J-E4 | `bin` | `je4_bin` | `rules_e.rs` |
+| J-E5, J-E6 | `and`, `or` | `je5_js_and`, `je6_js_or` | `rules_logic.rs` |
+| J-E7 | `cond` | `je7_cond` | `rules_logic.rs` |
+| J-E8 | `not` | `je8_not` | `rules_e.rs` |
+| J-E9, J-E10 | none: reached from `and`, `or` and `cond` only (no call in `bir/lower`) | `je9_simplify_and`, `je10_simplify_or` | `rules_logic.rs` |
+| J-S1 | `exp_rule` | `js1_exp` | `rules_s.rs` |
+| J-S2, J-S5 | none: no call in `bir/lower`; the lowering unnests on its stack (`cond.rs::unnest`) | `js2_block`, `js5_unnest_block` | not ported: deleted with `norm.rs` |
+| J-S3 | `if_`, and `if_head` for the form that works on runs (`simplify_if_head`) | `js3_simplify_if`, `simplify_if_head` | `rules_s.rs` |
+| J-S4 | `switch` (every statement constructor applies it today through `plain::statement`; only a switch can match) | `js4_normalize` | `rules_s.rs` |
+| J-M0 | `without_pure(a, e) -> Option<E>` | `jm0_remove_pure_subexpression` | `rules_m.rs` |
+| J-M1 | `seq_rule` | `jm1_js_seq` | `rules_m.rs` |
+| J-M2 | `nullish_eq(a, neq, l, r)`, `int_eq` | `jm2_nullish_strict_comparison`, `jm2_int_equality` | `rules_m.rs` |
+| J-M3 to J-M8, J-M10, J-M13 | `to_int32`, `int_or`, `int_add(a, subtract, l, r)`, `int_mul`, `int_pow`, `int_lsl`, `int_lsr`, `int_xor`, `int_and`, `bnot`, `int_div(a, check, l, r)`, `int_mod` | the `jm*` function of the same row | `rules_m.rs` |
+| J-M9 | `typeof_` | `jm9_typeof` | `rules_m.rs` |
+| J-M11 | `project(a, e, field, index) -> Result<E, E>`, `poly_var(a, e, payload)` | `jm11_projection`, `jm11_poly_var_access` | `rules_m.rs` |
+| J-M12 | `template` | `jm12_interpolated_template` | `rules_m.rs` |
+| J-M14 | `effect(a, e)`: stages the statements of a value used for its effect; `effect_if_impure` | `jm14_push_effect_expression`, `jm14_push_s_if_empty`; `jm14_push_s_exp` has no call in `bir/lower` and is not ported | `rules_s.rs` |
+
+What stays a decision of the lowering, in the file it is in today: the
+literal folds of the primitives (`prim_cmp.rs`: `comparison_constant`,
+the bool and literal comparisons, `primitive_min_max`; `prim.rs`:
+`Psome`'s identity test, `PisNotNone`, `Plsrint` by zero), rows R1 to R6
+of the conditional (`cond.rs`), argument sequencing (`args.rs`), the
+grouping of switch cases, the choice between `bin` and `bin_plain`, and
+every decision of 11.4. They read the interface's readers and call its
+constructors; none of them is a row of section 6.
+
+**(d) `names.rs` and `globals.rs` (T6r), and the seal (T6u).**
+
+*The walk.* `names::replay` becomes generic over `JsStmt` and keeps its
+shape: one frame per open list, no recursion. What it reads changes from
+`bir.view(statement)` to the statement interface:
+
+| The replay needs | Function of `JsStmt` | Cost |
+| --- | --- | --- |
+| The final lists of a statement, in print order (`Replay::child`) | `bodies(a, &S) -> u32` and `body(a, &mut S, i) -> B::L`: the list is taken out of the statement and `set_body(a, &mut S, i, B::L)` puts it back | O(1) each (Rows: the `ListId`; the builder: the arena vector moved in and out of the node) |
+| The statements of a list, each once | `len`, `take_at(a, l, i) -> S`, then `stage` and `list` for the list that replaces it | one move per statement (4 bytes on rows, 24 on the builder) |
+| The binders of a statement (`Replay::statement`) | `stmt_kind`, `binder(a, &S) -> Option<VarId>`, `rest_fields`, `stmt_aux` (the status of a declaration) | O(1) |
+| The function literals of a statement, in print order | `functions(a, &mut S, visit)`: the descent below `HAS_FUN`, calling `visit(FuncId, &mut B::L)` with the body's list for each literal; `SwitchStats::descent_steps` counts one per operand read | the descent of "T6 design" (d): one row read per operand of each ancestor of a literal inside its statement |
+| References to JavaScript globals in a statement | `globals(a, &mut S, visit)`: the same descent below `HAS_GLOBAL`, calling `visit(VarId) -> bool`; `true` makes the reference `globalThis.name` | the same form of cost |
+
+The prelude, `Scratch::marks`, `Scratch::next` and `ambiguous_orders` are
+deleted by T6r, not by T6s: with the descent, operand order is print
+order on rows too. The replay rebuilds each list it walks (take, stage,
+`list`); "it rewrites a statement list only when a statement of it
+changes" ("T6 design" (e)) is given up for one move per statement, which
+is what makes one walk serve both implementations. The step test of T6r
+states it: moves equal statements.
+
+*The external-shadow decision in the walk.* `globals::decide` marks the
+scope of every binding that prints with a referenced global's name and
+then climbs from each reference (`shadowed`). Top down there is nothing
+to climb: the walk keeps, per referenced global name (the rows of
+`Globals`), a count of the bindings of that name that cover the place it
+is at. It adds one when it enters what `binding_scope` returns for a
+binder (a list for its declarations, read from the rows of the list
+before its statements are walked, with an explicit block's declarations
+counted in the list it is spliced into; a function for its parameters; a
+loop for its variable; a handler for its catch variable; the cases of a
+`switch` for the declarations of all of them) and subtracts on leaving. A
+reference found by `globals` is qualified when its name's count is not
+zero or an imported module prints with the name. Cost: one step per
+binder that prints with a referenced global's name, on entry and on exit,
+and the descent; nothing for a unit that references no global
+(`Globals::names` is empty, as today). `Globals::marks` and the epochs
+are deleted by T6r. Step 3 of `decide` (the table of names) is unchanged.
+
+*The seal* (T6u, `bir/lower/seal.rs`) is the same walk with one more
+step where a statement is taken out of its list: F1 to F8 of "T6 design"
+(e) are applied to the statement in hand, and what they produce is staged
+instead of it, each result offered to the rules again (an explicit work
+stack; a result that is not an expression statement, a `return` or a
+block is final). The functions it uses are the lowering's: `into_operand`
+and `unpack` on the value, `not`, `if_plain`, `return_`, `exp`,
+`release`. Two marks direct it: a statement whose row has none of
+`SEAL`, `HAS_FUN`, `HAS_GLOBAL`, `JSX` and is not an expression
+statement, a `return` or a block is staged without being read further;
+the test of an `if` that F3, F5 or a splice wrote is not entered (the
+mark of E2). After the rules, and after the names of the list, the
+implementation writes its print forms: `seal(a, l, Position) -> B::L`,
+which is the identity on rows (the legacy printer writes them) and T6e's
+work on the builder. `Position` is 8 bytes: `top`, `tail`, and the
+indentation of (e).
+
+**(e) JSX in preserve mode** (review decision 6). A preserved JSX element
+prints its children on lines of their own, indented by where the element
+stands (`Build::jsx_indent` in `emit/build.rs`: one level per enclosing
+block and function body, and one or two per enclosing member, index,
+conditional and call argument). That is known going down. So the element
+is built with its whitespace children empty and its row, and every row
+above it up to its statement, carries `JSX` (bit 7 of `Row::flags`,
+inherited as `HAS_FUN` is). The seal knows the indentation of the list it
+writes; `seal` descends below `JSX` adding the levels of the parents it
+passes (read from their rows' kinds) and writes each whitespace child
+where it reaches the element. Cost: one row read per operand of each
+ancestor of a preserved element inside its statement, in `descent_steps`,
+and one arena string per whitespace child, which the emitter allocates
+today. Rows ignores the flag. This is T6e's (the descent) and T6d's (the
+element with empty whitespace); it is closed when `tests/tests` has no
+unit left uncompared for JSX on the builder's path, which T6v's tests
+state for the one unit the ratchet counts. Not tried.
+
+**(f) The readers of J rows outside `bir/lower` and `bir/j`.**
+
+| Reader | What happens to it |
+| --- | --- |
+| `bridge_j::Exporter::build`, `export_lowered`, `export_js` | Kept until T6s: it is how the remaining legacy passes and the legacy printer read the lowering's program. Deleted by T6s |
+| `bridge_j::Importer`, `import_js`; `shadow::check_js` (the JS bridge's round trip) | Deleted by T6s with the J opcodes ("T6 design" (f)) |
+| `validate.rs`, the J arms | Kept until T6s (Rows relies on it); deleted by T6s |
+| `edit.rs`: `attach_list`, the pooled constructors (`block_from_list`, `call_from_list`, `switch_from_list`, `object_from_list`, `jsx_from_list`, `explicit_block_from_list`) | Called by `Rows` only from T6l on (the lowering's `rg` end state excludes them); deleted by T6s |
+| `edit.rs`: `bind`, `unbind`, `value_fact`, `binding_facts`, `update_facts`, `register_kind`, `mark_captures` on J operations: binders, variable facts (`ASSIGNED`), import uses, captures | The facts are the lowering's and stay: after the flip `Oxc` calls the same table updates from its constructors (`declare` binds, `bin` with `=` marks its target assigned, `qualified` counts an import use, `function` closes captures). The J arms inside `edit.rs` are deleted by T6s; the tables (`vars`, `js_scope`) are not |
+| `node.rs`: `pack`, `view`, `remap`, the accessors of J operations | Deleted by T6s with the opcodes |
+| `shadow::prepare_lower`, `compare_decisions`, `check_lower` | `prepare_lower` calls the lowering and `export_lowered` until T6s, the lowering and `oxc_codegen` after; `compare_decisions` reads decision rows and is unchanged; `check_lower` compares as "The order of the flip" says |
+| `replay.rs` (the Lambda constructor replay) | Reads no J row; unchanged |
+| `export.rs` (inside `bir/lower`, but the one reader of parents that stays): `row_of`, `declared`, `mentions` | `owner(a, id) -> Option<u32>`: the id of the node a node is an operand of. Rows: `Bir::parents`. The builder has no parent, and "T6 design" (f) said a position fact is recorded where the reference is built; it cannot be ("T4a as built": a reference is built before its statement has a slot, and `row_of` climbs when the top level is complete). So `Oxc` keeps one column, `owners: Vec<u32>` dense by `node_id`, written by the function that attaches an operand: one store per operand, 4 bytes a node, in the lowering's implementation and not in `Builder` (the emitter of T6f does not pay it). `row_of` and `declared` read kinds through `kind_of(a, id)`. The callee test of `mentions` (`callee == site.node`) becomes `operand_index(a, id) == 0` of a call's row. This is the one new per-node cost of the interface on the builder's path; it is counted in T6v's step test and measured at T6s |
+
+**(g) The instruction budget.**
+
+- *The default path* runs no function of `bir/lower`, `bir/j` or `emit`.
+  Every slice of phase C must leave the CI job `Instruction count` within
+  +0.02%; that job is the measurement, per pull request.
+- *Check mode* is not measured by CI. Each slice of phase C states two
+  numbers in its pull request: the instructions of a clean
+  `RESCRIPT_BACKEND=check` build of `tests/tests` before and after
+  (`scripts/compare_build_instructions.py` with the variable set, one
+  worker thread; noise is about 0.1%). The budget is +0.1% a slice and
+  +0.3% for T6k to T6x together. Why it should be level: `Rows` adds no
+  work to a construction (the call it wraps is the call of today) and a
+  read is the load of today plus, for `has`, three shifts and masks to
+  the interface's bits. Two things can cost and are named: `operands`
+  (one push and one pop per operand of a list constructor that takes a
+  slice today) and the rebuild of each list in T6r's walk (one move per
+  statement). T6k's pull request is the first measurement; if `operands`
+  alone exceeds the budget the builder stops and reports, and the fix is
+  a slice-taking twin of the list constructors on `Rows` only.
+- *Not measured in this turn*: anything. The costs above are read from
+  the code.
+
+#### T6: the cut of the interface, revisited
+
+Replaces the rows T6e and T6k to T6t of "T6: the cut". Three things
+changed the cut: `prim.rs`, `cond.rs` and `switch.rs` are each a slice's
+worth of call sites (the inventory counts 83, 57 and 40 places), so the
+interface itself cannot share a slice with the largest file; `out.rs`
+goes last, so that the slices between can run in any order ((b)); and
+the order of the flip adds T6u and T6v and puts the T4 slices before
+T6s.
+
+"Own" names what a slice may change; a function not named belongs to
+another slice. Every slice of phase C also owns the `impl` header lines
+of the files it converts and nothing else in them. Lines are added or
+changed lines without tests.
+
+| Slice | Files | Own | Depends on | May run beside | Lines | Default path |
+| --- | --- | --- | --- | --- | ---: | --- |
+| T6e (changed) | `emit/builder_seal.rs` | The print forms of "T6 design" (c), the descent below `HAS_FUN`, `SEAL` and `JSX`, `Builder::release`, `Builder::copy`. Not F1 to F8 | T6d | T6g to T6j, phase C | 450 | no |
+| T6k | `bir/lower/js.rs`, `bir/j/rows.rs`, `emit/row.rs`; `bir/lower/prim_cmp.rs`, `prim_block.rs`; `State` | Every function of `Js` on `Rows`; `State<'a, B>` and the `impl` headers of every file of `bir/lower`; all of `prim_cmp.rs` and `prim_block.rs` | - | phases A, B | 650 | no |
+| T6l | `bir/lower/js_stmt.rs`, `bir/j/rows_stmt.rs`; `assign.rs`, `loops.rs`, `try_.rs` | Every function of `JsStmt` on `Rows`; all of the three files | T6k | phases A, B | 600 | no |
+| T6m | `prim.rs`, `konst.rs`, `record.rs`, `import.rs` | All of the four files | T6l | T6n, T6o, T6p, T6w, T6q | 600 | no |
+| T6n | `cond.rs`, `expr.rs` | All of the two files | T6l | T6m, T6o, T6p, T6w, T6q | 600 | no |
+| T6o | `switch.rs`, `variant.rs`, `untagged.rs`, `location.rs` | All of the four files | T6l | T6m, T6n, T6p, T6w, T6q | 600 | no |
+| T6p | `args.rs`, `call.rs`, `ffi_args.rs`, `external.rs`, `jsx.rs` | All of the five files | T6l | T6m, T6n, T6o, T6w, T6q | 600 | no |
+| T6w | `tail.rs`, `rec.rs`, `exit.rs`, `label.rs` | All of the four files | T6l | T6m, T6n, T6o, T6p, T6q | 400 | no |
+| T6q | `export.rs`, `close.rs`, `scope.rs` | All of the three files; `Js::owner`, `kind_of`, `operand_index` on `Rows` | T6l | T6m, T6n, T6o, T6p, T6w | 600 | no |
+| T6x | `out.rs`, `mod.rs`, `unit.rs` | `Out<B>`, `Probed<B>`, `Free<B>`, `StatementStack<B>`; `State::{leaf, seq, effect, complete_unit, complete, finish}`; deletes `from_node`, `node`, `at` and their statement twins from both traits and every call | T6m to T6q, T6w | - | 600 | no |
+| T6r | `names.rs`, `globals.rs` | Both files; `JsStmt::{bodies, body, set_body, functions, globals, binder, rest_fields}` on `Rows` | T6x | phases A, B | 600 | no |
+| T6u | `bir/lower/seal.rs`, `names.rs` (the call of the seal in `Replay::statements`), `lambda/lam_compile.rs` (the new side of `compile_deps_program_with_lower_check`), `bir/shadow.rs` (`prepare_lower`, `check_lower`) | F1 to F8; `JsStmt::seal` on `Rows` (the identity) | T6r | phases A, B | 450 | check mode only: needs the full output gate |
+| T4g, T4d, T4e, T4f | as their prompts will say | 11.4, "The order of the flip" | T6u, in this order | T6v | - | check mode only |
+| T6v | `bir/lower/js_oxc.rs`, `bir/lower/oracle_tests.rs`, `emit/builder.rs` (the `STRICT` flag of a statement) | `Oxc<'a>` and every function of `Js` and `JsStmt` on it | T6a to T6j, T6r | T6u, the T4 slices | 600 | no (compiled for tests) |
+| T6s | `bir/`, `emit/`, `lambda/lam_compile.rs`, `bir/shadow.rs` | The flip | all above | - | 300, and about 9,000 deleted | check mode; deletes code the default build links: full output gate |
+| T6t | docs, tests, `bir/lower` | Measurements on the four corpora, STATUS, `tests/backend_coverage.txt`, the allocation pins re-pinned with the builder's vectors named, the type parameter `B` removed | T6s | - | 100, and the mechanical removal | no |
+
+**What each slice deletes**, in the same pull request:
+
+| Slice | Deletes |
+| --- | --- |
+| T6k | In its two files: every `plain::`, `norm::` and `View::J` use; `State::primitive_int`, `primitive_bool`, `primitive_string` and `primitive_bigint` become calls of the readers and are deleted where they only forwarded |
+| T6l to T6q, T6w | The same in their files; a helper of `State` that only wrapped a constructor (`State::pure_expression` when its last caller is converted, by the slice that converts it) |
+| T6x | The three transitional functions and their twins; the `NodeId` in `Out`, `Free` and the stack's slots |
+| T6r | `Replay::prelude`, `Scratch::{marks, next}`, `Replayed::ambiguous_orders`, `globals::{shadowed, binding_scope}`, `Globals::{marks, epoch}` |
+| T6u | The call of `apply_js_flatten_pass` on the new side; `bridge_j::qualify`'s caller keeps its order |
+| T4g to T4f | The call of one legacy pass on the new side, each |
+| T6v | Nothing (it is the second implementation, for tests) |
+| T6s | `bir/bridge_j.rs`, the J opcodes of `bir/node.rs`, `bir/j/`, `Rows`, the J arms of `validate.rs` and `edit.rs`, `Printed::{modules, finishes}`, the legacy printing of the new side in `shadow.rs` |
+| T6t | The type parameter of `State` and of the output types |
+
+**End state of each slice**, to paste with the output (`rg` runs in
+`compiler-rust/`; "outside tests" means the match is not in a
+`#[cfg(test)]` module, which is checked by reading the matches):
+
+| Slice | Facts |
+| --- | --- |
+| T6k | `rg -c 'todo!\("T6k"\)' src/bir` prints nothing; `rg -n 'T6k build' src` is empty; `rg -n 'View::J\|Op::J\|View::S[A-Z]\|Op::S[A-Z]\|plain::\|norm::\|\.arena\.(view\|node\|release\|detach\|replace)\(' src/bir/lower/prim_cmp.rs src/bir/lower/prim_block.rs` is empty; `rg -n 'cfg\(test\)' -A1 src/bir/lower/mod.rs` does not show `mod js;` |
+| T6l | The same `rg` for `assign.rs`, `loops.rs`, `try_.rs` with `block_from_list\|new_node\(` added to the pattern; `rg -c 'todo!\(' src/bir/j/rows_stmt.rs` prints nothing |
+| T6m to T6q, T6w | The same `rg` for the slice's files, outside tests; `rg -c 'from_node\|B::node\(\|B::at\(' <files>` is pasted (it may only fall in T6x) |
+| T6x | `rg -n 'from_node\|fn node\(\|fn at\(' src/bir` is empty; `rg -n 'NodeId' src/bir/lower/out.rs` matches only inside its tests |
+| T6r | `rg -n 'View::J\|Op::J\|View::S[A-Z]\|Op::S[A-Z]\|parents\[' src/bir/lower` matches only inside `#[cfg(test)]` modules and `export.rs` has no `parents\[`; `rg -n 'ambiguous_orders\|fn prelude' src` is empty |
+| T6u | `rg -n 'apply_js_flatten_pass' src/lambda/lam_compile.rs` shows the legacy side (`finish_lowered_output`) only |
+| T6v | `rg -n 'impl.* JsStmt for' src` shows two implementations; the oracle tests run on both |
+| T6s | As "T6: the cut" says for T6s, and `rg -n 'struct Rows' src` is empty |
+
+What is designed to the level of a build prompt in this turn: T6k
+(skeleton, acceptance tests, 11.9). T6l to T6x have their functions,
+files and end state fixed here; each gets its skeleton and tests from a
+design turn, T6l first. T6u, T6v and the T4 slices need a design turn
+each.
+
 ### 11.5 Worker prompt for T4b
 
 Which form: it needs one experiment, because nothing read so far proves that
