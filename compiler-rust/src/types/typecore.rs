@@ -1506,6 +1506,9 @@ pub struct TypeCheckContext<'a> {
     /// This mirrors OCaml typetexp's `univars` stack, which is deliberately
     /// separate from `used_variables`.
     univars: Vec<(String, TypeExprRef)>,
+    /// Whether a `Ptyp_poly` of the current top-level type translation made a
+    /// variable universal, so that [`make_fixed_univars`] has work to do.
+    universalized: bool,
     /// Bound type variables from the surrounding declaration context.
     /// This matches OCaml's typetexp `type_variables` table used by
     /// `globalize_used_variables` to link per-type-expression variables
@@ -1688,6 +1691,7 @@ impl<'a> TypeCheckContext<'a> {
             used_variables: HashMap::new(),
             used_variable_locs: HashMap::new(),
             univars: Vec::new(),
+            universalized: false,
             type_variables: HashMap::new(),
             fixed_type_variables: false,
             active_recursive_value_ids: Vec::new(),
@@ -2716,7 +2720,72 @@ pub fn transl_type_delayed(
     TypeExprRef,
     Vec<GlobalizeForce>,
 )> {
-    transl_type_globalized(tctx, env, styp, globalize, false)
+    let (typed, ty, forces) = transl_type_globalized(tctx, env, styp, globalize, false)?;
+    // typetexp.ml:744-748: `make_fixed_univars` before the force is returned.
+    if tctx.universalized {
+        make_fixed_univars(tctx.type_ctx, ty);
+    }
+    Ok((typed, ty, forces))
+}
+
+/// OCaml `Typetexp.make_fixed_univars` (compiler/ml/typetexp.ml:677-703),
+/// which `transl_simple_type` and `transl_simple_type_delayed` run on every
+/// translated type: a variant row whose tail is a universal variable becomes
+/// fixed and its `Reither` fields matched, so unification cannot drop them.
+/// Visits each node reachable from `ty` once: O(nodes), one mark per node,
+/// and a new row only for a row with a universal tail. Only a `Ptyp_poly` of
+/// the same translation makes a row tail universal (a row of an earlier
+/// translation was fixed by that translation's own walk), so callers run it
+/// only when the translation universalized a variable.
+fn make_fixed_univars(ctx: &TypeContext, ty: TypeExprRef) {
+    let mut visited = crate::types::type_marks::visit_set();
+    let mut work = vec![ty];
+    while let Some(node) = work.pop() {
+        let node = ctx.repr(node);
+        if ctx.get_level(node) < crate::types::type_expr::LOWEST_LEVEL || !visited.visit(node) {
+            continue;
+        }
+        #[cfg(test)]
+        crate::tc::steps::tick();
+        let row = match &*ctx.borrow_desc(node) {
+            TypeDesc::Tvariant(row) => Some(crate::types::btype::row_repr(ctx, &ctx.row_desc(row))),
+            _ => None,
+        };
+        let Some(row) = row else {
+            crate::types::iter_type_expr(ctx, node, |child| work.push(child));
+            continue;
+        };
+        if crate::types::btype::is_tunivar(ctx, crate::types::btype::row_more(ctx, &row)) {
+            let row_fields: Vec<_> = row
+                .row_fields
+                .iter()
+                .map(|(label, field)| {
+                    let field = match crate::types::btype::row_field_repr(ctx, field) {
+                        RowField::Reither {
+                            constant,
+                            types,
+                            link,
+                            ..
+                        } => RowField::Reither {
+                            constant,
+                            types,
+                            matched: true,
+                            link,
+                        },
+                        _ => field.clone(),
+                    };
+                    (label.clone(), field)
+                })
+                .collect();
+            let fixed = ctx.new_row_desc(crate::types::RowDesc {
+                row_fields: row_fields.into(),
+                row_fixed: true,
+                ..row.clone()
+            });
+            ctx.set_desc(node, TypeDesc::Tvariant(fixed));
+        }
+        crate::types::btype::iter_row(ctx, &row, |child| work.push(child));
+    }
 }
 
 /// `Typetexp.transl_simple_type` (typetexp.ml:690-696): translate, then run
@@ -2731,6 +2800,10 @@ fn transl_type_with_options(
     let (typed, ty, forces) =
         transl_type_globalized(tctx, env, styp, globalize, fixed_type_variables)?;
     run_globalize_forces(tctx, forces)?;
+    // typetexp.ml:736-741: `make_fixed_univars` after the force.
+    if tctx.universalized {
+        make_fixed_univars(tctx.type_ctx, ty);
+    }
     Ok((typed, ty))
 }
 
@@ -2749,6 +2822,7 @@ fn transl_type_globalized(
     tctx.used_variables.clear();
     tctx.used_variable_locs.clear();
     tctx.univars.clear();
+    tctx.universalized = false;
     let old_fixed_type_variables = tctx.fixed_type_variables;
     tctx.fixed_type_variables = fixed_type_variables;
     let translated = transl_type_inner(tctx, env, styp);
@@ -3462,6 +3536,7 @@ fn transl_type_inner(
                             TypeDesc::Tunivar(name),
                         );
                         ty_list.push(v);
+                        tctx.universalized = true;
                     } else {
                         return Err(TypeCoreError::CannotQuantify {
                             loc,
@@ -30276,6 +30351,52 @@ mod tests {
 
     use super::*;
     use crate::context::IdGenerator;
+
+    #[test]
+    fn make_fixed_univars_visits_each_node_once_at_ten_thousand() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let row = |more| crate::types::RowDesc {
+            row_fields: vec![(
+                crate::types::asttypes::Label::from("A"),
+                RowField::Reither {
+                    constant: true,
+                    types: vec![],
+                    matched: false,
+                    link: ctx.alloc_row_field(None),
+                },
+            )]
+            .into(),
+            row_more: more,
+            row_closed: true,
+            row_fixed: false,
+            row_name: None,
+        };
+        let universal = ctx.new_variant(row(ctx.new_univar(None)));
+        let open = ctx.new_variant(row(ctx.new_var(None)));
+        let mut items: Vec<_> = (0..9_998).map(|_| ctx.new_var(None)).collect();
+        items.push(universal);
+        items.push(open);
+        let ty = ctx.new_tuple(items);
+        let fixed = |variant| {
+            let TypeDesc::Tvariant(row) = ctx.get_desc(variant).into_desc() else {
+                panic!("a variant");
+            };
+            let row = crate::types::btype::row_repr(&ctx, &ctx.row_desc(row));
+            let matched = row.row_fields.iter().all(|(_, field)| {
+                matches!(
+                    crate::types::btype::row_field_repr(&ctx, field),
+                    RowField::Reither { matched: true, .. }
+                )
+            });
+            (row.row_fixed, matched)
+        };
+        // The tuple and its 10,000 items; `iter_row` visits what a row tail
+        // holds, not the tail (btype.ml `iter_row`).
+        let steps = crate::tc::steps::scope(|| make_fixed_univars(&ctx, ty));
+        assert_eq!(steps, 10_001);
+        assert_eq!(fixed(universal), (true, true));
+        assert_eq!(fixed(open), (false, false));
+    }
 
     #[test]
     fn clash_site_resolves_owned_payloads() {
