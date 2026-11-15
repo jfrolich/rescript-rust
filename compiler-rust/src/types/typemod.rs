@@ -2445,7 +2445,8 @@ fn nondep_sig(
                 ));
             }
             SignatureItem::SigTypext(id, ext, es) => {
-                let new_ext = nondep_extension_constructor(ctx, env, mid, ext)?;
+                let new_ext =
+                    crate::types::ctype::nondep_extension_constructor(ctx, env, mid, ext)?;
                 result.push(SignatureItem::SigTypext(*id, new_ext, *es));
             }
             SignatureItem::SigModule(id, md, rs) => {
@@ -2484,66 +2485,6 @@ fn nondep_sig(
         }
     }
     Some(result)
-}
-
-/// OCaml `Ctype.nondep_extension_constructor` (compiler/ml/ctype.ml:4521-4552):
-/// the extended type's path and parameters, the arguments and the result type
-/// of an extension constructor, made independent of `mid`. An extended type
-/// of the parameter is replaced by the type its expansion names. Cost: one
-/// `nondep_type` per type of the constructor.
-fn nondep_extension_constructor(
-    ctx: &crate::types::context::TypeContext,
-    env: &Env,
-    mid: &Ident,
-    ext: &crate::types::decl::ExtensionConstructor,
-) -> Option<crate::types::decl::ExtensionConstructor> {
-    use crate::types::decl::ConstructorArguments;
-    let nondep = |ty: TypeExprRef| crate::types::ctype::nondep_type(ctx, env, mid, ty);
-    let (ext_type_path, ext_type_params) = if ext.ext_type_path.is_free(mid) {
-        let ty = ctx.new_generic_type(TypeDesc::Tconstr {
-            path: ext.ext_type_path,
-            args: ctx.new_type_list(&ext.ext_type_params),
-            abbrev: ctx.alloc_abbrev_nil(),
-        });
-        let ty = ctx.repr(nondep(ty)?);
-        match &*ctx.get_desc(ty) {
-            TypeDesc::Tconstr { path, args, .. } => (*path, ctx.type_list(args).to_vec()),
-            _ => return None,
-        }
-    } else {
-        let params: Option<Vec<_>> = ext.ext_type_params.iter().map(|ty| nondep(*ty)).collect();
-        (ext.ext_type_path, params?)
-    };
-    let ext_args = match &ext.ext_args {
-        ConstructorArguments::CstrTuple(args) => ConstructorArguments::CstrTuple(
-            args.iter().map(|ty| nondep(*ty)).collect::<Option<_>>()?,
-        ),
-        ConstructorArguments::CstrRecord(labels) => ConstructorArguments::CstrRecord(
-            labels
-                .iter()
-                .map(|label| {
-                    Some(crate::types::decl::LabelDeclaration {
-                        ld_type: nondep(label.ld_type)?,
-                        ..label.clone()
-                    })
-                })
-                .collect::<Option<_>>()?,
-        ),
-    };
-    let ext_ret_type = match ext.ext_ret_type {
-        Some(ty) => Some(nondep(ty)?),
-        None => None,
-    };
-    Some(crate::types::decl::ExtensionConstructor {
-        ext_type_path,
-        ext_type_params,
-        ext_args,
-        ext_ret_type,
-        ext_private: ext.ext_private,
-        ext_loc: ext.ext_loc,
-        ext_attributes: ext.ext_attributes.clone(),
-        ext_is_exception: ext.ext_is_exception,
-    })
 }
 
 fn rewrite_module_path_prefix_with_aliases(
