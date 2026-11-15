@@ -3229,6 +3229,9 @@ for the builder:
 
 ### 11.8 Worker prompt for T6
 
+Superseded by 11.9 and by 11.4, "T6 design": not to be issued. Kept as
+written, as the record of what the design turn was asked.
+
 Written by the builder of T5 part B. Reviewed in 11.4, "T5 part B as
 redesigned" (g): each paragraph is kept or corrected there; issue it with
 those corrections. T6 starts from a design turn.
@@ -3317,6 +3320,181 @@ between "a builder rule is implemented wrongly" (fix it, add the rule
 test) and "a legacy pass reads what the builder changed" (commit the
 Lambda as a test asserting both texts, write which pass under 11.4,
 stop).
+```
+
+### 11.9 Build prompts for T6
+
+Supersedes 11.8. The design is 11.4, "T6 design" and "T6: the cut". One
+prompt per slice, issued verbatim; a slice without a prompt here is not
+ready to issue (its skeleton and tests come from a design turn). The
+skeleton names (`Builder::statements_of`, `Mark`) are those of
+`emit/builder.rs` as committed with this section.
+
+Common to every T6 prompt (part of each):
+
+```text
+Repository: compiler-rust/. Read first: AGENTS.md; docs/THREE_TREES.md
+section 3 and 11.4 "T6 design" (all of it) and "T6: the cut";
+src/emit/builder.rs and src/emit/builder_tests.rs whole.
+
+You build bodies. You change no signature, no doc-comment cost, no pinned
+size, no flag of the table in the header of builder.rs, and no test. If
+one cannot be met, stop: commit what passes, and report the function, the
+test, and the smallest input that shows it. Adding a private helper or a
+private field, and the layout of the code, are yours; say what you added
+in the commit message, with its cost in its doc comment.
+
+Counts as failure: an `allow` attribute; a hash map or set; a Vec, Box,
+String or format! per node, per operand or per statement (the builder's
+own vectors grow, and only through `reserve` and `reserve_statements` in a
+warm unit); a walk over an expression or a statement list other than the
+loop over the operands or statements a function is given; a rule of
+BACKEND_LOWERING 6 applied in a constructor (a constructor builds the
+node it is asked for); a second place that computes a flag; an ignored
+test other than those of a later slice; a number you did not measure;
+`unsafe`.
+
+A step bound in a test is a relation between two sizes. If the body that
+meets the doc comment's cost fails one, do not adjust the body to the
+test or the test to the body: report the two measured counts and stop.
+
+Every commit: `cargo check --all-targets --manifest-path
+compiler-rust/Cargo.toml` and `cargo clippy --all-targets --manifest-path
+compiler-rust/Cargo.toml` print no warning; `cargo test --manifest-path
+compiler-rust/Cargo.toml --lib emit::builder` passes. Never run the whole
+test suite: a checkout without the built runtime fails tests that have
+nothing to do with this slice (for one, `emit::oracle_tests::remaining_
+expressions_source_oracle`); CI judges those. Push after every commit.
+Changelog: a fragment under changes/ ending in `.internal.md`, one line
+starting with "- ".
+
+When a test of the oracle form fails: the two texts are in the message.
+Reduce to the smallest description (`T` or `St` in builder_tests.rs) and
+decide only between "the body is wrong" (fix it) and "the legacy printer
+does something the design does not say" (do not change the test: report
+the description and both texts, and stop).
+```
+
+T6a:
+
+```text
+Task T6a: the bodies marked todo!("T6a") in src/emit/builder.rs: the
+leaves and the expression constructors of the builder over oxc nodes.
+Nothing outside src/emit/builder.rs, src/emit/builder_tests.rs (removing
+ignore attributes only) and the changelog fragment changes.
+
+What exists: the types, `Builder::new`, `clear`, `nodes`, `mark`,
+`stage_mark`, and 14 tests ignored as "T6a build". The module is compiled
+for tests only (`#[cfg(test)] mod builder` in src/emit/mod.rs): leave that.
+
+How a node gets its facts: every constructor builds the oxc node, gives
+it the next `node_id` (the index its row will have in `rows`; entry 0 is
+unused), pushes the row, adds one to `steps`, and returns the node with
+the same row. The flags of each kind are the table in the header of
+builder.rs; `aux` and `payload` of each kind are in the doc comments of
+`Kind`. The printer's spellings are those of src/emit/build.rs today,
+which you read and do not change: `Build::number` (a float through
+`normalize_float_literal_for_js`; `NaN` and `Infinity` as identifiers; a
+negative number as a negation of its absolute value; a bigint that is not
+decimal is Unsupported("non-decimal bigint")), `Build::string`
+(`literal::arena_string`), `Build::member` (`walk::member_form`,
+`walk::numeric_member`), `Build::bin` (the operator table;
+`walk::negation_form`; `walk::nullish_target`, whose two outcomes are a
+loose comparison with `null` and Unsupported("nullish comparison target
+equality"); an assignment's target is a member, a computed member or an
+identifier, else Unsupported("assignment target"); `BinOp::Bnot` is
+Unsupported("binary bitwise-not")). `&&` and `||` are logical
+expressions, as given: do not rebuild a chain.
+
+Do exactly this, one commit each, in this order, each pushed when made:
+1. `reserve`, `row`, `reference`, `named`, `undefined`, `null`, `boolean`,
+   `string`, `int`, `number`. Remove the ignore from
+   `leaves_print_as_the_legacy_printer_prints_them`: it passes.
+2. `not`, `bnot`, `typeof_`, `is_nullish`, `in_`, `str_append`, `bin`,
+   `cond`, `seq`, `dot`, `length`, `index`, `push`, `call`, `new_`. Remove
+   the ignore from the other 13 tests: they pass.
+3. The changelog fragment changes/builder-expressions.internal.md.
+
+Relations to hold (asserted by the tests): steps and nodes are exactly
+linear between 1,000 and 10,000 elements for a wide call, a deep member
+chain under negations and a long concatenation; steps are at least the
+nodes and at most twice the nodes; a warm builder (arena with capacity,
+`reserve` called) performs no heap allocation for 10,000 calls and a
+chain of 10,000.
+
+End state, to paste in the pull request with the output:
+- `rg -c 'todo!\("T6a"\)' src/emit/builder.rs` prints nothing (no match).
+- `rg -n 'T6a build' src` is empty; `rg -c 'T6b build' src/emit/
+  builder_tests.rs` prints 7.
+- `rg -n 'mod builder' -B1 src/emit/mod.rs` shows `#[cfg(test)]`.
+- `cargo test --manifest-path compiler-rust/Cargo.toml --lib
+  emit::builder`: 18 passed, 7 ignored.
+- The CI job `Instruction count` within +0.02% (the release binary does
+  not contain the module).
+
+Shortcuts that count as failure, beside the common list: taking a flag
+from the oxc node instead of the operand's row; reading the table for an
+operand that is in a handle; a `match` on the oxc node where the row's
+kind answers; building an argument list in a Vec and copying it (drain the
+operand stack into an arena vector of the exact length); printing a
+variable's name into the node (`reference` writes no text: the reference
+id is the variable's index).
+```
+
+T6b:
+
+```text
+Task T6b: the bodies marked todo!("T6b") in src/emit/builder.rs:
+statements and statement lists of the builder over oxc nodes.
+Precondition, check it first and stop with a report if it fails:
+`rg -c 'todo!\("T6a"\)' src/emit/builder.rs` prints nothing and `cargo
+test --manifest-path compiler-rust/Cargo.toml --lib emit::builder` shows
+18 passed. Nothing outside src/emit/builder.rs, src/emit/builder_tests.rs
+(removing ignore attributes only) and the changelog fragment changes.
+
+What a statement in flight is: the oxc statement in the form the
+lowering's rules read, not the print form. A `return` always has its
+value, `undefined` too. An `if` always has two block statements, an empty
+one too. A declaration always has the value it was given. A `while` is
+one statement (the legacy printer writes a `;` after it: that, a dropped
+`else`, an omitted declaration and a block's braces are the seal's, T6e,
+and not yours). A statement's row has the kind, `HAS_FUN` and `SEAL` of
+what it holds (its expression and its lists) and no other flag; a
+declaration's `payload` is the variable's index and its `aux` the kind
+given. A declaration's binder is a binding identifier without text whose
+symbol id is the variable's index.
+
+What a list in flight is: the caller takes `stage_mark`, stages
+statements, and `list` moves the statements staged since the mark into a
+run of `pool` and returns the run. Lists nest: a list finished while
+another is being staged takes only its own statements. A statement is
+taken out of a list at most once (`take`, and the constructors that
+consume a list); reading or taking it again panics with "a statement
+taken twice".
+
+Do exactly this, one commit each, in this order, each pushed when made:
+1. Every body marked todo!("T6b"). Remove the ignore from the 7 tests of
+   `emit::builder::tests::statements`: they pass.
+2. The changelog fragment changes/builder-statements.internal.md.
+
+Relations to hold (asserted by the tests): steps and nodes are exactly
+linear between 1,000 and 10,000 for a long list, for a nest of that depth
+and for both; steps are at most four times the nodes; a warm builder
+performs no heap allocation for a list of 10,000 statements and a nest of
+10,000.
+
+End state, to paste in the pull request with the output:
+- `rg -c 'todo!\(' src/emit/builder.rs` prints nothing.
+- `rg -n 'T6b build' src` is empty.
+- `cargo test --manifest-path compiler-rust/Cargo.toml --lib
+  emit::builder`: 25 passed, 0 ignored.
+- The CI job `Instruction count` within +0.02%.
+
+Shortcuts that count as failure, beside the common list: a print-form
+decision in a constructor (omitting an `else`, a value or a statement);
+a Vec per list (a list is a run of the pool); copying a statement instead
+of moving it; a statement constructor that reads the table for a
+statement it was given in a handle.
 ```
 
 ## 12. Risks and what was not measured
