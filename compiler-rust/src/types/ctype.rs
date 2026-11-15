@@ -14992,17 +14992,25 @@ fn nondep_type_rec(
             }
         }
         TypeDesc::Tpackage { path, lids, args } => {
-            if path.is_free(mid) {
-                // OCaml: normalize_package_path then check again
-                return None;
-            }
+            // ctype.ml:4443-4446: a path that depends on `mid` is
+            // normalized first, which follows `mid`'s module type
+            // abbreviations to a path that may not.
+            let path = if path.is_free(mid) {
+                let normalized = normalize_package_path(ctx, env, path);
+                if normalized.is_free(mid) {
+                    return None;
+                }
+                normalized
+            } else {
+                *path
+            };
             let new_args: Option<Vec<_>> = ctx
                 .type_list(args)
                 .iter()
                 .map(|a| nondep_type_rec(ctx, env, mid, a, cache))
                 .collect();
             TypeDesc::Tpackage {
-                path: *path,
+                path,
                 lids: *lids,
                 args: ctx.new_type_list(&new_args?),
             }
