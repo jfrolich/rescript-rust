@@ -240,9 +240,12 @@ pub trait Js {
     /// operand.
     fn block(&mut self, a: &mut Pools, mark: Mark, info: JsId, mutability: u8) -> Self::E;
     /// An object literal whose keys are `info`, in the operands' order. One
-    /// step per operand.
+    /// step per operand. Panics when the operands are not as many as the
+    /// keys.
     fn object(&mut self, a: &mut Pools, mark: Mark, info: JsId) -> Self::E;
-    /// A JSX element with the header `info`. One step per operand.
+    /// A JSX element with the header `info`. One step per operand. Panics
+    /// when the operands are not the callee, the tag and what the header
+    /// counts (a spread, the properties, the children, a key).
     fn jsx(&mut self, a: &mut Pools, mark: Mark, info: JsId, has_children: bool) -> Self::E;
 
     // ---- Taking apart, copying, releasing ----
@@ -271,7 +274,9 @@ pub trait Js {
     fn refill(&mut self, a: &mut Pools, e: Self::E, mark: Mark) -> Self::E;
     /// A copy of the node `r` and everything below it
     /// (`Bir::copy_subtree` without a renaming: the binders inside it are
-    /// fresh). One step per node copied.
+    /// fresh and not reported; [`Js::copy_fresh`] reports them). One step
+    /// per node copied; allocates nothing once the implementation's copy
+    /// storage has its capacity and the tree has no binder.
     fn copy(&mut self, a: &mut Pools, r: Self::Ref<'_>) -> Self::E;
     /// [`Js::copy`] that reports the binders it freshened: `(fresh,
     /// source)` is appended to `fresh` for each, in the order the fresh

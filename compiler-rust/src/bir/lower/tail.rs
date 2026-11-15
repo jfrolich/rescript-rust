@@ -174,6 +174,100 @@ mod tests {
     fn ident(name: &str, stamp: i32) -> Ident {
         Ident::new(name, stamp, crate::ident::IdentFlags::NONE)
     }
+
+    /// `f(x, y)` whose body nests `depth` conditionals through their
+    /// continuing branch: `if (x && y) { next level } else if (x) { throw
+    /// level } else { return 0 }`, the innermost level being `f(y, x)`.
+    /// Each level is R6 with a guard (`if (x) throw level`) followed by a
+    /// return: `merge_tail_guard` merges at every level.
+    fn guard_chain(depth: usize) -> (crate::lambda::arena::LamArena, crate::lambda::arena::Lam) {
+        use crate::lambda::lam_constant::Constant;
+        use crate::lambda::lam_primitive::Primitive as P;
+        let mut a = crate::lambda::arena::LamArena::new();
+        let (f, x, y) = (ident("f", 1), ident("x", 2), ident("y", 3));
+        let args = [a.var(y), a.var(x)];
+        let mut body = call(&mut a, f, &args);
+        for level in (1..=depth).rev() {
+            let (left, right) = (a.var(x), a.var(y));
+            let test = a.prim_raw(P::Psequand, &[left, right], crate::lambda::LamLoc::NONE);
+            let guard = a.var(x);
+            let exception = a.const_(Constant::int(level as i32));
+            let (raised, none) = (a.prim_raw(P::Praise, &[exception], crate::lambda::LamLoc::NONE), a.const_(Constant::int(0)));
+            let rest = a.if_raw(guard, raised, none);
+            body = a.if_raw(test, body, rest);
+        }
+        let root = wrap(&mut a, f, &[x, y], body);
+        (a, root)
+    }
+
+    /// `f(x) = let a1 = x; ...; f(1)`: a loop body of `width` declarations
+    /// in a unit whose source has four list operands, so the operand stack
+    /// is reserved for 64. `loop_function_body` gives the body's block back
+    /// to the statement stack through `unblock`, which buffers nothing: the
+    /// stack does not grow.
+    #[test]
+    fn a_block_wider_than_the_operand_stack_is_unblocked_without_growing_it() {
+        for width in [1_000usize, 10_000] {
+            let mut a = crate::lambda::arena::LamArena::new();
+            let (f, x) = (ident("f", 1), ident("x", 2));
+            let one = a.const_(crate::lambda::lam_constant::Constant::int(1));
+            let mut body = call(&mut a, f, &[one]);
+            for i in 0..width {
+                let value = a.var(x);
+                body = a.let_(crate::lambda::lam_compat::LetKind::Strict, ident("a", 10 + i as i32), value, body);
+            }
+            let root = wrap(&mut a, f, &[x], body);
+            let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+            let root = input.root;
+            let mut state = State::new(input);
+            let reserved = state.js.operand_capacity();
+            assert!(reserved < width);
+            let output = state.probe(Cx::value(), root).unwrap();
+            let out = state.realize(Cx::value(), output);
+            assert!(out.value.is_some());
+            assert!(state.tail_body_statements >= width, "the body went through unblock");
+            assert_eq!(state.js.operand_capacity(), reserved, "width {width}");
+        }
+    }
+
+    #[test]
+    fn a_chain_of_merged_guards_moves_each_statement_once() {
+        // The merge is taken: two levels are two guards with an else.
+        let (a, root) = guard_chain(2);
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let output = state.probe(Cx::value(), root).unwrap();
+        let lowered = state.complete(Cx::value(), output);
+        // An `if` whose else-block has a statement is a merged guard: no
+        // other `if` of this program has one.
+        let dump = lowered.program.arena.dump();
+        let merged = dump
+            .lines()
+            .filter(|line| line.contains(" SIf {"))
+            .filter(|line| {
+                let block = line.split("else_: Some(NodeId(").nth(1).and_then(|rest| rest.split(')').next()).expect("an else");
+                let row = dump.lines().find(|row| row.starts_with(&format!("n{block} "))).expect("the else-block");
+                !row.contains("statements: []")
+            })
+            .count();
+        assert_eq!(merged, 2, "{dump}");
+        let steps = |depth: usize| {
+            let (a, root) = guard_chain(depth);
+            let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+            let root = input.root;
+            let mut state = State::new(input);
+            let output = state.probe(Cx::value(), root).unwrap();
+            let out = state.realize(Cx::value(), output);
+            assert!(out.value.is_some());
+            (crate::bir::lower::js::Js::steps(&state.js), state.statements.scanned as u64, state.tail_body_statements as u64)
+        };
+        let (one, two, ten) = (steps(1_000), steps(2_000), steps(10_000));
+        assert_eq!(ten.0 - one.0, 9 * (two.0 - one.0), "interface steps {one:?} {two:?} {ten:?}");
+        assert_eq!(ten.1 - one.1, 9 * (two.1 - one.1), "statements scanned {one:?} {two:?} {ten:?}");
+        assert_eq!(ten.2 - one.2, 9 * (two.2 - one.2), "body statements moved {one:?} {two:?} {ten:?}");
+        assert!(two.0 > one.0);
+    }
     fn call(a: &mut crate::lambda::arena::LamArena, f: Ident, args: &[crate::lambda::arena::Lam]) -> crate::lambda::arena::Lam {
         let f = a.var(f);
         a.apply_raw(f, args, crate::lambda::ApInfo { status: crate::lambda::ApplyStatus::InferFull, loc: crate::lambda::LamLoc::NONE })

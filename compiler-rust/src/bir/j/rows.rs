@@ -38,7 +38,7 @@
 //! | `push_list` | `Rows::operands` extended by `Lists::get(list)` |
 //! | `keep_operand` | `child_at`, `Bir::detach` of the operand, `Bir::release` of the node |
 //! | `unpack_rev` | for the operands from the last to the first: `detach`, push; then `release` of the node |
-//! | `copy` | `Bir::copy_subtree(r, &[])` |
+//! | `copy` | as `copy_fresh`, with a vector of its own for the binders, which it drops (the copies of the lowering that use it have none) |
 //! | `copy_fresh` | `Bir::copy_subtree_with_scratch(r, &[], fresh, ..)` with the copy storage and the label vector of `Rows`; the label vector is cleared; one step per node the copy visited (`CopyScratch::copied`) |
 //! | `copy_leaf` | `plain::node` with the view and `aux` of `r`, for `Var`, `JQualified`, `JNumber`, `JStr`, `JJson`, `JRaw`, `JBool`, `JNull`, `JUndefined` and a `JTemplate` without values; a panic for any other |
 //! | `release`, `drop_operands` | `Bir::release` of the node; of each operand since the mark, then the stack is cut back |
@@ -107,6 +107,11 @@ impl Rows {
     #[cfg(test)]
     pub(crate) fn reserve_copy(&mut self, a: &Pools) {
         self.copy.reserve_arena(a);
+    }
+    /// The capacity of the operand stack, for a test that it did not grow.
+    #[cfg(test)]
+    pub(crate) fn operand_capacity(&self) -> usize {
+        self.operands.capacity()
     }
     /// The capacities of the copy storage and of the label vector.
     #[cfg(test)]
@@ -554,6 +559,8 @@ impl Js for Rows {
     }
     fn object(&mut self, a: &mut Pools, mark: Mark, info: JsId) -> E {
         let start = self.since(mark);
+        let JsPayload::Object(keys) = a.javascript(info) else { panic!("an object's keys") };
+        assert_eq!(self.operands.len() - start, keys.len as usize, "one operand per key of the object");
         let id = plain::node(
             a,
             View::JObject {
@@ -566,6 +573,10 @@ impl Js for Rows {
     }
     fn jsx(&mut self, a: &mut Pools, mark: Mark, info: JsId, has_children: bool) -> E {
         let start = self.since(mark);
+        let JsPayload::Jsx(header) = a.javascript(info) else { panic!("a JSX header") };
+        // The callee and the tag, then what the header counts.
+        let expected = 2 + usize::from(header.spread) + header.props.len as usize + header.children as usize + usize::from(header.key);
+        assert_eq!(self.operands.len() - start, expected, "the operands the JSX header counts");
         let id = plain::node(
             a,
             View::JJsx {
@@ -624,10 +635,11 @@ impl Js for Rows {
         self.cut(start, id)
     }
     fn copy(&mut self, a: &mut Pools, r: NodeId) -> E {
-        let before = a.nodes.len();
-        let copy = a.copy_subtree(r, &[]);
-        self.steps += (a.nodes.len() - before).max(1) as u64;
-        E(copy)
+        // The binders a copy freshens are not reported here: a tree with
+        // one is copied with `copy_fresh`. An empty vector allocates
+        // nothing.
+        let mut fresh = Vec::new();
+        E(self.copy_recording(a, r, &mut fresh))
     }
     fn copy_fresh(&mut self, a: &mut Pools, r: NodeId, fresh: &mut Vec<(VarId, VarId)>) -> E {
         E(self.copy_recording(a, r, fresh))

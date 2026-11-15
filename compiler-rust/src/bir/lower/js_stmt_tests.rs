@@ -631,8 +631,9 @@ fn the_statement_rules_are_their_rows_of_section_6() {
             }
             assert_eq!(given, today, "{operand:?}, if_impure {if_impure}");
             assert_eq!(left.b.dump(), right.b.dump(), "{operand:?}, if_impure {if_impure}");
-            // The operand stack is as it was: the rule's vector is cut back.
-            assert_eq!(rows.mark().0, 0);
+            // The rule gives its statements on as it makes them: the
+            // operand stack is not used.
+            assert_eq!((rows.mark().0, rows.operand_capacity()), (0, 0));
         }
         // J-S3, on every pair of branches.
         for yes in SHAPES {
@@ -886,12 +887,12 @@ fn rows_allocates_what_the_calls_of_today_allocate() {
         .count_total;
         assert_eq!(through, direct, "width {width}");
     }
-    // J-M14 through a warm operand stack allocates less than with the
-    // vector the lowering lends the rule today, taken empty.
+    // J-M14 through the interface collects nothing: it allocates less than
+    // with the vector the rule is lent elsewhere, taken empty, and the
+    // operand stack of a `Rows` that reserved nothing stays empty.
     for length in [1_000usize, 10_000] {
         let (mut left, mut right) = (unit(), unit());
         let mut rows = Rows::default();
-        rows.reserve(length);
         let mut chain = value(&mut rows, &mut left, Value::Call);
         let mut chain_today = value_today(&mut right, Value::Call);
         for _ in 1..length {
@@ -910,6 +911,20 @@ fn rows_allocates_what_the_calls_of_today_allocate() {
         .count_total;
         assert_eq!(count, length);
         assert!(through < direct, "length {length}: {through} through the interface, {direct} direct");
+        assert_eq!(rows.operand_capacity(), 0);
+    }
+    // A block of any width gives its statements back without storage.
+    for width in [1_000usize, 10_000] {
+        let mut u = unit();
+        let mut rows = Rows::default();
+        let statements: Vec<S> = (0..width).map(|_| statement(&mut rows, &mut u, St::Call)).collect();
+        let list = rows.list(&mut u.b, width as u32, statements.into_iter());
+        let block = rows.block_of(&mut u.b, list);
+        let mut count = 0;
+        let before = rows.steps();
+        rows.unblock(&mut u.b, block, |_| count += 1);
+        assert_eq!((count, rows.operand_capacity()), (width, 0), "width {width}");
+        assert_eq!(rows.steps() - before, 1 + width as u64);
     }
 }
 
