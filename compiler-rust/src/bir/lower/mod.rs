@@ -518,7 +518,11 @@ struct State<'a> {
     external_bindings: Vec<[Option<VarId>; 2]>,
     module_constants: Vec<ModuleConstants>,
     direct: bool,
-    located_functions: Vec<bool>,
+    /// Function headers below this index are the unit's source headers,
+    /// whose location `location::is_located` reads from `locations` when
+    /// the body is closed; later headers (copies, inlined bodies) are never
+    /// located. Set by `unit::lower` when it has a table; 0 otherwise.
+    source_functions: u32,
     next_order: u32,
     resolver: Option<&'a crate::js_ir::ModulePathResolver>,
     cross_module_inline: bool,
@@ -680,7 +684,7 @@ impl State<'_> {
             ffi_suffix: Vec::new(), ffi_params: Vec::new(),
             source_steps: 0,
             direct: false,
-            located_functions: Vec::new(),
+            source_functions: 0,
             next_order,
             resolver: None,
             cross_module_inline: false,

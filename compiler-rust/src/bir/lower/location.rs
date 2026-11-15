@@ -11,6 +11,15 @@ pub(super) struct Fact {
 }
 
 impl State<'_> {
+    /// Whether `loc` is a real source position of the unit's location
+    /// table: present, not ghost, at a non-negative offset. False without a
+    /// table. Cost: O(1), one row read of the table; no allocation.
+    pub(super) fn is_located(&self, loc: LamLoc) -> bool {
+        self.locations
+            .and_then(|locations| locations.get(loc))
+            .is_some_and(|loc| !loc.loc_ghost && loc.loc_start.cnum >= 0)
+    }
+
     /// O(newly visited source nodes), amortized across all clauses. There is no
     /// recursion, including a source-map-enabled chain of 10,000 switches.
     pub(super) fn switch_location(&mut self, root: NodeId) -> Option<LamLoc> {

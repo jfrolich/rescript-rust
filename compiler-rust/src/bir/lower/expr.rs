@@ -278,12 +278,8 @@ impl State<'_> {
                 let list = self.statements.take_list(&mut self.arena, body.stmts);
                 let body = self.arena.block_from_list(list);
                 let body = if let Some(frame) = loop_ { self.loop_function_body(frame, header, body) } else { body };
-                let source_loc = self
-                    .located_functions
-                    .get(header.index())
-                    .copied()
-                    .unwrap_or(false)
-                    .then_some(self.arena.function(header).loc);
+                let source_loc = Some(self.arena.function(header).loc)
+                    .filter(|&loc| header.index() < self.source_functions as usize && self.is_located(loc));
                 let attr = self.arena.function_attributes(header);
                 let header = if attr.one_unit_arg {
                     self.arena.function_header_from(header, VarSpan::default())
