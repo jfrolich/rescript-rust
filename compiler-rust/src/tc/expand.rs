@@ -1431,6 +1431,29 @@ mod tests {
         assert_eq!(c.find_repr(n).0, NONE);
     }
 
+    /// The same chain in [`ExpandMode::Unif`], the loop of
+    /// [`Checker::expand_head_unif`] (K4): the same bounds, one loop step and
+    /// one instance per abbreviation, then one step each from the memo.
+    #[test]
+    fn expanding_a_chain_of_ten_thousand_abbreviations_in_unif_mode() {
+        let n = 10_000u32;
+        let mut c = checker(n as usize + 1);
+        for ty in 1..=n {
+            let body = constr(&mut c, GENERIC, ty - 1, &[]);
+            abbreviation(&mut c, ty, &[], body);
+        }
+        let last = constr(&mut c, 1, n, &[]);
+        let mut head = last;
+        let count = steps::scope(|| head = c.expand_head_unif(last).unwrap());
+        assert!(count <= 7 * u64::from(n) + 1, "{count}");
+        assert_eq!(c.g.nodes[head.0 as usize].a, 0);
+        let nodes = c.g.nodes.len();
+        let count =
+            steps::scope(|| assert_eq!(c.expand_head(last, ExpandMode::Unif).unwrap(), head));
+        assert!(count <= u64::from(n) + 1, "{count}");
+        assert_eq!(c.g.nodes.len(), nodes);
+    }
+
     /// 10,000 constructors with an argument, each expanded once: a cleanup
     /// is one step per memorized slot 0, and forgets all of them.
     #[test]
