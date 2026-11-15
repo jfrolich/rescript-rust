@@ -1,7 +1,7 @@
 //! X: external calls, scoped targets, and indexed module references.
 use super::*;
-use crate::bir::j::plain;
 use crate::bir::{ImportId, PrimId};
+use crate::emit::row::Kind;
 use crate::lambda::lam_primitive::{
     DeclKind, ExternalModuleName, JsCall, ModuleBindName, ModuleSource,
 };
@@ -14,25 +14,30 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             return arg;
         }
         let value = arg.value.expect("receiver value");
-        let mut root = value;
+        let mut root = B::at(value);
         let duplicable = loop {
-            match self.arena.view(root) {
-                View::JDot { object, .. } => root = object,
-                View::Var { .. }
-                | View::JQualified { .. }
-                | View::JBool
-                | View::JStr { .. }
-                | View::JTemplate { .. }
-                | View::JNumber { .. } => break true,
+            match self.js.kind(&self.arena, root) {
+                Kind::Dot => root = self.js.operand(&self.arena, root, 0),
+                Kind::Var
+                | Kind::Qualified
+                | Kind::Bool
+                | Kind::Str
+                | Kind::Template
+                | Kind::Number => break true,
                 _ => break false,
             }
         };
         if !duplicable {
             let var = self.fresh_variable("tmp");
-            let statement = crate::bir::j::declare(&mut self.arena, LetKind::Strict, var, value);
-            self.statements
-                .fill_held(arg.stmts.start + arg.stmts.len - 1, &[statement]);
-            arg.value = Some(self.pure_expression(View::Var { var }, 0));
+            let statement =
+                self.js.declare(&mut self.arena, LetKind::Strict, var, Some(B::from_node(value)));
+            self.statements.fill_held(
+                arg.stmts.start + arg.stmts.len - 1,
+                &[B::stmt_node(statement)],
+            );
+            let mut held = self.js.var(&mut self.arena, var);
+            self.js.assume_strict(&mut self.arena, &mut held);
+            arg.value = Some(B::node(held));
         }
         arg
     }
@@ -89,7 +94,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                             at += 1;
                             value
                         } else {
-                            plain::node(&mut self.arena, View::JUndefined, 0)
+                            B::node(self.js.undefined(&mut self.arena, false))
                         };
                         let next = self.external_arg_effect(cx, arg);
                         if let Some(next) = next {
@@ -106,7 +111,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                             at += 1;
                             value
                         } else {
-                            plain::node(&mut self.arena, View::JUndefined, 0)
+                            B::node(self.js.undefined(&mut self.arena, false))
                         };
                         let (value, next_effect) = self.lower_object_external_arg_value_and_effect(
                             cx,
@@ -130,19 +135,18 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                         at += 1;
                         value
                     } else {
-                        plain::node(&mut self.arena, View::JUndefined, 0)
+                        B::node(self.js.undefined(&mut self.arena, false))
                     };
-                    match self.arena.view(arg) {
-                        View::JUndefined => {
-                            self.arena.release(arg);
+                    match self.js.kind(&self.arena, B::at(arg)) {
+                        Kind::Undefined => {
+                            self.js.release(&mut self.arena, B::from_node(arg));
                         }
-                        View::JOptional { value } => {
-                            self.arena.detach(value);
-                            self.arena.release(arg);
+                        Kind::Optional => {
+                            let value = self.js.keep_operand(&mut self.arena, B::from_node(arg), 0);
                             let (value, next_effect) = self
                                 .lower_object_external_arg_value_and_effect(
                                     cx,
-                                    value,
+                                    B::node(value),
                                     LabelNoname::ArgLabel,
                                     &spec.obj_arg_type,
                                 );
@@ -162,15 +166,19 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
         debug_assert_eq!(at, argc);
         self.arena.lists.truncate(values, keys.len as usize);
-        let object = self.arena.object_from_list(values, keys);
-        let object = self.add_external_effect(cx, effect, object);
+        let info = self.arena.js_info(crate::bir::JsPayload::Object(keys));
+        let mark = self.js.mark();
+        self.js.push_list(&self.arena, values);
+        let object = self.js.object(&mut self.arena, mark, info);
+        let object = self.add_external_effect(cx, effect, B::node(object));
         if pending.is_empty() {
             self.external_pending = pending;
             return object;
         }
         let obj = self.fresh_variable("tmp");
-        let declaration = crate::bir::j::declare(&mut self.arena, LetKind::Variable, obj, object);
-        self.statements.push(declaration);
+        let declaration =
+            self.js.declare(&mut self.arena, LetKind::Variable, obj, Some(B::from_node(object)));
+        self.statements.push(B::stmt_node(declaration));
         for (i, mut arg) in pending.drain(..) {
             self.primitive_steps += 1;
             let spec = &specs[i as usize];
@@ -184,11 +192,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             if !self.optional_duplicable(cx, arg) {
                 let tmp = self.fresh_variable("tmp");
                 let declaration =
-                    crate::bir::j::declare(&mut self.arena, LetKind::Strict, tmp, arg);
-                self.statements.push(declaration);
-                arg = self.pure_expression(View::Var { var: tmp }, 0);
+                    self.js.declare(&mut self.arena, LetKind::Strict, tmp, Some(B::from_node(arg)));
+                self.statements.push(B::stmt_node(declaration));
+                let mut held = self.js.var(&mut self.arena, tmp);
+                self.js.assume_strict(&mut self.arena, &mut held);
+                arg = B::node(held);
             }
-            let test_arg = self.arena.copy_subtree(arg, &[]);
+            let test_arg = self.js.copy(&mut self.arena, B::at(arg));
             let value_arg = if *for_sure_no_nested_option {
                 arg
             } else {
@@ -200,25 +210,29 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 LabelNoname::ArgEmpty,
                 &spec.obj_arg_type,
             );
-            let undefined = plain::node(&mut self.arena, View::JUndefined, 0);
-            let test = crate::bir::j::norm::je4_bin(
-                &mut self.arena,
-                crate::js_ir::BinOp::NotEqEq,
-                test_arg,
-                undefined,
-            );
-            let receiver = self.pure_expression(View::Var { var: obj }, 0);
-            let target = self.static_member(receiver, name);
+            let undefined = self.js.undefined(&mut self.arena, false);
+            let test =
+                self.js.bin(&mut self.arena, crate::js_ir::BinOp::NotEqEq, test_arg, undefined);
+            let mut receiver = self.js.var(&mut self.arena, obj);
+            self.js.assume_strict(&mut self.arena, &mut receiver);
+            let target = self.static_member(B::node(receiver), name);
             let value = self.add_external_effect(cx, next_effect, value);
-            let assign = plain::bin(&mut self.arena, crate::js_ir::BinOp::Eq, target, value);
-            let statement = crate::bir::j::norm::js1_exp(&mut self.arena, assign);
-            let yes = self.arena.lists.push(&[statement]);
-            let no = self.arena.lists.push(&[]);
-            let branch = crate::bir::j::norm::js3_simplify_if(&mut self.arena, test, yes, no);
-            self.statements.push(branch);
+            let assign = self.js.bin_plain(
+                &mut self.arena,
+                crate::js_ir::BinOp::Eq,
+                B::from_node(target),
+                B::from_node(value),
+            );
+            let statement = self.js.exp_rule(&mut self.arena, assign);
+            let yes = self.js.list(&mut self.arena, 1, std::iter::once(statement));
+            let no = self.js.list(&mut self.arena, 0, std::iter::empty());
+            let branch = self.js.if_(&mut self.arena, test, yes, no);
+            self.statements.push(B::stmt_node(branch));
         }
         self.external_pending = pending;
-        self.pure_expression(View::Var { var: obj }, 0)
+        let mut object = self.js.var(&mut self.arena, obj);
+        self.js.assume_strict(&mut self.arena, &mut object);
+        B::node(object)
     }
 
     /// X:581 external_module_id. O(1) for a previously seen primitive; the
@@ -268,7 +282,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 var
             }
         };
-        let value = self.pure_expression(View::Var { var }, 0);
+        let mut value = self.js.var(&mut self.arena, var);
+        self.js.assume_strict(&mut self.arena, &mut value);
+        let value = B::node(value);
         if scopes.is_empty() {
             value
         } else {
@@ -293,7 +309,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let head = scopes.first().map_or(name, String::as_str);
         let module = self.external_module_cached(cx, primitive, module, head == "default", false);
         let member = Some(self.arena.intern_text(head));
-        let value = plain::node(&mut self.arena, View::JQualified { module, member }, 0);
+        let value = B::node(self.js.qualified(&mut self.arena, module, member));
         if scopes.is_empty() {
             value
         } else {
@@ -315,22 +331,18 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.external_references[primitive.index()] = Some(module);
             module
         };
-        plain::node(
-            &mut self.arena,
-            View::JQualified {
-                module,
-                member: None,
-            },
-            0,
-        )
+        B::node(self.js.qualified(&mut self.arena, module, None))
     }
 
-    /// O(arguments): consume a pooled call argument list without a transient vector.
+    /// O(arguments): the operands of a pooled call argument list pushed and
+    /// built into a call, without a transient vector; one step per argument.
     fn external_call_from_list(&mut self, callee: NodeId, args: crate::bir::ListId) -> NodeId {
         let info = self
             .arena
             .js_info(crate::bir::JsPayload::Call(Default::default()));
-        self.arena.call_from_list(callee, args, Some(info))
+        let mark = self.js.mark();
+        self.js.push_list(&self.arena, args);
+        B::node(self.js.call(&mut self.arena, B::from_node(callee), mark, info))
     }
 
     /// X:1202 compile_js_call. O(arguments + conversions + scope spelling).
@@ -353,7 +365,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             DeclKind::DeclVal { .. } if itself && decl.effective_arity == 0 => {
                 for i in 0..self.arena.lists.get(args).len() {
                     let value = self.arena.lists.get(args)[i];
-                    self.arena.release(value);
+                    self.js.release(&mut self.arena, B::from_node(value));
                 }
                 self.external_module_binding(cx, primitive, &call.prim_name)
             }
@@ -366,8 +378,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             DeclKind::DeclNew { .. } if itself => {
                 let target = self.external_module_binding(cx, primitive, &call.prim_name);
                 let (args, effect) = self.assemble_external_args_no_splice(cx, specs, args);
-                let value = self.arena.call_from_list(target, args, None);
-                self.add_external_effect(cx, effect, value)
+                let mark = self.js.mark();
+                self.js.push_list(&self.arena, args);
+                let value = self.js.new_(&mut self.arena, B::from_node(target), mark);
+                self.add_external_effect(cx, effect, B::node(value))
             }
             _ if itself => unreachable!("invalid module-itself declaration"),
             DeclKind::DeclVal { name } if decl.effective_arity == 0 => {
@@ -390,8 +404,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 let (args, effect) = self.assemble_external_args(cx, specs, args, decl.variadic);
                 let target =
                     self.translate_scoped_module_value(cx, primitive, module, name, &decl.scopes);
-                let value = self.arena.call_from_list(target, args, None);
-                self.add_external_effect(cx, effect, value)
+                let mark = self.js.mark();
+                self.js.push_list(&self.arena, args);
+                let value = self.js.new_(&mut self.arena, B::from_node(target), mark);
+                self.add_external_effect(cx, effect, B::node(value))
             }
             DeclKind::DeclSend { name } => {
                 let receiver = self.arena.lists.get(args)[0];
@@ -417,7 +433,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     assert_eq!(self.arena.lists.get(args).len(), 2);
                     {
                         let value = self.arena.lists.get(args)[1];
-                        plain::bin(&mut self.arena, crate::js_ir::BinOp::Eq, target, value)
+                        let assign = self.js.bin_plain(
+                            &mut self.arena,
+                            crate::js_ir::BinOp::Eq,
+                            B::from_node(target),
+                            B::from_node(value),
+                        );
+                        B::node(assign)
                     }
                 } else {
                     assert_eq!(self.arena.lists.get(args).len(), 1);
@@ -430,24 +452,22 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 let receiver = self.arena.lists.get(args)[0];
                 let receiver = self.apply_scoped_access(cx, receiver, &decl.scopes);
                 let index = self.arena.lists.get(args)[1];
-                let target = plain::node(
-                    &mut self.arena,
-                    View::JIndex {
-                        object: receiver,
-                        index,
-                    },
-                    0,
-                );
+                let target =
+                    self.js.index(&mut self.arena, B::from_node(receiver), B::from_node(index));
                 let value = if matches!(decl.kind, DeclKind::DeclSetIndex) {
                     assert_eq!(self.arena.lists.get(args).len(), 3);
-                    {
-                        let value = self.arena.lists.get(args)[2];
-                        plain::bin(&mut self.arena, crate::js_ir::BinOp::Eq, target, value)
-                    }
+                    let value = self.arena.lists.get(args)[2];
+                    self.js.bin_plain(
+                        &mut self.arena,
+                        crate::js_ir::BinOp::Eq,
+                        target,
+                        B::from_node(value),
+                    )
                 } else {
                     assert_eq!(self.arena.lists.get(args).len(), 2);
                     target
                 };
+                let value = B::node(value);
                 self.add_external_effect(cx, effect, value)
             }
         }
