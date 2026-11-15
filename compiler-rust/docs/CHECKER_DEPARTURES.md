@@ -7203,3 +7203,108 @@ which normalizes the prefix through the alias (`compiler/ml/transl_path.ml:43-46
 (`compiler-rust/src/raw_lambda/convert.rs:3705`) does not reach the alias
 target for a local `module A = R`. That is the Lambda translation of
 modules, not constructor typing.
+
+### A3 — module aliases of a functor argument
+
+The witness: a module alias declared in a functor parameter's signature and
+re-exported from the functor body.
+
+```rescript
+module N = {let x = 1}
+module F = (X: {
+  module N: {let x: int}
+  module M = N
+}) => {module Z = X.M}
+module R = F({
+  module N = N
+  module M = N
+})
+let y = R.Z.x
+```
+
+OCaml emitted `Z: undefined` in the body of `F` and in `R`, and `let y = 1`;
+Rust emitted `Z: X.N`, `Z: N` and `let y = R.Z.x` read through `R`. Both
+compilers' `-drawlambda` show where it starts: OCaml binds
+`Z/1008 =a module_alias`, Rust `Z/1008 =a (field:N/0 X/1007)`. The
+translation of a module expression (`convert_module_expr_raw0`,
+`compiler-rust/src/raw_lambda/convert.rs:4196`, the counterpart of
+`transl_module0` at `compiler/ml/translmod.ml:257-261`) compiles any
+expression whose type is an alias to `module_alias`, as OCaml does for
+`Mty_alias (Mta_absent, _)`; the type of `X.M` was the difference.
+
+Commands as in "Scope, calibration and reproducibility" (OCaml `bsc` from
+`dune build`, Rust from the thin-LTO release build); each program is
+`Main.res` (plus `Main.resi` where noted) compiled by both with
+`-I . -I packages/@rescript/runtime/lib/rescript`, and stdout, stderr and the
+exit status compared byte for byte.
+
+#### Fixed
+
+- `5d4b69ea3`: eliminating the parameter from the result of a functor
+  applied to a structure (`Mtype.nondep_supertype`) replaces an alias of a
+  module of the parameter by that module's type, read through the argument
+  (`compiler/ml/mtype.ml:114-117`). The alias arm of the Rust `nondep_mty`
+  (`compiler-rust/src/types/typemod.rs:2340`) returned `None`, so Rust
+  rejected `include X` of a parameter with an alias ("The parameter cannot
+  be eliminated in the result type") where OCaml accepts it. It now reads the
+  module's type through the argument's component table
+  (`tests/tests/src/functor_argument_alias_include`).
+- `a5eda8581`: `module Z = path` strengthens the declared module type with
+  `Mtype.strengthen ~aliasable`, `aliasable` false for a path into a functor
+  parameter (`compiler/ml/typemod.ml:1238-1258`), and `strengthen` leaves an
+  alias as it is (`compiler/ml/mtype.ml:30-38`). The Rust call
+  (`compiler-rust/src/types/typemod.rs:14861`) scraped the alias to the
+  strengthened signature of `X.N` and always strengthened as if the path
+  were aliasable. `X.M` now keeps `Mty_alias (Mta_absent, X.N)` and compiles
+  to `module_alias`, and `module Z = X.N` keeps the strengthened types of
+  `N`'s submodules instead of aliases of the parameter's modules, which
+  could not be eliminated from the result. Fixtures:
+  `tests/tests/src/functor_argument_alias_module`,
+  `functor_argument_alias_interface` (with an interface) and super_errors
+  `functor_argument_alias_signature_mismatch`.
+
+Programs run through both compilers, before (at `a2777909d`) and after
+`a5eda8581` (exit status of OCaml; DIFFER lists Rust's when it differs):
+
+| Program | Before | After |
+| --- | --- | --- |
+| the witness | DIFFER (Rust `Z: X.N`) | agree, 0 |
+| alias not used in the body (`module Z = X.M` and a value) | DIFFER | agree, 0 |
+| alias used in the body (`Z.x`) | DIFFER | agree, 0 |
+| alias accessed as a value (`X.M.x`) | agree, 0 | agree, 0 |
+| re-exported under a signature (`: {module Z: {let x: int}}`) | agree, 0 | agree, 0 |
+| alias of a module outside the parameter (`module M = N`, top-level `N`) | DIFFER | agree, 0 |
+| an unused alias outside the parameter next to a value | DIFFER | agree, 0 |
+| two levels of alias (`L = M`, `M = N`) | DIFFER | agree, 0 |
+| functor applied to a named module | DIFFER | agree, 0 |
+| the same alias in an ordinary signature, no functor | agree, 0 | agree, 0 |
+| first-class module built from the alias (`module(X.M: T)`) | agree, 0 | agree, 0 |
+| interface exporting `F` and `R` | OCaml 2 (crash), Rust 0 | OCaml 2 (crash), Rust 0 |
+| interface exporting only `R` | DIFFER | agree, 0 |
+| a submodule of the parameter (`module Z = X.N`, `Z.K.x`) | DIFFER (Rust 2) | agree, 0 |
+| the parameter itself (`module Z = X`) | agree, 0 | agree, 0 |
+| an alias inside a nested functor of the body | DIFFER | agree, 0 |
+| `include X` | DIFFER (Rust 2) | agree, 0 |
+| `include X` of a named signature, then `M.x` | DIFFER (Rust 2) | agree, 0 |
+| parameter's `M` not an alias | agree, 0 | agree, 0 |
+| parameter typed `module type of A` | agree, 0 | agree, 0 |
+| nested functor with `module type of X` | agree, 0 | agree, 0 |
+| alias in a constrained argument inside another functor | DIFFER | agree, 0 |
+| argument's `M` not an alias of its `N` (rejected) | agree, 2 | agree, 2 |
+| wrong member through the result (`R.Z.z`, rejected) | agree, 2 | agree, 2 |
+| wrong type in the body (`let v: string = Z.x`, rejected) | agree, 2 | agree, 2 |
+| body against a mismatching result signature (rejected) | agree, 2 | agree, 2 |
+
+#### Open
+
+With an interface that exports `F` itself
+(`module F: (X: {module N: {let x: int}
+module M = N}) => {module Z: {let x: int}}`), OCaml prints warning 32 and
+then stops with `Fatal error: exception Failure("File
+\"compiler/core/lam_dce.ml\", line 33, characters 31-38X/1034 not found")`:
+the coercion of `Z` against the interface is `Tcoerce_alias (X.N, _)`
+(`compiler/ml/includemod.ml:224-237`), which names the parameter `X`
+outside the coerced functor's own parameter `funarg`. Rust prints the same
+warning, exits 0 and emits `Z: X.N` in `function F(funarg)`, a reference to
+an unbound `X`. This is a defect of both compilers, and the reference
+crashes; it was left as it is.
