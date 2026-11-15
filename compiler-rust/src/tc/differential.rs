@@ -2640,28 +2640,24 @@ mod tests {
     /// nodes: the acceptance test of R3e. A case that differs is read
     /// against the OCaml arm before either side is followed (decision 18).
     ///
-    /// The pinned seeds are one departure of the old checker (E4). unify3
-    /// links the expanded head it chose to the ORIGINAL other side before
-    /// the children (`occur !env t1' t2'; link_type t1' t2`,
-    /// compiler/ml/ctype.ml:2330-2331). The old checker unifies the two
-    /// expanded heads first and links to the original afterwards unless the
-    /// head now occurs in it (`unify_after_expansion`, types/ctype.rs),
-    /// which it always does when the abbreviation expands to its own
-    /// argument (`type id<'a> = 'a`): `id<X>` against `id<Y>` leaves
-    /// `id<Y>` where OCaml leaves `id<id<Y>>`, and `X` against `id<Y>`
-    /// leaves `X` where OCaml leaves `id<Y>`. The new side follows OCaml.
-    /// The difference shows in a diagnostic of the two compilers, so the
-    /// old checker is corrected in a change of its own, which empties
-    /// these lists (decision 20: a list only ever shrinks).
+    /// No seed is pinned. 31000122, 31000191 and 77000306 (and 77000265
+    /// with BUILD) were one departure of the old checker (E4), now fixed:
+    /// unify3 links the expanded head it chose to the ORIGINAL other side
+    /// before the children (`occur !env t1' t2'; link_type t1' t2`,
+    /// compiler/ml/ctype.ml:2330-2331), and the old checker's
+    /// `unify_after_expansion` (types/ctype.rs) linked the two expanded
+    /// heads to each other instead whenever the abbreviation expands to its
+    /// own argument (`type id<'a> = 'a`). It now follows OCaml's order, so
+    /// both lists are empty (decision 20: a list only ever shrinks).
     /// Reaches: R3m, R3e.
     #[test]
     fn object_plan_agrees_on_generated_cases() {
-        let known = [31_000_122, 31_000_191, 77_000_306];
+        let known: [u64; 0] = [];
         let coverage = run_cases_except(Plan::new(Tier::Full, OBJECTS | CELLS), &known);
         // `cases` counts the cases that agree: the pinned ones are not in it.
         assert_eq!(coverage.cases + known.len(), 10_000);
         assert!(coverage.failures * 10 > coverage.cases, "{coverage:?}");
-        run_cases_except(Plan::new(Tier::Full, OBJECTS | CELLS | BUILD), &[77_000_265]);
+        run_cases_except(Plan::new(Tier::Full, OBJECTS | CELLS | BUILD), &[]);
         run_cases(Plan::new(Tier::Full, OBJECTS | CELLS | EXPLAIN), 1, 20, 100);
     }
 
