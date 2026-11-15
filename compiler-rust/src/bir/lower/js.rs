@@ -42,8 +42,8 @@
 //! implementation, so that a call borrows two fields of the lowering's
 //! state and not the state.
 //!
-//! Slice T6k builds the bodies of `Rows`. Until then this module is
-//! compiled for tests and its tests are ignored as "T6k build".
+//! Until the lowering holds an implementation (T6k's second commit) this
+//! module is compiled for tests only.
 use crate::bir::{Bir, ConstId, FuncId, ImportId, JsId, NodeId, StrId, VarId};
 use crate::emit::row::Kind;
 use crate::js_ir::BinOp;
