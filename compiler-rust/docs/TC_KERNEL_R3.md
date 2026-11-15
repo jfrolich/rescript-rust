@@ -1905,3 +1905,539 @@ and the fresh-parameter link citation; it changes no benchmark or compiler
 code. The source-group totals were independently resummed from the Markdown:
 916.953969, 122, 119, 124.000058, 960.954414 and 2826.268888, matching their
 operation measurements within 0.0001 instruction.
+
+## K3
+
+Four removals from the hot paths of unification that K3a section 5 ranks,
+with no change of behaviour, one commit each; an item is kept when it
+saves 5 instructions or more on `unify_ground3`, `unify_datatype2` or
+`unify_abbrev2` and makes no operation of the table more than 2 dearer,
+and is otherwise reverted in a commit of its own. Same machine kind and
+method as "K3a" section 1 (x86-64 Linux, eight virtual CPUs, Valgrind
+3.22.0, pinned `rustc 1.102.0-nightly (ac8310ba6 2026-11-09)`, fat LTO,
+one codegen unit, line tables, 1,000,000 iterations minus zero,
+unification minus its `build_*` twin, the other operations as in "K1").
+The reference script ran first and reproduced R1's raw figures (`empty
+18`, `unify_ground1 318`, `unify_ground3 746`, `generalize7 672`). No
+bench operation changed.
+
+### Per commit
+
+Before: trunk `6a0838552`. Each column is a whole build and run of that
+commit: (1) `ac4d94e52`, (2) `e6528bba7`, (3) `fa0c96fbd`, (4)
+`e91359ead`. The three reverts `4773a3e0a`, `4b230242c` and `a4c3a5137`
+have the trees of the base, of (2) and of (2), so their figures are
+those columns. After review, (1) was re-applied on top of (2) (see
+"Review" below); the final figures are those of "Merged head".
+
+| Operation | K3a now | Before | (1) | (2) | (3) | (4) |
+|---|---:|---:|---:|---:|---:|---:|
+| `unify_vars` | 119.00 | 120.00 | 120.00 | 120.00 | 118.00 | 118.00 |
+| `unify_ground1` | 122.00 | 121.00 | 121.00 | 121.00 | 119.00 | 122.00 |
+| `unify_ground3` | 916.95 | 911.95 | 820.95 | 894.00 | 892.00 | 894.00 |
+| `bind_ground1` | 124.00 | 124.00 | 124.00 | 124.00 | 122.00 | 122.00 |
+| `unify_vars_local` | 119.00 | 120.00 | 120.00 | 120.00 | 118.00 | 118.00 |
+| `unify_ground1_local` | 122.00 | 121.00 | 121.00 | 121.00 | 119.00 | 122.00 |
+| `unify_ground3_local` | 916.95 | 911.95 | 820.95 | 894.00 | 892.00 | 894.00 |
+| `bind_ground1_local` | 124.00 | 124.00 | 124.00 | 124.00 | 122.00 | 122.00 |
+| `unify_datatype2` | 960.95 | 955.95 | 828.95 | 938.00 | 936.00 | 938.00 |
+| `unify_abbrev2` | 2826.27 | 2822.27 | 2867.27 | 2788.06 | 2786.06 | 2788.06 |
+| `instance1` | 137.06 | 137.06 | 137.06 | 137.06 | 137.06 | 137.06 |
+| `instance3` | 217.31 | 217.31 | 217.31 | 217.31 | 217.31 | 217.31 |
+| `instance5` | 305.34 | 305.34 | 305.34 | 305.34 | 305.34 | 305.34 |
+| `instance7` | 325.27 | 325.27 | 325.27 | 325.27 | 325.27 | 325.27 |
+| `generalize7` | 449.00 | 449.00 | 449.00 | 449.00 | 449.00 | 449.00 |
+| `lower7` | 422.00 | 422.00 | 422.00 | 422.00 | 422.00 | 422.00 |
+| `copy7` | 1709.58 | 1709.58 | 1709.58 | 1709.58 | 1709.58 | 1709.58 |
+| `repr` | 9.00 | 9.00 | 9.00 | 9.00 | 9.00 | 9.00 |
+| `restore` | 63.00 | 63.00 | 63.00 | 63.00 | 63.00 | 63.00 |
+| `keep` | 44.00 | 44.00 | 44.00 | 44.00 | 44.00 | 44.00 |
+
+"K3a now" is K3a's table on `c4e9326eb`. The base reproduces it within
+5 instructions on every operation (trunk's R3e frame kinds since: the
+largest moves are `unify_ground3` and `unify_datatype2` -5, `unify_abbrev2`
+-4, `unify_vars` +1, `unify_ground1` -1).
+
+| Item | `unify_ground3` | `unify_datatype2` | `unify_abbrev2` | Dearest other operation | Kept |
+|---|---:|---:|---:|---|---|
+| (1) expansion test inline | -91.00 | -127.00 | **+45.00** | none dearer | reverted, then **kept by decision in review** |
+| (2) occurrence probe | -17.95 | -17.95 | -34.21 | none dearer | **yes** |
+| (3) `link_distinct` | -2.00 | -2.00 | -2.00 | none dearer | no: saves 2 |
+| (4) rare frame arms out of line | 0.00 | 0.00 | 0.00 | `unify_ground1` +1 | no: saves 0 |
+
+(1) and (3) are measured against the base and (2) respectively; (4)
+against (2).
+
+**(1) An expansion attempt that cannot succeed makes no call. Reverted by the rule, then kept by decision in review.**
+`Checker::never_expands` tested, inline in front of the first pair of
+`expand_head` calls of `unify_expanded`, the returns of `expand_once`
+that have no side effect and need no memo: the representative is not a
+constructor, or its type's row (read at the call, one `TypeInfo` load)
+has none of `ABBREV`, `ALIAS`, `INHERITS`, for which no public memo entry
+can exist (`memorize` runs only in `subst` of a public expansion, which
+needs `ABBREV`, and in `expand_alias`, which needs `ALIAS`; the chain
+lookup only for `INHERITS`). On the two operations whose heads do not
+expand it removes the two calls (`expand_once` 94 and 138 instructions)
+for 2 node and row tests. On `unify_abbrev2`, whose heads do expand, the
+tests are added work in front of an `expand_once` that loads the node and
+the row again, and spills: +45, where the rule allows +2. Any test in
+front of an unchanged `expand_once` costs the expanding path at least one
+row load and two compares per head, so no form of the item meets the
+rule. Three forms were measured:
+
+| Operation | Before | (1) wrapper, four asks | (1) wrapper, first pair | (1) as committed |
+|---|---:|---:|---:|---:|
+| `unify_vars` | 120.00 | 117.00 | 117.00 | 120.00 |
+| `unify_ground1` | 121.00 | 118.00 | 118.00 | 121.00 |
+| `unify_ground3` | 911.95 | 818.95 | 825.95 | 820.95 |
+| `bind_ground1` | 124.00 | 121.00 | 121.00 | 124.00 |
+| `unify_datatype2` | 955.95 | 826.95 | 833.95 | 828.95 |
+| `unify_abbrev2` | 2822.27 | 3040.27 | 2917.27 | 2867.27 |
+
+The first two put the test in an inline wrapper around `expand_head`;
+LLVM then called `expand_head` out of line (212 instructions in
+`unify_abbrev2` for four calls, 106 for two). The committed form tests
+the first pair only (the second pair runs only after an expansion), with
+`expand_head` called at the original sites, where it stays inline: 45
+over the base in `unify_expanded`, all of it the two tests and register
+pressure. (The message of the revert commit `4773a3e0a` names the
+first two forms' figures the wrong way round: +218 belongs to four asks,
++95 to the first pair. This table is right.)
+
+**(2) The occurrence walk of a small type uses no marks. Kept.**
+`Checker::reaches` first runs `Checker::unreached_within_budget`, the
+probe of `occur_reaches_budget` (compiler/ml/ctype.ml:1432-1465,
+`walk_budget` 256 at :1424): the same edges as the marked walk in the
+same mode, on `g.work`, one step a node, no marks; it answers "not
+reached" only when it finished within 256 nodes. When it met the node or
+ran out of budget the marked walk runs as before and answers. The saving
+is all in `reaches`: 214.05 -> 196.00 in `unify_ground3` and
+`unify_datatype2`, 434.05 -> 400.00 in `unify_abbrev2` (the generation
+setup, the mark test and the mark store a node, and the amortized growth
+of `marks`). No step count changed: no step test failed, so none was
+lowered.
+
+**(3) A link between two nodes proven distinct makes no identity test.
+Reverted.** `Graph::link` kept its guard and called the new
+`Graph::link_distinct` (`pub(super)`, since the callers are in
+`tc::unify`; `debug_assert_ne!`). Unproven sites kept the guard: the
+link of `bind_routed` and `bind_leaf` when reached from `Checker::bind`
+(with scoped types a childless target is linked without a walk, so
+`var == ty` is not excluded), the structure link of `unify3` (an
+expansion through a parameter can make `t1'` the other side's original),
+and `repair_recursion`. Proven sites: the nullary shortcut and
+`bind_leaf` from `unify_pair` (two distinct representatives), the two
+variable cases of `unify3` (`occur` clashes when the other side is the
+variable), and `unify_var` (`var == ty` returned at its top). 2 fewer on
+every unification operation.
+
+**(4) The loop of `run_frames` tests the common frame kinds first.
+Reverted.** The arms of every kind but `Pair` and `Linked` moved,
+unchanged, into one out-of-line `Checker::run_rare_frame`. With
+`#[inline(never)]` alone the call in the loop made `unify_distinct` keep
+more values in callee-saved registers (+9 on its line 0, +4 at the loop
+head): dearer everywhere. With `#[cold]` too (committed) it is neutral on
+the three operations of the rule:
+
+| Operation | (2) | (4) `#[inline(never)]` | (4) `#[cold] #[inline(never)]`, committed |
+|---|---:|---:|---:|
+| `unify_vars` | 120.00 | 121.00 | 118.00 |
+| `unify_ground1` | 121.00 | 125.00 | 122.00 |
+| `unify_ground3` | 894.00 | 900.00 | 894.00 |
+| `bind_ground1` | 124.00 | 125.00 | 122.00 |
+| `unify_datatype2` | 938.00 | 944.00 | 938.00 |
+| `unify_abbrev2` | 2788.06 | 2794.06 | 2788.06 |
+
+In `unify_ground3` the dispatch itself (`unify.rs:1255`) went from 10 to
+6 instructions, and the loop and entry gained what it lost. K3a's
+"about 18 instructions" of these arms are therefore not in the
+dispatch: the rare arms' code is not executed on these operations.
+
+### Review
+
+The keep rule was stated per operation where item (1) is a trade
+between operations: 91 and 127 fewer on heads that do not expand
+against 45 more (1.6%) on a pair that expands twice, which loses only
+if most structure pairs have abbreviation heads. And R3f measured that
+new callers elsewhere in the crate made LLVM stop inlining
+`expand_head` into `unify_expanded` (about 100 on `unify_ground3`); a
+test in front of the call keeps the common path independent of that
+decision. So (1) was re-applied as `0022a7a57` ("kept by decision in
+review"), with its three figures against the base: `unify_ground3`
+-91.00, `unify_datatype2` -127.00, `unify_abbrev2` +45.00.
+
+One attempt then tried to take back the 45 (keep it for 20 or more, with
+`unify_ground3` and `unify_datatype2` within 5 of their saving):
+`f5bae56ab` made the test one condition over both heads, so that when
+the left head may expand the right one's row is not read and both go to
+`expand_head`. It took back 6, so it was reverted (`06b497a58`):
+
+| Operation | (2) `e6528bba7` | (1) kept `0022a7a57` | (1) 2 `f5bae56ab` |
+|---|---:|---:|---:|
+| `unify_vars` | 120.00 | 120.00 | 120.00 |
+| `unify_ground1` | 121.00 | 121.00 | 121.00 |
+| `unify_ground3` | 894.00 | 803.00 | 805.00 |
+| `bind_ground1` | 124.00 | 124.00 | 124.00 |
+| `unify_vars_local` | 120.00 | 120.00 | 120.00 |
+| `unify_ground1_local` | 121.00 | 121.00 | 121.00 |
+| `unify_ground3_local` | 894.00 | 803.00 | 805.00 |
+| `bind_ground1_local` | 124.00 | 124.00 | 124.00 |
+| `unify_datatype2` | 938.00 | 811.00 | 813.00 |
+| `unify_abbrev2` | 2788.06 | 2833.06 | 2827.06 |
+| `instance1` | 137.06 | 137.06 | 137.06 |
+| `instance3` | 217.31 | 217.31 | 217.31 |
+| `instance5` | 305.34 | 305.34 | 305.34 |
+| `instance7` | 325.27 | 325.27 | 325.27 |
+| `generalize7` | 449.00 | 449.00 | 449.00 |
+| `lower7` | 422.00 | 422.00 | 422.00 |
+| `copy7` | 1709.58 | 1709.58 | 1709.58 |
+| `repr` | 9.00 | 9.00 | 9.00 |
+| `restore` | 63.00 | 63.00 | 63.00 |
+| `keep` | 44.00 | 44.00 | 44.00 |
+
+
+### Merged head
+
+`origin/ocaml-to-rust-rewrite` at `d158207a2` (with R3f, #294) merged
+without conflict as `06489d7d1`; trunk added no attribute on
+`Checker::expand_head`. Base: that trunk. Head: the merge. This is the
+final table of K3:
+
+| Operation | Base (trunk `d158207a2`) | Head | Change |
+|---|---:|---:|---:|
+| `unify_vars` | 117.00 | 117.00 | +0.00 |
+| `unify_ground1` | 122.00 | 122.00 | +0.00 |
+| `unify_ground3` | 1013.95 | 814.00 | -199.95 |
+| `bind_ground1` | 121.00 | 121.00 | +0.00 |
+| `unify_vars_local` | 117.00 | 117.00 | +0.00 |
+| `unify_ground1_local` | 122.00 | 122.00 | +0.00 |
+| `unify_ground3_local` | 1013.95 | 814.00 | -199.95 |
+| `bind_ground1_local` | 121.00 | 121.00 | +0.00 |
+| `unify_datatype2` | 1013.95 | 822.00 | -191.95 |
+| `unify_abbrev2` | 2940.27 | 2968.06 | +27.79 |
+| `instance1` | 137.06 | 137.06 | +0.00 |
+| `instance3` | 217.31 | 217.31 | +0.00 |
+| `instance5` | 305.34 | 305.34 | +0.00 |
+| `instance7` | 325.27 | 325.27 | +0.00 |
+| `generalize7` | 449.00 | 449.00 | +0.00 |
+| `lower7` | 422.00 | 422.00 | +0.00 |
+| `copy7` | 1709.58 | 1709.58 | +0.00 |
+| `repr` | 9.00 | 9.00 | +0.00 |
+| `restore` | 63.00 | 63.00 | +0.00 |
+| `keep` | 44.00 | 44.00 | +0.00 |
+
+`unify_ground3` and `unify_datatype2` on trunk carry R3f's loss of the
+inlining of `expand_head`; on the head neither head of those operations
+reaches it. `unify_abbrev2` pays item (1)'s two tests, as decided.
+
+### Raw output
+
+```text
+revision operation zero full raw
+before empty 335066 19337324 19.002258
+before instance1 335086 156395945 156.060859
+before instance3 335120 236644455 236.309335
+before instance5 335154 324673170 324.338016
+before instance7 335188 344607404 344.272216
+before generalize7 335134 793607350 793.272216
+before lower7 335084 766607286 766.272202
+before copy7 335106 1728916091 1728.580985
+before repr 335058 165395931 165.060873
+before restore 335114 219396353 219.061239
+before keep 335098 200396351 200.061253
+before build_vars 335393 78405840 78.070447
+before unify_vars 335427 198405874 198.070447
+before build_ground1 335456 98413433 98.077977
+before unify_ground1 335489 219413466 219.077977
+before build_ground3 335522 200776627 200.441105
+before unify_ground3 335556 1112730630 1112.395074
+before build_vars_local 335320 78405795 78.070475
+before unify_vars_local 335354 198405829 198.070475
+before build_ground1_local 335382 98413359 98.077977
+before unify_ground1_local 335422 219413399 219.077977
+before build_ground3_local 335451 200776556 200.441105
+before unify_ground3_local 335485 1112730559 1112.395074
+before build_bind_ground1 335420 88427658 88.092238
+before bind_ground1 335514 212427780 212.092266
+before build_bind_ground1_local 335499 88427765 88.092266
+before bind_ground1_local 335469 212427707 212.092238
+before build_datatype2 323577 186767415 186.443838
+before unify_datatype2 323582 1142721834 1142.398252
+before build_abbrev2 329106 186770975 186.441869
+before unify_abbrev2 329112 3009039869 3008.710757
+(1) empty 335312 19337570 19.002258
+(1) instance1 335332 156396191 156.060859
+(1) instance3 335366 236644701 236.309335
+(1) instance5 335400 324673416 324.338016
+(1) instance7 335434 344607650 344.272216
+(1) generalize7 335380 793607596 793.272216
+(1) lower7 335316 766607546 766.272230
+(1) copy7 335352 1728916337 1728.580985
+(1) repr 335318 165396163 165.060845
+(1) restore 335360 219396599 219.061239
+(1) keep 335358 200396583 200.061225
+(1) build_vars 335629 78406104 78.070475
+(1) unify_vars 335662 198406137 198.070475
+(1) build_ground1 335698 98413675 98.077977
+(1) unify_ground1 335732 219413709 219.077977
+(1) build_ground3 335770 200776875 200.441105
+(1) unify_ground3 335803 1021730877 1021.395074
+(1) build_vars_local 335580 78406027 78.070447
+(1) unify_vars_local 335614 198406061 198.070447
+(1) build_ground1_local 335634 98413611 98.077977
+(1) unify_ground1_local 335663 219413640 219.077977
+(1) build_ground3_local 335703 200776808 200.441105
+(1) unify_ground3_local 335738 1021730812 1021.395074
+(1) build_bind_ground1 335658 88427924 88.092266
+(1) bind_ground1 335770 212428008 212.092238
+(1) build_bind_ground1_local 335753 88427991 88.092238
+(1) bind_ground1_local 335708 212427974 212.092266
+(1) build_datatype2 323823 186767661 186.443838
+(1) unify_datatype2 323828 1015722080 1015.398252
+(1) build_abbrev2 329352 186771221 186.441869
+(1) unify_abbrev2 329358 3054040115 3053.710757
+(2) empty 335330 19337574 19.002244
+(2) instance1 335350 156396165 156.060815
+(2) instance3 335384 236644675 236.309291
+(2) instance5 335418 324673390 324.337972
+(2) instance7 335452 344607624 344.272172
+(2) generalize7 335384 793607584 793.272200
+(2) lower7 335348 766607534 766.272186
+(2) copy7 335370 1728916341 1728.580971
+(2) repr 335336 165396195 165.060859
+(2) restore 335364 219396587 219.061223
+(2) keep 335376 200396615 200.061239
+(2) build_vars 335657 78406088 78.070431
+(2) unify_vars 335691 198406122 198.070431
+(2) build_ground1 335686 98413649 98.077963
+(2) unify_ground1 335724 219413687 219.077963
+(2) build_ground3 335757 200776848 200.441091
+(2) unify_ground3 335790 1094777086 1094.441296
+(2) build_vars_local 335568 78406029 78.070461
+(2) unify_vars_local 335602 198406063 198.070461
+(2) build_ground1_local 335602 98413593 98.077991
+(2) unify_ground1_local 335642 219413633 219.077991
+(2) build_ground3_local 335677 200776796 200.441119
+(2) unify_ground3_local 335706 1094777030 1094.441324
+(2) build_bind_ground1 335654 88427906 88.092252
+(2) bind_ground1 335762 212428014 212.092252
+(2) build_bind_ground1_local 335747 88428027 88.092280
+(2) bind_ground1_local 335703 212427955 212.092252
+(2) build_datatype2 323797 186767649 186.443852
+(2) unify_datatype2 323802 1124768065 1124.444263
+(2) build_abbrev2 329340 186771195 186.441855
+(2) unify_abbrev2 329346 2974828246 2974.498900
+(3) empty 335330 19337574 19.002244
+(3) instance1 335350 156396165 156.060815
+(3) instance3 335384 236644675 236.309291
+(3) instance5 335418 324673390 324.337972
+(3) instance7 335452 344607624 344.272172
+(3) generalize7 335384 793607584 793.272200
+(3) lower7 335348 766607534 766.272186
+(3) copy7 335370 1728916341 1728.580971
+(3) repr 335336 165396195 165.060859
+(3) restore 335364 219396587 219.061223
+(3) keep 335376 200396615 200.061239
+(3) build_vars 335657 78406088 78.070431
+(3) unify_vars 335691 196406122 196.070431
+(3) build_ground1 335686 98413649 98.077963
+(3) unify_ground1 335724 217413687 217.077963
+(3) build_ground3 335757 200776848 200.441091
+(3) unify_ground3 335790 1092777086 1092.441296
+(3) build_vars_local 335568 78406029 78.070461
+(3) unify_vars_local 335602 196406063 196.070461
+(3) build_ground1_local 335602 98413593 98.077991
+(3) unify_ground1_local 335642 217413633 217.077991
+(3) build_ground3_local 335677 200776796 200.441119
+(3) unify_ground3_local 335706 1092777030 1092.441324
+(3) build_bind_ground1 335654 88427906 88.092252
+(3) bind_ground1 335762 210428014 210.092252
+(3) build_bind_ground1_local 335747 88428027 88.092280
+(3) bind_ground1_local 335703 210427955 210.092252
+(3) build_datatype2 323797 186767649 186.443852
+(3) unify_datatype2 323802 1122768065 1122.444263
+(3) build_abbrev2 329340 186771195 186.441855
+(3) unify_abbrev2 329346 2972828246 2972.498900
+(4) empty 335318 19337590 19.002272
+(4) instance1 335338 156396211 156.060873
+(4) instance3 335372 236644721 236.309349
+(4) instance5 335406 324673436 324.338030
+(4) instance7 335440 344607670 344.272230
+(4) generalize7 335400 793607602 793.272202
+(4) lower7 335350 766607566 766.272216
+(4) copy7 335358 1728916357 1728.580999
+(4) repr 335338 165396197 165.060859
+(4) restore 335380 219396605 219.061225
+(4) keep 335378 200396617 200.061239
+(4) build_vars 335659 78406120 78.070461
+(4) unify_vars 335697 196406158 196.070461
+(4) build_ground1 335708 98413699 98.077991
+(4) unify_ground1 335741 220413732 220.077991
+(4) build_ground3 335774 200776893 200.441119
+(4) unify_ground3 335808 1094777132 1094.441324
+(4) build_vars_local 335600 78406061 78.070461
+(4) unify_vars_local 335634 196406095 196.070461
+(4) build_ground1_local 335648 98413611 98.077963
+(4) unify_ground1_local 335688 220413651 220.077963
+(4) build_ground3_local 335717 200776808 200.441091
+(4) unify_ground3_local 335751 1094777047 1094.441296
+(4) build_bind_ground1 335686 88427938 88.092252
+(4) bind_ground1 335794 210428046 210.092252
+(4) build_bind_ground1_local 335779 88428031 88.092252
+(4) bind_ground1_local 335735 210427987 210.092252
+(4) build_datatype2 323843 186767667 186.443824
+(4) unify_datatype2 323848 1124768083 1124.444235
+(4) build_abbrev2 329358 186771241 186.441883
+(4) unify_abbrev2 329364 2974828292 2974.498928
+(1)-kept empty 333047 19335305 19.002258
+(1)-kept instance1 333067 156393926 156.060859
+(1)-kept instance3 333101 236642436 236.309335
+(1)-kept instance5 333135 324671151 324.338016
+(1)-kept instance7 333169 344605385 344.272216
+(1)-kept generalize7 333115 793605331 793.272216
+(1)-kept lower7 333051 766605281 766.272230
+(1)-kept copy7 333087 1728914072 1728.580985
+(1)-kept repr 333053 165393898 165.060845
+(1)-kept restore 333095 219394334 219.061239
+(1)-kept keep 333093 200394318 200.061225
+(1)-kept build_vars 333360 78403835 78.070475
+(1)-kept unify_vars 333398 198403873 198.070475
+(1)-kept build_ground1 333437 98411414 98.077977
+(1)-kept unify_ground1 333470 219411447 219.077977
+(1)-kept build_ground3 333503 200774608 200.441105
+(1)-kept unify_ground3 333537 1003774847 1003.441310
+(1)-kept build_vars_local 333315 78403762 78.070447
+(1)-kept unify_vars_local 333349 198403796 198.070447
+(1)-kept build_ground1_local 333363 98411340 98.077977
+(1)-kept unify_ground1_local 333403 219411380 219.077977
+(1)-kept build_ground3_local 333432 200774537 200.441105
+(1)-kept unify_ground3_local 333466 1003774776 1003.441310
+(1)-kept build_bind_ground1 333387 88425653 88.092266
+(1)-kept bind_ground1 333509 212425747 212.092238
+(1)-kept build_bind_ground1_local 333494 88425732 88.092238
+(1)-kept bind_ground1_local 333436 212425702 212.092266
+(1)-kept build_datatype2 321558 186765396 186.443838
+(1)-kept unify_datatype2 321563 997765812 997.444249
+(1)-kept build_abbrev2 327087 186768956 186.441869
+(1)-kept unify_abbrev2 327093 3019826007 3019.498914
+(1)-2 empty 333016 19335288 19.002272
+(1)-2 instance1 333036 156393909 156.060873
+(1)-2 instance3 333070 236642419 236.309349
+(1)-2 instance5 333104 324671134 324.338030
+(1)-2 instance7 333138 344605368 344.272230
+(1)-2 generalize7 333098 793605300 793.272202
+(1)-2 lower7 333048 766605264 766.272216
+(1)-2 copy7 333056 1728914055 1728.580999
+(1)-2 repr 333036 165393895 165.060859
+(1)-2 restore 333078 219394303 219.061225
+(1)-2 keep 333076 200394315 200.061239
+(1)-2 build_vars 333357 78403818 78.070461
+(1)-2 unify_vars 333395 198403856 198.070461
+(1)-2 build_ground1 333406 98411397 98.077991
+(1)-2 unify_ground1 333439 219411430 219.077991
+(1)-2 build_ground3 333472 200774591 200.441119
+(1)-2 unify_ground3 333506 1005774830 1005.441324
+(1)-2 build_vars_local 333298 78403759 78.070461
+(1)-2 unify_vars_local 333332 198403793 198.070461
+(1)-2 build_ground1_local 333346 98411309 98.077963
+(1)-2 unify_ground1_local 333386 219411349 219.077963
+(1)-2 build_ground3_local 333415 200774506 200.441091
+(1)-2 unify_ground3_local 333449 1005774745 1005.441296
+(1)-2 build_bind_ground1 333384 88425636 88.092252
+(1)-2 bind_ground1 333492 212425744 212.092252
+(1)-2 build_bind_ground1_local 333477 88425729 88.092252
+(1)-2 bind_ground1_local 333433 212425685 212.092252
+(1)-2 build_datatype2 321541 186765365 186.443824
+(1)-2 unify_datatype2 321546 999765781 999.444235
+(1)-2 build_abbrev2 327056 186768939 186.441883
+(1)-2 unify_abbrev2 327062 3013825990 3013.498928
+trunk empty 334357 19336601 19.002244
+trunk instance1 334377 156395222 156.060845
+trunk instance3 334411 236643732 236.309321
+trunk instance5 334445 324672447 324.338002
+trunk instance7 334479 344606681 344.272202
+trunk generalize7 334411 793606641 793.272230
+trunk lower7 334375 766606591 766.272216
+trunk copy7 334397 1728915368 1728.580971
+trunk repr 334363 165395222 165.060859
+trunk restore 334391 219395644 219.061253
+trunk keep 334403 200395642 200.061239
+trunk build_vars 334684 78405145 78.070461
+trunk unify_vars 334718 195405179 195.070461
+trunk build_ground1 334743 98412706 98.077963
+trunk unify_ground1 334777 220412740 220.077963
+trunk build_ground3 334811 200775902 200.441091
+trunk unify_ground3 334845 1214729905 1214.395060
+trunk build_vars_local 334631 78405092 78.070461
+trunk unify_vars_local 334660 195405121 195.070461
+trunk build_ground1_local 334659 98412650 98.077991
+trunk unify_ground1_local 334693 220412684 220.077991
+trunk build_ground3_local 334727 200775846 200.441119
+trunk unify_ground3_local 334761 1214729849 1214.395088
+trunk build_bind_ground1 334711 88426963 88.092252
+trunk bind_ground1 334815 209427067 209.092252
+trunk build_bind_ground1_local 334798 88427050 88.092252
+trunk bind_ground1_local 334760 209427012 209.092252
+trunk build_datatype2 322854 186766706 186.443852
+trunk unify_datatype2 322859 1200721125 1200.398266
+trunk build_abbrev2 328397 186770252 186.441855
+trunk unify_abbrev2 328403 3127039145 3126.710742
+head empty 334391 19336635 19.002244
+head instance1 334411 156395226 156.060815
+head instance3 334445 236643736 236.309291
+head instance5 334479 324672451 324.337972
+head instance7 334513 344606685 344.272172
+head generalize7 334445 793606645 793.272200
+head lower7 334409 766606595 766.272186
+head copy7 334431 1728915402 1728.580971
+head repr 334397 165395256 165.060859
+head restore 334425 219395648 219.061223
+head keep 334437 200395676 200.061239
+head build_vars 334718 78405149 78.070431
+head unify_vars 334752 195405183 195.070431
+head build_ground1 334747 98412710 98.077963
+head unify_ground1 334781 220412744 220.077963
+head build_ground3 334815 200775906 200.441091
+head unify_ground3 334849 1014776145 1014.441296
+head build_vars_local 334629 78405090 78.070461
+head unify_vars_local 334663 195405124 195.070461
+head build_ground1_local 334663 98412654 98.077991
+head unify_ground1_local 334697 220412688 220.077991
+head build_ground3_local 334731 200775850 200.441119
+head unify_ground3_local 334765 1014776089 1014.441324
+head build_bind_ground1 334715 88426967 88.092252
+head bind_ground1 334819 209427071 209.092252
+head build_bind_ground1_local 334802 88427082 88.092280
+head bind_ground1_local 334770 209427022 209.092252
+head build_datatype2 322858 186766710 186.443852
+head unify_datatype2 322863 1008767126 1008.444263
+head build_abbrev2 328401 186770256 186.441855
+head unify_abbrev2 328407 3154827306 3154.498899
+```
+
+### Checks
+
+Every commit, before its push (each run listed separately, debug build):
+
+```text
+cargo test --manifest-path compiler-rust/Cargo.toml --lib tc::
+(1)       test result: ok. 217 passed; 0 failed; 11 ignored; 0 measured; 2621 filtered out; finished in 294.62s
+(2)       test result: ok. 217 passed; 0 failed; 11 ignored; 0 measured; 2621 filtered out; finished in 304.43s
+(3)       test result: ok. 217 passed; 0 failed; 11 ignored; 0 measured; 2621 filtered out; finished in 289.57s
+(4)       test result: ok. 217 passed; 0 failed; 11 ignored; 0 measured; 2621 filtered out; finished in 292.77s
+(1) 2     test result: ok. 217 passed; 0 failed; 11 ignored; 0 measured; 2621 filtered out; finished in 298.10s
+head      test result: ok. 231 passed; 0 failed; 1 ignored; 0 measured; 2648 filtered out; finished in 294.14s
+```
+
+CI `Instruction count` on `f4f485422` (head = trunk `6a0838552` plus
+item (2)): base 4,024,492,488, head 4,023,750,316, within the threshold.
+
+The reverts restore trees that ran these tests (the base's is trunk's;
+the head's is (2)'s). No test was added, removed, ignored or edited and
+no step count was lowered. The differential plans passed; that their
+pinned seed lists are unchanged was checked as
+`git diff origin/ocaml-to-rust-rewrite -- compiler-rust/src/tc/differential.rs`,
+which is empty on the final head (this branch does not touch the file). `tc` is not on a compiler build's path (the driver's
+default checker is the old one), so no application or `tests/tests`
+saving is claimed; the CI `Instruction count` check reports the build's
+figures.

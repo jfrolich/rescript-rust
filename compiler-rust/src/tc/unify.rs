@@ -7,7 +7,7 @@
 //! it. Recursion is an explicit stack of [`Frame`]s, popped in the order the
 //! recursive calls would run.
 
-use super::expand::{ExpandMode, Memo, TypeTable, link_node};
+use super::expand::{ABBREV, ALIAS, ExpandMode, INHERITS, Memo, TypeTable, link_node};
 use super::graph::{
     ARROW, CONSTR, Change, GENERIC, Graph, LINK, Mode, NONE, Node, Speculation, TUPLE, Ty, VAR,
 };
@@ -27,6 +27,10 @@ use super::segment::{EXTENDED, ExtraDescriptor};
 const LEVEL_ONLY: u32 = 1 << 30;
 /// See [`LEVEL_ONLY`].
 const LOWERS: u32 = 1 << 31;
+
+/// The node budget of [`Checker::unreached_within_budget`]: `walk_budget`
+/// (compiler/ml/ctype.ml:1424).
+const PROBE_BUDGET: u32 = 256;
 
 /// A failed unification. It carries nothing: in `Mode::Explain` the trace is
 /// [`Checker::trace`]; in `Mode::Success` there is none.
@@ -689,8 +693,18 @@ impl Checker {
         // of the other side (ctype.ml:2278-2283). When neither side expanded
         // the second pair would read the same graph and return the same
         // nodes, so it is made only after an expansion.
-        let mut expanded_left = self.expand_head(left, ExpandMode::Unif)?;
-        let mut expanded_right = self.expand_head(right, ExpandMode::Unif)?;
+        let left_head = self.g.repr(left);
+        let mut expanded_left = if self.never_expands(left_head) {
+            left_head
+        } else {
+            self.expand_head(left_head, ExpandMode::Unif)?
+        };
+        let right_head = self.g.repr(right);
+        let mut expanded_right = if self.never_expands(right_head) {
+            right_head
+        } else {
+            self.expand_head(right_head, ExpandMode::Unif)?
+        };
         let unexpanded = expanded_left == self.g.repr(left) && expanded_right == self.g.repr(right);
         if !unexpanded {
             expanded_left = self.expand_head(left, ExpandMode::Unif)?;
@@ -740,6 +754,31 @@ impl Checker {
         } else {
             self.unify3([t2, expanded_right, t1, expanded_left], [left, right], true)
         }
+    }
+
+    /// `expand_head_unif` of `ty` (compiler/ml/ctype.ml:1279) as unify2 asks
+    /// for it (ctype.ml:2278-2282): [`Checker::expand_head`] in
+    /// [`ExpandMode::Unif`], except that the answer "does not expand" is
+    /// given here, without the call, when the first [`Checker::expand_once`]
+    /// would return it on a test without a side effect: the representative
+    /// is not a constructor (its first return), or its type's row, read now
+    /// with one `TypeInfo` load, has none of [`ABBREV`], [`ALIAS`],
+    /// [`INHERITS`]. Such a type has no public memo entry: slot 0 or the
+    /// nullary row gets one only from `memorize` in `subst` of a public
+    /// expansion (which needs [`ABBREV`]) or in `expand_alias` (which needs
+    /// [`ALIAS`]), and the chain lookup runs only for [`INHERITS`]; so
+    /// `expand_once` finds no memo, skips the alias and the chain and
+    /// returns `NONE` at its `!expands` test. The row is the one at the time
+    /// of the call, nothing is cached: a pattern-mode equation that gives a
+    /// locally abstract type a manifest (R3h) sets its row's flags before a
+    /// later unification reads them, and one that takes it away cleans the
+    /// memos as `check_abbrev_env` does (ctype.ml:1163, `Checker::set_env`),
+    /// which `expand_once` relies on as well. Cost: one `repr`, one node
+    /// load and at most one row load; otherwise `expand_head`'s.
+    #[inline(always)]
+    fn never_expands(&self, head: Ty) -> bool {
+        let node = self.g.nodes[head.0 as usize];
+        node.tag() != CONSTR || self.types.info(node.a).flags & (ABBREV | ALIAS | INHERITS) == 0
     }
 
     /// `unify3 env t1 t1' t2 t2'` (compiler/ml/ctype.ml:2305-2438) on
@@ -1343,11 +1382,17 @@ impl Checker {
         self.mark_generation
     }
 
-    /// Whether `node` is reachable from `ty`: one step a node, each node
-    /// once (marks), explicit stack. With `deep` objects and variant rows
-    /// are crossed (`deep_occur`, ctype.ml:1775), otherwise not
-    /// (`occur_rec`, ctype.ml:1403). No level cut.
+    /// Whether `node` is reachable from `ty`: first
+    /// [`Checker::unreached_within_budget`]; when that does not decide, one
+    /// step a node, each node once (marks), explicit stack. With `deep`
+    /// objects and variant rows are crossed (`deep_occur`, ctype.ml:1775),
+    /// otherwise not (`occur_rec`, ctype.ml:1403). No level cut. Cost: at
+    /// most [`PROBE_BUDGET`] + 1 steps of the probe, then, when it did not
+    /// decide, the marked walk's O(nodes of `ty`).
     fn reaches(&mut self, node: Ty, ty: Ty, deep: bool) -> bool {
+        if self.unreached_within_budget(node, ty, deep) {
+            return false;
+        }
         let generation = self.fresh_marks();
         self.g.work.clear();
         self.g.work.push(ty);
@@ -1369,6 +1414,38 @@ impl Checker {
             }
         }
         false
+    }
+
+    /// The probe of [`Checker::reaches`], `occur_reaches_budget`
+    /// (compiler/ml/ctype.ml:1432-1465): the same edges as the marked walk
+    /// in the same mode (objects and variant rows crossed only with `deep`,
+    /// [`Checker::stops_occurrence`]), explicit stack on `g.work`, no marks,
+    /// at most [`PROBE_BUDGET`] nodes. `true` only when the walk finished
+    /// within the budget without meeting `node`: then no path from `ty`
+    /// reaches it. `false` when it met `node` or the budget ran out (a large
+    /// type, a cycle or heavy sharing, which a walk without marks visits
+    /// once per path); the caller then decides with the marked walk. One
+    /// step a node visited, at most [`PROBE_BUDGET`] + 1; allocates nothing
+    /// beyond `g.work`'s growth.
+    fn unreached_within_budget(&mut self, node: Ty, ty: Ty, deep: bool) -> bool {
+        self.g.work.clear();
+        self.g.work.push(ty);
+        let mut budget = PROBE_BUDGET;
+        while let Some(ty) = self.g.work.pop() {
+            let ty = self.g.repr(ty);
+            #[cfg(test)]
+            super::steps::tick();
+            if ty == node || budget == 0 {
+                self.g.work.clear();
+                return false;
+            }
+            budget -= 1;
+            let descriptor = self.g.nodes[ty.0 as usize];
+            if deep || !self.stops_occurrence(descriptor) {
+                self.g.children(descriptor, false);
+            }
+        }
+        true
     }
 
     /// O(1): the checking mode, fixed for the unit (CHECKER_REWRITE 3.4).
