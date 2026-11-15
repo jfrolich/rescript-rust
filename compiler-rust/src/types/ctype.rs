@@ -8023,7 +8023,6 @@ fn unify_after_expansion(
     // the occurrence check, the link to `relink_target` and the restore in
     // each structural arm.
     let create_recursion = deep_occur(ctx, lhs, relink_target);
-    state.mark_unified(lhs, rhs);
     swap_trace(unify_types(ctx, state, lhs, rhs, relink_target))?;
     if create_recursion && let Some(env) = state.env() {
         repair_recursion(ctx, env, relink_target, rhs);
