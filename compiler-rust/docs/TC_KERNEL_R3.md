@@ -2696,3 +2696,114 @@ commit:
 | `unify_datatype2` | 822.00 | 823.00 | 816.00 | 823.00 | 822.00 | 825.00 | 828.00 |
 | `build_abbrev2` | 186.44 | 186.44 | 186.44 | 186.44 | 186.44 | 186.44 | 186.44 |
 | `unify_abbrev2` | 2968.06 | 3113.06 | 2857.06 | 3113.06 | 2976.06 | 2699.06 | 2761.06 |
+
+### Merged head
+
+`origin/ocaml-to-rust-rewrite` moved to `d862f5d25` (R3n, #298) and was
+merged without conflict as `0d5562e92`. Base: that trunk, built and run.
+Head: the merge (attempt (b) kept; (a) and (c1)-(c4) reverted). The step
+test added after it is `cfg(test)` code and does not change the bench
+binary. The final table of K4:
+
+| Operation | Merged trunk `d862f5d25` | Head  Change |
+|---|---:|---:|---:|
+| `instance1` | 137.06 | 137.06 | +0.00 |
+| `instance3` | 217.31 | 217.31 | +0.00 |
+| `instance5` | 305.34 | 305.34 | +0.00 |
+| `instance7` | 325.27 | 325.27 | +0.00 |
+| `generalize7` | 449.00 | 449.00 | +0.00 |
+| `empty` | 19.00 | 19.00 | +0.00 |
+| `lower7` | 422.00 | 422.00 | +0.00 |
+| `copy7` | 1709.58 | 1709.58 | +0.00 |
+| `repr` | 9.00 | 9.00 | +0.00 |
+| `restore` | 63.00 | 63.00 | +0.00 |
+| `keep` | 44.00 | 44.00 | +0.00 |
+| `checker_instance1` | 126.06 | 126.06 | +0.00 |
+| `checker_instance3` | 207.31 | 207.31 | +0.00 |
+| `checker_instance5` | 294.34 | 294.34 | +0.00 |
+| `checker_instance7` | 314.27 | 314.27 | +0.00 |
+| `build_vars` | 78.07 | 78.07 | +0.00 |
+| `unify_vars` | 117.00 | 117.00 | +0.00 |
+| `build_ground1` | 98.08 | 98.08 | +0.00 |
+| `unify_ground1` | 122.00 | 122.00 | +0.00 |
+| `build_ground3` | 200.44 | 200.44 | +0.00 |
+| `unify_ground3` | 816.00 | 810.00 | -6.00 |
+| `build_vars_local` | 78.07 | 78.07 | +0.00 |
+| `unify_vars_local` | 117.00 | 117.00 | +0.00 |
+| `build_ground1_local` | 98.08 | 98.08 | +0.00 |
+| `unify_ground1_local` | 122.00 | 122.00 | +0.00 |
+| `build_ground3_local` | 200.44 | 200.44 | +0.00 |
+| `unify_ground3_local` | 816.00 | 810.00 | -6.00 |
+| `binder` | -8.00 | -8.00 | +0.00 |
+| `find_local` | 47.00 | 47.00 | +0.00 |
+| `find_open` | 224.00 | 224.00 | +0.00 |
+| `find_miss2` | 624.00 | 624.00 | +0.00 |
+| `bind_leave` | 172.18 | 172.18 | +0.00 |
+| `intern` | 160.00 | 160.00 | +0.00 |
+| `build_bind_ground1` | 88.09 | 88.09 | +0.00 |
+| `bind_ground1` | 121.00 | 121.00 | +0.00 |
+| `build_bind_ground1_local` | 88.09 | 88.09 | +0.00 |
+| `bind_ground1_local` | 121.00 | 121.00 | +0.00 |
+| `build_datatype2` | 186.44 | 186.44 | +0.00 |
+| `unify_datatype2` | 824.00 | 818.00 | -6.00 |
+| `build_abbrev2` | 186.44 | 186.44 | +0.00 |
+| `unify_abbrev2` | 2999.06 | 2888.06 | -111.00 |
+
+The target is missed: `unify_abbrev2` is 2888.06 against 2822.27
+(+65.79); `unify_ground3` 810 and `unify_datatype2` 818 are within
+theirs (816, 824). R3n alone made `unify_abbrev2` 31 dearer on trunk
+(2968.06 -> 2999.06: `Checker::expand_once` +32, `unify3` -1). R3n
+replaced the `todo!` of `Checker::copy_refs` with its code, which is
+reached from `link_memorized` in the `subst` that `expand_once` inlines;
+it does not run here (no row has cells), so the 32 are the code
+generation of the larger `expand_once` (its node, row and memo lines).
+
+What remains above `838ccbca7`, by function:
+
+| Function | `838ccbca7` | Head | Change |
+|---|---:|---:|---:|
+| `Checker::expand_once` | 798.00 | 848.00 | +50.00 |
+| `Graph::instance` | 458.00 | 458.00 | +0.00 |
+| `Checker::reaches` | 434.05 | 400.00 | -34.05 |
+| `Graph::compress` | 306.00 | 306.00 | +0.00 |
+| `Checker::unify_expanded` | 251.00 | 296.00 | +45.00 |
+| `Checker::unify_distinct` | 276.00 | 284.00 | +8.00 |
+| `Checker::unify3` | 192.00 | 189.00 | -3.00 |
+| `Checker::memorize` | 82.00 | 82.00 | +0.00 |
+| `tc_kernel::main` | 25.00 | 25.00 | +0.00 |
+| total | 2822.27 | 2888.06 |
+
+- `Checker::expand_once`, +50: +32 arrived with the merge of R3n (above);
+  +18 was there before (line 0 +20: the function's frame; the node and
+  row loads of the two expanding heads, `graph.rs:248` and
+  `index.rs:238`, which K3's test has just loaded; (a) and (c1)-(c4)
+  were the attempts to hand them over, and none paid).
+- `Checker::unify_expanded`, +45: the loop of (b) costs inline what
+  `expand_head`'s did at `838ccbca7` (its lines `expand.rs:853-854` 26 and
+  16 against 42 and 16), plus the `Result` of its `?` (`result.rs:2182`,
+  16), and K3's two tests (`unify.rs:780-781`, 13) with their registers
+  (line 0 +11).
+- `Checker::unify_distinct`, +8, `Checker::unify3`, -3: register
+  allocation of the callers.
+- `Checker::reaches`, -34.05: K3's occurrence probe.
+
+### Checks
+
+```text
+cargo test --manifest-path compiler-rust/Cargo.toml --lib tc::   (debug build)
+(a)  013996c36  test result: ok. 231 passed; 0 failed; 1 ignored; 0 measured; 2650 filtered out; finished in 243.20s
+(b)  bca643d3b  test result: ok. 231 passed; 0 failed; 1 ignored; 0 measured; 2650 filtered out; finished in 379.25s
+merge 0d5562e92 test result: ok. 235 passed; 0 failed; 0 ignored; 0 measured; 2650 filtered out; finished in 304.70s
+head  a3b43d30f test result: ok. 236 passed; 0 failed; 0 ignored; 0 measured; 2650 filtered out; finished in 297.20s
+```
+
+The trees of the reverts are those of trunk (after (a)) and of (b)
+(after (c4)-(c1)), which ran these tests. No test was edited, removed or
+ignored and no step count changed (no step test failed); the one test
+added is the step test of `Checker::expand_head_unif` at 10,000
+abbreviations, the bounds of the existing `Safe` one.
+`git diff origin/ocaml-to-rust-rewrite -- compiler-rust/src/tc/differential.rs`
+is empty on the head. `tc` is not on a compiler build's path (the
+driver's default checker is the old one), so no application or
+`tests/tests` saving is claimed; the CI `Instruction count` check reports
+the build's figures.
