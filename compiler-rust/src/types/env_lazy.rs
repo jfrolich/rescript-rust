@@ -2374,12 +2374,26 @@ fn build_local_module_components(
                 if let Some(working_env) = working_env.as_mut() {
                     let child_access_path =
                         ctx.dotted_from_ident(shared_access_path.clone(), *id, runtime_pos as i32);
+                    // OCaml compiler/ml/env.ml:1568-1579 gives a child's
+                    // component thunk and the evolving `env` the raw `md`;
+                    // the thunk prefixes it with `sub` (env.ml:1530-1531,
+                    // 1454-1486 `prefix_idents`). Rust materializes that
+                    // substitution in the qualified item, except for an
+                    // alias: its target is a sibling bound in the evolving
+                    // env (`module A = R`), and its prefixed form names the
+                    // parent's access path (`O.R`), which is not bound there
+                    // when the parent is itself an alias (`module O = Outer`).
+                    // The alias child's components substitute the parent's
+                    // paths themselves (`parent_context` below).
+                    let item_md = if use_qualified_items_for_env
+                        && !matches!(child_md.md_type, super::decl::ModuleType::MtyAlias(..))
+                    {
+                        qmd
+                    } else {
+                        child_md
+                    };
                     let env_decl = strengthened_child_env_decl(
-                        if use_qualified_items_for_env {
-                            qmd
-                        } else {
-                            child_md
-                        },
+                        item_md,
                         *id,
                         shared_source_prefix
                             .as_ref()
@@ -2387,16 +2401,7 @@ fn build_local_module_components(
                         runtime_pos,
                         ctx,
                     );
-                    // OCaml compiler/ml/env.ml:1573-1578 stores the child
-                    // component thunk with the final substitution built by
-                    // env.ml:1530-1531/1454-1486 `prefix_idents`. Rust
-                    // materializes that substituted child module declaration in
-                    // the qualified signature item.
-                    let component_decl = if use_qualified_items_for_env {
-                        qmd.clone()
-                    } else {
-                        child_md.clone()
-                    };
+                    let component_decl = item_md.clone();
                     working_env.add_module_with_component_context(
                         *id,
                         env_decl,
