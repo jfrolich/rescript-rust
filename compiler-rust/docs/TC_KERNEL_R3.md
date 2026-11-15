@@ -2611,3 +2611,88 @@ What remains above `838ccbca7` after (b), 34.79: `unify_expanded` +45
 (K3's two tests and their registers), `expand_once` +18 (line 0 +20, the
 node and row loads of the two expanding heads +10), `unify_distinct` +8,
 against the probe's -34.05 in `reaches`.
+
+### Attempt (c): inline attributes. Four combinations, none kept.
+
+On top of (b). (a)'s functions were reverted, so the combinations bring
+back its hand-over in the form (b) leaves: `Checker::expand_once` a
+wrapper of a private `Checker::expand_loaded` (node and row as
+`Checker::load_head` loads them), `Checker::expand_head_unif` a wrapper
+of a `pub(super)` `Checker::expand_head_unif_loaded`, whose first step
+is `expand_loaded` on the pair K3's test (`may_expand`) loaded. Each
+combination is a whole build and run against (b); none meets the rule,
+and each is reverted in a commit of its own.
+
+| Combination | Commit | `unify_ground3` | `unify_datatype2` | `unify_abbrev2` | Kept |
+|---|---|---:|---:|---:|---|
+| (c1) hand-over, no attribute (LLVM's choice) | `400161538` | +5.00 | +7.00 | +256.00 | no |
+| (c2) (c1) + `#[inline(always)]` on `expand_head_unif` and `expand_head_unif_loaded` | `292ab9638` | +0.00 | +6.00 | +119.00 | no |
+| (c3) (c2) + `#[inline(always)]` on `expand_loaded` | `097f80d04` | +5.00 | +9.00 | **-158.00** | no: `unify_datatype2` +9 |
+| (c4) (c3) with `#[inline(never)]` on `expand_head_unif` (the second pair) | `c3d7a91b7` | +5.00 | +12.00 | -96.00 | no: `unify_datatype2` +12 |
+
+No other operation moved in any combination. An attribute on
+`Checker::expand_head` was not among them: after (b) no path of
+`unify_expanded` calls it, so it cannot move these operations.
+
+- (c1): as (a), LLVM calls both loops out of line with the pair as two
+  16-byte arguments (`expand_head_unif_loaded` 292, the wrapper 78).
+- (c2): the loops are in `unify_expanded` (+161 there), but
+  `expand_loaded` is called out of line from four sites with the pair
+  through the stack (its call line 40 for the four calls) and the second
+  pair now loads in `load_head` what `expand_once` loaded inside.
+- (c3): the whole step is in `unify_expanded` (+188 there), `subst` is
+  called out of line (470), and `expand_once` is not called: 158 fewer.
+  But the test of the heads that do not expand is dearer: it keeps the
+  whole 16-byte row live for the hand-over where K3's `never_expands`
+  read one byte of it (`load_head`, `expand.rs:664-665` and the row read
+  `expand.rs:268`, 8 in `unify_datatype2`, with `then_some` 2), and
+  `unify_ground3` pays 5 the same way.
+- (c4): the second pair's loop out of line again costs a call (224 in
+  `expand_head_unif`) and keeps the test's cost.
+
+The whole table, every operation, each column a build and run of its
+commit:
+
+| Operation | Trunk `5ea10ac75` | (a) | (b) | (c1) | (c2) | (c3) | (c4) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `instance1` | 137.06 | 137.06 | 137.06 | 137.06 | 137.06 | 137.06 | 137.06 |
+| `instance3` | 217.31 | 217.31 | 217.31 | 217.31 | 217.31 | 217.31 | 217.31 |
+| `instance5` | 305.34 | 305.34 | 305.34 | 305.34 | 305.34 | 305.34 | 305.34 |
+| `instance7` | 325.27 | 325.27 | 325.27 | 325.27 | 325.27 | 325.27 | 325.27 |
+| `generalize7` | 449.00 | 449.00 | 449.00 | 449.00 | 449.00 | 449.00 | 449.00 |
+| `empty` | 19.00 | 19.00 | 19.00 | 19.00 | 19.00 | 19.00 | 19.00 |
+| `lower7` | 422.00 | 422.00 | 422.00 | 422.00 | 422.00 | 422.00 | 422.00 |
+| `copy7` | 1709.58 | 1709.58 | 1709.58 | 1709.58 | 1709.58 | 1709.58 | 1709.58 |
+| `repr` | 9.00 | 9.00 | 9.00 | 9.00 | 9.00 | 9.00 | 9.00 |
+| `restore` | 63.00 | 63.00 | 63.00 | 63.00 | 63.00 | 63.00 | 63.00 |
+| `keep` | 44.00 | 44.00 | 44.00 | 44.00 | 44.00 | 44.00 | 44.00 |
+| `checker_instance1` | 126.06 | 126.06 | 126.06 | 126.06 | 126.06 | 126.06 | 126.06 |
+| `checker_instance3` | 207.31 | 207.31 | 207.31 | 207.31 | 207.31 | 207.31 | 207.31 |
+| `checker_instance5` | 294.34 | 294.34 | 294.34 | 294.34 | 294.34 | 294.34 | 294.34 |
+| `checker_instance7` | 314.27 | 314.27 | 314.27 | 314.27 | 314.27 | 314.27 | 314.27 |
+| `build_vars` | 78.07 | 78.07 | 78.07 | 78.07 | 78.07 | 78.07 | 78.07 |
+| `unify_vars` | 117.00 | 117.00 | 117.00 | 117.00 | 117.00 | 117.00 | 117.00 |
+| `build_ground1` | 98.08 | 98.08 | 98.08 | 98.08 | 98.08 | 98.08 | 98.08 |
+| `unify_ground1` | 122.00 | 122.00 | 122.00 | 122.00 | 122.00 | 122.00 | 122.00 |
+| `build_ground3` | 200.44 | 200.44 | 200.44 | 200.44 | 200.44 | 200.44 | 200.44 |
+| `unify_ground3` | 814.00 | 813.00 | 808.00 | 813.00 | 808.00 | 813.00 | 813.00 |
+| `build_vars_local` | 78.07 | 78.07 | 78.07 | 78.07 | 78.07 | 78.07 | 78.07 |
+| `unify_vars_local` | 117.00 | 117.00 | 117.00 | 117.00 | 117.00 | 117.00 | 117.00 |
+| `build_ground1_local` | 98.08 | 98.08 | 98.08 | 98.08 | 98.08 | 98.08 | 98.08 |
+| `unify_ground1_local` | 122.00 | 122.00 | 122.00 | 122.00 | 122.00 | 122.00 | 122.00 |
+| `build_ground3_local` | 200.44 | 200.44 | 200.44 | 200.44 | 200.44 | 200.44 | 200.44 |
+| `unify_ground3_local` | 814.00 | 813.00 | 808.00 | 813.00 | 808.00 | 813.00 | 813.00 |
+| `binder` | -8.00 | -8.00 | -8.00 | -8.00 | -8.00 | -8.00 | -8.00 |
+| `find_local` | 47.00 | 47.00 | 47.00 | 47.00 | 47.00 | 47.00 | 47.00 |
+| `find_open` | 224.00 | 224.00 | 224.00 | 224.00 | 224.00 | 224.00 | 224.00 |
+| `find_miss2` | 624.00 | 624.00 | 624.00 | 624.00 | 624.00 | 624.00 | 624.00 |
+| `bind_leave` | 172.18 | 172.18 | 172.18 | 172.18 | 172.18 | 172.18 | 172.18 |
+| `intern` | 160.00 | 160.00 | 160.00 | 160.00 | 160.00 | 160.00 | 160.00 |
+| `build_bind_ground1` | 88.09 | 88.09 | 88.09 | 88.09 | 88.09 | 88.09 | 88.09 |
+| `bind_ground1` | 121.00 | 121.00 | 121.00 | 121.00 | 121.00 | 121.00 | 121.00 |
+| `build_bind_ground1_local` | 88.09 | 88.09 | 88.09 | 88.09 | 88.09 | 88.09 | 88.09 |
+| `bind_ground1_local` | 121.00 | 121.00 | 121.00 | 121.00 | 121.00 | 121.00 | 121.00 |
+| `build_datatype2` | 186.44 | 186.44 | 186.44 | 186.44 | 186.44 | 186.44 | 186.44 |
+| `unify_datatype2` | 822.00 | 823.00 | 816.00 | 823.00 | 822.00 | 825.00 | 828.00 |
+| `build_abbrev2` | 186.44 | 186.44 | 186.44 | 186.44 | 186.44 | 186.44 | 186.44 |
+| `unify_abbrev2` | 2968.06 | 3113.06 | 2857.06 | 3113.06 | 2976.06 | 2699.06 | 2761.06 |

@@ -650,42 +650,15 @@ impl Checker {
     /// constructor node of the target type sharing the argument list.
     /// `expand_abbrev_gen`, compiler/ml/ctype.ml:1187. (R3b)
     pub fn expand_once(&mut self, ty: Ty, mode: ExpandMode) -> Result<Ty, Clash> {
-        let (node, info) = self.load_head(ty);
-        self.expand_loaded(ty, node, info, mode)
-    }
-
-    /// O(1): node `ty` and, when it is a constructor, its type's row
-    /// ([`TypeTable::info`]), otherwise [`ABSTRACT`]: one node load and at
-    /// most one row load. What [`Checker::expand_loaded`] and
-    /// [`Checker::expand_head_unif_loaded`] take, so that a caller that
-    /// already tested them hands them on instead of loading them again. (K4)
-    #[inline(always)]
-    pub(super) fn load_head(&self, ty: Ty) -> (Node, TypeInfo) {
         let node = self.g.nodes[ty.0 as usize];
-        let info = if node.tag() == CONSTR {
-            self.types.info(node.a)
-        } else {
-            ABSTRACT
-        };
-        (node, info)
-    }
-
-    /// [`Checker::expand_once`] of `ty` with `(node, info)` the answer of
-    /// [`Checker::load_head`] for it, loaded by the caller: the same steps
-    /// and cost less the node and row loads. (K4)
-    fn expand_loaded(
-        &mut self,
-        ty: Ty,
-        node: Node,
-        info: TypeInfo,
-        mode: ExpandMode,
-    ) -> Result<Ty, Clash> {
         if node.tag() != CONSTR {
             return Ok(Ty(NONE));
         }
         let private = matches!(mode, ExpandMode::Opt | ExpandMode::Rigid);
         let mut memorized = self.find_expansion(ty, private);
+        let mut info = ABSTRACT;
         if memorized.0 == NONE {
+            info = self.types.info(node.a);
             // `find_expans` goes on through `Mlink` (btype.ml:618): the
             // entries of the nodes whose expansions made this one.
             if info.flags & INHERITS != 0 && node.arity() != 0 {
@@ -869,31 +842,15 @@ impl Checker {
     }
 
     /// [`Checker::expand_head`] in [`ExpandMode::Unif`] (`expand_head_unif`,
-    /// compiler/ml/ctype.ml:1279): [`Checker::expand_head_unif_loaded`] of
-    /// the representative and what [`Checker::load_head`] loads for it. (K4)
+    /// compiler/ml/ctype.ml:1279): the same loop of [`Checker::expand_once`]
+    /// with a clash of a step returned as the caller's, so no mode is tested
+    /// on the way. O(expansions), O(1) machine stack. (K4)
     pub(super) fn expand_head_unif(&mut self, ty: Ty) -> Result<Ty, Clash> {
-        let head = self.g.repr(ty);
-        let (node, info) = self.load_head(head);
-        self.expand_head_unif_loaded(head, node, info)
-    }
-
-    /// The loop of [`Checker::expand_head`] in [`ExpandMode::Unif`] from the
-    /// representative `head`, with `(node, info)` the answer of
-    /// [`Checker::load_head`] for it, loaded by the caller: the first step is
-    /// [`Checker::expand_loaded`] on them, each later one loads its head. A
-    /// clash of a step is returned as the caller's, so no mode is tested on
-    /// the way. O(expansions), O(1) machine stack. (K4)
-    pub(super) fn expand_head_unif_loaded(
-        &mut self,
-        head: Ty,
-        node: Node,
-        info: TypeInfo,
-    ) -> Result<Ty, Clash> {
-        let (mut head, mut node, mut info) = (head, node, info);
+        let mut head = self.g.repr(ty);
         loop {
             #[cfg(test)]
             super::steps::tick();
-            let next = self.expand_loaded(head, node, info, ExpandMode::Unif)?;
+            let next = self.expand_once(head, ExpandMode::Unif)?;
             if next.0 == NONE {
                 return Ok(head);
             }
@@ -903,7 +860,6 @@ impl Checker {
                 return Ok(head);
             }
             head = next;
-            (node, info) = self.load_head(head);
         }
     }
 
