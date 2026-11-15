@@ -29,7 +29,7 @@ pub(super) struct Plan {
     )>,
 }
 
-impl State {
+impl State<'_> {
     /// O(1): inspect cold call metadata without copying it down the walk.
     pub(super) fn call_plan(&self, call: Call) -> &Plan {
         self.calls[call.0 as usize].as_ref().expect("live call plan")
@@ -81,7 +81,6 @@ impl State {
             if self.cross_module_inline {
                 if let Some(exports) = self
                     .resolver
-                    .as_ref()
                     .and_then(|r| r.module_cmj_export_lambdas(module_name))
                 {
                     if let Some(crate::lambda::Lambda::Lfunction(function)) = exports.get(name) {
@@ -287,7 +286,7 @@ impl State {
             )
         };
         // C:1129 compile_apply_call: attach only a real, non-ghost location.
-        if self.locations.as_ref().and_then(|locations| locations.get(call.loc))
+        if self.locations.and_then(|locations| locations.get(call.loc))
             .is_some_and(|loc| !loc.loc_ghost && loc.loc_start.cnum >= 0) {
             self.arena.set_cold(value, crate::bir::Cold { loc: call.loc, comment: None });
             let mut flags = self.arena.node(value).flags();
@@ -349,7 +348,7 @@ impl State {
     ) -> Option<AritySpan> {
         if let Some(arity) = self.call_arity_index.get(&(module, field)) { return *arity; }
         let name = self.arena.pools.j_modules[module.index()].id.name();
-        let table = self.resolver.as_ref().and_then(|resolver| resolver.module_cmj_export_arities(name));
+        let table = self.resolver.and_then(|resolver| resolver.module_cmj_export_arities(name));
         let arity = match table.as_ref().and_then(|table| table.get(self.arena.text(field))) {
             Some(crate::cmi::persistent_env::CmjExportArity::Single(arity)) => self.store_call_arity(arity),
             _ => None,
@@ -552,8 +551,8 @@ mod allocation_tests {
         }).collect();
         let root = a.prim_raw(Primitive::Pmakearray, &calls, LamLoc::NONE);
         let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
-        let root = input.root; let mut state = State::new(input); state.resolver = Some(resolver);
-        let run = |s: &mut State| {
+        let root = input.root; let mut state = State::new(input); state.resolver = Some(&resolver);
+        let run = |s: &mut State<'_>| {
             let out = s.probe(Cx::returning(), root).unwrap(); let out = s.realize(Cx::returning(), out);
             for node in s.statements.statements(out.stmts) { s.arena.release(node); }
             if let Some(value) = out.value { s.arena.release(value); }
@@ -579,7 +578,7 @@ mod allocation_tests {
         state.arena.capture_binders.reserve(10_000); state.arena.bulk_binders.reserve(10_000); state.idents.reserve(10_000);
         state.free.reserve_repeat();
         state.arena.js_scope.as_mut().unwrap().reserve_repeat();
-        let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
+        let capacities = |s: &State<'_>| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
             s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1, s.source.lists.storage_shape().1,
             s.arena.vars.funcs.capacity(), s.arena.func_owners.capacity(), s.arena.pools.attrs.capacity(), s.arena.pools.js.capacity(),
             s.call_arities.capacity(), s.call_arity_index.capacity(), s.eta_arguments.capacity(), s.call_reversed.capacity(), s.calls.capacity(),
@@ -639,10 +638,10 @@ mod inline_allocation_tests {
             }
             let root = a.prim_raw(Primitive::Pmakearray, &roots, LamLoc::NONE);
             let input = crate::bir::bridge::import_lambda(&a, root).unwrap(); let root = input.root;
-            let mut state = State::new(input); state.resolver = Some(resolver); state.cross_module_inline = true;
+            let mut state = State::new(input); state.resolver = Some(&resolver); state.cross_module_inline = true;
             let View::Prim { args: [warm, measured], .. } = state.source.view(root) else { unreachable!() };
             let (warm, measured) = (*warm, *measured);
-            let run = |s: &mut State, root| {
+            let run = |s: &mut State<'_>, root| {
                 let out = s.probe(Cx::returning(), root).unwrap(); let out = s.realize(Cx::returning(), out);
                 for n in s.statements.statements(out.stmts) { s.arena.release(n); }
                 if let Some(n) = out.value { s.arena.release(n); } s.statements.kill(out.stmts);
@@ -674,14 +673,14 @@ mod inline_allocation_tests {
             state.source.lists.reserve_test_growth(state.source.lists.storage_shape().0 - source_lists);
             state.inline_engine.reserve_node_growth(state.source.nodes.len() - nodes);
             state.free.reserve_repeat(); state.arena.js_scope.as_mut().unwrap().reserve_repeat();
-            let capacities = |s: &State| {
+            let capacities = |s: &State<'_>| {
                 let mut out = Vec::new();
                 macro_rules! capacity { ($s:ident, $($p:ident).+) => { out.push((stringify!($($p).+), $s.$($p).+.capacity())); }; }
                 stores!(capacity, s); out
             };
             let before = capacities(&state); let source_before = state.source_steps;
             let sequence_before = state.sequence_steps; let primitive_before = state.primitive_steps;
-            let inline_capacities = |s: &State| [s.inline_templates.capacity(), s.inline_param_stats.capacity(), s.inline_foreign.capacity(),
+            let inline_capacities = |s: &State<'_>| [s.inline_templates.capacity(), s.inline_param_stats.capacity(), s.inline_foreign.capacity(),
                 s.inline_globals.capacity(), s.inline_engine.stats.rules.len(), s.arena.lists.storage_shape().1, s.source.lists.storage_shape().1];
             let inline_before = inline_capacities(&state); let beta_before = state.inline_scratch.capacities(); let engine_before = state.inline_engine.capacities();
             let scope_before = state.arena.js_scope.as_ref().unwrap().capacities(); let free_before = state.free.capacities(); let statements_before = state.statements.capacities();

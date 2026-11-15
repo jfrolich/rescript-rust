@@ -4,7 +4,7 @@ use crate::bir::j::{norm, plain};
 use crate::js_ir::arena::FieldPos;
 use crate::lambda::lam_compat::FieldDbgInfo;
 
-impl State {
+impl State<'_> {
     /// P: compile_flat_make_field, tried before lowering operands. O(d + name
     /// bytes) for d module-field segments. Failed paths are marked in a dense
     /// source-node table, so nested make misses never rescan an earlier spine.
@@ -85,7 +85,7 @@ impl State {
                 // Acquire each immutable summary once per compilation, indexed
                 // by ImportId. Fields have names but no export handles yet.
                 if matches!(self.module_constants[module.index()], ModuleConstants::Unread) {
-                    self.module_constants[module.index()] = match self.resolver.as_ref()
+                    self.module_constants[module.index()] = match self.resolver
                         .and_then(|r| r.module_cmj_export_constants(module_name)) {
                         Some(table) => ModuleConstants::Present(table),
                         None => ModuleConstants::Missing,
@@ -442,7 +442,7 @@ mod tests {
             let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
             let root = input.root;
             let mut state = State::new(input);
-            let run = |s: &mut State| {
+            let run = |s: &mut State<'_>| {
                 // Exercise the entire failed-spine walk, not just warmed misses.
                 s.invalid_module_paths.fill(false);
                 let out = s.probe(Cx::value(), root).unwrap();
@@ -459,7 +459,7 @@ mod tests {
             state.labels.reserve_repeat();
             #[cfg(debug_assertions)]
             state.arena.checked_children.reserve(state.arena.nodes.len() - state.arena.checked_children.len());
-            let capacities = |s: &State| [
+            let capacities = |s: &State<'_>| [
                 s.scratch.capacity(), s.tail_name.capacity(), s.invalid_module_paths.capacity(),
                 s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
                 s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1,

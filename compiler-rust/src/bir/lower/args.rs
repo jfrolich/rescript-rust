@@ -13,7 +13,7 @@ pub(super) struct Evaluation {
     statements: Vec<NodeId>,
 }
 
-impl State {
+impl State<'_> {
     /// A:28 delay_safe: a cached fact, never a subtree walk.
     fn delay_safe(&self, value: NodeId) -> bool {
         self.arena
@@ -296,7 +296,7 @@ mod tests {
         let input = bridge::import_lambda(&a, root).unwrap();
         let root = input.root;
         let mut state = State::new(input);
-        let run = |s: &mut State| {
+        let run = |s: &mut State<'_>| {
             let out = s.probe(Cx::returning(), root).unwrap();
             let out = s.realize(Cx::returning(), out);
             for node in s.statements.statements(out.stmts) { s.arena.release(node); }
@@ -322,7 +322,7 @@ mod tests {
         state.free.reserve_repeat();
         state.arena.js_scope.as_mut().unwrap().reserve_repeat();
         state.statements.reserve_repeat();
-        let capacities = |s: &State| {
+        let capacities = |s: &State<'_>| {
             let e = &s.evaluation; let v = &s.arena.vars;
             [e.work.capacity(), e.values.capacity(), e.statements.capacity(),
                 s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),

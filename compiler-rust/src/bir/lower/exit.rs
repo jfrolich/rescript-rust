@@ -76,7 +76,7 @@ pub(super) struct Plan {
     output: Span,
 }
 
-impl State {
+impl State<'_> {
     fn has_exit(&self, node: NodeId) -> bool {
         self.source.node(node).flags().contains(NodeFlags::HAS_EXIT)
     }
@@ -1253,7 +1253,7 @@ mod tests {
         compare(a, root, ALL);
     }
 
-    fn lower(a: &LamArena, root: Lam, cx: Cx) -> State {
+    fn lower(a: &LamArena, root: Lam, cx: Cx) -> State<'_> {
         let input = crate::bir::bridge::import_lambda(a, root).unwrap();
         let source_root = input.root;
         let mut state = State::new(input);
@@ -1309,7 +1309,7 @@ mod tests {
         let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
         let root = input.root;
         let mut state = State::new(input);
-        let run = |s: &mut State| {
+        let run = |s: &mut State<'_>| {
             let output = s.probe(Cx::effect(), root).unwrap();
             let output = s.realize(Cx::effect(), output);
             for node in s.statements.statements(output.stmts) { s.arena.release(node); }
@@ -1329,7 +1329,7 @@ mod tests {
         state.switch_output_clauses.reserve(state.switch_output_clauses.len());
         state.arena.pools.switch_keys.reserve(state.arena.pools.switch_keys.len());
         state.arena.pools.switch_clauses.reserve(state.arena.pools.switch_clauses.len());
-        let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.lists.storage_shape().1,
+        let capacities = |s: &State<'_>| [s.arena.nodes.capacity(), s.arena.lists.storage_shape().1,
             s.source.lists.storage_shape().1, s.group_indices.capacity(), s.group_nodes.capacity(),
             s.switch_output_nodes.capacity(), s.switch_output_clauses.capacity(),
             s.arena.pools.switch_keys.capacity(), s.arena.pools.switch_clauses.capacity(),

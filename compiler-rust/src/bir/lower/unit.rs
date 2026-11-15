@@ -4,9 +4,9 @@ use super::*;
 /// N1/K11: C:663 compile_deps_program_in_arena / C:1513 continues_toplevel_spine.
 /// Consume top-level groups iteratively. No group in this slice creates loop
 /// labels; loop-bearing groups remain Unsupported before label allocation.
-/// Cost: `State::new` (O(N + V + F + G), stated there); copies of
-/// `resolver` and of `locations` (all rows and index entries of the table)
-/// and, with `locations`, one flag per function header, each allocating;
+/// Cost: `State::new` (O(N + V + F + G), stated there); `resolver` and
+/// `locations` are borrowed for the unit, O(1) and no allocation (a
+/// header's location is read where its body is closed, `is_located`);
 /// then one iteration per `Let` or `Seq` on the right spine of the unit
 /// (one step each), which probes and realizes one top-level group
 /// (`State::probe`, `State::realize`; the groups are disjoint subtrees)
@@ -25,23 +25,13 @@ pub(super) fn lower(
     let mut node = input.root;
     let mut state = State::new(input);
     state.direct = direct;
-    state.resolver = resolver.cloned();
+    state.resolver = resolver;
     state.cross_module_inline = cross_module_inline;
     state.check_div_by_zero = check_div_by_zero;
     state.arena.js_scope.as_mut().expect("lowering scope").names.jsx_preserve = jsx_preserve;
-    state.locations = locations.cloned();
-    if let Some(locations) = locations {
-        state.located_functions = state
-            .arena
-            .vars
-            .funcs
-            .iter()
-            .map(|f| {
-                locations
-                    .get(f.loc)
-                    .is_some_and(|loc| !loc.loc_ghost && loc.loc_start.cnum >= 0)
-            })
-            .collect();
+    state.locations = locations;
+    if locations.is_some() {
+        state.source_functions = u32::try_from(state.arena.vars.funcs.len()).expect("function header count");
     }
     let mut accumulated: Option<Out> = None;
     loop {
@@ -224,6 +214,48 @@ mod tests {
         // Release builds omit the debug-only child-uniqueness table.
         let expected = expected - u64::from(!cfg!(debug_assertions));
         assert_eq!(counts, [expected; 2], "{shape}: per-unit allocation budget changed");
+    }
+
+    /// The unit borrows the caller's location table and module resolver and
+    /// reads a function header's location where its body is closed: lending
+    /// a 10,000-row table and a resolver with 10,000 path overrides to a
+    /// unit of 10,000 functions allocates exactly what lowering without them
+    /// does, at 1,000 and at 10,000 of each. The functions' own locations
+    /// are `NONE`, so the output is the same with and without the table.
+    #[test]
+    fn full_unit_borrows_locations_and_resolver() {
+        use crate::lambda::{FunctionAttribute, LamLoc};
+        use crate::lambda::lam_primitive::{Mutable, Primitive as P};
+        let mut counts = [[0; 2]; 2];
+        for (run, width) in [1_000usize, 10_000].into_iter().enumerate() {
+            let mut a = LamArena::new();
+            let mut locations = crate::lambda::LamLocTable::located(Default::default());
+            let mut resolver = crate::js_ir::ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+            let values: Vec<_> = (0..width).map(|i| {
+                locations.intern(crate::location::Location::new(Default::default(), i + 1, i + 8));
+                resolver.set_module_path_override(&format!("M{i}"), format!("./M{i}.res.js"));
+                let body = a.const_(Constant::Int { i: i as i32, comment: None });
+                a.function_(0, &[], body, FunctionAttribute::default(), LamLoc::NONE)
+            }).collect();
+            let root = a.prim_raw(P::Pmakearray, &values, LamLoc::NONE);
+            let export = Ident::new("answer", 2, crate::ident::IdentFlags::NONE);
+            let root = a.prim_raw(P::Pmakeblock(TagInfo::ModuleExport(vec![export]), Mutable::Immutable), &[root], LamLoc::NONE);
+            for (lent, (l, r)) in [(None, None), (Some(&locations), Some(&resolver))].into_iter().enumerate() {
+                let warm = crate::bir::bridge::import_for_lowering(&a, root).0.unwrap();
+                let input = crate::bir::bridge::import_for_lowering(&a, root).0.unwrap();
+                drop(super::super::lower_with_resolver(warm, l, true, r, false, true, false).unwrap());
+                let mut result = None;
+                let allocations = allocation_counter::measure(|| {
+                    result = Some(super::super::lower_with_resolver(input, l, true, r, false, true, false).unwrap());
+                });
+                let result = result.unwrap();
+                assert_eq!(result.program.arena.vars.funcs.len(), width);
+                println!("borrowed inputs width={width} lent={lent}: {allocations:?}");
+                counts[run][lent] = allocations.count_total;
+            }
+        }
+        assert_eq!(counts[0], counts[1], "allocation count must not scale with the table, resolver or headers");
+        assert_eq!(counts[0][0], counts[0][1], "lending the table and resolver must not allocate");
     }
 
     #[inline(never)]

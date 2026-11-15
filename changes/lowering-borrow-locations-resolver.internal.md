@@ -1,0 +1,1 @@
+- Lowering (check mode): borrow the location table and the module resolver for a unit instead of copying them, and read a function's location where its body is closed instead of allocating a flag per function header.

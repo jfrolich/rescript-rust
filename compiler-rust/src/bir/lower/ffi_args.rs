@@ -29,7 +29,7 @@ impl LaterLiteral {
     }
 }
 
-impl State {
+impl State<'_> {
     /// X:60 duplicable. O(1), a dense cached fact computed on construction.
     fn duplicable(&self, _cx: Cx, root: NodeId) -> bool {
         self.arena.j_duplicable[root.index()]
@@ -685,7 +685,7 @@ mod tests {
         let input = crate::bir::bridge::import_lambda(&source, root).unwrap();
         let root = input.root;
         let mut state = State::new(input);
-        let run = |state: &mut State| {
+        let run = |state: &mut State<'_>| {
             let out = state.probe(Cx::value(), root).unwrap();
             let out = state.realize(Cx::value(), out);
             assert!(!state.statements.has_statements(out.stmts));
@@ -708,7 +708,7 @@ mod tests {
             .pools
             .switch_clauses
             .reserve(state.arena.pools.switch_clauses.len());
-        let capacities = |s: &State| {
+        let capacities = |s: &State<'_>| {
             [
                 s.arena.nodes.capacity(),
                 s.arena.lists.storage_shape().1,

@@ -25,7 +25,7 @@ pub(super) struct Member {
     mode: Mode,
 }
 
-impl State {
+impl State<'_> {
     /// O(m + a + newly indexed source slots): stable function/value partition
     /// and one inspection of each makeblock's a direct arguments. Membership
     /// in the group is a VarId interval test, never a scan of other members.
@@ -310,7 +310,7 @@ mod tests {
         let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
         let root = input.root;
         let mut state = State::new(input);
-        let run = |s: &mut State| {
+        let run = |s: &mut State<'_>| {
             let output = s.probe(Cx::value(), root).unwrap();
             let output = s.realize(Cx::value(), output);
             for node in s.statements.statements(output.stmts) { s.arena.release(node); }
@@ -322,7 +322,7 @@ mod tests {
         state.arena.lists.reserve_test_growth(state.arena.lists.storage_shape().0 - lists);
         state.free.reserve_repeat();
         state.arena.js_scope.as_mut().unwrap().reserve_repeat();
-        let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(),
+        let capacities = |s: &State<'_>| [s.arena.nodes.capacity(), s.arena.parents.capacity(),
             s.arena.free_nodes.capacity(), s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1,
             s.traversal.work.capacity(), s.traversal.values.capacity(), s.traversal.children.capacity(),
             s.rec_members.capacity(), s.constant_work.capacity(), s.constant_values.capacity(),

@@ -63,9 +63,9 @@ fn compare_oracle(mut arena: LamArena, root: Lam, resolver: Option<&crate::js_ir
             let mut state = State::new(input);
             state.direct = direct;
             state.cross_module_inline = inline;
-            state.locations = locations.cloned();
+            state.locations = locations;
             state.check_div_by_zero = checks;
-            state.resolver = resolver.cloned();
+            state.resolver = resolver;
             let probed = state.probe(cx, source_root).unwrap();
             let lowered = state.complete(cx, probed);
             lowered
@@ -1563,7 +1563,7 @@ fn cached_external_templates_keep_fresh_binders_and_import_once() {
             let root = a.prim_raw(Primitive::Pmakearray, &calls, LamLoc::NONE);
             if count == 2 { compare_oracle(a.clone(), root, Some(&resolver), true, &[0,1,2,3,4], None, true); }
             let input = bridge::import_lambda(&a, root).unwrap(); let root = input.root;
-            let mut state = State::new(input); state.cross_module_inline = true; state.resolver = Some(resolver.clone());
+            let mut state = State::new(input); state.cross_module_inline = true; state.resolver = Some(&resolver);
             let out = state.probe(Cx::returning(), root).unwrap(); let out = state.realize(Cx::returning(), out);
             assert_eq!(state.inline_imports, 1); assert_eq!(state.inline_reductions, count as usize);
             assert_eq!(state.inline_templates.len(), 1); assert_eq!(state.inline_param_stats.len(), width as usize);
@@ -1590,7 +1590,7 @@ fn new_text(build: impl Fn(&mut LamArena) -> Lam, resolver: Option<&crate::js_ir
     input.idents.push(exported);
     let source_root = input.root;
     let mut state = State::new(input);
-    state.resolver = resolver.cloned();
+    state.resolver = resolver;
     let cx = Cx::declare(LetKind::Strict, var);
     let probed = state.probe(cx, source_root).unwrap();
     // As `bir_lower_oracle`: the statements, without a value.

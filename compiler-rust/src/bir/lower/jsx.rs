@@ -96,7 +96,7 @@ fn jsx_tag(bir: &Bir, idents: &[Ident], tag: NodeId, spelling: &mut String, step
     }
 }
 
-impl State {
+impl State<'_> {
     /// X: jsx_callee / translate_scoped_module_value / translate_scoped_global_value.
     /// O(module inventory + scopes + spelling bytes). Each scope is built once.
     fn jsx_callee(&mut self, decl: &ExternalDecl) -> NodeId {
@@ -539,7 +539,7 @@ mod tests {
             let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
             let root = input.root;
             let mut state = State::new(input);
-            let run = |s: &mut State| {
+            let run = |s: &mut State<'_>| {
                 let out = s.probe(Cx::value(), root).unwrap();
                 let out = s.realize(Cx::value(), out);
                 for node in s.statements.statements(out.stmts) { s.arena.release(node); }
@@ -564,7 +564,7 @@ mod tests {
             state.labels.reserve_repeat();
             #[cfg(debug_assertions)]
             state.arena.checked_children.reserve(state.arena.nodes.len() - state.arena.checked_children.len());
-            let capacities = |s: &State| [s.scratch.capacity(), s.tail_name.capacity(),
+            let capacities = |s: &State<'_>| [s.scratch.capacity(), s.tail_name.capacity(),
                 s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
                 s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1,
                 s.arena.pools.js.capacity(), s.arena.pools.property_keys.capacity(),

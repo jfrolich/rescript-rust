@@ -431,7 +431,9 @@ enum ModuleConstants {
     Present(std::sync::Arc<ahash::AHashMap<String, crate::cmi::persistent_env::CmjExportConstant>>),
 }
 
-struct State {
+/// The unit's lowering state. `'a` is the lifetime of the inputs the unit
+/// only reads and its caller owns: the location table and the module resolver.
+struct State<'a> {
     tail_arguments: usize,
     tail_parameters: usize,
     tail_sort_comparisons: usize,
@@ -516,12 +518,16 @@ struct State {
     external_bindings: Vec<[Option<VarId>; 2]>,
     module_constants: Vec<ModuleConstants>,
     direct: bool,
-    located_functions: Vec<bool>,
+    /// Function headers below this index are the unit's source headers,
+    /// whose location `location::is_located` reads from `locations` when
+    /// the body is closed; later headers (copies, inlined bodies) are never
+    /// located. Set by `unit::lower` when it has a table; 0 otherwise.
+    source_functions: u32,
     next_order: u32,
-    resolver: Option<crate::js_ir::ModulePathResolver>,
+    resolver: Option<&'a crate::js_ir::ModulePathResolver>,
     cross_module_inline: bool,
     check_div_by_zero: bool,
-    locations: Option<crate::lambda::LamLocTable>,
+    locations: Option<&'a crate::lambda::LamLocTable>,
     switch_locations: Vec<location::Fact>,
     location_work: Vec<(NodeId,bool)>,
     location_steps: usize,
@@ -554,7 +560,7 @@ struct State {
     /// The tables of the export fold (`export.rs`).
     coercion: export::Tables,
 }
-impl State {
+impl State<'_> {
     /// N1: C:481 new. Transfer cold pools, while source hot nodes/list operands
     /// remain readable. Variables retain source identities, never global stamps.
     /// Cost: O(N + V + F + G) initialization for source nodes, variables, function headers
@@ -678,7 +684,7 @@ impl State {
             ffi_suffix: Vec::new(), ffi_params: Vec::new(),
             source_steps: 0,
             direct: false,
-            located_functions: Vec::new(),
+            source_functions: 0,
             next_order,
             resolver: None,
             cross_module_inline: false,
@@ -886,7 +892,7 @@ impl State {
                 let module = &modules[index];
                 scope.import_uses.get(index).is_some_and(|&uses| uses > 0)
                     && !module.dynamic_import
-                    && self.resolver.as_ref().is_none_or(|resolver| resolver.resolve_module_path(module).is_some())
+                    && self.resolver.is_none_or(|resolver| resolver.resolve_module_path(module).is_some())
             })
             .map(|index| crate::bir::ImportId(index as u32)));
         storage.imports.sort_by(|a, b| crate::lambda::lam_compile::module_sort_cmp(&modules[a.index()], &modules[b.index()]));
@@ -911,7 +917,7 @@ impl State {
     }
 }
 
-impl ProbeRules for State {
+impl ProbeRules for State<'_> {
     fn source_enter(&mut self, cx: Cx, node: NodeId) { self.label_enter(cx, node); }
     fn source_leave(&mut self, output: &Probed) { self.label_leave(output); }
     type Resume = expr::Resume;
@@ -1113,7 +1119,7 @@ impl ProbeRules for State {
     }
 }
 
-impl Realizer for State {
+impl Realizer for State<'_> {
     /// K4/K5/K6: C:6648 declare_compiled, C:6667 assign_compiled, C:6658 return_compiled.
     fn leaf(&mut self, cx: Cx, value: NodeId) -> Out {
         let start = self.statements.mark();

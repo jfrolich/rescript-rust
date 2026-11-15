@@ -355,7 +355,7 @@ impl Schedule {
     }
 }
 
-impl State {
+impl State<'_> {
     /// O(1): capture a source control event before its one lowering visit.
     pub(super) fn label_enter(&mut self, cx: Cx, node: NodeId) {
         let group_body = match self.source.view(node) {
@@ -640,7 +640,7 @@ mod tests {
         let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
         let root = input.root;
         let mut state = State::new(input);
-        let run = |s: &mut State| {
+        let run = |s: &mut State<'_>| {
             let output = s.probe(Cx::effect(), root).unwrap();
             let output = s.realize(Cx::effect(), output);
             for node in s.statements.statements(output.stmts) { s.arena.release(node); }
@@ -664,7 +664,7 @@ mod tests {
         state.arena.pools.strings.reserve(2);
         state.arena.pools.text.reserve(24);
         state.arena.pools.text_index.reserve(1, |&(hash, _)| hash);
-        let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(),
+        let capacities = |s: &State<'_>| [s.arena.nodes.capacity(), s.arena.parents.capacity(),
             s.arena.free_nodes.capacity(), s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1,
             s.loops.capacity(), s.arena.pools.strings.capacity(), s.arena.pools.text.capacity(),
             s.arena.pools.text_index.capacity(), s.group_indices.capacity(), s.group_nodes.capacity(),

@@ -21,7 +21,7 @@ pub(super) struct Storage {
     resolved: std::collections::HashMap<Ident, (ImportId, Option<crate::bir::StrId>)>,
 }
 
-impl State {
+impl State<'_> {
     /// M: is_awaited_unit / awaited_units. O(1), inspect two primitive headers
     /// at the binding on the existing walk; no second unit traversal.
     pub(super) fn record_awaited_unit(&mut self, var: VarId, value: NodeId) {
@@ -187,7 +187,7 @@ impl State {
             ImportSource::ImportModule { module_, path } => {
                 let (module, resolved) = if let Some(&cached) = self.import_storage.resolved.get(module_) { cached } else {
                     let module = crate::js_ir::ModuleId { id: *module_, kind: crate::js_ir::Kind::Ml, dynamic_import: true };
-                    let resolved = self.resolver.as_ref().and_then(|r| r.resolve_module_path(&module));
+                    let resolved = self.resolver.and_then(|r| r.resolve_module_path(&module));
                     let resolved = resolved.map(|path| self.arena.intern_text(&path));
                     let module = self.add_import_module(module);
                     self.import_storage.resolved.insert(*module_, (module, resolved));
@@ -345,8 +345,8 @@ mod tests {
             let imports: Vec<_> = (0..10_000).map(|_| a.prim_raw(Primitive::Pimport(Box::new(source.clone())), &[], LamLoc::NONE)).collect();
             let root = a.prim_raw(Primitive::Pmakearray, &imports, LamLoc::NONE);
             let input = crate::bir::bridge::import_lambda(&a, root).unwrap(); let root = input.root;
-            let mut state = State::new(input); state.resolver = Some(resolver);
-            let run = |s: &mut State| {
+            let mut state = State::new(input); state.resolver = Some(&resolver);
+            let run = |s: &mut State<'_>| {
                 let out = s.probe(Cx::returning(), root).unwrap(); let out = s.realize(Cx::returning(), out);
                 for node in s.statements.statements(out.stmts) { s.arena.release(node); }
                 if let Some(value) = out.value { s.arena.release(value); }
@@ -370,7 +370,7 @@ mod tests {
             state.arena.js_scope.as_mut().unwrap().uses.reserve(20_000); state.idents.reserve(20_000);
             state.dynamic_imports.reserve(10_000); state.free.reserve_repeat();
         state.arena.js_scope.as_mut().unwrap().reserve_repeat();
-            let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
+            let capacities = |s: &State<'_>| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
                 s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1, s.arena.vars.funcs.capacity(),
                 s.arena.func_owners.capacity(), s.arena.pools.attrs.capacity(), s.arena.pools.js.capacity(),
                 s.arena.pools.j_modules.capacity(), s.arena.pools.imports.capacity(), s.external_bindings.capacity(),

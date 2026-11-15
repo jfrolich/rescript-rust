@@ -28,6 +28,21 @@ Each figure is 17 above the one before the naming log (68, 85, 68, 138): the
 log and its replay (THREE_TREES 11.4, "T5 part B as built") add 17 allocations
 to a unit, the same at both widths. "The naming log" below names each one.
 
+The four pinned inputs lower without a location table and without a module
+resolver, so the per-unit copies of both and the per-header location flags
+never ran in them; their constants are unchanged by removing those copies.
+The unit now borrows both inputs (`State<'a>`) and reads a function header's
+location where its body is closed (`State::is_located`, for headers below
+`State::source_functions`). `full_unit_borrows_locations_and_resolver`
+lowers W functions with a W-row table and a resolver with W path overrides:
+
+| Per-unit cost, W = 1,000 / 10,000 | Before (allocations, bytes) | After |
+| --- | --- | --- |
+| Resolver copy | 2,002, 117,151 / 20,002, 990,615 | 0, 0 (borrowed) |
+| Location table copy | 2, 119,984 / 2, 1,031,760 | 0, 0 (borrowed) |
+| Per-header located flags | 1, 1,000 / 1, 10,000 | 0, 0 (read on demand) |
+| Whole unit, table and resolver lent | 2,100, 1,382,448 / 20,100, 13,436,688 | 95, 1,144,313 / 95, 11,404,313: equal to lowering without them |
+
 Release omits the one debug-only child-uniqueness table. These are proofs for
 these four shapes, not a claim about every possible program, number of exports,
 argument width, inlined body or variant layout. Bytes still scale with output

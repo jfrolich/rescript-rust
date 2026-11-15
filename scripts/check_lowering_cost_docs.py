@@ -20,6 +20,10 @@ def normalized(source):
                    if not m[0].startswith(('//', '/*')))
 
 
+def receiver_key(header):
+    return normalized(header).replace("<'_>", '')
+
+
 def functions(source):
     masked = re.sub(LEXEME, lambda m: re.sub(r'[^\n]', ' ', m[0]), source, flags=re.S)
 
@@ -50,7 +54,8 @@ def functions(source):
     for match in re.finditer(r'^\s*impl\b', masked, re.M):
         bounds = body(match.end())
         if bounds:
-            receivers.append((match.start(), bounds[1], normalized(source[match.start():bounds[0]])))
+            # An elided lifetime names no new receiver: `impl S<'_>` is `impl S`.
+            receivers.append((match.start(), bounds[1], receiver_key(source[match.start():bounds[0]])))
     rows = []
     for match in re.finditer(r'\bfn\s+(\w+)\s*(?:<|\()', masked):
         if any(a <= match.start() < b for a, b in excluded):
@@ -115,6 +120,11 @@ impl Other { fn get(&self) -> usize { let text = "fn fake() { }"; 0 } }
     print('unchanged code, accepted note reworded: not reported')
     assert cost_error(removed, removed) is None
     print('unchanged code, no note before or after: not reported')
+    plain = functions('impl S {\n    fn get(&self) -> usize { 0 }\n}')[0]
+    elided = functions("impl S<'_> {\n    fn get(&self) -> usize { 0 }\n}")[0]
+    named = functions("impl<'a> S<'a> {\n    fn get(&self) -> usize { 0 }\n}")[0]
+    assert plain['key'] == elided['key'] and plain['key'] != named['key']
+    print('receiver gains an elided lifetime: same key')
     print('cost scanner self-tests: passed')
 
 

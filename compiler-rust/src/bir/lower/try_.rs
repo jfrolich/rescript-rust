@@ -14,7 +14,7 @@ pub(super) struct Plan {
     target: Option<VarId>,
 }
 
-impl State {
+impl State<'_> {
     /// C:1503 try_statement / C:3129 compile_return_output. O(1), with no
     /// inspection of the body or handler to select their form.
     pub(super) fn try_statement(
