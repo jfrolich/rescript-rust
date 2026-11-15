@@ -310,7 +310,10 @@ fn a_list_constructor_takes_the_operands_since_its_mark() {
         |u| {
             let callee = var(&mut u.b, u.f);
             let x = var(&mut u.b, u.x);
-            built(plain::node(&mut u.b, View::JNew { callee, args: &[x] }, 0));
+            // As `external.rs` builds it today: `aux` 1, the argument
+            // list is present (`new F()`, not `new F`).
+            let args = u.b.lists.push(&[x]);
+            built(u.b.call_from_list(callee, args, None));
         },
     );
     for mutability in [0, 1] {
@@ -968,5 +971,101 @@ fn the_operand_stack_is_the_one_allocation_of_rows() {
     for width in [1_000, 10_000] {
         let (through, direct) = allocations(width);
         assert!(through < direct, "width {width}: {through} through the interface, {direct} direct");
+    }
+}
+
+#[test]
+fn a_node_keeps_its_row_over_other_operands() {
+    // `args.rs` holds the operands of a literal or of a member callee in
+    // variables and builds the node again over the variables: the same
+    // kind, `aux`, information and location, a new row.
+    for shape in 0..5u8 {
+        let arity = if matches!(shape, 0 | 4) { 1 } else { 2 };
+        same(
+            |r, u| {
+                let a = &mut u.b;
+                let (x, y) = (r.var(a, u.x), r.var(a, u.y));
+                let mark = r.mark();
+                let mut old = match shape {
+                    0 => {
+                        r.release(a, y);
+                        r.optional(a, x, true)
+                    }
+                    4 => {
+                        r.release(a, y);
+                        r.dot(a, x, u.name, FieldPos::new(Some(1)), false)
+                    }
+                    _ => {
+                        r.push(x);
+                        r.push(y);
+                        match shape {
+                            1 => r.array(a, mark, 1),
+                            2 => r.block(a, mark, u.tuple, 1),
+                            _ => r.object(a, mark, u.keys),
+                        }
+                    }
+                };
+                r.locate(a, &mut old, crate::lambda::LamLoc::NONE);
+                let before = r.steps();
+                assert_eq!(r.take_operands(a, &mut old), arity);
+                assert_eq!(r.steps() - before, 1 + u64::from(arity));
+                for _ in 0..arity {
+                    let operand = r.pop();
+                    r.release(a, operand);
+                }
+                let mark = r.mark();
+                for _ in 0..arity {
+                    let f = r.var(a, u.f);
+                    r.push(f);
+                }
+                let kind = r.kind(a, Rows::of(&old));
+                let new = r.refill(a, old, mark);
+                assert_eq!(r.kind(a, Rows::of(&new)), kind);
+                assert!(r.located(a, Rows::of(&new)));
+                assert_eq!(r.arity(a, Rows::of(&new)), arity);
+                done(new);
+            },
+            |u| {
+                let (tuple, keys, name) = (u.tuple, u.keys, u.name);
+                let b = &mut u.b;
+                let (x, y) = (var(b, u.x), var(b, u.y));
+                fn view(shape: u8, values: &[NodeId], tuple: JsId, keys: JsId, property: StrId) -> (u16, View<'_>) {
+                    match shape {
+                        0 => (1, View::JOptional { value: values[0] }),
+                        1 => (1, View::JArray { values }),
+                        2 => (1, View::JBlockLit { values, info: tuple }),
+                        3 => (0, View::JObject { values, info: keys }),
+                        _ => (0, View::JDot { object: values[0], property, position: FieldPos::new(Some(1)) }),
+                    }
+                }
+                let view = |values| view(shape, values, tuple, keys, name);
+                let operands = [x, y];
+                if arity == 1 {
+                    b.release(y);
+                }
+                let (aux, old_view) = view(&operands[..arity as usize]);
+                let old = plain::node(b, old_view, aux);
+                b.set_cold(old, crate::bir::Cold { loc: crate::lambda::LamLoc::NONE, comment: None });
+                let mut flags = b.node(old).flags();
+                flags.0 |= crate::bir::NodeFlags::JS_LOC_PRESENT;
+                b.nodes[old.index()].set_flags(flags);
+                for &operand in &operands[..arity as usize] {
+                    b.detach(operand);
+                }
+                for &operand in &operands[..arity as usize] {
+                    b.release(operand);
+                }
+                let first = var(b, u.f);
+                let fresh = [first, if arity == 2 { var(b, u.f) } else { first }];
+                let (aux, new_view) = view(&fresh[..arity as usize]);
+                let new = plain::node(b, new_view, aux);
+                b.set_cold(new, crate::bir::Cold { loc: crate::lambda::LamLoc::NONE, comment: None });
+                let mut flags = b.node(new).flags();
+                flags.0 |= crate::bir::NodeFlags::JS_LOC_PRESENT;
+                b.nodes[new.index()].set_flags(flags);
+                b.release(old);
+                built(new);
+            },
+        );
     }
 }

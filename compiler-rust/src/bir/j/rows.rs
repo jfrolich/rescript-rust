@@ -17,7 +17,7 @@
 //! | a leaf | `plain::node` with the leaf's view (`int_literal`: `plain::int`; `string`: `plain::string`; `boolean`: `plain::boolean`); `aux` is the unit bit of `undefined` and the statement bit of `raw`, 0 otherwise |
 //! | `bin_plain`, `seq` | `plain::bin`, `plain::seq` |
 //! | the other plain functions | `plain::node` with the view of the same name; `aux` is the tag bit of `dot`, the identity bit of `optional`, 0 otherwise |
-//! | a list constructor | `plain::node` with `&self.operands[mark..]` as the list (the callee or tag is not on the stack), then the stack is cut back to the mark; `aux` is the mutability of `array` and `block` and the children bit of `jsx` |
+//! | a list constructor | `plain::node` with `&self.operands[mark..]` as the list (the callee or tag is not on the stack), then the stack is cut back to the mark; `aux` is the mutability of `array` and `block`, the children bit of `jsx`, and 1 for `new_` (its argument list is present, as `Bir::call_from_list` without call information writes it) |
 //! | a rule function | the function of `norm.rs` named in THREE_TREES 11.4, "T6: the interface" (c); `template` gives `jm12_interpolated_template` the operands since the mark and cuts the stack back; `project` returns `Err(value)` when `jm11_projection` returns `None` (it has consumed nothing then) |
 //! | `id` | the row's id (`NodeId::0`) |
 //! | `kind` | `kind_of` of the node's operation |
@@ -43,6 +43,8 @@
 //! | `assume_strict` | `NodeFlags::STRICT` set on the node |
 //! | `locate` | `Bir::set_cold` with `loc` and the comment the node has, and `JS_LOC_PRESENT` set |
 //! | `comment` | `Bir::set_cold` with the comment and the location the node has (`LamLoc::NONE` when it has none); the flags are not touched |
+//! | `take_operands` | each child `Bir::detach`ed and pushed on `Rows::operands`, last first; the node stays |
+//! | `refill` | `plain::node` of the view of `e`'s operation (`JOptional`, `JArray`, `JBlockLit`, `JObject`, `JDot`) over the operands since the mark with `e`'s `aux`, information, property and position; `plain::copy_cold` from `e`; `Bir::release` of `e` |
 //! | `copy_cold` | `plain::copy_cold`, then the character of `from` (`Node::js_char`) set on `to` when `from` has one |
 //!
 //! Steps (`Js::steps`): one for every function that builds a node or takes
@@ -476,7 +478,8 @@ impl Js for Rows {
                 callee: callee.0,
                 args: &self.operands[start..],
             },
-            0,
+            // The argument list is present, with no argument too.
+            1,
         );
         self.cut(start, id)
     }
@@ -557,6 +560,35 @@ impl Js for Rows {
         }
         a.release(e.0);
         count as u32
+    }
+    fn take_operands(&mut self, a: &mut Pools, e: &mut E) -> u32 {
+        let count = a.view(e.0).child_count();
+        self.steps += 1 + count as u64;
+        for index in (0..count).rev() {
+            let operand = a.view(e.0).child_at(index);
+            a.detach(operand);
+            self.operands.push(operand);
+        }
+        count as u32
+    }
+    fn refill(&mut self, a: &mut Pools, e: E, mark: Mark) -> E {
+        self.steps += 1;
+        let start = self.since(mark);
+        let aux = a.node(e.0).aux();
+        let values = &self.operands[start..];
+        assert_eq!(values.len(), a.view(e.0).child_count(), "as many operands as were taken");
+        let view = match a.view(e.0) {
+            View::JOptional { .. } => View::JOptional { value: values[0] },
+            View::JArray { .. } => View::JArray { values },
+            View::JBlockLit { info, .. } => View::JBlockLit { values, info },
+            View::JObject { info, .. } => View::JObject { values, info },
+            View::JDot { property, position, .. } => View::JDot { object: values[0], property, position },
+            _ => panic!("refill of a kind that is not a literal or a member read"),
+        };
+        let id = plain::node(a, view, aux);
+        plain::copy_cold(a, e.0, id);
+        a.release(e.0);
+        self.cut(start, id)
     }
     fn copy(&mut self, a: &mut Pools, r: NodeId) -> E {
         let before = a.nodes.len();

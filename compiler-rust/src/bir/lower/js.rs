@@ -227,7 +227,8 @@ pub trait Js {
     /// `callee(operands since mark)` with the call information `info`. One
     /// step per operand.
     fn call(&mut self, a: &mut Pools, callee: Self::E, mark: Mark, info: JsId) -> Self::E;
-    /// `new callee(operands since mark)`. One step per operand.
+    /// `new callee(operands since mark)`: the argument list is present,
+    /// with no operand too. One step per operand.
     fn new_(&mut self, a: &mut Pools, callee: Self::E, mark: Mark) -> Self::E;
     /// `tag` applied to the template `info` with the operands since mark.
     /// One step per operand.
@@ -253,6 +254,21 @@ pub trait Js {
     /// first, so that [`Js::pop`] gives them in order; the node itself is
     /// released. Returns their number. One step, and one per operand.
     fn unpack_rev(&mut self, a: &mut Pools, e: Self::E) -> u32;
+    /// The operands of `e` moved onto the operand stack last operand
+    /// first, as [`Js::unpack_rev`], but the node stays: `e` is a node
+    /// without operands, to be given to [`Js::refill`] or released and to
+    /// nothing else. Returns their number. One step, and one per operand.
+    /// (T6p: `args.rs`, a literal or a member callee whose operands are
+    /// held in variables.)
+    fn take_operands(&mut self, a: &mut Pools, e: &mut Self::E) -> u32;
+    /// The node `e` over the operands pushed since `mark` in place of the
+    /// ones [`Js::take_operands`] took: the same kind, `aux`, call
+    /// information, location, comment and character; plain (no rule), its
+    /// facts those the plain constructor of its kind computes. `e` is
+    /// released. One step. Defined for an `Optional`, an `Array`, a
+    /// `BlockLit`, an `Object` and a `Dot`; panics on any other kind and
+    /// when the number of operands differs from the number taken.
+    fn refill(&mut self, a: &mut Pools, e: Self::E, mark: Mark) -> Self::E;
     /// A copy of the node `r` and everything below it
     /// (`Bir::copy_subtree` without a renaming: the binders inside it are
     /// fresh). One step per node copied.
