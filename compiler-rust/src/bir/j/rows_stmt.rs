@@ -35,8 +35,8 @@
 //! | `if_` | `norm::js3_simplify_if` |
 //! | `effect`, `effect_if_impure` | `norm::jm14_push_effect_expression`, `norm::jm14_push_s_if_empty`, with `Rows::operands` as the vector the rule pushes to: the statements pushed above its length on entry are given to `sink` in order and the vector is cut back |
 //!
-//! Bodies of later slices (`todo!` with the slice's name; each is built by
-//! that slice, with its test in `js_stmt_tests.rs`):
+//! What the conversion slices T6m to T6q call beside the functions above
+//! (the slice is the first that calls it):
 //!
 //! | Function | Slice | Body |
 //! | --- | --- | --- |
@@ -54,7 +54,7 @@ use super::rows::{E, Rows, kind_of};
 use super::{norm, plain};
 use crate::bir::lower::js::Pools;
 use crate::bir::lower::js_stmt::{JsStmt, Range};
-use crate::bir::{FuncId, ListId, NodeId, StrId, SwitchId, VarId, View};
+use crate::bir::{FuncId, ListId, NodeFlags, NodeId, StrId, SwitchId, VarId, View};
 use crate::lambda::LamLoc;
 use crate::emit::row::Kind;
 use crate::lambda::lam_compat::LetKind;
@@ -106,8 +106,7 @@ impl JsStmt for Rows {
 
     #[inline]
     fn stmt_located(&self, a: &Pools, s: &S) -> bool {
-        let _inputs = (a, s);
-        todo!("T6o")
+        a.node(s.0).flags().contains(NodeFlags::JS_LOC_PRESENT)
     }
 
     fn list(&mut self, a: &mut Pools, len: u32, statements: impl Iterator<Item = S>) -> ListId {
@@ -235,16 +234,30 @@ impl JsStmt for Rows {
     }
 
     fn locate_stmt(&mut self, a: &mut Pools, s: &mut S, loc: LamLoc) {
-        let _inputs = (a, s, loc);
-        todo!("T6m")
+        let comment = a.cold(s.0).and_then(|cold| cold.comment);
+        a.set_cold(s.0, crate::bir::Cold { loc, comment });
+        let mut flags = a.node(s.0).flags();
+        flags.0 |= NodeFlags::JS_LOC_PRESENT;
+        a.nodes[s.0.index()].set_flags(flags);
     }
     fn take_value(&mut self, a: &mut Pools, s: S) -> E {
-        let _inputs = (a, s);
-        todo!("T6n")
+        let (View::SExp { value } | View::SReturn { value } | View::SThrow { value }) = a.view(s.0) else {
+            panic!("a statement without a value to take")
+        };
+        self.steps += 1;
+        a.detach(value);
+        a.release(s.0);
+        E(value)
     }
     fn unblock(&mut self, a: &mut Pools, s: S, sink: impl FnMut(S)) {
-        let _inputs = (a, s, sink);
-        todo!("T6n")
+        let View::SBlock { statements } = a.view(s.0) else { panic!("not a block statement") };
+        let start = self.operands.len();
+        self.operands.extend_from_slice(statements);
+        for &statement in &self.operands[start..] {
+            a.detach(statement);
+        }
+        a.release(s.0);
+        self.give(start, sink);
     }
 
     fn exp_rule(&mut self, a: &mut Pools, value: E) -> S {

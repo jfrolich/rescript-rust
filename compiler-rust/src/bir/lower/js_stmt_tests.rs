@@ -717,7 +717,7 @@ fn a_reader_reads_the_statement_in_hand() {
     }
 }
 
-// ---- Functions of later slices (each test is ignored for its slice) ----
+// ---- Functions the conversion slices T6m to T6q call ----
 
 fn located_today(b: &mut Bir, statement: NodeId) {
     let comment = b.cold(statement).and_then(|cold| cold.comment);
@@ -728,7 +728,6 @@ fn located_today(b: &mut Bir, statement: NodeId) {
 }
 
 #[test]
-#[ignore = "T6m build"]
 fn a_located_statement_is_the_row_the_lowering_writes_today() {
     for st in [St::Call, St::Throw] {
         same(
@@ -745,7 +744,6 @@ fn a_located_statement_is_the_row_the_lowering_writes_today() {
 }
 
 #[test]
-#[ignore = "T6o build"]
 fn a_statement_says_whether_it_is_located() {
     let mut u = unit();
     let r = Rows::default();
@@ -757,7 +755,6 @@ fn a_statement_says_whether_it_is_located() {
 }
 
 #[test]
-#[ignore = "T6n build"]
 fn a_statement_gives_its_value_and_a_block_its_statements() {
     // `f();`, `return y;` and `throw x;` give their value and are released.
     for st in [St::Call, St::Return, St::Throw] {

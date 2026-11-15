@@ -41,7 +41,7 @@
 //! the flip). It is a parameter of every function, beside the
 //! implementation, so that a call borrows two fields of the lowering's
 //! state and not the state.
-use crate::bir::{Bir, ConstId, FuncId, ImportId, JsId, NodeId, StrId, VarId};
+use crate::bir::{Bir, ConstId, FuncId, ImportId, JsId, ListId, NodeId, StrId, VarId};
 use crate::emit::row::Kind;
 use crate::js_ir::BinOp;
 use crate::js_ir::arena::FieldPos;
@@ -138,6 +138,24 @@ pub trait Js {
     /// A:90 `runs_no_code`. One step per member of a chain of field reads
     /// with a position, to its base.
     fn runs_no_code(&self, a: &Pools, r: Self::Ref<'_>) -> bool;
+    /// The interned text of a string literal; `None` for any other node, a
+    /// template too. O(1): no text is read or interned. (T6m: the key of
+    /// a pair in `Pmakedict` becomes a property key.)
+    fn str_of(&self, a: &Pools, r: Self::Ref<'_>) -> Option<StrId>;
+
+    // ---- Reading by id (T6q: `export.rs` climbs from a site) ----
+
+    /// The id of the node that `id` is an operand of, or of the statement
+    /// that holds it; `None` for a node nothing holds. `id` is an
+    /// expression's or a statement's ([`Js::id`], a site's node, a
+    /// variable's binder). O(1).
+    fn owner(&self, a: &Pools, id: u32) -> Option<u32>;
+    /// The kind of the node `id`, an expression's or a statement's. O(1).
+    fn kind_of(&self, a: &Pools, id: u32) -> Kind;
+    /// Whether the node `id` is what its owner calls: the callee of a
+    /// call, of a `new` or of a flat call, or the tag of a tagged
+    /// template. O(1): one read of the owner, no scan of its operands.
+    fn is_callee(&self, a: &Pools, id: u32) -> bool;
 
     // ---- Leaves (plain; O(1) unless said) ----
 
@@ -200,6 +218,12 @@ pub trait Js {
     fn push(&mut self, operand: Self::E);
     /// The last operand pushed. O(1). Panics on an empty stack.
     fn pop(&mut self) -> Self::E;
+    /// Transition (deleted by T6x with its last call): the nodes of a pool
+    /// list of detached J expressions that a caller that is not converted
+    /// built, pushed as operands in order. One move per node; counts no
+    /// step, as [`Js::push`] counts none. (T6p: `external.rs` gets the
+    /// operands of a call from `prim.rs` as a pool list.)
+    fn push_list(&mut self, a: &Pools, list: ListId);
     /// `callee(operands since mark)` with the call information `info`. One
     /// step per operand.
     fn call(&mut self, a: &mut Pools, callee: Self::E, mark: Mark, info: JsId) -> Self::E;

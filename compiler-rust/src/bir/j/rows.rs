@@ -30,6 +30,11 @@
 //! | `arity`, `operand` | `View::child_count`, `View::child_at` |
 //! | `located` | `NodeFlags::JS_LOC_PRESENT` |
 //! | `runs_no_code` | `facts::runs_no_code` |
+//! | `str_of` | the `text` of a `JStr`; `None` otherwise |
+//! | `owner` | `Bir::parents` of the node |
+//! | `kind_of` (by id) | `kind_of` of the node's operation |
+//! | `is_callee` | the owner is a `JCall`, `JFlatCall` or `JNew` whose `callee` is the node, or a `JTagged` whose `tag` is |
+//! | `push_list` | `Rows::operands` extended by `Lists::get(list)` |
 //! | `keep_operand` | `child_at`, `Bir::detach` of the operand, `Bir::release` of the node |
 //! | `unpack_rev` | for the operands from the last to the first: `detach`, push; then `release` of the node |
 //! | `copy` | `Bir::copy_subtree(r, &[])` |
@@ -53,7 +58,7 @@
 use crate::bir::j::{facts, norm, plain};
 use crate::bir::lower::js::{Js, Mark, Pools};
 use crate::bir::{
-    Cold, ConstId, Constant, FuncId, ImportId, JsId, JsPayload, NodeFlags, NodeId, Op, StrId,
+    Cold, ConstId, Constant, FuncId, ImportId, JsId, JsPayload, ListId, NodeFlags, NodeId, Op, StrId,
     VarId, View,
 };
 use crate::emit::row::{Kind, flag};
@@ -275,6 +280,33 @@ impl Js for Rows {
     fn runs_no_code(&self, a: &Pools, r: NodeId) -> bool {
         facts::runs_no_code(a, r)
     }
+    #[inline]
+    fn str_of(&self, a: &Pools, r: NodeId) -> Option<StrId> {
+        match a.view(r) {
+            View::JStr { text } => Some(text),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn owner(&self, a: &Pools, id: u32) -> Option<u32> {
+        a.parents[id as usize].map(|owner| owner.0)
+    }
+    #[inline]
+    fn kind_of(&self, a: &Pools, id: u32) -> Kind {
+        kind_of(a.node(NodeId(id)).op())
+    }
+    #[inline]
+    fn is_callee(&self, a: &Pools, id: u32) -> bool {
+        let Some(owner) = a.parents[id as usize] else { return false };
+        match a.view(owner) {
+            View::JCall { callee, .. } | View::JFlatCall { callee, .. } | View::JNew { callee, .. } => {
+                callee.0 == id
+            }
+            View::JTagged { tag, .. } => tag.0 == id,
+            _ => false,
+        }
+    }
 
     #[inline]
     fn var(&mut self, a: &mut Pools, var: VarId) -> E {
@@ -418,6 +450,10 @@ impl Js for Rows {
     #[inline]
     fn pop(&mut self) -> E {
         E(self.operands.pop().expect("an operand"))
+    }
+    #[inline]
+    fn push_list(&mut self, a: &Pools, list: ListId) {
+        self.operands.extend_from_slice(a.lists.get(list));
     }
     fn call(&mut self, a: &mut Pools, callee: E, mark: Mark, info: JsId) -> E {
         let start = self.since(mark);

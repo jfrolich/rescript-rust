@@ -799,6 +799,84 @@ fn steps(build: fn(&mut Rows, &mut Unit, usize) -> E, size: usize) -> u64 {
     r.steps()
 }
 
+#[test]
+fn a_node_is_read_by_its_id() {
+    let mut u = unit();
+    let mut r = Rows::default();
+    let a = &mut u.b;
+    // `f(x, "s")`, `new f(y)` and a flat call: the callee is what its owner
+    // calls, an argument is not.
+    let f = r.var(a, u.f);
+    let callee = r.id(a, Rows::of(&f));
+    let mark = r.mark();
+    let x = r.var(a, u.x);
+    let argument = r.id(a, Rows::of(&x));
+    r.push(x);
+    let text = r.str(a, u.name);
+    assert_eq!(r.str_of(a, Rows::of(&text)), Some(u.name));
+    r.push(text);
+    assert_eq!((r.owner(a, callee), r.is_callee(a, callee)), (None, false));
+    let call = r.call(a, f, mark, u.call);
+    let id = r.id(a, Rows::of(&call));
+    assert_eq!((r.owner(a, callee), r.owner(a, argument), r.owner(a, id)), (Some(id), Some(id), None));
+    assert!(r.is_callee(a, callee) && !r.is_callee(a, argument));
+    assert_eq!((r.kind_of(a, id), r.kind_of(a, callee)), (Kind::Call, Kind::Var));
+    for flat in [false, true] {
+        let f = r.var(a, u.f);
+        let callee = r.id(a, Rows::of(&f));
+        let y = r.var(a, u.y);
+        let argument = r.id(a, Rows::of(&y));
+        let built = if flat {
+            r.flat_call(a, f, y)
+        } else {
+            let mark = r.mark();
+            r.push(y);
+            r.new_(a, f, mark)
+        };
+        assert!(r.is_callee(a, callee) && !r.is_callee(a, argument));
+        assert_eq!(r.owner(a, argument), Some(r.id(a, Rows::of(&built))));
+    }
+    // An operand of anything else is not a callee, the first one neither.
+    let (l, right) = (r.var(a, u.x), r.var(a, u.y));
+    let first = r.id(a, Rows::of(&l));
+    let sum = r.bin_plain(a, BinOp::Plus, l, right);
+    assert!(!r.is_callee(a, first));
+    assert_eq!(r.owner(a, first), Some(r.id(a, Rows::of(&sum))));
+    // Only a string literal has an interned text to give.
+    let template = r.mark();
+    let template = r.template(a, &[crate::string_literal::template_from_semantic("ab")], template);
+    let number = r.int_literal(a, 1);
+    for other in [&template, &number, &sum] {
+        assert_eq!(r.str_of(a, Rows::of(other)), None);
+    }
+    // The owner of a statement's value is the statement, and the id of a
+    // statement has a kind.
+    let value = a.new_node(View::SExp { value: Rows::node(sum) }, 0);
+    assert_eq!(r.kind_of(a, value.0), Kind::Exp);
+}
+
+#[test]
+fn a_pool_list_of_operands_is_pushed_in_order() {
+    same(
+        |r, u| {
+            let f = r.var(&mut u.b, u.f);
+            let nodes = [var(&mut u.b, u.x), plain::int(&mut u.b, 1), var(&mut u.b, u.y)];
+            let list = u.b.lists.push(&nodes);
+            let steps = r.steps();
+            let mark = r.mark();
+            r.push_list(&u.b, list);
+            assert_eq!((r.mark(), r.steps()), (Mark(mark.0 + 3), steps));
+            done(r.call(&mut u.b, f, mark, u.call));
+        },
+        |u| {
+            let callee = var(&mut u.b, u.f);
+            let args = [var(&mut u.b, u.x), plain::int(&mut u.b, 1), var(&mut u.b, u.y)];
+            let _list = u.b.lists.push(&args);
+            built(plain::node(&mut u.b, View::JCall { callee, args: &args, info: u.call }, 0));
+        },
+    );
+}
+
 /// Releasing costs one step per node released, whichever function
 /// releases: `release` of a nest, `keep_operand` on a comma of the nest
 /// and a variable (the nest is the operand not kept), and `drop_operands`
