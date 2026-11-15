@@ -1,5 +1,7 @@
 //! Opt-in AST emitter. Unsupported modules are printed entirely by the legacy path.
 mod build;
+#[cfg(test)]
+mod builder;
 mod literal;
 mod naming;
 pub(crate) use naming::{FreeLists, NameStats, Printed, Subject, Tables, compare_with_pass};
