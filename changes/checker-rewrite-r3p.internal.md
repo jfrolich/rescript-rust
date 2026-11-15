@@ -1,0 +1,1 @@
+- Checker rewrite R3p: two packages unify in the new checker by one merge of their name lists, the names one side lacks completed from the other module type, and their paths decide last, as OCaml does.
