@@ -12601,15 +12601,23 @@ pub fn instance_poly(
         });
     }
     let univars = univars.to_smallvec::<4>();
-    ctx.with_copy_session(|| instance_poly_in_session(ctx, keep_names, fixed, &univars, sch))
+    let mut cache = CopyCache::new(ctx);
+    instance_poly_in_session(ctx, keep_names, fixed, &univars, sch, &mut cache)
 }
 
+/// `instance_poly` inside the copy operation `cache` belongs to: the parts of
+/// `sch` free of universal variables are copied through `cache`, so a node
+/// that an earlier copy of the same operation reached maps to the same copy
+/// (OCaml's delayed `copy ty` sees the `Tsubst` marks of the enclosing
+/// session, compiler/ml/ctype.ml:1037-1041 and 1097-1105). One call costs one
+/// visit per node of `sch` plus the copy of its univar-free parts.
 fn instance_poly_in_session(
     ctx: &TypeContext,
     keep_names: bool,
     fixed: bool,
     univars: &[TypeExprRef],
     sch: TypeExprRef,
+    cache: &mut CopyCache<'_>,
 ) -> (Vec<TypeExprRef>, TypeExprRef) {
     let univars: Vec<_> = univars.iter().map(|u| ctx.repr(*u)).collect();
     let vars: Vec<TypeExprRef> = univars
@@ -12657,9 +12665,8 @@ fn instance_poly_in_session(
     // OCaml pushes delayed copies onto a list head (`::`) and forces them in
     // list order, so materialization runs in reverse discovery order under one
     // shared copy window.
-    let mut delayed_cache = CopyCache::joined(ctx);
     for (stub, source) in delayed_copy.into_iter().rev() {
-        let copied = copy_type_cached(ctx, source, &mut delayed_cache);
+        let copied = copy_type_cached(ctx, source, cache);
         ctx.set_desc(stub, TypeDesc::Tlink(copied));
     }
 
@@ -12872,25 +12879,12 @@ pub fn instance_label(
         match &*desc {
             super::TypeDesc::Tpoly { body, vars } => {
                 let body = *body;
-                let vars = *vars;
-                // OCaml runs copy(lbl_res) and then instance_poly(lbl_arg) within
-                // one temporary substitution window. For empty-Tpoly label args,
-                // that means instance_poly allocates a fresh body but still
-                // constrains it through the shared copy state from ty_res.
-                // Reconcile the empty-Tpoly instance with the shared-body copy
-                // without replacing the allocated instance node.
-                let shared_body = if vars.is_empty() {
-                    Some(copy_type_cached(ctx, body, &mut cache))
-                } else {
-                    None
-                };
-                let (poly_vars, ty_arg) =
-                    instance_poly(ctx, false, fixed, ctx.type_list(vars), body);
-                if let Some(shared_body) = shared_body {
-                    let mut state = UnifyState::new();
-                    let _ = unify(ctx, &mut state, ty_arg, shared_body);
-                }
-                (poly_vars, ty_arg)
+                let univars = ctx.type_list(*vars).to_smallvec::<4>();
+                // OCaml runs copy(lbl_res) and then instance_poly(lbl_arg) in
+                // one copy session (ctype.ml:1097-1105): a type parameter of
+                // the record that the field's body mentions is the copy made
+                // for `ty_res`, not a fresh variable.
+                instance_poly_in_session(ctx, false, fixed, &univars, body, &mut cache)
             }
             _ => {
                 let copied = copy_type_cached(ctx, lbl.lbl_arg, &mut cache);
@@ -13033,20 +13027,6 @@ pub(crate) fn instance_label_arg_at(
     let mut cache = CopyCache::new(ctx);
     cache.param_subst = Some(subst);
     copy_type_cached(ctx, lbl_arg, &mut cache)
-}
-
-/// OCaml's check_univars: after typing a polymorphic field value,
-/// convert any still-unresolved fresh Tvars back to Tunivar.
-/// This preserves the universal quantification in the typed tree.
-pub fn check_univars(ctx: &TypeContext, vars: &[TypeExprRef]) {
-    for &v in vars {
-        let v = ctx.repr(v);
-        let desc = ctx.get_desc(v);
-        if let super::TypeDesc::Tvar(name) = &*desc {
-            let name = *name;
-            ctx.set_desc(v, super::TypeDesc::Tunivar(name));
-        }
-    }
 }
 
 /// Deep copy a type, creating fresh type variables regardless of level.
@@ -13245,12 +13225,10 @@ pub fn copy_type_deep(
 
 /// Cache for copy_type_cached: tracks node identity to preserve sharing.
 ///
-/// A cache made with `new`/`new_partial` is one graph-copy operation and owns
-/// a copy session (btype.ml `with_copy_session`), ended when the cache is
-/// dropped; `joined` caches take part in the enclosing session.
+/// A cache is one graph-copy operation and owns a copy session (btype.ml
+/// `with_copy_session`), ended when the cache is dropped.
 pub(crate) struct CopyCache<'c> {
     ctx: &'c TypeContext,
-    owns_session: bool,
 
     /// Node identity cache: maps original TypeExprRef → copied TypeExprRef.
     /// Ensures that if the same node is visited twice, we reuse the copy.
@@ -13302,9 +13280,7 @@ struct CopyPartial {
 
 impl Drop for CopyCache<'_> {
     fn drop(&mut self) {
-        if self.owns_session {
-            self.ctx.end_copy_session();
-        }
+        self.ctx.end_copy_session();
     }
 }
 
@@ -13313,19 +13289,6 @@ impl<'c> CopyCache<'c> {
         ctx.begin_copy_session();
         CopyCache {
             ctx,
-            owns_session: true,
-            nodes: super::type_expr::TypeExprRefMap::new(),
-            row_more_markers: RowMoreMarkers::default(),
-            partial: None,
-            param_subst: None,
-        }
-    }
-
-    /// A cache taking part in the enclosing copy session.
-    pub(crate) fn joined(ctx: &'c TypeContext) -> Self {
-        CopyCache {
-            ctx,
-            owns_session: false,
             nodes: super::type_expr::TypeExprRefMap::new(),
             row_more_markers: RowMoreMarkers::default(),
             partial: None,
@@ -13337,7 +13300,6 @@ impl<'c> CopyCache<'c> {
         ctx.begin_copy_session();
         CopyCache {
             ctx,
-            owns_session: true,
             nodes: super::type_expr::TypeExprRefMap::new(),
             row_more_markers: RowMoreMarkers::default(),
             partial: Some(CopyPartial {

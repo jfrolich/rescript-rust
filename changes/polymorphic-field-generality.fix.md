@@ -1,0 +1,1 @@
+- Type checker: a record field value less general than its polymorphic field is rejected, as OCaml rejects it, when the field's type mentions a parameter of the record or when the field is assigned; an expansive field value is typed again without the field type, as OCaml does, before it is rejected.

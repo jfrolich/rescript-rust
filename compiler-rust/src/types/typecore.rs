@@ -15632,7 +15632,7 @@ fn type_record(
             crate::types::LabelDescription,
             TypeExprRef,
             TypeExprRef,
-            Vec<TypeExprRef>,
+            Option<PolyFieldValue<'_>>,
             Expression,
         )> {
             // Build label description (prefer env-disambiguated metadata).
@@ -15846,6 +15846,14 @@ fn type_record(
                     .as_ref()
                     .map(|info| info.jsx_type),
             });
+            // OCaml compiler/ml/typecore.ml:4327: the state a polymorphic
+            // field's value is retyped from (`check_label_univars`).
+            let poly_field = (!poly_vars.is_empty()).then(|| PolyFieldValue {
+                vars: poly_vars,
+                snapshot: ctx.snapshot_type_state(),
+                source: tctx.arena.get_expanded_expr(field.expr),
+                context: field_context,
+            });
             let typed_expr = type_expect(
                 tctx,
                 env,
@@ -15863,25 +15871,23 @@ fn type_record(
                 field_input_ty_inst,
                 field_context,
             )?;
-            Ok((label_desc, field_input_ty, less_general_expected_ty, poly_vars, typed_expr))
+            Ok((label_desc, field_input_ty, less_general_expected_ty, poly_field, typed_expr))
         })();
         ctx.end_def();
-        let (label_desc, _field_input_ty, less_general_expected_ty, poly_vars, typed_expr) =
+        let (label_desc, field_input_ty, less_general_expected_ty, poly_field, typed_expr) =
             field_result?;
 
-        // OCaml check_univars: convert fresh Tvars back to Tunivar for poly fields
-        // or report Less_general if a universal variable was specialized.
-        if !poly_vars.is_empty() {
-            check_univars_or_less_general(
+        let typed_expr = match poly_field {
+            Some(poly_field) => check_label_univars(
                 tctx,
                 env,
-                true,
-                "field value",
-                &typed_expr,
+                typed_expr,
+                field_input_ty,
                 less_general_expected_ty,
-                &poly_vars,
-            )?;
-        }
+                poly_field,
+            )?,
+            None => typed_expr,
+        };
 
         // process_optional_label: wrap optional fields in Some(...) only when the
         // user did not write the `?` form.
@@ -16745,7 +16751,12 @@ fn type_setfield(
     // literal fields.
     ctx.begin_def();
     let field_result =
-        (|| -> TypeCoreResult<(crate::types::LabelDescription, Vec<TypeExprRef>, Expression)> {
+        (|| -> TypeCoreResult<(
+            crate::types::LabelDescription,
+            TypeExprRef,
+            Option<PolyFieldValue<'_>>,
+            Expression,
+        )> {
             let (label_desc, field_ty, poly_vars) = if let Some(env_label) = env_label {
                 let separate = env.has_local_constraints();
                 if separate {
@@ -16858,20 +16869,38 @@ fn type_setfield(
             let field_context = Some(ClashSite::SetRecordField {
                 field_name: crate::name::Name::new(&field_context_name),
             });
+            // OCaml compiler/ml/typecore.ml:4327 (`check_label_univars`).
+            let poly_field = (!poly_vars.is_empty()).then(|| PolyFieldValue {
+                vars: poly_vars,
+                snapshot: ctx.snapshot_type_state(),
+                source: new_value,
+                context: field_context,
+            });
             let typed_value = type_expect(tctx, env, new_value, field_ty, field_context)?;
             // OCaml compiler/ml/typecore.ml:3740-3743 uses `type_argument`, which
             // types against `ty_arg` and then unifies with `instance env ty_arg`.
             let field_ty_inst = crate::types::ctype::instance(ctx, field_ty);
             unify_expression_types(tctx, loc, typed_value.exp_type, field_ty_inst, None)?;
 
-            Ok((label_desc, poly_vars, typed_value))
+            Ok((label_desc, field_ty, poly_field, typed_value))
         })();
     ctx.end_def();
-    let (label_desc, poly_vars, mut typed_value) = field_result?;
+    let (label_desc, field_ty, poly_field, typed_value) = field_result?;
 
-    if !poly_vars.is_empty() {
-        crate::types::ctype::check_univars(ctx, &poly_vars);
-    }
+    // OCaml types the assigned value with `type_label_exp` too
+    // (compiler/ml/typecore.ml:3206-3211), which rejects a value less general
+    // than a polymorphic field.
+    let mut typed_value = match poly_field {
+        Some(poly_field) => check_label_univars(
+            tctx,
+            env,
+            typed_value,
+            field_ty,
+            label_desc.lbl_arg,
+            poly_field,
+        )?,
+        None => typed_value,
+    };
     // OCaml compiler/ml/typecore.ml:3779 returns `{arg with exp_type =
     // instance env arg.exp_type}` from `type_label_exp`.
     typed_value.exp_type = crate::types::ctype::instance(ctx, typed_value.exp_type);
@@ -19582,6 +19611,79 @@ fn is_nonexpansive_module_expr(
                 }
             }),
         crate::types::typedtree::ModuleExprDesc::Tmod_apply(_, _, _) => false,
+    }
+}
+
+/// The value written for a polymorphic record field, as `check_label_univars`
+/// needs it: the field's instantiated universal variables, the type state
+/// before the value was first typed, its source and the clash site of its
+/// diagnostics, to type it again from.
+struct PolyFieldValue<'c> {
+    vars: Vec<TypeExprRef>,
+    snapshot: crate::types::context::TypeMutationSnapshot<'c>,
+    source: &'c ParsedExpression,
+    context: Option<ClashSite>,
+}
+
+/// OCaml `type_label_exp` after typing the value of a polymorphic field
+/// (compiler/ml/typecore.ml:4339-4358): `check_univars`, and when that fails
+/// for an expansive value, the value typed again from `snapshot` without the
+/// field type propagated (PR#4862), generalized, unified with `ty_arg` and
+/// checked again. A `Less_general` of the second attempt is reported, any
+/// other failure reports the first error. Only polymorphic fields reach it.
+/// One call costs one `check_univars`; the retry, taken only when that
+/// fails, types the value once more.
+fn check_label_univars(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    typed: Expression,
+    ty_arg: TypeExprRef,
+    ty_expected: TypeExprRef,
+    poly_field: PolyFieldValue<'_>,
+) -> TypeCoreResult<Expression> {
+    let ctx = tctx.type_ctx;
+    let PolyFieldValue {
+        vars,
+        snapshot,
+        source,
+        context,
+    } = poly_field;
+    let vars = &vars[..];
+    let first = match check_univars_or_less_general(
+        tctx,
+        env,
+        true,
+        "field value",
+        &typed,
+        ty_expected,
+        vars,
+    ) {
+        Ok(()) => return Ok(typed),
+        Err(first) => first,
+    };
+    if is_nonexpansive_node(tctx, &typed) {
+        return Err(first);
+    }
+
+    // `snapshot` was taken inside the field's definition scope, and
+    // restoring it puts the level counters back there too (OCaml's
+    // `Btype.backtrack` leaves `current_level` alone): close that scope again,
+    // so the retry starts from the level OCaml's does (typecore.ml:4339, 4346).
+    ctx.restore_type_state(snapshot);
+    ctx.end_def();
+    ctx.begin_def();
+    let retyped = type_exp(tctx, env, source, context);
+    ctx.end_def();
+    let retry = retyped.and_then(|arg| {
+        crate::types::ctype::generalize_expansive(ctx, env, arg.exp_type);
+        unify_expression_types(tctx, arg.exp_loc, arg.exp_type, ty_arg, context)?;
+        check_univars_or_less_general(tctx, env, false, "field value", &arg, ty_expected, vars)?;
+        Ok(arg)
+    });
+    match retry {
+        Ok(arg) => Ok(arg),
+        Err(err @ TypeCoreError::LessGeneral { .. }) => Err(err),
+        Err(_) => Err(first),
     }
 }
 
