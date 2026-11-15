@@ -1276,10 +1276,17 @@ fn modtypes_inner(
         path: &Path,
         namespace: PathNamespace,
     ) -> Option<ModuleType> {
-        fn should_try_env_lazy(path: &Path) -> bool {
+        fn should_try_env_lazy(path: &Path, namespace: PathNamespace) -> bool {
             match path.view() {
                 PathView::Pident(id) => id.is_persistent() || id.stamp() == 0,
-                PathView::Pdot(_, _, _) => true,
+                // A dotted module is OCaml `expand_module_alias`, `(Env.find_module
+                // path env).md_type` (compiler/ml/includemod.ml:99-101): the
+                // declaration its parent's components hold, under the parent's
+                // substitution only (compiler/ml/env.ml:1555-1557). Its own
+                // items keep their identifiers (`type ext` of `Outer.R` is
+                // `ext`, not `Outer.R.ext`), which `expand_local` reads; the
+                // components view of the path itself prefixes them.
+                PathView::Pdot(_, _, _) => matches!(namespace, PathNamespace::ModuleType),
                 PathView::Papply(_, _) => false,
             }
         }
@@ -1349,7 +1356,7 @@ fn modtypes_inner(
             }
         }
 
-        if should_try_env_lazy(path) {
+        if should_try_env_lazy(path, namespace) {
             if let Some(resolved) =
                 crate::types::ctype::resolve_module_type_through_env(type_ctx, env, path)
             {
