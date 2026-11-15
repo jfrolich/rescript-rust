@@ -3620,7 +3620,15 @@ fn strengthen_module_type_for_module_access_path(
 ) -> super::decl::ModuleType {
     use super::decl::ModuleType;
 
+    /// OCaml `Mtype.scrape` (compiler/ml/mtype.ml:21-25): follow `Mty_ident`
+    /// through `Env.find_modtype_expansion`. A dotted path is expanded
+    /// through its parent module's components, which carry that module's
+    /// prefix (`R.T = Y.T` declared inside `R` expands to `R.Y.T`, not to the
+    /// `Y.T` written in `R`'s own signature). Cost: one module type lookup
+    /// per abbreviation followed; nothing for a module type that is not a
+    /// path.
     fn scrape_modtype_ident_for_strengthen(
+        ctx: &TypeContext,
         env: &super::env::Env,
         mty: &super::decl::ModuleType,
         visiting: &mut HashSet<Path>,
@@ -3630,11 +3638,14 @@ fn strengthen_module_type_for_module_access_path(
                 if !visiting.insert(*path) {
                     return mty.clone();
                 }
-                let expanded = env
-                    .lookup_modtype(path)
-                    .ok()
-                    .and_then(|mtd| mtd.mtd_type.as_ref())
-                    .map(|expanded| scrape_modtype_ident_for_strengthen(env, expanded, visiting));
+                let mut persistent_env = in_process_module_resolution_env(ctx);
+                let expanded = crate::types::typemod::find_modtype_expansion(
+                    path,
+                    env,
+                    &mut persistent_env,
+                    ctx,
+                )
+                .map(|expanded| scrape_modtype_ident_for_strengthen(ctx, env, &expanded, visiting));
                 visiting.remove(path);
                 expanded.unwrap_or_else(|| mty.clone())
             }
@@ -3642,12 +3653,8 @@ fn strengthen_module_type_for_module_access_path(
         }
     }
 
-    // Match OCaml compiler/ml/mtype.ml:22-32: `strengthen` calls `scrape`
-    // first, and `scrape` expands `Mty_ident` with Env.find_modtype_expansion
-    // before signature strengthening, so strengthening sees the expanded
-    // module type.
     let mut visiting = HashSet::new();
-    let scraped = scrape_modtype_ident_for_strengthen(env, mty, &mut visiting);
+    let scraped = scrape_modtype_ident_for_strengthen(ctx, env, mty, &mut visiting);
 
     match &scraped {
         ModuleType::MtySignature(sig) => ModuleType::MtySignature(std::sync::Arc::new(
