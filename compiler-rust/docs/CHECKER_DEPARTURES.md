@@ -127,6 +127,7 @@ checker witness.
 | E1 | REACHED, NO DIFFERENCE SEEN | 6 |
 | E2 | REACHED, NO DIFFERENCE SEEN | 6 |
 | E3 | REACHED, NO DIFFERENCE SEEN | 6 |
+| E4 | WITNESS, FIXED | 6 |
 
 ## D1 — REACHED, NO DIFFERENCE SEEN
 
@@ -2575,6 +2576,310 @@ Debugger hit counts:
 
 ```text
 {"equal": 0, "equal_false": 0, "level_retry": 0, "moregen_occur": 0, "nullary_lower": 5, "object_retry": 0, "occur_failure": 0, "pattern_row_failure": 0, "row_failure": 0, "subst": 9, "subst_body_failure": 0, "subst_param_failure": 0}
+```
+
+## E4 — WITNESS, FIXED: the link of an expanded head to the original type
+
+OCaml's `unify3` links the expanded head it chose to the ORIGINAL opposite
+side before it unifies the children, in expression mode
+(`compiler/ml/ctype.ml:2330-2331`: `occur !env t1' t2'; link_type t1' t2`;
+`d1` and `d2` are read before the link at 2308, `create_recursion` at 2309,
+a failure puts `d1` back at 2437, and the recursion is repaired after the
+children at 2428-2436). The Rust `unify_after_expansion`
+(`compiler-rust/src/types/ctype.rs:7855`, before the fix) had this order only
+for two constructors of one path. For every other pair it called `unify` on
+the two expanded heads (`ctype.rs:8006`), which linked one expanded head to
+the other, and linked to the original afterwards only when the head did not
+occur in it (`!deep_occur(ctx, lhs, to_ty)`, `ctype.rs:8021`). For an
+abbreviation that expands to its own argument (`type id<'a> = 'a`) the head
+always occurs there, so the link to the original never happened and the
+alias spelling of the original was lost.
+
+E4-1 to E4-3 are the three witnesses (each a file of its own; `let z:
+string = ...` prints a type). E4-4 to E4-6 print the other variable; they
+agreed before and agree after. Commands as in "Candidate commands"
+(single-file); every output below is stderr, colour escapes removed, stdout
+empty, exit status 2 on both sides.
+
+### Fixed
+
+`unify_types` (`compiler-rust/src/types/ctype.rs:8136`) takes the target
+its structural arms link the left side to: the right side when it is reached
+directly, the original opposite side from `unify_after_expansion`, whose
+general arm in expression mode now reads `create_recursion` before the link
+(`ctype.rs:8025`, OCaml 2309), runs the structural arms on the expanded pair
+with the original as the target (occurrence check, link, children, the
+descriptor put back on failure; OCaml 2330-2331 and 2437), and then the
+recursion repair `repair_recursion` (`ctype.rs:8041`, OCaml 2428-2436) with
+`forget_abbrev` (OCaml `btype.ml:636-647`) and `closed_parameterized_type`
+(`ctype.rs:8061`, OCaml `ctype.ml:441-451`). All six candidates now print
+OCaml's output byte for byte; E4-1 to E4-3 are the super_errors fixtures
+`abbreviation_expansion_links_original`, `_object` and `_one_sided`. Pattern
+mode keeps unifying the two expanded heads (OCaml: `add_type_equality t1'
+t2'`, ctype.ml:2332); that departure stays open, as do the `deep_occur`
+guards of the same-path arm of `unify_after_expansion`, of the same-path
+constructor arm of `unify_types` and of `update_level_pass`
+(OCaml `ctype.ml:2330-2331`, 594, 603 have none), for which no program
+showing a difference was found.
+
+### E4-1 — WITNESS (program A)
+
+`Main.res`:
+
+```rescript
+type id<'a> = 'a
+let mk = (): id<(int, int)> => (1, 2)
+let f = (a, b) => {
+  let _ = [a, mk()]
+  let _ = [b, mk()]
+  let _ = [a, b]
+  let z: string = b
+  z
+}
+```
+
+#### OCaml, and Rust after the fix
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:19
+
+  5 │   let _ = [b, mk()]
+  6 │   let _ = [a, b]
+  7 │   let z: string = b
+  8 │   z
+  9 │ }
+
+  This has type: id<id<(int, int)>> (defined as (int, int))
+  But it's expected to have type: string
+
+```
+
+#### Rust before the fix
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:19
+
+  5 │   let _ = [b, mk()]
+  6 │   let _ = [a, b]
+  7 │   let z: string = b
+  8 │   z
+  9 │ }
+
+  This has type: id<(int, int)> (defined as (int, int))
+  But it's expected to have type: string
+
+```
+
+### E4-2 — WITNESS (program B)
+
+`Main.res`:
+
+```rescript
+type id<'a> = 'a
+let mk = (): id<{"x": int}> => {"x": 1}
+let f = (a, b) => {
+  let _ = [a, mk()]
+  let _ = [b, mk()]
+  let _ = [a, b]
+  let z: string = b
+  z
+}
+```
+
+#### OCaml, and Rust after the fix
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:19
+
+  5 │   let _ = [b, mk()]
+  6 │   let _ = [a, b]
+  7 │   let z: string = b
+  8 │   z
+  9 │ }
+
+  This has type: id<id<{"x": int}>>
+  But it's expected to have type: string
+
+```
+
+#### Rust before the fix
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:19
+
+  5 │   let _ = [b, mk()]
+  6 │   let _ = [a, b]
+  7 │   let z: string = b
+  8 │   z
+  9 │ }
+
+  This has type: id<{"x": int}>
+  But it's expected to have type: string
+
+```
+
+### E4-3 — WITNESS (program C)
+
+`Main.res`:
+
+```rescript
+type id<'a> = 'a
+let mk = (): id<(int, int)> => (1, 2)
+let pl = (): (int, int) => (1, 2)
+let f = (a, b) => {
+  let _ = [a, pl()]
+  let _ = [b, mk()]
+  let _ = [b, a]
+  let z: string = a
+  z
+}
+```
+
+#### OCaml, and Rust after the fix
+
+```text
+
+  We've found a bug for you!
+  Main.res:8:19
+
+   6 │   let _ = [b, mk()]
+   7 │   let _ = [b, a]
+   8 │   let z: string = a
+   9 │   z
+  10 │ }
+
+  This has type: id<(int, int)> (defined as (int, int))
+  But it's expected to have type: string
+
+```
+
+#### Rust before the fix
+
+```text
+
+  We've found a bug for you!
+  Main.res:8:19
+
+   6 │   let _ = [b, mk()]
+   7 │   let _ = [b, a]
+   8 │   let z: string = a
+   9 │   z
+  10 │ }
+
+  This has type: (int, int)
+  But it's expected to have type: string
+
+```
+
+### E4-4 — outputs agree (program A, printing `a`)
+
+`Main.res`:
+
+```rescript
+type id<'a> = 'a
+let mk = (): id<(int, int)> => (1, 2)
+let f = (a, b) => {
+  let _ = [a, mk()]
+  let _ = [b, mk()]
+  let _ = [a, b]
+  let z: string = a
+  z
+}
+```
+
+#### Both compilers, before and after the fix
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:19
+
+  5 │   let _ = [b, mk()]
+  6 │   let _ = [a, b]
+  7 │   let z: string = a
+  8 │   z
+  9 │ }
+
+  This has type: id<(int, int)> (defined as (int, int))
+  But it's expected to have type: string
+
+```
+
+### E4-5 — outputs agree (program B, printing `a`)
+
+`Main.res`:
+
+```rescript
+type id<'a> = 'a
+let mk = (): id<{"x": int}> => {"x": 1}
+let f = (a, b) => {
+  let _ = [a, mk()]
+  let _ = [b, mk()]
+  let _ = [a, b]
+  let z: string = a
+  z
+}
+```
+
+#### Both compilers, before and after the fix
+
+```text
+
+  We've found a bug for you!
+  Main.res:7:19
+
+  5 │   let _ = [b, mk()]
+  6 │   let _ = [a, b]
+  7 │   let z: string = a
+  8 │   z
+  9 │ }
+
+  This has type: id<{"x": int}>
+  But it's expected to have type: string
+
+```
+
+### E4-6 — outputs agree (program C, printing `b`)
+
+`Main.res`:
+
+```rescript
+type id<'a> = 'a
+let mk = (): id<(int, int)> => (1, 2)
+let pl = (): (int, int) => (1, 2)
+let f = (a, b) => {
+  let _ = [a, pl()]
+  let _ = [b, mk()]
+  let _ = [b, a]
+  let z: string = b
+  z
+}
+```
+
+#### Both compilers, before and after the fix
+
+```text
+
+  We've found a bug for you!
+  Main.res:8:19
+
+   6 │   let _ = [b, mk()]
+   7 │   let _ = [b, a]
+   8 │   let z: string = b
+   9 │   z
+  10 │ }
+
+  This has type: id<(int, int)> (defined as (int, int))
+  But it's expected to have type: string
+
 ```
 
 ## Reachability measurement
