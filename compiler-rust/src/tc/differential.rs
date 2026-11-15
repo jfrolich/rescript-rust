@@ -2877,7 +2877,6 @@ mod tests {
     /// later component clashes, in both orders.
     /// Reaches: R3m, R3f.
     #[test]
-    #[ignore = "R3f build"]
     fn variant_rows_agree_on_fixed_cases() {
         let program = compile(REF_PROGRAM.to_string());
         let plan = Plan::new(Tier::Full, VARIANTS | REFS);
