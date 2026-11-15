@@ -25,7 +25,7 @@ pub(super) struct Member {
     mode: Mode,
 }
 
-impl<B: super::js::Js> State<'_, B> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// O(m + a + newly indexed source slots): stable function/value partition
     /// and one inspection of each makeblock's a direct arguments. Membership
     /// in the group is a VarId interval test, never a scan of other members.

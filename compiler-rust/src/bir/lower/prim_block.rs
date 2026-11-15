@@ -4,7 +4,7 @@ use crate::emit::row::{Kind, flag};
 use crate::js_ir::arena::FieldPos;
 use crate::lambda::lam_compat::FieldDbgInfo;
 
-impl<B: super::js::Js> State<'_, B> {
+impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// P: compile_flat_make_field, tried before lowering operands. O(d + name
     /// bytes) for d module-field segments. Failed paths are marked in a dense
     /// source-node table, so nested make misses never rescan an earlier spine.
