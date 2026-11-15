@@ -21892,12 +21892,14 @@ where
         match plan {
             CopyTypeExprPlan::Tvar(name) => TypeDesc::Tvar(name),
             CopyTypeExprPlan::Tarrow { args, ret } => {
+                // btype.ml:511-512: the result before the parameters (OCaml
+                // evaluates constructor arguments right to left).
+                let ret = copy_lookup_type_expr_with_paths(ctx, ret, cache, type_path);
                 let args = ctx.new_type_args_from(ctx.type_args(args).iter().map(|arg| {
                     let mut arg = arg;
                     arg.typ = copy_lookup_type_expr_with_paths(ctx, arg.typ, cache, type_path);
                     arg
                 }));
-                let ret = copy_lookup_type_expr_with_paths(ctx, ret, cache, type_path);
                 TypeDesc::Tarrow { args, ret }
             }
             CopyTypeExprPlan::Ttuple(types) => {
@@ -21935,8 +21937,9 @@ where
                     let cache = &*cache;
                     ctx.copy_field_mutability(mutability, rest, false, &|t| cache.get(t).copied())
                 };
-                let copied_typ = copy_lookup_type_expr_with_paths(ctx, typ, cache, type_path);
+                // btype.ml:532: the rest before the type.
                 let copied_rest = copy_lookup_type_expr_with_paths(ctx, rest, cache, type_path);
+                let copied_typ = copy_lookup_type_expr_with_paths(ctx, typ, cache, type_path);
                 TypeDesc::Tfield {
                     name,
                     mutability,
@@ -22014,12 +22017,13 @@ where
             }
             CopyTypeExprPlan::Tunivar(name) => TypeDesc::Tunivar(name),
             CopyTypeExprPlan::Tpoly { body, vars } => {
-                let copied_body = copy_lookup_type_expr_with_paths(ctx, body, cache, type_path);
+                // btype.ml:538-539: the binders before the body.
                 let copied_vars = ctx.new_type_list_from(
                     ctx.type_list(vars)
                         .iter()
                         .map(|t| copy_lookup_type_expr_with_paths(ctx, t, cache, type_path)),
                 );
+                let copied_body = copy_lookup_type_expr_with_paths(ctx, body, cache, type_path);
                 TypeDesc::Tpoly {
                     body: copied_body,
                     vars: copied_vars,
