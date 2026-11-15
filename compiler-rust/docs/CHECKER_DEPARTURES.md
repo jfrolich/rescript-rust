@@ -7494,6 +7494,122 @@ diagnostics:
   also creates a new exception instead of rebinding. The fix is in
   `typecore.rs`, outside this change.
 
+### L1 - a local exception that rebinds another
+
+The witness: a local exception in a function that rebinds a top-level one.
+
+```rescript
+exception E(int)
+let f = x => {
+  exception L = E
+  switch x {
+  | L(n) => n
+  | _ => 0
+  }
+}
+```
+
+OCaml accepted it with warning 38 ("exception L is never used to build
+values. (However, this constructor appears in patterns.)", `3:3-17`), and
+its JavaScript tests `x.RE_EXN_ID === E` and returns `x._1`. Rust rejected
+it at `5:5-8`: "This variant constructor L expects 0 arguments, but it's
+being passed 1."
+
+Commands as in "Scope, calibration and reproducibility": the OCaml `bsc`
+from `dune build`, Rust from thin-LTO release builds of `acf84ba17` (before)
+and of the fix (after), the runtime built by `build-reference` with the
+OCaml `bsc`; each program is `Main.res` compiled by both with
+`-I . -I packages/@rescript/runtime/lib/rescript`, and stdout (the
+JavaScript), stderr (the diagnostics), and the exit status compared byte for
+byte.
+
+#### Fixed
+
+- `cd3f30219`: OCaml types `Pexp_letexception` with
+  `Typedecl.transl_exception` (`compiler/ml/typecore.ml:3762-3763`), the
+  function an `exception` structure item uses
+  (`compiler/ml/typedecl.ml:1895-1911`); its `Pext_rebind` arm of
+  `transl_extension_constructor` takes the arguments, the result type, the
+  inline record and the path of the constructor it rebinds
+  (`typedecl.ml:1694-1749`). The Rust `type_letexception`
+  (`compiler-rust/src/types/typecore.rs:17753` before the fix) was a copy of
+  the item's translation whose `Pext_rebind` arm (`typecore.rs:17892`)
+  returned a constructor with no arguments and built a `Text_decl`, so a
+  rebind became a new exception without arguments: matching it with an
+  argument was rejected, and `exception L = E0` compiled to
+  `Primitive_exceptions.create("L")`. The copy also skipped what the item
+  checked (the duplicate-label and `@as` checks of an inline record, the
+  unbound type variable check, `reset_type_variables`, the lookup of the
+  rebound name). The item's translation is now `transl_exception`
+  (`compiler-rust/src/types/typemod.rs:16506`), called by the
+  `Pstr_exception` item (`typemod.rs:19152`) and by `type_letexception`
+  (`typecore.rs:17756`); the copy is deleted. Fixtures:
+  `tests/tests/src/local_exception_rebind_cases` (every accepted program
+  below in one module, with the controls), and the super_errors fixtures
+  `local_exception_rebind_not_exception`, `_unbound`, `_argument_count`,
+  `_wrong_field`, `_decl_unbound_type_var`, `_pattern_only` (warning 38 for
+  a constructor seen only in patterns) and `_unused` (agreed before).
+
+The three local-exception rows left open under E1 above (`exception L =
+A.E`, `= R.E`, `= E`, each with `L(1)`) are programs 8, 9 and 5 below and
+now agree.
+
+Programs run through both compilers. OCaml status 0 is accepted, 2
+rejected; DIFFER is a difference in the JavaScript, the diagnostics or the
+status:
+
+| # | Program | OCaml | Before (Rust) | After (Rust) |
+| --- | --- | --- | --- | --- |
+| 1 | the witness, one argument, used in a pattern | 0, warning 38 | DIFFER (2) | agree |
+| 2 | no argument, `\| L =>` | 0, warning 38 | DIFFER (0, a new exception `"L"`) | agree |
+| 3 | two arguments, `\| L(n, s)` | 0, warning 38 | DIFFER (2) | agree |
+| 4 | inline record, `\| L({a, b})` and `L({a: 1, b: "x"})` | 0, warning 38 | DIFFER (2) | agree |
+| 5 | used only to build, `L(1)` | 0 | DIFFER (2) | agree |
+| 6 | pattern and construction, `\| L(n) => L(n + 1)` | 0 | DIFFER (2) | agree |
+| 7 | not used at all | 0, warning 38 "unused exception L" | agree | agree |
+| 8 | through a module path, `exception L = M.E` | 0, warning 38 | DIFFER (2) | agree |
+| 9 | through a module alias, `exception L = A.E` | 0, warning 38 | DIFFER (2) | agree |
+| 10 | a local `exception K(int)` rebound by a local `exception L = K` | 0 | DIFFER (2) | agree |
+| 11 | control: local declaration `exception L(int, string)` | 0 | agree | agree |
+| 12 | in a function called twice, `throw(L(x))` caught as `E1(n)` | 0 | DIFFER (2) | agree |
+| 13 | rebind of the predefined `Failure`, `\| L(s)` | 0, warning 38 | DIFFER (2) | agree |
+| 14 | control: item rebind `exception F = E` | 0 | agree | agree |
+| 15 | rebind of a variant constructor `A` of `type t` | 2, `3:17` "The constructor A has type t but was expected to be of type exn" | DIFFER (0) | agree |
+| 16 | rebind of an unbound `Nope` | 2, `2:17-20` "The variant constructor Nope can't be found." | DIFFER (0) | agree |
+| 17 | `\| L(n, m)` for one argument | 2, `5:6-11` "This pattern matches values of type ('a, 'b)" | DIFFER (2, `5:5-11` "expects 0 arguments, but it's being passed 2") | agree |
+| 18 | `\| L({c})` for an inline record `{a, b}` | 2, `5:8` "The field c is not part of the record argument for the L constructor" | DIFFER (2, `5:5-10` "expects 0 arguments") | agree |
+| 19 | local declaration `exception L('a)` | 2, `2:16` "Unbound type parameter 'a" | DIFFER (0) | agree |
+| 20 | `L("x")` for an `int` argument | 2, `4:5-7` "This has type: string" | DIFFER (2, `4:3-8` "expects 0 arguments") | agree |
+| 21 | rebind of `Nope.E`, an unbound module | 2, `2:17-22` "The module or file Nope can't be found." | DIFFER (0, warning 38) | agree |
+
+#### Fixed: a rebind marks the constructor it rebinds as used
+
+- The commit that adds this paragraph: OCaml's `Pext_rebind` arm marks the constructor it rebinds
+  as used: `Env.mark_constructor usage env (Longident.last lid.txt) cdescr`
+  (`compiler/ml/typedecl.ml:1694-1700`). The usage is `Positive`, or
+  `Privatize` when the new constructor is private and the rebound one is
+  not. The Rust `lookup_rebind_constructor`
+  (`compiler-rust/src/types/typemod.rs:555`) did not mark it, so every
+  rebound constructor kept the warning 38 it would have had without the
+  rebind. This applied to exception items, local exceptions and
+  `type t += B = A` alike. It now calls `typecore::mark_constructor` with
+  that usage. The exception paths pass `Public`, and
+  `transl_type_extension` passes the extension's private flag. Fixtures:
+  super_errors `local_exception_rebind_marks_use`,
+  `local_exception_rebind_marks_use_item` and
+  `local_exception_rebind_marks_use_private_extension`. All 21 programs
+  above still agree, and every existing super_errors fixture keeps its
+  output.
+
+| # | Program | OCaml warnings | Trunk | Previous head | After |
+| --- | --- | --- | --- | --- | --- |
+| 22 | local `L = E`, local `M = L`, `\| L(n)` | 38 `4:3-17` "unused exception M" | DIFFER | DIFFER (also `3:3-17` "exception L is never used to build values") | agree |
+| 23 | item `L = E`, item `M = L` under a signature, `\| L(n)`, `\| M(_)` | 38 `6:3-17` "exception M is never used to build values" | DIFFER (also L, `5:3-17`) | DIFFER (also L, `5:3-17`) | agree |
+| 24 | local `L = E`, `M = L`, none used | 38 `4:3-17` "unused exception M" | DIFFER | DIFFER (also `3:3-17` "unused exception L") | agree |
+| 25 | local `K(int)` used only by `L = K`, `\| L(n)` | 38 `3:3-17` "exception L is never used to build values" | DIFFER | DIFFER (also `2:3-18` "unused exception K") | agree |
+| 26 | `type t += private B = A`, `\| B(n)`, under a signature | 38 `6:13-18` "extension constructor A is never used to build values." and `7:21-25` B | DIFFER ("unused extension constructor A") | DIFFER (same) | agree |
+| 27 | `type t += B = A`, `\| B(n)`, under a signature | 38 `7:13-17` for B only | DIFFER (also `6:13-18` "unused extension constructor A") | DIFFER (same) | agree |
+| 28 | item `K(int)` used only by item `L = K`, under a signature | 38 `5:3-17` for L only | DIFFER (also `4:3-18` "unused exception K") | DIFFER (same) | agree |
 ### C1 - constructors and labels through an alias of a module that holds an alias
 
 The witness: a constructor read through an alias (`O`) of a module that
