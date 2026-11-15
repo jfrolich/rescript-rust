@@ -1,0 +1,1 @@
+- The backend lowering writes the JavaScript of self tail calls, recursive bindings and static exits through its interface instead of naming J opcodes.

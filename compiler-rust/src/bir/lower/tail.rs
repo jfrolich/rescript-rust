@@ -44,10 +44,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let mut assignments = std::mem::take(&mut self.tail_assignments);
         for (i, &value) in values.iter().enumerate() {
             self.tail_arguments += 1;
-            if i == 0 || i > params.len() { self.arena.release(value); continue; }
+            if i == 0 || i > params.len() { self.js.release(&mut self.arena, B::from_node(value)); continue; }
             let param = VarId(params.start + i as u32 - 1);
-            if matches!(self.arena.view(value), View::Var { var } if var == param) {
-                self.arena.release(value);
+            if self.js.var_of(&self.arena, B::at(value)) == Some(param) {
+                self.js.release(&mut self.arena, B::from_node(value));
                 continue;
             }
             let copy = if let Some(copy) = self.tail_copies[param.index()] { copy } else {
@@ -61,12 +61,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 self.tail_copies[param.index()] = Some(copy);
                 copy
             };
-            assignments.push(crate::bir::j::assign(&mut self.arena, copy, value));
+            let assignment = self.js.assign(&mut self.arena, copy, B::from_node(value));
+            assignments.push(B::stmt_node(assignment));
         }
         for statement in assignments.drain(..).rev() { self.statements.push(statement); }
         self.tail_assignments = assignments;
-        let jump = self.arena.new_node(View::SContinue { label: None }, 0);
-        self.statements.push(jump);
+        let jump = self.js.continue_(&mut self.arena, None);
+        self.statements.push(B::stmt_node(jump));
         Probed::Out(Out { stmts: self.statements.since(Span { start: statements.start, len: 0 }), value: None, finished: Finished::True })
     }
 
@@ -95,26 +96,21 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let mark = self.statements.mark();
         for param in ordered.drain(..) {
             let copy = self.tail_copies[param.index()].unwrap();
-            let value = self.pure_expression(View::Var { var: copy }, 0);
-            let statement = crate::bir::j::declare(&mut self.arena, LetKind::Alias, param, value);
-            self.statements.push(statement);
+            let value = self.js.var(&mut self.arena, copy);
+            let statement = self.js.declare(&mut self.arena, LetKind::Alias, param, Some(value));
+            self.statements.push(B::stmt_node(statement));
         }
         self.tail_order = ordered;
-        let View::SBlock { statements } = self.arena.view(body) else { unreachable!() };
-        let count = statements.len();
-        for i in 0..count {
-            self.tail_body_statements += 1;
-            let View::SBlock { statements } = self.arena.view(body) else { unreachable!() };
-            let statement = statements[i];
-            self.arena.detach(statement);
-            self.statements.push(statement);
-        }
-        self.arena.release(body);
+        let (statements, moved) = (&mut self.statements, &mut self.tail_body_statements);
+        self.js.unblock(&mut self.arena, B::stmt_from_node(body), |s| {
+            *moved += 1;
+            statements.push(B::stmt_node(s));
+        });
         let list = self.statements.take_list(&mut self.arena, self.statements.since(mark));
-        let body = self.arena.block_from_list(list);
-        let condition = self.pure_expression(View::JBool, 1);
-        let loop_ = self.arena.new_node(View::SWhile { condition, body, label: None }, 0);
-        self.arena.new_node(View::SBlock { statements: &[loop_] }, 0)
+        let condition = self.js.boolean(&mut self.arena, true);
+        let loop_ = self.js.while_(&mut self.arena, condition, B::list_from(list), None);
+        let loop_ = self.js.list(&mut self.arena, 1, std::iter::once(loop_));
+        B::stmt_node(self.js.block_of(&mut self.arena, loop_))
     }
 }
 

@@ -146,6 +146,7 @@ impl Bir {
 
     /// O(arguments): adopt the callee and a pooled argument list exactly once.
     /// `None` selects construction; `Some` carries ordinary call metadata.
+    #[cfg(test)]
     pub(crate) fn call_from_list(
         &mut self,
         callee: NodeId,
@@ -165,28 +166,6 @@ impl Bir {
         let id = self.attach_list(Node::call_list(callee, args, info), args);
         self.parents[callee.index()] = Some(id);
         id
-    }
-
-    /// O(fields): adopt an object's pooled operands without a temporary vector.
-    /// Each operand is adopted once; cached J facts inspect immediate children.
-    pub(crate) fn object_from_list(&mut self, list: ListId, keys: PropertySpan) -> NodeId {
-        assert_eq!(self.lists.get(list).len(), keys.len as usize);
-        let info = self.js_info(JsPayload::Object(keys));
-        let id = self.attach_list(Node::object_list(list, info), list);
-        if j::facts::delay_safe(self, id) {
-            let mut flags = self.node(id).flags();
-            flags.0 |= NodeFlags::DELAY_SAFE;
-            self.nodes[id.index()].set_flags(flags);
-        }
-        id
-    }
-
-    /// O(operands): adopt a finalized JSX list without a temporary operand vector.
-    pub(crate) fn jsx_from_list(&mut self, list: ListId, header: JsxHeader, children: bool) -> NodeId {
-        assert_eq!(self.lists.get(list).len(), 2 + usize::from(header.spread)
-            + header.props.len as usize + header.children as usize + usize::from(header.key));
-        let info = self.js_info(JsPayload::Jsx(header));
-        self.attach_list(Node::jsx_list(list, info, u16::from(children)), list)
     }
 
     /// [`Self::block_from_list`] for an explicit block statement (B:1225).

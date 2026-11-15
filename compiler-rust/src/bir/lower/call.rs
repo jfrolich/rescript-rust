@@ -1,6 +1,7 @@
 //! H1: C:1144 compile_apply_call_inner, local application lowering.
 use super::*;
 use crate::bir::ApplyId;
+use crate::emit::row::flag;
 use crate::lambda::ApplyStatus;
 
 /// C:1144 compile_apply_call_inner: operands saved before their single visit.
@@ -256,14 +257,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         if call.inline {
             return self.primitive_result(cx, statements, values[0]);
         }
-        let value = if let Some((module, member, arity)) = call.external {
-            let callee = self.pure_expression(
-                View::JQualified {
-                    module,
-                    member: Some(member),
-                },
-                0,
-            );
+        let mut value = if let Some((module, member, arity)) = call.external {
+            let mut callee = self.js.qualified(&mut self.arena, module, Some(member));
+            self.js.assume_strict(&mut self.arena, &mut callee);
+            let callee = B::node(callee);
             match call.status {
                 ApplyStatus::InferFull | ApplyStatus::Uncurry => self.call_node(
                     callee,
@@ -288,10 +285,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         // C:1129 compile_apply_call: attach only a real, non-ghost location.
         if self.locations.and_then(|locations| locations.get(call.loc))
             .is_some_and(|loc| !loc.loc_ghost && loc.loc_start.cnum >= 0) {
-            self.arena.set_cold(value, crate::bir::Cold { loc: call.loc, comment: None });
-            let mut flags = self.arena.node(value).flags();
-            flags.0 |= crate::bir::NodeFlags::JS_LOC_PRESENT;
-            self.arena.nodes[value.index()].set_flags(flags);
+            let mut located = B::from_node(value);
+            self.js.locate(&mut self.arena, &mut located, call.loc);
+            value = B::node(located);
         }
         if !self.statements.has_statements(statements) {
             // Holes carry no effects; pop them before returning a free value.
@@ -367,6 +363,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// C:1144 compile_apply_call_inner: the call constructor performs no rewrite.
+    /// Cost: O(A): one move and one step per argument.
     pub(super) fn call_node(
         &mut self,
         callee: NodeId,
@@ -374,7 +371,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         info: crate::js_ir::CallInfo,
     ) -> NodeId {
         let info = self.arena.js_info(crate::bir::JsPayload::Call(info));
-        crate::bir::j::plain::node(&mut self.arena, View::JCall { callee, args, info }, 0)
+        let mark = self.js.mark();
+        for &arg in args {
+            self.js.push(B::from_node(arg));
+        }
+        let call = self.js.call(&mut self.arena, B::from_node(callee), mark, info);
+        B::node(call)
     }
 
     /// C:1341 apply_with_arity: consume saturated groups once, then eta-expand
@@ -400,12 +402,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             if remaining.len() >= count {
                 callee = self.call_node(callee, &remaining[..count], full.clone());
                 offset += count;
-            } else if remaining.iter().all(|&node| {
-                self.arena
-                    .node(node)
-                    .flags()
-                    .contains(crate::bir::NodeFlags::STRICT)
-            }) {
+            } else if remaining
+                .iter()
+                .all(|&node| self.js.has(&self.arena, B::at(node), flag::STRICT))
+            {
                 let missing = count - remaining.len();
                 let params = crate::bir::VarSpan {
                     start: self.arena.vars.len() as u32,
@@ -417,7 +417,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 super::names::open(&mut self.arena);
                 for _ in 0..missing {
                     let var = self.fresh_variable("param");
-                    full_args.push(self.pure_expression(View::Var { var }, 0));
+                    let mut param = self.js.var(&mut self.arena, var);
+                    self.js.assume_strict(&mut self.arena, &mut param);
+                    full_args.push(B::node(param));
                 }
                 // The callee and the arguments were built before the
                 // function's scope opened and move into it (G10).
@@ -427,16 +429,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 }
                 let call = self.call_node(callee, &full_args, full);
                 full_args.clear(); self.eta_arguments = full_args;
-                let ret = crate::bir::j::return_value(&mut self.arena, call);
-                let body = self.arena.new_node(View::SBlock { statements: &[ret] }, 0);
+                let ret = self.js.return_(&mut self.arena, B::from_node(call));
+                let body = self.js.list(&mut self.arena, 1, std::iter::once(ret));
                 let header = self.arena.function_header(
                     params,
                     Default::default(),
                     crate::lambda::LamLoc::NONE,
                 );
-                let function = self.pure_expression(View::JFun { body, header }, 0);
+                let function = self.js.function(&mut self.arena, header, body);
                 super::names::close(&mut self.arena, &self.idents, header);
-                return function;
+                return B::node(function);
             } else {
                 return self.call_node(callee, remaining, crate::js_ir::CallInfo::default());
             }

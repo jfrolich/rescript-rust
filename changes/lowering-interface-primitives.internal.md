@@ -1,0 +1,1 @@
+- The backend lowering writes the JavaScript of primitives, constants, records and dynamic imports through its interface (`Js`, `JsStmt`) instead of naming J opcodes. https://github.com/jfrolich/rescript-rust/pull/324

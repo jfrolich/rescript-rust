@@ -1,0 +1,1 @@
+- The switches, named and untagged variant dispatch and switch locations of the new backend lowering write JavaScript through its interface instead of naming J opcodes, and its copies of repeated dispatch output use the interface's copy storage.

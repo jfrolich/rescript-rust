@@ -2,7 +2,7 @@
 //! The existing untagged_dispatch planner is unchanged. Its tree becomes an
 //! explicit emission program which pauses only to lower a source body once.
 use super::*;
-use crate::bir::j::{norm, plain};
+use crate::emit::row;
 use crate::bir::{CaseKey, ClauseMeta};
 use crate::bir::untagged_plan::{self as dispatch, Clause, StoredTest as Test, TestId, Tree, TreeId};
 use crate::lambda::{SwitchCaseTag, SwitchDispatch, SwitchKey};
@@ -126,9 +126,7 @@ pub(super) struct Storage {
     cache: Vec<[u32; 2]>,
     test_work: Vec<(TestId, bool)>,
     test_values: Vec<NodeId>,
-    copy_scratch: crate::bir::edit::CopyScratch,
     copied_vars: Vec<(VarId, VarId)>,
-    copied_labels: Vec<(u32, u32)>,
     program_steps: usize,
     copied_outputs: usize,
     imported: Vec<Option<ImportedPlan>>,
@@ -414,12 +412,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             _ => None,
         };
         if let Some((kind, var)) = binding {
-            let declaration = plain::node(
-                &mut self.arena,
-                View::SDecl { var, value: None },
-                kind as u16 | ((crate::js_ir::op::UsedStats::Used as u16) << 2),
-            );
-            self.statements.push(declaration);
+            let declaration = self.js.declare(&mut self.arena, kind, var, None);
+            self.statements.push(B::stmt_node(declaration));
         }
         let frame = Untagged(self.untagged.len() as u32);
         let states = Run::new(
@@ -611,15 +605,14 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let mut p = self.untagged[frame.0 as usize].take().unwrap();
         let mut out = self.realize(cx, child);
         if index == 0 {
-            let mut value = out.value.unwrap();
-            if !p.payload_only && !matches!(self.arena.view(value), View::Var { .. }) {
+            let mut value = B::from_node(out.value.unwrap());
+            if !p.payload_only && self.js.kind(&self.arena, B::of(&value)) != row::Kind::Var {
                 let var = self.fresh_variable("tmp");
-                let declaration =
-                    crate::bir::j::declare(&mut self.arena, LetKind::Strict, var, value);
-                self.statements.push(declaration);
-                value = self.pure_expression(View::Var { var }, 0);
+                let declaration = self.js.declare(&mut self.arena, LetKind::Strict, var, Some(value));
+                self.statements.push(B::stmt_node(declaration));
+                value = self.js.var(&mut self.arena, var);
             }
-            p.scrutinee = Some(value);
+            p.scrutinee = Some(B::node(value));
         } else {
             let Op::Run(action) = self.untagged_storage.program.get(&p.program, p.pc) else {
                 unreachable!("paused for source action")
@@ -656,7 +649,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 self.untagged_storage
                     .states
                     .get_mut(&p.states, action as usize)
-                    .cached = Some(self.arena.block_from_list(list));
+                    .cached = Some(B::stmt_node(self.js.block_of(&mut self.arena, B::list_from(list))));
                 self.emit_cached_action(&mut p, action);
             } else {
                 self.untagged_storage
@@ -684,28 +677,26 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         })
     }
 
-    /// Copy a multiply-emitted J output, never relower its source. O(emitted
-    /// nodes), including binder remapping by the arena's existing copier.
+    /// Copy a multiply-emitted statement, never relower its source. O(emitted
+    /// nodes): one step per node `copy_stmt` copies, plus `name_fresh`.
     fn copy_dispatch_output(&mut self, root: NodeId) -> NodeId {
         self.untagged_storage.copied_outputs += 1;
         let mut vars = std::mem::take(&mut self.untagged_storage.copied_vars);
-        let mut labels = std::mem::take(&mut self.untagged_storage.copied_labels);
-        let copied = self.arena.copy_subtree_with_scratch(
-            root,
-            &[],
-            &mut vars,
-            &mut labels,
-            &mut self.untagged_storage.copy_scratch,
-        );
+        let copied = self.js.copy_stmt(&mut self.arena, &B::stmt_from_node(root), &mut vars);
+        self.name_fresh(&mut vars);
+        self.untagged_storage.copied_vars = vars;
+        B::stmt_node(copied)
+    }
+
+    /// Give each binder a copy freshened the identifier and order of its
+    /// source, and drain `vars`. O(fresh binders); no allocation once
+    /// `idents` has its capacity.
+    fn name_fresh(&mut self, vars: &mut Vec<(VarId, VarId)>) {
         for (new, old) in vars.drain(..) {
             assert_eq!(new.index(), self.idents.len());
             self.idents.push(self.idents[old.index()]);
             self.arena.vars.order[new.index()] = self.arena.vars.order(old);
         }
-        labels.clear();
-        self.untagged_storage.copied_vars = vars;
-        self.untagged_storage.copied_labels = labels;
-        copied
     }
 
     /// V: untagged_fallback_block, generalized to all shared plan actions.
@@ -730,16 +721,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             )
         };
         let start = self.statements.mark();
-        let View::SBlock { statements } = self.arena.view(root) else {
-            unreachable!("cached run")
-        };
-        for &statement in statements {
-            self.statements.push(statement);
-        }
-        for statement in self.statements.statements(self.statements.since(start)) {
-            self.arena.detach(statement);
-        }
-        self.arena.release(root);
+        let statements = &mut self.statements;
+        self.js.unblock(&mut self.arena, B::stmt_from_node(root), |s| statements.push(B::stmt_node(s)));
         self.untagged_storage.outputs.push(
             &mut p.outputs,
             Output {
@@ -751,13 +734,19 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// A scrutinee occurrence. O(1) for variables (the normal bound case),
-    /// otherwise O(emitted expression) for the legacy payload-only form.
+    /// otherwise O(emitted expression) for the legacy payload-only form: one
+    /// step per node `copy_fresh` copies, plus `name_fresh`.
     fn untagged_scrutinee(&mut self, p: &Plan) -> NodeId {
         let value = p.scrutinee.unwrap();
-        if let View::Var { var } = self.arena.view(value) {
-            self.pure_expression(View::Var { var }, 0)
+        if let Some(var) = self.js.var_of(&self.arena, B::at(value)) {
+            B::node(self.js.var(&mut self.arena, var))
         } else {
-            self.copy_dispatch_output(value)
+            self.untagged_storage.copied_outputs += 1;
+            let mut vars = std::mem::take(&mut self.untagged_storage.copied_vars);
+            let copied = self.js.copy_fresh(&mut self.arena, B::at(value), &mut vars);
+            self.name_fresh(&mut vars);
+            self.untagged_storage.copied_vars = vars;
+            B::node(copied)
         }
     }
 
@@ -805,7 +794,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                         statement
                     } else {
                         let list = self.statements.take_list(&mut self.arena, run);
-                        self.arena.explicit_block_from_list(list)
+                        B::stmt_node(self.js.explicit_block(&mut self.arena, B::list_from(list)))
                     };
                     self.place(start.start, block);
                     self.untagged_storage.outputs.push(
@@ -852,11 +841,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         {
             !self.statements.last(out.run).is_some_and(|s| {
                 matches!(
-                    self.arena.view(s),
-                    View::SReturn { .. }
-                        | View::SThrow { .. }
-                        | View::SContinue { .. }
-                        | View::SBreak { .. }
+                    self.js.stmt_kind(&self.arena, &B::stmt_from_node(s)),
+                    row::Kind::Return | row::Kind::Throw | row::Kind::Continue | row::Kind::Break
                 )
             })
         } else {
@@ -887,7 +873,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         };
         let list = self.statements.take_list(&mut self.arena, out.run);
         (
-            self.arena.block_from_list(list),
+            B::stmt_node(self.js.block_of(&mut self.arena, B::list_from(list))),
             ClauseMeta {
                 should_break,
                 comment: None,
@@ -967,8 +953,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
         if has_default {
             let list = self.statements.take_list(&mut self.arena, default.run);
-            let body = self.arena.block_from_list(list);
-            self.arena.lists.set(actions, count, body);
+            let body = self.js.block_of(&mut self.arena, B::list_from(list));
+            self.arena.lists.set(actions, count, B::stmt_node(body));
             self.arena.pools.switch_clauses.push(ClauseMeta {
                 should_break: false,
                 comment: None,
@@ -978,9 +964,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.statements.kill(default.run);
         }
         p.outputs.len = base as u32;
-        let mut scrutinee = self.untagged_scrutinee(p);
+        let mut scrutinee = B::from_node(self.untagged_scrutinee(p));
         if typeof_ {
-            scrutinee = plain::node(&mut self.arena, View::JTypeof { value: scrutinee }, 0);
+            scrutinee = self.js.typeof_plain(&mut self.arena, scrutinee);
         }
         let header = self.arena.switch_record(crate::bir::SwitchRecord {
             constants: count as u32,
@@ -991,8 +977,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             has_default,
             dispatch: SwitchDispatch::Direct,
         });
-        let statement = self.arena.switch_from_list(scrutinee, actions, header, 1);
-        self.statements.fill(start.start, statement);
+        let statement = self.js.switch(&mut self.arena, scrutinee, B::list_from(actions), header, true);
+        self.statements.fill(start.start, B::stmt_node(statement));
         self.untagged_storage.outputs.push(
             &mut p.outputs,
             Output {
@@ -1005,9 +991,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// V: untagged_typeof_expr. O(1), retaining raw typeof rather than folding.
     fn untagged_typeof(&mut self, value: NodeId, kind: &dispatch::Kind) -> NodeId {
-        let value = plain::node(&mut self.arena, View::JTypeof { value }, 0);
-        let text = plain::string(&mut self.arena, kind.typeof_name().expect("typeof kind"));
-        norm::je4_bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, value, text)
+        let value = self.js.typeof_plain(&mut self.arena, B::from_node(value));
+        let text = self.js.string(&mut self.arena, kind.typeof_name().expect("typeof kind"));
+        B::node(self.js.bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, value, text))
     }
 
     /// V: untagged_test_expr. O(test occurrences + emitted scrutinee copies),
@@ -1032,42 +1018,38 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             }
             let value = match test {
                 Test::Equals(tag) => {
-                    let left = self.untagged_scrutinee(p);
+                    let left = B::from_node(self.untagged_scrutinee(p));
                     let right = match self.untagged_storage.literals[tag.0 as usize].value {
-                        LiteralValue::String(text) => {
-                            plain::node(&mut self.arena, View::JStr { text }, 0)
-                        }
-                        LiteralValue::Number(value) => {
-                            plain::node(&mut self.arena, View::JNumber { value }, 0)
-                        }
-                        LiteralValue::Bool(b) => plain::boolean(&mut self.arena, b),
-                        LiteralValue::Null => plain::node(&mut self.arena, View::JNull, 0),
-                        LiteralValue::Undefined => {
-                            plain::node(&mut self.arena, View::JUndefined, 0)
-                        }
+                        LiteralValue::String(text) => self.js.str(&mut self.arena, text),
+                        LiteralValue::Number(value) => self.js.number(&mut self.arena, value),
+                        LiteralValue::Bool(b) => self.js.boolean(&mut self.arena, b),
+                        LiteralValue::Null => self.js.null(&mut self.arena),
+                        LiteralValue::Undefined => self.js.undefined(&mut self.arena, false),
                     };
-                    norm::je4_bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, left, right)
+                    self.js.bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, left, right)
                 }
                 Test::Typeof(kind) => {
                     let value = self.untagged_scrutinee(p);
-                    self.untagged_typeof(value, kind)
+                    B::from_node(self.untagged_typeof(value, kind))
                 }
                 Test::Instance(instance) => {
                     let value = self.untagged_scrutinee(p);
-                    self.untagged_instance(value, &dispatch.metadata, *instance)
+                    B::from_node(self.untagged_instance(value, &dispatch.metadata, *instance))
                 }
                 Test::NotNull => {
-                    let value = self.untagged_scrutinee(p);
-                    let null = plain::node(&mut self.arena, View::JNull, 0);
-                    let eq =
-                        norm::je4_bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, value, null);
-                    norm::je8_not(&mut self.arena, eq)
+                    let value = B::from_node(self.untagged_scrutinee(p));
+                    let null = self.js.null(&mut self.arena);
+                    let eq = self.js.bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, value, null);
+                    self.js.not(&mut self.arena, eq)
                 }
-                Test::Not(_) => norm::je8_not(&mut self.arena, values.pop().unwrap()),
+                Test::Not(_) => {
+                    let value = B::from_node(values.pop().unwrap());
+                    self.js.not(&mut self.arena, value)
+                }
                 Test::And(..) | Test::Or(..) => {
-                    let r = values.pop().unwrap();
-                    let l = values.pop().unwrap();
-                    norm::je4_bin(
+                    let r = B::from_node(values.pop().unwrap());
+                    let l = B::from_node(values.pop().unwrap());
+                    self.js.bin(
                         &mut self.arena,
                         if matches!(test, Test::And(..)) {
                             crate::js_ir::BinOp::And
@@ -1079,7 +1061,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     )
                 }
             };
-            values.push(value);
+            values.push(B::node(value));
         }
         let value = values.pop().unwrap();
         self.untagged_storage.test_work = work;
@@ -1102,50 +1084,29 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         self.idents.push(Ident::create_persistent(first));
         self.arena.vars.flags[var.index()].0 |=
             crate::bir::VarFlags::JS_GLOBAL | crate::bir::VarFlags::JS_IDENT;
-        let mut class = self.pure_expression(View::Var { var }, 0);
+        let value = B::from_node(value);
+        let mut class = self.js.var(&mut self.arena, var);
         for property in parts {
             let property = self.arena.intern_text(property);
-            class = plain::node(
-                &mut self.arena,
-                View::JDot {
-                    object: class,
-                    property,
-                    position: crate::js_ir::arena::FieldPos::NONE,
-                },
-                0,
-            );
+            class = self.js.dot(&mut self.arena, class, property, crate::js_ir::arena::FieldPos::NONE, false);
         }
-        if !metadata.is_class(instance) {
+        B::node(if !metadata.is_class(instance) {
             let property = self.arena.intern_text("isArray");
-            let callee = plain::node(
-                &mut self.arena,
-                View::JDot {
-                    object: class,
-                    property,
-                    position: crate::js_ir::arena::FieldPos::NONE,
-                },
-                0,
-            );
+            let callee = self.js.dot(&mut self.arena, class, property, crate::js_ir::arena::FieldPos::NONE, false);
             let info = self.arena.js_info(crate::bir::JsPayload::Call(
                 crate::js_ir::CallInfo::default(),
             ));
-            plain::node(
-                &mut self.arena,
-                View::JCall {
-                    callee,
-                    args: &[value],
-                    info,
-                },
-                0,
-            )
+            let mark = self.js.mark();
+            self.js.push(value);
+            self.js.call(&mut self.arena, callee, mark, info)
         } else {
-            norm::je4_bin(
+            self.js.bin(
                 &mut self.arena,
                 crate::js_ir::BinOp::InstanceOf,
                 value,
                 class,
             )
-        }
+        })
     }
 
     /// V: compile_untagged_switch result. O(trailing empty block shells),
@@ -1157,18 +1118,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
         assert_eq!(p.pc, p.program.len as usize);
         assert_eq!(p.outputs.len as usize, 1);
-        self.arena.release(p.scrutinee.unwrap());
+        self.js.release(&mut self.arena, B::from_node(p.scrutinee.unwrap()));
         if matches!(cx.cont, Cont::Effect(Tail::Return(_))) {
             self.unnest(p.start.start);
         }
         let value = match cx.cont {
-            Cont::Value(_) => Some(self.pure_expression(
-                View::Var {
-                    var: p.target.unwrap(),
-                },
-                0,
-            )),
-            Cont::Effect(Tail::No) => Some(plain::node(&mut self.arena, View::JUndefined, 0)),
+            Cont::Value(_) => Some(B::node(self.js.var(&mut self.arena, p.target.unwrap()))),
+            Cont::Effect(Tail::No) => Some(B::node(self.js.undefined(&mut self.arena, false))),
             _ => None,
         };
         Probed::Out(Out {
@@ -1718,7 +1674,6 @@ mod tests {
                 d.test_work.capacity(),
                 d.test_values.capacity(),
                 d.copied_vars.capacity(),
-                d.copied_labels.capacity(),
                 s.arena.j_equal_work.capacity(),
             ]
         };
@@ -1732,8 +1687,8 @@ mod tests {
         let graph_before = state.untagged_dispatch.capacities();
         let free_before = state.free.capacities();
         let metadata_before = state.untagged_dispatch.metadata.capacities();
-        state.untagged_storage.copy_scratch.reserve_arena(&state.arena);
-        let copy_before = state.untagged_storage.copy_scratch.capacities();
+        state.js.reserve_copy(&state.arena);
+        let copy_before = state.js.copy_capacities();
         let counts = (
             state.source_steps,
             state.switch_group_steps,
@@ -1770,7 +1725,7 @@ mod tests {
             metadata_before
         );
         assert_eq!(
-            state.untagged_storage.copy_scratch.capacities(),
+            state.js.copy_capacities(),
             copy_before
         );
         if let Some(expected) = expected {

@@ -1,7 +1,7 @@
 //! X: compile_jsx / jsx_callee. JSX policy remains in the shared passes/printer.
 use super::*;
-use crate::bir::j::{norm, plain};
 use crate::bir::{JsxHeader, PropertyKey, PropertySpan};
+use crate::emit::row::Kind;
 use crate::lambda::lam_primitive::{DeclKind, ExternalDecl, JsxElement, ModuleSource};
 
 /// How the printer writes a JSX node of a unit that preserves JSX.
@@ -112,14 +112,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 let module = self.external_module(external, first == "default", false);
                 let member_id = Some(self.arena.intern_text(first));
                 (
-                    plain::node(
-                        &mut self.arena,
-                        View::JQualified {
-                            module,
-                            member: member_id,
-                        },
-                        0,
-                    ),
+                    B::node(self.js.qualified(&mut self.arena, module, member_id)),
                     rest,
                     member,
                 )
@@ -132,7 +125,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 let var = self.fresh_variable(first);
                 self.idents[var.index()] = Ident::create_persistent(first);
                 self.arena.mark_js_global(var);
-                (self.pure_expression(View::Var { var }, 0), rest, member)
+                let mut global = self.js.var(&mut self.arena, var);
+                self.js.assume_strict(&mut self.arena, &mut global);
+                (B::node(global), rest, member)
             }
             Some(ModuleSource::ModuleItself) => {
                 unreachable!("JSX external cannot be the module itself")
@@ -176,8 +171,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         for (name, optional) in &jsx.jsx_props {
             self.primitive_steps += 1;
             let value = args.next().expect("JSX prop");
-            if *optional && matches!(self.arena.view(value), View::JUndefined) {
-                self.arena.release(value);
+            if *optional && self.js.kind(&self.arena, B::at(value)) == Kind::Undefined {
+                self.js.release(&mut self.arena, B::from_node(value));
             } else {
                 let key = PropertyKey::Literal(self.arena.intern_text(name));
                 self.arena.pools.property_keys.push(key);
@@ -200,42 +195,41 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let callee = self.jsx_callee(&jsx.jsx_ffi);
         self.arena.lists.set(values, 0, callee);
         self.arena.lists.truncate(values, at);
-        self.arena.jsx_from_list(values, JsxHeader {
+        let info = self.arena.js_info(crate::bir::JsPayload::Jsx(JsxHeader {
             spread: jsx.jsx_spread,
             props,
             children: jsx.jsx_children.unwrap_or(0) as u32,
             key: jsx.jsx_key,
             multi: jsx.jsx_multi,
             fragment: jsx.jsx_fragment,
-        }, jsx.jsx_children.is_some())
+        }));
+        let mark = self.js.mark();
+        self.js.push_list(&self.arena, values);
+        B::node(self.js.jsx(&mut self.arena, mark, info, jsx.jsx_children.is_some()))
     }
 
     /// X: external_optional_to_undefined_expr. O(member-spine depth) for a
     /// duplicable key, O(1) otherwise, plus J-E4/J-E7 constructor work.
     fn jsx_key(&mut self, key: NodeId) -> NodeId {
-        match self.arena.view(key) {
-            View::JUndefined => {
-                self.arena.release(key);
-                plain::node(&mut self.arena, View::JUndefined, 0)
+        match self.js.kind(&self.arena, B::at(key)) {
+            Kind::Undefined => {
+                self.js.release(&mut self.arena, B::from_node(key));
+                B::node(self.js.undefined(&mut self.arena, false))
             }
-            View::JOptional { value } => {
-                self.arena.detach(value);
-                self.arena.release(key);
-                value
-            }
+            Kind::Optional => B::node(self.js.keep_operand(&mut self.arena, B::from_node(key), 0)),
             _ => {
                 if let Some(copy) = self.duplicate_jsx_key(key) {
-                    let undefined = plain::node(&mut self.arena, View::JUndefined, 0);
-                    let test = norm::je4_bin(
+                    let undefined = self.js.undefined(&mut self.arena, false);
+                    let test = self.js.bin(
                         &mut self.arena,
                         crate::js_ir::BinOp::NotEqEq,
-                        key,
+                        B::from_node(key),
                         undefined,
                     );
                     let value =
                         self.primitive_runtime("Primitive_option", "valFromOption", &[copy]);
-                    let undefined = plain::node(&mut self.arena, View::JUndefined, 0);
-                    norm::je7_cond(&mut self.arena, test, value, undefined)
+                    let undefined = self.js.undefined(&mut self.arena, false);
+                    B::node(self.js.cond(&mut self.arena, test, B::from_node(value), undefined))
                 } else {
                     self.primitive_runtime("Primitive_option", "valFromOption", &[key])
                 }
@@ -246,33 +240,37 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// A: is_okay_to_duplicate(false), with copying in the same walk. O(d)
     /// for a d-deep member spine; one reusable stack, no per-node allocation.
     /// A failed shape leaves the original key untouched and creates no nodes.
-    fn duplicate_jsx_key(&mut self, mut key: NodeId) -> Option<NodeId> {
+    /// The spine holds the ids of the member reads, read by reference.
+    fn duplicate_jsx_key(&mut self, key: NodeId) -> Option<NodeId> {
         let mut spine = std::mem::take(&mut self.scratch);
         debug_assert!(spine.is_empty());
+        let mut r = B::at(key);
         loop {
             self.primitive_steps += 1;
-            match self.arena.view(key) {
-                View::JDot {
-                    object, position, ..
-                } if position.get().is_some() => {
-                    spine.push(key);
-                    key = object;
+            match self.js.kind(&self.arena, r) {
+                Kind::Dot
+                    if self
+                        .js
+                        .member_of(&self.arena, r)
+                        .is_some_and(|(_, position)| position.get().is_some()) =>
+                {
+                    spine.push(NodeId(self.js.id(&self.arena, r)));
+                    r = self.js.operand(&self.arena, r, 0);
                 }
-                View::Var { var }
-                    if !self
-                        .arena
-                        .vars
-                        .flags(var)
-                        .contains(crate::bir::VarFlags::JS_GLOBAL)
-                        || !self.arena.vars.name(var).as_str().contains('.') =>
+                Kind::Var
+                    if self.js.var_of(&self.arena, r).is_some_and(|var| {
+                        !self
+                            .arena
+                            .vars
+                            .flags(var)
+                            .contains(crate::bir::VarFlags::JS_GLOBAL)
+                            || !self.arena.vars.name(var).as_str().contains('.')
+                    }) =>
                 {
                     break;
                 }
-                View::JQualified { .. }
-                | View::JBool
-                | View::JStr { .. }
-                | View::JNumber { .. } => break,
-                View::JTemplate { .. } if self.arena.node(key).aux() == 1 => break,
+                Kind::Qualified | Kind::Bool | Kind::Str | Kind::Number => break,
+                Kind::Template if self.js.aux(&self.arena, r) == 1 => break,
                 _ => {
                     spine.clear();
                     self.scratch = spine;
@@ -280,59 +278,18 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 }
             }
         }
-        let aux = self.arena.node(key).aux();
-        let view = match self.arena.view(key) {
-            View::Var { var } => View::Var { var },
-            View::JQualified { module, member } => View::JQualified { module, member },
-            View::JBool => View::JBool,
-            View::JStr { text } => View::JStr { text },
-            View::JNumber { value } => View::JNumber { value },
-            View::JTemplate { info, .. } => View::JTemplate { values: &[], info },
-            _ => unreachable!("duplicable leaf"),
-        };
-        let mut copy = plain::node(&mut self.arena, view, aux);
-        self.copy_jsx_key_decoration(key, copy);
+        let leaf = NodeId(self.js.id(&self.arena, r));
+        let mut copy = self.js.copy_leaf(&mut self.arena, B::at(leaf));
+        self.js.copy_cold(&mut self.arena, B::at(leaf), &mut copy);
         for node in spine.drain(..).rev() {
-            let View::JDot {
-                property, position, ..
-            } = self.arena.view(node)
-            else {
-                unreachable!()
-            };
-            let aux = self.arena.node(node).aux();
-            copy = plain::node(
-                &mut self.arena,
-                View::JDot {
-                    object: copy,
-                    property,
-                    position,
-                },
-                aux,
-            );
-            self.copy_jsx_key_decoration(node, copy);
+            let r = B::at(node);
+            let (name, position) = self.js.member_of(&self.arena, r).expect("a member read");
+            let tag = self.js.aux(&self.arena, r) != 0;
+            copy = self.js.dot(&mut self.arena, copy, name, position, tag);
+            self.js.copy_cold(&mut self.arena, B::at(node), &mut copy);
         }
         self.scratch = spine;
-        Some(copy)
-    }
-
-    /// O(1), copy the cold decoration of a duplicated key node.
-    fn copy_jsx_key_decoration(&mut self, from: NodeId, to: NodeId) {
-        if let Some(cold) = self.arena.cold(from) {
-            self.arena.set_cold(to, cold);
-        }
-        if let Some(code) = self.arena.node(from).js_char() {
-            self.arena.nodes[to.index()].set_js_char(code);
-        }
-        if self
-            .arena
-            .node(from)
-            .flags()
-            .contains(crate::bir::NodeFlags::JS_LOC_PRESENT)
-        {
-            let mut flags = self.arena.node(to).flags();
-            flags.0 |= crate::bir::NodeFlags::JS_LOC_PRESENT;
-            self.arena.nodes[to.index()].set_flags(flags);
-        }
+        Some(B::node(copy))
     }
 }
 

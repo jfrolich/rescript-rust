@@ -8,6 +8,8 @@
 use super::*;
 use crate::bir::j::norm;
 use crate::bir::{ListId, NodeFlags};
+use crate::emit::row::{self, flag};
+use crate::js_ir::BinOp;
 
 /// The construct a `Conditional` frame lowers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,8 +175,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// K1: C:1812, as each child completes; `cx` is the child's. The test is
     /// realized and the slots are reserved; a branch that needs statements
     /// gets the effect of its value (C:4875 compiled_to_effect_block, row R4)
-    /// and is trimmed. One call costs the statements it pushes and the holes
-    /// it pops.
+    /// and is trimmed. Cost: O(P + H + R) for the P statements it pushes,
+    /// the H holes it pops and the R nodes of a value it releases.
     pub(super) fn conditional_child(
         &mut self,
         cx: Cx,
@@ -210,7 +212,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             Cont::Effect(Tail::No) => {
                 if let Some(value) = out.value.take() {
                     if out.finished == Finished::True {
-                        self.arena.release(value);
+                        self.js.release(&mut self.arena, B::from_node(value));
                     } else {
                         self.drop_pure_effect(value);
                     }
@@ -218,7 +220,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             }
             Cont::Effect(Tail::Return(_)) | Cont::Assign(_) | Cont::Declare(..) => {
                 if let Some(value) = out.value.take() {
-                    self.arena.release(value);
+                    self.js.release(&mut self.arena, B::from_node(value));
                 }
             }
         }
@@ -229,8 +231,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         Probed::Out(out)
     }
 
-    /// K1: C:1812, after the children: the row of `cx`. The cost is that
-    /// row's; none of them reads a statement of a branch that stays in place.
+    /// K1: C:1812, after the children: the row of `cx`. Cost: that row's,
+    /// plus O(1); none of them reads a statement of a branch that stays in
+    /// place.
     pub(super) fn finish_conditional(
         &mut self,
         cx: Cx,
@@ -264,8 +267,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
         // 3.7, C:3187 compile_short_circuit_return_output: the If rule with
         // a constant branch; no L node is built.
-        let constant = self.pure_expression(View::JBool, u16::from(!and));
-        let constant = Probed::Free(self.free.push(Free::Leaf(constant)));
+        let constant = self.js.boolean(&mut self.arena, !and);
+        let constant = Probed::Free(self.free.push(Free::Leaf(B::node(constant))));
         if and {
             self.finish_if(cx, Target::None, parts, test, yes, constant)
         } else {
@@ -357,11 +360,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// Fill a reserved slot; an explicit empty block is recorded for the
-    /// `if_` of an enclosing conditional. Constant.
+    /// `if_` of an enclosing conditional. O(1).
     pub(super) fn place(&mut self, slot: u32, statement: NodeId) {
+        let handle = B::stmt_from_node(statement);
+        let empty = self.js.is_empty_block(&self.arena, &handle);
+        let statement = B::stmt_node(handle);
         self.statements.fill(slot, statement);
-        if matches!(self.arena.view(statement), View::SBlock { statements } if statements.is_empty())
-        {
+        if empty {
             self.statements.note_empty_block(slot, statement);
         }
     }
@@ -369,7 +374,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// B:1225 block of no statement: an explicit empty block.
     #[cfg(test)]
     fn empty_block(&mut self) -> NodeId {
-        self.arena.new_node(View::SBlock { statements: &[] }, 1)
+        let list = self.js.list(&mut self.arena, 0, std::iter::empty());
+        B::stmt_node(self.js.explicit_block(&mut self.arena, list))
     }
 
     /// Forget two consumed runs, the upper one first so that both are popped
@@ -387,75 +393,72 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// Release the statements of a discarded run: one step per statement.
     pub(super) fn release_run(&mut self, run: Span) {
         for statement in self.statements.statements(run) {
-            self.arena.release(statement);
+            self.js.release_stmt(&mut self.arena, B::stmt_from_node(statement));
         }
         self.statements.kill(run);
     }
 
-    /// `[return value]`: the statement and the returned value. Constant on a
+    /// `[return value]`: the statement and the returned value. O(1) on a
     /// trimmed run.
     fn single_return(&mut self, run: Span) -> Option<(NodeId, NodeId)> {
         let (_, statement) = self.statements.only(run)?;
-        match self.arena.view(statement) {
-            View::SReturn { value } => Some((statement, value)),
-            _ => None,
+        let statement = B::stmt_from_node(statement);
+        if self.js.stmt_kind(&self.arena, &statement) != row::Kind::Return {
+            return None;
         }
+        let value = self.js.value_of(&self.arena, &statement)?;
+        let value = NodeId(self.js.id(&self.arena, value));
+        Some((B::stmt_node(statement), value))
     }
 
     /// C:5187 take_single_result_assignment: `[target = value]`, the
-    /// statement and the value. Constant on a trimmed run.
+    /// statement and the value. O(1) on a trimmed run.
     pub(super) fn single_assignment(&mut self, run: Span, target: VarId) -> Option<(NodeId, NodeId)> {
         let (_, statement) = self.statements.only(run)?;
-        let View::SExp { value } = self.arena.view(statement) else {
+        let statement = B::stmt_from_node(statement);
+        if self.js.stmt_kind(&self.arena, &statement) != row::Kind::Exp {
             return None;
-        };
-        let View::JBin { left, right } = self.arena.view(value) else {
+        }
+        let value = self.js.value_of(&self.arena, &statement)?;
+        if self.js.kind(&self.arena, value) != row::Kind::Bin
+            || self.js.aux(&self.arena, value) != BinOp::Eq as u8
+            || self.js.var_of(&self.arena, self.js.operand(&self.arena, value, 0)) != Some(target)
+        {
             return None;
-        };
-        (self.arena.node(value).aux() == crate::js_ir::BinOp::Eq as u16
-            && matches!(self.arena.view(left), View::Var { var } if var == target))
-        .then_some((statement, right))
+        }
+        let right = NodeId(self.js.id(&self.arena, self.js.operand(&self.arena, value, 1)));
+        Some((B::stmt_node(statement), right))
     }
 
     /// js_stmt_make.ml:186 block_last_is_return_throw_or_continue, on the
-    /// literal last statement.
+    /// literal last statement. O(1).
     fn terminal(&self, statement: NodeId) -> bool {
         matches!(
-            self.arena.view(statement),
-            View::SReturn { .. }
-                | View::SThrow { .. }
-                | View::SBreak { .. }
-                | View::SContinue { .. }
+            self.js.stmt_kind(&self.arena, &B::stmt_from_node(statement)),
+            row::Kind::Return | row::Kind::Throw | row::Kind::Break | row::Kind::Continue
         )
     }
 
-    /// The test without its negation, when it has one. Constant.
+    /// The test without its negation, when it has one. O(1): one step and
+    /// the negation released.
     fn positive(&mut self, test: NodeId) -> Option<NodeId> {
-        let View::JNot { value } = self.arena.view(test) else {
+        if self.js.kind(&self.arena, B::at(test)) != row::Kind::Not {
             return None;
-        };
-        self.arena.detach(value);
-        self.arena.release(test);
-        Some(value)
+        }
+        let value = self.js.keep_operand(&mut self.arena, B::from_node(test), 0);
+        Some(B::node(value))
     }
 
     /// `if (test) yes else no` with both lists as given: no rule of J-S3.
     #[cfg(test)]
     fn raw_if(&mut self, test: NodeId, yes: ListId, no: ListId) -> NodeId {
-        let then_ = self.arena.block_from_list(yes);
-        let else_ = self.arena.block_from_list(no);
-        self.arena.new_node(
-            View::SIf {
-                condition: test,
-                then_,
-                else_: Some(else_),
-            },
-            0,
-        )
+        let statement = self.js.if_plain(&mut self.arena, B::from_node(test), B::list_from(yes), B::list_from(no));
+        B::stmt_node(statement)
     }
 
     /// B:1575 simplify_if as one statement. Each run is copied into the
     /// arena once; all rules receive pool handles, never branch vectors.
+    /// Cost: O(yes + no) statements copied, plus J-S3's.
     pub(super) fn if_statement(&mut self, test: NodeId, yes: Span, no: Span) -> NodeId {
         self.statements.drop_empty_blocks(&mut self.arena, yes);
         self.statements.drop_empty_blocks(&mut self.arena, no);
@@ -466,7 +469,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let no = self.statements.take_list(&mut self.arena, no);
             (self.statements.take_list(&mut self.arena, yes), no)
         };
-        norm::js3_simplify_if(&mut self.arena, test, yes, no)
+        let statement = self.js.if_(&mut self.arena, B::from_node(test), B::list_from(yes), B::list_from(no));
+        B::stmt_node(statement)
     }
 
     /// Shared J-S3 rules 0..6 leave a retained tail on the statement stack.
@@ -492,9 +496,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             return;
         }
         let list = self.statements.take_list(&mut self.arena, run);
-        let block = self.arena.explicit_block_from_list(list);
+        let block = self.js.explicit_block(&mut self.arena, B::list_from(list));
+        let empty = self.js.is_empty_block(&self.arena, &block);
+        let block = B::stmt_node(block);
         self.statements.push(block);
-        if self.arena.lists.get(list).is_empty() {
+        if empty {
             self.statements.note_empty_block(head, block);
         }
     }
@@ -505,54 +511,43 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     pub(super) fn unnest(&mut self, start: u32) -> Option<(u32, NodeId)> {
         loop {
             let run = self.statements.trim(Self::from(start));
-            let only = self.statements.only(run)?;
-            let (slot, block) = only;
-            let View::SBlock { statements } = self.arena.view(block) else {
-                return Some(only);
-            };
+            let (slot, block) = self.statements.only(run)?;
+            let block = B::stmt_from_node(block);
+            if self.js.stmt_kind(&self.arena, &block) != row::Kind::Block {
+                return Some((slot, B::stmt_node(block)));
+            }
             self.statements.clear(slot);
-            let mark = self.statements.mark();
-            for &statement in statements {
-                self.statements.push(statement);
-            }
-            for statement in self.statements.statements(self.statements.since(mark)) {
-                self.arena.detach(statement);
-            }
-            self.arena.release(block);
+            let statements = &mut self.statements;
+            self.js.unblock(&mut self.arena, block, |s| statements.push(B::stmt_node(s)));
         }
     }
 
     /// C:7612 compiled_from_effect_block over the output from `start`: a
-    /// lone expression statement becomes the value. Constant, plus `unnest`.
+    /// lone expression statement becomes the value. O(1), plus `unnest`.
     fn effect_output(&mut self, start: u32) -> Probed {
-        let value = match self.unnest(start) {
-            Some((slot, statement)) if matches!(self.arena.view(statement), View::SExp { .. }) => {
-                let View::SExp { value } = self.arena.view(statement) else {
-                    unreachable!()
-                };
-                self.arena.detach(value);
-                self.arena.release(statement);
+        let lone = self.unnest(start).map(|(slot, statement)| (slot, B::stmt_from_node(statement)));
+        let value = match lone {
+            Some((slot, statement)) if self.js.stmt_kind(&self.arena, &statement) == row::Kind::Exp => {
+                let value = self.js.take_value(&mut self.arena, statement);
                 self.statements.clear(slot);
                 self.statements.trim(Self::from(start));
                 value
             }
-            _ => self.pure_expression(View::JUndefined, 0),
+            _ => self.js.undefined(&mut self.arena, false),
         };
-        Probed::Out(self.output(start, Some(value), Finished::False))
+        Probed::Out(self.output(start, Some(B::node(value)), Finished::False))
     }
 
     /// O:359 push_s_if_empty: the test as a statement when it has effects.
+    /// Cost: J-M14's: one step, O(1) per statement pushed, and the nodes of
+    /// a pure test released.
     fn push_s_if_empty(&mut self, test: NodeId) {
-        let mut statements = std::mem::take(&mut self.scratch);
-        norm::jm14_push_s_if_empty(&mut self.arena, test, &mut statements);
-        for statement in statements.drain(..) {
-            self.statements.push(statement);
-        }
-        self.scratch = statements;
+        let statements = &mut self.statements;
+        self.js.effect_if_impure(&mut self.arena, B::from_node(test), |s| statements.push(B::stmt_node(s)));
     }
 
-    /// Rows R1 to R3 on the two runs that assign `target`. Costs
-    /// `if_statement`, or is constant when both branches are one assignment.
+    /// Rows R1 to R3 on the two runs that assign `target`. Cost:
+    /// `if_statement`'s, or O(1) when both branches are one assignment.
     fn assigning_conditional(
         &mut self,
         cont: Cont,
@@ -562,41 +557,28 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         yes: Span,
         no: Span,
     ) -> Probed {
-        let used = (crate::js_ir::op::UsedStats::Used as u16) << 2;
         if let Cont::Value(_) = cont {
             // R1, C:1812 compile_expr: `let tmp`, `if_(c, T, E)`, value `tmp`.
             let statement = self.if_statement(test, yes, no);
             self.place(parts.head, statement);
-            let declaration = self.arena.new_node(
-                View::SDecl {
-                    var: target,
-                    value: None,
-                },
-                LetKind::Strict as u16 | used,
-            );
-            self.statements.fill(parts.head - 1, declaration);
-            let value = self.pure_expression(View::Var { var: target }, 0);
-            return Probed::Out(self.output(parts.start, Some(value), Finished::False));
+            let declaration = self.js.declare(&mut self.arena, LetKind::Strict, target, None);
+            self.statements.fill(parts.head - 1, B::stmt_node(declaration));
+            let value = self.js.var(&mut self.arena, target);
+            return Probed::Out(self.output(parts.start, Some(B::node(value)), Finished::False));
         }
         let merged = self.merge_assignments(test, target, yes, no);
         match (cont, merged) {
             // R2, C:5049 compile_declared_if_block.
             (Cont::Declare(kind, _), Ok(value)) => {
-                let statement = crate::bir::j::declare(&mut self.arena, kind, target, value);
-                self.statements.fill(parts.head - 1, statement);
+                let statement = self.js.declare(&mut self.arena, kind, target, Some(B::from_node(value)));
+                self.statements.fill(parts.head - 1, B::stmt_node(statement));
                 self.statements.trim(Self::from(parts.head));
             }
             (Cont::Declare(kind, _), Err((test, yes, no))) => {
                 let statement = self.if_statement(test, yes, no);
                 self.place(parts.head, statement);
-                let declaration = self.arena.new_node(
-                    View::SDecl {
-                        var: target,
-                        value: None,
-                    },
-                    kind as u16 | used,
-                );
-                self.statements.fill(parts.head - 1, declaration);
+                let declaration = self.js.declare(&mut self.arena, kind, target, None);
+                self.statements.fill(parts.head - 1, B::stmt_node(declaration));
             }
             // R3, C:5018 compile_test_assignment_block.
             (_, merged) => {
@@ -610,7 +592,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// Rows R2 and R3 before their result: the swap of C:6741
     /// normalize_if_assignment_merge_order, then the conditional expression
     /// when each run is the one statement `target = x` (the runs are
-    /// consumed), else the operands after the swap. Constant on trimmed runs.
+    /// consumed), else the operands after the swap. O(1) on trimmed runs.
     pub(super) fn merge_assignments(
         &mut self,
         mut test: NodeId,
@@ -624,34 +606,36 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             test = value;
             std::mem::swap(&mut yes, &mut no);
         }
-        let (Some((then_, yes_value)), Some((else_, no_value))) = (
+        let (Some((then_, _)), Some((else_, _))) = (
             self.single_assignment(yes, target),
             self.single_assignment(no, target),
         ) else {
             return Err((test, yes, no));
         };
-        self.arena.detach(yes_value);
-        self.arena.detach(no_value);
-        self.arena.release(then_);
-        self.arena.release(else_);
+        let assignment = self.js.take_value(&mut self.arena, B::stmt_from_node(then_));
+        let yes_value = self.js.keep_operand(&mut self.arena, assignment, 1);
+        let assignment = self.js.take_value(&mut self.arena, B::stmt_from_node(else_));
+        let no_value = self.js.keep_operand(&mut self.arena, assignment, 1);
         self.kill(yes, no);
-        Ok(norm::je7_cond(&mut self.arena, test, yes_value, no_value))
+        let value = self.js.cond(&mut self.arena, B::from_node(test), yes_value, no_value);
+        Ok(B::node(value))
     }
 
     /// Row R3 as one statement: `target = cond(...)` or `if_(c, T, E)`.
+    /// O(1) for the assignment; else `if_statement`'s cost.
     pub(super) fn assignment_statement(
         &mut self,
         target: VarId,
         merged: Result<NodeId, (NodeId, Span, Span)>,
     ) -> NodeId {
         match merged {
-            Ok(value) => crate::bir::j::assign(&mut self.arena, target, value),
+            Ok(value) => B::stmt_node(self.js.assign(&mut self.arena, target, B::from_node(value))),
             Err((test, yes, no)) => self.if_statement(test, yes, no),
         }
     }
 
     /// R4 steps 2 to 4, C:4884 compile_if_effect_block, then C:7612
-    /// compiled_from_effect_block. Costs one `if_statement` over the branch
+    /// compiled_from_effect_block. Cost: one `if_statement` over the branch
     /// that becomes the guarded list; the other branch is not read.
     fn effect_conditional(
         &mut self,
@@ -666,8 +650,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let statement = match (yes, no) {
             // Step 2: a free then branch without effects.
             (None, Some(no)) => {
-                let test = norm::je8_not(&mut self.arena, test);
-                self.if_statement(test, no, EMPTY)
+                let test = self.js.not(&mut self.arena, B::from_node(test));
+                self.if_statement(B::node(test), no, EMPTY)
             }
             // Step 3: a free else branch without effects.
             (Some(yes), None) => self.if_statement(test, yes, EMPTY),
@@ -675,8 +659,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 let last = self.statements.last(yes);
                 if self.single_return(no).is_some() {
                     // Step 4, first form: the then branch follows in place.
-                    let test = norm::je8_not(&mut self.arena, test);
-                    self.if_statement(test, no, EMPTY)
+                    let test = self.js.not(&mut self.arena, B::from_node(test));
+                    self.if_statement(B::node(test), no, EMPTY)
                 } else if last.is_some_and(|last| self.terminal(last)) {
                     // Step 4, second form: the else branch follows in place.
                     self.if_statement(test, yes, EMPTY)
@@ -691,7 +675,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// `E(branch)` as a run (C:4875 compiled_to_effect_block), or nothing for
-    /// a free branch whose value has no effect (E:15). Constant.
+    /// a free branch whose value has no effect (E:15). O(1), plus J-M14 or
+    /// the nodes of a strict value released.
     fn effect_run(&mut self, cx: Cx, branch: Probed) -> Option<Span> {
         match branch {
             // B:1565 unnest_block has nothing to do here: no producer of an
@@ -699,8 +684,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             Probed::Out(out) => Some(out.stmts),
             Probed::Free(free) => {
                 let value = self.free_value(cx, free);
-                if self.arena.node(value).flags().contains(NodeFlags::STRICT) {
-                    self.arena.release(value);
+                if self.js.has(&self.arena, B::at(value), flag::STRICT) {
+                    self.js.release(&mut self.arena, B::from_node(value));
                     return None;
                 }
                 let mark = self.statements.mark();
@@ -711,28 +696,30 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// R4 step 1 on the values of two free branches: pushes the statements.
-    /// Constant, plus J-M0 over the comma spine of each value.
+    /// O(1), plus J-M0 over the comma spine of each value.
     fn free_effect(&mut self, test: NodeId, yes: NodeId, no: NodeId) {
-        let yes = norm::jm0_remove_pure_subexpression(&mut self.arena, yes);
-        let no = norm::jm0_remove_pure_subexpression(&mut self.arena, no);
+        let yes = self.js.without_pure(&mut self.arena, B::from_node(yes));
+        let no = self.js.without_pure(&mut self.arena, B::from_node(no));
+        let test = B::from_node(test);
         let (test, value) = match (yes, no) {
-            (None, None) => return self.push_s_if_empty(test),
+            (None, None) => return self.push_s_if_empty(B::node(test)),
             (Some(yes), Some(no)) => {
-                let value = norm::je7_cond(&mut self.arena, test, yes, no);
-                return self.drop_pure_effect(value);
+                let value = self.js.cond(&mut self.arena, test, yes, no);
+                return self.drop_pure_effect(B::node(value));
             }
             (Some(value), None) => (test, value),
-            (None, Some(value)) => (norm::je8_not(&mut self.arena, test), value),
+            (None, Some(value)) => (self.js.not(&mut self.arena, test), value),
         };
         let mark = self.statements.mark();
-        let statement = norm::js1_exp(&mut self.arena, value);
-        self.statements.push(statement);
+        let statement = self.js.exp_rule(&mut self.arena, value);
+        self.statements.push(B::stmt_node(statement));
         let run = self.statements.since(mark);
-        let statement = self.if_statement(test, run, EMPTY);
+        let statement = B::stmt_from_node(self.if_statement(B::node(test), run, EMPTY));
+        let empty = self.js.is_empty_block(&self.arena, &statement);
+        let statement = B::stmt_node(statement);
         let slot = self.statements.mark().start;
         self.statements.push(statement);
-        if matches!(self.arena.view(statement), View::SBlock { statements } if statements.is_empty())
-        {
+        if empty {
             self.statements.note_empty_block(slot, statement);
         }
     }
@@ -741,7 +728,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// unnest_block of C:3179 compile_return_output. Step 1 reads the
     /// expression statements that lead each branch and stops at the first
     /// other statement; step 3 is `if_in_place`. A branch kept as the
-    /// statements after a guard is not read, moved or copied.
+    /// statements after a guard is not read, moved or copied. Cost: O(the
+    /// statements read, folded or consumed), plus `if_in_place`'s.
     fn return_conditional(
         &mut self,
         cx: Cx,
@@ -761,16 +749,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let then_ = self.fold_return_tail(yes);
             let else_ = self.fold_return_tail(no);
             self.kill(yes, no);
-            let value = norm::je7_cond(&mut self.arena, test, then_, else_);
-            let statement = crate::bir::j::return_value(&mut self.arena, value);
-            self.statements.fill(parts.head, statement);
+            let value = self.js.cond(&mut self.arena, B::from_node(test), B::from_node(then_), B::from_node(else_));
+            let statement = self.js.return_(&mut self.arena, value);
+            self.statements.fill(parts.head, B::stmt_node(statement));
             return Probed::Out(self.output(parts.start, None, Finished::True));
         }
         // Step 3, C:5368 compile_test_return_block_with_fallback.
         if self.single_return(yes).is_none() && self.single_return(no).is_some() {
             // One block of `if (!c) E` and `T`; `T` stays in place.
-            let test = norm::je8_not(&mut self.arena, test);
-            let statement = self.if_statement(test, no, EMPTY);
+            let test = self.js.not(&mut self.arena, B::from_node(test));
+            let statement = self.if_statement(B::node(test), no, EMPTY);
             self.place(parts.head, statement);
         } else {
             self.if_in_place(parts.head, test, yes, no);
@@ -792,16 +780,17 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// Unlike R5, do not discard unit returns or fold non-free return tails.
     /// A unit return exits the loop; falling through repeats it.
     fn tail_return_conditional(&mut self, parts: Parts, test: NodeId, yes: Span, no: Span) -> Probed {
-        let conjunction = matches!(self.arena.view(test), View::JBin { .. })
-            && self.arena.node(test).aux() == crate::js_ir::BinOp::And as u16;
-        let continues = self.statements.last(yes).is_some_and(|s| matches!(self.arena.view(s), View::SContinue { .. }));
-        let terminal = self.statements.last(no).is_some_and(|s| matches!(self.arena.view(s), View::SReturn { .. } | View::SThrow { .. } | View::SBreak { .. }));
+        let conjunction = self.js.kind(&self.arena, B::at(test)) == row::Kind::Bin
+            && self.js.aux(&self.arena, B::at(test)) == BinOp::And as u8;
+        let continues = self.statements.last(yes).is_some_and(|s| self.js.stmt_kind(&self.arena, &B::stmt_from_node(s)) == row::Kind::Continue);
+        let terminal = self.statements.last(no).is_some_and(|s| matches!(self.js.stmt_kind(&self.arena, &B::stmt_from_node(s)), row::Kind::Return | row::Kind::Throw | row::Kind::Break));
         if conjunction && continues && terminal {
-            let then_ = self.merge_tail_guard(no);
-            let else_ = self.arena.new_node(View::SBlock { statements: &[] }, 0);
-            let condition = norm::je8_not(&mut self.arena, test);
-            let statement = self.arena.new_node(View::SIf { condition, then_, else_: Some(else_) }, 0);
-            self.place(parts.head, statement);
+            let then_ = B::stmt_from_node(self.merge_tail_guard(no));
+            let empty = self.js.list(&mut self.arena, 0, std::iter::empty());
+            let else_ = self.js.block_of(&mut self.arena, empty);
+            let condition = self.js.not(&mut self.arena, B::from_node(test));
+            let statement = self.js.if_blocks(&mut self.arena, condition, then_, else_);
+            self.place(parts.head, B::stmt_node(statement));
         } else {
             self.if_in_place(parts.head, test, yes, no);
             let prelude = Span { start: parts.start, len: parts.head - parts.start };
@@ -814,25 +803,34 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// R6 guard merge (legacy merge_terminal_guard_fallthrough_else): O(s)
     /// consumed statements; inspect the leading guard and terminal endpoints.
     fn merge_tail_guard(&mut self, run: Span) -> NodeId {
-        let merge = self.statements.first_single_slot(run).and_then(|(slot, statement)| {
-            let View::SIf { condition, then_, else_ } = self.arena.view(statement) else { return None };
-            let empty = else_.is_none_or(|b| matches!(self.arena.view(b), View::SBlock { statements } if statements.is_empty()));
-            let View::SBlock { statements } = self.arena.view(then_) else { return None };
-            let terminal = statements.last().is_some_and(|&s| self.terminal(s));
-            (empty && terminal && self.statements.last(run) != Some(statement)).then_some((slot, statement, condition, then_))
-        });
-        if let Some((slot, statement, condition, then_)) = merge {
+        let merge = match self.statements.first_single_slot(run) {
+            Some((slot, statement)) => {
+                let guard = B::stmt_from_node(statement);
+                let merges = self.js.stmt_kind(&self.arena, &guard) == row::Kind::If
+                    && self.js.branch_last_kind(&self.arena, &guard, true).is_none()
+                    && matches!(
+                        self.js.branch_last_kind(&self.arena, &guard, false),
+                        Some(row::Kind::Return | row::Kind::Throw | row::Kind::Break | row::Kind::Continue)
+                    )
+                    && self.statements.last(run) != Some(statement);
+                merges.then_some((slot, guard))
+            }
+            None => None,
+        };
+        if let Some((slot, guard)) = merge {
             self.statements.clear(slot);
-            self.arena.detach(condition);
-            self.arena.detach(then_);
-            self.arena.release(statement);
+            let (condition, then_, empty) = self.js.take_if(&mut self.arena, guard);
+            if let Some(empty) = empty {
+                self.js.release_stmt(&mut self.arena, empty);
+            }
             let rest = self.statements.take_list(&mut self.arena, run);
-            let else_ = self.arena.block_from_list(rest);
-            let statement = self.arena.new_node(View::SIf { condition, then_, else_: Some(else_) }, 0);
-            self.arena.new_node(View::SBlock { statements: &[statement] }, 0)
+            let else_ = self.js.block_of(&mut self.arena, B::list_from(rest));
+            let statement = self.js.if_blocks(&mut self.arena, condition, then_, else_);
+            let list = self.js.list(&mut self.arena, 1, std::iter::once(statement));
+            B::stmt_node(self.js.block_of(&mut self.arena, list))
         } else {
             let list = self.statements.take_list(&mut self.arena, run);
-            self.arena.block_from_list(list)
+            B::stmt_node(self.js.block_of(&mut self.arena, B::list_from(list)))
         }
     }
 
@@ -842,7 +840,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let Some(last) = self.statements.last(run) else {
             return false;
         };
-        if !matches!(self.arena.view(last), View::SReturn { .. }) {
+        if self.js.stmt_kind(&self.arena, &B::stmt_from_node(last)) != row::Kind::Return {
             return false;
         }
         let mut steps = 0;
@@ -852,7 +850,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             if statement == last {
                 break;
             }
-            if !matches!(self.arena.view(statement), View::SExp { .. }) {
+            if self.js.stmt_kind(&self.arena, &B::stmt_from_node(statement)) != row::Kind::Exp {
                 folds = false;
                 break;
             }
@@ -866,18 +864,15 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     fn fold_return_tail(&mut self, run: Span) -> NodeId {
         let mut result = None;
         for statement in self.statements.statements_rev(run) {
-            let (View::SReturn { value } | View::SExp { value }) = self.arena.view(statement)
-            else {
-                unreachable!("checked by returns_after_effects")
-            };
-            self.arena.detach(value);
-            self.arena.release(statement);
+            // Checked by returns_after_effects: a `return` led by expression
+            // statements.
+            let value = self.js.take_value(&mut self.arena, B::stmt_from_node(statement));
             result = Some(match result {
                 None => value,
-                Some(result) => norm::jm1_js_seq(&mut self.arena, value, result),
+                Some(result) => self.js.seq_rule(&mut self.arena, value, result),
             });
         }
-        result.expect("a return statement")
+        B::node(result.expect("a return statement"))
     }
 
     /// C:3662 lambda_is_trivial_unit_undefined. One cached flag read,
@@ -891,7 +886,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// Section 3.7 outside a return continuation: C:2918
     /// compile_short_circuit_js, C:2971 compile_short_circuit_binding_block,
     /// C:5415 for an assignment. The right operand was lowered once, as a
-    /// value. Constant when it is free; else `if_statement` over its run.
+    /// value. O(1) when it is free; else `if_statement` over its run.
     fn short_circuit(
         &mut self,
         cx: Cx,
@@ -902,12 +897,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     ) -> Probed {
         let right = match right {
             Probed::Free(free) => {
-                let right = self.free_value(cx, free);
+                let right = B::from_node(self.free_value(cx, free));
                 let value = if and {
-                    norm::je5_js_and(&mut self.arena, left, right)
+                    self.js.and(&mut self.arena, B::from_node(left), right)
                 } else {
-                    norm::je6_js_or(&mut self.arena, left, right)
+                    self.js.or(&mut self.arena, B::from_node(left), right)
                 };
+                let value = B::node(value);
                 self.statements.trim(Self::from(parts.start));
                 if self.statements.since(Self::from(parts.start)).len == 0 {
                     return self.probe_leaf(cx, value);
@@ -923,19 +919,19 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         };
         if let Some(value) = right.value {
             if right.finished == Finished::True {
-                self.arena.release(value);
+                self.js.release(&mut self.arena, B::from_node(value));
             } else {
-                let statement = crate::bir::j::assign(&mut self.arena, target, value);
-                self.statements.push(statement);
+                let statement = self.js.assign(&mut self.arena, target, B::from_node(value));
+                self.statements.push(B::stmt_node(statement));
             }
         }
         let yes = self.statements.since(Self::from(right.stmts.start));
-        let default = self.pure_expression(View::JBool, u16::from(!and));
+        let default = self.js.boolean(&mut self.arena, !and);
         let no = match cx.cont {
             Cont::Assign(_) => {
                 let mark = self.statements.mark();
-                let statement = crate::bir::j::assign(&mut self.arena, target, default);
-                self.statements.push(statement);
+                let statement = self.js.assign(&mut self.arena, target, default);
+                self.statements.push(B::stmt_node(statement));
                 self.statements.since(mark)
             }
             Cont::Declare(..) | Cont::Value(_) | Cont::Effect(_) => {
@@ -945,21 +941,21 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 } else {
                     LetKind::Strict
                 };
-                let statement = crate::bir::j::declare(&mut self.arena, kind, target, default);
-                self.statements.fill(parts.head - 1, statement);
+                let statement = self.js.declare(&mut self.arena, kind, target, Some(default));
+                self.statements.fill(parts.head - 1, B::stmt_node(statement));
                 EMPTY
             }
         };
         let test = if and {
             left
         } else {
-            norm::je8_not(&mut self.arena, left)
+            B::node(self.js.not(&mut self.arena, B::from_node(left)))
         };
         let statement = self.if_statement(test, yes, no);
         self.place(parts.head, statement);
         let value = match cx.cont {
             Cont::Value(_) | Cont::Effect(_) => {
-                Some(self.pure_expression(View::Var { var: target }, 0))
+                Some(B::node(self.js.var(&mut self.arena, target)))
             }
             Cont::Declare(..) | Cont::Assign(_) => None,
         };
@@ -967,7 +963,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// `realize(Free::Cond, k)` of section 3.6: on the values of the two
-    /// branches, or in **A** on their assignments. Constant.
+    /// branches, or in **A** on their assignments. O(1), plus
+    /// `free_effect` and `effect_output` in an effect continuation.
     pub(super) fn realize_conditional(&mut self, cx: Cx, test: NodeId, yes: Out, no: Out) -> Out {
         match cx.cont {
             Cont::Effect(Tail::No) => {
@@ -990,10 +987,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 self.output(start, None, Finished::False)
             }
             Cont::Value(_) | Cont::Declare(..) | Cont::Effect(Tail::Return(_)) => {
-                let yes = yes.value.expect("free value");
-                let no = no.value.expect("free value");
-                let value = norm::je7_cond(&mut self.arena, test, yes, no);
-                self.leaf(cx, value)
+                let yes = B::from_node(yes.value.expect("free value"));
+                let no = B::from_node(no.value.expect("free value"));
+                let value = self.js.cond(&mut self.arena, B::from_node(test), yes, no);
+                self.leaf(cx, B::node(value))
             }
         }
     }
