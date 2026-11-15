@@ -3204,4 +3204,64 @@ mod provenance_tests {
             assert_eq!(**path, Path::pdot_pos(**source, module_id.name_atom(), 3));
         }
     }
+
+    #[test]
+    fn sibling_alias_sources_are_put_at_the_access_path() {
+        // A unit's signature read through the alias `O`: `R` and 10,000
+        // aliases of it. `R` has the stamp of the compiling unit's `O`, as a
+        // unit's `.cmi` stamps can. Each alias's source is `O.R`, the
+        // sibling put at the access path, never the bare `R`.
+        let ctx =
+            super::super::context::TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
+        let alias = ctx.create_ident("O");
+        let sibling = Ident::new("R", alias.stamp(), crate::ident::IdentFlags::NONE);
+        let module = |id, md_type| {
+            SignatureItem::SigModule(
+                id,
+                ModuleDeclaration {
+                    md_type,
+                    md_attributes: vec![],
+                    md_loc: Default::default(),
+                    md_path: None,
+                },
+                super::super::decl::RecStatus::TrecNot,
+            )
+        };
+        let mut sig = vec![module(sibling, ModuleType::MtySignature(Arc::new(vec![])))];
+        let aliases: Vec<Ident> = (0..10_000)
+            .map(|i| ctx.create_ident(&format!("A{i}")))
+            .collect();
+        for id in &aliases {
+            sig.push(module(
+                *id,
+                ModuleType::MtyAlias(
+                    super::super::decl::AliasPresence::MtaAbsent,
+                    Arc::new(Path::pident(sibling)),
+                ),
+            ));
+        }
+        let access_path = Path::pident(alias);
+        let unit = Path::pident(Ident::create_persistent("Lib"));
+        let _components =
+            QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
+                access_path,
+                Arc::new(sig),
+                HashMap::new(),
+                Some(unit),
+                &ctx,
+            );
+        let expected = Path::pdot(access_path, "R");
+        for (pos, id) in aliases.iter().enumerate() {
+            let component = Path::pdot_pos(access_path, id.name_atom(), pos as i32 + 1);
+            let sources = ctx.alias_sources_for_component_path(&component);
+            assert_eq!(sources.len(), 1, "{}", id.name());
+            assert!(
+                sources[0].same(&expected),
+                "{}: {:?}",
+                id.name(),
+                sources[0]
+            );
+            assert!(!sources[0].same(&Path::pident(sibling)));
+        }
+    }
 }
