@@ -1,0 +1,10 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/inline_record_extension_variant_wrong_field.res[0m:[2m4:14[0m
+
+  2 [2m│[0m   type u = A({w: int})
+  3 [2m│[0m }
+  [1;31m4[0m [2m│[0m let a = R.A({[1;31mx[0m: 1})
+  5 [2m│[0m 
+
+  The field x is not part of the record argument for the R.u.A constructor

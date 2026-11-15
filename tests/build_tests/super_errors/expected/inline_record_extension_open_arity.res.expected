@@ -1,0 +1,10 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/inline_record_extension_open_arity.res[0m:[2m5:9-27[0m
+
+  3 [2m│[0m }
+  4 [2m│[0m open R
+  [1;31m5[0m [2m│[0m let e = [1;31mE({v: 1, w: ""}, 2)[0m
+  6 [2m│[0m 
+
+  This constructor expects an inlined record argument.

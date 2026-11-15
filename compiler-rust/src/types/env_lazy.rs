@@ -518,7 +518,7 @@ fn build_type_constructors(
 /// The description of extension constructor `id` of a component at
 /// `access_path` (env.ml:1560-1565), whose type is `ext_type_path` after the
 /// component substitution. One description; no loop over the signature.
-fn extension_constructor_description(
+pub(crate) fn extension_constructor_description(
     access_path: &Path,
     id: Ident,
     ext: &super::decl::ExtensionConstructor,
