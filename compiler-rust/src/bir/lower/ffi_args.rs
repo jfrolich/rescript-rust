@@ -628,7 +628,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
     }
 
-    /// X:755 add_external_effect. The cost is that of J-M1 on the two operands.
+    /// X:755 add_external_effect. Cost: O(1), apart from that of J-M1 on the
+    /// two operands.
     pub(super) fn add_external_effect(
         &mut self,
         _cx: Cx,

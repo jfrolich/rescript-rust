@@ -21,6 +21,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// A:90 runs_no_code: inspect each owned member spine without recursion.
+    /// Cost: one step per member of the chain of field reads, to its base.
     fn runs_no_code(&self, value: NodeId) -> bool {
         self.js.runs_no_code(&self.arena, B::at(value))
     }
@@ -38,6 +39,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// A:96 defines_pure_values: each statement is examined once by sequencing.
+    /// Cost: O(statements), each `declares_pure`.
     fn defines_pure_values(&self, statements: &[NodeId]) -> bool {
         statements.iter().all(|&statement| self.declares_pure(statement))
     }
