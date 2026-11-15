@@ -2828,6 +2828,78 @@ not exist (11.8 step 5).
    T4f.* Recommended: accept; the alternative is a converter from oxc nodes
    back to the JS IR, which is a fallback structure of about 2,000 lines.
 
+#### T6: the cut
+
+T6 as 11.8 wrote it is one slice of about 9,000 added and 9,000 deleted
+lines. It is cut so that trunk is green and check mode stays at zero
+differences after every slice. Four phases:
+
+- **A, the builder** (T6a to T6f). The builder is written and tested
+  against the legacy printer in the oracle form, under `#[cfg(test)]` (the
+  form T5b-1 and T5b-2 had), and then becomes the back half of the oxc
+  emitter trunk already has: `emit/build.rs` stops building nodes and
+  drives the builder from the JS IR (T6f). From then on the printer-parity
+  suite runs every constructor on three corpora in CI.
+- **B, the rules** (T6g to T6j). The normalising rules of `bir/j/` over
+  handles, each with its rule tests in the oracle form against
+  `js_ir::build` and `js_exp_make`, under `#[cfg(test)]` until the flip.
+- **C, the interface** (T6k to T6r). The lowering stops naming J opcodes:
+  every construction, match, detach, release and copy of a J node in
+  `bir/lower/` goes through functions of `bir/j/` over a handle type that
+  is not `Copy`. The storage is still `Bir`, so check mode cannot move.
+- **D, the flip** (T6s, T6t). The functions of the interface are the
+  builder's; the J opcodes, `bir/j/`'s rules and `bridge_j.rs` are deleted;
+  the gate changes as "The gate" says.
+
+A slice "deletes what it replaces": in A (but T6f) and B nothing is
+replaced yet, and what is added cannot be reached outside tests; T6f, each
+slice of C, and T6s delete in the same pull request.
+
+| Slice | What | Files | Depends on | May run beside | Lines |
+| --- | --- | --- | --- | --- | ---: |
+| T6a | `Row`, `J`, `Kind`, the table, leaves, operators, calls, members, with their flags | `emit/builder.rs`, `emit/builder_tests.rs` | - | T6k | 450 |
+| T6b | `S`, `List`, the staging stack; expression, `return`, `throw`, declaration, `if`, block, `while`, `break`, `continue`, `debugger`, in the form the rules read | the same two | T6a | T6c, T6k | 300 |
+| T6c | Shaped literals: array, object, block with `Shape`, optional, spread, `await`, template, tagged template, JSON, flat call, record rest; `throw` of an exception block | `emit/builder_shape.rs` | T6a | T6b, T6k | 600 |
+| T6d | The other statements (range loop with its bound's variable, `for of`, the two switches, `try`, labels); function nodes (parameters, the method's `this`, `async`, directive); raw JavaScript; JSX with its indentation as a parameter; the program (directives, imports, exports, trailer) and the `Scoping` from the names | `emit/builder_program.rs`, `Cargo.toml` uses `oxc_semantic` | T6b, T6c | T6g | 600 |
+| T6e | The seal: print forms of (c), F1 to F8 of (e), the descent below `HAS_FUN` and `SEAL`; `Builder::release`, `Builder::copy` | `emit/builder_seal.rs` | T6d | T6g to T6j | 600 |
+| T6f | `emit/build.rs` drives the builder: it walks the JS IR and calls constructors, then the seal; the node construction and the decisions of `walk.rs` that moved are deleted | `emit/build.rs`, `emit/walk.rs`, `emit/program.rs`, `emit/mod.rs` | T6e | T6g to T6j | 500, and 1,400 deleted |
+| T6g | Taking a handle apart; `equal`; J-E1 to J-E4, J-E8 | `emit/rules_e.rs` | T6c | T6d to T6f, T6h | 600 |
+| T6h | J-E5, J-E6, J-E7, J-E9, J-E10 | `emit/rules_logic.rs` | T6g | T6i, T6j | 600 |
+| T6i | J-S1 to J-S5, J-M14 | `emit/rules_s.rs` | T6b, T6g | T6h, T6j | 500 |
+| T6j | J-M0 to J-M13 | `emit/rules_m.rs` | T6g | T6h, T6i | 600 |
+| T6k to T6q | The interface, one group of files a slice: (k) the handle types and `prim.rs`, `prim_cmp.rs`, `prim_block.rs`; (l) `cond.rs`, `switch.rs`; (m) `ffi_args.rs`, `external.rs`, `args.rs`, `call.rs`; (n) `jsx.rs`, `variant.rs`, `untagged.rs`, `record.rs`, `konst.rs`; (o) `loops.rs`, `tail.rs`, `rec.rs`, `try_.rs`, `exit.rs`, `label.rs`, `assign.rs`, `import.rs`, `expr.rs`; (p) `out.rs`, `mod.rs`, `unit.rs`; (q) `export.rs`, `close.rs`, `scope.rs` | `bir/j/`, the files named | T6k first, then any order | each other, phases A and B | 600 each |
+| T6r | The interface for `names.rs` (the replay behind the statement interface of "(g)" point 2) and `globals.rs` (the decision in the replay's walk) | `bir/lower/names.rs`, `globals.rs` | T6q | phases A and B | 600 |
+| T6s | The flip: `State` owns the allocator and the `Builder`; the interface's functions are the builder's and the rules of phase B; the replay seals and names the builder's lists; check mode compares as "The gate" says; deleted: `bir/bridge_j.rs`, the J opcodes of `bir/node.rs`, `bir/j/{norm,logic,equal,facts,plain}.rs`, the prelude, `Scratch::marks`, `ambiguous_orders`, `Printed::{modules, finishes}`, `validate.rs`'s J arms | `bir/`, `emit/`, `lambda/lam_compile.rs`, `bir/shadow.rs` | all | - | 600, and about 9,000 deleted |
+| T6t | Measurements on the four corpora, docs/STATUS.md, `tests/backend_coverage.txt`, the allocation pins | docs, tests | T6s | - | 100 |
+
+**Which slices change a default-path function.** None is meant to. T6f
+changes `emit/` (reached with `RESCRIPT_JS_PRINTER=oxc` only) and T6s
+changes the `CHECK` arm of `lam_compile.rs` and deletes code the default
+build links but does not run: both need the full output gate (the four
+parity scripts and the `Instruction count` job within +0.02%), because a
+shared helper is easy to touch by accident. T6k to T6r change `bir/`
+(check mode only): `scripts/test_backend_coverage.py` with the ratchet
+unchanged, and the `Instruction count` job. The others add code under
+`#[cfg(test)]`: `cargo test` for `emit::`, and the job as a check that the
+binary did not move.
+
+**End state of each slice**, to paste with the output:
+
+| Slice | Facts |
+| --- | --- |
+| T6a | `rg -c 'todo!\("T6a"\)' src/emit/builder.rs` gives 0; `rg -n 'T6a build' src` is empty; `rg -n 'mod builder' -B1 src/emit/mod.rs` shows `#[cfg(test)]` |
+| T6b | `rg -c 'todo!\(' src/emit/builder.rs` gives 0; `rg -n 'T6b build' src` is empty |
+| T6c, T6d, T6e, T6g to T6j | `rg -n 'todo!\(' src/emit` is empty for the slice's file; `rg -n '<slice> build' src` is empty |
+| T6f | `rg -n 'Expression::new_\|Statement::new_\|AstBuilder' src/emit/build.rs src/emit/program.rs` is empty; `rg -n 'cfg\(test\)' src/emit/mod.rs` shows test modules only; `rg -n 'chain_tasks\|string_tasks\|jsx_indent' src/emit` shows `builder` files only; the printer-parity ratchet unchanged or risen |
+| T6k to T6r | for the slice's files, `rg -n 'View::J\|Op::J\|View::S[A-Z]\|Op::S[A-Z]'` matches only inside `#[cfg(test)]` modules; after T6r the same for all of `src/bir/lower` |
+| T6s | `rg 'JSeq\|JBlockLit' src/bir/node.rs` is empty; `rg bridge_j src` is empty; `rg -n 'ambiguous_orders' src` is empty; `rg -n 'apply_js_flatten_pass' src/lambda/lam_compile.rs` shows the legacy side and the check copy only; `rg -n 'Names::collect' src` shows `emit/program.rs` (the legacy side's oxc printer) and check mode only |
+
+What is designed to the level of a build prompt in this turn: T6a and T6b
+(skeleton, acceptance tests, 11.9). T6c to T6j have their content, files
+and end state fixed here and get their skeleton and tests from the next
+design turn. T6k to T6r need the interface designed first (open question
+3).
+
 ### 11.5 Worker prompt for T4b
 
 Which form: it needs one experiment, because nothing read so far proves that
