@@ -2110,8 +2110,9 @@ impl Checker {
     ///   references are its own (`ref None`).
     /// - The source is unopened, `keep`: the source is opened with its
     ///   new references at the level of the row variable
-    ///   ([`Checker::open_row`], then one `Graph::write` of the level of
-    ///   each reference it made), so that every later copy shares them;
+    ///   ([`Checker::open_row`], then one store of the level of each
+    ///   reference it made: a fresh node), so that every later copy shares
+    ///   them;
     ///   then the copy is opened onto the same unresolved references: its
     ///   own [`RES_EITHER`] node for each field that has types (the copy's
     ///   own type slots), a holder of the source's reference.
@@ -2136,7 +2137,166 @@ impl Checker {
     /// `Reither` field at most one node per chain node, one reference
     /// and 8 bytes of holder. (R3n)
     pub fn copy_refs(&mut self, copy: Ty, node: Node, first: u32) {
-        todo!("R3n")
+        let ExtraDescriptor::Variant(row) = self.extras.descriptors[node.a as usize] else {
+            unreachable!("a variant node");
+        };
+        let row = self.extras.variants[row as usize];
+        let fields = row.fields.start..row.fields.start + row.fields.len;
+        let either = |field: &&RowFieldRow| matches!(field.kind, RowFieldKind::Either { .. });
+        let rows = &self.extras.row_fields[fields.start as usize..fields.end as usize];
+        let Some(published) = rows.iter().find(either).map(|field| field.link) else {
+            return;
+        };
+        // `more = repr row.row_more` of the flattened row (ctype.ml:803),
+        // read in the copy: a generic `more` is one this session copied.
+        let mut more = self.g.repr(self.g.lists[(node.b + row.more) as usize]);
+        while let next = self.g.nodes[more.0 as usize]
+            && next.head & EXTENDED != 0
+            && let ExtraDescriptor::Variant(next_row) = self.extras.descriptors[next.a as usize]
+        {
+            let slot = next.b + self.extras.variants[next_row as usize].more;
+            more = self.g.repr(self.g.lists[slot as usize]);
+        }
+        // `let keep = more.level <> generic_level` (ctype.ml:806).
+        let keep = more.0 < first;
+        let source = self.g.work[(copy.0 - first) as usize];
+        if published >= self.g.nodes[source.0 as usize].arity() {
+            if keep {
+                let level = self.g.nodes[more.0 as usize].level;
+                self.open_shared([copy, source], node, level, published, fields);
+            }
+            return;
+        }
+        let generation = self.mark_generation;
+        let end = first + self.g.work.len() as u32;
+        for index in fields {
+            #[cfg(test)]
+            super::steps::tick();
+            let field = self.extras.row_fields[index as usize];
+            if !matches!(field.kind, RowFieldKind::Either { .. }) {
+                continue;
+            }
+            let last = field_repr(&self.g, node.b, node.arity(), field).end;
+            if last.0 == NONE {
+                continue;
+            }
+            let mut slot = node.b + field.link;
+            if keep {
+                // `e` of the copy is the source's (btype.ml:374): the end
+                // the session copied is pointed back at its source.
+                let target = if last.0 >= first && last.0 < end {
+                    self.g.work[(last.0 - first) as usize]
+                } else {
+                    last
+                };
+                loop {
+                    let at = self.g.lists[slot as usize];
+                    if at == last {
+                        self.g.lists[slot as usize] = target;
+                        break;
+                    }
+                    if at.0 < first || at.0 >= end || self.marks[at.0 as usize] == generation {
+                        break;
+                    }
+                    self.marks[at.0 as usize] = generation;
+                    let chain = self.g.nodes[at.0 as usize];
+                    let added = chain.arity() - 1;
+                    if added != 0 {
+                        self.hold(at, target);
+                    }
+                    slot = chain.b + added;
+                }
+            } else {
+                // `ref None` (btype.ml:374): a chain of the field's own.
+                let mut head = NONE;
+                loop {
+                    let mut at = self.g.lists[slot as usize];
+                    if at == last {
+                        break;
+                    }
+                    let mut chain = self.g.nodes[at.0 as usize];
+                    // Not the session's, or taken by a field before: copied.
+                    let shared = at.0 < first || at.0 >= end || self.marks[at.0 as usize] == generation;
+                    if shared {
+                        let start = self.g.lists.len() as u32;
+                        self.g.lists.extend_from_within(chain.b as usize..(chain.b + chain.arity()) as usize);
+                        chain.b = start;
+                        at = self.g.push(chain);
+                        self.g.lists[slot as usize] = at;
+                        if slot == node.b + field.link {
+                            let own = node.b + field.types.start;
+                            self.g.lists[own as usize..(own + field.types.len) as usize].fill(at);
+                        }
+                    } else {
+                        self.marks[at.0 as usize] = generation;
+                    }
+                    let added = chain.arity() - 1;
+                    if added != 0 {
+                        self.extras.holders.push(Holder { node: at, next: head });
+                        head = self.extras.holders.len() as u32 - 1;
+                    }
+                    slot = chain.b + added;
+                }
+                self.g.lists[slot as usize] = self.g.push(ref_node(self.g.level, head));
+            }
+        }
+    }
+
+    /// O(1): make chain node `chain` a holder of the unresolved reference
+    /// `reference`: one 8-byte [`Holder`] row and one logged write of the
+    /// reference's `b`.
+    fn hold(&mut self, chain: Ty, reference: Ty) {
+        let mut node = self.g.nodes[reference.0 as usize];
+        self.extras.holders.push(Holder { node: chain, next: node.b });
+        node.b = self.extras.holders.len() as u32 - 1;
+        self.g.write(reference, node);
+    }
+
+    /// The second case of [`Checker::copy_refs`]: open `source`, give the
+    /// references it made the `level` of the shared row variable, and open
+    /// `copy` (the unopened `node`, of the same row) onto them: as
+    /// [`Checker::open_row`] does, but each field's end is the source's.
+    /// The source's references and the copy are fresh or the session's:
+    /// plain stores. `published` is the row's count of published slots.
+    /// O(slots of the node); the steps are `open_row`'s, one a field. Per
+    /// `Reither` field with types one node, `types + 1` slots and one
+    /// holder; nothing per field without.
+    fn open_shared(&mut self, [copy, source]: [Ty; 2], node: Node, level: u32, published: u32, fields: std::ops::Range<u32>) {
+        let opened = self.open_row(source);
+        let (b, arity) = (self.g.lists.len() as u32, opened.arity());
+        self.g.lists.extend_from_within(node.b as usize..(node.b + published) as usize);
+        self.g.lists.resize((b + arity) as usize, Ty(NONE));
+        for index in fields {
+            let field = self.extras.row_fields[index as usize];
+            let RowFieldKind::Either { constant, matched } = field.kind else {
+                continue;
+            };
+            let types = field.types;
+            let mut reference = self.g.lists[(opened.b + field.link) as usize];
+            if types.len != 0 {
+                reference = self.g.lists[(self.g.nodes[reference.0 as usize].b + types.len) as usize];
+            }
+            self.g.nodes[reference.0 as usize].level = level;
+            let mut slot = reference;
+            if types.len != 0 {
+                let start = self.g.lists.len() as u32;
+                let own = (b + types.start) as usize..(b + types.start + types.len) as usize;
+                self.g.lists.extend_from_within(own.clone());
+                self.g.lists.push(reference);
+                slot = self.g.push(Node {
+                    head: TUPLE | (types.len + 1) << 8,
+                    level: node.level,
+                    a: either_flags(constant, matched),
+                    b: start,
+                });
+                let holders = &mut self.g.nodes[reference.0 as usize].b;
+                self.extras.holders.push(Holder { node: slot, next: *holders });
+                *holders = self.extras.holders.len() as u32 - 1;
+                self.g.lists[own].fill(slot);
+            }
+            self.g.lists[(b + field.link) as usize] = slot;
+        }
+        self.g.nodes[copy.0 as usize] = Node { head: (node.head & 0xff) | arity << 8, b, ..node };
     }
 
     /// `unify_univar` (compiler/ml/ctype.ml:1544-1561): two universal
@@ -2429,6 +2589,67 @@ mod tests {
             c.open_row(ty);
         });
         assert_eq!(again, 0);
+    }
+
+    /// The four cases of `copy_refs` on a row of 10,000 `Reither` fields
+    /// with a type each: one step a field (the first case none), besides
+    /// the copy's own step a node and the pass's. Unopened source, generic
+    /// `more`: nothing. Unopened, shared `more`: the source is opened and
+    /// the copy shares its references. Opened, shared `more`: a copy's
+    /// chain ends in the source's reference and holds it. Opened, generic
+    /// `more`: each field gets a reference of its own.
+    #[test]
+    fn copying_ten_thousand_references_is_one_step_a_field() {
+        let either = |_| RowFieldKind::Either { constant: false, matched: false };
+        let reference = |c: &Checker, ty: Ty, k: u32| {
+            let node = c.g.nodes[ty.0 as usize];
+            let field = c.extras.row_fields[k as usize];
+            field_repr(&c.g, node.b, node.arity(), field).end
+        };
+        let holders = |c: &Checker, end: Ty| {
+            let (mut count, mut at) = (0, c.g.nodes[end.0 as usize].b);
+            while at != NONE {
+                count += 1;
+                at = c.extras.holders[at as usize].next;
+            }
+            count
+        };
+        let (mut c, ty) = row_of(10_000, true, either);
+        let more = Ty(ty.0 - 1);
+        c.g.nodes[ty.0 as usize].level = GENERIC;
+        c.g.nodes[more.0 as usize].level = GENERIC;
+        let mut copied = ty;
+        assert_eq!(super::super::steps::scope(|| copied = c.copy(ty)), 2 + 2);
+        assert!(c.g.nodes[copied.0 as usize].arity() < 20_001, "unopened");
+        // Shared `more`, unopened source.
+        c.g.nodes[more.0 as usize].level = 1;
+        assert_eq!(super::super::steps::scope(|| copied = c.copy(ty)), 1 + 1 + 10_000);
+        assert_eq!(c.g.nodes[ty.0 as usize].arity(), 20_001);
+        for k in [0, 9_999] {
+            let end = reference(&c, ty, k);
+            assert_eq!((reference(&c, copied, k), c.g.nodes[end.0 as usize].level), (end, 1));
+            assert_eq!(holders(&c, end), 2);
+        }
+        // Shared `more`, opened source: the chain nodes are copied.
+        assert_eq!(super::super::steps::scope(|| copied = c.copy(ty)), 2 * 10_001 + 10_000);
+        for k in [0, 9_999] {
+            let end = reference(&c, ty, k);
+            assert_eq!((reference(&c, copied, k), holders(&c, end)), (end, 3));
+        }
+        // Generic `more`, opened source: the references are copied too.
+        let (mut c, ty) = row_of(10_000, true, either);
+        c.g.nodes[ty.0 as usize].level = GENERIC;
+        c.g.nodes[ty.0 as usize - 1].level = GENERIC;
+        c.open_row(ty);
+        assert_eq!(super::super::steps::scope(|| copied = c.copy(ty)), 2 * 20_002 + 10_000);
+        let mut ends: Vec<u32> = (0..10_000).map(|k| reference(&c, copied, k).0).collect();
+        for &end in &ends {
+            assert_eq!((c.g.nodes[end as usize].level, holders(&c, Ty(end))), (c.g.level, 1));
+        }
+        ends.sort();
+        ends.dedup();
+        assert_eq!(ends.len(), 10_000);
+        assert_ne!(reference(&c, ty, 0), reference(&c, copied, 0));
     }
 
     /// `merge_rows` of two lists of 10,000 tags, every other tag common:

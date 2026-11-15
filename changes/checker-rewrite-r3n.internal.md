@@ -1,0 +1,1 @@
+- Type checker rewrite R3n: a copy of a polymorphic variant row shares the references of its `Reither` fields when the row variable is shared, and gives each field a new one otherwise.

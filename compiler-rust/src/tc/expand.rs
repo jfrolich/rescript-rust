@@ -871,7 +871,9 @@ impl Checker {
         }
         let first = self.g.nodes.len();
         let copied = self.g.copy(root);
+        self.extras.copying = true;
         self.link_memorized(first, NONE, !self.extras.descriptors.is_empty());
+        self.extras.copying = false;
         copied
     }
 
