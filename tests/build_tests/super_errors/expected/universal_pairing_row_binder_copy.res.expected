@@ -1,0 +1,15 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/universal_pairing_row_binder_copy.res[0m:[2m1:116[0m
+
+  [1;31m1[0m [2m│[0m module F = (X: {let x: {"f": 'a. ([< #A(int)] as 'a) => 'a}}): {let x: {
+    [2m│[0m [1;31m"f": 'a. ([< #A(string)] as 'a) => 'a}} => X[0m
+  2 [2m│[0m 
+
+  Signature mismatch:
+  
+  Actual declaration ([36m/.../fixtures/universal_pairing_row_binder_copy.res[0m:[2m1:17-59[0m):
+    let x: {"f": 'a. ([< #A(int)] as 'a) => 'a}
+  
+  Expected declaration ([36m/.../fixtures/universal_pairing_row_binder_copy.res[0m:[2m1:65-110[0m):
+    let x: {"f": 'a. ([< #A(string)] as 'a) => 'a}
