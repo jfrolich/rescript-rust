@@ -63,7 +63,7 @@ fn compare_oracle(mut arena: LamArena, root: Lam, resolver: Option<&crate::js_ir
             let mut state = State::new(input);
             state.direct = direct;
             state.cross_module_inline = inline;
-            state.locations = locations.cloned();
+            state.locations = locations;
             state.check_div_by_zero = checks;
             state.resolver = resolver.cloned();
             let probed = state.probe(cx, source_root).unwrap();

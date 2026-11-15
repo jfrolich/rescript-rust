@@ -11,7 +11,7 @@ pub(super) struct Prim {
     pub operands: crate::bir::ListId,
 }
 
-impl State {
+impl State<'_> {
     /// O(1): inspect a numeric leaf and its interned constant.
     pub(super) fn primitive_int(&self, node: NodeId) -> Option<i32> {
         if let View::JNumber { value } = self.arena.view(node) {
@@ -75,7 +75,6 @@ impl State {
     fn primitive_statement(&mut self, statement: NodeId, loc: crate::lambda::LamLoc) {
         if self
             .locations
-            .as_ref()
             .and_then(|locations| locations.get(loc))
             .is_some_and(|loc| !loc.loc_ghost && loc.loc_start.cnum >= 0)
         {
@@ -800,7 +799,7 @@ impl State {
             _ => true,
         };
         if located && !self.arena.node(value).flags().contains(crate::bir::NodeFlags::JS_LOC_PRESENT)
-            && self.locations.as_ref().and_then(|t|t.get(payload.loc)).is_some_and(|loc| !loc.loc_ghost && loc.loc_start.cnum >= 0) {
+            && self.locations.and_then(|t|t.get(payload.loc)).is_some_and(|loc| !loc.loc_ghost && loc.loc_start.cnum >= 0) {
             let comment = self.arena.cold(value).and_then(|c|c.comment);
             self.arena.set_cold(value,crate::bir::Cold { loc:payload.loc,comment });
             let mut flags = self.arena.node(value).flags(); flags.0 |= crate::bir::NodeFlags::JS_LOC_PRESENT;
@@ -1316,7 +1315,7 @@ mod dictionary_allocations {
             let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
             let root = input.root;
             let mut state = State::new(input);
-            let run = |s: &mut State| {
+            let run = |s: &mut State<'_>| {
                 let out = s.probe(Cx::returning(), root).unwrap();
                 let out = s.realize(Cx::returning(), out);
                 for node in s.statements.statements(out.stmts) { s.arena.release(node); }
@@ -1332,7 +1331,7 @@ mod dictionary_allocations {
             state.arena.pools.js.reserve(state.arena.pools.js.len() - infos);
             state.free.reserve_repeat();
         state.arena.js_scope.as_mut().unwrap().reserve_repeat();
-            let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
+            let capacities = |s: &State<'_>| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
                 s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1, s.arena.pools.property_keys.capacity(),
                 s.arena.pools.js.capacity(), s.object_scratch.keys.capacity(), s.object_scratch.values.capacity(),
                 s.argument_outputs.capacity(), s.argument_values.capacity(), s.traversal.work.capacity(),
@@ -1377,7 +1376,7 @@ mod template_allocations {
             let root = a.prim_raw(primitive, &args, LamLoc::NONE);
             let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
             let root = input.root; let mut state = State::new(input);
-            let run = |s: &mut State| {
+            let run = |s: &mut State<'_>| {
                 let out = s.probe(Cx::returning(), root).unwrap(); let out = s.realize(Cx::returning(), out);
                 for node in s.statements.statements(out.stmts) { s.arena.release(node); }
                 if let Some(value) = out.value { s.arena.release(value); }
@@ -1391,7 +1390,7 @@ mod template_allocations {
             state.arena.pools.js.reserve(state.arena.pools.js.len() - infos);
             state.free.reserve_repeat();
         state.arena.js_scope.as_mut().unwrap().reserve_repeat();
-            let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
+            let capacities = |s: &State<'_>| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
                 s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1, s.arena.pools.template_parts.capacity(),
                 s.arena.pools.js.capacity(), s.arena.pools.text.capacity(), s.arena.pools.strings.capacity(),
                 s.arena.pools.text_index.capacity(), s.arena.j_template_scratch.kept.capacity(),

@@ -52,7 +52,7 @@ pub(super) struct Plan {
     pending_value: bool,
 }
 
-impl State {
+impl State<'_> {
     /// C: compile_switch_*_block_inner. O(c + compared nodes), apart from
     /// fingerprint indexing. General string switches queue their default first.
     pub(super) fn integer_switch(
@@ -201,7 +201,7 @@ impl Facts {
     pub(super) fn comparable(&self) -> bool { self.comparable }
 }
 
-impl State {
+impl State<'_> {
     /// V: stable_group_switch_cases, C: filtered_switch_case_refs. Expected
     /// O(c + reachable nodes + confirmed equal nodes); collision candidates
     /// are confirmed by eq_approx. Dense case-indexed links preserve the head
@@ -927,7 +927,7 @@ impl State {
     }
 }
 
-impl State {
+impl State<'_> {
     /// O(spelling bytes): append one J case key, interning borrowed spellings.
     /// Scalar tags are copied; source constructor metadata is never cloned.
     fn append_switch_key(&mut self, index: usize) {
@@ -1093,7 +1093,7 @@ impl State {
     }
 }
 
-impl State {
+impl State<'_> {
     /// V: compile_small_string_switch_assignment/return/effect, one Cx path.
     /// O(statements consumed by J-S3); the direct-body form copies no run.
     fn finish_small_switch(&mut self, cx: Cx, plan: &Plan) -> Probed {
@@ -1324,7 +1324,7 @@ mod tests {
         let input = crate::bir::bridge::import_lambda(&source, root).unwrap();
         let root = input.root;
         let mut state = State::new(input);
-        let run = |state: &mut State| {
+        let run = |state: &mut State<'_>| {
             let out = state.probe(Cx::returning(), root).unwrap();
             let out = state.realize(Cx::returning(), out);
             for node in state.statements.statements(out.stmts) {
@@ -1362,7 +1362,7 @@ mod tests {
             .reserve(state.switch_output_clauses.len());
         state.free.reserve_repeat();
         state.arena.js_scope.as_mut().unwrap().reserve_repeat();
-        let capacities = |s: &State| {
+        let capacities = |s: &State<'_>| {
             [
                 s.arena.nodes.capacity(),
                 s.arena.lists.storage_shape().1,

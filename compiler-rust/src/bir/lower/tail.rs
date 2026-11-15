@@ -10,7 +10,7 @@ pub(super) struct Frame {
     triggered: bool,
 }
 
-impl State {
+impl State<'_> {
     /// Amortized O(1) per recursive member, plus O(new source slots) when the
     /// dense function table first grows. The construction fact selects the
     /// loop continuation; no body is inspected or lowered twice.
@@ -478,7 +478,7 @@ mod tests {
         // including every argument, holding, sequencing, assignments and release.
         state.register_tail_function(function, first);
         let cx = Cx { cont: Cont::Effect(Tail::Return(Ret::Named { loop_: Some(LoopRef(0)), in_catch: false })), ..Cx::returning() };
-        let run = |s: &mut State| {
+        let run = |s: &mut State<'_>| {
             let output = s.probe(cx, body).unwrap();
             let output = s.realize(cx, output);
             for node in s.statements.statements(output.stmts) { s.arena.release(node); }
@@ -493,7 +493,7 @@ mod tests {
         state.free.reserve_repeat();
         state.arena.js_scope.as_mut().unwrap().reserve_repeat();
         state.tail_copies.reserve(state.arena.vars.len() - state.tail_copies.len());
-        let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(),
+        let capacities = |s: &State<'_>| [s.arena.nodes.capacity(), s.arena.parents.capacity(),
             s.arena.free_nodes.capacity(), s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1,
             s.traversal.work.capacity(), s.traversal.values.capacity(), s.traversal.children.capacity(),
             s.tail_assignments.capacity(), s.tail_copies.capacity(), s.tail_name.capacity(),

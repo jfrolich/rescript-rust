@@ -147,7 +147,7 @@ pub(super) fn is_untagged(h: &SwitchHeader<'_>) -> bool {
         })
 }
 
-impl State {
+impl State<'_> {
     /// V: compile_named_variant_switch_*_statements / uses_named_variant_switch.
     /// O(keys + fingerprint/grouping work), with two bounded side plans.
     pub(super) fn named_variant(
@@ -742,7 +742,7 @@ mod tests {
         let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
         let root = input.root;
         let mut state = State::new(input);
-        let run = |s: &mut State| {
+        let run = |s: &mut State<'_>| {
             let out = s.probe(Cx::returning(), root).unwrap();
             let out = s.realize(Cx::returning(), out);
             for node in s.statements.statements(out.stmts) { s.arena.release(node); }
@@ -764,7 +764,7 @@ mod tests {
         state.switch_output_clauses.reserve(state.switch_output_clauses.len());
         state.free.reserve_repeat();
         state.arena.js_scope.as_mut().unwrap().reserve_repeat();
-        let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
+        let capacities = |s: &State<'_>| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
             s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1, s.source.lists.storage_shape().1,
             s.arena.pools.switch_keys.capacity(), s.arena.pools.switch_clauses.capacity(), s.arena.pools.switches.capacity(),
             s.group_indices.capacity(), s.group_nodes.capacity(), s.group_heads.capacity(), s.group_order.capacity(), s.group_table.capacity(),

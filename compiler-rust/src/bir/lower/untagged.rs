@@ -342,7 +342,7 @@ pub(super) struct Plan {
     outputs: Run<Output>,
 }
 
-impl State {
+impl State<'_> {
     /// V: compile_untagged_switch. O(planner work + its emitted plan + new
     /// fingerprint nodes). Stable source groups provide dense equality aliases;
     /// planner comparisons read those aliases without borrowing mutable state.
@@ -1456,7 +1456,7 @@ mod tests {
         let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
         let root = input.root;
         let mut state = State::new(input);
-        let run = |s: &mut State| {
+        let run = |s: &mut State<'_>| {
             let output = s.probe(Cx::returning(), root).unwrap();
             let output = s.realize(Cx::returning(), output);
             for node in s.statements.statements(output.stmts) {
@@ -1484,7 +1484,7 @@ mod tests {
         storage.states.values.reserve(storage.states.values.len());
         storage.marks.values.reserve(storage.marks.values.len());
         storage.outputs.values.reserve(storage.outputs.values.len());
-        let capacities = |s: &State| {
+        let capacities = |s: &State<'_>| {
             let d = &s.untagged_storage;
             [
                 s.arena.nodes.capacity(),
@@ -1643,7 +1643,7 @@ mod tests {
         let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
         let root = input.root;
         let mut state = State::new(input);
-        let run = |s: &mut State| {
+        let run = |s: &mut State<'_>| {
             let out = s.probe(Cx::returning(), root).unwrap();
             let out = s.realize(Cx::returning(), out);
             for node in s.statements.statements(out.stmts) {
@@ -1687,7 +1687,7 @@ mod tests {
         d.states.values.reserve(d.states.values.len());
         d.marks.values.reserve(d.marks.values.len());
         d.outputs.values.reserve(d.outputs.values.len());
-        let capacities = |s: &State| {
+        let capacities = |s: &State<'_>| {
             let d = &s.untagged_storage;
             [
                 s.arena.nodes.capacity(),

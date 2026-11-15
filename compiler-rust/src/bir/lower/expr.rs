@@ -33,7 +33,7 @@ pub(super) enum Resume {
         loop_: Option<LoopRef>,
     },
 }
-impl State {
+impl State<'_> {
     /// K4/K2/K10: C:2411 compile_let_binding_output, C:4603 compile_effect_output,
     /// C:1997 with_function_scope. Preserve order and reset function boundaries.
     /// Cost: O(C): appends the C immediate children selected by the resume kind (arguments,
@@ -356,7 +356,7 @@ mod allocation_tests {
         let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
         let root = input.root;
         let mut state = State::new(input);
-        let run = |s: &mut State| {
+        let run = |s: &mut State<'_>| {
             let out = s.probe(Cx::returning(), root).unwrap();
             let out = s.realize(Cx::returning(), out);
             for node in s.statements.statements(out.stmts) { s.arena.release(node); }
@@ -374,7 +374,7 @@ mod allocation_tests {
         state.arena.func_owners.reserve(10_000);
         state.free.reserve_repeat();
         state.arena.js_scope.as_mut().unwrap().reserve_repeat();
-        let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
+        let capacities = |s: &State<'_>| [s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(),
             s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1, s.arena.vars.funcs.capacity(),
             s.arena.func_owners.capacity(), s.arena.pools.attrs.capacity(), s.traversal.work.capacity(),
             s.traversal.values.capacity(), s.traversal.children.capacity()];

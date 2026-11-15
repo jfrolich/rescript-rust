@@ -20,7 +20,7 @@ pub(super) struct Plan {
     needs_label: bool,
 }
 
-impl State {
+impl State<'_> {
     /// O(1): decode loop operands; the upward exclusive-bound rule inspects
     /// only the end primitive and its literal operand (C:6390).
     pub(super) fn loop_statement(&mut self, cx: Cx, node: NodeId) -> Loop {
@@ -330,7 +330,7 @@ mod tests {
         let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
         let root = input.root;
         let mut state = State::new(input);
-        let run = |s: &mut State| {
+        let run = |s: &mut State<'_>| {
             let output = s.probe(Cx::effect(), root).unwrap();
             let output = s.realize(Cx::effect(), output);
             for node in s.statements.statements(output.stmts) { s.arena.release(node); }
@@ -344,7 +344,7 @@ mod tests {
         state.arena.js_scope.as_mut().unwrap().reserve_repeat();
         state.loops.reserve(state.loops.len());
         state.labels.reserve_repeat();
-        let capacities = |s: &State| [s.arena.nodes.capacity(), s.arena.parents.capacity(),
+        let capacities = |s: &State<'_>| [s.arena.nodes.capacity(), s.arena.parents.capacity(),
             s.arena.free_nodes.capacity(), s.arena.release_stack.capacity(), s.arena.lists.storage_shape().1,
             s.traversal.work.capacity(), s.traversal.values.capacity(), s.traversal.children.capacity(), s.loops.capacity()];
         let before = capacities(&state);

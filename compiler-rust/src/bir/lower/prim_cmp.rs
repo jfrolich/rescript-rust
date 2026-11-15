@@ -21,7 +21,7 @@ pub(super) fn comparison_op(cmp: Comparison, float: bool) -> BinOp {
         (Ge, true) => BinOp::FloatGe,
     }
 }
-impl State {
+impl State<'_> {
     /// O(1): read a boolean leaf tag.
     pub(super) fn primitive_bool(&self, node: NodeId) -> Option<bool> {
         matches!(self.arena.view(node), View::JBool).then(|| self.arena.node(node).aux() != 0)

@@ -10,11 +10,11 @@ pub(super) struct Fact {
     ready: bool,
 }
 
-impl State {
+impl State<'_> {
     /// O(newly visited source nodes), amortized across all clauses. There is no
     /// recursion, including a source-map-enabled chain of 10,000 switches.
     pub(super) fn switch_location(&mut self, root: NodeId) -> Option<LamLoc> {
-        self.locations.as_ref()?;
+        self.locations?;
         self.switch_locations
             .resize(self.source.nodes.len(), Fact::default());
         let mut work = std::mem::take(&mut self.location_work);
@@ -47,7 +47,6 @@ impl State {
         self.location_work = work;
         self.switch_locations[root.index()].loc.filter(|&loc| {
             self.locations
-                .as_ref()
                 .and_then(|t| t.get(loc))
                 .is_some_and(|loc| !loc.loc_ghost && loc.loc_start.cnum >= 0)
         })
@@ -183,7 +182,7 @@ mod oracle_tests {
         let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
         let root = input.root;
         let mut state = State::new(input);
-        state.locations = Some(locations);
+        state.locations = Some(&locations);
         assert_eq!(state.switch_location(root), Some(loc));
         assert_eq!(state.location_steps, 10_001);
         assert_eq!(state.switch_location(root), Some(loc));

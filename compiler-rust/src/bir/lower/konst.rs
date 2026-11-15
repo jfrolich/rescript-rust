@@ -152,7 +152,7 @@ fn leaf(arena: &crate::bir::Bir, id: ConstId, text: &mut String) -> Leaf {
         none,
     }
 }
-impl State {
+impl State<'_> {
     /// H12: K:60 compile_constant, numeric leaf with preserved spelling.
     fn number(&mut self, value: Constant) -> NodeId {
         let value = self.arena.intern_const(value);
@@ -387,7 +387,7 @@ mod allocation_tests {
         let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
         let root = input.root;
         let mut state = State::new(input);
-        let run = |s: &mut State| {
+        let run = |s: &mut State<'_>| {
             let out = s.probe(Cx::returning(), root).unwrap();
             let out = s.realize(Cx::returning(), out);
             for node in s.statements.statements(out.stmts) {
@@ -412,7 +412,7 @@ mod allocation_tests {
             .reserve(state.arena.pools.cold.len() - cold);
         state.free.reserve_repeat();
         state.arena.js_scope.as_mut().unwrap().reserve_repeat();
-        let capacities = |s: &State| {
+        let capacities = |s: &State<'_>| {
             [
                 s.arena.nodes.capacity(),
                 s.arena.parents.capacity(),
@@ -509,7 +509,7 @@ mod allocation_tests {
             let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
             let root = input.root;
             let mut state = State::new(input);
-            let run = |s: &mut State| {
+            let run = |s: &mut State<'_>| {
                 let out = s.probe(Cx::returning(), root).unwrap();
                 let out = s.realize(Cx::returning(), out);
                 for node in s.statements.statements(out.stmts) {
@@ -541,7 +541,7 @@ mod allocation_tests {
                 .reserve(state.arena.pools.js.len() - infos);
             state.free.reserve_repeat();
         state.arena.js_scope.as_mut().unwrap().reserve_repeat();
-            let capacities = |s: &State| {
+            let capacities = |s: &State<'_>| {
                 [
                     s.arena.nodes.capacity(),
                     s.arena.parents.capacity(),

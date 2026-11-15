@@ -6,7 +6,7 @@ use crate::lambda::lam_primitive::{
     DeclKind, ExternalModuleName, JsCall, ModuleBindName, ModuleSource,
 };
 
-impl State {
+impl State<'_> {
     /// P:84 compile_js_object_get. O(receiver field spine), holding only
     /// receivers with a prelude that cannot be safely read in place.
     pub(super) fn hold_external_receiver(&mut self, _cx: Cx, mut arg: Out) -> Out {
@@ -515,7 +515,7 @@ mod tests {
         let input = crate::bir::bridge::import_lambda(&source, root.unwrap()).unwrap();
         let root = input.root;
         let mut state = State::new(input);
-        let run = |state: &mut State| {
+        let run = |state: &mut State<'_>| {
             let result = state.probe(Cx::value(), root).unwrap();
             let result = state.realize(Cx::value(), result);
             for statement in state.statements.statements(result.stmts) {
@@ -547,7 +547,7 @@ mod tests {
             .reserve(state.arena.pools.property_keys.len());
         state.free.reserve_repeat();
         state.arena.js_scope.as_mut().unwrap().reserve_repeat();
-        let capacities = |s: &State| {
+        let capacities = |s: &State<'_>| {
             vec![
                 s.arena.nodes.capacity(),
                 s.arena.parents.capacity(),

@@ -431,7 +431,9 @@ enum ModuleConstants {
     Present(std::sync::Arc<ahash::AHashMap<String, crate::cmi::persistent_env::CmjExportConstant>>),
 }
 
-struct State {
+/// The unit's lowering state. `'a` is the lifetime of the inputs the unit
+/// only reads and its caller owns: the location table.
+struct State<'a> {
     tail_arguments: usize,
     tail_parameters: usize,
     tail_sort_comparisons: usize,
@@ -521,7 +523,7 @@ struct State {
     resolver: Option<crate::js_ir::ModulePathResolver>,
     cross_module_inline: bool,
     check_div_by_zero: bool,
-    locations: Option<crate::lambda::LamLocTable>,
+    locations: Option<&'a crate::lambda::LamLocTable>,
     switch_locations: Vec<location::Fact>,
     location_work: Vec<(NodeId,bool)>,
     location_steps: usize,
@@ -554,7 +556,7 @@ struct State {
     /// The tables of the export fold (`export.rs`).
     coercion: export::Tables,
 }
-impl State {
+impl State<'_> {
     /// N1: C:481 new. Transfer cold pools, while source hot nodes/list operands
     /// remain readable. Variables retain source identities, never global stamps.
     /// Cost: O(N + V + F + G) initialization for source nodes, variables, function headers
@@ -911,7 +913,7 @@ impl State {
     }
 }
 
-impl ProbeRules for State {
+impl ProbeRules for State<'_> {
     fn source_enter(&mut self, cx: Cx, node: NodeId) { self.label_enter(cx, node); }
     fn source_leave(&mut self, output: &Probed) { self.label_leave(output); }
     type Resume = expr::Resume;
@@ -1113,7 +1115,7 @@ impl ProbeRules for State {
     }
 }
 
-impl Realizer for State {
+impl Realizer for State<'_> {
     /// K4/K5/K6: C:6648 declare_compiled, C:6667 assign_compiled, C:6658 return_compiled.
     fn leaf(&mut self, cx: Cx, value: NodeId) -> Out {
         let start = self.statements.mark();

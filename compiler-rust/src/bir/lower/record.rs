@@ -18,7 +18,7 @@ pub(super) struct Scratch {
     pub(super) values: Vec<NodeId>,
 }
 
-impl State {
+impl State<'_> {
     /// C: try_compile_record_spread / collect_record_spread_overrides.
     /// O(k + field-name bytes) for k consecutive writes, with one inspection
     /// per spine node. No initializer or override expression is walked here.
@@ -138,7 +138,6 @@ impl State {
         self.object_scratch.values = values;
         if self
             .locations
-            .as_ref()
             .and_then(|locations| locations.get(record.loc))
             .is_some_and(|loc| !loc.loc_ghost && loc.loc_start.cnum >= 0)
         {
@@ -315,7 +314,7 @@ mod tests {
         let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
         let root = input.root;
         let mut state = State::new(input);
-        let run = |s: &mut State| {
+        let run = |s: &mut State<'_>| {
             let out = s.probe(Cx::returning(), root).unwrap();
             let out = s.realize(Cx::returning(), out);
             for node in s.statements.statements(out.stmts) { s.arena.release(node); }
@@ -332,7 +331,7 @@ mod tests {
         state.arena.pools.js.reserve(1);
         state.free.reserve_repeat();
         state.arena.js_scope.as_mut().unwrap().reserve_repeat();
-        let capacities = |s: &State| {
+        let capacities = |s: &State<'_>| {
             [s.object_scratch.operands.capacity(), s.object_scratch.keys.capacity(), s.object_scratch.values.capacity(),
                 s.arena.nodes.capacity(), s.arena.parents.capacity(), s.arena.free_nodes.capacity(), s.arena.release_stack.capacity(),
                 s.arena.lists.storage_shape().1, s.source.lists.storage_shape().1, s.arena.pools.property_keys.capacity(),

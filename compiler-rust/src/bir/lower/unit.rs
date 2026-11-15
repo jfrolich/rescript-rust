@@ -4,9 +4,9 @@ use super::*;
 /// N1/K11: C:663 compile_deps_program_in_arena / C:1513 continues_toplevel_spine.
 /// Consume top-level groups iteratively. No group in this slice creates loop
 /// labels; loop-bearing groups remain Unsupported before label allocation.
-/// Cost: `State::new` (O(N + V + F + G), stated there); copies of
-/// `resolver` and of `locations` (all rows and index entries of the table)
-/// and, with `locations`, one flag per function header, each allocating;
+/// Cost: `State::new` (O(N + V + F + G), stated there); a copy of
+/// `resolver` (allocating); `locations` is borrowed for the unit, O(1) and
+/// no allocation; with `locations`, one flag per function header (allocating);
 /// then one iteration per `Let` or `Seq` on the right spine of the unit
 /// (one step each), which probes and realizes one top-level group
 /// (`State::probe`, `State::realize`; the groups are disjoint subtrees)
@@ -29,7 +29,7 @@ pub(super) fn lower(
     state.cross_module_inline = cross_module_inline;
     state.check_div_by_zero = check_div_by_zero;
     state.arena.js_scope.as_mut().expect("lowering scope").names.jsx_preserve = jsx_preserve;
-    state.locations = locations.cloned();
+    state.locations = locations;
     if let Some(locations) = locations {
         state.located_functions = state
             .arena
