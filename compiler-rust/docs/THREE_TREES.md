@@ -3880,8 +3880,36 @@ counts, and exactly linear. The allocation test of `untagged.rs` reads
 the storage through two test-only functions of `Rows`
 (`reserve_copy`, `copy_capacities`).
 
-**Not done in this turn.** See the pull request of this turn's end
-state; T6q's open decisions (4 and 9) are below when they are taken.
+**Not done: T6q and the cut of T6x.** T6q (`export.rs`, `close.rs`,
+`scope.rs`) has no probe, no added function and no prompt; T6x is not
+cut. What reading the 117 J sites of the three files (a search, not a
+conversion) shows, for the turn that designs T6q:
+
+- `close.rs` and `scope.rs` are free functions over `&Bir`, called from
+  `out.rs` (T6x) and `globals.rs` (T6r) on finished lists, as
+  `jsx::printed_form` is. Whether they are T6q's at all is its first
+  decision.
+- `export.rs` is not a file that builds JavaScript and holds it: it
+  reads the finished top-level run into tables indexed by node id
+  (`row_of`), climbs parents, walks the children of compound statements
+  (`has_toplevel_effect`), replaces a reference in place
+  (`Bir::replace` in `substitute_after`) and moves statements between
+  rows. The probe has to decide what a row's statement is while it is in
+  the table (a `NodeId` until T6x, by the storage rule) before it can
+  say which readers are missing.
+- `is_callee` is the test `mentions` makes (the owner is a call, a flat
+  call or a `new` whose callee the site is, or a tagged template whose
+  tag it is): confirmed by reading, not by a caller.
+- **`equal` is needed after all.** `equivalent_later` calls
+  `bir::j::equal::equal` on an initialiser and a value. The third
+  turn's decision not to add `equal` looked only at
+  `same_reusable_value`. T6q adds `equal(a, r1, r2) -> bool` with the
+  cost of `bir/j/equal.rs` and a step test.
+- Also to settle there: an in-place replacement of a reference by a
+  copy (`replace`), the children of a compound statement for the
+  strictness walk (decisions 4 and 9: `stmt_has` or a walk in the
+  lowering over `stmt_kind` and a new reader of a statement's parts),
+  and `SRest`, which the statement half has no kind test for.
 
 **T6n: the guard merge (decision 6 of the review of the T6l skeleton).**
 `cond.rs::merge_tail_guard` takes a guard `if (c) { ..; jump }` whose
