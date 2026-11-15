@@ -7587,79 +7587,6 @@ pub(crate) fn apply(
 // Core Unification
 // ============================================================================
 
-pub(crate) fn package_type_lists_have_ocaml_same_label_completion_side_effect(
-    ctx: &TypeContext,
-    env: Option<&Env>,
-    mty: super::decl::ModuleType,
-    required_lids: &[crate::parser::longident::Longident],
-    existing_lids: &[crate::parser::longident::Longident],
-) -> bool {
-    // Matches the same-label path through compiler/ml/ctype.ml:2199-2206:
-    // `complete_type_list` first allocates `Pkg` and calls `Env.add_module`
-    // (compiler/ml/ctype.ml:2200-2201), then returns existing entries when
-    // `Longident.cmp n n2 = 0` (compiler/ml/ctype.ml:2205-2206). CMI package
-    // labels are reconstructed with synthetic StrIdx values, so compare their
-    // resolved component names like OCaml's structural Longident comparison
-    // instead of raw arena ids.
-    let pkg_id = ctx.create_ident("Pkg");
-    if let Some(env) = env {
-        let mut env_prime = env.clone();
-        env_prime.add_module(
-            pkg_id,
-            super::decl::ModuleDeclaration {
-                md_type: mty,
-                md_attributes: vec![],
-                md_loc: crate::types::DeclLoc::none(),
-                md_path: None,
-            },
-        );
-    }
-    required_lids.len() == existing_lids.len()
-        && required_lids
-            .iter()
-            .zip(existing_lids.iter())
-            .all(|(required, existing)| package_longident_same_label(ctx, required, existing))
-}
-
-fn package_longident_same_label(
-    ctx: &TypeContext,
-    left: &crate::parser::longident::Longident,
-    right: &crate::parser::longident::Longident,
-) -> bool {
-    use crate::parser::longident::Longident;
-
-    fn component_same(
-        ctx: &TypeContext,
-        left: crate::intern::StrIdx,
-        right: crate::intern::StrIdx,
-    ) -> bool {
-        left == right
-            || match (
-                ctx.resolve_any_longident_component(left),
-                ctx.resolve_any_longident_component(right),
-            ) {
-                (Some(left), Some(right)) => left == right,
-                _ => false,
-            }
-    }
-
-    match (left, right) {
-        (Longident::Lident(left), Longident::Lident(right)) => component_same(ctx, *left, *right),
-        (Longident::Ldot(left_prefix, left), Longident::Ldot(right_prefix, right)) => {
-            package_longident_same_label(ctx, left_prefix, right_prefix)
-                && component_same(ctx, *left, *right)
-        }
-        (
-            Longident::Lapply(left_functor, left_arg),
-            Longident::Lapply(right_functor, right_arg),
-        ) => {
-            package_longident_same_label(ctx, left_functor, right_functor)
-                && package_longident_same_label(ctx, left_arg, right_arg)
-        }
-        _ => false,
-    }
-}
-
 /// OCaml `Longident.cmp` (compiler/ml/longident.ml:17-28) on package labels:
 /// identifiers before dotted paths, components compared as strings. CMI
 /// labels carry synthetic `StrIdx` values, so unequal indices are compared by
@@ -7878,6 +7805,52 @@ pub(crate) fn normalize_package_path(ctx: &TypeContext, env: &Env, path: &Path) 
 /// path, otherwise two `normalize_package_path`.
 fn eq_package_path(ctx: &TypeContext, env: &Env, p1: &Path, p2: &Path) -> bool {
     p1.same(p2) || normalize_package_path(ctx, env, p1).same(&normalize_package_path(ctx, env, p2))
+}
+
+/// One side of a package comparison: the level of its type node, the
+/// module type path, the constraint labels and their types.
+pub(crate) type PackageSide = (
+    i32,
+    Path,
+    super::type_expr::PackageLidsRef,
+    super::type_expr::TypeRefList,
+);
+
+/// OCaml `unify_package env unify_list lv1 p1 n1 tl1 lv2 p2 n2 tl2`
+/// (compiler/ml/ctype.ml:2172-2181), the package arm of unification,
+/// `moregen` and `eqtype`: complete each side's constraints with the
+/// manifests its module type gives the other side's labels, relate the
+/// completed types with `relate`, then accept the same module type, or two
+/// module types each included in the other (`Typemod.package_subtype`).
+/// `None` is OCaml's `Not_found`: a label one module type does not define
+/// as a manifest, or module types that differ. Cost: two
+/// `complete_type_list` and one `relate` on the completed lists; for
+/// different paths, two path normalizations and two module inclusion checks.
+pub(crate) fn unify_package(
+    ctx: &TypeContext,
+    env: &Env,
+    (lv1, p1, lids1, args1): PackageSide,
+    (lv2, p2, lids2, args2): PackageSide,
+    relate: impl FnOnce(&[TypeExprRef], &[TypeExprRef]) -> TypeResult<()>,
+) -> Option<TypeResult<()>> {
+    let nl1 = ctx.package_lids(lids1);
+    let nl2 = ctx.package_lids(lids2);
+    let ntl2 = complete_type_list(ctx, env, &nl1, lv2, p2, &nl2, ctx.type_list(args2), false)?;
+    let ntl1 = complete_type_list(ctx, env, &nl2, lv1, p1, &nl1, ctx.type_list(args1), false)?;
+    let tl1: smallvec::SmallVec<[TypeExprRef; 4]> = ntl1.iter().map(|&(_, ty)| ty).collect();
+    let tl2: smallvec::SmallVec<[TypeExprRef; 4]> = ntl2.iter().map(|&(_, ty)| ty).collect();
+    if let Err(error) = relate(&tl1, &tl2) {
+        return Some(Err(error));
+    }
+    let included =
+        |(pa, nla, tla): (&Path, &[crate::parser::longident::Longident], _),
+         (pb, nlb, tlb): (&Path, &[crate::parser::longident::Longident], _)| {
+            crate::types::typemod::package_subtype(ctx, env, (pa, nla, tla), (pb, nlb, tlb))
+        };
+    let side1 = (&p1, nl1.as_slice(), ctx.type_list(args1));
+    let side2 = (&p2, nl2.as_slice(), ctx.type_list(args2));
+    (eq_package_path(ctx, env, &p1, &p2) || included(side1, side2) && included(side2, side1))
+        .then_some(Ok(()))
 }
 
 /// Unify two types.
@@ -9023,72 +8996,42 @@ fn unify_types(
                 args: args2,
             },
         ) => {
-            let path1 = *path1;
-            let path2 = *path2;
-            let lids1 = ctx.package_lids(lids1);
-            let lids2 = ctx.package_lids(lids2);
-            let args1 = *args1;
-            let args2 = *args2;
+            let original_desc1 = *desc1;
+            let side1 = (ctx.get_level(t1), *path1, *lids1, *args1);
+            let side2 = (ctx.get_level(t2), *path2, *lids2, *args2);
+            let env = state.env().cloned().unwrap_or_else(Env::empty);
 
-            let unify_env = state.env().cloned();
-            let labels_2_complete = package_type_lists_have_ocaml_same_label_completion_side_effect(
-                ctx,
-                unify_env.as_ref(),
-                super::decl::ModuleType::MtyIdent(path2),
-                &lids1,
-                &lids2,
-            );
-            let labels_1_complete = package_type_lists_have_ocaml_same_label_completion_side_effect(
-                ctx,
-                unify_env.as_ref(),
-                super::decl::ModuleType::MtyIdent(path1),
-                &lids2,
-                &lids1,
-            );
-            if !labels_1_complete || !labels_2_complete {
-                return Err(TypeError::Unify(vec![]));
-            }
-
-            let package_paths_equivalent = path1.same(&path2)
-                || unify_env.as_ref().is_some_and(|env| {
-                    // OCaml compiler/ml/ctype.ml:2173-2175 `eq_package_path`
-                    // compares the original paths or their normalized paths
-                    // with `Path.same`; it does not compare printed names.
-                    let norm1 = normalize_path_full(ctx, env, &path1);
-                    let norm2 = normalize_path_full(ctx, env, &path2);
-                    norm1.same(&norm2)
-                });
-            if !package_paths_equivalent {
-                return Err(TypeError::Unify(vec![]));
-            }
-
-            if args1.len() != args2.len() {
-                return Err(TypeError::Unify(vec![]));
-            }
-
-            if lids1.len() != args1.len() || lids2.len() != args2.len() {
-                return Err(TypeError::Unify(vec![]));
-            }
-
-            let pairs: TypePairs = ctx
-                .type_list(args1)
-                .iter()
-                .zip(ctx.type_list(args2).iter())
-                .collect();
-
-            // ctype.ml:2197-2201: in Expression mode unify3 runs
-            // `occur !env t1' t2'` before linking and unifying children.
+            // ctype.ml:2330-2331: in Expression mode unify3 runs
+            // `occur !env t1' t2'` and links t1' to the original t2 before
+            // the arms.
             if state.mode == UnifyMode::Expression {
                 occur_check(ctx, state.env(), state.mode, t1, t2)?;
             }
-            // OCaml links t1' to the original t2 (`link_to`) BEFORE recursing into children
             link_type(ctx, t1, link_to);
 
-            for (a, b) in pairs {
-                unify(ctx, state, a, b)?;
+            // ctype.ml:2416-2424.
+            let result = match unify_package(ctx, &env, side1, side2, |tl1, tl2| {
+                if tl1.len() != tl2.len() {
+                    return Err(TypeError::Unify(vec![]));
+                }
+                for (&a, &b) in tl1.iter().zip(tl2) {
+                    unify(ctx, state, a, b)?;
+                }
+                Ok(())
+            }) {
+                Some(result) => result,
+                None if state.mode == UnifyMode::Expression => Err(TypeError::Unify(vec![])),
+                None => ctx
+                    .type_list(side1.3)
+                    .iter()
+                    .chain(ctx.type_list(side2.3).iter())
+                    .try_for_each(|ty| reify_in_unify_state(ctx, state, ty)),
+            };
+            // ctype.ml:2437: a failure puts t1's descriptor back.
+            if matches!(result, Err(TypeError::Unify(_))) {
+                ctx.set_desc(t1, original_desc1);
             }
-
-            Ok(())
+            result
         }
 
         // Substitution types (used during copying)
@@ -10469,42 +10412,13 @@ fn moregen(
                 args: args2,
             },
         ) => {
-            let path1 = *path1;
-            let path2 = *path2;
-            let lids1 = ctx.package_lids(lids1);
-            let lids2 = ctx.package_lids(lids2);
-            let args1 = *args1;
-            let args2 = *args2;
-            // OCaml compiler/ml/ctype.ml:2996-3002 routes package
-            // comparison through `unify_package`; ctype.ml:2237-2238 calls
-            // `complete_type_list` twice, and ctype.ml:2199-2201 allocates a
-            // hidden `Pkg` module for each completion even when the labels are
-            // already identical.
-            let complete_right = package_type_lists_have_ocaml_same_label_completion_side_effect(
-                ctx,
-                Some(env),
-                crate::types::decl::ModuleType::MtyIdent(path2),
-                &lids1,
-                &lids2,
-            );
-            let complete_left = package_type_lists_have_ocaml_same_label_completion_side_effect(
-                ctx,
-                Some(env),
-                crate::types::decl::ModuleType::MtyIdent(path1),
-                &lids2,
-                &lids1,
-            );
-            if !(complete_right && complete_left && path1.same(&path2)) {
-                return Err(TypeError::Unify(vec![]));
-            }
-            moregen_list(
-                ctx,
-                inst_nongen,
-                type_pairs,
-                env,
-                ctx.type_list(args1),
-                ctx.type_list(args2),
-            )
+            // ctype.ml:2969-2974.
+            let side1 = (ctx.get_level(t1_expanded), *path1, *lids1, *args1);
+            let side2 = (ctx.get_level(t2_expanded), *path2, *lids2, *args2);
+            unify_package(ctx, env, side1, side2, |tl1, tl2| {
+                moregen_list(ctx, inst_nongen, type_pairs, env, tl1.into(), tl2.into())
+            })
+            .unwrap_or(Err(TypeError::Unify(vec![])))
         }
         (TypeDesc::Tvariant(row1), TypeDesc::Tvariant(row2)) => {
             let row1 = ctx.row_desc(row1);
@@ -11667,36 +11581,29 @@ fn equal_type_exprs_without_renaming_rec(
                 args: right_args,
             },
         ) => {
-            let left_path = *left_path;
-            let right_path = *right_path;
-            let left_lids = ctx.package_lids(left_lids);
-            let right_lids = ctx.package_lids(right_lids);
-            let left_args = *left_args;
-            let right_args = *right_args;
-            let complete_right = package_type_lists_have_ocaml_same_label_completion_side_effect(
-                ctx,
-                Some(env),
-                crate::types::decl::ModuleType::MtyIdent(right_path),
-                &left_lids,
-                &right_lids,
+            // ctype.ml:3252-3257.
+            let left = (
+                ctx.get_level(left_expanded),
+                *left_path,
+                *left_lids,
+                *left_args,
             );
-            let complete_left = package_type_lists_have_ocaml_same_label_completion_side_effect(
-                ctx,
-                Some(env),
-                crate::types::decl::ModuleType::MtyIdent(left_path),
-                &right_lids,
-                &left_lids,
+            let right = (
+                ctx.get_level(right_expanded),
+                *right_path,
+                *right_lids,
+                *right_args,
             );
-            if !(complete_right && complete_left && left_path.same(&right_path)) {
-                return Err(TypeError::Unify(vec![]));
-            }
-            equal_type_expr_lists_without_renaming(
-                ctx,
-                env,
-                type_pairs,
-                ctx.type_list(left_args),
-                ctx.type_list(right_args),
-            )
+            unify_package(ctx, env, left, right, |left, right| {
+                equal_type_expr_lists_without_renaming(
+                    ctx,
+                    env,
+                    type_pairs,
+                    left.into(),
+                    right.into(),
+                )
+            })
+            .unwrap_or(Err(TypeError::Unify(vec![])))
         }
         (TypeDesc::Tvariant(left_row), TypeDesc::Tvariant(right_row)) => {
             let left_row = ctx.row_desc(left_row);
