@@ -18150,13 +18150,20 @@ pub(crate) fn unbound_name_alternatives(
     match lid {
         Longident::Lident(_) => local_names(env),
         Longident::Ldot(prefix, _) => tbl_fold_names_list(
-            with_resolved_module_components_for_lid(prefix, arena, env, pers_env, ctx, |components| {
-                let mut names = Vec::new();
-                for item in components.signature() {
-                    item_names(item, &mut names);
-                }
-                names
-            })
+            with_resolved_module_components_for_lid(
+                prefix,
+                arena,
+                env,
+                pers_env,
+                ctx,
+                |components| {
+                    let mut names = Vec::new();
+                    for item in components.signature() {
+                        item_names(item, &mut names);
+                    }
+                    names
+                },
+            )
             .unwrap_or_default(),
         ),
         Longident::Lapply(_, _) => Vec::new(),
