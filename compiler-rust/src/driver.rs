@@ -6702,8 +6702,20 @@ fn compile_source_to_js_with_options_inner(
                             && !crate::parser::code_frame::should_enable_color(),
                     ));
                 }
+            };
+        let implementation_coercion = match implementation_coercion {
+            Ok(coercion) => coercion,
+            Err(error) => {
+                attempt_output.warnings(arena, source, filename, &tctx.warnings);
+                return Err(inferred_signature_mismatch(
+                    type_ctx,
+                    source,
+                    filename,
+                    source_file_for_interface,
+                    &error,
+                ));
             }
-            .map_err(|e| anyhow!("Inferred signature inclusion failed: {e:?}"))?;
+        };
         if let Err(e) =
             crate::types::typemod::check_nongen_schemes(type_ctx, &final_env, &simple_signature)
         {
@@ -7341,6 +7353,30 @@ fn format_compunit_mismatch_report(
         );
     }
     format_compiler_error_report_raw_message_from_location(source, filename, loc, &message)
+}
+
+/// A unit without an interface that is not included in its own inferred
+/// signature: `Includemod.compunit` raises the same error as for an
+/// interface, named "(inferred signature)" (compiler/ml/typemod.ml:1812-1815).
+fn inferred_signature_mismatch(
+    type_ctx: &TypeContext,
+    source: &str,
+    filename: &str,
+    impl_name: &str,
+    error: &crate::types::includemod::IncludeModError,
+) -> anyhow::Error {
+    UserDiagnostic::new(
+        format_compunit_mismatch_report(
+            type_ctx,
+            source,
+            filename,
+            impl_name,
+            "(inferred signature)",
+            error,
+        ),
+        2,
+    )
+    .into()
 }
 
 /// The result of checking an implementation against its interface: OCaml's
@@ -10733,10 +10769,20 @@ fn compile_until_js(
                         &tctx.warnings,
                     )
                 })?;
-            inferred_implementation_coercion = Some(
-                inferred_inclusion
-                    .map_err(|e| anyhow!("Inferred signature inclusion failed: {e:?}"))?,
-            );
+            inferred_implementation_coercion = Some(match inferred_inclusion {
+                Ok(coercion) => coercion,
+                Err(error) => {
+                    if !arena.stores_locations() {
+                        return Err(LocationRetry::Diagnostic.into());
+                    }
+                    let warnings =
+                        format_type_warnings_lazy(arena, &source, filename, &tctx.warnings);
+                    return Err(prefix_diagnostic(
+                        &warnings,
+                        inferred_signature_mismatch(type_ctx, source(), filename, filename, &error),
+                    ));
+                }
+            });
             if let Err(e) = crate::types::typemod::check_nongen_schemes(
                 type_ctx,
                 &final_env,

@@ -5472,43 +5472,47 @@ Smallest witness found: **U8-8 (off-path)** (full source and both outputs below)
   super_errors `universal_pairing_residual_escape` (U8-10) and
   `universal_pairing_residual_swap` (U8-11), tests/tests
   `universal_pairing_residual_payload` (agreed before).
-- U8-12 and U8-13, open. OCaml rejects the program's own inferred
-  signature; Rust accepts it. Traced on the reduction
-  `let f = (x: {"f": 'a. [< #A('a)] => int}) => x` (OCaml rejects, Rust
-  accepts; U8-13 and `[> ...]`, `(x, x)` variants behave the same), with
-  temporary dumps of the two value types `moregeneral` receives on both
-  sides. Three causes, all needed:
-  1. The order of the copy of an arrow. `copy_type_cached` and
-     `subst_identity_copy_rec` (`ctype.rs:13947` and the `Tarrow` arm of
-     `subst_identity_copy_rec`) copy the parameters before the result;
-     OCaml's `copy_type_desc` builds `Tarrow (List.map .. params, f ret)`
-     (`compiler/ml/btype.ml:511-512`), whose arguments OCaml evaluates
-     right to left, so the result is copied first. In `f` both object
-     types share one row variable, and the row copy keeps whichever
-     variant it reaches first (`ctype.ml:806-810`, `subst.ml:185-189`).
-     OCaml's expected type therefore shares one variant whose payload is
-     the second method's universal variable, inside the first method;
-     Rust's kept each method's own payload, so `moregen` succeeded.
-     With the order reversed (an experiment, not committed) the Rust
-     expected type has OCaml's shape and `moregen` fails at the pair of
-     universal variables, as OCaml's does (`MOREGEN FAIL ... Tunivar vs
-     Tunivar` on the OCaml side, `univars.unify` false on the Rust side).
-  2. `inferred_signature_coercion`
-     (`compiler-rust/src/types/includemod.rs:2207`) answers the inclusion
-     of a unit in its inferred signature without comparing anything, on
-     the premise that a value type is always more general than its own
-     copy. These programs show the premise is false; OCaml always runs
-     `Includemod.compunit` (`compiler/ml/typemod.ml:1814-1815`). With the
-     shortcut disabled as well, Rust rejects the program.
-  3. The driver reports a failure of that inclusion as an internal
-     message (`Inferred signature inclusion failed: ValueTypeMismatch
-     ...`, `compiler-rust/src/driver.rs:6706, 10738`) instead of OCaml's
-     "The implementation ... does not match the interface (inferred
-     signature)" diagnostic.
-  The first cause alone changes no output (the shortcut still accepts),
-  so it is not committed; the second and third are outside the functions
-  of this change and need a decision on the cost of the inclusion check
-  for every unit without an interface.
+- U8-12 and U8-13, fixed. OCaml rejects the program's own inferred
+  signature; Rust accepted it. Reduction: `let f = (x: {"f": 'a. [<
+  #A('a)] => int}) => x`. Three causes, all needed (each verified by an
+  experiment: the order change alone, or the shortcut disabled alone,
+  leaves all three programs accepted):
+  1. The order of a type copy. OCaml's `copy_type_desc`
+     (`compiler/ml/btype.ml:508-541`) is evaluated right to left for
+     constructor arguments and record fields: an arrow's result is copied
+     before its parameters (`btype.ml:512`), a field's rest before its type
+     (`btype.ml:532`); lists are mapped left to right and a `Tpoly`'s
+     binders come before its body (`btype.ml:538-539`), as a probe built
+     with the OCaml 5.5 native compiler prints. Where two variants share a
+     row variable the copy keeps the variant it reaches first
+     (`ctype.ml:786-791, 806-816`). `7db7702c3` makes every Rust copy that
+     builds a descriptor as `copy_type_desc` does visit children in that
+     order: `copy_type_cached` (`compiler-rust/src/types/ctype.rs:14004`,
+     Ctype.copy), `subst_identity_copy_rec` (`ctype.rs:13637`,
+     Subst.typexp), `copy_sep_inner` (`ctype.rs:12489`, Ctype.copy_sep),
+     `nondep_type_rec` (`ctype.rs:14847`, Ctype.nondep_type) and
+     `copy_lookup_type_expr_with_paths` (`typecore.rs:21718`, Subst.typexp
+     with a path map). It changes no output by itself.
+  2. `inferred_signature_coercion` (`includemod.rs:2213`) answered the
+     inclusion without comparing anything; OCaml always runs
+     `Includemod.compunit` (`compiler/ml/typemod.ml:1812-1815`).
+     `94fd623f3` records on the unit's type context whether it created or
+     copied a polymorphic type with a bound variable
+     (`TypeContext::note_bound_universal`, `context.rs:3008`; set in the
+     `Ptyp_poly` translation, `typecore.rs:3542`, and in the `Tpoly` arm of
+     the five copies above when the binder list is not empty); such a unit
+     goes to the full `compunit` check, the others keep the shortcut for one
+     load. No program without a polymorphic type was found whose inferred
+     signature OCaml rejects (19 programs, listed in the pull request).
+  3. The driver reported the failure as an internal message
+     (`Inferred signature inclusion failed: ...`, exit 1). `b3944a33a`
+     reports it through `format_compunit_mismatch_report`, the path of an
+     interface mismatch, named "(inferred signature)", exit 2
+     (`inferred_signature_mismatch`, `driver.rs:7361`, at both sites).
+  Fixtures: super_errors `inferred_signature_shared_variant` (the
+  reduction) and `inferred_signature_shared_variant_annotated` (U8-12),
+  tests/tests `inferred_signature_polymorphic` (accepted before and after,
+  now through the full check). U8-1 to U8-11 still agree.
 
 #### U8-1 — WITNESS
 
@@ -6136,7 +6140,7 @@ stderr:
 
 ```
 
-Open (see "Fixed and open").
+Fixed (see "Fixed and open").
 
 #### U8-13 — WITNESS (added after the search)
 
@@ -6192,7 +6196,7 @@ stderr:
 ```text
 ```
 
-Open (see "Fixed and open").
+Fixed (see "Fixed and open").
 
 
 ### U9 — WITNESS

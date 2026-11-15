@@ -2200,7 +2200,13 @@ pub fn simplify_signature(sig: &Signature) -> Signature {
 ///
 /// The inferred signature `simple_sig` is `impl_sig` without its shadowed
 /// values, so the full check pairs each of its items with that same item of
-/// the unit and every comparison succeeds. What the check leaves behind is
+/// the unit. Every comparison succeeds unless the unit holds a polymorphic
+/// type with a bound variable: a value type is then not always more general
+/// than its own copy (two variants sharing one row variable keep one shared
+/// variant in the copy), and OCaml's check, which always runs, can fail
+/// (compiler/ml/typemod.ml:1812-1815). Such a unit, recorded by
+/// `TypeContext::note_bound_universal` while it was checked, goes to the
+/// full check; for the others this costs one load. What the check leaves behind is
 /// the coercion and the items it marked as used. Each paired item is exported
 /// as it is (see `includes_itself_plainly`), so the coercion only selects
 /// the fields that are not shadowed, as `signatures_with_subst` builds it.
@@ -2210,7 +2216,7 @@ pub fn inferred_signature_coercion(
     impl_sig: &Signature,
     simple_sig: &Signature,
 ) -> Option<ModuleCoercion> {
-    if !includes_itself_plainly(simple_sig) {
+    if type_ctx.has_bound_universals() || !includes_itself_plainly(simple_sig) {
         return None;
     }
     mark_self_included_items_used(type_ctx, env, simple_sig);
