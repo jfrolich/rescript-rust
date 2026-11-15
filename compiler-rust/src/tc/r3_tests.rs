@@ -1672,7 +1672,7 @@ fn fields_a_side_lacks_are_built_on_one_row_variable() {
 /// is bound to `b; nil` and `unify rest1 va` is one node on both sides.
 /// The other way, `{a}` closed against `{.. a, b}`: `va` is the right rest
 /// (`use2`), and `unify rest1 (b; va)` is `Tnil` against a field: a clash
-/// (`_, _ -> raise (Unify [])`, ctype.ml:2424).
+/// (`_, _ -> raise (Unify [])`, ctype.ml:2425).
 /// Reaches: R3e.
 #[test]
 fn a_closed_row_takes_no_field() {
@@ -2892,7 +2892,7 @@ fn a_variable_of_an_outer_scope_pairs_in_its_scope() {
 /// What the scopes hold and who cuts them back (section 8.6, decision
 /// 50). `enter_poly` pushes one [`PolyScope`] and one partner node per
 /// bound variable; a pairing writes two partner nodes (`set_univar`,
-/// compiler/ml/btype.ml:748-750, which logs `Cuniv`). A failure cuts the
+/// compiler/ml/btype.ml:739-741, which logs `Cuniv`). A failure cuts the
 /// scopes back (`univar_pairs := old_univars; raise exn`,
 /// compiler/ml/ctype.ml:1677-1679) in both modes; inside a speculation
 /// its owner's restore puts every node back, partner nodes included,

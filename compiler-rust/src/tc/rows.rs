@@ -236,7 +236,7 @@ pub const ROW_UNIVARS: u32 = 16;
 /// nodes*, one per bound variable, left ones first: the `ref None` of
 /// `(t, ref None)` (ctype.ml:1670). A partner node is a node of the graph
 /// that no node has as a child ([`partner_node`]), as a mutability cell
-/// is, so that `set_univar` (compiler/ml/btype.ml:748-750, which logs
+/// is, so that `set_univar` (compiler/ml/btype.ml:739-741, which logs
 /// `Cuniv`) is `Graph::write`: logged inside a speculation and undone by
 /// its restore, with no log of its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -269,17 +269,17 @@ pub enum Completion {
     /// A public abstract type without parameters that has a manifest: an
     /// instance of the manifest, free of the module type's own names, at
     /// the level asked for (`(n, nondep_instance env' lv2 id2 t2)`,
-    /// ctype.ml:2152).
+    /// ctype.ml:2155).
     Type(Ty),
     /// A public abstract type without parameters and without a manifest
-    /// (ctype.ml:2153-2160): skipped with `allow_absent` (subtyping, R3j),
+    /// (ctype.ml:2156-2163): skipped with `allow_absent` (subtyping, R3j),
     /// incompatible otherwise.
     Abstract,
     /// The module type has no type of that name (`Not_found`, ctype.ml:
-    /// 2163): skipped with `allow_absent`, incompatible otherwise.
+    /// 2166): skipped with `allow_absent`, incompatible otherwise.
     Missing,
     /// Any other declaration, or a manifest that cannot be freed of the
-    /// module type's own names (`raise Exit`, ctype.ml:2161, 2164):
+    /// module type's own names (`raise Exit`, ctype.ml:2164):
     /// incompatible.
     Other,
 }
@@ -2310,14 +2310,14 @@ impl Checker {
             let slot = next.b + self.extras.variants[next_row as usize].more;
             more = self.g.repr(self.g.lists[slot as usize]);
         }
-        // `let m = if row.row_fixed then fixed else m` (btype.ml:376, with
+        // `let m = if row.row_fixed then fixed else m` (btype.ml:375, with
         // `fixed = true` from `Ctype.copy`, ctype.ml:868) is not built:
         // nothing through R3g makes a fixed row with a `Reither` field
         // that is not matched (CHECKER_REWRITE 8.6, decision 47). The
         // slice that makes one (R3h's `reify`) builds the rule here.
         debug_assert!(
             !self.fixed_with_unmatched(node, row, more),
-            "a fixed row with an unmatched `Reither` field is copied: btype.ml:376"
+            "a fixed row with an unmatched `Reither` field is copied: btype.ml:375"
         );
         // `let keep = more.level <> generic_level` (ctype.ml:806).
         let keep = more.0 < first;

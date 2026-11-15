@@ -3363,8 +3363,8 @@ mod tests {
     /// `fixed = true` (`copy_row copy true row keep more'`,
     /// compiler/ml/ctype.ml:868), so each copied field is matched
     /// (`let m = if row.row_fixed then fixed else m`, compiler/ml/btype.ml:
-    /// 376: `?m`, `?cm`) and the copy stays fixed (`row_fixed =
-    /// row.row_fixed && fixed`, btype.ml:388). With a generic row variable
+    /// 375: `?m`, `?cm`) and the copy stays fixed (`row_fixed =
+    /// row.row_fixed && fixed`, btype.ml:389). With a generic row variable
     /// the copy has references of its own (`^2 ^3`); with one that is not
     /// generic it shares the source's (`^0 ^1`, `keep`, btype.ml:374) and
     /// the source's own fields stay unmatched.

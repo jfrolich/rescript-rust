@@ -2880,7 +2880,7 @@ a change in graph.rs, level.rs or template.rs. At most 150 lines.
 R3g. Read section 8.8 whole and section 8.6, decisions 49 to 51;
 compiler/ml/ctype.ml 1544-1679 (unify_univar, occur_univar,
 univars_escape, enter_poly), 2216-2247, 2299-2331, 2413-2415 and
-2685-2704; compiler/ml/btype.ml 229-272 and 748-750; in src/tc/rows.rs
+2685-2704; compiler/ml/btype.ml 229-272 and 739-741; in src/tc/rows.rs
 the doc comments of PolyScope, partner_node, unify_univar, enter_poly,
 univars_escape, free_univar, occur_univar and split_univars, and
 join_either and row_field_end, which call split_univars; in
@@ -2936,9 +2936,18 @@ row is written in place (assert_rows_kept in the tests); `scopes`,
 Report, before and after, the instructions of the tc_kernel bench
 operations unify_vars, unify_ground1, unify_ground3, unify_datatype2
 and unify_abbrev2 (compiler-rust/docs/TC_KERNEL_R3.md, "Machine and
-method"). None may move by more than 2: your bodies are reached only
-through functions that are already out of line. If one moves, mark the
-body `#[inline(never)]` and say so; do not tune anything else.
+method"), at three commits: de646dffcb (the trunk before this slice's
+skeleton, which added reads to unify_pair and unify3 that nobody has
+measured), the trunk you start from, and your head. No target is set
+(section 8.6, decision 46): report the figures. Your bodies are reached
+only through functions that are already out of line; if an operation
+moves by more than 2 between your start and your head, mark the body
+`#[inline(never)]`, measure once more, report both, and do not tune
+anything else.
+
+Another builder writes Checker::unify_package and Checker::package_end
+(slice R3p) in src/tc/rows.rs at the same time. Do not edit those two
+functions or the three tests ignored for "R3p build".
 
 If a generated case differs, read the ctype.ml lines above first. If
 your code does what they say, stop and report the seed with the lines:
@@ -2976,6 +2985,16 @@ Relations to hold: every tc:: test that passed before passes unchanged;
 packages_of_ten_thousand_names_are_linear as written; after a clash
 `frames` and `saved` are as long as before the call and
 `Checker::packages` is `Some` again.
+
+Report, before and after, the instructions of the tc_kernel bench
+operations unify_vars, unify_ground1, unify_ground3, unify_datatype2
+and unify_abbrev2 (compiler-rust/docs/TC_KERNEL_R3.md, "Machine and
+method"). No target is set (section 8.6, decision 46).
+
+Another builder writes the five `todo!("R3g")` bodies of
+src/tc/rows.rs (free_univar, unify_univar, enter_poly, univars_escape,
+split_univars) at the same time. Do not edit those functions or the
+tests ignored for "R3g build".
 
 Shortcuts that count as failure: a `Vec` of pairs (push the frames and
 reverse that part of `frames` in place); comparing names in the kernel
@@ -4027,7 +4046,7 @@ unless it says "ignored".
 
 47. **The fixed-row rule of `copy_row` is not reachable through R3g, and
     is built by the slice that makes it reachable.** The rule
-    (btype.ml:376, 388): a copy of a row whose `row_fixed` flag is set
+    (btype.ml:375, 389): a copy of a row whose `row_fixed` flag is set
     gives every `Reither` field `m = fixed` and keeps the flag only when
     `fixed`. The callers and what they pass:
 
@@ -4165,7 +4184,7 @@ unless it says "ignored".
       until the old checker is corrected (decision 50, "Acceptance").
     - *A second difference of the old checker, reported and not fixed.*
       `Tpoly (t, [])` against a type that is not polymorphic is a clash
-      in OCaml (`_, _ -> raise (Unify [])`, ctype.ml:2424). The old
+      in OCaml (`_, _ -> raise (Unify [])`, ctype.ml:2425). The old
       checker unifies the body with the other type ("Tpoly with empty
       vars: unwrap and retry", types/ctype.rs, the two arms after the
       package arm of its unify3). Smallest case: `newty (Tpoly (t, []))`
@@ -4245,7 +4264,8 @@ unless it says "ignored".
       type, abstract, missing, other) and `compatible` (the last test
       for two different paths). R5a supplies it over its module types
       and installs it before the first unification of a unit; with none
-      installed two packages that need a completion are a clash.
+      installed any two packages are a clash: without `compare` the
+      kernel cannot put two name lists in one order.
     - *A name is a position* in the pool that `PackageRow::longidents`
       ranges over. The kernel passes positions and never reads the pool.
     - *The levels* `lv1` and `lv2` are both the lower of the two nodes'

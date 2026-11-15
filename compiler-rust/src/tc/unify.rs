@@ -1091,7 +1091,7 @@ impl Checker {
     pub fn push_children(&mut self, left: Node, right: Node) -> Result<(), Clash> {
         if (left.head | right.head) & EXTENDED != 0 {
             // An extended descriptor against another kind of node
-            // (`_, _ -> raise (Unify [])`, ctype.ml:2424).
+            // (`_, _ -> raise (Unify [])`, ctype.ml:2425).
             return Err(Clash);
         }
         let arity = left.arity();
@@ -1377,7 +1377,7 @@ impl Checker {
     /// (ctype.ml:2414-2415; R3g). Two packages:
     /// [`Checker::unify_package`] (ctype.ml:2416-2423; R3p). Anything else,
     /// a universal variable against another extended node included, is a
-    /// clash (`_, _ -> raise (Unify [])`, ctype.ml:2424; two universal
+    /// clash (`_, _ -> raise (Unify [])`, ctype.ml:2425; two universal
     /// variables never come here: `unify3` takes them first). Like
     /// [`Checker::push_children`], it pushes nothing when it fails. O(1)
     /// plus the callee.
