@@ -1,6 +1,5 @@
 //! Record duplication and rest; C: try_compile_record_spread, P: compile_primitive_js.
 use super::*;
-use crate::bir::j::plain;
 use crate::bir::{JsId, JsPayload, ListId, PropertyKey};
 use crate::lambda::{LamLoc, lam_primitive::Primitive};
 
@@ -125,15 +124,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             start.get_or_insert(out.stmts.start);
             values.push(out.value.expect("record operand value"));
         }
-        values[1..].reverse();
-        let value = plain::node(
-            &mut self.arena,
-            View::JObject {
-                values: &values,
-                info: record.info,
-            },
-            0,
-        );
+        // The spread, then the overrides in the order of their keys
+        // (`record_copy` reversed the keys of the spine).
+        let mark = self.js.mark();
+        if let Some((&spread, overrides)) = values.split_first() {
+            self.js.push(B::from_node(spread));
+            for &value in overrides.iter().rev() {
+                self.js.push(B::from_node(value));
+            }
+        }
+        let mut value = self.js.object(&mut self.arena, mark, record.info);
         values.clear();
         self.object_scratch.values = values;
         if self
@@ -141,16 +141,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             .and_then(|locations| locations.get(record.loc))
             .is_some_and(|loc| !loc.loc_ghost && loc.loc_start.cnum >= 0)
         {
-            self.arena.set_cold(
-                value,
-                crate::bir::Cold {
-                    loc: record.loc,
-                    comment: None,
-                },
-            );
-            let mut flags = self.arena.node(value).flags();
-            flags.0 |= crate::bir::NodeFlags::JS_LOC_PRESENT;
-            self.arena.nodes[value.index()].set_flags(flags);
+            self.js.locate(&mut self.arena, &mut value, record.loc);
         }
         self.primitive_result(
             cx,
@@ -158,7 +149,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 start: start.expect("record initializer"),
                 len: 0,
             }),
-            value,
+            B::node(value),
         )
     }
 
@@ -167,14 +158,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let info = self
             .arena
             .object_info(&[PropertyKey::RecordSpread]);
-        plain::node(
-            &mut self.arena,
-            View::JObject {
-                values: &[source],
-                info,
-            },
-            0,
-        )
+        let mark = self.js.mark();
+        self.js.push(B::from_node(source));
+        B::node(self.js.object(&mut self.arena, mark, info))
     }
 
     /// P: compile_primitive_js PrecordRest. O(k + label bytes) for k excluded
@@ -189,14 +175,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let info = self.arena.js_info(JsPayload::Rest(crate::bir::RestSpan {
             start, len: excluded.len() as u32,
         }));
-        plain::node(
-            &mut self.arena,
-            View::JRecordRest {
-                value: source,
-                info,
-            },
-            0,
-        )
+        B::node(self.js.record_rest(&mut self.arena, B::from_node(source), info))
     }
 }
 
