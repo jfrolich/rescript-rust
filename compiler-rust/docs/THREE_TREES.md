@@ -3735,9 +3735,9 @@ block of phase C, and are part of every prompt below):
    boundary as a `NodeId` until T6x. Inside a body a handle is made at
    the first interface call (`B::from_node(x)`, or `B::at(x)` to read)
    and turned back (`B::node`, `B::stmt_node`) only where it is stored,
-   returned or passed to a function of the lowering. Reason: 31
+   returned or passed to a function of the lowering. Reason: 33
    functions with a `NodeId` in their signature are called from a file
-   of another slice (`if_statement` from five files, `drop_pure_effect`
+   of another slice (counted by a script over the non-test code) (`if_statement` from five files, `drop_pure_effect`
    from seven, `primitive_runtime` from five); a signature change is an
    edit in another builder's file. The common block's "the functions of
    the file take and return `B::E`" held for T6k and T6l, whose callers
