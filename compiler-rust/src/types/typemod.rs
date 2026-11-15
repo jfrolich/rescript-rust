@@ -8554,7 +8554,7 @@ fn modtype_of_package_constraints(
     apply_package_constraints_to_module_type(
         env,
         &base_mty,
-        &constraints,
+        constraints,
         package_parent_path.as_ref(),
         pers_env,
         ctx,

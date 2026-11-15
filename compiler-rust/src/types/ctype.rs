@@ -6437,10 +6437,7 @@ fn subtype_package(
         ctx,
         env,
         &nl2,
-        ctx.get_level(t1),
-        p1,
-        &nl1,
-        ctx.type_list(args1),
+        (ctx.get_level(t1), p1, &nl1, ctx.type_list(args1)),
         false,
     )
     .and_then(|ntl1| {
@@ -6448,10 +6445,7 @@ fn subtype_package(
             ctx,
             env,
             &nl1,
-            ctx.get_level(t2),
-            p2,
-            &nl2,
-            ctx.type_list(args2),
+            (ctx.get_level(t2), p2, &nl2, ctx.type_list(args2)),
             true,
         )?;
         // `List.assoc n2 ntl1`. Both lists are sorted and `ntl1` holds
@@ -7679,10 +7673,12 @@ fn complete_type_list(
     ctx: &TypeContext,
     env: &Env,
     required: &[crate::parser::longident::Longident],
-    level: i32,
-    mty_path: Path,
-    lids: &[crate::parser::longident::Longident],
-    args: crate::types::type_expr::TypeSlice<'_>,
+    (level, mty_path, lids, args): (
+        i32,
+        Path,
+        &[crate::parser::longident::Longident],
+        crate::types::type_expr::TypeSlice<'_>,
+    ),
     allow_absent: bool,
 ) -> Option<Vec<(crate::parser::longident::Longident, TypeExprRef)>> {
     use std::cmp::Ordering;
@@ -7835,8 +7831,8 @@ pub(crate) fn unify_package(
 ) -> Option<TypeResult<()>> {
     let nl1 = ctx.package_lids(lids1);
     let nl2 = ctx.package_lids(lids2);
-    let ntl2 = complete_type_list(ctx, env, &nl1, lv2, p2, &nl2, ctx.type_list(args2), false)?;
-    let ntl1 = complete_type_list(ctx, env, &nl2, lv1, p1, &nl1, ctx.type_list(args1), false)?;
+    let ntl2 = complete_type_list(ctx, env, &nl1, (lv2, p2, &nl2, ctx.type_list(args2)), false)?;
+    let ntl1 = complete_type_list(ctx, env, &nl2, (lv1, p1, &nl1, ctx.type_list(args1)), false)?;
     let tl1: smallvec::SmallVec<[TypeExprRef; 4]> = ntl1.iter().map(|&(_, ty)| ty).collect();
     let tl2: smallvec::SmallVec<[TypeExprRef; 4]> = ntl2.iter().map(|&(_, ty)| ty).collect();
     if let Err(error) = relate(&tl1, &tl2) {
@@ -15593,10 +15589,7 @@ mod tests {
                 &ctx,
                 &env,
                 &lids,
-                0,
-                mty,
-                &lids,
-                ctx.type_list(args),
+                (0, mty, &lids, ctx.type_list(args)),
                 false,
             )
         });
