@@ -154,6 +154,16 @@ impl Graph {
         if from == to {
             return;
         }
+        self.link_distinct(from, to);
+    }
+
+    /// O(1): [`Graph::link`] of two nodes the caller has proven distinct,
+    /// without its identity test: one bounds check, one node load, one node
+    /// store and one untaken branch. A self-link would make a cycle that
+    /// [`Graph::repr`] never leaves, so each call site states its proof.
+    #[inline]
+    pub(super) fn link_distinct(&mut self, from: Ty, to: Ty) {
+        debug_assert_ne!(from, to, "a node linked to itself");
         let slot = &mut self.nodes[from.0 as usize];
         let source = *slot;
         *slot = Node {
