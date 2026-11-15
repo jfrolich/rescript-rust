@@ -982,6 +982,18 @@ fn scan_child_component_from_signature(
     (found, scanned_items)
 }
 
+/// `path` with its head identifier replaced by the path `head`. Cost: one
+/// step per component of `path`.
+fn replace_path_head(path: &Path, head: Path) -> Path {
+    match path.view() {
+        PathView::Pident(_) => head,
+        PathView::Pdot(parent, name, pos) => {
+            Path::pdot_pos(replace_path_head(parent, head), *name, *pos)
+        }
+        PathView::Papply(functor, arg) => Path::papply(replace_path_head(functor, head), *arg),
+    }
+}
+
 impl QualifiedModuleComponents {
     pub(crate) fn new(
         access_path: Path,
@@ -1132,6 +1144,38 @@ impl QualifiedModuleComponents {
                     | super::decl::ModuleType::MtyIdent(_) = &md.md_type
                 {
                     let alias_source = md.md_type.ident_or_alias_path().unwrap();
+                    // A unit's own signature names a sibling target by its
+                    // identifier (`module A = R`); `prefix_idents` puts it
+                    // at this path (`O.R`, compiler/ml/env.ml:1369-1410,
+                    // 1519) before env.ml:1504 scrapes the alias. Bare, `R` would
+                    // name whatever identifier of the compiling unit has its
+                    // stamp. Cost: one name probe of the index per alias
+                    // of a module that is not a unit.
+                    let head = alias_source.head();
+                    let sibling = if head.is_persistent() {
+                        None
+                    } else {
+                        index.module(head.name())
+                    };
+                    let alias_source = match sibling {
+                        Some((sibling, sibling_pos))
+                            if matches!(
+                                &signature[sibling],
+                                SignatureItem::SigModule(sibling_id, _, _)
+                                    if sibling_id.same(head) && sibling_id.equal(head)
+                            ) =>
+                        {
+                            replace_path_head(
+                                alias_source,
+                                ctx.dotted_from_ident(
+                                    shared_access_path.clone(),
+                                    *head,
+                                    sibling_pos as i32,
+                                ),
+                            )
+                        }
+                        _ => *alias_source,
+                    };
                     let component_path =
                         ctx.dotted_from_ident(shared_access_path.clone(), *id, runtime_pos as i32);
                     // OCaml compiler/ml/env.ml:1517 `scrape_alias` follows
@@ -1140,7 +1184,7 @@ impl QualifiedModuleComponents {
                     // stores thunks under the selected component path.
                     // Preserve the actual source path from the declaration
                     // instead of recovering it from flattened spelling.
-                    ctx.register_component_alias_source(component_path, *alias_source);
+                    ctx.register_component_alias_source(component_path, alias_source);
                 }
             } else {
                 let idx = *modtype_items.next().expect("peeked modtype item");
@@ -2374,12 +2418,26 @@ fn build_local_module_components(
                 if let Some(working_env) = working_env.as_mut() {
                     let child_access_path =
                         ctx.dotted_from_ident(shared_access_path.clone(), *id, runtime_pos as i32);
+                    // OCaml compiler/ml/env.ml:1556-1568 gives a child's
+                    // component thunk and the evolving `env` the raw `md`;
+                    // the thunk prefixes it with `sub` (env.ml:1519,
+                    // 1369-1410 `prefix_idents`). Rust materializes that
+                    // substitution in the qualified item, except for an
+                    // alias: its target is a sibling bound in the evolving
+                    // env (`module A = R`), and its prefixed form names the
+                    // parent's access path (`O.R`), which is not bound there
+                    // when the parent is itself an alias (`module O = Outer`).
+                    // The alias child's components substitute the parent's
+                    // paths themselves (`parent_context` below).
+                    let item_md = if use_qualified_items_for_env
+                        && !matches!(child_md.md_type, super::decl::ModuleType::MtyAlias(..))
+                    {
+                        qmd
+                    } else {
+                        child_md
+                    };
                     let env_decl = strengthened_child_env_decl(
-                        if use_qualified_items_for_env {
-                            qmd
-                        } else {
-                            child_md
-                        },
+                        item_md,
                         *id,
                         shared_source_prefix
                             .as_ref()
@@ -2387,16 +2445,7 @@ fn build_local_module_components(
                         runtime_pos,
                         ctx,
                     );
-                    // OCaml compiler/ml/env.ml:1573-1578 stores the child
-                    // component thunk with the final substitution built by
-                    // env.ml:1530-1531/1454-1486 `prefix_idents`. Rust
-                    // materializes that substituted child module declaration in
-                    // the qualified signature item.
-                    let component_decl = if use_qualified_items_for_env {
-                        qmd.clone()
-                    } else {
-                        child_md.clone()
-                    };
+                    let component_decl = item_md.clone();
                     working_env.add_module_with_component_context(
                         *id,
                         env_decl,
@@ -3158,6 +3207,66 @@ mod provenance_tests {
                 panic!("alias")
             };
             assert_eq!(**path, Path::pdot_pos(**source, module_id.name_atom(), 3));
+        }
+    }
+
+    #[test]
+    fn sibling_alias_sources_are_put_at_the_access_path() {
+        // A unit's signature read through the alias `O`: `R` and 10,000
+        // aliases of it. `R` has the stamp of the compiling unit's `O`, as a
+        // unit's `.cmi` stamps can. Each alias's source is `O.R`, the
+        // sibling put at the access path, never the bare `R`.
+        let ctx =
+            super::super::context::TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
+        let alias = ctx.create_ident("O");
+        let sibling = Ident::new("R", alias.stamp(), crate::ident::IdentFlags::NONE);
+        let module = |id, md_type| {
+            SignatureItem::SigModule(
+                id,
+                ModuleDeclaration {
+                    md_type,
+                    md_attributes: vec![],
+                    md_loc: Default::default(),
+                    md_path: None,
+                },
+                super::super::decl::RecStatus::TrecNot,
+            )
+        };
+        let mut sig = vec![module(sibling, ModuleType::MtySignature(Arc::new(vec![])))];
+        let aliases: Vec<Ident> = (0..10_000)
+            .map(|i| ctx.create_ident(format!("A{i}")))
+            .collect();
+        for id in &aliases {
+            sig.push(module(
+                *id,
+                ModuleType::MtyAlias(
+                    super::super::decl::AliasPresence::MtaAbsent,
+                    Arc::new(Path::pident(sibling)),
+                ),
+            ));
+        }
+        let access_path = Path::pident(alias);
+        let unit = Path::pident(Ident::create_persistent("Lib"));
+        let _components =
+            QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
+                access_path,
+                Arc::new(sig),
+                HashMap::new(),
+                Some(unit),
+                &ctx,
+            );
+        let expected = Path::pdot(access_path, "R");
+        for (pos, id) in aliases.iter().enumerate() {
+            let component = Path::pdot_pos(access_path, id.name_atom(), pos as i32 + 1);
+            let sources = ctx.alias_sources_for_component_path(&component);
+            assert_eq!(sources.len(), 1, "{}", id.name());
+            assert!(
+                sources[0].same(&expected),
+                "{}: {:?}",
+                id.name(),
+                sources[0]
+            );
+            assert!(!sources[0].same(&Path::pident(sibling)));
         }
     }
 }

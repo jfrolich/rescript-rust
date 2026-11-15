@@ -1,0 +1,15 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/alias_chain_constructor_label_missing.res[0m:[2m8:10-15[0m
+
+  6 [2m│[0m }
+  7 [2m│[0m module O = Outer
+  [1;31m8[0m [2m│[0m let r = {[1;31mO.A.ff[0m: 1}
+  9 [2m│[0m 
+
+  [1;33mO.A.ff[0m refers to a record field, but no corresponding record type is in scope.
+  
+  If it's defined in another module or file, bring it into scope by:
+  - Prefixing the field name with the module name: [1;33mTheModule.O.A.ff[0m
+  - Or specifying the record type explicitly:
+  [1;33mlet theValue: TheModule.theType = {O.A.ff: VALUE}[0m
