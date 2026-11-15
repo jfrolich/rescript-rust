@@ -4026,7 +4026,10 @@ declarations. The probe converted the whole file. What it decided:
    rows-only shim for each now would be a vocabulary nobody else calls.
 9. *What goes dead.* With `export.rs` converted, `bir::j::member` and
    `Bir::copy_leaf` have no production caller (`cargo check` named
-   both in the probe); the builder deletes them by the common rule.
+   both in the probe). By the common rule the builder deletes
+   `Bir::copy_leaf`, which nothing else calls, and puts `#[cfg(test)]`
+   on `bir::j::member`, which tests of `bir/j/mod.rs` and of `args.rs`
+   still call.
    `copy_replacement` copies a leaf with `Js::copy_leaf` and
    `Js::copy_cold`, where `Bir::copy_leaf` copied the node's words and
    flags: the flags are computed again by the plain constructor, and
@@ -4278,7 +4281,7 @@ is not a call: `Out` is passed by value in 37 constructions and read at
 | T6x-c1 | Bodies and private functions: the primitives. `values` becomes a vector of handles from `sequence_arguments` on; `constant_children` goes; the functions of the cluster that only the cluster calls take and return handles | `prim.rs`, `prim_cmp.rs`, `prim_block.rs`, `konst.rs`, `record.rs`, `import.rs`, `args.rs`, `call.rs` | 139 + 7 + 15 + 7 + 8 + 22 + 10 calls: about 300 | T6x-b | c2, c3, c4 |
 | T6x-c2 | The same for the externals; the operand lists in the pool become operands pushed as they are converted, and `push_list` loses its five calls; the three chain walks read `var_of` first | `external.rs`, `ffi_args.rs`, `jsx.rs` (not `printed_form`, `jsx_tag`) | 40 + 64 + 19 calls and the list assembly: about 300 | T6x-b | c1, c3, c4 |
 | T6x-c3 | The same for conditionals and switches | `cond.rs`, `expr.rs`, `switch.rs`, `variant.rs`, `untagged.rs`, `location.rs` | what a and b leave of 96 + 16 + 23 + 22 + 39 + 2: about 250 | T6x-b | c1, c2, c4 |
-| T6x-c4 | The same for loops, exits and recursion | `loops.rs`, `try_.rs`, `exit.rs`, `rec.rs`, `tail.rs`, `assign.rs`, `label.rs` | what a and b leave of 17 + 5 + 14 + 11 + 11 + 3: about 100 | T6x-b | c1, c2, c3 |
+| T6x-c4 | The same for loops, exits and recursion; `recursive_dummy` gives a handle to its two callers in `rec.rs` | `loops.rs`, `try_.rs`, `exit.rs`, `rec.rs`, `tail.rs`, `assign.rs`, `label.rs` | what a and b leave of 17 + 5 + 14 + 11 + 11 + 3: about 100 | T6x-b | c1, c2, c3 |
 | T6x-d | The functions that cross clusters, each with all its callers in one slice: the 36 rows of the callers' table (`if_statement`, `unnest`, `place`, `drop_pure_effect`, `primitive_runtime`, `static_member`, `number`, `string`, `constant`, `add_external_effect`, `compile_js_call`, `compile_jsx`, `sequence_arguments`, ...). No turn-back is left between two files | every file of a row | 36 signatures and 110 calls in other files: about 300 | c1 to c4 | none |
 | T6x-e | `export.rs`: its tables hold handles or ids the interface gives (`Js::id`), and its three edits are interface calls (the replacement in place, a row taken out of its block, the final list) | `export.rs` | to be counted after T6q | T6x-d, T6q | none |
 | T6x-f | The transition functions leave the two traits and `Rows`: `from_node`, `node`, `at`, `stmt_from_node`, `stmt_node`, `list_from`, `list_id`, `push_list`, `function_of_block`; `rg 'B::(from_node\|node\|at\|stmt_)' src/bir/lower` is empty | `js.rs`, `js_stmt.rs`, `rows.rs`, `rows_stmt.rs`, the interface tests | about 150 | T6x-e, T6r | none |
@@ -5909,9 +5912,15 @@ Do exactly this, one commit each, in this order, each pushed when made:
      `self.js.declare(.., kind, var, value.map(B::from_node))`.
    The tests of the file pass unchanged.
 
-4. What lost its last caller: `bir::j::member` (src/bir/j/mod.rs) and
-   `Bir::copy_leaf` (src/bir/edit.rs). Delete exactly these two, in
-   this commit, and list them in the pull request.
+4. What lost its last production caller: `Bir::copy_leaf`
+   (src/bir/edit.rs) and `bir::j::member` (src/bir/j/mod.rs). Delete
+   `Bir::copy_leaf`: nothing calls it any more. Put `#[cfg(test)]` on
+   `bir::j::member`: tests of src/bir/j/mod.rs and of
+   src/bir/lower/args.rs still call it, and those tests are not yours
+   to change. Exactly these two, in this commit, listed in the pull
+   request; run `cargo clippy --manifest-path compiler-rust/Cargo.toml
+   --all-targets -- -D warnings` after it (an import only `member`
+   used gets the same `#[cfg(test)]`).
 
 5. The changelog fragment changes/lowering-interface-exports.internal.md.
 
@@ -5921,8 +5930,9 @@ End state, to paste in the pull request with the output:
   lines: one in `substitute_after` (`replace`), three in `release_row`
   (`parents`, `detach`, `release`), four in `coerced_list` (`parents`,
   `detach`, `release`, `lists.push_iter`).
-- `rg -n 'fn member\b' src/bir/j/mod.rs` and `rg -n 'fn copy_leaf'
-  src/bir/edit.rs` are empty.
+- `rg -n 'fn copy_leaf' src/bir/edit.rs` is empty, and `rg -n -B1
+  'fn member\b' src/bir/j/mod.rs` shows `#[cfg(test)]` on the line
+  before the function.
 - `git diff --stat origin/ocaml-to-rust-rewrite` names export.rs, the
   two files of commit 4 and the fragment only.
 - `cargo test --manifest-path compiler-rust/Cargo.toml --lib bir::lower`

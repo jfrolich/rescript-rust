@@ -314,7 +314,7 @@ impl JsStmt for Rows {
                 | View::SForRangeExisting { .. }
                 | View::SSwitch { .. }
                 | View::STry { .. } => {
-                    work.extend(a.view(node).children());
+                    a.view(node).children_into(&mut work);
                     true
                 }
                 View::SThrow { .. }
