@@ -1,6 +1,8 @@
 //! Loop statements (BACKEND_LOWERING §3.11).
 use super::*;
-use crate::bir::{ListId, NodeFlags, Op, StrId};
+use crate::bir::{ListId, Op, StrId};
+use crate::emit::row::flag;
+use super::js_stmt::Range;
 use crate::js_ir::ForDirection;
 
 /// O(1) index into the unit's loop-plan pool.
@@ -69,7 +71,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
     }
 
-    /// O(s) for the child's emitted statements: seal them once into a block.
+    /// O(s) for the child's emitted statements: seal them once into a list.
     /// For loops the end and start are lowered in allocation order, then their
     /// saved blocks are attached in execution order without moving statements.
     pub(super) fn loop_child(&mut self, cx: Cx, frame: Loop, index: usize, child: Probed) -> Probed {
@@ -108,17 +110,19 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.loops[index].label
         };
         let start = self.statements.mark();
-        let statement = self.arena.new_node(if continue_ { View::SContinue { label } } else { View::SBreak { label } }, 0);
-        self.statements.push(statement);
-        let value = self.pure_expression(View::JUndefined, 0);
-        Ok(Probed::Out(Out { stmts: self.statements.since(start), value: Some(value), finished: Finished::True }))
+        let statement = if continue_ { self.js.continue_(&mut self.arena, label) } else { self.js.break_(&mut self.arena, label) };
+        self.statements.push(B::stmt_node(statement));
+        let value = self.js.undefined(&mut self.arena, false);
+        Ok(Probed::Out(Out { stmts: self.statements.since(start), value: Some(B::node(value)), finished: Finished::True }))
     }
 
     /// O(s): attach s saved prelude statements in execution order. Each
     /// prelude is replayed once; nested loop bodies remain one statement.
     fn push_loop_list(&mut self, list: ListId) {
-        for index in 0..self.arena.lists.get(list).len() {
-            self.statements.push(self.arena.lists.get(list)[index]);
+        let list = B::list_from(list);
+        for index in 0..self.js.len(&self.arena, list) {
+            let statement = self.js.take_at(&mut self.arena, list, index);
+            self.statements.push(B::stmt_node(statement));
         }
     }
 
@@ -133,59 +137,58 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let direction = plan.direction;
         let label = plan.label;
         let op = self.source.node(plan.node).op();
-        let end = values[0].unwrap_or_else(|| self.pure_expression(View::JUndefined, 0));
+        let end = match values[0] {
+            Some(value) => B::from_node(value),
+            None => self.js.undefined(&mut self.arena, false),
+        };
         let statement = if op == Op::While {
-            let body_list = blocks[1].unwrap();
-            let body;
-            let mut condition = end;
-            let prelude = blocks[0].unwrap();
-            if !self.arena.lists.get(prelude).is_empty() {
-                let negated = crate::bir::j::norm::je8_not(&mut self.arena, condition);
+            let prelude = B::list_from(blocks[0].unwrap());
+            if self.js.len(&self.arena, prelude) != 0 {
+                let negated = self.js.not(&mut self.arena, end);
                 let mark = self.statements.mark();
-                let break_ = self.arena.new_node(View::SBreak { label: None }, 0);
-                self.statements.push(break_);
+                let break_ = self.js.break_(&mut self.arena, None);
+                self.statements.push(B::stmt_node(break_));
                 let yes = self.statements.since(mark);
                 let no = self.statements.mark();
-                let guard = self.if_statement(negated, yes, no);
+                let guard = self.if_statement(B::node(negated), yes, no);
                 let mark = self.statements.mark();
-                self.push_loop_list(prelude);
+                self.push_loop_list(blocks[0].unwrap());
                 self.statements.push(guard);
-                self.push_loop_list(body_list);
+                self.push_loop_list(blocks[1].unwrap());
                 let list = self.statements.take_list(&mut self.arena, self.statements.since(mark));
-                body = self.arena.block_from_list(list);
-                condition = crate::bir::j::plain::boolean(&mut self.arena, true);
-            } else { body = self.arena.block_from_list(body_list); }
-            self.arena.new_node(View::SWhile { condition, body, label }, 0)
+                let condition = self.js.boolean(&mut self.arena, true);
+                self.js.while_(&mut self.arena, condition, B::list_from(list), label)
+            } else {
+                self.js.while_(&mut self.arena, end, B::list_from(blocks[1].unwrap()), label)
+            }
         } else if matches!(op, Op::ForOf | Op::ForAwaitOf) {
             self.push_loop_list(blocks[0].unwrap());
-            let body = self.arena.block_from_list(blocks[1].unwrap());
-            let var = var.unwrap();
-            let parts = [end, body];
-            self.arena.new_node(if op == Op::ForOf {
-                View::SForOf { var, parts: &parts, label }
-            } else { View::SForAwaitOf { var, parts: &parts, label } }, 0)
+            let body = B::list_from(blocks[1].unwrap());
+            self.js.for_of(&mut self.arena, var.unwrap(), end, body, label, op == Op::ForAwaitOf)
         } else {
             let var = var.unwrap();
-            let init = values[1].unwrap_or_else(|| self.pure_expression(View::JUndefined, 0));
-            let end_block = blocks[0].unwrap();
+            let init = match values[1] {
+                Some(value) => B::from_node(value),
+                None => self.js.undefined(&mut self.arena, false),
+            };
+            let end_block = B::list_from(blocks[0].unwrap());
             self.push_loop_list(blocks[1].unwrap());
-            let hold = !self.arena.lists.get(end_block).is_empty()
-                && !self.arena.node(init).flags().contains(NodeFlags::DELAY_SAFE);
-            if hold {
-                let declaration = crate::bir::j::declare(&mut self.arena, LetKind::Variable, var, init);
-                self.statements.push(declaration);
-            }
-            self.push_loop_list(end_block);
-            let body = self.arena.block_from_list(blocks[2].unwrap());
-            if hold {
-                self.arena.new_node(View::SForRange { var, parts: &[end, body], label }, direction)
+            let hold = self.js.len(&self.arena, end_block) != 0
+                && !self.js.has(&self.arena, B::of(&init), flag::DELAY_SAFE);
+            let init = if hold {
+                let declaration = self.js.declare(&mut self.arena, LetKind::Variable, var, Some(init));
+                self.statements.push(B::stmt_node(declaration));
+                None
             } else {
-                self.arena.new_node(View::SForRange { var, parts: &[init, end, body], label }, direction)
-            }
+                Some(init)
+            };
+            self.push_loop_list(blocks[0].unwrap());
+            let range = Range { init, end, direction };
+            self.js.for_range(&mut self.arena, var, range, B::list_from(blocks[2].unwrap()), label)
         };
-        self.statements.push(statement);
-        let unit = self.pure_expression(View::JUndefined, 0);
-        let mut out = self.leaf(cx, unit);
+        self.statements.push(B::stmt_node(statement));
+        let unit = self.js.undefined(&mut self.arena, false);
+        let mut out = self.leaf(cx, B::node(unit));
         out.stmts = self.statements.since(start);
         Probed::Out(out)
     }
