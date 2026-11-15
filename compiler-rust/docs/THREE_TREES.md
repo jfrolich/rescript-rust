@@ -3181,8 +3181,9 @@ Rows needs one new vector for it (`Rows::operands`, reserved once where
 the unit's state is made); that is the one allocation this design adds to
 a unit, and it is why each of the four allocation pins of
 `bir/lower/unit.rs` rises by exactly one in T6k (85, 102, 85, 155 become
-86, 103, 86, 156). Read, not run: T6k's prompt makes any other movement of
-a pin a reason to stop.
+86, 103, 86, 156). Observed in the design turn with the `State` of T6k
+and a reserve of 64 operands (see "T6k: the skeleton" below); T6k's prompt
+makes any other movement of a pin a reason to stop.
 
 *Reading back.* The read-back table of the inventory has four kinds of
 read. None needs a walk, because each is one of these:
@@ -3192,7 +3193,7 @@ read. None needs a walk, because each is one of these:
 | A flag of a node the lowering holds (`flags().contains(STRICT)`, `delay_safe`, `strictly_pure`, `PURE` of an argument; `args.rs`, `cond.rs`, `expr.rs`, `ffi_args.rs`, `mod.rs::seq`, `loops.rs`) | `has(a, r, flag)` on the handle's reference | The flag was computed where the node was built (Rows: the node's flags; the builder: the row in the handle) |
 | The kind of a node it holds, and a literal's value (`View::JUndefined`, `JOptional`, `JStr`, `primitive_int`, `primitive_bool`, `primitive_string`, `primitive_bigint`) | `kind(a, r)`, `aux(a, r)`, `int(a, r)`, `text(a, r)`, `bigint(a, r)`, `var_of(a, r)`, `qualified_of(a, r)` | O(1) each: the row, or one pool entry |
 | A child, or a child of a child (`JCall` of a `JQualified` in `primitive_int_comparison`; the elements of an array of pairs in `Pmakedict`; `JDot` chains in `jsx_tag`, `copy_replacement`; `JSeq` ends in `complete_unit`, `extract_exports`) | `operand(a, r, i)` gives the reference of operand `i`; `arity(a, r)` | Each step is one read chosen by the caller; the depth is the pattern's, which is fixed (two for the runtime `compare` call, three for a dictionary entry) or counted where it is a chain (`descent` steps of the JSX tag and of `copy_replacement`, as today) |
-| Taking a node apart to keep a part (`detach` then `release`: `positive`, `PvalFromOption`, `evaluate_now`, `fold_return_tail`, `hold_external_arg`, `primitive_int_comparison`) | `into_operand(a, e, i)` for one part of a node with a fixed number of operands (the rest is released); `unpack(a, e) -> Mark` for a list (its operands go onto the operand stack, in order; `take(a, mark, i)` moves one out, `drop_operands(a, mark)` releases what is left) | The parts are operands of the node in hand; releasing the rest is `release`'s cost, one step per node released |
+| Taking a node apart to keep a part (`detach` then `release`: `positive`, `PvalFromOption`, `evaluate_now`, `fold_return_tail`, `hold_external_arg`, `primitive_int_comparison`) | `keep_operand(a, e, i)` for one part of a node with a fixed number of operands (the rest is released); `unpack(a, e) -> Mark` for a list (its operands go onto the operand stack, in order; `take(a, mark, i)` moves one out, `drop_operands(a, mark)` releases what is left) | The parts are operands of the node in hand; releasing the rest is `release`'s cost, one step per node released |
 | A statement of a run or of a list (`single_return`, `terminal`, `merge_tail_guard`, `returns_after_effects`, empty blocks; `tail.rs`; `switch.rs`) | `JsStmt` (T6l): `stmt_kind(a, &S)`, `stmt_has`, `value_of(a, &S) -> Ref` and, for a list in flight, `len(l)`, `row_at(a, l, i)`, `take_at(a, l, i)` | The statement stack owns the handles of a run; a list in flight is read by position |
 | Equality of two expressions (`same_reusable_value` in `export.rs`; inside the rules) | `equal(a, r1, r2)`, with the cost of `bir/j/equal.rs` (stops at the first difference; pairs on an explicit stack) | It is a rule's read, already counted |
 | The parent of a node (`export::row_of`, `declared`; `globals::shadowed`, `binding_scope`; the prelude of `names::replay`) | `owner(a, id)`: (f). `globals.rs` and the prelude stop needing it: (d) | - |
@@ -3334,7 +3335,7 @@ step where a statement is taken out of its list: F1 to F8 of "T6 design"
 (e) are applied to the statement in hand, and what they produce is staged
 instead of it, each result offered to the rules again (an explicit work
 stack; a result that is not an expression statement, a `return` or a
-block is final). The functions it uses are the lowering's: `into_operand`
+block is final). The functions it uses are the lowering's: `keep_operand`
 and `unpack` on the value, `not`, `if_plain`, `return_`, `exp`,
 `release`. Two marks direct it: a statement whose row has none of
 `SEAL`, `HAS_FUN`, `HAS_GLOBAL`, `JSX` and is not an expression
@@ -3418,7 +3419,7 @@ changed lines without tests.
 | Slice | Files | Own | Depends on | May run beside | Lines | Default path |
 | --- | --- | --- | --- | --- | ---: | --- |
 | T6e (changed) | `emit/builder_seal.rs` | The print forms of "T6 design" (c), the descent below `HAS_FUN`, `SEAL` and `JSX`, `Builder::release`, `Builder::copy`. Not F1 to F8 | T6d | T6g to T6j, phase C | 450 | no |
-| T6k | `bir/lower/js.rs`, `bir/j/rows.rs`, `emit/row.rs`; `bir/lower/prim_cmp.rs`, `prim_block.rs`; `State` | Every function of `Js` on `Rows`; `State<'a, B>` and the `impl` headers of every file of `bir/lower`; all of `prim_cmp.rs` and `prim_block.rs` | - | phases A, B | 650 | no |
+| T6k | `bir/lower/js.rs`, `bir/j/rows.rs`, `emit/row.rs`; `bir/lower/prim_cmp.rs`, `prim_block.rs`; `State` | Every function of `Js` on `Rows`; `State<'a, B>` and the `impl` headers of every file of `bir/lower`; all of `prim_cmp.rs` and `prim_block.rs`; the 22 call expressions of their functions in `prim.rs`, `rec.rs` and `mod.rs` (wrapped, see "T6k: the skeleton") | - | phases A, B | 650 | no |
 | T6l | `bir/lower/js_stmt.rs`, `bir/j/rows_stmt.rs`; `assign.rs`, `loops.rs`, `try_.rs` | Every function of `JsStmt` on `Rows`; all of the three files | T6k | phases A, B | 600 | no |
 | T6m | `prim.rs`, `konst.rs`, `record.rs`, `import.rs` | All of the four files | T6l | T6n, T6o, T6p, T6w, T6q | 600 | no |
 | T6n | `cond.rs`, `expr.rs` | All of the two files | T6l | T6m, T6o, T6p, T6w, T6q | 600 | no |
@@ -3454,7 +3455,7 @@ changed lines without tests.
 
 | Slice | Facts |
 | --- | --- |
-| T6k | `rg -c 'todo!\("T6k"\)' src/bir` prints nothing; `rg -n 'T6k build' src` is empty; `rg -n 'View::J\|Op::J\|View::S[A-Z]\|Op::S[A-Z]\|plain::\|norm::\|\.arena\.(view\|node\|release\|detach\|replace)\(' src/bir/lower/prim_cmp.rs src/bir/lower/prim_block.rs` is empty; `rg -n 'cfg\(test\)' -A1 src/bir/lower/mod.rs` does not show `mod js;` |
+| T6k | `rg -c 'todo!\("T6k"\)' src/bir` prints nothing; `rg -n 'T6k build' src` is empty; `rg -n 'View::J\|Op::J\|View::S[A-Z]\|Op::S[A-Z]\|plain::\|norm::\|\.arena\.(view\|node\|release\|detach\|replace)\(' src/bir/lower/prim_cmp.rs src/bir/lower/prim_block.rs` matches only below `mod tests` of each file; `rg -n 'cfg\(test\)' -A1 src/bir/lower/mod.rs` does not show `mod js;` |
 | T6l | The same `rg` for `assign.rs`, `loops.rs`, `try_.rs` with `block_from_list\|new_node\(` added to the pattern; `rg -c 'todo!\(' src/bir/j/rows_stmt.rs` prints nothing |
 | T6m to T6q, T6w | The same `rg` for the slice's files, outside tests; `rg -c 'from_node\|B::node\(\|B::at\(' <files>` is pasted (it may only fall in T6x) |
 | T6x | `rg -n 'from_node\|fn node\(\|fn at\(' src/bir` is empty; `rg -n 'NodeId' src/bir/lower/out.rs` matches only inside its tests |
@@ -3468,6 +3469,66 @@ What is designed to the level of a build prompt in this turn: T6k
 files and end state fixed here; each gets its skeleton and tests from a
 design turn, T6l first. T6u, T6v and the T4 slices need a design turn
 each.
+
+#### T6k: the skeleton
+
+Status: skeleton and acceptance tests committed; bodies are T6k's
+(11.9). Files: `bir/lower/js.rs` (the trait, every function with its
+cost), `bir/j/rows.rs` (`Rows`, 85 bodies `todo!("T6k")`, with a table in
+its header that says what each body is), `bir/lower/js_tests.rs` (15
+tests, 11 ignored as "T6k build"), `emit/row.rs` (`Kind`, `Row`, `flag`,
+`num`, `var`, moved out of `emit/builder.rs`, which re-exports them). The
+three modules are compiled for tests only until T6k's second commit.
+
+**What ran, and against what.** A prototype of all 85 bodies was written,
+the 15 tests were run against it (15 passed), and the bodies were then
+taken out; with the bodies out, each of the 11 ignored tests fails with
+`not yet implemented: T6k` and with nothing else, which is the mechanical
+check that an ignored test reaches no body of a later slice (the tests
+call `Rows`, `bir/j/plain.rs` and `bir/j/norm.rs` and nothing of the
+lowering). A second, throw-away probe then did the rest of T6k on the
+prototype: `State<'a, B>` with every `impl` header, and `prim_cmp.rs` and
+`prim_block.rs` converted whole. With it `cargo test --lib bir::lower`
+gave 514 passed and 4 failed, the 4 being the allocation pins, each by
+exactly one (86, 103, 86, 156). The probe is not committed: the committed
+tree is today's lowering, and its tests pass as before (`bir::lower` 518
+passed and 11 ignored, `emit::builder` 26, `bir::j` 58).
+
+**What the tests are.** The oracle form: the same nodes are built in two
+arenas that start equal, once through `Js` on `Rows` and once with the
+calls of `plain.rs` and `norm.rs` the lowering makes today, and
+`Bir::dump` of the two must be equal (every node with its operation,
+`aux`, flags and operands; every variable with its uses). No expected row
+is written down. The rule functions are compared on 11 operands that the
+rules treat differently, in every pair (22 binary rules, 10 unary). The
+step test is a relation: steps at 10,000 minus steps at 1,000 equal nine
+times the step from 1,000 to 2,000, for a nest, for a wide call and for
+taking a wide call apart. The allocation test is a relation too: building
+a call of 1,000 and of 10,000 arguments through a warm `Rows` allocates
+less than building it with an argument vector, as the lowering does today.
+No test pins a count that a later slice changes.
+
+**Changes to "T6: the interface" that the skeleton made**, each with its
+reason:
+
+| Change | Reason |
+| --- | --- |
+| `int` (a) is `int_literal`; `int` is the reader | Two functions had one name |
+| `not_plain`, `bnot_plain`, `char` are not in the trait | The lowering has no call of them today (`rg 'View::JNot\|View::JBnot' src/bir/lower` matches readers and tests only; a character literal is `number` of its constant, and the lowering sets a character on a node only when it copies one, which is `copy_cold`). A function without a caller is not added |
+| `unpack(a, e) -> Mark` and `take(a, mark, i)` are `unpack_rev(a, e) -> u32` and `pop()` | `take` by index would leave a hole in the operand stack that the next `mark` could not describe. `unpack_rev` pushes the operands last to first, so `pop` returns them first to last, and every operand is moved out exactly once |
+| `into_operand` is `keep_operand` | Clippy's convention for `into_` wants `self` by value; the crate builds without `allow` |
+| `copy_leaf(a, r) -> E` is added | `primitive_min_max` copies a literal leaf without the bookkeeping of `copy` (no occurrence is counted for a literal). With it the function needs no `View` |
+| `assume_strict(a, &mut E)` is added | The lowering sets `STRICT` on arrays, objects, blocks, optionals and functions it builds through `bir::j::pure_expression`, whatever their operands are. That is today's behaviour and it is kept: the function says so at the call. A leaf has the flag already (tested: a leaf built by `pure_expression` and the leaf of the interface dump alike), so the leaves need no second family. Whether the forced flag can disagree with the computed one is an open question of this turn |
+| `text` returns `None` for a template whose one part has no cooked text | `State::primitive_string` does; `plain::string_of` returns the empty string. The lowering's reader is the one the interface replaces |
+| `equal`, `owner`, `kind_of` as a trait function, `operand_index`, `park`, `effect`, `if_head` are not in the skeleton | They are T6l's, T6q's and the T4 slices' additions, each with the slice that has their first caller. `kind_of` exists as a free function of `rows.rs` (tested: every J and S operation has a kind of its own, and `Named` is no operation's) |
+| The interface is `pub`, with `emit::row` | Outside tests the trait has, after T6k, 57 functions without a caller; a `pub(crate)` trait would need `#[cfg(test)]` on each, on its implementation and on the imports only they use, moved by every later slice. `bir::j::norm`, `bir::j::plain` and `bir::lower::out` are `pub` modules already. Tried both ways in the probe: the `pub` form compiles without a warning. T6t narrows it when the type parameter goes |
+| A converted function takes and returns `B::E`; its callers in files of later slices are wrapped at the call (`B::node(self.f(B::from_node(x)))`) | The other form (convert inside, keep `NodeId` at the edge) makes a later slice change a signature in a file another slice owns: `primitive_set_field` is called from `prim.rs` (T6m) and `rec.rs` (T6w), which run side by side. A wrapper is removed by the slice that owns the file it is in |
+| `State<'a, B: js::Js = Rows>`: the parameter has a default | 73 tests say `State::new(input)` and about 40 closures say `State<'_>`; with the default none of them changes |
+
+**Found on the way, not changed.** `norm::jm8_int32_lsr` folds two
+literals with `>>` on the count as given, which overflows in a debug build
+for a negative count. The lowering does not produce one (the tests skip
+that pair); it is a note for the T6h slice, whose rule it becomes.
 
 ### 11.5 Worker prompt for T4b
 
@@ -4064,6 +4125,163 @@ decision in a constructor (omitting an `else`, a value or a statement);
 a Vec per list (a list is a run of the pool); copying a statement instead
 of moving it; a statement constructor that reads the table for a
 statement it was given in a handle.
+```
+
+Common to every prompt of phase C (T6k to T6x; part of each, in place of
+the common block above):
+
+```text
+Repository: compiler-rust/. Read first: AGENTS.md; docs/THREE_TREES.md
+11.4 "T6: the interface", "T6: the cut of the interface, revisited" and
+"T6k: the skeleton"; src/bir/lower/js.rs and src/bir/j/rows.rs whole
+(the header of rows.rs says what every body is).
+
+You build bodies and convert call sites. You change no signature of the
+trait, no doc-comment cost, no pinned size and no test other than what
+the task names. If one cannot be met, stop: commit what passes, and
+report the function, the test and the smallest input that shows it.
+Adding a private helper is yours; say what you added in the commit
+message, with its cost in its doc comment.
+
+Converting a file means: every construction, read, release and detach of
+a J or S node in it goes through `self.js` with `&self.arena` or `&mut
+self.arena`, and the functions of the file take and return `B::E` where
+they took and returned the `NodeId` of a J node (a `NodeId` of the source
+tree stays). A call of a converted function from a file that is not
+yours is wrapped at the call and nowhere else: `B::from_node(x)` for an
+argument, `B::node(...)` around the result. A call from your file to a
+function that is not converted is wrapped the other way. You change
+nothing else in a file that is not yours. Where the code calls `plain::`
+it calls the plain function; where it calls `norm::` it calls the rule
+function named for that rule in "T6: the interface" (c): the family is
+never changed.
+
+Counts as failure: an `allow` attribute; `#[cfg(test)]` on a function of
+the trait; a hash map or set; a Vec, Box, String or format! per node or
+per operand; a walk over an expression; a `View::J`, `Op::J`, `plain::`
+or `norm::` left in a converted file outside its tests; a new function
+of the trait (stop and report the call that needs it); a changed
+expected value in a test of the lowering; an ignored test other than
+those of a later slice; a number you did not measure; `unsafe`.
+
+Every commit: `cargo check --all-targets --manifest-path
+compiler-rust/Cargo.toml` and `cargo clippy --all-targets --manifest-path
+compiler-rust/Cargo.toml` print no warning; `cargo test --manifest-path
+compiler-rust/Cargo.toml --lib bir::lower` and `--lib bir::j` pass.
+Never run the whole test suite: a checkout without the built runtime
+fails tests that have nothing to do with this slice; CI judges those.
+Push after every commit. Changelog: a fragment under changes/ ending in
+`.internal.md`, one line starting with "- ".
+
+The generated JavaScript does not change and the default build does not
+run this code: the CI job `Instruction count` stays within +0.02%. If it
+does not, stop and report the number.
+```
+
+T6k:
+
+```text
+Task T6k: the first implementation of the lowering's interface, and the
+first two files on it.
+Precondition, check it first and stop with a report if it fails:
+`rg -c 'todo!\("T6k"\)' src/bir/j/rows.rs` prints 85, and `cargo test
+--manifest-path compiler-rust/Cargo.toml --lib bir::lower::js::` shows 4
+passed and 11 ignored.
+Yours: src/bir/j/rows.rs; src/bir/lower/prim_cmp.rs and prim_block.rs
+whole; the `State` struct, `State::new` and the three module lines named
+below; the `impl` header lines of every file of src/bir/lower; the four
+numbers of src/bir/lower/unit.rs named below; the 22 call expressions
+named in commit 3; src/bir/lower/js_tests.rs (removing ignore attributes
+only); the changelog fragment. Nothing else.
+
+Do exactly this, one commit each, in this order, each pushed when made:
+
+1. Every body marked todo!("T6k") in src/bir/j/rows.rs, as the table in
+   its header says. Remove the ignore from the 11 tests of
+   `bir::lower::js::tests`: 15 pass. The modules stay compiled for tests
+   only in this commit.
+
+2. The lowering holds the implementation.
+   - Remove `#[cfg(test)]` from `pub mod js;` (src/bir/lower/mod.rs),
+     `pub mod rows;` (src/bir/j/mod.rs) and `pub mod row;`
+     (src/emit/mod.rs).
+   - `struct State<'a>` becomes
+     `struct State<'a, B: js::Js = crate::bir::j::rows::Rows>` with a
+     first field `js: B`.
+   - Every `impl State<'_> {` in src/bir/lower becomes
+     `impl<B: super::js::Js> State<'_, B> {` (in mod.rs: `js::Js`); the
+     same for `impl ProbeRules for State<'_>` and `impl Realizer for
+     State<'_>`.
+   - `State::new(input)` becomes, in the generic impl, `fn with(input,
+     js: B) -> Self` with the same body and `js` stored; and a second
+     impl block `impl<'a> State<'a> { fn new(input) -> Self }` that makes
+     `Rows::default()`, calls `reserve(64)` on it and calls `with`. No
+     caller of `State::new` changes.
+   - In src/bir/lower/unit.rs the four allocation counts 85, 102, 85, 155
+     become 86, 103, 86, 156: the one allocation is the operand stack
+     (say so in the comment there). If any of the four is another number,
+     stop and report it.
+   No call site changes in this commit and no test changes its result.
+
+3. prim_cmp.rs and prim_block.rs converted.
+   - `comparison_constant`, `primitive_bool_comparison`,
+     `primitive_int_comparison`, `primitive_literal_comparison`,
+     `primitive_object_comparison`, `primitive_min_max`, `primitive_field`
+     and `primitive_set_field` take and return `B::E`;
+     `flat_make_field` keeps its source `NodeId` and returns
+     `Option<B::E>`.
+   - Their 22 calls outside the two files are wrapped: 20 in prim.rs
+     (lines found by `rg -n 'primitive_(int|bool|literal|object)_comparison\(|primitive_min_max\(|primitive_field\(|primitive_set_field\(' src/bir/lower/prim.rs`),
+     1 in rec.rs (`primitive_set_field`), 1 in mod.rs (`flat_make_field`:
+     `.map(B::node)`). The two reads `self.primitive_bool(values[i])` in
+     prim.rs are not touched.
+   - `State::primitive_bool(&self, node: NodeId)` stays in prim_cmp.rs
+     for those two reads, as the readers on `B::at(node)`; T6m deletes
+     it. `State::primitive_string` and `primitive_bigint` are deleted:
+     their reads are `text` and `bigint`. `primitive_literal_copy` is
+     `copy_leaf` then `copy_cold`.
+   - `primitive_int_comparison` strips `compare(l, r) <cmp> 0` so: the
+     test is `kind` is `Call`, `arity` is 3 and `qualified_of` of
+     operand 0 is a member "compare" of a runtime module; then
+     `release` of the right operand, `unpack_rev` of the call, and three
+     `pop`s: the callee (released), the new left, the new right.
+   - `strictly_pure(..)` is `has(.., flag::STRICT)`. A `matches!` on two
+     views is a `matches!` on two kinds.
+   - `primitive_runtime` and `static_member` are T6m's: a call of
+     `primitive_runtime` is wrapped; `flat_make_field` builds its member
+     with `var`, `intern_text` and `dot(.., FieldPos::new(None), false)`
+     and does not call `static_member`.
+   The tests of both files pass unchanged.
+
+4. The changelog fragment changes/lowering-interface-rows.internal.md.
+
+Relations to hold (asserted by the tests): through the interface and
+with today's calls the arena dumps alike, for every leaf, every plain
+function, every list constructor and every rule function on 11 operands
+in every pair; steps at 10,000 minus steps at 1,000 are nine times the
+step from 1,000 to 2,000; a warm `Rows` allocates less for a call of
+10,000 arguments than today's argument vector does.
+
+End state, to paste in the pull request with the output:
+- `rg -c 'todo!\("T6k"\)' src/bir` prints nothing; `rg -n 'T6k build'
+  src` is empty.
+- `rg -n 'View::J|Op::J|View::S[A-Z]|Op::S[A-Z]|plain::|norm::|\.arena\.(view|node|release|detach|replace)\('
+  src/bir/lower/prim_cmp.rs src/bir/lower/prim_block.rs` matches only
+  below `mod tests` of each file.
+- `rg -n 'cfg\(test\)' -A1 src/bir/lower/mod.rs src/bir/j/mod.rs
+  src/emit/mod.rs` shows none of `mod js;`, `mod rows;`, `mod row;`.
+- `rg -c 'B::from_node|B::node\(|B::at\(' src/bir/lower` pasted (it
+  may only fall from here to T6x).
+- `cargo test --manifest-path compiler-rust/Cargo.toml --lib
+  bir::lower::js::`: 15 passed, 0 ignored.
+- The CI job `Instruction count` within +0.02%.
+
+Shortcuts that count as failure, beside the common list: a body of
+rows.rs that does something other than its row of the header's table
+(for one, a rule applied in a plain function); a reader that counts a
+step; `Rows` holding anything but the operand stack and the step count;
+an allocation pin moved by more than one; converting a function of
+prim.rs because a wrapper looked untidy.
 ```
 
 ## 12. Risks and what was not measured
