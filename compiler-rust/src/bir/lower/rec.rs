@@ -1,6 +1,7 @@
 //! Recursive binding groups (BACKEND_LOWERING 5.3).
 use super::*;
 use crate::bir::{ListId, Op};
+use crate::emit::row::Kind;
 use crate::lambda::{lam_primitive::Primitive, TagInfo};
 
 /// A group's source handle and pooled member slice; no per-group allocation.
@@ -86,13 +87,17 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// O(1) shape selection and construction; tag data remains borrowed.
     fn recursive_dummy(&mut self, tag: &TagInfo) -> NodeId {
-        if matches!(tag, TagInfo::Tuple | TagInfo::ModuleExport(_))
+        let mut dummy = if matches!(tag, TagInfo::Tuple | TagInfo::ModuleExport(_))
             || matches!(tag, TagInfo::Record(r) if r.array) {
-            self.pure_expression(View::JArray { values: &[] }, 1)
+            let mark = self.js.mark();
+            self.js.array(&mut self.arena, mark, 1)
         } else {
             let info = self.arena.object_info(&[]);
-            self.pure_expression(View::JObject { values: &[], info }, 0)
-        }
+            let mark = self.js.mark();
+            self.js.object(&mut self.arena, mark, info)
+        };
+        self.js.assume_strict(&mut self.arena, &mut dummy);
+        B::node(dummy)
     }
 
     /// O(a + field-name bytes): turn the self block's already lowered fields
@@ -105,23 +110,23 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let prims = std::mem::take(&mut self.arena.pools.prims);
         let Primitive::Pmakeblock(tag, _) = &prims[primitive.index()].primitive else { unreachable!() };
         if mode == Mode::Update {
-            let target = self.pure_expression(View::Var { var }, 0);
-            let call = self.primitive_runtime("Primitive_object", "updateDummy", &[target, value]);
+            let target = self.js.var(&mut self.arena, var);
+            let call = self.primitive_runtime("Primitive_object", "updateDummy", &[B::node(target), value]);
             self.drop_pure_effect(call);
             let dummy = self.recursive_dummy(tag);
-            self.rec_members[member].placeholder = Some(crate::bir::j::declare(&mut self.arena, LetKind::Variable, var, dummy));
+            let placeholder = self.js.declare(&mut self.arena, LetKind::Variable, var, Some(B::from_node(dummy)));
+            self.rec_members[member].placeholder = Some(B::stmt_node(placeholder));
         } else {
             let dummy = self.recursive_dummy(tag);
-            let declaration = crate::bir::j::declare(&mut self.arena, LetKind::Variable, var, dummy);
-            self.statements.push(declaration);
-            let View::JBlockLit { values, .. } = self.arena.view(value) else { unreachable!("recursive self block") };
-            let count = values.len();
+            let declaration = self.js.declare(&mut self.arena, LetKind::Variable, var, Some(B::from_node(dummy)));
+            self.statements.push(B::stmt_node(declaration));
+            let mut shell = B::from_node(value);
+            assert!(self.js.kind(&self.arena, B::of(&shell)) == Kind::BlockLit, "recursive self block");
+            let count = self.js.take_operands(&mut self.arena, &mut shell) as usize;
             for index in 0..count {
                 self.rec_steps += 1;
-                let View::JBlockLit { values, .. } = self.arena.view(value) else { unreachable!() };
-                let field_value = values[index];
-                self.arena.detach(field_value);
-                let target = self.pure_expression(View::Var { var }, 0);
+                let field_value = self.js.pop();
+                let target = self.js.var(&mut self.arena, var);
                 let mut numbered = [0u8; 24];
                 let field = match tag {
                     TagInfo::Record(r) => r.fields[index].0.as_str(),
@@ -136,10 +141,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     }
                     _ => unreachable!("self-init classification"),
                 };
-                let set = B::node(self.primitive_set_field(index as i32, field, B::from_node(target), B::from_node(field_value)));
+                let set = B::node(self.primitive_set_field(index as i32, field, target, field_value));
                 self.drop_pure_effect(set);
             }
-            self.arena.release(value);
+            self.js.release(&mut self.arena, shell);
         }
         self.arena.pools.prims = prims;
     }
@@ -153,7 +158,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let member = group.base as usize + count - 1 - index;
         let mut out = self.realize(cx, child);
         if self.rec_members[member].mode != Mode::Declare {
-            let value = out.value.take().unwrap_or_else(|| self.pure_expression(View::JUndefined, 0));
+            let value = out.value.take().unwrap_or_else(|| B::node(self.js.undefined(&mut self.arena, false)));
             self.recursive_block(member, value);
             // Legacy updateDummy/self initialization always produces a normal
             // block output, even when the block value's prelude was finished.
@@ -171,12 +176,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             }
             for i in group.base as usize..group.base as usize + count {
                 self.rec_steps += 1;
-                let list = self.rec_members[i].code.take().unwrap();
-                for k in 0..self.arena.lists.get(list).len() {
+                let list = B::list_from(self.rec_members[i].code.take().unwrap());
+                for k in 0..self.js.len(&self.arena, list) {
                     self.rec_steps += 1;
-                    let statement = self.arena.lists.get(list)[k];
-                    if finished == Finished::True { self.arena.release(statement); }
-                    else { self.statements.push(statement); }
+                    let statement = self.js.take_at(&mut self.arena, list, k);
+                    if finished == Finished::True { self.js.release_stmt(&mut self.arena, statement); }
+                    else { self.statements.push(B::stmt_node(statement)); }
                 }
                 if self.rec_members[i].finished == Finished::True { finished = Finished::True; }
             }
