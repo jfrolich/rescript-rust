@@ -2555,3 +2555,30 @@ expansion test and the occurrence probe) and R3f.
 Together: the out-of-line `expand_head` and the reloads behind K3's test
 cost about +174 (`expand_head` + `expand_once` + `unify_expanded`), the
 probe takes back 34.
+
+### Attempt (a): the loaded node and row go to the expansion. Reverted.
+
+`013996c36`. `Checker::expand_once` and `Checker::expand_head` became
+wrappers, of unchanged signature and behaviour, of a private
+`Checker::expand_loaded` and a `pub(super)` `Checker::expand_head_loaded`
+that take the head's node and its type's row as loaded
+(`Checker::load_head`); K3's test (`never_expands`, as `may_expand`)
+returned the pair it loaded and the head that may expand handed it to
+`expand_head_loaded`. The loads went, as intended: `expand_loaded` is 42
+below `expand_once` (774 against 816). But both pairs of expansions now
+make out-of-line calls with the pair as two 16-byte arguments: the first
+pair calls `expand_head_loaded` (entry line 52, its call of
+`expand_loaded` 56, return line 40, for the four calls), the second pair
+calls `expand_head`, now a wrapper of 78 around the same call. Against
+trunk: `unify_abbrev2` +145.00, `unify_ground3` -1.00, `unify_datatype2` +1.00
+(the whole table is in "Per attempt" below):
+
+| Function | Trunk | (a) | Change |
+|---|---:|---:|---:|
+| `Checker::expand_once` | 816.00 | 0.00 | -816.00 |
+| `Checker::expand_loaded` | 0.00 | 774.00 | +774.00 |
+| `Checker::expand_head_loaded` | 0.00 | 292.00 | +292.00 |
+| `Checker::expand_head` | 212.00 | 78.00 | -134.00 |
+| `Checker::unify_expanded` | 195.00 | 224.00 | +29.00 |
+| every other function | 1745.06 | 1745.06 | +0.00 |
+| total | 2968.06 | 3113.06 | +145.00 |

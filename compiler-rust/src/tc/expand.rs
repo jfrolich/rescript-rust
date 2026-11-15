@@ -650,42 +650,15 @@ impl Checker {
     /// constructor node of the target type sharing the argument list.
     /// `expand_abbrev_gen`, compiler/ml/ctype.ml:1187. (R3b)
     pub fn expand_once(&mut self, ty: Ty, mode: ExpandMode) -> Result<Ty, Clash> {
-        let (node, info) = self.load_head(ty);
-        self.expand_loaded(ty, node, info, mode)
-    }
-
-    /// O(1): node `ty` and, when it is a constructor, its type's row
-    /// ([`TypeTable::info`]), otherwise [`ABSTRACT`]: one node load and at
-    /// most one row load. What [`Checker::expand_loaded`] and
-    /// [`Checker::expand_head_loaded`] take, so that a caller that already
-    /// tested them hands them on instead of loading them again. (K4)
-    #[inline(always)]
-    pub(super) fn load_head(&self, ty: Ty) -> (Node, TypeInfo) {
         let node = self.g.nodes[ty.0 as usize];
-        let info = if node.tag() == CONSTR {
-            self.types.info(node.a)
-        } else {
-            ABSTRACT
-        };
-        (node, info)
-    }
-
-    /// [`Checker::expand_once`] of `ty` with `(node, info)` the answer of
-    /// [`Checker::load_head`] for it, loaded by the caller: the same steps
-    /// and cost less the node and row loads. (K4)
-    fn expand_loaded(
-        &mut self,
-        ty: Ty,
-        node: Node,
-        info: TypeInfo,
-        mode: ExpandMode,
-    ) -> Result<Ty, Clash> {
         if node.tag() != CONSTR {
             return Ok(Ty(NONE));
         }
         let private = matches!(mode, ExpandMode::Opt | ExpandMode::Rigid);
         let mut memorized = self.find_expansion(ty, private);
+        let mut info = ABSTRACT;
         if memorized.0 == NONE {
+            info = self.types.info(node.a);
             // `find_expans` goes on through `Mlink` (btype.ml:618): the
             // entries of the nodes whose expansions made this one.
             if info.flags & INHERITS != 0 && node.arity() != 0 {
@@ -839,28 +812,11 @@ impl Checker {
     /// type's parameters are constrained. (R3b)
     pub fn expand_head(&mut self, ty: Ty, mode: ExpandMode) -> Result<Ty, Clash> {
         let original = self.g.repr(ty);
-        let (node, info) = self.load_head(original);
-        self.expand_head_loaded(original, node, info, mode)
-    }
-
-    /// [`Checker::expand_head`] of the representative `original` with
-    /// `(node, info)` the answer of [`Checker::load_head`] for it, loaded by
-    /// the caller: the first step is [`Checker::expand_loaded`] on them, each
-    /// later one loads its head. The same steps and cost less the first
-    /// node and row loads. (K4)
-    pub(super) fn expand_head_loaded(
-        &mut self,
-        original: Ty,
-        node: Node,
-        info: TypeInfo,
-        mode: ExpandMode,
-    ) -> Result<Ty, Clash> {
         let mut head = original;
-        let (mut node, mut info) = (node, info);
         loop {
             #[cfg(test)]
             super::steps::tick();
-            let next = match self.expand_loaded(head, node, info, mode) {
+            let next = match self.expand_once(head, mode) {
                 Ok(next) => next,
                 // `expand_head_opt` backtracks and returns the type it was
                 // given (compiler/ml/ctype.ml:1330-1335).
@@ -881,7 +837,6 @@ impl Checker {
                 return Ok(head);
             }
             head = next;
-            (node, info) = self.load_head(head);
         }
     }
 
