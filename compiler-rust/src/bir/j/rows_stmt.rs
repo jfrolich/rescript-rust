@@ -46,6 +46,7 @@
 //! | `stmt_located` | T6o | `NodeFlags::JS_LOC_PRESENT` |
 //! | `is_empty_block` | T6n | an `SBlock` whose `statements` is empty |
 //! | `branch_last_kind` | T6n | of an `SIf`: `rows::kind_of` of the operation of the last entry of the `statements` of `then_`, or of `else_` when `otherwise`; `None` for no entry or no `else_` |
+//! | `copy_stmt` | T6o | `Bir::copy_subtree_with_scratch(s, &[], fresh, ..)` with the copy storage and the label vector of `Rows`, as `copy_fresh` |
 //! | `release_stmt` | T6n | `Bir::release`; one step per node it frees |
 //! | `if_blocks` | T6n | `Bir::new_node(View::SIf { condition, then_, else_: Some(else_) }, 0)` over the two blocks; one step |
 //! | `take_if` | T6n | of an `SIf`: `Bir::detach` of `condition`, `then_` and of `else_` when there is one, `Bir::release` of the statement; one step |
@@ -274,6 +275,9 @@ impl JsStmt for Rows {
         let block = if otherwise { else_? } else { then_ };
         let View::SBlock { statements } = a.view(block) else { panic!("a branch is a block") };
         statements.last().map(|&last| kind_of(a.node(last).op()))
+    }
+    fn copy_stmt(&mut self, a: &mut Pools, s: &S, fresh: &mut Vec<(VarId, VarId)>) -> S {
+        S(self.copy_recording(a, s.0, fresh))
     }
     #[inline]
     fn release_stmt(&mut self, a: &mut Pools, s: S) {

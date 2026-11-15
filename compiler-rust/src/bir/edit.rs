@@ -51,6 +51,13 @@ pub(crate) struct CopyScratch {
     nodes: DenseMap<NodeId>,
 }
 
+impl CopyScratch {
+    /// The nodes the last copy visited: the size of what it copied. O(1).
+    pub(crate) fn copied(&self) -> usize {
+        self.order.len()
+    }
+}
+
 #[cfg(test)]
 impl CopyScratch {
     /// Reserve the already reserved arena domains; recycled handles may change

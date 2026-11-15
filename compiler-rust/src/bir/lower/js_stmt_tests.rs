@@ -1013,3 +1013,80 @@ fn releasing_a_statement_costs_one_step_per_node() {
     let (one, two, ten) = (steps(1_000), steps(2_000), steps(10_000));
     assert_eq!(ten - one, 9 * (two - one), "{one} {two} {ten}");
 }
+
+#[test]
+fn a_copy_is_the_copy_the_lowering_makes_today_and_reports_its_binders() {
+    // A block of `let t = x;` and a run: the binder is fresh in the copy.
+    for shape in SHAPES {
+        let (mut left, mut right) = (unit(), unit());
+        let mut r = Rows::default();
+        let x = r.var(&mut left.b, left.x);
+        let declaration = r.declare(&mut left.b, LetKind::Strict, left.t, Some(x));
+        let rest: Vec<S> = shape.iter().map(|&st| statement(&mut r, &mut left, st)).collect();
+        let list = r.list(&mut left.b, 1 + shape.len() as u32, std::iter::once(declaration).chain(rest));
+        let block = r.block_of(&mut left.b, list);
+        let mut fresh = Vec::new();
+        done(r.copy_stmt(&mut left.b, &block, &mut fresh));
+        assert_eq!(fresh.len(), 1);
+        assert_eq!(fresh[0].1, left.t);
+
+        let b = &mut right.b;
+        let value = var(b, right.x);
+        let declaration = crate::bir::j::declare(b, LetKind::Strict, right.t, value);
+        let mut statements = vec![declaration];
+        statements.extend(shape.iter().map(|&st| statement_today(&mut right, st)));
+        let b = &mut right.b;
+        let list = b.lists.push_iter(statements.len(), statements.into_iter());
+        let block = b.block_from_list(list);
+        let (mut vars, mut labels) = (Vec::new(), Vec::new());
+        built(b.copy_subtree_recording(block, &[], &mut vars, &mut labels));
+        assert_eq!(vars, fresh);
+        assert_eq!(left.b.dump(), right.b.dump());
+    }
+    // The copy of an expression reports alike.
+    let mut u = unit();
+    let mut r = Rows::default();
+    let body = run(&mut r, &mut u, &[St::Return]);
+    let function = r.function(&mut u.b, u.header, body);
+    let mut fresh = Vec::new();
+    let copy = r.copy_fresh(&mut u.b, Rows::of(&function), &mut fresh);
+    assert_eq!(r.kind(&u.b, Rows::of(&copy)), Kind::Fun);
+    assert!(fresh.is_empty());
+}
+
+#[test]
+fn a_copy_costs_one_step_per_node_and_allocates_nothing_in_a_warm_unit() {
+    let measure = |size: usize| {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let statement = nest(&mut r, &mut u, size);
+        let mut fresh = Vec::new();
+        // The first copy sizes the arena and the copy storage.
+        let lists_before = u.b.lists.storage_shape().0;
+        let warm = r.copy_stmt(&mut u.b, &statement, &mut fresh);
+        let growth = u.b.lists.storage_shape().0 - lists_before;
+        r.release_stmt(&mut u.b, warm);
+        u.b.lists.reserve_test_growth(growth);
+        r.reserve_copy(&u.b);
+        u.b.js_scope.as_mut().expect("the unit counts occurrences").reserve_repeat();
+        let capacities = r.copy_capacities();
+        let caps = |b: &Bir| [b.nodes.capacity(), b.lists.storage_shape().1, b.pools.js.capacity(), b.release_stack.capacity(), b.free_nodes.capacity(), b.parents.capacity(), b.vars.name.capacity()];
+        let caps_before = caps(&u.b);
+        let before = r.steps();
+        let mut copy = None;
+        let allocations = allocation_counter::measure(|| copy = Some(r.copy_stmt(&mut u.b, &statement, &mut fresh)));
+        let steps = r.steps() - before;
+        assert_eq!(caps(&u.b), caps_before);
+        assert_eq!(allocations.count_total, 0, "size {size}");
+        assert_eq!(r.copy_capacities(), capacities);
+        assert!(fresh.is_empty());
+        // One step per node: releasing the copy counts the same nodes.
+        let before = r.steps();
+        r.release_stmt(&mut u.b, copy.expect("the copy"));
+        assert_eq!(r.steps() - before, steps);
+        assert!(steps as usize >= size);
+        steps
+    };
+    let (one, two, ten) = (measure(1_000), measure(2_000), measure(10_000));
+    assert_eq!(ten - one, 9 * (two - one), "{one} {two} {ten}");
+}

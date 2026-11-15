@@ -191,6 +191,14 @@ pub trait JsStmt: Js {
     /// statement that is not an `If`. (T6n: `cond.rs::merge_tail_guard`
     /// reads whether a guard ends in a jump and has nothing in its else.)
     fn branch_last_kind(&self, a: &Pools, s: &Self::S, otherwise: bool) -> Option<Kind>;
+    /// A copy of the statement `s` and everything below it: the binders
+    /// and the static labels inside it are fresh, and `(fresh, source)` is
+    /// appended to `fresh` for each binder, in the order the fresh
+    /// variables were made. One step per node copied; allocates nothing
+    /// once the implementation's copy storage and `fresh` have their
+    /// capacity. (T6o: `untagged.rs::copy_dispatch_output`, an action of a
+    /// dispatch that is emitted more than once.)
+    fn copy_stmt(&mut self, a: &mut Pools, s: &Self::S, fresh: &mut Vec<(VarId, VarId)>) -> Self::S;
     /// `s` is not used: its references and sites are given back. One step
     /// per node released. (T6n: `cond.rs::release_run`, a discarded run.)
     fn release_stmt(&mut self, a: &mut Pools, s: Self::S);
