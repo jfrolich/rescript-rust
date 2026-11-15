@@ -3112,3 +3112,3351 @@ stderr (328 bytes):
   the stronger state-survival conditions remain unproved.
 - The two-file D2 witness has not been reduced further or attributed to D2's
   swallowed lowering error. It must not be used as evidence of that cause.
+
+## Second round: universal variables, polymorphic types and packages
+
+### Scope, calibration and reproducibility
+
+This search ran 74 candidates against `7871ac5909`, six per place in U1–U11
+order followed by eight reduction/coverage probes. All output comparisons use the
+unmodified compiler; a separate instrumented binary records reachability only.
+A WITNESS is an observed difference, **not a causal attribution** to the nominated
+lines. In particular U2, U7 and U8 have off-path witnesses. REACHED means the
+specific marker ran, not that every escape/mutation condition was satisfied.
+The smallest witness found for each place is identified below; this is bounded
+reduction, not a proof of global minimality.
+
+Every source below ends with a newline. Every candidate has its own temporary
+directory under `$TMPDIR`, containing `Main.res`, optional `Main.resi`, and:
+
+```json
+{"name":"checker-probe","sources":["."]}
+```
+
+Commands (ROOT is the checkout; SCRATCH is a temporary directory):
+
+```sh
+export PATH="$HOME/.cargo/bin:$PATH"
+export ROOT="$PWD"
+export RESCRIPT_RUNTIME="$ROOT/packages/@rescript/runtime"
+eval $(opam env)
+dune build --root .
+CARGO_TARGET_DIR="$ROOT/.universal-target" CARGO_PROFILE_RELEASE_LTO=thin \
+  cargo build --release --manifest-path rewatch/Cargo.toml
+cp .universal-target/release/rescript "$SCRATCH/rescript-original"
+"$SCRATCH/rescript-original" build-reference \
+  --bsc "$ROOT/_build/install/default/bin/bsc" packages/@rescript/runtime
+# bsc-original is a shell wrapper executing rescript-original bsc "$@".
+RUST_BSC="$SCRATCH/bsc-original" PARITY_JOBS=1 \
+  bash scripts/test_error_output_parity.sh --release --compiler-only apply_non_function.res
+```
+
+The initial Cargo attempt with the default target directory failed writing a
+cached dependency file (`No such file or directory`); a fresh target directory
+built successfully. OCaml build exited 0 with empty stdout and stderr. Rust:
+
+```text
+warning: `rescript` (lib) generated 1 warning (run `cargo fix --lib -p rescript` to apply 1 suggestion)
+warning: `rescript` (lib) generated 1 warning (1 duplicate)
+    Finished `release` profile [optimized] target(s) in 2m 05s
+```
+
+The warning is the existing unused `console::style` import in
+`rewatch/src/build/packages.rs:12`. Runtime and calibration output (terminal
+color escapes omitted only in this build/calibration summary):
+
+```text
+OCaml reference build: 113 of 113 modules built
+Compiler diagnostics parity
+
+Error output parity summary
+  total:  2
+  pass:   2
+  fail:   0
+SUCCESS: OCaml and Rust diagnostic output match for tested fixtures.
+```
+
+The first calibration attempt omitted RESCRIPT_RUNTIME for the relocated Rust
+binary and failed with `bsc: pass -runtime-path or set RESCRIPT_RUNTIME` (exit 1).
+The exported runtime above fixes that setup error; it is not a checker witness.
+Existing fixture `tests/build_tests/super_errors/fixtures/apply_non_function.res`:
+
+```rescript
+let x = 1
+
+let y = x(2)
+```
+
+Both exit 2; stdout:
+
+```text
+```
+
+Both stderr:
+
+```text
+
+  We've found a bug for you!
+  tests/build_tests/super_errors/fixtures/apply_non_function.res:3:9
+
+  1 │ let x = 1
+  2 │ 
+  3 │ let y = x(2)
+  4 │ 
+
+  This can't be called, it's not a function.
+  It has type: int
+
+```
+
+Each single-file candidate was compiled from its directory with these commands:
+
+```sh
+timeout 10 "$ROOT/_build/install/default/bin/bsc" -w +A -bs-jsx 4 -color never Main.res
+timeout 10 "$SCRATCH/rescript-original" bsc -w +A -bs-jsx 4 -color never Main.res
+```
+
+The runner uses Python `subprocess.run(capture_output=True, text=True, timeout=10)`
+for the equivalent timeout and separate exit/stdout/stderr capture. Before each
+invocation it deletes only that candidate's generated `.cm*` files. U6 uses the
+parity script's reference interface prebuild before **each** implementation:
+
+```sh
+timeout 10 "$ROOT/_build/install/default/bin/bsc" -w -A -color never Main.resi
+timeout 10 "$ROOT/_build/install/default/bin/bsc" -w +A -bs-jsx 4 -color never -I . -bs-read-cmi Main.res
+# Repeat the OCaml interface prebuild, then:
+timeout 10 "$SCRATCH/rescript-original" bsc -w +A -bs-jsx 4 -color never -I . -bs-read-cmi Main.res
+```
+
+JavaScript is stdout and was compared byte-for-byte along with stderr and exit
+status. Empty fences are literally empty streams. Candidate output fences retain
+ANSI escape bytes emitted by the compilers even with `-color never`; no diagnostic
+normalization was applied. Matching outputs are pasted once.
+
+### Reachability instrumentation
+
+Temporary `eprintln!("PROBE:U<n>")` statements were inserted at the sites below,
+then the same thin-LTO build was rerun (exit 0, `Finished release profile
+[optimized] target(s) in 1m 26s`). Every candidate was also run with that binary,
+using the same flags and interface setup. Markers are listed separately from the
+unmodified outputs and were never used as diagnostic comparison evidence. The
+source was restored byte-for-byte before any commit; no compiler change is part
+of this report.
+
+| Marker | Exact insertion site in compiler-rust/src/types/ctype.rs at the tested commit |
+| --- | --- |
+| U1 | After `state.univar_pairs.push((cl1, cl2))` in mcomp_enter_poly and unify_enter_poly (1119, 1252). |
+| U2 | Inside `for (cl1, cl2) in pairs.iter().rev()` in mcomp_univar_family (1007). |
+| U3 | Immediately before surely_univar_free in occur_univar (2278). |
+| U4 | Start of the nonempty equal-binder-count Tpoly arm in moregen (10202). |
+| U5 | The successful name-equal Tunivar row-tail arm in moregen_row (9883). This marker does not cover the name-unequal rejection arm. |
+| U6 | Start of the nonempty equal-binder-count Tpoly arm in equal_type_exprs_without_renaming_rec (11409). |
+| U7 | After successful occur and before update_level_checked in moregen_occur (9758). |
+| U8 | After both remq calls, before lowering in unify_row_field (9347). |
+| U9 | subtype_rec fallback (6372), guarded by both operands being Tpackage. |
+| U10 | Inside the path.is_free(mid) branch of nondep_type_rec's Tpackage arm (14651). |
+| U11 | At the start of each one-sided empty-binder Tpoly unwrapping arm in unify (8773, 8777). |
+
+### Second-round summary
+
+| Place | Verdict | Candidates | Smallest witness found |
+| --- | --- | ---: | --- |
+| U1 | REACHED, NO DIFFERENCE SEEN | 6 | — |
+| U2 | WITNESS | 7 | U2-7 (off-path) |
+| U3 | REACHED, NO DIFFERENCE SEEN | 6 | — |
+| U4 | WITNESS | 7 | U4-7 |
+| U5 | WITNESS | 7 | U5-7 |
+| U6 | WITNESS | 6 | U6-1 |
+| U7 | WITNESS | 7 | U7-7 (off-path; identical to U4-7) |
+| U8 | WITNESS | 9 | U8-8 (off-path) |
+| U9 | WITNESS | 6 | U9-1 |
+| U10 | WITNESS | 7 | U10-7 |
+| U11 | NOT REACHED | 6 | — |
+
+### U1 — REACHED, NO DIFFERENCE SEEN
+
+A program must unify two nonempty polymorphic object schemes to enter the directional pair scopes in Rust mcomp_enter_poly/unify_enter_poly (1088–1123, 1213–1256) and OCaml enter_poly (1656–1679). A later body comparison or scope exit must expose different pairing or restoration to produce an output difference.
+
+U1-1, U1-2, U1-3 and U1-6 hit U1; all six outputs agree. This does not exercise every exceptional scope-exit path.
+
+#### U1-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+type a = {"id": 'a. 'a => 'a}
+type b = {"id": 'b. 'b => 'b}
+let f = (x: a): b => x
+```
+
+Reachability markers: `PROBE:U1`.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x) {
+  return x;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### U1-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+type a = {"id": 'a 'b. ('a, 'b) => 'a}
+type b = {"id": 'b 'a. ('a, 'b) => 'a}
+let f = (x: a): b => x
+```
+
+Reachability markers: `PROBE:U1`.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x) {
+  return x;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### U1-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+type a = {"id": 'a 'b. ('a, 'b) => 'a}
+type b = {"id": 'a 'b. ('a, 'b) => 'b}
+let f = (x: a): b => x
+```
+
+Reachability markers: `PROBE:U1`.
+
+Both compilers, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:22
+
+  1 │ type a = {"id": 'a 'b. ('a, 'b) => 'a}
+  2 │ type b = {"id": 'a 'b. ('a, 'b) => 'b}
+  3 │ let f = (x: a): b => x
+  4 │ 
+
+  This has type: [1;31ma[0m
+  But it's expected to have type: [1;33mb[0m
+  
+  Types for field [1;33m"id"[0m are incompatible:
+  Field [1;33m"id"[0m in the passed object has type [1;31m'a 'b. ('a, 'b) => 'a[0m, but is expected to have type [1;33m'a 'b. ('a, 'b) => 'b[0m.
+  
+  Possible solutions: 
+  - These types are compatible at runtime. You can use the coercion operator to convert to the expected type: [1;33m(x :> b)
+[0m
+  
+
+```
+
+#### U1-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+type t = {f: 'a. 'a => 'a}
+let v: t = {f: x => x}
+```
+
+Reachability markers: none.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let v = {
+  f: x => x
+};
+
+exports.v = v;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### U1-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+type t = {f: 'a. 'a => 'a}
+let v: t = {f: x => 1}
+```
+
+Reachability markers: none.
+
+Both compilers, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:16-21
+
+  1 │ type t = {f: 'a. 'a => 'a}
+  2 │ let v: t = {f: x => 1}
+  3 │ 
+
+  This field value has type [1;31mint => int[0m
+  which is less general than [1;33m'a. 'a => 'a[0m
+
+```
+
+#### U1-6 — outputs agree
+
+`Main.res`:
+
+```rescript
+type a = {"f": 'a. {"g": 'b. ('a, 'b) => 'a} => 'a}
+type b = {"f": 'x. {"g": 'y. ('x, 'y) => 'x} => 'x}
+let f = (x: a): b => x
+```
+
+Reachability markers: `PROBE:U1`.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x) {
+  return x;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+
+### U2 — WITNESS
+
+A program must re-enter a binder already present in the pairing stack so enter_poly_univars (1147–1152) calls mcomp_univars_escape and its family loop (996–1012), corresponding to OCaml get_univar_family (1612–1623). The family propagated across multiple scopes must affect escape acceptance to expose a traversal-order difference.
+
+No U2 marker ran: these candidates did not satisfy the known-binder escape guard in enter_poly_univars. U2-5 and the smaller U2-7 instead expose acceptance of a field that OCaml rejects as less general; this is an off-path witness, not evidence against reverse family iteration.
+
+Smallest witness found: **U2-7 (off-path)** (full source and both outputs below).
+
+#### U2-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+type a = {"f": 'a. {"g": 'b. ('a, 'b) => 'a} => 'a}
+type b = {"f": 'x. {"g": 'y. ('x, 'y) => 'x} => 'x}
+let f = (x: a): b => x
+```
+
+Reachability markers: `PROBE:U1`.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x) {
+  return x;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### U2-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+type a = {"f": 'a. {"g": 'b. ('a, 'b) => 'b} => 'a}
+type b = {"f": 'x. {"g": 'y. ('x, 'y) => 'x} => 'x}
+let f = (x: a): b => x
+```
+
+Reachability markers: `PROBE:U1`.
+
+Both compilers, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:22
+
+  1 │ type a = {"f": 'a. {"g": 'b. ('a, 'b) => 'b} => 'a}
+  2 │ type b = {"f": 'x. {"g": 'y. ('x, 'y) => 'x} => 'x}
+  3 │ let f = (x: a): b => x
+  4 │ 
+
+  This has type: [1;31ma[0m
+  But it's expected to have type: [1;33mb[0m
+  
+  Types for field [1;33m"g"[0m are incompatible:
+  Field [1;33m"g"[0m in the passed object has type [1;31m'y. ('x, 'y) => 'y[0m, but is expected to have type [1;33m'y. ('x, 'y) => 'x[0m.
+
+```
+
+#### U2-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+type a = {"f": 'a. 'a => a}
+type b = {"f": 'b. 'b => b}
+let f = (x: a): b => x
+```
+
+Reachability markers: none.
+
+Both compilers, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:26
+
+  1 │ type a = {"f": 'a. 'a => a}
+  2 │ type b = {"f": 'b. 'b => b}
+  3 │ let f = (x: a): b => x
+
+  This type constructor, `a`, can't be found.
+  If you wanted to write a recursive type, don't forget the `rec` in `type rec`
+
+```
+
+#### U2-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+type a<'x> = {"f": 'a. ('a, 'x) => a<'a>}
+type b<'x> = {"f": 'b. ('b, 'x) => b<'x>}
+let f = (x: a<int>): b<int> => x
+```
+
+Reachability markers: none.
+
+Both compilers, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:36
+
+  1 │ type a<'x> = {"f": 'a. ('a, 'x) => a<'a>}
+  2 │ type b<'x> = {"f": 'b. ('b, 'x) => b<'x>}
+  3 │ let f = (x: a<int>): b<int> => x
+
+  This type constructor, `a`, can't be found.
+  If you wanted to write a recursive type, don't forget the `rec` in `type rec`
+
+```
+
+#### U2-5 — WITNESS
+
+`Main.res`:
+
+```rescript
+type t<'a> = {f: 'b. 'b => 'a}
+let f = x => {f: y => y}
+```
+
+Reachability markers: none.
+
+OCaml, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:18-23
+
+  1 │ type t<'a> = {f: 'b. 'b => 'a}
+  2 │ let f = x => {f: y => y}
+  3 │ 
+
+  This field value has type [1;31m'c => 'c[0m
+  which is less general than [1;33m'b. 'b => 'a[0m
+
+```
+
+Rust, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x) {
+  return {
+    f: y => y
+  };
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 27
+  Main.res:2:9
+
+  1 │ type t<'a> = {f: 'b. 'b => 'a}
+  2 │ let f = x => {f: y => y}
+  3 │ 
+
+  unused variable x.
+
+Fix this by:
+- Deleting the variable if it's not used anymore.
+- Prepending the variable name with `_` (like `_x`) to ignore that the variable is unused.
+- Using the variable somewhere.
+
+```
+
+#### U2-6 — outputs agree
+
+`Main.res`:
+
+```rescript
+type t = {f: 'a. 'a => 'a}
+let f = x => {f: y => x}
+```
+
+Reachability markers: none.
+
+Both compilers, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:18-23
+
+  1 │ type t = {f: 'a. 'a => 'a}
+  2 │ let f = x => {f: y => x}
+  3 │ 
+
+  This field value has type [1;31m'b => 'b[0m
+  which is less general than [1;33m'a. 'a => 'a[0m
+
+```
+
+#### U2-7 — WITNESS
+
+`Main.res`:
+
+```rescript
+type t<'a> = {f: 'b. 'b => 'a}
+let v = {f: y => y}
+```
+
+Reachability markers: none.
+
+OCaml, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:13-18
+
+  1 │ type t<'a> = {f: 'b. 'b => 'a}
+  2 │ let v = {f: y => y}
+  3 │ 
+
+  This field value has type [1;31m'c => 'c[0m
+  which is less general than [1;33m'b. 'b => 'a[0m
+
+```
+
+Rust, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let v = {
+  f: y => y
+};
+
+exports.v = v;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+
+### U3 — REACHED, NO DIFFERENCE SEEN
+
+A program must link a variable through occur_univar so Rust executes the bounded surely_univar_free precheck (2005–2014, 2275–2279), where OCaml starts its binder walk (1563–1607). Acceptance or a later diagnostic must reveal a free universal missed by that precheck or an observable skipped traversal.
+
+U3-5 and U3-6 hit U3; all six outputs agree. The marker proves precheck entry, not which of its return paths was taken.
+
+#### U3-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+let id = x => x
+let n = id(1)
+```
+
+Reachability markers: none.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function id(x) {
+  return x;
+}
+
+let n = 1;
+
+exports.id = id;
+exports.n = n;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### U3-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+type t = {f: 'a. 'a => 'a}
+let v: t = {f: x => x}
+```
+
+Reachability markers: none.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let v = {
+  f: x => x
+};
+
+exports.v = v;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### U3-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+type t = {f: 'a. 'a => 'a}
+let v: t = {f: x => 1}
+```
+
+Reachability markers: none.
+
+Both compilers, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:16-21
+
+  1 │ type t = {f: 'a. 'a => 'a}
+  2 │ let v: t = {f: x => 1}
+  3 │ 
+
+  This field value has type [1;31mint => int[0m
+  which is less general than [1;33m'a. 'a => 'a[0m
+
+```
+
+#### U3-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+type t = {f: 'a. 'a => 'a}
+let escape = x => {f: y => x}
+```
+
+Reachability markers: none.
+
+Both compilers, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:23-28
+
+  1 │ type t = {f: 'a. 'a => 'a}
+  2 │ let escape = x => {f: y => x}
+  3 │ 
+
+  This field value has type [1;31m'b => 'b[0m
+  which is less general than [1;33m'a. 'a => 'a[0m
+
+```
+
+#### U3-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+let id: 'a. 'a => 'a = x => x
+```
+
+Reachability markers: `PROBE:U3`.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function id(x) {
+  return x;
+}
+
+exports.id = id;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### U3-6 — outputs agree
+
+`Main.res`:
+
+```rescript
+let id: type a. a => a = x => 1
+```
+
+Reachability markers: `PROBE:U3`.
+
+Both compilers, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:31
+
+  1 │ let id: type a. a => a = x => 1
+  2 │ 
+
+  This has type: [1;31mint[0m
+  But it's expected to have type: [1;33ma[0m
+
+```
+
+
+### U4 — WITNESS
+
+A signature value comparison must descend into nonempty polymorphic object methods in moregen (10198–10208), where OCaml uses enter_poly and unify_univar (2985–2989). Renaming or reordering binders must then affect the acceptance or diagnostic of signature inclusion.
+
+All seven candidates hit U4. Alpha-renaming alone fails in U4-1 and the reduced U4-7; reordering in U4-2 agrees.
+
+Smallest witness found: **U4-7** (full source and both outputs below).
+
+#### U4-1 — WITNESS
+
+`Main.res`:
+
+```rescript
+module type A = {let x: {"id": 'a. 'a => 'a}}
+module F = (X: A): {let x: {"id": 'b. 'b => 'b}} => X
+```
+
+Reachability markers: `PROBE:U4`.
+
+OCaml, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return X;
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Rust, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:53
+
+  1 │ module type A = {let x: {"id": 'a. 'a => 'a}}
+  2 │ module F = (X: A): {let x: {"id": 'b. 'b => 'b}} => X
+  3 │ 
+
+  Signature mismatch:
+  
+  Actual declaration (Main.res:1:18-44):
+    let x: {"id": 'a. 'a => 'a}
+  
+  Expected declaration (Main.res:2:21-47):
+    let x: {"id": 'b. 'b => 'b}
+
+```
+
+#### U4-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type A = {let x: {"id": 'a 'b. ('a, 'b) => 'a}}
+module F = (X: A): {let x: {"id": 'b 'a. ('a, 'b) => 'a}} => X
+```
+
+Reachability markers: `PROBE:U4`.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return X;
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### U4-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type A = {let x: {"id": 'a 'b. ('a, 'b) => 'a}}
+module F = (X: A): {let x: {"id": 'a 'b. ('a, 'b) => 'b}} => X
+```
+
+Reachability markers: `PROBE:U4`.
+
+Both compilers, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:62
+
+  1 │ module type A = {let x: {"id": 'a 'b. ('a, 'b) => 'a}}
+  2 │ module F = (X: A): {let x: {"id": 'a 'b. ('a, 'b) => 'b}} => X
+  3 │ 
+
+  Signature mismatch:
+  
+  Actual declaration (Main.res:1:18-53):
+    let x: {"id": 'a 'b. ('a, 'b) => 'a}
+  
+  Expected declaration (Main.res:2:21-56):
+    let x: {"id": 'a 'b. ('a, 'b) => 'b}
+
+```
+
+#### U4-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type A = {let x: {"id": 'a. 'a => 'a}}
+module F = (X: A): {let x: {"id": 'a. 'a => 'a}} => X
+```
+
+Reachability markers: `PROBE:U4`.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return X;
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### U4-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type A = {let x: {"id": 'a 'b. 'a => 'a}}
+module F = (X: A): {let x: {"id": 'a. 'a => 'a}} => X
+```
+
+Reachability markers: `PROBE:U4`.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return X;
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### U4-6 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type A = {let x: {"id": 'a. 'a => int}}
+module F = (X: A): {let x: {"id": 'b. 'b => string}} => X
+```
+
+Reachability markers: `PROBE:U4`.
+
+Both compilers, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:57
+
+  1 │ module type A = {let x: {"id": 'a. 'a => int}}
+  2 │ module F = (X: A): {let x: {"id": 'b. 'b => string}} => X
+  3 │ 
+
+  Signature mismatch:
+  
+  Actual declaration (Main.res:1:18-45):
+    let x: {"id": 'a. 'a => int}
+  
+  Expected declaration (Main.res:2:21-51):
+    let x: {"id": 'b. 'b => string}
+
+```
+
+#### U4-7 — WITNESS
+
+`Main.res`:
+
+```rescript
+module F = (X: {let x: {"f": 'a. 'a => 'a}}): {let x: {"f": 'b. 'b => 'b}} => X
+```
+
+Reachability markers: `PROBE:U4`.
+
+OCaml, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return X;
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Rust, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:79
+
+  1 │ module F = (X: {let x: {"f": 'a. 'a => 'a}}): {let x: {"f": 'b. 'b => 'b
+    │ }} => X
+  2 │ 
+
+  Signature mismatch:
+  
+  Actual declaration (Main.res:1:17-42):
+    let x: {"f": 'a. 'a => 'a}
+  
+  Expected declaration (Main.res:1:48-73):
+    let x: {"f": 'b. 'b => 'b}
+
+```
+
+
+### U5 — WITNESS
+
+A moregeneral comparison must descend through a polymorphic variant to two universal row tails in moregen_row (9883–9886), corresponding to OCaml's pairing comparison (3048–3049). Row-tail matching or the subsequent printed signature must expose a name-versus-pairing difference.
+
+U5-1 through U5-5 and U5-7 hit the successful U5 row-tail arm. U5-4, U5-6 and U5-7 differ in printed aliases; U5-5 differs in acceptance, with U4 also hit, so this does not isolate the tail comparison as the cause.
+
+Smallest witness found: **U5-7** (full source and both outputs below).
+
+#### U5-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type A = {let x: {"id": 'a. ([< #A | #B] as 'a) => 'a}}
+module F = (X: A): {let x: {"id": 'b. ([< #A | #B] as 'b) => 'b}} => X
+```
+
+Reachability markers: `PROBE:U4`, `PROBE:U5`.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return X;
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### U5-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type A = {let x: {"id": 'a. ([< #A | #B] as 'a) => 'a}}
+module F = (X: A): {let x: {"id": 'a. ([< #A | #B] as 'a) => 'a}} => X
+```
+
+Reachability markers: `PROBE:U4`, `PROBE:U5`.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return X;
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### U5-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type A = {let x: {"id": 'a. ([> #A] as 'a) => 'a}}
+module F = (X: A): {let x: {"id": 'b. ([> #A] as 'b) => 'b}} => X
+```
+
+Reachability markers: `PROBE:U4`, `PROBE:U5`.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return X;
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### U5-4 — WITNESS
+
+`Main.res`:
+
+```rescript
+module type A = {let x: {"id": 'a. ([< #A(int) | #B] as 'a) => 'a}}
+module F = (X: A): {let x: {"id": 'a. ([< #A(string) | #B] as 'a) => 'a}} => X
+```
+
+Reachability markers: `PROBE:U4`, `PROBE:U5`.
+
+OCaml, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:78
+
+  1 │ module type A = {let x: {"id": 'a. ([< #A(int) | #B] as 'a) => 'a}}
+  2 │ module F = (X: A): {let x: {"id": 'a. ([< #A(string) | #B] as 'a) => 'a}
+    │ } => X
+  3 │ 
+
+  Signature mismatch:
+  
+  Actual declaration (Main.res:1:18-66):
+    let x: {"id": 'a. ([< #A(int) | #B] as 'a) => 'a}
+  
+  Expected declaration (Main.res:2:21-72):
+    let x: {"id": 'a. ([< #A(string) | #B] as 'a) => 'a}
+
+```
+
+Rust, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:78
+
+  1 │ module type A = {let x: {"id": 'a. ([< #A(int) | #B] as 'a) => 'a}}
+  2 │ module F = (X: A): {let x: {"id": 'a. ([< #A(string) | #B] as 'a) => 'a}
+    │ } => X
+  3 │ 
+
+  Signature mismatch:
+  
+  Actual declaration (Main.res:1:18-66):
+    let x: {"id": 'a. ([< #A(int) | #B] as 'a) => 'a}
+  
+  Expected declaration (Main.res:2:21-72):
+    let x: {"id": 'a. ([< #A(string) | #B] as 'b) => 'b}
+
+```
+
+#### U5-5 — WITNESS
+
+`Main.res`:
+
+```rescript
+module type A = {let x: {"id": 'a 'b. ([< #A('b)] as 'a) => 'b}}
+module F = (X: A): {let x: {"id": 'b 'a. ([< #A('a)] as 'b) => 'a}} => X
+```
+
+Reachability markers: `PROBE:U4`, `PROBE:U5`.
+
+OCaml, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return X;
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Rust, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:72
+
+  1 │ module type A = {let x: {"id": 'a 'b. ([< #A('b)] as 'a) => 'b}}
+  2 │ module F = (X: A): {let x: {"id": 'b 'a. ([< #A('a)] as 'b) => 'a}} => X
+  3 │ 
+
+  Signature mismatch:
+  
+  Actual declaration (Main.res:1:18-63):
+    let x: {"id": 'a 'b. ([< #A('b)] as 'a) => 'b}
+  
+  Expected declaration (Main.res:2:21-66):
+    let x: {"id": 'b 'a. [< #A('a)] => 'a}
+
+```
+
+#### U5-6 — WITNESS
+
+`Main.res`:
+
+```rescript
+module type A = {let x: {"id": 'a. ([< #A | #B] as 'a) => 'a}}
+module F = (X: A): {let x: {"id": 'a. ([< #A] as 'a) => 'a}} => X
+```
+
+Reachability markers: `PROBE:U4`.
+
+OCaml, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:65
+
+  1 │ module type A = {let x: {"id": 'a. ([< #A | #B] as 'a) => 'a}}
+  2 │ module F = (X: A): {let x: {"id": 'a. ([< #A] as 'a) => 'a}} => X
+  3 │ 
+
+  Signature mismatch:
+  
+  Actual declaration (Main.res:1:18-61):
+    let x: {"id": 'a. ([< #A | #B] as 'a) => 'a}
+  
+  Expected declaration (Main.res:2:21-59):
+    let x: {"id": 'a. ([< #A] as 'a) => 'a}
+
+```
+
+Rust, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:65
+
+  1 │ module type A = {let x: {"id": 'a. ([< #A | #B] as 'a) => 'a}}
+  2 │ module F = (X: A): {let x: {"id": 'a. ([< #A] as 'a) => 'a}} => X
+  3 │ 
+
+  Signature mismatch:
+  
+  Actual declaration (Main.res:1:18-61):
+    let x: {"id": 'a. ([< #A | #B] as 'a) => 'a}
+  
+  Expected declaration (Main.res:2:21-59):
+    let x: {"id": 'a. ([< #A] as 'b) => 'b}
+
+```
+
+#### U5-7 — WITNESS
+
+`Main.res`:
+
+```rescript
+module F = (X: {let x: {"f": 'a. ([< #A(int)] as 'a) => 'a}}): {let x: {"f": 'a. ([< #A(string)] as 'a) => 'a}} => X
+```
+
+Reachability markers: `PROBE:U4`, `PROBE:U5`.
+
+OCaml, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:116
+
+  1 │ module F = (X: {let x: {"f": 'a. ([< #A(int)] as 'a) => 'a}}): {let x: {
+    │ "f": 'a. ([< #A(string)] as 'a) => 'a}} => X
+  2 │ 
+
+  Signature mismatch:
+  
+  Actual declaration (Main.res:1:17-59):
+    let x: {"f": 'a. ([< #A(int)] as 'a) => 'a}
+  
+  Expected declaration (Main.res:1:65-110):
+    let x: {"f": 'a. ([< #A(string)] as 'a) => 'a}
+
+```
+
+Rust, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:116
+
+  1 │ module F = (X: {let x: {"f": 'a. ([< #A(int)] as 'a) => 'a}}): {let x: {
+    │ "f": 'a. ([< #A(string)] as 'a) => 'a}} => X
+  2 │ 
+
+  Signature mismatch:
+  
+  Actual declaration (Main.res:1:17-59):
+    let x: {"f": 'a. ([< #A(int)] as 'a) => 'a}
+  
+  Expected declaration (Main.res:1:65-110):
+    let x: {"f": 'a. ([< #A(string)] as 'b) => 'b}
+
+```
+
+
+### U6 — WITNESS
+
+An implementation/interface record declaration comparison must require equality of a quantified field, reaching equal_type_exprs_without_renaming_rec (11401–11418) rather than only value inclusion. Comparing alpha-renamed field binders then tests Rust's name comparison against OCaml eqtype's scoped pairing (3268–3272).
+
+All six candidates hit U6. U6-1 rejects alpha-renaming only in Rust; its interface prebuild succeeds on both invocations.
+
+Smallest witness found: **U6-1** (full source and both outputs below).
+
+#### U6-1 — WITNESS
+
+`Main.res`:
+
+```rescript
+type t = {f: 'a. 'a => 'a}
+```
+
+`Main.resi`:
+
+```rescript
+type t = {f: 'b. 'b => 'b}
+```
+
+Reachability markers: `PROBE:U6`.
+
+OCaml, reference interface prebuild exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+OCaml, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+/* This output is empty. Its source's type definitions, externals and/or unused code got optimized away. */
+```
+
+stderr:
+
+```text
+```
+
+Rust, reference interface prebuild exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Rust, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:1-26
+
+  1 │ type t = {f: 'a. 'a => 'a}
+  2 │ 
+
+  The implementation Main.res does not match the interface Main.resi:
+  
+  Actual declaration (Main.res:1:1-26):
+    type t = {f: 'a. 'a => 'a}
+  
+  Expected declaration (Main.resi:1:1-26):
+    type t = {f: 'b. 'b => 'b}
+  
+  The types for field f are not equal.
+
+```
+
+#### U6-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+type t = {f: 'a 'b. ('a, 'b) => 'a}
+```
+
+`Main.resi`:
+
+```rescript
+type t = {f: 'b 'a. ('a, 'b) => 'a}
+```
+
+Reachability markers: `PROBE:U6`.
+
+Both compilers, reference interface prebuild exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+/* This output is empty. Its source's type definitions, externals and/or unused code got optimized away. */
+```
+
+stderr:
+
+```text
+```
+
+#### U6-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+type t = {f: 'a 'b. ('a, 'b) => 'a}
+```
+
+`Main.resi`:
+
+```rescript
+type t = {f: 'a 'b. ('a, 'b) => 'b}
+```
+
+Reachability markers: `PROBE:U6`.
+
+Both compilers, reference interface prebuild exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Both compilers, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:1-35
+
+  1 │ type t = {f: 'a 'b. ('a, 'b) => 'a}
+  2 │ 
+
+  The implementation Main.res does not match the interface Main.resi:
+  
+  Actual declaration (Main.res:1:1-35):
+    type t = {f: 'a 'b. ('a, 'b) => 'a}
+  
+  Expected declaration (Main.resi:1:1-35):
+    type t = {f: 'a 'b. ('a, 'b) => 'b}
+  
+  The types for field f are not equal.
+
+```
+
+#### U6-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+type t = {f: 'a. 'a => 'a}
+```
+
+`Main.resi`:
+
+```rescript
+type t = {f: 'a. 'a => 'a}
+```
+
+Reachability markers: `PROBE:U6`.
+
+Both compilers, reference interface prebuild exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+/* This output is empty. Its source's type definitions, externals and/or unused code got optimized away. */
+```
+
+stderr:
+
+```text
+```
+
+#### U6-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+type t = {f: 'a 'b. 'a => 'a}
+```
+
+`Main.resi`:
+
+```rescript
+type t = {f: 'a. 'a => 'a}
+```
+
+Reachability markers: `PROBE:U6`.
+
+Both compilers, reference interface prebuild exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+/* This output is empty. Its source's type definitions, externals and/or unused code got optimized away. */
+```
+
+stderr:
+
+```text
+```
+
+#### U6-6 — outputs agree
+
+`Main.res`:
+
+```rescript
+type t = {f: 'a. ([< #A] as 'a) => 'a}
+```
+
+`Main.resi`:
+
+```rescript
+type t = {f: 'b. ([< #A] as 'b) => 'b}
+```
+
+Reachability markers: `PROBE:U6`.
+
+Both compilers, reference interface prebuild exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+/* This output is empty. Its source's type definitions, externals and/or unused code got optimized away. */
+```
+
+stderr:
+
+```text
+```
+
+
+### U7 — WITNESS
+
+Signature inclusion must instantiate a pattern variable and finish moregen_occur (9757–9759), where OCaml additionally calls occur_univar (2918). A free universal in the candidate must escape the ordinary occurrence/lowering checks and alter acceptance to isolate the missing call.
+
+U7-1 and U7-2 hit U7 and agree. U7-3, U7-4 and U7-7 instead hit U4 and differ there; none establishes a free-universal escape through the nominated U7 exit.
+
+Smallest witness found: **U7-7 (off-path; identical to U4-7)** (full source and both outputs below).
+
+#### U7-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type A = {let x: {"id": 'a => 'a}}
+module F = (X: A): {let x: {"id": int => int}} => X
+```
+
+Reachability markers: `PROBE:U7`.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return X;
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### U7-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type A = {let x: {"id": 'a => 'a}}
+module F = (X: A): {let x: {"id": int => string}} => X
+```
+
+Reachability markers: `PROBE:U7`.
+
+Both compilers, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:54
+
+  1 │ module type A = {let x: {"id": 'a => 'a}}
+  2 │ module F = (X: A): {let x: {"id": int => string}} => X
+  3 │ 
+
+  Signature mismatch:
+  
+  Actual declaration (Main.res:1:18-40):
+    let x: {"id": 'a => 'a}
+  
+  Expected declaration (Main.res:2:21-48):
+    let x: {"id": int => string}
+
+```
+
+#### U7-3 — WITNESS
+
+`Main.res`:
+
+```rescript
+module type A = {let x: {"id": 'x. 'x => 'x}}
+module F = (X: A): {let x: {"id": 'a. 'a => 'a}} => X
+```
+
+Reachability markers: `PROBE:U4`.
+
+OCaml, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return X;
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Rust, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:53
+
+  1 │ module type A = {let x: {"id": 'x. 'x => 'x}}
+  2 │ module F = (X: A): {let x: {"id": 'a. 'a => 'a}} => X
+  3 │ 
+
+  Signature mismatch:
+  
+  Actual declaration (Main.res:1:18-44):
+    let x: {"id": 'x. 'x => 'x}
+  
+  Expected declaration (Main.res:2:21-47):
+    let x: {"id": 'a. 'a => 'a}
+
+```
+
+#### U7-4 — WITNESS
+
+`Main.res`:
+
+```rescript
+module type A = {let x: {"id": 'x. 'x => int}}
+module F = (X: A): {let x: {"id": 'a. 'a => int}} => X
+```
+
+Reachability markers: `PROBE:U4`.
+
+OCaml, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return X;
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Rust, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:54
+
+  1 │ module type A = {let x: {"id": 'x. 'x => int}}
+  2 │ module F = (X: A): {let x: {"id": 'a. 'a => int}} => X
+  3 │ 
+
+  Signature mismatch:
+  
+  Actual declaration (Main.res:1:18-45):
+    let x: {"id": 'x. 'x => int}
+  
+  Expected declaration (Main.res:2:21-48):
+    let x: {"id": 'a. 'a => int}
+
+```
+
+#### U7-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type A = {let x: {"id": 'a. 'a => 'a}}
+module F = (X: A): {let x: {"id": 'a 'b. 'a => 'b}} => X
+```
+
+Reachability markers: none.
+
+Both compilers, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:56
+
+  1 │ module type A = {let x: {"id": 'a. 'a => 'a}}
+  2 │ module F = (X: A): {let x: {"id": 'a 'b. 'a => 'b}} => X
+  3 │ 
+
+  Signature mismatch:
+  
+  Actual declaration (Main.res:1:18-44):
+    let x: {"id": 'a. 'a => 'a}
+  
+  Expected declaration (Main.res:2:21-50):
+    let x: {"id": 'a 'b. 'a => 'b}
+
+```
+
+#### U7-6 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type A = {let x: {"id": 'a. 'a => 'a}}
+module F = (X: A): {let x: {"id": 'a. 'a => {"id": 'b. 'b => 'b}}} => X
+```
+
+Reachability markers: `PROBE:U4`.
+
+Both compilers, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:71
+
+  1 │ module type A = {let x: {"id": 'a. 'a => 'a}}
+  2 │ module F = (X: A): {let x: {"id": 'a. 'a => {"id": 'b. 'b => 'b}}} => X
+  3 │ 
+
+  Signature mismatch:
+  
+  Actual declaration (Main.res:1:18-44):
+    let x: {"id": 'a. 'a => 'a}
+  
+  Expected declaration (Main.res:2:21-65):
+    let x: {"id": 'a. 'a => {"id": 'b. 'b => 'b}}
+
+```
+
+#### U7-7 — WITNESS
+
+`Main.res`:
+
+```rescript
+module F = (X: {let x: {"f": 'a. 'a => 'a}}): {let x: {"f": 'b. 'b => 'b}} => X
+```
+
+Reachability markers: `PROBE:U4`.
+
+OCaml, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return X;
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Rust, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:79
+
+  1 │ module F = (X: {let x: {"f": 'a. 'a => 'a}}): {let x: {"f": 'b. 'b => 'b
+    │ }} => X
+  2 │ 
+
+  Signature mismatch:
+  
+  Actual declaration (Main.res:1:17-42):
+    let x: {"f": 'a. 'a => 'a}
+  
+  Expected declaration (Main.res:1:48-73):
+    let x: {"f": 'b. 'b => 'b}
+
+```
+
+
+### U8 — WITNESS
+
+Two distinct Reither fields must pass the fixed-row fast path and duplicate-removal logic in unify_row_field (9346–9354), corresponding to OCaml's residual partition (2685–2703). A residual containing a universal must survive to lowering and change acceptance or diagnostics to isolate the omitted reconciliation.
+
+U8-9 hits U8 and agrees, but has ordinary int payloads. The universal-payload witnesses U8-1, U8-3 through U8-6 and U8-8 hit U1, not U8: the fixed-row pairwise payload path at 9290–9305 precedes the residual branch, so these are off-path witnesses. Removing the explicit row binder in U8-7 fails with an unbound variable in both compilers.
+
+Smallest witness found: **U8-8 (off-path)** (full source and both outputs below).
+
+#### U8-1 — WITNESS
+
+`Main.res`:
+
+```rescript
+type a = {"f": 'a 'r. ([< #A('a) | #B] as 'r) => 'a}
+type b = {"f": 'b 's. ([< #A('b) | #B] as 's) => 'b}
+let f = (x: a): b => x
+```
+
+Reachability markers: `PROBE:U1`.
+
+OCaml, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x) {
+  return x;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Rust, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:22
+
+  1 │ type a = {"f": 'a 'r. ([< #A('a) | #B] as 'r) => 'a}
+  2 │ type b = {"f": 'b 's. ([< #A('b) | #B] as 's) => 'b}
+  3 │ let f = (x: a): b => x
+  4 │ 
+
+  This has type: [1;31ma[0m
+  But it's expected to have type: [1;33mb[0m
+
+```
+
+#### U8-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+type a = {"f": 'a 'r. ([< #A('a)] as 'r) => 'a}
+type b = {"f": 'a 'r. ([< #A(int)] as 'r) => 'a}
+let f = (x: a): b => x
+```
+
+Reachability markers: `PROBE:U1`.
+
+Both compilers, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:22
+
+  1 │ type a = {"f": 'a 'r. ([< #A('a)] as 'r) => 'a}
+  2 │ type b = {"f": 'a 'r. ([< #A(int)] as 'r) => 'a}
+  3 │ let f = (x: a): b => x
+  4 │ 
+
+  This has type: [1;31ma[0m
+  But it's expected to have type: [1;33mb[0m
+  
+  Both polymorphic variants have the constructor [1;33m#A[0m, but their payload types are incompatible.
+  Make sure the payload types for [1;33m#A[0m match exactly in both polymorphic variants.
+
+```
+
+#### U8-3 — WITNESS
+
+`Main.res`:
+
+```rescript
+type a = {"f": 'a 'r. ([< #A('a)] as 'r) => 'a}
+type b = {"f": 'a 'r. ([< #A('a)] as 'r) => 'a}
+let f = (x: a): b => x
+```
+
+Reachability markers: `PROBE:U1`.
+
+OCaml, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x) {
+  return x;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Rust, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:22
+
+  1 │ type a = {"f": 'a 'r. ([< #A('a)] as 'r) => 'a}
+  2 │ type b = {"f": 'a 'r. ([< #A('a)] as 'r) => 'a}
+  3 │ let f = (x: a): b => x
+  4 │ 
+
+  This has type: [1;31ma[0m
+  But it's expected to have type: [1;33mb[0m
+  
+  Both polymorphic variants have the constructor [1;33m#A[0m, but their payload types are incompatible.
+  Make sure the payload types for [1;33m#A[0m match exactly in both polymorphic variants.
+
+```
+
+#### U8-4 — WITNESS
+
+`Main.res`:
+
+```rescript
+type a = {"f": 'a 'b 'r. ([< #A('a) | #B('b)] as 'r) => 'a}
+type b = {"f": 'a 'b 'r. ([< #A('b) | #B('a)] as 'r) => 'a}
+let f = (x: a): b => x
+```
+
+Reachability markers: `PROBE:U1`.
+
+OCaml, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:22
+
+  1 │ type a = {"f": 'a 'b 'r. ([< #A('a) | #B('b)] as 'r) => 'a}
+  2 │ type b = {"f": 'a 'b 'r. ([< #A('b) | #B('a)] as 'r) => 'a}
+  3 │ let f = (x: a): b => x
+  4 │ 
+
+  This has type: [1;31ma[0m
+  But it's expected to have type: [1;33mb[0m
+  
+  Types for field [1;33m"f"[0m are incompatible:
+  Field [1;33m"f"[0m in the passed object has type [1;31m'b 'a 'c. [< #A('b) | #B('a)] => 'b[0m, but is expected to have type [1;33m'a 'b 'd. [< #A('b) | #B('a)] => 'a[0m.
+  
+  Possible solutions: 
+  - These types are compatible at runtime. You can use the coercion operator to convert to the expected type: [1;33m(x :> b)
+[0m
+  
+
+```
+
+Rust, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:22
+
+  1 │ type a = {"f": 'a 'b 'r. ([< #A('a) | #B('b)] as 'r) => 'a}
+  2 │ type b = {"f": 'a 'b 'r. ([< #A('b) | #B('a)] as 'r) => 'a}
+  3 │ let f = (x: a): b => x
+  4 │ 
+
+  This has type: [1;31ma[0m
+  But it's expected to have type: [1;33mb[0m
+
+```
+
+#### U8-5 — WITNESS
+
+`Main.res`:
+
+```rescript
+type a = {"f": 'r. ([< #A(int) | #B] as 'r) => 'r}
+type b = {"f": 'r. ([< #A(string) | #B] as 'r) => 'r}
+let f = (x: a): b => x
+```
+
+Reachability markers: `PROBE:U1`.
+
+OCaml, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:22
+
+  1 │ type a = {"f": 'r. ([< #A(int) | #B] as 'r) => 'r}
+  2 │ type b = {"f": 'r. ([< #A(string) | #B] as 'r) => 'r}
+  3 │ let f = (x: a): b => x
+  4 │ 
+
+  This has type: [1;31ma[0m
+  But it's expected to have type: [1;33mb[0m
+  
+  Both polymorphic variants have the constructor [1;33m#A[0m, but their payload types are incompatible.
+  Make sure the payload types for [1;33m#A[0m match exactly in both polymorphic variants.
+  
+  You can convert [1;33mint[0m to [1;33mstring[0m with [1;33mInt.toString[0m.
+
+```
+
+Rust, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:22
+
+  1 │ type a = {"f": 'r. ([< #A(int) | #B] as 'r) => 'r}
+  2 │ type b = {"f": 'r. ([< #A(string) | #B] as 'r) => 'r}
+  3 │ let f = (x: a): b => x
+  4 │ 
+
+  This has type: [1;31ma[0m
+  But it's expected to have type: [1;33mb[0m
+
+```
+
+#### U8-6 — WITNESS
+
+`Main.res`:
+
+```rescript
+type a = {"f": 'a 'r. ([< #A('a)] as 'r) => 'a}
+type b = {"f": 'b 'r. ([< #A('b) | #B] as 'r) => 'b}
+let f = (x: a): b => x
+```
+
+Reachability markers: `PROBE:U1`.
+
+OCaml, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:22
+
+  1 │ type a = {"f": 'a 'r. ([< #A('a)] as 'r) => 'a}
+  2 │ type b = {"f": 'b 'r. ([< #A('b) | #B] as 'r) => 'b}
+  3 │ let f = (x: a): b => x
+  4 │ 
+
+  This has type: [1;31ma[0m
+  But it's expected to have type: [1;33mb[0m
+  
+  The first polymorphic variant is [1;33mclosed[0m and doesn't include the constructor: [1;31m#B[0m.
+  
+  Possible solutions:
+  - Either make the first variant [1;33mopen[0m so it can accept additional constructors. To do this, make sure the type starts with [1;33m[>[0m instead of [1;33m[[0m
+  - Or add the missing constructor to it.
+
+```
+
+Rust, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:22
+
+  1 │ type a = {"f": 'a 'r. ([< #A('a)] as 'r) => 'a}
+  2 │ type b = {"f": 'b 'r. ([< #A('b) | #B] as 'r) => 'b}
+  3 │ let f = (x: a): b => x
+  4 │ 
+
+  This has type: [1;31ma[0m
+  But it's expected to have type: [1;33mb[0m
+
+```
+
+#### U8-7 — outputs agree
+
+`Main.res`:
+
+```rescript
+type a = {"f": 'a. [< #A('a)] => 'a}
+type b = {"f": 'a. [< #A('a)] => 'a}
+let f = (x: a): b => x
+```
+
+Reachability markers: none.
+
+Both compilers, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:1-36
+
+  1 │ type a = {"f": 'a. [< #A('a)] => 'a}
+  2 │ type b = {"f": 'a. [< #A('a)] => 'a}
+  3 │ let f = (x: a): b => x
+
+  A type variable is unbound in this type declaration.
+In field f: 'a. ([< #A('a)] as 'b) => 'a the variable 'b is unbound
+
+```
+
+#### U8-8 — WITNESS
+
+`Main.res`:
+
+```rescript
+type a = {"f": 'a 'r. ([< #A('a)] as 'r) => 'a}
+let f = (x: a): {"f": 'a 'r. ([< #A('a)] as 'r) => 'a} => x
+```
+
+Reachability markers: `PROBE:U1`.
+
+OCaml, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x) {
+  return x;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Rust, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:59
+
+  1 │ type a = {"f": 'a 'r. ([< #A('a)] as 'r) => 'a}
+  2 │ let f = (x: a): {"f": 'a 'r. ([< #A('a)] as 'r) => 'a} => x
+  3 │ 
+
+  This has type: [1;31ma[0m
+  But it's expected to have type: [1;33m{"f": 'a 'b. [< #A('a)] => 'a}[0m
+  
+  Both polymorphic variants have the constructor [1;33m#A[0m, but their payload types are incompatible.
+  Make sure the payload types for [1;33m#A[0m match exactly in both polymorphic variants.
+
+```
+
+#### U8-9 — outputs agree
+
+`Main.res`:
+
+```rescript
+let f = (x: [< #A(int)]) => (x: [< #A(int) | #B])
+```
+
+Reachability markers: `PROBE:U8`.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x) {
+  return x;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+
+### U9 — WITNESS
+
+An explicit :> coercion must compare first-class module types and reach subtype_rec's package fallback (6372–6375), where OCaml has asymmetric constraint completion and package subtyping (4077–4104). Dropping a constraint or comparing distinct constraints must then expose equality being stronger than subtyping or change the error text.
+
+All six candidates hit U9. U9-1 and U9-6 reject valid constraint removal in Rust; U9-3 differs in the printed source type and extra incompatibility detail.
+
+Smallest witness found: **U9-1** (full source and both outputs below).
+
+#### U9-1 — WITNESS
+
+`Main.res`:
+
+```rescript
+module type S = {type t}
+let f = (x: module(S with type t = int)) => (x :> module(S))
+```
+
+Reachability markers: `PROBE:U9`.
+
+OCaml, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x) {
+  return x;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Rust, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:46-59
+
+  1 │ module type S = {type t}
+  2 │ let f = (x: module(S with type t = int)) => (x :> module(S))
+  3 │ 
+
+  Type module(S with type t = int) is not a subtype of module(S) 
+
+```
+
+#### U9-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type S = {let x: int}
+module type T = {}
+let f = (x: module(S)) => (x :> module(T))
+```
+
+Reachability markers: `PROBE:U9`.
+
+Both compilers, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:28-41
+
+  1 │ module type S = {let x: int}
+  2 │ module type T = {}
+  3 │ let f = (x: module(S)) => (x :> module(T))
+  4 │ 
+
+  Type module(S) is not a subtype of module(T) 
+
+```
+
+#### U9-3 — WITNESS
+
+`Main.res`:
+
+```rescript
+module type S = {type t}
+let f = (x: module(S with type t = int)) => (x :> module(S with type t = string))
+```
+
+Reachability markers: `PROBE:U9`.
+
+OCaml, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:46-80
+
+  1 │ module type S = {type t}
+  2 │ let f = (x: module(S with type t = int)) => (x :> module(S with type t =
+    │  string))
+  3 │ 
+
+  Type module(S with type t = int) is not a subtype of
+    module(S with type t = string) 
+
+```
+
+Rust, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:46-80
+
+  1 │ module type S = {type t}
+  2 │ let f = (x: module(S with type t = int)) => (x :> module(S with type t =
+    │  string))
+  3 │ 
+
+  Type module(S with type t = string) is not a subtype of
+    module(S with type t = string) 
+  Type int is not compatible with type string 
+
+```
+
+#### U9-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type S = {type t}
+let f = (x: module(S)) => (x :> module(S with type t = int))
+```
+
+Reachability markers: `PROBE:U9`.
+
+Both compilers, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:28-59
+
+  1 │ module type S = {type t}
+  2 │ let f = (x: module(S)) => (x :> module(S with type t = int))
+  3 │ 
+
+  Type module(S) is not a subtype of module(S with type t = int) 
+
+```
+
+#### U9-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type S = {type t}
+let f = (x: module(S with type t = int)) => (x :> module(S with type t = int))
+```
+
+Reachability markers: `PROBE:U9`.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x) {
+  return x;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### U9-6 — WITNESS
+
+`Main.res`:
+
+```rescript
+module type S = {type t; type u}
+let f = (x: module(S with type t = int and type u = string)) => (x :> module(S with type t = int))
+```
+
+Reachability markers: `PROBE:U9`.
+
+OCaml, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x) {
+  return x;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Rust, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:66-97
+
+  1 │ module type S = {type t; type u}
+  2 │ let f = (x: module(S with type t = int and type u = string)) => (x :> mo
+    │ dule(S with type t = int))
+  3 │ 
+
+  Type module(S with type t = int and type u = string) is not a subtype of
+    module(S with type t = int) 
+
+```
+
+
+### U10 — WITNESS
+
+Eliminating an anonymous functor argument must encounter a package path free in that parameter in nondep_type_rec (14650–14654). A path normalizable to a nondependent module-type alias must then be rejected by Rust but normalized by OCaml (4443–4446) to expose the missing attempt.
+
+U10-1, U10-2, U10-3 and U10-7 hit U10. Type-only results still agree, but retaining a package value in U10-7 exposes rejection of parameter elimination. U10-4 is a parser failure in both compilers; replacing semicolon separators with newlines produced U10-7.
+
+Smallest witness found: **U10-7** (full source and both outputs below).
+
+#### U10-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type S = {let x: int}
+module F = (X: {module type T = S}) => {type t = module(X.T)}
+module R = F({module type T = S})
+```
+
+Reachability markers: `PROBE:U10`.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return {};
+}
+
+let R = {};
+
+exports.F = F;
+exports.R = R;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### U10-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+module F = (X: {module type T}) => {type t = module(X.T)}
+module R = F({module type T = {let x: int}})
+```
+
+Reachability markers: `PROBE:U10`.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return {};
+}
+
+let R = {};
+
+exports.F = F;
+exports.R = R;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 32
+  Main.res:2:32-41
+
+  1 │ module F = (X: {module type T}) => {type t = module(X.T)}
+  2 │ module R = F({module type T = {let x: int}})
+  3 │ 
+
+  unused value x.
+
+```
+
+#### U10-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type S = {type t}
+module F = (X: {module type T = S}) => {type t = module(X.T with type t = int)}
+module R = F({module type T = S})
+```
+
+Reachability markers: `PROBE:U10`.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return {};
+}
+
+let R = {};
+
+exports.F = F;
+exports.R = R;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### U10-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type S = {let x: int}
+module F = (X: {module type T = S; let p: module(T)}) => {let p = X.p}
+module R = F({module type T = S; module M = {let x = 1}; let p = module(M: T)})
+```
+
+Reachability markers: none.
+
+Both compilers, implementation exit 1; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  Syntax error!
+  Main.res:2:34
+
+  1 │ module type S = {let x: int}
+  2 │ module F = (X: {module type T = S; let p: module(T)}) => {let p = X.p}
+  3 │ module R = F({module type T = S; module M = {let x = 1}; let p = module(
+    │ M: T)})
+  4 │ 
+
+  I'm not sure what to parse here when looking at ";".
+
+```
+
+#### U10-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type S = {let x: int}
+module A = {module type T = S}
+module F = (X: {module type T = S}) => {type t = module(X.T)}
+module R = F(A)
+```
+
+Reachability markers: none.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let A = {};
+
+function F(X) {
+  return {};
+}
+
+let R = {};
+
+exports.A = A;
+exports.F = F;
+exports.R = R;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### U10-6 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type S = {let x: int}
+let p = {module A = {module type T = S; module M = {let x = 1}}; module(A.M: A.T)}
+```
+
+Reachability markers: none.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let M = {
+  x: 1
+};
+
+let p = M;
+
+exports.p = p;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### U10-7 — WITNESS
+
+`Main.res`:
+
+```rescript
+module type S = {let x: int}
+module F = (X: {module type T = S
+let p: module(T)}) => {let p = X.p}
+module R = F({module type T = S
+module M = {let x = 1}
+let p = module(M: T)})
+```
+
+Reachability markers: `PROBE:U10`.
+
+OCaml, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return X;
+}
+
+let M = {
+  x: 1
+};
+
+let R = {
+  p: M
+};
+
+exports.F = F;
+exports.R = R;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Rust, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:12-6:22
+
+  2 │ module F = (X: {module type T = S
+  3 │ let p: module(T)}) => {let p = X.p}
+  4 │ module R = F({module type T = S
+  5 │ module M = {let x = 1}
+  6 │ let p = module(M: T)})
+  7 │ 
+
+  This functor has type
+  (
+    X: {
+      module type T = S
+      let p: module(T)
+    },
+  ) => {
+    let p: module(X.T)
+  } The parameter cannot be eliminated in the result type.
+   Bind the argument to a module identifier.
+
+```
+
+
+### U11 — NOT REACHED
+
+Unification must see exactly one empty-binder Tpoly operand after earlier dispatch, reaching Rust's one-sided unwrap arms (8772–8779), rather than the paired-poly arms also present in OCaml (2413–2424). Unwrapping must change the resulting constraint failure or inferred output to demonstrate a difference.
+
+No U11 marker ran in these six candidates. Ordinary object literals, inferred access and polymorphic reads/writes did not leave a one-sided empty-binder Tpoly at those late unify arms; the earlier paired/variable handling or instantiation prevents these candidates from demonstrating the condition. All six outputs agree; no general unreachability claim is made.
+
+#### U11-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+let o = {"x": 1}
+let n = o["x"]
+```
+
+Reachability markers: `PROBE:U3`.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let o = {
+  x: 1
+};
+
+let n = o.x;
+
+exports.o = o;
+exports.n = n;
+/* n Not a pure module */
+```
+
+stderr:
+
+```text
+```
+
+#### U11-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+let get = o => o["x"]
+let n = get({"x": 1})
+```
+
+Reachability markers: `PROBE:U3`.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function get(o) {
+  return o.x;
+}
+
+let n = ({
+  x: 1
+}).x;
+
+exports.get = get;
+exports.n = n;
+/* n Not a pure module */
+```
+
+stderr:
+
+```text
+```
+
+#### U11-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+type t = {"id": 'a. 'a => 'a}
+let f = (o: t) => o["id"](1)
+```
+
+Reachability markers: none.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(o) {
+  return o.id(1);
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### U11-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+type t = {@set "id": 'a. 'a => 'a}
+let set = (o: t) => o["id"] = (x => x)
+```
+
+Reachability markers: none.
+
+Both compilers, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function set(o) {
+  o.id = x => x;
+}
+
+exports.set = set;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### U11-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+type t = {@set "id": 'a. 'a => 'a}
+let set = (o: t) => o["id"] = (x => 1)
+```
+
+Reachability markers: none.
+
+Both compilers, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:32-37
+
+  1 │ type t = {@set "id": 'a. 'a => 'a}
+  2 │ let set = (o: t) => o["id"] = (x => 1)
+  3 │ 
+
+  This field value has type [1;31mint => int[0m
+  which is less general than [1;33m'a. 'a => 'a[0m
+
+```
+
+#### U11-6 — outputs agree
+
+`Main.res`:
+
+```rescript
+let f = (o: {"x": int}) => o["x"]
+let n = f({"x": "bad"})
+```
+
+Reachability markers: `PROBE:U3`.
+
+Both compilers, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:11-22
+
+  1 │ let f = (o: {"x": int}) => o["x"]
+  2 │ let n = f({"x": "bad"})
+  3 │ 
+
+  This has type: [1;31m{"x": string}[0m
+  But this function argument is expecting: [1;33m{"x": int}[0m
+  
+  Types for field [1;33m"x"[0m are incompatible:
+  Field [1;33m"x"[0m in the passed object has type [1;31mstring[0m, but is expected to have type [1;33mint[0m.
+  
+  You can convert [1;33mstring[0m to [1;33mint[0m with [1;33mInt.fromString[0m.
+
+```
+
