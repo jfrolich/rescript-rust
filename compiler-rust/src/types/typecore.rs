@@ -16751,7 +16751,12 @@ fn type_setfield(
     // literal fields.
     ctx.begin_def();
     let field_result =
-        (|| -> TypeCoreResult<(crate::types::LabelDescription, Vec<TypeExprRef>, Expression)> {
+        (|| -> TypeCoreResult<(
+            crate::types::LabelDescription,
+            TypeExprRef,
+            Option<PolyFieldValue<'_>>,
+            Expression,
+        )> {
             let (label_desc, field_ty, poly_vars) = if let Some(env_label) = env_label {
                 let separate = env.has_local_constraints();
                 if separate {
@@ -16864,20 +16869,38 @@ fn type_setfield(
             let field_context = Some(ClashSite::SetRecordField {
                 field_name: crate::name::Name::new(&field_context_name),
             });
+            // OCaml compiler/ml/typecore.ml:4327 (`check_label_univars`).
+            let poly_field = (!poly_vars.is_empty()).then(|| PolyFieldValue {
+                vars: poly_vars,
+                snapshot: ctx.snapshot_type_state(),
+                source: new_value,
+                context: field_context,
+            });
             let typed_value = type_expect(tctx, env, new_value, field_ty, field_context)?;
             // OCaml compiler/ml/typecore.ml:3740-3743 uses `type_argument`, which
             // types against `ty_arg` and then unifies with `instance env ty_arg`.
             let field_ty_inst = crate::types::ctype::instance(ctx, field_ty);
             unify_expression_types(tctx, loc, typed_value.exp_type, field_ty_inst, None)?;
 
-            Ok((label_desc, poly_vars, typed_value))
+            Ok((label_desc, field_ty, poly_field, typed_value))
         })();
     ctx.end_def();
-    let (label_desc, poly_vars, mut typed_value) = field_result?;
+    let (label_desc, field_ty, poly_field, typed_value) = field_result?;
 
-    if !poly_vars.is_empty() {
-        crate::types::ctype::check_univars(ctx, &poly_vars);
-    }
+    // OCaml types the assigned value with `type_label_exp` too
+    // (compiler/ml/typecore.ml:3206-3211), which rejects a value less general
+    // than a polymorphic field.
+    let mut typed_value = match poly_field {
+        Some(poly_field) => check_label_univars(
+            tctx,
+            env,
+            typed_value,
+            field_ty,
+            label_desc.lbl_arg,
+            poly_field,
+        )?,
+        None => typed_value,
+    };
     // OCaml compiler/ml/typecore.ml:3779 returns `{arg with exp_type =
     // instance env arg.exp_type}` from `type_label_exp`.
     typed_value.exp_type = crate::types::ctype::instance(ctx, typed_value.exp_type);
@@ -19654,15 +19677,7 @@ fn check_label_univars(
     let retry = retyped.and_then(|arg| {
         crate::types::ctype::generalize_expansive(ctx, env, arg.exp_type);
         unify_expression_types(tctx, arg.exp_loc, arg.exp_type, ty_arg, context)?;
-        check_univars_or_less_general(
-            tctx,
-            env,
-            false,
-            "field value",
-            &arg,
-            ty_expected,
-            vars,
-        )?;
+        check_univars_or_less_general(tctx, env, false, "field value", &arg, ty_expected, vars)?;
         Ok(arg)
     });
     match retry {

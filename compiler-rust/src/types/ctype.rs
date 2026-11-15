@@ -12782,20 +12782,6 @@ pub(crate) fn instance_label_arg_at(
     copy_type_cached(ctx, lbl_arg, &mut cache)
 }
 
-/// OCaml's check_univars: after typing a polymorphic field value,
-/// convert any still-unresolved fresh Tvars back to Tunivar.
-/// This preserves the universal quantification in the typed tree.
-pub fn check_univars(ctx: &TypeContext, vars: &[TypeExprRef]) {
-    for &v in vars {
-        let v = ctx.repr(v);
-        let desc = ctx.get_desc(v);
-        if let super::TypeDesc::Tvar(name) = &*desc {
-            let name = *name;
-            ctx.set_desc(v, super::TypeDesc::Tunivar(name));
-        }
-    }
-}
-
 /// Deep copy a type, creating fresh type variables regardless of level.
 /// Used for label instantiation where types may not be at GENERIC_LEVEL
 /// but still need fresh copies to avoid sharing across different uses.
