@@ -2428,6 +2428,406 @@ and 17 allocations.
 - A module that does not resolve is named by the pass where it is used and
   by the replay never (`name_differences`). No built unit has one.
 
+#### T6 design
+
+Status: design. No slice is built. Skeleton and acceptance tests of the
+first two slices are in `emit/builder.rs` and `emit/builder_tests.rs`; the
+build prompts are in 11.9, which supersedes 11.8. "Prototype" below means
+bodies written during this design turn, run against the tests and the
+profiler, and taken out again before the commit; "read" means read in the
+code and not run.
+
+**Findings: what 11.8 and section 3 did not account for.**
+
+1. **11.6 and 11.8 contradict each other on what runs after T6.** 11.8's end
+   state deletes `bir/bridge_j.rs`. 11.6 (T4g) and the re-cut table keep the
+   legacy passes P3 to P6 on the new side after T6, and those passes read a
+   `JsArena`, which the new side only has through `bridge_j::export_lowered`.
+   No pass can run on oxc nodes. Decided below ("The gate"): the passes do
+   not run on the builder's program; the comparison point of check mode
+   moves to the legacy program after the passes that have left.
+2. **"`bir/lower` changes types only" (11.8, step 4) does not hold.** Read:
+   the lowering outside its tests is about 18,000 lines with about 900
+   places that build, match, detach, release or copy a J node through a
+   `NodeId` (`rg -c 'View::J|Op::J|View::S[A-Z]|\.view\(|\.release\(|\.detach\(|\.replace\(|copy_subtree'`
+   per file; `prim.rs` 83, `ffi_args.rs` 66, `names.rs` 66, `cond.rs` 57).
+   A `NodeId` is `Copy`, has a parent and is its own identity. A handle that
+   owns an oxc node is none of the three.
+3. **A function body's final form is not known when the function closes.**
+   The flatten pass leaves the test of a conditional it splits untouched
+   (`Flatten::statement`, `Return(Cond)` and `Exp(Cond)`: OCaml
+   `js_pass_flatten.ml` 54-61 and 79-86), so a function literal inside such
+   a test keeps the body the lowering wrote (`z => z ? 1 : 2`), and the same
+   literal anywhere else gets `if (z) { return 1; } else { return 2; }`
+   ("T4c design", counterexample 2). Which of the two is decided where the
+   statement around the literal ends up, after the literal's node exists.
+4. **An oxc node inside a parent can only be reached from above.** There is
+   no parent link and no pointer from a table to a node, and safe Rust gives
+   no second owner. A fact can be recorded at construction (the table); an
+   edit of a node that is already attached needs a path from a node one
+   owns.
+5. **The form the rules read is not the form the printer needs.** The legacy
+   printer writes right-nested `&&`, `||` and `|` chains without
+   parentheses and a nested sequence flat; `oxc_codegen` prints the tree it
+   is given, so `a && (b && c)` keeps its parentheses. The emitter of trunk
+   rebuilds the chain left-nested (`Build::bin`, `chain_tasks`; `sequence`).
+   The rules need the nesting the lowering built (J-E5 reads `x && (x &&
+   r)`; J-E9 descends ten levels through `&&` and `||`; `equal` is false
+   for two different nestings).
+6. **A statement's print form depends on where it stands.** `Build::stmt`
+   takes `top` (a top-level function is a declaration) and `tail` (a unit
+   function drops its final `return` and an `else` that only returns
+   `undefined`); a `while` is followed by an empty statement (found by the
+   prototype: the legacy text is `while (c) {...}` and a line `;`); an
+   expression statement that is a variable, a module or a string is not
+   printed (`walk::omitted_expression`).
+7. **There is no "Bir view of `emit/walk.rs`" on trunk** (11.8, step 5): the
+   experiment that had one was not merged (PRINTER_INSTRUCTIONS,
+   "Historical experiment"). `emit/` reads the JS IR only.
+8. **A 2-byte table entry cannot point to a side pool** (section 3, "2 bytes
+   a node ... a side pool the table points to").
+9. **B:164 reads a fact of an identifier that section 3 does not list**: a
+   call is pure only as `Array.isArray(x)` on a JavaScript identifier
+   (`is_array_is_array_callee`: the `JS` flag, or a global of stamp zero).
+   Found by the prototype: the purity oracle failed without it.
+10. **JSX in preserve mode and `%raw` take the indentation of what is
+    around them** (`Build::jsx_indent`, `call_argument_needs_extra_group_
+    indent`): a value known going down, not when the node is built.
+
+**(a) The handle and the table.**
+
+| Type | What it is | Bytes | Where |
+| --- | --- | ---: | --- |
+| `Row` | The facts of one node: `flags` (16 bits), `kind` (the J-level kind, 8 bits), `aux` (8 bits: the `BinOp`, a boolean's value, the unit bit, the number class, the `LetKind`), `payload` (32 bits: a variable's index, an integer literal's value, a field position, the lowering's id of a call's information or of a block's shape, a function's scope row) | 8 | one per node in `Builder::rows`, dense by `node_id`; written where the node is created |
+| `J` | An expression in flight: the oxc `Expression` by value and its `Row` | 24 | what an expression constructor takes and returns |
+| `S` | A statement in flight: the oxc `Statement` by value and its `Row` | 24 | what a statement constructor returns |
+| `List` | A statement list in flight: a run of the builder's statement pool | 8 | what a compound statement constructor takes |
+| `Mark` | Where the operands (or staged statements) of the next list constructor start | 4 | `Builder::mark`, `Builder::stage_mark` |
+| `Kind` | 31 kinds in the first two slices, numbered densely (`Kind::ALL`) | 1 | `Row::kind` |
+
+All pinned (`sizes`, `statements::sizes`). `Option<S>` is 24 bytes (the
+pool's slot).
+
+*Why the handle is 24 bytes.* `Expression` is 16 (a tag and an arena box).
+Every rule reads flags or the kind of its operands; with a 16-byte handle
+that is the node's `node_id` (a load through the box, at an offset that
+depends on the variant) and then the table row, for every operand. The row
+beside the node makes it a register read. A handle is not `Copy`: the
+constructor that attaches an operand consumes it, which is the invariant
+`Bir` checks at run time today (a node attached twice).
+
+*Why the row is written at creation and is 8 bytes* (changes section 3: "2
+bytes a node, written when the handle is attached"). Finding 8: the pointer
+to the side data has to be in the entry, so the entry is 8 bytes: 2 of
+flags, 1 of kind, 1 of `aux`, 4 of payload. Writing it where the node is
+created costs the same store as writing it at the attachment and makes
+attaching free; `Builder::row` gives the row of an attached node in one
+indexed read.
+
+*The side pools are the lowering's own.* A payload is an id in a pool the
+lowering already has (`pools.javascript` for call information, object keys
+and templates; the constant pool; the text pool; `FuncId`). The builder
+adds one pool in T6c: `Shape` (16 bytes, blocks only: the lowering's id of
+the tag information, the element count, the number of leading properties
+the print form adds and where the bits of the omitted optional fields
+start).
+
+*Flags.* `PURE` (B:102), `STRICT` (E:15), `DELAY_SAFE` (A:28), `SUBEXPR`
+(E:146), `DUPLICABLE` (X:60), each computed from the operands' rows in
+O(arity) as `bir/j/facts.rs` does today; `HAS_FUN` (a function literal at
+or below) and `SEAL` (the seal has work at or below: (e)), both the "or" of
+the operands. T4g adds the late mark.
+
+*Operand lists* (arguments, elements, statements) go through a stack the
+builder owns: the caller takes a `Mark`, pushes handles, and the list
+constructor drains them into an arena vector of exactly that length. No
+`Vec` per call.
+
+*Identity.* `node_id` is the node's index in `Builder::rows`, from 1
+(`NodeId::DUMMY` is 0). It replaces the `NodeId` of `Bir` wherever a table
+is keyed by a node (sites, the scope row of a function literal).
+
+**(b) Per row: what it reads of a child, and from where.** "Handle": the
+`Row` in the operand's handle. "Node": the oxc node of the operand, matched
+by reference or taken apart by `Box::unbox` (the operand is owned).
+"Table": `Builder::row` of a node inside the operand. "Pool": the
+lowering's pool the payload names.
+
+| Row | Reads | From |
+| --- | --- | --- |
+| J-E1 `string_append` | an operand is a string literal; its text | handle (`Kind::Str`); pool (the payload is the text's id: the node's string is decoded for printing and two decoded halves do not concatenate to the decoded whole) |
+| | `(a ^ "b")`, `("c" ^ d)`: the inner operands | handle (`Kind::StrAppend`); node (left, right, by `unbox`); table (their kinds) |
+| J-E2 `length` | pure array or block literal and its element count; string literal; function literal | handle (`PURE`, kind); node (`elements.len()`) for an array, `Shape` for a block; pool (UTF-16 length of the text); the function's header through the payload |
+| J-E3 `is_null_or_undefined` | the kind | handle |
+| J-E4 `bin` | integer literals; `len` of a pure target against 0; `null`/`undefined`; optional block | handle (`Row::int`, kind, `PURE`); for the length's target: node, table |
+| J-E5, J-E6 | `x && x`: two variables are the same; `x && (x && r)`: the right operand's operands | handle (`Kind::Var`, payload); node of the right operand (left, right); table (their rows) |
+| | `v !== undefined && v === literal` | node (both comparisons), table |
+| J-E7 `cond` | the test is a literal, `!c`; both branches `(effect, undefined)`; a branch is `c2 ? a : b` | handle (kind, `Row::int`, `PURE`); node (the parts, by `unbox`); table |
+| | the branches are equal | `equal`: both nodes read in parallel with an explicit pair stack, each pair's rows from the table; stops at the first difference (the cost of `bir/j/equal.rs`) |
+| J-E8 `not` | literal; `!x`; a comparison; `&&`/`\|\|` whose operands can be negated | handle (kind, `aux` is the `BinOp`); for a comparison the operator is rewritten in place through the owned node, and `aux` in the handle and in the table; for De Morgan: node, table, explicit stack |
+| J-E9, J-E10 | operands pure; `typeof x === "..."`, `Array.isArray(x)`, `x === literal`, to depth 10 | handle (`PURE`); node and table below it. A part used twice is copied (`Builder::copy`: one step per node copied, each copy gets its own row) |
+| J-S1 `exp` | `(a, b)` with a number or `undefined` side; a number or `undefined` | handle (`Kind::Seq`); node (the two parts); table |
+| J-S2 `block`, J-S5 `unnest_block` | the list has no statement, one, one block | `List::len`, `Builder::row_at` (kind) |
+| J-S3 `simplify_if` | test is a boolean, `!c`; a branch is empty, exactly one `return`, one assignment to the same target, one expression statement; then ends in `return`/`throw`/`continue`/`break`; a branch is exactly one `if` | handle (test); `List::len`, `Builder::last_row`, `Builder::row_at` (the statements' kinds); `Builder::take` and the statement's node for the parts; `equal` on lists for rules 9 and 10 |
+| J-S4 `normalize` | a switch on a literal | handle (`Row::int`, or the text through the pool); the clause keys, scanned once |
+| J-M0 `remove_pure_subexpression` | `SUBEXPR` | handle |
+| J-M1 `js_seq` | a side is a number or `undefined`; the left operand is a variable | handle; for an inner sequence: node, table |
+| J-M2 | `null`/`undefined`; strictly pure and cannot be nullish; two literals | handle (kind, `STRICT`, `Row::int`); node for a float literal's value |
+| J-M3 to J-M8, J-M10 | integer literals; an operand is `x >>> n`, `x \| 0` | handle (`Row::int`; `Kind::Bin` with `aux`); node (its right operand), table (`Row::int`) |
+| J-M9 `typeof` | number, length, string, array, boolean | handle (kind) |
+| J-M11 projection | a strictly pure array or block literal; element `i` | handle (`STRICT`, kind); node by `unbox`; for a block, `Shape` gives the print position of field `i` (the leading properties plus `i` minus the omitted optional fields before it: one popcount), an omitted field is a new `undefined` |
+| J-M12 template | a value is a string or template literal | handle (kind); pool |
+| J-M13 div, mod | `len / 2`; a nonzero integer divisor; two literals | handle (`Kind::Length`, `Row::int`) |
+| J-M14 effects | a sequence; strictly pure parts; numbers and `undefined` | handle (`Kind::Seq`, `STRICT`, kind); node (the parts, by `unbox`) |
+
+A rule that keeps a part of an operand and drops the rest calls
+`Builder::release` on the rest: one step per node released, with the
+reference bookkeeping `Bir::release` does today (a `Var` row clears its
+site and its count; a function literal's row dies). A dropped node stays in
+the arena until the unit is printed.
+
+**(c) Where each printer decision of BACKEND_REDESIGN A.7 is taken.**
+
+| Decision | Taken | By |
+| --- | --- | --- |
+| `x === null \|\| x === undefined` prints `x == null`; `0 - x` prints `-x`; property access with `.` or `[...]`; number spelling; string decoding; a call whose only argument is the unit value prints `f()`; the nullish test | when the node is built | T6a (`Builder::bin`, `dot`, `number`, `string`, `call`, `is_nullish`) |
+| Runtime shape of blocks; `Some` as itself or through `Primitive_option.some`; templates; JSON; method `this` | when the node is built | T6c (with `Shape`), T6d |
+| Parentheses by precedence | never: `oxc_codegen` | - |
+| No parentheses for right-nested `&&`, `\|\|`, `\|`; a nested sequence flat | at the seal (finding 5) | T6e |
+| A dead pure declaration is not printed, a dead impure one prints its value; `let x = undefined` prints `let x`; an expression statement that is a name or a string is not printed; `else { if }` prints `else if`; an `else` that is omitted; the `;` after a `while`; a block's statements spliced into its list | at the seal (finding 6) | T6e |
+| Function declaration or `let`; a unit function drops its final `return`; an `else` that only returns `undefined` | at the seal: `top` and `tail` are known going down | T6e |
+| Eta reduction; arrow or `function`; expression body or block; `{}` | at the seal, where the body is final (finding 3) | T6e |
+| `for` upper bound bound to `i_finish` | when the loop is built (the bound is simple or not); its name at the replay | T6d (the loop), (d) |
+| Raw JavaScript verbatim; JSX syntax or a call | when the node is built, with the indentation limit of finding 10 | T6d |
+| File: directives, header, imports, exports, trailer | when the program is assembled | T6d |
+| Names | the replay, (d) | T6d, T6s |
+
+"The decisions that depend on the finished function are made when the
+function's scope closes" (section 3) becomes "at the seal": finding 3.
+
+**(d) Names.** Decided before this turn: the symbol of a binder and of a
+reference is the variable's index, and the names are the replay's.
+
+*The table `oxc_codegen` reads.* `Codegen::with_scoping` takes an
+`oxc_semantic::Scoping`. A binder carries `symbol_id = variable`, a
+reference carries `reference_id = variable`; the program slice creates one
+symbol and one reference per variable, in index order, with the name of
+`Vars::printed`: O(variables) and the bytes of the names, once per unit, no
+step per reference. The mechanism is tried: the test helper `names` builds
+the `Scoping` by hand and `a_reference_and_a_binder_print_the_name_of_
+their_variable` prints `let v1 = 1; f(v1);` from a binder and a reference
+that hold no text (ran against the prototype).
+
+*An imported module and a cached bound are variables.* A symbol has to be
+known where the node is built, and the number of variables is not final
+then, so a second id space cannot be put after it. The first reference to
+an import allocates a variable for it (kept in `pools.j_modules`); a range
+loop whose bound is not simple allocates one for the bound. Neither has a
+declaration the replay reads as a binder: the replay names the import in
+the program's prologue and the bound at its loop (`Tables::synthetic`) and
+writes both into `Vars::printed`. `Printed::modules` and `Printed::finishes`
+go.
+
+*How the replay reaches the function literals of a statement, in print
+order* (changes "(g)" point 2, "the handle carries the first and last
+literal"). A chain in the handle cannot be kept right: a rule that takes an
+operand apart (`evaluate_now` moves an element of a literal into a
+statement of its own) splits it, and the handle has no room (24 bytes are
+the node, the flags, the kind and the payload). And by finding 4 the
+replay cannot enter a literal's body from its scope row at all: the body is
+inside the node. So: a statement's row has `HAS_FUN` when a literal is
+inside it. The replay, on such a statement, descends its expressions in
+operand order through the nodes whose row has `HAS_FUN`, and nowhere else;
+at a function node it reads the scope row from the node's payload, does
+what the replay does today (reservation, parameters) and walks the body's
+statements. Operand order is print order, so `ambiguous_orders`, the
+prelude and `Scratch::marks` go. Cost: one row read per operand of each
+ancestor of a literal inside its statement ("T5 part B as built" measured
+1.03 to 2.67 ancestors per literal). This is the one place besides `adopt`
+and `release` where an expression is entered, it enters only the nodes
+above a function literal, and it is counted (`descent_steps`); see open
+question 1.
+
+*`adopt`* stays: it reads an expression that was built before its
+function's scope opened, now over oxc nodes (a `Kind::Var` row is a
+reference; a function node gives its scope row).
+
+**(e) The flatten pass, applied where a statement is written.** A statement
+is "written" at the seal: once, when the unit is complete, in the replay's
+walk over the final statement lists (the one statement-level walk; the
+seal of a list comes before its naming). Not where a list is copied (T4b,
+RESULT B) and not where a function closes (finding 3).
+
+| Rule (`Flatten::statement`) | At the seal |
+| --- | --- |
+| F1 `Exp(Seq)`: one statement per part | the parts of the sequence become statements of the list being written; each is sealed |
+| F2 `Exp` of a block literal: one statement per element | the same, from the literal's elements |
+| F3 `Exp(Cond)`: an `if`; a branch without effect is dropped (`PURE` of the branch, from the table), the test negated when only the else branch is left; nothing, or the test alone, when both go | the `if` is written; the dropped branch is released; the test is not entered |
+| F4 `Exp(target = Seq)`: the heads as statements, then the assignment of the last part | the same |
+| F5 `Return(Cond)`: `if (test) { return a } else { return b }`, each `return` sealed again | the same; the test is not entered |
+| F6 `Return(Seq)`: the heads as statements, then `return` of the last part | the same |
+| F7 a block of one statement is that statement; F8 a block statement inside a list is spliced | the same |
+| otherwise: every expression of the statement is mapped, which reaches the bodies of the function literals inside it | the descent of (d): the body of each literal is sealed where the replay enters it. A literal inside a test that F3 or F5 does not enter is named and its body is left as built |
+
+The seal also writes the print forms of (c). It rewrites a statement list
+only when a statement of it changes, and it enters an expression only below
+`HAS_FUN` or `SEAL` (a chain or a sequence not in print form).
+
+*The copied-branch reader (T4b, RESULT B).* `simplify_if_head` reads the
+last statement of a copied branch as `Return(Cond)`. It keeps reading that:
+nothing is sealed while the lowering runs, so every list the lowering
+reads, copied or not, holds what its constructors wrote.
+`flattening_a_copied_return_branch_changes_the_simplify_if_head_reader`
+stays as it is; after the flip its two texts are the builder's.
+
+*What T4g gets.* The site of a tail call is still read through the
+reshaping (`sites` of "T4c design"): the `return` is not split when the
+splice runs. The splice writes the `if` of F5 itself for the one statement
+it splices into, and marks that `if` as not to be entered at its test.
+The dropped branch of F3 is released at the seal, after every scope-close
+decision: the count hazard `a_pure_branch_the_flatten_pass_drops_takes_
+an_occurrence_built_still_counts` is not removed by T6, and T4g's design
+step has to subtract those occurrences where the statement is built (the
+branch's `PURE` flag is in the handle then). This corrects "T4c design",
+"What has to move first", first item.
+
+**(f) The readers of J-level `Bir` today.**
+
+| Reader | After T6 |
+| --- | --- |
+| `bir/j/` rules (`norm.rs`, `logic.rs`, `equal.rs`, `facts.rs`, `plain.rs`) | Rewritten over handles in `emit/` (T6g to T6j), with the rule tests of `norm_tests.rs` and `facts_tests.rs` ported to the oracle form against `js_ir::build` and `js_exp_make`; the `bir/j/` files are deleted at the flip |
+| The lowering (`bir/lower/`) | Reaches J nodes only through an interface (T6k to T6r), then the interface is the builder's (T6s) |
+| The naming log: `open`, `close`, sites | Unchanged in what they do. A site is keyed by `node_id`; `Bir::replace` moving a site becomes the handle carrying its site in the payload of a `Kind::Var` row |
+| The replay (`names::replay`) | Walks the builder's statements with the seal; the prelude, `Scratch::marks` and `ambiguous_orders` are deleted (T6s) |
+| `export.rs` (rows, sites of the position facts) | A `Row` (the 8-byte top-level row) holds a statement's position in the top-level `List` instead of its `NodeId`; a position fact is recorded where the reference is built, as today |
+| `close.rs`, `scope::return_sites` | Read the last statement of a list through `Builder::last_row` and its node |
+| `globals.rs` (`decide`: from a reference up to the root) | No parent exists. The decision moves into the replay's walk, which knows the bindings around the statement it is in: a reference to a global is found by the descent only when its statement's row says one is inside (a flag, set like `HAS_FUN`). Designed in the turn that issues T6r |
+| The check-mode gate | "The gate" below |
+| The allocation-pinned tests (`unit.rs`, LOWERING_ALLOCATION_SCALING.md) | Re-pinned once at the flip, with the builder's vectors named; a pin is an invariant of the flip slice, not of the slices before it |
+| `bridge_j.rs` (import and export), the `lambda-bridge` round trip of J | Deleted at the flip; `shadow.rs` keeps the Lambda bridge only |
+| `validate.rs` on J nodes | Deleted at the flip: ownership makes a node attached twice a compile error |
+
+**The gate.**
+
+- *Until the flip (T6a to T6r)* check mode is what it is today: both texts
+  through the legacy printer, before and after the passes. The builder is
+  compared with the legacy text by the suite that exists for the oxc
+  emitter: `scripts/test_printer_parity.py` (through
+  `scripts/test_js_output_parity.sh --printer oxc` and the `stdlib` and
+  `gentype` twins; CI job `printer-parity`), which reformats the legacy
+  JavaScript once with `scripts/js-reformat` and compares with the oxc
+  text, on the JavaScript, stdlib and genType corpora, with the ratchet
+  `compiler-rust/tests/printer_coverage.json`. From T6f on the emitter of
+  trunk writes through the builder, so every builder constructor is under
+  that suite.
+- *From the flip (T6s)* check mode compares the builder's text with the
+  legacy program after the passes that have left the new side: the legacy
+  side keeps a copy of its program after P1 and P2, prints it with the
+  legacy printer, reformats it once in process (`js_reformat::reformat`,
+  already a dependency) and requires equality with what `oxc_codegen`
+  prints for the builder's program. Corpora: the runtime library,
+  tests/tests and the fixtures through `scripts/test_backend_coverage.py`,
+  and the application through a `RESCRIPT_BACKEND=check` build. T4g moves
+  the point after P3, T4d after P4, T4e after P5, T4f to the final text.
+- *What is given up between T6s and T4f*: the second comparison of today
+  (both programs through the remaining legacy passes). It caught facts the
+  passes read that no text shows (purity, the kind of a declaration, the
+  call information). Those surface in T4g to T4f, each of which compares
+  its own decisions.
+- *`RESCRIPT_BACKEND=new` keeps today's meaning* (the legacy lowering) until
+  T4f: before that the builder's program is not the final program. This
+  corrects 11.8, step 4 and its end state ("`RESCRIPT_BACKEND=new` below
+  the default"): that measurement belongs to T4f.
+
+**(g) The instruction budget.**
+
+*Where the +10% of PRINTER_INSTRUCTIONS came from* (tests/tests, of
+4,357 M): 298 M was `bridge_j::import_js`, the conversion of a finished
+`JsArena` into `Bir`, which a lowering that writes its own tree never pays;
+65 M was the adapter that decoded each J node into a JS-shaped view
+(`EmitterView::ek` 23 M and its helpers); 56 M was the naming pass. The
+rest is shared with printing from the JS IR.
+
+*What the builder does instead, per node:* one bump allocation of the oxc
+node, O(arity) flag arithmetic on rows that are in the operands' handles,
+one 8-byte push. No second tree, no view, no naming pass: the replay costs
+one step per statement and the descent of (d).
+
+*Measured on a prototype* of T6a (the bodies behind the tests of
+`emit/builder_tests.rs`): one expression of 10,000 calls `f(a.b, 1, "s")`
+inside a call (60,002 nodes), release test binary with thin LTO,
+cachegrind, one run each, the cost of the test harness and of building the
+description subtracted (21,324,660):
+
+| Path | Instructions | Per node |
+| --- | ---: | ---: |
+| Builder: construct the oxc nodes with their rows, print with `oxc_codegen` | 19,604,712 | 327 |
+| Legacy: construct the JS IR | 14,839,066 | 247 |
+| Legacy printer on that JS IR | 23,226,389 | 387 |
+| `emit::emit` on that JS IR (naming pass, `Build`, `oxc_codegen`) | 45,856,062 | 764 |
+| `bridge_j::export_js` of the J-level `Bir` of that program, then `emit::emit` | 79,211,835 | 1,320 |
+| (`bridge_j::import_js`, to get that `Bir`; not part of any path after T6) | 155,654,043 | 2,594 |
+
+So on this input the builder with its printing is 0.25 of "`bridge_j` plus
+`emit`", which is what the new side would pay to print through oxc today,
+and 0.51 of the legacy construction plus the legacy printer. What the
+figure does not show: names (the identifiers are written by text, so no
+replay and no `Scoping`), statements, the rules, the seal, and the
+construction of the J-level `Bir` that the fifth row starts from. The
+input is the smallest honest one, not a corpus. The first slice that
+measures a corpus is T6f (the printer-parity build with
+`RESCRIPT_JS_PRINTER=oxc`, before and after, by
+`scripts/compare_build_instructions.py`); the first that measures the
+lowering is T6s (check mode before and after, with the share of
+`emit::builder` from the cachegrind output).
+
+*The budget.* The default build runs neither the lowering nor the oxc
+emitter, so every slice must leave the `Instruction count` job within
++0.02%; a slice that moves it more has changed a default-path function and
+is wrong. T6a to T6e and T6g to T6j add code under `#[cfg(test)]` only: the
+release binary is the same. T6f changes the `RESCRIPT_JS_PRINTER=oxc`
+path: budget, no more instructions than before on tests/tests with that
+variable set (the naming pass and `Build` stay; the constructors move).
+T6s changes check mode: budget, fewer instructions than before (the J
+tree, `export_lowered` and one printing go).
+
+**Changed against earlier statements**, each with its reason above: the
+table entry is 8 bytes and written at creation (section 3); the print
+decisions that need the final statement are at the seal, not at the
+function's close (section 3, 11.8 step 1 (c)); the handle carries no
+literal chain, the replay descends below `HAS_FUN` ("(g)" points 2 and 5);
+modules and cached bounds are variables ("(g)" point 3); the lowering's
+change is not types only and comes in eight slices (11.8 step 4); the
+legacy passes do not run on the builder's program and the gate's point
+moves (11.6 preconditions and end state, 11.8 end state); `RESCRIPT_
+BACKEND=new` is unchanged until T4f; "the Bir view of `emit/walk.rs`" does
+not exist (11.8 step 5).
+
+**Open questions**, each with the recommended answer.
+
+1. *The descent below `HAS_FUN` and `SEAL` enters expressions, which "(g)"
+   point 5 forbids.* Recommended: accept it as a counted exception
+   (`descent_steps`, reported per corpus beside `adopted_nodes`), because
+   finding 4 leaves no other way to reach a function body, and require of
+   T6f the relation "descent steps <= 3 x the ancestors of function
+   literals and of chains" on tests/tests.
+2. *JSX in preserve mode on the lowering's path* (finding 10). Recommended:
+   the unit stays unsupported on the builder's path (counted, one unit in
+   tests/tests) until a slice after T6 gives the JSX node its indentation
+   at the seal, which knows the depth.
+3. *The lowering's interface (T6k to T6r) is cut by file here, not
+   designed.* Recommended: one more design turn before T6k is issued, which
+   writes the interface (the constructors and readers `bir/lower` may call)
+   as a skeleton; T6a to T6j do not depend on it.
+4. *Source maps on the builder's path.* The emitter sets spans on leaves
+   and statements from locations; the handle has no room for one.
+   Recommended: a location is set on the node where it is built (`span` is
+   a field of every node), in the slice that wires the lowering (T6s), and
+   check mode compares mappings as today.
+5. *The comparison through the remaining passes is suspended from T6s to
+   T4f.* Recommended: accept; the alternative is a converter from oxc nodes
+   back to the JS IR, which is a fallback structure of about 2,000 lines.
+
 ### 11.5 Worker prompt for T4b
 
 Which form: it needs one experiment, because nothing read so far proves that
