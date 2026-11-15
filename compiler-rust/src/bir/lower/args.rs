@@ -1,6 +1,7 @@
 //! H13: A:28–249, argument sequencing after left-to-right value lowering.
 use super::*;
-use crate::bir::{NodeFlags, Op};
+use crate::bir::PropertyKey;
+use crate::emit::row::{Kind, flag};
 
 enum Work {
     Enter(NodeId),
@@ -14,28 +15,31 @@ pub(super) struct Evaluation {
 }
 
 impl<B: super::js_stmt::JsStmt> State<'_, B> {
-    /// A:28 delay_safe: a cached fact, never a subtree walk.
+    /// A:28 delay_safe: a cached fact, never a subtree walk. O(1).
     fn delay_safe(&self, value: NodeId) -> bool {
-        self.arena
-            .node(value)
-            .flags()
-            .contains(NodeFlags::DELAY_SAFE)
+        self.js.has(&self.arena, B::at(value), flag::DELAY_SAFE)
     }
 
     /// A:90 runs_no_code: inspect each owned member spine without recursion.
     fn runs_no_code(&self, value: NodeId) -> bool {
-        crate::bir::j::facts::runs_no_code(&self.arena, value)
+        self.js.runs_no_code(&self.arena, B::at(value))
+    }
+
+    /// Whether `statement` declares a variable whose value, if it has one,
+    /// runs no code. One step per member of the value's chain of field
+    /// reads with a position (`runs_no_code`); O(1) otherwise.
+    fn declares_pure(&self, statement: NodeId) -> bool {
+        let statement = B::stmt_from_node(statement);
+        self.js.stmt_kind(&self.arena, &statement) == Kind::Declare
+            && self
+                .js
+                .value_of(&self.arena, &statement)
+                .is_none_or(|value| self.js.runs_no_code(&self.arena, value))
     }
 
     /// A:96 defines_pure_values: each statement is examined once by sequencing.
     fn defines_pure_values(&self, statements: &[NodeId]) -> bool {
-        statements.iter().all(|&statement| {
-            if let View::SDecl { value, .. } = self.arena.view(statement) {
-                value.is_none_or(|value| self.runs_no_code(value))
-            } else {
-                false
-            }
-        })
+        statements.iter().all(|&statement| self.declares_pure(statement))
     }
 
     /// X:1445 fresh_ident: unit-local naming order, without a global counter.
@@ -71,96 +75,67 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                         values.push(value);
                         continue;
                     }
-                    if let View::JSeq { first, second } = self.arena.view(value) {
-                        self.arena.detach(first);
-                        self.arena.detach(second);
-                        self.arena.release(value);
-                        if self.arena.node(first).flags().contains(NodeFlags::STRICT) {
-                            self.arena.release(first);
+                    let kind = self.js.kind(&self.arena, B::at(value));
+                    if kind == Kind::Seq {
+                        self.js.unpack_rev(&mut self.arena, B::from_node(value));
+                        let first = self.js.pop();
+                        let second = self.js.pop();
+                        if self.js.has(&self.arena, B::of(&first), flag::STRICT) {
+                            self.js.release(&mut self.arena, first);
                         } else {
-                            statements.push(crate::bir::j::norm::js1_exp(&mut self.arena, first));
+                            let statement = self.js.exp_rule(&mut self.arena, first);
+                            statements.push(B::stmt_node(statement));
                         }
-                        work.push(Work::Enter(second));
+                        work.push(Work::Enter(B::node(second)));
                         continue;
                     }
-                    let op = self.arena.node(value).op();
-                    let literal = matches!(op, Op::JOptional | Op::JArray | Op::JBlockLit)
-                        || if let View::JObject { info, .. } = self.arena.view(value) {
-                            let crate::bir::JsPayload::Object(keys) =
-                                &self.arena.pools.js[info.index()]
-                            else {
+                    let literal = match kind {
+                        Kind::Optional | Kind::Array | Kind::BlockLit => true,
+                        Kind::Object => {
+                            let info = self.js.info_of(&self.arena, B::at(value)).expect("object information");
+                            let crate::bir::JsPayload::Object(keys) = self.arena.javascript(info) else {
                                 unreachable!("object payload")
                             };
                             self.arena.property_keys(*keys).iter().all(|key| {
-                                matches!(
-                                    key,
-                                    crate::bir::PropertyKey::Literal(_)
-                                        | crate::bir::PropertyKey::Symbol
-                                )
+                                matches!(key, PropertyKey::Literal(_) | PropertyKey::Symbol)
                             })
-                        } else {
-                            false
-                        };
-                    if literal {
-                        let count = self.arena.view(value).child_count();
-                        work.push(Work::Rebuild(value, count));
-                        for i in (0..count).rev() {
-                            let child = self.arena.view(value).child_at(i);
-                            self.arena.detach(child);
-                            work.push(Work::Enter(child));
                         }
+                        _ => false,
+                    };
+                    if literal {
+                        let mut shell = B::from_node(value);
+                        let count = self.js.take_operands(&mut self.arena, &mut shell);
+                        work.push(Work::Rebuild(B::node(shell), count as usize));
+                        let at = work.len();
+                        for _ in 0..count {
+                            work.push(Work::Enter(B::node(self.js.pop())));
+                        }
+                        // The first operand is entered first.
+                        work[at..].reverse();
                     } else {
                         let var = self.fresh_variable("tmp");
-                        statements.push(crate::bir::j::declare(
+                        let statement = self.js.declare(
                             &mut self.arena,
                             LetKind::Strict,
                             var,
-                            value,
-                        ));
-                        values.push(self.pure_expression(View::Var { var }, 0));
+                            Some(B::from_node(value)),
+                        );
+                        statements.push(B::stmt_node(statement));
+                        let mut held = self.js.var(&mut self.arena, var);
+                        self.js.assume_strict(&mut self.arena, &mut held);
+                        values.push(B::node(held));
                     }
                 }
                 Work::Rebuild(old, count) => {
                     let begin = values.len() - count;
-                    let children = &values[begin..];
-                    let aux = self.arena.node(old).aux();
-                    let cold = self.arena.cold(old);
-                    let located = self.arena.node(old).flags().contains(NodeFlags::JS_LOC_PRESENT);
-                    let view = self.arena.view(old);
-                    let value = if let View::JOptional { .. } = view {
-                        self.pure_expression(View::JOptional { value: children[0] }, aux)
-                    } else if let View::JArray { .. } = view {
-                        self.pure_expression(View::JArray { values: children }, aux)
-                    } else if let View::JBlockLit { info, .. } = view {
-                        self.pure_expression(
-                            View::JBlockLit {
-                                values: children,
-                                info,
-                            },
-                            aux,
-                        )
-                    } else if let View::JObject { info, .. } = view {
-                        self.pure_expression(
-                            View::JObject {
-                                values: children,
-                                info,
-                            },
-                            aux,
-                        )
-                    } else {
-                        unreachable!("held literal")
-                    };
-                    if let Some(cold) = cold {
-                        self.arena.set_cold(value, cold);
-                        if located {
-                            let mut flags = self.arena.node(value).flags();
-                            flags.0 |= NodeFlags::JS_LOC_PRESENT;
-                            self.arena.nodes[value.index()].set_flags(flags);
-                        }
+                    let mark = self.js.mark();
+                    for &child in &values[begin..] {
+                        self.js.push(B::from_node(child));
                     }
-                    self.arena.release(old);
                     values.truncate(begin);
-                    values.push(value);
+                    let mut value = self.js.refill(&mut self.arena, B::from_node(old), mark);
+                    self.js.assume_strict(&mut self.arena, &mut value);
+                    values.push(B::node(value));
                 }
             }
         }
@@ -204,44 +179,27 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let (held, value) =
                 if !needs_holds || !has_code || (later_defines_pure && self.runs_no_code(value)) {
                     (Span::default(), value)
-                } else if method_callee && i == 0 && self.arena.node(value).op() == Op::JDot {
-                    let View::JDot {
-                        object,
-                        property,
-                        position,
-                    } = self.arena.view(value)
-                    else {
-                        unreachable!("member callee")
-                    };
-                    let aux = self.arena.node(value).aux();
-                    let cold = self.arena.cold(value);
-                    let located = self.arena.node(value).flags().contains(NodeFlags::JS_LOC_PRESENT);
-                    self.arena.detach(object);
-                    self.arena.release(value);
-                    let (held, object) = self.evaluate_now(object);
-                    let value =
-                        crate::bir::j::member(&mut self.arena, object, property, position, aux);
-                    if let Some(cold) = cold {
-                        self.arena.set_cold(value, cold);
-                        if located {
-                            let mut flags = self.arena.node(value).flags();
-                            flags.0 |= NodeFlags::JS_LOC_PRESENT;
-                            self.arena.nodes[value.index()].set_flags(flags);
-                        }
-                    }
-                    (held, value)
+                } else if method_callee
+                    && i == 0
+                    && self.js.kind(&self.arena, B::at(value)) == Kind::Dot
+                {
+                    let mut shell = B::from_node(value);
+                    self.js.take_operands(&mut self.arena, &mut shell);
+                    let object = self.js.pop();
+                    let (held, object) = self.evaluate_now(B::node(object));
+                    let mark = self.js.mark();
+                    self.js.push(B::from_node(object));
+                    let value = self.js.refill(&mut self.arena, shell, mark);
+                    (held, B::node(value))
                 } else {
                     self.evaluate_now(value)
                 };
             has_code |= self.statements.has_statements(arg.stmts) || held.len != 0;
             later_defines_pure &= self.defines_pure_values(&self.evaluation.statements[held.start as usize..(held.start + held.len) as usize])
-                && self.statements.statements(arg.stmts).all(|statement| {
-                    if let View::SDecl { value, .. } = self.arena.view(statement) {
-                        value.is_none_or(|value| self.runs_no_code(value))
-                    } else {
-                        false
-                    }
-                });
+                && self
+                    .statements
+                    .statements(arg.stmts)
+                    .all(|statement| self.declares_pure(statement));
             if held.len != 0 {
                 self.statements
                     .fill_held(arg.stmts.start + arg.stmts.len - 1, &self.evaluation.statements[held.start as usize..(held.start + held.len) as usize]);
@@ -257,6 +215,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bir::NodeFlags;
     use crate::bir::{JsPayload, bridge, bridge_j};
     use crate::js_ir::{
         CallInfo,
