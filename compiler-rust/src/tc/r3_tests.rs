@@ -1672,7 +1672,7 @@ fn fields_a_side_lacks_are_built_on_one_row_variable() {
 /// is bound to `b; nil` and `unify rest1 va` is one node on both sides.
 /// The other way, `{a}` closed against `{.. a, b}`: `va` is the right rest
 /// (`use2`), and `unify rest1 (b; va)` is `Tnil` against a field: a clash
-/// (`_, _ -> raise (Unify [])`, ctype.ml:2424).
+/// (`_, _ -> raise (Unify [])`, ctype.ml:2425).
 /// Reaches: R3e.
 #[test]
 fn a_closed_row_takes_no_field() {
@@ -2732,4 +2732,1019 @@ fn an_escape_below_a_swapped_unify3_is_reversed() {
     assert_eq!(trace[2][1], t);
     let escaped = c.g.nodes[trace[2][0].0 as usize];
     assert_eq!((escaped.tag(), escaped.level), (VAR, 1));
+}
+
+// ---------------------------------------------------------------------------
+// R3g: universal variables and polymorphic types (section 8.6, decisions
+// 49 to 51).
+// ---------------------------------------------------------------------------
+
+use super::rows::{PolyScope, partner_node};
+
+/// A universal variable with no name at `level` (`newty2 level (Tunivar
+/// None)`), with a descriptor row of its own, counted (`Extras::univar`).
+fn univar_at(c: &mut Checker, level: u32) -> Ty {
+    let a = c.extras.univar(NONE);
+    let b = c.g.lists.len() as u32;
+    c.g.push(Node {
+        head: TUPLE | EXTENDED,
+        level,
+        a,
+        b,
+    })
+}
+
+/// `Tpoly (body, binders)` at `level`: slot 0 the body, then the bound
+/// variables (tc/segment.rs, `ExtraDescriptor::Poly`).
+fn poly_of(c: &mut Checker, level: u32, body: Ty, binders: &[Ty]) -> Ty {
+    let mut slots = vec![body];
+    slots.extend_from_slice(binders);
+    extended_at(c, level, ExtraDescriptor::Poly, &slots)
+}
+
+/// `poly((first, second, third); [u, v])` at level 2 over two new
+/// universal variables `u` and `v`, the tuple's elements chosen among
+/// them by index (0 is `u`, 1 is `v`): the type, `u`, `v`.
+fn two_binders(c: &mut Checker, elements: [usize; 3], order: [usize; 2]) -> (Ty, [Ty; 2]) {
+    let vars = [univar_at(c, 2), univar_at(c, 2)];
+    let body = tuple_at(c, 2, &elements.map(|at| vars[at]));
+    (poly_of(c, 2, body, &order.map(|at| vars[at])), vars)
+}
+
+/// The nodes a failed unification must leave as they were.
+fn nodes_now(c: &Checker) -> Vec<Node> {
+    c.g.nodes.clone()
+}
+
+/// Universal variables are paired by position in the two binder lists,
+/// never by name or by count (compiler/ml/ctype.ml:1544-1559, 1670-1672,
+/// 2244-2247):
+///
+/// ```text
+/// | (cl1, cl2) :: rem -> (
+///   match (find_univ t1 cl1, find_univ t2 cl2) with
+///   | Some {contents = Some t'2}, Some _ when t2 == repr t'2 -> ()
+///   | Some ({contents = None} as r1), Some ({contents = None} as r2) ->
+///     set_univar r1 t2;
+///     set_univar r2 t1
+///   | None, None -> unify_univar t1 t2 rem
+///   | _ -> raise (Unify []))
+/// | [] -> raise (Unify [])
+/// ...
+/// let cl1 = List.map (fun t -> (t, ref None)) tl1
+/// and cl2 = List.map (fun t -> (t, ref None)) tl2 in
+/// univar_pairs := (cl1, cl2) :: (cl2, cl1) :: old_univars;
+/// ...
+/// | Tunivar _, Tunivar _ ->
+///   unify_univar t1 t2 !(current_univar_pairs ());
+///   update_level !env t1.level t2;
+///   link_type t1 t2
+/// ```
+///
+/// Witnesses, observed on the old checker in
+/// `differential::tests::old_checker_pairs_universal_variables_by_position`:
+/// - `poly((u, v, u); u v)` against `poly((v', u', v'); v' u')`: the
+///   first variables pair and the second ones pair, whatever they are
+///   called; each left variable is a link to its partner, the left type a
+///   link to the right one, and no scope stays open.
+/// - `poly((u, v, u); u v)` against `poly((u', v', v'); u' v')`: the third
+///   element pairs the first variable with the second: a clash. In the
+///   explaining mode the trace is the two types, the two bodies, and the
+///   two variables as they stood (`u` is a link to `u'` by then: the pair
+///   is `(u', v')`).
+/// - `poly((u, u, v); u v)` against `poly((u', v', v'); u' v')`: `u` has
+///   `u'` as its partner when it meets `v'`: a clash (the first arm needs
+///   `t2 == repr t'2`, the second two empty partners).
+///
+/// No descriptor row is written.
+/// Reaches: R3g.
+#[test]
+#[ignore = "R3g build"]
+fn universal_variables_pair_by_position() {
+    let mut c = checker(Mode::Success);
+    let (left, [u, v]) = two_binders(&mut c, [0, 1, 0], [0, 1]);
+    let (right, [u2, v2]) = two_binders(&mut c, [1, 0, 1], [1, 0]);
+    let rows = rows_now(&c);
+    c.unify(left, right).unwrap();
+    assert_eq!(c.g.repr(left), right);
+    // `u` is the first bound variable of the left type, `v2` of the right.
+    assert_eq!((c.g.repr(u), c.g.repr(v)), (v2, u2));
+    assert!(c.scopes.is_empty() && c.frames.is_empty());
+    assert_rows_kept(&c, &rows);
+
+    for (first, second) in [([0, 1, 0], [0, 1, 1]), ([0, 0, 1], [0, 1, 1])] {
+        for mode in [Mode::Success, Mode::Explain] {
+            let mut c = checker(mode);
+            let (left, _) = two_binders(&mut c, first, [0, 1]);
+            let (right, [u2, v2]) = two_binders(&mut c, second, [0, 1]);
+            assert!(c.unify(left, right).is_err(), "{first:?} {second:?}");
+            assert!(c.scopes.is_empty() && c.frames.is_empty() && c.saved.is_empty());
+            if mode == Mode::Explain {
+                assert_eq!(c.trace.len(), 3, "{:?}", c.trace);
+                assert_eq!(c.trace[0], [left, right]);
+                assert_eq!(c.trace[2], [u2, v2]);
+            }
+        }
+    }
+}
+
+/// The scopes are searched innermost first, and a pair that neither list
+/// of a scope holds goes on to the next (compiler/ml/ctype.ml:1557,
+/// `None, None -> unify_univar t1 t2 rem`); a variable of an outer scope
+/// against one the inner scope binds is refused at the inner scope (one
+/// found, the other not: `| _ -> raise (Unify [])`, ctype.ml:1558).
+/// Observed on the old checker in
+/// `differential::tests::old_checker_searches_the_scopes_innermost_first`.
+/// Witnesses: `poly(poly((a, b); b); a)` against the same shape unifies
+/// and pairs `a` with `a'` from inside the inner scope; against
+/// `poly(poly((b', a'); b'); a')` it fails at the first element, `a`
+/// against `b'`, the last pair of the trace.
+/// Reaches: R3g.
+#[test]
+#[ignore = "R3g build"]
+fn a_variable_of_an_outer_scope_pairs_in_its_scope() {
+    let nested = |c: &mut Checker, swap: bool| {
+        let (a, b) = (univar_at(c, 2), univar_at(c, 2));
+        let body = if swap {
+            tuple_at(c, 2, &[b, a])
+        } else {
+            tuple_at(c, 2, &[a, b])
+        };
+        let inner = poly_of(c, 2, body, &[b]);
+        (poly_of(c, 2, inner, &[a]), a, b)
+    };
+    let mut c = checker(Mode::Success);
+    let (left, a, b) = nested(&mut c, false);
+    let (right, a2, b2) = nested(&mut c, false);
+    c.unify(left, right).unwrap();
+    assert_eq!((c.g.repr(a), c.g.repr(b)), (a2, b2));
+    assert!(c.scopes.is_empty());
+
+    let mut c = checker(Mode::Explain);
+    let (left, a, _) = nested(&mut c, false);
+    let (right, _, b2) = nested(&mut c, true);
+    assert!(c.unify(left, right).is_err());
+    assert_eq!(c.trace.len(), 4, "{:?}", c.trace);
+    assert_eq!(c.trace[3], [a, b2]);
+    assert!(c.scopes.is_empty() && c.frames.is_empty());
+}
+
+/// What the scopes hold and who cuts them back (section 8.6, decision
+/// 50). `enter_poly` pushes one [`PolyScope`] and one partner node per
+/// bound variable; a pairing writes two partner nodes (`set_univar`,
+/// compiler/ml/btype.ml:739-741, which logs `Cuniv`). A failure cuts the
+/// scopes back (`univar_pairs := old_univars; raise exn`,
+/// compiler/ml/ctype.ml:1677-1679) in both modes; inside a speculation
+/// its owner's restore puts every node back, partner nodes included,
+/// with no log of its own.
+/// Reaches: R3g.
+#[test]
+#[ignore = "R3g build"]
+fn a_failure_leaves_no_scope_and_a_restore_undoes_the_pairings() {
+    let mut c = checker(Mode::Success);
+    let (left, _) = two_binders(&mut c, [0, 1, 0], [0, 1]);
+    let (right, _) = two_binders(&mut c, [0, 1, 1], [0, 1]);
+    let before = nodes_now(&c);
+    let token = c.g.speculate();
+    assert!(c.unify(left, right).is_err());
+    assert!(c.scopes.is_empty() && c.frames.is_empty());
+    // Four partner nodes (two variables a side), consecutive, and nothing
+    // else: the scope named the first.
+    assert_eq!(c.g.nodes.len(), before.len() + 4);
+    c.restore(token);
+    assert_eq!(c.g.nodes[..before.len()], before[..]);
+    for node in &c.g.nodes[before.len()..] {
+        assert_eq!(
+            *node,
+            partner_node(Ty(NONE)),
+            "a pairing survived the restore"
+        );
+    }
+    // Entering alone: what one scope is.
+    let mut c = checker(Mode::Success);
+    let (left, _) = two_binders(&mut c, [0, 1, 0], [0, 1]);
+    let (right, _) = two_binders(&mut c, [0, 1, 0], [0, 1]);
+    let (l, r) = (c.g.nodes[left.0 as usize], c.g.nodes[right.0 as usize]);
+    let nodes = c.g.nodes.len() as u32;
+    c.enter_poly(l, r).unwrap();
+    assert_eq!(
+        c.scopes,
+        [PolyScope {
+            left: l.b + 1,
+            right: r.b + 1,
+            left_len: 2,
+            right_len: 2,
+            partners: Ty(nodes)
+        }]
+    );
+    assert_eq!(c.frames.len(), 2);
+    assert_eq!(c.frames[0].kind, super::unify::FrameKind::LeavePoly);
+    assert_eq!(c.frames[0].extra, 0);
+    assert_eq!(
+        [c.frames[1].left, c.frames[1].right],
+        [c.g.lists[l.b as usize], c.g.lists[r.b as usize]]
+    );
+}
+
+/// `enter_poly` tests escape BEFORE it pushes the scopes and before the
+/// bodies are unified (compiler/ml/ctype.ml:1656-1669):
+///
+/// ```text
+/// let tl1 = List.map repr tl1 and tl2 = List.map repr tl2 in
+/// if
+///   List.exists (fun t -> Type_set.mem t known_univars) tl1
+///   && univars_escape env old_univars tl1 (newty (Tpoly (t2, tl2)))
+///   || List.exists (fun t -> Type_set.mem t known_univars) tl2
+///      && univars_escape env old_univars tl2 (newty (Tpoly (t1, tl1)))
+/// then raise (Unify []);
+/// ```
+///
+/// The cases of `differential::tests::old_checker_tests_escape_before_
+/// the_bodies` (observed), by hand. Left: `outer = poly(inner; u)`,
+/// `inner = poly((u, second); u)`: `u` is bound twice. Right: `outer' =
+/// poly(inner'; u')`, `inner' = poly((first', second'); w')`.
+/// - `inner' = poly((w', u'); w')`: the family of `u` is `u` and `u'`
+///   (`get_univar_family`, ctype.ml:1612-1623), and `u'` is in `inner'`
+///   outside a binder of the family: a clash. The trace is the two outer
+///   types and the two inner types; every node is as it was, apart from
+///   the inner types' link put back; the only nodes made are the two
+///   partner nodes of the outer scope.
+/// - The same with `second` an arrow, which could not unify with `u'`:
+///   the same trace (a test after the bodies would end at the arrow).
+/// - `inner' = poly((w', w'); w')`: no variable of the family in
+///   `inner'`: the bodies unify, `u` is a link to `w'`, and `u'`, which
+///   no body names, stays a node of its own.
+///
+/// Reaches: R3g.
+#[test]
+#[ignore = "R3g build"]
+fn a_known_binder_escapes_before_the_bodies() {
+    let build = |c: &mut Checker, arrow: bool, right: [usize; 2]| {
+        let u = univar_at(c, 2);
+        let second = if arrow {
+            let x = var(c);
+            arrow_at(c, 2, &[x], x)
+        } else {
+            u
+        };
+        let body = tuple_at(c, 2, &[u, second]);
+        let inner = poly_of(c, 2, body, &[u]);
+        let outer = poly_of(c, 2, inner, &[u]);
+        let vars = [univar_at(c, 2), univar_at(c, 2)];
+        let body2 = tuple_at(c, 2, &right.map(|at| vars[at]));
+        let inner2 = poly_of(c, 2, body2, &[vars[1]]);
+        let outer2 = poly_of(c, 2, inner2, &[vars[0]]);
+        ([outer, inner, outer2, inner2], u, vars)
+    };
+    for arrow in [false, true] {
+        let mut c = checker(Mode::Explain);
+        // `(w', u')`: index 1 is `w'`, index 0 is `u'`.
+        let ([outer, inner, outer2, inner2], _, _) = build(&mut c, arrow, [1, 0]);
+        let before = nodes_now(&c);
+        assert!(c.unify(outer, outer2).is_err());
+        assert_eq!(
+            c.trace,
+            [[outer, outer2], [inner, inner2]],
+            "arrow: {arrow}"
+        );
+        assert_eq!(c.g.nodes[..before.len()], before[..]);
+        assert_eq!(c.g.nodes.len(), before.len() + 2);
+        assert!(c.scopes.is_empty() && c.frames.is_empty());
+    }
+    let mut c = checker(Mode::Success);
+    let ([outer, _, outer2, _], u, [u2, w2]) = build(&mut c, false, [1, 1]);
+    c.unify(outer, outer2).unwrap();
+    assert_eq!([c.g.repr(u), c.g.repr(u2)], [w2, u2]);
+    // Directly: the family walk. `binder` binds `u`; `other` names `u'`.
+    let mut c = checker(Mode::Success);
+    let ([outer, inner, outer2, inner2], _, _) = build(&mut c, false, [1, 0]);
+    let d = [outer, inner, outer2, inner2].map(|ty| c.g.nodes[ty.0 as usize]);
+    c.enter_poly(d[0], d[2]).unwrap();
+    assert!(c.univars_escape(d[1], d[3]));
+    assert!(
+        !c.univars_escape(d[3], d[1]),
+        "`w'` has no partner and `inner` does not name it"
+    );
+}
+
+/// A universal variable outside its binder (compiler/ml/ctype.ml:
+/// 1563-1607, 2216-2219):
+///
+/// ```text
+/// | Tunivar _ ->
+///   if not (Type_set.mem ty bound) then raise (Unify [(ty, newgenvar ())])
+/// | Tpoly (ty, tyl) ->
+///   let bound = List.fold_right Type_set.add (List.map repr tyl) bound in
+///   occur_rec bound ty
+/// | Tconstr (_, [], _) -> ()
+/// | Tconstr (p, tl, _) -> (
+///   try
+///     let td = Env.find_type p env in
+///     List.iter2
+///       (fun t v ->
+///         if Variance.(mem May_pos v || mem May_neg v) then
+///           occur_rec bound t)
+///       tl td.type_variance
+///   with Not_found -> List.iter (occur_rec bound) tl)
+/// ...
+/// let unify1_var env t1 t2 =
+///   assert (is_Tvar t1);
+///   occur env t1 t2;
+///   occur_univar env t2;
+/// ```
+///
+/// Observed on the old checker in `differential::tests::old_checker_
+/// refuses_a_free_universal_variable`. Witnesses: a variable against `u`,
+/// and against `(int, u)`, is refused, in the explaining mode with the
+/// pair of the unification and then the pair of `u` and a new GENERIC
+/// variable; against `poly((int, u); u)` it is bound. `phantom<u>`: the
+/// hand-built table has no declaration row, so the argument is visited
+/// and the variable refused (`with Not_found`); with the parameter marked
+/// as one the type does not use, the variable is bound.
+/// Reaches: R3g.
+#[test]
+#[ignore = "R3g build"]
+fn a_free_universal_variable_is_refused() {
+    for mode in [Mode::Success, Mode::Explain] {
+        let mut c = checker(mode);
+        let u = univar_at(&mut c, 2);
+        let int = constr(&mut c, INT, &[]);
+        let pair = tuple(&mut c, &[int, u]);
+        let closed = poly_of(&mut c, 2, pair, &[u]);
+        let phantom = constr(&mut c, PHANTOM, &[u]);
+        for target in [u, pair, phantom] {
+            for reversed in [false, true] {
+                let x = var(&mut c);
+                let before = nodes_now(&c);
+                let result = if reversed {
+                    c.unify(target, x)
+                } else {
+                    c.unify(x, target)
+                };
+                assert!(result.is_err());
+                assert_eq!(
+                    c.g.nodes[..before.len()],
+                    before[..],
+                    "nothing is linked or lowered"
+                );
+                if mode == Mode::Explain {
+                    assert_eq!(c.trace.len(), 2, "{:?}", c.trace);
+                    assert_eq!(c.trace[0], if reversed { [target, x] } else { [x, target] });
+                    let [free, fresh] = c.trace[1];
+                    let fresh = c.g.nodes[fresh.0 as usize];
+                    assert_eq!(
+                        (free, fresh.tag(), fresh.level, fresh.a),
+                        (u, VAR, GENERIC, NONE)
+                    );
+                }
+            }
+        }
+        let x = var(&mut c);
+        c.unify(x, closed).unwrap();
+        assert_eq!(c.g.repr(x), closed);
+        // `phantom`'s parameter does not occur in its body.
+        c.types.variances = vec![NONE; TYPES];
+        c.types.variances[PHANTOM as usize] = 0;
+        c.types.occurs = vec![0];
+        let x = var(&mut c);
+        c.unify(x, phantom).unwrap();
+        assert_eq!(c.g.repr(x), phantom);
+    }
+}
+
+/// The walk of `occur_univar` finds the FIRST free universal variable in
+/// `iter_type_expr`'s order, binds the variables of a polymorphic type
+/// for its body only, and visits a node again when the context it was
+/// visited in has closed (compiler/ml/ctype.ml:1565-1589: `bound`,
+/// `visited`; compiler/ml/btype.ml:250-272).
+/// - `((p, q) => r, s)` with four universal variables: the answer is `p`
+///   (an arrow's parameters, then its result, then the next element).
+/// - `(poly((u, v); u), w)`: `v` (inside the polymorphic type and not
+///   bound by it), before `w`.
+/// - `shared = (u, int)`, `(poly(shared; u), shared)`: inside the
+///   polymorphic type `u` is bound and `shared` is visited; outside, that
+///   context has closed, `shared` is visited again and `u` is free.
+/// - `(shared, poly(shared; u))` with `u` free at the first element: `u`.
+/// - `poly(poly((u, v); v); u)`: nothing; an inner type that binds `u`
+///   again inside leaves `u` bound after it: `poly((poly(u; u), u); u)`.
+/// - A type without a universal variable: nothing.
+///
+/// Reaches: R3g.
+#[test]
+#[ignore = "R3g build"]
+fn the_first_free_universal_variable_is_found_in_order() {
+    let mut c = checker(Mode::Success);
+    let [p, q, r, s] = [0; 4].map(|_| univar_at(&mut c, 2));
+    let arrow = arrow_at(&mut c, 2, &[p, q], r);
+    let ty = tuple(&mut c, &[arrow, s]);
+    assert_eq!(c.free_univar(ty), p);
+
+    let [u, v, w] = [0; 3].map(|_| univar_at(&mut c, 2));
+    let body = tuple(&mut c, &[u, v]);
+    let poly = poly_of(&mut c, 2, body, &[u]);
+    let ty = tuple(&mut c, &[poly, w]);
+    assert_eq!(c.free_univar(ty), v);
+
+    let u = univar_at(&mut c, 2);
+    let int = constr(&mut c, INT, &[]);
+    let shared = tuple(&mut c, &[u, int]);
+    let poly = poly_of(&mut c, 2, shared, &[u]);
+    let ty = tuple(&mut c, &[poly, shared]);
+    assert_eq!(c.free_univar(ty), u);
+    assert_eq!(c.free_univar(poly).0, NONE);
+    let ty = tuple(&mut c, &[shared, poly]);
+    assert_eq!(c.free_univar(ty), u);
+
+    let [u, v] = [0; 2].map(|_| univar_at(&mut c, 2));
+    let body = tuple(&mut c, &[u, v]);
+    let inner = poly_of(&mut c, 2, body, &[v]);
+    let outer = poly_of(&mut c, 2, inner, &[u]);
+    assert_eq!(c.free_univar(outer).0, NONE);
+    assert_eq!(c.free_univar(inner), u);
+
+    let u = univar_at(&mut c, 2);
+    let again = poly_of(&mut c, 2, u, &[u]);
+    let body = tuple(&mut c, &[again, u]);
+    let outer = poly_of(&mut c, 2, body, &[u]);
+    assert_eq!(c.free_univar(outer).0, NONE);
+
+    let int = constr(&mut c, INT, &[]);
+    let ty = tuple(&mut c, &[int, int]);
+    assert_eq!(c.free_univar(ty).0, NONE);
+    assert!(c.extras.open_polys.is_empty() && c.g.work.is_empty());
+}
+
+/// The pair `occur_univar` raises is made below unify3, so a swapped
+/// unify3 reverses it (compiler/ml/ctype.ml:2299-2303, 2316-2323):
+///
+/// ```text
+/// if unify_eq t1 t1' || not (unify_eq t2 t2') then unify3 env t1 t1' t2 t2'
+/// else
+///   try unify3 env t2 t2' t1 t1'
+///   with Unify trace ->
+///     raise (Unify (List.map (fun (x, y) -> (y, x)) trace))
+/// ...
+/// | Tvar _, _ ->
+///   occur !env t1' t2;
+///   occur_univar !env t2;
+///   link_type t1' t2
+/// ```
+///
+/// Witness: `type k<'a, 'b> = 'b`, and `k<x, u>` against the variable
+/// `x`, with `u` a universal variable. `x` occurs in `k<x, u>`, so the
+/// pair goes to unify2 (`deep_occur`, ctype.ml:2240-2241); the left head
+/// expands to `u` and the right one is its own expansion: unify3 runs on
+/// `(x, x, k<x, u>, u)`, swapped. `occur` passes (the expansion does not
+/// hold `x`); `occur_univar` of `k<x, u>` finds `u`. The trace: the pair
+/// of the unification as written, then `(the new variable, u)`, reversed.
+/// The other way round (`x` against `k<x, u>`) unify3 is not swapped and
+/// the pair is `(u, the new variable)`.
+/// Reaches: R3g.
+#[test]
+#[ignore = "R3g build"]
+fn a_free_universal_variable_below_a_swapped_unify3_is_reversed() {
+    for swapped in [true, false] {
+        let mut c = checker(Mode::Explain);
+        let k = c.types.rows.len() as u32;
+        c.types.rows.push(c.types.rows[INT as usize]);
+        let (a, b) = (var_at(&mut c, GENERIC), var_at(&mut c, GENERIC));
+        abbreviation(&mut c, k, &[a, b], b);
+        let x = var(&mut c);
+        let u = univar_at(&mut c, 2);
+        let applied = constr(&mut c, k, &[x, u]);
+        let result = if swapped {
+            c.unify(applied, x)
+        } else {
+            c.unify(x, applied)
+        };
+        assert!(result.is_err());
+        assert_eq!(c.trace.len(), 2, "{:?}", c.trace);
+        assert_eq!(
+            c.trace[0],
+            if swapped { [applied, x] } else { [x, applied] }
+        );
+        let [first, second] = c.trace[1];
+        let (free, fresh) = if swapped {
+            (second, first)
+        } else {
+            (first, second)
+        };
+        assert_eq!(free, u, "swapped: {swapped}");
+        let fresh = c.g.nodes[fresh.0 as usize];
+        assert_eq!((fresh.tag(), fresh.level), (VAR, GENERIC));
+    }
+}
+
+/// A `LeavePoly` frame carries no pair and no swap: the entries of a
+/// clash in the bodies of two polymorphic types below a swapped unify3
+/// are reversed by the `Linked` frame of the two types, as OCaml's
+/// handler reverses the whole trace (compiler/ml/ctype.ml:2299-2303; the
+/// lines are quoted above `a_free_universal_variable_below_a_swapped_
+/// unify3_is_reversed`; section 8.6, decisions 42 and 51).
+///
+/// Witness: `type ap = poly((u, int); u)` (an abbreviation of a
+/// polymorphic type), and `ap` against `poly((u', string); u')`. The left
+/// head expands and the right one does not: unify3 runs on the swapped
+/// pair. The bodies clash at `int` against `string`. The trace: `(ap,
+/// the right type)` as written; then the two bodies and the two
+/// constructors, each LEFT first (the expansion's body, then the right
+/// type's; `int`, then `string`), although unify3 took them right first.
+/// No scope stays open.
+/// Reaches: R3g.
+#[test]
+#[ignore = "R3g build"]
+fn a_clash_in_the_bodies_below_a_swapped_unify3_is_reversed() {
+    let mut c = checker(Mode::Explain);
+    let ap = c.types.rows.len() as u32;
+    c.types.rows.push(c.types.rows[INT as usize]);
+    let u = univar_at(&mut c, GENERIC);
+    let int = constr_at(&mut c, GENERIC, INT, &[]);
+    let body = tuple_at(&mut c, GENERIC, &[u, int]);
+    let manifest = poly_of(&mut c, GENERIC, body, &[u]);
+    abbreviation(&mut c, ap, &[], manifest);
+    let left = constr(&mut c, ap, &[]);
+    let u2 = univar_at(&mut c, 2);
+    let string = constr(&mut c, STRING, &[]);
+    let body2 = tuple(&mut c, &[u2, string]);
+    let right = poly_of(&mut c, 2, body2, &[u2]);
+    assert!(c.unify(left, right).is_err());
+    assert_eq!(c.trace.len(), 3, "{:?}", c.trace);
+    assert_eq!(c.trace[0], [left, right]);
+    assert_eq!(c.trace[1][1], body2);
+    let (left_body, left_constructor) = (c.trace[1][0], c.trace[2][0]);
+    let second = child(&mut c, left_body, 1);
+    assert_eq!(path(&mut c, second), INT);
+    assert_eq!(c.trace[2][1], string);
+    assert_eq!(path(&mut c, left_constructor), INT);
+    assert!(c.scopes.is_empty() && c.frames.is_empty() && c.saved.is_empty());
+}
+
+/// PR#6744 in `unify_row_field` (compiler/ml/ctype.ml:2685-2704):
+///
+/// ```text
+/// let split_univars =
+///   List.partition (fun ty ->
+///       try occur_univar !env ty; true with Unify _ -> false)
+/// in
+/// let tl1', tlu1 = split_univars tl1'
+/// and tl2', tlu2 = split_univars tl2' in
+/// (match (tlu1, tlu2) with
+/// | [], [] -> ()
+/// | tu1 :: tlu1, _ :: _ ->
+///   (* Attempt to merge all the types containing univars *)
+///   if not !(passive_variants ()) then
+///     List.iter (unify env tu1) (tlu1 @ tlu2)
+/// | tu :: _, [] | [], tu :: _ -> occur_univar !env tu);
+/// (* Is this handling of levels really principal? *)
+/// List.iter (update_level !env (repr more).level) (tl1' @ tl2');
+/// let e = ref None in
+/// let f1' = Reither (c1 || c2, tl1', m1 || m2, e)
+/// and f2' = Reither (c1 || c2, tl2', m1 || m2, e) in
+/// ```
+///
+/// Witnesses, both inside two polymorphic types so that the variables
+/// have a scope:
+/// - `poly([< #A(u)]; u)` against `poly([< #A(u')]; u')`: each field
+///   would gain the other's type, and both hold a universal variable:
+///   they are unified instead, the type row 1 would gain first (`unify
+///   env tu1`: `u'` becomes a link to `u`), and neither field gains a
+///   type (one each).
+/// - `poly([< #A(u)]; u)` against `poly([< #A(int)]; u')`: only one side
+///   holds a universal variable: a clash, in the explaining mode with the
+///   pair of `u` and a new variable last.
+///
+/// No row is written.
+/// Reaches: R3f, R3g.
+#[test]
+#[ignore = "R3g build"]
+fn the_types_that_hold_a_universal_variable_are_unified_not_gained() {
+    let side = |c: &mut Checker, univar: bool| {
+        let u = univar_at(c, 2);
+        let ty = if univar { u } else { constr(c, INT, &[]) };
+        let more = var(c);
+        let row = variant_at(
+            c,
+            2,
+            &[("A", Tag::Either(false, Some(ty), false))],
+            more,
+            true,
+            NONE,
+        );
+        (poly_of(c, 2, row, &[u]), row, u)
+    };
+    let mut c = checker(Mode::Success);
+    let (left, row1, u) = side(&mut c, true);
+    let (right, row2, u2) = side(&mut c, true);
+    let rows = rows_now(&c);
+    c.unify(left, right).unwrap();
+    assert_eq!(c.g.repr(u2), u);
+    assert_rows_kept(&c, &rows);
+    // The left row's node is a link to the right one by now; the right
+    // node's field has its one type and nothing gained.
+    let (tags, _, _) = read_row(&mut c, row2);
+    assert_eq!(tags.len(), 1);
+    assert_eq!((tags[0].1.types, c.g.repr(tags[0].1.first)), (1, u));
+    assert_eq!(c.g.repr(row1), c.g.repr(row2));
+    assert!(c.scopes.is_empty() && c.frames.is_empty() && c.saved.is_empty());
+
+    for mode in [Mode::Success, Mode::Explain] {
+        let mut c = checker(mode);
+        let (left, _, u) = side(&mut c, true);
+        let (right, _, _) = side(&mut c, false);
+        assert!(c.unify(left, right).is_err());
+        assert!(c.scopes.is_empty() && c.frames.is_empty());
+        if mode == Mode::Explain {
+            let [free, fresh] = *c.trace.last().expect("trace");
+            assert_eq!(free, u, "{:?}", c.trace);
+            assert_eq!(c.g.nodes[fresh.0 as usize].level, GENERIC);
+        }
+    }
+}
+
+/// The cost of universal variables, as relations between n = 1,000 and
+/// n = 10,000.
+/// - n bound variables, the body the last of them: `unify_univar` scans
+///   the two lists of the one scope (`find_univ`, compiler/ml/ctype.ml:
+///   1546-1551), `enter_poly` makes n partner nodes a side: linear.
+/// - n nested polymorphic types of one variable each, the innermost body
+///   the outermost variable: `unify_univar` passes n scopes, linear in n;
+///   but `enter_poly` marks the variables of every open scope at each
+///   entry, as OCaml rebuilds `known_univars` (ctype.ml:1658-1662), and
+///   the occurrence test walks each right type (ctype.ml:2330): the
+///   whole is quadratic, at most 110 times the steps for ten times n.
+/// - A row of n `Reither` tags of which one has a type that holds a
+///   universal variable, inside two polymorphic types: each joined tag
+///   tests the types it gains with one walk of a node without children:
+///   linear.
+///
+/// Reaches: R3f, R3g.
+#[test]
+#[ignore = "R3g build"]
+fn universal_variables_at_ten_thousand() {
+    let binders = |n: u32| {
+        let mut c = checker(Mode::Success);
+        let side = |c: &mut Checker| {
+            let vars: Vec<Ty> = (0..n).map(|_| univar_at(c, 2)).collect();
+            poly_of(c, 2, vars[n as usize - 1], &vars)
+        };
+        let (left, right) = (side(&mut c), side(&mut c));
+        let count = steps::scope(|| c.unify(left, right).unwrap());
+        assert!(c.scopes.is_empty());
+        count
+    };
+    let (small, large) = (binders(1_000), binders(10_000));
+    assert!(large <= 11 * small, "binders: {small} {large}");
+
+    let nested = |n: u32| {
+        let mut c = checker(Mode::Success);
+        let side = |c: &mut Checker| {
+            let vars: Vec<Ty> = (0..n).map(|_| univar_at(c, 2)).collect();
+            let mut ty = vars[0];
+            for &var in vars.iter().rev() {
+                ty = poly_of(c, 2, ty, &[var]);
+            }
+            ty
+        };
+        let (left, right) = (side(&mut c), side(&mut c));
+        let count = steps::scope(|| c.unify(left, right).unwrap());
+        assert!(c.scopes.is_empty());
+        count
+    };
+    let (small, large) = (nested(1_000), nested(10_000));
+    assert!(large <= 110 * small, "nested: {small} {large}");
+
+    let row = |n: u32| {
+        let mut c = checker(Mode::Success);
+        let labels: Vec<String> = (0..n).map(|at| format!("t{at:05}")).collect();
+        let side = |c: &mut Checker| {
+            let u = univar_at(c, 2);
+            let tags: Vec<(&str, Tag)> = labels
+                .iter()
+                .enumerate()
+                .map(|(at, label)| {
+                    let ty = if at == 0 { u } else { constr(c, INT, &[]) };
+                    (label.as_str(), Tag::Either(false, Some(ty), false))
+                })
+                .collect();
+            let more = var(c);
+            let row = variant_at(c, 2, &tags, more, true, NONE);
+            poly_of(c, 2, row, &[u])
+        };
+        let (left, right) = (side(&mut c), side(&mut c));
+        steps::scope(|| c.unify(left, right).unwrap())
+    };
+    let (small, large) = (row(1_000), row(10_000));
+    assert!(large <= 11 * small, "row: {small} {large}");
+}
+
+/// What a universal variable and a polymorphic type cost in memory, and
+/// what the scopes hold (section 8.6, decision 50). A universal variable
+/// is one 16-byte node and no slot, its 12-byte descriptor row shared by
+/// every copy; a polymorphic type of `k` variables is one node and `1 +
+/// k` slots: `16 + 4 * (1 + k)` bytes. A scope is 20 bytes and one
+/// 16-byte partner node per bound variable. Runs today.
+#[test]
+fn sizes_of_universal_variables() {
+    assert_eq!(std::mem::size_of::<PolyScope>(), 20);
+    assert_eq!(std::mem::size_of::<super::rows::Completion>(), 8);
+    assert_eq!(std::mem::size_of_val(&partner_node(Ty(NONE))), 16);
+    let mut c = checker(Mode::Success);
+    let (nodes, lists, rows) = (c.g.nodes.len(), c.g.lists.len(), c.extras.descriptors.len());
+    let (poly, [u, v]) = two_binders(&mut c, [0, 1, 0], [0, 1]);
+    // Two variables, the body tuple, the polymorphic type; 3 + 3 slots.
+    assert_eq!((c.g.nodes.len() - nodes, c.g.lists.len() - lists), (4, 6));
+    assert_eq!(c.g.nodes[poly.0 as usize].arity(), 3);
+    assert_eq!(
+        (
+            c.g.nodes[u.0 as usize].arity(),
+            c.g.nodes[v.0 as usize].arity()
+        ),
+        (0, 0)
+    );
+    assert_eq!(c.extras.univars, 2);
+    // A copy makes nodes and slots and no descriptor row.
+    let rows_before = c.extras.descriptors.len();
+    assert_eq!(rows_before - rows, 3);
+    c.g.end_def();
+    c.g.generalize(poly);
+    let copy = c.copy(poly);
+    assert_ne!(copy, poly);
+    assert_eq!(c.extras.descriptors.len(), rows_before);
+    assert_eq!(c.extras.univars, 2);
+}
+
+// ---------------------------------------------------------------------------
+// R3p: packages (section 8.6, decision 52).
+// ---------------------------------------------------------------------------
+
+use super::rows::{Completion, PackageDecls};
+use super::segment::PackageRow;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+/// The questions a [`Supplier`] was asked, shared with the test.
+type Calls = Rc<RefCell<Vec<(u32, &'static str, u32)>>>;
+
+/// What a hand-built module type answers for one name.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Answer {
+    /// `type name = int`.
+    Int,
+    Abstract,
+    Missing,
+    Other,
+}
+
+/// The declarations of the package tests: `names[position]` is the text
+/// of a name; a module type `path` answers `answers[(path, text)]`, and
+/// `Missing` for a name it does not list; two different paths are
+/// compatible when `compatible` says so. Every call is recorded in
+/// `calls`: `(path, text, level)` for a completion, `(left path, right
+/// path, u32::MAX)` under the text `"compatible"` for the last question.
+struct Supplier {
+    names: Vec<&'static str>,
+    answers: Vec<(u32, &'static str, Answer)>,
+    compatible: bool,
+    calls: Calls,
+}
+
+impl PackageDecls for Supplier {
+    fn compare(&self, left: u32, right: u32) -> std::cmp::Ordering {
+        self.names[left as usize].cmp(self.names[right as usize])
+    }
+    fn complete(&mut self, c: &mut Checker, path: u32, name: u32, level: u32) -> Completion {
+        let text = self.names[name as usize];
+        self.calls.borrow_mut().push((path, text, level));
+        let answer = self
+            .answers
+            .iter()
+            .find(|entry| entry.0 == path && entry.1 == text);
+        match answer.map_or(Answer::Missing, |entry| entry.2) {
+            Answer::Int => Completion::Type(constr_at(c, level, INT, &[])),
+            Answer::Abstract => Completion::Abstract,
+            Answer::Missing => Completion::Missing,
+            Answer::Other => Completion::Other,
+        }
+    }
+    fn compatible(&mut self, c: &mut Checker, left: Node, right: Node) -> bool {
+        let path = |c: &Checker, node: Node| match c.extras.descriptors[node.a as usize] {
+            ExtraDescriptor::Package(row) => c.extras.packages[row as usize].path,
+            _ => panic!("not a package"),
+        };
+        self.calls
+            .borrow_mut()
+            .push((path(c, left), "compatible", path(c, right)));
+        self.compatible
+    }
+}
+
+/// `Tpackage (path, names, arguments)` at `level`: the names are the
+/// `arguments.len()` positions from `first` on in the supplier's pool.
+fn package_at(c: &mut Checker, level: u32, path: u32, first: u32, arguments: &[Ty]) -> Ty {
+    let len = arguments.len() as u32;
+    let row = c.extras.packages.len() as u32;
+    c.extras.packages.push(PackageRow {
+        path,
+        longidents: Range { start: first, len },
+        arguments: Range { start: 0, len },
+    });
+    extended_at(c, level, ExtraDescriptor::Package(row), arguments)
+}
+
+/// A checker whose declarations are a [`Supplier`], and the calls it
+/// will record.
+fn with_supplier(
+    mode: Mode,
+    names: &[&'static str],
+    answers: &[(u32, &'static str, Answer)],
+    compatible: bool,
+) -> (Checker, Calls) {
+    let mut c = checker(mode);
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    c.packages = Some(Box::new(Supplier {
+        names: names.to_vec(),
+        answers: answers.to_vec(),
+        compatible,
+        calls: calls.clone(),
+    }));
+    (c, calls)
+}
+
+/// Two packages of one module type unify their types name by name, in
+/// name order, and ask nothing of the declarations (compiler/ml/ctype.ml:
+/// 2172-2181, 2416-2423):
+///
+/// ```text
+/// let unify_package env unify_list lv1 p1 n1 tl1 lv2 p2 n2 tl2 =
+///   let ntl2 = complete_type_list env n1 lv2 (Mty_ident p2) n2 tl2
+///   and ntl1 = complete_type_list env n2 lv1 (Mty_ident p1) n1 tl1 in
+///   unify_list (List.map snd ntl1) (List.map snd ntl2);
+///   if
+///     eq_package_path env p1 p2
+///     || !package_subtype env p1 n1 tl1 p2 n2 tl2
+///        && !package_subtype env p2 n2 tl2 p1 n1 tl1
+///   then ()
+///   else raise Not_found
+/// ...
+/// | Tpackage (p1, n1, tl1), Tpackage (p2, n2, tl2) -> (
+///   try
+///     unify_package !env (unify_list env) t1.level p1 n1 tl1 t2.level p2 n2
+///       tl2
+///   with Not_found ->
+///     if !(umode ()) = Expression then raise (Unify []);
+/// ```
+///
+/// Witnesses, module type 7 with the names `t` and `u`:
+/// - `{t = x, u = int}` against `{t = string, u = y}`: `x` is `string`
+///   and `y` is `int`; the left node is a link to the right one; no frame
+///   and no saved descriptor stays; the declarations are not asked.
+/// - `{t = int, u = int}` against `{t = string, u = string}`: a clash at
+///   `t`, the first name: the trace is the two packages, then `int` and
+///   `string` of `t`.
+///
+/// Reaches: R3p.
+#[test]
+#[ignore = "R3p build"]
+fn packages_of_one_module_type_unify_name_by_name() {
+    let names = ["t", "u", "t", "u"];
+    let (mut c, calls) = with_supplier(Mode::Success, &names, &[], false);
+    let (x, y) = (var(&mut c), var(&mut c));
+    let (int, string) = (constr(&mut c, INT, &[]), constr(&mut c, STRING, &[]));
+    let left = package_at(&mut c, 2, 7, 0, &[x, int]);
+    let right = package_at(&mut c, 2, 7, 2, &[string, y]);
+    c.unify(left, right).unwrap();
+    assert_eq!(
+        (c.g.repr(left), c.g.repr(x), c.g.repr(y)),
+        (right, string, int)
+    );
+    assert!(c.frames.is_empty() && c.saved.is_empty() && calls.borrow().is_empty());
+    assert!(c.packages.is_some(), "the supplier is put back");
+
+    let (mut c, _) = with_supplier(Mode::Explain, &names, &[], false);
+    let ints = [constr(&mut c, INT, &[]), constr(&mut c, INT, &[])];
+    let strings = [constr(&mut c, STRING, &[]), constr(&mut c, STRING, &[])];
+    let left = package_at(&mut c, 2, 7, 0, &ints);
+    let right = package_at(&mut c, 2, 7, 2, &strings);
+    assert!(c.unify(left, right).is_err());
+    assert_eq!(c.trace, [[left, right], [ints[0], strings[0]]]);
+    assert!(c.frames.is_empty() && c.saved.is_empty() && c.packages.is_some());
+}
+
+/// A name one package lists and the other does not is completed from the
+/// OTHER package's module type, at the level of the unification
+/// (`complete_type_list`, compiler/ml/ctype.ml:2135-2169):
+///
+/// ```text
+/// | n :: nl, ((n2, _) as nt2) :: ntl' when Longident.cmp n n2 >= 0 ->
+///   nt2 :: complete (if Longident.cmp n n2 = 0 then nl else nl1) ntl'
+/// | n :: nl, _ -> (
+///   try
+///     let path =
+///       Env.lookup_type (concat_longident (Longident.Lident "Pkg") n) env'
+///     in
+///     match Env.find_type path env' with
+///     | { type_arity = 0; type_kind = Type_abstract; type_private = Public;
+///         type_manifest = Some t2 } ->
+///       (n, nondep_instance env' lv2 id2 t2) :: complete nl ntl2
+///     ...
+///     | _ -> raise Exit
+///   with
+///   | Not_found when allow_absent -> complete nl ntl2
+///   | Exit -> raise Not_found)
+/// ```
+///
+/// Witnesses. Left: module type 7, `{t = x}` at level 2. Right: module
+/// type 7, `{t = int, u = y}` at level 1.
+/// - Module type 7 declares `type u = int`: the declarations are asked
+///   once, for `(7, "u")` at level 1 (the lower of the two), and `y` is
+///   `int`.
+/// - The other way round the question is the same.
+/// - `u` abstract, missing, or another declaration: a clash, in the
+///   explaining mode with the two packages as the only pair, and no frame
+///   or saved descriptor left.
+/// - No declarations (`Checker::packages` is `None`): a clash.
+/// - Different module types (7 and 8) with the same names: the lists are
+///   unified FIRST and the declarations asked last whether the two are
+///   compatible; a refusal is a clash with the two packages as the only
+///   pair, after `x` was bound.
+///
+/// Reaches: R3p.
+#[test]
+#[ignore = "R3p build"]
+fn a_package_is_completed_from_the_other_module_type() {
+    let names = ["t", "t", "u"];
+    for reversed in [false, true] {
+        let (mut c, calls) = with_supplier(Mode::Success, &names, &[(7, "u", Answer::Int)], false);
+        let (x, y) = (var(&mut c), var_at(&mut c, 1));
+        let int = constr_at(&mut c, 1, INT, &[]);
+        let left = package_at(&mut c, 2, 7, 0, &[x]);
+        let right = package_at(&mut c, 1, 7, 1, &[int, y]);
+        if reversed {
+            c.unify(right, left).unwrap()
+        } else {
+            c.unify(left, right).unwrap()
+        }
+        assert_eq!(*calls.borrow(), [(7, "u", 1)], "reversed: {reversed}");
+        assert_eq!(c.g.repr(x), int);
+        assert_eq!(path(&mut c, y), INT);
+        assert!(c.frames.is_empty() && c.saved.is_empty());
+    }
+    for answer in [Answer::Abstract, Answer::Missing, Answer::Other] {
+        let (mut c, _) = with_supplier(Mode::Explain, &names, &[(7, "u", answer)], true);
+        let (x, y) = (var(&mut c), var(&mut c));
+        let int = constr(&mut c, INT, &[]);
+        let left = package_at(&mut c, 2, 7, 0, &[x]);
+        let right = package_at(&mut c, 2, 7, 1, &[int, y]);
+        assert!(c.unify(left, right).is_err(), "{answer:?}");
+        assert_eq!(c.trace, [[left, right]]);
+        assert!(c.frames.is_empty() && c.saved.is_empty() && c.packages.is_some());
+        assert_eq!(c.g.repr(x), x, "nothing was unified");
+    }
+    let mut c = checker(Mode::Success);
+    let (x, int) = (var(&mut c), constr(&mut c, INT, &[]));
+    let left = package_at(&mut c, 2, 7, 0, &[x]);
+    let right = package_at(&mut c, 2, 7, 0, &[int]);
+    assert!(c.unify(left, right).is_err());
+
+    for compatible in [true, false] {
+        let (mut c, calls) = with_supplier(Mode::Explain, &["t", "t"], &[], compatible);
+        let (x, int) = (var(&mut c), constr(&mut c, INT, &[]));
+        let left = package_at(&mut c, 2, 7, 0, &[x]);
+        let right = package_at(&mut c, 2, 8, 1, &[int]);
+        assert_eq!(c.unify(left, right).is_ok(), compatible);
+        assert_eq!(*calls.borrow(), [(7, "compatible", 8)]);
+        assert!(c.frames.is_empty() && c.saved.is_empty());
+        if !compatible {
+            assert_eq!(c.trace, [[left, right]]);
+        }
+    }
+}
+
+/// The cost of two packages of n names: one merge, one comparison a
+/// name, one pair a name: at most 11 times the steps for ten times the
+/// names, with every second name completed.
+/// Reaches: R3p.
+#[test]
+#[ignore = "R3p build"]
+fn packages_of_ten_thousand_names_are_linear() {
+    let run = |n: u32| {
+        let texts: Vec<&'static str> = (0..n)
+            .map(|at| &*Box::leak(format!("t{at:05}").into_boxed_str()))
+            .collect();
+        // The left lists every name, the right every second one.
+        let mut names = texts.clone();
+        names.extend(texts.iter().step_by(2));
+        let answers: Vec<(u32, &'static str, Answer)> =
+            texts.iter().map(|&text| (7, text, Answer::Int)).collect();
+        let (mut c, calls) = with_supplier(Mode::Success, &names, &answers, false);
+        let all: Vec<Ty> = (0..n).map(|_| constr(&mut c, INT, &[])).collect();
+        let half: Vec<Ty> = (0..n.div_ceil(2)).map(|_| var(&mut c)).collect();
+        let left = package_at(&mut c, 2, 7, 0, &all);
+        let right = package_at(&mut c, 2, 7, n, &half);
+        let count = steps::scope(|| c.unify(left, right).unwrap());
+        assert_eq!(calls.borrow().len() as u32, n / 2);
+        count
+    };
+    let (small, large) = (run(1_000), run(10_000));
+    assert!(large <= 11 * small, "{small} {large}");
 }
