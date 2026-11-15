@@ -9775,7 +9775,19 @@ fn moregen_may_instantiate(ctx: &TypeContext, inst_nongen: bool, ty: TypeExprRef
     }
 }
 
-fn moregen_occur(ctx: &TypeContext, env: &Env, level: i32, ty: TypeExprRef) -> TypeResult<()> {
+/// OCaml `moregen_occur` (compiler/ml/ctype.ml:2901-2919): `ty` may be linked
+/// to a pattern variable of level `level`. `univars` is the binder scope
+/// `moregen` has entered; a universal variable can be free in a subject
+/// subterm only below one of its binders (a scheme's root has none, and
+/// only the `Tpoly` arm descends into a binder's body), so OCaml's
+/// `occur_univar` (2918) runs only when that scope is not empty.
+fn moregen_occur(
+    ctx: &TypeContext,
+    env: &Env,
+    univars: &UnivarPairs,
+    level: i32,
+    ty: TypeExprRef,
+) -> TypeResult<()> {
     fn occur(
         ctx: &TypeContext,
         level: i32,
@@ -9821,6 +9833,9 @@ fn moregen_occur(ctx: &TypeContext, env: &Env, level: i32, ty: TypeExprRef) -> T
     // into `false`, before the variable is linked.
     let mut seen = TypeExprRefSet::new();
     occur(ctx, level, ty, &mut seen)?;
+    if !univars.pairs.is_empty() {
+        occur_univar(ctx, env, ty)?;
+    }
     update_level_checked(ctx, env, level, ty)
 }
 
@@ -9961,7 +9976,7 @@ fn moregen_row(
                 row_name: None,
                 ..row2.clone()
             })));
-            moregen_occur(ctx, env, ctx.get_level(rm1), ext)?;
+            moregen_occur(ctx, env, &state.univars, ctx.get_level(rm1), ext)?;
             link_type(ctx, rm1, ext);
         }
         (TypeDesc::Tconstr { .. }, TypeDesc::Tconstr { .. }) => {
@@ -10074,7 +10089,7 @@ fn moregen(
     {
         let desc1 = ctx.get_desc(t1);
         if matches!(&*desc1, TypeDesc::Tvar(..)) && moregen_may_instantiate(ctx, inst_nongen, t1) {
-            moregen_occur(ctx, env, ctx.get_level(t1), t2)?;
+            moregen_occur(ctx, env, &state.univars, ctx.get_level(t1), t2)?;
             occur_check(ctx, Some(env), UnifyMode::Expression, t1, t2)?;
             link_type(ctx, t1, t2);
             return Ok(());
@@ -10116,7 +10131,7 @@ fn moregen(
     let desc2 = ctx.get_desc(t2_expanded);
     match (&*desc1, &*desc2) {
         (TypeDesc::Tvar(..), _) if moregen_may_instantiate(ctx, inst_nongen, t1_expanded) => {
-            moregen_occur(ctx, env, ctx.get_level(t1_expanded), t2)?;
+            moregen_occur(ctx, env, &state.univars, ctx.get_level(t1_expanded), t2)?;
             link_type(ctx, t1_expanded, t2);
             Ok(())
         }
