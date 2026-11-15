@@ -238,7 +238,7 @@ impl Kind {
     ];
 }
 
-/// The facts of one node. 8 bytes: one per node in [`Builder::rows`], and
+/// The facts of one node. 8 bytes: one per node in `Builder::rows` (`emit/builder.rs`), and
 /// the same value travels in the handle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Row {
