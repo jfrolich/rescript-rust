@@ -2441,3 +2441,369 @@ which is empty on the final head (this branch does not touch the file). `tc` is 
 default checker is the old one), so no application or `tests/tests`
 saving is claimed; the CI `Instruction count` check reports the build's
 figures.
+
+## K4
+
+The cost of a unification whose heads expand, with no change of
+behaviour. `unify_abbrev2` (two parameterised abbreviation heads, each
+expands once) cost 2822.27 at `838ccbca7` and 2968.06 on trunk
+`5ea10ac75`. Three attempts, one commit each, in a fixed order: an
+attempt is kept when `unify_abbrev2` goes down by 20 or more and no other
+operation goes up by more than 2, and is otherwise reverted in a commit of
+its own. Target: `unify_abbrev2` at or below 2822.27 with `unify_ground3`
+at or below 816 and `unify_datatype2` at or below 824.
+
+Same machine kind and method as "K3a" section 1 (x86-64 Linux, eight
+virtual CPUs, Valgrind 3.22.0, the pinned nightly of `rust-toolchain.toml`,
+fat LTO, one codegen unit, line tables, every operation of
+`benches/tc_kernel.rs` at 1,000,000 iterations minus zero; unification and
+`bind_ground1` minus their `build_*` twin, `generalize7` and `lower7`
+minus `instance7`, `repr`, `restore` and `keep` minus `instance1`, the
+other operations minus `empty`; a control row (`empty`, `build_*`) is
+shown raw). Function attribution: for every function cachegrind records
+(inlined code counts in the function it is inlined into),
+`(op.full - op.zero - twin.full + twin.zero) / 1,000,000` summed over its
+files and lines.
+
+### Before
+
+| Operation | `838ccbca7` | Before (trunk `5ea10ac75`) |
+|---|---:|---:|
+| `instance1` | 137.06 | 137.06 |
+| `instance3` | 217.31 | 217.31 |
+| `instance5` | 305.34 | 305.34 |
+| `instance7` | 325.27 | 325.27 |
+| `generalize7` | 449.00 | 449.00 |
+| `empty` | 19.00 | 19.00 |
+| `lower7` | 422.00 | 422.00 |
+| `copy7` | 1709.58 | 1709.58 |
+| `repr` | 9.00 | 9.00 |
+| `restore` | 63.00 | 63.00 |
+| `keep` | 44.00 | 44.00 |
+| `checker_instance1` | 126.06 | 126.06 |
+| `checker_instance3` | 207.31 | 207.31 |
+| `checker_instance5` | 294.34 | 294.34 |
+| `checker_instance7` | 314.27 | 314.27 |
+| `build_vars` | 78.07 | 78.07 |
+| `unify_vars` | 120.00 | 117.00 |
+| `build_ground1` | 98.08 | 98.08 |
+| `unify_ground1` | 121.00 | 122.00 |
+| `build_ground3` | 200.44 | 200.44 |
+| `unify_ground3` | 911.95 | 814.00 |
+| `build_vars_local` | 78.07 | 78.07 |
+| `unify_vars_local` | 120.00 | 117.00 |
+| `build_ground1_local` | 98.08 | 98.08 |
+| `unify_ground1_local` | 121.00 | 122.00 |
+| `build_ground3_local` | 200.44 | 200.44 |
+| `unify_ground3_local` | 911.95 | 814.00 |
+| `binder` | -8.00 | -8.00 |
+| `find_local` | 47.00 | 47.00 |
+| `find_open` | 224.00 | 224.00 |
+| `find_miss2` | 624.00 | 624.00 |
+| `bind_leave` | 172.18 | 172.18 |
+| `intern` | 160.00 | 160.00 |
+| `build_bind_ground1` | 88.09 | 88.09 |
+| `bind_ground1` | 124.00 | 121.00 |
+| `build_bind_ground1_local` | 88.09 | 88.09 |
+| `bind_ground1_local` | 124.00 | 121.00 |
+| `build_datatype2` | 186.44 | 186.44 |
+| `unify_datatype2` | 955.95 | 822.00 |
+| `build_abbrev2` | 186.44 | 186.44 |
+| `unify_abbrev2` | 2822.27 | 2968.06 |
+
+`838ccbca7` is the base of K3's table ("Per commit", column "Before"):
+its figures reproduce that column exactly. Trunk carries K3 (the
+expansion test and the occurrence probe) and R3f.
+
+### Where `unify_abbrev2`'s difference sits
+
+| Function | `838ccbca7` | Trunk `5ea10ac75` | Change |
+|---|---:|---:|---:|
+| `Checker::expand_once` | 798.00 | 816.00 | +18.00 |
+| `Graph::instance` | 458.00 | 458.00 | +0.00 |
+| `Checker::reaches` | 434.05 | 400.00 | -34.05 |
+| `Graph::compress` | 306.00 | 306.00 | +0.00 |
+| `Checker::unify_distinct` | 276.00 | 284.00 | +8.00 |
+| `Checker::unify_expanded` | 251.00 | 195.00 | -56.00 |
+| `Checker::expand_head` | 0.00 | 212.00 | +212.00 |
+| `Checker::unify3` | 192.00 | 190.00 | -2.00 |
+| `Checker::memorize` | 82.00 | 82.00 | +0.00 |
+| `tc_kernel::main` | 25.00 | 25.00 | +0.00 |
+| total | 2822.27 | 2968.06 |
+
+- `Checker::expand_head`, +212: at `838ccbca7` it is inlined into
+  `unify_expanded`; on trunk it is a function of its own, called four
+  times (two heads, each asked twice, ctype.ml:2278-2283). Its loop lines
+  cost what they cost inline (`expand.rs:819` the call of `expand_once`,
+  42 inline and 40 out of line; `:831` 16 and 16; `:836` 4 and 4); the
+  `repr` at its entry is 48 out of line where 31 left `unify_expanded`.
+  What is new is the call itself: the entry line `:813` 28, the return
+  line `:841` 32, and 16 + 8 + 8 more on lines 0 and on the slot reads
+  (`graph.rs:235`, `mod.rs:1823`), about 23 a call.
+- `Checker::unify_expanded`, -56: the loop lines above left it (about
+  -100); K3's two tests (`unify.rs:780-781`, 13, with the `Result`
+  handling of the two new call sites, `result.rs`, 16) and its own lines
+  came in.
+- `Checker::expand_once`, +18: the same steps, compiled in a different
+  frame (line 0 +20, the node and row loads of the two heads that do
+  expand, which K3's test has just loaded: `graph.rs:248` +6,
+  `index.rs:238` +4).
+- `Checker::reaches`, -34.05: K3's item (2), the occurrence probe.
+- `Checker::unify_distinct`, +8, and `unify3`, -2: register allocation
+  around the new call.
+
+Together: the out-of-line `expand_head` and the reloads behind K3's test
+cost about +174 (`expand_head` + `expand_once` + `unify_expanded`), the
+probe takes back 34.
+
+### Attempt (a): the loaded node and row go to the expansion. Reverted.
+
+`013996c36`. `Checker::expand_once` and `Checker::expand_head` became
+wrappers, of unchanged signature and behaviour, of a private
+`Checker::expand_loaded` and a `pub(super)` `Checker::expand_head_loaded`
+that take the head's node and its type's row as loaded
+(`Checker::load_head`); K3's test (`never_expands`, as `may_expand`)
+returned the pair it loaded and the head that may expand handed it to
+`expand_head_loaded`. The loads went, as intended: `expand_loaded` is 42
+below `expand_once` (774 against 816). But both pairs of expansions now
+make out-of-line calls with the pair as two 16-byte arguments: the first
+pair calls `expand_head_loaded` (entry line 52, its call of
+`expand_loaded` 56, return line 40, for the four calls), the second pair
+calls `expand_head`, now a wrapper of 78 around the same call. Against
+trunk: `unify_abbrev2` +145.00, `unify_ground3` -1.00, `unify_datatype2` +1.00
+(the whole table is in "Per attempt" below):
+
+| Function | Trunk | (a) | Change |
+|---|---:|---:|---:|
+| `Checker::expand_once` | 816.00 | 0.00 | -816.00 |
+| `Checker::expand_loaded` | 0.00 | 774.00 | +774.00 |
+| `Checker::expand_head_loaded` | 0.00 | 292.00 | +292.00 |
+| `Checker::expand_head` | 212.00 | 78.00 | -134.00 |
+| `Checker::unify_expanded` | 195.00 | 224.00 | +29.00 |
+| every other function | 1745.06 | 1745.06 | +0.00 |
+| total | 2968.06 | 3113.06 | +145.00 |
+
+### Attempt (b): the `Unif` loop of `expand_head` on its own. Kept.
+
+`bca643d3b`, on the tree of trunk (after the revert of (a)).
+`Checker::expand_head_unif` (`pub(super)`) is `expand_head`'s loop in
+`ExpandMode::Unif` with a clash of a step returned as the caller's (`?`)
+and no mode test; `expand_head` hands `Unif` to it and its own loop serves
+`Safe`, `Opt` and `Rigid`. `unify_expanded` calls it at its four sites.
+LLVM inlines it there: the 212 of the out-of-line `expand_head` go, and
+`unify_expanded` gains 101 (the loop lines, `expand.rs:853-854` 26 and 16,
+and the `Result` of `?`, `result.rs:2182` 16). Against trunk:
+`unify_abbrev2` -111.00, `unify_ground3` -6.00, `unify_datatype2` -6.00,
+no operation dearer (the whole table is in "Per attempt" below).
+
+| Function | `838ccbca7` | Trunk | (b) |
+|---|---:|---:|---:|
+| `Checker::expand_once` | 798.00 | 816.00 | 816.00 |
+| `Checker::reaches` | 434.05 | 400.00 | 400.00 |
+| `Checker::unify_expanded` | 251.00 | 195.00 | 296.00 |
+| `Checker::expand_head` | 0.00 | 212.00 | 0.00 |
+| `Checker::unify_distinct` | 276.00 | 284.00 | 284.00 |
+| `Checker::unify3` | 192.00 | 190.00 | 190.00 |
+| `Graph::instance`, `Graph::compress`, `memorize`, `main` | 871.00 | 871.00 | 871.00 |
+| total | 2822.27 | 2968.06 | 2857.06 |
+
+What remains above `838ccbca7` after (b), 34.79: `unify_expanded` +45
+(K3's two tests and their registers), `expand_once` +18 (line 0 +20, the
+node and row loads of the two expanding heads +10), `unify_distinct` +8,
+against the probe's -34.05 in `reaches`.
+
+### Attempt (c): inline attributes. Four combinations, none kept.
+
+On top of (b). (a)'s functions were reverted, so the combinations bring
+back its hand-over in the form (b) leaves: `Checker::expand_once` a
+wrapper of a private `Checker::expand_loaded` (node and row as
+`Checker::load_head` loads them), `Checker::expand_head_unif` a wrapper
+of a `pub(super)` `Checker::expand_head_unif_loaded`, whose first step
+is `expand_loaded` on the pair K3's test (`may_expand`) loaded. Each
+combination is a whole build and run against (b); none meets the rule,
+and each is reverted in a commit of its own.
+
+| Combination | Commit | `unify_ground3` | `unify_datatype2` | `unify_abbrev2` | Kept |
+|---|---|---:|---:|---:|---|
+| (c1) hand-over, no attribute (LLVM's choice) | `400161538` | +5.00 | +7.00 | +256.00 | no |
+| (c2) (c1) + `#[inline(always)]` on `expand_head_unif` and `expand_head_unif_loaded` | `292ab9638` | +0.00 | +6.00 | +119.00 | no |
+| (c3) (c2) + `#[inline(always)]` on `expand_loaded` | `097f80d04` | +5.00 | +9.00 | **-158.00** | no: `unify_datatype2` +9 |
+| (c4) (c3) with `#[inline(never)]` on `expand_head_unif` (the second pair) | `c3d7a91b7` | +5.00 | +12.00 | -96.00 | no: `unify_datatype2` +12 |
+
+No other operation moved in any combination. An attribute on
+`Checker::expand_head` was not among them: after (b) no path of
+`unify_expanded` calls it, so it cannot move these operations.
+
+- (c1): as (a), LLVM calls both loops out of line with the pair as two
+  16-byte arguments (`expand_head_unif_loaded` 292, the wrapper 78).
+- (c2): the loops are in `unify_expanded` (+161 there), but
+  `expand_loaded` is called out of line from four sites with the pair
+  through the stack (its call line 40 for the four calls) and the second
+  pair now loads in `load_head` what `expand_once` loaded inside.
+- (c3): the whole step is in `unify_expanded` (+188 there), `subst` is
+  called out of line (470), and `expand_once` is not called: 158 fewer.
+  But the test of the heads that do not expand is dearer: it keeps the
+  whole 16-byte row live for the hand-over where K3's `never_expands`
+  read one byte of it (`load_head`, `expand.rs:664-665` and the row read
+  `expand.rs:268`, 8 in `unify_datatype2`, with `then_some` 2), and
+  `unify_ground3` pays 5 the same way.
+- (c4): the second pair's loop out of line again costs a call (224 in
+  `expand_head_unif`) and keeps the test's cost.
+
+The whole table, every operation, each column a build and run of its
+commit:
+
+| Operation | Trunk `5ea10ac75` | (a) | (b) | (c1) | (c2) | (c3) | (c4) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `instance1` | 137.06 | 137.06 | 137.06 | 137.06 | 137.06 | 137.06 | 137.06 |
+| `instance3` | 217.31 | 217.31 | 217.31 | 217.31 | 217.31 | 217.31 | 217.31 |
+| `instance5` | 305.34 | 305.34 | 305.34 | 305.34 | 305.34 | 305.34 | 305.34 |
+| `instance7` | 325.27 | 325.27 | 325.27 | 325.27 | 325.27 | 325.27 | 325.27 |
+| `generalize7` | 449.00 | 449.00 | 449.00 | 449.00 | 449.00 | 449.00 | 449.00 |
+| `empty` | 19.00 | 19.00 | 19.00 | 19.00 | 19.00 | 19.00 | 19.00 |
+| `lower7` | 422.00 | 422.00 | 422.00 | 422.00 | 422.00 | 422.00 | 422.00 |
+| `copy7` | 1709.58 | 1709.58 | 1709.58 | 1709.58 | 1709.58 | 1709.58 | 1709.58 |
+| `repr` | 9.00 | 9.00 | 9.00 | 9.00 | 9.00 | 9.00 | 9.00 |
+| `restore` | 63.00 | 63.00 | 63.00 | 63.00 | 63.00 | 63.00 | 63.00 |
+| `keep` | 44.00 | 44.00 | 44.00 | 44.00 | 44.00 | 44.00 | 44.00 |
+| `checker_instance1` | 126.06 | 126.06 | 126.06 | 126.06 | 126.06 | 126.06 | 126.06 |
+| `checker_instance3` | 207.31 | 207.31 | 207.31 | 207.31 | 207.31 | 207.31 | 207.31 |
+| `checker_instance5` | 294.34 | 294.34 | 294.34 | 294.34 | 294.34 | 294.34 | 294.34 |
+| `checker_instance7` | 314.27 | 314.27 | 314.27 | 314.27 | 314.27 | 314.27 | 314.27 |
+| `build_vars` | 78.07 | 78.07 | 78.07 | 78.07 | 78.07 | 78.07 | 78.07 |
+| `unify_vars` | 117.00 | 117.00 | 117.00 | 117.00 | 117.00 | 117.00 | 117.00 |
+| `build_ground1` | 98.08 | 98.08 | 98.08 | 98.08 | 98.08 | 98.08 | 98.08 |
+| `unify_ground1` | 122.00 | 122.00 | 122.00 | 122.00 | 122.00 | 122.00 | 122.00 |
+| `build_ground3` | 200.44 | 200.44 | 200.44 | 200.44 | 200.44 | 200.44 | 200.44 |
+| `unify_ground3` | 814.00 | 813.00 | 808.00 | 813.00 | 808.00 | 813.00 | 813.00 |
+| `build_vars_local` | 78.07 | 78.07 | 78.07 | 78.07 | 78.07 | 78.07 | 78.07 |
+| `unify_vars_local` | 117.00 | 117.00 | 117.00 | 117.00 | 117.00 | 117.00 | 117.00 |
+| `build_ground1_local` | 98.08 | 98.08 | 98.08 | 98.08 | 98.08 | 98.08 | 98.08 |
+| `unify_ground1_local` | 122.00 | 122.00 | 122.00 | 122.00 | 122.00 | 122.00 | 122.00 |
+| `build_ground3_local` | 200.44 | 200.44 | 200.44 | 200.44 | 200.44 | 200.44 | 200.44 |
+| `unify_ground3_local` | 814.00 | 813.00 | 808.00 | 813.00 | 808.00 | 813.00 | 813.00 |
+| `binder` | -8.00 | -8.00 | -8.00 | -8.00 | -8.00 | -8.00 | -8.00 |
+| `find_local` | 47.00 | 47.00 | 47.00 | 47.00 | 47.00 | 47.00 | 47.00 |
+| `find_open` | 224.00 | 224.00 | 224.00 | 224.00 | 224.00 | 224.00 | 224.00 |
+| `find_miss2` | 624.00 | 624.00 | 624.00 | 624.00 | 624.00 | 624.00 | 624.00 |
+| `bind_leave` | 172.18 | 172.18 | 172.18 | 172.18 | 172.18 | 172.18 | 172.18 |
+| `intern` | 160.00 | 160.00 | 160.00 | 160.00 | 160.00 | 160.00 | 160.00 |
+| `build_bind_ground1` | 88.09 | 88.09 | 88.09 | 88.09 | 88.09 | 88.09 | 88.09 |
+| `bind_ground1` | 121.00 | 121.00 | 121.00 | 121.00 | 121.00 | 121.00 | 121.00 |
+| `build_bind_ground1_local` | 88.09 | 88.09 | 88.09 | 88.09 | 88.09 | 88.09 | 88.09 |
+| `bind_ground1_local` | 121.00 | 121.00 | 121.00 | 121.00 | 121.00 | 121.00 | 121.00 |
+| `build_datatype2` | 186.44 | 186.44 | 186.44 | 186.44 | 186.44 | 186.44 | 186.44 |
+| `unify_datatype2` | 822.00 | 823.00 | 816.00 | 823.00 | 822.00 | 825.00 | 828.00 |
+| `build_abbrev2` | 186.44 | 186.44 | 186.44 | 186.44 | 186.44 | 186.44 | 186.44 |
+| `unify_abbrev2` | 2968.06 | 3113.06 | 2857.06 | 3113.06 | 2976.06 | 2699.06 | 2761.06 |
+
+### Merged head
+
+`origin/ocaml-to-rust-rewrite` moved to `d862f5d25` (R3n, #298) and was
+merged without conflict as `0d5562e92`. Base: that trunk, built and run.
+Head: the merge (attempt (b) kept; (a) and (c1)-(c4) reverted). The step
+test added after it is `cfg(test)` code and does not change the bench
+binary. The final table of K4:
+
+| Operation | Merged trunk `d862f5d25` | Head | Change |
+|---|---:|---:|---:|
+| `instance1` | 137.06 | 137.06 | +0.00 |
+| `instance3` | 217.31 | 217.31 | +0.00 |
+| `instance5` | 305.34 | 305.34 | +0.00 |
+| `instance7` | 325.27 | 325.27 | +0.00 |
+| `generalize7` | 449.00 | 449.00 | +0.00 |
+| `empty` | 19.00 | 19.00 | +0.00 |
+| `lower7` | 422.00 | 422.00 | +0.00 |
+| `copy7` | 1709.58 | 1709.58 | +0.00 |
+| `repr` | 9.00 | 9.00 | +0.00 |
+| `restore` | 63.00 | 63.00 | +0.00 |
+| `keep` | 44.00 | 44.00 | +0.00 |
+| `checker_instance1` | 126.06 | 126.06 | +0.00 |
+| `checker_instance3` | 207.31 | 207.31 | +0.00 |
+| `checker_instance5` | 294.34 | 294.34 | +0.00 |
+| `checker_instance7` | 314.27 | 314.27 | +0.00 |
+| `build_vars` | 78.07 | 78.07 | +0.00 |
+| `unify_vars` | 117.00 | 117.00 | +0.00 |
+| `build_ground1` | 98.08 | 98.08 | +0.00 |
+| `unify_ground1` | 122.00 | 122.00 | +0.00 |
+| `build_ground3` | 200.44 | 200.44 | +0.00 |
+| `unify_ground3` | 816.00 | 810.00 | -6.00 |
+| `build_vars_local` | 78.07 | 78.07 | +0.00 |
+| `unify_vars_local` | 117.00 | 117.00 | +0.00 |
+| `build_ground1_local` | 98.08 | 98.08 | +0.00 |
+| `unify_ground1_local` | 122.00 | 122.00 | +0.00 |
+| `build_ground3_local` | 200.44 | 200.44 | +0.00 |
+| `unify_ground3_local` | 816.00 | 810.00 | -6.00 |
+| `binder` | -8.00 | -8.00 | +0.00 |
+| `find_local` | 47.00 | 47.00 | +0.00 |
+| `find_open` | 224.00 | 224.00 | +0.00 |
+| `find_miss2` | 624.00 | 624.00 | +0.00 |
+| `bind_leave` | 172.18 | 172.18 | +0.00 |
+| `intern` | 160.00 | 160.00 | +0.00 |
+| `build_bind_ground1` | 88.09 | 88.09 | +0.00 |
+| `bind_ground1` | 121.00 | 121.00 | +0.00 |
+| `build_bind_ground1_local` | 88.09 | 88.09 | +0.00 |
+| `bind_ground1_local` | 121.00 | 121.00 | +0.00 |
+| `build_datatype2` | 186.44 | 186.44 | +0.00 |
+| `unify_datatype2` | 824.00 | 818.00 | -6.00 |
+| `build_abbrev2` | 186.44 | 186.44 | +0.00 |
+| `unify_abbrev2` | 2999.06 | 2888.06 | -111.00 |
+
+The target is missed: `unify_abbrev2` is 2888.06 against 2822.27
+(+65.79); `unify_ground3` 810 and `unify_datatype2` 818 are within
+theirs (816, 824). R3n alone made `unify_abbrev2` 31 dearer on trunk
+(2968.06 -> 2999.06: `Checker::expand_once` +32, `unify3` -1). R3n
+replaced the `todo!` of `Checker::copy_refs` with its code, which is
+reached from `link_memorized` in the `subst` that `expand_once` inlines;
+it does not run here (no row has cells), so the 32 are the code
+generation of the larger `expand_once` (its node, row and memo lines).
+
+What remains above `838ccbca7`, by function:
+
+| Function | `838ccbca7` | Head | Change |
+|---|---:|---:|---:|
+| `Checker::expand_once` | 798.00 | 848.00 | +50.00 |
+| `Graph::instance` | 458.00 | 458.00 | +0.00 |
+| `Checker::reaches` | 434.05 | 400.00 | -34.05 |
+| `Graph::compress` | 306.00 | 306.00 | +0.00 |
+| `Checker::unify_expanded` | 251.00 | 296.00 | +45.00 |
+| `Checker::unify_distinct` | 276.00 | 284.00 | +8.00 |
+| `Checker::unify3` | 192.00 | 189.00 | -3.00 |
+| `Checker::memorize` | 82.00 | 82.00 | +0.00 |
+| `tc_kernel::main` | 25.00 | 25.00 | +0.00 |
+| total | 2822.27 | 2888.06 |
+
+- `Checker::expand_once`, +50: +32 arrived with the merge of R3n (above);
+  +18 was there before (line 0 +20: the function's frame; the node and
+  row loads of the two expanding heads, `graph.rs:248` and
+  `index.rs:238`, which K3's test has just loaded; (a) and (c1)-(c4)
+  were the attempts to hand them over, and none paid).
+- `Checker::unify_expanded`, +45: the loop of (b) costs inline what
+  `expand_head`'s did at `838ccbca7` (its lines `expand.rs:853-854` 26 and
+  16 against 42 and 16), plus the `Result` of its `?` (`result.rs:2182`,
+  16), and K3's two tests (`unify.rs:780-781`, 13) with their registers
+  (line 0 +11).
+- `Checker::unify_distinct`, +8, `Checker::unify3`, -3: register
+  allocation of the callers.
+- `Checker::reaches`, -34.05: K3's occurrence probe.
+
+### Checks
+
+```text
+cargo test --manifest-path compiler-rust/Cargo.toml --lib tc::   (debug build)
+(a)  013996c36  test result: ok. 231 passed; 0 failed; 1 ignored; 0 measured; 2650 filtered out; finished in 243.20s
+(b)  bca643d3b  test result: ok. 231 passed; 0 failed; 1 ignored; 0 measured; 2650 filtered out; finished in 379.25s
+merge 0d5562e92 test result: ok. 235 passed; 0 failed; 0 ignored; 0 measured; 2650 filtered out; finished in 304.70s
+head  a3b43d30f test result: ok. 236 passed; 0 failed; 0 ignored; 0 measured; 2650 filtered out; finished in 297.20s
+```
+
+The trees of the reverts are those of trunk (after (a)) and of (b)
+(after (c4)-(c1)), which ran these tests. No test was edited, removed or
+ignored and no step count changed (no step test failed); the one test
+added is the step test of `Checker::expand_head_unif` at 10,000
+abbreviations, the bounds of the existing `Safe` one.
+`git diff origin/ocaml-to-rust-rewrite -- compiler-rust/src/tc/differential.rs`
+is empty on the head. `tc` is not on a compiler build's path (the
+driver's default checker is the old one), so no application or
+`tests/tests` saving is claimed; the CI `Instruction count` check reports
+the build's figures.

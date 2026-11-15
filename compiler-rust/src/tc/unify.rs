@@ -697,18 +697,18 @@ impl Checker {
         let mut expanded_left = if self.never_expands(left_head) {
             left_head
         } else {
-            self.expand_head(left_head, ExpandMode::Unif)?
+            self.expand_head_unif(left_head)?
         };
         let right_head = self.g.repr(right);
         let mut expanded_right = if self.never_expands(right_head) {
             right_head
         } else {
-            self.expand_head(right_head, ExpandMode::Unif)?
+            self.expand_head_unif(right_head)?
         };
         let unexpanded = expanded_left == self.g.repr(left) && expanded_right == self.g.repr(right);
         if !unexpanded {
-            expanded_left = self.expand_head(left, ExpandMode::Unif)?;
-            expanded_right = self.expand_head(right, ExpandMode::Unif)?;
+            expanded_left = self.expand_head_unif(left)?;
+            expanded_right = self.expand_head_unif(right)?;
         }
         let left_level = self.g.nodes[expanded_left.0 as usize].level;
         let right_level = self.g.nodes[expanded_right.0 as usize].level;

@@ -1,0 +1,1 @@
+- Run the `Unif` loop of the new type checker's head expansion as a function of its own, 111 fewer instructions for a unification of two abbreviation heads, and record the measured attempts (checker rewrite K4).
