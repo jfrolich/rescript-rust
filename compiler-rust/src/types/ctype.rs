@@ -12708,6 +12708,9 @@ fn copy_sep_inner(
             )))
         }
         TypeDesc::Tpoly { body, vars } => {
+            if !vars.is_empty() {
+                ctx.note_bound_universal();
+            }
             let vars: Vec<_> = ctx
                 .type_list(vars)
                 .into_iter()
@@ -13755,6 +13758,9 @@ fn subst_identity_copy_rec(
                 TypeDesc::Tpoly { body, vars } => {
                     let body = *body;
                     let vars = *vars;
+                    if !vars.is_empty() {
+                        ctx.note_bound_universal();
+                    }
                     // btype.ml:537-539: the binders are copied before the body
                     // (see the `Poly` arm of `copy_type_cached`).
                     let vars_copy: Vec<_> = ctx
@@ -14302,6 +14308,9 @@ pub(crate) fn copy_type_cached(
                 }
                 CopyAction::Nil => TypeDesc::Tnil,
                 CopyAction::Poly { body, vars } => {
+                    if !vars.is_empty() {
+                        ctx.note_bound_universal();
+                    }
                     // btype.ml:537-539 copies the binders before the body: a
                     // binder that is also the tail of a variant row in the
                     // body is then copied as itself, not as the marker the
@@ -14993,6 +15002,9 @@ fn nondep_type_rec(
             TypeDesc::Ttuple(ctx.new_type_list(&new_types?))
         }
         TypeDesc::Tpoly { body, vars } => {
+            if !vars.is_empty() {
+                ctx.note_bound_universal();
+            }
             let new_vars: Option<Vec<_>> = ctx
                 .type_list(vars)
                 .iter()

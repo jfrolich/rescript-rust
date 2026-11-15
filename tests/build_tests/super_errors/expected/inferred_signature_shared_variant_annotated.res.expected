@@ -1,0 +1,16 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/inferred_signature_shared_variant_annotated.res[0m:[2m1:5[0m
+
+  [1;31m1[0m [2m│[0m let [1;31mf[0m = (x: {"f": 'a. [< #A('a) | #B] => 'a}) => (x: {"f": 'a. [< #A('a)
+    [2m│[0m [1;31m | #B[0m] => 'a})
+  2 [2m│[0m 
+
+  The implementation /.../fixtures/inferred_signature_shared_variant_annotated.res
+  does not match the interface (inferred signature):
+  
+  Actual declaration ([36m/.../fixtures/inferred_signature_shared_variant_annotated.res[0m:[2m1:5[0m):
+    let f: {"f": 'a. ([< #A('a) | #B] as 'b) => 'a} => {"f": 'a. 'b => 'a}
+  
+  Expected declaration ([36m/.../fixtures/inferred_signature_shared_variant_annotated.res[0m:[2m1:5[0m):
+    let f: {"f": 'a. ([< #A('a0) | #B] as 'b) => 'a} => {"f": 'a0. 'b => 'a0}

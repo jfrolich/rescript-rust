@@ -3539,6 +3539,7 @@ fn transl_type_inner(
                         );
                         ty_list.push(v);
                         tctx.universalized = true;
+                        ctx.note_bound_universal();
                     } else {
                         return Err(TypeCoreError::CannotQuantify {
                             loc,
@@ -22017,6 +22018,9 @@ where
             }
             CopyTypeExprPlan::Tunivar(name) => TypeDesc::Tunivar(name),
             CopyTypeExprPlan::Tpoly { body, vars } => {
+                if !vars.is_empty() {
+                    ctx.note_bound_universal();
+                }
                 // btype.ml:538-539: the binders before the body.
                 let copied_vars = ctx.new_type_list_from(
                     ctx.type_list(vars)
