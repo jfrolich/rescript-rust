@@ -7552,12 +7552,12 @@ JavaScript compared byte for byte.
   table's `scrape_alias` (env.ml:1504, 1350-1362) resolves `module A = R`
   to the sibling `R` there, and `prefix_idents` (env.ml:1369-1410, 1519)
   prefixes the result. For a parent read through an alias, the Rust
-  `build_local_module_components` (`compiler-rust/src/types/env_lazy.rs:2118`,
+  `build_local_module_components` (`compiler-rust/src/types/env_lazy.rs:2123`,
   the child item at 2395 before the fix) gave the child and the evolving
   environment the prefixed item, `Mty_alias O.R`; `O` is not bound in that
   environment, so `resolve_module_type` failed, the child had no
   components and the lookup found nothing. An alias child now keeps its
-  raw declaration (`env_lazy.rs:2427`); its components substitute the
+  raw declaration (`env_lazy.rs:2432`); its components substitute the
   parent's paths themselves, as a child of a parent that is no alias
   already did. Fixtures: `tests/tests/src/alias_chain_constructor_local`,
   `alias_chain_constructor_functor`, `alias_chain_constructor_direct`
@@ -7579,7 +7579,8 @@ JavaScript compared byte for byte.
   re-rooting the constructors from `R` to `O.A`
   (`reroot_constructor_descriptions`) rewrote `O.A.t` into `O.A.A.t`. The
   source is now the target with its head put at the access path
-  (`env_lazy.rs:1154`, one name probe of the signature index per alias).
+  (`env_lazy.rs:1155`, one name probe of the signature index per alias
+  of a module that is not a unit).
   Fixtures: `tests/tests/src/alias_chain_constructor_unit` with
   `alias_chain_constructor_unit_lib`, `alias_chain_constructor_unit_direct`
   (agreed before), super_errors_multi `alias_chain_constructor_unit`.
