@@ -2316,13 +2316,28 @@ fn nondep_supertype(
     mid: &Ident,
     mty: &crate::types::decl::ModuleType,
 ) -> Option<crate::types::decl::ModuleType> {
-    nondep_mty(ctx, env, mid, mty)
+    nondep_mty(ctx, env, mid, NondepVariance::Co, mty)
 }
 
+/// Position of a module type inside the one whose parameter dependency is
+/// removed (OCaml `variance`, compiler/ml/mtype.ml:105): the result itself is
+/// covariant, a functor parameter flips it, and the manifest of a module type
+/// declaration is strict. Only a covariant position may lose information.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum NondepVariance {
+    Co,
+    Contra,
+    Strict,
+}
+
+/// One call walks `mty` once: each signature item and functor parameter is
+/// visited once, and a module type path of the parameter costs one lookup and
+/// a walk of its expansion.
 fn nondep_mty(
     ctx: &crate::types::context::TypeContext,
     env: &Env,
     mid: &Ident,
+    va: NondepVariance,
     mty: &crate::types::decl::ModuleType,
 ) -> Option<crate::types::decl::ModuleType> {
     use crate::types::decl::ModuleType as DeclMty;
@@ -2330,9 +2345,13 @@ fn nondep_mty(
     match mty {
         DeclMty::MtyIdent(path) => {
             if path.is_free(mid) {
-                // OCaml: nondep_mty env va (Env.find_modtype_expansion p env)
-                // For simplicity, return None (cannot eliminate)
-                None
+                // compiler/ml/mtype.ml:110-113: a module type path of the
+                // parameter is replaced by its expansion, found through the
+                // argument bound to the parameter in `env`; an abstract
+                // module type has none and the parameter is not eliminated.
+                let mut pers_env = ctx.persistent_env_clone();
+                let expansion = find_modtype_expansion(path, env, &mut pers_env, ctx)?;
+                nondep_mty(ctx, env, mid, va, &expansion)
             } else {
                 Some(mty.clone())
             }
@@ -2345,7 +2364,7 @@ fn nondep_mty(
             }
         }
         DeclMty::MtySignature(sig_items) => {
-            let new_items = nondep_sig(ctx, env, mid, sig_items)?;
+            let new_items = nondep_sig(ctx, env, mid, va, sig_items)?;
             Some(DeclMty::MtySignature(std::sync::Arc::new(new_items)))
         }
         DeclMty::MtyFunctor {
@@ -2353,8 +2372,14 @@ fn nondep_mty(
             param_type,
             result,
         } => {
+            // compiler/ml/mtype.ml:119-123: the parameter is contravariant.
+            let param_va = match va {
+                NondepVariance::Co => NondepVariance::Contra,
+                NondepVariance::Contra => NondepVariance::Co,
+                NondepVariance::Strict => NondepVariance::Strict,
+            };
             let new_param_type = match param_type {
-                Some(pt) => Some(Box::new(nondep_mty(ctx, env, mid, pt)?)),
+                Some(pt) => Some(Box::new(nondep_mty(ctx, env, mid, param_va, pt)?)),
                 None => None,
             };
             let inner_env = {
@@ -2374,7 +2399,7 @@ fn nondep_mty(
                 );
                 e
             };
-            let new_result = nondep_mty(ctx, &inner_env, mid, result)?;
+            let new_result = nondep_mty(ctx, &inner_env, mid, va, result)?;
             Some(DeclMty::MtyFunctor {
                 param: *param,
                 param_type: new_param_type,
@@ -2388,6 +2413,7 @@ fn nondep_sig(
     ctx: &crate::types::context::TypeContext,
     env: &Env,
     mid: &Ident,
+    va: NondepVariance,
     sig_items: &[crate::types::decl::SignatureItem],
 ) -> Option<Vec<crate::types::decl::SignatureItem>> {
     use crate::types::decl::SignatureItem;
@@ -2402,9 +2428,16 @@ fn nondep_sig(
                 result.push(SignatureItem::SigValue(*id, new_vd));
             }
             SignatureItem::SigType(id, decl, rs) => {
-                // OCaml: Ctype.nondep_type_decl env mid id (va = Co) d
-                let new_decl =
-                    crate::types::ctype::nondep_type_decl(ctx, env, mid, id, true, decl)?;
+                // compiler/ml/mtype.ml:139-140: only a covariant position
+                // may drop a manifest or kind that keeps the parameter.
+                let new_decl = crate::types::ctype::nondep_type_decl(
+                    ctx,
+                    env,
+                    mid,
+                    id,
+                    va == NondepVariance::Co,
+                    decl,
+                )?;
                 result.push(SignatureItem::SigType(
                     *id,
                     std::sync::Arc::new(new_decl),
@@ -2412,30 +2445,38 @@ fn nondep_sig(
                 ));
             }
             SignatureItem::SigTypext(id, ext, es) => {
-                // Simplified: try to remove dep from extension constructor
-                let new_params: Option<Vec<_>> = ext
-                    .ext_type_params
-                    .iter()
-                    .map(|ty| crate::types::ctype::nondep_type(ctx, env, mid, *ty))
-                    .collect();
-                let mut new_ext = ext.clone();
-                new_ext.ext_type_params = new_params?;
-                // TODO: handle ext_args and ext_ret_type nondep
+                let new_ext =
+                    crate::types::ctype::nondep_extension_constructor(ctx, env, mid, ext)?;
                 result.push(SignatureItem::SigTypext(*id, new_ext, *es));
             }
             SignatureItem::SigModule(id, md, rs) => {
-                let new_md_type = nondep_mty(ctx, env, mid, &md.md_type)?;
+                let new_md_type = nondep_mty(ctx, env, mid, va, &md.md_type)?;
                 let mut new_md = md.clone();
                 new_md.md_type = new_md_type;
                 result.push(SignatureItem::SigModule(*id, new_md, *rs));
             }
             SignatureItem::SigModtype(id, mtd) => {
-                let new_mtd_type = match &mtd.mtd_type {
-                    Some(mty) => Some(nondep_mty(ctx, env, mid, mty)?),
-                    None => None,
+                // compiler/ml/mtype.ml:147-160: the manifest is strict; when
+                // it cannot be made independent of the parameter, a
+                // covariant position keeps the declaration as an abstract
+                // module type and any other position fails.
+                let new_mtd = match &mtd.mtd_type {
+                    None => mtd.clone(),
+                    Some(mty) => match nondep_mty(ctx, env, mid, NondepVariance::Strict, mty) {
+                        Some(new_mty) => crate::types::decl::ModtypeDeclaration {
+                            mtd_type: Some(new_mty),
+                            ..mtd.clone()
+                        },
+                        None if va == NondepVariance::Co => {
+                            crate::types::decl::ModtypeDeclaration {
+                                mtd_type: None,
+                                mtd_attributes: vec![],
+                                mtd_loc: crate::types::DeclLoc::none(),
+                            }
+                        }
+                        None => return None,
+                    },
                 };
-                let mut new_mtd = mtd.clone();
-                new_mtd.mtd_type = new_mtd_type;
                 result.push(SignatureItem::SigModtype(*id, new_mtd));
             }
             _ => {
@@ -20953,6 +20994,11 @@ mod tests {
     use crate::context::IdGenerator;
     use crate::parser::{Parser, module};
     use crate::types::{TypeCheckContext, TypeContext, initial_env};
+
+    #[test]
+    fn nondep_variance_is_one_byte() {
+        assert_eq!(std::mem::size_of::<NondepVariance>(), 1);
+    }
 
     #[test]
     fn test_type_module_error_conversion() {
