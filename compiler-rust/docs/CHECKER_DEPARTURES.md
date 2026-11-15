@@ -4031,6 +4031,20 @@ All seven candidates hit U4. Alpha-renaming alone fails in U4-1 and the reduced 
 
 Smallest witness found: **U4-7** (full source and both outputs below).
 
+#### Fixed
+
+Cause: `moregen`'s polymorphic-type arm compared the binder counts and its
+universal-variable arm the variables' names
+(`compiler-rust/src/types/ctype.rs:10200-10208` before the fix), where
+OCaml enters the binder lists as a scope of pairs and looks the pair up
+(`compiler/ml/ctype.ml:2985-2989`, `enter_poly` 1656-1679, `unify_univar`
+1544-1559, from an empty `univar_pairs`, 3093). `7a0be2705` gives `moregen`
+a `UnivarPairs` scope (`MoregenState`; arms at `ctype.rs:10283-10312`) built
+by the functions unification uses. U4-1 and U4-7 now build with OCaml's
+JavaScript; U4-2 to U4-6 agree as before. Fixtures: tests/tests
+`universal_pairing_moregen` (U4-7, U5-5, U4-2) and super_errors
+`universal_pairing_moregen_mismatch` (U4-3).
+
 #### U4-1 — WITNESS
 
 `Main.res`:
@@ -4319,6 +4333,24 @@ A moregeneral comparison must descend through a polymorphic variant to two unive
 U5-1 through U5-5 and U5-7 hit the successful U5 row-tail arm. U5-4, U5-6 and U5-7 differ in printed aliases; U5-5 differs in acceptance, with U4 also hit, so this does not isolate the tail comparison as the cause.
 
 Smallest witness found: **U5-7** (full source and both outputs below).
+
+#### Fixed
+
+Two causes. U5-4, U5-6 and U5-7: the printed expected declaration is a
+`subst_identity_copy` copy (traced: its `Tpoly` binder list held a `Ttuple`
+node), because both Rust copies copied a `Tpoly`'s body before its binders,
+so a binder that is also a row tail came back as the marker the row copy
+leaves on the tail (`ctype.rs` `subst_identity_copy_rec` and
+`copy_type_cached`, `Poly` arms, now at 13488 and 14029). OCaml copies the binders first through
+`norm_univar` (`compiler/ml/btype.ml:396-401, 537-539`) and its row copy
+reuses a tail copied before (`ctype.ml:816`); `bb08840b0` does the same
+(fixture super_errors `universal_pairing_row_binder_copy`, U5-7). U5-5:
+`moregen_row` compared universal row tails by name (`ctype.rs:9883` before
+the fix; OCaml `ctype.ml:3048`, `unify_univar`); `7a0be2705` pairs them
+(`ctype.rs:9963`)
+(fixture tests/tests `universal_pairing_moregen`). With pairing alone U5-1,
+U5-2 and U6-6 were rejected, because of the first cause; both commits
+together make all seven candidates agree.
 
 #### U5-1 — outputs agree
 
@@ -4669,6 +4701,17 @@ All six candidates hit U6. U6-1 rejects alpha-renaming only in Rust; its interfa
 
 Smallest witness found: **U6-1** (full source and both outputs below).
 
+#### Fixed
+
+Cause: `equal_type_exprs_without_renaming_rec` compared binder counts and
+universal-variable names (`ctype.rs:11401-11418` before the fix), where
+OCaml's `eqtype` enters the binders as pairs (`ctype.ml:3268-3272`, from an
+empty `univar_pairs`, 3362). `7a0be2705` gives `EqtypeState` a
+`UnivarPairs` scope (arms at `ctype.rs:11516-11546`). U6-1 builds with
+OCaml's output; U6-2 to U6-6 agree (U6-6 needs `bb08840b0` as well, see U5).
+Fixture: tests/tests `universal_pairing_equal` with its interface (U6-1 and
+U6-2).
+
 #### U6-1 — WITNESS
 
 `Main.res`:
@@ -4957,6 +5000,21 @@ Signature inclusion must instantiate a pattern variable and finish moregen_occur
 U7-1 and U7-2 hit U7 and agree. U7-3, U7-4 and U7-7 instead hit U4 and differ there; none establishes a free-universal escape through the nominated U7 exit.
 
 Smallest witness found: **U7-7 (off-path; identical to U4-7)** (full source and both outputs below).
+
+#### Fixed
+
+U7-3, U7-4 and U7-7 were the U4 cause and agree after `7a0be2705`. The
+nominated difference is real as well: OCaml's `moregen_occur` ends with
+`occur_univar env ty` (`ctype.ml:2918`) and the Rust one had no such call
+(`ctype.rs:9713-9760` before the fix), so a pattern variable inside a
+polymorphic method could be instantiated with the method's universal
+variable. U7-8 below shows it (OCaml rejects, Rust built it before
+`8f73338c3`). `8f73338c3` calls `occur_univar` in `moregen_occur` when
+`moregen` has entered a binder scope (`ctype.rs:9784-9840`): outside
+one the subject holds no free universal variable, so inclusion of values
+without polymorphic types does no walk. U7-9 below agreed before and
+after. Fixtures: super_errors `universal_pairing_free_univar` (U7-8) and
+tests/tests `universal_pairing_free_univar` (U7-9).
 
 #### U7-1 — outputs agree
 
@@ -5271,6 +5329,112 @@ stderr:
 ```
 
 
+#### U7-8 — WITNESS (added after the search)
+
+`Main.res`:
+
+```rescript
+module F = (X: {let x: {"f": 'b. 'b => 'a}}): {let x: {"f": 'b. 'b => 'b}} => X
+```
+
+OCaml, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:79
+
+  1 │ module F = (X: {let x: {"f": 'b. 'b => 'a}}): {let x: {"f": 'b. 'b => 'b
+    │ }} => X
+  2 │ 
+
+  Signature mismatch:
+  
+  Actual declaration (Main.res:1:17-42):
+    let x: {"f": 'b. 'b => 'a}
+  
+  Expected declaration (Main.res:1:48-73):
+    let x: {"f": 'b. 'b => 'b}
+
+```
+
+Rust before `8f73338c3`, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return X;
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+After `8f73338c3` the Rust output is OCaml's, byte for byte.
+
+#### U7-9 — outputs agree (added after the search)
+
+`Main.res`:
+
+```rescript
+module type A = {let x: {"f": 'b. 'b => 'a}}
+module F = (X: A): {let x: {"f": 'b. 'b => int}} => X
+```
+
+OCaml, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return X;
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Rust at `8f73338c3`, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return X;
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+
 ### U8 — WITNESS
 
 Two distinct Reither fields must pass the fixed-row fast path and duplicate-removal logic in unify_row_field (9346–9354), corresponding to OCaml's residual partition (2685–2703). A residual containing a universal must survive to lowering and change acceptance or diagnostics to isolate the omitted reconciliation.
@@ -5278,6 +5442,39 @@ Two distinct Reither fields must pass the fixed-row fast path and duplicate-remo
 U8-9 hits U8 and agrees, but has ordinary int payloads. The universal-payload witnesses U8-1, U8-3 through U8-6 and U8-8 hit U1, not U8: the fixed-row pairwise payload path at 9290–9305 precedes the residual branch, so these are off-path witnesses. Removing the explicit row binder in U8-7 fails with an unbound variable in both compilers.
 
 Smallest witness found: **U8-8 (off-path)** (full source and both outputs below).
+
+#### Fixed and open
+
+- U8-1, U8-3, U8-4, U8-5 and U8-8: unification already paired binders by
+  node, and the binder lists of the copies it compared held the row copy's
+  `Ttuple` marker instead of the row tail (traced in the `moregen` and
+  unification arms on U5-1 and U8-6: `vars1=[Ttuple(..)]`); the U5 copy
+  cause, fixed by `bb08840b0` (fixture tests/tests
+  `universal_pairing_row_binder`, U8-8).
+- U8-6: OCaml's `transl_simple_type` and `transl_simple_type_delayed` end
+  with `make_fixed_univars` (`compiler/ml/typetexp.ml:677-703, 736-748`),
+  which fixes every row with a universal tail and marks its `Reither`
+  fields matched; Rust had no such pass, so `set_more`
+  (`ctype.ml:2597-2606`) erased the unmatched `#B` instead of reporting it.
+  `3681faca1` adds `make_fixed_univars` (`compiler-rust/src/types/typecore.rs:2740`),
+  run only when the translation universalized a variable (fixtures
+  super_errors and tests/tests `universal_pairing_fixed_row`, U8-6 and
+  U8-1/U8-9).
+- The nominated residual split (PR#6744, `ctype.ml:2685-2703`) is a
+  separate difference: U8-10 and U8-11 below show it (Rust keeps a payload
+  holding a free universal variable in the `Reither` conjunction and
+  reports a different type and location). A fix that partitions the
+  payloads with `occur_univar` as OCaml does makes both agree and keeps
+  every other candidate agreeing; it adds one `occur_univar` quick walk per
+  residual payload on the default path (2 calls and 8 nodes in a build of
+  tests/tests), so it is held for review of that cost and is not part of
+  this change. Open.
+- U8-12 and U8-13 below differ in a different way: OCaml rejects the
+  program's own inferred signature ("does not match the interface
+  (inferred signature)"), Rust accepts it; with the residual split U8-12
+  still differs. The payload of the shared row names the universal
+  variable of the first method in the second (see OCaml's expected
+  declaration); the cause was not traced. Open.
 
 #### U8-1 — WITNESS
 
@@ -5731,6 +5928,237 @@ stderr:
 
 ```text
 ```
+
+
+#### U8-10 — WITNESS (added after the search)
+
+`Main.res`:
+
+```rescript
+let f = (x: {"f": 'a. [< #A('a)] => 'a}) => (x: {"f": 'a. [< #A(int)] => 'a})
+```
+
+OCaml, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:46
+
+  1 │ let f = (x: {"f": 'a. [< #A('a)] => 'a}) => (x: {"f": 'a. [< #A(int)] =>
+    │  'a})
+  2 │ 
+
+  This has type: [1;31m{"f": 'a. [< #A('a)] => 'a}[0m
+  But it's expected to have type: [1;33m{"f": 'a. [< #A(int)] => 'a}[0m
+  The universal variable 'a would escape its scope
+
+```
+
+Rust at `8f73338c3`, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:46-76
+
+  1 │ let f = (x: {"f": 'a. [< #A('a)] => 'a}) => (x: {"f": 'a. [< #A(int)] =>
+    │  'a})
+  2 │ 
+
+  This has type: [1;31m{"f": 'a. [< #A(int) & ('a0)] => 'a}[0m
+  But it's expected to have type: [1;33m'b[0m
+  The universal variable 'a0 would escape its scope
+
+```
+
+Open (see "Fixed and open").
+
+#### U8-11 — WITNESS (added after the search)
+
+`Main.res`:
+
+```rescript
+let f = (x: {"f": 'a 'b. ([< #A('a) | #B('b)] => 'a)}) => (x: {"f": 'a 'b. [< #A('b) | #B('a)] => 'a})
+```
+
+OCaml, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:60
+
+  1 │ let f = (x: {"f": 'a 'b. ([< #A('a) | #B('b)] => 'a)}) => (x: {"f": 'a '
+    │ b. [< #A('b) | #B('a)] => 'a})
+  2 │ 
+
+  This has type: [1;31m{"f": 'a 'b. ([< #A('a) | #B('b)] as 'c) => 'a}[0m
+  But it's expected to have type: [1;33m{"f": 'b 'a. 'c => 'b}[0m
+  
+  Types for field [1;33m"f"[0m are incompatible:
+  Field [1;33m"f"[0m in the passed object has type [1;31m'a 'b. 'c => 'a[0m, but is expected to have type [1;33m'b 'a. 'c => 'b[0m.
+  
+  Possible solutions: 
+  - These types are compatible at runtime. You can use the coercion operator to convert to the expected type: [1;33m(x :> {"f": 'b 'b. [< #A('b) | #B('b)] => 'b})
+[0m
+  
+
+```
+
+Rust at `8f73338c3`, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:60-101
+
+  1 │ let f = (x: {"f": 'a 'b. ([< #A('a) | #B('b)] => 'a)}) => (x: {"f": 'a '
+    │ b. [< #A('b) | #B('a)] => 'a})
+  2 │ 
+
+  This has type: [1;31m{"f": 'a 'b. [< #A('b) & ('a0) | #B('a) & ('b0)] => 'a}[0m
+  But it's expected to have type: [1;33m'c[0m
+  The universal variable 'a0 would escape its scope
+
+```
+
+Open (see "Fixed and open").
+
+#### U8-12 — WITNESS (added after the search)
+
+`Main.res`:
+
+```rescript
+let f = (x: {"f": 'a. [< #A('a) | #B] => 'a}) => (x: {"f": 'a. [< #A('a) | #B] => 'a})
+```
+
+OCaml, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:5
+
+  1 │ let f = (x: {"f": 'a. [< #A('a) | #B] => 'a}) => (x: {"f": 'a. [< #A('a)
+    │  | #B] => 'a})
+  2 │ 
+
+  The implementation Main.res
+  does not match the interface (inferred signature):
+  
+  Actual declaration (Main.res:1:5):
+    let f: {"f": 'a. ([< #A('a) | #B] as 'b) => 'a} => {"f": 'a. 'b => 'a}
+  
+  Expected declaration (Main.res:1:5):
+    let f: {"f": 'a. ([< #A('a0) | #B] as 'b) => 'a} => {"f": 'a0. 'b => 'a0}
+
+```
+
+Rust at `8f73338c3`, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:51-85
+
+  1 │ let f = (x: {"f": 'a. [< #A('a) | #B] => 'a}) => (x: {"f": 'a. [< #A('a)
+    │  | #B] => 'a})
+  2 │ 
+
+  This has type: [1;31m{"f": 'a. [< #A('a) & ('a0) | #B] => 'a}[0m
+  But it's expected to have type: [1;33m'b[0m
+  The universal variable 'a0 would escape its scope
+
+```
+
+Open (see "Fixed and open").
+
+#### U8-13 — WITNESS (added after the search)
+
+`Main.res`:
+
+```rescript
+let f = (x: {"f": 'a. [< #A('a) & (int)] => 'a}) => x
+```
+
+OCaml, implementation exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:5
+
+  1 │ let f = (x: {"f": 'a. [< #A('a) & (int)] => 'a}) => x
+  2 │ 
+
+  The implementation Main.res
+  does not match the interface (inferred signature):
+  
+  Actual declaration (Main.res:1:5):
+    let f: {"f": 'a. ([< #A('a) & (int)] as 'b) => 'a} => {"f": 'a. 'b => 'a}
+  
+  Expected declaration (Main.res:1:5):
+    let f: {"f": 'a. ([< #A('a0) & (int)] as 'b) => 'a} => {"f": 'a0. 'b => 'a0}
+
+```
+
+Rust at `8f73338c3`, implementation exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x) {
+  return x;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Open (see "Fixed and open").
 
 
 ### U9 — WITNESS

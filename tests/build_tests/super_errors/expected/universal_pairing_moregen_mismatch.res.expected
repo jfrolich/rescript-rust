@@ -1,0 +1,15 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/universal_pairing_moregen_mismatch.res[0m:[2m2:62[0m
+
+  1 [2m│[0m module type A = {let x: {"id": 'a 'b. ('a, 'b) => 'a}}
+  [1;31m2[0m [2m│[0m module F = (X: A): {let x: {"id": 'a 'b. ('a, 'b) => 'b}} => [1;31mX[0m
+  3 [2m│[0m 
+
+  Signature mismatch:
+  
+  Actual declaration ([36m/.../fixtures/universal_pairing_moregen_mismatch.res[0m:[2m1:18-53[0m):
+    let x: {"id": 'a 'b. ('a, 'b) => 'a}
+  
+  Expected declaration ([36m/.../fixtures/universal_pairing_moregen_mismatch.res[0m:[2m2:21-56[0m):
+    let x: {"id": 'a 'b. ('a, 'b) => 'b}
