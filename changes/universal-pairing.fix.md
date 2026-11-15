@@ -1,1 +1,2 @@
 - Copying a polymorphic type keeps a type variable that is bound by the polymorphic type and is also the row variable of a polymorphic variant in it, so such types unify, are compared and print as with the OCaml compiler.
+- Signature inclusion and type equality compare the type variables of two polymorphic types by their position in the binder lists, as the OCaml compiler does, so `'a. 'a => 'a` and `'b. 'b => 'b` are the same type.

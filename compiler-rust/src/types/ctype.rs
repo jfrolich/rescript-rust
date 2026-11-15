@@ -1107,19 +1107,93 @@ fn mcomp_enter_poly(
     else {
         return mcomp_fail();
     };
-    let new_slot = |state: &mut McompState| {
-        state.univar_slots.push(None);
-        state.univar_slots.len() - 1
-    };
-    let cl1: Vec<_> = tl1.iter().map(|&t| (t, new_slot(state))).collect();
-    let cl2: Vec<_> = tl2.iter().map(|&t| (t, new_slot(state))).collect();
-    let saved = state.univar_pairs.len();
-    // OCaml: `(cl1, cl2) :: (cl2, cl1) :: old_univars` (newest last here).
-    state.univar_pairs.push((cl2.clone(), cl1.clone()));
-    state.univar_pairs.push((cl1, cl2));
+    let saved = push_univar_scope(&mut state.univar_pairs, &mut state.univar_slots, &tl1, &tl2);
     let result = mcomp_rec(ctx, env, state, body1, body2);
     state.univar_pairs.truncate(saved);
     result
+}
+
+/// Pushes the scope OCaml `enter_poly` builds, `(cl1, cl2) :: (cl2, cl1) ::
+/// old_univars` (compiler/ml/ctype.ml:1669-1672; newest last here), with one
+/// fresh slot per binder. Returns the length to truncate `pairs` to when the
+/// scope is left. One call costs O(|tl1| + |tl2|) and allocates the four
+/// binder lists of the two entries.
+fn push_univar_scope(
+    pairs: &mut Vec<UnivarPairEntry>,
+    slots: &mut Vec<Option<TypeExprRef>>,
+    tl1: &[TypeExprRef],
+    tl2: &[TypeExprRef],
+) -> usize {
+    let mut new_slot = || {
+        #[cfg(test)]
+        crate::tc::steps::tick();
+        slots.push(None);
+        slots.len() - 1
+    };
+    let cl1: Vec<_> = tl1.iter().map(|&t| (t, new_slot())).collect();
+    let cl2: Vec<_> = tl2.iter().map(|&t| (t, new_slot())).collect();
+    let saved = pairs.len();
+    pairs.push((cl2.clone(), cl1.clone()));
+    pairs.push((cl1, cl2));
+    saved
+}
+
+/// OCaml `univar_pairs` of one `moregen` or `eqtype` run, which both start
+/// from an empty list (compiler/ml/ctype.ml:3093, 3362), with the slots its
+/// entries share.
+#[derive(Default)]
+struct UnivarPairs {
+    pairs: Vec<UnivarPairEntry>,
+    slots: Vec<Option<TypeExprRef>>,
+}
+
+/// What [`UnivarPairs::leave`] restores.
+struct UnivarScopeMark {
+    pairs: usize,
+    slots: usize,
+}
+
+impl UnivarPairs {
+    /// OCaml `enter_poly` (compiler/ml/ctype.ml:1656-1679) before it calls
+    /// `f`: `None` when a binder of one side escapes into the other side;
+    /// otherwise the binders are paired and the mark to leave the scope with
+    /// is returned. Costs what `enter_poly_univars` and
+    /// [`push_univar_scope`] cost.
+    fn enter(
+        &mut self,
+        ctx: &TypeContext,
+        env: &Env,
+        body1: TypeExprRef,
+        vars1: crate::types::type_expr::TypeSlice<'_>,
+        body2: TypeExprRef,
+        vars2: crate::types::type_expr::TypeSlice<'_>,
+    ) -> Option<UnivarScopeMark> {
+        let (tl1, tl2) = enter_poly_univars(ctx, env, &self.pairs, body1, vars1, body2, vars2)?;
+        let slots = self.slots.len();
+        let pairs = push_univar_scope(&mut self.pairs, &mut self.slots, &tl1, &tl2);
+        Some(UnivarScopeMark { pairs, slots })
+    }
+
+    /// Leaves the scope [`UnivarPairs::enter`] entered (OCaml restores
+    /// `old_univars`, ctype.ml:1675-1678). O(1).
+    fn leave(&mut self, mark: UnivarScopeMark) {
+        self.pairs.truncate(mark.pairs);
+        self.slots.truncate(mark.slots);
+    }
+
+    /// OCaml `unify_univar t1 t2 !univar_pairs` (ctype.ml:1544-1559): whether
+    /// the two (represented) universal variables are paired. Costs what
+    /// `univars_unify` costs: one scan of the entered binder lists.
+    fn unify(&mut self, ctx: &TypeContext, t1: TypeExprRef, t2: TypeExprRef) -> bool {
+        univars_unify(ctx, &self.pairs, &mut self.slots, t1, t2)
+    }
+}
+
+/// The state of one `moregen` run: OCaml's `type_pairs` table and
+/// `univar_pairs`.
+struct MoregenState {
+    type_pairs: HashSet<(TypeExprRef, TypeExprRef)>,
+    univars: UnivarPairs,
 }
 
 /// OCaml `enter_poly` (compiler/ml/ctype.ml:1561-1584) escape check, shared
@@ -1240,16 +1314,7 @@ fn unify_enter_poly(
         return Err(TypeError::Unify(Vec::new()));
     };
     let saved_slots = state.univar_slots.len();
-    let new_slot = |state: &mut UnifyState| {
-        state.univar_slots.push(None);
-        state.univar_slots.len() - 1
-    };
-    let cl1: Vec<_> = tl1.iter().map(|&t| (t, new_slot(state))).collect();
-    let cl2: Vec<_> = tl2.iter().map(|&t| (t, new_slot(state))).collect();
-    let saved = state.univar_pairs.len();
-    // OCaml: `(cl1, cl2) :: (cl2, cl1) :: old_univars` (newest last here).
-    state.univar_pairs.push((cl2.clone(), cl1.clone()));
-    state.univar_pairs.push((cl1, cl2));
+    let saved = push_univar_scope(&mut state.univar_pairs, &mut state.univar_slots, &tl1, &tl2);
     let result = unify(ctx, state, body1, body2);
     state.univar_pairs.truncate(saved);
     state.univar_slots.truncate(saved_slots);
@@ -9762,7 +9827,7 @@ fn moregen_occur(ctx: &TypeContext, env: &Env, level: i32, ty: TypeExprRef) -> T
 fn moregen_list(
     ctx: &TypeContext,
     inst_nongen: bool,
-    type_pairs: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    state: &mut MoregenState,
     env: &Env,
     left: crate::types::type_expr::TypeSlice<'_>,
     right: crate::types::type_expr::TypeSlice<'_>,
@@ -9773,7 +9838,7 @@ fn moregen_list(
         return Err(TypeError::Unify(vec![]));
     }
     for (left, right) in left.iter().zip(right.iter()) {
-        moregen(ctx, inst_nongen, type_pairs, env, left, right)?;
+        moregen(ctx, inst_nongen, state, env, left, right)?;
     }
     Ok(())
 }
@@ -9781,7 +9846,7 @@ fn moregen_list(
 fn moregen_fields(
     ctx: &TypeContext,
     inst_nongen: bool,
-    type_pairs: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    state: &mut MoregenState,
     env: &Env,
     ty1: TypeExprRef,
     ty2: TypeExprRef,
@@ -9796,13 +9861,13 @@ fn moregen_fields(
         return Err(TypeError::Unify(vec![]));
     }
     let rest2_with_missing = build_fields(ctx, ctx.get_level(ctx.repr(ty2)), &miss2, rest2);
-    moregen(ctx, inst_nongen, type_pairs, env, rest1, rest2_with_missing)?;
+    moregen(ctx, inst_nongen, state, env, rest1, rest2_with_missing)?;
     for (f1, f2) in pairs {
         // ctype.ml moregen_fields: the field capabilities must agree.
         if ctx.mutability_repr(f1.mutability) != ctx.mutability_repr(f2.mutability) {
             return Err(TypeError::Unify(vec![]));
         }
-        moregen(ctx, inst_nongen, type_pairs, env, f1.typ, f2.typ)?;
+        moregen(ctx, inst_nongen, state, env, f1.typ, f2.typ)?;
     }
     Ok(())
 }
@@ -9834,7 +9899,7 @@ fn moregen_filter_row_fields(
 fn moregen_row(
     ctx: &TypeContext,
     inst_nongen: bool,
-    type_pairs: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    state: &mut MoregenState,
     env: &Env,
     row1: &RowDesc,
     row2: &RowDesc,
@@ -9880,7 +9945,12 @@ fn moregen_row(
     let rm1_desc = ctx.get_desc(rm1);
     let rm2_desc = ctx.get_desc(rm2);
     match (&*rm1_desc, &*rm2_desc) {
-        (TypeDesc::Tunivar(name1), TypeDesc::Tunivar(name2)) if name1 == name2 => {}
+        // ctype.ml:3048: universal row tails agree when they are paired.
+        (TypeDesc::Tunivar(..), TypeDesc::Tunivar(..)) => {
+            if !state.univars.unify(ctx, rm1, rm2) {
+                return Err(TypeError::Unify(vec![]));
+            }
+        }
         (TypeDesc::Tunivar(..), _) | (_, TypeDesc::Tunivar(..)) => {
             return Err(TypeError::Unify(vec![]));
         }
@@ -9895,7 +9965,7 @@ fn moregen_row(
             link_type(ctx, rm1, ext);
         }
         (TypeDesc::Tconstr { .. }, TypeDesc::Tconstr { .. }) => {
-            moregen(ctx, inst_nongen, type_pairs, env, rm1, rm2)?;
+            moregen(ctx, inst_nongen, state, env, rm1, rm2)?;
         }
         _ => return Err(TypeError::Unify(vec![])),
     }
@@ -9905,7 +9975,7 @@ fn moregen_row(
         let field2 = btype::row_field_repr(ctx, field2);
         match (&field1, &field2) {
             (RowField::Rpresent(Some(ty1)), RowField::Rpresent(Some(ty2))) => {
-                moregen(ctx, inst_nongen, type_pairs, env, *ty1, *ty2)?;
+                moregen(ctx, inst_nongen, state, env, *ty1, *ty2)?;
             }
             (RowField::Rpresent(None), RowField::Rpresent(None))
             | (RowField::Rabsent, RowField::Rabsent) => {}
@@ -9920,7 +9990,7 @@ fn moregen_row(
             ) if may_inst => {
                 ctx.set_row_field(*link, field2.clone());
                 for ty1 in types {
-                    moregen(ctx, inst_nongen, type_pairs, env, *ty1, *ty2)?;
+                    moregen(ctx, inst_nongen, state, env, *ty1, *ty2)?;
                 }
             }
             (
@@ -9952,11 +10022,11 @@ fn moregen_row(
                     );
                     if types1.len() == types2.len() {
                         for (&ty1, &ty2) in types1.iter().zip(types2.iter()) {
-                            moregen(ctx, inst_nongen, type_pairs, env, ty1, ty2)?;
+                            moregen(ctx, inst_nongen, state, env, ty1, ty2)?;
                         }
                     } else if let Some(&ty2) = types2.first() {
                         for &ty1 in types1 {
-                            moregen(ctx, inst_nongen, type_pairs, env, ty1, ty2)?;
+                            moregen(ctx, inst_nongen, state, env, ty1, ty2)?;
                         }
                     } else if !types1.is_empty() {
                         return Err(TypeError::Unify(vec![]));
@@ -9986,7 +10056,7 @@ fn moregen_row(
 fn moregen(
     ctx: &TypeContext,
     inst_nongen: bool,
-    type_pairs: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    state: &mut MoregenState,
     env: &Env,
     t1: TypeExprRef,
     t2: TypeExprRef,
@@ -10038,7 +10108,7 @@ fn moregen(
     if t1_expanded == t2_expanded {
         return Ok(());
     }
-    if !type_pairs.insert((t1_expanded, t2_expanded)) {
+    if !state.type_pairs.insert((t1_expanded, t2_expanded)) {
         return Ok(());
     }
 
@@ -10074,9 +10144,9 @@ fn moregen(
             let ret1 = *ret1;
             let ret2 = *ret2;
             for (arg1, arg2) in ctx.type_args(args1).iter().zip(ctx.type_args(args2).iter()) {
-                moregen(ctx, inst_nongen, type_pairs, env, arg1.typ, arg2.typ)?;
+                moregen(ctx, inst_nongen, state, env, arg1.typ, arg2.typ)?;
             }
-            moregen(ctx, inst_nongen, type_pairs, env, ret1, ret2)
+            moregen(ctx, inst_nongen, state, env, ret1, ret2)
         }
         (TypeDesc::Ttuple(left), TypeDesc::Ttuple(right)) => {
             let left = *left;
@@ -10084,7 +10154,7 @@ fn moregen(
             moregen_list(
                 ctx,
                 inst_nongen,
-                type_pairs,
+                state,
                 env,
                 ctx.type_list(left),
                 ctx.type_list(right),
@@ -10107,7 +10177,7 @@ fn moregen(
             moregen_list(
                 ctx,
                 inst_nongen,
-                type_pairs,
+                state,
                 env,
                 ctx.type_list(args1),
                 ctx.type_list(args2),
@@ -10156,7 +10226,7 @@ fn moregen(
             moregen_list(
                 ctx,
                 inst_nongen,
-                type_pairs,
+                state,
                 env,
                 ctx.type_list(args1),
                 ctx.type_list(args2),
@@ -10165,7 +10235,7 @@ fn moregen(
         (TypeDesc::Tvariant(row1), TypeDesc::Tvariant(row2)) => {
             let row1 = ctx.row_desc(row1);
             let row2 = ctx.row_desc(row2);
-            moregen_row(ctx, inst_nongen, type_pairs, env, &row1, &row2)
+            moregen_row(ctx, inst_nongen, state, env, &row1, &row2)
         }
         (
             TypeDesc::Tobject {
@@ -10177,10 +10247,10 @@ fn moregen(
         ) => {
             let fields1 = *fields1;
             let fields2 = *fields2;
-            moregen_fields(ctx, inst_nongen, type_pairs, env, fields1, fields2)
+            moregen_fields(ctx, inst_nongen, state, env, fields1, fields2)
         }
         (TypeDesc::Tfield { .. }, TypeDesc::Tfield { .. }) => {
-            moregen_fields(ctx, inst_nongen, type_pairs, env, t1_expanded, t2_expanded)
+            moregen_fields(ctx, inst_nongen, state, env, t1_expanded, t2_expanded)
         }
         (TypeDesc::Tnil, TypeDesc::Tnil) => Ok(()),
         (
@@ -10192,7 +10262,7 @@ fn moregen(
         ) if vars.is_empty() && vars2.is_empty() => {
             let body1 = *body1;
             let body2 = *body2;
-            moregen(ctx, inst_nongen, type_pairs, env, body1, body2)
+            moregen(ctx, inst_nongen, state, env, body1, body2)
         }
         (
             TypeDesc::Tpoly { body: body1, vars },
@@ -10200,12 +10270,31 @@ fn moregen(
                 body: body2,
                 vars: vars2,
             },
-        ) if vars.len() == vars2.len() => {
-            let body1 = *body1;
-            let body2 = *body2;
-            moregen(ctx, inst_nongen, type_pairs, env, body1, body2)
+        ) => {
+            // ctype.ml:2985-2987: the binders are entered as a scope of pairs.
+            let (body1, body2) = (*body1, *body2);
+            let Some(saved) = state.univars.enter(
+                ctx,
+                env,
+                body1,
+                ctx.type_list(vars),
+                body2,
+                ctx.type_list(vars2),
+            ) else {
+                return Err(TypeError::Unify(vec![]));
+            };
+            let result = moregen(ctx, inst_nongen, state, env, body1, body2);
+            state.univars.leave(saved);
+            result
         }
-        (TypeDesc::Tunivar(name1), TypeDesc::Tunivar(name2)) if name1 == name2 => Ok(()),
+        // ctype.ml:2988-2989: two universal variables agree when they are paired.
+        (TypeDesc::Tunivar(..), TypeDesc::Tunivar(..)) => {
+            if state.univars.unify(ctx, t1_expanded, t2_expanded) {
+                Ok(())
+            } else {
+                Err(TypeError::Unify(vec![]))
+            }
+        }
         _ => Err(TypeError::Unify(vec![])),
     }
 }
@@ -10228,8 +10317,12 @@ pub fn moregeneral(
     let subj = subst_identity_copy(ctx, instance(ctx, subj_sch));
     ctx.set_current_level(GENERIC_LEVEL);
     let patt = instance(ctx, pat_sch);
-    let mut type_pairs = HashSet::new();
-    let result = moregen(ctx, inst_nongen, &mut type_pairs, env, patt, subj).is_ok();
+    // ctype.ml:3092-3094: `moregen` starts from an empty `univar_pairs`.
+    let mut state = MoregenState {
+        type_pairs: HashSet::new(),
+        univars: UnivarPairs::default(),
+    };
+    let result = moregen(ctx, inst_nongen, &mut state, env, patt, subj).is_ok();
     ctx.set_current_level(old_level);
     result
 }
@@ -11121,6 +11214,7 @@ pub(crate) fn equal_type_exprs_without_renaming(
         pairs: HashSet::new(),
         subst: Vec::new(),
         rename: false,
+        univars: UnivarPairs::default(),
     };
     equal_type_exprs_without_renaming_rec(ctx, env, &mut type_pairs, left, right).is_ok()
 }
@@ -11131,6 +11225,8 @@ pub(crate) struct EqtypeState {
     pairs: HashSet<(TypeExprRef, TypeExprRef)>,
     subst: Vec<(TypeExprRef, TypeExprRef)>,
     rename: bool,
+    /// ctype.ml:3361-3362: `eqtype_list` starts from an empty `univar_pairs`.
+    univars: UnivarPairs,
 }
 
 /// `Ctype.equal env rename tyl1 tyl2` (ctype.ml:3161-3165).
@@ -11145,6 +11241,7 @@ pub(crate) fn equal(
         pairs: HashSet::new(),
         subst: Vec::new(),
         rename,
+        univars: UnivarPairs::default(),
     };
     equal_type_expr_lists_without_renaming(ctx, env, &mut state, left.into(), right.into()).is_ok()
 }
@@ -11406,15 +11503,31 @@ fn equal_type_exprs_without_renaming_rec(
                 body: right_body,
                 vars: right_vars,
             },
-        ) if vars.len() == right_vars.len() => {
-            let left_body = *left_body;
-            let right_body = *right_body;
-            equal_type_exprs_without_renaming_rec(ctx, env, type_pairs, left_body, right_body)
+        ) => {
+            // ctype.ml:3268-3270: the binders are entered as a scope of pairs.
+            let (left_body, right_body) = (*left_body, *right_body);
+            let Some(saved) = type_pairs.univars.enter(
+                ctx,
+                env,
+                left_body,
+                ctx.type_list(vars),
+                right_body,
+                ctx.type_list(right_vars),
+            ) else {
+                return Err(TypeError::Unify(vec![]));
+            };
+            let result =
+                equal_type_exprs_without_renaming_rec(ctx, env, type_pairs, left_body, right_body);
+            type_pairs.univars.leave(saved);
+            result
         }
-        (TypeDesc::Tunivar(left_name), TypeDesc::Tunivar(right_name))
-            if left_name == right_name =>
-        {
-            Ok(())
+        // ctype.ml:3271-3272: two universal variables are equal when paired.
+        (TypeDesc::Tunivar(..), TypeDesc::Tunivar(..)) => {
+            if type_pairs.univars.unify(ctx, left_expanded, right_expanded) {
+                Ok(())
+            } else {
+                Err(TypeError::Unify(vec![]))
+            }
         }
         _ => Err(TypeError::Unify(vec![])),
     }
@@ -13587,6 +13700,8 @@ fn subst_identity_copy_rec(
 /// binder, which is the first element when the copy is the `Ttuple [more';
 /// ty']` marker a row copy leaves on its tail. O(1) per link followed.
 fn norm_univar(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
+    #[cfg(test)]
+    crate::tc::steps::tick();
     let ty = ctx.repr(ty);
     let first = match &*ctx.get_desc(ty) {
         TypeDesc::Ttuple(items) => ctx.type_list(items).iter().next(),
@@ -15345,6 +15460,56 @@ mod tests {
         assert!(!deep_occur(&ctx, needle, without_needle));
         let mut budget = 256;
         assert!(!surely_univar_free(&ctx, without_needle, &mut budget));
+    }
+
+    #[test]
+    fn univar_scope_pairs_ten_thousand_binders_in_one_step_each() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let env = Env::empty();
+        let left: Vec<_> = (0..10_000).map(|_| ctx.new_univar(None)).collect();
+        let right: Vec<_> = (0..10_000).map(|_| ctx.new_univar(None)).collect();
+        let body1 = ctx.new_tuple(left.clone());
+        let body2 = ctx.new_tuple(right.clone());
+        let vars1 = ctx.new_type_list(&left);
+        let vars2 = ctx.new_type_list(&right);
+        let mut univars = UnivarPairs::default();
+        let mut mark = None;
+        // One slot per binder on each side.
+        let steps = crate::tc::steps::scope(|| {
+            mark = univars.enter(
+                &ctx,
+                &env,
+                body1,
+                ctx.type_list(vars1),
+                body2,
+                ctx.type_list(vars2),
+            )
+        });
+        assert_eq!(steps, 20_000);
+        // Binders pair by position: the first with the first, never with
+        // another, whatever their names.
+        assert!(univars.unify(&ctx, left[0], right[0]));
+        assert!(univars.unify(&ctx, left[0], right[0]));
+        assert!(!univars.unify(&ctx, left[0], right[1]));
+        assert!(!univars.unify(&ctx, left[1], right[0]));
+        univars.leave(mark.expect("no binder escapes"));
+        assert!(univars.pairs.is_empty() && univars.slots.is_empty());
+        assert!(!univars.unify(&ctx, left[1], right[1]));
+    }
+
+    #[test]
+    fn norm_univar_follows_ten_thousand_markers_once_each() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let univar = ctx.new_univar(None);
+        let other = ctx.new_var(None);
+        let mut marker = univar;
+        for _ in 0..10_000 {
+            marker = ctx.new_tuple(vec![marker, other]);
+        }
+        let mut normalized = marker;
+        let steps = crate::tc::steps::scope(|| normalized = norm_univar(&ctx, marker));
+        assert_eq!(normalized, univar);
+        assert_eq!(steps, 10_001);
     }
 
     #[test]
