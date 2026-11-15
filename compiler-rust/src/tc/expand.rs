@@ -809,8 +809,12 @@ impl Checker {
     /// the representative it stops at. `try_expand_head`,
     /// compiler/ml/ctype.ml:1267-1325. In `Safe` mode a clash inside one step
     /// is undone with a speculation opened for that step only when the
-    /// type's parameters are constrained. (R3b)
+    /// type's parameters are constrained. [`ExpandMode::Unif`] is
+    /// [`Checker::expand_head_unif`]. (R3b)
     pub fn expand_head(&mut self, ty: Ty, mode: ExpandMode) -> Result<Ty, Clash> {
+        if mode == ExpandMode::Unif {
+            return self.expand_head_unif(ty);
+        }
         let original = self.g.repr(ty);
         let mut head = original;
         loop {
@@ -818,16 +822,35 @@ impl Checker {
             super::steps::tick();
             let next = match self.expand_once(head, mode) {
                 Ok(next) => next,
-                // `expand_head_opt` backtracks and returns the type it was
-                // given (compiler/ml/ctype.ml:1330-1335).
-                Err(Clash) if matches!(mode, ExpandMode::Opt | ExpandMode::Rigid) => {
-                    return Ok(original);
-                }
                 // `try_expand_safe` turns a clash into `Cannot_expand`
                 // (compiler/ml/ctype.ml:1251-1256).
                 Err(Clash) if mode == ExpandMode::Safe => return Ok(head),
-                Err(Clash) => return Err(Clash),
+                // `expand_head_opt` backtracks and returns the type it was
+                // given (compiler/ml/ctype.ml:1330-1335): `Opt`, `Rigid`.
+                Err(Clash) => return Ok(original),
             };
+            if next.0 == NONE {
+                return Ok(head);
+            }
+            let next = self.g.repr(next);
+            // A memo naming the node itself (PR#7324, ctype.ml:1202).
+            if next == head {
+                return Ok(head);
+            }
+            head = next;
+        }
+    }
+
+    /// [`Checker::expand_head`] in [`ExpandMode::Unif`] (`expand_head_unif`,
+    /// compiler/ml/ctype.ml:1279): the same loop of [`Checker::expand_once`]
+    /// with a clash of a step returned as the caller's, so no mode is tested
+    /// on the way. O(expansions), O(1) machine stack. (K4)
+    pub(super) fn expand_head_unif(&mut self, ty: Ty) -> Result<Ty, Clash> {
+        let mut head = self.g.repr(ty);
+        loop {
+            #[cfg(test)]
+            super::steps::tick();
+            let next = self.expand_once(head, ExpandMode::Unif)?;
             if next.0 == NONE {
                 return Ok(head);
             }
