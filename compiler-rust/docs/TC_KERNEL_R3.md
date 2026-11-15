@@ -1927,7 +1927,8 @@ Before: trunk `6a0838552`. Each column is a whole build and run of that
 commit: (1) `ac4d94e52`, (2) `e6528bba7`, (3) `fa0c96fbd`, (4)
 `e91359ead`. The three reverts `4773a3e0a`, `4b230242c` and `a4c3a5137`
 have the trees of the base, of (2) and of (2), so their figures are
-those columns; the head is (2).
+those columns. After review, (1) was re-applied on top of (2) (see
+"Review" below); the final figures are those of "Merged head".
 
 | Operation | K3a now | Before | (1) | (2) | (3) | (4) |
 |---|---:|---:|---:|---:|---:|---:|
@@ -1959,7 +1960,7 @@ largest moves are `unify_ground3` and `unify_datatype2` -5, `unify_abbrev2`
 
 | Item | `unify_ground3` | `unify_datatype2` | `unify_abbrev2` | Dearest other operation | Kept |
 |---|---:|---:|---:|---|---|
-| (1) expansion test inline | -91.00 | -127.00 | **+45.00** | none dearer | no: `unify_abbrev2` +45 |
+| (1) expansion test inline | -91.00 | -127.00 | **+45.00** | none dearer | reverted, then **kept by decision in review** |
 | (2) occurrence probe | -17.95 | -17.95 | -34.21 | none dearer | **yes** |
 | (3) `link_distinct` | -2.00 | -2.00 | -2.00 | none dearer | no: saves 2 |
 | (4) rare frame arms out of line | 0.00 | 0.00 | 0.00 | `unify_ground1` +1 | no: saves 0 |
@@ -1967,7 +1968,7 @@ largest moves are `unify_ground3` and `unify_datatype2` -5, `unify_abbrev2`
 (1) and (3) are measured against the base and (2) respectively; (4)
 against (2).
 
-**(1) An expansion attempt that cannot succeed makes no call. Reverted.**
+**(1) An expansion attempt that cannot succeed makes no call. Reverted by the rule, then kept by decision in review.**
 `Checker::never_expands` tested, inline in front of the first pair of
 `expand_head` calls of `unify_expanded`, the returns of `expand_once`
 that have no side effect and need no memo: the representative is not a
@@ -1999,8 +2000,9 @@ LLVM then called `expand_head` out of line (212 instructions in
 the first pair only (the second pair runs only after an expansion), with
 `expand_head` called at the original sites, where it stays inline: 45
 over the base in `unify_expanded`, all of it the two tests and register
-pressure. (The message of the revert commit names the first two forms'
-figures the wrong way round; this table is right.)
+pressure. (The message of the revert commit `4773a3e0a` names the
+first two forms' figures the wrong way round: +218 belongs to four asks,
++95 to the first pair. This table is right.)
 
 **(2) The occurrence walk of a small type uses no marks. Kept.**
 `Checker::reaches` first runs `Checker::unreached_within_budget`, the
@@ -2050,6 +2052,83 @@ In `unify_ground3` the dispatch itself (`unify.rs:1255`) went from 10 to
 6 instructions, and the loop and entry gained what it lost. K3a's
 "about 18 instructions" of these arms are therefore not in the
 dispatch: the rare arms' code is not executed on these operations.
+
+### Review
+
+The keep rule was stated per operation where item (1) is a trade
+between operations: 91 and 127 fewer on heads that do not expand
+against 45 more (1.6%) on a pair that expands twice, which loses only
+if most structure pairs have abbreviation heads. And R3f measured that
+new callers elsewhere in the crate made LLVM stop inlining
+`expand_head` into `unify_expanded` (about 100 on `unify_ground3`); a
+test in front of the call keeps the common path independent of that
+decision. So (1) was re-applied as `0022a7a57` ("kept by decision in
+review"), with its three figures against the base: `unify_ground3`
+-91.00, `unify_datatype2` -127.00, `unify_abbrev2` +45.00.
+
+One attempt then tried to take back the 45 (keep it for 20 or more, with
+`unify_ground3` and `unify_datatype2` within 5 of their saving):
+`f5bae56ab` made the test one condition over both heads, so that when
+the left head may expand the right one's row is not read and both go to
+`expand_head`. It took back 6, so it was reverted (`06b497a58`):
+
+| Operation | (2) `e6528bba7` | (1) kept `0022a7a57` | (1) 2 `f5bae56ab` |
+|---|---:|---:|---:|
+| `unify_vars` | 120.00 | 120.00 | 120.00 |
+| `unify_ground1` | 121.00 | 121.00 | 121.00 |
+| `unify_ground3` | 894.00 | 803.00 | 805.00 |
+| `bind_ground1` | 124.00 | 124.00 | 124.00 |
+| `unify_vars_local` | 120.00 | 120.00 | 120.00 |
+| `unify_ground1_local` | 121.00 | 121.00 | 121.00 |
+| `unify_ground3_local` | 894.00 | 803.00 | 805.00 |
+| `bind_ground1_local` | 124.00 | 124.00 | 124.00 |
+| `unify_datatype2` | 938.00 | 811.00 | 813.00 |
+| `unify_abbrev2` | 2788.06 | 2833.06 | 2827.06 |
+| `instance1` | 137.06 | 137.06 | 137.06 |
+| `instance3` | 217.31 | 217.31 | 217.31 |
+| `instance5` | 305.34 | 305.34 | 305.34 |
+| `instance7` | 325.27 | 325.27 | 325.27 |
+| `generalize7` | 449.00 | 449.00 | 449.00 |
+| `lower7` | 422.00 | 422.00 | 422.00 |
+| `copy7` | 1709.58 | 1709.58 | 1709.58 |
+| `repr` | 9.00 | 9.00 | 9.00 |
+| `restore` | 63.00 | 63.00 | 63.00 |
+| `keep` | 44.00 | 44.00 | 44.00 |
+
+
+### Merged head
+
+`origin/ocaml-to-rust-rewrite` at `d158207a2` (with R3f, #294) merged
+without conflict as `06489d7d1`; trunk added no attribute on
+`Checker::expand_head`. Base: that trunk. Head: the merge. This is the
+final table of K3:
+
+| Operation | Base (trunk `d158207a2`) | Head | Change |
+|---|---:|---:|---:|
+| `unify_vars` | 117.00 | 117.00 | +0.00 |
+| `unify_ground1` | 122.00 | 122.00 | +0.00 |
+| `unify_ground3` | 1013.95 | 814.00 | -199.95 |
+| `bind_ground1` | 121.00 | 121.00 | +0.00 |
+| `unify_vars_local` | 117.00 | 117.00 | +0.00 |
+| `unify_ground1_local` | 122.00 | 122.00 | +0.00 |
+| `unify_ground3_local` | 1013.95 | 814.00 | -199.95 |
+| `bind_ground1_local` | 121.00 | 121.00 | +0.00 |
+| `unify_datatype2` | 1013.95 | 822.00 | -191.95 |
+| `unify_abbrev2` | 2940.27 | 2968.06 | +27.79 |
+| `instance1` | 137.06 | 137.06 | +0.00 |
+| `instance3` | 217.31 | 217.31 | +0.00 |
+| `instance5` | 305.34 | 305.34 | +0.00 |
+| `instance7` | 325.27 | 325.27 | +0.00 |
+| `generalize7` | 449.00 | 449.00 | +0.00 |
+| `lower7` | 422.00 | 422.00 | +0.00 |
+| `copy7` | 1709.58 | 1709.58 | +0.00 |
+| `repr` | 9.00 | 9.00 | +0.00 |
+| `restore` | 63.00 | 63.00 | +0.00 |
+| `keep` | 44.00 | 44.00 | +0.00 |
+
+`unify_ground3` and `unify_datatype2` on trunk carry R3f's loss of the
+inlining of `expand_head`; on the head neither head of those operations
+reaches it. `unify_abbrev2` pays item (1)'s two tests, as decided.
 
 ### Raw output
 
@@ -2210,6 +2289,130 @@ before unify_abbrev2 329112 3009039869 3008.710757
 (4) unify_datatype2 323848 1124768083 1124.444235
 (4) build_abbrev2 329358 186771241 186.441883
 (4) unify_abbrev2 329364 2974828292 2974.498928
+(1)-kept empty 333047 19335305 19.002258
+(1)-kept instance1 333067 156393926 156.060859
+(1)-kept instance3 333101 236642436 236.309335
+(1)-kept instance5 333135 324671151 324.338016
+(1)-kept instance7 333169 344605385 344.272216
+(1)-kept generalize7 333115 793605331 793.272216
+(1)-kept lower7 333051 766605281 766.272230
+(1)-kept copy7 333087 1728914072 1728.580985
+(1)-kept repr 333053 165393898 165.060845
+(1)-kept restore 333095 219394334 219.061239
+(1)-kept keep 333093 200394318 200.061225
+(1)-kept build_vars 333360 78403835 78.070475
+(1)-kept unify_vars 333398 198403873 198.070475
+(1)-kept build_ground1 333437 98411414 98.077977
+(1)-kept unify_ground1 333470 219411447 219.077977
+(1)-kept build_ground3 333503 200774608 200.441105
+(1)-kept unify_ground3 333537 1003774847 1003.441310
+(1)-kept build_vars_local 333315 78403762 78.070447
+(1)-kept unify_vars_local 333349 198403796 198.070447
+(1)-kept build_ground1_local 333363 98411340 98.077977
+(1)-kept unify_ground1_local 333403 219411380 219.077977
+(1)-kept build_ground3_local 333432 200774537 200.441105
+(1)-kept unify_ground3_local 333466 1003774776 1003.441310
+(1)-kept build_bind_ground1 333387 88425653 88.092266
+(1)-kept bind_ground1 333509 212425747 212.092238
+(1)-kept build_bind_ground1_local 333494 88425732 88.092238
+(1)-kept bind_ground1_local 333436 212425702 212.092266
+(1)-kept build_datatype2 321558 186765396 186.443838
+(1)-kept unify_datatype2 321563 997765812 997.444249
+(1)-kept build_abbrev2 327087 186768956 186.441869
+(1)-kept unify_abbrev2 327093 3019826007 3019.498914
+(1)-2 empty 333016 19335288 19.002272
+(1)-2 instance1 333036 156393909 156.060873
+(1)-2 instance3 333070 236642419 236.309349
+(1)-2 instance5 333104 324671134 324.338030
+(1)-2 instance7 333138 344605368 344.272230
+(1)-2 generalize7 333098 793605300 793.272202
+(1)-2 lower7 333048 766605264 766.272216
+(1)-2 copy7 333056 1728914055 1728.580999
+(1)-2 repr 333036 165393895 165.060859
+(1)-2 restore 333078 219394303 219.061225
+(1)-2 keep 333076 200394315 200.061239
+(1)-2 build_vars 333357 78403818 78.070461
+(1)-2 unify_vars 333395 198403856 198.070461
+(1)-2 build_ground1 333406 98411397 98.077991
+(1)-2 unify_ground1 333439 219411430 219.077991
+(1)-2 build_ground3 333472 200774591 200.441119
+(1)-2 unify_ground3 333506 1005774830 1005.441324
+(1)-2 build_vars_local 333298 78403759 78.070461
+(1)-2 unify_vars_local 333332 198403793 198.070461
+(1)-2 build_ground1_local 333346 98411309 98.077963
+(1)-2 unify_ground1_local 333386 219411349 219.077963
+(1)-2 build_ground3_local 333415 200774506 200.441091
+(1)-2 unify_ground3_local 333449 1005774745 1005.441296
+(1)-2 build_bind_ground1 333384 88425636 88.092252
+(1)-2 bind_ground1 333492 212425744 212.092252
+(1)-2 build_bind_ground1_local 333477 88425729 88.092252
+(1)-2 bind_ground1_local 333433 212425685 212.092252
+(1)-2 build_datatype2 321541 186765365 186.443824
+(1)-2 unify_datatype2 321546 999765781 999.444235
+(1)-2 build_abbrev2 327056 186768939 186.441883
+(1)-2 unify_abbrev2 327062 3013825990 3013.498928
+trunk empty 334357 19336601 19.002244
+trunk instance1 334377 156395222 156.060845
+trunk instance3 334411 236643732 236.309321
+trunk instance5 334445 324672447 324.338002
+trunk instance7 334479 344606681 344.272202
+trunk generalize7 334411 793606641 793.272230
+trunk lower7 334375 766606591 766.272216
+trunk copy7 334397 1728915368 1728.580971
+trunk repr 334363 165395222 165.060859
+trunk restore 334391 219395644 219.061253
+trunk keep 334403 200395642 200.061239
+trunk build_vars 334684 78405145 78.070461
+trunk unify_vars 334718 195405179 195.070461
+trunk build_ground1 334743 98412706 98.077963
+trunk unify_ground1 334777 220412740 220.077963
+trunk build_ground3 334811 200775902 200.441091
+trunk unify_ground3 334845 1214729905 1214.395060
+trunk build_vars_local 334631 78405092 78.070461
+trunk unify_vars_local 334660 195405121 195.070461
+trunk build_ground1_local 334659 98412650 98.077991
+trunk unify_ground1_local 334693 220412684 220.077991
+trunk build_ground3_local 334727 200775846 200.441119
+trunk unify_ground3_local 334761 1214729849 1214.395088
+trunk build_bind_ground1 334711 88426963 88.092252
+trunk bind_ground1 334815 209427067 209.092252
+trunk build_bind_ground1_local 334798 88427050 88.092252
+trunk bind_ground1_local 334760 209427012 209.092252
+trunk build_datatype2 322854 186766706 186.443852
+trunk unify_datatype2 322859 1200721125 1200.398266
+trunk build_abbrev2 328397 186770252 186.441855
+trunk unify_abbrev2 328403 3127039145 3126.710742
+head empty 334391 19336635 19.002244
+head instance1 334411 156395226 156.060815
+head instance3 334445 236643736 236.309291
+head instance5 334479 324672451 324.337972
+head instance7 334513 344606685 344.272172
+head generalize7 334445 793606645 793.272200
+head lower7 334409 766606595 766.272186
+head copy7 334431 1728915402 1728.580971
+head repr 334397 165395256 165.060859
+head restore 334425 219395648 219.061223
+head keep 334437 200395676 200.061239
+head build_vars 334718 78405149 78.070431
+head unify_vars 334752 195405183 195.070431
+head build_ground1 334747 98412710 98.077963
+head unify_ground1 334781 220412744 220.077963
+head build_ground3 334815 200775906 200.441091
+head unify_ground3 334849 1014776145 1014.441296
+head build_vars_local 334629 78405090 78.070461
+head unify_vars_local 334663 195405124 195.070461
+head build_ground1_local 334663 98412654 98.077991
+head unify_ground1_local 334697 220412688 220.077991
+head build_ground3_local 334731 200775850 200.441119
+head unify_ground3_local 334765 1014776089 1014.441324
+head build_bind_ground1 334715 88426967 88.092252
+head bind_ground1 334819 209427071 209.092252
+head build_bind_ground1_local 334802 88427082 88.092280
+head bind_ground1_local 334770 209427022 209.092252
+head build_datatype2 322858 186766710 186.443852
+head unify_datatype2 322863 1008767126 1008.444263
+head build_abbrev2 328401 186770256 186.441855
+head unify_abbrev2 328407 3154827306 3154.498899
 ```
 
 ### Checks
@@ -2222,12 +2425,19 @@ cargo test --manifest-path compiler-rust/Cargo.toml --lib tc::
 (2)       test result: ok. 217 passed; 0 failed; 11 ignored; 0 measured; 2621 filtered out; finished in 304.43s
 (3)       test result: ok. 217 passed; 0 failed; 11 ignored; 0 measured; 2621 filtered out; finished in 289.57s
 (4)       test result: ok. 217 passed; 0 failed; 11 ignored; 0 measured; 2621 filtered out; finished in 292.77s
+(1) 2     test result: ok. 217 passed; 0 failed; 11 ignored; 0 measured; 2621 filtered out; finished in 298.10s
+head      test result: ok. 231 passed; 0 failed; 1 ignored; 0 measured; 2648 filtered out; finished in 294.14s
 ```
+
+CI `Instruction count` on `f4f485422` (head = trunk `6a0838552` plus
+item (2)): base 4,024,492,488, head 4,023,750,316, within the threshold.
 
 The reverts restore trees that ran these tests (the base's is trunk's;
 the head's is (2)'s). No test was added, removed, ignored or edited and
-no step count was lowered; the differential plans passed with their
-pinned seed lists. `tc` is not on a compiler build's path (the driver's
+no step count was lowered. The differential plans passed; that their
+pinned seed lists are unchanged was checked as
+`git diff origin/ocaml-to-rust-rewrite -- compiler-rust/src/tc/differential.rs`,
+which is empty on the final head (this branch does not touch the file). `tc` is not on a compiler build's path (the driver's
 default checker is the old one), so no application or `tests/tests`
 saving is claimed; the CI `Instruction count` check reports the build's
 figures.
