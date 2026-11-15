@@ -2358,7 +2358,26 @@ fn nondep_mty(
         }
         DeclMty::MtyAlias(_, path) => {
             if path.is_free(mid) {
-                None
+                // compiler/ml/mtype.ml:114-117: an alias of a module of the
+                // parameter is replaced by that module's type, read through
+                // the argument bound to the parameter in `env` (so its items
+                // name the argument's modules, as Env components do).
+                let md_type = match path.view() {
+                    PathView::Pident(_) => env.lookup_module(path).ok()?.md_type.clone(),
+                    PathView::Pdot(parent, name, _) => {
+                        crate::types::typecore::lookup_module_in_resolved_path(
+                            parent,
+                            name.as_str(),
+                            env,
+                            &mut None,
+                            ctx,
+                        )?
+                        .2
+                        .md_type
+                    }
+                    PathView::Papply(_, _) => return None,
+                };
+                nondep_mty(ctx, env, mid, va, &md_type)
             } else {
                 Some(mty.clone())
             }
@@ -14880,20 +14899,33 @@ fn type_module_expr_with_alias_inner<'a>(
                 // Subst.modtype work before typemod.ml:1245-1255 does.
                 alias_mod_type.clone()
             } else {
-                // typemod.ml:1253-1256: strengthen only when `sttn`.
+                // typemod.ml:1253-1256: `Mtype.strengthen ~aliasable` when
+                // `sttn`, where `aliasable` is false for a path into a
+                // functor parameter (typemod.ml:1240), so its submodules keep
+                // their strengthened types instead of becoming aliases.
+                // `strengthen` leaves an alias as it is (mtype.ml:30-38): in
+                // the alias mode, `module Z = X.M` for an alias `M` of the
+                // parameter keeps `Mty_alias (Mta_absent, X.N)`, which
+                // translmod.ml:260-261 compiles to `module_alias`.
                 mod_type
                     .clone()
                     .map(|mty| {
-                        if sttn {
-                            strengthen_semantic_ident_module_type(
+                        if !sttn {
+                            mty
+                        } else if aliasable {
+                            crate::types::ctype::strengthen_module_type_for_inclusion_path(
+                                tctx.type_ctx,
                                 env,
                                 &path,
-                                mty,
-                                &mut tctx.persistent_env,
-                                tctx.type_ctx,
+                                &mty,
                             )
                         } else {
-                            mty
+                            crate::types::ctype::strengthen_module_type_for_non_aliasable_path(
+                                tctx.type_ctx,
+                                env,
+                                &path,
+                                &mty,
+                            )
                         }
                     })
                     .unwrap_or_else(|| crate::types::decl::ModuleType::MtyIdent(path))
