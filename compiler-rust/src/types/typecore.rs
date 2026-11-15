@@ -16360,81 +16360,7 @@ fn with_record_labels<R>(
         }
     }
 
-    let repr = ctx.repr(ty);
-    let desc = ctx.get_desc(repr);
-    if let crate::types::TypeDesc::Tconstr { ref path, .. } = *desc {
-        // For inline records in extension/exception constructors, the type path
-        // is the constructor path. Match the constructor by path, not by bare
-        // name, otherwise exception/extension inline records pick up unrelated
-        // constructors with the same short name.
-        let cstr_name = path.last();
-        let mut matches_inline_record_path =
-            |cstr: &crate::types::decl::ConstructorDescription| match &cstr.cstr_kind {
-                crate::types::ConstructorKind::Extension(ext_path) => ext_path.same(path),
-                crate::types::ConstructorKind::Ordinary(_) => {
-                    let cstr_res = ctx.repr(cstr.cstr_res);
-                    let cstr_res_desc = ctx.get_desc(cstr_res);
-                    let Some(matches_parent) = (match &*cstr_res_desc {
-                        TypeDesc::Tconstr { path: res_path, .. } => match path.view() {
-                            PathView::Pdot(parent, name, _) if name == &cstr.cstr_name => Some(
-                                parent.same(res_path)
-                                    || compare_type_paths_for_disambiguation(
-                                        parent, res_path, env, pers_env, ctx,
-                                    ),
-                            ),
-                            _ => None,
-                        },
-                        _ => None,
-                    }) else {
-                        return false;
-                    };
-                    matches_parent
-                }
-            };
-
-        for cstr in env.find_all_constructors(cstr_name).iter().rev() {
-            if matches_inline_record_path(cstr) {
-                if let Some(ref inlined) = cstr.cstr_inlined {
-                    if let crate::types::TypeKind::TypeRecord(ref labels, _) = inlined.type_kind {
-                        return Some(f(labels));
-                    }
-                }
-            }
-        }
-    }
     None
-}
-
-fn constructor_matches_inline_record_path(
-    path: &Path,
-    cstr: &crate::types::decl::ConstructorDescription,
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &crate::types::context::TypeContext,
-) -> bool {
-    if cstr.cstr_inlined.is_none() {
-        return false;
-    }
-
-    match &cstr.cstr_kind {
-        crate::types::ConstructorKind::Extension(ext_path) => ext_path.same(path),
-        crate::types::ConstructorKind::Ordinary(_) => {
-            let cstr_res = ctx.repr(cstr.cstr_res);
-            let cstr_res_desc = ctx.get_desc(cstr_res);
-            match &*cstr_res_desc {
-                TypeDesc::Tconstr { path: res_path, .. } => match path.view() {
-                    PathView::Pdot(parent, name, _) if name == &cstr.cstr_name => {
-                        parent.same(res_path)
-                            || compare_type_paths_for_disambiguation(
-                                parent, res_path, env, pers_env, ctx,
-                            )
-                    }
-                    _ => false,
-                },
-                _ => false,
-            }
-        }
-    }
 }
 
 fn inline_record_decl_from_variant_type(
@@ -16493,6 +16419,14 @@ fn inline_record_decl_from_variant_type(
     None
 }
 
+/// The record type of the constructor whose inline record `path` names, as
+/// `Env.find_type_full` finds it (compiler/ml/env.ml:773-811): by the
+/// constructor's own path (`Path.constructor_typath`), never by the bare
+/// name of a constructor in scope. A constructor of a variant is read from
+/// the variant's declaration, a local extension constructor by its exact
+/// identifier, and an extension constructor of a module from that module's
+/// components. Cost: one type or module lookup and one scan of the
+/// constructors bound to that one name.
 fn lookup_inline_record_decl_for_path(
     path: &Path,
     actual_args: &[TypeExprRef],
@@ -16500,29 +16434,44 @@ fn lookup_inline_record_decl_for_path(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
 ) -> Option<(Path, Vec<TypeExprRef>, Arc<crate::types::TypeDeclaration>)> {
-    if let PathView::Pdot(parent_path, cstr_name, _) = path.view() {
-        if let Some(parent_decl) = lookup_type_decl_for_path(parent_path, env, pers_env, ctx) {
-            if let Some(inline_decl) =
-                inline_record_decl_from_variant_type(ctx, &parent_decl, cstr_name)
-            {
-                return Some((*path, actual_args.to_vec(), Arc::new(inline_decl)));
-            }
+    use crate::types::path::Typath;
+    let inline_decl = match path.constructor_typath() {
+        Typath::Regular(_) => return None,
+        Typath::Cstr(ty_path, cstr_name) => {
+            let parent_decl = lookup_type_decl_for_path(&ty_path, env, pers_env, ctx)?;
+            Arc::new(inline_record_decl_from_variant_type(ctx, &parent_decl, &cstr_name)?)
         }
-    }
-
-    for cstr in env.find_all_constructors(path.last()).iter().rev() {
-        if constructor_matches_inline_record_path(path, cstr, env, pers_env, ctx) {
-            if let Some(inlined) = &cstr.cstr_inlined {
-                return Some((
-                    *path,
-                    actual_args.to_vec(),
-                    Arc::new((**inlined).clone()),
-                ));
-            }
+        // env.ml:787-791: `Tycomp_tbl.find_same id env.constrs`.
+        Typath::LocalExt(id) => {
+            Arc::new((**env.find_constructor_by_ident(&id)?.cstr_inlined.as_ref()?).clone())
         }
-    }
-
-    None
+        // env.ml:792-811: the one extension constructor named `s` in the
+        // components of `mod_path`.
+        Typath::Ext(mod_path, cstr_name) => {
+            with_resolved_module_components_for_path_with_cache_mode(
+                &mod_path,
+                env,
+                pers_env,
+                ctx,
+                ComponentLookupApi::FindType,
+                |components| {
+                    let constructors = components.lookup_constructors(&cstr_name, ctx);
+                    let mut extensions = constructors.iter().filter(|cstr| {
+                        matches!(cstr.cstr_kind, crate::types::ConstructorKind::Extension(_))
+                    });
+                    match (extensions.next(), extensions.next()) {
+                        (Some(cstr), None) => cstr
+                            .cstr_inlined
+                            .as_ref()
+                            .map(|inlined| Arc::new((**inlined).clone())),
+                        _ => None,
+                    }
+                },
+            )
+            .flatten()?
+        }
+    };
+    Some((*path, actual_args.to_vec(), inline_decl))
 }
 
 /// Type check field access.

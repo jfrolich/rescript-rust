@@ -8433,40 +8433,18 @@ fn add_signature_to_env_with_options_inner(
                 let ext_slot = pos;
                 pos += 1; // Extension constructors occupy runtime slots
                 let ext_type_path = substitute_path(&ext.ext_type_path);
-                // Add extension constructor
-                let ext_cstr_args: Vec<TypeExprRef> = match &ext.ext_args {
-                    crate::types::decl::ConstructorArguments::CstrTuple(args) => args.clone(),
-                    crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
-                        labels.iter().map(|l| l.ld_type).collect()
-                    }
-                };
-                let cstr_desc = ConstructorDescription {
-                    cstr_name: id.name().to_string(),
-                    cstr_res: ctx.new_generic_constr(ext_type_path, ext.ext_type_params.clone()),
-                    // datarepr.ml:62-75, extension_descr.
-                    cstr_existentials: crate::types::env::constructor_existentials(
-                        ctx,
-                        &ext_cstr_args,
-                        ext.ext_ret_type,
-                    ),
-                    cstr_args: ext_cstr_args,
-                    cstr_arity: match &ext.ext_args {
-                        crate::types::decl::ConstructorArguments::CstrTuple(args) => {
-                            args.len() as i32
-                        }
-                        crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
-                            labels.len() as i32
-                        }
-                    },
-                    cstr_kind: ConstructorKind::Extension(slot_path(id.name(), ext_slot)),
-                    cstr_generalized: ext.ext_ret_type.is_some(),
-                    cstr_private: ext.ext_private,
-                    // `Datarepr.extension_descr`: `cstr_loc = ext.ext_loc`.
-                    cstr_loc: ext.ext_loc,
-                    // `Datarepr.extension_descr`: `cstr_attributes = ext.ext_attributes`.
-                    cstr_attributes: ext.ext_attributes.clone(),
-                    cstr_inlined: None,
-                };
+                // The open installs the component table's description
+                // (env.ml:1560-1565, `Datarepr.extension_descr`): an inline
+                // record is the constructor's one argument, typed by the
+                // record type the constructor's path names.
+                let cstr_desc = crate::types::env_lazy::extension_constructor_description(
+                    module_path,
+                    *id,
+                    ext,
+                    ext_slot,
+                    ext_type_path,
+                    ctx,
+                );
                 if as_opened {
                     opened_constructors.push((*id, cstr_desc));
                 } else {

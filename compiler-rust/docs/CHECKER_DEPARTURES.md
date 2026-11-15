@@ -7124,6 +7124,167 @@ stderr:
 
 ## Third round: differences found while fixing
 
+### Q5 — an inline record of an extension constructor through a module path
+
+Commands are the ones in "Scope, calibration and reproducibility". Each program
+was run with `bsc -w +A -bs-jsx 4 -color never Main.res` through both
+compilers; the program split across two units was built as a project with
+`rescript build-reference --bsc <OCaml bsc>` and `rescript build`. Verdicts
+before the fixes (trunk `a2777909d`) and after them:
+
+| Program | OCaml | Rust before | Rust after |
+| --- | --- | --- | --- |
+| `R.E({v: 1})`, `exception E({v: int})` in `R` | accepts | rejects (unbound label `v`) | agrees |
+| `R.C({v: 1})`, `type t += C({v: int})` in `R` | accepts | rejects | agrees |
+| `R.A({w: 1})`, `type u = A({w: int})` in `R` | accepts | agrees | agrees |
+| `E({v: 1})` inside `R` | accepts | agrees | agrees |
+| `open R` then `E({v: 1})` (also `open! R`) | accepts | rejects | agrees |
+| `open R` then `E(1)` | rejects ("expects an inlined record argument") | accepts, `_1: 1` | agrees |
+| `open R` then `E({v: 1, w: ""})` for two fields | accepts | rejects (arity 2) | agrees |
+| `module A = R` then `A.E({v: 1})` | accepts | rejects | accepted, JavaScript differs (open, below) |
+| `switch x { \| R.E({v}) => v }` | accepts | rejects | agrees |
+| `R.S.E({v: 1})` and `\| R.S.E({v})`, two levels | accepts | rejects | agrees |
+| punned `R.E({v, w})` | accepts | rejects | agrees |
+| optional field `w?: string`, `{v: 1}`, `w: "x"`, `w: ?Some("y")` | accepts | rejects | agrees |
+| spread `R.E({...r, v: 2})` of a matched `R.E(r)` | accepts | rejects | agrees |
+| field access `r.v` of a matched `R.E(r)` | accepts | rejects | agrees |
+| `R.E` next to a local `exception E({w: string})` | accepts | rejects | agrees |
+| another unit's `Lib.E({v: 1})`, `Lib.C({v: 2})`, `\| Lib.E({v})` | accepts | rejects | agrees |
+| wrong field `R.E({x: 1})` | rejects: "The field x is not part of the record argument for the R.E constructor" | rejects: "x refers to a record field, but no corresponding record type is in scope" | agrees |
+| extra field `R.C({v: 1, z: 2})` | rejects | rejects, other text | agrees |
+| missing field `R.C({w: 1})` | rejects at 5:13-18: "Some required record fields are missing: v." | rejects at 5:14, unbound label | agrees |
+| wrong field `R.A({x: 1})` of a variant | rejects: "...for the R.u.A constructor" | agrees | agrees |
+
+#### Fixed
+
+- `42865599f`: the record type of an inline record is named by the
+  constructor's path (`R.E`). OCaml's `Env.find_type_full`
+  (`compiler/ml/env.ml:773-811`) classifies that path with
+  `Path.constructor_typath` and reads the constructor from the variant's
+  declaration (`Cstr`), by exact identifier (`LocalExt`, `find_same`) or
+  from the components of the module (`Ext`). The Rust
+  `lookup_inline_record_decl_for_path`
+  (`compiler-rust/src/types/typecore.rs:16430`, before the fix 16496)
+  searched the constructors in scope by the bare name `E`, so through any
+  module path it found nothing, `extract_concrete_record_type_info` had no
+  record and every label was unbound. It now takes the three cases of
+  `find_type_full`; the name-based search it shared with
+  `with_record_labels` (typecore.rs:16348) is deleted. Fixtures:
+  `tests/tests/src/inline_record_extension_path`,
+  `inline_record_extension_second_unit` (with `inline_record_extension_lib`),
+  super_errors `inline_record_extension_wrong_field`,
+  `inline_record_extension_missing_field` and
+  `inline_record_extension_variant_wrong_field` (agreed before).
+- `62c757dc0`: `open` installs the module's component table
+  (`env.ml:1841-1877`), whose extension constructors come from
+  `Datarepr.extension_descr` (`env.ml:1560-1565`, `datarepr.ml:218-240`): an
+  inline record is one argument of the record type the constructor's path
+  names, with `cstr_inlined` set. The Rust open
+  (`add_signature_to_env_with_options_inner`,
+  `compiler-rust/src/cmi/persistent_env.rs:8432`) built its own description
+  that spread the fields into a tuple and dropped `cstr_inlined`. It now
+  uses the component table's `env_lazy::extension_constructor_description`
+  (`compiler-rust/src/types/env_lazy.rs:521`). Fixtures:
+  `tests/tests/src/inline_record_extension_open`, super_errors
+  `inline_record_extension_open_tuple_argument` and
+  `inline_record_extension_open_arity`.
+
+#### Open
+
+Through a module alias, `module A = R` then `A.E({v: 1})` is now accepted,
+but the JavaScript differs: Rust emits `let e_0 = A.E;` and
+`RE_EXN_ID: e_0`, OCaml `RE_EXN_ID: E`. The same difference exists before
+these fixes and without an inline record (`exception E(int)`, `A.E(1)`).
+Both typed trees hold `Texp_construct "A.E"`; the raw Lambda differs: OCaml
+`(makeblock ext (field:E/0 R/1001) 1)`, Rust `(field:E/0 A/1003)`. OCaml
+translates the constructor's path with `Transl_path.transl_extension_path`,
+which normalizes the prefix through the alias (`compiler/ml/transl_path.ml:43-46`,
+`Env.normalize_path_prefix`); the Rust `translate_extension_path_raw`
+(`compiler-rust/src/raw_lambda/convert.rs:3705`) does not reach the alias
+target for a local `module A = R`. That is the Lambda translation of
+modules, not constructor typing.
+
+### Q1 — a module type abbreviation of a module type in a submodule
+
+```rescript
+module type S = {let x: int}
+module R = {
+  module Y = {
+    module type T = S
+  }
+  module type T = Y.T
+}
+module M: R.T = {
+  let x = 2
+}
+```
+
+OCaml compiles the unit; Rust rejected it: "The implementation Main.res does
+not match the interface (inferred signature): In module M: Actual module
+type: Y.T Expected module type: R.T". The printed `Y.T` was the cause, not a
+printing matter: two places read the declaration of `R.T` from `R`'s own
+signature, where it is written `Y.T` with the `Y` bound inside `R`, instead
+of from `R`'s components, where OCaml's `Env` stores it prefixed as `R.Y.T`
+(`Subst.add_module id (Pdot (path, name))` in `components_of_module_maker`,
+`compiler/ml/env.ml:1555-1590`). Outside `R`, `Y.T` names nothing, so the
+expansion stopped there and the two paths compared unequal.
+
+#### Fixed
+
+- `1399d0e44`: `Mtype.strengthen` scrapes `Mty_ident p` with
+  `Env.find_modtype_expansion` (`compiler/ml/mtype.ml:21-25`). The Rust
+  scrape (`scrape_modtype_ident_for_strengthen` in
+  `strengthen_module_type_for_module_access_path`,
+  `compiler-rust/src/types/ctype.rs:3630`) used `Env::lookup_modtype`, whose
+  dotted case scans the parent module's raw signature. Strengthening `M`
+  when the unit is checked against its inferred signature
+  (`Includemod.compunit`, `compiler/ml/typemod.ml:1812-1815`, through
+  `module_declarations`, `includemod.ml:396-413`) gave `Y.T`. It now calls
+  `typemod::find_modtype_expansion` (`typemod.rs:11011`), which reads the
+  parent's components. Fixtures: `tests/tests/src/modtype_abbreviation_submodule`,
+  `modtype_abbreviation_submodule_interface`, super_errors
+  `modtype_abbreviation_value_mismatch` (agreed before).
+- `827faf1c4`: `Includemod.try_modtypes` expands an alias with
+  `Env.find_module` and a module type path with `Env.find_modtype_expansion`
+  (`includemod.ml:223-236`). The local expansion of the Rust check
+  (`expand_local` in `modtypes_inner`, `compiler-rust/src/types/includemod.rs:1287`,
+  dotted arm at 1316) scanned the parent's raw signature in the same way, so
+  `module N: R.Y.T = M` for `M: R.T` was rejected with "Actual module type:
+  Y.T", and a missing value in a constraint on such a module was reported
+  as that module type mismatch instead of "The value `y` is required but
+  not provided". The dotted arm now reads a module through
+  `lookup_module_in_resolved_path` and a module type through
+  `find_modtype_expansion`. Fixtures:
+  `tests/tests/src/modtype_abbreviation_constraint_target`, super_errors
+  `modtype_abbreviation_alias_missing_value` and
+  `modtype_abbreviation_abstract_implementation` (agreed before).
+
+Twenty programs around the witness were run through both compilers
+(commands as in "Scope, calibration and reproducibility"). Before / after:
+
+| Program | OCaml | Rust before | Rust after |
+| --- | --- | --- | --- |
+| the witness (one submodule) | accepts | rejects | accepts |
+| two submodules (`R.Y.Z.T`) | accepts | rejects | accepts |
+| submodule that is a module alias | accepts | rejects | accepts |
+| `R` a functor's result | accepts | rejects | accepts |
+| `Y.T` used in `R` before `T` is declared | accepts | rejects | accepts |
+| through `module type of R` | accepts | accepts | accepts |
+| abstract module type through an alias, functor parameter | accepts | accepts | accepts |
+| constrained by the abbreviation, its target, `S`, the abbreviation | accepts | rejects | accepts |
+| with an interface declaring `M: R.T` | accepts | rejects | accepts |
+| with an interface declaring `M: R.Y.T` | accepts | rejects | accepts |
+| abbreviation used inside `R` | accepts | accepts | accepts |
+| `module M: R.T` as an item of a module type | accepts | rejects | accepts |
+| functor parameter of type `R.T` | accepts | rejects | accepts |
+| `M: R.T` with `x: string` | rejects | same text | same text |
+| `M: R.T` without `x` | rejects | same text | same text |
+| interface `M: R.T`, implementation lacks `x` | rejects | same text | same text |
+| interface's `R.T` is another module type | rejects | same text | same text |
+| abstract `R.T` implemented by a structure | rejects | same text | same text |
+| `module N: {x, y} = M` for `M: R.T` | rejects | other text | same text |
+| `module N: U = M`, `U` with `x: string` | rejects | other text | same text |
+
 ### A3 — module aliases of a functor argument
 
 The witness: a module alias declared in a functor parameter's signature and

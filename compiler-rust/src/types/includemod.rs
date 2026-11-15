@@ -1276,8 +1276,6 @@ fn modtypes_inner(
         path: &Path,
         namespace: PathNamespace,
     ) -> Option<ModuleType> {
-        use crate::types::decl::SignatureItem as SigItem;
-
         fn should_try_env_lazy(path: &Path) -> bool {
             match path.view() {
                 PathView::Pident(id) => id.is_persistent() || id.stamp() == 0,
@@ -1287,6 +1285,7 @@ fn modtypes_inner(
         }
 
         fn expand_local(
+            type_ctx: &TypeContext,
             env: &Env,
             path: &Path,
             namespace: PathNamespace,
@@ -1307,51 +1306,44 @@ fn modtypes_inner(
                         .mtd_type
                         .clone()?,
                 },
+                // `Env.find_module` / `Env.find_modtype_expansion`
+                // (compiler/ml/env.ml:865-882, 970-973): a component of a
+                // module is read from that module's components, whose
+                // declarations carry the module's prefix
+                // (`Subst.add_module id (Pdot (path, name))`, env.ml:1555-1590).
+                // `module type T = Y.T` declared in `R` is `R.Y.T` there,
+                // not the `Y.T` of `R`'s own signature.
                 PathView::Pdot(parent, name, _) => {
-                    let parent_mty = expand_local(env, parent, PathNamespace::Module, visiting)?;
-                    let parent_sig = match &parent_mty {
-                        ModuleType::MtySignature(sig) => sig.clone(),
-                        ModuleType::MtyIdent(parent_path) => {
-                            match expand_local(
+                    let mut persistent_env = ctype::in_process_module_resolution_env(type_ctx);
+                    match namespace {
+                        PathNamespace::Module => {
+                            crate::types::typecore::lookup_module_in_resolved_path(
+                                parent,
+                                name.as_str(),
                                 env,
-                                parent_path,
-                                PathNamespace::ModuleType,
-                                visiting,
-                            )? {
-                                ModuleType::MtySignature(sig) => sig,
-                                _ => return None,
-                            }
+                                &mut persistent_env,
+                                type_ctx,
+                            )?
+                            .2
+                            .md_type
                         }
-                        ModuleType::MtyAlias(_, parent_path) => {
-                            match expand_local(env, parent_path, PathNamespace::Module, visiting)? {
-                                ModuleType::MtySignature(sig) => sig,
-                                _ => return None,
-                            }
-                        }
-                        _ => return None,
-                    };
-                    parent_sig.iter().find_map(|item| match (item, namespace) {
-                        (SigItem::SigModule(id, md, _), PathNamespace::Module)
-                            if id.name() == name.as_str() =>
-                        {
-                            Some(md.md_type.clone())
-                        }
-                        (SigItem::SigModtype(id, mtd), PathNamespace::ModuleType)
-                            if id.name() == name.as_str() =>
-                        {
-                            mtd.mtd_type.clone()
-                        }
-                        _ => None,
-                    })?
+                        PathNamespace::ModuleType => crate::types::typemod::find_modtype_expansion(
+                            path,
+                            env,
+                            &mut persistent_env,
+                            type_ctx,
+                        )?,
+                    }
                 }
                 PathView::Papply(_, _) => return None,
             };
             match &mty {
                 ModuleType::MtyIdent(next) => {
-                    expand_local(env, next, PathNamespace::ModuleType, visiting).or(Some(mty))
+                    expand_local(type_ctx, env, next, PathNamespace::ModuleType, visiting)
+                        .or(Some(mty))
                 }
                 ModuleType::MtyAlias(_, next) => {
-                    expand_local(env, next, PathNamespace::Module, visiting).or(Some(mty))
+                    expand_local(type_ctx, env, next, PathNamespace::Module, visiting).or(Some(mty))
                 }
                 _ => Some(mty),
             }
@@ -1366,7 +1358,7 @@ fn modtypes_inner(
         }
 
         let mut visiting = HashSet::new();
-        expand_local(env, path, namespace, &mut visiting)
+        expand_local(type_ctx, env, path, namespace, &mut visiting)
     }
 
     fn normalized_alias_path(type_ctx: &TypeContext, env: &Env, path: &Path) -> Path {

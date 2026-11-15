@@ -2247,6 +2247,12 @@ impl Env {
             .ok_or_else(|| EnvError::ConstructorNotFound(name.text().into()))
     }
 
+    /// The constructor bound to exactly `id` (OCaml `TycompTbl.find_same`):
+    /// one hash lookup and a scan of the bindings of that name.
+    pub(crate) fn find_constructor_by_ident(&self, id: &Ident) -> Option<&ConstructorDescription> {
+        self.data.constrs.find_by_ident(id).map(|c| c.as_ref())
+    }
+
     /// Find all constructors with a given name.
     pub fn find_all_constructors(&self, name: impl crate::name::NameKey) -> Vec<&ConstructorDescription> {
         #[cfg(debug_assertions)]
