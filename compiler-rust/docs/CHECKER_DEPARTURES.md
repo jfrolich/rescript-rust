@@ -3262,7 +3262,7 @@ of this report.
 | Place | Verdict | Candidates | Smallest witness found |
 | --- | --- | ---: | --- |
 | U1 | REACHED, NO DIFFERENCE SEEN | 6 | — |
-| U2 | WITNESS | 7 | U2-7 (off-path) |
+| U2 | WITNESS, FIXED | 7 | U2-7 (off-path) |
 | U3 | REACHED, NO DIFFERENCE SEEN | 6 | — |
 | U4 | WITNESS | 7 | U4-7 |
 | U5 | WITNESS | 7 | U5-7 |
@@ -3488,6 +3488,55 @@ A program must re-enter a binder already present in the pairing stack so enter_p
 No U2 marker ran: these candidates did not satisfy the known-binder escape guard in enter_poly_univars. U2-5 and the smaller U2-7 instead expose acceptance of a field that OCaml rejects as less general; this is an off-path witness, not evidence against reverse family iteration.
 
 Smallest witness found: **U2-7 (off-path)** (full source and both outputs below).
+
+#### Fixed
+
+The two witnesses are not a difference of the family loop the place
+nominates; tracing them found three causes in the typing of a value for a
+polymorphic record field, each fixed in its own commit. After them all
+seven candidates agree with OCaml byte for byte (exit status, stdout and
+stderr, commands as in "Scope, calibration and reproducibility"), and so
+do 48 further programs of the same family (record literal, record field
+assignment, object field assignment, let binding with a polymorphic
+annotation; accepted and rejected), 17 of which differed before.
+
+- `ff3fc6fe1`: OCaml's `instance_label` copies the record type and
+  instantiates the field in one copy session (`compiler/ml/ctype.ml:1097-1105`),
+  and `instance_poly`'s delayed `copy` of the univar-free parts sees that
+  session (ctype.ml:1037-1041), so the field's `'a` is the record's. The
+  Rust `instance_label` (`compiler-rust/src/types/ctype.rs:12604` before the
+  fix) called `instance_poly`, which opened a copy cache of its own, so the
+  field's `'a` was a fresh variable; `check_univars` then found `'b`, unified
+  with it by `y => y`, still generic and accepted the field. Now
+  `instance_poly_in_session` (`ctype.rs:12367`) takes the copy cache of the
+  operation it belongs to and `instance_label` (`ctype.rs:12611`) passes its
+  own. U2-5 and U2-7 are rejected with OCaml's "less general" diagnostic;
+  U2-7 is the super_errors fixture
+  `polymorphic_field_generality_record_parameter`, and
+  `tests/tests/src/polymorphic_field_generality_record_parameter` holds
+  programs with such fields both compilers accept.
+- `8379f4a59`: OCaml's `type_label_exp` (`compiler/ml/typecore.ml:4336-4358`)
+  types an expansive value again without the field type propagated when
+  `check_univars` rejects it (PR#4862); Rust checked once and rejected
+  values OCaml accepts, such as `{f: Obj.magic(x => x)}` for
+  `{f: 'a. 'a => 'a}`. `check_label_univars`
+  (`compiler-rust/src/types/typecore.rs:19636`) does what those lines do. It
+  is `tests/tests/src/polymorphic_field_generality_retry`; the super_errors
+  fixture `polymorphic_field_generality_retry_less_general` is an expansive
+  value both reject.
+- `77d4cb02b`: OCaml types the value of `r.f = v` with `type_label_exp`
+  (typecore.ml:3206-3211); the Rust setfield path
+  (`typecore.rs:16873` before the fix) called `ctype::check_univars`
+  (`ctype.rs:12794` before the fix), which never generalized and never
+  failed. It now calls `check_label_univars` (`typecore.rs:16873`); the
+  super_errors fixture `polymorphic_field_generality_setfield` is
+  `v.f = y => y` for `{mutable f: 'b. 'b => 'a}`, and
+  `tests/tests/src/polymorphic_field_generality_setfield` holds assignments
+  both accept.
+
+The object field assignment (`type_object_field_value`) and the
+let binding with a polymorphic annotation agreed in every program tried,
+before and after.
 
 #### U2-1 — outputs agree
 
