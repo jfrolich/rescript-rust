@@ -572,9 +572,14 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     /// and globals, plus untagged::prepare and variant::prepare metadata work. Reserves
     /// output node/list/switch domains from imported counts; moves cold pools rather than
     /// cloning them.
-    fn with(mut input: super::bridge::Imported, js: B) -> Self {
+    fn with(mut input: super::bridge::Imported, mut js: B) -> Self {
         let source_nodes = input.arena.nodes.len();
         let source_operands = input.arena.lists.slot_count();
+        // The operand stack holds the operands of the list constructors that
+        // are being collected: no more than the unit has source operands,
+        // and at least the few a constant or a runtime call pushes. Its one
+        // allocation.
+        js.reserve(source_operands.max(64));
         let mut arena = Bir::default();
         arena.begin_bulk();
         arena.pools = std::mem::take(&mut input.arena.pools);
@@ -719,12 +724,9 @@ impl<B: js_stmt::JsStmt> State<'_, B> {
     }
 }
 impl<'a> State<'a> {
-    /// [`State::with`] on J rows: `Rows` with room for 64 pending operands,
-    /// its one allocation. Cost: that of `with`, and the reserve.
+    /// [`State::with`] on J rows. Cost: that of `with`.
     fn new(input: super::bridge::Imported) -> Self {
-        let mut rows = crate::bir::j::rows::Rows::default();
-        js::Js::reserve(&mut rows, 64);
-        Self::with(input, rows)
+        Self::with(input, crate::bir::j::rows::Rows::default())
     }
 }
 impl<B: js_stmt::JsStmt> State<'_, B> {
