@@ -1,0 +1,17 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/alias_path_hint_module.res[0m:[2m19:11-20[0m
+
+  17 [2m│[0m   },
+  18 [2m│[0m ) => {
+  [1;31m19[0m [2m│[0m   let v = [1;31mX.A.Subb.x[0m
+  20 [2m│[0m }
+  21 [2m│[0m 
+
+  [1;33mThe module or file X.A.Subb can't be found.[0m
+  - If it's a third-party dependency:
+    - Did you add it to the "dependencies" or "dev-dependencies" in rescript.json?
+  - Did you include the file's directory to the "sources" in rescript.json?
+  
+  
+  [1;33mHint: Did you mean Sub?[0m

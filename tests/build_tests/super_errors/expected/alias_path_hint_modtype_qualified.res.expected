@@ -1,0 +1,12 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/alias_path_hint_modtype_qualified.res[0m:[2m6:11-16[0m
+
+  4 [2m│[0m   }
+  5 [2m│[0m }
+  [1;31m6[0m [2m│[0m module M: [1;31mR.Sigg[0m = {
+  7 [2m│[0m   let x = 1
+  8 [2m│[0m }
+
+  Unbound module type R.Sigg
+Hint: Did you mean Sig?

@@ -1,0 +1,17 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/alias_path_hint_label_pattern.res[0m:[2m21:6-13[0m
+
+  19 [2m│[0m let g = (r: Q.A.r) =>
+  20 [2m│[0m   switch r {
+  [1;31m21[0m [2m│[0m   | {[1;31mQ.A.aple[0m: a} => a
+  22 [2m│[0m   }
+  23 [2m│[0m 
+
+  [1;33mQ.A.aple[0m refers to a record field, but no corresponding record type is in scope.
+  
+  If it's defined in another module or file, bring it into scope by:
+  - Prefixing the field name with the module name: [1;33mTheModule.Q.A.aple[0m
+  - Or specifying the record type explicitly:
+  [1;33mlet theValue: TheModule.theType = {Q.A.aple: VALUE}[0m
+Hint: Did you mean apple?

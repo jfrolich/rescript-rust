@@ -1,0 +1,16 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/alias_path_hint_too_far.res[0m:[2m18:9-20[0m
+
+  16 [2m│[0m }
+  17 [2m│[0m module O = Outer
+  [1;31m18[0m [2m│[0m let v = [1;31mO.A.Zzzzzzzz[0m
+  19 [2m│[0m 
+
+  [1;33mThe variant constructor O.A.Zzzzzzzz can't be found.[0m
+  
+  - If it's defined in another module or file, bring it into scope by:
+    - Prefixing it with said module name: [1;33mTheModule.O.A.Zzzzzzzz[0m
+    - Or specifying its type: [1;33mlet theValue: TheModule.theType = O.A.Zzzzzzzz[0m
+  - Constructors and modules are both capitalized. Did you want the latter?
+    Then instead of [2mlet foo = Bar[0m, try [1;33mmodule Foo = Bar[0m.
