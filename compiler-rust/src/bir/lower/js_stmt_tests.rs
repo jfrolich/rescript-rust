@@ -1105,3 +1105,91 @@ fn a_copy_costs_one_step_per_node_and_allocates_nothing_in_a_warm_unit() {
     let (one, two, ten) = (measure(1_000), measure(2_000), measure(10_000));
     assert_eq!(ten - one, 9 * (two - one), "{one} {two} {ten}");
 }
+
+
+#[test]
+fn a_declaration_gives_its_variable_and_a_block_the_ids_of_its_statements() {
+    let mut u = unit();
+    let mut r = Rows::default();
+    let x = r.var(&mut u.b, u.x);
+    let with_value = r.declare(&mut u.b, LetKind::Strict, u.t, Some(x));
+    let without = r.declare(&mut u.b, LetKind::Variable, u.y, None);
+    assert_eq!(r.declared(&u.b, &with_value), Some(u.t));
+    assert_eq!(r.declared(&u.b, &without), Some(u.y));
+    let call = statement(&mut r, &mut u, St::Call);
+    assert_eq!(r.declared(&u.b, &call), None);
+    let ids = [with_value, without, call].map(|s| Rows::stmt_node(s).0);
+    let list = r.list(&mut u.b, 3, ids.iter().map(|&id| Rows::stmt_from_node(NodeId(id))));
+    let block = r.block_of(&mut u.b, list);
+    let (mut given, before) = (Vec::new(), r.steps());
+    r.block_ids(&u.b, &block, |id| given.push(id));
+    assert_eq!(given, ids);
+    assert_eq!(r.steps(), before);
+    // The statements are still the block's.
+    assert_eq!(r.owner(&u.b, ids[0]), Some(Rows::stmt_node(block).0));
+}
+
+/// `while (true) { x; while (true) { ... } }`, `depth` loops deep, around
+/// `innermost`: no statement of it has an effect unless `innermost` has.
+fn quiet_nest(r: &mut Rows, u: &mut Unit, depth: usize, innermost: S) -> S {
+    let mut inner = innermost;
+    for _ in 0..depth {
+        let x = r.var(&mut u.b, u.x);
+        let read = r.exp(&mut u.b, x);
+        let body = r.list(&mut u.b, 2, [read, inner].into_iter());
+        let condition = r.boolean(&mut u.b, true);
+        inner = r.while_(&mut u.b, condition, body, None);
+    }
+    inner
+}
+
+#[test]
+fn a_statement_is_effect_free_when_everything_below_it_is() {
+    let mut u = unit();
+    let mut r = Rows::default();
+    // The statements that never are, and an expression statement by its value.
+    for (st, free) in [(St::Call, false), (St::Return, true), (St::Break, false), (St::Throw, false)] {
+        let statement = statement(&mut r, &mut u, st);
+        assert_eq!(r.effect_free(&u.b, &statement), free, "{st:?}");
+    }
+    let x = r.var(&mut u.b, u.x);
+    let declaration = r.declare(&mut u.b, LetKind::Strict, u.t, Some(x));
+    assert!(!r.effect_free(&u.b, &declaration));
+    let debugger = r.debugger(&mut u.b);
+    assert!(!r.effect_free(&u.b, &debugger));
+    // A compound statement is read until its first effect.
+    for shape in SHAPES {
+        let list = run(&mut r, &mut u, shape);
+        let block = r.block_of(&mut u.b, list);
+        let free = shape.iter().all(|st| matches!(st, St::Return));
+        assert_eq!(r.effect_free(&u.b, &block), free, "{shape:?}");
+        let (yes, no) = (run(&mut r, &mut u, shape), run(&mut r, &mut u, &[]));
+        let test = r.var(&mut u.b, u.x);
+        let conditional = r.if_plain(&mut u.b, test, yes, no);
+        assert_eq!(r.effect_free(&u.b, &conditional), free, "if {shape:?}");
+        // The test of an `if` is read too.
+        let (yes, no) = (run(&mut r, &mut u, &[]), run(&mut r, &mut u, &[]));
+        let test = value(&mut r, &mut u, Value::Call);
+        let conditional = r.if_plain(&mut u.b, test, yes, no);
+        assert!(!r.effect_free(&u.b, &conditional));
+    }
+    // One step per node read, linear in a nest that has no effect; a nest
+    // whose outermost statement list starts with an effect is read no
+    // further than that.
+    let steps = |depth: usize, effect: bool| {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let innermost = statement(&mut r, &mut u, if effect { St::Call } else { St::Return });
+        let nest = quiet_nest(&mut r, &mut u, depth, innermost);
+        let before = r.steps();
+        assert_eq!(r.effect_free(&u.b, &nest), !effect);
+        r.steps() - before
+    };
+    let (one, two, ten) = (steps(1_000, false), steps(2_000, false), steps(10_000, false));
+    assert_eq!(ten - one, 9 * (two - one), "{one} {two} {ten}");
+    assert!(one >= 3 * 1_000);
+    // The work stack reads the last child first: the inner loop before the
+    // read of `x`. An effect at the bottom is found after one step a level.
+    let (one, ten) = (steps(1_000, true), steps(10_000, true));
+    assert!(one < 3 * 1_000 && ten < 3 * 10_000, "{one} {ten}");
+}

@@ -34,6 +34,8 @@
 //! | `str_of` | the `text` of a `JStr`; `None` otherwise |
 //! | `owner` | `Bir::parents` of the node |
 //! | `kind_of` (by id) | `kind_of` of the node's operation |
+//! | `id_bound` | the length of `Bir::nodes` |
+//! | `equal` | `bir::j::equal::equal` |
 //! | `is_callee` | the owner is a `JCall`, `JFlatCall` or `JNew` whose `callee` is the node, or a `JTagged` whose `tag` is |
 //! | `push_list` | `Rows::operands` extended by `Lists::get(list)` |
 //! | `keep_operand` | `child_at`, `Bir::detach` of the operand, `Bir::release` of the node |
@@ -91,6 +93,11 @@ pub struct Rows {
     /// is cleared after each copy and exists so that a copy with labels
     /// allocates nothing in a warm unit.
     labels: Vec<(u32, u32)>,
+    /// The statements and expressions `effect_free` has still to read. A
+    /// work stack of that one walk, empty between calls and kept so that
+    /// the walk allocates only when a statement is wider and deeper than
+    /// any before it in the unit.
+    pub(super) work: Vec<NodeId>,
 }
 
 impl Rows {
@@ -346,6 +353,14 @@ impl Js for Rows {
             View::JTagged { tag, .. } => tag.0 == id,
             _ => false,
         }
+    }
+
+    #[inline]
+    fn id_bound(&self, a: &Pools) -> u32 {
+        a.nodes.len() as u32
+    }
+    fn equal(&self, a: &Pools, left: NodeId, right: NodeId, steps: &mut usize) -> bool {
+        crate::bir::j::equal::equal(a, left, right, steps)
     }
 
     #[inline]

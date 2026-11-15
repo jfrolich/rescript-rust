@@ -156,6 +156,16 @@ pub trait Js {
     /// call, of a `new` or of a flat call, or the tag of a tagged
     /// template. O(1): one read of the owner, no scan of its operands.
     fn is_callee(&self, a: &Pools, id: u32) -> bool;
+    /// One above the largest id a node of the unit has now: the size of a
+    /// table indexed by id. O(1). (T6q: `export.rs::row_of`.)
+    fn id_bound(&self, a: &Pools) -> u32;
+    /// B:237 `ocaml_eq_expression`: whether two expressions are equal as
+    /// the rules of J compare them. Deliberately partial: a kind it does
+    /// not know is unequal to itself. One step per pair of nodes it
+    /// inspects, the mismatching pair included, added to `steps`; bounded
+    /// by the smaller of the two trees; stops at the first mismatch.
+    /// (T6q: `export.rs::equivalent_later`.)
+    fn equal(&self, a: &Pools, left: Self::Ref<'_>, right: Self::Ref<'_>, steps: &mut usize) -> bool;
 
     // ---- Leaves (plain; O(1) unless said) ----
 

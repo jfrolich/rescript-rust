@@ -191,6 +191,25 @@ pub trait JsStmt: Js {
     /// statement that is not an `If`. (T6n: `cond.rs::merge_tail_guard`
     /// reads whether a guard ends in a jump and has nothing in its else.)
     fn branch_last_kind(&self, a: &Pools, s: &Self::S, otherwise: bool) -> Option<Kind>;
+    /// The variable a `Declare` or a `Rest` binds; `None` for any other
+    /// statement. O(1). (T6q: `export.rs`, the rows of the top level.)
+    fn declared(&self, a: &Pools, s: &Self::S) -> Option<VarId>;
+    /// The ids of the statements of a block, given to `sink` in order; the
+    /// statements stay in the block. O(statements); counts no step (a
+    /// reader). Panics on a statement that is not a `Block`. (T6q:
+    /// `export.rs::build_rows`, the rows of a top-level block.)
+    fn block_ids(&self, a: &Pools, s: &Self::S, sink: impl FnMut(u32));
+    /// S:1053 `js_statement_no_side_effects`: the statement runs no code
+    /// that can be observed. An expression statement and a `return` are
+    /// free when their value is strictly pure (E:15); a block, an `if`, a
+    /// `while`, a range loop, a `switch` and a `try` when every statement
+    /// and expression below them is; a `throw`, a `debugger`, a jump, a
+    /// declaration and a loop over an iterable never are. One step per
+    /// node read; the read stops at the first effect. An implementation
+    /// that keeps the fact with the statement answers in O(1). (T6q:
+    /// `export.rs::has_toplevel_effect`; the review of the T6l skeleton,
+    /// decisions 4 and 9.)
+    fn effect_free(&mut self, a: &Pools, s: &Self::S) -> bool;
     /// A copy of the statement `s` and everything below it: the binders
     /// and the static labels inside it are fresh, and `(fresh, source)` is
     /// appended to `fresh` for each binder, in the order the fresh

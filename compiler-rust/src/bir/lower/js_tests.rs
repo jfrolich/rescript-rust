@@ -80,9 +80,10 @@ fn sizes() {
     assert_eq!(std::mem::size_of::<E>(), 4);
     assert_eq!(std::mem::size_of::<Option<E>>(), 8);
     assert_eq!(std::mem::size_of::<Mark>(), 4);
-    // The operand stack (24), the step count (8), the copy storage (336)
-    // and the label vector (24): one per unit, never passed down a walk.
-    assert_eq!(std::mem::size_of::<Rows>(), 392);
+    // The operand stack (24), the step count (8), the copy storage (336),
+    // the label vector (24) and the work stack of `effect_free` (24): one
+    // per unit, never passed down a walk.
+    assert_eq!(std::mem::size_of::<Rows>(), 416);
     assert_eq!(std::mem::size_of::<<Rows as Js>::Ref<'_>>(), 4);
 }
 
@@ -1141,4 +1142,49 @@ fn a_jsx_element_without_the_operands_of_its_header_is_refused() {
         r.push(operand);
     }
     done(r.jsx(&mut u.b, mark, info, false));
+}
+
+
+/// `equal` is `bir::j::equal::equal` and counts the pairs it inspects:
+/// ten times the nodes, ten times the steps, and one step when the roots
+/// differ.
+#[test]
+fn equal_compares_as_the_rules_do_and_counts_its_pairs() {
+    let mut u = unit();
+    let mut r = Rows::default();
+    let a = &mut u.b;
+    let (x, y, one, other) = (r.var(a, u.x), r.var(a, u.y), r.int_literal(a, 1), r.int_literal(a, 1));
+    let string = r.string(a, "text");
+    for (left, right) in [(&x, &x), (&x, &y), (&one, &other), (&one, &string), (&string, &string)] {
+        let (mut steps, mut expected) = (0, 0);
+        let (l, rr) = (Rows::of(left), Rows::of(right));
+        assert_eq!(r.equal(a, l, rr, &mut steps), crate::bir::j::equal::equal(a, l, rr, &mut expected));
+        assert_eq!(steps, expected);
+    }
+    let pairs = |calls: usize| {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let (left, right) = (nest(&mut r, &mut u, calls), nest(&mut r, &mut u, calls));
+        let mut steps = 0;
+        assert!(r.equal(&u.b, Rows::of(&left), Rows::of(&right), &mut steps));
+        // Unequal at the root: one pair, whatever the size.
+        let other = r.var(&mut u.b, u.x);
+        let mut first = 0;
+        assert!(!r.equal(&u.b, Rows::of(&left), Rows::of(&other), &mut first));
+        assert_eq!(first, 1);
+        steps
+    };
+    let (one, two, ten) = (pairs(1_000), pairs(2_000), pairs(10_000));
+    assert_eq!(ten - one, 9 * (two - one), "{one} {two} {ten}");
+    assert!(one >= 1_000);
+}
+
+#[test]
+fn the_id_bound_is_above_every_id() {
+    let mut u = unit();
+    let mut r = Rows::default();
+    let before = r.id_bound(&u.b);
+    let x = r.var(&mut u.b, u.x);
+    assert!(r.id(&u.b, Rows::of(&x)) < r.id_bound(&u.b));
+    assert!(r.id(&u.b, Rows::of(&x)) >= before);
 }

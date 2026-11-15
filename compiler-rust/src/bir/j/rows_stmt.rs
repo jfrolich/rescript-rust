@@ -47,6 +47,9 @@
 //! | `is_empty_block` | T6n | an `SBlock` whose `statements` is empty |
 //! | `branch_last_kind` | T6n | of an `SIf`: `rows::kind_of` of the operation of the last entry of the `statements` of `then_`, or of `else_` when `otherwise`; `None` for no entry or no `else_` |
 //! | `copy_stmt` | T6o | `Bir::copy_subtree_with_scratch(s, &[], fresh, ..)` with the copy storage and the label vector of `Rows`, as `copy_fresh` |
+//! | `declared` | T6q | the `var` of `SDecl` or `SRest` |
+//! | `block_ids` | T6q | the ids of the `statements` of an `SBlock`, in order |
+//! | `effect_free` | T6q | the read `export.rs::has_toplevel_effect` made of a statement that is not a declaration row: a work stack (`Rows::work`) of the node's children for a compound statement, the `STRICT` flag of the value of `SExp` and `SReturn` and of every expression below a compound statement, `false` at `SThrow`, `SDebugger`, a jump, `SDecl`, `SRest`, `SForOf`, `SForAwaitOf`; one step per node read |
 //! | `release_stmt` | T6n | `Bir::release`; one step per node it frees |
 //! | `if_blocks` | T6n | `Bir::new_node(View::SIf { condition, then_, else_: Some(else_) }, 0)` over the two blocks; one step |
 //! | `take_if` | T6n | of an `SIf`: `Bir::detach` of `condition`, `then_` and of `else_` when there is one, `Bir::release` of the statement; one step |
@@ -281,6 +284,58 @@ impl JsStmt for Rows {
     }
     fn copy_stmt(&mut self, a: &mut Pools, s: &S, fresh: &mut Vec<(VarId, VarId)>) -> S {
         S(self.copy_recording(a, s.0, fresh))
+    }
+    #[inline]
+    fn declared(&self, a: &Pools, s: &S) -> Option<VarId> {
+        match a.view(s.0) {
+            View::SDecl { var, .. } | View::SRest { var, .. } => Some(var),
+            _ => None,
+        }
+    }
+    fn block_ids(&self, a: &Pools, s: &S, mut sink: impl FnMut(u32)) {
+        let View::SBlock { statements } = a.view(s.0) else { panic!("not a block statement") };
+        for statement in statements {
+            sink(statement.0);
+        }
+    }
+    fn effect_free(&mut self, a: &Pools, s: &S) -> bool {
+        let mut work = std::mem::take(&mut self.work);
+        debug_assert!(work.is_empty());
+        work.push(s.0);
+        let mut free = true;
+        while let Some(node) = work.pop() {
+            self.steps += 1;
+            let ok = match a.view(node) {
+                View::SExp { value } | View::SReturn { value } => a.node(value).flags().contains(NodeFlags::STRICT),
+                View::SBlock { .. }
+                | View::SIf { .. }
+                | View::SWhile { .. }
+                | View::SForRange { .. }
+                | View::SForRangeExisting { .. }
+                | View::SSwitch { .. }
+                | View::STry { .. } => {
+                    work.extend(a.view(node).children());
+                    true
+                }
+                View::SThrow { .. }
+                | View::SDebugger
+                | View::SBreak { .. }
+                | View::SContinue { .. }
+                | View::SDecl { .. }
+                | View::SRest { .. }
+                | View::SForOf { .. }
+                | View::SForAwaitOf { .. } => false,
+                // An expression below a compound statement.
+                _ => a.node(node).flags().contains(NodeFlags::STRICT),
+            };
+            if !ok {
+                free = false;
+                break;
+            }
+        }
+        work.clear();
+        self.work = work;
+        free
     }
     #[inline]
     fn release_stmt(&mut self, a: &mut Pools, s: S) {
