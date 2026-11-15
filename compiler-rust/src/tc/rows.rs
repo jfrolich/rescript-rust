@@ -11,7 +11,7 @@
 
 use std::cmp::Ordering;
 
-use super::graph::{CONSTR, Graph, LINK, Mode, NONE, Node, TUPLE, Ty, VAR};
+use super::graph::{CONSTR, GENERIC, Graph, LINK, Mode, NONE, Node, TUPLE, Ty, VAR};
 use super::segment::{
     EXTENDED, ExtraDescriptor, PackageRow, Range, RowFieldKind, RowFieldRow, Segment, VariantRow,
 };
@@ -1200,8 +1200,244 @@ impl Checker {
     /// Cost: the two flattenings and the merge; one step per field of a
     /// rest; per changed row what [`Checker::set_more`] allocates; 16
     /// bytes of frame and 16 of record per pair. (R3f)
-    pub fn unify_row(&mut self, [t1x, t2x]: [Ty; 2], left: Node, right: Node) -> Result<(), Clash> {
-        todo!("R3f")
+    pub fn unify_row(&mut self, [_, t2x]: [Ty; 2], left: Node, right: Node) -> Result<(), Clash> {
+        // 1. `row_repr` of both.
+        let base = self.extras.row_scratch.len();
+        let (last1, rm1) = self.flatten_row(left);
+        let n1 = self.extras.row_scratch.len() - base;
+        let (last2, rm2) = self.flatten_row(right);
+        let n2 = self.extras.row_scratch.len() - base - n1;
+        // 2. `if unify_eq rm1 rm2 then ()`.
+        if rm1 == rm2 {
+            self.extras.row_scratch.truncate(base);
+            return Ok(());
+        }
+        let home = |c: &Checker, last: Ty, top: Node| {
+            let node = if last.0 == NONE { top } else { c.g.nodes[last.0 as usize] };
+            let ExtraDescriptor::Variant(row) = c.extras.descriptors[node.a as usize] else {
+                unreachable!("a variant node");
+            };
+            (c.extras.variants[row as usize], node.b)
+        };
+        let (row1, home1) = home(self, last1, left);
+        let (row2, home2) = home(self, last2, right);
+        // 3. `merge_row_fields`: `r1`, `r2`, then the pairs.
+        let pairs = self.merge_rows(base, n1);
+        let r1 = base..base + n1 - pairs;
+        let r2 = r1.end..r1.end + n2 - pairs;
+        let paired = r2.end..r2.end + 2 * pairs;
+        // 4. `more`, `fixed`, `closed` (ctype.ml:2547-2553).
+        let fixed1 = self.row_is_fixed(row1, rm1);
+        let fixed2 = self.row_is_fixed(row2, rm2);
+        let more = if fixed1 {
+            rm1
+        } else if fixed2 {
+            rm2
+        } else {
+            let level = self.g.nodes[rm1.0 as usize].level.min(self.g.nodes[rm2.0 as usize].level);
+            self.g.push(Node { head: VAR, level, a: NONE, b: 0 })
+        };
+        let closed = row1.closed || row2.closed;
+        let explain = self.g.mode == Mode::Explain;
+        let (frames, saved) = (self.frames.len(), self.saved.len());
+        // 5. The empty type (ctype.ml:2564-2573).
+        let empty1 = self.all_absent(r1.clone());
+        let empty2 = self.all_absent(r2.clone());
+        let a_side_absent = (0..pairs).all(|k| {
+            let at = paired.start + 2 * k;
+            self.absent_now(at) || self.absent_now(at + 1)
+        });
+        let result = if closed && (empty1 || row2.closed) && (empty2 || row1.closed) && a_side_absent {
+            if explain {
+                let t1 = self.trace_row(base..base, true);
+                let t2 = self.trace_row(base..base, true);
+                self.trace.push([t1, t2]);
+            }
+            Err(Clash)
+        } else {
+            // 6. The name (ctype.ml:2574-2586); `keep` for row 1, then for
+            //    row 2.
+            let keep = |c: &Checker, first: usize| {
+                (0..pairs).all(|k| {
+                    let at = paired.start + 2 * k;
+                    c.absent_now(at + first) || !c.absent_now(at + 1 - first)
+                })
+            };
+            let chosen = if row1.name != NONE
+                && (row1.closed || empty2)
+                && (!row2.closed || (keep(self, 0) && empty1))
+            {
+                Some((row1, home1))
+            } else if row2.name != NONE
+                && (row2.closed || empty1)
+                && (!row1.closed || (keep(self, 1) && empty2))
+            {
+                Some((row2, home2))
+            } else {
+                None
+            };
+            let row0 = VariantRow {
+                fields: Range::default(),
+                more: 0,
+                name: chosen.map_or(NONE, |(row, _)| row.name),
+                name_arguments: chosen.map_or(Range::default(), |(row, _)| row.name_arguments),
+                closed,
+                fixed: fixed1 || fixed2,
+            };
+            let name = (row0, chosen.map_or(0, |(_, home)| home));
+            // 7. `let md1 = rm1.desc and md2 = rm2.desc`.
+            if explain {
+                let extra = self.saved.len() as u32;
+                self.saved.push(self.g.nodes[rm1.0 as usize]);
+                self.saved.push(self.g.nodes[rm2.0 as usize]);
+                self.frames.push(Frame { left: rm1, right: rm2, kind: FrameKind::Fields, extra });
+            }
+            // 8. `set_more row2 r1; set_more row1 r2`.
+            self.set_more(row2, rm2, fixed2, r1, more, closed, name, false)
+                .and_then(|pair2| {
+                    let pair1 = self.set_more(row1, rm1, fixed1, r2, more, closed, name, true)?;
+                    Ok(pair2.or(pair1))
+                })
+        };
+        let pair = match result {
+            Ok(pair) => pair,
+            Err(clash) => {
+                if explain && self.frames.len() > frames {
+                    // `rm1.desc <- md1; rm2.desc <- md2` (ctype.ml:2637-2641):
+                    // the descriptor, at the level the rest has now.
+                    for (rest, slot) in [(rm1, saved), (rm2, saved + 1)] {
+                        let level = self.g.nodes[rest.0 as usize].level;
+                        self.g.write(rest, Node { level, ..self.saved[slot] });
+                    }
+                }
+                self.frames.truncate(frames);
+                self.saved.truncate(saved);
+                self.extras.row_scratch.truncate(base);
+                return Err(clash);
+            }
+        };
+        // 9. The static row below the common tags, which are popped in the
+        //    order of the pairs, then the pair a fixed row asked for.
+        if closed {
+            self.frames.push(Frame { left: t2x, right: t2x, kind: FrameKind::RowEnd, extra: 0 });
+        }
+        let flags = if fixed1 { ROW_FIXED1 } else { 0 } | if fixed2 { ROW_FIXED2 } else { 0 };
+        for k in (0..pairs).rev() {
+            let at = paired.start + 2 * k;
+            let (f1, f2) = (self.extras.row_scratch[at], self.extras.row_scratch[at + 1]);
+            let extra = self.saved.len() as u32;
+            self.saved.push(Node { head: f1.at, level: f2.at, a: more.0, b: flags });
+            self.frames.push(Frame { left: f1.ty, right: f2.ty, kind: FrameKind::RowField, extra });
+        }
+        if let Some([rm, more]) = pair {
+            self.frames.push(Frame { left: rm, right: more, kind: FrameKind::Pair, extra: 0 });
+        }
+        self.extras.row_scratch.truncate(base);
+        Ok(())
+    }
+
+    /// O(chain): the field `extras.row_scratch[at]` is, read now
+    /// ([`field_repr`]; its home is opened, so every `Reither` field of it
+    /// has its reference slot).
+    #[inline]
+    fn field_now_at(&self, at: usize) -> FieldRepr {
+        let field = self.extras.row_scratch[at];
+        field_repr(&self.g, field.ty.0, u32::MAX, self.extras.row_fields[field.at as usize])
+    }
+
+    /// O(chain): whether the field `extras.row_scratch[at]` is `Rabsent`.
+    #[inline]
+    fn absent_now(&self, at: usize) -> bool {
+        self.field_now_at(at).kind == RowFieldKind::Absent
+    }
+
+    /// `empty fields` (compiler/ml/ctype.ml:2563) of a range of the
+    /// scratch. O(fields + chains), no write.
+    fn all_absent(&self, fields: std::ops::Range<usize>) -> bool {
+        fields.into_iter().all(|at| self.absent_now(at))
+    }
+
+    /// `newgenty (Tvariant row)` for the fields `extras.row_scratch[fields]`
+    /// as [`Checker::set_more`] copies a field, with `more`, `closed`,
+    /// `fixed` and the name and name arguments of `name.0` (slots of the
+    /// list at `name.1`). Slots: the present types in field order, `more`,
+    /// the name's arguments, then one reference slot per `Either` field
+    /// holding the handle its source home has in that field's reference
+    /// slot. One node, one descriptor row, one `VariantRow`, one
+    /// `RowFieldRow` a field and those slots; two reads of each field
+    /// (one to count the slots, one to fill them), no allocation beyond
+    /// the pools.
+    fn build_variant(
+        &mut self,
+        fields: std::ops::Range<usize>,
+        more: Ty,
+        closed: bool,
+        fixed: bool,
+        name: (VariantRow, u32),
+    ) -> Ty {
+        let (mut types, mut references) = (0, 0);
+        for at in fields.clone() {
+            let field = self.field_now_at(at);
+            match field.kind {
+                RowFieldKind::Present => types += u32::from(field.first.0 != NONE),
+                RowFieldKind::Either { .. } => references += 1,
+                RowFieldKind::Absent => {}
+            }
+        }
+        let arguments = if name.0.name == NONE { Range::default() } else { name.0.name_arguments };
+        let published = types + 1 + arguments.len;
+        let b = self.g.lists.len() as u32;
+        self.g.lists.resize((b + published + references) as usize, Ty(NONE));
+        let start = self.extras.row_fields.len() as u32;
+        let (mut typed, mut referenced) = (0, 0);
+        for at in fields.clone() {
+            let source = self.extras.row_scratch[at];
+            let row_field = self.extras.row_fields[source.at as usize];
+            let field = self.field_now_at(at);
+            let mut copy = RowFieldRow {
+                name: row_field.name,
+                types: Range::default(),
+                link: NONE,
+                kind: field.kind,
+            };
+            match field.kind {
+                RowFieldKind::Present if field.first.0 != NONE => {
+                    self.g.lists[(b + typed) as usize] = field.first;
+                    copy.types = Range { start: typed, len: 1 };
+                    typed += 1;
+                }
+                RowFieldKind::Either { .. } => {
+                    copy.link = published + referenced;
+                    let chain = self.g.lists[(source.ty.0 + row_field.link) as usize];
+                    self.g.lists[(b + copy.link) as usize] = chain;
+                    referenced += 1;
+                }
+                _ => {}
+            }
+            self.extras.row_fields.push(copy);
+        }
+        self.g.lists[(b + types) as usize] = more;
+        let from = (name.1 + arguments.start) as usize;
+        self.g
+            .lists
+            .copy_within(from..from + arguments.len as usize, (b + types + 1) as usize);
+        let row = self.extras.variants.len() as u32;
+        self.extras.variants.push(VariantRow {
+            fields: Range { start, len: fields.len() as u32 },
+            more: types,
+            name: name.0.name,
+            name_arguments: Range { start: types + 1, len: arguments.len },
+            closed,
+            fixed,
+        });
+        let a = self.extras.descriptors.len() as u32;
+        self.extras.descriptors.push(ExtraDescriptor::Variant(row));
+        self.g.push(Node {
+            head: TUPLE | EXTENDED | (published + references) << 8,
+            level: GENERIC,
+            a,
+            b,
+        })
     }
 
     /// `row_fixed row` (compiler/ml/btype.ml:153-160) for a flattened row:
@@ -1271,7 +1507,58 @@ impl Checker {
         name: (VariantRow, u32),
         first: bool,
     ) -> Result<Option<[Ty; 2]>, Clash> {
-        todo!("R3f")
+        // 1. `filter_row_fields row.row_closed rest` when `closed`, from
+        //    the last field to the first; the kept ones move up to the end.
+        let mut kept = rest.end;
+        for at in rest.clone().rev() {
+            #[cfg(test)]
+            super::steps::tick();
+            let field = self.field_now_at(at);
+            let dropped = closed
+                && match field.kind {
+                    RowFieldKind::Absent => true,
+                    RowFieldKind::Either { matched: false, .. } if row.closed => {
+                        let holders = self.resolve(field.end, RES_ABSENT, Ty(NONE));
+                        self.settle(holders, RES_ABSENT);
+                        true
+                    }
+                    _ => false,
+                };
+            if !dropped {
+                kept -= 1;
+                self.extras.row_scratch[kept] = self.extras.row_scratch[at];
+            }
+        }
+        let rest = kept..rest.end;
+        // 2. A row that may not gain a tag (ctype.ml:2600-2604).
+        if (!rest.is_empty() && (row.closed || fixed)) || (closed && fixed && !row.closed) {
+            if self.g.mode == Mode::Explain {
+                let t1 = self.trace_row(rest.start..rest.start, true);
+                let t2 = self.trace_row(rest, false);
+                self.trace.push(if first { [t1, t2] } else { [t2, t1] });
+            }
+            return Err(Clash);
+        }
+        // 3. A fixed row (ctype.ml:2609-2612).
+        if fixed {
+            if more == rm {
+                return Ok(None);
+            }
+            if self.g.nodes[rm.0 as usize].tag() == VAR {
+                self.g.link(rm, more);
+                return Ok(None);
+            }
+            return Ok(Some([rm, more]));
+        }
+        // 4. `let ty = newgenty (Tvariant {row0 with row_fields = rest}) in
+        //    update_level !env rm.level ty; link_type rm ty`.
+        let level = self.g.nodes[rm.0 as usize].level;
+        let ty = self.build_variant(rest, more, closed, name.0.fixed, name);
+        if level != GENERIC {
+            self.lower(ty, level)?;
+        }
+        self.g.link(rm, ty);
+        Ok(None)
     }
 
     /// `set_row_field e v` (compiler/ml/btype.ml:742-744) for a `v` that is
@@ -1282,7 +1569,16 @@ impl Checker {
     /// The holders are not touched: [`Checker::settle`] does that once the
     /// resolution stands. O(1); one slot for a type. (R3f)
     pub fn resolve(&mut self, e: Ty, kind: u32, ty: Ty) -> u32 {
-        todo!("R3f")
+        let reference = self.g.nodes[e.0 as usize];
+        let b = self.g.lists.len() as u32;
+        let arity = if ty.0 == NONE {
+            0
+        } else {
+            self.g.lists.push(ty);
+            1
+        };
+        self.g.write(e, Node { head: TUPLE | arity << 8, level: reference.level, a: kind, b });
+        reference.b
     }
 
     /// The holders of a reference that was resolved to `kind`
@@ -1301,7 +1597,23 @@ impl Checker {
     /// skipped. O(holders), one step and at most one node write each, no
     /// allocation. (R3f)
     pub fn settle(&mut self, holders: u32, kind: u32) {
-        todo!("R3f")
+        let mut at = holders;
+        while at != NONE {
+            #[cfg(test)]
+            super::steps::tick();
+            let holder = self.extras.holders[at as usize];
+            at = holder.next;
+            let node = self.g.nodes[holder.node.0 as usize];
+            if node.head & (EXTENDED | 15) != TUPLE || node.a & RES_KIND != RES_EITHER {
+                continue;
+            }
+            let settled = if kind == RES_ABSENT {
+                Node { head: TUPLE, a: RES_ABSENT, b: 0, ..node }
+            } else {
+                Node { head: TUPLE | 1 << 8, a: RES_PRESENT, ..node }
+            };
+            self.g.write(holder.node, settled);
+        }
     }
 
     /// `set_row_field e (Reither (c, tl, m, e'))` (compiler/ml/ctype.ml:
@@ -1420,7 +1732,27 @@ impl Checker {
     /// linked to a new `Tnil` node at its level (one node, one 12-byte
     /// descriptor row). O(fields of the row), one step a field. (R3f)
     pub fn row_end(&mut self, frame: Frame) {
-        todo!("R3f")
+        let top = self.g.repr(frame.left);
+        let node = self.open_row(top);
+        let variant = node.head & EXTENDED != 0
+            && matches!(self.extras.descriptors[node.a as usize], ExtraDescriptor::Variant(_));
+        if !variant {
+            return;
+        }
+        let base = self.extras.row_scratch.len();
+        let (_, more) = self.flatten_row(node);
+        let end = self.extras.row_scratch.len();
+        let static_row = (base..end).all(|at| !matches!(self.field_now_at(at).kind, RowFieldKind::Either { .. }));
+        self.extras.row_scratch.truncate(base);
+        let rest = self.g.nodes[more.0 as usize];
+        if static_row && rest.tag() == VAR {
+            // `link_type rm (newty2 rm.level Tnil)`.
+            let nil = self.extras.descriptors.len() as u32;
+            self.extras.descriptors.push(ExtraDescriptor::Nil);
+            let b = self.g.lists.len() as u32;
+            let tnil = self.g.push(Node { head: TUPLE | EXTENDED, level: rest.level, a: nil, b });
+            self.g.link(more, tnil);
+        }
     }
 
     /// `mkvariant fields closed` (compiler/ml/ctype.ml:1704-1713) for a
@@ -1429,7 +1761,16 @@ impl Checker {
     /// field, whose `more` is a new variable at the current level, not
     /// fixed, with no name. Failure path of `Mode::Explain` only. (R3f)
     pub fn trace_row(&mut self, fields: std::ops::Range<usize>, closed: bool) -> Ty {
-        todo!("R3f")
+        let more = self.g.push(Node { head: VAR, level: self.g.level, a: NONE, b: 0 });
+        let unnamed = VariantRow {
+            fields: Range::default(),
+            more: 0,
+            name: NONE,
+            name_arguments: Range::default(),
+            closed,
+            fixed: false,
+        };
+        self.build_variant(fields, more, closed, false, (unnamed, 0))
     }
 
     /// The trace pair of a common tag whose fields clashed
@@ -1673,12 +2014,23 @@ mod tests {
     /// `Extras::from_segment` lays out a published row; and the node.
     fn row_of(n: u32, typed: bool, kind: impl Fn(u32) -> RowFieldKind) -> (Checker, Ty) {
         let mut c = Checker::new(Graph::default(), Default::default());
+        let node = add_row(&mut c, 0..n, typed, kind);
+        (c, node)
+    }
+
+    /// An open row of the tags `names` (named `f00000` and up) on `c`, as
+    /// [`row_of`] makes one.
+    fn add_row(c: &mut Checker, names: std::ops::Range<u32>, typed: bool, kind: impl Fn(u32) -> RowFieldKind) -> Ty {
         let ty = push(&mut c.g, CONSTR, 0, &[]);
         let mut slots = Vec::new();
-        for k in 0..n {
-            let start = c.extras.names.bytes.len() as u32;
-            c.extras.names.bytes.extend_from_slice(format!("f{k:05}").as_bytes());
-            c.extras.names.spans.push(Range { start, len: 6 });
+        let first = c.extras.row_fields.len();
+        for k in names.clone() {
+            while c.extras.names.spans.len() <= k as usize {
+                let start = c.extras.names.bytes.len() as u32;
+                let text = format!("f{:05}", c.extras.names.spans.len());
+                c.extras.names.bytes.extend_from_slice(text.as_bytes());
+                c.extras.names.spans.push(Range { start, len: 6 });
+            }
             let types = Range { start: slots.len() as u32, len: u32::from(typed) };
             if typed {
                 slots.push(ty);
@@ -1688,7 +2040,7 @@ mod tests {
         let more = slots.len() as u32;
         slots.push(push(&mut c.g, VAR, NONE, &[]));
         let row = VariantRow {
-            fields: Range { start: 0, len: n },
+            fields: Range { start: first as u32, len: names.len() as u32 },
             more,
             name: NONE,
             name_arguments: Range::default(),
@@ -1696,16 +2048,60 @@ mod tests {
             fixed: false,
         };
         let mut slot = published_slots(row, &c.extras.row_fields);
-        for field in &mut c.extras.row_fields {
+        for field in &mut c.extras.row_fields[first..] {
             if matches!(field.kind, RowFieldKind::Either { .. }) {
                 field.link = slot;
                 slot += 1;
             }
         }
+        let index = c.extras.variants.len() as u32;
         c.extras.variants.push(row);
-        c.extras.descriptors.push(ExtraDescriptor::Variant(0));
-        let node = push(&mut c.g, TUPLE | EXTENDED, 0, &slots);
-        (c, node)
+        let descriptor = c.extras.descriptors.len() as u32;
+        c.extras.descriptors.push(ExtraDescriptor::Variant(index));
+        push(&mut c.g, TUPLE | EXTENDED, descriptor, &slots)
+    }
+
+    /// Two open rows of 10,000 tags each, none in common: each row gains
+    /// the other's 10,000 in one node. Steps: two flattenings, the merge,
+    /// one a field of each rest and the lowering of the two new rows; at
+    /// most 7 a tag.
+    #[test]
+    fn rows_that_gain_ten_thousand_tags_make_one_node_each() {
+        let mut c = Checker::new(Graph::default(), Default::default());
+        let present = |_| RowFieldKind::Present;
+        let left = add_row(&mut c, 0..10_000, true, present);
+        let right = add_row(&mut c, 10_000..20_000, true, present);
+        let nodes = c.g.nodes.len();
+        let steps = super::super::steps::scope(|| c.unify(left, right).unwrap());
+        assert_eq!(c.g.nodes.len() - nodes, 3, "a variable and two rows");
+        assert!(steps <= 7 * 20_000, "{steps}");
+    }
+
+    /// A reference held by 10,000 chain nodes, resolved to absent: one
+    /// step a holder, and each holder stops being a parent of its type.
+    #[test]
+    fn settling_ten_thousand_holders_is_one_step_a_holder() {
+        let mut c = Checker::new(Graph::default(), Default::default());
+        let ty = push(&mut c.g, VAR, NONE, &[]);
+        let end = c.g.push(ref_node(1, NONE));
+        let mut head = NONE;
+        let mut chains = Vec::new();
+        for _ in 0..10_000 {
+            let chain = push(&mut c.g, TUPLE, RES_EITHER, &[ty, end]);
+            c.extras.holders.push(Holder { node: chain, next: head });
+            head = c.extras.holders.len() as u32 - 1;
+            chains.push(chain);
+        }
+        c.g.nodes[end.0 as usize].b = head;
+        let steps = super::super::steps::scope(|| {
+            let holders = c.resolve(end, RES_ABSENT, Ty(NONE));
+            c.settle(holders, RES_ABSENT);
+        });
+        assert_eq!(steps, 10_000);
+        for chain in chains {
+            let node = c.g.nodes[chain.0 as usize];
+            assert_eq!((node.a, node.arity()), (RES_ABSENT, 0));
+        }
     }
 
     /// Opening a node of 10,000 `Reither` fields with a type each is one

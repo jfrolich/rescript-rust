@@ -2291,7 +2291,6 @@ fn opening_a_row_gives_each_reither_field_a_reference() {
 /// (`link_type t1' t2`, ctype.ml:2331), whose row now reads `B A()`.
 /// Reaches: R3f.
 #[test]
-#[ignore = "R3f build"]
 fn an_open_row_takes_the_tags_it_lacks() {
     let mut c = checker(Mode::Success);
     let int = constr(&mut c, INT, &[]);
@@ -2383,7 +2382,6 @@ fn a_closed_row_closes_the_other_and_a_static_row_ends_in_nil() {
 /// linked; the pair is two empty closed rows.
 /// Reaches: R3f.
 #[test]
-#[ignore = "R3f build"]
 fn a_closed_row_refuses_a_tag_and_the_empty_type_is_a_clash() {
     for both_closed in [false, true] {
         let mut c = checker(Mode::Explain);
