@@ -1,0 +1,12 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/alias_path_hint_modtype_alias.res[0m:[2m18:11-18[0m
+
+  16 [2m│[0m }
+  17 [2m│[0m module O = Outer
+  [1;31m18[0m [2m│[0m module M: [1;31mO.A.Sigg[0m = {
+  19 [2m│[0m   let x = 1
+  20 [2m│[0m }
+
+  Unbound module type O.A.Sigg
+Hint: Did you mean Sig?

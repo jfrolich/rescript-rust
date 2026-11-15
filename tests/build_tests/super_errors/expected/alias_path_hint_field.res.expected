@@ -1,0 +1,18 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/alias_path_hint_field.res[0m:[2m20:25-32[0m
+
+  18 [2m│[0m   include Outer
+  19 [2m│[0m }
+  [1;31m20[0m [2m│[0m let g = (r: I.A.r) => r.[1;31mI.A.aple[0m
+  21 [2m│[0m 
+
+  You're trying to access the record field [1;33mI.A.aple[0m, but the thing you're trying to access it on is not a record. 
+  
+The type of the thing you're trying to access it on is:
+  
+I.A.r
+  
+
+  Only records have fields that can be accessed with dot notation.
+Hint: Did you mean apple?
