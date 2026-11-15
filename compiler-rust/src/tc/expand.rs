@@ -673,7 +673,6 @@ impl Checker {
     /// [`Checker::expand_once`] of `ty` with `(node, info)` the answer of
     /// [`Checker::load_head`] for it, loaded by the caller: the same steps
     /// and cost less the node and row loads. (K4)
-    #[inline(always)]
     fn expand_loaded(
         &mut self,
         ty: Ty,
