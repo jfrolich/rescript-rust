@@ -6369,10 +6369,128 @@ fn subtype_rec(
             cstrs.univar_pairs.truncate(saved);
             result
         }
+        (
+            TypeDesc::Tpackage {
+                path: p1,
+                lids: lids1,
+                args: args1,
+            },
+            TypeDesc::Tpackage {
+                path: p2,
+                lids: lids2,
+                args: args2,
+            },
+        ) => {
+            subtype_package(
+                ctx,
+                env,
+                trace,
+                t1,
+                (*p1, *lids1, *args1),
+                t2,
+                (*p2, *lids2, *args2),
+                cstrs,
+            );
+            Ok(())
+        }
         _ => {
             push_subtype_cstr(cstrs, trace, t1, t2, None);
             Ok(())
         }
+    }
+}
+
+/// The package arm of OCaml `subtype_rec` (compiler/ml/ctype.ml:4077-4104):
+/// `t1 = module(P1 with nl1 = tl1)` is a subtype of `t2 = module(P2 with
+/// nl2 = tl2)` when, after completing each constraint list with the
+/// manifests the other side's module type gives the other side's labels,
+/// every type `t2` constrains is one `t1` gives it, and the module types are
+/// the same or `P1` with its constraints is included in `P2` with its
+/// constraints without coercion (`Typemod.package_subtype`). The pairs of
+/// constrained types are recorded as constraints, unified when the subtype
+/// check is enforced; any other outcome records `(t1, t2)` itself. Cost: two
+/// `complete_type_list` and one constraint per label of `t2`; for different
+/// paths, one speculative unification per label and one module inclusion
+/// check, all undone.
+#[allow(clippy::too_many_arguments)]
+fn subtype_package(
+    ctx: &TypeContext,
+    env: &Env,
+    trace: &[TypePair],
+    t1: TypeExprRef,
+    (p1, lids1, args1): (
+        Path,
+        super::type_expr::PackageLidsRef,
+        super::type_expr::TypeRefList,
+    ),
+    t2: TypeExprRef,
+    (p2, lids2, args2): (
+        Path,
+        super::type_expr::PackageLidsRef,
+        super::type_expr::TypeRefList,
+    ),
+    cstrs: &mut SubtypeAcc,
+) {
+    let nl1 = ctx.package_lids(lids1);
+    let nl2 = ctx.package_lids(lids2);
+    let completed = complete_type_list(
+        ctx,
+        env,
+        &nl2,
+        ctx.get_level(t1),
+        p1,
+        &nl1,
+        ctx.type_list(args1),
+        false,
+    )
+    .and_then(|ntl1| {
+        let ntl2 = complete_type_list(
+            ctx,
+            env,
+            &nl1,
+            ctx.get_level(t2),
+            p2,
+            &nl2,
+            ctx.type_list(args2),
+            true,
+        )?;
+        // `List.assoc n2 ntl1`. Both lists are sorted and `ntl1` holds
+        // every label of `nl2` and `nl1`, so one forward walk finds each.
+        let mut ntl1 = ntl1.into_iter();
+        ntl2.into_iter()
+            .map(|(label, ty2)| {
+                ntl1.find(|(label1, _)| package_longident_cmp(ctx, label1, &label).is_eq())
+                    .map(|(_, ty1)| (ty1, ty2))
+            })
+            .collect::<Option<Vec<_>>>()
+    });
+    let accepted = completed.filter(|pairs| {
+        eq_package_path(ctx, env, &p1, &p2) || {
+            // ctype.ml:4093-4102: unify the constrained types speculatively,
+            // then ask whether the module types are included; undo both.
+            let snapshot = ctx.snapshot_type_state();
+            let included = pairs.iter().all(|&(ty1, ty2)| {
+                let mut state = UnifyState::new();
+                state.set_env(env);
+                unify(ctx, &mut state, ty1, ty2).is_ok()
+            }) && crate::types::typemod::package_subtype(
+                ctx,
+                env,
+                (&p1, &nl1, ctx.type_list(args1)),
+                (&p2, &nl2, ctx.type_list(args2)),
+            );
+            ctx.restore_type_state(snapshot);
+            included
+        }
+    });
+    match accepted {
+        // `cstrs' @ cstrs`: enforced in the reverse of `ntl2`'s order.
+        Some(pairs) => {
+            for (ty1, ty2) in pairs.into_iter().rev() {
+                push_subtype_cstr(cstrs, trace, ty1, ty2, None);
+            }
+        }
+        None => push_subtype_cstr(cstrs, trace, t1, t2, None),
     }
 }
 
@@ -7542,6 +7660,226 @@ fn package_longident_same_label(
     }
 }
 
+/// OCaml `Longident.cmp` (compiler/ml/longident.ml:17-28) on package labels:
+/// identifiers before dotted paths, components compared as strings. CMI
+/// labels carry synthetic `StrIdx` values, so unequal indices are compared by
+/// their resolved names. Cost: one step per component of the shorter label.
+fn package_longident_cmp(
+    ctx: &TypeContext,
+    left: &crate::parser::longident::Longident,
+    right: &crate::parser::longident::Longident,
+) -> std::cmp::Ordering {
+    use crate::parser::longident::Longident;
+    use std::cmp::Ordering;
+
+    let component = |left: crate::intern::StrIdx, right: crate::intern::StrIdx| {
+        if left == right {
+            return Ordering::Equal;
+        }
+        ctx.resolve_any_longident_component(left)
+            .cmp(&ctx.resolve_any_longident_component(right))
+    };
+    match (left, right) {
+        (Longident::Lident(left), Longident::Lident(right)) => component(*left, *right),
+        (Longident::Lident(_), _) => Ordering::Less,
+        (_, Longident::Lident(_)) => Ordering::Greater,
+        (Longident::Ldot(left_prefix, left), Longident::Ldot(right_prefix, right)) => {
+            package_longident_cmp(ctx, left_prefix, right_prefix)
+                .then_with(|| component(*left, *right))
+        }
+        // A package label is never a functor application.
+        (Longident::Lapply(..), _) | (_, Longident::Lapply(..)) => Ordering::Equal,
+    }
+}
+
+/// The module path `Pkg.M1...Mn` and the type name of the label `M1...Mn.t`
+/// read in the module `pkg` (OCaml `concat_longident (Lident "Pkg") n`,
+/// compiler/ml/ctype.ml:2146). `None` for a functor application, which no
+/// package label is. Cost: one step per component.
+fn package_label_type_path(
+    ctx: &TypeContext,
+    pkg: Ident,
+    label: &crate::parser::longident::Longident,
+) -> Option<(Path, String)> {
+    use crate::parser::longident::Longident;
+
+    fn module_path(
+        ctx: &TypeContext,
+        pkg: Ident,
+        lid: &crate::parser::longident::Longident,
+    ) -> Option<Path> {
+        match lid {
+            Longident::Lident(name) => Some(Path::pdot(
+                Path::pident(pkg),
+                ctx.resolve_any_longident_component(*name)?,
+            )),
+            Longident::Ldot(prefix, name) => Some(Path::pdot(
+                module_path(ctx, pkg, prefix)?,
+                ctx.resolve_any_longident_component(*name)?,
+            )),
+            Longident::Lapply(..) => None,
+        }
+    }
+    match label {
+        Longident::Lident(name) => Some((
+            Path::pident(pkg),
+            ctx.resolve_any_longident_component(*name)?,
+        )),
+        Longident::Ldot(prefix, name) => Some((
+            module_path(ctx, pkg, prefix)?,
+            ctx.resolve_any_longident_component(*name)?,
+        )),
+        Longident::Lapply(..) => None,
+    }
+}
+
+/// OCaml `complete_type_list ?allow_absent env nl1 lv2 (Mty_ident mty2) nl2
+/// tl2` (compiler/ml/ctype.ml:2135-2169): the sorted labels `lids` with their
+/// types `args`, merged with every label of the sorted `required` that the
+/// module type `mty_path` defines as a public, parameterless, abstract type
+/// with a manifest. That manifest is read through a fresh module `Pkg` of
+/// type `mty_path` and copied without its dependency on `Pkg` at `level`
+/// (`nondep_instance`, ctype.ml:2123-2131). `None` is OCaml's `Not_found`: a
+/// required label the module type does not define so. With `allow_absent` a
+/// label that is not found, abstract without a manifest, or whose manifest
+/// depends on `Pkg` is skipped instead (ctype.ml:2156-2166).
+///
+/// Cost: one merge step per label of both lists; the environment with `Pkg`
+/// is built, and one type lookup and one dependency-free copy of its
+/// manifest made, only for a required label missing from `lids`, so two
+/// packages with the same labels cost the merge alone.
+fn complete_type_list(
+    ctx: &TypeContext,
+    env: &Env,
+    required: &[crate::parser::longident::Longident],
+    level: i32,
+    mty_path: Path,
+    lids: &[crate::parser::longident::Longident],
+    args: crate::types::type_expr::TypeSlice<'_>,
+    allow_absent: bool,
+) -> Option<Vec<(crate::parser::longident::Longident, TypeExprRef)>> {
+    use std::cmp::Ordering;
+
+    let mut pkg_env: Option<(Ident, Env)> = None;
+    let mut completed = Vec::with_capacity(lids.len().max(required.len()));
+    let mut existing = lids.iter().zip(args.iter()).peekable();
+    let mut required = required.iter().peekable();
+    while let Some(&label) = required.peek() {
+        #[cfg(test)]
+        crate::tc::steps::tick();
+        // ctype.ml:2141-2142: an existing label not after the required one
+        // is kept; the required label is consumed when it is the same.
+        if let Some(&(existing_label, ty)) = existing.peek() {
+            let order = package_longident_cmp(ctx, label, existing_label);
+            if order != Ordering::Less {
+                completed.push((existing_label.clone(), ty));
+                existing.next();
+                if order == Ordering::Equal {
+                    required.next();
+                }
+                continue;
+            }
+        }
+        required.next();
+        // ctype.ml:2136-2137: `Pkg` and the environment holding it.
+        let (pkg, pkg_env) = pkg_env.get_or_insert_with(|| {
+            let pkg = ctx.create_ident("Pkg");
+            let mut pkg_env = env.clone();
+            pkg_env.add_module(
+                pkg,
+                super::decl::ModuleDeclaration {
+                    md_type: super::decl::ModuleType::MtyIdent(mty_path),
+                    md_attributes: vec![],
+                    md_loc: crate::types::DeclLoc::none(),
+                    md_path: None,
+                },
+            );
+            (pkg, pkg_env)
+        });
+        let found = package_label_type_path(ctx, *pkg, label).and_then(|(parent, name)| {
+            let mut persistent_env = in_process_module_resolution_env(ctx);
+            crate::types::typecore::lookup_type_in_resolved_path(
+                &parent,
+                &name,
+                pkg_env,
+                &mut persistent_env,
+                ctx,
+            )
+        });
+        let Some((_, _, decl)) = found else {
+            if allow_absent {
+                continue;
+            }
+            return None;
+        };
+        let parameterless_abstract = decl.type_arity == 0
+            && matches!(decl.type_kind, super::decl::TypeKind::TypeAbstract)
+            && decl.type_private == PrivateFlag::Public;
+        match decl.type_manifest {
+            Some(manifest) if parameterless_abstract => {
+                // `nondep_instance env' lv2 id2 t2`; its `Not_found` is
+                // caught like a missing label (ctype.ml:2166).
+                let Some(ty) = nondep_type(ctx, pkg_env, pkg, manifest) else {
+                    if allow_absent {
+                        continue;
+                    }
+                    return None;
+                };
+                // At the generic level OCaml copies the copy once more
+                // (`duplicate_type`); the nondep copy is already fresh.
+                let ty = if level == GENERIC_LEVEL {
+                    ty
+                } else {
+                    let old_level = ctx.current_level();
+                    ctx.set_current_level(level);
+                    let ty = instance(ctx, ty);
+                    ctx.set_current_level(old_level);
+                    ty
+                };
+                completed.push((label.clone(), ty));
+            }
+            None if parameterless_abstract && allow_absent => {}
+            // ctype.ml:2164 and 2167: `Exit`, raised as `Not_found` even
+            // with `allow_absent`.
+            _ => return None,
+        }
+    }
+    completed.extend(existing.map(|(label, ty)| (label.clone(), ty)));
+    Some(completed)
+}
+
+/// OCaml `normalize_package_path` (compiler/ml/ctype.ml:571-582): follow the
+/// module type abbreviations `module type T = U` from `path`, then the
+/// module aliases of its prefix, until neither changes it. Cost: one module
+/// type lookup and one prefix normalization per abbreviation followed.
+pub(crate) fn normalize_package_path(ctx: &TypeContext, env: &Env, path: &Path) -> Path {
+    let mut path = *path;
+    loop {
+        let mut persistent_env = in_process_module_resolution_env(ctx);
+        if let Some(super::decl::ModuleType::MtyIdent(target)) =
+            crate::types::typemod::find_modtype_expansion(&path, env, &mut persistent_env, ctx)
+        {
+            path = target;
+            continue;
+        }
+        let PathView::Pdot(prefix, name, pos) = path.view() else {
+            return path;
+        };
+        let normalized = normalize_path_full(ctx, env, prefix);
+        if normalized.same(prefix) {
+            return path;
+        }
+        path = Path::pdot_pos(normalized, *name, *pos);
+    }
+}
+
+/// OCaml `eq_package_path` (compiler/ml/ctype.ml:2110-2112): the same path,
+/// or the same path once both are normalized. Cost: nothing for the same
+/// path, otherwise two `normalize_package_path`.
+fn eq_package_path(ctx: &TypeContext, env: &Env, p1: &Path, p2: &Path) -> bool {
+    p1.same(p2) || normalize_package_path(ctx, env, p1).same(&normalize_package_path(ctx, env, p2))
+}
+
 /// Unify two types.
 ///
 /// This is the main entry point for unification. It attempts to make
@@ -8103,6 +8441,12 @@ fn closed_parameterized_type(
         iter_type_expr(ctx, node, |child| work.push(child));
     }
     true
+}
+
+/// OCaml `free_variables ty = []` (compiler/ml/ctype.ml:431-434): `ty` has
+/// no type variable. Cost: one step per node reachable from `ty`.
+pub(crate) fn is_closed_type(ctx: &TypeContext, ty: TypeExprRef) -> bool {
+    closed_parameterized_type(ctx, std::iter::empty(), ty)
 }
 
 fn has_cached_expansion(ctx: &TypeContext, path: &Path, mut memo: AbbrevMemoRef) -> bool {
@@ -15314,6 +15658,36 @@ mod tests {
         assert!(!deep_occur(&ctx, needle, without_needle));
         let mut budget = 256;
         assert!(!surely_univar_free(&ctx, without_needle, &mut budget));
+    }
+
+    #[test]
+    fn complete_type_list_with_the_same_labels_is_one_step_per_label_at_ten_thousand() {
+        use crate::parser::longident::Longident;
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let env = Env::empty();
+        let int = Path::pident(crate::ident::Ident::create_persistent("int"));
+        let mty = Path::pident(crate::ident::Ident::create_persistent("S"));
+        let lids: Vec<_> = (0..10_000)
+            .map(|i| Longident::Lident(crate::intern::StrIdx(i)))
+            .collect();
+        let args: Vec<_> = (0..10_000).map(|_| ctx.new_constr(int, vec![])).collect();
+        let args = ctx.new_type_list(&args);
+        let mut completed = None;
+        let steps = crate::tc::steps::scope(|| {
+            completed = complete_type_list(
+                &ctx,
+                &env,
+                &lids,
+                0,
+                mty,
+                &lids,
+                ctx.type_list(args),
+                false,
+            )
+        });
+        // Every required label is an existing one: no lookup, one merge step each.
+        assert_eq!(completed.map(|completed| completed.len()), Some(10_000));
+        assert_eq!(steps, 10_000);
     }
 
     #[test]
