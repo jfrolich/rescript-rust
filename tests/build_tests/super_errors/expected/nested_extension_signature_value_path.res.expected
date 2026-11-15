@@ -1,0 +1,16 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/nested_extension_signature_value_path.res[0m:[2m9:5-11[0m
+
+   7 [2m│[0m module S: {
+   8 [2m│[0m   let x: int
+   [1;31m9[0m [2m│[0m } = [1;31mOuter.R[0m
+  10 [2m│[0m 
+
+  Signature mismatch:
+  
+  Actual declaration ([36m/.../fixtures/nested_extension_signature_value_path.res[0m:[2m4:9[0m):
+    let x: t
+  
+  Expected declaration ([36m/.../fixtures/nested_extension_signature_value_path.res[0m:[2m8:3-12[0m):
+    let x: int

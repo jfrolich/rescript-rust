@@ -1,0 +1,23 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/nested_extension_signature_argument.res[0m:[2m7:7-12:3[0m
+
+   5 [2m│[0m       type ext += C(string)
+   6 [2m│[0m     }
+   [1;31m7[0m [2m│[0m   } = [1;31m{[0m
+   [1;31m8[0m [2m│[0m [1;31m    module R = {[0m
+   [2m.[0m [2m│[0m [2m...[0m
+  [1;31m11[0m [2m│[0m [1;31m    }[0m
+  [1;31m12[0m [2m│[0m [1;31m  }[0m
+  13 [2m│[0m }
+  14 [2m│[0m 
+
+  Signature mismatch:
+  
+  In module R:
+  
+  Actual declaration ([36m/.../fixtures/nested_extension_signature_argument.res[0m:[2m10:19-24[0m):
+    type ext += C(int)
+  
+  Expected declaration ([36m/.../fixtures/nested_extension_signature_argument.res[0m:[2m5:19-27[0m):
+    type ext += C(string)

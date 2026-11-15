@@ -1276,10 +1276,17 @@ fn modtypes_inner(
         path: &Path,
         namespace: PathNamespace,
     ) -> Option<ModuleType> {
-        fn should_try_env_lazy(path: &Path) -> bool {
+        fn should_try_env_lazy(path: &Path, namespace: PathNamespace) -> bool {
             match path.view() {
                 PathView::Pident(id) => id.is_persistent() || id.stamp() == 0,
-                PathView::Pdot(_, _, _) => true,
+                // A dotted module is OCaml `expand_module_alias`, `(Env.find_module
+                // path env).md_type` (compiler/ml/includemod.ml:99-101): the
+                // declaration its parent's components hold, under the parent's
+                // substitution only (compiler/ml/env.ml:1555-1557). Its own
+                // items keep their identifiers (`type ext` of `Outer.R` is
+                // `ext`, not `Outer.R.ext`), which `expand_local` reads; the
+                // components view of the path itself prefixes them.
+                PathView::Pdot(_, _, _) => matches!(namespace, PathNamespace::ModuleType),
                 PathView::Papply(_, _) => false,
             }
         }
@@ -1349,7 +1356,7 @@ fn modtypes_inner(
             }
         }
 
-        if should_try_env_lazy(path) {
+        if should_try_env_lazy(path, namespace) {
             if let Some(resolved) =
                 crate::types::ctype::resolve_module_type_through_env(type_ctx, env, path)
             {
@@ -4962,7 +4969,27 @@ fn extension_constructors(
         expected: Box::new(sig_ext.clone()),
     };
 
-    if !impl_ext.ext_type_path.same(&sig_ext.ext_type_path) {
+    // includecore.ml:717-728: the extended types are compared as types,
+    // `Ctype.equal env true (ty1 :: ext1.ext_type_params) (ty2 ::
+    // ext2.ext_type_params)`, so a path that expands to the other one in
+    // `env` matches it: `type t = A.ext = ..` with `type A.ext += C`, or
+    // the strengthened `type ext = Outer.R.ext` of a nested module whose
+    // constructor is read through `Outer.R`. Cost: two type nodes and one
+    // `equal` over the parameters; the lists stay inline up to three
+    // parameters.
+    let impl_ty = type_ctx.new_generic_constr(
+        impl_ext.ext_type_path,
+        impl_ext.ext_type_params.clone(),
+    );
+    let sig_ty =
+        type_ctx.new_generic_constr(sig_ext.ext_type_path, sig_ext.ext_type_params.clone());
+    let impl_types: smallvec::SmallVec<[TypeExprRef; 4]> = std::iter::once(impl_ty)
+        .chain(impl_ext.ext_type_params.iter().copied())
+        .collect();
+    let sig_types: smallvec::SmallVec<[TypeExprRef; 4]> = std::iter::once(sig_ty)
+        .chain(sig_ext.ext_type_params.iter().copied())
+        .collect();
+    if !crate::types::ctype::equal(type_ctx, env, true, &impl_types, &sig_types) {
         return Err(mismatch());
     }
 
@@ -4971,23 +4998,6 @@ fn extension_constructors(
         &impl_ext.ext_type_params,
         &sig_ext.ext_type_params,
     );
-    if impl_ext.ext_type_params.len() != sig_ext.ext_type_params.len()
-        || impl_ext
-            .ext_type_params
-            .iter()
-            .zip(sig_ext.ext_type_params.iter())
-            .any(|(impl_param, sig_param)| {
-                !type_exprs_equal_for_inclusion(
-                    type_ctx,
-                    Some(env),
-                    &param_map,
-                    *impl_param,
-                    *sig_param,
-                )
-            })
-    {
-        return Err(mismatch());
-    }
 
     // `compare_constructor_arguments env (Ident.create "")
     // ext1.ext_type_params ext2.ext_type_params ext1.ext_args ext2.ext_args
