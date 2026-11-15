@@ -3308,7 +3308,6 @@ fn a_clash_in_the_bodies_below_a_swapped_unify3_is_reversed() {
 /// No row is written.
 /// Reaches: R3f, R3g.
 #[test]
-#[ignore = "R3g build"]
 fn the_types_that_hold_a_universal_variable_are_unified_not_gained() {
     let side = |c: &mut Checker, univar: bool| {
         let u = univar_at(c, 2);
@@ -3371,7 +3370,6 @@ fn the_types_that_hold_a_universal_variable_are_unified_not_gained() {
 ///
 /// Reaches: R3f, R3g.
 #[test]
-#[ignore = "R3g build"]
 fn universal_variables_at_ten_thousand() {
     let binders = |n: u32| {
         let mut c = checker(Mode::Success);

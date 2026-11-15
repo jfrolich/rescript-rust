@@ -3962,7 +3962,6 @@ mod tests {
     /// decision 49).
     /// Reaches: R3m, R3e, R3f, R3n, R3g.
     #[test]
-    #[ignore = "R3g build"]
     fn universal_variables_agree_on_fixed_cases() {
         let program = compile(UNIVAR_PROGRAM.to_string());
         let mut cases: Vec<Vec<Op>> = Vec::new();
@@ -4023,7 +4022,6 @@ mod tests {
     /// builder.
     /// Reaches: R3m, R3e, R3f, R3n, R3g.
     #[test]
-    #[ignore = "R3g build"]
     fn univar_plan_agrees_on_generated_cases() {
         let coverage = run_cases(Plan::new(Tier::Full, UNIVAR_PLAN), 1, 100, 100);
         assert_eq!(coverage.cases, 10_000);

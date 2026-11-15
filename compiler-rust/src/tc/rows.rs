@@ -3008,7 +3008,61 @@ impl Checker {
         frame: Frame,
         gained: [std::ops::Range<usize>; 2],
     ) -> Result<Option<[std::ops::Range<usize>; 2]>, [Ty; 2]> {
-        todo!("R3g")
+        let [gained1, gained2] = gained;
+        // `let tl1', tlu1 = split_univars tl1' and tl2', tlu2 = ...`.
+        let (kept1, held1) = self.partition_univars(gained1);
+        let (kept2, held2) = self.partition_univars(gained2);
+        match (held1.is_empty(), held2.is_empty()) {
+            (true, true) => Ok(Some([kept1, kept2])),
+            (false, false) if self.extras.passive_variants => Ok(Some([kept1, kept2])),
+            // `tu1 :: tlu1, _ :: _ -> List.iter (unify env tu1) (tlu1 @
+            // tlu2)`.
+            (false, false) => {
+                self.saved[frame.extra as usize].b |= ROW_UNIVARS;
+                let end = Frame { kind: FrameKind::RowFieldEnd, ..frame };
+                if self.frames.last() != Some(&end) {
+                    self.frames.push(end);
+                }
+                let tu1 = self.extras.row_scratch[held1.start].ty;
+                for at in (held1.start + 1..held2.end).rev() {
+                    // The two holder ranges are adjacent: `held2` was
+                    // appended right after `held1`.
+                    let ty = self.extras.row_scratch[at].ty;
+                    self.push_row_pair(tu1, ty);
+                }
+                Ok(None)
+            }
+            // `tu :: _, [] | [], tu :: _ -> occur_univar !env tu`.
+            (false, true) | (true, false) => {
+                let first = if held1.is_empty() { held2.start } else { held1.start };
+                let tu = self.extras.row_scratch[first].ty;
+                let refused = self.occur_univar(tu);
+                debug_assert!(refused.is_err(), "the type holds a free universal variable");
+                Err([Ty(NONE), Ty(NONE)])
+            }
+        }
+    }
+
+    /// `List.partition` of [`Checker::split_univars`] (compiler/ml/
+    /// ctype.ml:2685-2690) over `extras.row_scratch[range]`: the types in
+    /// which [`Checker::free_univar`] finds no variable are compacted in
+    /// place, in order, to the start of the range; those in which it finds
+    /// one are appended, in order, at the end of the scratch. Returns the
+    /// two ranges. O(types) walks, each `free_univar`'s cost; no
+    /// allocation beyond the scratch's growth.
+    fn partition_univars(&mut self, range: std::ops::Range<usize>) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
+        let (start, held) = (range.start, self.extras.row_scratch.len());
+        let mut kept = start;
+        for at in range {
+            let field = self.extras.row_scratch[at];
+            if self.free_univar(field.ty).0 == NONE {
+                self.extras.row_scratch[kept] = field;
+                kept += 1;
+            } else {
+                self.extras.row_scratch.push(field);
+            }
+        }
+        (start..kept, held..self.extras.row_scratch.len())
     }
 
     /// `Tpackage (p1, n1, tl1), Tpackage (p2, n2, tl2)` of unify3
