@@ -1,0 +1,18 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/modtype_abbreviation_value_mismatch.res[0m:[2m8:17-10:1[0m
+
+   6 [2m│[0m   module type T = Y.T
+   7 [2m│[0m }
+   [1;31m8[0m [2m│[0m module M: R.T = [1;31m{[0m
+   [1;31m9[0m [2m│[0m [1;31m  let x = "a"[0m
+  [1;31m10[0m [2m│[0m [1;31m}[0m
+  11 [2m│[0m 
+
+  Signature mismatch:
+  
+  Actual declaration ([36m/.../fixtures/modtype_abbreviation_value_mismatch.res[0m:[2m9:7[0m):
+    let x: string
+  
+  Expected declaration ([36m/.../fixtures/modtype_abbreviation_value_mismatch.res[0m:[2m1:18-27[0m):
+    let x: int
