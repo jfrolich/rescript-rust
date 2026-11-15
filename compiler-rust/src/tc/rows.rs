@@ -305,9 +305,15 @@ pub fn field_repr(g: &Graph, b: u32, arity: u32, field: RowFieldRow) -> FieldRep
 /// for an unopened node, otherwise those of each [`RES_EITHER`] of its
 /// chain. O(types + chain), no allocation when `out` has the capacity.
 pub fn field_types(g: &Graph, b: u32, arity: u32, field: RowFieldRow, out: &mut Vec<Ty>) {
+    each_field_types(g, b, arity, field, |types| out.extend_from_slice(types));
+}
+
+/// [`field_types`] for any destination: `each` gets the types of the
+/// field one run of slots at a time, in order. Same cost, no allocation.
+pub fn each_field_types(g: &Graph, b: u32, arity: u32, field: RowFieldRow, mut each: impl FnMut(&[Ty])) {
     if field.link >= arity {
         let own = field.types;
-        out.extend_from_slice(&g.lists[(b + own.start) as usize..(b + own.start + own.len) as usize]);
+        each(&g.lists[(b + own.start) as usize..(b + own.start + own.len) as usize]);
         return;
     }
     let mut reference = g.lists[(b + field.link) as usize];
@@ -317,7 +323,7 @@ pub fn field_types(g: &Graph, b: u32, arity: u32, field: RowFieldRow, out: &mut 
             return;
         }
         let added = node.arity() - 1;
-        out.extend_from_slice(&g.lists[node.b as usize..(node.b + added) as usize]);
+        each(&g.lists[node.b as usize..(node.b + added) as usize]);
         reference = g.lists[(node.b + added) as usize];
     }
 }
@@ -1363,8 +1369,9 @@ impl Checker {
     /// list at `name.1`). Slots: the present types in field order, `more`,
     /// the name's arguments, then one reference slot per `Either` field
     /// holding the handle its source home has in that field's reference
-    /// slot. One node, one descriptor row, one `VariantRow`, one
-    /// `RowFieldRow` a field and those slots; two reads of each field
+    /// slot. Each field is copied as its row has it, not read through
+    /// its chain. One node, one descriptor row, one `VariantRow`, one
+    /// `RowFieldRow` a field and those slots; two row loads per field
     /// (one to count the slots, one to fill them), no allocation beyond
     /// the pools.
     fn build_variant(
@@ -1377,9 +1384,9 @@ impl Checker {
     ) -> Ty {
         let (mut types, mut references) = (0, 0);
         for at in fields.clone() {
-            let field = self.field_now_at(at);
+            let field = self.extras.row_fields[self.extras.row_scratch[at].at as usize];
             match field.kind {
-                RowFieldKind::Present => types += u32::from(field.first.0 != NONE),
+                RowFieldKind::Present => types += field.types.len,
                 RowFieldKind::Either { .. } => references += 1,
                 RowFieldKind::Absent => {}
             }
@@ -1393,16 +1400,16 @@ impl Checker {
         for at in fields.clone() {
             let source = self.extras.row_scratch[at];
             let row_field = self.extras.row_fields[source.at as usize];
-            let field = self.field_now_at(at);
             let mut copy = RowFieldRow {
                 name: row_field.name,
                 types: Range::default(),
                 link: NONE,
-                kind: field.kind,
+                kind: row_field.kind,
             };
-            match field.kind {
-                RowFieldKind::Present if field.first.0 != NONE => {
-                    self.g.lists[(b + typed) as usize] = field.first;
+            match row_field.kind {
+                RowFieldKind::Present if row_field.types.len != 0 => {
+                    let ty = self.g.lists[(source.ty.0 + row_field.types.start) as usize];
+                    self.g.lists[(b + typed) as usize] = ty;
                     copy.types = Range { start: typed, len: 1 };
                     typed += 1;
                 }
@@ -1483,12 +1490,15 @@ impl Checker {
     ///    fields are what is left, in order, with `more`, `closed`, the
     ///    `fixed` of the two rows and the name; [`Checker::lower`] of it
     ///    to `rm`'s level; `Graph::link(rm, node)`. A field of the new
-    ///    node is the field it copies, read now ([`field_repr`]): absent;
-    ///    present with its type in a slot of its own or with none; or
-    ///    `Either` with the `c` and `m` read, no type slot, and in its
+    ///    node is the `row_field` it copies, as its row has it (OCaml puts
+    ///    the same value in the new row, `filter_row_fields` keeps `p`):
+    ///    absent; present with its type in a slot of its own or with none;
+    ///    or `Either` with the row's `c` and `m`, no type slot, and in its
     ///    reference slot **the handle the source home has in that field's
     ///    reference slot** (the two homes then hold one chain, as two rows
-    ///    hold one `row_field` in OCaml).
+    ///    hold one `row_field` in OCaml). Read through the chain it is
+    ///    what the source reads now, and it follows a later restore of the
+    ///    chain as the source does (`e1 := None`, ctype.ml:2716).
     ///
     /// Allocates, for a row that is not fixed: one node, one descriptor
     /// row (12 bytes), one `VariantRow` (28), one `RowFieldRow` (20) per
@@ -1626,7 +1636,34 @@ impl Checker {
     /// it got a type, in front of the list `next` has; `next`'s `b` is
     /// written last. O(types + holders of `e`), 8 bytes a holder. (R3f)
     pub fn resolve_either(&mut self, e: Ty, flags: u32, types: std::ops::Range<usize>, next: Ty) {
-        todo!("R3f")
+        let reference = self.g.nodes[e.0 as usize];
+        let b = self.g.lists.len() as u32;
+        let count = types.len() as u32;
+        for at in types {
+            let ty = self.extras.row_scratch[at].ty;
+            self.g.lists.push(ty);
+        }
+        self.g.lists.push(next);
+        self.g.write(
+            e,
+            Node { head: TUPLE | (count + 1) << 8, level: reference.level, a: flags, b },
+        );
+        let target = self.g.nodes[next.0 as usize];
+        let mut head = target.b;
+        let mut at = reference.b;
+        while at != NONE {
+            #[cfg(test)]
+            super::steps::tick();
+            let holder = self.extras.holders[at as usize];
+            self.extras.holders.push(Holder { node: holder.node, next: head });
+            head = self.extras.holders.len() as u32 - 1;
+            at = holder.next;
+        }
+        if count != 0 {
+            self.extras.holders.push(Holder { node: e, next: head });
+            head = self.extras.holders.len() as u32 - 1;
+        }
+        self.g.write(next, Node { b: head, ..target });
     }
 
     /// The pop of a [`FrameKind::RowField`] frame: `unify_row_field env
@@ -1657,7 +1694,9 @@ impl Checker {
     /// - Any other two `Reither` (ctype.ml:2662-2708). When the row is not
     ///   passive and (`m1 || m2 || fixed1 || fixed2`, or rigid and one
     ///   list has one type) and `tl1 @ tl2` is not empty: a clash when `c1
-    ///   || c2`; otherwise [`ROW_AGAIN`] is set in the record and the
+    ///   || c2`; otherwise [`ROW_AGAIN`] is set in the record, the two
+    ///   references the arm saw go in a `saved` entry right after it
+    ///   (`head`, `level`), and the
     ///   pairs of the first type with each of the others are pushed, in
     ///   order. Otherwise [`Checker::join_either`] now.
     /// - `Reither (_, _, false, e1), Rabsent` when row 1 is not fixed:
@@ -1668,8 +1707,9 @@ impl Checker {
     ///   fixed (ctype.ml:2711-2717): [`Checker::resolve`] of `e1` to
     ///   [`RES_PRESENT`] with `t2`; [`Checker::lower`] of `t2` to the
     ///   level of `more`'s representative; [`ROW_SETTLE`] is set in the
-    ///   record, with the holder list and `e1` kept in the
-    ///   `RowFieldEnd` frame (`left` the reference, `right` the list); in
+    ///   record, with the holder list in `a` of a `saved` entry right
+    ///   after the record (the `RowFieldEnd` frame keeps the two homes,
+    ///   which [`Checker::row_trace_pair`] reads); in
     ///   `Mode::Explain` a [`FrameKind::Fields`] frame with `e1` twice and
     ///   the unresolved node it was, twice (`e1 := None` on a failure);
     ///   then the pairs `(t1, t2)` for each `t1` of `tl`, in order. The
@@ -1685,8 +1725,188 @@ impl Checker {
     /// taken off before the function returns. O(types of the two fields)
     /// plus the callees. PR#6744's split of the types that hold a
     /// universal variable (ctype.ml:2688-2702) is R3g's. (R3f)
+    #[inline(never)]
     pub fn unify_row_field(&mut self, frame: Frame) -> Result<(), [Ty; 2]> {
-        todo!("R3f")
+        const UNIFY: [Ty; 2] = [Ty(NONE), Ty(NONE)];
+        let extra = frame.extra as usize;
+        let record = self.saved[extra];
+        self.frames.push(Frame { kind: FrameKind::RowFieldEnd, ..frame });
+        let (fixed1, fixed2) = (record.b & ROW_FIXED1 != 0, record.b & ROW_FIXED2 != 0);
+        let (row1, row2) = (
+            self.extras.row_fields[record.head as usize],
+            self.extras.row_fields[record.level as usize],
+        );
+        let f1 = field_repr(&self.g, frame.left.0, u32::MAX, row1);
+        let f2 = field_repr(&self.g, frame.right.0, u32::MAX, row2);
+        let base = self.extras.row_scratch.len();
+        let result = match (f1.kind, f2.kind) {
+            // `Rpresent (Some t1), Rpresent (Some t2) -> unify env t1 t2`;
+            // `Rpresent None, Rpresent None -> ()`.
+            (RowFieldKind::Present, RowFieldKind::Present) => match (f1.first.0 == NONE, f2.first.0 == NONE) {
+                (false, false) => {
+                    self.push_row_pair(f1.first, f2.first);
+                    Ok(())
+                }
+                (true, true) => Ok(()),
+                _ => Err(UNIFY),
+            },
+            (
+                RowFieldKind::Either { constant: c1, matched: m1 },
+                RowFieldKind::Either { constant: c2, matched: m2 },
+            ) => {
+                if f1.end == f2.end {
+                    Ok(())
+                } else if (fixed1 || fixed2) && !(c1 || c2) && f1.types == f2.types {
+                    // PR#7496 (ctype.ml:2652-2661): one `Reither (c, [], m,
+                    // ref None)` for both, then the types pairwise.
+                    let level = self.more_level(record);
+                    let e = self.g.push(ref_node(level, NONE));
+                    let flags = either_flags(c1 || c2, m1 || m2);
+                    self.read_types(frame.left.0, row1);
+                    self.read_types(frame.right.0, row2);
+                    self.resolve_either(f1.end, flags, base..base, e);
+                    self.resolve_either(f2.end, flags, base..base, e);
+                    let n = f1.types as usize;
+                    for k in (0..n).rev() {
+                        let (t1, t2) = (self.extras.row_scratch[base + k].ty, self.extras.row_scratch[base + n + k].ty);
+                        self.push_row_pair(t1, t2);
+                    }
+                    Ok(())
+                } else if !self.extras.passive_variants
+                    && (m1 || m2 || fixed1 || fixed2
+                        || (self.extras.rigid_variants && (f1.types == 1 || f2.types == 1)))
+                    && f1.types + f2.types != 0
+                {
+                    // `redo` (ctype.ml:2663-2675): the first type of `tl1 @
+                    // tl2` with each of the others; `row_field_end` reads
+                    // the references afterwards.
+                    if c1 || c2 {
+                        Err(UNIFY)
+                    } else {
+                        self.saved[extra].b |= ROW_AGAIN;
+                        self.saved.push(Node { head: f1.end.0, level: f2.end.0, a: NONE, b: 0 });
+                        self.read_types(frame.left.0, row1);
+                        self.read_types(frame.right.0, row2);
+                        let end = self.extras.row_scratch.len();
+                        let t1 = self.extras.row_scratch[base].ty;
+                        for at in (base + 1..end).rev() {
+                            let t = self.extras.row_scratch[at].ty;
+                            self.push_row_pair(t1, t);
+                        }
+                        Ok(())
+                    }
+                } else {
+                    self.join_either(frame)
+                }
+            }
+            (RowFieldKind::Either { matched: false, .. }, RowFieldKind::Absent) if !fixed1 => {
+                let holders = self.resolve(f1.end, RES_ABSENT, Ty(NONE));
+                self.settle(holders, RES_ABSENT);
+                Ok(())
+            }
+            (RowFieldKind::Absent, RowFieldKind::Either { matched: false, .. }) if !fixed2 => {
+                let holders = self.resolve(f2.end, RES_ABSENT, Ty(NONE));
+                self.settle(holders, RES_ABSENT);
+                Ok(())
+            }
+            (RowFieldKind::Absent, RowFieldKind::Absent) => Ok(()),
+            (RowFieldKind::Either { constant: false, .. }, RowFieldKind::Present)
+                if f2.first.0 != NONE && !fixed1 =>
+            {
+                self.present_either(extra, record, f1.end, f2.first, frame.left.0, row1, true)
+            }
+            (RowFieldKind::Present, RowFieldKind::Either { constant: false, .. })
+                if f1.first.0 != NONE && !fixed2 =>
+            {
+                self.present_either(extra, record, f2.end, f1.first, frame.right.0, row2, false)
+            }
+            // `Reither (true, [], _, e1), Rpresent None when not fixed1`.
+            (RowFieldKind::Either { constant: true, .. }, RowFieldKind::Present)
+                if f1.types == 0 && f2.first.0 == NONE && !fixed1 =>
+            {
+                self.resolve(f1.end, RES_PRESENT, Ty(NONE));
+                Ok(())
+            }
+            (RowFieldKind::Present, RowFieldKind::Either { constant: true, .. })
+                if f2.types == 0 && f1.first.0 == NONE && !fixed2 =>
+            {
+                self.resolve(f2.end, RES_PRESENT, Ty(NONE));
+                Ok(())
+            }
+            _ => Err(UNIFY),
+        };
+        self.extras.row_scratch.truncate(base);
+        result
+    }
+
+    /// `Reither (false, tl, _, e), Rpresent (Some t)` and its mirror
+    /// (compiler/ml/ctype.ml:2711-2724): `e` resolved to present with `t`,
+    /// `t` lowered to the level of `more`'s representative, the holders
+    /// kept for [`Checker::row_field_end`] in a `saved` entry after the
+    /// record, in `Mode::Explain` a `Fields` frame that puts `e` back
+    /// (`e1 := None`), then the pairs of `t` with each type of the
+    /// `Reither` side (`(t1, t2)` when it is the left side, else `(t2,
+    /// t1)`), the first popped first. O(types) plus the lowering.
+    #[allow(clippy::too_many_arguments)]
+    fn present_either(
+        &mut self,
+        extra: usize,
+        record: Node,
+        e: Ty,
+        t: Ty,
+        home: u32,
+        field: RowFieldRow,
+        left: bool,
+    ) -> Result<(), [Ty; 2]> {
+        let unresolved = self.g.nodes[e.0 as usize];
+        let holders = self.resolve(e, RES_PRESENT, t);
+        let level = self.more_level(record);
+        if level != GENERIC && self.lower(t, level).is_err() {
+            return Err([Ty(NONE), Ty(NONE)]);
+        }
+        self.saved[extra].b |= ROW_SETTLE;
+        self.saved.push(Node { head: NONE, level: NONE, a: holders, b: 0 });
+        if self.g.mode == Mode::Explain {
+            let slot = self.saved.len() as u32;
+            self.saved.push(unresolved);
+            self.saved.push(unresolved);
+            self.frames.push(Frame { left: e, right: e, kind: FrameKind::Fields, extra: slot });
+        }
+        let base = self.extras.row_scratch.len();
+        self.read_types(home, field);
+        for at in (base..self.extras.row_scratch.len()).rev() {
+            let other = self.extras.row_scratch[at].ty;
+            if left {
+                self.push_row_pair(other, t);
+            } else {
+                self.push_row_pair(t, other);
+            }
+        }
+        Ok(())
+    }
+
+    /// O(1): push the pair `(left, right)` for `run_frames` to unify.
+    #[inline]
+    fn push_row_pair(&mut self, left: Ty, right: Ty) {
+        self.frames.push(Frame { left, right, kind: FrameKind::Pair, extra: 0 });
+    }
+
+    /// O(links): the level of the representative of a record's `more`
+    /// (`(repr more).level`).
+    fn more_level(&mut self, record: Node) -> u32 {
+        let more = self.g.repr(Ty(record.a));
+        self.g.nodes[more.0 as usize].level
+    }
+
+    /// The types of `field` of the opened home at list index `home`, in
+    /// OCaml's order ([`each_field_types`]), appended to
+    /// `extras.row_scratch` as the `ty` of a [`FieldRef`]. O(types +
+    /// chain), no allocation once the scratch has the capacity.
+    fn read_types(&mut self, home: u32, field: RowFieldRow) {
+        let scratch = &mut self.extras.row_scratch;
+        each_field_types(&self.g, home, u32::MAX, field, |types| {
+            scratch.extend(types.iter().map(|&ty| FieldRef { name: 0, at: 0, ty }));
+        });
     }
 
     /// The end of two `Reither` fields that stay `Reither`
@@ -1701,7 +1921,60 @@ impl Checker {
     /// comparisons of representatives, in the scratch, no allocation
     /// beyond the two lists. (R3f)
     pub fn join_either(&mut self, frame: Frame) -> Result<(), [Ty; 2]> {
-        todo!("R3f")
+        let record = self.saved[frame.extra as usize];
+        let (row1, row2) = (
+            self.extras.row_fields[record.head as usize],
+            self.extras.row_fields[record.level as usize],
+        );
+        let f1 = field_repr(&self.g, frame.left.0, u32::MAX, row1);
+        let f2 = field_repr(&self.g, frame.right.0, u32::MAX, row2);
+        let (
+            RowFieldKind::Either { constant: c1, matched: m1 },
+            RowFieldKind::Either { constant: c2, matched: m2 },
+        ) = (f1.kind, f2.kind)
+        else {
+            unreachable!("two `Reither` fields");
+        };
+        // `List.map repr tl1` and `tl2`, then `tl1'` (what row 1 gains:
+        // `remq tl1 tl2`) and `tl2'` (`remq tl2 tl1`).
+        let base = self.extras.row_scratch.len();
+        self.read_types(frame.left.0, row1);
+        let middle = self.extras.row_scratch.len();
+        self.read_types(frame.right.0, row2);
+        let end = self.extras.row_scratch.len();
+        for at in base..end {
+            let ty = self.g.repr(self.extras.row_scratch[at].ty);
+            self.extras.row_scratch[at].ty = ty;
+        }
+        let missing = |c: &mut Checker, from: std::ops::Range<usize>, against: std::ops::Range<usize>| {
+            for at in from {
+                let ty = c.extras.row_scratch[at];
+                if !c.extras.row_scratch[against.clone()].iter().any(|other| other.ty == ty.ty) {
+                    c.extras.row_scratch.push(ty);
+                }
+            }
+        };
+        missing(self, middle..end, base..middle);
+        let gained1 = end..self.extras.row_scratch.len();
+        missing(self, base..middle, middle..end);
+        let gained2 = gained1.end..self.extras.row_scratch.len();
+        // `List.iter (update_level !env (repr more).level) (tl1' @ tl2')`.
+        let level = self.more_level(record);
+        if level != GENERIC {
+            for at in gained1.start..gained2.end {
+                let ty = self.extras.row_scratch[at].ty;
+                if self.lower(ty, level).is_err() {
+                    self.extras.row_scratch.truncate(base);
+                    return Err([Ty(NONE), Ty(NONE)]);
+                }
+            }
+        }
+        let e = self.g.push(ref_node(level, NONE));
+        let flags = either_flags(c1 || c2, m1 || m2);
+        self.resolve_either(f1.end, flags, gained1, e);
+        self.resolve_either(f2.end, flags, gained2, e);
+        self.extras.row_scratch.truncate(base);
+        Ok(())
     }
 
     /// The pop of a [`FrameKind::RowFieldEnd`] frame: everything the pair
@@ -1715,8 +1988,33 @@ impl Checker {
     /// ([`RES_PRESENT`]). Then the record leaves `saved` (`saved` is cut
     /// back to the frame's `extra`), unless the pair is unified again.
     /// O(1) plus the callee. (R3f)
+    #[inline(never)]
     pub fn row_field_end(&mut self, frame: Frame) -> Result<(), [Ty; 2]> {
-        todo!("R3f")
+        let extra = frame.extra as usize;
+        let record = self.saved[extra];
+        if record.b & ROW_AGAIN != 0 {
+            // `!e1 <> None || !e2 <> None` (ctype.ml:2674): the ends the
+            // arm saw, after the record.
+            let ends = self.saved[extra + 1];
+            let still = |c: &Checker, home: Ty, field: u32, end: u32| {
+                let field = field_repr(&c.g, home.0, u32::MAX, c.extras.row_fields[field as usize]);
+                matches!(field.kind, RowFieldKind::Either { .. }) && field.end.0 == end
+            };
+            let unresolved = still(self, frame.left, record.head, ends.head)
+                && still(self, frame.right, record.level, ends.level);
+            self.saved.truncate(extra + 1);
+            self.saved[extra].b &= !ROW_AGAIN;
+            if !unresolved {
+                self.frames.push(Frame { kind: FrameKind::RowField, ..frame });
+                return Ok(());
+            }
+            self.join_either(frame)?;
+        } else if record.b & ROW_SETTLE != 0 {
+            let holders = self.saved[extra + 1].a;
+            self.settle(holders, RES_PRESENT);
+        }
+        self.saved.truncate(extra);
+        Ok(())
     }
 
     /// The pop of a [`FrameKind::RowEnd`] frame, pushed when the merged
@@ -1731,6 +2029,7 @@ impl Checker {
     /// ([`field_repr`]) and its `more` is a variable, that variable is
     /// linked to a new `Tnil` node at its level (one node, one 12-byte
     /// descriptor row). O(fields of the row), one step a field. (R3f)
+    #[inline(never)]
     pub fn row_end(&mut self, frame: Frame) {
         let top = self.g.repr(frame.left);
         let node = self.open_row(top);
@@ -1779,7 +2078,16 @@ impl Checker {
     /// frame: two [`Checker::trace_row`] of one field each, closed.
     /// Failure path of `Mode::Explain` only. (R3f)
     pub fn row_trace_pair(&mut self, frame: Frame) -> [Ty; 2] {
-        todo!("R3f")
+        let record = self.saved[frame.extra as usize];
+        let base = self.extras.row_scratch.len();
+        for (at, home) in [(record.head, frame.left), (record.level, frame.right)] {
+            let name = self.extras.row_fields[at as usize].name;
+            self.extras.row_scratch.push(FieldRef { name, at, ty: home });
+        }
+        let t1 = self.trace_row(base..base + 1, true);
+        let t2 = self.trace_row(base + 1..base + 2, true);
+        self.extras.row_scratch.truncate(base);
+        [t1, t2]
     }
 
     /// The references of one variant node a copy made (`copy_row`,

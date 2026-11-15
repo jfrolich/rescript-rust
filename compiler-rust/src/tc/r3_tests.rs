@@ -2338,7 +2338,6 @@ fn an_open_row_takes_the_tags_it_lacks() {
 /// `Tnil`.
 /// Reaches: R3f.
 #[test]
-#[ignore = "R3f build"]
 fn a_closed_row_closes_the_other_and_a_static_row_ends_in_nil() {
     for swap in [false, true] {
         let mut c = checker(Mode::Success);
@@ -2425,7 +2424,6 @@ fn a_closed_row_refuses_a_tag_and_the_empty_type_is_a_clash() {
 /// and not in the rest, and the row is static.
 /// Reaches: R3f.
 #[test]
-#[ignore = "R3f build"]
 fn a_reither_tag_becomes_present_and_a_closed_row_erases_the_others() {
     for closed in [false, true] {
         let mut c = checker(Mode::Success);
@@ -2488,7 +2486,6 @@ fn tag_pair(left: Kind, right: Kind, fixed: bool) -> Option<String> {
 ///
 /// Reaches: R3f.
 #[test]
-#[ignore = "R3f build"]
 fn each_pair_of_tag_kinds() {
     let some: Kind = |ty| Tag::Present(Some(ty));
     let none: Kind = |_| Tag::Present(None);
@@ -2544,7 +2541,6 @@ fn each_pair_of_tag_kinds() {
 /// neither test holds and the row has no name.
 /// Reaches: R3f.
 #[test]
-#[ignore = "R3f build"]
 fn the_row_keeps_a_name_only_when_it_stays_the_named_row() {
     let mut c = checker(Mode::Success);
     let (rm1, rm2) = (var(&mut c), var(&mut c));
@@ -2579,7 +2575,6 @@ fn the_row_keeps_a_name_only_when_it_stays_the_named_row() {
 /// row would gain `#C`, a clash.
 /// Reaches: R3f.
 #[test]
-#[ignore = "R3f build"]
 fn a_fixed_row_gains_nothing() {
     let mut c = checker(Mode::Success);
     let rm1 = var(&mut c);
@@ -2611,7 +2606,6 @@ fn a_fixed_row_gains_nothing() {
 /// n nodes of one tag each (`row_repr`, compiler/ml/btype.ml:126-135).
 /// Reaches: R3f.
 #[test]
-#[ignore = "R3f build"]
 fn rows_of_ten_thousand_tags_are_linear() {
     let labels = |prefix: &str, n: u32| -> Vec<String> {
         (0..n).map(|at| format!("{prefix}{at:05}")).collect()
