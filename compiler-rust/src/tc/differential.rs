@@ -153,6 +153,16 @@ pub(crate) const VARIANTS: u16 = 1 << 5;
 /// cells print two (section 8.6, decisions 17 and 27).
 pub(crate) const CELLS: u16 = 1 << 6;
 
+/// [`Plan::with`]: the form prints the class of the reference of every
+/// field that is still `Reither` (`row_field option ref`,
+/// compiler/ml/types.mli:160-169): `#A?^k(..)`, `k` numbering the classes
+/// at their first visit across the operands of the case. Two fields that
+/// share a reference print one number (section 8.6, decision 34). The
+/// operations get [`Op::GeneralizeStructure`], which is what leaves a row
+/// variable below its generic row, and so makes a copy share references
+/// (`keep`, compiler/ml/ctype.ml:806; btype.ml:374).
+pub(crate) const REFS: u16 = 1 << 7;
+
 /// A tier and what a case adds to it. 4 bytes, passed by value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Plan {
@@ -214,6 +224,11 @@ pub(crate) enum Op {
     /// Never generated: hand-written cases use it to reach a node inside an
     /// object.
     Slot(u16, u8),
+    /// `generalize_structure` of an operand at the current level
+    /// (compiler/ml/ctype.ml:524-544, 672): the structure above the current
+    /// level becomes generic, a variable above it comes down to it. What
+    /// an annotation's type is after `Typetexp` made it. [`REFS`].
+    GeneralizeStructure(u16),
 }
 
 /// A deliberately wrong new side, for the tests that prove the harness sees
@@ -527,6 +542,8 @@ pub(crate) fn operations(rng: &mut Rng, plan: impl Into<Plan>, values: usize) ->
             op
         } else if operands == 0 {
             Op::Instance(rng.below(values) as u16)
+        } else if plan.has(REFS) && rng.below(6) == 0 {
+            Op::GeneralizeStructure(operand(rng))
         } else if plan.has(BUILD) && rng.below(4) == 0 {
             match rng.below(4) {
                 0 => Op::Var,
@@ -563,6 +580,17 @@ pub(crate) fn operations(rng: &mut Rng, plan: impl Into<Plan>, values: usize) ->
                         Op::Unify(tuple, var)
                     };
                     follow = vec![unify, Op::Var, Op::Tuple(operand(rng), operand(rng))];
+                } else if plan.has(REFS) && operands != 0 && rng.below(2) == 0 {
+                    // [`REFS`]: what follows an `EndDef`, last first: the
+                    // newest operand becomes an annotation's type (a
+                    // generic row over a row variable that is not), and
+                    // is copied twice.
+                    let newest = operands as u16 - 1;
+                    follow = vec![
+                        Op::Copy(newest),
+                        Op::Copy(newest),
+                        Op::GeneralizeStructure(newest),
+                    ];
                 }
             }
             _ => {}
@@ -698,6 +726,8 @@ fn old_children(ctx: &TypeContext, ty: TypeExprRef) -> Vec<TypeExprRef> {
 struct OldSeen {
     nodes: Vec<TypeExprRef>,
     cells: Option<Vec<crate::types::type_expr::MutabilityRef>>,
+    /// [`REFS`]: the references of `Reither` fields numbered so far.
+    refs: Option<Vec<crate::types::type_expr::RowFieldRef>>,
 }
 
 /// O(printed nodes²): the form of every operand, and the text of a trace
@@ -712,6 +742,7 @@ fn old_forms(
     let mut seen = OldSeen {
         nodes: Vec::new(),
         cells: plan.has(CELLS).then(Vec::new),
+        refs: plan.has(REFS).then(Vec::new),
     };
     for (index, &operand) in operands.iter().enumerate() {
         let _ = write!(form, "{index} = ");
@@ -767,6 +798,9 @@ pub(crate) fn run_old(program: &Program, plan: impl Into<Plan>, ops: &[Op]) -> O
             Op::BeginDef => ctx.begin_def(),
             Op::EndDef => ctx.end_def(),
             Op::Generalize(operand) => ctype::generalize(ctx, operands[operand as usize]),
+            Op::GeneralizeStructure(operand) => {
+                ctype::generalize_structure(ctx, ctx.current_level(), operands[operand as usize])
+            }
             Op::Lower(operand, level) => {
                 let (level, ty) = (base + i32::from(level), operands[operand as usize]);
                 if plan.has(SCOPED) {
@@ -959,13 +993,22 @@ fn old_form(
                         old_form(ctx, base, names, ty, seen, out);
                         out.push(')');
                     }
-                    RowField::Reither { constant, types, matched, .. } => {
+                    RowField::Reither { constant, types, matched, link } => {
                         let _ = write!(
                             out,
-                            "?{}{}(",
+                            "?{}{}",
                             if constant { "c" } else { "" },
                             if matched { "m" } else { "" }
                         );
+                        if let Some(refs) = &mut seen.refs {
+                            let number = refs.iter().position(|&other| other == link);
+                            let number = number.unwrap_or_else(|| {
+                                refs.push(link);
+                                refs.len() - 1
+                            });
+                            let _ = write!(out, "^{number}");
+                        }
+                        out.push('(');
                         for ty in types {
                             old_form(ctx, base, names, ty, seen, out);
                             out.push(' ');
@@ -1028,6 +1071,11 @@ pub(crate) struct New {
     /// [`CELLS`]: per value, whether its template has an open row
     /// (`rows::template_has_open_row`): its instances duplicate cells.
     open: Vec<bool>,
+    /// [`REFS`]: the classes of references one form has numbered: the
+    /// handle of an unresolved reference node, or, for a field of an
+    /// unopened node, the node and the field (bit 63 set): a reference
+    /// nothing else holds.
+    refs: Vec<u64>,
 }
 
 impl New {
@@ -1087,6 +1135,7 @@ impl New {
         let mut new = New {
             first: vec![None; roots.len()],
             cells: Vec::new(),
+            refs: Vec::new(),
             open,
             segment,
             checker,
@@ -1239,6 +1288,15 @@ impl New {
                     }
                 }
             }
+            Op::GeneralizeStructure(operand) => {
+                let ty = self.operands[operand as usize];
+                let level = self.checker.g.level;
+                if self.tier.memo_aware() {
+                    self.checker.generalize_structure(ty, level);
+                } else {
+                    self.checker.g.generalize_structure(ty, level);
+                }
+            }
             Op::Lower(operand, level) => {
                 let ty = self.operands[operand as usize];
                 let level = 1 + u32::from(level);
@@ -1350,6 +1408,7 @@ impl New {
         let mut seen = vec![NONE; self.checker.g.nodes.len()];
         let mut count = 0;
         self.cells.clear();
+        self.refs.clear();
         let operands = self.operands.clone();
         for (index, operand) in operands.into_iter().enumerate() {
             let _ = write!(form, "{index} = ");
@@ -1449,7 +1508,7 @@ impl New {
                 out.push_str(") => ");
                 self.node_form(Ty(node.a), seen, count, out);
             }
-            TUPLE => self.extended_form(node, seen, count, out),
+            TUPLE => self.extended_form(ty, node, seen, count, out),
             _ => out.push_str("?unsupported"),
         }
     }
@@ -1470,7 +1529,7 @@ impl New {
     /// a field list, or a variant. A chain of rows (a row whose `more` is a
     /// row) prints as one, the fields outermost first with the innermost
     /// row's flags (`row_repr`, compiler/ml/btype.ml:126-135).
-    fn extended_form(&mut self, node: Node, seen: &mut [u32], count: &mut u32, out: &mut String) {
+    fn extended_form(&mut self, ty: Ty, node: Node, seen: &mut [u32], count: &mut u32, out: &mut String) {
         use super::segment::{ExtraDescriptor, RowFieldKind};
         let slot = |new: &New, node: Node, index: u32| new.checker.g.lists[(node.b + index) as usize];
         match self.checker.extras.descriptors[node.a as usize] {
@@ -1499,52 +1558,75 @@ impl New {
             ExtraDescriptor::Nil => out.push_str("nil"),
             ExtraDescriptor::Variant(first) => {
                 // Collect the chain first: the flags are the innermost row's.
-                let mut chain = vec![(node, first)];
+                let mut chain = vec![(ty, node, first)];
                 let more = loop {
-                    let (owner, row) = *chain.last().expect("chain");
+                    let (_, owner, row) = *chain.last().expect("chain");
                     let more = slot(self, owner, self.checker.extras.variants[row as usize].more);
                     let more = self.checker.g.repr(more);
                     let inner = self.checker.g.nodes[more.0 as usize];
                     match inner.head & super::segment::EXTENDED != 0 {
                         true => match self.checker.extras.descriptors[inner.a as usize] {
-                            ExtraDescriptor::Variant(row) => chain.push((inner, row)),
+                            ExtraDescriptor::Variant(row) => chain.push((more, inner, row)),
                             _ => break more,
                         },
                         false => break more,
                     }
                 };
-                let last = self.checker.extras.variants[chain.last().expect("chain").1 as usize];
+                let last = self.checker.extras.variants[chain.last().expect("chain").2 as usize];
                 let _ = write!(
                     out,
                     "[{}{}",
                     if last.closed { "closed " } else { "" },
                     if last.fixed { "fixed " } else { "" }
                 );
-                for &(owner, row) in &chain {
+                // Each field as `row_field_repr` gives it (compiler/ml/
+                // btype.ml:112-121): `rows::field_repr` follows the chain of
+                // references from the field's slot.
+                let mut types = Vec::new();
+                for &(home, owner, row) in &chain {
                     let fields = self.checker.extras.variants[row as usize].fields;
                     for index in fields.start..fields.start + fields.len {
-                        let mut field = self.checker.extras.row_fields[index as usize];
-                        while field.link != NONE {
-                            field = self.checker.extras.row_fields[field.link as usize];
-                        }
+                        let field = self.checker.extras.row_fields[index as usize];
+                        let repr =
+                            super::rows::field_repr(&self.checker.g, owner.b, owner.arity(), field);
                         let _ = write!(out, "#{}", self.string(field.name));
-                        let types = field.types;
-                        match field.kind {
-                            RowFieldKind::Present if types.len == 0 => {}
+                        match repr.kind {
+                            RowFieldKind::Present if repr.first.0 == NONE => {}
                             RowFieldKind::Present => {
                                 out.push('(');
-                                self.node_form(slot(self, owner, types.start), seen, count, out);
+                                self.node_form(repr.first, seen, count, out);
                                 out.push(')');
                             }
                             RowFieldKind::Either { constant, matched } => {
                                 let _ = write!(
                                     out,
-                                    "?{}{}(",
+                                    "?{}{}",
                                     if constant { "c" } else { "" },
                                     if matched { "m" } else { "" }
                                 );
-                                for index in types.start..types.start + types.len {
-                                    self.node_form(slot(self, owner, index), seen, count, out);
+                                if self.plan.has(REFS) {
+                                    let class = match repr.end.0 {
+                                        NONE => 1 << 63 | u64::from(home.0) << 24 | u64::from(index),
+                                        end => u64::from(end),
+                                    };
+                                    let number = self.refs.iter().position(|&other| other == class);
+                                    let number = number.unwrap_or_else(|| {
+                                        self.refs.push(class);
+                                        self.refs.len() - 1
+                                    });
+                                    let _ = write!(out, "^{number}");
+                                }
+                                out.push('(');
+                                types.clear();
+                                super::rows::field_types(
+                                    &self.checker.g,
+                                    owner.b,
+                                    owner.arity(),
+                                    field,
+                                    &mut types,
+                                );
+                                for &ty in &types {
+                                    self.node_form(ty, seen, count, out);
                                     out.push(' ');
                                 }
                                 out.push(')');
@@ -1557,7 +1639,7 @@ impl New {
                 out.push_str("| ");
                 self.node_form(more, seen, count, out);
                 if last.name != NONE {
-                    let (owner, _) = *chain.last().expect("chain");
+                    let (_, owner, _) = *chain.last().expect("chain");
                     let _ = write!(out, " as {}<", self.path_name(last.name));
                     let arguments = last.name_arguments;
                     for index in arguments.start..arguments.start + arguments.len {
@@ -2570,15 +2652,276 @@ mod tests {
         run_cases(Plan::new(Tier::Full, OBJECTS | CELLS | EXPLAIN), 1, 20, 100);
     }
 
-    /// 10,000 cases of everything on programs with variants, and with both:
-    /// the acceptance test of R3f. Reaches: R3m, R3e, R3f.
+    /// The program of the reference cases: a row whose two tags are
+    /// `Reither` (`a`), an open row with one of them present (`g`), a
+    /// closed row without it (`c`), and the first two again beside a
+    /// component that clashes (`h`, `k`).
+    const REF_PROGRAM: &str = "external a: [< #A(int) | #B] => unit = \"a\"\n\
+        external g: [> #A(int)] => unit = \"g\"\n\
+        external c: [#B] => unit = \"c\"\n\
+        external h: ([< #A(int) | #B], int) => unit = \"h\"\n\
+        external k: ([> #A(int)], string) => unit = \"k\"\n";
+
+    /// The cases of [`REF_PROGRAM`]. An annotation's type is an instance
+    /// made one definition deep and then `generalize_structure`d: its row
+    /// is generic and its row variable is not.
+    const ANNOTATION: [Op; 6] = [
+        Op::BeginDef,
+        Op::Instance(0),
+        Op::EndDef,
+        Op::GeneralizeStructure(0),
+        Op::Copy(0),
+        Op::Copy(0),
+    ];
+    const GENERALIZED: [Op; 6] = [
+        Op::BeginDef,
+        Op::Instance(0),
+        Op::EndDef,
+        Op::Generalize(0),
+        Op::Copy(0),
+        Op::Copy(0),
+    ];
+
+    /// O(1): `ops` followed by `more`.
+    fn then(ops: &[Op], more: &[Op]) -> Vec<Op> {
+        [ops, more].concat()
+    }
+
+    /// What the old checker shows for the references of `Reither` fields
+    /// today (observed; section 8.6, decision 34). Two instances of a
+    /// scheme have references of their own (`^0 ^1`, then `^2 ^3`), and so
+    /// have two copies of a generalized type: `let e = if keep then e else
+    /// ref None` with `keep = more.level <> generic_level`
+    /// (compiler/ml/btype.ml:374, ctype.ml:806). Two copies of an
+    /// annotation's type share the references of the type they copy, and
+    /// its row variable (`@3`); each has its own copy of the argument type.
+    #[test]
+    fn old_checker_shares_the_references_of_an_annotation() {
+        let program = compile(REF_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, VARIANTS | REFS);
+        let old = |ops: &[Op]| run_old(&program, plan, ops).form;
+        assert_eq!(
+            old(&[Op::Instance(0), Op::Instance(0)]),
+            "0 = &0[0]fn(&1[0][closed #A?^0(&2[0]int ) #B?c^1() | &3[0]']) => &4[0]unit\n\
+             1 = &5[0]fn(&6[0][closed #A?^2(&7[0]int ) #B?c^3() | &8[0]']) => &9[0]unit\n"
+        );
+        assert_eq!(
+            old(&ANNOTATION),
+            "0 = &0[G]fn(&1[G][closed #A?^0(&2[G]int ) #B?c^1() | &3[0]']) => &4[G]unit\n\
+             1 = &5[0]fn(&6[0][closed #A?^0(&7[0]int ) #B?c^1() | @3]) => &8[0]unit\n\
+             2 = &9[0]fn(&10[0][closed #A?^0(&11[0]int ) #B?c^1() | @3]) => &12[0]unit\n"
+        );
+        assert_eq!(
+            old(&GENERALIZED),
+            "0 = &0[G]fn(&1[G][closed #A?^0(&2[G]int ) #B?c^1() | &3[G]']) => &4[G]unit\n\
+             1 = &5[0]fn(&6[0][closed #A?^2(&7[0]int ) #B?c^3() | &8[0]']) => &9[0]unit\n\
+             2 = &10[0]fn(&11[0][closed #A?^4(&12[0]int ) #B?c^5() | &13[0]']) => &14[0]unit\n"
+        );
+    }
+
+    /// A resolution is seen by every holder of the reference (observed).
+    /// One copy of the annotation's type is unified with `[> #A(int)]`:
+    /// `Reither (false, tl, _, e1), Rpresent (Some t2)` sets `e1`
+    /// (compiler/ml/ctype.ml:2711-2713), and the type itself and its other
+    /// copy have `#A` present too, each with its *own* argument
+    /// (`Rpresent (Some (List.hd tl))`, btype.ml:117: nodes 2, 7 and 11).
+    /// With copies of a generalized type only the copy that was unified
+    /// changes. Unified with the closed `[#B]`, `#A` is absent for every
+    /// holder (`filter_row_fields`, ctype.ml:388-397), `#B` is present
+    /// (ctype.ml:2726-2727) and the row variable all three share is `Tnil`
+    /// (the static row, ctype.ml:2634-2636). A copy taken after the
+    /// resolution has the resolved field and shares what is left (`^0`).
+    #[test]
+    fn old_checker_resolves_a_shared_reference_for_every_holder() {
+        let program = compile(REF_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, VARIANTS | REFS);
+        let old = |ops: &[Op]| run_old(&program, plan, ops).form;
+        assert_eq!(
+            old(&then(&ANNOTATION, &[Op::Instance(1), Op::Unify(1, 3)])),
+            "0 = &0[G]fn(&1[G][closed #A(&2[G]int) #B?c^0() | &3[0]']) => &4[G]unit\n\
+             1 = &5[0]fn(&6[0][closed #A(&7[0]int) #B?c^0() | @3]) => &8[0]unit\n\
+             2 = &9[0]fn(&10[0][closed #A(&11[0]int) #B?c^0() | @3]) => &12[0]unit\n\
+             3 = @5\n"
+        );
+        assert_eq!(
+            old(&then(&GENERALIZED, &[Op::Instance(1), Op::Unify(1, 3)])),
+            "0 = &0[G]fn(&1[G][closed #A?^0(&2[G]int ) #B?c^1() | &3[G]']) => &4[G]unit\n\
+             1 = &5[0]fn(&6[0][closed #A(&7[0]int) #B?c^2() | &8[0]']) => &9[0]unit\n\
+             2 = &10[0]fn(&11[0][closed #A?^3(&12[0]int ) #B?c^4() | &13[0]']) => &14[0]unit\n\
+             3 = @5\n"
+        );
+        assert_eq!(
+            old(&then(&ANNOTATION, &[Op::Instance(2), Op::Unify(1, 3)])),
+            "0 = &0[G]fn(&1[G][closed #A- #B | &2[0]nil]) => &3[G]unit\n\
+             1 = &4[0]fn(&5[0][closed #B | @2]) => &6[0]unit\n\
+             2 = &7[0]fn(&8[0][closed #A- #B | @2]) => &9[0]unit\n\
+             3 = @4\n"
+        );
+        let after = old(&[
+            Op::BeginDef,
+            Op::Instance(0),
+            Op::EndDef,
+            Op::GeneralizeStructure(0),
+            Op::Copy(0),
+            Op::Instance(1),
+            Op::Unify(1, 2),
+            Op::Copy(0),
+        ]);
+        assert!(
+            after.ends_with("3 = &9[0]fn(&10[0][closed #A(&11[0]int) #B?c^0() | @3]) => &12[0]unit\n"),
+            "{after}"
+        );
+    }
+
+    /// A failed unification leaves what it resolved (observed, in the
+    /// explaining mode): the two rows are unified before the second
+    /// components clash, and afterwards `#A` is present and the two
+    /// operands hold one row node. `set_row_field` logs `Crow`
+    /// (compiler/ml/btype.ml:742-744) and a failure undoes path compression
+    /// only (btype.ml:792-800); the descriptor put back is the arrow's
+    /// (`t1'.desc <- d1`, ctype.ml:2437), not the row's.
+    #[test]
+    fn old_checker_keeps_a_resolution_after_a_failed_unification() {
+        let program = compile(REF_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, VARIANTS | REFS | EXPLAIN);
+        let old = run_old(&program, plan, &[Op::Instance(3), Op::Instance(4), Op::Unify(0, 1)]);
+        assert_eq!(old.failed, Some(2));
+        assert!(
+            old.form.ends_with(
+                "0 = &0[0]fn(&1[0][closed #A(&2[0]int) #B?c^0() | &3[0]'], &4[0]int) => &5[0]unit\n\
+                 1 = &6[0]fn(@1, &7[0]string) => &8[0]unit\n"
+            ),
+            "{}",
+            old.form
+        );
+    }
+
+    /// A field resolved to `Rabsent` is no longer a parent of its types
+    /// (`iter_row`, compiler/ml/btype.ml:229-236, visits what
+    /// `row_field_repr` gives), also for a holder the unification did not
+    /// touch (observed). The annotation `([< #A('a) | #B], 'a) => unit`
+    /// is copied twice two definitions deep; the row of the first copy is
+    /// unified with `[#B]`; the row of the second copy is then lowered to
+    /// the starting level. It comes down (`&9[0]`) and the variable its
+    /// `#A` named stays where it was (`&3[1]`).
+    #[test]
+    fn old_checker_does_not_reach_the_types_of_an_absent_field() {
+        let program = compile(
+            "external p: ([< #A('a) | #B], 'a) => unit = \"p\"\n\
+             external c: [#B] => unit = \"c\"\n"
+                .to_string(),
+        );
+        let ops = [
+            Op::BeginDef,
+            Op::BeginDef,
+            Op::Instance(0),
+            Op::EndDef,
+            Op::GeneralizeStructure(0),
+            Op::Copy(0),
+            Op::Copy(0),
+            Op::Child(1, 0),
+            Op::Instance(1),
+            Op::Child(4, 0),
+            Op::Unify(3, 5),
+            Op::Child(2, 0),
+            Op::Lower(6, 0),
+        ];
+        let old = run_old(&program, Plan::new(Tier::Full, VARIANTS | REFS), &ops);
+        assert_eq!(
+            old.form,
+            "0 = &0[G]fn(&1[G][closed #A- #B | &2[0]nil], &3[1]') => &4[G]unit\n\
+             1 = &5[1]fn(&6[1][closed #B | @2], @3) => &7[1]unit\n\
+             2 = &8[1]fn(&9[0][closed #A- #B | @2], @3) => &10[1]unit\n\
+             3 = @6\n\
+             4 = &11[1]fn(@6) => &12[1]unit\n\
+             5 = @6\n\
+             6 = @9\n"
+        );
+    }
+
+    /// The classes are compared: the kernel tier's copy is R1's, which
+    /// knows no reference, so a field of a node it copies has a class of
+    /// its own. It agrees where the old checker makes new references (two
+    /// instances, two copies of a generalized type) and differs where the
+    /// old checker shares them (two copies of an annotation's type), on
+    /// the fixed case and on generated ones (observed: 70 of 10,000).
+    #[test]
+    fn reference_classes_show_a_missing_share() {
+        let program = compile(REF_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Kernel, VARIANTS | REFS);
+        compare(1, &program, plan, &[Op::Instance(0), Op::Instance(0)], Fault::None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        compare(2, &program, plan, &GENERALIZED, Fault::None).unwrap_or_else(|e| panic!("{e}"));
+        let report = compare(3, &program, plan, &ANNOTATION, Fault::None)
+            .expect_err("a copy without the shared references must be seen");
+        assert!(report.contains("seed 3") && report.contains("#A?^2("), "{report}");
+        let (coverage, mismatches) = run_plan(plan, 1, 100, 100);
+        assert_eq!(coverage.cases + mismatches.len(), 10_000);
+        assert!(mismatches.len() >= 20, "{}", mismatches.len());
+    }
+
+    /// The fixed cases of [`REF_PROGRAM`] that make no copy, on both
+    /// sides, with the classes of references printed: a `Reither` row
+    /// against an open row with one of its tags present, in both orders;
+    /// against a closed row without it; against another instance of
+    /// itself; and, in the explaining mode, the rows unified before a
+    /// later component clashes, in both orders.
+    /// Reaches: R3m, R3f.
     #[test]
     #[ignore = "R3f build"]
+    fn variant_rows_agree_on_fixed_cases() {
+        let program = compile(REF_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, VARIANTS | REFS);
+        let cases: [&[Op]; 5] = [
+            &[Op::Instance(0), Op::Instance(1), Op::Unify(0, 1), Op::Instance(0)],
+            &[Op::Instance(1), Op::Instance(0), Op::Unify(0, 1)],
+            &[Op::Instance(0), Op::Instance(2), Op::Unify(0, 1)],
+            &[Op::Instance(0), Op::Instance(0), Op::Unify(0, 1)],
+            &[Op::Instance(2), Op::Instance(1), Op::Unify(0, 1)],
+        ];
+        for (index, ops) in cases.into_iter().enumerate() {
+            compare(index as u64, &program, plan, ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
+        }
+        let plan = Plan::new(Tier::Full, VARIANTS | REFS | EXPLAIN);
+        for (index, ops) in [[3, 4], [4, 3]].into_iter().enumerate() {
+            let ops = [Op::Instance(ops[0]), Op::Instance(ops[1]), Op::Unify(0, 1)];
+            compare(10 + index as u64, &program, plan, &ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
+        }
+    }
+
+    /// The copies of an annotation's type and of a generalized type on
+    /// both sides (the cases of `old_checker_shares_the_references_of_an_
+    /// annotation` and `old_checker_resolves_a_shared_reference_for_every_
+    /// holder`), then 10,000 cases of everything on programs with
+    /// variants, with the classes of references compared, and 10,000 with
+    /// objects and made nodes too: the acceptance test of R3f and R3n
+    /// together. A generated case copies rows, so it needs both. A case
+    /// that differs is read against the OCaml arm before either side is
+    /// followed (decision 18); a seed where the old checker departs from
+    /// ctype.ml is pinned with `run_cases_except` and its cause by the
+    /// reviewer, not by the builder.
+    /// Reaches: R3m, R3e, R3f, R3n.
+    #[test]
+    #[ignore = "R3n build"]
     fn variant_plan_agrees_on_generated_cases() {
-        let coverage = run_cases(Plan::new(Tier::Full, VARIANTS), 1, 100, 100);
+        let program = compile(REF_PROGRAM.to_string());
+        let plan = Plan::new(Tier::Full, VARIANTS | REFS);
+        let cases: [Vec<Op>; 6] = [
+            ANNOTATION.to_vec(),
+            GENERALIZED.to_vec(),
+            then(&ANNOTATION, &[Op::Instance(1), Op::Unify(1, 3)]),
+            then(&GENERALIZED, &[Op::Instance(1), Op::Unify(1, 3)]),
+            then(&ANNOTATION, &[Op::Instance(2), Op::Unify(1, 3)]),
+            then(&ANNOTATION, &[Op::Instance(1), Op::Unify(1, 3), Op::Copy(0), Op::Copy(1)]),
+        ];
+        for (index, ops) in cases.iter().enumerate() {
+            compare(index as u64, &program, plan, ops, Fault::None).unwrap_or_else(|e| panic!("{e}"));
+        }
+        let coverage = run_cases(plan, 1, 100, 100);
         assert_eq!(coverage.cases, 10_000);
         assert!(coverage.failures * 10 > coverage.cases, "{coverage:?}");
-        run_cases(Plan::new(Tier::Full, OBJECTS | VARIANTS | BUILD), 1, 100, 100);
+        run_cases(Plan::new(Tier::Full, OBJECTS | VARIANTS | REFS | BUILD), 1, 100, 100);
+        run_cases(Plan::new(Tier::Full, VARIANTS | REFS | EXPLAIN), 1, 20, 100);
     }
 
     /// The mechanical check of the first skeleton turn's second lesson:
@@ -2592,15 +2935,16 @@ mod tests {
     /// R3x.
     #[test]
     fn ignored_tests_name_the_slices_they_reach() {
-        let before: [(&str, &[&str]); 8] = [
+        let before: [(&str, &[&str]); 9] = [
             ("R3k", &[]),
             ("R3m", &[]),
             ("R3e", &["R3m"]),
             ("R3f", &["R3m", "R3e"]),
+            ("R3n", &["R3m", "R3e", "R3f"]),
             ("R3g", &["R3m", "R3e"]),
-            ("R3h", &["R3m", "R3e", "R3f", "R3g"]),
-            ("R3i", &["R3m", "R3e", "R3f", "R3g"]),
-            ("R3j", &["R3m", "R3e", "R3f", "R3g"]),
+            ("R3h", &["R3m", "R3e", "R3f", "R3n", "R3g"]),
+            ("R3i", &["R3m", "R3e", "R3f", "R3n", "R3g"]),
+            ("R3j", &["R3m", "R3e", "R3f", "R3n", "R3g"]),
         ];
         // Method name -> slice, from the bodies that are still `todo!`.
         let mut methods: Vec<(String, String)> = Vec::new();
@@ -2688,6 +3032,20 @@ mod tests {
                 }
                 if rows && (full || body.contains("Tier::Expand")) {
                     reaches.push("R3m");
+                }
+                // A copy of a row is R3n's: a generated case (every plan
+                // draws `Op::Copy`), or a fixed one that copies.
+                if full
+                    && body.contains("VARIANTS")
+                    && ["run_cases", "Op::Copy", "ANNOTATION", "GENERALIZED"]
+                        .iter()
+                        .any(|needle| body.contains(needle))
+                {
+                    reaches.push("R3n");
+                }
+                // A hand-built variant row reaches R3f.
+                if ["variant_at(", "tag_pair("].iter().any(|needle| body.contains(needle)) {
+                    reaches.push("R3f");
                 }
                 // A hand-built test: a type marked INHERITS, or the marks
                 // themselves, is R3m's.

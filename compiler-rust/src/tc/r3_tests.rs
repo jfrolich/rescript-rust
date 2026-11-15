@@ -2054,3 +2054,597 @@ fn sizes_of_object_rows() {
     assert_eq!(std::mem::size_of::<ExtraDescriptor>(), 12);
     assert_eq!(std::mem::size_of_val(&cell_node(true)), 16);
 }
+
+// ---------------------------------------------------------------------------
+// R3f: polymorphic variant rows (section 8.6, decision 34).
+// ---------------------------------------------------------------------------
+
+use super::rows::{FieldRepr, RES_EITHER, RES_KIND, field_repr, published_slots};
+use super::segment::{RowFieldKind, RowFieldRow, VariantRow};
+
+/// One tag of a hand-built row.
+#[derive(Clone, Copy)]
+enum Tag {
+    /// `Rpresent`, with its argument or none.
+    Present(Option<Ty>),
+    Absent,
+    /// `Reither (c, tl, m, ref None)` with at most one type.
+    Either(bool, Option<Ty>, bool),
+}
+
+/// An unopened variant node at `level`, as a segment publishes one
+/// (tc/bridge/from_old.rs, `variant`): the slots are the tags' types in
+/// order, then `more`; each `Reither` field has the slot its reference
+/// will have (`Extras::from_segment`). `name` is a path index or `NONE`.
+fn variant_at(c: &mut Checker, level: u32, tags: &[(&str, Tag)], more: Ty, closed: bool, name: u32) -> Ty {
+    let start = c.extras.row_fields.len() as u32;
+    let mut slots = Vec::new();
+    for &(label, tag) in tags {
+        let name = name_index(c, label);
+        let (ty, kind) = match tag {
+            Tag::Present(ty) => (ty, RowFieldKind::Present),
+            Tag::Absent => (None, RowFieldKind::Absent),
+            Tag::Either(constant, ty, matched) => (ty, RowFieldKind::Either { constant, matched }),
+        };
+        let types = Range { start: slots.len() as u32, len: u32::from(ty.is_some()) };
+        slots.extend(ty);
+        c.extras.row_fields.push(RowFieldRow { name, types, link: NONE, kind });
+    }
+    let more_slot = slots.len() as u32;
+    slots.push(more);
+    let row = VariantRow {
+        fields: Range { start, len: tags.len() as u32 },
+        more: more_slot,
+        name,
+        name_arguments: Range::default(),
+        closed,
+        fixed: false,
+    };
+    let mut slot = published_slots(row, &c.extras.row_fields);
+    for field in &mut c.extras.row_fields[start as usize..] {
+        if matches!(field.kind, RowFieldKind::Either { .. }) {
+            field.link = slot;
+            slot += 1;
+        }
+    }
+    c.extras.variants.push(row);
+    let index = c.extras.variants.len() as u32 - 1;
+    extended_at(c, level, ExtraDescriptor::Variant(index), &slots)
+}
+
+/// [`name`], under a name that a parameter called `name` does not hide.
+fn name_index(c: &mut Checker, text: &str) -> u32 {
+    name(c, text)
+}
+
+/// The row of `ty` as `row_repr` gives it (compiler/ml/btype.ml:126-135):
+/// every tag with its field read through its references, outermost node
+/// first; the last node's row; the representative of its `more`.
+fn read_row(c: &mut Checker, ty: Ty) -> (Vec<(String, FieldRepr)>, VariantRow, Ty) {
+    let mut at = c.g.repr(ty);
+    let mut tags = Vec::new();
+    loop {
+        let node = c.g.nodes[at.0 as usize];
+        let ExtraDescriptor::Variant(row) = c.extras.descriptors[node.a as usize] else {
+            panic!("not a variant");
+        };
+        let row = c.extras.variants[row as usize];
+        for index in row.fields.start..row.fields.start + row.fields.len {
+            let field = c.extras.row_fields[index as usize];
+            let label = String::from_utf8(c.extras.names.text(field.name).to_vec()).unwrap();
+            tags.push((label, field_repr(&c.g, node.b, node.arity(), field)));
+        }
+        let more = c.g.repr(c.g.lists[(node.b + row.more) as usize]);
+        let inner = c.g.nodes[more.0 as usize];
+        let variant = inner.head & EXTENDED != 0
+            && matches!(c.extras.descriptors[inner.a as usize], ExtraDescriptor::Variant(_));
+        if !variant {
+            return (tags, row, more);
+        }
+        at = more;
+    }
+}
+
+/// [`read_row`] as text: `[closed fixed A B() C- D?cm1 | more as name]`:
+/// a present tag, one with an argument, an absent one, a `Reither` one
+/// with its flags and how many types it has; `more` is `'` (a variable),
+/// `nil` or `t` (a constructor).
+fn shape(c: &mut Checker, ty: Ty) -> String {
+    let (tags, row, more) = read_row(c, ty);
+    let mut text = String::from("[");
+    for flag in [(row.closed, "closed "), (row.fixed, "fixed ")] {
+        if flag.0 {
+            text.push_str(flag.1);
+        }
+    }
+    for (label, field) in tags {
+        text.push_str(&label);
+        match field.kind {
+            RowFieldKind::Present if field.first.0 == NONE => {}
+            RowFieldKind::Present => text.push_str("()"),
+            RowFieldKind::Absent => text.push('-'),
+            RowFieldKind::Either { constant, matched } => {
+                text.push('?');
+                text.push_str(if constant { "c" } else { "" });
+                text.push_str(if matched { "m" } else { "" });
+                text.push_str(&field.types.to_string());
+            }
+        }
+        text.push(' ');
+    }
+    let node = c.g.nodes[more.0 as usize];
+    text.push_str(match node.tag() {
+        VAR => "| '",
+        CONSTR => "| t",
+        _ => "| nil",
+    });
+    if row.name != NONE {
+        text.push_str(&format!(" as {}", row.name));
+    }
+    text.push(']');
+    text
+}
+
+/// The rows unification must not write (section 8.6, decision 18).
+type Rows = (Vec<ExtraDescriptor>, Vec<VariantRow>, Vec<RowFieldRow>);
+
+fn rows_now(c: &Checker) -> Rows {
+    (c.extras.descriptors.clone(), c.extras.variants.clone(), c.extras.row_fields.clone())
+}
+
+/// Every row that existed at `before` is as it was.
+fn assert_rows_kept(c: &Checker, before: &Rows) {
+    assert_eq!(c.extras.descriptors[..before.0.len()], before.0[..], "a descriptor row was written");
+    assert_eq!(c.extras.variants[..before.1.len()], before.1[..], "a variant row was written");
+    assert_eq!(c.extras.row_fields[..before.2.len()], before.2[..], "a row-field row was written");
+}
+
+/// Opening a node (section 8.6, decision 34): `[< #A(int) | #B | #C(int)]`
+/// with `#A` and `#B` `Reither` and `#C` present has three published
+/// slots (`int`, `int`, `more`). Opened it has five: slot 3 is `#A`'s
+/// first chain node, `Reither (false, [int], false, e)` with a new
+/// unresolved `e`, and so is `#A`'s type slot; slot 4 is `#B`'s unresolved
+/// reference. Three nodes, one holder; no row is made or written; every
+/// field reads as before (`row_field_repr`, compiler/ml/btype.ml:112-121),
+/// except that a `Reither` field now names its reference. A second
+/// opening, and the opening of a row without a `Reither` field, do
+/// nothing.
+/// Reaches: R3f.
+#[test]
+#[ignore = "R3f build"]
+fn opening_a_row_gives_each_reither_field_a_reference() {
+    let mut c = checker(Mode::Success);
+    let (a, b) = (constr(&mut c, INT, &[]), constr(&mut c, INT, &[]));
+    let more = var(&mut c);
+    let tags = [
+        ("A", Tag::Either(false, Some(a), false)),
+        ("B", Tag::Either(true, None, false)),
+        ("C", Tag::Present(Some(b))),
+    ];
+    let ty = variant_at(&mut c, 2, &tags, more, true, NONE);
+    let (before, _, _) = read_row(&mut c, ty);
+    let rows = rows_now(&c);
+    let nodes = c.g.nodes.len();
+    let opened = c.open_row(ty);
+    assert_eq!(rows_now(&c), rows, "no row made or written");
+    assert_eq!(c.g.nodes.len() - nodes, 3);
+    assert_eq!(c.extras.holders.len(), 1);
+    assert_eq!(opened, c.g.nodes[ty.0 as usize]);
+    assert_eq!(opened.arity(), 5);
+    let slot = |c: &Checker, index: u32| c.g.lists[(opened.b + index) as usize];
+    let first = slot(&c, 3);
+    assert_eq!(slot(&c, 0), first, "the type slot names the chain node");
+    assert_eq!((slot(&c, 1), slot(&c, 2)), (b, more));
+    let chain = c.g.nodes[first.0 as usize];
+    assert_eq!((chain.tag(), chain.head & EXTENDED, chain.a & RES_KIND), (TUPLE, 0, RES_EITHER));
+    assert_eq!((chain.arity(), chain.level, c.g.lists[chain.b as usize]), (2, 2, a));
+    let end = c.g.lists[chain.b as usize + 1];
+    assert_eq!(c.extras.holders[c.g.nodes[end.0 as usize].b as usize].node, first);
+    for reference in [end, slot(&c, 4)] {
+        let node = c.g.nodes[reference.0 as usize];
+        assert_eq!((node.tag(), node.level, node.a), (VAR, 2, NONE));
+    }
+    let (after, _, _) = read_row(&mut c, ty);
+    for ((_, was), (_, is)) in before.iter().zip(&after) {
+        assert_eq!((was.first, was.types, was.kind), (is.first, is.types, is.kind));
+    }
+    assert_eq!((after[0].1.end, after[1].1.end, after[2].1.end), (end, slot(&c, 4), Ty(NONE)));
+    let nodes = c.g.nodes.len();
+    assert_eq!(c.open_row(ty), opened);
+    let plain = variant_at(&mut c, 2, &[("C", Tag::Present(None))], more, true, NONE);
+    let node = c.g.nodes[plain.0 as usize];
+    assert_eq!(c.open_row(plain), node);
+    assert_eq!(c.g.nodes.len(), nodes + 1, "only the node this test pushed");
+}
+
+/// Two open rows with no tag in common (compiler/ml/ctype.ml:380-386,
+/// 2548-2552, 2596-2616):
+///
+/// ```text
+/// | [p1], _ when not (List.mem_assoc (fst p1) fi2) -> (fi1, fi2, [])
+/// ...
+/// else newty2 (Ext_pervasives.min_int rm1.level rm2.level) (Tvar None)
+/// ...
+/// let ty = newgenty (Tvariant {row0 with row_fields = rest}) in
+/// update_level !env rm.level ty;
+/// link_type rm ty
+/// ```
+///
+/// `[> #A(int)]` against `[> #B]`: no pair; `more` is a new variable at
+/// level 2; row 2's variable becomes a new row `[#A(int) | more]` and row
+/// 1's a new row `[#B | more]`, both at the level of the variable they
+/// replace. Three nodes. The left node is linked to the right one
+/// (`link_type t1' t2`, ctype.ml:2331), whose row now reads `B A()`.
+/// Reaches: R3f.
+#[test]
+#[ignore = "R3f build"]
+fn an_open_row_takes_the_tags_it_lacks() {
+    let mut c = checker(Mode::Success);
+    let int = constr(&mut c, INT, &[]);
+    let (rm1, rm2) = (var(&mut c), var(&mut c));
+    let left = variant_at(&mut c, 2, &[("A", Tag::Present(Some(int)))], rm1, false, NONE);
+    let right = variant_at(&mut c, 2, &[("B", Tag::Present(None))], rm2, false, NONE);
+    let rows = rows_now(&c);
+    let nodes = c.g.nodes.len() as u32;
+    c.unify(left, right).unwrap();
+    assert_rows_kept(&c, &rows);
+    assert_eq!(c.g.nodes.len() as u32 - nodes, 3, "a variable and two rows");
+    assert_eq!(c.g.repr(left), right);
+    assert_eq!(shape(&mut c, right), "[B A() | ']");
+    assert_eq!(shape(&mut c, rm1), "[B | ']");
+    assert_eq!(shape(&mut c, rm2), "[A() | ']");
+    let (_, _, more) = read_row(&mut c, right);
+    assert!(more.0 >= nodes);
+    assert_eq!(c.g.nodes[more.0 as usize].level, 2);
+    for built in [rm1, rm2] {
+        let built = c.g.repr(built);
+        assert_eq!(c.g.nodes[built.0 as usize].level, 2, "lowered from the generic level");
+    }
+    // Unifying them again is one node on both sides.
+    let nodes = c.g.nodes.len();
+    c.unify(left, right).unwrap();
+    assert_eq!(c.g.nodes.len(), nodes);
+}
+
+/// A closed row closes the other and takes nothing; the static row
+/// (compiler/ml/ctype.ml:2553, 2596-2616, 2630-2636):
+///
+/// ```text
+/// and closed = row1.row_closed || row2.row_closed in
+/// ...
+/// if static_row row1 then
+///   let rm = row_more row1 in
+///   if is_Tvar rm then link_type rm (newty2 rm.level Tnil)
+/// ```
+///
+/// `[#A(int) | #B]` closed against `[> #A(int)]`, in both orders: one
+/// pair, `#B` goes to the open row, both rows get a closed rest, the two
+/// `int` are unified, and since row 1 read again (`static_row` calls
+/// `row_repr`, btype.ml:162-170) is closed with no `Reither` field, the
+/// new variable becomes `Tnil`. Four nodes: the variable, two rows, the
+/// `Tnil`.
+/// Reaches: R3f.
+#[test]
+#[ignore = "R3f build"]
+fn a_closed_row_closes_the_other_and_a_static_row_ends_in_nil() {
+    for swap in [false, true] {
+        let mut c = checker(Mode::Success);
+        let (i1, i2) = (constr(&mut c, INT, &[]), constr(&mut c, INT, &[]));
+        let (rm1, rm2) = (var(&mut c), var(&mut c));
+        let tags = [("A", Tag::Present(Some(i1))), ("B", Tag::Present(None))];
+        let closed = variant_at(&mut c, 2, &tags, rm1, true, NONE);
+        let open = variant_at(&mut c, 2, &[("A", Tag::Present(Some(i2)))], rm2, false, NONE);
+        let rows = rows_now(&c);
+        let nodes = c.g.nodes.len();
+        let (left, right) = if swap { (open, closed) } else { (closed, open) };
+        c.unify(left, right).unwrap();
+        assert_rows_kept(&c, &rows);
+        assert_eq!(c.g.nodes.len() - nodes, 4, "swap {swap}");
+        assert_eq!(shape(&mut c, right), "[closed A() B | nil]", "swap {swap}");
+        assert_eq!(shape(&mut c, rm2), "[closed B | nil]");
+        assert_eq!(shape(&mut c, rm1), "[closed | nil]");
+        assert_eq!(c.g.repr(i1), c.g.repr(i2), "the arguments of the common tag are unified");
+    }
+}
+
+/// The two clashes of a row that may not gain a tag, in `Mode::Explain`
+/// (compiler/ml/ctype.ml:2564-2573, 2596-2604, 2637-2641):
+///
+/// ```text
+/// then raise (Unify [(mkvariant [] true, mkvariant [] true)]);
+/// ...
+/// (if (rest <> [] && (row.row_closed || row_fixed row)) || ...
+///  then
+///    let t1 = mkvariant [] true and t2 = mkvariant rest false in
+///    raise (Unify [(if row == row1 then (t1, t2) else (t2, t1))]));
+/// ...
+/// with exn -> log_type rm1; rm1.desc <- md1; log_type rm2; rm2.desc <- md2;
+/// ```
+///
+/// Closed `[#A]` against open `[> #B]`: `set_more row2 [A]` links row 2's
+/// variable; `set_more row1 [B]` clashes with the pair (an empty closed
+/// row, an open row of `#B`). Afterwards row 2's variable is a variable
+/// again and the left node is not linked (`t1'.desc <- d1`, ctype.ml:2437).
+/// Closed `[#A]` against closed `[#B]`: the empty type, before anything is
+/// linked; the pair is two empty closed rows.
+/// Reaches: R3f.
+#[test]
+#[ignore = "R3f build"]
+fn a_closed_row_refuses_a_tag_and_the_empty_type_is_a_clash() {
+    for both_closed in [false, true] {
+        let mut c = checker(Mode::Explain);
+        let (rm1, rm2) = (var(&mut c), var(&mut c));
+        let left = variant_at(&mut c, 2, &[("A", Tag::Present(None))], rm1, true, NONE);
+        let right = variant_at(&mut c, 2, &[("B", Tag::Present(None))], rm2, both_closed, NONE);
+        let rows = rows_now(&c);
+        assert!(c.unify(left, right).is_err());
+        assert_rows_kept(&c, &rows);
+        assert_eq!((c.g.repr(left), c.g.repr(rm1), c.g.repr(rm2)), (left, rm1, rm2));
+        assert_eq!(c.g.nodes[rm2.0 as usize].tag(), VAR);
+        assert_eq!(shape(&mut c, left), "[closed A | ']");
+        let trace = c.trace.clone();
+        assert_eq!(trace.len(), 2);
+        assert_eq!(trace[0], [left, right]);
+        let pair = [shape(&mut c, trace[1][0]), shape(&mut c, trace[1][1])];
+        let expected = if both_closed { ["[closed | ']", "[closed | ']"] } else { ["[closed | ']", "[B | ']"] };
+        assert_eq!(pair, expected, "both closed {both_closed}");
+        assert!(c.frames.is_empty() && c.saved.is_empty());
+    }
+}
+
+/// `Reither` against a present tag, and `filter_row_fields`
+/// (compiler/ml/ctype.ml:388-397, 2711-2717):
+///
+/// ```text
+/// | Reither (_, _, false, e) when erase -> set_row_field e Rabsent; fi
+/// ...
+/// | Reither (false, tl, _, e1), Rpresent (Some t2) when not fixed1 -> (
+///   set_row_field e1 f2;
+///   update_level !env (repr more).level t2;
+///   try List.iter (fun t1 -> unify env t1 t2) tl
+/// ```
+///
+/// `[< #A(int) | #B]` (both `Reither`, closed) against `[> #A(int)]`: `#A`
+/// becomes present and its type is unified with the right one; `#B`
+/// stays `Reither` and goes to the open row with its reference (the old
+/// checker shows the same row: `[closed #A(int) #B?c^0() | ']`,
+/// `differential::tests::old_checker_resolves_a_shared_reference_for_
+/// every_holder`). Against the closed `[#A(int)]`, `#B` is erased: absent
+/// and not in the rest, and the row is static.
+/// Reaches: R3f.
+#[test]
+#[ignore = "R3f build"]
+fn a_reither_tag_becomes_present_and_a_closed_row_erases_the_others() {
+    for closed in [false, true] {
+        let mut c = checker(Mode::Success);
+        let (i1, i2) = (constr(&mut c, INT, &[]), constr(&mut c, INT, &[]));
+        let (rm1, rm2) = (var(&mut c), var(&mut c));
+        let tags = [("A", Tag::Either(false, Some(i1), false)), ("B", Tag::Either(true, None, false))];
+        let left = variant_at(&mut c, 2, &tags, rm1, true, NONE);
+        let right = variant_at(&mut c, 2, &[("A", Tag::Present(Some(i2)))], rm2, closed, NONE);
+        let rows = rows_now(&c);
+        c.unify(left, right).unwrap();
+        assert_rows_kept(&c, &rows);
+        assert_eq!(c.g.repr(i1), c.g.repr(i2));
+        let expected = if closed { "[closed A() | nil]" } else { "[closed A() B?c0 | ']" };
+        assert_eq!(shape(&mut c, right), expected, "closed {closed}");
+    }
+}
+
+/// How a test makes a tag from the `int` node of its row.
+type Kind = fn(Ty) -> Tag;
+
+/// Two rows, each with the one tag `X` of kind `left` and `right`, both
+/// open; what `X` is in the right row afterwards, or `None` for a clash.
+fn tag_pair(left: Kind, right: Kind, fixed: bool) -> Option<String> {
+    let mut c = checker(Mode::Success);
+    let (i1, i2) = (constr(&mut c, INT, &[]), constr(&mut c, INT, &[]));
+    let rm1 = var(&mut c);
+    // A row whose `more` is a constructor is fixed (`row_fixed`,
+    // compiler/ml/btype.ml:153-160).
+    let rm2 = if fixed { constr(&mut c, T, &[]) } else { var(&mut c) };
+    let l = variant_at(&mut c, 2, &[("X", left(i1))], rm1, false, NONE);
+    let r = variant_at(&mut c, 2, &[("X", right(i2))], rm2, false, NONE);
+    let rows = rows_now(&c);
+    let result = c.unify(l, r);
+    assert_rows_kept(&c, &rows);
+    result.ok()?;
+    let text = shape(&mut c, r);
+    Some(text.split(' ').next().unwrap().trim_start_matches('[').to_string())
+}
+
+/// `unify_row_field`, one pair of kinds at a time, in the order of its
+/// arms (compiler/ml/ctype.ml:2643-2730). `X()` is present with an
+/// argument, `X` present without, `X-` absent, `X?cm2` `Reither` with its
+/// flags and two types.
+///
+/// - `Rpresent (Some t1), Rpresent (Some t2) -> unify env t1 t2`;
+///   `Rpresent None, Rpresent None -> ()`.
+/// - Two `Reither`, no row fixed, neither matched (ctype.ml:2676-2708):
+///   each side gains the types of the other it lacks (`remq`), `c` is
+///   `c1 || c2`. With one matched (`redo`, ctype.ml:2663-2675) the types
+///   are unified first: `if c1 || c2 then raise (Unify [])`; otherwise
+///   the two `int` become one node and neither side gains a type.
+/// - Two `Reither` of one length, a row fixed, neither constant (PR#7496,
+///   ctype.ml:2652-2661): both get a `Reither` with no type and one new
+///   reference, and the types are unified pairwise.
+/// - `Reither (_, _, false, e1), Rabsent when not fixed1 -> set_row_field
+///   e1 f2`, and mirrored; a matched one clashes.
+/// - `Reither (false, tl, _, e1), Rpresent (Some t2) when not fixed1`, and
+///   mirrored; `Reither (true, [], _, e1), Rpresent None`, and mirrored.
+/// - `| _ -> raise (Unify [])`.
+///
+/// Reaches: R3f.
+#[test]
+#[ignore = "R3f build"]
+fn each_pair_of_tag_kinds() {
+    let some: Kind = |ty| Tag::Present(Some(ty));
+    let none: Kind = |_| Tag::Present(None);
+    let absent: Kind = |_| Tag::Absent;
+    let either: Kind = |ty| Tag::Either(false, Some(ty), false);
+    let constant: Kind = |_| Tag::Either(true, None, false);
+    let matched: Kind = |ty| Tag::Either(false, Some(ty), true);
+    let constant_matched: Kind = |_| Tag::Either(true, None, true);
+    let cases: [(&str, Kind, Kind, Option<&str>); 20] = [
+        ("some some", some, some, Some("X()")),
+        ("none none", none, none, Some("X")),
+        ("some none", some, none, None),
+        ("either either", either, either, Some("X?2")),
+        ("constant either", constant, either, Some("X?c1")),
+        ("either constant", either, constant, Some("X?c1")),
+        ("matched either", matched, either, Some("X?m1")),
+        ("constant-matched either", constant_matched, either, None),
+        ("either absent", either, absent, Some("X-")),
+        ("absent either", absent, either, Some("X-")),
+        ("matched absent", matched, absent, None),
+        ("absent absent", absent, absent, Some("X-")),
+        ("either some", either, some, Some("X()")),
+        ("some either", some, either, Some("X()")),
+        ("constant none", constant, none, Some("X")),
+        ("none constant", none, constant, Some("X")),
+        ("constant some", constant, some, None),
+        ("either none", either, none, None),
+        ("none absent", none, absent, None),
+        ("absent some", absent, some, None),
+    ];
+    for (label, left, right, expected) in cases {
+        assert_eq!(tag_pair(left, right, false).as_deref(), expected, "{label}");
+    }
+    // A fixed row 2: PR#7496 for two `Reither` of one length; and the arms
+    // guarded by `when not fixed2` clash.
+    assert_eq!(tag_pair(either, either, true).as_deref(), Some("X?1"));
+    assert_eq!(tag_pair(some, either, true), None);
+    assert_eq!(tag_pair(absent, either, true), None);
+    assert_eq!(tag_pair(either, some, true).as_deref(), Some("X()"));
+}
+
+/// The name of the row (compiler/ml/ctype.ml:2574-2586):
+///
+/// ```text
+/// if row1.row_name <> None && (row1.row_closed || empty r2)
+///    && ((not row2.row_closed) || (keep (fun f1 f2 -> (f1, f2)) && empty r1))
+/// then row1.row_name
+/// ```
+///
+/// A named closed `[#A]` against an open `[> #A]`: row 1's name. A named
+/// closed `[< #A | #B]` (`#B` `Reither`) against a closed `[#A]` without a
+/// name: `r1` is `#B`, which is not absent when the name is chosen, so
+/// neither test holds and the row has no name.
+/// Reaches: R3f.
+#[test]
+#[ignore = "R3f build"]
+fn the_row_keeps_a_name_only_when_it_stays_the_named_row() {
+    let mut c = checker(Mode::Success);
+    let (rm1, rm2) = (var(&mut c), var(&mut c));
+    let left = variant_at(&mut c, 2, &[("A", Tag::Present(None))], rm1, true, 5);
+    let right = variant_at(&mut c, 2, &[("A", Tag::Present(None))], rm2, false, NONE);
+    c.unify(left, right).unwrap();
+    assert_eq!(shape(&mut c, right), "[closed A | nil as 5]");
+
+    let mut c = checker(Mode::Success);
+    let (rm1, rm2) = (var(&mut c), var(&mut c));
+    let tags = [("A", Tag::Present(None)), ("B", Tag::Either(true, None, false))];
+    let left = variant_at(&mut c, 2, &tags, rm1, true, 5);
+    let right = variant_at(&mut c, 2, &[("A", Tag::Present(None))], rm2, true, NONE);
+    c.unify(left, right).unwrap();
+    assert_eq!(shape(&mut c, right), "[closed A | nil]");
+}
+
+/// A fixed row (compiler/ml/ctype.ml:2548-2551, 2596-2612; `row_fixed`,
+/// btype.ml:153-160: a row whose `more` is a constructor):
+///
+/// ```text
+/// let more = if fixed1 then rm1 else if fixed2 then rm2 else ...
+/// ...
+/// if row_fixed row then
+///   if more == rm then () else if is_Tvar rm then link_type rm more
+///   else unify env rm more
+/// ```
+///
+/// Open `[> #A]` against the fixed `[#A | #B | t]`: `more` is the fixed
+/// row's; nothing is made for it; the open row's variable becomes a new
+/// row `[#B | t]` marked fixed. Open `[> #A | #C]` against it: the fixed
+/// row would gain `#C`, a clash.
+/// Reaches: R3f.
+#[test]
+#[ignore = "R3f build"]
+fn a_fixed_row_gains_nothing() {
+    let mut c = checker(Mode::Success);
+    let rm1 = var(&mut c);
+    let rm2 = constr(&mut c, T, &[]);
+    let open = variant_at(&mut c, 2, &[("A", Tag::Present(None))], rm1, false, NONE);
+    let tags = [("A", Tag::Present(None)), ("B", Tag::Present(None))];
+    let fixed = variant_at(&mut c, 2, &tags, rm2, false, NONE);
+    let nodes = c.g.nodes.len();
+    c.unify(open, fixed).unwrap();
+    assert_eq!(c.g.nodes.len() - nodes, 1, "the row the open one gains");
+    assert_eq!(shape(&mut c, fixed), "[A B | t]");
+    assert_eq!(shape(&mut c, rm1), "[fixed B | t]");
+    let (_, _, more) = read_row(&mut c, rm1);
+    assert_eq!(more, rm2);
+
+    let mut c = checker(Mode::Success);
+    let rm1 = var(&mut c);
+    let rm2 = constr(&mut c, T, &[]);
+    let wide = [("A", Tag::Present(None)), ("C", Tag::Present(None))];
+    let open = variant_at(&mut c, 2, &wide, rm1, false, NONE);
+    let fixed = variant_at(&mut c, 2, &tags, rm2, false, NONE);
+    assert!(c.unify(open, fixed).is_err());
+}
+
+/// The cost of rows, as relations between n = 1,000 and n = 10,000 (the
+/// name comparisons of the sort are not steps): two closed rows of n
+/// common tags listed in opposite orders; two open rows of n tags each
+/// with none in common; a row of n tags against a row that is a chain of
+/// n nodes of one tag each (`row_repr`, compiler/ml/btype.ml:126-135).
+/// Reaches: R3f.
+#[test]
+#[ignore = "R3f build"]
+fn rows_of_ten_thousand_tags_are_linear() {
+    let labels = |prefix: &str, n: u32| -> Vec<String> {
+        (0..n).map(|at| format!("{prefix}{at:05}")).collect()
+    };
+    let common = |n: u32| {
+        let mut c = checker(Mode::Success);
+        let labels = labels("t", n);
+        let forward: Vec<(&str, Tag)> = labels.iter().map(|l| (l.as_str(), Tag::Present(None))).collect();
+        let backward: Vec<(&str, Tag)> = forward.iter().rev().copied().collect();
+        let (rm1, rm2) = (var(&mut c), var(&mut c));
+        let left = variant_at(&mut c, 2, &backward, rm1, true, NONE);
+        let right = variant_at(&mut c, 2, &forward, rm2, true, NONE);
+        steps::scope(|| c.unify(left, right).unwrap())
+    };
+    let (small, large) = (common(1_000), common(10_000));
+    assert!(large <= 11 * small, "common: {small} {large}");
+
+    let disjoint = |n: u32| {
+        let mut c = checker(Mode::Success);
+        let (f, g) = (labels("f", n), labels("g", n));
+        let f: Vec<(&str, Tag)> = f.iter().map(|l| (l.as_str(), Tag::Present(None))).collect();
+        let g: Vec<(&str, Tag)> = g.iter().map(|l| (l.as_str(), Tag::Present(None))).collect();
+        let (rm1, rm2) = (var(&mut c), var(&mut c));
+        let left = variant_at(&mut c, 2, &f, rm1, false, NONE);
+        let right = variant_at(&mut c, 2, &g, rm2, false, NONE);
+        let nodes = c.g.nodes.len();
+        let count = steps::scope(|| c.unify(left, right).unwrap());
+        assert_eq!(c.g.nodes.len() - nodes, 3, "a changed row is one node, whatever it gains");
+        count
+    };
+    let (small, large) = (disjoint(1_000), disjoint(10_000));
+    assert!(large <= 11 * small, "disjoint: {small} {large}");
+
+    let chain = |n: u32| {
+        let mut c = checker(Mode::Success);
+        let labels = labels("t", n);
+        let flat: Vec<(&str, Tag)> = labels.iter().map(|l| (l.as_str(), Tag::Present(None))).collect();
+        let rm1 = var(&mut c);
+        let left = variant_at(&mut c, 2, &flat, rm1, false, NONE);
+        let mut right = var(&mut c);
+        for label in &labels {
+            right = variant_at(&mut c, 2, &[(label.as_str(), Tag::Present(None))], right, false, NONE);
+        }
+        steps::scope(|| c.unify(left, right).unwrap())
+    };
+    let (small, large) = (chain(1_000), chain(10_000));
+    assert!(large <= 11 * small, "chain: {small} {large}");
+}
