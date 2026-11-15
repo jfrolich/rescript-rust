@@ -1,0 +1,1 @@
+- An inline record of an extension constructor or exception reached through a module path, such as `R.E({v: 1})`, is typed against the constructor's record type, as the OCaml compiler does.
