@@ -1,7 +1,8 @@
 //! P: compile_primitive: lower arguments once, sequence, then convert the result.
 use super::*;
 use crate::bir::PrimId;
-use crate::bir::j::{norm, plain};
+use crate::emit::row::Kind;
+use super::js::Mark;
 use crate::js_ir::BinOp;
 use crate::js_ir::op::LengthObject;
 use crate::lambda::lam_primitive::Primitive;
@@ -14,15 +15,7 @@ pub(super) struct Prim {
 impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// O(1): inspect a numeric leaf and its interned constant.
     pub(super) fn primitive_int(&self, node: NodeId) -> Option<i32> {
-        if let View::JNumber { value } = self.arena.view(node) {
-            match self.arena.constant(value) {
-                crate::bir::Constant::Int(n) => Some(*n as i32),
-                crate::bir::Constant::Char(n) => Some(*n as i32),
-                _ => None,
-            }
-        } else {
-            None
-        }
+        self.js.int(&self.arena, B::at(node))
     }
 
     /// C: runtime_call_expr / X: pure_runtime_call_expr. Runtime imports retain
@@ -35,6 +28,21 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         member: &str,
         args: &[NodeId],
     ) -> NodeId {
+        B::node(self.runtime(name, member, args))
+    }
+
+    /// `primitive_runtime` on a handle: the operands of `args` pushed in
+    /// order, then [`Self::runtime_call`]. O(r + a + text bytes), as
+    /// `primitive_runtime`.
+    fn runtime(&mut self, name: &str, member: &str, args: &[NodeId]) -> B::E {
+        let mark = self.push_values(args);
+        self.runtime_call(name, member, mark)
+    }
+
+    /// C: runtime_call_expr: `name.member(...)` over the operands pushed
+    /// since `mark`. O(r + a + text bytes), with r runtime modules (bounded
+    /// by the primitive runtime inventory) and a operands since `mark`.
+    fn runtime_call(&mut self, name: &str, member: &str, mark: Mark) -> B::E {
         let module = match self
             .arena
             .pools
@@ -59,7 +67,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             }
         };
         let member = Some(self.arena.intern_text(member));
-        let callee = plain::node(&mut self.arena, View::JQualified { module, member }, 0);
+        let callee = self.js.qualified(&mut self.arena, module, member);
         let info = self
             .arena
             .js_info(crate::bir::JsPayload::Call(crate::js_ir::CallInfo {
@@ -67,24 +75,45 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 arity: crate::js_ir::CallArity::Full,
                 ..Default::default()
             }));
-        plain::node(&mut self.arena, View::JCall { callee, args, info }, 0)
+        self.js.call(&mut self.arena, callee, mark, info)
+    }
+
+    /// The nodes of `values` pushed as operands, in order; returns the mark
+    /// of the first. O(values): one move each, no allocation in a warm unit.
+    fn push_values(&mut self, values: &[NodeId]) -> Mark {
+        let mark = self.js.mark();
+        for &value in values {
+            self.js.push(B::from_node(value));
+        }
+        mark
+    }
+
+    /// `values[0] op values[1]` by J-E4. O(1) beside the cost of the J-E4
+    /// row; no operand is walked here.
+    fn bin_of(&mut self, op: BinOp, values: &[NodeId]) -> B::E {
+        self.js.bin(&mut self.arena, op, B::from_node(values[0]), B::from_node(values[1]))
+    }
+
+    /// The first value, or `undefined` when there is none. O(1).
+    fn first_value(&mut self, values: &[NodeId]) -> B::E {
+        match values.first() {
+            Some(&value) => B::from_node(value),
+            None => self.js.undefined(&mut self.arena, false),
+        }
     }
 
     /// P: compile_primitive_js / compile_debugger source locations on statements.
     /// O(1): one location lookup and one statement push.
     fn primitive_statement(&mut self, statement: NodeId, loc: crate::lambda::LamLoc) {
+        let mut statement = B::stmt_from_node(statement);
         if self
             .locations
             .and_then(|locations| locations.get(loc))
             .is_some_and(|loc| !loc.loc_ghost && loc.loc_start.cnum >= 0)
         {
-            self.arena
-                .set_cold(statement, crate::bir::Cold { loc, comment: None });
-            let mut flags = self.arena.node(statement).flags();
-            flags.0 |= crate::bir::NodeFlags::JS_LOC_PRESENT;
-            self.arena.nodes[statement.index()].set_flags(flags);
+            self.js.locate_stmt(&mut self.arena, &mut statement, loc);
         }
-        self.statements.push(statement);
+        self.statements.push(B::stmt_node(statement));
     }
 
     /// P: compile_primitive_js. O(a + emitted metadata bytes), plus sequencing
@@ -145,46 +174,47 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     ) -> Result<Probed, Unsupported> {
         self.primitive_steps += values.len() + 1;
         let primitive = &payload.primitive;
-        let value = match primitive {
+        let mut value = match primitive {
             // P: compile_primitive_js, dictionaries: extract only literal-key
             // tuple entries, exactly as the legacy filter_map does.
             Primitive::Pmakedict => {
                 let mut keys = std::mem::take(&mut self.object_scratch.keys);
                 let mut kept = std::mem::take(&mut self.object_scratch.values);
                 debug_assert!(keys.is_empty() && kept.is_empty());
-                let extracted = if let [array] = values.as_slice() {
-                    if let View::JArray { values: items } = self.arena.view(*array) {
-                        for &item in items {
-                            self.primitive_steps += 1;
-                            if let View::JBlockLit { values: [key, value], .. } = self.arena.view(item) {
-                                if let View::JStr { text } = self.arena.view(*key) {
-                                    keys.push(crate::bir::PropertyKey::Literal(text));
-                                    kept.push(*value);
-                                }
+                let array = match values.as_slice() {
+                    &[array] if self.js.kind(&self.arena, B::at(array)) == Kind::Array => Some(array),
+                    _ => None,
+                };
+                let result = if let Some(array) = array {
+                    let count = self.js.unpack_rev(&mut self.arena, B::from_node(array));
+                    for _ in 0..count {
+                        self.primitive_steps += 1;
+                        let item = self.js.pop();
+                        let r = B::of(&item);
+                        let key = if self.js.kind(&self.arena, r) == Kind::BlockLit
+                            && self.js.arity(&self.arena, r) == 2
+                        {
+                            self.js.str_of(&self.arena, self.js.operand(&self.arena, r, 0))
+                        } else {
+                            None
+                        };
+                        match key {
+                            Some(text) => {
+                                keys.push(crate::bir::PropertyKey::Literal(text));
+                                kept.push(B::node(self.js.keep_operand(&mut self.arena, item, 1)));
                             }
+                            None => self.js.release(&mut self.arena, item),
                         }
-                        true
-                    } else { false }
-                } else { false };
-                let result = if extracted {
-                    for &value in &kept {
-                        self.arena.detach(value);
                     }
                     let info = self.arena.object_info(&keys);
-                    plain::node(
-                        &mut self.arena,
-                        View::JObject {
-                            values: &kept,
-                            info,
-                        },
-                        0,
-                    )
+                    let mark = self.push_values(&kept);
+                    self.js.object(&mut self.arena, mark, info)
                 } else {
-                    plain::node(&mut self.arena, View::JUndefined, 0)
+                    for value in values.drain(..) {
+                        self.js.release(&mut self.arena, B::from_node(value));
+                    }
+                    self.js.undefined(&mut self.arena, false)
                 };
-                for value in values.drain(..) {
-                    self.arena.release(value);
-                }
                 keys.clear(); kept.clear();
                 self.object_scratch.keys = keys;
                 self.object_scratch.values = kept;
@@ -196,8 +226,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 debug_assert!(keys.is_empty() && kept.is_empty());
                 for arg in values.drain(..) {
                     self.primitive_steps += 1;
-                    let start = kept.len();
-                    let flatten = if let View::JObject { info, values } = self.arena.view(arg) {
+                    let r = B::at(arg);
+                    let literal = self.js.kind(&self.arena, r) == Kind::Object && {
+                        let info = self.js.info_of(&self.arena, r).expect("an object's keys");
                         let crate::bir::JsPayload::Object(props) = self.arena.javascript(info)
                         else {
                             unreachable!()
@@ -212,169 +243,120 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                         });
                         if literal {
                             keys.extend_from_slice(props);
-                            kept.extend_from_slice(values);
                         }
                         literal
-                    } else {
-                        false
                     };
-                    if flatten {
-                        for &value in &kept[start..] {
-                            self.arena.detach(value);
+                    if literal {
+                        let count = self.js.unpack_rev(&mut self.arena, B::from_node(arg));
+                        for _ in 0..count {
+                            kept.push(B::node(self.js.pop()));
                         }
-                        self.arena.release(arg);
                     } else {
                         keys.push(crate::bir::PropertyKey::Spread);
                         kept.push(arg);
                     }
                 }
                 let info = self.arena.object_info(&keys);
-                let result = plain::node(
-                    &mut self.arena,
-                    View::JObject {
-                        values: &kept,
-                        info,
-                    },
-                    0,
-                );
+                let mark = self.push_values(&kept);
+                let result = self.js.object(&mut self.arena, mark, info);
                 keys.clear(); kept.clear();
                 self.object_scratch.keys = keys;
                 self.object_scratch.values = kept;
                 result
             }
             Primitive::PdictHas => {
-                if let [object, property] = values.as_slice() {
-                    plain::node(
-                        &mut self.arena,
-                        View::JIn {
-                            left: *property,
-                            right: *object,
-                        },
-                        0,
-                    )
+                if let &[object, property] = values.as_slice() {
+                    self.js.in_(&mut self.arena, B::from_node(property), B::from_node(object))
                 } else {
                     for value in values.drain(..) {
-                        self.arena.release(value);
+                        self.js.release(&mut self.arena, B::from_node(value));
                     }
-                    plain::node(&mut self.arena, View::JUndefined, 0)
+                    self.js.undefined(&mut self.arena, false)
                 }
             }
-            Primitive::ParraySpread => self.primitive_runtime("Primitive_array", "spread", values),
-            Primitive::PlistSpread => self.primitive_runtime("Primitive_list", "spread", values),
+            Primitive::ParraySpread => self.runtime("Primitive_array", "spread", values),
+            Primitive::PlistSpread => self.runtime("Primitive_list", "spread", values),
             // P: compile_primitive_js, hashing runtime entry points.
-            Primitive::Phash => self.primitive_runtime("Primitive_hash", "hash", values),
-            Primitive::PhashMixint => {
-                self.primitive_runtime("Primitive_hash", "hash_mix_int", values)
-            }
+            Primitive::Phash => self.runtime("Primitive_hash", "hash", values),
+            Primitive::PhashMixint => self.runtime("Primitive_hash", "hash_mix_int", values),
             Primitive::PhashMixstring => {
-                self.primitive_runtime("Primitive_hash", "hash_mix_string", values)
+                self.runtime("Primitive_hash", "hash_mix_string", values)
             }
-            Primitive::PhashFinalmix => {
-                self.primitive_runtime("Primitive_hash", "hash_final_mix", values)
-            }
+            Primitive::PhashFinalmix => self.runtime("Primitive_hash", "hash_final_mix", values),
             // P: compile_primitive_js, blocks and fields (K: compile_field_access).
             Primitive::Pmakeblock(tag, mutable) => {
                 let info = self.arena.block_info(tag);
-                plain::node(
-                    &mut self.arena,
-                    View::JBlockLit {
-                        values,
-                        info,
-                    },
-                    if matches!(mutable, crate::lambda::lam_primitive::Mutable::Mutable) {
-                        1
-                    } else {
-                        0
-                    },
-                )
+                let mark = self.push_values(values);
+                let mutable = matches!(mutable, crate::lambda::lam_primitive::Mutable::Mutable);
+                self.js.block(&mut self.arena, mark, info, u8::from(mutable))
             }
             Primitive::Pmakelist => {
                 let info = *self.list_block_info.get_or_insert_with(|| self.arena.js_info(crate::bir::JsPayload::Block(
                     crate::lambda::TagInfo::constructor("::", 1),
                 )));
-                plain::node(
-                    &mut self.arena,
-                    View::JBlockLit {
-                        values,
-                        info,
-                    },
-                    1,
-                )
+                let mark = self.push_values(values);
+                self.js.block(&mut self.arena, mark, info, 1)
             }
             Primitive::Pmakearray => {
-                plain::node(&mut self.arena, View::JArray { values }, 1)
+                let mark = self.push_values(values);
+                self.js.array(&mut self.arena, mark, 1)
             }
-            Primitive::Pfield(idx, info) => B::node(self.primitive_field(*idx, info, B::from_node(values[0]))),
+            Primitive::Pfield(idx, info) => self.primitive_field(*idx, info, B::from_node(values[0])),
             Primitive::Psetfield(idx, info) => {
-                B::node(self.primitive_set_field(*idx, info.name(), B::from_node(values[0]), B::from_node(values[1])))
+                self.primitive_set_field(*idx, info.name(), B::from_node(values[0]), B::from_node(values[1]))
             }
             Primitive::Pobjtag => {
                 let property = self.arena.intern_text("TAG");
-                plain::node(
+                self.js.dot(
                     &mut self.arena,
-                    View::JDot {
-                        object: values[0],
-                        property,
-                        position: crate::js_ir::arena::FieldPos::NONE,
-                    },
-                    1,
+                    B::from_node(values[0]),
+                    property,
+                    crate::js_ir::arena::FieldPos::NONE,
+                    true,
                 )
             }
             Primitive::Pobjsize => {
-                let length = norm::je2_length(&mut self.arena, values[0], LengthObject::CamlBlock);
-                norm::jm3_to_int32(&mut self.arena, length)
+                let length = self.js.length(&mut self.arena, B::from_node(values[0]), LengthObject::CamlBlock);
+                self.js.to_int32(&mut self.arena, length)
             }
             Primitive::PisPolyVarBlock => {
                 // P:642 / E:653 folds typeof before comparing the type name.
-                let typeof_ = norm::jm9_typeof(&mut self.arena, values[0]);
-                let object = plain::string(&mut self.arena, "object");
-                norm::je4_bin(&mut self.arena, BinOp::EqEqEq, typeof_, object)
+                let typeof_ = self.js.typeof_(&mut self.arena, B::from_node(values[0]));
+                let object = self.js.string(&mut self.arena, "object");
+                self.js.bin(&mut self.arena, BinOp::EqEqEq, typeof_, object)
             }
             // P: compile_primitive_js, indexing. Both string forms are checked.
             Primitive::Pstringrefs | Primitive::Pstringrefu => {
-                self.primitive_runtime("Primitive_string", "getChar", values)
+                self.runtime("Primitive_string", "getChar", values)
             }
-            Primitive::Parrayrefs => self.primitive_runtime("Primitive_array", "get", values),
+            Primitive::Parrayrefs => self.runtime("Primitive_array", "get", values),
             Primitive::Parrayrefu => {
-                if let [object, index] = values.as_slice() {
-                    plain::node(
-                        &mut self.arena,
-                        View::JIndex {
-                            object: *object,
-                            index: *index,
-                        },
-                        0,
-                    )
+                if let &[object, index] = values.as_slice() {
+                    self.js.index(&mut self.arena, B::from_node(object), B::from_node(index))
                 } else {
                     for v in values.drain(..) {
-                        self.arena.release(v);
+                        self.js.release(&mut self.arena, B::from_node(v));
                     }
-                    plain::node(&mut self.arena, View::JUndefined, 0)
+                    self.js.undefined(&mut self.arena, false)
                 }
             }
             Primitive::Parraysetu => {
-                if let [object, index, value] = values.as_slice() {
-                    let target = plain::node(
-                        &mut self.arena,
-                        View::JIndex {
-                            object: *object,
-                            index: *index,
-                        },
-                        0,
-                    );
-                    let assignment = norm::je4_bin(&mut self.arena, BinOp::Eq, target, *value);
-                    let unit = plain::node(&mut self.arena, View::JUndefined, 0);
-                    plain::seq(&mut self.arena, assignment, unit)
+                if let &[object, index, value] = values.as_slice() {
+                    let target = self.js.index(&mut self.arena, B::from_node(object), B::from_node(index));
+                    let assignment = self.js.bin(&mut self.arena, BinOp::Eq, target, B::from_node(value));
+                    let unit = self.js.undefined(&mut self.arena, false);
+                    self.js.seq(&mut self.arena, assignment, unit)
                 } else {
                     for v in values.drain(..) {
-                        self.arena.release(v);
+                        self.js.release(&mut self.arena, B::from_node(v));
                     }
-                    plain::node(&mut self.arena, View::JUndefined, 0)
+                    self.js.undefined(&mut self.arena, false)
                 }
             }
             // P: compile_primitive_js, template arms; J-M12 preserves raw spelling.
             Primitive::Ptemplate(segments) => {
-                norm::jm12_interpolated_template(&mut self.arena, segments, values.drain(..))
+                let mark = self.push_values(values);
+                self.js.template(&mut self.arena, segments, mark)
             }
             Primitive::PtaggedTemplate(segments) => {
                 let start = self.arena.pools.template_parts.len() as u32;
@@ -383,108 +365,83 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     self.arena.pools.template_parts.push(crate::bir::TemplatePart { raw, cooked: None });
                 }
                 let info = self.arena.js_info(crate::bir::JsPayload::Tagged(crate::bir::TemplateSpan { start, len: segments.len() as u32 }));
-                plain::node(
-                    &mut self.arena,
-                    View::JTagged {
-                        tag: values[0],
-                        values: &values[1..],
-                        info,
-                    },
-                    0,
-                )
+                let tag = B::from_node(values[0]);
+                let mark = self.push_values(&values[1..]);
+                self.js.tagged(&mut self.arena, tag, mark, info)
             }
             // X: some_expr / optional_block. Identity is a shape test, not purity.
             Primitive::Psome | Primitive::PsomeNotNest => {
-                let value = values[0];
+                let value = B::at(values[0]);
                 let identity = matches!(primitive, Primitive::PsomeNotNest)
-                    || matches!(
-                        self.arena.view(value),
-                        View::JNull
-                            | View::JObject { .. }
-                            | View::JNumber { .. }
-                            | View::JBlockLit { .. }
-                            | View::JArray { .. }
-                            | View::JStr { .. }
-                    )
-                    || matches!(self.arena.view(value), View::JTemplate { .. })
-                        && self.arena.node(value).aux() == 1;
-                plain::node(
-                    &mut self.arena,
-                    View::JOptional { value },
-                    u16::from(identity),
-                )
+                    || match self.js.kind(&self.arena, value) {
+                        Kind::Null
+                        | Kind::Object
+                        | Kind::Number
+                        | Kind::BlockLit
+                        | Kind::Array
+                        | Kind::Str => true,
+                        Kind::Template => self.js.aux(&self.arena, value) == 1,
+                        _ => false,
+                    };
+                self.js.optional(&mut self.arena, B::from_node(values[0]), identity)
             }
             // X: val_from_option_expr.
             Primitive::PvalFromOption => {
-                if let View::JOptional { value } = self.arena.view(values[0]) {
-                    self.arena.detach(value);
-                    self.arena.release(values[0]);
-                    value
+                if self.js.kind(&self.arena, B::at(values[0])) == Kind::Optional {
+                    self.js.keep_operand(&mut self.arena, B::from_node(values[0]), 0)
                 } else {
-                    self.primitive_runtime("Primitive_option", "valFromOption", values)
+                    self.runtime("Primitive_option", "valFromOption", values)
                 }
             }
-            Primitive::PvalFromOptionNotNest => values[0],
+            Primitive::PvalFromOptionNotNest => B::from_node(values[0]),
             // X: is_not_none_expr, intentionally drops even effectful Some payloads.
-            Primitive::PisNotNone => match self.arena.view(values[0]) {
-                View::JUndefined => {
-                    self.arena.release(values[0]);
-                    plain::boolean(&mut self.arena, false)
+            Primitive::PisNotNone => match self.js.kind(&self.arena, B::at(values[0])) {
+                Kind::Undefined => {
+                    self.js.release(&mut self.arena, B::from_node(values[0]));
+                    self.js.boolean(&mut self.arena, false)
                 }
-                View::JOptional { .. } => {
-                    self.arena.release(values[0]);
-                    plain::boolean(&mut self.arena, true)
+                Kind::Optional => {
+                    self.js.release(&mut self.arena, B::from_node(values[0]));
+                    self.js.boolean(&mut self.arena, true)
                 }
                 _ => {
-                    let undefined = plain::node(&mut self.arena, View::JUndefined, 0);
-                    norm::je4_bin(&mut self.arena, BinOp::NotEqEq, values[0], undefined)
+                    let undefined = self.js.undefined(&mut self.arena, false);
+                    self.js.bin(&mut self.arena, BinOp::NotEqEq, B::from_node(values[0]), undefined)
                 }
             },
             // X: is_null_expr / is_undefined_expr / is_null_or_undefined_expr.
             Primitive::PisNull | Primitive::PisUndefined => {
-                let nullish = plain::node(
-                    &mut self.arena,
-                    if matches!(primitive, Primitive::PisNull) {
-                        View::JNull
-                    } else {
-                        View::JUndefined
-                    },
-                    0,
-                );
-                norm::je4_bin(&mut self.arena, BinOp::EqEqEq, values[0], nullish)
+                let nullish = if matches!(primitive, Primitive::PisNull) {
+                    self.js.null(&mut self.arena)
+                } else {
+                    self.js.undefined(&mut self.arena, false)
+                };
+                self.js.bin(&mut self.arena, BinOp::EqEqEq, B::from_node(values[0]), nullish)
             }
             Primitive::PisNullUndefined => {
-                norm::je3_is_null_or_undefined(&mut self.arena, values[0])
+                self.js.is_nullish(&mut self.arena, B::from_node(values[0]))
             }
             // X: null_to_opt_expr / null_undefined_to_opt_expr. Only leaf operands
             // are duplicated, so this costs constant work per primitive.
             Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt => {
                 let nullable = matches!(primitive, Primitive::PnullUndefinedToOpt);
+                let value = B::at(values[0]);
                 if matches!(
-                    self.arena.view(values[0]),
-                    View::Var { .. } | View::JUndefined | View::JNull
+                    self.js.kind(&self.arena, value),
+                    Kind::Var | Kind::Undefined | Kind::Null
                 ) {
-                    let copy = match self.arena.view(values[0]) {
-                        View::Var { var } => plain::node(&mut self.arena, View::Var { var }, 0),
-                        View::JUndefined => {
-                            let aux = self.arena.node(values[0]).aux();
-                            plain::node(&mut self.arena, View::JUndefined, aux)
-                        }
-                        View::JNull => plain::node(&mut self.arena, View::JNull, 0),
-                        _ => unreachable!("inline option operand is a leaf"),
-                    };
+                    let copy = self.js.copy_leaf(&mut self.arena, value);
                     let test = if nullable {
-                        norm::je3_is_null_or_undefined(&mut self.arena, copy)
+                        self.js.is_nullish(&mut self.arena, copy)
                     } else {
-                        let null = plain::node(&mut self.arena, View::JNull, 0);
-                        norm::je4_bin(&mut self.arena, BinOp::EqEqEq, copy, null)
+                        let null = self.js.null(&mut self.arena);
+                        self.js.bin(&mut self.arena, BinOp::EqEqEq, copy, null)
                     };
-                    let undefined = plain::node(&mut self.arena, View::JUndefined, 0);
-                    let some =
-                        plain::node(&mut self.arena, View::JOptional { value: values[0] }, 0);
-                    norm::je7_cond(&mut self.arena, test, undefined, some)
+                    let undefined = self.js.undefined(&mut self.arena, false);
+                    let some = self.js.optional(&mut self.arena, B::from_node(values[0]), false);
+                    self.js.cond(&mut self.arena, test, undefined, some)
                 } else {
-                    self.primitive_runtime(
+                    self.runtime(
                         "Primitive_option",
                         if nullable { "fromNullable" } else { "fromNull" },
                         values,
@@ -492,235 +449,180 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 }
             }
             // P: compile_primitive_js, comparison arms.
-            Primitive::Pintcomp(cmp) => B::node(self.primitive_int_comparison(*cmp, B::from_node(values[0]), B::from_node(values[1]))),
-            Primitive::Pboolcomp(cmp) => B::node(self.primitive_bool_comparison(*cmp, B::from_node(values[0]), B::from_node(values[1]))),
+            Primitive::Pintcomp(cmp) => self.primitive_int_comparison(*cmp, B::from_node(values[0]), B::from_node(values[1])),
+            Primitive::Pboolcomp(cmp) => self.primitive_bool_comparison(*cmp, B::from_node(values[0]), B::from_node(values[1])),
             Primitive::Pstringcomp(cmp) => {
-                B::node(self.primitive_literal_comparison(*cmp, B::from_node(values[0]), B::from_node(values[1]), false))
+                self.primitive_literal_comparison(*cmp, B::from_node(values[0]), B::from_node(values[1]), false)
             }
             Primitive::Pbigintcomp(cmp) => {
-                B::node(self.primitive_literal_comparison(*cmp, B::from_node(values[0]), B::from_node(values[1]), true))
+                self.primitive_literal_comparison(*cmp, B::from_node(values[0]), B::from_node(values[1]), true)
             }
-            Primitive::Pobjcomp(cmp) => B::node(self.primitive_object_comparison(*cmp, B::from_node(values[0]), B::from_node(values[1]))),
+            Primitive::Pobjcomp(cmp) => self.primitive_object_comparison(*cmp, B::from_node(values[0]), B::from_node(values[1])),
             Primitive::Pfloatcomp(
                 cmp @ (crate::lambda::lam_compat::Comparison::Eq
                 | crate::lambda::lam_compat::Comparison::Neq),
-            ) => B::node(self.primitive_int_comparison(*cmp, B::from_node(values[0]), B::from_node(values[1]))),
-            Primitive::Pfloatcomp(cmp) | Primitive::Pjscomp(cmp) => norm::je4_bin(
+            ) => self.primitive_int_comparison(*cmp, B::from_node(values[0]), B::from_node(values[1])),
+            Primitive::Pfloatcomp(cmp) | Primitive::Pjscomp(cmp) => self.js.bin(
                 &mut self.arena,
                 super::prim_cmp::comparison_op(*cmp, true),
-                values[0],
-                values[1],
+                B::from_node(values[0]),
+                B::from_node(values[1]),
             ),
-            Primitive::Pobjorder => self.primitive_runtime("Primitive_object", "compare", values),
-            Primitive::Pobjmin => B::node(self.primitive_min_max("object", false, B::from_node(values[0]), B::from_node(values[1]))),
-            Primitive::Pobjmax => B::node(self.primitive_min_max("object", true, B::from_node(values[0]), B::from_node(values[1]))),
+            Primitive::Pobjorder => self.runtime("Primitive_object", "compare", values),
+            Primitive::Pobjmin => self.primitive_min_max("object", false, B::from_node(values[0]), B::from_node(values[1])),
+            Primitive::Pobjmax => self.primitive_min_max("object", true, B::from_node(values[0]), B::from_node(values[1])),
             Primitive::Pboolorder => {
                 if let (Some(l), Some(r)) = (
                     self.primitive_bool(values[0]),
                     self.primitive_bool(values[1]),
                 ) {
-                    self.arena.release(values[0]);
-                    self.arena.release(values[1]);
-                    plain::int(&mut self.arena, l.cmp(&r) as i32)
+                    self.js.release(&mut self.arena, B::from_node(values[0]));
+                    self.js.release(&mut self.arena, B::from_node(values[1]));
+                    self.js.int_literal(&mut self.arena, l.cmp(&r) as i32)
                 } else {
-                    self.primitive_runtime("Primitive_bool", "compare", values)
+                    self.runtime("Primitive_bool", "compare", values)
                 }
             }
-            Primitive::Pboolmin => B::node(self.primitive_min_max("bool", false, B::from_node(values[0]), B::from_node(values[1]))),
-            Primitive::Pboolmax => B::node(self.primitive_min_max("bool", true, B::from_node(values[0]), B::from_node(values[1]))),
-            Primitive::Pintorder => self.primitive_runtime("Primitive_int", "compare", values),
-            Primitive::Pintmin => B::node(self.primitive_min_max("int", false, B::from_node(values[0]), B::from_node(values[1]))),
-            Primitive::Pintmax => B::node(self.primitive_min_max("int", true, B::from_node(values[0]), B::from_node(values[1]))),
-            Primitive::Pfloatorder => self.primitive_runtime("Primitive_float", "compare", values),
-            Primitive::Pfloatmin => B::node(self.primitive_min_max("float", false, B::from_node(values[0]), B::from_node(values[1]))),
-            Primitive::Pfloatmax => B::node(self.primitive_min_max("float", true, B::from_node(values[0]), B::from_node(values[1]))),
-            Primitive::Pbigintorder => {
-                self.primitive_runtime("Primitive_bigint", "compare", values)
-            }
-            Primitive::Pbigintmin => B::node(self.primitive_min_max("bigint", false, B::from_node(values[0]), B::from_node(values[1]))),
-            Primitive::Pbigintmax => B::node(self.primitive_min_max("bigint", true, B::from_node(values[0]), B::from_node(values[1]))),
-            Primitive::Pstringorder => {
-                self.primitive_runtime("Primitive_string", "compare", values)
-            }
-            Primitive::Pstringmin => B::node(self.primitive_min_max("string", false, B::from_node(values[0]), B::from_node(values[1]))),
-            Primitive::Pstringmax => B::node(self.primitive_min_max("string", true, B::from_node(values[0]), B::from_node(values[1]))),
+            Primitive::Pboolmin => self.primitive_min_max("bool", false, B::from_node(values[0]), B::from_node(values[1])),
+            Primitive::Pboolmax => self.primitive_min_max("bool", true, B::from_node(values[0]), B::from_node(values[1])),
+            Primitive::Pintorder => self.runtime("Primitive_int", "compare", values),
+            Primitive::Pintmin => self.primitive_min_max("int", false, B::from_node(values[0]), B::from_node(values[1])),
+            Primitive::Pintmax => self.primitive_min_max("int", true, B::from_node(values[0]), B::from_node(values[1])),
+            Primitive::Pfloatorder => self.runtime("Primitive_float", "compare", values),
+            Primitive::Pfloatmin => self.primitive_min_max("float", false, B::from_node(values[0]), B::from_node(values[1])),
+            Primitive::Pfloatmax => self.primitive_min_max("float", true, B::from_node(values[0]), B::from_node(values[1])),
+            Primitive::Pbigintorder => self.runtime("Primitive_bigint", "compare", values),
+            Primitive::Pbigintmin => self.primitive_min_max("bigint", false, B::from_node(values[0]), B::from_node(values[1])),
+            Primitive::Pbigintmax => self.primitive_min_max("bigint", true, B::from_node(values[0]), B::from_node(values[1])),
+            Primitive::Pstringorder => self.runtime("Primitive_string", "compare", values),
+            Primitive::Pstringmin => self.primitive_min_max("string", false, B::from_node(values[0]), B::from_node(values[1])),
+            Primitive::Pstringmax => self.primitive_min_max("string", true, B::from_node(values[0]), B::from_node(values[1])),
             // P: compile_primitive_js, arithmetic arms; J-M3–M13 own the folds.
             Primitive::Paddint => {
-                norm::jm4_int32_add_sub(&mut self.arena, false, values[0], values[1])
+                self.js.int_add(&mut self.arena, false, B::from_node(values[0]), B::from_node(values[1]))
             }
             Primitive::Psubint => {
-                norm::jm4_int32_add_sub(&mut self.arena, true, values[0], values[1])
+                self.js.int_add(&mut self.arena, true, B::from_node(values[0]), B::from_node(values[1]))
             }
-            Primitive::Pmulint => norm::jm5_int32_mul(&mut self.arena, values[0], values[1]),
-            Primitive::Pdivint => norm::jm13_int32_div(
+            Primitive::Pmulint => self.js.int_mul(&mut self.arena, B::from_node(values[0]), B::from_node(values[1])),
+            Primitive::Pdivint => self.js.int_div(
                 &mut self.arena,
                 self.check_div_by_zero,
-                values[0],
-                values[1],
+                B::from_node(values[0]),
+                B::from_node(values[1]),
             ),
-            Primitive::Pmodint => norm::jm13_int32_mod(
+            Primitive::Pmodint => self.js.int_mod(
                 &mut self.arena,
                 self.check_div_by_zero,
-                values[0],
-                values[1],
+                B::from_node(values[0]),
+                B::from_node(values[1]),
             ),
-            Primitive::Ppowint => norm::jm6_int32_pow(&mut self.arena, values[0], values[1]),
-            Primitive::Pandint => norm::jm8_int32_band(&mut self.arena, values[0], values[1]),
-            Primitive::Porint => norm::jm3_int32_bor(&mut self.arena, values[0], values[1]),
-            Primitive::Pxorint => norm::jm8_int32_bxor(&mut self.arena, values[0], values[1]),
-            Primitive::Plslint => norm::jm7_int32_lsl(&mut self.arena, values[0], values[1]),
-            Primitive::Paddfloat => {
-                norm::je4_bin(&mut self.arena, BinOp::Plus, values[0], values[1])
+            Primitive::Ppowint => self.js.int_pow(&mut self.arena, B::from_node(values[0]), B::from_node(values[1])),
+            Primitive::Pandint => self.js.int_and(&mut self.arena, B::from_node(values[0]), B::from_node(values[1])),
+            Primitive::Porint => self.js.int_or(&mut self.arena, B::from_node(values[0]), B::from_node(values[1])),
+            Primitive::Pxorint => self.js.int_xor(&mut self.arena, B::from_node(values[0]), B::from_node(values[1])),
+            Primitive::Plslint => self.js.int_lsl(&mut self.arena, B::from_node(values[0]), B::from_node(values[1])),
+            Primitive::Paddfloat | Primitive::Paddbigint => self.bin_of(BinOp::Plus, values),
+            Primitive::Psubfloat | Primitive::Psubbigint => self.bin_of(BinOp::Minus, values),
+            Primitive::Pmulfloat | Primitive::Pmulbigint => self.bin_of(BinOp::Mul, values),
+            Primitive::Pdivfloat => self.bin_of(BinOp::Div, values),
+            Primitive::Pmodfloat => self.bin_of(BinOp::Mod, values),
+            Primitive::Ppowfloat | Primitive::Ppowbigint => self.bin_of(BinOp::Pow, values),
+            Primitive::Pandbigint => self.bin_of(BinOp::Band, values),
+            Primitive::Porbigint => self.bin_of(BinOp::Bor, values),
+            Primitive::Pxorbigint => self.bin_of(BinOp::Bxor, values),
+            Primitive::Plslbigint => self.bin_of(BinOp::Lsl, values),
+            Primitive::Pasrbigint | Primitive::Pasrint => self.bin_of(BinOp::Asr, values),
+            Primitive::Pnotint | Primitive::Pnotbigint => {
+                self.js.bnot(&mut self.arena, B::from_node(values[0]))
             }
-            Primitive::Psubfloat => {
-                norm::je4_bin(&mut self.arena, BinOp::Minus, values[0], values[1])
-            }
-            Primitive::Pmulfloat => {
-                norm::je4_bin(&mut self.arena, BinOp::Mul, values[0], values[1])
-            }
-            Primitive::Pdivfloat => {
-                norm::je4_bin(&mut self.arena, BinOp::Div, values[0], values[1])
-            }
-            Primitive::Pmodfloat => {
-                norm::je4_bin(&mut self.arena, BinOp::Mod, values[0], values[1])
-            }
-            Primitive::Ppowfloat => {
-                norm::je4_bin(&mut self.arena, BinOp::Pow, values[0], values[1])
-            }
-            Primitive::Paddbigint => {
-                norm::je4_bin(&mut self.arena, BinOp::Plus, values[0], values[1])
-            }
-            Primitive::Psubbigint => {
-                norm::je4_bin(&mut self.arena, BinOp::Minus, values[0], values[1])
-            }
-            Primitive::Pmulbigint => {
-                norm::je4_bin(&mut self.arena, BinOp::Mul, values[0], values[1])
-            }
-            Primitive::Ppowbigint => {
-                norm::je4_bin(&mut self.arena, BinOp::Pow, values[0], values[1])
-            }
-            Primitive::Pandbigint => {
-                norm::je4_bin(&mut self.arena, BinOp::Band, values[0], values[1])
-            }
-            Primitive::Porbigint => {
-                norm::je4_bin(&mut self.arena, BinOp::Bor, values[0], values[1])
-            }
-            Primitive::Pxorbigint => {
-                norm::je4_bin(&mut self.arena, BinOp::Bxor, values[0], values[1])
-            }
-            Primitive::Plslbigint => {
-                norm::je4_bin(&mut self.arena, BinOp::Lsl, values[0], values[1])
-            }
-            Primitive::Pasrbigint => {
-                norm::je4_bin(&mut self.arena, BinOp::Asr, values[0], values[1])
-            }
-            Primitive::Pasrint => norm::je4_bin(&mut self.arena, BinOp::Asr, values[0], values[1]),
-            Primitive::Pnotint => norm::jm10_int_bnot(&mut self.arena, values[0]),
-            Primitive::Pnotbigint => norm::jm10_int_bnot(&mut self.arena, values[0]),
-            Primitive::Pintoffloat => norm::jm3_to_int32(&mut self.arena, values[0]),
+            Primitive::Pintoffloat => self.js.to_int32(&mut self.arena, B::from_node(values[0])),
             Primitive::Pnegint => {
-                let zero = plain::int(&mut self.arena, 0);
-                norm::jm4_int32_add_sub(&mut self.arena, true, zero, values[0])
+                let zero = self.js.int_literal(&mut self.arena, 0);
+                self.js.int_add(&mut self.arena, true, zero, B::from_node(values[0]))
             }
             Primitive::Pnegfloat => {
                 let value = self.arena.intern_float("0.").unwrap();
-                let zero = plain::node(&mut self.arena, View::JNumber { value }, 0);
-                norm::je4_bin(&mut self.arena, BinOp::Minus, zero, values[0])
+                let zero = self.js.number(&mut self.arena, value);
+                self.js.bin(&mut self.arena, BinOp::Minus, zero, B::from_node(values[0]))
             }
             Primitive::Pnegbigint => {
                 let text = self.arena.intern_text("+0");
                 let value = self.arena.intern_const(crate::bir::Constant::BigInt(text));
-                let zero = plain::node(&mut self.arena, View::JNumber { value }, 0);
-                norm::je4_bin(&mut self.arena, BinOp::Minus, zero, values[0])
+                let zero = self.js.number(&mut self.arena, value);
+                self.js.bin(&mut self.arena, BinOp::Minus, zero, B::from_node(values[0]))
             }
             Primitive::Plsrint => {
                 if self.primitive_int(values[1]) == Some(0) {
-                    self.arena.release(values[1]);
-                    values[0]
+                    self.js.release(&mut self.arena, B::from_node(values[1]));
+                    B::from_node(values[0])
                 } else {
-                    let value = norm::jm8_int32_lsr(&mut self.arena, values[0], values[1]);
-                    norm::jm3_to_int32(&mut self.arena, value)
+                    let value = self.js.int_lsr(&mut self.arena, B::from_node(values[0]), B::from_node(values[1]));
+                    self.js.to_int32(&mut self.arena, value)
                 }
             }
             Primitive::Pdivbigint => {
                 if self.check_div_by_zero {
-                    self.primitive_runtime("Primitive_bigint", "div", values)
+                    self.runtime("Primitive_bigint", "div", values)
                 } else {
-                    norm::je4_bin(&mut self.arena, BinOp::Div, values[0], values[1])
+                    self.bin_of(BinOp::Div, values)
                 }
             }
             Primitive::Pmodbigint => {
                 if self.check_div_by_zero {
-                    self.primitive_runtime("Primitive_bigint", "mod_", values)
+                    self.runtime("Primitive_bigint", "mod_", values)
                 } else {
-                    norm::je4_bin(&mut self.arena, BinOp::Mod, values[0], values[1])
+                    self.bin_of(BinOp::Mod, values)
                 }
             }
             // P: compile_primitive_js, PfnArity.
             Primitive::PfnArity => match values.first() {
-                Some(&value) => norm::je2_length(&mut self.arena, value, LengthObject::Function),
-                None => plain::node(&mut self.arena, View::JUndefined, 0),
+                Some(&value) => self.js.length(&mut self.arena, B::from_node(value), LengthObject::Function),
+                None => self.js.undefined(&mut self.arena, false),
             },
             // P: compile_primitive_js, strings and booleans.
-            Primitive::Pstringadd => norm::je1_string_append(&mut self.arena, values[0], values[1]),
-            Primitive::Pnot => norm::je8_not(&mut self.arena, values[0]),
+            Primitive::Pstringadd => self.js.append(&mut self.arena, B::from_node(values[0]), B::from_node(values[1])),
+            Primitive::Pnot => self.js.not(&mut self.arena, B::from_node(values[0])),
             // P: compile_primitive_js, identity group.
-            Primitive::Pidentity | Primitive::Pfloatofint => values
-                .first()
-                .copied()
-                .unwrap_or_else(|| plain::node(&mut self.arena, View::JUndefined, 0)),
+            Primitive::Pidentity | Primitive::Pfloatofint => self.first_value(values),
             Primitive::Pignore => {
-                let value = values
-                    .first()
-                    .copied()
-                    .unwrap_or_else(|| plain::node(&mut self.arena, View::JUndefined, 0));
-                let unit = plain::node(&mut self.arena, View::JUndefined, 1);
-                plain::seq(&mut self.arena, value, unit)
+                let value = self.first_value(values);
+                let unit = self.js.undefined(&mut self.arena, true);
+                self.js.seq(&mut self.arena, value, unit)
             }
-            Primitive::Ptypeof => norm::jm9_typeof(&mut self.arena, values[0]),
+            Primitive::Ptypeof => self.js.typeof_(&mut self.arena, B::from_node(values[0])),
             Primitive::PrawJsCode(info) => {
                 let text = self.arena.intern_text(info.code.trim());
-                plain::node(
-                    &mut self.arena,
-                    View::JRaw { text },
-                    u16::from(info.is_stmt),
-                )
+                self.js.raw(&mut self.arena, text, info.is_stmt)
             }
             Primitive::PcreateExtension(name) => {
-                let name = plain::string(&mut self.arena, name);
-                let call = self.primitive_runtime("Primitive_exceptions", "create", &[name]);
-                let comment = Some(self.arena.intern_text("@__PURE__"));
-                self.arena.set_cold(
-                    call,
-                    crate::bir::Cold {
-                        loc: crate::lambda::LamLoc::NONE,
-                        comment,
-                    },
-                );
+                let mark = self.js.mark();
+                let name = self.js.string(&mut self.arena, name);
+                self.js.push(name);
+                let mut call = self.runtime_call("Primitive_exceptions", "create", mark);
+                let comment = self.arena.intern_text("@__PURE__");
+                self.js.comment(&mut self.arena, &mut call, comment);
                 call
             }
-            Primitive::PinitMod => self.primitive_runtime("Primitive_module", "init", values),
-            Primitive::PupdateMod => self.primitive_runtime("Primitive_module", "update", values),
+            Primitive::PinitMod => self.runtime("Primitive_module", "init", values),
+            Primitive::PupdateMod => self.runtime("Primitive_module", "update", values),
             // P: compile_debugger lowers each argument for effects before debugger.
             Primitive::Pdebugger => {
                 for value in values.drain(..) {
-                    self.arena.release(value);
+                    self.js.release(&mut self.arena, B::from_node(value));
                 }
-                let statement = plain::node(&mut self.arena, View::SDebugger, 0);
-                self.primitive_statement(statement, payload.loc);
-                plain::node(&mut self.arena, View::JUndefined, 1)
+                let statement = self.js.debugger(&mut self.arena);
+                self.primitive_statement(B::stmt_node(statement), payload.loc);
+                self.js.undefined(&mut self.arena, true)
             }
             // P: compile_primitive_js, Praise; conversion never binds a thrown value.
             Primitive::Praise => {
-                let value = values
-                    .first()
-                    .copied()
-                    .unwrap_or_else(|| plain::node(&mut self.arena, View::JUndefined, 0));
-                let statement = plain::node(&mut self.arena, View::SThrow { value }, 0);
-                self.primitive_statement(statement, payload.loc);
+                let value = self.first_value(values);
+                let statement = self.js.throw(&mut self.arena, value);
+                self.primitive_statement(B::stmt_node(statement), payload.loc);
                 let value = match cx.cont {
                     Cont::Value(_) | Cont::Effect(Tail::No) => {
-                        Some(plain::node(&mut self.arena, View::JUndefined, 0))
+                        Some(B::node(self.js.undefined(&mut self.arena, false)))
                     }
                     _ => None,
                 };
@@ -733,51 +635,60 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     finished: Finished::True,
                 }));
             }
-            Primitive::Pjsx(jsx) => self.compile_jsx(jsx, values.drain(..)),
-            Primitive::Pimport(source) => self.compile_import(source),
-            Primitive::Pduprecord => self.duplicate_record(values[0]),
-            Primitive::PrecordRest(excluded) => self.record_rest(values[0], excluded),
+            Primitive::Pjsx(jsx) => B::from_node(self.compile_jsx(jsx, values.drain(..))),
+            Primitive::Pimport(source) => B::from_node(self.compile_import(source)),
+            Primitive::Pduprecord => B::from_node(self.duplicate_record(values[0])),
+            Primitive::PrecordRest(excluded) => B::from_node(self.record_rest(values[0], excluded)),
             // P: compile_primitive_js, Pawait. O(1): one owned J node.
-            Primitive::Pawait => plain::node(&mut self.arena, View::JAwait { value: values[0] }, 0),
+            Primitive::Pawait => self.js.await_(&mut self.arena, B::from_node(values[0])),
             Primitive::Pstringlength => {
-                norm::je2_length(&mut self.arena, values[0], LengthObject::String)
+                self.js.length(&mut self.arena, B::from_node(values[0]), LengthObject::String)
             }
             Primitive::Parraylength => {
-                norm::je2_length(&mut self.arena, values[0], LengthObject::Array)
+                self.js.length(&mut self.arena, B::from_node(values[0]), LengthObject::Array)
             }
             Primitive::PjsCall(call) => {
                 let values = self.arena.lists.push(values);
-                self.compile_js_call(cx, prim.primitive, call, values)
+                B::from_node(self.compile_js_call(cx, prim.primitive, call, values))
             },
             Primitive::PjsApply => match values.split_first() {
-                Some((&callee, args)) => self.call_node(callee, args, Default::default()),
-                None => plain::node(&mut self.arena, View::JUndefined, 0),
+                Some((&callee, args)) => {
+                    let info = self.arena.js_info(crate::bir::JsPayload::Call(Default::default()));
+                    let mark = self.push_values(args);
+                    self.js.call(&mut self.arena, B::from_node(callee), mark, info)
+                }
+                None => self.js.undefined(&mut self.arena, false),
             },
             Primitive::PjsObjectCreate(specs) => {
                 let values = self.arena.lists.push(values);
-                self.compile_js_object_create(cx, specs, values)
+                B::from_node(self.compile_js_object_create(cx, specs, values))
             },
             Primitive::PjsFnMethod => {
-                let mut values = values.drain(..);
-                let value = values.next().unwrap_or_else(|| plain::node(&mut self.arena, View::JUndefined, 0));
-                for unused in values { self.arena.release(unused); }
-                if let View::JFun { header, .. } = self.arena.view(value) {
+                let value = self.first_value(values);
+                for unused in values.drain(..).skip(1) {
+                    self.js.release(&mut self.arena, B::from_node(unused));
+                }
+                if let Some(header) = self.js.function_of(&self.arena, B::of(&value)) {
                     self.arena.vars.funcs[header.index()].flags |= crate::bir::FuncHeader::METHOD;
                 }
                 value
             }
             Primitive::PjsObjectGet(name) | Primitive::PjsObjectSet(name) => {
                 match (primitive, values.as_slice()) {
-                    (Primitive::PjsObjectGet(_), &[receiver]) => self.static_member(receiver, name),
+                    (Primitive::PjsObjectGet(_), &[receiver]) => {
+                        B::from_node(self.static_member(receiver, name))
+                    }
                     (Primitive::PjsObjectSet(_), &[receiver, value]) => {
-                        let target = self.static_member(receiver, name);
-                        let assign = plain::bin(&mut self.arena, BinOp::Eq, target, value);
-                        let unit = plain::node(&mut self.arena, View::JUndefined, 1);
-                        plain::seq(&mut self.arena, assign, unit)
+                        let target = B::from_node(self.static_member(receiver, name));
+                        let assign = self.js.bin_plain(&mut self.arena, BinOp::Eq, target, B::from_node(value));
+                        let unit = self.js.undefined(&mut self.arena, true);
+                        self.js.seq(&mut self.arena, assign, unit)
                     }
                     _ => {
-                        for value in values.drain(..) { self.arena.release(value); }
-                        plain::node(&mut self.arena, View::JUndefined, 0)
+                        for value in values.drain(..) {
+                            self.js.release(&mut self.arena, B::from_node(value));
+                        }
+                        self.js.undefined(&mut self.arena, false)
                     }
                 }
             }
@@ -798,12 +709,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 !matches!(self.source.lists.get(prim.operands),[arg] if matches!(self.source.view(*arg),View::Global { .. })),
             _ => true,
         };
-        if located && !self.arena.node(value).flags().contains(crate::bir::NodeFlags::JS_LOC_PRESENT)
+        if located && !self.js.located(&self.arena, B::of(&value))
             && self.locations.and_then(|t|t.get(payload.loc)).is_some_and(|loc| !loc.loc_ghost && loc.loc_start.cnum >= 0) {
-            let comment = self.arena.cold(value).and_then(|c|c.comment);
-            self.arena.set_cold(value,crate::bir::Cold { loc:payload.loc,comment });
-            let mut flags = self.arena.node(value).flags(); flags.0 |= crate::bir::NodeFlags::JS_LOC_PRESENT;
-            self.arena.nodes[value.index()].set_flags(flags);
+            self.js.locate(&mut self.arena, &mut value, payload.loc);
         }
         Ok(self.primitive_result(
             cx,
@@ -811,7 +719,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 start: statements.start,
                 len: 0,
             }),
-            value,
+            B::node(value),
         ))
     }
 
