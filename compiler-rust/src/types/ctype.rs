@@ -7600,7 +7600,7 @@ pub fn unify(
     state.mark_unified(t1, t2);
 
     // Get descriptors
-    let result = unify_types(ctx, state, t1, t2);
+    let result = unify_types(ctx, state, t1, t2, t2);
 
     let result = if let Err(TypeError::Unify(trace)) = &result {
         // Add this pair to the trace
@@ -8001,29 +8001,109 @@ fn unify_after_expansion(
         }
     }
 
-    // OCaml runs unify3 on the expanded pair without a trace entry of its
-    // own (ctype.ml:2169-2173); drop the pair the nested `unify` adds.
-    let unify_result = swap_trace(match unify(ctx, state, lhs, rhs) {
-        Err(TypeError::Unify(mut trace)) if trace.first() == Some(&(lhs, rhs)) => {
-            trace.remove(0);
-            Err(TypeError::Unify(trace))
-        }
-        other => other,
-    });
-    unify_result?;
-
-    if state.mode != crate::types::UnifyMode::Pattern {
-        // Match OCaml unify3 expression mode:
-        //   link_type t1' t2
-        // where t1' is the selected expanded side and t2 is the selected
-        // ORIGINAL opposite side.
-        let to_ty = ctx.repr(relink_target);
-        if lhs != to_ty && !deep_occur(ctx, lhs, to_ty) {
-            ctx.set_desc(lhs, TypeDesc::Tlink(to_ty));
-        }
+    if state.mode == crate::types::UnifyMode::Pattern {
+        // OCaml runs unify3 on the expanded pair without a trace entry of
+        // its own (ctype.ml:2169-2173); drop the pair the nested `unify`
+        // adds.
+        return swap_trace(match unify(ctx, state, lhs, rhs) {
+            Err(TypeError::Unify(mut trace)) if trace.first() == Some(&(lhs, rhs)) => {
+                trace.remove(0);
+                Err(TypeError::Unify(trace))
+            }
+            other => other,
+        });
     }
 
+    // OCaml `unify3` in expression mode (compiler/ml/ctype.ml:2304-2440):
+    // `create_recursion` is read before the link (2309; `t2 != t2'` holds,
+    // since the selected original side is always one that was expanded);
+    // then `occur t1' t2'` and `link_type t1' t2` link the expanded head to
+    // the ORIGINAL opposite side before the children are unified
+    // (2330-2331), and a failure puts `d1` back (2437). `unify_types` does
+    // the occurrence check, the link to `relink_target` and the restore in
+    // each structural arm.
+    let create_recursion = deep_occur(ctx, lhs, relink_target);
+    state.mark_unified(lhs, rhs);
+    swap_trace(unify_types(ctx, state, lhs, rhs, relink_target))?;
+    if create_recursion && let Some(env) = state.env() {
+        repair_recursion(ctx, env, relink_target, rhs);
+    }
     Ok(())
+}
+
+/// OCaml `unify3`'s `create_recursion` repair (compiler/ml/ctype.ml:2428-2436)
+/// after the children of a pair whose original side `t2` expanded to
+/// `t2_expanded`: while `t2` itself (not its representative) is still a
+/// constructor, forget its memorized expansion, expand it again, and link it
+/// to `t2_expanded` when the new expansion is not closed over `t2`'s
+/// arguments. One memo-chain walk, one `expand_head_unif` and one
+/// [`closed_parameterized_type`] walk.
+fn repair_recursion(ctx: &TypeContext, env: &Env, t2: TypeExprRef, t2_expanded: TypeExprRef) {
+    let (path, args, abbrev) = match &*ctx.borrow_desc(t2) {
+        TypeDesc::Tconstr { path, args, abbrev } => (*path, *args, *abbrev),
+        // ctype.ml:2436: "t2 has already been expanded by update_level".
+        _ => return,
+    };
+    ctx.forget_abbrev(abbrev, &path);
+    let expansion = expand_head_unif(ctx, env, t2);
+    if !closed_parameterized_type(ctx, ctx.type_list(&args).iter(), expansion) {
+        link_type(ctx, ctx.repr(t2), ctx.repr(t2_expanded));
+    }
+}
+
+/// OCaml `closed_parameterized_type params ty` (compiler/ml/ctype.ml:441-451):
+/// whether every type variable reachable from `ty` without passing through a
+/// node reachable from `params` is reachable from `params`, that is, whether
+/// `ty` has no variable outside `params`. As in OCaml's `free_vars_rec`
+/// (ctype.ml:408-423), the row variable of a static polymorphic variant is
+/// not visited. One explicit stack and one visited set: one step per node
+/// reachable from `params` and from `ty`, each node visited once.
+fn closed_parameterized_type(
+    ctx: &TypeContext,
+    params: impl Iterator<Item = TypeExprRef>,
+    ty: TypeExprRef,
+) -> bool {
+    let mut seen = TypeExprRefSet::new();
+    let mut work: Vec<TypeExprRef> = params.collect();
+    // `List.iter mark_type params`: everything reachable from the parameters.
+    while let Some(node) = work.pop() {
+        let node = ctx.repr(node);
+        if !seen.insert(node) {
+            continue;
+        }
+        #[cfg(test)]
+        crate::tc::steps::tick();
+        iter_type_expr(ctx, node, |child| work.push(child));
+    }
+    // `closed_type ty`: a variable not marked by the parameters is free.
+    work.push(ty);
+    while let Some(node) = work.pop() {
+        let node = ctx.repr(node);
+        if !seen.insert(node) {
+            continue;
+        }
+        #[cfg(test)]
+        crate::tc::steps::tick();
+        match &*ctx.borrow_desc(node) {
+            TypeDesc::Tvar(..) => return false,
+            // `Tobject ty -> free_vars_rec false ty`: the fields only.
+            TypeDesc::Tobject { fields, .. } => {
+                work.push(*fields);
+                continue;
+            }
+            TypeDesc::Tvariant(row) => {
+                let row = crate::types::btype::row_repr(ctx, &ctx.row_desc(*row));
+                crate::types::btype::iter_row(ctx, &row, |child| work.push(child));
+                if !crate::types::btype::static_row(ctx, &row) {
+                    work.push(row.row_more);
+                }
+                continue;
+            }
+            _ => {}
+        }
+        iter_type_expr(ctx, node, |child| work.push(child));
+    }
+    true
 }
 
 fn has_cached_expansion(ctx: &TypeContext, path: &Path, mut memo: AbbrevMemoRef) -> bool {
@@ -8048,12 +8128,17 @@ fn has_cached_expansion(ctx: &TypeContext, path: &Path, mut memo: AbbrevMemoRef)
     false
 }
 
-/// Internal unification logic.
+/// Internal unification logic: OCaml's `unify3` (compiler/ml/ctype.ml:2304-2440)
+/// on `t1` against `t2`, reached directly or through the expansion cases.
+/// The arms that link `t1` before the children link it to `link_to`: OCaml's
+/// original `t2` where `t2` is `t2'` expanded (ctype.ml:2330-2331), `t2`
+/// itself otherwise. Passing the target costs nothing beyond the argument.
 fn unify_types(
     ctx: &TypeContext,
     state: &mut UnifyState,
     t1: TypeExprRef,
     t2: TypeExprRef,
+    link_to: TypeExprRef,
 ) -> TypeResult<()> {
     let t1 = ctx.repr(t1);
     let t2 = ctx.repr(t2);
@@ -8209,8 +8294,8 @@ fn unify_types(
             if state.mode == UnifyMode::Expression {
                 occur_check(ctx, state.env(), state.mode, t1, t2)?;
             }
-            // OCaml links t1'→t2 before recursively unifying children.
-            link_type(ctx, t1, t2);
+            // OCaml links t1' to the original t2 (`link_to`) before recursively unifying children.
+            link_type(ctx, t1, link_to);
             let result = (|| {
                 for (arg1, arg2) in ctx.type_args(args1).iter().zip(ctx.type_args(args2).iter()) {
                     unify(ctx, state, arg1.typ, arg2.typ)?;
@@ -8241,8 +8326,8 @@ fn unify_types(
             if state.mode == UnifyMode::Expression {
                 occur_check(ctx, state.env(), state.mode, t1, t2)?;
             }
-            // OCaml links t1'→t2 BEFORE recursing into children
-            link_type(ctx, t1, t2);
+            // OCaml links t1' to the original t2 (`link_to`) BEFORE recursing into children
+            link_type(ctx, t1, link_to);
 
             let result = (|| {
                 for (a, b) in pairs {
@@ -8502,8 +8587,8 @@ fn unify_types(
             if state.mode == UnifyMode::Expression {
                 occur_check(ctx, state.env(), state.mode, t1, t2)?;
             }
-            // OCaml links t1'→t2 BEFORE recursing into children
-            link_type(ctx, t1, t2);
+            // OCaml links t1' to the original t2 (`link_to`) BEFORE recursing into children
+            link_type(ctx, t1, link_to);
 
             // ctype.ml unify3: `Tpoly (t1, []), Tpoly (t2, []) -> unify env
             // t1 t2 | Tpoly (t1, tl1), Tpoly (t2, tl2) -> enter_poly !env
@@ -8523,7 +8608,7 @@ fn unify_types(
 
         // Nil types (for objects)
         (TypeDesc::Tnil, TypeDesc::Tnil) => {
-            link_type(ctx, t1, t2);
+            link_type(ctx, t1, link_to);
             Ok(())
         }
 
@@ -8538,8 +8623,8 @@ fn unify_types(
             if state.mode == UnifyMode::Expression {
                 occur_check(ctx, state.env(), state.mode, t1, t2)?;
             }
-            // OCaml links t1'→t2 BEFORE recursing into children
-            link_type(ctx, t1, t2);
+            // OCaml links t1' to the original t2 (`link_to`) BEFORE recursing into children
+            link_type(ctx, t1, link_to);
 
             let result = unify_rows(ctx, state, &row1, &row2);
             if matches!(result, Err(TypeError::Unify(_))) {
@@ -8566,8 +8651,8 @@ fn unify_types(
             if state.mode == UnifyMode::Expression {
                 occur_check(ctx, state.env(), state.mode, t1, t2)?;
             }
-            // OCaml links t1'→t2 BEFORE recursing into children
-            link_type(ctx, t1, t2);
+            // OCaml links t1' to the original t2 (`link_to`) BEFORE recursing into children
+            link_type(ctx, t1, link_to);
 
             let result = unify_object_fields(ctx, state, fields1, fields2);
             if matches!(result, Err(TypeError::Unify(_))) {
@@ -8653,8 +8738,8 @@ fn unify_types(
             if state.mode == UnifyMode::Expression {
                 occur_check(ctx, state.env(), state.mode, t1, t2)?;
             }
-            // OCaml links t1'→t2 BEFORE recursing into children
-            link_type(ctx, t1, t2);
+            // OCaml links t1' to the original t2 (`link_to`) BEFORE recursing into children
+            link_type(ctx, t1, link_to);
 
             for (a, b) in pairs {
                 unify(ctx, state, a, b)?;
@@ -15230,6 +15315,60 @@ mod tests {
         assert!(!deep_occur(&ctx, needle, without_needle));
         let mut budget = 256;
         assert!(!surely_univar_free(&ctx, without_needle, &mut budget));
+    }
+
+    #[test]
+    fn closed_parameterized_type_visits_each_node_once_at_ten_thousand() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let int = Path::pident(crate::ident::Ident::create_persistent("int"));
+        let vars: Vec<_> = (0..10_000).map(|_| ctx.new_var(None)).collect();
+        let open = ctx.new_tuple(vars.clone());
+        // The parameters mark 10,000 variables; the tuple is one more node.
+        let mut closed = false;
+        let steps = crate::tc::steps::scope(|| {
+            closed = closed_parameterized_type(&ctx, vars.iter().copied(), open)
+        });
+        assert!(closed);
+        assert_eq!(steps, 10_001);
+        // Without parameters the first variable reached is free.
+        let mut closed = false;
+        let steps = crate::tc::steps::scope(|| {
+            closed = closed_parameterized_type(&ctx, std::iter::empty(), open)
+        });
+        assert!(!closed);
+        assert_eq!(steps, 2);
+        let ints: Vec<_> = (0..10_000).map(|_| ctx.new_constr(int, vec![])).collect();
+        let ground = ctx.new_tuple(ints);
+        let mut closed = false;
+        let steps = crate::tc::steps::scope(|| {
+            closed = closed_parameterized_type(&ctx, std::iter::empty(), ground)
+        });
+        assert!(closed);
+        assert_eq!(steps, 10_001);
+    }
+
+    #[test]
+    fn forget_abbrev_walks_the_chain_once_at_ten_thousand() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let memo = ctx.alloc_abbrev_nil();
+        let ty = ctx.new_var(None);
+        let paths: Vec<_> = (0..10_000)
+            .map(|i| Path::pident(crate::ident::Ident::create_persistent(&format!("t{i}"))))
+            .collect();
+        for path in &paths {
+            ctx.memorize_abbrev_expansion(memo, PrivateFlag::Public, *path, ty, ty);
+        }
+        // The oldest entry is the last of the chain: 10,000 cells.
+        let steps = crate::tc::steps::scope(|| ctx.forget_abbrev(memo, &paths[0]));
+        assert_eq!(steps, 10_000);
+        // It is gone: the walk now reaches the end, 9,999 cells and `Mnil`.
+        let steps = crate::tc::steps::scope(|| ctx.forget_abbrev(memo, &paths[0]));
+        assert_eq!(steps, 10_000);
+        // The newest is the head; forgetting it keeps the rest.
+        let steps = crate::tc::steps::scope(|| ctx.forget_abbrev(memo, &paths[9_999]));
+        assert_eq!(steps, 1);
+        assert!(has_cached_expansion(&ctx, &paths[9_998], memo));
+        assert!(!has_cached_expansion(&ctx, &paths[9_999], memo));
     }
 
     #[test]
