@@ -3766,6 +3766,82 @@ pins stay 86, 103, 86, 156.
 | --- | --- | --- | --- |
 | T6m | `prim.rs`, `konst.rs`, `record.rs`, `import.rs` | 546 passed (`bir::lower`), 58 (`bir::j`); 589 lines changed | Nothing in the trait (`str_of` and `locate_stmt` were added before it). The operand-stack reserve above |
 | T6n | `cond.rs`, `expr.rs` | 546 and 58, on top of T6m's; 279 lines changed | `is_empty_block`, `branch_last_kind`, `release_stmt`, `if_blocks`, `take_if`, `function_of_block` |
+| T6p | `args.rs`, `call.rs`, `ffi_args.rs`, `external.rs`, `jsx.rs` | 550 and 58, on top of T6m's and T6n's; 703 lines changed | `take_operands`, `refill`; `new_` wrote the wrong `aux` |
+| T6o, T6w, T6q | | Not probed in this turn | See "Not done" below |
+
+**What the functions of the survey became.** "T6m to T6x: what each
+slice adds" listed six expression-side functions to add once T6k had
+merged. In code now, each with its body on rows and a test: `str_of`,
+`push_list`, `owner`, `kind_of`, and `is_callee(a, id) -> bool` in place
+of `operand_index` (the one reader, `export.rs`, asks only whether the
+reference is the callee of its owner; that is one comparison where an
+index is a scan of the owner's operands). `equal` is not added:
+`export.rs::same_reusable_value` compares two chains of member reads
+over a variable or a module by their names, which `var_of`,
+`qualified_of`, `member_of`, `aux` and `operand` already give; it is not
+`plain::equal` and needs no function. The four statement functions that
+were `todo!` for a later slice (`locate_stmt`, `take_value`, `unblock`,
+`stmt_located`) have their bodies: each is a plain call, and a body left
+for "the slice that lands first" is an edit two builders would make.
+
+**T6p: a node over other operands.** `args.rs` (A:116 `evaluate_now`)
+holds each operand of a literal in a variable and builds the literal
+again with its `aux`, its information, its location and its comment;
+`sequence_arguments` does the same to the object of a member callee and
+`ffi_args.rs::hold_external_arg` to the payload of an optional. Today
+the node stays as a shell without children while its operands are
+lowered. With handles that is two functions: `take_operands(a, &mut E)
+-> u32` moves the operands to the operand stack and leaves the node,
+and `refill(a, E, mark) -> E` builds the node of the same kind over the
+operands pushed since the mark and releases the shell. It is defined
+for `Optional`, `Array`, `BlockLit`, `Object` and `Dot`, the five kinds
+the three callers have; it is plain, and `args.rs` asserts strictness
+with `assume_strict` as `bir::j::pure_expression` did. The alternative,
+readers for a node's location and comment so that the caller carries
+them, puts cold data in the lowering's work stack (24 bytes a frame
+where it has 8).
+
+**T6p: `new_`.** The body T6k built wrote `aux` 0 on a `JNew`, which in
+`bir/node.rs` means "no argument list"; `Bir::call_from_list(callee,
+args, None)`, the only producer in the lowering, writes 1. The function
+had no caller, so nothing was wrong in any output, and its test compared
+with `plain::node(.., 0)`, which was the same mistake on both sides. The
+probe showed it as a disagreement of the naming replay in two tests of
+`external.rs`. The body writes 1 and the test compares with
+`call_from_list`. Lesson for the remaining probes: an oracle test of a
+function without a caller proves the two sides alike, not that either is
+what the lowering writes; the probe is the first real check.
+
+**T6p: operand lists in the pool.** `external.rs`, `ffi_args.rs` and
+`jsx.rs` receive and return the operands of a call as a `ListId` of the
+arena's list pool (`compile_js_call(.., args: ListId)` is called from
+`prim.rs`, T6m) and assemble lists in place (`Lists::set`, `truncate`,
+`slice`). That is storage, and its type is in signatures: it stays
+until T6x. What changes is the constructor: `call_from_list`,
+`object_from_list` and `jsx_from_list` become `mark`, `push_list(list)`
+and `call`, `new_`, `object`, `jsx`. Cost: the operands of an external
+call are copied once more into the node's own list (one move per
+operand, counted by the constructor's step per operand). T6x removes the
+copy with the lists. The probe held the allocation tests of the five
+files with this, among them 10,000 dispatch cases without an allocation.
+
+**T6p: what stays on rows.** `jsx.rs::printed_form` and `jsx_tag` are
+free functions over `&Bir` that `names.rs` (T6r) calls on the finished
+node; they are not the lowering building JavaScript and are converted
+with `names.rs`.
+
+**Not done in this turn.** T6o, T6w and T6q have no probe, no added
+function and no prompt. Open for their design turn, as the reviews left
+them: T6o states the fields `copy_stmt` needs in `Rows` and pins
+`size_of::<Rows>()` again (decision 7); T6q starts from the owner
+column (`owner`, `kind_of`, `is_callee` are in code) and says how the
+strictness of a statement is answered (decisions 4 and 9). The rules
+above already bind them: no signature change, no shared file. Known
+from the callers' table: `tail.rs::loop_function_body` keeps taking and
+returning a block statement (T6n calls it), `konst::number` is called
+from `label.rs`, `if_statement`, `unnest`, `place` and
+`drop_pure_effect` from `switch.rs`, `variant.rs`, `untagged.rs`,
+`exit.rs` and `rec.rs`.
 
 **T6n: the guard merge (decision 6 of the review of the T6l skeleton).**
 `cond.rs::merge_tail_guard` takes a guard `if (c) { ..; jump }` whose
@@ -4899,6 +4975,161 @@ a list in `merge_tail_guard`; `self.scratch` given to a rule; a
 signature changed (`if_statement`, `unnest`, `place`,
 `single_assignment`, `merge_assignments`, `assignment_statement` and
 `drop_pure_effect` are called from other builders' files).
+```
+
+T6p (with both common blocks; read also "T6p: a node over other
+operands", "T6p: operand lists in the pool" and "T6p: what stays on
+rows"):
+
+```text
+Task T6p: args.rs, call.rs, ffi_args.rs, external.rs and jsx.rs on the
+interface.
+Precondition, check it first and stop with a report if it fails: `rg -n
+'fn (take_operands|refill|push_list)' src/bir/j/rows.rs` shows three
+functions, none with a `todo!` body, and `cargo test --manifest-path
+compiler-rust/Cargo.toml --lib bir::lower::js::` shows
+`a_node_keeps_its_row_over_other_operands` passing.
+Yours: src/bir/lower/args.rs, call.rs, ffi_args.rs, external.rs and
+jsx.rs whole; the changelog fragment. Nothing else. In jsx.rs the free
+functions `printed_form` and `jsx_tag` stay exactly as they are (T6r).
+
+Operand lists: a `ListId` of operands in the arena's list pool is
+storage. `self.arena.lists.get`, `push`, `push_iter`, `set`, `truncate`
+and `slice` on such a list stay as they are, and so do the `ListId`
+parameters and results. What goes is every constructor from a list:
+`let mark = self.js.mark(); self.js.push_list(&self.arena, list);` and
+then the constructor.
+
+Do exactly this, one commit each, in this order, each pushed when made:
+
+1. args.rs.
+   - `delay_safe`: `self.js.has(.., B::at(value), flag::DELAY_SAFE)`.
+     `runs_no_code`: `self.js.runs_no_code`.
+   - Add the private function `declares_pure(&self, statement: NodeId)
+     -> bool`: `stmt_kind == Kind::Declare` and `value_of` is none or
+     runs no code; `defines_pure_values` and the closure in
+     `sequence_arguments` call it.
+   - `evaluate_now`, `Work::Enter`: read `self.js.kind` once.
+     A `Seq`: `self.js.unpack_rev`, `pop` the first, `pop` the second;
+     the first is released when it `has` `flag::STRICT`, else it is
+     `exp_rule`; the second is entered.
+     A literal is `Optional`, `Array`, `BlockLit`, or an `Object` whose
+     keys (`self.js.info_of`, `self.arena.javascript`) are all `Literal`
+     or `Symbol`. For a literal: `let mut shell = B::from_node(value);
+     let count = self.js.take_operands(.., &mut shell);` push
+     `Work::Rebuild(B::node(shell), count)`; then `let at = work.len();`
+     push `Work::Enter(B::node(self.js.pop()))` `count` times and
+     `work[at..].reverse()` (the first operand is entered first).
+   - `Work::Rebuild(old, count)`: mark; push the `count` values;
+     `self.js.refill(.., B::from_node(old), mark)`;
+     `self.js.assume_strict`. No read of `aux`, of cold data or of the
+     view.
+   - `sequence_arguments`, the member callee: when `kind` is `Dot`,
+     `take_operands`, `pop` the object, `evaluate_now` it, mark, push
+     the result, `refill`.
+
+2. call.rs.
+   - The location of a call: `self.js.locate`.
+   - The strict test of the remaining arguments: `self.js.has`.
+   - The eta function: `self.js.list(.., 1,
+     std::iter::once(B::stmt_from_node(ret)))` and `self.js.function`.
+
+3. ffi_args.rs.
+   - `literal_polyvar_block`: `kind == BlockLit`, `arity == 2`, the tag
+     of `info_of` is `PolyVar`, and `kind` of `operand(r, 0)` is `Str`.
+   - `hold_external_arg`: `wrapped` is `label == ArgOptional` and
+     `kind == Optional`; the target read for the decision is `operand(r,
+     0)` when wrapped. To hold: when wrapped, `take_operands` and `pop`
+     give the target; `declare`; then mark, push the variable, `refill`
+     and `assume_strict`. When not wrapped the value itself is declared
+     and the variable replaces it.
+   - `hold_external_obj_args`: the tests are `kind` (`Undefined`,
+     `Optional`) and `has` (`DELAY_SAFE`, `STRICT`).
+   - `external_optional_to_undefined_expr`,
+     `external_option_unwrap_expr`: match on `kind`; the payload of an
+     optional is `self.js.keep_operand(.., arg, 0)`; a copy is
+     `self.js.copy(.., B::at(arg))`.
+   - `optional_duplicable`: a loop over a `B::Ref`: `Var` reads
+     `var_of`; `Named`, `Bool`, `Str`, `Template`, `Number` are
+     duplicable; a `Dot` whose `member_of` has a position continues at
+     `operand(r, 0)`.
+   - `external_polyvar_unwrap_expr`: a `BlockLit` of arity 2 whose first
+     operand is a `Number` gives `keep_operand(.., arg, 1)`.
+   - `external_dispatch`: its parameter becomes `value: impl Fn(&mut B,
+     &mut Bir, &T) -> B::E` and the two callers pass `|js, arena, v|
+     js.string(arena, v)` and `|js, arena, v| js.int_literal(arena, *v
+     as i32)` (the function is private to the file). The actions are
+     collected in `self.scratch` (taken and put back; not
+     `self.external_values`, which a caller holds): for each case
+     `return_`, `list` of one, `block_of`, pushed as a `NodeId`. Then
+     `self.js.list(.., count, actions.drain(..).map(B::stmt_from_node))`,
+     `self.js.switch(.., arg, list, header, true)`, `list` of the one
+     switch and `self.js.function`. No list is reserved for the actions.
+   - `external_polyvar_string_expr`, `external_polyvar_int_expr`: the
+     literal's text is `self.js.text` when `kind` is `Str`.
+   - `external_polyvar_event_exprs`: `unpack_rev` and two `pop`s; the
+     copy is `self.js.copy`.
+   - `assemble_external_args_with_splice`: an `Array` last argument is
+     `unpack_rev` and `count` `pop`s into `values`; `primitive_steps`
+     counts one per element as today.
+
+4. external.rs.
+   - `hold_external_receiver`: the loop over a `B::Ref` (`Dot`
+     continues at `operand(r, 0)`).
+   - `compile_js_object_create`: the optional argument is matched on
+     `kind` and its payload is `keep_operand`. The object is
+     `self.arena.js_info(JsPayload::Object(keys))`, mark,
+     `push_list(values)`, `self.js.object`. The copy for the test is
+     `self.js.copy`. The two branches of the `if_` are `self.js.list` of
+     one statement and of none.
+   - `external_call_from_list`: mark, `push_list`, `self.js.call`.
+     The two `call_from_list(target, args, None)`: mark, `push_list`,
+     `self.js.new_`.
+
+5. jsx.rs.
+   - `compile_jsx`: the header goes through
+     `self.arena.js_info(JsPayload::Jsx(..))`; mark, `push_list(values)`,
+     `self.js.jsx(.., mark, info, jsx.jsx_children.is_some())`. The
+     reserved list and its `set` and `truncate` stay.
+   - `jsx_key`: match on `kind`; `keep_operand`.
+   - `duplicate_jsx_key`: the loop reads `kind`, `member_of`, `var_of`
+     and `aux`; the leaf is `self.js.copy_leaf` and `self.js.copy_cold`;
+     each member is `self.js.dot` with the `member_of` of the original
+     and `aux != 0` as its tag, then `copy_cold`.
+     `copy_jsx_key_decoration` is deleted.
+   The tests of the five files pass unchanged.
+
+6. The changelog fragment changes/lowering-interface-calls.internal.md.
+
+End state, to paste in the pull request with the output:
+- `rg -n 'View::J|Op::J|View::S[A-Z]|Op::S[A-Z]|plain::|norm::|\.arena\.(view|node|release|detach|replace|new_node|cold|set_cold|copy_subtree\w*|\w+_from_list)\(|pure_expression|bir::j::|arena\.nodes|NodeFlags::'
+  src/bir/lower/args.rs src/bir/lower/call.rs src/bir/lower/ffi_args.rs
+  src/bir/lower/external.rs src/bir/lower/jsx.rs`, outside `mod tests`,
+  matches only lines of `printed_form` and `jsx_tag` in jsx.rs.
+- `rg -c 'self\.js\.push_list' src/bir/lower` prints 4 for external.rs
+  (`compile_js_object_create`, `external_call_from_list` and the two
+  `new_`) and 1 for jsx.rs, and no other file.
+- `git diff --stat origin/ocaml-to-rust-rewrite` names the five files
+  and the fragment only.
+- `cargo test --manifest-path compiler-rust/Cargo.toml --lib bir::lower`
+  and `--lib bir::j`: the counts of the base.
+- The three CI numbers of the common block.
+
+Run by the design turn against a probe conversion of these five files
+(with the probes of T6m and T6n in place): `--lib bir::lower` 550
+passed, `--lib bir::j` 58 passed, the four pins unchanged, the
+allocation tests of the five files among them. Not run: the corpus
+gates, `Instruction count`, check mode. Not measured: what the one more
+copy of an external call's operands costs.
+
+Shortcuts that count as failure, beside the common lists: a signature
+changed (`call_node`, `compile_js_call`, `compile_js_object_create`,
+`compile_jsx` and `sequence_arguments` are called from prim.rs,
+`printed_form` from names.rs); a location, comment or `aux` read to
+carry it across a rebuild (that is `refill`); `new_` replaced by a call
+with invented information; a vector made per call or per case; the
+callee of a JSX element built before its properties (the order of the
+rows would change); converting `printed_form` or `jsx_tag`.
 ```
 
 ## 12. Risks and what was not measured
