@@ -1,0 +1,1 @@
+- Rust compiler: an exception or extensible-type constructor named through a module alias (`module A = R`, then `A.E(1)` or `exception F = A.E`) is read from the aliased module, as OCaml compiles it, instead of from the alias, which is undefined at runtime.

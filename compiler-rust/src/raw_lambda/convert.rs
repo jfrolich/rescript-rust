@@ -1266,8 +1266,13 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
             .map(|path| crate::types::Path::papply(*path, crate::types::Path::pident(*param)))
     }
 
+    /// `Translcore.transl_extension_constructor env path ext`
+    /// (compiler/ml/translcore.ml:44-53): `env` is the environment of the
+    /// item or expression that declares `ext`, where a rebind's path is
+    /// normalized.
     fn transl_extension_constructor_raw(
         &mut self,
+        env: EnvRef,
         path: Option<crate::types::Path>,
         ext: &crate::types::typedtree::ExtensionConstructor,
     ) -> RawLambda {
@@ -1282,13 +1287,14 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                 rb.prim(Primitive::PcreateExtension(name), &[], self.lam_loc(loc))
             }
             crate::types::typedtree::ExtensionConstructorKind::Text_rebind(path, _) => {
-                self.translate_extension_path_raw(path, SrcLoc::from(loc))
+                self.translate_extension_path_raw(env, path, SrcLoc::from(loc))
             }
         }
     }
 
     fn transl_type_extension_raw(
         &mut self,
+        env: EnvRef,
         rootpath: &Option<crate::types::Path>,
         tyext: &crate::types::typedtree::TypeExtension,
         body: RawLambda,
@@ -1303,6 +1309,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                     LetKind::Strict,
                     ext.ext_id,
                     self.transl_extension_constructor_raw(
+                        env,
                         Self::field_path(rootpath, &ext.ext_id),
                         ext,
                     ),
@@ -2593,8 +2600,11 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         }
     }
 
+    /// `env` is the expression's environment, where an extension
+    /// constructor's path is normalized (compiler/ml/translcore.ml:1417).
     fn convert_construct_raw(
         &mut self,
+        env: EnvRef,
         loc: SrcLoc,
         cstr: &crate::types::ConstructorDescription,
         args: &[&Expression],
@@ -2605,6 +2615,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                 [arg] => match &arg.exp_desc {
                     ExpressionDesc::Texp_record { fields, extended_expression, .. } => {
                         self.convert_record_raw(
+                            arg.exp_env,
                             SrcLoc::from(arg.exp_loc),
                             self.ta.record_fields(*fields),
                             extended_expression.map(|e| self.ta.expr(e)),
@@ -2638,7 +2649,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
             }
             crate::types::ConstructorKind::Extension(ref path) => {
                 let mut args_lam = Vec::with_capacity(args.len() + 1);
-                args_lam.push(self.translate_extension_path_raw(path, loc));
+                args_lam.push(self.translate_extension_path_raw(env, path, loc));
                 args_lam.extend(args.iter().map(|arg| self.convert_expr_raw(arg)));
                 rb.prim(
                     Primitive::Pmakeblock(TagInfo::Extension, Mutable::Immutable),
@@ -2739,13 +2750,14 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
     /// `lbl_all` (`all_labels fields`, none for `{}`).
     fn convert_record_raw(
         &mut self,
+        env: EnvRef,
         loc: SrcLoc,
         fields: &[RecordField],
         base: Option<&Expression>,
         empty_repres: Option<RecordRepresentation>,
     ) -> RawLambda {
         let base_lam = base.map(|expr| self.convert_expr_raw(expr));
-        self.record_of(loc, fields, base_lam, empty_repres, &mut TypedFields)
+        self.record_of(env, loc, fields, base_lam, empty_repres, &mut TypedFields)
     }
 
     /// [`Self::convert_record_raw`] over fields `how` lowers: those of a
@@ -2753,8 +2765,11 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
     /// `base_lam` is the lowered record the literal extends.
     /// Cost: O(labels of the record): one slot per label to place the
     /// written fields by position, one term per field and one block.
+    /// `env` is where the path of an extensible record's constructor is
+    /// normalized (compiler/ml/translcore.ml:1902).
     fn record_of<F>(
         &mut self,
+        env: EnvRef,
         loc: SrcLoc,
         fields: &[F],
         base_lam: Option<RawLambda>,
@@ -2930,7 +2945,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                         _ => return rb.unit(),
                     };
                     let mut args = Vec::with_capacity(elems.len() + 1);
-                    args.push(self.translate_extension_path_raw(&path, loc));
+                    args.push(self.translate_extension_path_raw(env, &path, loc));
                     args.extend(elems);
                     rb.prim(
                         Primitive::Pmakeblock(
@@ -3702,12 +3717,22 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         self.translate_normal_path_raw_in_env(env, &normalized, loc)
     }
 
+    /// `Transl_path.transl_extension_path env path`
+    /// (compiler/ml/transl_path.ml:46): the value-path translation in the
+    /// environment `env` of the construction, record, or declaration that
+    /// names the constructor, so a prefix through a module alias declared
+    /// there normalizes to the aliased module. Cost: one environment-table
+    /// read plus the value-path normalization.
     fn translate_extension_path_raw(
         &mut self,
+        env: EnvRef,
         path: &crate::types::Path,
         loc: SrcLoc,
     ) -> RawLambda {
-        self.translate_value_path_raw(path, loc)
+        match self.type_ctx.get_typed_env(env) {
+            Some(env) => self.translate_value_path_raw_in_env(env.as_ref(), path, loc),
+            None => self.translate_value_path_raw(path, loc),
+        }
     }
 
     fn note_possible_required_modules_from_module_expr(&mut self, module_expr: &ModuleExpr) {
@@ -5013,7 +5038,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                 let body =
                     self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
                 fields.truncate(old_len);
-                self.transl_type_extension_raw(rootpath, tyext, body)
+                self.transl_type_extension_raw(item.str_env, rootpath, tyext, body)
             }
             StructureItemDesc::Tstr_exception(ext) => {
                 let old_len = fields.len();
@@ -5025,6 +5050,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                     LetKind::Strict,
                     self.ta.extension_constructor(*ext).ext_id,
                     self.transl_extension_constructor_raw(
+                        item.str_env,
                         Self::field_path(rootpath, &self.ta.extension_constructor(*ext).ext_id),
                         self.ta.extension_constructor(*ext),
                     ),
@@ -5372,7 +5398,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
             }
             ExpressionDesc::Texp_construct(_, cstr, args) => {
                 let args: smallvec::SmallVec<[&Expression; 4]> = self.ta.exprs(*args).collect();
-                self.convert_construct_raw(SrcLoc::from(expr.exp_loc), cstr, &args)
+                self.convert_construct_raw(expr.exp_env, SrcLoc::from(expr.exp_loc), cstr, &args)
             }
             ExpressionDesc::Texp_variant(tag, arg) => match arg {
                 None => raw_polyvariant_const(rb, tag),
@@ -5404,6 +5430,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                 empty_representation,
                 extended_expression,
             } => self.convert_record_raw(
+                expr.exp_env,
                 SrcLoc::from(expr.exp_loc),
                 self.ta.record_fields(*fields),
                 extended_expression.map(|e| self.ta.expr(e)),
@@ -5540,7 +5567,11 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
             ExpressionDesc::Texp_letexception(ext, body) => rb.let_(
                 LetKind::Strict,
                 self.ta.extension_constructor(*ext).ext_id,
-                self.transl_extension_constructor_raw(None, self.ta.extension_constructor(*ext)),
+                self.transl_extension_constructor_raw(
+                    expr.exp_env,
+                    None,
+                    self.ta.extension_constructor(*ext),
+                ),
                 self.convert_expr_raw(self.ta.expr(*body)),
             ),
             ExpressionDesc::Texp_pack(modl) => self.convert_module_expr_for_pack_raw(self.ta.module_expr(*modl)),
@@ -7288,7 +7319,7 @@ mod tests {
             cstr_inlined: None,
         };
 
-        let lowered = converter.convert_construct_raw(SrcLoc::from(Location::none()), &cstr, &[]);
+        let lowered = converter.convert_construct_raw(EnvRef(0), SrcLoc::from(Location::none()), &cstr, &[]);
 
         assert!(matches!(
             rb.get().export(lowered),
@@ -7358,7 +7389,7 @@ mod tests {
         };
 
         let lowered =
-            converter.convert_construct_raw(SrcLoc::from(Location::none()), &cstr, &[&arg]);
+            converter.convert_construct_raw(EnvRef(0), SrcLoc::from(Location::none()), &cstr, &[&arg]);
 
         assert!(matches!(
             rb.get().export(lowered),

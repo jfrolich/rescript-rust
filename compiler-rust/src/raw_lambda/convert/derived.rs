@@ -482,7 +482,9 @@ impl<S: Steps> Lowering<'_, S> {
                     .enumerate()
                     .map(|(i, value)| (ObligationIdx(labels.0 + i as u32), *value))
                     .collect();
-                (conv.record_of(SrcLoc::from(dummy), &fields, None, None, self), None)
+                let lam =
+                    conv.record_of(self.env_ref, SrcLoc::from(dummy), &fields, None, None, self);
+                (lam, None)
             }
             BodyNode::Construct { constructor, arg } => {
                 let Obligation::Constructor { args, .. } = self.plans.obligation(constructor)
@@ -530,7 +532,9 @@ impl<S: Steps> Lowering<'_, S> {
             }
             BodyNode::Update { base, label, value } => {
                 let base = self.node(conv, base).0;
-                (conv.record_of(SrcLoc::from(dummy), &[(label, value)], Some(base), None, self), None)
+                let fields = [(label, value)];
+                let loc = SrcLoc::from(dummy);
+                (conv.record_of(self.env_ref, loc, &fields, Some(base), None, self), None)
             }
             // translcore.ml `Texp_tuple`.
             BodyNode::Tuple { args, len } => {

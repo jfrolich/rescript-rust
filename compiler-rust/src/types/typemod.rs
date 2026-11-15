@@ -16473,6 +16473,28 @@ pub fn check_nongen_schemes(
     Ok(())
 }
 
+/// The `str_env` of an item declaring extension constructors: OCaml's is the
+/// environment before the item (compiler/ml/typemod.ml:1655), and the
+/// translation reads it only to normalize the path of a rebind
+/// (compiler/ml/translcore.ml:53, `transl_extension_path`), so it is stored
+/// only when one constructor is a rebind. Cost: O(constructors) to look for a
+/// rebind; for one, a `store_typed_env` (one table lookup, and one `Env`
+/// clone the first time this environment is stored). Without a rebind it
+/// is `EnvRef(0)`, the placeholder every other item carries.
+fn extension_item_env<'c>(
+    tctx: &TypeCheckContext<'_>,
+    env: &Env,
+    mut constructors: impl Iterator<Item = &'c crate::types::typedtree::ExtensionConstructor>,
+) -> EnvRef {
+    if constructors.any(|ext| {
+        matches!(ext.ext_kind, crate::types::typedtree::ExtensionConstructorKind::Text_rebind(..))
+    }) {
+        tctx.type_ctx.store_typed_env(env)
+    } else {
+        EnvRef(0)
+    }
+}
+
 /// Type check a structure item.
 /// OCaml `Typedecl.transl_type_extension extend env loc styext`
 /// (typedecl.ml:1802-1897): `extend` is true for a structure item
@@ -16916,6 +16938,7 @@ fn transl_type_extension<'a>(
             )
         })
         .collect();
+    let str_env = extension_item_env(tctx, env, typed_constructors.iter());
     let desc = StructureItemDesc::Tstr_typext(TypeExtension {
         tyext_path: path,
         tyext_params: typed_params.into_iter().map(|(ct, v)| (tctx.typed.push_core_type(ct), v)).collect(),
@@ -16927,7 +16950,7 @@ fn transl_type_extension<'a>(
         StructureItem {
             str_desc: desc,
             str_loc: loc,
-            str_env: EnvRef(0),
+            str_env,
         },
         item_sig,
         new_env,
@@ -19124,24 +19147,25 @@ fn type_structure_item<'a>(
                 ),
                 ext_is_exception: true,
             };
-            let desc = StructureItemDesc::Tstr_exception(tctx.typed.push_extension_constructor(
-                crate::types::typedtree::ExtensionConstructor {
-                    ext_id: id,
-                    ext_name: crate::parse_arena::Located {
-                        txt: name_str,
-                        loc: ext_constr.pext_name.loc,
-                    },
-                    ext_type: ext_type.clone(),
-                    ext_kind,
-                    ext_loc: ext_constr.pext_loc,
-                    ext_attributes: ext_constr.pext_attributes.clone(),
+            let typed_ext = crate::types::typedtree::ExtensionConstructor {
+                ext_id: id,
+                ext_name: crate::parse_arena::Located {
+                    txt: name_str,
+                    loc: ext_constr.pext_name.loc,
                 },
-            ));
+                ext_type: ext_type.clone(),
+                ext_kind,
+                ext_loc: ext_constr.pext_loc,
+                ext_attributes: ext_constr.pext_attributes.clone(),
+            };
+            let str_env = extension_item_env(tctx, env, std::iter::once(&typed_ext));
+            let desc =
+                StructureItemDesc::Tstr_exception(tctx.typed.push_extension_constructor(typed_ext));
             Ok((
                 StructureItem {
                     str_desc: desc,
                     str_loc: loc,
-                    str_env: EnvRef(0),
+                    str_env,
                 },
                 vec![crate::types::decl::SignatureItem::SigTypext(
                     id,

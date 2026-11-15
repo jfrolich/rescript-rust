@@ -7204,6 +7204,10 @@ which normalizes the prefix through the alias (`compiler/ml/transl_path.ml:43-46
 target for a local `module A = R`. That is the Lambda translation of
 modules, not constructor typing.
 
+Fixed under E1 below (`4be340ef5`): the translation now normalizes the path
+in the construction's environment; `A.E({v: 1})` through `module A = R`
+agrees after the merge of both.
+
 ### Q1 — a module type abbreviation of a module type in a submodule
 
 ```rescript
@@ -7389,3 +7393,103 @@ outside the coerced functor's own parameter `funarg`. Rust prints the same
 warning, exits 0 and emits `Z: X.N` in `function F(funarg)`, a reference to
 an unbound `X`. This is a defect of both compilers, and the reference
 crashes; it was left as it is.
+
+### E1 - an extension constructor read through a module alias
+
+The witness: an extension constructor named through a local module alias.
+
+```rescript
+module R = { exception E(int) }
+module A = R
+let e = A.E(1)
+```
+
+OCaml emitted `let e = { RE_EXN_ID: E, _1: 1 }` followed by `let A;`; Rust
+emitted `let A;`, then `let e_0 = A.E; let e = { RE_EXN_ID: e_0, _1: 1 }`,
+a read of a field of `A`, which is undefined at runtime. `-drawlambda`:
+OCaml reads `field:E/0 R`, Rust `field:E/0 A`. A value read the same way
+(`A.x`) compiled as OCaml compiles it.
+
+Commands as in "Scope, calibration and reproducibility" (OCaml `bsc` from
+`dune build`, Rust from the thin-LTO release build, the runtime built by
+`build-reference` with the OCaml `bsc`); each program is `Main.res`
+compiled by both with `-I . -I packages/@rescript/runtime/lib/rescript`,
+and stdout, stderr, the exit status and the JavaScript compared byte for
+byte. The two-unit program is a project with `Other.res` and `Main.res`,
+built by `rescript build-reference --bsc <OCaml bsc>` and by
+`rescript build`, its JavaScript compared byte for byte.
+
+#### Fixed
+
+- `4be340ef5`: OCaml's `transl_extension_path` is `transl_value_path`
+  (`compiler/ml/transl_path.ml:43-46`), which normalizes the path's prefix
+  with `Env.normalize_path_prefix` in the environment it is given: the
+  construction's `e.exp_env` (`compiler/ml/translcore.ml:1417`), the
+  record's (`translcore.ml:1902`), a local exception's
+  (`translcore.ml:1551`), the declaring item's `item.str_env` for a rebind
+  (`compiler/ml/translmod.ml:373,381`, `translcore.ml:53`), the pattern's
+  `pat_env` (`compiler/ml/matching.ml:2363`). The Rust
+  `translate_extension_path_raw`
+  (`compiler-rust/src/raw_lambda/convert.rs:3705` before the fix) called
+  `translate_value_path_raw`, which normalizes in the converter's
+  unit-level environment, where an alias declared in the unit is not
+  bound; patterns already used `pat_env` (`raw_lambda/matching.rs:7427`),
+  which is why matching agreed. Constructions, records and local
+  exceptions now pass the expression's environment. Structure items never
+  recorded `str_env` (always `EnvRef(0)` in
+  `compiler-rust/src/types/typemod.rs`); an `exception` or `type +=` item
+  with a rebind now stores the environment before it
+  (`extension_item_env`, `typemod.rs:16484`), and the converter normalizes
+  the rebind there. Fixtures: `tests/tests/src/extension_alias_path_construct`,
+  `extension_alias_path_rebind`, `extension_alias_path_unit` with
+  `extension_alias_path_unit_alias` (an alias of another unit).
+
+Since the merge of trunk at `393969158` (Q5, an inline record of an
+extension constructor through a module path), `56053c43c` adds the inline
+record through an alias, `AI.E({a: 1, b: "x"})` and `| AI.E({a}) => a`, to
+`extension_alias_path_construct`; it needs Q5 to be accepted and this fix to
+read `RI`.
+
+Programs run through both compilers, before (at `112f68648`), after
+`4be340ef5`, and after the merge of trunk at `393969158` (`dcfa51c78`). OCaml
+accepts every one (exit 0); DIFFER is a difference in the JavaScript or the
+diagnostics:
+
+| Program | Before | After | After the merge |
+| --- | --- | --- | --- |
+| the witness, `A.E(1)` | DIFFER | agree | agree |
+| constant exception `A.E` | DIFFER | agree | agree |
+| `switch x { \| A.E(n) => n }` | agree | agree | agree |
+| `try g() catch { \| A.E(n) => n }` | agree | agree | agree |
+| extensible type `A.C(1)` | DIFFER | agree | agree |
+| extensible constant `A.C`, then `\| A.C =>` | DIFFER | agree | agree |
+| inline record `A.E({a: 1, b: "x"})` | DIFFER (Rust 2) | DIFFER (Rust 2) | agree |
+| two aliases `B = A`, `B.E(1)`, `\| B.E(n)` | DIFFER | agree | agree |
+| alias of a submodule `A = R.S` | DIFFER | agree | agree |
+| alias declared after `open O` | DIFFER | agree | agree |
+| `open A`, then `E(1)` | DIFFER | agree | agree |
+| alias of another unit (`A = Other`, `A.E`, `A.C`, `\| A.E(n)`) | DIFFER | agree | agree |
+| alias inside a functor body of a module outside it | DIFFER | agree | agree |
+| alias of the functor's parameter (`A = X`, `A.E(1)`, `\| A.E(n)`) | agree | agree | agree |
+| `throw(A.E(1))` | DIFFER | agree | agree |
+| `include R` in a third module, `I.E(1)` and `A.E(2)` | DIFFER | agree | agree |
+| rebind `exception F = A.E` | DIFFER | agree | agree |
+| value through the alias, `A.x` | agree | agree | agree |
+| `type R.t += D = A.C`, `D(1)` | DIFFER | agree | agree |
+| local `exception L = A.E` in a function, `L(1)` | DIFFER (Rust 2) | DIFFER (Rust 2), open | DIFFER (Rust 2), open |
+| inline record `R.E({a: 1, b: "x"})`, no alias | DIFFER (Rust 2) | DIFFER (Rust 2) | agree |
+| local `exception L = R.E`, no alias | DIFFER (Rust 2) | DIFFER (Rust 2), open | DIFFER (Rust 2), open |
+| local `exception L = E`, top-level `E`, no alias | DIFFER (Rust 2) | DIFFER (Rust 2), open | DIFFER (Rust 2), open |
+
+#### Open
+
+- A local `exception L = E` in an expression is typed by Rust as a
+  constructor without arguments ("This variant constructor L expects 0
+  arguments, but it's being passed 1"), alias or not. OCaml types it with
+  `Typedecl.transl_exception` (`compiler/ml/typecore.ml:3763`), whose
+  `Pext_rebind` arm reads the rebound constructor's arguments
+  (`compiler/ml/typedecl.ml:1694`). The Rust `type_letexception`
+  (`compiler-rust/src/types/typecore.rs:17753`) answers `Pext_rebind`
+  with no arguments (`typecore.rs:17892`) and builds a `Text_decl`, so it
+  also creates a new exception instead of rebinding. The fix is in
+  `typecore.rs`, outside this change.
