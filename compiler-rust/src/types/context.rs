@@ -3973,6 +3973,30 @@ impl TypeContext {
         self.read_abbrev(memo)
     }
 
+    /// OCaml `Btype.forget_abbrev mem path` (compiler/ml/btype.ml:636-647):
+    /// drop the first memorized expansion of `path` from the chain `memo`,
+    /// following `Mlink`s. A chain without one is left as it is: OCaml
+    /// asserts it has one, but the nil sentinel memorizes nothing here.
+    /// One step per chain cell before the entry.
+    pub fn forget_abbrev(&self, memo: AbbrevMemoRef, path: &Path) {
+        let mut cell = memo;
+        loop {
+            #[cfg(test)]
+            crate::tc::steps::tick();
+            match self.read_abbrev(cell) {
+                AbbrevMemo::Mnil => return,
+                AbbrevMemo::Mcons {
+                    path: cached, next, ..
+                } if path.same(&cached) => {
+                    let rest = self.read_abbrev(next);
+                    self.write_abbrev(cell, rest);
+                    return;
+                }
+                AbbrevMemo::Mcons { next, .. } | AbbrevMemo::Mlink(next) => cell = next,
+            }
+        }
+    }
+
     /// Reset a per-node abbreviation memo chain to Mnil.
     pub fn clear_abbrev_memo(&self, memo: AbbrevMemoRef) {
         if memo == AbbrevMemoRef::nil() {
