@@ -7204,6 +7204,10 @@ which normalizes the prefix through the alias (`compiler/ml/transl_path.ml:43-46
 target for a local `module A = R`. That is the Lambda translation of
 modules, not constructor typing.
 
+Fixed under E1 below (`4be340ef5`): the translation now normalizes the path
+in the construction's environment; `A.E({v: 1})` through `module A = R`
+agrees after the merge of both.
+
 ### Q1 — a module type abbreviation of a module type in a submodule
 
 ```rescript
@@ -7440,53 +7444,52 @@ built by `rescript build-reference --bsc <OCaml bsc>` and by
   `extension_alias_path_rebind`, `extension_alias_path_unit` with
   `extension_alias_path_unit_alias` (an alias of another unit).
 
-Programs run through both compilers, before (at `112f68648`) and after
-`4be340ef5`. OCaml accepts every one (exit 0); DIFFER is a difference in the
-JavaScript or the diagnostics:
+Since the merge of trunk at `393969158` (Q5, an inline record of an
+extension constructor through a module path), `56053c43c` adds the inline
+record through an alias, `AI.E({a: 1, b: "x"})` and `| AI.E({a}) => a`, to
+`extension_alias_path_construct`; it needs Q5 to be accepted and this fix to
+read `RI`.
 
-| Program | Before | After |
-| --- | --- | --- |
-| the witness, `A.E(1)` | DIFFER | agree |
-| constant exception `A.E` | DIFFER | agree |
-| `switch x { \| A.E(n) => n }` | agree | agree |
-| `try g() catch { \| A.E(n) => n }` | agree | agree |
-| extensible type `A.C(1)` | DIFFER | agree |
-| extensible constant `A.C`, then `\| A.C =>` | DIFFER | agree |
-| inline record `A.E({a: 1, b: "x"})` | DIFFER (Rust 2) | DIFFER (Rust 2), open |
-| two aliases `B = A`, `B.E(1)`, `\| B.E(n)` | DIFFER | agree |
-| alias of a submodule `A = R.S` | DIFFER | agree |
-| alias declared after `open O` | DIFFER | agree |
-| `open A`, then `E(1)` | DIFFER | agree |
-| alias of another unit (`A = Other`, `A.E`, `A.C`, `\| A.E(n)`) | DIFFER | agree |
-| alias inside a functor body of a module outside it | DIFFER | agree |
-| alias of the functor's parameter (`A = X`, `A.E(1)`, `\| A.E(n)`) | agree | agree |
-| `throw(A.E(1))` | DIFFER | agree |
-| `include R` in a third module, `I.E(1)` and `A.E(2)` | DIFFER | agree |
-| rebind `exception F = A.E` | DIFFER | agree |
-| value through the alias, `A.x` | agree | agree |
-| `type R.t += D = A.C`, `D(1)` | DIFFER | agree |
-| local `exception L = A.E` in a function, `L(1)` | DIFFER (Rust 2) | DIFFER (Rust 2), open |
-| inline record `R.E({a: 1, b: "x"})`, no alias | DIFFER (Rust 2) | DIFFER (Rust 2), open |
-| local `exception L = R.E`, no alias | DIFFER (Rust 2) | DIFFER (Rust 2), open |
-| local `exception L = E`, top-level `E`, no alias | DIFFER (Rust 2) | DIFFER (Rust 2), open |
+Programs run through both compilers, before (at `112f68648`), after
+`4be340ef5`, and after the merge of trunk at `393969158` (`dcfa51c78`). OCaml
+accepts every one (exit 0); DIFFER is a difference in the JavaScript or the
+diagnostics:
+
+| Program | Before | After | After the merge |
+| --- | --- | --- | --- |
+| the witness, `A.E(1)` | DIFFER | agree | agree |
+| constant exception `A.E` | DIFFER | agree | agree |
+| `switch x { \| A.E(n) => n }` | agree | agree | agree |
+| `try g() catch { \| A.E(n) => n }` | agree | agree | agree |
+| extensible type `A.C(1)` | DIFFER | agree | agree |
+| extensible constant `A.C`, then `\| A.C =>` | DIFFER | agree | agree |
+| inline record `A.E({a: 1, b: "x"})` | DIFFER (Rust 2) | DIFFER (Rust 2) | agree |
+| two aliases `B = A`, `B.E(1)`, `\| B.E(n)` | DIFFER | agree | agree |
+| alias of a submodule `A = R.S` | DIFFER | agree | agree |
+| alias declared after `open O` | DIFFER | agree | agree |
+| `open A`, then `E(1)` | DIFFER | agree | agree |
+| alias of another unit (`A = Other`, `A.E`, `A.C`, `\| A.E(n)`) | DIFFER | agree | agree |
+| alias inside a functor body of a module outside it | DIFFER | agree | agree |
+| alias of the functor's parameter (`A = X`, `A.E(1)`, `\| A.E(n)`) | agree | agree | agree |
+| `throw(A.E(1))` | DIFFER | agree | agree |
+| `include R` in a third module, `I.E(1)` and `A.E(2)` | DIFFER | agree | agree |
+| rebind `exception F = A.E` | DIFFER | agree | agree |
+| value through the alias, `A.x` | agree | agree | agree |
+| `type R.t += D = A.C`, `D(1)` | DIFFER | agree | agree |
+| local `exception L = A.E` in a function, `L(1)` | DIFFER (Rust 2) | DIFFER (Rust 2), open | DIFFER (Rust 2), open |
+| inline record `R.E({a: 1, b: "x"})`, no alias | DIFFER (Rust 2) | DIFFER (Rust 2) | agree |
+| local `exception L = R.E`, no alias | DIFFER (Rust 2) | DIFFER (Rust 2), open | DIFFER (Rust 2), open |
+| local `exception L = E`, top-level `E`, no alias | DIFFER (Rust 2) | DIFFER (Rust 2), open | DIFFER (Rust 2), open |
 
 #### Open
 
-- An exception with an inline record read through a module
-  (`R.E({a: 1, b: "x"})`, with or without an alias) is rejected by Rust
-  with "`a` refers to a record field, but no corresponding record type is
-  in scope" (printed by `compiler-rust/src/driver/type_clash.rs:2045`);
-  OCaml accepts it. It does not depend on the alias, and it is the typing
-  of inline records of extension constructors in
-  `compiler-rust/src/types/typecore.rs`, being worked on separately; not
-  touched here.
 - A local `exception L = E` in an expression is typed by Rust as a
   constructor without arguments ("This variant constructor L expects 0
   arguments, but it's being passed 1"), alias or not. OCaml types it with
   `Typedecl.transl_exception` (`compiler/ml/typecore.ml:3763`), whose
   `Pext_rebind` arm reads the rebound constructor's arguments
   (`compiler/ml/typedecl.ml:1694`). The Rust `type_letexception`
-  (`compiler-rust/src/types/typecore.rs:17804`) answers `Pext_rebind`
-  with no arguments (`typecore.rs:17943`) and builds a `Text_decl`, so it
+  (`compiler-rust/src/types/typecore.rs:17753`) answers `Pext_rebind`
+  with no arguments (`typecore.rs:17892`) and builds a `Text_decl`, so it
   also creates a new exception instead of rebinding. The fix is in
   `typecore.rs`, outside this change.
