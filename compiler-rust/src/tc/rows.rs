@@ -11,7 +11,7 @@
 
 use std::cmp::Ordering;
 
-use super::graph::{Graph, LINK, Mode, NONE, Node, TUPLE, Ty, VAR};
+use super::graph::{CONSTR, Graph, LINK, Mode, NONE, Node, TUPLE, Ty, VAR};
 use super::segment::{
     EXTENDED, ExtraDescriptor, PackageRow, Range, RowFieldKind, RowFieldRow, Segment, VariantRow,
 };
@@ -204,6 +204,12 @@ pub const ROW_AGAIN: u32 = 4;
 /// In the `b` of a record: a reference was resolved to a present field
 /// and its holders are settled once the types are unified.
 pub const ROW_SETTLE: u32 = 8;
+
+/// O(1): the `a` of a [`RES_EITHER`] node with `c` and `m`.
+#[inline]
+pub fn either_flags(constant: bool, matched: bool) -> u32 {
+    RES_EITHER | if constant { RES_CONSTANT } else { 0 } | if matched { RES_MATCHED } else { 0 }
+}
 
 /// An unresolved reference (`ref None`) at `level`, with `holders` the head
 /// of its [`Holder`] list or `NONE`. A variable, so that
@@ -933,7 +939,72 @@ impl Checker {
     /// after); it is done before the node is unified, copied with its row
     /// variable shared, or listed as a rest. (R3f)
     pub fn open_row(&mut self, ty: Ty) -> Node {
-        todo!("R3f")
+        let node = self.g.nodes[ty.0 as usize];
+        if node.head & EXTENDED == 0 {
+            return node;
+        }
+        let ExtraDescriptor::Variant(row) = self.extras.descriptors[node.a as usize] else {
+            return node;
+        };
+        let fields = self.extras.variants[row as usize].fields;
+        let fields = fields.start as usize..(fields.start + fields.len) as usize;
+        // The k-th reference slot is `published_slots + k` (`from_segment`):
+        // the first `Reither` field's slot is the count of published slots,
+        // the last one's is one below the opened arity, and a node is
+        // opened exactly when its arity covers the first.
+        let either = |field: &&RowFieldRow| matches!(field.kind, RowFieldKind::Either { .. });
+        let row_fields = &self.extras.row_fields[fields.clone()];
+        let Some(published) = row_fields.iter().find(either).map(|field| field.link) else {
+            return node;
+        };
+        if published < node.arity() {
+            return node;
+        }
+        let arity = row_fields.iter().rev().find(either).map_or(published, |field| field.link + 1);
+        // The new list: the published slots, then one slot per reference.
+        let b = self.g.lists.len() as u32;
+        self.g
+            .lists
+            .extend_from_within(node.b as usize..(node.b + published) as usize);
+        self.g.lists.resize((b + arity) as usize, Ty(NONE));
+        for index in fields {
+            #[cfg(test)]
+            super::steps::tick();
+            let field = self.extras.row_fields[index];
+            let RowFieldKind::Either { constant, matched } = field.kind else {
+                continue;
+            };
+            let types = field.types;
+            let first = if types.len == 0 {
+                self.g.push(ref_node(node.level, NONE))
+            } else {
+                // `Reither (c, tl, m, e)` as a chain node of this node's
+                // own: the types, then `e`, of which it is the one holder.
+                let holder = self.extras.holders.len() as u32;
+                let reference = self.g.push(ref_node(node.level, holder));
+                let start = self.g.lists.len() as u32;
+                let own = (b + types.start) as usize..(b + types.start + types.len) as usize;
+                self.g.lists.extend_from_within(own.clone());
+                self.g.lists.push(reference);
+                let chain = self.g.push(Node {
+                    head: TUPLE | (types.len + 1) << 8,
+                    level: node.level,
+                    a: either_flags(constant, matched),
+                    b: start,
+                });
+                self.extras.holders.push(Holder { node: chain, next: NONE });
+                self.g.lists[own].fill(chain);
+                chain
+            };
+            self.g.lists[(b + field.link) as usize] = first;
+        }
+        let opened = Node {
+            head: (node.head & 0xff) | arity << 8,
+            b,
+            ..node
+        };
+        self.g.write(ty, opened);
+        opened
     }
 
     /// `row_repr` (compiler/ml/btype.ml:126-135) of the row of `top`, a
@@ -949,7 +1020,28 @@ impl Checker {
     /// `more`. O(fields + chain), one step a field, no allocation once the
     /// scratch has the capacity. (R3f)
     pub fn flatten_row(&mut self, top: Node) -> (Ty, Ty) {
-        todo!("R3f")
+        let (mut last, mut node) = (Ty(NONE), top);
+        loop {
+            let ExtraDescriptor::Variant(row) = self.extras.descriptors[node.a as usize] else {
+                unreachable!("a variant node");
+            };
+            let row = self.extras.variants[row as usize];
+            for at in row.fields.start..row.fields.start + row.fields.len {
+                #[cfg(test)]
+                super::steps::tick();
+                let name = self.extras.row_fields[at as usize].name;
+                self.extras.row_scratch.push(FieldRef { name, at, ty: Ty(node.b) });
+            }
+            let more = self.g.repr(self.g.lists[(node.b + row.more) as usize]);
+            let next = self.g.nodes[more.0 as usize];
+            let variant = next.head & EXTENDED != 0
+                && matches!(self.extras.descriptors[next.a as usize], ExtraDescriptor::Variant(_));
+            if !variant {
+                return (last, more);
+            }
+            last = more;
+            node = self.open_row(more);
+        }
     }
 
     /// `merge_row_fields` (compiler/ml/ctype.ml:380-386) of the two rows
@@ -971,12 +1063,88 @@ impl Checker {
     ///   returns (`(l1, f1, f2) :: pairs`, ctype.ml:374), so the last tag
     ///   merged is the first unified.
     ///
-    /// Tags are equal when their name indices are. O(n log n) name
+    /// Tags are one tag when their name indices are equal; when the
+    /// indices differ the two texts are compared once (one `cmp` with three
+    /// outcomes; `Equal` is a common tag; 8.6, decision 39). O(n log n) name
     /// comparisons and one step per merge step; the merge writes into the
     /// scratch above the two lists and moves the result down: no
     /// allocation. (R3f)
     pub fn merge_rows(&mut self, first: usize, left: usize) -> usize {
-        todo!("R3f")
+        let scratch = &mut self.extras.row_scratch;
+        let names = &self.extras.names;
+        let order = |f: &FieldRef, g: &FieldRef| {
+            if f.name == g.name {
+                Ordering::Equal
+            } else {
+                names.text(f.name).cmp(names.text(g.name))
+            }
+        };
+        let middle = first + left;
+        let end = scratch.len();
+        let right = end - middle;
+        // `[], _ | _, [] -> (fi1, fi2, [])`, and a single tag the other
+        // list lacks (`List.mem_assoc`).
+        let lacks = |one: &FieldRef, other: &[FieldRef]| {
+            other.iter().all(|f| order(one, f) != Ordering::Equal)
+        };
+        if left == 0
+            || right == 0
+            || (left == 1 && lacks(&scratch[first], &scratch[middle..end]))
+            || (right == 1 && lacks(&scratch[middle], &scratch[first..middle]))
+        {
+            return 0;
+        }
+        scratch[first..middle].sort_unstable_by(order);
+        scratch[middle..end].sort_unstable_by(order);
+        // `merge_rf` into a region above the lists: `r1` ascending from its
+        // start, `r2` ascending from `left` on, and the k-th pair met at
+        // `left - 1 - k` (its left field) and `left + right - 1 - k` (its
+        // right one): `r1` and the pairs fill at most `left` slots, `r2`
+        // and the pairs at most `right`.
+        scratch.resize(end + left + right, FieldRef { name: 0, at: 0, ty: Ty(NONE) });
+        let (mut i, mut j) = (first, middle);
+        let (mut r1, mut r2, mut pairs) = (0, 0, 0);
+        while i < middle || j < end {
+            #[cfg(test)]
+            super::steps::tick();
+            let step = if i == middle {
+                Ordering::Greater
+            } else if j == end {
+                Ordering::Less
+            } else {
+                order(&scratch[i], &scratch[j])
+            };
+            match step {
+                Ordering::Equal => {
+                    scratch[end + left - 1 - pairs] = scratch[i];
+                    scratch[end + left + right - 1 - pairs] = scratch[j];
+                    pairs += 1;
+                    i += 1;
+                    j += 1;
+                }
+                Ordering::Less => {
+                    scratch[end + r1] = scratch[i];
+                    r1 += 1;
+                    i += 1;
+                }
+                Ordering::Greater => {
+                    scratch[end + left + r2] = scratch[j];
+                    r2 += 1;
+                    j += 1;
+                }
+            }
+        }
+        // Down: `r1`, `r2`, then the pairs, the last met first. Every
+        // destination is below `end`, where the region starts.
+        scratch.copy_within(end..end + r1, first);
+        scratch.copy_within(end + left..end + left + r2, first + r1);
+        let at = first + r1 + r2;
+        for k in 0..pairs {
+            scratch[at + 2 * k] = scratch[end + left - pairs + k];
+            scratch[at + 2 * k + 1] = scratch[end + left + right - pairs + k];
+        }
+        scratch.truncate(at + 2 * pairs);
+        pairs
     }
 
     /// `unify_row env row1 row2` (compiler/ml/ctype.ml:2541-2641), for the
@@ -1041,7 +1209,11 @@ impl Checker {
     /// representative) is a universal variable or a constructor; a
     /// variable and `Tnil` are not. O(1). (R3f)
     pub fn row_is_fixed(&self, row: VariantRow, more: Ty) -> bool {
-        todo!("R3f")
+        let node = self.g.nodes[more.0 as usize];
+        row.fixed
+            || node.tag() == CONSTR
+            || (node.head & EXTENDED != 0
+                && matches!(self.extras.descriptors[node.a as usize], ExtraDescriptor::Univar(_)))
     }
 
     /// `set_more row rest` (compiler/ml/ctype.ml:2596-2616). `rest` is
@@ -1494,6 +1666,89 @@ mod tests {
         field_types(&g, node.b, 1, field, &mut types);
         assert_eq!(types.len(), 10_000);
         assert_eq!(g.nodes, before);
+    }
+
+    /// A checker whose pools hold one row of `n` fields, `kind(k)` the k-th,
+    /// each with one type when `typed`, named `f00000` and up, as
+    /// `Extras::from_segment` lays out a published row; and the node.
+    fn row_of(n: u32, typed: bool, kind: impl Fn(u32) -> RowFieldKind) -> (Checker, Ty) {
+        let mut c = Checker::new(Graph::default(), Default::default());
+        let ty = push(&mut c.g, CONSTR, 0, &[]);
+        let mut slots = Vec::new();
+        for k in 0..n {
+            let start = c.extras.names.bytes.len() as u32;
+            c.extras.names.bytes.extend_from_slice(format!("f{k:05}").as_bytes());
+            c.extras.names.spans.push(Range { start, len: 6 });
+            let types = Range { start: slots.len() as u32, len: u32::from(typed) };
+            if typed {
+                slots.push(ty);
+            }
+            c.extras.row_fields.push(RowFieldRow { name: k, types, link: NONE, kind: kind(k) });
+        }
+        let more = slots.len() as u32;
+        slots.push(push(&mut c.g, VAR, NONE, &[]));
+        let row = VariantRow {
+            fields: Range { start: 0, len: n },
+            more,
+            name: NONE,
+            name_arguments: Range::default(),
+            closed: false,
+            fixed: false,
+        };
+        let mut slot = published_slots(row, &c.extras.row_fields);
+        for field in &mut c.extras.row_fields {
+            if matches!(field.kind, RowFieldKind::Either { .. }) {
+                field.link = slot;
+                slot += 1;
+            }
+        }
+        c.extras.variants.push(row);
+        c.extras.descriptors.push(ExtraDescriptor::Variant(0));
+        let node = push(&mut c.g, TUPLE | EXTENDED, 0, &slots);
+        (c, node)
+    }
+
+    /// Opening a node of 10,000 `Reither` fields with a type each is one
+    /// step a field and two nodes a field; a second opening is none.
+    #[test]
+    fn opening_ten_thousand_fields_is_one_step_a_field() {
+        let either = |_| RowFieldKind::Either { constant: false, matched: false };
+        let (mut c, ty) = row_of(10_000, true, either);
+        let nodes = c.g.nodes.len();
+        let opened = super::super::steps::scope(|| {
+            c.open_row(ty);
+        });
+        assert_eq!(opened, 10_000);
+        assert_eq!(c.g.nodes.len() - nodes, 20_000);
+        assert_eq!(c.g.nodes[ty.0 as usize].arity(), 20_001);
+        let again = super::super::steps::scope(|| {
+            c.open_row(ty);
+        });
+        assert_eq!(again, 0);
+    }
+
+    /// `merge_rows` of two lists of 10,000 tags, every other tag common:
+    /// one step a merge step, at most 15,000; the pairs descending.
+    #[test]
+    fn merging_ten_thousand_tags_is_one_step_a_merge_step() {
+        let (mut c, _) = row_of(15_000, false, |_| RowFieldKind::Present);
+        let field = |k: u32| FieldRef { name: k, at: k, ty: Ty(0) };
+        // Left: the even tags and the first 5,000 odd ones, reversed; right:
+        // the even tags and the last 5,000 names.
+        let left: Vec<FieldRef> = (0..10_000).rev().map(field).collect();
+        let right: Vec<FieldRef> = (0..5_000).map(|k| field(2 * k)).chain((10_000..15_000).map(field)).collect();
+        c.extras.row_scratch.extend(left);
+        c.extras.row_scratch.extend(right);
+        let mut pairs = 0;
+        let steps = super::super::steps::scope(|| pairs = c.merge_rows(0, 10_000));
+        assert_eq!(pairs, 5_000);
+        assert!(steps <= 15_000, "{steps}");
+        let scratch = &c.extras.row_scratch;
+        assert_eq!(scratch.len(), 5_000 + 5_000 + 10_000);
+        assert_eq!((scratch[0].name, scratch[4_999].name), (1, 9_999));
+        assert_eq!((scratch[5_000].name, scratch[9_999].name), (10_000, 14_999));
+        assert_eq!((scratch[10_000].name, scratch[10_001].name), (9_998, 9_998));
+        assert_eq!(scratch[19_999].name, 0);
     }
 
     /// The reference of the k-th `Either` field of a published row is the

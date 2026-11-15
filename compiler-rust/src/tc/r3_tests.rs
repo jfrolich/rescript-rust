@@ -2226,7 +2226,6 @@ fn assert_rows_kept(c: &Checker, before: &Rows) {
 /// nothing.
 /// Reaches: R3f.
 #[test]
-#[ignore = "R3f build"]
 fn opening_a_row_gives_each_reither_field_a_reference() {
     let mut c = checker(Mode::Success);
     let (a, b) = (constr(&mut c, INT, &[]), constr(&mut c, INT, &[]));
