@@ -2704,7 +2704,70 @@ impl Checker {
     /// one step a slot of the family pass and one a node visited; no
     /// allocation. (R3g)
     pub fn univars_escape(&mut self, binder: Node, other: Node) -> bool {
-        todo!("R3g")
+        // `get_univar_family` (ctype.ml:1612-1623).
+        let family = self.fresh_marks();
+        self.mark_slots(binder.b + 1, binder.arity() - 1, family);
+        for at in (0..self.scopes.len()).rev() {
+            let scope = self.scopes[at];
+            let left = (scope.left, scope.left_len);
+            let right = (scope.right, scope.right_len);
+            for ((start1, len1), (start2, len2)) in [(left, right), (right, left)] {
+                if len2 != 0 && self.any_marked(start1, len1, family) {
+                    self.mark_slots(start2, len2, family);
+                }
+            }
+        }
+        // `occur (newty (Tpoly (t, tl')))` (ctype.ml:1630-1652).
+        let visited = self.fresh_marks();
+        self.g.work.clear();
+        self.push_unless_bound(other, family);
+        while let Some(entry) = self.g.work.pop() {
+            let t = self.g.repr(entry);
+            if self.marks[t.0 as usize] == visited {
+                continue;
+            }
+            #[cfg(test)]
+            super::steps::tick();
+            let node = self.g.nodes[t.0 as usize];
+            if self.is_univar(t) {
+                // `Tunivar _ -> if Type_set.mem t family then raise Occur`.
+                if self.marks[t.0 as usize] == family {
+                    self.g.work.clear();
+                    return true;
+                }
+                continue;
+            }
+            self.marks[t.0 as usize] = visited;
+            match node.tag() {
+                // `Tconstr (_, [], _) -> ()` and the arguments the
+                // variances allow (ctype.ml:1638-1647).
+                CONSTR => {
+                    for i in 0..node.arity() {
+                        if self.types.may_occur(node.a, i) {
+                            let ty = self.g.lists[(node.b + 1 + i) as usize];
+                            self.g.work.push(ty);
+                        }
+                    }
+                }
+                TUPLE if node.head & EXTENDED != 0
+                    && matches!(self.extras.descriptors[node.a as usize], ExtraDescriptor::Poly) =>
+                {
+                    self.push_unless_bound(node, family);
+                }
+                _ => self.g.children(node, false),
+            }
+        }
+        false
+    }
+
+    /// `Tpoly (t, tl)` of [`Checker::univars_escape`] (compiler/ml/ctype.
+    /// ml:1634-1636): push the body of the polymorphic descriptor `node`
+    /// unless one of its bound variables is in the family (marked
+    /// `family`). O(bound variables): one step a slot read.
+    fn push_unless_bound(&mut self, node: Node, family: u32) {
+        if !self.any_marked(node.b + 1, node.arity() - 1, family) {
+            self.g.work.push(self.g.lists[node.b as usize]);
+        }
     }
 
     /// The walk of `occur_univar` (compiler/ml/ctype.ml:1563-1607): the

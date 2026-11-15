@@ -2974,7 +2974,6 @@ fn a_failure_leaves_no_scope_and_a_restore_undoes_the_pairings() {
 ///
 /// Reaches: R3g.
 #[test]
-#[ignore = "R3g build"]
 fn a_known_binder_escapes_before_the_bodies() {
     let build = |c: &mut Checker, arrow: bool, right: [usize; 2]| {
         let u = univar_at(c, 2);
