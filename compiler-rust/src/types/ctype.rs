@@ -9702,6 +9702,48 @@ fn unify_row_field(
             let tl2_prime = remq(&tl2, &tl1);
             let tl1_prime = remq(&tl1, &tl2);
 
+            // ctype.ml:2685-2701 (PR#6744): a payload holding a free
+            // universal variable is neither lowered nor kept in the new
+            // conjunction; those of the two sides are unified with each
+            // other, and one on a single side cannot be matched. Costs one
+            // `occur_univar` per payload (its bounded quick walk when the
+            // payload holds no universal variable) and allocates only when
+            // one does.
+            let empty_env;
+            let env = match state.env() {
+                Some(env) => env,
+                None => {
+                    empty_env = Env::empty();
+                    &empty_env
+                }
+            };
+            let holds_univar = |ty: &TypeExprRef| {
+                #[cfg(test)]
+                crate::tc::steps::tick();
+                occur_univar(ctx, env, *ty).is_err()
+            };
+            let (tl1_prime, tl2_prime) =
+                if tl1_prime.iter().chain(tl2_prime.iter()).any(holds_univar) {
+                    let (tlu1, tl1_prime): (Vec<_>, Vec<_>) =
+                        tl1_prime.into_iter().partition(holds_univar);
+                    let (tlu2, tl2_prime): (Vec<_>, Vec<_>) =
+                        tl2_prime.into_iter().partition(holds_univar);
+                    match (tlu1.split_first(), tlu2.first()) {
+                        (Some((tu1, rest1)), Some(_)) => {
+                            if !ctx.passive_variants() {
+                                for ty in rest1.iter().chain(tlu2.iter()) {
+                                    unify(ctx, state, *tu1, *ty)?;
+                                }
+                            }
+                        }
+                        (Some((tu, _)), None) | (None, Some(tu)) => occur_univar(ctx, env, *tu)?,
+                        (None, None) => {}
+                    }
+                    (tl1_prime, tl2_prime)
+                } else {
+                    (tl1_prime, tl2_prime)
+                };
+
             let more_level = ctx.get_level(ctx.repr(more));
             for ty in tl1_prime.iter().chain(tl2_prime.iter()) {
                 update_level(ctx, more_level, *ty);
@@ -12516,9 +12558,20 @@ fn copy_sep_inner(
     let copied_desc = match desc {
         // btype.ml:510: the static `Tvar None`.
         TypeDesc::Tvar(..) => TypeDesc::Tvar(None),
-        // compiler/ml/btype.ml:422-423 maps every argument type and then ret.
-        TypeDesc::Tarrow { args, ret } => TypeDesc::Tarrow {
-            args: ctx.new_type_args_from(ctx.type_args(args).into_iter().map(|mut arg| {
+        // btype.ml:511-512: the result before the parameters (see the
+        // `Arrow` arm of `copy_type_cached`); the order of `delayed_copy`
+        // follows it.
+        TypeDesc::Tarrow { args, ret } => {
+            let ret = copy_sep_inner(
+                ctx,
+                ret,
+                fixed,
+                free_univars,
+                bound,
+                &visited_for_children,
+                delayed_copy,
+            );
+            let args = ctx.new_type_args_from(ctx.type_args(args).into_iter().map(|mut arg| {
                 arg.typ = copy_sep_inner(
                     ctx,
                     arg.typ,
@@ -12529,17 +12582,9 @@ fn copy_sep_inner(
                     delayed_copy,
                 );
                 arg
-            })),
-            ret: copy_sep_inner(
-                ctx,
-                ret,
-                fixed,
-                free_univars,
-                bound,
-                &visited_for_children,
-                delayed_copy,
-            ),
-        },
+            }));
+            TypeDesc::Tarrow { args, ret }
+        }
         TypeDesc::Ttuple(types) => {
             TypeDesc::Ttuple(ctx.new_type_list_from(ctx.type_list(types).iter().map(|t| {
                 copy_sep_inner(
@@ -12588,27 +12633,30 @@ fn copy_sep_inner(
             // btype.ml copy_type_desc: classify the row before copying either
             // child.
             let mutability = ctx.copy_field_mutability(mutability, rest, false, &|_| None);
+            // btype.ml:532: the rest before the type.
+            let rest = copy_sep_inner(
+                ctx,
+                rest,
+                fixed,
+                free_univars,
+                bound,
+                &visited_for_children,
+                delayed_copy,
+            );
+            let typ = copy_sep_inner(
+                ctx,
+                typ,
+                fixed,
+                free_univars,
+                bound,
+                &visited_for_children,
+                delayed_copy,
+            );
             TypeDesc::Tfield {
                 name,
                 mutability,
-                typ: copy_sep_inner(
-                    ctx,
-                    typ,
-                    fixed,
-                    free_univars,
-                    bound,
-                    &visited_for_children,
-                    delayed_copy,
-                ),
-                rest: copy_sep_inner(
-                    ctx,
-                    rest,
-                    fixed,
-                    free_univars,
-                    bound,
-                    &visited_for_children,
-                    delayed_copy,
-                ),
+                typ,
+                rest,
             }
         }
         TypeDesc::Tnil => TypeDesc::Tnil,
@@ -12660,6 +12708,9 @@ fn copy_sep_inner(
             )))
         }
         TypeDesc::Tpoly { body, vars } => {
+            if !vars.is_empty() {
+                ctx.note_bound_universal();
+            }
             let vars: Vec<_> = ctx
                 .type_list(vars)
                 .into_iter()
@@ -13632,6 +13683,9 @@ fn subst_identity_copy_rec(
                 TypeDesc::Tarrow { args, ret } => {
                     let args = *args;
                     let ret = *ret;
+                    // btype.ml:511-512: the result before the parameters
+                    // (see the `Arrow` arm of `copy_type_cached`).
+                    let ret = subst_identity_copy_rec(ctx, ret, mode, seen, row_more_markers);
                     let args = ctx.new_type_args_from(ctx.type_args(args).iter()
                         .map(|mut arg| {
                             arg.typ =
@@ -13639,7 +13693,6 @@ fn subst_identity_copy_rec(
                             arg
                         },
                     ));
-                    let ret = subst_identity_copy_rec(ctx, ret, mode, seen, row_more_markers);
                     TypeDesc::Tarrow { args, ret }
                 }
                 TypeDesc::Ttuple(types) => {
@@ -13705,6 +13758,9 @@ fn subst_identity_copy_rec(
                 TypeDesc::Tpoly { body, vars } => {
                     let body = *body;
                     let vars = *vars;
+                    if !vars.is_empty() {
+                        ctx.note_bound_universal();
+                    }
                     // btype.ml:537-539: the binders are copied before the body
                     // (see the `Poly` arm of `copy_type_cached`).
                     let vars_copy: Vec<_> = ctx
@@ -14150,12 +14206,17 @@ pub(crate) fn copy_type_cached(
             cache.nodes.insert(ty, placeholder);
             let copied_desc = match structural {
                 CopyAction::Arrow { args, ret } => {
+                    // btype.ml:511-512 `Tarrow (List.map .. params, f ret)`:
+                    // OCaml evaluates constructor arguments right to left,
+                    // so the result is copied before the parameters. Which
+                    // variant a shared row variable keeps depends on it
+                    // (ctype.ml:786-791).
+                    let ret = copy_type_cached(ctx, ret, cache);
                     let args = ctx.new_type_args_from(ctx.type_args(args).iter().map(|arg| {
                         let mut arg = arg;
                         arg.typ = copy_type_cached(ctx, arg.typ, cache);
                         arg
                     }));
-                    let ret = copy_type_cached(ctx, ret, cache);
                     TypeDesc::Tarrow { args, ret }
                 }
                 CopyAction::Tuple(types) => {
@@ -14233,8 +14294,11 @@ pub(crate) fn copy_type_cached(
                             nodes.get(t).copied()
                         })
                     };
-                    let typ_copy = copy_type_cached(ctx, typ, cache);
+                    // btype.ml:532 `{f_ with ..; typ = f f_.typ; rest = f
+                    // f_.rest}`: record fields are evaluated right to left,
+                    // the rest before the type.
                     let rest_copy = copy_type_cached(ctx, rest, cache);
+                    let typ_copy = copy_type_cached(ctx, typ, cache);
                     TypeDesc::Tfield {
                         name,
                         mutability,
@@ -14244,6 +14308,9 @@ pub(crate) fn copy_type_cached(
                 }
                 CopyAction::Nil => TypeDesc::Tnil,
                 CopyAction::Poly { body, vars } => {
+                    if !vars.is_empty() {
+                        ctx.note_bound_universal();
+                    }
                     // btype.ml:537-539 copies the binders before the body: a
                     // binder that is also the tail of a variant row in the
                     // body is then copied as itself, not as the marker the
@@ -14909,6 +14976,8 @@ fn nondep_type_rec(
             }
         }
         TypeDesc::Tarrow { args, ret } => {
+            // btype.ml:511-512: the result before the parameters.
+            let ret = nondep_type_rec(ctx, env, mid, *ret, cache)?;
             let args = ctx
                 .type_args(args)
                 .iter()
@@ -14919,7 +14988,6 @@ fn nondep_type_rec(
                     ))
                 })
                 .collect::<Option<Vec<_>>>()?;
-            let ret = nondep_type_rec(ctx, env, mid, *ret, cache)?;
             TypeDesc::Tarrow {
                 args: ctx.new_type_args(&args),
                 ret,
@@ -14934,6 +15002,9 @@ fn nondep_type_rec(
             TypeDesc::Ttuple(ctx.new_type_list(&new_types?))
         }
         TypeDesc::Tpoly { body, vars } => {
+            if !vars.is_empty() {
+                ctx.note_bound_universal();
+            }
             let new_vars: Option<Vec<_>> = ctx
                 .type_list(vars)
                 .iter()
@@ -15016,8 +15087,9 @@ fn nondep_type_rec(
             // btype.ml copy_type_desc: classify the row before copying either
             // child. nondep_type_rec cannot use `Tsubst` marks.
             let mutability = ctx.copy_field_mutability(*mutability, *rest, false, &|_| None);
-            let new_typ = nondep_type_rec(ctx, env, mid, *typ, cache)?;
+            // btype.ml:532: the rest before the type.
             let new_rest = nondep_type_rec(ctx, env, mid, *rest, cache)?;
+            let new_typ = nondep_type_rec(ctx, env, mid, *typ, cache)?;
             TypeDesc::Tfield {
                 name: *name,
                 mutability,
@@ -15762,6 +15834,34 @@ mod tests {
         univars.leave(mark.expect("no binder escapes"));
         assert!(univars.pairs.is_empty() && univars.slots.is_empty());
         assert!(!univars.unify(&ctx, left[1], right[1]));
+    }
+
+    #[test]
+    fn residual_split_tests_each_of_ten_thousand_payloads_once() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let either = |types: Vec<TypeExprRef>| RowField::Reither {
+            constant: false,
+            types,
+            matched: false,
+            link: ctx.alloc_row_field(None),
+        };
+        let left = either((0..5_000).map(|_| ctx.new_var(None)).collect());
+        let right = either((0..5_000).map(|_| ctx.new_var(None)).collect());
+        let more = ctx.new_var(None);
+        let mut state = UnifyState::new();
+        let mut result = Ok(());
+        // No payload holds a universal variable: one test each, no split.
+        let steps = crate::tc::steps::scope(|| {
+            result = unify_row_field(&ctx, &mut state, false, false, more, &left, &right)
+        });
+        assert!(result.is_ok());
+        assert_eq!(steps, 10_000);
+        let RowField::Reither { types, .. } = btype::row_field_repr(&ctx, &left) else {
+            panic!("a conjunction");
+        };
+        // `row_field_repr` joins the conjunctions along the link
+        // (btype.ml `row_field_repr_aux`): both sides' 5,000 payloads.
+        assert_eq!(types.len(), 10_000);
     }
 
     #[test]

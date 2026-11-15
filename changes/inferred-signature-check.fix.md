@@ -1,0 +1,1 @@
+- The Rust type checker rejects a unit without an interface that is not included in its own inferred signature, as the OCaml compiler does (for example `let f = (x: {"f": 'a. [< #A('a)] => int}) => x`), with the same "does not match the interface (inferred signature)" report.
