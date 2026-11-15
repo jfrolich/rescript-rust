@@ -1,0 +1,1 @@
+- Applying a functor to an anonymous argument expands module types of the parameter in the result, as the OCaml compiler does, instead of reporting that the parameter cannot be eliminated.
