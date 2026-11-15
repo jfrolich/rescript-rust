@@ -41,9 +41,6 @@
 //! the flip). It is a parameter of every function, beside the
 //! implementation, so that a call borrows two fields of the lowering's
 //! state and not the state.
-//!
-//! Until the lowering holds an implementation (T6k's second commit) this
-//! module is compiled for tests only.
 use crate::bir::{Bir, ConstId, FuncId, ImportId, JsId, NodeId, StrId, VarId};
 use crate::emit::row::Kind;
 use crate::js_ir::BinOp;

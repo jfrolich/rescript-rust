@@ -21,7 +21,10 @@ def normalized(source):
 
 
 def receiver_key(header):
-    return normalized(header).replace("<'_>", '')
+    # The parameter of the lowering's interface (`impl<B: js::Js> State<'_, B>`)
+    # names no new receiver either: the functions are those of `impl State<'_>`.
+    key = re.sub(r"^impl<B:(?:super::)?js::Js>", 'impl', normalized(header))
+    return key.replace("<'_,B>", "<'_>").replace("<'_>", '')
 
 
 def functions(source):
@@ -125,6 +128,9 @@ impl Other { fn get(&self) -> usize { let text = "fn fake() { }"; 0 } }
     named = functions("impl<'a> S<'a> {\n    fn get(&self) -> usize { 0 }\n}")[0]
     assert plain['key'] == elided['key'] and plain['key'] != named['key']
     print('receiver gains an elided lifetime: same key')
+    generic = functions("impl<B: super::js::Js> S<'_, B> {\n    fn get(&self) -> usize { 0 }\n}")[0]
+    assert generic['key'] == elided['key']
+    print("receiver gains the interface's parameter: same key")
     print('cost scanner self-tests: passed')
 
 

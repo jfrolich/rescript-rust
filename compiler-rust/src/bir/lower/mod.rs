@@ -13,7 +13,6 @@ mod cond;
 mod exit;
 mod export;
 mod globals;
-#[cfg(test)]
 pub mod js;
 pub(crate) mod names;
 mod expr;
@@ -435,7 +434,10 @@ enum ModuleConstants {
 
 /// The unit's lowering state. `'a` is the lifetime of the inputs the unit
 /// only reads and its caller owns: the location table and the module resolver.
-struct State<'a> {
+struct State<'a, B: js::Js = crate::bir::j::rows::Rows> {
+    /// The implementation of the lowering's interface (THREE_TREES 11.4,
+    /// "T6: the interface"): the JavaScript the lowering writes.
+    js: B,
     tail_arguments: usize,
     tail_parameters: usize,
     tail_sort_comparisons: usize,
@@ -562,14 +564,14 @@ struct State<'a> {
     /// The tables of the export fold (`export.rs`).
     coercion: export::Tables,
 }
-impl State<'_> {
-    /// N1: C:481 new. Transfer cold pools, while source hot nodes/list operands
+impl<B: js::Js> State<'_, B> {
+    /// N1: C:481 new, with the implementation `js` of the interface. Transfer cold pools, while source hot nodes/list operands
     /// remain readable. Variables retain source identities, never global stamps.
     /// Cost: O(N + V + F + G) initialization for source nodes, variables, function headers
     /// and globals, plus untagged::prepare and variant::prepare metadata work. Reserves
     /// output node/list/switch domains from imported counts; moves cold pools rather than
     /// cloning them.
-    fn new(mut input: super::bridge::Imported) -> Self {
+    fn with(mut input: super::bridge::Imported, js: B) -> Self {
         let source_nodes = input.arena.nodes.len();
         let source_operands = input.arena.lists.slot_count();
         let mut arena = Bir::default();
@@ -639,6 +641,7 @@ impl State<'_> {
         let named_metadata = variant::prepare(&mut arena);
         let needs_hashes = switch_arms != 0 || !arena.pools.catches.is_empty();
         Self {
+            js,
             evaluation: args::Evaluation::default(),
             object_scratch: record::Scratch::default(),
             tail_arguments: 0, tail_parameters: 0, tail_sort_comparisons: 0, tail_body_statements: 0,
@@ -713,6 +716,17 @@ impl State<'_> {
             names: names::Storage::default(),
         }
     }
+}
+impl<'a> State<'a> {
+    /// [`State::with`] on J rows: `Rows` with room for 64 pending operands,
+    /// its one allocation. Cost: that of `with`, and the reserve.
+    fn new(input: super::bridge::Imported) -> Self {
+        let mut rows = crate::bir::j::rows::Rows::default();
+        js::Js::reserve(&mut rows, 64);
+        Self::with(input, rows)
+    }
+}
+impl<B: js::Js> State<'_, B> {
     /// K1: C:1529 compile_expr. Direct mode is the bounded P1 oracle: convert
     /// leaves immediately instead of allocating deferred expression records.
     fn probe_leaf(&mut self, cx: Cx, value: NodeId) -> Probed {
@@ -919,7 +933,7 @@ impl State<'_> {
     }
 }
 
-impl ProbeRules for State<'_> {
+impl<B: js::Js> ProbeRules for State<'_, B> {
     fn source_enter(&mut self, cx: Cx, node: NodeId) { self.label_enter(cx, node); }
     fn source_leave(&mut self, output: &Probed) { self.label_leave(output); }
     type Resume = expr::Resume;
@@ -998,7 +1012,7 @@ impl ProbeRules for State<'_> {
                 use crate::lambda::lam_primitive::Primitive;
                 if matches!(self.arena.primitive(primitive).primitive,
                     Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { name }) if name.as_str() == "make") {
-                    if let Some(value) = self.flat_make_field(node) {
+                    if let Some(value) = self.flat_make_field(node).map(B::node) {
                         return Ok(ProbePlan::Ready(self.probe_leaf(cx, value)));
                     }
                 }
@@ -1121,7 +1135,7 @@ impl ProbeRules for State<'_> {
     }
 }
 
-impl Realizer for State<'_> {
+impl<B: js::Js> Realizer for State<'_, B> {
     /// K4/K5/K6: C:6648 declare_compiled, C:6667 assign_compiled, C:6658 return_compiled.
     fn leaf(&mut self, cx: Cx, value: NodeId) -> Out {
         let start = self.statements.mark();

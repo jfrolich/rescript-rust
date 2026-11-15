@@ -46,9 +46,12 @@
 //! `copy` one per node the arena grew by, at least one. A reader, `mark`,
 //! `push`, `pop`, `reserve`, and the four functions of cold data and
 //! `assume_strict` count nothing.
-use crate::bir::lower::js::{Js, Mark, Pools};
 use crate::bir::j::{facts, norm, plain};
-use crate::bir::{Cold, ConstId, Constant, FuncId, ImportId, JsId, JsPayload, NodeFlags, NodeId, Op, StrId, VarId, View};
+use crate::bir::lower::js::{Js, Mark, Pools};
+use crate::bir::{
+    Cold, ConstId, Constant, FuncId, ImportId, JsId, JsPayload, NodeFlags, NodeId, Op, StrId,
+    VarId, View,
+};
 use crate::emit::row::{Kind, flag};
 use crate::js_ir::BinOp;
 use crate::js_ir::arena::FieldPos;
@@ -169,7 +172,8 @@ impl Js for Rows {
     fn has(&self, a: &Pools, r: NodeId, flags: u16) -> bool {
         let f = u16::from(a.node(r).flags().0);
         let mut ours = (f & 1) | ((f >> 2) & 0b1110);
-        if flags & flag::DUPLICABLE != 0 && a.j_duplicable.get(r.index()).copied().unwrap_or(false) {
+        if flags & flag::DUPLICABLE != 0 && a.j_duplicable.get(r.index()).copied().unwrap_or(false)
+        {
             ours |= flag::DUPLICABLE;
         }
         ours & flags == flags
@@ -226,7 +230,9 @@ impl Js for Rows {
     #[inline]
     fn member_of(&self, a: &Pools, r: NodeId) -> Option<(StrId, FieldPos)> {
         match a.view(r) {
-            View::JDot { property, position, .. } => Some((property, position)),
+            View::JDot {
+                property, position, ..
+            } => Some((property, position)),
             _ => None,
         }
     }
@@ -330,15 +336,37 @@ impl Js for Rows {
     }
     #[inline]
     fn in_(&mut self, a: &mut Pools, left: E, right: E) -> E {
-        self.leaf(a, View::JIn { left: left.0, right: right.0 }, 0)
+        self.leaf(
+            a,
+            View::JIn {
+                left: left.0,
+                right: right.0,
+            },
+            0,
+        )
     }
     #[inline]
     fn index(&mut self, a: &mut Pools, object: E, index: E) -> E {
-        self.leaf(a, View::JIndex { object: object.0, index: index.0 }, 0)
+        self.leaf(
+            a,
+            View::JIndex {
+                object: object.0,
+                index: index.0,
+            },
+            0,
+        )
     }
     #[inline]
     fn dot(&mut self, a: &mut Pools, object: E, name: StrId, position: FieldPos, tag: bool) -> E {
-        self.leaf(a, View::JDot { object: object.0, property: name, position }, u16::from(tag))
+        self.leaf(
+            a,
+            View::JDot {
+                object: object.0,
+                property: name,
+                position,
+            },
+            u16::from(tag),
+        )
     }
     #[inline]
     fn await_(&mut self, a: &mut Pools, value: E) -> E {
@@ -354,11 +382,25 @@ impl Js for Rows {
     }
     #[inline]
     fn record_rest(&mut self, a: &mut Pools, value: E, info: JsId) -> E {
-        self.leaf(a, View::JRecordRest { value: value.0, info }, 0)
+        self.leaf(
+            a,
+            View::JRecordRest {
+                value: value.0,
+                info,
+            },
+            0,
+        )
     }
     #[inline]
     fn flat_call(&mut self, a: &mut Pools, callee: E, args: E) -> E {
-        self.leaf(a, View::JFlatCall { callee: callee.0, args: args.0 }, 0)
+        self.leaf(
+            a,
+            View::JFlatCall {
+                callee: callee.0,
+                args: args.0,
+            },
+            0,
+        )
     }
 
     #[inline]
@@ -375,37 +417,87 @@ impl Js for Rows {
     }
     fn call(&mut self, a: &mut Pools, callee: E, mark: Mark, info: JsId) -> E {
         let start = self.since(mark);
-        let id = plain::node(a, View::JCall { callee: callee.0, args: &self.operands[start..], info }, 0);
+        let id = plain::node(
+            a,
+            View::JCall {
+                callee: callee.0,
+                args: &self.operands[start..],
+                info,
+            },
+            0,
+        );
         self.cut(start, id)
     }
     fn new_(&mut self, a: &mut Pools, callee: E, mark: Mark) -> E {
         let start = self.since(mark);
-        let id = plain::node(a, View::JNew { callee: callee.0, args: &self.operands[start..] }, 0);
+        let id = plain::node(
+            a,
+            View::JNew {
+                callee: callee.0,
+                args: &self.operands[start..],
+            },
+            0,
+        );
         self.cut(start, id)
     }
     fn tagged(&mut self, a: &mut Pools, tag: E, mark: Mark, info: JsId) -> E {
         let start = self.since(mark);
-        let id = plain::node(a, View::JTagged { tag: tag.0, values: &self.operands[start..], info }, 0);
+        let id = plain::node(
+            a,
+            View::JTagged {
+                tag: tag.0,
+                values: &self.operands[start..],
+                info,
+            },
+            0,
+        );
         self.cut(start, id)
     }
     fn array(&mut self, a: &mut Pools, mark: Mark, mutability: u8) -> E {
         let start = self.since(mark);
-        let id = plain::node(a, View::JArray { values: &self.operands[start..] }, u16::from(mutability));
+        let id = plain::node(
+            a,
+            View::JArray {
+                values: &self.operands[start..],
+            },
+            u16::from(mutability),
+        );
         self.cut(start, id)
     }
     fn block(&mut self, a: &mut Pools, mark: Mark, info: JsId, mutability: u8) -> E {
         let start = self.since(mark);
-        let id = plain::node(a, View::JBlockLit { values: &self.operands[start..], info }, u16::from(mutability));
+        let id = plain::node(
+            a,
+            View::JBlockLit {
+                values: &self.operands[start..],
+                info,
+            },
+            u16::from(mutability),
+        );
         self.cut(start, id)
     }
     fn object(&mut self, a: &mut Pools, mark: Mark, info: JsId) -> E {
         let start = self.since(mark);
-        let id = plain::node(a, View::JObject { values: &self.operands[start..], info }, 0);
+        let id = plain::node(
+            a,
+            View::JObject {
+                values: &self.operands[start..],
+                info,
+            },
+            0,
+        );
         self.cut(start, id)
     }
     fn jsx(&mut self, a: &mut Pools, mark: Mark, info: JsId, has_children: bool) -> E {
         let start = self.since(mark);
-        let id = plain::node(a, View::JJsx { values: &self.operands[start..], info }, u16::from(has_children));
+        let id = plain::node(
+            a,
+            View::JJsx {
+                values: &self.operands[start..],
+                info,
+            },
+            u16::from(has_children),
+        );
         self.cut(start, id)
     }
 
@@ -478,7 +570,13 @@ impl Js for Rows {
     }
     fn comment(&mut self, a: &mut Pools, e: &mut E, text: StrId) {
         let loc = a.cold(e.0).map_or(LamLoc::NONE, |cold| cold.loc);
-        a.set_cold(e.0, Cold { loc, comment: Some(text) });
+        a.set_cold(
+            e.0,
+            Cold {
+                loc,
+                comment: Some(text),
+            },
+        );
     }
     fn copy_cold(&mut self, a: &mut Pools, from: NodeId, to: &mut E) {
         plain::copy_cold(a, from, to.0);
@@ -579,17 +677,31 @@ impl Js for Rows {
         self.steps += 1;
         E(norm::jm10_int_bnot(a, value.0))
     }
-    fn project(&mut self, a: &mut Pools, value: E, field: Option<&str>, index: Option<i32>) -> Result<E, E> {
+    fn project(
+        &mut self,
+        a: &mut Pools,
+        value: E,
+        field: Option<&str>,
+        index: Option<i32>,
+    ) -> Result<E, E> {
         self.steps += 1;
-        norm::jm11_projection(a, value.0, field, index).map(E).ok_or(value)
+        norm::jm11_projection(a, value.0, field, index)
+            .map(E)
+            .ok_or(value)
     }
     fn poly_var(&mut self, a: &mut Pools, value: E, payload: bool) -> E {
         self.steps += 1;
         E(norm::jm11_poly_var_access(a, value.0, payload))
     }
-    fn template(&mut self, a: &mut Pools, segments: &[crate::string_literal::TemplateSegment], mark: Mark) -> E {
+    fn template(
+        &mut self,
+        a: &mut Pools,
+        segments: &[crate::string_literal::TemplateSegment],
+        mark: Mark,
+    ) -> E {
         let start = self.since(mark);
-        let id = norm::jm12_interpolated_template(a, segments, self.operands[start..].iter().copied());
+        let id =
+            norm::jm12_interpolated_template(a, segments, self.operands[start..].iter().copied());
         self.cut(start, id)
     }
     fn int_div(&mut self, a: &mut Pools, check: bool, left: E, right: E) -> E {
@@ -613,7 +725,10 @@ impl Rows {
     #[inline]
     fn since(&self, mark: Mark) -> usize {
         let start = mark.0 as usize;
-        debug_assert!(start <= self.operands.len(), "a mark above the operand stack");
+        debug_assert!(
+            start <= self.operands.len(),
+            "a mark above the operand stack"
+        );
         start
     }
     /// The stack cut back to `start` after a list constructor built `id`

@@ -10,7 +10,7 @@ pub(super) struct Frame {
     triggered: bool,
 }
 
-impl State<'_> {
+impl<B: super::js::Js> State<'_, B> {
     /// Amortized O(1) per recursive member, plus O(new source slots) when the
     /// dense function table first grows. The construction fact selects the
     /// loop continuation; no body is inspected or lowered twice.

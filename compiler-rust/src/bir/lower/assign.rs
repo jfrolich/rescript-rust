@@ -1,7 +1,7 @@
 //! Assignment statements (BACKEND_LOWERING §3.11).
 use super::*;
 
-impl State<'_> {
+impl<B: super::js::Js> State<'_, B> {
     /// C:2078 compile_expr, Assign arm. O(1) excluding realization of the
     /// already visited operand. Assignment facts are final on entry.
     pub(super) fn finish_assignment(&mut self, cx: Cx, var: VarId, child: Probed) -> Probed {

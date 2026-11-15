@@ -33,7 +33,7 @@ pub(super) enum Resume {
         loop_: Option<LoopRef>,
     },
 }
-impl State<'_> {
+impl<B: super::js::Js> State<'_, B> {
     /// K4/K2/K10: C:2411 compile_let_binding_output, C:4603 compile_effect_output,
     /// C:1997 with_function_scope. Preserve order and reset function boundaries.
     /// Cost: O(C): appends the C immediate children selected by the resume kind (arguments,

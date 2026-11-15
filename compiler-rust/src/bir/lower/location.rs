@@ -10,7 +10,7 @@ pub(super) struct Fact {
     ready: bool,
 }
 
-impl State<'_> {
+impl<B: super::js::Js> State<'_, B> {
     /// Whether `loc` is a real source position of the unit's location
     /// table: present, not ghost, at a non-negative offset. False without a
     /// table. Cost: O(1), one row read of the table; no allocation.

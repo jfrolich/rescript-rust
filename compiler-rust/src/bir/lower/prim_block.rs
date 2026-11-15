@@ -1,15 +1,15 @@
 //! K: compile_field_access / compile_set_field and P block constructors.
 use super::*;
-use crate::bir::j::{norm, plain};
+use crate::emit::row::{Kind, flag};
 use crate::js_ir::arena::FieldPos;
 use crate::lambda::lam_compat::FieldDbgInfo;
 
-impl State<'_> {
+impl<B: super::js::Js> State<'_, B> {
     /// P: compile_flat_make_field, tried before lowering operands. O(d + name
     /// bytes) for d module-field segments. Failed paths are marked in a dense
     /// source-node table, so nested make misses never rescan an earlier spine.
     /// A successful path replaces the entire spine without visiting it again.
-    pub(super) fn flat_make_field(&mut self, mut source: NodeId) -> Option<NodeId> {
+    pub(super) fn flat_make_field(&mut self, mut source: NodeId) -> Option<B::E> {
         // This synchronous probe shares the unit's empty node/name scratch;
         // neither name construction nor the J constructors reenter lowering.
         let mut visited = std::mem::take(&mut self.scratch);
@@ -43,11 +43,13 @@ impl State<'_> {
                     let value = match base {
                         View::Global { module } => {
                             let member = Some(self.arena.intern_text(&name));
-                            plain::node(&mut self.arena, View::JQualified { module, member }, 0)
+                            self.js.qualified(&mut self.arena, module, member)
                         }
                         View::Var { var } => {
-                            let object = self.pure_expression(View::Var { var }, 0);
-                            self.static_member(object, &name)
+                            let object = self.js.var(&mut self.arena, var);
+                            let property = self.arena.intern_text(&name);
+                            let position = FieldPos::new(None);
+                            self.js.dot(&mut self.arena, object, property, position, false)
                         }
                         _ => unreachable!(),
                     };
@@ -69,24 +71,20 @@ impl State<'_> {
     /// K: resolve_cmj_module_field_constant / compile_field_access.
     /// O(record arity + discarded nodes + field-name bytes) for literal
     /// projection; otherwise O(field-name bytes) and one summary lookup.
-    pub(super) fn primitive_field(
-        &mut self,
-        idx: i32,
-        info: &FieldDbgInfo,
-        target: NodeId,
-    ) -> NodeId {
+    pub(super) fn primitive_field(&mut self, idx: i32, info: &FieldDbgInfo, target: B::E) -> B::E {
         if let FieldDbgInfo::Module { name } = info {
-            if let View::JQualified {
-                module,
-                member: None,
-            } = self.arena.view(target)
-            {
+            if let Some((module, None)) = self.js.qualified_of(&self.arena, B::of(&target)) {
                 let module_name = self.arena.pools.j_modules[module.index()].id.name();
                 // Acquire each immutable summary once per compilation, indexed
                 // by ImportId. Fields have names but no export handles yet.
-                if matches!(self.module_constants[module.index()], ModuleConstants::Unread) {
-                    self.module_constants[module.index()] = match self.resolver
-                        .and_then(|r| r.module_cmj_export_constants(module_name)) {
+                if matches!(
+                    self.module_constants[module.index()],
+                    ModuleConstants::Unread
+                ) {
+                    self.module_constants[module.index()] = match self
+                        .resolver
+                        .and_then(|r| r.module_cmj_export_constants(module_name))
+                    {
                         Some(table) => ModuleConstants::Present(table),
                         None => ModuleConstants::Missing,
                     };
@@ -96,19 +94,17 @@ impl State<'_> {
                     ModuleConstants::Missing => None,
                     ModuleConstants::Unread => unreachable!("summary acquisition completed"),
                 };
-                self.arena.release(target);
+                self.js.release(&mut self.arena, target);
                 if let Some(constant) = constant {
                     use crate::cmi::persistent_env::CmjExportConstant as C;
                     return match constant {
-                        C::Bool(value) => plain::boolean(&mut self.arena, value),
-                        C::Null => plain::node(&mut self.arena, View::JNull, 0),
-                        C::Undefined { is_unit } => {
-                            plain::node(&mut self.arena, View::JUndefined, u16::from(is_unit))
-                        }
+                        C::Bool(value) => self.js.boolean(&mut self.arena, value),
+                        C::Null => self.js.null(&mut self.arena),
+                        C::Undefined { is_unit } => self.js.undefined(&mut self.arena, is_unit),
                     };
                 }
                 let member = Some(self.arena.intern_text(name.as_str()));
-                return plain::node(&mut self.arena, View::JQualified { module, member }, 0);
+                return self.js.qualified(&mut self.arena, module, member);
             }
         }
         let record = matches!(
@@ -119,21 +115,22 @@ impl State<'_> {
         );
         match info {
             FieldDbgInfo::PolyVarTag => {
-                return norm::jm11_poly_var_access(&mut self.arena, target, false);
+                return self.js.poly_var(&mut self.arena, target, false);
             }
             FieldDbgInfo::PolyVarContent => {
-                return norm::jm11_poly_var_access(&mut self.arena, target, true);
+                return self.js.poly_var(&mut self.arena, target, true);
             }
             _ => {}
         }
-        if let Some(value) = norm::jm11_projection(
+        let target = match self.js.project(
             &mut self.arena,
             target,
             if record { info.name() } else { None },
             Some(idx),
         ) {
-            return value;
-        }
+            Ok(value) => return value,
+            Err(target) => target,
+        };
         let mut field = std::mem::take(&mut self.tail_name);
         field.clear();
         let property = match info {
@@ -158,12 +155,8 @@ impl State<'_> {
             FieldDbgInfo::VariantTag => self.arena.intern_text("TAG"),
             FieldDbgInfo::Tuple => {
                 self.tail_name = field;
-                let index = plain::int(&mut self.arena, idx);
-                return plain::node(
-                    &mut self.arena,
-                    View::JIndex { object: target, index },
-                    0,
-                );
+                let index = self.js.int_literal(&mut self.arena, idx);
+                return self.js.index(&mut self.arena, target, index);
             }
             FieldDbgInfo::PolyVarTag | FieldDbgInfo::PolyVarContent => unreachable!(),
         };
@@ -174,15 +167,8 @@ impl State<'_> {
         } else {
             Some(idx)
         });
-        plain::node(
-            &mut self.arena,
-            View::JDot {
-                object: target,
-                property,
-                position,
-            },
-            0,
-        )
+        self.js
+            .dot(&mut self.arena, target, property, position, false)
     }
 
     /// K: compile_set_field, including the pure literal receiver rule.
@@ -191,31 +177,30 @@ impl State<'_> {
         &mut self,
         idx: i32,
         field: &str,
-        target: NodeId,
-        value: NodeId,
-    ) -> NodeId {
-        let assignment = if crate::bir::j::facts::strictly_pure(&self.arena, target)
+        target: B::E,
+        value: B::E,
+    ) -> B::E {
+        let assignment = if self.js.has(&self.arena, B::of(&target), flag::STRICT)
             && matches!(
-                self.arena.view(target),
-                View::JArray { .. } | View::JBlockLit { .. }
+                self.js.kind(&self.arena, B::of(&target)),
+                Kind::Array | Kind::BlockLit
             ) {
-            self.arena.release(target);
+            self.js.release(&mut self.arena, target);
             value
         } else {
             let property = self.arena.intern_text(field);
-            let target = plain::node(
+            let target = self.js.dot(
                 &mut self.arena,
-                View::JDot {
-                    object: target,
-                    property,
-                    position: FieldPos::new(Some(idx)),
-                },
-                0,
+                target,
+                property,
+                FieldPos::new(Some(idx)),
+                false,
             );
-            norm::je4_bin(&mut self.arena, crate::js_ir::BinOp::Eq, target, value)
+            self.js
+                .bin(&mut self.arena, crate::js_ir::BinOp::Eq, target, value)
         };
-        let unit = plain::node(&mut self.arena, View::JUndefined, 0);
-        plain::seq(&mut self.arena, assignment, unit)
+        let unit = self.js.undefined(&mut self.arena, false);
+        self.js.seq(&mut self.arena, assignment, unit)
     }
 }
 
