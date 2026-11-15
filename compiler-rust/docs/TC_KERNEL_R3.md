@@ -2441,3 +2441,117 @@ which is empty on the final head (this branch does not touch the file). `tc` is 
 default checker is the old one), so no application or `tests/tests`
 saving is claimed; the CI `Instruction count` check reports the build's
 figures.
+
+## K4
+
+The cost of a unification whose heads expand, with no change of
+behaviour. `unify_abbrev2` (two parameterised abbreviation heads, each
+expands once) cost 2822.27 at `838ccbca7` and 2968.06 on trunk
+`5ea10ac75`. Three attempts, one commit each, in a fixed order: an
+attempt is kept when `unify_abbrev2` goes down by 20 or more and no other
+operation goes up by more than 2, and is otherwise reverted in a commit of
+its own. Target: `unify_abbrev2` at or below 2822.27 with `unify_ground3`
+at or below 816 and `unify_datatype2` at or below 824.
+
+Same machine kind and method as "K3a" section 1 (x86-64 Linux, eight
+virtual CPUs, Valgrind 3.22.0, the pinned nightly of `rust-toolchain.toml`,
+fat LTO, one codegen unit, line tables, every operation of
+`benches/tc_kernel.rs` at 1,000,000 iterations minus zero; unification and
+`bind_ground1` minus their `build_*` twin, `generalize7` and `lower7`
+minus `instance7`, `repr`, `restore` and `keep` minus `instance1`, the
+other operations minus `empty`; a control row (`empty`, `build_*`) is
+shown raw). Function attribution: for every function cachegrind records
+(inlined code counts in the function it is inlined into),
+`(op.full - op.zero - twin.full + twin.zero) / 1,000,000` summed over its
+files and lines.
+
+### Before
+
+| Operation | `838ccbca7` | Before (trunk `5ea10ac75`) |
+|---|---:|---:|
+| `instance1` | 137.06 | 137.06 |
+| `instance3` | 217.31 | 217.31 |
+| `instance5` | 305.34 | 305.34 |
+| `instance7` | 325.27 | 325.27 |
+| `generalize7` | 449.00 | 449.00 |
+| `empty` | 19.00 | 19.00 |
+| `lower7` | 422.00 | 422.00 |
+| `copy7` | 1709.58 | 1709.58 |
+| `repr` | 9.00 | 9.00 |
+| `restore` | 63.00 | 63.00 |
+| `keep` | 44.00 | 44.00 |
+| `checker_instance1` | 126.06 | 126.06 |
+| `checker_instance3` | 207.31 | 207.31 |
+| `checker_instance5` | 294.34 | 294.34 |
+| `checker_instance7` | 314.27 | 314.27 |
+| `build_vars` | 78.07 | 78.07 |
+| `unify_vars` | 120.00 | 117.00 |
+| `build_ground1` | 98.08 | 98.08 |
+| `unify_ground1` | 121.00 | 122.00 |
+| `build_ground3` | 200.44 | 200.44 |
+| `unify_ground3` | 911.95 | 814.00 |
+| `build_vars_local` | 78.07 | 78.07 |
+| `unify_vars_local` | 120.00 | 117.00 |
+| `build_ground1_local` | 98.08 | 98.08 |
+| `unify_ground1_local` | 121.00 | 122.00 |
+| `build_ground3_local` | 200.44 | 200.44 |
+| `unify_ground3_local` | 911.95 | 814.00 |
+| `binder` | -8.00 | -8.00 |
+| `find_local` | 47.00 | 47.00 |
+| `find_open` | 224.00 | 224.00 |
+| `find_miss2` | 624.00 | 624.00 |
+| `bind_leave` | 172.18 | 172.18 |
+| `intern` | 160.00 | 160.00 |
+| `build_bind_ground1` | 88.09 | 88.09 |
+| `bind_ground1` | 124.00 | 121.00 |
+| `build_bind_ground1_local` | 88.09 | 88.09 |
+| `bind_ground1_local` | 124.00 | 121.00 |
+| `build_datatype2` | 186.44 | 186.44 |
+| `unify_datatype2` | 955.95 | 822.00 |
+| `build_abbrev2` | 186.44 | 186.44 |
+| `unify_abbrev2` | 2822.27 | 2968.06 |
+
+`838ccbca7` is the base of K3's table ("Per commit", column "Before"):
+its figures reproduce that column exactly. Trunk carries K3 (the
+expansion test and the occurrence probe) and R3f.
+
+### Where `unify_abbrev2`'s difference sits
+
+| Function | `838ccbca7` | Trunk `5ea10ac75` | Change |
+|---|---:|---:|---:|
+| `Checker::expand_once` | 798.00 | 816.00 | +18.00 |
+| `Graph::instance` | 458.00 | 458.00 | +0.00 |
+| `Checker::reaches` | 434.05 | 400.00 | -34.05 |
+| `Graph::compress` | 306.00 | 306.00 | +0.00 |
+| `Checker::unify_distinct` | 276.00 | 284.00 | +8.00 |
+| `Checker::unify_expanded` | 251.00 | 195.00 | -56.00 |
+| `Checker::expand_head` | 0.00 | 212.00 | +212.00 |
+| `Checker::unify3` | 192.00 | 190.00 | -2.00 |
+| `Checker::memorize` | 82.00 | 82.00 | +0.00 |
+| `tc_kernel::main` | 25.00 | 25.00 | +0.00 |
+| total | 2822.27 | 2968.06 |
+
+- `Checker::expand_head`, +212: at `838ccbca7` it is inlined into
+  `unify_expanded`; on trunk it is a function of its own, called four
+  times (two heads, each asked twice, ctype.ml:2278-2283). Its loop lines
+  cost what they cost inline (`expand.rs:819` the call of `expand_once`,
+  42 inline and 40 out of line; `:831` 16 and 16; `:836` 4 and 4); the
+  `repr` at its entry is 48 out of line where 31 left `unify_expanded`.
+  What is new is the call itself: the entry line `:813` 28, the return
+  line `:841` 32, and 16 + 8 + 8 more on lines 0 and on the slot reads
+  (`graph.rs:235`, `mod.rs:1823`), about 23 a call.
+- `Checker::unify_expanded`, -56: the loop lines above left it (about
+  -100); K3's two tests (`unify.rs:780-781`, 13, with the `Result`
+  handling of the two new call sites, `result.rs`, 16) and its own lines
+  came in.
+- `Checker::expand_once`, +18: the same steps, compiled in a different
+  frame (line 0 +20, the node and row loads of the two heads that do
+  expand, which K3's test has just loaded: `graph.rs:248` +6,
+  `index.rs:238` +4).
+- `Checker::reaches`, -34.05: K3's item (2), the occurrence probe.
+- `Checker::unify_distinct`, +8, and `unify3`, -2: register allocation
+  around the new call.
+
+Together: the out-of-line `expand_head` and the reloads behind K3's test
+cost about +174 (`expand_head` + `expand_once` + `unify_expanded`), the
+probe takes back 34.

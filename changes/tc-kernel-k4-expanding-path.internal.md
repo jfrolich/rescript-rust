@@ -1,0 +1,1 @@
+- Measure the instructions of a type checker unification whose heads expand, and try three ways of cutting them (checker rewrite K4).
