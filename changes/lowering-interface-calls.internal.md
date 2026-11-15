@@ -1,0 +1,1 @@
+- The backend lowering writes the JavaScript of arguments, calls, externals and JSX through its interface instead of naming J nodes.

@@ -423,6 +423,7 @@ impl Node {
         }
     }
     /// O(1): encode a call or construction over a finalized argument list.
+    #[cfg(test)]
     pub(super) fn call_list(callee: NodeId, args: ListId, info: Option<JsId>) -> Self {
         Self {
             op: if info.is_some() { Op::JCall } else { Op::JNew },
@@ -431,16 +432,6 @@ impl Node {
             words: [callee.0, args.0, info.map_or(0, |id| id.0)],
         }
     }
-    /// O(1): encode an object over finalized operand and metadata pools.
-    pub(super) fn object_list(list: ListId, info: JsId) -> Self {
-        Self {
-            op: Op::JObject,
-            flags: NodeFlags::default(),
-            aux: 0,
-            words: [list.0, info.0, 0],
-        }
-    }
-    /// O(1): encode JSX over its finalized operand list and cold shape.
     /// Replace only immutable block metadata with an equivalent owned payload
     /// at the export boundary; child links and cached expression facts stay valid.
     pub(super) fn set_block_info(&mut self, info: JsId) {
@@ -448,9 +439,6 @@ impl Node {
         self.words[1] = info.0;
     }
 
-    pub(super) fn jsx_list(list: ListId, info: JsId, aux: u16) -> Self {
-        Self { op: Op::JJsx, aux, ..Self::object_list(list, info) }
-    }
     pub(super) fn block_list(list: ListId) -> Self {
         Self { op: Op::SBlock, flags: NodeFlags::default(), aux: 0, words: [list.0, 0, 0] }
     }
