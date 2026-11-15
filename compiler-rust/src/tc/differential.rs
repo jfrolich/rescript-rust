@@ -2910,7 +2910,6 @@ mod tests {
     /// reviewer, not by the builder.
     /// Reaches: R3m, R3e, R3f, R3n.
     #[test]
-    #[ignore = "R3n build"]
     fn variant_plan_agrees_on_generated_cases() {
         let program = compile(REF_PROGRAM.to_string());
         let plan = Plan::new(Tier::Full, VARIANTS | REFS);
