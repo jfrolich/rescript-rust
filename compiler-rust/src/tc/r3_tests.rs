@@ -1640,7 +1640,6 @@ fn class(c: &Checker, field: Ty) -> Ty {
 /// ctype.ml:2331) and no field node is.
 /// Reaches: R3e.
 #[test]
-#[ignore = "R3e build"]
 fn fields_a_side_lacks_are_built_on_one_row_variable() {
     let mut c = checker(Mode::Success);
     let int = constr(&mut c, INT, &[]);
@@ -1676,7 +1675,6 @@ fn fields_a_side_lacks_are_built_on_one_row_variable() {
 /// (`_, _ -> raise (Unify [])`, ctype.ml:2424).
 /// Reaches: R3e.
 #[test]
-#[ignore = "R3e build"]
 fn a_closed_row_takes_no_field() {
     let mut c = checker(Mode::Success);
     let int = constr(&mut c, INT, &[]);
@@ -1714,7 +1712,6 @@ fn a_closed_row_takes_no_field() {
 /// (`t1'.desc <- d1`, ctype.ml:2437).
 /// Reaches: R3e.
 #[test]
-#[ignore = "R3e build"]
 fn common_fields_unify_in_name_order_and_a_failure_restores_the_rests() {
     let mut c = checker(Mode::Explain);
     let (int, string, unit) = (constr(&mut c, INT, &[]), constr(&mut c, STRING, &[]), constr(&mut c, UNIT, &[]));
@@ -1762,7 +1759,6 @@ fn common_fields_unify_in_name_order_and_a_failure_restores_the_rests() {
 /// (`differential::tests::old_checker_duplicates_the_cells_of_an_open_row`).
 /// Reaches: R3e.
 #[test]
-#[ignore = "R3e build"]
 fn mutability_is_promoted_on_the_open_side_and_classes_merge() {
     // (left open, left mutable, right open, right mutable) -> unifies
     let cases = [
@@ -1807,7 +1803,6 @@ fn mutability_is_promoted_on_the_open_side_and_classes_merge() {
 /// (ctype.ml:2242-2243).
 /// Reaches: R3e.
 #[test]
-#[ignore = "R3e build"]
 fn the_row_variable_keeps_a_name() {
     let mut c = checker(Mode::Success);
     let int = constr(&mut c, INT, &[]);
@@ -1821,6 +1816,29 @@ fn the_row_variable_keeps_a_name() {
     assert_eq!(c.g.nodes[rest2.0 as usize].level, 2);
 }
 
+/// What a failure leaves of the name `make_rowvar` gave (ctype.ml:2477-2482,
+/// 2512-2517): `let d1 = rest1.desc and d2 = rest2.desc` is read after
+/// `make_rowvar`, so the descriptor a failure puts back on the right rest
+/// is the named one (`set_name rest2 name`, ctype.ml:2458). `{x: int, ..}`
+/// with a named rest against `{x: string, ..}` in `Mode::Explain`: the
+/// left rest, linked to the right one by the tail unification, is a
+/// variable of its own again, and the right rest keeps the name.
+/// Reaches: R3e.
+#[test]
+fn a_failure_keeps_the_name_the_row_variable_was_given() {
+    let mut c = checker(Mode::Explain);
+    let (int, string) = (constr(&mut c, INT, &[]), constr(&mut c, STRING, &[]));
+    let (rest1, rest2) = (var_at(&mut c, 3), var(&mut c));
+    c.g.nodes[rest1.0 as usize].a = 7;
+    let (left, _) = obj(&mut c, &[("x", false, int)], rest1);
+    let (right, _) = obj(&mut c, &[("x", false, string)], rest2);
+    assert!(c.unify(left, right).is_err());
+    assert_eq!(c.g.repr(rest1), rest1);
+    assert_eq!(c.g.nodes[rest1.0 as usize].a, 7);
+    assert_eq!(c.g.repr(rest2), rest2);
+    assert_eq!(c.g.nodes[rest2.0 as usize].a, 7);
+}
+
 /// The arms of unify3 beside the object's (ctype.ml:2322-2324, 2412-2413,
 /// 2424). Two field nodes go to `unify_fields` with no link of their own
 /// (`Tfield _, Tfield _ -> unify_fields env t1' t2'`): the rests are
@@ -1829,7 +1847,6 @@ fn the_row_variable_keeps_a_name() {
 /// object against a tuple, and a field against `Tnil`, clash.
 /// Reaches: R3e.
 #[test]
-#[ignore = "R3e build"]
 fn the_other_arms_of_objects() {
     let mut c = checker(Mode::Success);
     let int = constr(&mut c, INT, &[]);
@@ -1872,7 +1889,6 @@ fn the_other_arms_of_objects() {
 /// variable's level, 2. In both modes.
 /// Reaches: R3e.
 #[test]
-#[ignore = "R3e build"]
 fn the_route_of_a_variable_crosses_an_object_and_the_occurrence_test_does_not() {
     for mode in [Mode::Success, Mode::Explain] {
         let mut c = checker(mode);
@@ -1935,7 +1951,6 @@ fn object_scheme(c: &mut Checker, open: bool, fields: u32) -> (Template, Vec<Ty>
 /// checker: `old_checker_duplicates_the_cells_of_an_open_row`.
 /// Reaches: R3e.
 #[test]
-#[ignore = "R3e build"]
 fn an_instance_duplicates_the_cells_of_an_open_row() {
     let field_of = |c: &mut Checker, root: Ty, index: u32| {
         let object = child(c, root, 0);
@@ -1948,7 +1963,8 @@ fn an_instance_duplicates_the_cells_of_an_open_row() {
     let mut c = checker(Mode::Success);
     let (open, scheme_fields) = object_scheme(&mut c, true, 2);
     let has = |c: &Checker, template| {
-        super::rows::template_has_open_row(&c.g.template_nodes, &c.g.template_lists, &c.extras.descriptors, template)
+        let slots = super::template::slots(&c.g.template_lists, &c.g.template_pools, template);
+        super::rows::template_has_open_row(&c.g.template_nodes, slots, &c.extras.descriptors, template)
     };
     assert!(has(&c, open));
     let descriptors = c.extras.descriptors.len();
@@ -1992,7 +2008,6 @@ fn an_instance_duplicates_the_cells_of_an_open_row() {
 ///
 /// Reaches: R3e.
 #[test]
-#[ignore = "R3e build"]
 fn objects_of_ten_thousand_fields_are_linear() {
     let common = |n: u32| {
         let mut c = checker(Mode::Success);
