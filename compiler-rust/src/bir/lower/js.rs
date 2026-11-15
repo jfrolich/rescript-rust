@@ -80,10 +80,11 @@ pub trait Js {
     /// Room for `operands` pending operands: at most one allocation, none
     /// when the capacity is there.
     fn reserve(&mut self, operands: usize);
-    /// Unit operations so far: one per function of this trait that builds,
-    /// takes apart, copies or releases, and one per operand of a list
-    /// constructor, of [`Js::unpack_rev`], and per node [`Js::copy`] and
-    /// [`Js::release`] visit. A reader counts nothing. O(1).
+    /// Unit operations so far: one per function of this trait that builds
+    /// or takes apart, one per operand of a list constructor and of
+    /// [`Js::unpack_rev`], one per node [`Js::copy`] copies, and one per
+    /// node released ([`Js::release`], [`Js::drop_operands`],
+    /// [`Js::keep_operand`]). A reader counts nothing. O(1).
     fn steps(&self) -> u64;
 
     // ---- Reading ----
@@ -113,9 +114,7 @@ pub trait Js {
     /// them (`+12`, `-0`). O(1).
     fn bigint<'r>(&self, a: &'r Pools, r: Self::Ref<'r>) -> Option<&'r str>;
     /// The text of a string literal, or of a template literal without
-    /// interpolation (its cooked text; `None` when it has none, as
-    /// `State::primitive_string` reads it today).
-    /// O(1).
+    /// interpolation (its cooked text; `None` when it has none). O(1).
     fn text<'r>(&self, a: &'r Pools, r: Self::Ref<'r>) -> Option<&'r str>;
     /// The variable of a reference. O(1).
     fn var_of(&self, a: &Pools, r: Self::Ref<'_>) -> Option<VarId>;
@@ -228,7 +227,7 @@ pub trait Js {
     fn keep_operand(&mut self, a: &mut Pools, e: Self::E, index: u32) -> Self::E;
     /// The operands of `e` pushed onto the operand stack last operand
     /// first, so that [`Js::pop`] gives them in order; the node itself is
-    /// released. Returns their number. One step per operand.
+    /// released. Returns their number. One step, and one per operand.
     fn unpack_rev(&mut self, a: &mut Pools, e: Self::E) -> u32;
     /// A copy of the node `r` and everything below it
     /// (`Bir::copy_subtree` without a renaming: the binders inside it are

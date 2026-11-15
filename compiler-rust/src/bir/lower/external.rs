@@ -133,7 +133,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                         plain::node(&mut self.arena, View::JUndefined, 0)
                     };
                     match self.arena.view(arg) {
-                        View::JUndefined => self.arena.release(arg),
+                        View::JUndefined => {
+                            self.arena.release(arg);
+                        }
                         View::JOptional { value } => {
                             self.arena.detach(value);
                             self.arena.release(arg);

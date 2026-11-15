@@ -19,11 +19,12 @@
 //! | the other plain functions | `plain::node` with the view of the same name; `aux` is the tag bit of `dot`, the identity bit of `optional`, 0 otherwise |
 //! | a list constructor | `plain::node` with `&self.operands[mark..]` as the list (the callee or tag is not on the stack), then the stack is cut back to the mark; `aux` is the mutability of `array` and `block` and the children bit of `jsx` |
 //! | a rule function | the function of `norm.rs` named in THREE_TREES 11.4, "T6: the interface" (c); `template` gives `jm12_interpolated_template` the operands since the mark and cuts the stack back; `project` returns `Err(value)` when `jm11_projection` returns `None` (it has consumed nothing then) |
+//! | `id` | the row's id (`NodeId::0`) |
 //! | `kind` | `kind_of` of the node's operation |
 //! | `has` | `NodeFlags` has `PURE` 1, `STRICT` 8, `DELAY_SAFE` 16, `J_SUBEXPR` 32; the interface's bits are 1, 2, 4, 8: `(f & 1) \| ((f >> 2) & 0b1110)`. `DUPLICABLE` is `Bir::j_duplicable` of the node, read only when the flag is asked for |
 //! | `aux` | the node's `aux`, truncated to 8 bits |
 //! | `int` | `plain::int_of` |
-//! | `text` | the text of a `JStr`; for a `JTemplate` whose `aux` is 1, the cooked text of its one part, `None` when the part has none (the body of `State::primitive_string` today; `plain::string_of` differs: it gives the empty string) |
+//! | `text` | the text of a `JStr`; for a `JTemplate` whose `aux` is 1, the cooked text of its one part, `None` when the part has none (`plain::string_of` differs: it gives the empty string) |
 //! | `is_float`, `bigint` | the constant of a `JNumber`: `Constant::Float`; the text of `Constant::BigInt` |
 //! | `var_of`, `qualified_of`, `member_of`, `function_of`, `info_of` | the fields of the view of that kind; `None` for any other kind |
 //! | `arity`, `operand` | `View::child_count`, `View::child_at` |
@@ -39,11 +40,14 @@
 //! | `comment` | `Bir::set_cold` with the comment and the location the node has (`LamLoc::NONE` when it has none); the flags are not touched |
 //! | `copy_cold` | `plain::copy_cold`, then the character of `from` (`Node::js_char`) set on `to` when `from` has one |
 //!
-//! Steps (`Js::steps`): one for every function that builds a node, takes
-//! one apart or releases one (`without_pure` and `project` too, whatever
-//! they return); a list constructor, `template` and `drop_operands` one
-//! more per operand since the mark; `unpack_rev` one more per operand;
-//! `copy` one per node the arena grew by, at least one. A reader, `mark`,
+//! Steps (`Js::steps`): one for every function that builds a node or takes
+//! one apart (`without_pure` and `project` too, whatever they return); a
+//! list constructor and `template` one more per operand since the mark;
+//! `unpack_rev` one more per operand; `copy` one per node the arena grew
+//! by, at least one. Releasing costs one step per node released, which is
+//! the number `Bir::release` returns: `release` counts that number,
+//! `drop_operands` the sum of it over the operands since the mark, and
+//! `keep_operand` one and that number for the node it takes apart. A reader, `mark`,
 //! `push`, `pop`, `reserve`, and the four functions of cold data and
 //! `assume_strict` count nothing.
 use crate::bir::j::{facts, norm, plain};
@@ -502,10 +506,9 @@ impl Js for Rows {
     }
 
     fn keep_operand(&mut self, a: &mut Pools, e: E, index: u32) -> E {
-        self.steps += 1;
         let kept = a.view(e.0).child_at(index as usize);
         a.detach(kept);
-        a.release(e.0);
+        self.steps += 1 + u64::from(a.release(e.0));
         E(kept)
     }
     fn unpack_rev(&mut self, a: &mut Pools, e: E) -> u32 {
@@ -543,14 +546,12 @@ impl Js for Rows {
         self.leaf(a, view, aux)
     }
     fn release(&mut self, a: &mut Pools, e: E) {
-        self.steps += 1;
-        a.release(e.0);
+        self.steps += u64::from(a.release(e.0));
     }
     fn drop_operands(&mut self, a: &mut Pools, mark: Mark) {
         let start = self.since(mark);
-        self.steps += 1 + (self.operands.len() - start) as u64;
         for &operand in &self.operands[start..] {
-            a.release(operand);
+            self.steps += u64::from(a.release(operand));
         }
         self.operands.truncate(start);
     }

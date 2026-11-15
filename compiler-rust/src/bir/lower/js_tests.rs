@@ -799,6 +799,48 @@ fn steps(build: fn(&mut Rows, &mut Unit, usize) -> E, size: usize) -> u64 {
     r.steps()
 }
 
+/// Releasing costs one step per node released, whichever function
+/// releases: `release` of a nest, `keep_operand` on a comma of the nest
+/// and a variable (the nest is the operand not kept), and `drop_operands`
+/// with the nest on the operand stack.
+#[test]
+fn releasing_ten_thousand_nodes_costs_ten_times_a_thousand() {
+    type Release = fn(&mut Rows, &mut Unit, E);
+    let ways: [Release; 3] = [
+        |r, u, nest| r.release(&mut u.b, nest),
+        |r, u, nest| {
+            let x = r.var(&mut u.b, u.x);
+            let comma = r.seq(&mut u.b, nest, x);
+            let before = r.steps();
+            let kept = r.keep_operand(&mut u.b, comma, 1);
+            // The comma, and every node of the nest.
+            assert!(r.steps() - before > 1);
+            r.release(&mut u.b, kept);
+        },
+        |r, u, nest| {
+            let mark = r.mark();
+            r.push(nest);
+            r.drop_operands(&mut u.b, mark);
+        },
+    ];
+    for (way, release) in ways.iter().enumerate() {
+        let released = |calls: usize| {
+            let mut u = unit();
+            let mut r = Rows::default();
+            let nest = nest(&mut r, &mut u, calls);
+            let nodes = u.b.nodes.len() as u64;
+            let before = r.steps();
+            release(&mut r, &mut u, nest);
+            // At least one step per node of the nest.
+            assert!(r.steps() - before >= nodes, "way {way}: {} steps, {nodes} nodes", r.steps() - before);
+            r.steps() - before
+        };
+        let (one, two, ten) = (released(1_000), released(2_000), released(10_000));
+        assert_eq!(ten - one, 9 * (two - one), "way {way}: {one} {two} {ten}");
+        assert!(two > one);
+    }
+}
+
 #[test]
 fn ten_thousand_nodes_cost_ten_times_a_thousand() {
     for build in [nest, wide] {

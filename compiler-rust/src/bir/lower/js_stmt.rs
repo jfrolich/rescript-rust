@@ -90,8 +90,8 @@ pub trait JsStmt: Js {
 
     // ---- Lists ----
 
-    /// The list of `len` statements, in the order given. One step per
-    /// statement, each moved once; no allocation in a warm unit. Panics
+    /// The list of `len` statements, in the order given. One step, and one
+    /// per statement, each moved once; no allocation in a warm unit. Panics
     /// when `statements` does not yield `len`.
     fn list(&mut self, a: &mut Pools, len: u32, statements: impl Iterator<Item = Self::S>) -> Self::L;
     /// The number of statements of a list in flight. O(1).
