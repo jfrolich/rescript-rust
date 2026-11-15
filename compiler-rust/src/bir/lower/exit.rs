@@ -7,7 +7,6 @@
 //! between the forms reads the continuation, the length of the flattened
 //! table and one flag of the handler (C: staticcatch_takes_pseudo_jump).
 use super::*;
-use crate::bir::j::{norm, plain};
 use crate::bir::{CaseKey, CatchId, ClauseMeta, ListId, NodeFlags};
 
 /// `order` of an entry whose catch is being flattened: no real order yet.
@@ -183,12 +182,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// `let var;` with a declaration kind (B: variable, no value). Constant.
     pub(super) fn declare_empty(&mut self, kind: LetKind, var: VarId) {
-        let declaration = plain::node(
-            &mut self.arena,
-            View::SDecl { var, value: None },
-            kind as u16 | ((crate::js_ir::op::UsedStats::Used as u16) << 2),
-        );
-        self.statements.push(declaration);
+        let declaration = self.js.declare(&mut self.arena, kind, var, None);
+        self.statements.push(B::stmt_node(declaration));
     }
 
     /// 4.1 `lower_catch` on entering the node (OCaml
@@ -249,9 +244,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 self.declare_empty(kind, var);
             }
             let exit = self.fresh_variable("exit");
-            let zero = plain::int(&mut self.arena, 0);
-            let declaration = crate::bir::j::declare(&mut self.arena, LetKind::Variable, exit, zero);
-            self.statements.push(declaration);
+            let zero = self.js.int_literal(&mut self.arena, 0);
+            let declaration = self.js.declare(&mut self.arena, LetKind::Variable, exit, Some(zero));
+            self.statements.push(B::stmt_node(declaration));
             (target.map(|(_, var)| var), Some(exit))
         };
         // 4.2 invariant 3: a table starts above every visible entry.
@@ -350,10 +345,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let should_break = finished != Finished::True
                 && (!matches!(cx.cont, Cont::Effect(Tail::Return(_))) || self.has_exit(handler));
             let list = self.statements.take_list(&mut self.arena, run);
-            let block = self.arena.block_from_list(list);
+            let block = self.js.block_of(&mut self.arena, B::list_from(list));
             let plan = self.catches[frame.0 as usize].as_mut().expect("live catch frame");
             let slot = plan.output.start as usize + index - 1;
-            self.switch_output_nodes[slot] = block;
+            self.switch_output_nodes[slot] = B::stmt_node(block);
             self.switch_output_clauses[slot] = ClauseMeta { should_break, comment: None, loc: None };
         }
         Probed::Out(Out { stmts: self.statements.mark(), value: None, finished })
@@ -377,7 +372,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let dropped = self.statements.since(after_body);
             self.release_run(dropped);
             for i in 0..plan.output.len {
-                self.arena.release(self.switch_output_nodes[(plan.output.start + i) as usize]);
+                let block = B::stmt_from_node(self.switch_output_nodes[(plan.output.start + i) as usize]);
+                self.js.release_stmt(&mut self.arena, block);
             }
             Finished::True
         } else if plan.exit.is_none() {
@@ -395,16 +391,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             // C: compile_staticcatch_expr: never finished.
             Cont::Value(_) => Out {
                 stmts,
-                value: Some(self.pure_expression(
-                    View::Var { var: plan.target.expect("value catch result") },
-                    0,
-                )),
+                value: Some(B::node(self.js.var(&mut self.arena, plan.target.expect("value catch result")))),
                 finished: Finished::False,
             },
             // K2: C: compile_effect_output keeps `undefined` as the value.
             Cont::Effect(Tail::No) => Out {
                 stmts,
-                value: Some(self.pure_expression(View::JUndefined, 0)),
+                value: Some(B::node(self.js.undefined(&mut self.arena, false))),
                 finished,
             },
             _ => Out { stmts, value: None, finished },
@@ -422,10 +415,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 self.statements.kill(run);
                 return;
             }
-            let exit = self.pure_expression(View::Var { var: exit }, 0);
-            let order = plain::int(&mut self.arena, plan.first);
-            let test = norm::je4_bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, exit, order);
-            let statement = self.if_statement(test, run, super::cond::EMPTY);
+            let exit = self.js.var(&mut self.arena, exit);
+            let order = self.js.int_literal(&mut self.arena, plan.first);
+            let test = self.js.bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, exit, order);
+            let statement = self.if_statement(B::node(test), run, super::cond::EMPTY);
             self.statements.push(statement);
             return;
         }
@@ -443,8 +436,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     (self.switch_output_nodes[plan.output.start as usize + group],
                      self.switch_output_clauses[plan.output.start as usize + group])
                 } else {
-                    let empty = self.arena.lists.push(&[]);
-                    (self.arena.block_from_list(empty), ClauseMeta { should_break: false, comment: None, loc: None })
+                    let empty = self.js.list(&mut self.arena, 0, std::iter::empty());
+                    let empty = self.js.block_of(&mut self.arena, empty);
+                    (B::stmt_node(empty), ClauseMeta { should_break: false, comment: None, loc: None })
                 };
                 self.arena.lists.set(actions, slot, action);
                 self.arena.pools.switch_clauses.push(clause);
@@ -458,9 +452,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             constants: plan.len, keys, clauses, has_default: false, consts_full: false,
             blocks_full: false, dispatch: crate::lambda::SwitchDispatch::Direct,
         });
-        let scrutinee = self.pure_expression(View::Var { var: exit }, 0);
-        let statement = self.arena.switch_from_list(scrutinee, actions, header, 0);
-        self.statements.push(statement);
+        let scrutinee = self.js.var(&mut self.arena, exit);
+        let statement = self.js.switch(&mut self.arena, scrutinee, B::list_from(actions), header, false);
+        self.statements.push(B::stmt_node(statement));
     }
 
     /// 4.1 `lower_exit` on entering the node (OCaml
@@ -564,9 +558,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             }
             None => {
                 if jump.order != CHEAP {
-                    let order = plain::int(&mut self.arena, jump.order);
-                    let statement = crate::bir::j::assign(&mut self.arena, jump.exit, order);
-                    self.statements.push(statement);
+                    let order = self.js.int_literal(&mut self.arena, jump.order);
+                    let statement = self.js.assign(&mut self.arena, jump.exit, order);
+                    self.statements.push(B::stmt_node(statement));
                 }
                 Finished::False
             }
@@ -579,13 +573,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
         let value = match cx.cont {
             Cont::Value(_) | Cont::Effect(Tail::No) => {
-                Some(self.pure_expression(View::JUndefined, 0))
+                Some(B::node(self.js.undefined(&mut self.arena, false)))
             }
             Cont::Declare(kind, var) => {
                 if finished != Finished::True {
-                    let undefined = self.pure_expression(View::JUndefined, 0);
-                    let statement = crate::bir::j::declare(&mut self.arena, kind, var, undefined);
-                    self.statements.push(statement);
+                    let undefined = self.js.undefined(&mut self.arena, false);
+                    let statement = self.js.declare(&mut self.arena, kind, var, Some(undefined));
+                    self.statements.push(B::stmt_node(statement));
                 }
                 None
             }
