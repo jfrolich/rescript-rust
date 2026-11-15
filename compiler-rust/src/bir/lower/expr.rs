@@ -1,6 +1,7 @@
 //! K1–K6: C:1529 compile_expr and its Let/Sequence/Function context arms.
 use super::*;
 use crate::bir::{FuncId, VarSpan};
+use crate::emit::row::flag;
 
 /// Decoded structural operands saved across child visits; no source re-read.
 pub(super) enum Resume {
@@ -143,7 +144,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             if let Resume::Prim(prim) = resume {
                 if matches!(self.arena.primitive(prim.primitive).primitive, crate::lambda::lam_primitive::Primitive::Pdebugger) {
                     if let Some(value) = out.value.take() { self.drop_pure_effect(value); }
-                    out.value = Some(crate::bir::j::plain::node(&mut self.arena, View::JUndefined, 1));
+                    out.value = Some(B::node(self.js.undefined(&mut self.arena, true)));
                 }
             }
             self.statements.reserve();
@@ -242,8 +243,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                         if !keeps_value && !self.statements.has_statements(first.stmts) =>
                     {
                         self.statements.remove_empty(first.stmts);
-                        if self.arena.node(head).flags().contains(crate::bir::NodeFlags::STRICT) {
-                            self.arena.release(head);
+                        if self.js.has(&self.arena, B::at(head), flag::STRICT) {
+                            self.js.release(&mut self.arena, B::from_node(head));
                             return Probed::Free(tail);
                         }
                         return Probed::Free(self.free.push(Free::Seq { first: head, second: tail }));
@@ -254,10 +255,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 if let Some(value) = head {
                     if keeps_value && !self.statements.has_statements(second.stmts) {
                         let second_value = second.value.expect("value continuation");
-                        let value = if self.arena.node(value).flags().contains(crate::bir::NodeFlags::STRICT) {
-                            self.arena.release(value);
+                        let value = if self.js.has(&self.arena, B::at(value), flag::STRICT) {
+                            self.js.release(&mut self.arena, B::from_node(value));
                             second_value
-                        } else { crate::bir::j::norm::jm1_js_seq(&mut self.arena, value, second_value) };
+                        } else {
+                            B::node(self.js.seq_rule(&mut self.arena, B::from_node(value), B::from_node(second_value)))
+                        };
                         second.value = Some(value);
                     } else {
                         self.hold_effect(slot, value);
@@ -276,8 +279,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 };
                 assert!(body.value.is_none());
                 let list = self.statements.take_list(&mut self.arena, body.stmts);
-                let body = self.arena.block_from_list(list);
-                let body = if let Some(frame) = loop_ { self.loop_function_body(frame, header, body) } else { body };
+                let body = self.js.block_of(&mut self.arena, B::list_from(list));
+                let body = match loop_ {
+                    Some(frame) => B::stmt_from_node(self.loop_function_body(frame, header, B::stmt_node(body))),
+                    None => body,
+                };
                 let source_loc = Some(self.arena.function(header).loc)
                     .filter(|&loc| header.index() < self.source_functions as usize && self.is_located(loc));
                 let attr = self.arena.function_attributes(header);
@@ -286,16 +292,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 } else {
                     header
                 };
-                let value = self.pure_expression(View::JFun { body, header }, 0);
+                let mut value = self.js.function_of_block(&mut self.arena, header, body);
                 super::names::close(&mut self.arena, &self.idents, header);
                 if let Some(loc) = source_loc {
-                    self.arena
-                        .set_cold(value, crate::bir::Cold { loc, comment: None });
-                    let mut flags = self.arena.node(value).flags();
-                    flags.0 |= crate::bir::NodeFlags::JS_LOC_PRESENT;
-                    self.arena.nodes[value.index()].set_flags(flags);
+                    self.js.locate(&mut self.arena, &mut value, loc);
                 }
-                self.probe_leaf(cx, value)
+                self.probe_leaf(cx, B::node(value))
             }
         }
     }
@@ -303,7 +305,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// of a sequence. One step per comma operand of the value.
     fn hold_effect(&mut self, slot: u32, value: NodeId) {
         let mut held = std::mem::take(&mut self.scratch);
-        crate::bir::j::norm::jm14_push_effect_expression(&mut self.arena, value, &mut held);
+        self.js.effect(&mut self.arena, B::from_node(value), |s| held.push(B::stmt_node(s)));
         self.statements.fill_held(slot, &held);
         held.clear();
         self.scratch = held;
@@ -313,12 +315,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// Cost: O(R): releases the R nodes owned by a discarded strict expression; the purity
     /// decision reads one cached flag.
     pub(super) fn drop_pure_effect(&mut self, value: NodeId) {
-        let mut effects = std::mem::take(&mut self.scratch);
-        crate::bir::j::norm::jm14_push_effect_expression(&mut self.arena, value, &mut effects);
-        for statement in effects.drain(..) {
-            self.statements.push(statement);
-        }
-        self.scratch = effects;
+        let statements = &mut self.statements;
+        self.js.effect(&mut self.arena, B::from_node(value), |s| statements.push(B::stmt_node(s)));
     }
 }
 
