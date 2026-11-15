@@ -4484,7 +4484,10 @@ fn format_unbound_modtype_report(
     alternatives: &[String],
 ) -> String {
     let name = format_longident_for_report(arena, lid);
-    if let Some(hint) = spellcheck_hint(&name, alternatives) {
+    // `Typetexp.spellcheck` matches the last component `s` of `Ldot (r, s)`
+    // against the names of `r` (compiler/ml/typetexp.ml:790-797).
+    let last = name.rsplit('.').next().unwrap_or(&name);
+    if let Some(hint) = spellcheck_hint(last, alternatives) {
         let mut raw_message = String::new();
         raw_message.push_str("  Unbound module type ");
         raw_message.push_str(&name);
