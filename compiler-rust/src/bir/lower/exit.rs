@@ -180,7 +180,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
     }
 
-    /// `let var;` with a declaration kind (B: variable, no value). Constant.
+    /// `let var;` with a declaration kind (B: variable, no value). Cost: O(1),
+    /// one declaration built and pushed.
     pub(super) fn declare_empty(&mut self, kind: LetKind, var: VarId) {
         let declaration = self.js.declare(&mut self.arena, kind, var, None);
         self.statements.push(B::stmt_node(declaration));
