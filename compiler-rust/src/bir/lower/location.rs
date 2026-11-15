@@ -132,19 +132,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             return;
         }
         if let Some(first) = self.statements.first(run)
-            && !self
-                .arena
-                .node(first)
-                .flags()
-                .contains(crate::bir::NodeFlags::JS_LOC_PRESENT)
+            && !self.js.stmt_located(&self.arena, &B::stmt_from_node(first))
             && let Some(loc) = self.switch_location(source)
         {
-            let comment = self.arena.cold(first).and_then(|c| c.comment);
-            self.arena
-                .set_cold(first, crate::bir::Cold { loc, comment });
-            let mut flags = self.arena.node(first).flags();
-            flags.0 |= crate::bir::NodeFlags::JS_LOC_PRESENT;
-            self.arena.nodes[first.index()].set_flags(flags);
+            let mut first = B::stmt_from_node(first);
+            self.js.locate_stmt(&mut self.arena, &mut first, loc);
         }
     }
 }
