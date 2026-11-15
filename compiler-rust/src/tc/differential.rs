@@ -2656,11 +2656,10 @@ mod tests {
     /// Reaches: R3m, R3e.
     #[test]
     fn object_plan_agrees_on_generated_cases() {
-        let coverage = run_cases_except(
-            Plan::new(Tier::Full, OBJECTS | CELLS),
-            &[31_000_122, 31_000_191, 77_000_306],
-        );
-        assert_eq!(coverage.cases, 10_000);
+        let known = [31_000_122, 31_000_191, 77_000_306];
+        let coverage = run_cases_except(Plan::new(Tier::Full, OBJECTS | CELLS), &known);
+        // `cases` counts the cases that agree: the pinned ones are not in it.
+        assert_eq!(coverage.cases + known.len(), 10_000);
         assert!(coverage.failures * 10 > coverage.cases, "{coverage:?}");
         run_cases_except(Plan::new(Tier::Full, OBJECTS | CELLS | BUILD), &[77_000_265]);
         run_cases(Plan::new(Tier::Full, OBJECTS | CELLS | EXPLAIN), 1, 20, 100);
