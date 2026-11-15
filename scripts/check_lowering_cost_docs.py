@@ -75,6 +75,16 @@ def functions(source):
     return rows
 
 
+def cost_error(row, before):
+    if before is not None and before['code'] == row['code']:
+        if COST.search(before['docs']) and not COST.search(row['docs']):
+            return 'removed cost note'
+        return None
+    if not COST.search(row['docs']) or 'amortized for a pool push' in row['docs']:
+        return 'missing or generic cost note'
+    return None
+
+
 def self_test():
     sample = '''
 struct S { #[cfg(test)] counter: usize }
@@ -96,6 +106,15 @@ impl Other { fn get(&self) -> usize { let text = "fn fake() { }"; 0 } }
     assert rows[2]['key'][1] == ('run',)
     assert normalized('fn f(){ "a b" }') != normalized('fn f(){ "ab" }')
     assert normalized('fn f(){ /* note */ 0 }') == normalized('fn f(){ 0 }')
+    documented = functions('/// Cost: O(1).\nfn f() { 0 }')[0]
+    removed = functions('fn f() { 0 }')[0]
+    reworded = functions('/// One write to a row.\nfn f() { 0 }')[0]
+    assert cost_error(removed, documented) == 'removed cost note'
+    print('unchanged code, note removed: reported')
+    assert cost_error(reworded, documented) is None
+    print('unchanged code, accepted note reworded: not reported')
+    assert cost_error(removed, removed) is None
+    print('unchanged code, no note before or after: not reported')
     print('cost scanner self-tests: passed')
 
 
@@ -110,7 +129,7 @@ def main():
              ROOT / 'compiler-rust/src/bir/untagged_plan/metadata.rs']
     paths += sorted(p for p in (ROOT / 'compiler-rust/src/bir/lower').glob('*.rs')
                     if not p.name.endswith('_tests.rs'))
-    total = changed = 0
+    total = changed = removed = 0
     errors = []
     for path in paths:
         relative = path.relative_to(ROOT)
@@ -119,15 +138,20 @@ def main():
         if old.returncode and subprocess.run(['git', 'rev-parse', '--verify', args.base], cwd=ROOT,
                                             capture_output=True).returncode:
             raise SystemExit(f'unknown base: {args.base}')
-        before = {r['key']: r['code'] for r in functions(old.stdout)}
+        before = {r['key']: r for r in functions(old.stdout)}
         for row in functions(path.read_text()):
             total += 1
-            if before.get(row['key']) == row['code']:
-                continue
-            changed += 1
-            if not COST.search(row['docs']) or 'amortized for a pool push' in row['docs']:
-                errors.append(f'{relative}:{row["line"]}: {row["name"]}: missing or generic cost note')
-    print(f'cost docs: production functions={total}; changed/new={changed}; missing/generic={len(errors)}')
+            previous = before.get(row['key'])
+            if previous is None or previous['code'] != row['code']:
+                changed += 1
+            error = cost_error(row, previous)
+            if error == 'removed cost note':
+                removed += 1
+                errors.append(f'removed cost note: {relative}::{row["name"]}')
+            elif error:
+                errors.append(f'{relative}:{row["line"]}: {row["name"]}: {error}')
+    print(f'cost docs: production functions={total}; changed/new={changed}; '
+          f'missing/generic={len(errors) - removed}; removed={removed}')
     if errors:
         raise SystemExit('\n'.join(errors))
 
