@@ -2,7 +2,6 @@
 //! compile_switch_effect_block_inner and compile_switch_return_block_inner.
 //! Group bodies are scheduled once by SourceProbe, never recursively lowered.
 use super::*;
-use crate::bir::j::{norm, plain};
 use crate::bir::{CaseKey, ClauseMeta, SwitchId};
 
 /// A source-traversal frame is a handle into the switch-plan pool.
@@ -157,12 +156,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         };
         let declaration = (string && binding.is_some()).then(|| self.statements.reserve());
         if let Some((kind, var)) = binding.filter(|_| !string) {
-            let declaration = plain::node(
-                &mut self.arena,
-                View::SDecl { var, value: None },
-                kind as u16 | ((crate::js_ir::op::UsedStats::Used as u16) << 2),
-            );
-            self.statements.push(declaration);
+            let declaration = self.js.declare(&mut self.arena, kind, var, None);
+            self.statements.push(B::stmt_node(declaration));
         }
         let frame = Switch(self.switches.len() as u32);
         self.switches.push(Some(Plan {
@@ -715,19 +710,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             // metadata. This distinction matters to the legacy JS printer.
             let explicit = should_break && matches!(cx.cont, Cont::Assign(_));
             if explicit {
-                self.statements.push(plain::node(
-                    &mut self.arena,
-                    View::SBreak { label: None },
-                    0,
-                ));
+                let statement = self.js.break_(&mut self.arena, None);
+                self.statements.push(B::stmt_node(statement));
             }
             let run = self.statements.since(Span { start, len: 0 });
             let list = self.statements.take_list(&mut self.arena, run);
-            let block = self.arena.block_from_list(list);
+            let block = self.js.block_of(&mut self.arena, B::list_from(list));
             let loc = self.switch_location(source);
             let plan = self.switches[frame.0 as usize].as_mut().unwrap();
             let slot = plan.output.start as usize + index - 1;
-            self.switch_output_nodes[slot] = block;
+            self.switch_output_nodes[slot] = B::stmt_node(block);
             self.switch_output_clauses[slot] = ClauseMeta {
                 should_break: should_break && !explicit,
                 comment: None,
@@ -756,16 +748,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         if plan.form != Form::General {
             return self.finish_small_switch(cx, &plan);
         }
-        let scrutinee = plan.value.expect("lowered scrutinee");
+        let scrutinee = B::from_node(plan.value.expect("lowered scrutinee"));
         let body_cont = plan.target.map_or(cx.cont, Cont::Assign);
-        let empty = self.switch_output_nodes[plan.output.start as usize..(plan.output.start + plan.output.len) as usize].iter().all(|&body| matches!(self.arena.view(body), View::SBlock { statements } if statements.is_empty()));
+        let empty = self.switch_output_nodes[plan.output.start as usize..(plan.output.start + plan.output.len) as usize].iter().all(|&body| self.js.is_empty_block(&self.arena, &B::stmt_from_node(body)));
         if empty && plan.kind != Kind::Named && matches!(cx.cont, Cont::Effect(Tail::No)) {
             for i in 0..plan.output.len {
-                self.arena
-                    .release(self.switch_output_nodes[(plan.output.start + i) as usize]);
+                let body = B::stmt_from_node(self.switch_output_nodes[(plan.output.start + i) as usize]);
+                self.js.release_stmt(&mut self.arena, body);
             }
-            self.statements
-                .push(norm::js1_exp(&mut self.arena, scrutinee));
+            let statement = self.js.exp_rule(&mut self.arena, scrutinee);
+            self.statements.push(B::stmt_node(statement));
         } else {
             let source_keys = self.arena.pools.switches[plan.header.index()].keys;
             let mut keys = crate::bir::KeySpan {
@@ -793,8 +785,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                             self.switch_output_clauses[plan.output.start as usize + group],
                         )
                     } else {
-                        let empty = self.arena.lists.push(&[]);
-                        let action = self.arena.block_from_list(empty);
+                        let empty = self.js.list(&mut self.arena, 0, std::iter::empty());
+                        let action = B::stmt_node(self.js.block_of(&mut self.arena, empty));
                         let source = self.source.lists.get(plan.operands)[case];
                         let loc = self.switch_location(source);
                         (
@@ -820,9 +812,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 let body =
                     self.switch_output_nodes[(plan.output.start + plan.output.len - 1) as usize];
                 if !matches!(body_cont, Cont::Assign(_))
-                    && matches!(self.arena.view(body), View::SBlock { statements } if statements.is_empty())
+                    && self.js.is_empty_block(&self.arena, &B::stmt_from_node(body))
                 {
-                    self.arena.release(body);
+                    self.js.release_stmt(&mut self.arena, B::stmt_from_node(body));
                     has_default = false;
                 } else {
                     self.arena.lists.set(actions, clauses.len as usize, body);
@@ -843,13 +835,14 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 blocks_full: false,
                 dispatch: crate::lambda::SwitchDispatch::Direct,
             });
-            let statement = self.arena.switch_from_list(
+            let statement = self.js.switch(
+                &mut self.arena,
                 scrutinee,
-                actions,
+                B::list_from(actions),
                 header,
-                u16::from(plan.kind != Kind::Integer),
+                plan.kind != Kind::Integer,
             );
-            self.statements.push(statement);
+            self.statements.push(B::stmt_node(statement));
         }
         self.switch_result(cx, &plan)
     }
@@ -886,37 +879,25 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             } else {
                 None
             };
-            if let Some((statement, value)) =
+            if let Some((statement, _)) =
                 candidate.and_then(|run| self.single_assignment(run, target))
             {
-                self.arena.detach(value);
-                self.arena.release(statement);
+                let assignment = self.js.take_value(&mut self.arena, B::stmt_from_node(statement));
+                let value = self.js.keep_operand(&mut self.arena, assignment, 1);
                 self.statements.kill(candidate.unwrap());
-                let statement = crate::bir::j::declare(&mut self.arena, kind, target, value);
-                self.statements.push(statement);
+                let statement = self.js.declare(&mut self.arena, kind, target, Some(value));
+                self.statements.push(B::stmt_node(statement));
             } else {
-                let declaration = plain::node(
-                    &mut self.arena,
-                    View::SDecl {
-                        var: target,
-                        value: None,
-                    },
-                    kind as u16 | ((crate::js_ir::op::UsedStats::Used as u16) << 2),
-                );
-                self.statements.fill(slot, declaration);
+                let declaration = self.js.declare(&mut self.arena, kind, target, None);
+                self.statements.fill(slot, B::stmt_node(declaration));
             }
         }
         if plan.kind != Kind::Named && matches!(cx.cont, Cont::Effect(Tail::Return(_))) {
             self.unnest(plan.start.start);
         }
         let value = match cx.cont {
-            Cont::Value(_) => Some(self.pure_expression(
-                View::Var {
-                    var: plan.target.unwrap(),
-                },
-                0,
-            )),
-            Cont::Effect(Tail::No) => Some(plain::node(&mut self.arena, View::JUndefined, 0)),
+            Cont::Value(_) => Some(B::node(self.js.var(&mut self.arena, plan.target.unwrap()))),
+            Cont::Effect(Tail::No) => Some(B::node(self.js.undefined(&mut self.arena, false))),
             _ => None,
         };
         Probed::Out(Out {
@@ -1097,15 +1078,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// V: compile_small_string_switch_assignment/return/effect, one Cx path.
     /// O(statements consumed by J-S3); the direct-body form copies no run.
     fn finish_small_switch(&mut self, cx: Cx, plan: &Plan) -> Probed {
-        let scrutinee = plan.value.unwrap();
+        let scrutinee = B::from_node(plan.value.unwrap());
         if plan.form == Form::Body {
-            self.arena.release(scrutinee);
+            self.js.release(&mut self.arena, scrutinee);
         } else {
             let index = self.arena.pools.switches[plan.header.index()].keys.start as usize;
             let keys = std::mem::take(&mut self.arena.pools.switch_keys);
             let key = self.switch_key_expression(&keys[index]);
             self.arena.pools.switch_keys = keys;
-            let test = norm::je4_bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, scrutinee, key);
+            let key = B::from_node(key);
+            let test = B::node(self.js.bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, scrutinee, key));
             let yes = plan.runs[0];
             let no = if plan.groups.bodies.len as usize + usize::from(plan.default.is_some()) == 2 {
                 plan.runs[1]
@@ -1120,12 +1102,11 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 Cont::Effect(_) => self.if_statement(test, yes, no),
                 _ => unreachable!("small switch branches assign their result"),
             };
-            if matches!(cx.cont, Cont::Effect(Tail::No))
-                && matches!(self.arena.view(statement), View::SBlock { statements } if statements.is_empty())
-            {
-                self.arena.release(statement);
+            let statement = B::stmt_from_node(statement);
+            if matches!(cx.cont, Cont::Effect(Tail::No)) && self.js.is_empty_block(&self.arena, &statement) {
+                self.js.release_stmt(&mut self.arena, statement);
             } else {
-                self.place(plan.head, statement);
+                self.place(plan.head, B::stmt_node(statement));
             }
         }
         self.switch_result(cx, plan)
