@@ -1,0 +1,1 @@
+- The conditionals and the sequence and function expressions of the new backend lowering write JavaScript through its interface instead of naming J opcodes.
