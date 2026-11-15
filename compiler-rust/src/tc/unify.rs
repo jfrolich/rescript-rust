@@ -7,7 +7,7 @@
 //! it. Recursion is an explicit stack of [`Frame`]s, popped in the order the
 //! recursive calls would run.
 
-use super::expand::{ExpandMode, Memo, TypeTable, link_node};
+use super::expand::{ABBREV, ALIAS, ExpandMode, INHERITS, Memo, TypeTable, link_node};
 use super::graph::{
     ARROW, CONSTR, Change, GENERIC, Graph, LINK, Mode, NONE, Node, Speculation, TUPLE, Ty, VAR,
 };
@@ -693,8 +693,18 @@ impl Checker {
         // of the other side (ctype.ml:2278-2283). When neither side expanded
         // the second pair would read the same graph and return the same
         // nodes, so it is made only after an expansion.
-        let mut expanded_left = self.expand_head(left, ExpandMode::Unif)?;
-        let mut expanded_right = self.expand_head(right, ExpandMode::Unif)?;
+        let left_head = self.g.repr(left);
+        let mut expanded_left = if self.never_expands(left_head) {
+            left_head
+        } else {
+            self.expand_head(left_head, ExpandMode::Unif)?
+        };
+        let right_head = self.g.repr(right);
+        let mut expanded_right = if self.never_expands(right_head) {
+            right_head
+        } else {
+            self.expand_head(right_head, ExpandMode::Unif)?
+        };
         let unexpanded = expanded_left == self.g.repr(left) && expanded_right == self.g.repr(right);
         if !unexpanded {
             expanded_left = self.expand_head(left, ExpandMode::Unif)?;
@@ -744,6 +754,31 @@ impl Checker {
         } else {
             self.unify3([t2, expanded_right, t1, expanded_left], [left, right], true)
         }
+    }
+
+    /// `expand_head_unif` of `ty` (compiler/ml/ctype.ml:1279) as unify2 asks
+    /// for it (ctype.ml:2278-2282): [`Checker::expand_head`] in
+    /// [`ExpandMode::Unif`], except that the answer "does not expand" is
+    /// given here, without the call, when the first [`Checker::expand_once`]
+    /// would return it on a test without a side effect: the representative
+    /// is not a constructor (its first return), or its type's row, read now
+    /// with one `TypeInfo` load, has none of [`ABBREV`], [`ALIAS`],
+    /// [`INHERITS`]. Such a type has no public memo entry: slot 0 or the
+    /// nullary row gets one only from `memorize` in `subst` of a public
+    /// expansion (which needs [`ABBREV`]) or in `expand_alias` (which needs
+    /// [`ALIAS`]), and the chain lookup runs only for [`INHERITS`]; so
+    /// `expand_once` finds no memo, skips the alias and the chain and
+    /// returns `NONE` at its `!expands` test. The row is the one at the time
+    /// of the call, nothing is cached: a pattern-mode equation that gives a
+    /// locally abstract type a manifest (R3h) sets its row's flags before a
+    /// later unification reads them, and one that takes it away cleans the
+    /// memos as `check_abbrev_env` does (ctype.ml:1163, `Checker::set_env`),
+    /// which `expand_once` relies on as well. Cost: one `repr`, one node
+    /// load and at most one row load; otherwise `expand_head`'s.
+    #[inline(always)]
+    fn never_expands(&self, head: Ty) -> bool {
+        let node = self.g.nodes[head.0 as usize];
+        node.tag() != CONSTR || self.types.info(node.a).flags & (ABBREV | ALIAS | INHERITS) == 0
     }
 
     /// `unify3 env t1 t1' t2 t2'` (compiler/ml/ctype.ml:2305-2438) on
