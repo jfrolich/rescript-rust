@@ -175,8 +175,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// K1: C:1812, as each child completes; `cx` is the child's. The test is
     /// realized and the slots are reserved; a branch that needs statements
     /// gets the effect of its value (C:4875 compiled_to_effect_block, row R4)
-    /// and is trimmed. One call costs the statements it pushes and the holes
-    /// it pops.
+    /// and is trimmed. Cost: O(P + H + R) for the P statements it pushes,
+    /// the H holes it pops and the R nodes of a value it releases.
     pub(super) fn conditional_child(
         &mut self,
         cx: Cx,
@@ -231,8 +231,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         Probed::Out(out)
     }
 
-    /// K1: C:1812, after the children: the row of `cx`. The cost is that
-    /// row's; none of them reads a statement of a branch that stays in place.
+    /// K1: C:1812, after the children: the row of `cx`. Cost: that row's,
+    /// plus O(1); none of them reads a statement of a branch that stays in
+    /// place.
     pub(super) fn finish_conditional(
         &mut self,
         cx: Cx,
@@ -359,7 +360,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// Fill a reserved slot; an explicit empty block is recorded for the
-    /// `if_` of an enclosing conditional. Constant.
+    /// `if_` of an enclosing conditional. O(1).
     pub(super) fn place(&mut self, slot: u32, statement: NodeId) {
         let handle = B::stmt_from_node(statement);
         let empty = self.js.is_empty_block(&self.arena, &handle);
@@ -397,7 +398,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         self.statements.kill(run);
     }
 
-    /// `[return value]`: the statement and the returned value. Constant on a
+    /// `[return value]`: the statement and the returned value. O(1) on a
     /// trimmed run.
     fn single_return(&mut self, run: Span) -> Option<(NodeId, NodeId)> {
         let (_, statement) = self.statements.only(run)?;
@@ -411,7 +412,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// C:5187 take_single_result_assignment: `[target = value]`, the
-    /// statement and the value. Constant on a trimmed run.
+    /// statement and the value. O(1) on a trimmed run.
     pub(super) fn single_assignment(&mut self, run: Span, target: VarId) -> Option<(NodeId, NodeId)> {
         let (_, statement) = self.statements.only(run)?;
         let statement = B::stmt_from_node(statement);
@@ -430,7 +431,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// js_stmt_make.ml:186 block_last_is_return_throw_or_continue, on the
-    /// literal last statement.
+    /// literal last statement. O(1).
     fn terminal(&self, statement: NodeId) -> bool {
         matches!(
             self.js.stmt_kind(&self.arena, &B::stmt_from_node(statement)),
@@ -438,7 +439,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         )
     }
 
-    /// The test without its negation, when it has one. Constant.
+    /// The test without its negation, when it has one. O(1): one step and
+    /// the negation released.
     fn positive(&mut self, test: NodeId) -> Option<NodeId> {
         if self.js.kind(&self.arena, B::at(test)) != row::Kind::Not {
             return None;
@@ -456,6 +458,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// B:1575 simplify_if as one statement. Each run is copied into the
     /// arena once; all rules receive pool handles, never branch vectors.
+    /// Cost: O(yes + no) statements copied, plus J-S3's.
     pub(super) fn if_statement(&mut self, test: NodeId, yes: Span, no: Span) -> NodeId {
         self.statements.drop_empty_blocks(&mut self.arena, yes);
         self.statements.drop_empty_blocks(&mut self.arena, no);
@@ -520,7 +523,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// C:7612 compiled_from_effect_block over the output from `start`: a
-    /// lone expression statement becomes the value. Constant, plus `unnest`.
+    /// lone expression statement becomes the value. O(1), plus `unnest`.
     fn effect_output(&mut self, start: u32) -> Probed {
         let lone = self.unnest(start).map(|(slot, statement)| (slot, B::stmt_from_node(statement)));
         let value = match lone {
@@ -536,13 +539,15 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// O:359 push_s_if_empty: the test as a statement when it has effects.
+    /// Cost: J-M14's: one step, O(1) per statement pushed, and the nodes of
+    /// a pure test released.
     fn push_s_if_empty(&mut self, test: NodeId) {
         let statements = &mut self.statements;
         self.js.effect_if_impure(&mut self.arena, B::from_node(test), |s| statements.push(B::stmt_node(s)));
     }
 
-    /// Rows R1 to R3 on the two runs that assign `target`. Costs
-    /// `if_statement`, or is constant when both branches are one assignment.
+    /// Rows R1 to R3 on the two runs that assign `target`. Cost:
+    /// `if_statement`'s, or O(1) when both branches are one assignment.
     fn assigning_conditional(
         &mut self,
         cont: Cont,
@@ -587,7 +592,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// Rows R2 and R3 before their result: the swap of C:6741
     /// normalize_if_assignment_merge_order, then the conditional expression
     /// when each run is the one statement `target = x` (the runs are
-    /// consumed), else the operands after the swap. Constant on trimmed runs.
+    /// consumed), else the operands after the swap. O(1) on trimmed runs.
     pub(super) fn merge_assignments(
         &mut self,
         mut test: NodeId,
@@ -617,6 +622,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// Row R3 as one statement: `target = cond(...)` or `if_(c, T, E)`.
+    /// O(1) for the assignment; else `if_statement`'s cost.
     pub(super) fn assignment_statement(
         &mut self,
         target: VarId,
@@ -629,7 +635,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// R4 steps 2 to 4, C:4884 compile_if_effect_block, then C:7612
-    /// compiled_from_effect_block. Costs one `if_statement` over the branch
+    /// compiled_from_effect_block. Cost: one `if_statement` over the branch
     /// that becomes the guarded list; the other branch is not read.
     fn effect_conditional(
         &mut self,
@@ -669,7 +675,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// `E(branch)` as a run (C:4875 compiled_to_effect_block), or nothing for
-    /// a free branch whose value has no effect (E:15). Constant.
+    /// a free branch whose value has no effect (E:15). O(1), plus J-M14 or
+    /// the nodes of a strict value released.
     fn effect_run(&mut self, cx: Cx, branch: Probed) -> Option<Span> {
         match branch {
             // B:1565 unnest_block has nothing to do here: no producer of an
@@ -689,7 +696,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// R4 step 1 on the values of two free branches: pushes the statements.
-    /// Constant, plus J-M0 over the comma spine of each value.
+    /// O(1), plus J-M0 over the comma spine of each value.
     fn free_effect(&mut self, test: NodeId, yes: NodeId, no: NodeId) {
         let yes = self.js.without_pure(&mut self.arena, B::from_node(yes));
         let no = self.js.without_pure(&mut self.arena, B::from_node(no));
@@ -721,7 +728,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// unnest_block of C:3179 compile_return_output. Step 1 reads the
     /// expression statements that lead each branch and stops at the first
     /// other statement; step 3 is `if_in_place`. A branch kept as the
-    /// statements after a guard is not read, moved or copied.
+    /// statements after a guard is not read, moved or copied. Cost: O(the
+    /// statements read, folded or consumed), plus `if_in_place`'s.
     fn return_conditional(
         &mut self,
         cx: Cx,
@@ -878,7 +886,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// Section 3.7 outside a return continuation: C:2918
     /// compile_short_circuit_js, C:2971 compile_short_circuit_binding_block,
     /// C:5415 for an assignment. The right operand was lowered once, as a
-    /// value. Constant when it is free; else `if_statement` over its run.
+    /// value. O(1) when it is free; else `if_statement` over its run.
     fn short_circuit(
         &mut self,
         cx: Cx,
@@ -955,7 +963,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// `realize(Free::Cond, k)` of section 3.6: on the values of the two
-    /// branches, or in **A** on their assignments. Constant.
+    /// branches, or in **A** on their assignments. O(1), plus
+    /// `free_effect` and `effect_output` in an effect continuation.
     pub(super) fn realize_conditional(&mut self, cx: Cx, test: NodeId, yes: Out, no: Out) -> Out {
         match cx.cont {
             Cont::Effect(Tail::No) => {

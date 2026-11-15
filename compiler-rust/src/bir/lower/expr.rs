@@ -121,6 +121,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// K4/K2/K10: C:2411 compile_let_binding_output / C:4603 compile_effect_output /
     /// C:1997 with_function_scope. Consume each non-speculative child before the
     /// next sibling; a declaration cannot be delayed past the body's statements.
+    /// Cost: O(1) per call, plus the child function it dispatches to, the
+    /// `realize` of the child and J-M14 over a dropped `debugger` value.
     pub(super) fn expression_child(
         &mut self,
         cx: Cx,
