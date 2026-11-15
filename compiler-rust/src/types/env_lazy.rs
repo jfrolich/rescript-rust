@@ -3234,7 +3234,7 @@ mod provenance_tests {
         };
         let mut sig = vec![module(sibling, ModuleType::MtySignature(Arc::new(vec![])))];
         let aliases: Vec<Ident> = (0..10_000)
-            .map(|i| ctx.create_ident(&format!("A{i}")))
+            .map(|i| ctx.create_ident(format!("A{i}")))
             .collect();
         for id in &aliases {
             sig.push(module(
