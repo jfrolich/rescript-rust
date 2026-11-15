@@ -3708,6 +3708,92 @@ site table alone does not have: whether a function literal lies between
 the reference and its row, and whether the reference is the callee of
 its parent; both are climbs of the same column.
 
+#### T6m to T6q: the probes, and slices built side by side
+
+Six slices convert the remaining lowering files at the same time. This
+section records what a probe of each found and the rules that keep six
+pull requests off one another's lines. A probe is a throw-away
+conversion of the slice's files in a copy of the tree, compiled and run
+against the bodies of the interface (`--lib bir::lower` and `--lib
+bir::j`), then taken out again; none of it is in the tree.
+
+**What a probe is and is not.** A script rewrote every `plain::`,
+`norm::`, `pure_expression`, `release` and `bir::j::` call of a file
+into the interface call, wrapping each handle at the call
+(`B::from_node`, `B::node`); the sites it could not rewrite were
+converted by hand. The probe therefore proves that every J operation of
+the file has a function in the interface with the same rows (the tests
+of the lowering compare rows) and that the allocation pins hold. It does
+not prove handle ownership across a function: locals stay `NodeId` in
+the probe except at the hand-converted sites.
+
+**Rules for the six slices** (they replace two sentences of the common
+block of phase C, and are part of every prompt below):
+
+1. *No signature changes.* Every function of the lowering keeps its
+   parameters and its result as they are: a J node crosses a function
+   boundary as a `NodeId` until T6x. Inside a body a handle is made at
+   the first interface call (`B::from_node(x)`, or `B::at(x)` to read)
+   and turned back (`B::node`, `B::stmt_node`) only where it is stored,
+   returned or passed to a function of the lowering. Reason: 31
+   functions with a `NodeId` in their signature are called from a file
+   of another slice (`if_statement` from five files, `drop_pure_effect`
+   from seven, `primitive_runtime` from five); a signature change is an
+   edit in another builder's file. The common block's "the functions of
+   the file take and return `B::E`" held for T6k and T6l, whose callers
+   were not being converted.
+2. *No shared file.* No slice edits `js.rs`, `js_stmt.rs`, `rows.rs`,
+   `rows_stmt.rs`, `mod.rs`, `out.rs`, `unit.rs` or a test file of the
+   interface. Every function a probe found missing is in the trait with
+   its body on rows and its test, written by the design turn; where a
+   body could not be written it is a `todo!` named for its slice and
+   that slice alone edits that one function.
+3. *No bound changes.* Every impl header already reads
+   `B: super::js_stmt::JsStmt` (T6l). None of the six slices needs
+   another bound, field or module line.
+4. *Storage stays.* `Out::value`, `values: &mut Vec<NodeId>`, the plans,
+   `argument_values`, `object_scratch` and every other field of `State`
+   keep their types (T6x).
+
+**One fix a probe forced.** With `prim.rs` converted, a wide call pushes
+its operands on the operand stack, which was reserved for 64: the
+allocation count of a unit grew with its width (90 against 94, 100
+against 104). `State::with` now reserves the stack for the count of
+source operands, as the argument scratch is; still one allocation, the
+pins stay 86, 103, 86, 156.
+
+| Slice | Files | Probe | What it lacked |
+| --- | --- | --- | --- |
+| T6m | `prim.rs`, `konst.rs`, `record.rs`, `import.rs` | 546 passed (`bir::lower`), 58 (`bir::j`); 589 lines changed | Nothing in the trait (`str_of` and `locate_stmt` were added before it). The operand-stack reserve above |
+| T6n | `cond.rs`, `expr.rs` | 546 and 58, on top of T6m's; 279 lines changed | `is_empty_block`, `branch_last_kind`, `release_stmt`, `if_blocks`, `take_if`, `function_of_block` |
+
+**T6n: the guard merge (decision 6 of the review of the T6l skeleton).**
+`cond.rs::merge_tail_guard` takes a guard `if (c) { ..; jump }` whose
+else is empty, and builds `{ if (c) { ..; jump } else { the rest } }`,
+reusing the guard's then-block as it is. Decided: an `if` constructor
+over two block statements, `if_blocks(a, test, yes: S, no: S)`, and
+`take_if(a, S) -> (E, S, Option<S>)` that gives the blocks back as
+statements. Both are O(1) and neither reads a statement of a block. The
+other choice, `take_if` giving lists, costs one step per statement of
+the then-block each time a guard is merged, and a chain of guards merges
+the same statements again: quadratic in the depth of the chain. A block
+statement is already a handle the lowering holds (`explicit_block`,
+`block_of`), so no new kind of value appears. The guard's two tests
+(its else has no statement; its then ends in a jump) are one reader,
+`branch_last_kind(a, &S, otherwise) -> Option<Kind>`, O(1).
+
+**T6n: what stays on rows (decision 5).** `cond.rs::if_in_place` calls
+`norm::simplify_if_head` over `impl norm::IfLists for StatementStack`.
+Both work on runs of the lowering's stack and cannot be given handles
+before `StatementStack<B>` exists (T6x). They stay, and T6n's end-state
+search excludes exactly those two names.
+
+**T6n: `function_of_block`.** `expr.rs` builds a function literal over a
+block that `tail.rs::loop_function_body` (T6w) may have rewritten; that
+function takes and returns a block statement and is another builder's.
+`function_of_block(a, header, body: S)` is a transition function: T6x
+deletes it when the body crosses as a list.
+
 ### 11.5 Worker prompt for T4b
 
 Which form: it needs one experiment, because nothing read so far proves that
@@ -4563,6 +4649,256 @@ rows_stmt.rs that does something other than its row of the header's
 table; a second vector in `Rows`; a block built in a converted file; an
 allocation pin that moves; a field of `Rows` or of `E` made more visible
 than `pub(super)`; a reader that counts a step.
+```
+
+Common to T6m, T6n, T6o, T6p, T6w and T6q, built side by side (part of
+each prompt, after the common block of phase C; read also "T6m to T6q:
+the probes, and slices built side by side"):
+
+```text
+Six slices are built at the same time on one trunk. You touch only the
+files listed under "Yours". These replace two rules of the common block:
+
+- No signature changes. Every function keeps its parameters and result:
+  a J node crosses a function boundary as a `NodeId`. Inside a body make
+  a handle at the first interface call (`B::from_node(x)`,
+  `B::stmt_from_node(x)`, `B::list_from(x)`; `B::at(x)` to read) and turn
+  it back (`B::node`, `B::stmt_node`, `B::list_id`) only where it is
+  stored in a field or a vector, returned, or passed to a function of
+  the lowering. Between two interface calls in one body the handle is
+  passed as it is: `B::from_node(B::node(..))` is a failure. You wrap no
+  call in a file that is not yours and you edit no such file.
+- No shared file: js.rs, js_stmt.rs, rows.rs, rows_stmt.rs, mod.rs,
+  out.rs, unit.rs and the tests of the interface are not yours, unless
+  "Yours" names one function of one of them. If a call you need is not
+  in the trait, stop and report the site; do not add it.
+- Storage stays: no field of `State`, of `Out` or of a plan changes its
+  type; `values: &mut Vec<NodeId>` stays.
+
+After converting, remove the imports the compiler reports unused; an
+import only the tests of the file use moves below `mod tests`.
+
+Hold in every commit: the four allocation counts of
+src/bir/lower/unit.rs stay 86, 103, 86, 156; no expected value of a
+test of the lowering changes. Hold in the pull request: the CI job
+`Backend bridge coverage` at zero differences; `Instruction count`
+within +0.02%; the check-mode build within +0.1% of its base (measure
+with scripts/compare_build_instructions.py on Linux and paste the line;
+if you cannot run it, say so: do not write a number).
+
+Merging: another slice may land first. Merge trunk, do not rebase. A
+conflict in a file that is yours is yours to resolve; a conflict in any
+other file means one of the two slices broke the rule above: stop and
+report.
+```
+
+T6m (with both common blocks):
+
+```text
+Task T6m: prim.rs, konst.rs, record.rs and import.rs on the interface.
+Precondition, check it first and stop with a report if it fails: `rg -c
+'todo!\(' src/bir/j/rows.rs src/bir/j/rows_stmt.rs` prints nothing or
+only lines of T6o, and `cargo test --manifest-path
+compiler-rust/Cargo.toml --lib bir::lower::js` shows no test ignored.
+Yours: src/bir/lower/prim.rs, konst.rs, record.rs, import.rs whole; the
+changelog fragment. Nothing else.
+
+Do exactly this, one commit each, in this order, each pushed when made:
+
+1. konst.rs, record.rs, import.rs.
+   - A literal is the function of its kind: `plain::string` is
+     `self.js.str`, `plain::int` is `self.js.int_literal`, a number is
+     `self.js.number`, `View::JBool` is `self.js.boolean`,
+     `View::JUndefined` is `self.js.undefined(.., false)` (`true` where
+     `aux` was 1), `View::JNull` is `self.js.null`.
+   - A node built from a slice of operands (`plain::node(View::JBlockLit
+     { values, info }, aux)`, an object, an array, a call) is: `let mark
+     = self.js.mark();`, `self.js.push(B::from_node(v))` for each operand
+     in order, then `self.js.block(.., mark, info, aux)`, `object`,
+     `array`, `call`. Where the code forced `NodeFlags::STRICT` on the
+     result (`bir::j::pure_expression`), call `self.js.assume_strict` on
+     the handle.
+   - konst.rs: the comment of a constant is `self.js.comment(&mut
+     self.arena, &mut handle, comment)`; the test for `undefined` under
+     an option is `self.js.kind(.., B::at(value)) == Kind::Undefined`.
+   - record.rs: the location of a record is `self.js.locate`.
+   - import.rs: the callback is `self.js.list(&mut self.arena, 1,
+     std::iter::once(B::stmt_from_node(ret)))` and `self.js.function(..,
+     header, body)`: no block is built in the file.
+
+2. prim.rs.
+   - The wrapped calls T6k left (`B::node(self.f(B::from_node(x)))` for
+     the functions of prim_cmp.rs and prim_block.rs) stay as they are:
+     `values` holds `NodeId`s.
+   - `primitive_int(node)` is `self.js.int(&self.arena, B::at(node))`.
+     `primitive_bool` is a function of prim_cmp.rs, already converted:
+     its two calls stay.
+   - `primitive_statement`: the location of a statement is
+     `self.js.locate_stmt`.
+   - A runtime call and every call built from a slice: mark, push each,
+     `self.js.call(.., callee, mark, info)`.
+   - `Pmakedict`: when the one value has `Kind::Array`, `let count =
+     self.js.unpack_rev(.., array)` and `count` times `self.js.pop()`.
+     For each item: its key is `self.js.str_of(.., self.js.operand(..,
+     r, 0))` when the item has `Kind::BlockLit` and `arity` 2, else
+     none; with a key push `PropertyKey::Literal(text)` and keep
+     `self.js.keep_operand(.., item, 1)` in the scratch (as a `NodeId`);
+     without one `self.js.release(.., item)`. Then build the object from
+     the scratch with mark and push. `primitive_steps` counts as today.
+   - `PdictSpread`: an argument is flattened when it has `Kind::Object`
+     and every key of `self.js.info_of(.., r)` is `Literal` or `Symbol`;
+     then `unpack_rev` and `pop` each value into the scratch.
+   - `Psome`, `PisNotNone`, `PvalFromOption` and the null conversions:
+     the tests are `self.js.kind` and `self.js.aux`; the payload of an
+     optional is `self.js.keep_operand(.., value, 0)`; the copy of a
+     variable, `undefined` or `null` is `self.js.copy_leaf`.
+   - `Ptemplate`: mark, push every value, `self.js.template(..,
+     segments, mark)`; `PtaggedTemplate`: push `values[1..]`,
+     `self.js.tagged(.., values[0], mark, info)`.
+   - `PcreateExtension`: `self.js.comment`. A function value is
+     recognised with `self.js.function_of`. The location of a
+     primitive's value is `self.js.located` and `self.js.locate`.
+   The tests of the four files pass unchanged.
+
+3. The changelog fragment changes/lowering-interface-primitives.internal.md.
+
+End state, to paste in the pull request with the output:
+- `rg -n 'View::J|Op::J|View::S[A-Z]|Op::S[A-Z]|plain::|norm::|\.arena\.(view|node|release|detach|replace|new_node|cold|set_cold|copy_subtree\w*|\w+_from_list)\(|pure_expression|bir::j::|arena\.nodes'
+  src/bir/lower/prim.rs src/bir/lower/konst.rs src/bir/lower/record.rs
+  src/bir/lower/import.rs` matches only below `mod tests` of each file.
+- `git diff --stat origin/ocaml-to-rust-rewrite` names the four files
+  and the fragment only.
+- `cargo test --manifest-path compiler-rust/Cargo.toml --lib bir::lower`
+  and `--lib bir::j`: the counts of the base, none ignored that the base
+  did not ignore.
+- The three CI numbers of the common block.
+
+Run by the design turn against a probe conversion of these four files:
+`--lib bir::lower` 546 passed, `--lib bir::j` 58 passed, the four pins
+unchanged. Not run: the corpus gates, `Instruction count`, check mode.
+The probe wrapped handles at each call, so it did not check the rule on
+`B::from_node(B::node(..))`.
+
+Shortcuts that count as failure, beside the common lists: a signature
+changed; `text` or `intern_text` where `str_of` gives the id; a vector
+made per primitive (the scratch of `object_scratch` is reused); a
+second `unpack_rev` of one node; a file outside "Yours" in the diff.
+```
+
+T6n (with both common blocks; read also "T6n: the guard merge" and "T6n:
+what stays on rows"):
+
+```text
+Task T6n: cond.rs and expr.rs on the interface.
+Precondition, check it first and stop with a report if it fails: `rg -n
+'fn (is_empty_block|branch_last_kind|release_stmt|if_blocks|take_if|function_of_block)'
+src/bir/j/rows_stmt.rs` shows six functions, none with a `todo!` body,
+and `cargo test --manifest-path compiler-rust/Cargo.toml --lib
+bir::lower::js_stmt::` shows no test ignored for T6n.
+Yours: src/bir/lower/cond.rs and expr.rs whole; the changelog fragment.
+Nothing else. In cond.rs two things stay exactly as they are and are not
+yours to convert: the `impl norm::IfLists for
+super::out::StatementStack` block, and the call of
+`norm::simplify_if_head` in `if_in_place` (T6x converts both).
+
+The kinds of the interface are `crate::emit::row::Kind`; cond.rs has its
+own `enum Kind { If, And, Or }`. Import `crate::emit::row::{self, flag}`
+and write `row::Kind::Return`; do not rename either.
+
+Do exactly this, one commit each, in this order, each pushed when made:
+
+1. cond.rs.
+   - `place`, `free_effect`: an empty block is
+     `self.js.is_empty_block(&self.arena, &handle)`. `block_statement`:
+     `self.js.explicit_block`, then `is_empty_block` of the result (no
+     read of the list).
+   - `empty_block` (tests only): `self.js.list(.., 0,
+     std::iter::empty())`, `self.js.explicit_block`. `raw_if` (tests
+     only): `self.js.if_plain`.
+   - `single_return`: `stmt_kind == row::Kind::Return`, the value is
+     `self.js.value_of`; its `NodeId` for the result is
+     `NodeId(self.js.id(&self.arena, value))`.
+   - `single_assignment`: `stmt_kind == Exp`; `value_of`; the value has
+     `kind` `Bin`, `aux` `BinOp::Eq as u8`, and `var_of(operand(value,
+     0)) == Some(target)`; the result is the id of `operand(value, 1)`.
+   - `terminal`: `stmt_kind` is `Return`, `Throw`, `Break` or
+     `Continue`.
+   - `positive`: when `kind` is `Not`, `self.js.keep_operand(.., test,
+     0)`.
+   - `release_run`: `self.js.release_stmt` for each statement.
+   - `unnest`: when `stmt_kind` is `Block`, clear the slot and
+     `self.js.unblock(.., block, |s| statements.push(B::stmt_node(s)))`
+     with `let statements = &mut self.statements;` taken before the
+     call.
+   - `effect_output`: a lone `Exp` statement gives
+     `self.js.take_value`.
+   - `push_s_if_empty`: `self.js.effect_if_impure(.., test, sink)` with
+     the same sink; `self.scratch` is not used.
+   - A declaration without a value: `self.js.declare(.., kind, target,
+     None)` (`LetKind::Strict` in R1).
+   - `merge_assignments`: for each of the two assignment statements,
+     `let assignment = self.js.take_value(.., statement)` and
+     `self.js.keep_operand(.., assignment, 1)`; then `self.js.cond`.
+   - A strict test (`effect_run`): `self.js.has(.., B::at(value),
+     flag::STRICT)`.
+   - `tail_return_conditional`: the conjunction test is `kind == Bin`
+     and `aux == BinOp::And as u8`; the last statements are read with
+     `stmt_kind`. The guard is `self.js.if_blocks(.., not(test), then_,
+     else_)` with `else_` `self.js.block_of` of the empty list.
+   - `merge_tail_guard`: the guard merges when `stmt_kind == If`,
+     `branch_last_kind(.., true)` is `None`,
+     `branch_last_kind(.., false)` is `Return`, `Throw`, `Break` or
+     `Continue`, and it is not the last statement of the run. Then
+     `let (condition, then_, empty) = self.js.take_if(..)`;
+     `self.js.release_stmt` of `empty` when there is one; `block_of` the
+     rest; `if_blocks(condition, then_, else_)`; `self.js.list(.., 1,
+     std::iter::once(statement))` and `block_of`. The then-block is
+     never turned into a list.
+   - `returns_after_effects`, `fold_return_tail`: `stmt_kind`; each
+     value is `self.js.take_value`; the comma is `seq_rule`.
+
+2. expr.rs.
+   - Strict tests: `self.js.has(.., flag::STRICT)`.
+   - `Resume::Fun`: `self.js.function_of_block(.., header,
+     B::stmt_from_node(body))`, then `names::close`, then
+     `self.js.locate` when there is a source location. `body` is still
+     made with `block_of` and still goes through `loop_function_body`
+     unchanged.
+   - `hold_effect`: `self.js.effect(.., value, |s|
+     held.push(B::stmt_node(s)))` into the scratch as today.
+     `drop_pure_effect`: `self.js.effect` with a sink that pushes on
+     `self.statements`; `self.scratch` is not used.
+   The tests of the two files pass unchanged.
+
+3. The changelog fragment changes/lowering-interface-conditional.internal.md.
+
+End state, to paste in the pull request with the output:
+- `rg -n 'View::J|Op::J|View::S[A-Z]|Op::S[A-Z]|plain::|norm::|\.arena\.(view|node|release|detach|replace|new_node|cold|set_cold|copy_subtree\w*|\w+_from_list)\(|pure_expression|bir::j::|arena\.nodes|arena\.lists'
+  src/bir/lower/cond.rs src/bir/lower/expr.rs`, outside `mod tests`,
+  matches exactly three lines, all in cond.rs: `use
+  crate::bir::j::norm;`, `impl norm::IfLists for
+  super::out::StatementStack {` and the `norm::simplify_if_head(` of
+  `if_in_place`.
+- `git diff --stat origin/ocaml-to-rust-rewrite` names the two files and
+  the fragment only.
+- `cargo test --manifest-path compiler-rust/Cargo.toml --lib bir::lower`
+  and `--lib bir::j`: the counts of the base.
+- The three CI numbers of the common block.
+
+Run by the design turn against a probe conversion of these two files
+(with T6m's probe in place): `--lib bir::lower` 546 passed, `--lib
+bir::j` 58 passed, the four pins unchanged. The six functions have
+tests of their own that run now (`a_guard_is_taken_apart_and_rebuilt_
+over_its_blocks` and three more). Not run: the corpus gates,
+`Instruction count`, check mode; no test measures that a chain of merged
+guards stays linear (the functions are O(1) by construction).
+
+Shortcuts that count as failure, beside the common lists: converting
+`simplify_if_head` or the `IfLists` impl; a then-block taken apart into
+a list in `merge_tail_guard`; `self.scratch` given to a rule; a
+signature changed (`if_statement`, `unnest`, `place`,
+`single_assignment`, `merge_assignments`, `assignment_statement` and
+`drop_pure_effect` are called from other builders' files).
 ```
 
 ## 12. Risks and what was not measured
