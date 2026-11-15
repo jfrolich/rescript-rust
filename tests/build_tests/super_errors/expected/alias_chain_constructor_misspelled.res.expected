@@ -1,0 +1,16 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/alias_chain_constructor_misspelled.res[0m:[2m8:20-25[0m
+
+  6 [2m│[0m }
+  7 [2m│[0m module O = Outer
+  [1;31m8[0m [2m│[0m let v: Outer.R.t = [1;31mO.A.Bb[0m
+  9 [2m│[0m 
+
+  [1;33mThe variant constructor O.A.Bb can't be found.[0m
+  
+  - If it's defined in another module or file, bring it into scope by:
+    - Prefixing it with said module name: [1;33mTheModule.O.A.Bb[0m
+    - Or specifying its type: [1;33mlet theValue: TheModule.theType = O.A.Bb[0m
+  - Constructors and modules are both capitalized. Did you want the latter?
+    Then instead of [2mlet foo = Bar[0m, try [1;33mmodule Foo = Bar[0m.
