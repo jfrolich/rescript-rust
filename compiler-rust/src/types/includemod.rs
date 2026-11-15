@@ -4588,40 +4588,41 @@ fn type_exprs_equal_for_inclusion_inner(
             },
         ) => {
             // OCaml compiler/ml/includecore.ml routes these comparisons through
-            // Ctype.equal. Its package branch calls complete_type_list twice
-            // (compiler/ml/ctype.ml:3048-3053, 2044-2047), allocating one
-            // hidden `Pkg` module per side before comparing package arguments.
-            let impl_lids = &type_ctx.package_lids(impl_lids);
-            let sig_lids = &type_ctx.package_lids(sig_lids);
-            let labels_complete = env.is_none_or(|env| {
-                let sig_complete = crate::types::ctype::package_type_lists_have_ocaml_same_label_completion_side_effect(
-                    type_ctx,
-                    Some(env),
-                    ModuleType::MtyIdent(*sig_path),
-                    impl_lids,
-                    sig_lids,
-                );
-                let impl_complete = crate::types::ctype::package_type_lists_have_ocaml_same_label_completion_side_effect(
-                    type_ctx,
-                    Some(env),
-                    ModuleType::MtyIdent(*impl_path),
-                    sig_lids,
-                    impl_lids,
-                );
-                sig_complete && impl_complete
-            });
-            labels_complete
-                && impl_path.same(sig_path)
-                && impl_args.len() == sig_args.len()
-                && type_ctx
-                    .type_list(impl_args)
-                    .iter()
-                    .zip(type_ctx.type_list(sig_args).iter())
-                    .all(|(impl_arg, sig_arg)| {
-                        type_exprs_equal_for_inclusion_inner(
-                            type_ctx, env, param_map, impl_arg, sig_arg, seen,
-                        )
-                    })
+            // Ctype.equal, whose package arm is `unify_package`
+            // (compiler/ml/ctype.ml:3252-3257).
+            let empty_env;
+            let env_or_empty = match env {
+                Some(env) => env,
+                None => {
+                    empty_env = Env::empty();
+                    &empty_env
+                }
+            };
+            crate::types::ctype::unify_package(
+                type_ctx,
+                env_or_empty,
+                (
+                    type_ctx.get_level(impl_ty),
+                    *impl_path,
+                    *impl_lids,
+                    *impl_args,
+                ),
+                (type_ctx.get_level(sig_ty), *sig_path, *sig_lids, *sig_args),
+                |impl_args, sig_args| {
+                    let equal = impl_args.len() == sig_args.len()
+                        && impl_args.iter().zip(sig_args).all(|(&impl_arg, &sig_arg)| {
+                            type_exprs_equal_for_inclusion_inner(
+                                type_ctx, env, param_map, impl_arg, sig_arg, seen,
+                            )
+                        });
+                    if equal {
+                        Ok(())
+                    } else {
+                        Err(crate::types::TypeError::Unify(vec![]))
+                    }
+                },
+            )
+            .is_some_and(|result| result.is_ok())
         }
         (TypeDesc::Tvariant(impl_row), TypeDesc::Tvariant(sig_row)) => {
             // OCaml compiler/ml/includecore.ml:87-151 compares type manifests

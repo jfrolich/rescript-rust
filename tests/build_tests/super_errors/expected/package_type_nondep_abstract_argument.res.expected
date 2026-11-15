@@ -1,0 +1,16 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/package_type_nondep_abstract_argument.res[0m:[2m5:12-7:26[0m
+
+  3 [2m│[0m let p: module(T)}
+  4 [2m│[0m module F = (X: P) => {let p = X.p}
+  [1;31m5[0m [2m│[0m module R = [1;31mF(({module type T = S[0m
+  [1;31m6[0m [2m│[0m [1;31mmodule M = {let x = 1}[0m
+  [1;31m7[0m [2m│[0m [1;31mlet p = module(M: T)}: P))[0m
+  8 [2m│[0m 
+
+  This functor has type
+  (X: P) => {
+    let p: module(X.T)
+  } The parameter cannot be eliminated in the result type.
+   Bind the argument to a module identifier.

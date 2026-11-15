@@ -6203,6 +6203,42 @@ All six candidates hit U9. U9-1 and U9-6 reject valid constraint removal in Rust
 
 Smallest witness found: **U9-1** (full source and both outputs below).
 
+#### Fixed
+
+The Rust `subtype_rec` (`compiler-rust/src/types/ctype.rs:5957`) had no arm
+for two package types: its fallback recorded the pair, and enforcing it
+unified the two packages, which asked for the same constraint labels and the
+same path. `d958d98c6` adds OCaml's arm (`compiler/ml/ctype.ml:4077-4104`) as
+`subtype_package` (`ctype.rs:6416`). It completes both constraint lists with
+`complete_type_list` (`ctype.rs:7672`, OCaml `ctype.ml:2135-2169`), records
+one constraint per label of the completed target, and for different paths
+runs a speculative unification plus `Typemod.package_subtype`
+(`typemod.rs:8488`, OCaml `typemod.ml:1224-1236`), comparing the paths with
+`eq_package_path`/`normalize_package_path` (`ctype.rs:7802`, `7778`; OCaml
+`ctype.ml:2110-2112`, `571-582`). U9-1 and U9-6 are now accepted with OCaml's
+JavaScript (`tests/tests/src/package_type_subtype`), and U9-3 prints OCaml's
+text (super_errors `package_type_subtype_constraint_mismatch`). U9-2, U9-4
+and U9-5 agreed before and still agree; U9-4 is
+`package_type_subtype_constraint_added`.
+
+Twenty more coercions were run through both compilers. These differed before
+and agree now: dropping the first of two constraints, a nested label
+(`S with type M.t = int`), another module type path with the same
+signature, with and without a constraint, a module type abbreviation, a
+module alias, a module type in a nested module, a functor result, and two
+applications of one functor. All are in `package_type_subtype`. The missing
+coercion hint of `(x: module(S with type t = int)): module(S) => x` also
+came from this cause (super_errors `package_type_subtype_coercion_hint`,
+`34b2adf70`). Two further candidates differed through unification itself
+rather than this arm, and are fixed by `8c2e46d70` (see U10's last
+paragraph): `module(S with type t = int) :> module(T with type t =
+string)` for two module types (`package_type_subtype_other_path_mismatch`)
+and the annotation `(x: module(S)): module(T) => x`. These must be rejected
+and agree before and after: adding a constraint, dropping a value from the
+signature, a module type with an extra value, an absent constraint label, a
+manifest that depends on another type of the signature, and a constraint of
+an already manifest type.
+
 #### U9-1 — WITNESS
 
 `Main.res`:
@@ -6466,6 +6502,67 @@ Eliminating an anonymous functor argument must encounter a package path free in 
 U10-1, U10-2, U10-3 and U10-7 hit U10. Type-only results still agree, but retaining a package value in U10-7 exposes rejection of parameter elimination. U10-4 is a parser failure in both compilers; replacing semicolon separators with newlines produced U10-7.
 
 Smallest witness found: **U10-7** (full source and both outputs below).
+
+#### Fixed
+
+The `Tpackage` arm of the Rust `nondep_type_rec`
+(`compiler-rust/src/types/ctype.rs:14898` after the fix) returned `None` for
+any package path free in the eliminated parameter. OCaml first normalizes it
+(`compiler/ml/ctype.ml:4443-4446`, `normalize_package_path` at 571-582) and
+fails only when the normalized path still depends on the parameter.
+`bff7c8c6f` does the same: with the argument bound to the parameter, `X.T`
+normalizes to `S`. U10-7 now builds with OCaml's JavaScript
+(`tests/tests/src/package_type_nondep`). U10-1 to U10-6 agreed before and
+still agree (U10-1 is in the same fixture).
+
+Ten more applications were run through both compilers. These differed
+before and agree now: an abstract module type in the parameter, a module
+type in a nested module of the parameter, two functors (`G(Y) = F(Y)`), a
+constrained package, a chain of module type abbreviations, the parameter's
+module type defined through another abbreviation and the unpacked result
+used afterwards, and the result used with an annotation and a coercion. All
+are in `package_type_nondep`. An argument constrained to an abstract module
+type is rejected by both before and after (super_errors
+`package_type_nondep_abstract_argument`).
+
+Open: a functor result that declares `module type T = X.T` next to the
+value is still rejected by Rust; OCaml accepts it:
+
+```rescript
+module type S = {let x: int}
+module F = (X: {module type T = S
+let p: module(T)}) => {
+  module type T = X.T
+  let p = X.p
+}
+module R = F({module type T = S
+module M = {let x = 1}
+let p = module(M: T)})
+```
+
+A temporary trace shows the failure comes from the `MtyIdent` arm of `nondep_mty` (`compiler-rust/src/types/typemod.rs:2331`):
+it returns `None` for `X.T`, where OCaml expands the path with
+`Env.find_modtype_expansion` (`compiler/ml/mtype.ml:110-113`) and, in a
+covariant position, falls back to an abstract module type declaration
+(`mtype.ml:148-158`). That function is `Mtype.nondep_supertype`, not the
+`nondep_type` of this place.
+
+Unifying, comparing and including two package types had the same kind of
+fault as the U9 arm. Unification, `moregen`, `Ctype.equal` and the
+inclusion check's type equality asked for the same labels and the same path
+before relating the constraint types. `8c2e46d70` routes all four through
+`unify_package` (`ctype.rs:7825`, OCaml `ctype.ml:2172-2181`; the arms at
+`ctype.rs:9008`, `10411`, `11580`, `includemod.rs:4591`; OCaml 2416-2424,
+2969-2974, 3252-3257). It completes both lists, relates the types first,
+then accepts the same normalized path or mutual `package_subtype`. Programs
+OCaml accepts that Rust rejected are in `tests/tests/src/package_type_unify`
+and `package_type_unify_interface` (another module type with the same
+signature in an annotation, an array, through an abbreviation, a value and a
+type manifest against an interface). The error for two such module types
+with mismatched constraints now names the incompatible parts as OCaml does
+(super_errors `package_type_unify_constraint_mismatch`).
+`package_type_unify_missing_value` (only one module type included in the
+other) was rejected before and still is.
 
 #### U10-1 — outputs agree
 

@@ -1,0 +1,17 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/package_type_unify_constraint_mismatch.res[0m:[2m5:77[0m
+
+  3 [2m│[0m module type T = {type t
+  4 [2m│[0m let x: t}
+  [1;31m5[0m [2m│[0m let f = (x: module(S with type t = int)): module(T with type t = string)
+    [2m│[0m [1;31m => x[0m
+  6 [2m│[0m 
+
+  This has type: [1;31mmodule(S with type t = int)[0m
+  But it's expected to have type: [1;33mmodule(T with type t = string)[0m
+  
+  The incompatible parts:
+    [1;31mint[0m vs [1;33mstring[0m
+  
+  You can convert [1;33mint[0m to [1;33mstring[0m with [1;33mInt.toString[0m.
