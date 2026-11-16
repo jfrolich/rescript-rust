@@ -1,0 +1,1 @@
+- Nightlies are published only when every platform built; a failed or cancelled platform build leaves the commit unpublished until its jobs are re-run.
