@@ -1,6 +1,6 @@
 //! Loop statements (BACKEND_LOWERING §3.11).
 use super::*;
-use crate::bir::{ListId, Op, StrId};
+use crate::bir::{Op, StrId};
 use crate::emit::row::flag;
 use super::js_stmt::Range;
 use crate::js_ir::ForDirection;
@@ -10,10 +10,10 @@ use crate::js_ir::ForDirection;
 pub(super) struct Loop(pub u32);
 
 /// Saved child outputs in arena blocks, not per-loop owned collections.
-pub(super) struct Plan {
+pub(super) struct Plan<L> {
     node: NodeId,
     nodes: [Option<NodeId>; 3],
-    blocks: [Option<ListId>; 3],
+    blocks: [Option<L>; 3],
     values: [Option<NodeId>; 2],
     start: Span,
     var: Option<VarId>,
@@ -83,7 +83,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             self.loops[frame.0 as usize].values[index] = out.value;
         }
         let span = self.statements.since(Span { start: out.stmts.start, len: 0 });
-        let list = B::list_id(self.statements.take_list(&mut self.js, &mut self.arena, span));
+        let list = self.statements.take_list(&mut self.js, &mut self.arena, span);
         self.loops[frame.0 as usize].blocks[index] = Some(list);
         if index == 0 {
             let plan = &self.loops[frame.0 as usize];
@@ -118,8 +118,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// O(s): attach s saved prelude statements in execution order. Each
     /// prelude is replayed once; nested loop bodies remain one statement.
-    fn push_loop_list(&mut self, list: ListId) {
-        let list = B::list_from(list);
+    fn push_loop_list(&mut self, list: B::L) {
         for index in 0..self.js.len(&self.arena, list) {
             let statement = self.js.take_at(&mut self.arena, list, index);
             self.statements.push(statement);
@@ -142,7 +141,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             None => self.js.undefined(&mut self.arena, false),
         };
         let statement = if op == Op::While {
-            let prelude = B::list_from(blocks[0].unwrap());
+            let prelude = blocks[0].unwrap();
             if self.js.len(&self.arena, prelude) != 0 {
                 let negated = self.js.not(&mut self.arena, end);
                 let mark = self.statements.mark();
@@ -155,15 +154,15 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 self.push_loop_list(blocks[0].unwrap());
                 self.statements.push(guard);
                 self.push_loop_list(blocks[1].unwrap());
-                let list = B::list_id(self.statements.take_list(&mut self.js, &mut self.arena, self.statements.since(mark)));
+                let list = self.statements.take_list(&mut self.js, &mut self.arena, self.statements.since(mark));
                 let condition = self.js.boolean(&mut self.arena, true);
-                self.js.while_(&mut self.arena, condition, B::list_from(list), label)
+                self.js.while_(&mut self.arena, condition, list, label)
             } else {
-                self.js.while_(&mut self.arena, end, B::list_from(blocks[1].unwrap()), label)
+                self.js.while_(&mut self.arena, end, blocks[1].unwrap(), label)
             }
         } else if matches!(op, Op::ForOf | Op::ForAwaitOf) {
             self.push_loop_list(blocks[0].unwrap());
-            let body = B::list_from(blocks[1].unwrap());
+            let body = blocks[1].unwrap();
             self.js.for_of(&mut self.arena, var.unwrap(), end, body, label, op == Op::ForAwaitOf)
         } else {
             let var = var.unwrap();
@@ -171,7 +170,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 Some(value) => B::from_node(value),
                 None => self.js.undefined(&mut self.arena, false),
             };
-            let end_block = B::list_from(blocks[0].unwrap());
+            let end_block = blocks[0].unwrap();
             self.push_loop_list(blocks[1].unwrap());
             let hold = self.js.len(&self.arena, end_block) != 0
                 && !self.js.has(&self.arena, B::of(&init), flag::DELAY_SAFE);
@@ -184,7 +183,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             };
             self.push_loop_list(blocks[0].unwrap());
             let range = Range { init, end, direction };
-            self.js.for_range(&mut self.arena, var, range, B::list_from(blocks[2].unwrap()), label)
+            self.js.for_range(&mut self.arena, var, range, blocks[2].unwrap(), label)
         };
         self.statements.push(statement);
         let unit = self.js.undefined(&mut self.arena, false);
@@ -290,7 +289,7 @@ mod tests {
     #[test]
     fn loop_plan_layout() {
         assert_eq!(std::mem::size_of::<Loop>(), 4);
-        assert_eq!(std::mem::size_of::<Plan>(), 96);
+        assert_eq!(std::mem::size_of::<Plan<crate::bir::ListId>>(), 96);
     }
 
     #[test]
