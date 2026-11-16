@@ -15603,3 +15603,5400 @@ No additional reference-backed compiler difference outside M6/M7 was established
 ### Gates and limits
 
 The OCaml build, fresh-target thin-LTO Rust release build, runtime reference build and named fixture parity calibration passed. All candidate invocations are recorded above; no whole compiler test suite was run, no manifest was touched, and no compiler/test/fixture source changed. The permitted single successful release build contains disabled-by-default reachability markers; this is not a release-performance comparison. No two-binary application benchmark or signature comparison was run: this documentation-only task provides no changed compiler candidate, and the permitted build budget was used for the witness-search executable. CI is a separate publication gate; its result is reported on the pull request rather than asserted here.
+
+## Fifth round: patterns, equations and compatibility
+
+### Summary
+
+| Place | Verdict | Number of candidates | Witness name |
+| --- | --- | ---: | --- |
+| G1 | REACHED, NO DIFFERENCE SEEN | 16 | — |
+| G2 | REACHED, NO DIFFERENCE SEEN | 8 | — |
+| G3 | WITNESS | 8 | row-closed; row-disjoint |
+| G4 | REACHED, NO DIFFERENCE SEEN | 8 | — |
+| G5 | REACHED, NO DIFFERENCE SEEN | 8 | — |
+| G6 | WITNESS | 8 | abstract-index |
+| G7 | REACHED, NO DIFFERENCE SEEN | 11 | — |
+| G8 | REACHED, NO DIFFERENCE SEEN | 16 | — |
+| G9 | REACHED, NO DIFFERENCE SEEN | 8 | — |
+| G10 | REACHED, NO DIFFERENCE SEEN | 16 | — |
+
+### Scope, calibration and reproducibility
+
+Both compilers are from `5fd5b73eb2`. This is a search, not a proof of
+unification equivalence: REACHED certifies the operations specified below,
+not every arm or every state precondition in the inventory. There are 107
+numbered candidates, all parsed, plus the explicitly listed reduction trials.
+No compiler source was changed, including for tracing. No OCaml internal
+error was observed. No additional unrelated departure was found on the way.
+
+The existing third-round examples and fourth-round summary informed the
+module-abstraction and diagnostic probes. Syntax was checked against
+`gadt_rec_missing.res`, `warning_62_constraint_on_gadt.res`,
+`gadt_partial_match_failure_test.res`, `gadt_refined_option_pattern_test.res`
+and `gadt_test.res` before writing the candidates.
+
+Build commands (one heavy build at a time):
+
+```sh
+export PATH="$HOME/.cargo/bin:$PATH"
+CARGO_PROFILE_RELEASE_LTO=thin cargo build --release --manifest-path rewatch/Cargo.toml
+eval $(opam env)
+dune build --root .
+scripts/rust_compiler_shims.sh release
+RESCRIPT_RUNTIME="$PWD/packages/@rescript/runtime" \
+  rewatch/target/release/rescript build-reference \
+  --bsc "$PWD/_build/install/default/bin/bsc" packages/@rescript/runtime
+```
+
+Rust finished successfully, with the existing unused `console::style` import
+warning in rewatch. Dune exited 0 without output. Runtime preparation printed:
+
+```text
+OCaml reference build: 113 of 113 modules built
+```
+
+Each candidate has a fresh directory under `${TMPDIR:-/tmp}`, containing the
+pasted `Main.res`, an empty `src/` directory, and this `rescript.json`:
+
+```json
+{"name":"pattern-search","sources":["."]}
+```
+
+With `ROOT` the checkout's absolute path and the working directory the
+candidate's project, every candidate uses the fixture commands from
+`scripts/test_error_output_parity.sh`, independently:
+
+```sh
+timeout 10 "$ROOT/_build/install/default/bin/bsc" -w +A -bs-jsx 4 -color never Main.res >ocaml.stdout 2>ocaml.stderr
+timeout 10 "$ROOT/rewatch/target/release/bsc" -w +A -bs-jsx 4 -color never Main.res >rust.stdout 2>rust.stderr
+```
+
+Exit status and complete stderr are compared. With these flags generated
+JavaScript is stdout, not a file under `src/`: accepted candidates compare
+stdout after removing blank lines. All pasted outputs are complete, with
+terminal SGR escapes stripped (`sed 's/\x1b\[[0-9;]*m//g'`); empty streams
+are empty fences, not omitted output. Candidate runs are not debugger runs.
+
+Calibration is `tests/build_tests/super_errors/fixtures/warning_62_constraint_on_gadt.res`
+copied to `Main.res`. Both exit 2, with empty stdout and identical stderr:
+
+```rescript
+type rec t<'a> =
+  | Int(int): t<int>
+  | Bool(bool): t<bool> constraint 'a = int
+```
+
+```text
+
+  Warning number 62
+  Main.res:3:25-43
+
+  1 │ type rec t<'a> =
+  2 │   | Int(int): t<int>
+  3 │   | Bool(bool): t<bool> constraint 'a = int
+  4 │ 
+
+  Type constraints do not apply to GADT cases of variant types.
+
+
+  We've found a bug for you!
+  Main.res:3:17-23
+
+  1 │ type rec t<'a> =
+  2 │   | Int(int): t<int>
+  3 │   | Bool(bool): t<bool> constraint 'a = int
+  4 │ 
+
+  Constraints are not satisfied in this type.
+  Type t<bool> should be an instance of t<int>
+
+```
+
+
+The fixture itself was also run with the parity script:
+
+```sh
+PARITY_JOBS=1 scripts/test_error_output_parity.sh --release --compiler-only warning_62_constraint_on_gadt
+```
+
+```text
+Compiler diagnostics parity
+
+Error output parity summary
+  total:  1
+  pass:   1
+  fail:   0
+```
+
+### Reachability method
+
+GDB breakpoints use the release executable's symbol table; no rebuild or
+instrumentation patch is involved. The debugger counts function entries,
+classifying a hit as `:gadt` only if its current stack contains
+`unify_pattern_types_gadt`, otherwise `:other`. `:other` alone is not a proof
+of Expression mode. Error runs can execute a second diagnostic attempt;
+counts include it. A missing key means zero hits. The following script was
+used as `trace.py` in separate invocations (it writes only scratch files):
+
+```python
+import gdb,json,collections,os
+counts=collections.Counter()
+class Probe(gdb.Breakpoint):
+ def __init__(self,symbol,label):
+  super().__init__(symbol,internal=True);self.label=label
+ def stop(self):
+  f=gdb.newest_frame();gadt=False
+  while f:
+   if 'unify_pattern_types_gadt' in (f.name() or ''):gadt=True
+   f=f.older()
+  counts[self.label+(':gadt' if gadt else ':other')]+=1
+  return False
+for symbol,label in [('unify','unify'),('unify_types::{closure#3}','arrow'),('unify_types::{closure#4}','tuple'),('unify_rows','rows'),('is_instantiable','instantiable'),('add_gadt_equation','equation'),('unify_same_path_constructor_args','same_path'),('occur_check','occur'),('mcomp_rec','mcomp'),('mcomp_enter_poly','mcomp_poly')]:
+ try:Probe('rescript_compiler::types::ctype::'+symbol,label)
+ except Exception as e: print('PROBE ERROR',label,str(e))
+Probe('rescript_compiler::types::typecore::unify_pattern_types_gadt','gadt')
+Probe("*'rescript_compiler::types::ctype::unify'+426",'pair_lookup')
+Probe("*'rescript_compiler::types::ctype::unify'+551",'pair_compare')
+Probe("*'rescript_compiler::types::ctype::occur_check'+177",'occur_shortcut')
+gdb.execute('run',to_string=True)
+open('trace.json','w').write(json.dumps(dict(counts),sort_keys=True))
+print('TRACE',json.dumps(dict(counts),sort_keys=True))
+```
+
+```sh
+timeout 15 gdb -q -batch -ex 'set pagination off' -x "$TRACE_SCRIPT" \
+  --args "$ROOT/rewatch/target/release/rescript" bsc \
+  -w +A -bs-jsx 4 -color never Main.res
+```
+
+The three instruction-offset probes are specific to this thin-LTO build.
+They were identified with `disassemble 'rescript_compiler::types::ctype::unify'`
+and `disassemble 'rescript_compiler::types::ctype::occur_check'`:
+`unify+426` tests the pair-table size after ruling out identical representatives;
+`unify+551` branches after comparing the stored key; `occur_check+177` is the
+successful shortcut return after testing the cheap walk's result. The pair
+comparison probe does not claim that the comparison succeeded.
+
+### G1 — REACHED, NO DIFFERENCE SEEN
+
+Unify two structural indices of `Refl` under locally abstract binders so that Pattern mode enters the arrow, tuple, row or object arm of `unify_types` (Rust ctype.rs:8660–9105; OCaml ctype.ml:2328–2424). Check the branch body both when it uses the resulting equality and when it demands an incompatible `int`, including the type names in that error.
+
+G1-1/6 hit the arrow closure, G1-2/5 the tuple closure, and G1-3/7 row unification under `unify_pattern_types_gadt`; all agree. G1-9–16 are controls with a structural index against one abstract index: they add an equation, but do not establish that the structural-vs-structural arm ran. Object cases are included, but no separate object-arm breakpoint was installed. Nil, package and polymorphic-type arms are not individually certified by this set.
+
+#### G1-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<a => a, b => b>, a) => b = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:gadt": 1, "arrow:other": 7, "equation:gadt": 1, "gadt:gadt": 1, "instantiable:gadt": 2, "occur:gadt": 1, "occur:other": 21, "occur_shortcut:gadt": 1, "occur_shortcut:other": 21, "pair_compare:other": 1, "pair_lookup:gadt": 5, "pair_lookup:other": 53, "same_path:gadt": 2, "same_path:other": 4, "unify:gadt": 5, "unify:other": 57}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(e, v) {
+  return v;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G1-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<(a, a), (b, b)>, a) => b = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 1, "gadt:gadt": 1, "instantiable:gadt": 2, "occur:gadt": 1, "occur:other": 21, "occur_shortcut:gadt": 1, "occur_shortcut:other": 21, "pair_compare:other": 1, "pair_lookup:gadt": 5, "pair_lookup:other": 53, "same_path:gadt": 2, "same_path:other": 4, "tuple:gadt": 1, "tuple:other": 4, "unify:gadt": 5, "unify:other": 57}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(e, v) {
+  return v;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G1-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<[#a(a)], [#a(b)]>, a) => b = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 1, "gadt:gadt": 1, "instantiable:gadt": 2, "occur:other": 21, "occur_shortcut:other": 21, "pair_compare:other": 1, "pair_lookup:gadt": 4, "pair_lookup:other": 49, "rows:gadt": 1, "rows:other": 4, "same_path:gadt": 1, "same_path:other": 4, "unify:gadt": 4, "unify:other": 51}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(e, v) {
+  return v;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G1-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<{"x": a}, {"x": b}>, a) => b = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 1, "gadt:gadt": 1, "instantiable:gadt": 2, "occur:other": 25, "occur_shortcut:other": 25, "pair_compare:other": 2, "pair_lookup:gadt": 6, "pair_lookup:other": 57, "same_path:gadt": 1, "same_path:other": 4, "unify:gadt": 7, "unify:other": 63}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(e, v) {
+  return v;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G1-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<(a, a), (b, b)>, b) => int = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 4, "occur:gadt": 2, "occur:other": 22, "occur_shortcut:gadt": 2, "occur_shortcut:other": 22, "pair_lookup:gadt": 10, "pair_lookup:other": 68, "same_path:gadt": 4, "same_path:other": 2, "tuple:gadt": 2, "unify:gadt": 10, "unify:other": 68}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:82
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a b. (eq<(a, a), (b, b)>, b) => int = (e, v) => switch e { |
+    │  Refl => v }
+  3 │ 
+
+  This has type: b (defined as a)
+  But this switch is expected to return: int
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G1-6 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<a => a, b => b>, b) => int = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:gadt": 2, "arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 4, "occur:gadt": 2, "occur:other": 22, "occur_shortcut:gadt": 2, "occur_shortcut:other": 22, "pair_lookup:gadt": 10, "pair_lookup:other": 68, "same_path:gadt": 4, "same_path:other": 2, "unify:gadt": 10, "unify:other": 68}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:82
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a b. (eq<a => a, b => b>, b) => int = (e, v) => switch e { |
+    │  Refl => v }
+  3 │ 
+
+  This has type: b (defined as a)
+  But this switch is expected to return: int
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G1-7 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<[#a(a)], [#a(b)]>, b) => int = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 4, "occur:other": 22, "occur_shortcut:other": 22, "pair_lookup:gadt": 8, "pair_lookup:other": 64, "rows:gadt": 2, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 8, "unify:other": 64}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:84
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a b. (eq<[#a(a)], [#a(b)]>, b) => int = (e, v) => switch e {
+    │  | Refl => v }
+  3 │ 
+
+  This has type: b (defined as a)
+  But this switch is expected to return: int
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G1-8 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<{"x": a}, {"x": b}>, b) => int = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 4, "occur:other": 22, "occur_shortcut:other": 22, "pair_compare:gadt": 2, "pair_lookup:gadt": 12, "pair_lookup:other": 64, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 14, "unify:other": 64}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:86
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a b. (eq<{"x": a}, {"x": b}>, b) => int = (e, v) => switch e
+    │  { | Refl => v }
+  3 │ 
+
+  This has type: b (defined as a)
+  But this switch is expected to return: int
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G1-9 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<a => a, b>, a) => b = (e, v) => switch e { | Refl => y => y }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 7, "equation:gadt": 1, "gadt:gadt": 1, "instantiable:gadt": 1, "occur:other": 23, "occur_shortcut:other": 23, "pair_compare:other": 3, "pair_lookup:gadt": 3, "pair_lookup:other": 55, "same_path:gadt": 1, "same_path:other": 3, "unify:gadt": 3, "unify:other": 58}
+```
+
+Both compilers, exit 0; stderr:
+
+```text
+
+  Warning number 27
+  Main.res:2:48
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a b. (eq<a => a, b>, a) => b = (e, v) => switch e { | Refl =
+    │ > y => y }
+
+  unused variable v.
+
+Fix this by:
+- Deleting the variable if it's not used anymore.
+- Prepending the variable name with `_` (like `_v`) to ignore that the variable is unused.
+- Using the variable somewhere.
+
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(e, v) {
+  return y => y;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G1-10 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<(a, a), b>, a) => b = (e, v) => switch e { | Refl => (v, v) }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 1, "gadt:gadt": 1, "instantiable:gadt": 1, "occur:other": 19, "occur_shortcut:other": 19, "pair_compare:other": 2, "pair_lookup:gadt": 3, "pair_lookup:other": 53, "same_path:gadt": 1, "same_path:other": 3, "tuple:other": 3, "unify:gadt": 3, "unify:other": 56}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(e, v) {
+  return [
+    v,
+    v
+  ];
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G1-11 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<[#a(a)], b>, a) => b = (e, v) => switch e { | Refl => #a(v) }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 1, "gadt:gadt": 1, "instantiable:gadt": 1, "occur:other": 18, "occur_shortcut:other": 18, "pair_compare:other": 1, "pair_lookup:gadt": 3, "pair_lookup:other": 47, "rows:other": 2, "same_path:gadt": 1, "same_path:other": 3, "unify:gadt": 3, "unify:other": 50}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(e, v) {
+  return {
+    NAME: "a",
+    VAL: v
+  };
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G1-12 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<{"x": a}, b>, a) => b = (e, v) => switch e { | Refl => {"x": v} }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 1, "gadt:gadt": 1, "instantiable:gadt": 1, "occur:other": 22, "occur_shortcut:other": 22, "pair_compare:other": 3, "pair_lookup:gadt": 3, "pair_lookup:other": 54, "same_path:gadt": 1, "same_path:other": 3, "unify:gadt": 3, "unify:other": 59}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(e, v) {
+  return {
+    x: v
+  };
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G1-13 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<(a, a), b>, b) => int = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 2, "occur:other": 22, "occur_shortcut:other": 22, "pair_compare:gadt": 1, "pair_lookup:gadt": 6, "pair_lookup:other": 66, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 6, "unify:other": 66}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:77
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a b. (eq<(a, a), b>, b) => int = (e, v) => switch e { | Refl
+    │  => v }
+
+  This has type: b (defined as (a, a))
+  But this switch is expected to return: int
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G1-14 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<a => a, b>, b) => int = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 2, "occur:other": 22, "occur_shortcut:other": 22, "pair_compare:gadt": 1, "pair_lookup:gadt": 6, "pair_lookup:other": 67, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 6, "unify:other": 67}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:77
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a b. (eq<a => a, b>, b) => int = (e, v) => switch e { | Refl
+    │  => v }
+
+  This has type: b (defined as a => a)
+  But this switch is expected to return: int
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G1-15 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<[#a(a)], b>, b) => int = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 2, "occur:other": 22, "occur_shortcut:other": 22, "pair_lookup:gadt": 6, "pair_lookup:other": 64, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 6, "unify:other": 64}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:78
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a b. (eq<[#a(a)], b>, b) => int = (e, v) => switch e { | Ref
+    │ l => v }
+
+  This has type: b
+  But this switch is expected to return: int
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G1-16 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<{"x": a}, b>, b) => int = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 2, "occur:other": 22, "occur_shortcut:other": 22, "pair_compare:gadt": 1, "pair_compare:other": 1, "pair_lookup:gadt": 6, "pair_lookup:other": 64, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 6, "unify:other": 64}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:79
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a b. (eq<{"x": a}, b>, b) => int = (e, v) => switch e { | Re
+    │ fl => v }
+
+  This has type: b
+  But this switch is expected to return: int
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+### G2 — REACHED, NO DIFFERENCE SEEN
+
+Use a pattern equality again in an expression annotation, a nested match or a let pattern to exercise `unify` in both contexts (Rust ctype.rs:7978–7987; OCaml ctype.ml:2205–2214). Check that repeated annotations still bind or reject the expression rather than accepting a stale assumed pair.
+
+All eight reach the pair-table lookup both under GADT unification and outside it; the traces report `pair_lookup`. `pair_compare` is a hash-key comparison, not proof of an equal-key hit or of a pair surviving from Pattern into Expression mode. These programs establish execution of the differing lookup code, not a stale-pair lifetime counterexample.
+
+#### G2-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<a, b>, a) => b = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 1, "gadt:gadt": 1, "instantiable:gadt": 2, "occur:other": 17, "occur_shortcut:other": 17, "pair_compare:other": 4, "pair_lookup:gadt": 3, "pair_lookup:other": 45, "same_path:gadt": 1, "same_path:other": 4, "unify:gadt": 3, "unify:other": 47}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(e, v) {
+  return v;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G2-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<a, b>, a) => b = (e, v) => switch e { | Refl => {let z: b = v; z} }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 1, "gadt:gadt": 1, "instantiable:gadt": 2, "occur:other": 17, "occur_shortcut:other": 17, "pair_compare:other": 2, "pair_lookup:gadt": 3, "pair_lookup:other": 48, "same_path:gadt": 1, "same_path:other": 4, "unify:gadt": 3, "unify:other": 50}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(e, v) {
+  return v;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G2-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<a, b>, a) => b = (e, v) => switch e { | Refl => {let z: b = v; let bad: int = z; bad} }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 4, "occur:other": 26, "occur_shortcut:other": 26, "pair_compare:other": 2, "pair_lookup:gadt": 6, "pair_lookup:other": 73, "same_path:gadt": 2, "same_path:other": 4, "unify:gadt": 6, "unify:other": 73}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:100
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a b. (eq<a, b>, a) => b = (e, v) => switch e { | Refl => {le
+    │ t z: b = v; let bad: int = z; bad} }
+  3 │ 
+
+  This has type: b (defined as a)
+  But it's expected to have type: int
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G2-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<a, b>, a) => b = (e, v) => switch e { | Refl => {let z: b = v; let bad: string = z; bad} }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 4, "occur:other": 26, "occur_shortcut:other": 26, "pair_compare:other": 2, "pair_lookup:gadt": 6, "pair_lookup:other": 73, "same_path:gadt": 2, "same_path:other": 4, "unify:gadt": 6, "unify:other": 73}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:103
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a b. (eq<a, b>, a) => b = (e, v) => switch e { | Refl => {le
+    │ t z: b = v; let bad: string = z; bad} }
+  3 │ 
+
+  This has type: b (defined as a)
+  But it's expected to have type: string
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G2-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<a, b>, b) => a = (e, v) => switch e { | Refl => switch e { | Refl => v } }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 1, "gadt:gadt": 2, "instantiable:gadt": 2, "occur:gadt": 1, "occur:other": 17, "occur_shortcut:gadt": 1, "occur_shortcut:other": 17, "pair_compare:other": 3, "pair_lookup:gadt": 6, "pair_lookup:other": 49, "same_path:gadt": 3, "same_path:other": 4, "unify:gadt": 6, "unify:other": 51}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(e, v) {
+  return v;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G2-6 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<a, b>, b) => a = (e, v) => switch e { | Refl => {let Refl = e; v} }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 1, "gadt:gadt": 2, "instantiable:gadt": 2, "occur:gadt": 1, "occur:other": 17, "occur_shortcut:gadt": 1, "occur_shortcut:other": 17, "pair_compare:other": 3, "pair_lookup:gadt": 6, "pair_lookup:other": 49, "same_path:gadt": 3, "same_path:other": 4, "unify:gadt": 6, "unify:other": 51}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(e, v) {
+  return v;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G2-7 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<a, b>, b) => a = (e, v) => switch e { | Refl => {let z: a = v; z} }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 1, "gadt:gadt": 1, "instantiable:gadt": 2, "occur:other": 17, "occur_shortcut:other": 17, "pair_compare:other": 2, "pair_lookup:gadt": 3, "pair_lookup:other": 48, "same_path:gadt": 1, "same_path:other": 4, "unify:gadt": 3, "unify:other": 50}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(e, v) {
+  return v;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G2-8 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<a, b>, b) => a = (e, v) => switch e { | Refl => {let z: a = v; z + 1} }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 4, "occur:other": 22, "occur_shortcut:other": 22, "pair_compare:other": 2, "pair_lookup:gadt": 6, "pair_lookup:other": 69, "same_path:gadt": 2, "same_path:other": 4, "unify:gadt": 6, "unify:other": 69}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:85
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a b. (eq<a, b>, b) => a = (e, v) => switch e { | Refl => {le
+    │ t z: a = v; z + 1} }
+  3 │ 
+
+  This has type: a
+  But it's expected to have type: int
+
+```
+
+stdout (empty):
+
+```text
+```
+
+### G3 — WITNESS
+
+Match a result-indexed constructor whose polymorphic-variant row clashes with the scrutinee index, reaching Rust `unify_rows` in Pattern mode (ctype.rs:9019–9025) and OCaml’s recovery arm (ctype.ml:2400–2411). Compare the entire trace-derived error after the row clash, not just the accept/reject result.
+
+G3-1–4 and G3-7 differ; G3-5/6/8 agree. All eight hit `rows:gadt`. The two reduced witnesses below distinguish a missing closed-row tag from disjoint rows. Rust preserves extra row-detail advice where the OCaml recovery/reification/compatibility path emits only the outer mismatch; both reject.
+
+#### G3-1 — outputs differ
+
+`Main.res`:
+
+```rescript
+type rec t<_> = A: t<[#a]> | B: t<[#b]>
+let f = (x: t<[#a | #b]>) => switch x { | A => 0 | B => 1 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "occur:other": 10, "occur_shortcut:other": 10, "pair_lookup:gadt": 4, "pair_lookup:other": 40, "rows:gadt": 2, "same_path:gadt": 2, "same_path:other": 4, "unify:gadt": 4, "unify:other": 42}
+```
+
+Ocaml, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:43
+
+  1 │ type rec t<_> = A: t<[#a]> | B: t<[#b]>
+  2 │ let f = (x: t<[#a | #b]>) => switch x { | A => 0 | B => 1 }
+  3 │ 
+
+  This pattern matches values of type t<[#a]>
+  but a pattern was expected which matches values of type t<[#a | #b]>
+
+```
+
+stdout (empty):
+
+```text
+```
+
+Rust, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:43
+
+  1 │ type rec t<_> = A: t<[#a]> | B: t<[#b]>
+  2 │ let f = (x: t<[#a | #b]>) => switch x { | A => 0 | B => 1 }
+  3 │ 
+
+  This pattern matches values of type t<[#a]>
+  but a pattern was expected which matches values of type t<[#a | #b]>
+  
+  The first polymorphic variant is closed and doesn't include the constructor: #b.
+  
+  Possible solutions:
+  - Either make the first variant open so it can accept additional constructors. To do this, make sure the type starts with [> instead of [
+  - Or add the missing constructor to it.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G3-2 — outputs differ
+
+`Main.res`:
+
+```rescript
+type rec t<_> = A: t<[#a]> | B: t<[#b]>
+let f = (x: t<[> #a]>) => switch x { | A => 0 | B => 1 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 4, "occur:other": 10, "occur_shortcut:other": 10, "pair_compare:other": 2, "pair_lookup:gadt": 8, "pair_lookup:other": 40, "rows:gadt": 4, "same_path:gadt": 4, "same_path:other": 4, "unify:gadt": 8, "unify:other": 42}
+```
+
+Ocaml, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:49
+
+  1 │ type rec t<_> = A: t<[#a]> | B: t<[#b]>
+  2 │ let f = (x: t<[> #a]>) => switch x { | A => 0 | B => 1 }
+  3 │ 
+
+  This pattern matches values of type t<[#b]>
+  but a pattern was expected which matches values of type t<[#a]>
+
+```
+
+stdout (empty):
+
+```text
+```
+
+Rust, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:49
+
+  1 │ type rec t<_> = A: t<[#a]> | B: t<[#b]>
+  2 │ let f = (x: t<[> #a]>) => switch x { | A => 0 | B => 1 }
+  3 │ 
+
+  This pattern matches values of type t<[#b]>
+  but a pattern was expected which matches values of type t<[#a]>
+  
+  These polymorphic variants are incompatible - they share no common constructors.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G3-3 — outputs differ
+
+`Main.res`:
+
+```rescript
+type rec t<_> = A: t<[#a]> | B: t<[#b]>
+let f = (x: t<[< #a | #b]>) => switch x { | A => 0 | B => 1 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 4, "occur:other": 10, "occur_shortcut:other": 10, "pair_compare:other": 2, "pair_lookup:gadt": 8, "pair_lookup:other": 40, "rows:gadt": 4, "same_path:gadt": 4, "same_path:other": 4, "unify:gadt": 8, "unify:other": 42}
+```
+
+Ocaml, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:54
+
+  1 │ type rec t<_> = A: t<[#a]> | B: t<[#b]>
+  2 │ let f = (x: t<[< #a | #b]>) => switch x { | A => 0 | B => 1 }
+  3 │ 
+
+  This pattern matches values of type t<[#b]>
+  but a pattern was expected which matches values of type t<[#a]>
+
+```
+
+stdout (empty):
+
+```text
+```
+
+Rust, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:54
+
+  1 │ type rec t<_> = A: t<[#a]> | B: t<[#b]>
+  2 │ let f = (x: t<[< #a | #b]>) => switch x { | A => 0 | B => 1 }
+  3 │ 
+
+  This pattern matches values of type t<[#b]>
+  but a pattern was expected which matches values of type t<[#a]>
+  
+  These polymorphic variants are incompatible - they share no common constructors.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G3-4 — outputs differ
+
+`Main.res`:
+
+```rescript
+type rec t<_> = A: t<[#a]> | B: t<[#b]>
+let f = (x: t<[#a]>) => switch x { | A => 0 | B => 1 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 4, "occur:other": 10, "occur_shortcut:other": 10, "pair_lookup:gadt": 8, "pair_lookup:other": 40, "rows:gadt": 4, "same_path:gadt": 4, "same_path:other": 4, "unify:gadt": 8, "unify:other": 42}
+```
+
+Ocaml, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:47
+
+  1 │ type rec t<_> = A: t<[#a]> | B: t<[#b]>
+  2 │ let f = (x: t<[#a]>) => switch x { | A => 0 | B => 1 }
+  3 │ 
+
+  This pattern matches values of type t<[#b]>
+  but a pattern was expected which matches values of type t<[#a]>
+
+```
+
+stdout (empty):
+
+```text
+```
+
+Rust, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:47
+
+  1 │ type rec t<_> = A: t<[#a]> | B: t<[#b]>
+  2 │ let f = (x: t<[#a]>) => switch x { | A => 0 | B => 1 }
+  3 │ 
+
+  This pattern matches values of type t<[#b]>
+  but a pattern was expected which matches values of type t<[#a]>
+  
+  These polymorphic variants are incompatible - they share no common constructors.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G3-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = A: t<[#a(int)]> | B: t<[#a(string)]>
+let f = (x: t<[#a(int)]>) => switch x { | A => 0 | B => 1 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 4, "instantiable:gadt": 4, "mcomp:gadt": 2, "occur:other": 10, "occur_shortcut:other": 10, "pair_lookup:gadt": 12, "pair_lookup:other": 54, "rows:gadt": 4, "same_path:gadt": 4, "same_path:other": 4, "unify:gadt": 12, "unify:other": 56}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:52
+
+  1 │ type rec t<_> = A: t<[#a(int)]> | B: t<[#a(string)]>
+  2 │ let f = (x: t<[#a(int)]>) => switch x { | A => 0 | B => 1 }
+  3 │ 
+
+  This pattern matches values of type t<[#a(string)]>
+  but a pattern was expected which matches values of type t<[#a(int)]>
+  
+  Both polymorphic variants have the constructor #a, but their payload types are incompatible.
+  Make sure the payload types for #a match exactly in both polymorphic variants.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G3-6 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = A: t<[#a(int)]> | B: t<[#a(string)]>
+let f = (x: t<[#a(string)]>) => switch x { | A => 0 | B => 1 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 4, "mcomp:gadt": 2, "occur:other": 10, "occur_shortcut:other": 10, "pair_lookup:gadt": 6, "pair_lookup:other": 54, "rows:gadt": 2, "same_path:gadt": 2, "same_path:other": 4, "unify:gadt": 6, "unify:other": 56}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:46
+
+  1 │ type rec t<_> = A: t<[#a(int)]> | B: t<[#a(string)]>
+  2 │ let f = (x: t<[#a(string)]>) => switch x { | A => 0 | B => 1 }
+  3 │ 
+
+  This pattern matches values of type t<[#a(int)]>
+  but a pattern was expected which matches values of type t<[#a(string)]>
+  
+  Both polymorphic variants have the constructor #a, but their payload types are incompatible.
+  Make sure the payload types for #a match exactly in both polymorphic variants.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G3-7 — outputs differ
+
+`Main.res`:
+
+```rescript
+type rec t<_> = A: t<[#a(int)]> | B: t<[#a(string)]>
+let f = (x: t<[#a(int) | #b]>) => switch x { | A => 0 | B => 1 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "occur:other": 10, "occur_shortcut:other": 10, "pair_lookup:gadt": 4, "pair_lookup:other": 54, "rows:gadt": 2, "same_path:gadt": 2, "same_path:other": 4, "unify:gadt": 4, "unify:other": 56}
+```
+
+Ocaml, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:48
+
+  1 │ type rec t<_> = A: t<[#a(int)]> | B: t<[#a(string)]>
+  2 │ let f = (x: t<[#a(int) | #b]>) => switch x { | A => 0 | B => 1 }
+  3 │ 
+
+  This pattern matches values of type t<[#a(int)]>
+  but a pattern was expected which matches values of type t<[#a(int) | #b]>
+
+```
+
+stdout (empty):
+
+```text
+```
+
+Rust, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:48
+
+  1 │ type rec t<_> = A: t<[#a(int)]> | B: t<[#a(string)]>
+  2 │ let f = (x: t<[#a(int) | #b]>) => switch x { | A => 0 | B => 1 }
+  3 │ 
+
+  This pattern matches values of type t<[#a(int)]>
+  but a pattern was expected which matches values of type t<[#a(int) | #b]>
+  
+  The first polymorphic variant is closed and doesn't include the constructor: #b.
+  
+  Possible solutions:
+  - Either make the first variant open so it can accept additional constructors. To do this, make sure the type starts with [> instead of [
+  - Or add the missing constructor to it.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G3-8 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = A: t<[#a(int)]> | B: t<[#a(string)]>
+let f = (x: t<[> #a(int)]>) => switch x { | A => 0 | B => 1 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 4, "instantiable:gadt": 4, "mcomp:gadt": 2, "occur:other": 10, "occur_shortcut:other": 10, "pair_compare:gadt": 4, "pair_lookup:gadt": 12, "pair_lookup:other": 54, "rows:gadt": 4, "same_path:gadt": 4, "same_path:other": 4, "unify:gadt": 12, "unify:other": 56}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:54
+
+  1 │ type rec t<_> = A: t<[#a(int)]> | B: t<[#a(string)]>
+  2 │ let f = (x: t<[> #a(int)]>) => switch x { | A => 0 | B => 1 }
+  3 │ 
+
+  This pattern matches values of type t<[#a(string)]>
+  but a pattern was expected which matches values of type t<[#a(int)]>
+  
+  Both polymorphic variants have the constructor #a, but their payload types are incompatible.
+  Make sure the payload types for #a match exactly in both polymorphic variants.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### Reduced witnesses and reduction evidence
+
+Removing the other constructor and the other match branch preserves the mismatch. Removing the payload in G3-7 yields row-closed; closing the row and removing the first case in G3-2–4 yields row-disjoint. Removing the scrutinee index or replacing the indexed constructor with a direct row pattern eliminates the discrepancy (controls below). Rust is at fault relative to the reference: its Pattern row-clash diagnostic retains advice that OCaml’s recovery path drops.
+
+#### row-closed — outputs differ
+
+`Main.res`:
+
+```rescript
+type rec t<_> = A: t<[#a]>
+let f = (x: t<[#a | #b]>) => switch x { | A => 0 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "occur:other": 6, "occur_shortcut:other": 6, "pair_lookup:gadt": 4, "pair_lookup:other": 28, "rows:gadt": 2, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 4, "unify:other": 30}
+```
+
+Ocaml, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:43
+
+  1 │ type rec t<_> = A: t<[#a]>
+  2 │ let f = (x: t<[#a | #b]>) => switch x { | A => 0 }
+
+  This pattern matches values of type t<[#a]>
+  but a pattern was expected which matches values of type t<[#a | #b]>
+
+```
+
+stdout (empty):
+
+```text
+```
+
+Rust, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:43
+
+  1 │ type rec t<_> = A: t<[#a]>
+  2 │ let f = (x: t<[#a | #b]>) => switch x { | A => 0 }
+
+  This pattern matches values of type t<[#a]>
+  but a pattern was expected which matches values of type t<[#a | #b]>
+  
+  The first polymorphic variant is closed and doesn't include the constructor: #b.
+  
+  Possible solutions:
+  - Either make the first variant open so it can accept additional constructors. To do this, make sure the type starts with [> instead of [
+  - Or add the missing constructor to it.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### row-disjoint — outputs differ
+
+`Main.res`:
+
+```rescript
+type rec t<_> = A: t<[#a]>
+let f = (x: t<[#b]>) => switch x { | A => 0 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "occur:other": 6, "occur_shortcut:other": 6, "pair_lookup:gadt": 4, "pair_lookup:other": 28, "rows:gadt": 2, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 4, "unify:other": 30}
+```
+
+Ocaml, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:38
+
+  1 │ type rec t<_> = A: t<[#a]>
+  2 │ let f = (x: t<[#b]>) => switch x { | A => 0 }
+
+  This pattern matches values of type t<[#a]>
+  but a pattern was expected which matches values of type t<[#b]>
+
+```
+
+stdout (empty):
+
+```text
+```
+
+Rust, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:38
+
+  1 │ type rec t<_> = A: t<[#a]>
+  2 │ let f = (x: t<[#b]>) => switch x { | A => 0 }
+
+  This pattern matches values of type t<[#a]>
+  but a pattern was expected which matches values of type t<[#b]>
+  
+  These polymorphic variants are incompatible - they share no common constructors.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### row-no-index — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = A: t<[#a]>
+let f = x => switch x { | A => 0 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 1, "occur:other": 2, "occur_shortcut:other": 2, "pair_compare:gadt": 1, "pair_compare:other": 1, "pair_lookup:gadt": 1, "pair_lookup:other": 12, "same_path:other": 1, "unify:gadt": 1, "unify:other": 13}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x) {
+  return 0;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### row-direct — outputs agree
+
+`Main.res`:
+
+```rescript
+let f = (x: [#b]) => switch x { | #a => 0 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"occur:other": 2, "occur_shortcut:other": 2, "pair_compare:other": 2, "pair_lookup:other": 14, "rows:other": 2, "unify:other": 16}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:35-36
+
+  1 │ let f = (x: [#b]) => switch x { | #a => 0 }
+
+  This pattern matches values of type [? #a]
+  but a pattern was expected which matches values of type [#b]
+  
+  The second polymorphic variant is closed and doesn't include the constructor: #a.
+  
+  Possible solutions:
+  - Either make the second variant open so it can accept additional constructors. To do this, make sure the type starts with [> instead of [
+  - Or add the missing constructor to it.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+### G4 — REACHED, NO DIFFERENCE SEEN
+
+Match equality witnesses with two indices having the same parameterized constructor path, including an alias and a recursive datatype (Rust ctype.rs:8932–8955; OCaml ctype.ml:2328–2374). Check argument clashes and the exposed abbreviation spelling after the body asks for an incompatible result.
+
+All eight hit `same_path:gadt` and agree. Correction to the proposed premise: in Pattern mode OCaml adds an equality instead of linking, and the Rust same-path arm also explicitly skips its final link in Pattern mode. The link-order departure is in Expression mode; these programs additionally execute same-path expression calls, but establish no order-sensitive witness.
+
+#### G4-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<option<a>, option<b>>, a) => b = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 1, "gadt:gadt": 1, "instantiable:gadt": 2, "occur:other": 25, "occur_shortcut:other": 25, "pair_compare:gadt": 1, "pair_compare:other": 1, "pair_lookup:gadt": 4, "pair_lookup:other": 57, "same_path:gadt": 2, "same_path:other": 8, "unify:gadt": 4, "unify:other": 59}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(e, v) {
+  return v;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G4-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<option<a>, option<b>>, a) => b = (e, v) => switch e { | Refl => 0 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 4, "occur:other": 30, "occur_shortcut:other": 30, "pair_compare:gadt": 2, "pair_lookup:gadt": 8, "pair_lookup:other": 78, "same_path:gadt": 4, "same_path:other": 2, "unify:gadt": 8, "unify:other": 78}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:86
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a b. (eq<option<a>, option<b>>, a) => b = (e, v) => switch e
+    │  { | Refl => 0 }
+  3 │ 
+
+  This has type: int
+  But this switch is expected to return: b (defined as a)
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G4-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<array<a>, array<b>>, a) => b = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 1, "gadt:gadt": 1, "instantiable:gadt": 2, "occur:other": 25, "occur_shortcut:other": 25, "pair_compare:gadt": 1, "pair_compare:other": 1, "pair_lookup:gadt": 4, "pair_lookup:other": 57, "same_path:gadt": 2, "same_path:other": 8, "unify:gadt": 4, "unify:other": 59}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(e, v) {
+  return v;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G4-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<array<a>, array<b>>, a) => b = (e, v) => switch e { | Refl => 0 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 4, "occur:other": 30, "occur_shortcut:other": 30, "pair_compare:gadt": 2, "pair_lookup:gadt": 8, "pair_lookup:other": 78, "same_path:gadt": 4, "same_path:other": 2, "unify:gadt": 8, "unify:other": 78}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:84
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a b. (eq<array<a>, array<b>>, a) => b = (e, v) => switch e {
+    │  | Refl => 0 }
+  3 │ 
+
+  This has type: int
+  But this switch is expected to return: b (defined as a)
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G4-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<list<a>, list<b>>, a) => b = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 1, "gadt:gadt": 1, "instantiable:gadt": 2, "occur:other": 25, "occur_shortcut:other": 25, "pair_compare:gadt": 1, "pair_compare:other": 1, "pair_lookup:gadt": 4, "pair_lookup:other": 57, "same_path:gadt": 2, "same_path:other": 8, "unify:gadt": 4, "unify:other": 59}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(e, v) {
+  return v;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G4-6 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b. (eq<list<a>, list<b>>, a) => b = (e, v) => switch e { | Refl => 0 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 4, "occur:other": 30, "occur_shortcut:other": 30, "pair_compare:gadt": 2, "pair_lookup:gadt": 8, "pair_lookup:other": 78, "same_path:gadt": 4, "same_path:other": 2, "unify:gadt": 8, "unify:other": 78}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:82
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a b. (eq<list<a>, list<b>>, a) => b = (e, v) => switch e { |
+    │  Refl => 0 }
+  3 │ 
+
+  This has type: int
+  But this switch is expected to return: b (defined as a)
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G4-7 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+type alias<'a> = option<'a>
+let f: type a b. (eq<alias<a>, option<b>>, a) => b = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 1, "gadt:gadt": 1, "instantiable:gadt": 2, "occur:gadt": 2, "occur:other": 41, "occur_shortcut:gadt": 2, "occur_shortcut:other": 41, "pair_compare:other": 3, "pair_lookup:gadt": 4, "pair_lookup:other": 65, "same_path:gadt": 2, "same_path:other": 9, "unify:gadt": 4, "unify:other": 67}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(e, v) {
+  return v;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G4-8 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+type rec tree<'a> = Leaf('a) | Branch(tree<'a>)
+let f: type a b. (eq<tree<a>, tree<b>>, a) => b = (e, v) => switch e { | Refl => 0 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 4, "occur:other": 34, "occur_shortcut:other": 34, "pair_lookup:gadt": 8, "pair_lookup:other": 98, "same_path:gadt": 4, "same_path:other": 4, "unify:gadt": 8, "unify:other": 98}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:82
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ type rec tree<'a> = Leaf('a) | Branch(tree<'a>)
+  3 │ let f: type a b. (eq<tree<a>, tree<b>>, a) => b = (e, v) => switch e { |
+    │  Refl => 0 }
+  4 │ 
+
+  This has type: int
+  But this switch is expected to return: b (defined as a)
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+### G5 — REACHED, NO DIFFERENCE SEEN
+
+Make two locally abstract types equal and then equate a third type in both orientations and nesting orders (OCaml ctype.ml:2258–2270; Rust ctype.rs:8848–8860 and 9192–9204). Compare whether the chain is accepted and which abstract name remains in an incompatible result or arithmetic diagnostic.
+
+Every candidate hits equation addition, with two additions per successful chain and four across the failed-build replay. All outputs agree. These probes cover chained equations and the Rust equation-selection path; no separately instrumented expansion-orientation branch proves that every OCaml level comparison was exercised.
+
+#### G5-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b c. (eq<a, b>, eq<b, c>, a) => c = (Refl, Refl, v) => v
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 4, "occur:gadt": 1, "occur:other": 27, "occur_shortcut:gadt": 1, "occur_shortcut:other": 27, "pair_lookup:gadt": 7, "pair_lookup:other": 69, "same_path:gadt": 2, "same_path:other": 8, "unify:gadt": 7, "unify:other": 72}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(param, param$1, v) {
+  return v;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G5-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b c. (eq<b, a>, eq<c, b>, a) => c = (Refl, Refl, v) => v
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 4, "occur:gadt": 1, "occur:other": 27, "occur_shortcut:gadt": 1, "occur_shortcut:other": 27, "pair_lookup:gadt": 7, "pair_lookup:other": 69, "same_path:gadt": 2, "same_path:other": 8, "unify:gadt": 7, "unify:other": 72}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(param, param$1, v) {
+  return v;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G5-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b c. (eq<a, b>, eq<c, b>, a) => c = (Refl, Refl, v) => 0
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 4, "gadt:gadt": 4, "instantiable:gadt": 8, "occur:gadt": 2, "occur:other": 34, "occur_shortcut:gadt": 2, "occur_shortcut:other": 34, "pair_lookup:gadt": 14, "pair_lookup:other": 99, "same_path:gadt": 4, "same_path:other": 6, "unify:gadt": 14, "unify:other": 99}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:70
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a b c. (eq<a, b>, eq<c, b>, a) => c = (Refl, Refl, v) => 0
+  3 │ 
+
+  This has type: int
+  But it's expected to have type: c (defined as a)
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G5-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b c. (eq<b, a>, eq<b, c>, a) => c = (Refl, Refl, v) => "x"
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 4, "gadt:gadt": 4, "instantiable:gadt": 8, "occur:gadt": 2, "occur:other": 34, "occur_shortcut:gadt": 2, "occur_shortcut:other": 34, "pair_lookup:gadt": 14, "pair_lookup:other": 99, "same_path:gadt": 4, "same_path:other": 6, "unify:gadt": 14, "unify:other": 99}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:70-72
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a b c. (eq<b, a>, eq<b, c>, a) => c = (Refl, Refl, v) => "x"
+  3 │ 
+
+  This has type: string
+  But it's expected to have type: c (defined as a)
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G5-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b c. (eq<a, b>, eq<b, c>, a) => c = (e, d, v) => switch e { | Refl => switch d { | Refl => v } }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 4, "occur:gadt": 1, "occur:other": 24, "occur_shortcut:gadt": 1, "occur_shortcut:other": 24, "pair_compare:other": 2, "pair_lookup:gadt": 7, "pair_lookup:other": 65, "same_path:gadt": 2, "same_path:other": 6, "unify:gadt": 7, "unify:other": 68}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(e, d, v) {
+  return v;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G5-6 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b c. (eq<a, b>, eq<b, c>, a) => c = (e, d, v) => switch d { | Refl => switch e { | Refl => v } }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 4, "occur:other": 25, "occur_shortcut:other": 25, "pair_compare:other": 3, "pair_lookup:gadt": 6, "pair_lookup:other": 65, "same_path:gadt": 2, "same_path:other": 6, "unify:gadt": 6, "unify:other": 68}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(e, d, v) {
+  return v;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G5-7 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b c. (eq<a, b>, eq<b, c>, a) => c = (e, d, v) => switch e { | Refl => switch d { | Refl => v + 1 } }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 4, "gadt:gadt": 4, "instantiable:gadt": 8, "occur:gadt": 2, "occur:other": 26, "occur_shortcut:gadt": 2, "occur_shortcut:other": 26, "pair_lookup:gadt": 14, "pair_lookup:other": 87, "same_path:gadt": 4, "same_path:other": 2, "unify:gadt": 14, "unify:other": 87}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:106
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a b c. (eq<a, b>, eq<b, c>, a) => c = (e, d, v) => switch e 
+    │ { | Refl => switch d { | Refl => v + 1 } }
+  3 │ 
+
+  This has type: a
+  But it's expected to have type: int
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G5-8 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a b c. (eq<a, b>, eq<b, c>, a) => c = (e, d, v) => switch d { | Refl => switch e { | Refl => v ++ "x" } }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 4, "gadt:gadt": 4, "instantiable:gadt": 8, "occur:other": 26, "occur_shortcut:other": 26, "pair_lookup:gadt": 12, "pair_lookup:other": 87, "same_path:gadt": 4, "same_path:other": 2, "unify:gadt": 12, "unify:other": 87}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:106
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a b c. (eq<a, b>, eq<b, c>, a) => c = (e, d, v) => switch d 
+    │ { | Refl => switch e { | Refl => v ++ "x" } }
+  3 │ 
+
+  This has type: a
+  But string concatenation is expecting: string
+
+```
+
+stdout (empty):
+
+```text
+```
+
+### G6 — WITNESS
+
+Match an equality whose index is a functor parameter’s abstract, private or parameterized type (OCaml ctype.ml:1874–1881; Rust ctype.rs:579–595). After the match, demand that an expression of that module type have the concrete index type, so merely accepting the constructor pattern is insufficient.
+
+G6-2 is a witness: OCaml adds the abstract module type equation, but Rust’s newtype-level requirement prevents it, leaving the branch expression at `X.t`. G6-1/3–8 agree. All eight reach `is_instantiable`, but parameterized indices are filtered by the nullary-constructor check before that function; there is no evidence of a parameterized declaration being incorrectly instantiated. The witness demonstrates that the extra Rust newtype-level requirement is too restrictive, rather than that a missing privacy/arity test is too permissive.
+
+#### G6-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+module F = (X: {
+  type t
+}) => {
+let f = (e: eq<X.t, int>, v: X.t): int => switch e { | Refl => 0 }
+}
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 1, "instantiable:gadt": 2, "mcomp:gadt": 1, "occur:other": 5, "occur_shortcut:other": 5, "pair_lookup:gadt": 3, "pair_lookup:other": 35, "same_path:gadt": 1, "same_path:other": 1, "unify:gadt": 3, "unify:other": 37}
+```
+
+Both compilers, exit 0; stderr:
+
+```text
+
+  Warning number 27
+  Main.res:5:27
+
+  3 │   type t
+  4 │ }) => {
+  5 │ let f = (e: eq<X.t, int>, v: X.t): int => switch e { | Refl => 0 }
+  6 │ }
+  7 │ 
+
+  unused variable v.
+
+Fix this by:
+- Deleting the variable if it's not used anymore.
+- Prepending the variable name with `_` (like `_v`) to ignore that the variable is unused.
+- Using the variable somewhere.
+
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  let f = (e, v) => 0;
+  return {
+    f: f
+  };
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+#### G6-2 — outputs differ
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+module F = (X: {
+  type t
+}) => {
+let f = (e: eq<X.t, int>, v: X.t): int => switch e { | Refl => v }
+}
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 4, "mcomp:gadt": 2, "occur:other": 10, "occur_shortcut:other": 10, "pair_lookup:gadt": 6, "pair_lookup:other": 60, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 6, "unify:other": 64}
+```
+
+Ocaml, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  let f = (e, v) => v;
+  return {
+    f: f
+  };
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+Rust, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:64
+
+  3 │   type t
+  4 │ }) => {
+  5 │ let f = (e: eq<X.t, int>, v: X.t): int => switch e { | Refl => v }
+  6 │ }
+  7 │ 
+
+  This has type: X.t
+  But this switch is expected to return: int
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G6-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+module F = (X: {
+  type t<'a>
+}) => {
+let f = (e: eq<X.t<int>, int>, v: X.t<int>): int => switch e { | Refl => 0 }
+}
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 1, "instantiable:gadt": 1, "mcomp:gadt": 1, "occur:other": 7, "occur_shortcut:other": 7, "pair_lookup:gadt": 3, "pair_lookup:other": 39, "same_path:gadt": 1, "same_path:other": 1, "unify:gadt": 3, "unify:other": 41}
+```
+
+Both compilers, exit 0; stderr:
+
+```text
+
+  Warning number 27
+  Main.res:5:32
+
+  3 │   type t<'a>
+  4 │ }) => {
+  5 │ let f = (e: eq<X.t<int>, int>, v: X.t<int>): int => switch e { | Refl =>
+    │  0 }
+  6 │ }
+  7 │ 
+
+  unused variable v.
+
+Fix this by:
+- Deleting the variable if it's not used anymore.
+- Prepending the variable name with `_` (like `_v`) to ignore that the variable is unused.
+- Using the variable somewhere.
+
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  let f = (e, v) => 0;
+  return {
+    f: f
+  };
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+#### G6-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+module F = (X: {
+  type t<'a>
+}) => {
+let f = (e: eq<X.t<int>, int>, v: X.t<int>): int => switch e { | Refl => v }
+}
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 2, "mcomp:gadt": 2, "occur:other": 14, "occur_shortcut:other": 14, "pair_lookup:gadt": 6, "pair_lookup:other": 68, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 6, "unify:other": 72}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:74
+
+  3 │   type t<'a>
+  4 │ }) => {
+  5 │ let f = (e: eq<X.t<int>, int>, v: X.t<int>): int => switch e { | Refl =>
+    │  v }
+  6 │ }
+  7 │ 
+
+  This has type: X.t<int>
+  But this switch is expected to return: int
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G6-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+module F = (X: {
+  type t = private int
+}) => {
+let f = (e: eq<X.t, int>, v: X.t): int => switch e { | Refl => 0 }
+}
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 1, "instantiable:gadt": 2, "mcomp:gadt": 1, "occur:gadt": 1, "occur:other": 6, "occur_shortcut:gadt": 1, "occur_shortcut:other": 6, "pair_compare:other": 2, "pair_lookup:gadt": 3, "pair_lookup:other": 38, "same_path:gadt": 1, "same_path:other": 1, "unify:gadt": 3, "unify:other": 40}
+```
+
+Both compilers, exit 0; stderr:
+
+```text
+
+  Warning number 27
+  Main.res:5:27
+
+  3 │   type t = private int
+  4 │ }) => {
+  5 │ let f = (e: eq<X.t, int>, v: X.t): int => switch e { | Refl => 0 }
+  6 │ }
+  7 │ 
+
+  unused variable v.
+
+Fix this by:
+- Deleting the variable if it's not used anymore.
+- Prepending the variable name with `_` (like `_v`) to ignore that the variable is unused.
+- Using the variable somewhere.
+
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  let f = (e, v) => 0;
+  return {
+    f: f
+  };
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+#### G6-6 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+module F = (X: {
+  type t = private int
+}) => {
+let f = (e: eq<X.t, int>, v: X.t): int => switch e { | Refl => v }
+}
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 4, "mcomp:gadt": 2, "occur:gadt": 2, "occur:other": 12, "occur_shortcut:gadt": 2, "occur_shortcut:other": 12, "pair_compare:other": 3, "pair_lookup:gadt": 6, "pair_lookup:other": 66, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 6, "unify:other": 70}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:64
+
+  3 │   type t = private int
+  4 │ }) => {
+  5 │ let f = (e: eq<X.t, int>, v: X.t): int => switch e { | Refl => v }
+  6 │ }
+  7 │ 
+
+  This has type: X.t
+  But this switch is expected to return: int
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G6-7 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+module F = (X: {
+  type t<'a> = private array<'a>
+}) => {
+let f = (e: eq<X.t<int>, int>, v: X.t<int>): int => switch e { | Refl => 0 }
+}
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 2, "mcomp:gadt": 2, "occur:gadt": 4, "occur:other": 22, "occur_shortcut:gadt": 4, "occur_shortcut:other": 22, "pair_compare:other": 9, "pair_lookup:gadt": 6, "pair_lookup:other": 80, "same_path:gadt": 2, "same_path:other": 4, "unify:gadt": 6, "unify:other": 84}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:66-69
+
+  3 │   type t<'a> = private array<'a>
+  4 │ }) => {
+  5 │ let f = (e: eq<X.t<int>, int>, v: X.t<int>): int => switch e { | Refl =>
+    │  0 }
+  6 │ }
+  7 │ 
+
+  This pattern matches values of type eq<X.t<int>, X.t<int>>
+  but a pattern was expected which matches values of type eq<X.t<int>, int>
+  
+  The incompatible parts:
+    X.t<int> vs int
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G6-8 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+module F = (X: {
+  type t<'a> = private array<'a>
+}) => {
+let f = (e: eq<X.t<int>, int>, v: X.t<int>): int => switch e { | Refl => v }
+}
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 2, "mcomp:gadt": 2, "occur:gadt": 4, "occur:other": 22, "occur_shortcut:gadt": 4, "occur_shortcut:other": 22, "pair_compare:other": 9, "pair_lookup:gadt": 6, "pair_lookup:other": 80, "same_path:gadt": 2, "same_path:other": 4, "unify:gadt": 6, "unify:other": 84}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:66-69
+
+  3 │   type t<'a> = private array<'a>
+  4 │ }) => {
+  5 │ let f = (e: eq<X.t<int>, int>, v: X.t<int>): int => switch e { | Refl =>
+    │  v }
+  6 │ }
+  7 │ 
+
+  This pattern matches values of type eq<X.t<int>, X.t<int>>
+  but a pattern was expected which matches values of type eq<X.t<int>, int>
+  
+  The incompatible parts:
+    X.t<int> vs int
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### Reduced witness: abstract-index
+
+Removing the switch and using a constructor parameter preserves G6-2; specializing the equality witness to a single `I: t<int>` constructor removes the second type parameter. Removing the abstract module boundary (abstract-root), removing the concrete result demand (abstract-no-return), or removing the value crossing the equation (abstract-no-value) removes the discrepancy. Replacing the functor with a sealed module also preserves it, but adds a module implementation rather than reducing the program. Rust is at fault: it accepts the constructor pattern but fails to apply the abstract module-type equation that makes the body type-correct in OCaml.
+
+#### abstract-index — outputs differ
+
+`Main.res`:
+
+```rescript
+type rec t<_> = I: t<int>
+module F = (X: {type t}) => {
+let f = (I: t<X.t>, v: X.t): int => v
+}
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 4, "mcomp:gadt": 2, "occur:other": 6, "occur_shortcut:other": 6, "pair_lookup:gadt": 4, "pair_lookup:other": 47, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 4, "unify:other": 51}
+```
+
+Ocaml, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  let f = (param, v) => v;
+  return {
+    f: f
+  };
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+Rust, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:37
+
+  1 │ type rec t<_> = I: t<int>
+  2 │ module F = (X: {type t}) => {
+  3 │ let f = (I: t<X.t>, v: X.t): int => v
+  4 │ }
+
+  This has type: X.t
+  But it's expected to have type: int
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### abstract — outputs differ
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+module F = (X: {type t}) => {
+let f = (Refl: eq<X.t, int>, v: X.t): int => v
+}
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 4, "mcomp:gadt": 2, "occur:other": 10, "occur_shortcut:other": 10, "pair_lookup:gadt": 6, "pair_lookup:other": 55, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 6, "unify:other": 59}
+```
+
+Ocaml, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  let f = (param, v) => v;
+  return {
+    f: f
+  };
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+Rust, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:46
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ module F = (X: {type t}) => {
+  3 │ let f = (Refl: eq<X.t, int>, v: X.t): int => v
+  4 │ }
+
+  This has type: X.t
+  But it's expected to have type: int
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### abstract-no-return — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+module F = (X: {type t}) => {
+let f = (Refl: eq<X.t, int>, v: X.t) => v
+}
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 1, "instantiable:gadt": 2, "mcomp:gadt": 1, "occur:other": 5, "occur_shortcut:other": 5, "pair_compare:other": 1, "pair_lookup:gadt": 3, "pair_lookup:other": 27, "same_path:gadt": 1, "same_path:other": 1, "unify:gadt": 3, "unify:other": 30}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  let f = (param, v) => v;
+  return {
+    f: f
+  };
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+#### abstract-no-functor — outputs differ
+
+`Main.res`:
+
+```rescript
+type rec t<_> = I: t<int>
+module X: {type t} = {type t = int}
+let f = (I: t<X.t>, v: X.t): int => v
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 4, "mcomp:gadt": 2, "occur:other": 8, "occur_shortcut:other": 8, "pair_lookup:gadt": 4, "pair_lookup:other": 53, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 4, "unify:other": 57}
+```
+
+Ocaml, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let X = {};
+
+function f(param, v) {
+  return v;
+}
+
+exports.X = X;
+exports.f = f;
+/* No side effect */
+```
+
+Rust, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:37
+
+  1 │ type rec t<_> = I: t<int>
+  2 │ module X: {type t} = {type t = int}
+  3 │ let f = (I: t<X.t>, v: X.t): int => v
+
+  This has type: X.t
+  But it's expected to have type: int
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### abstract-no-value — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = I: t<int>
+module F = (X: {type t}) => {
+let f = (I: t<X.t>): int => 0
+}
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 1, "instantiable:gadt": 2, "mcomp:gadt": 1, "occur:other": 3, "occur_shortcut:other": 3, "pair_lookup:gadt": 2, "pair_lookup:other": 21, "same_path:gadt": 1, "same_path:other": 1, "unify:gadt": 2, "unify:other": 23}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  let f = param => 0;
+  return {
+    f: f
+  };
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+#### abstract-root — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = I: t<int>
+type a
+let f = (I: t<a>, v: a): int => v
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 4, "mcomp:gadt": 2, "occur:other": 6, "occur_shortcut:other": 6, "pair_lookup:gadt": 4, "pair_lookup:other": 28, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 4, "unify:other": 28}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:10
+
+  1 │ type rec t<_> = I: t<int>
+  2 │ type a
+  3 │ let f = (I: t<a>, v: a): int => v
+
+  This pattern matches values of type t<int>
+  but a pattern was expected which matches values of type t<a>
+  
+  The incompatible parts:
+    int vs a
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### abstract-let — outputs differ
+
+`Main.res`:
+
+```rescript
+type rec t<_> = I: t<int>
+module X: {type t} = {type t = int}
+let f = (I: t<X.t>, v: X.t) => v + 1
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 4, "mcomp:gadt": 2, "occur:other": 8, "occur_shortcut:other": 8, "pair_compare:other": 2, "pair_lookup:gadt": 4, "pair_lookup:other": 51, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 4, "unify:other": 55}
+```
+
+Ocaml, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let X = {};
+
+function f(param, v) {
+  return v + 1 | 0;
+}
+
+exports.X = X;
+exports.f = f;
+/* No side effect */
+```
+
+Rust, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:32
+
+  1 │ type rec t<_> = I: t<int>
+  2 │ module X: {type t} = {type t = int}
+  3 │ let f = (I: t<X.t>, v: X.t) => v + 1
+
+  This has type: X.t
+  But it's expected to have type: int
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### abstract-short — outputs differ
+
+`Main.res`:
+
+```rescript
+type rec t<_> = I: t<int>
+module F = (X: {type t}) => {
+let f = (I: t<X.t>, v: X.t) => v + 1
+}
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 4, "mcomp:gadt": 2, "occur:other": 6, "occur_shortcut:other": 6, "pair_lookup:gadt": 4, "pair_lookup:other": 45, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 4, "unify:other": 49}
+```
+
+Ocaml, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  let f = (param, v) => v + 1 | 0;
+  return {
+    f: f
+  };
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+Rust, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:32
+
+  1 │ type rec t<_> = I: t<int>
+  2 │ module F = (X: {type t}) => {
+  3 │ let f = (I: t<X.t>, v: X.t) => v + 1
+  4 │ }
+
+  This has type: X.t
+  But it's expected to have type: int
+
+```
+
+stdout (empty):
+
+```text
+```
+
+### G7 — REACHED, NO DIFFERENCE SEEN
+
+Type consecutive GADT constructor patterns in branches, nested matches, tuples and an or-pattern (OCaml ctype.ml:2739–2750; Rust typecore.rs:5516–5567). Check incompatible branches and warnings 8, 11 and 56 after the wrapper restores its flags without clearing the shared pair set.
+
+G7-1–6/8–11 execute the wrapper, and agree; G7-7 rejects the or-pattern before entering it. G7-9 has warning 8 with example `Str`, G7-10 warning 11, and G7-11 warnings 4 and 56; all warning bytes and locations agree. Wrapper entries do not by themselves prove that a particular pair remains live across two invocations.
+
+#### G7-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = Int: t<int> | Str: t<string>
+let f: type a. (t<a>, a) => a = (x, y) => switch x { | Int => 0 | Str => "" }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 3, "gadt:gadt": 3, "instantiable:gadt": 6, "occur:other": 18, "occur_shortcut:other": 18, "pair_compare:other": 2, "pair_lookup:gadt": 6, "pair_lookup:other": 50, "same_path:gadt": 3, "same_path:other": 7, "unify:gadt": 6, "unify:other": 52}
+```
+
+Both compilers, exit 0; stderr:
+
+```text
+
+  Warning number 27
+  Main.res:2:37
+
+  1 │ type rec t<_> = Int: t<int> | Str: t<string>
+  2 │ let f: type a. (t<a>, a) => a = (x, y) => switch x { | Int => 0 | Str =>
+    │  "" }
+  3 │ 
+
+  unused variable y.
+
+Fix this by:
+- Deleting the variable if it's not used anymore.
+- Prepending the variable name with `_` (like `_y`) to ignore that the variable is unused.
+- Using the variable somewhere.
+
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  if (x === "Int") {
+    return 0;
+  } else {
+    return "";
+  }
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G7-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = Int: t<int> | Str: t<string>
+let f: type a. (t<a>, a) => a = (x, y) => switch x { | Str => "" | Int => 0 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 3, "gadt:gadt": 3, "instantiable:gadt": 6, "occur:other": 18, "occur_shortcut:other": 18, "pair_compare:other": 2, "pair_lookup:gadt": 6, "pair_lookup:other": 50, "same_path:gadt": 3, "same_path:other": 7, "unify:gadt": 6, "unify:other": 52}
+```
+
+Both compilers, exit 0; stderr:
+
+```text
+
+  Warning number 27
+  Main.res:2:37
+
+  1 │ type rec t<_> = Int: t<int> | Str: t<string>
+  2 │ let f: type a. (t<a>, a) => a = (x, y) => switch x { | Str => "" | Int =
+    │ > 0 }
+  3 │ 
+
+  unused variable y.
+
+Fix this by:
+- Deleting the variable if it's not used anymore.
+- Prepending the variable name with `_` (like `_y`) to ignore that the variable is unused.
+- Using the variable somewhere.
+
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  if (x === "Int") {
+    return 0;
+  } else {
+    return "";
+  }
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G7-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = Int: t<int> | Str: t<string>
+let f: type a. (t<a>, a) => a = (x, y) => switch x { | Int => "" | Str => "" }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 4, "gadt:gadt": 4, "instantiable:gadt": 8, "occur:other": 22, "occur_shortcut:other": 22, "pair_lookup:gadt": 8, "pair_lookup:other": 74, "same_path:gadt": 4, "same_path:other": 6, "unify:gadt": 8, "unify:other": 74}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:63-64
+
+  1 │ type rec t<_> = Int: t<int> | Str: t<string>
+  2 │ let f: type a. (t<a>, a) => a = (x, y) => switch x { | Int => "" | Str =
+    │ > "" }
+  3 │ 
+
+  This has type: string
+  But this switch is expected to return: a (defined as int)
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+  
+  You can convert string to int with Int.fromString.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G7-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = Int: t<int> | Str: t<string>
+let f: type a. (t<a>, a) => a = (x, y) => switch x { | Int => switch x { | Int => 0 } | Str => "" }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 3, "gadt:gadt": 5, "instantiable:gadt": 8, "mcomp:gadt": 1, "occur:gadt": 3, "occur:other": 18, "occur_shortcut:gadt": 3, "occur_shortcut:other": 18, "pair_compare:gadt": 1, "pair_compare:other": 1, "pair_lookup:gadt": 11, "pair_lookup:other": 54, "same_path:gadt": 6, "same_path:other": 7, "unify:gadt": 11, "unify:other": 56}
+```
+
+Both compilers, exit 0; stderr:
+
+```text
+
+  Warning number 27
+  Main.res:2:37
+
+  1 │ type rec t<_> = Int: t<int> | Str: t<string>
+  2 │ let f: type a. (t<a>, a) => a = (x, y) => switch x { | Int => switch x {
+    │  | Int => 0 } | Str => "" }
+  3 │ 
+
+  unused variable y.
+
+Fix this by:
+- Deleting the variable if it's not used anymore.
+- Prepending the variable name with `_` (like `_y`) to ignore that the variable is unused.
+- Using the variable somewhere.
+
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  if (x === "Int") {
+    return 0;
+  } else {
+    return "";
+  }
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G7-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = Int: t<int> | Str: t<string>
+let f: type a. (t<a>, a) => a = (x, y) => switch (x, y) { | (Int, 0) => 0 | (Int, _) => 1 | (Str, _) => "" }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 5, "gadt:gadt": 5, "instantiable:gadt": 10, "occur:other": 32, "occur_shortcut:other": 32, "pair_compare:gadt": 1, "pair_compare:other": 6, "pair_lookup:gadt": 10, "pair_lookup:other": 76, "same_path:gadt": 5, "same_path:other": 10, "tuple:other": 7, "unify:gadt": 10, "unify:other": 78}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  if (x === "Int") {
+    if (y !== 0) {
+      return 1;
+    } else {
+      return 0;
+    }
+  } else {
+    return "";
+  }
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G7-6 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = Int: t<int> | Str: t<string>
+let f: type a. (t<a>, a) => a = (x, y) => switch (x, x) { | (Int, Int) => 0 | (Str, Str) => "" }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 5, "gadt:gadt": 10, "instantiable:gadt": 14, "mcomp:gadt": 2, "occur:gadt": 7, "occur:other": 30, "occur_shortcut:gadt": 7, "occur_shortcut:other": 30, "pair_compare:other": 3, "pair_lookup:gadt": 22, "pair_lookup:other": 80, "same_path:gadt": 13, "same_path:other": 8, "tuple:other": 10, "unify:gadt": 22, "unify:other": 83}
+```
+
+Both compilers, exit 0; stderr:
+
+```text
+
+  Warning number 27
+  Main.res:2:37
+
+  1 │ type rec t<_> = Int: t<int> | Str: t<string>
+  2 │ let f: type a. (t<a>, a) => a = (x, y) => switch (x, x) { | (Int, Int) =
+    │ > 0 | (Str, Str) => "" }
+  3 │ 
+
+  unused variable y.
+
+Fix this by:
+- Deleting the variable if it's not used anymore.
+- Prepending the variable name with `_` (like `_y`) to ignore that the variable is unused.
+- Using the variable somewhere.
+
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  if (x === "Int") {
+    return 0;
+  } else {
+    return "";
+  }
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G7-7 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = Int: t<int> | Str: t<string>
+let f: type a. (t<a>, a) => a = (x, y) => switch x { | Int | Str => y }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "occur:other": 18, "occur_shortcut:other": 18, "pair_lookup:other": 70, "same_path:other": 6, "unify:other": 70}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:56-58
+
+  1 │ type rec t<_> = Int: t<int> | Str: t<string>
+  2 │ let f: type a. (t<a>, a) => a = (x, y) => switch x { | Int | Str => y }
+  3 │ 
+
+  This pattern matches values of type t<int>
+  but a pattern was expected which matches values of type t<a>
+  
+  The incompatible parts:
+    int vs a
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G7-8 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = Int: t<int> | Str: t<string>
+let f: type a. (t<a>, a) => a = (x, y) => {let z = switch x { | Int => 0 | Str => 1 }; switch x { | Int => z | Str => "" }}
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 6, "gadt:gadt": 6, "instantiable:gadt": 12, "occur:other": 19, "occur_shortcut:other": 19, "pair_compare:other": 5, "pair_lookup:gadt": 12, "pair_lookup:other": 58, "same_path:gadt": 6, "same_path:other": 8, "unify:gadt": 12, "unify:other": 61}
+```
+
+Both compilers, exit 0; stderr:
+
+```text
+
+  Warning number 27
+  Main.res:2:37
+
+  1 │ type rec t<_> = Int: t<int> | Str: t<string>
+  2 │ let f: type a. (t<a>, a) => a = (x, y) => {let z = switch x { | Int => 0
+    │  | Str => 1 }; switch x { | Int => z | Str => "" }}
+  3 │ 
+
+  unused variable y.
+
+Fix this by:
+- Deleting the variable if it's not used anymore.
+- Prepending the variable name with `_` (like `_y`) to ignore that the variable is unused.
+- Using the variable somewhere.
+
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x, y) {
+  let z;
+  z = x === "Int" ? 0 : 1;
+  if (x === "Int") {
+    return z;
+  } else {
+    return "";
+  }
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G7-9 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = Int: t<int> | Str: t<string>
+let f: type a. t<a> => int = x => switch x { | Int => 0 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 4, "occur:other": 13, "occur_shortcut:other": 13, "pair_compare:other": 1, "pair_lookup:gadt": 4, "pair_lookup:other": 44, "same_path:gadt": 2, "same_path:other": 4, "unify:gadt": 4, "unify:other": 44}
+```
+
+Both compilers, exit 0; stderr:
+
+```text
+
+  Warning number 8
+  Main.res:2:35-57
+
+  1 │ type rec t<_> = Int: t<int> | Str: t<string>
+  2 │ let f: type a. t<a> => int = x => switch x { | Int => 0 }
+
+  You forgot to handle a possible case here, for example: 
+  | Str
+
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x) {
+  if (x === "Int") {
+    return 0;
+  }
+  throw {
+    RE_EXN_ID: "Match_failure",
+    _1: [
+      "Main.res",
+      2,
+      34
+    ],
+    Error: new Error()
+  };
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G7-10 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = Int: t<int> | Str: t<string>
+let f: type a. t<a> => int = x => switch x { | Int => 0 | Str => 1 | Int => 2 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 4, "gadt:gadt": 4, "instantiable:gadt": 8, "occur:other": 15, "occur_shortcut:other": 15, "pair_compare:gadt": 1, "pair_compare:other": 2, "pair_lookup:gadt": 8, "pair_lookup:other": 52, "same_path:gadt": 4, "same_path:other": 6, "unify:gadt": 8, "unify:other": 52}
+```
+
+Both compilers, exit 0; stderr:
+
+```text
+
+  Warning number 11
+  Main.res:2:70-72
+
+  1 │ type rec t<_> = Int: t<int> | Str: t<string>
+  2 │ let f: type a. t<a> => int = x => switch x { | Int => 0 | Str => 1 | Int
+    │  => 2 }
+
+  this match case is unused.
+
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x) {
+  if (x === "Int") {
+    return 0;
+  } else {
+    return 1;
+  }
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G7-11 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = Int: t<int> | Str: t<string>
+let f = (x: t<int>) => switch x { | Int => 0 | _ => 1 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 2, "mcomp:gadt": 1, "occur:other": 6, "occur_shortcut:other": 6, "pair_compare:other": 1, "pair_lookup:gadt": 4, "pair_lookup:other": 34, "same_path:gadt": 2, "same_path:other": 3, "unify:gadt": 4, "unify:other": 37}
+```
+
+Both compilers, exit 0; stderr:
+
+```text
+
+  Warning number 4
+  Main.res:2:24-55
+
+  1 │ type rec t<_> = Int: t<int> | Str: t<string>
+  2 │ let f = (x: t<int>) => switch x { | Int => 0 | _ => 1 }
+
+  this pattern-matching is fragile.
+It will remain exhaustive when constructors are added to type t.
+
+
+  Warning number 56
+  Main.res:2:48
+
+  1 │ type rec t<_> = Int: t<int> | Str: t<string>
+  2 │ let f = (x: t<int>) => switch x { | Int => 0 | _ => 1 }
+
+  this match case is unreachable.
+Consider replacing it with a refutation case '<pat> -> .'
+
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x) {
+  if (x === "Int") {
+    return 0;
+  } else {
+    return 1;
+  }
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+### G8 — REACHED, NO DIFFERENCE SEEN
+
+Match a constructor with an existential payload and, in the indexed cases, equate a locally abstract result with a structure containing that payload (OCaml ctype.ml:2084–2100 and 2390–2394; Rust ctype.rs:1700–1722). Check escape errors and forced concrete payloads for invented type names as well as acceptance.
+
+G8-1–8 are existential-escape controls: the wrapper runs, but `add_gadt_equation` does not. G8-9–16 hit equation addition and agree, including the rejected concrete payloads. The fallback for a declaration without a newtype level is not independently reached here; G6 explains one guard preventing such an equation in Rust.
+
+#### G8-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec packed = Pack('a): packed
+let f = x => switch x { | Pack(v) => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "pair_compare:other": 2, "pair_lookup:gadt": 2, "pair_lookup:other": 20, "unify:gadt": 2, "unify:other": 20}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:38
+
+  1 │ type rec packed = Pack('a): packed
+  2 │ let f = x => switch x { | Pack(v) => v }
+  3 │ 
+
+  This has type: $a
+  But this switch is expected to return: 'a
+  $a is an existential type bound by the constructor Pack.
+  It is only known in the scope of the pattern that matches Pack.
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G8-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec packed = Pack(array<'a>): packed
+let f = x => switch x { | Pack(v) => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "occur:other": 4, "occur_shortcut:other": 4, "pair_compare:other": 2, "pair_lookup:gadt": 2, "pair_lookup:other": 32, "same_path:other": 2, "unify:gadt": 2, "unify:other": 32}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:38
+
+  1 │ type rec packed = Pack(array<'a>): packed
+  2 │ let f = x => switch x { | Pack(v) => v }
+  3 │ 
+
+  This has type: array<$a>
+  But this switch is expected to return: 'a
+  $a is an existential type bound by the constructor Pack.
+  It is only known in the scope of the pattern that matches Pack.
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G8-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec packed = Pack('a => 'a): packed
+let f = x => switch x { | Pack(v) => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "pair_compare:other": 2, "pair_lookup:gadt": 2, "pair_lookup:other": 20, "unify:gadt": 2, "unify:other": 20}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:38
+
+  1 │ type rec packed = Pack('a => 'a): packed
+  2 │ let f = x => switch x { | Pack(v) => v }
+  3 │ 
+
+  This has type: $a => $a
+  But this switch is expected to return: 'a
+  $a is an existential type bound by the constructor Pack.
+  It is only known in the scope of the pattern that matches Pack.
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G8-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec packed = Pack(option<'a>): packed
+let f = x => switch x { | Pack(v) => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "occur:other": 4, "occur_shortcut:other": 4, "pair_compare:other": 2, "pair_lookup:gadt": 2, "pair_lookup:other": 32, "same_path:other": 2, "unify:gadt": 2, "unify:other": 32}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:38
+
+  1 │ type rec packed = Pack(option<'a>): packed
+  2 │ let f = x => switch x { | Pack(v) => v }
+  3 │ 
+
+  This has type: option<$a>
+  But this switch is expected to return: 'a
+  $a is an existential type bound by the constructor Pack.
+  It is only known in the scope of the pattern that matches Pack.
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G8-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec packed = Pack('a): packed
+let f = x => switch x { | Pack(v) => v + 1 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "pair_compare:other": 2, "pair_lookup:gadt": 2, "pair_lookup:other": 21, "unify:gadt": 2, "unify:other": 21}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:38
+
+  1 │ type rec packed = Pack('a): packed
+  2 │ let f = x => switch x { | Pack(v) => v + 1 }
+  3 │ 
+
+  This has type: $a
+  But it's expected to have type: int
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G8-6 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec packed = Pack('a): packed
+let f = x => switch x { | Pack(v) => v ++ "x" }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "pair_compare:other": 2, "pair_lookup:gadt": 2, "pair_lookup:other": 21, "unify:gadt": 2, "unify:other": 21}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:38
+
+  1 │ type rec packed = Pack('a): packed
+  2 │ let f = x => switch x { | Pack(v) => v ++ "x" }
+  3 │ 
+
+  This has type: $a
+  But string concatenation is expecting: string
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G8-7 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec packed = Pack('a): packed
+let f = x => switch x { | Pack(v) => (v, v) }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "pair_compare:other": 2, "pair_lookup:gadt": 2, "pair_lookup:other": 23, "unify:gadt": 2, "unify:other": 23}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:39
+
+  1 │ type rec packed = Pack('a): packed
+  2 │ let f = x => switch x { | Pack(v) => (v, v) }
+  3 │ 
+
+  This has type: $a
+  But it's expected to have type: 'a
+  $a is an existential type bound by the constructor Pack.
+  It is only known in the scope of the pattern that matches Pack.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G8-8 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec packed = Pack('a): packed
+let f = x => switch x { | Pack(v) => Some(v) }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "pair_compare:other": 2, "pair_lookup:gadt": 2, "pair_lookup:other": 23, "unify:gadt": 2, "unify:other": 23}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:43
+
+  1 │ type rec packed = Pack('a): packed
+  2 │ let f = x => switch x { | Pack(v) => Some(v) }
+  3 │ 
+
+  This has type: $a
+  But it's expected to have type: 'a
+  $a is an existential type bound by the constructor Pack.
+  It is only known in the scope of the pattern that matches Pack.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G8-9 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = Pack(option<'b>): t<option<'b>>
+let f: type a. t<a> => a = x => switch x { | Pack(v) => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 1, "gadt:gadt": 1, "instantiable:gadt": 1, "occur:other": 17, "occur_shortcut:other": 17, "pair_compare:other": 3, "pair_lookup:gadt": 2, "pair_lookup:other": 47, "same_path:gadt": 1, "same_path:other": 6, "unify:gadt": 2, "unify:other": 48}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x) {
+  return x._0;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G8-10 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = Pack(array<'b>): t<array<'b>>
+let f: type a. t<a> => a = x => switch x { | Pack(v) => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 1, "gadt:gadt": 1, "instantiable:gadt": 1, "occur:other": 17, "occur_shortcut:other": 17, "pair_compare:other": 3, "pair_lookup:gadt": 2, "pair_lookup:other": 47, "same_path:gadt": 1, "same_path:other": 6, "unify:gadt": 2, "unify:other": 48}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x) {
+  return x._0;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G8-11 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = Pack('b => 'b): t<'b => 'b>
+let f: type a. t<a> => a = x => switch x { | Pack(v) => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 4, "equation:gadt": 1, "gadt:gadt": 1, "instantiable:gadt": 1, "occur:other": 13, "occur_shortcut:other": 13, "pair_compare:other": 2, "pair_lookup:gadt": 2, "pair_lookup:other": 35, "same_path:gadt": 1, "same_path:other": 3, "unify:gadt": 2, "unify:other": 37}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x) {
+  return x._0;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G8-12 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = Pack(('b, 'b)): t<('b, 'b)>
+let f: type a. t<a> => a = x => switch x { | Pack(v) => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 3, "equation:gadt": 1, "gadt:gadt": 1, "instantiable:gadt": 1, "occur:other": 13, "occur_shortcut:other": 13, "pair_compare:other": 2, "pair_lookup:gadt": 2, "pair_lookup:other": 35, "same_path:gadt": 1, "same_path:other": 3, "tuple:other": 1, "unify:gadt": 2, "unify:other": 37}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x) {
+  return x._0;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+#### G8-13 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = Pack(option<'b>): t<option<'b>>
+let f: type a. t<a> => a = x => switch x { | Pack(v) => Some(0) }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 2, "occur:other": 24, "occur_shortcut:other": 24, "pair_compare:other": 1, "pair_lookup:gadt": 4, "pair_lookup:other": 77, "same_path:gadt": 2, "same_path:other": 8, "unify:gadt": 4, "unify:other": 77}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:62
+
+  1 │ type rec t<_> = Pack(option<'b>): t<option<'b>>
+  2 │ let f: type a. t<a> => a = x => switch x { | Pack(v) => Some(0) }
+
+  This has type: int
+  But it's expected to have type: $0
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G8-14 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = Pack(array<'b>): t<array<'b>>
+let f: type a. t<a> => a = x => switch x { | Pack(v) => [0] }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 2, "occur:other": 24, "occur_shortcut:other": 24, "pair_compare:other": 3, "pair_lookup:gadt": 4, "pair_lookup:other": 76, "same_path:gadt": 2, "same_path:other": 8, "unify:gadt": 4, "unify:other": 76}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:58
+
+  1 │ type rec t<_> = Pack(array<'b>): t<array<'b>>
+  2 │ let f: type a. t<a> => a = x => switch x { | Pack(v) => [0] }
+
+  This array item has type: int
+  But this array is expected to have items of type: $0
+
+  Arrays can only contain items of the same type.
+
+  Possible solutions:
+  - Convert all values in the array to the same type.
+  - Use a tuple, if your array is of fixed length. Tuples can mix types freely, and compiles to a JavaScript array. Example of a tuple: `let myTuple = (10, "hello", 15.5, true)
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G8-15 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = Pack('b => 'b): t<'b => 'b>
+let f: type a. t<a> => a = x => switch x { | Pack(v) => x => x + 1 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 4, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 2, "occur:other": 18, "occur_shortcut:other": 18, "pair_compare:other": 2, "pair_lookup:gadt": 4, "pair_lookup:other": 57, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 4, "unify:other": 57}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:62
+
+  1 │ type rec t<_> = Pack('b => 'b): t<'b => 'b>
+  2 │ let f: type a. t<a> => a = x => switch x { | Pack(v) => x => x + 1 }
+
+  This has type: $0
+  But it's expected to have type: int
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G8-16 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec t<_> = Pack(('b, 'b)): t<('b, 'b)>
+let f: type a. t<a> => a = x => switch x { | Pack(v) => (0, 0) }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 2, "occur:other": 16, "occur_shortcut:other": 16, "pair_compare:other": 2, "pair_lookup:gadt": 4, "pair_lookup:other": 55, "same_path:gadt": 2, "same_path:other": 2, "tuple:other": 2, "unify:gadt": 4, "unify:other": 55}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:58
+
+  1 │ type rec t<_> = Pack(('b, 'b)): t<('b, 'b)>
+  2 │ let f: type a. t<a> => a = x => switch x { | Pack(v) => (0, 0) }
+
+  This has type: int
+  But it's expected to have type: $0
+
+```
+
+stdout (empty):
+
+```text
+```
+
+### G9 — REACHED, NO DIFFERENCE SEEN
+
+Use `eq<a, RHS<a>>` with recursive structural and constructor right-hand sides, including an abbreviation that expands during unification (OCaml ctype.ml:1467–1490; Rust ctype.rs:2190–2337). Check whether the equation itself or a later concrete demand is rejected and compare the printed recursive abbreviation.
+
+G9-1–7 add equations but do not call `occur_check` under the GADT wrapper. G9-8 does: four Pattern-context calls take the cheap `occur_shortcut`, confirmed by a breakpoint at the successful shortcut return; both compilers give the same mismatch. This reaches the shortcut departure but does not establish a repeated-walk/type-change counterexample.
+
+#### G9-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a. (eq<a, list<a>>, a) => int = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 2, "occur:other": 26, "occur_shortcut:other": 26, "pair_compare:other": 2, "pair_lookup:gadt": 6, "pair_lookup:other": 72, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 6, "unify:other": 72}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:76
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a. (eq<a, list<a>>, a) => int = (e, v) => switch e { | Refl 
+    │ => v }
+  3 │ 
+
+  This has type: a (defined as list<a>)
+  But this switch is expected to return: int
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G9-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a. (eq<a, a => a>, a) => int = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 2, "occur:other": 24, "occur_shortcut:other": 24, "pair_compare:other": 1, "pair_lookup:gadt": 6, "pair_lookup:other": 67, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 6, "unify:other": 67}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:75
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a. (eq<a, a => a>, a) => int = (e, v) => switch e { | Refl =
+    │ > v }
+  3 │ 
+
+  This has type: a (defined as a => a)
+  But this switch is expected to return: int
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G9-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a. (eq<a, option<a>>, a) => int = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 2, "occur:other": 26, "occur_shortcut:other": 26, "pair_compare:other": 2, "pair_lookup:gadt": 6, "pair_lookup:other": 72, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 6, "unify:other": 72}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:78
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a. (eq<a, option<a>>, a) => int = (e, v) => switch e { | Ref
+    │ l => v }
+  3 │ 
+
+  This has type: a (defined as option<a>)
+  But this switch is expected to return: int
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G9-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a. (eq<a, array<a>>, a) => int = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 2, "occur:other": 26, "occur_shortcut:other": 26, "pair_compare:other": 2, "pair_lookup:gadt": 6, "pair_lookup:other": 72, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 6, "unify:other": 72}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:77
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a. (eq<a, array<a>>, a) => int = (e, v) => switch e { | Refl
+    │  => v }
+  3 │ 
+
+  This has type: a (defined as array<a>)
+  But this switch is expected to return: int
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G9-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a. (eq<a, (a, a)>, a) => int = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 2, "occur:other": 22, "occur_shortcut:other": 22, "pair_compare:other": 1, "pair_lookup:gadt": 6, "pair_lookup:other": 66, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 6, "unify:other": 66}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:75
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a. (eq<a, (a, a)>, a) => int = (e, v) => switch e { | Refl =
+    │ > v }
+  3 │ 
+
+  This has type: a (defined as (a, a))
+  But this switch is expected to return: int
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G9-6 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a. (eq<a, [#a(a)]>, a) => int = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 2, "occur:other": 22, "occur_shortcut:other": 22, "pair_lookup:gadt": 6, "pair_lookup:other": 64, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 6, "unify:other": 64}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:76
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a. (eq<a, [#a(a)]>, a) => int = (e, v) => switch e { | Refl 
+    │ => v }
+  3 │ 
+
+  This has type: a
+  But this switch is expected to return: int
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G9-7 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+let f: type a. (eq<a, {"x": a}>, a) => int = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 2, "occur:other": 22, "occur_shortcut:other": 22, "pair_compare:other": 3, "pair_lookup:gadt": 6, "pair_lookup:other": 64, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 6, "unify:other": 64}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:77
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ let f: type a. (eq<a, {"x": a}>, a) => int = (e, v) => switch e { | Refl
+    │  => v }
+  3 │ 
+
+  This has type: a
+  But this switch is expected to return: int
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G9-8 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+type alias<'a> = array<'a>
+let f: type a. (eq<a, alias<a>>, a) => int = (e, v) => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"arrow:other": 2, "equation:gadt": 2, "gadt:gadt": 2, "instantiable:gadt": 2, "occur:gadt": 4, "occur:other": 34, "occur_shortcut:gadt": 4, "occur_shortcut:other": 34, "pair_lookup:gadt": 8, "pair_lookup:other": 88, "same_path:gadt": 2, "same_path:other": 4, "unify:gadt": 8, "unify:other": 88}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:77
+
+  1 │ type rec eq<_, _> = Refl: eq<'a, 'a>
+  2 │ type alias<'a> = array<'a>
+  3 │ let f: type a. (eq<a, alias<a>>, a) => int = (e, v) => switch e { | Refl
+    │  => v }
+  4 │ 
+
+  This has type: a (defined as array<a>)
+  But this switch is expected to return: int
+
+  All branches in a switch must return the same type.
+  To fix this, change your branch to return the expected type.
+
+```
+
+stdout (empty):
+
+```text
+```
+
+### G10 — REACHED, NO DIFFERENCE SEEN
+
+Compare GADT indices containing polymorphic record fields, first as local datatypes and then through a functor parameter so compatibility can inspect their fields (OCaml ctype.ml:1961–1964 and 2080; Rust ctype.rs:852–857 and `mcomp_enter_poly`). Check both compatible polymorphic signatures and incompatible field results, including any exhaustiveness diagnostic.
+
+G10-1–8 stop at incompatible local datatype paths; they hit `mcomp` but not `mcomp_enter_poly`. G10-9–16 reach `mcomp_enter_poly` under the GADT wrapper and agree. This exercises the empty-pair initialization and the polymorphic compatibility body, but does not prove a nonempty outer universal-pair environment at entry; that stronger condition remains unestablished.
+
+#### G10-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+type r = {f: 'a. 'a => 'a}
+type s = {f: 'a. 'a => 'a}
+let f = (e: eq<r, s>, v: r): s => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 4, "mcomp:gadt": 2, "occur:other": 14, "occur_shortcut:other": 14, "pair_lookup:gadt": 6, "pair_lookup:other": 56, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 6, "unify:other": 60}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:48-51
+
+  2 │ type r = {f: 'a. 'a => 'a}
+  3 │ type s = {f: 'a. 'a => 'a}
+  4 │ let f = (e: eq<r, s>, v: r): s => switch e { | Refl => v }
+  5 │ 
+
+  This pattern matches values of type eq<r, r>
+  but a pattern was expected which matches values of type eq<r, s>
+  
+  The incompatible parts:
+    r vs s
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G10-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+type r = {f: 'a. 'a => 'a}
+type s = {f: 'a. 'a => 'a}
+let f = (e: eq<r, s>, v: r): s => switch e { | Refl => 0 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 4, "mcomp:gadt": 2, "occur:other": 14, "occur_shortcut:other": 14, "pair_lookup:gadt": 6, "pair_lookup:other": 56, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 6, "unify:other": 60}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:48-51
+
+  2 │ type r = {f: 'a. 'a => 'a}
+  3 │ type s = {f: 'a. 'a => 'a}
+  4 │ let f = (e: eq<r, s>, v: r): s => switch e { | Refl => 0 }
+  5 │ 
+
+  This pattern matches values of type eq<r, r>
+  but a pattern was expected which matches values of type eq<r, s>
+  
+  The incompatible parts:
+    r vs s
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G10-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+type r = {f: 'a. array<'a> => array<'a>}
+type s = {f: 'a. array<'a> => array<'a>}
+let f = (e: eq<r, s>, v: r): s => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 4, "mcomp:gadt": 2, "occur:other": 30, "occur_shortcut:other": 30, "pair_lookup:gadt": 6, "pair_lookup:other": 104, "same_path:gadt": 2, "same_path:other": 10, "unify:gadt": 6, "unify:other": 108}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:48-51
+
+  2 │ type r = {f: 'a. array<'a> => array<'a>}
+  3 │ type s = {f: 'a. array<'a> => array<'a>}
+  4 │ let f = (e: eq<r, s>, v: r): s => switch e { | Refl => v }
+  5 │ 
+
+  This pattern matches values of type eq<r, r>
+  but a pattern was expected which matches values of type eq<r, s>
+  
+  The incompatible parts:
+    r vs s
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G10-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+type r = {f: 'a. array<'a> => array<'a>}
+type s = {f: 'a. array<'a> => array<'a>}
+let f = (e: eq<r, s>, v: r): s => switch e { | Refl => 0 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 4, "mcomp:gadt": 2, "occur:other": 30, "occur_shortcut:other": 30, "pair_lookup:gadt": 6, "pair_lookup:other": 104, "same_path:gadt": 2, "same_path:other": 10, "unify:gadt": 6, "unify:other": 108}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:48-51
+
+  2 │ type r = {f: 'a. array<'a> => array<'a>}
+  3 │ type s = {f: 'a. array<'a> => array<'a>}
+  4 │ let f = (e: eq<r, s>, v: r): s => switch e { | Refl => 0 }
+  5 │ 
+
+  This pattern matches values of type eq<r, r>
+  but a pattern was expected which matches values of type eq<r, s>
+  
+  The incompatible parts:
+    r vs s
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G10-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+type r = {f: 'a. option<'a> => option<'a>}
+type s = {f: 'a. option<'a> => option<'a>}
+let f = (e: eq<r, s>, v: r): s => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 4, "mcomp:gadt": 2, "occur:other": 30, "occur_shortcut:other": 30, "pair_lookup:gadt": 6, "pair_lookup:other": 104, "same_path:gadt": 2, "same_path:other": 10, "unify:gadt": 6, "unify:other": 108}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:48-51
+
+  2 │ type r = {f: 'a. option<'a> => option<'a>}
+  3 │ type s = {f: 'a. option<'a> => option<'a>}
+  4 │ let f = (e: eq<r, s>, v: r): s => switch e { | Refl => v }
+  5 │ 
+
+  This pattern matches values of type eq<r, r>
+  but a pattern was expected which matches values of type eq<r, s>
+  
+  The incompatible parts:
+    r vs s
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G10-6 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+type r = {f: 'a. option<'a> => option<'a>}
+type s = {f: 'a. option<'a> => option<'a>}
+let f = (e: eq<r, s>, v: r): s => switch e { | Refl => 0 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 4, "mcomp:gadt": 2, "occur:other": 30, "occur_shortcut:other": 30, "pair_lookup:gadt": 6, "pair_lookup:other": 104, "same_path:gadt": 2, "same_path:other": 10, "unify:gadt": 6, "unify:other": 108}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:48-51
+
+  2 │ type r = {f: 'a. option<'a> => option<'a>}
+  3 │ type s = {f: 'a. option<'a> => option<'a>}
+  4 │ let f = (e: eq<r, s>, v: r): s => switch e { | Refl => 0 }
+  5 │ 
+
+  This pattern matches values of type eq<r, r>
+  but a pattern was expected which matches values of type eq<r, s>
+  
+  The incompatible parts:
+    r vs s
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G10-7 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+type r = {f: 'a. ('a, 'a) => 'a}
+type s = {f: 'a. ('a, 'a) => 'a}
+let f = (e: eq<r, s>, v: r): s => switch e { | Refl => v }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 4, "mcomp:gadt": 2, "occur:other": 14, "occur_shortcut:other": 14, "pair_lookup:gadt": 6, "pair_lookup:other": 56, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 6, "unify:other": 60}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:48-51
+
+  2 │ type r = {f: 'a. ('a, 'a) => 'a}
+  3 │ type s = {f: 'a. ('a, 'a) => 'a}
+  4 │ let f = (e: eq<r, s>, v: r): s => switch e { | Refl => v }
+  5 │ 
+
+  This pattern matches values of type eq<r, r>
+  but a pattern was expected which matches values of type eq<r, s>
+  
+  The incompatible parts:
+    r vs s
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G10-8 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+type r = {f: 'a. ('a, 'a) => 'a}
+type s = {f: 'a. ('a, 'a) => 'a}
+let f = (e: eq<r, s>, v: r): s => switch e { | Refl => 0 }
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 4, "mcomp:gadt": 2, "occur:other": 14, "occur_shortcut:other": 14, "pair_lookup:gadt": 6, "pair_lookup:other": 56, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 6, "unify:other": 60}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:48-51
+
+  2 │ type r = {f: 'a. ('a, 'a) => 'a}
+  3 │ type s = {f: 'a. ('a, 'a) => 'a}
+  4 │ let f = (e: eq<r, s>, v: r): s => switch e { | Refl => 0 }
+  5 │ 
+
+  This pattern matches values of type eq<r, r>
+  but a pattern was expected which matches values of type eq<r, s>
+  
+  The incompatible parts:
+    r vs s
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G10-9 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+module F = (X: {
+type r = {f: 'a. 'a => 'a}
+type s = {f: 'a. 'a => 'a}
+}) => {
+let f = (e: eq<X.r, X.s>) => switch e { | Refl => 0 }
+}
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 1, "instantiable:gadt": 2, "mcomp:gadt": 5, "mcomp_poly:gadt": 1, "occur:other": 7, "occur_shortcut:other": 7, "pair_compare:other": 1, "pair_lookup:gadt": 3, "pair_lookup:other": 26, "same_path:gadt": 1, "same_path:other": 1, "unify:gadt": 3, "unify:other": 28}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  let f = e => 0;
+  return {
+    f: f
+  };
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+#### G10-10 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+module F = (X: {
+type r = {f: 'a. array<'a> => array<'a>}
+type s = {f: 'a. array<'a> => array<'a>}
+}) => {
+let f = (e: eq<X.r, X.s>) => switch e { | Refl => 0 }
+}
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 1, "instantiable:gadt": 2, "mcomp:gadt": 7, "mcomp_poly:gadt": 1, "occur:other": 15, "occur_shortcut:other": 15, "pair_lookup:gadt": 3, "pair_lookup:other": 50, "same_path:gadt": 1, "same_path:other": 5, "unify:gadt": 3, "unify:other": 52}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  let f = e => 0;
+  return {
+    f: f
+  };
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+#### G10-11 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+module F = (X: {
+type r = {f: 'a. option<'a> => option<'a>}
+type s = {f: 'a. option<'a> => option<'a>}
+}) => {
+let f = (e: eq<X.r, X.s>) => switch e { | Refl => 0 }
+}
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 1, "instantiable:gadt": 2, "mcomp:gadt": 7, "mcomp_poly:gadt": 1, "occur:other": 15, "occur_shortcut:other": 15, "pair_lookup:gadt": 3, "pair_lookup:other": 50, "same_path:gadt": 1, "same_path:other": 5, "unify:gadt": 3, "unify:other": 52}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  let f = e => 0;
+  return {
+    f: f
+  };
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+#### G10-12 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+module F = (X: {
+type r = {f: 'a. ('a, 'a) => 'a}
+type s = {f: 'a. ('a, 'a) => 'a}
+}) => {
+let f = (e: eq<X.r, X.s>) => switch e { | Refl => 0 }
+}
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 1, "instantiable:gadt": 2, "mcomp:gadt": 6, "mcomp_poly:gadt": 1, "occur:other": 7, "occur_shortcut:other": 7, "pair_compare:other": 1, "pair_lookup:gadt": 3, "pair_lookup:other": 26, "same_path:gadt": 1, "same_path:other": 1, "unify:gadt": 3, "unify:other": 28}
+```
+
+Both compilers, exit 0; stderr (empty):
+
+```text
+```
+
+stdout (generated JavaScript):
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  let f = e => 0;
+  return {
+    f: f
+  };
+}
+
+exports.F = F;
+/* No side effect */
+```
+
+#### G10-13 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+module F = (X: {
+type r = {f: 'a. 'a => 'a}
+type s = {f: 'a. 'a => int}
+}) => {
+let f = (e: eq<X.r, X.s>) => switch e { | Refl => 0 }
+}
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 4, "mcomp:gadt": 10, "mcomp_poly:gadt": 2, "occur:other": 14, "occur_shortcut:other": 14, "pair_lookup:gadt": 6, "pair_lookup:other": 50, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 6, "unify:other": 52}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:43-46
+
+  4 │ type s = {f: 'a. 'a => int}
+  5 │ }) => {
+  6 │ let f = (e: eq<X.r, X.s>) => switch e { | Refl => 0 }
+  7 │ }
+
+  This pattern matches values of type eq<X.r, X.r>
+  but a pattern was expected which matches values of type eq<X.r, X.s>
+  
+  The incompatible parts:
+    X.r vs X.s
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G10-14 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+module F = (X: {
+type r = {f: 'a. 'a => 'a}
+type s = {f: 'a. array<'a> => array<int>}
+}) => {
+let f = (e: eq<X.r, X.s>) => switch e { | Refl => 0 }
+}
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 4, "mcomp:gadt": 8, "mcomp_poly:gadt": 2, "occur:other": 22, "occur_shortcut:other": 22, "pair_lookup:gadt": 6, "pair_lookup:other": 74, "same_path:gadt": 2, "same_path:other": 6, "unify:gadt": 6, "unify:other": 76}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:43-46
+
+  4 │ type s = {f: 'a. array<'a> => array<int>}
+  5 │ }) => {
+  6 │ let f = (e: eq<X.r, X.s>) => switch e { | Refl => 0 }
+  7 │ }
+
+  This pattern matches values of type eq<X.r, X.r>
+  but a pattern was expected which matches values of type eq<X.r, X.s>
+  
+  The incompatible parts:
+    X.r vs X.s
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G10-15 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+module F = (X: {
+type r = {f: 'a. 'a => 'a}
+type s = {f: 'a. option<'a> => option<int>}
+}) => {
+let f = (e: eq<X.r, X.s>) => switch e { | Refl => 0 }
+}
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 4, "mcomp:gadt": 8, "mcomp_poly:gadt": 2, "occur:other": 22, "occur_shortcut:other": 22, "pair_lookup:gadt": 6, "pair_lookup:other": 74, "same_path:gadt": 2, "same_path:other": 6, "unify:gadt": 6, "unify:other": 76}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:43-46
+
+  4 │ type s = {f: 'a. option<'a> => option<int>}
+  5 │ }) => {
+  6 │ let f = (e: eq<X.r, X.s>) => switch e { | Refl => 0 }
+  7 │ }
+
+  This pattern matches values of type eq<X.r, X.r>
+  but a pattern was expected which matches values of type eq<X.r, X.s>
+  
+  The incompatible parts:
+    X.r vs X.s
+
+```
+
+stdout (empty):
+
+```text
+```
+
+#### G10-16 — outputs agree
+
+`Main.res`:
+
+```rescript
+type rec eq<_, _> = Refl: eq<'a, 'a>
+module F = (X: {
+type r = {f: 'a. 'a => 'a}
+type s = {f: 'a. ('a, 'a) => int}
+}) => {
+let f = (e: eq<X.r, X.s>) => switch e { | Refl => 0 }
+}
+```
+
+Debugger counts (separate invocation):
+
+```json
+{"gadt:gadt": 2, "instantiable:gadt": 4, "mcomp:gadt": 6, "mcomp_poly:gadt": 2, "occur:other": 14, "occur_shortcut:other": 14, "pair_lookup:gadt": 6, "pair_lookup:other": 50, "same_path:gadt": 2, "same_path:other": 2, "unify:gadt": 6, "unify:other": 52}
+```
+
+Both compilers, exit 2; stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:43-46
+
+  4 │ type s = {f: 'a. ('a, 'a) => int}
+  5 │ }) => {
+  6 │ let f = (e: eq<X.r, X.s>) => switch e { | Refl => 0 }
+  7 │ }
+
+  This pattern matches values of type eq<X.r, X.r>
+  but a pattern was expected which matches values of type eq<X.r, X.s>
+  
+  The incompatible parts:
+    X.r vs X.s
+
+```
+
+stdout (empty):
+
+```text
+```
+
+### Found on the way
+
+No departure outside G1–G10 was observed in these runs. The stricter Rust
+newtype-level requirement is recorded as G6, even though its direction is
+the reverse of the missing privacy/arity checks proposed in the inventory.
+
+### Limits and verification
+
+The source and manifests are unchanged. No whole compiler test suite was
+run. This search does not certify all internal-state combinations: notably,
+G2/G7 do not prove cross-mode pair reuse, G5 does not separately trace the
+OCaml level-choice branch, G8 does not exercise the missing-level fallback,
+and G10 does not establish inherited nonempty universal pairs. The concrete
+reachability and output evidence above is the extent of each verdict.
+
+Application self-comparison with two byte-identical copies of the unchanged
+release executable also matched: 3,735 signatures, 32 diagnostics in 18 files,
+and 3,980 generated files. This verifies repeatability, not a Rust-versus-OCaml
+comparison or a performance improvement; the pattern evidence above comes
+from separate Rust and OCaml invocations.
