@@ -11,7 +11,7 @@
 
 use std::cmp::Ordering;
 
-use super::graph::{CONSTR, GENERIC, Graph, LINK, Mode, NONE, Node, TUPLE, Ty, VAR};
+use super::graph::{ARROW, CONSTR, GENERIC, Graph, LINK, Mode, NONE, Node, TUPLE, Ty, VAR};
 use super::segment::{
     EXTENDED, ExtraDescriptor, PackageRow, Range, RowFieldKind, RowFieldRow, Segment, VariantRow,
 };
@@ -2102,10 +2102,14 @@ impl Checker {
         } else {
             (gained1, gained2)
         };
-        // `List.iter (update_level !env (repr more).level) (tl1' @ tl2')`.
+        // `List.iter (update_level !env (repr more).level) (tl1' @ tl2')`:
+        // each range on its own. After the split the two need not be
+        // adjacent, and what lies between them is what its compaction
+        // left behind, which can be a type that holds a universal
+        // variable and that OCaml does not lower.
         let level = self.more_level(record);
         if level != GENERIC {
-            for at in gained1.start..gained2.end {
+            for at in gained1.clone().chain(gained2.clone()) {
                 let ty = self.extras.row_scratch[at].ty;
                 if self.lower(ty, level).is_err() {
                     self.extras.row_scratch.truncate(base);
@@ -2528,8 +2532,54 @@ impl Checker {
     /// O(scopes × bound variables): one step and one `repr` per slot
     /// compared, at most `2 × (left_len + right_len)` a scope; no
     /// allocation. (R3g)
+    #[inline(never)]
     pub fn unify_univar(&mut self, t1: Ty, t2: Ty) -> Result<(), Clash> {
-        todo!("R3g")
+        for at in (0..self.scopes.len()).rev() {
+            let scope = self.scopes[at];
+            // `(cl1, cl2)`, then `(cl2, cl1)`: each list with the first
+            // partner node of its own positions.
+            let left = (scope.left, scope.left_len, scope.partners.0);
+            let right = (scope.right, scope.right_len, scope.partners.0 + scope.left_len);
+            for (a, b) in [(left, right), (right, left)] {
+                match (self.find_univ(t1, a), self.find_univ(t2, b)) {
+                    (Some(r1), Some(r2)) => {
+                        let (p1, p2) = (self.g.nodes[r1.0 as usize].a, self.g.nodes[r2.0 as usize].a);
+                        // `Some {contents = Some t'2}, Some _ when t2 == repr
+                        // t'2 -> ()`.
+                        if p1 != NONE && self.g.repr(Ty(p1)) == t2 {
+                            return Ok(());
+                        }
+                        // `Some ({contents = None} as r1), Some ({contents =
+                        // None} as r2) -> set_univar r1 t2; set_univar r2 t1`.
+                        if p1 == NONE && p2 == NONE {
+                            self.g.write(r1, partner_node(t2));
+                            self.g.write(r2, partner_node(t1));
+                            return Ok(());
+                        }
+                        return Err(Clash);
+                    }
+                    (None, None) => {}
+                    _ => return Err(Clash),
+                }
+            }
+        }
+        Err(Clash)
+    }
+
+    /// `find_univ t cl` of [`Checker::unify_univar`] (compiler/ml/ctype.ml:
+    /// 1546-1551): the partner node of the first slot of the binder list
+    /// `(start, len, partners)` whose representative is `t`, or `None`.
+    /// O(len): one step and one `repr` a slot read; no allocation.
+    #[inline]
+    fn find_univ(&mut self, t: Ty, (start, len, partners): (u32, u32, u32)) -> Option<Ty> {
+        for i in 0..len {
+            #[cfg(test)]
+            super::steps::tick();
+            if self.g.repr(self.g.lists[(start + i) as usize]) == t {
+                return Some(Ty(partners + i));
+            }
+        }
+        None
     }
 
     /// `enter_poly env univar_pairs t1 tl1 t2 tl2 (unify env)`
@@ -2567,8 +2617,68 @@ impl Checker {
     /// (`B + left_len + right_len`), and the escape walk only when a bound
     /// variable is already known. OCaml rebuilds `known_univars` at every
     /// entry too. (R3g)
+    #[inline(never)]
     pub fn enter_poly(&mut self, left: Node, right: Node) -> Result<(), Clash> {
-        todo!("R3g")
+        let (left_len, right_len) = (left.arity() - 1, right.arity() - 1);
+        let base = self.scopes.len();
+        if base != 0 {
+            // `known_univars` (ctype.ml:1658-1662).
+            let known = self.fresh_marks();
+            for at in 0..base {
+                let scope = self.scopes[at];
+                self.mark_slots(scope.left, scope.left_len, known);
+                self.mark_slots(scope.right, scope.right_len, known);
+            }
+            let known1 = self.any_marked(left.b + 1, left_len, known);
+            let known2 = self.any_marked(right.b + 1, right_len, known);
+            // `raise (Unify [])`, before anything is pushed (ctype.ml:
+            // 1664-1669).
+            if known1 && self.univars_escape(left, right) || known2 && self.univars_escape(right, left) {
+                return Err(Clash);
+            }
+        }
+        // `let cl1 = List.map (fun t -> (t, ref None)) tl1 and cl2 = ...`;
+        // `univar_pairs := (cl1, cl2) :: (cl2, cl1) :: old_univars`.
+        let partners = Ty(self.g.nodes.len() as u32);
+        for _ in 0..left_len + right_len {
+            self.g.push(partner_node(Ty(NONE)));
+        }
+        self.scopes.push(PolyScope {
+            left: left.b + 1,
+            right: right.b + 1,
+            left_len,
+            right_len,
+            partners,
+        });
+        // `f t1 t2`, then `univar_pairs := old_univars` (ctype.ml:
+        // 1673-1676).
+        self.frames.push(Frame { left: Ty(NONE), right: Ty(NONE), kind: FrameKind::LeavePoly, extra: base as u32 });
+        let (body1, body2) = (self.g.lists[left.b as usize], self.g.lists[right.b as usize]);
+        self.push_row_pair(body1, body2);
+        Ok(())
+    }
+
+    /// O(len): mark the representative of each of the `len` slots from
+    /// list index `start` with `generation`; one step a slot read.
+    fn mark_slots(&mut self, start: u32, len: u32, generation: u32) {
+        for i in 0..len {
+            #[cfg(test)]
+            super::steps::tick();
+            let ty = self.g.repr(self.g.lists[(start + i) as usize]);
+            self.marks[ty.0 as usize] = generation;
+        }
+    }
+
+    /// O(len): whether the representative of one of the `len` slots from
+    /// list index `start` is marked with `generation`; one step a slot
+    /// read, stopping at the first.
+    fn any_marked(&mut self, start: u32, len: u32, generation: u32) -> bool {
+        (0..len).any(|i| {
+            #[cfg(test)]
+            super::steps::tick();
+            let ty = self.g.repr(self.g.lists[(start + i) as usize]);
+            self.marks[ty.0 as usize] == generation
+        })
     }
 
     /// `univars_escape env old_univars tl (newty (Tpoly (t, tl')))`
@@ -2599,8 +2709,72 @@ impl Checker {
     /// table). O(bound variables of the open scopes + nodes of `other`),
     /// one step a slot of the family pass and one a node visited; no
     /// allocation. (R3g)
+    #[inline(never)]
     pub fn univars_escape(&mut self, binder: Node, other: Node) -> bool {
-        todo!("R3g")
+        // `get_univar_family` (ctype.ml:1612-1623).
+        let family = self.fresh_marks();
+        self.mark_slots(binder.b + 1, binder.arity() - 1, family);
+        for at in (0..self.scopes.len()).rev() {
+            let scope = self.scopes[at];
+            let left = (scope.left, scope.left_len);
+            let right = (scope.right, scope.right_len);
+            for ((start1, len1), (start2, len2)) in [(left, right), (right, left)] {
+                if len2 != 0 && self.any_marked(start1, len1, family) {
+                    self.mark_slots(start2, len2, family);
+                }
+            }
+        }
+        // `occur (newty (Tpoly (t, tl')))` (ctype.ml:1630-1652).
+        let visited = self.fresh_marks();
+        self.g.work.clear();
+        self.push_unless_bound(other, family);
+        while let Some(entry) = self.g.work.pop() {
+            let t = self.g.repr(entry);
+            if self.marks[t.0 as usize] == visited {
+                continue;
+            }
+            #[cfg(test)]
+            super::steps::tick();
+            let node = self.g.nodes[t.0 as usize];
+            if self.is_univar(t) {
+                // `Tunivar _ -> if Type_set.mem t family then raise Occur`.
+                if self.marks[t.0 as usize] == family {
+                    self.g.work.clear();
+                    return true;
+                }
+                continue;
+            }
+            self.marks[t.0 as usize] = visited;
+            match node.tag() {
+                // `Tconstr (_, [], _) -> ()` and the arguments the
+                // variances allow (ctype.ml:1638-1647).
+                CONSTR => {
+                    for i in 0..node.arity() {
+                        if self.types.may_occur(node.a, i) {
+                            let ty = self.g.lists[(node.b + 1 + i) as usize];
+                            self.g.work.push(ty);
+                        }
+                    }
+                }
+                TUPLE if node.head & EXTENDED != 0
+                    && matches!(self.extras.descriptors[node.a as usize], ExtraDescriptor::Poly) =>
+                {
+                    self.push_unless_bound(node, family);
+                }
+                _ => self.g.children(node, false),
+            }
+        }
+        false
+    }
+
+    /// `Tpoly (t, tl)` of [`Checker::univars_escape`] (compiler/ml/ctype.
+    /// ml:1634-1636): push the body of the polymorphic descriptor `node`
+    /// unless one of its bound variables is in the family (marked
+    /// `family`). O(bound variables): one step a slot read.
+    fn push_unless_bound(&mut self, node: Node, family: u32) {
+        if !self.any_marked(node.b + 1, node.arity() - 1, family) {
+            self.g.work.push(self.g.lists[node.b as usize]);
+        }
     }
 
     /// The walk of `occur_univar` (compiler/ml/ctype.ml:1563-1607): the
@@ -2658,8 +2832,127 @@ impl Checker {
     /// without a polymorphic type that shares a node with the outside.
     /// No allocation: `g.work` and `open_polys` keep their capacity.
     /// Never called when [`Extras::univars`] is 0. (R3g)
+    #[inline(never)]
     pub fn free_univar(&mut self, ty: Ty) -> Ty {
-        todo!("R3g")
+        if self.mark_generation > u32::MAX / 2 {
+            self.marks.fill(0);
+            self.mark_generation = 0;
+        }
+        let first = self.fresh_marks();
+        let mut current = first;
+        self.extras.open_polys.push(true);
+        self.g.work.clear();
+        self.g.work.push(ty);
+        let mut found = Ty(NONE);
+        while let Some(entry) = self.g.work.pop() {
+            if entry.0 == NONE {
+                // Leave the context: the entry below is the one to return to.
+                self.extras.open_polys[(current - first) as usize] = false;
+                current = self.g.work.pop().expect("a context to return to").0;
+                continue;
+            }
+            let t = self.g.repr(entry);
+            let live = self.live_mark(t, first);
+            if self.is_univar(t) {
+                // `if not (Type_set.mem ty bound) then raise ...`.
+                if !live {
+                    found = t;
+                    break;
+                }
+                continue;
+            }
+            if !live {
+                self.marks[t.0 as usize] = current;
+                #[cfg(test)]
+                super::steps::tick();
+                let node = self.g.nodes[t.0 as usize];
+                self.push_free_univar_children(node, first, &mut current);
+            }
+        }
+        self.g.work.clear();
+        self.extras.open_polys.clear();
+        found
+    }
+
+    /// O(1): whether the mark of `t` is a generation of the current
+    /// [`Checker::free_univar`] walk (from `first`) whose context is still
+    /// open. One mark load and, for a mark of this walk, one flag load.
+    #[inline]
+    fn live_mark(&self, t: Ty, first: u32) -> bool {
+        let mark = self.marks[t.0 as usize];
+        mark >= first && self.extras.open_polys[(mark - first) as usize]
+    }
+
+    /// One visit of [`Checker::free_univar`] after `node` was marked: push
+    /// what the walk visits next, last first, so that the children are
+    /// popped in `iter_type_expr`'s order (compiler/ml/btype.ml:229-272).
+    /// A polymorphic type opens a context (a new generation, its bound
+    /// variables marked with it unless an open context binds them
+    /// already) and makes `current` that generation. O(arity) pushes and,
+    /// for a polymorphic type, one mark load and store per bound
+    /// variable; no allocation beyond `g.work`'s growth.
+    fn push_free_univar_children(&mut self, node: Node, first: u32, current: &mut u32) {
+        let arity = node.arity();
+        match node.tag() {
+            ARROW => {
+                self.g.work.push(Ty(node.a));
+                for i in (0..arity).rev() {
+                    let ty = self.g.params[(node.b + i) as usize].ty;
+                    self.g.work.push(ty);
+                }
+            }
+            // `Tconstr (_, [], _) -> ()`; the arguments the variances allow
+            // (compiler/ml/ctype.ml:1590-1599). The abbreviation memo is
+            // not a child (`iter_type_expr`).
+            CONSTR => {
+                for i in (0..arity).rev() {
+                    if self.types.may_occur(node.a, i) {
+                        let ty = self.g.lists[(node.b + 1 + i) as usize];
+                        self.g.work.push(ty);
+                    }
+                }
+            }
+            TUPLE if node.head & EXTENDED != 0 => match self.extras.descriptors[node.a as usize] {
+                // `Tpoly (ty, tyl)`: the body with the bound variables
+                // added to `bound` (compiler/ml/ctype.ml:1587-1589).
+                ExtraDescriptor::Poly => {
+                    let generation = self.fresh_marks();
+                    self.extras.open_polys.push(true);
+                    for i in 1..arity {
+                        let bound = self.g.repr(self.g.lists[(node.b + i) as usize]);
+                        if !self.live_mark(bound, first) {
+                            self.marks[bound.0 as usize] = generation;
+                        }
+                    }
+                    self.g.work.push(Ty(*current));
+                    self.g.work.push(Ty(NONE));
+                    self.g.work.push(self.g.lists[node.b as usize]);
+                    *current = generation;
+                }
+                // `iter_row` (the fields and the name's arguments), then
+                // the row variable (compiler/ml/btype.ml:229-241, 263-266).
+                ExtraDescriptor::Variant(index) => {
+                    let more = self.extras.variants[index as usize].more;
+                    self.g.work.push(self.g.lists[(node.b + more) as usize]);
+                    for i in (0..arity).rev() {
+                        if i != more {
+                            self.g.work.push(self.g.lists[(node.b + i) as usize]);
+                        }
+                    }
+                }
+                _ => {
+                    for i in (0..arity).rev() {
+                        self.g.work.push(self.g.lists[(node.b + i) as usize]);
+                    }
+                }
+            },
+            TUPLE => {
+                for i in (0..arity).rev() {
+                    self.g.work.push(self.g.lists[(node.b + i) as usize]);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// `occur_univar env ty` (compiler/ml/ctype.ml:1563-1607): a clash
@@ -2718,12 +3011,67 @@ impl Checker {
     ///
     /// O(types gained) walks, each [`Checker::free_univar`]'s cost; no
     /// allocation. (R3g)
+    #[inline(never)]
     pub fn split_univars(
         &mut self,
         frame: Frame,
         gained: [std::ops::Range<usize>; 2],
     ) -> Result<Option<[std::ops::Range<usize>; 2]>, [Ty; 2]> {
-        todo!("R3g")
+        let [gained1, gained2] = gained;
+        // `let tl1', tlu1 = split_univars tl1' and tl2', tlu2 = ...`.
+        let (kept1, held1) = self.partition_univars(gained1);
+        let (kept2, held2) = self.partition_univars(gained2);
+        match (held1.is_empty(), held2.is_empty()) {
+            (true, true) => Ok(Some([kept1, kept2])),
+            (false, false) if self.extras.passive_variants => Ok(Some([kept1, kept2])),
+            // `tu1 :: tlu1, _ :: _ -> List.iter (unify env tu1) (tlu1 @
+            // tlu2)`.
+            (false, false) => {
+                self.saved[frame.extra as usize].b |= ROW_UNIVARS;
+                let end = Frame { kind: FrameKind::RowFieldEnd, ..frame };
+                if self.frames.last() != Some(&end) {
+                    self.frames.push(end);
+                }
+                let tu1 = self.extras.row_scratch[held1.start].ty;
+                for at in (held1.start + 1..held2.end).rev() {
+                    // The two holder ranges are adjacent: `held2` was
+                    // appended right after `held1`.
+                    let ty = self.extras.row_scratch[at].ty;
+                    self.push_row_pair(tu1, ty);
+                }
+                Ok(None)
+            }
+            // `tu :: _, [] | [], tu :: _ -> occur_univar !env tu`.
+            (false, true) | (true, false) => {
+                let first = if held1.is_empty() { held2.start } else { held1.start };
+                let tu = self.extras.row_scratch[first].ty;
+                let refused = self.occur_univar(tu);
+                debug_assert!(refused.is_err(), "the type holds a free universal variable");
+                Err([Ty(NONE), Ty(NONE)])
+            }
+        }
+    }
+
+    /// `List.partition` of [`Checker::split_univars`] (compiler/ml/
+    /// ctype.ml:2685-2690) over `extras.row_scratch[range]`: the types in
+    /// which [`Checker::free_univar`] finds no variable are compacted in
+    /// place, in order, to the start of the range; those in which it finds
+    /// one are appended, in order, at the end of the scratch. Returns the
+    /// two ranges. O(types) walks, each `free_univar`'s cost; no
+    /// allocation beyond the scratch's growth.
+    fn partition_univars(&mut self, range: std::ops::Range<usize>) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
+        let (start, held) = (range.start, self.extras.row_scratch.len());
+        let mut kept = start;
+        for at in range {
+            let field = self.extras.row_scratch[at];
+            if self.free_univar(field.ty).0 == NONE {
+                self.extras.row_scratch[kept] = field;
+                kept += 1;
+            } else {
+                self.extras.row_scratch.push(field);
+            }
+        }
+        (start..kept, held..self.extras.row_scratch.len())
     }
 
     /// `Tpackage (p1, n1, tl1), Tpackage (p2, n2, tl2)` of unify3

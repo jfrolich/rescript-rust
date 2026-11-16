@@ -2819,7 +2819,6 @@ fn nodes_now(c: &Checker) -> Vec<Node> {
 /// No descriptor row is written.
 /// Reaches: R3g.
 #[test]
-#[ignore = "R3g build"]
 fn universal_variables_pair_by_position() {
     let mut c = checker(Mode::Success);
     let (left, [u, v]) = two_binders(&mut c, [0, 1, 0], [0, 1]);
@@ -2861,7 +2860,6 @@ fn universal_variables_pair_by_position() {
 /// against `b'`, the last pair of the trace.
 /// Reaches: R3g.
 #[test]
-#[ignore = "R3g build"]
 fn a_variable_of_an_outer_scope_pairs_in_its_scope() {
     let nested = |c: &mut Checker, swap: bool| {
         let (a, b) = (univar_at(c, 2), univar_at(c, 2));
@@ -2899,7 +2897,6 @@ fn a_variable_of_an_outer_scope_pairs_in_its_scope() {
 /// with no log of its own.
 /// Reaches: R3g.
 #[test]
-#[ignore = "R3g build"]
 fn a_failure_leaves_no_scope_and_a_restore_undoes_the_pairings() {
     let mut c = checker(Mode::Success);
     let (left, _) = two_binders(&mut c, [0, 1, 0], [0, 1]);
@@ -2977,7 +2974,6 @@ fn a_failure_leaves_no_scope_and_a_restore_undoes_the_pairings() {
 ///
 /// Reaches: R3g.
 #[test]
-#[ignore = "R3g build"]
 fn a_known_binder_escapes_before_the_bodies() {
     let build = |c: &mut Checker, arrow: bool, right: [usize; 2]| {
         let u = univar_at(c, 2);
@@ -3063,7 +3059,6 @@ fn a_known_binder_escapes_before_the_bodies() {
 /// as one the type does not use, the variable is bound.
 /// Reaches: R3g.
 #[test]
-#[ignore = "R3g build"]
 fn a_free_universal_variable_is_refused() {
     for mode in [Mode::Success, Mode::Explain] {
         let mut c = checker(mode);
@@ -3131,7 +3126,6 @@ fn a_free_universal_variable_is_refused() {
 ///
 /// Reaches: R3g.
 #[test]
-#[ignore = "R3g build"]
 fn the_first_free_universal_variable_is_found_in_order() {
     let mut c = checker(Mode::Success);
     let [p, q, r, s] = [0; 4].map(|_| univar_at(&mut c, 2));
@@ -3201,7 +3195,6 @@ fn the_first_free_universal_variable_is_found_in_order() {
 /// the pair is `(u, the new variable)`.
 /// Reaches: R3g.
 #[test]
-#[ignore = "R3g build"]
 fn a_free_universal_variable_below_a_swapped_unify3_is_reversed() {
     for swapped in [true, false] {
         let mut c = checker(Mode::Explain);
@@ -3252,7 +3245,6 @@ fn a_free_universal_variable_below_a_swapped_unify3_is_reversed() {
 /// No scope stays open.
 /// Reaches: R3g.
 #[test]
-#[ignore = "R3g build"]
 fn a_clash_in_the_bodies_below_a_swapped_unify3_is_reversed() {
     let mut c = checker(Mode::Explain);
     let ap = c.types.rows.len() as u32;
@@ -3316,7 +3308,6 @@ fn a_clash_in_the_bodies_below_a_swapped_unify3_is_reversed() {
 /// No row is written.
 /// Reaches: R3f, R3g.
 #[test]
-#[ignore = "R3g build"]
 fn the_types_that_hold_a_universal_variable_are_unified_not_gained() {
     let side = |c: &mut Checker, univar: bool| {
         let u = univar_at(c, 2);
@@ -3379,7 +3370,6 @@ fn the_types_that_hold_a_universal_variable_are_unified_not_gained() {
 ///
 /// Reaches: R3f, R3g.
 #[test]
-#[ignore = "R3g build"]
 fn universal_variables_at_ten_thousand() {
     let binders = |n: u32| {
         let mut c = checker(Mode::Success);

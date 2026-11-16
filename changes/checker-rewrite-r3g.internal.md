@@ -1,0 +1,1 @@
+- The rewritten type checker unifies universal variables and polymorphic types with bound variables: pairing by position in nested scopes, the escape test of a known binder, the check for a universal variable outside its binder, and the split of the types that hold one when two variant tags are joined.
