@@ -20813,10 +20813,8 @@ OCaml level-choice branch, G8 does not exercise the missing-level fallback,
 and G10 does not establish inherited nonempty universal pairs. The concrete
 reachability and output evidence above is the extent of each verdict.
 
-The ancillary application benchmark was attempted with two byte-identical
-copies of the unchanged release executable; it is not a before/after
-performance comparison. `bench_project.sh` stopped because Valgrind was not
-installed. `compare_checker_builds.py` stopped because no compiler log was
-produced: the 3,735-module application lacked a resolvable `@rescript/belt`
-dependency before benchmark preparation. Neither produced a comparison,
-and no application performance or parity result is claimed.
+Application self-comparison with two byte-identical copies of the unchanged
+release executable also matched: 3,735 signatures, 32 diagnostics in 18 files,
+and 3,980 generated files. This verifies repeatability, not a Rust-versus-OCaml
+comparison or a performance improvement; the pattern evidence above comes
+from separate Rust and OCaml invocations.
