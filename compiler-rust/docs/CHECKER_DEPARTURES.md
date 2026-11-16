@@ -8030,3 +8030,7017 @@ difference in the exit status, the diagnostics or the JavaScript:
 #### Open
 
 Nothing of this place.
+
+## Fourth round: modules, aliases and usage marks
+
+### Scope, commands and calibration
+
+Tested commit: `8590ce4c03`. This is an investigation, not a compiler fix. Each candidate below was actually run with a ten-second per-compiler timeout; every source ends with a newline. Captured stdout and stderr are pasted verbatim, including ANSI escapes emitted despite `-color never`; empty fences mean empty streams. Exit status, both streams, and (where requested) the JavaScript file were compared. M3 JavaScript comparisons also remove blank lines. Repeated setup attempts are retained and excluded from witness attribution. No OCaml internal error is used as a reference.
+
+The ten places were investigated in order, with reductions, reachability probes and dependency-setup repairs afterwards. The counts include those repairs and syntax failures, not just successful checker entries. All source instrumentation was restored byte-for-byte before writing this section; the committed diff contains only this document and the internal changelog fragment.
+
+```sh
+export PATH="$HOME/.cargo/bin:$PATH"
+export ROOT="$PWD"
+export RESCRIPT_RUNTIME="$ROOT/packages/@rescript/runtime"
+export TERM=dumb NO_COLOR=1
+unset MODULE_SEARCH_TRACE
+eval $(opam env)
+dune build --root .
+CARGO_TARGET_DIR="$TMPDIR/modules-target" CARGO_PROFILE_RELEASE_LTO=thin \
+  cargo build --release --manifest-path rewatch/Cargo.toml
+export OCAML_BSC="$ROOT/_build/install/default/bin/bsc"
+export RUST="$TMPDIR/modules-target/release/rescript"
+"$RUST" build-reference --bsc "$OCAML_BSC" packages/@rescript/runtime
+# RUST_BSC is an executable wrapper: exec "$RUST" bsc "$@"
+RUST_BSC="$SCRATCH/bsc" PARITY_JOBS=1 bash scripts/test_error_output_parity.sh \
+  --release --compiler-only access_functor_as_structure.res
+```
+
+The first Cargo build using the prepopulated default target failed writing a cached dependency file (`No such file or directory`); the fresh target above succeeded. OCaml build exited 0 with empty output. The successful Rust build ended with:
+
+```text
+warning: `rescript` (lib) generated 1 warning (run `cargo fix --lib -p rescript` to apply 1 suggestion)
+warning: `rescript` (lib) generated 1 warning (1 duplicate)
+    Finished `release` profile [optimized] target(s) in 2m 59s
+```
+
+The warning is the existing unused `console::style` import at `rewatch/src/build/packages.rs:12`. Runtime preparation and parity calibration (terminal styling and the machine-specific cache-location line omitted from this summary only):
+
+```text
+OCaml reference build: 113 of 113 modules built
+Compiler diagnostics parity
+
+Error output parity summary
+  total:  2
+  pass:   2
+  fail:   0
+SUCCESS: OCaml and Rust diagnostic output match for tested fixtures.
+```
+
+An initial direct calibration invocation lacked the runtime: OCaml reported missing Pervasives and Rust requested RESCRIPT_RUNTIME. It was corrected by building and exporting the runtime above; those setup failures are not checker results. The calibrated fixture is `tests/build_tests/super_errors/fixtures/access_functor_as_structure.res`:
+
+```rescript
+module F = (
+  M: {
+    let x: int
+  },
+) => {
+  let v = M.x
+}
+
+let _: F.v = 1
+```
+
+Both compilers, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  tests/build_tests/super_errors/fixtures/access_functor_as_structure.res:9:8-10
+
+   7 │ }
+   8 │ 
+   9 │ let _: F.v = 1
+  10 │ 
+
+  The module F is a functor, not a structure
+
+```
+
+Each candidate uses a fresh directory under `$TMPDIR`, with the listed sources and this `rescript.json`:
+
+```json
+{"name":"checker-probe","sources":["."]}
+```
+
+The working directory is the candidate directory. The ordinary invocation for each listed file, in listed order, is:
+
+```sh
+timeout 10 "$OCAML_BSC" -w +A -bs-jsx 4 -color never \
+  -I . -I "$RESCRIPT_RUNTIME/lib/rescript" [EXTRA] FILE
+timeout 10 "$RUST" bsc -w +A -bs-jsx 4 -color never \
+  -I . -I "$RESCRIPT_RUNTIME/lib/rescript" [EXTRA] FILE
+```
+
+Compile an interface first; append `-bs-read-cmi` to EXTRA only for an implementation with its matching interface. OCaml runs the whole source sequence first, then Rust runs the sequence against the OCaml-built interface. A compiler sequence stops after its first nonzero status. Each Rust invocation is repeated with `MODULE_SEARCH_TRACE=1` for reachability; those trace lines are not included in the comparison streams. No diagnostic is filtered from a comparison run.
+
+For dependency-package runs, `dependency/` contains copies of the listed Lib.res/Lib.resi and its own rescript.json; run `"$RUST" build-reference --bsc "$OCAML_BSC" dependency` before either compiler and add `-I dependency/lib/rescript`. This is the parity script’s package protocol: OCaml reads the compiled package, while Rust builds it in memory. Dependency configuration and the exact EXTRA variant for every multi-unit attempt are specified below. The final setup explicitly requests CommonJS for the dependency, passes `-bs-project-root . -bs-package-name checker-probe -bs-package-output commonjs:.`, and removes only the generated root Lib.cmi/Lib.cmj/Lib.js before compiling Main.res so both read the same dependency rather than two different copies.
+
+### Reachability measurements
+
+The single successful Rust release build included temporary, environment-guarded eprintln markers. With MODULE_SEARCH_TRACE unset the markers do not print; there is no alternate compiler behavior. The guarded inserts were removed from the source after building. The markers report branch entry, not causality or numeric node-level differences.
+
+| Marker | Inserted at |
+| --- | --- |
+| M1 | nondep_sig before its item loop, typemod.rs:2461 |
+| M2 | nondep_mty functor arm, typemod.rs:2415 |
+| M3 plus alias presence | convert_module_expr_raw0 before its alias test, convert.rs:4227 |
+| M4 | lookup_modtype dotted arm, env.rs:2701 |
+| M5 | describe_tables before alias_sources.push, module_view.rs:819 |
+| M6 | lookup_rebind_constructor entry, typemod.rs:561 |
+| M7-M8 | extension_constructors entry, includemod.rs:4948 |
+| M9 | package arm before level reads, ctype.rs:9074 |
+| M10-entry/full/shortcut | inferred_signature_coercion entry, fallback return, and shortcut mark, includemod.rs:2218-2221 |
+
+M5 is also hit while initializing the runtime. Control-1 below logs it 60 times; local-only candidates do not establish world-table reachability merely by logging that same count. The final dependency Main.res logs 63. No claim is made about the uninstrumented value-lookup fallback.
+
+### Summary
+
+| Place | Verdict | Candidates |
+| --- | --- | ---: |
+| M1 | REACHED, NO DIFFERENCE SEEN | 13 |
+| M2 | REACHED, NO DIFFERENCE SEEN | 9 |
+| M3 | NOT REACHED | 16 |
+| M4 | REACHED, NO DIFFERENCE SEEN | 10 |
+| M5 | REACHED, NO DIFFERENCE SEEN | 11 |
+| M6 | WITNESS | 9 |
+| M7 | WITNESS | 8 |
+| M8 | REACHED, NO DIFFERENCE SEEN | 6 |
+| M9 | REACHED, NO DIFFERENCE SEEN | 12 |
+| M10 | REACHED, NO DIFFERENCE SEEN | 6 |
+
+### M1 — REACHED, NO DIFFERENCE SEEN
+
+Apply a functor to a non-path argument so that `nondep_supertype` eliminates the parameter from a result signature (`typemod.rs:15287`, `nondep_sig:2452`; `mtype.ml:126-160`). Check the exposed dependent types, aliases and exceptions, including rejected uses, for an order-sensitive change in diagnostics or JavaScript.
+
+M1-7–9 and M1-11–13 hit M1 and agree. Correction to the proposed premise: OCaml does recurse into the remainder first, but neither implementation extends the environment per item here; `mtype.ml:101-103` explicitly says that the environment need not be kept up to date. M1-1–6 were invalid same-line declarations; M1-10 was an invalid separator repair. They are retained rather than counted as reachability evidence.
+
+#### M1-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+module F = (X: {type t let x: t}) => {type t = X.t let x = X.x}
+module R = F({type t = int let x = 1})
+let y: int = R.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: (none)
+```
+
+Both compilers, Main.res, exit 1; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  Syntax error!
+  Main.res:1:23-26
+
+  1 │ module F = (X: {type t let x: t}) => {type t = X.t let x = X.x}
+  2 │ module R = F({type t = int let x = 1})
+  3 │ let y: int = R.x
+
+  consecutive specifications on a line must be separated by ';' or a newline
+
+
+  Syntax error!
+  Main.res:1:51-54
+
+  1 │ module F = (X: {type t let x: t}) => {type t = X.t let x = X.x}
+  2 │ module R = F({type t = int let x = 1})
+  3 │ let y: int = R.x
+
+  Consecutive statements on a line must be separated by ';' or a newline
+
+
+  Syntax error!
+  Main.res:2:27-30
+
+  1 │ module F = (X: {type t let x: t}) => {type t = X.t let x = X.x}
+  2 │ module R = F({type t = int let x = 1})
+  3 │ let y: int = R.x
+  4 │ 
+
+  Consecutive statements on a line must be separated by ';' or a newline
+
+```
+
+#### M1-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+module F = (X: {type t let x: t}) => {let x = X.x type t = X.t}
+module R = F({type t = int let x = 1})
+let y: string = R.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: (none)
+```
+
+Both compilers, Main.res, exit 1; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  Syntax error!
+  Main.res:1:23-26
+
+  1 │ module F = (X: {type t let x: t}) => {let x = X.x type t = X.t}
+  2 │ module R = F({type t = int let x = 1})
+  3 │ let y: string = R.x
+
+  consecutive specifications on a line must be separated by ';' or a newline
+
+
+  Syntax error!
+  Main.res:1:50-54
+
+  1 │ module F = (X: {type t let x: t}) => {let x = X.x type t = X.t}
+  2 │ module R = F({type t = int let x = 1})
+  3 │ let y: string = R.x
+
+  Consecutive statements on a line must be separated by ';' or a newline
+
+
+  Syntax error!
+  Main.res:2:27-30
+
+  1 │ module F = (X: {type t let x: t}) => {let x = X.x type t = X.t}
+  2 │ module R = F({type t = int let x = 1})
+  3 │ let y: string = R.x
+  4 │ 
+
+  Consecutive statements on a line must be separated by ';' or a newline
+
+```
+
+#### M1-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+module F = (X: {type t let x: t}) => {module A = X module B = A let x = B.x}
+module R = F({type t = int let x = 1})
+let y = R.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: (none)
+```
+
+Both compilers, Main.res, exit 1; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  Syntax error!
+  Main.res:1:23-26
+
+  1 │ module F = (X: {type t let x: t}) => {module A = X module B = A let x = 
+    │ B.x}
+  2 │ module R = F({type t = int let x = 1})
+  3 │ let y = R.x
+
+  consecutive specifications on a line must be separated by ';' or a newline
+
+
+  Syntax error!
+  Main.res:1:51-57
+
+  1 │ module F = (X: {type t let x: t}) => {module A = X module B = A let x = 
+    │ B.x}
+  2 │ module R = F({type t = int let x = 1})
+  3 │ let y = R.x
+
+  Consecutive statements on a line must be separated by ';' or a newline
+
+
+  Syntax error!
+  Main.res:1:64-67
+
+  1 │ module F = (X: {type t let x: t}) => {module A = X module B = A let x = 
+    │ B.x}
+  2 │ module R = F({type t = int let x = 1})
+  3 │ let y = R.x
+
+  Consecutive statements on a line must be separated by ';' or a newline
+
+
+  Syntax error!
+  Main.res:2:27-30
+
+  1 │ module F = (X: {type t let x: t}) => {module A = X module B = A let x = 
+    │ B.x}
+  2 │ module R = F({type t = int let x = 1})
+  3 │ let y = R.x
+  4 │ 
+
+  Consecutive statements on a line must be separated by ';' or a newline
+
+```
+
+#### M1-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+module F = (X: {module type S module A: S}) => {module type T = X.S module B = X.A}
+module R = F({module type S = {let x: int} module A = {let x = 1}})
+let y = R.B.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: (none)
+```
+
+Both compilers, Main.res, exit 1; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  Syntax error!
+  Main.res:1:68-74
+
+  1 │ module F = (X: {module type S module A: S}) => {module type T = X.S modu
+    │ le B = X.A}
+  2 │ module R = F({module type S = {let x: int} module A = {let x = 1}})
+  3 │ let y = R.B.x
+
+  Consecutive statements on a line must be separated by ';' or a newline
+
+
+  Syntax error!
+  Main.res:2:43-49
+
+  1 │ module F = (X: {module type S module A: S}) => {module type T = X.S modu
+    │ le B = X.A}
+  2 │ module R = F({module type S = {let x: int} module A = {let x = 1}})
+  3 │ let y = R.B.x
+  4 │ 
+
+  Consecutive statements on a line must be separated by ';' or a newline
+
+```
+
+#### M1-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+module F = (X: {type t let x: t}) => {type a = X.t type b = a let pair = (X.x, X.x)}
+module R = F({type t = int let x = 1})
+let y: (int, string) = R.pair
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: (none)
+```
+
+Both compilers, Main.res, exit 1; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  Syntax error!
+  Main.res:1:23-26
+
+  1 │ module F = (X: {type t let x: t}) => {type a = X.t type b = a let pair =
+    │  (X.x, X.x)}
+  2 │ module R = F({type t = int let x = 1})
+  3 │ let y: (int, string) = R.pair
+
+  consecutive specifications on a line must be separated by ';' or a newline
+
+
+  Syntax error!
+  Main.res:1:51-55
+
+  1 │ module F = (X: {type t let x: t}) => {type a = X.t type b = a let pair =
+    │  (X.x, X.x)}
+  2 │ module R = F({type t = int let x = 1})
+  3 │ let y: (int, string) = R.pair
+
+  Consecutive statements on a line must be separated by ';' or a newline
+
+
+  Syntax error!
+  Main.res:1:62-65
+
+  1 │ module F = (X: {type t let x: t}) => {type a = X.t type b = a let pair =
+    │  (X.x, X.x)}
+  2 │ module R = F({type t = int let x = 1})
+  3 │ let y: (int, string) = R.pair
+
+  Consecutive statements on a line must be separated by ';' or a newline
+
+
+  Syntax error!
+  Main.res:2:27-30
+
+  1 │ module F = (X: {type t let x: t}) => {type a = X.t type b = a let pair =
+    │  (X.x, X.x)}
+  2 │ module R = F({type t = int let x = 1})
+  3 │ let y: (int, string) = R.pair
+  4 │ 
+
+  Consecutive statements on a line must be separated by ';' or a newline
+
+```
+
+#### M1-6 — outputs agree
+
+`Main.res`:
+
+```rescript
+module F = (X: {type t}) => {type a = X.t exception E(a) module N = {type b = a}}
+module R = F({type t = int})
+let e = R.E(1)
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: (none)
+```
+
+Both compilers, Main.res, exit 1; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  Syntax error!
+  Main.res:1:42-51
+
+  1 │ module F = (X: {type t}) => {type a = X.t exception E(a) module N = {typ
+    │ e b = a}}
+  2 │ module R = F({type t = int})
+  3 │ let e = R.E(1)
+
+  Consecutive statements on a line must be separated by ';' or a newline
+
+
+  Syntax error!
+  Main.res:1:57-63
+
+  1 │ module F = (X: {type t}) => {type a = X.t exception E(a) module N = {typ
+    │ e b = a}}
+  2 │ module R = F({type t = int})
+  3 │ let e = R.E(1)
+
+  Consecutive statements on a line must be separated by ';' or a newline
+
+```
+
+#### M1-7 — outputs agree
+
+`Main.res`:
+
+```rescript
+module F = (X: {type t; let x: t}) => {type t = X.t; let x = X.x}
+module R = F({type t = int; let x = 1})
+let y: int = R.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M1 x1, TRACE M10-entry x1, TRACE M10-full x1, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return X;
+}
+
+let R = {
+  x: 1
+};
+
+let y = 1;
+
+exports.F = F;
+exports.R = R;
+exports.y = y;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M1-8 — outputs agree
+
+`Main.res`:
+
+```rescript
+module F = (X: {type t; let x: t}) => {let x = X.x; type t = X.t}
+module R = F({type t = int; let x = 1})
+let y: string = R.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M1 x2, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:17-19
+
+  1 │ module F = (X: {type t; let x: t}) => {let x = X.x; type t = X.t}
+  2 │ module R = F({type t = int; let x = 1})
+  3 │ let y: string = R.x
+  4 │ 
+
+  This has type: [1;31mint[0m
+  But it's expected to have type: [1;33mstring[0m
+  
+  You can convert [1;33mint[0m to [1;33mstring[0m with [1;33mInt.toString[0m.
+
+```
+
+#### M1-9 — outputs agree
+
+`Main.res`:
+
+```rescript
+module F = (X: {type t; let x: t}) => {module A = X; module B = A; let x = B.x}
+module R = F({type t = int; let x = 1})
+let y = R.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M1 x2, TRACE M10-entry x1, TRACE M10-full x1, TRACE M3 MtaAbsent x1, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return {
+    A: X,
+    B: undefined,
+    x: X.x
+  };
+}
+
+let X = {
+  x: 1
+};
+
+let R = {
+  A: X,
+  B: undefined,
+  x: 1
+};
+
+let y = 1;
+
+exports.F = F;
+exports.R = R;
+exports.y = y;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M1-10 — outputs agree
+
+`Main.res`:
+
+```rescript
+module F = (X: {module; type S; module A: S}) => {module; type T = X.S; module B = X.A}
+module R = F({module; type S = {let x: int}; module A = {let x = 1}})
+let y = R.B.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: (none)
+```
+
+Both compilers, Main.res, exit 1; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  Syntax error!
+  Main.res:1:23
+
+  1 │ module F = (X: {module; type S; module A: S}) => {module; type T = X.S; 
+    │ module B = X.A}
+  2 │ module R = F({module; type S = {let x: int}; module A = {let x = 1}})
+  3 │ let y = R.B.x
+
+  At this point, I'm looking for an uppercased name like `Array` or `Math`
+
+
+  Syntax error!
+  Main.res:1:30
+
+  1 │ module F = (X: {module; type S; module A: S}) => {module; type T = X.S; 
+    │ module B = X.A}
+  2 │ module R = F({module; type S = {let x: int}; module A = {let x = 1}})
+  3 │ let y = R.B.x
+
+  Did you mean `s` instead of `S`?
+
+
+  Syntax error!
+  Main.res:1:57
+
+  1 │ module F = (X: {module; type S; module A: S}) => {module; type T = X.S; 
+    │ module B = X.A}
+  2 │ module R = F({module; type S = {let x: int}; module A = {let x = 1}})
+  3 │ let y = R.B.x
+
+  At this point, I'm looking for an uppercased name like `Array` or `Math`
+
+
+  Syntax error!
+  Main.res:1:64
+
+  1 │ module F = (X: {module; type S; module A: S}) => {module; type T = X.S; 
+    │ module B = X.A}
+  2 │ module R = F({module; type S = {let x: int}; module A = {let x = 1}})
+  3 │ let y = R.B.x
+
+  Did you mean `t` instead of `T`?
+
+
+  Syntax error!
+  Main.res:2:21
+
+  1 │ module F = (X: {module; type S; module A: S}) => {module; type T = X.S; 
+    │ module B = X.A}
+  2 │ module R = F({module; type S = {let x: int}; module A = {let x = 1}})
+  3 │ let y = R.B.x
+  4 │ 
+
+  At this point, I'm looking for an uppercased name like `Array` or `Math`
+
+
+  Syntax error!
+  Main.res:2:28
+
+  1 │ module F = (X: {module; type S; module A: S}) => {module; type T = X.S; 
+    │ module B = X.A}
+  2 │ module R = F({module; type S = {let x: int}; module A = {let x = 1}})
+  3 │ let y = R.B.x
+  4 │ 
+
+  Did you mean `s` instead of `S`?
+
+
+  Syntax error!
+  Main.res:2:43
+
+  1 │ module F = (X: {module; type S; module A: S}) => {module; type T = X.S; 
+    │ module B = X.A}
+  2 │ module R = F({module; type S = {let x: int}; module A = {let x = 1}})
+  3 │ let y = R.B.x
+  4 │ 
+
+  Did you forget a `=` here?
+
+```
+
+#### M1-11 — outputs agree
+
+`Main.res`:
+
+```rescript
+module F = (X: {type t; let x: t}) => {type a = X.t; type b = a; let pair = (X.x, X.x)}
+module R = F({type t = int; let x = 1})
+let y: (int, string) = R.pair
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M1 x2, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:24-29
+
+  1 │ module F = (X: {type t; let x: t}) => {type a = X.t; type b = a; let pai
+    │ r = (X.x, X.x)}
+  2 │ module R = F({type t = int; let x = 1})
+  3 │ let y: (int, string) = R.pair
+  4 │ 
+
+  This has type: [1;31m(int, int)[0m
+  But it's expected to have type: [1;33m(int, string)[0m
+  
+  The incompatible parts:
+    [1;31mint[0m vs [1;33mstring[0m
+  
+  You can convert [1;33mint[0m to [1;33mstring[0m with [1;33mInt.toString[0m.
+
+```
+
+#### M1-12 — outputs agree
+
+`Main.res`:
+
+```rescript
+module F = (X: {type t}) => {type a = X.t; exception E(a); module N = {type b = a}}
+module R = F({type t = int})
+let e = R.E(1)
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M1 x2, TRACE M10-entry x1, TRACE M10-full x1, TRACE M5 x60, TRACE M7-M8 x2
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_exceptions = require("@rescript/runtime/lib/js/Primitive_exceptions.cjs");
+
+function F(X) {
+  let E = /* @__PURE__ */Primitive_exceptions.create("Main.F(X).E");
+  let N = {};
+  return {
+    E: E,
+    N: N
+  };
+}
+
+let E = /* @__PURE__ */Primitive_exceptions.create("Main.F(X).E");
+
+let N = {};
+
+let R = {
+  E: E,
+  N: N
+};
+
+let e = {
+  RE_EXN_ID: E,
+  _1: 1
+};
+
+exports.F = F;
+exports.R = R;
+exports.e = e;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M1-13 — outputs agree
+
+`Main.res`:
+
+```rescript
+module F = (X: {
+module type S
+module A: S
+}) => {
+module type T = X.S
+module B = X.A
+}
+module R = F({
+module type S = {let x: int}
+module A = {let x = 1}
+})
+let y = R.B.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M1 x3, TRACE M10-entry x1, TRACE M10-full x1, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return {
+    B: X.A
+  };
+}
+
+let A = {
+  x: 1
+};
+
+let R = {
+  B: A
+};
+
+let y = 1;
+
+exports.F = F;
+exports.R = R;
+exports.y = y;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+### M2 — REACHED, NO DIFFERENCE SEEN
+
+Make that non-path application return an inner functor, whose parameter or result mentions the eliminated outer parameter (`nondep_mty`, `typemod.rs:2410-2448`; `mtype.ml:118-125`). Then re-export or include a module of the inner parameter and compare its aliasability, resulting types and JavaScript.
+
+M2-1–5 and the corrected dependency-package run M2-9 agree and hit M2. M2-6–8 are setup attempts, not checker witnesses.
+
+#### M2-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+module F = (X: {type t}) => {
+module G = (Y: {type u = X.t}) => {module A = Y}
+}
+module R = F({type t = int})
+module Q = R.G({type u = int})
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M1 x6, TRACE M10-entry x1, TRACE M10-full x1, TRACE M2 x1, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  let G = Y => ({
+    A: Y
+  });
+  return {
+    G: G
+  };
+}
+
+function G(Y) {
+  return {
+    A: Y
+  };
+}
+
+let R = {
+  G: G
+};
+
+let Q = {
+  A: {}
+};
+
+exports.F = F;
+exports.R = R;
+exports.Q = Q;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M2-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+module F = (X: {type t; let x: t}) => {
+module G = (Y: {let y: X.t}) => {module A = Y; let x = X.x}
+}
+module R = F({type t = int; let x = 1})
+module Q = R.G({let y = 2})
+let x = Q.A.y
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M1 x6, TRACE M10-entry x1, TRACE M10-full x1, TRACE M2 x1, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  let G = Y => ({
+    A: Y,
+    x: X.x
+  });
+  return {
+    G: G
+  };
+}
+
+function G(Y) {
+  return {
+    A: Y,
+    x: 1
+  };
+}
+
+let R = {
+  G: G
+};
+
+let Y = {
+  y: 2
+};
+
+let Q = {
+  A: Y,
+  x: 1
+};
+
+let x = Y.y;
+
+exports.F = F;
+exports.R = R;
+exports.Q = Q;
+exports.x = x;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M2-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+module F = (X: {module type S}) => {
+module G = (Y: X.S) => {module A = Y}
+}
+module R = F({module type S = {let x: int}})
+module Q = R.G({let x = 1})
+let x = Q.A.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M1 x6, TRACE M10-entry x1, TRACE M10-full x1, TRACE M2 x1, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  let G = Y => ({
+    A: Y
+  });
+  return {
+    G: G
+  };
+}
+
+function G(Y) {
+  return {
+    A: Y
+  };
+}
+
+let R = {
+  G: G
+};
+
+let Q = {
+  A: {
+    x: 1
+  }
+};
+
+let x = Q.A.x;
+
+exports.F = F;
+exports.R = R;
+exports.Q = Q;
+exports.x = x;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M2-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+module F = (X: {type t}) => {
+module G = (Y: {module N: {type t = X.t}; module A = N}) => {module B = Y.A}
+}
+module R = F({type t = int})
+module Q = R.G({module N = {type t = int}; module A = N})
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M1 x6, TRACE M10-entry x1, TRACE M10-full x1, TRACE M2 x1, TRACE M3 MtaAbsent x2, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  let G = Y => ({
+    B: undefined
+  });
+  return {
+    G: G
+  };
+}
+
+function G(Y) {
+  return {
+    B: undefined
+  };
+}
+
+let R = {
+  G: G
+};
+
+let Q = {
+  B: undefined
+};
+
+exports.F = F;
+exports.R = R;
+exports.Q = Q;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M2-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+module F = (X: {type t; let x: t}) => {
+module G = (Y: {let y: X.t}) => {module A = Y; let x = X.x}
+}
+module R = F({type t = int; let x = 1})
+module Q = R.G({let y = "wrong"})
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M1 x8, TRACE M2 x2, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:16-32
+
+  3 │ }
+  4 │ module R = F({type t = int; let x = 1})
+  5 │ module Q = R.G({let y = "wrong"})
+  6 │ 
+
+  Signature mismatch:
+  
+  Actual declaration (Main.res:5:21):
+    let y: string
+  
+  Expected declaration (Main.res:2:17-26):
+    let y: int
+
+```
+
+#### M2-6 — setup attempt
+
+`Lib.res`:
+
+```rescript
+module F = (X: {type t}) => {
+module G = (Y: {type u = X.t; let y: u}) => {module A = Y}
+}
+module R = F({type t = int})
+```
+
+`Main.res`:
+
+```rescript
+module Q = Lib.R.G({type u = int; let y = 2})
+let y: string = Q.A.y
+```
+
+Setup: plain `-I .`, no dependency package. These attempts cannot supply a dependency to the in-process Rust CLI. M2-6/M3-6 also cleaned the OCaml artifacts before Rust; M4-5 retained them.
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Lib.res: TRACE M1 x4, TRACE M10-entry x1, TRACE M10-full x1, TRACE M2 x1, TRACE M5 x60
+Main.res: TRACE M5 x60
+```
+
+OCaml, Lib.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  let G = Y => ({
+    A: Y
+  });
+  return {
+    G: G
+  };
+}
+
+function G(Y) {
+  return {
+    A: Y
+  };
+}
+
+let R = {
+  G: G
+};
+
+exports.F = F;
+exports.R = R;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+OCaml, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:17-21
+
+  1 │ module Q = Lib.R.G({type u = int; let y = 2})
+  2 │ let y: string = Q.A.y
+  3 │ 
+
+  This has type: [1;31mQ.A.u[0m [2m(defined as[0m [1;31mint[0m[2m)[0m
+  But it's expected to have type: [1;33mstring[0m
+  
+  You can convert [1;33mint[0m to [1;33mstring[0m with [1;33mInt.toString[0m.
+
+```
+
+Rust, Lib.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  let G = Y => ({
+    A: Y
+  });
+  return {
+    G: G
+  };
+}
+
+function G(Y) {
+  return {
+    A: Y
+  };
+}
+
+let R = {
+  G: G
+};
+
+exports.F = F;
+exports.R = R;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Rust, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:12-18
+
+  1 │ module Q = Lib.R.G({type u = int; let y = 2})
+  2 │ let y: string = Q.A.y
+  3 │ 
+
+  [1;33mThe module or file Lib can't be found.[0m
+  - If it's a third-party dependency:
+    - Did you add it to the "dependencies" or "dev-dependencies" in rescript.json?
+  - Did you include the file's directory to the "sources" in rescript.json?
+  
+
+```
+
+#### M2-7 — setup attempt
+
+`Lib.res`:
+
+```rescript
+module F = (X: {type t}) => {
+module G = (Y: {type u = X.t; let y: u}) => {module A = Y}
+}
+module R = F({type t = int})
+```
+
+`Main.res`:
+
+```rescript
+module Q = Lib.R.G({type u = int; let y = 2})
+let y: string = Q.A.y
+```
+
+`dependency/rescript.json` (Lib sources copied unchanged):
+
+```json
+{"name":"probe-dependency","sources":["."]}
+```
+
+Additional flags: `-I dependency/lib/rescript -bs-package-name checker-probe`.
+
+This attempt leaves the root Lib artifacts in the load path.
+
+Dependency OCaml prebuild, exit 0; stdout:
+
+```text
+OCaml reference build: 1 of 1 modules built
+```
+
+stderr:
+
+```text
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Lib.res: TRACE M1 x8, TRACE M10-entry x2, TRACE M10-full x2, TRACE M2 x2, TRACE M5 x60
+Main.res: TRACE M1 x8, TRACE M10-entry x1, TRACE M10-full x1, TRACE M2 x1, TRACE M5 x60
+```
+
+OCaml, Lib.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+OCaml, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:17-21
+
+  1 │ module Q = Lib.R.G({type u = int; let y = 2})
+  2 │ let y: string = Q.A.y
+  3 │ 
+
+  This has type: [1;31mQ.A.u[0m [2m(defined as[0m [1;31mint[0m[2m)[0m
+  But it's expected to have type: [1;33mstring[0m
+  
+  You can convert [1;33mint[0m to [1;33mstring[0m with [1;33mInt.toString[0m.
+
+```
+
+Rust, Lib.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  let G = Y => ({
+    A: Y
+  });
+  return {
+    G: G
+  };
+}
+
+function G(Y) {
+  return {
+    A: Y
+  };
+}
+
+let R = {
+  G: G
+};
+
+exports.F = F;
+exports.R = R;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Rust, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:17-21
+
+  1 │ module Q = Lib.R.G({type u = int; let y = 2})
+  2 │ let y: string = Q.A.y
+  3 │ 
+
+  This has type: [1;31mQ.A.u[0m [2m(defined as[0m [1;31mint[0m[2m)[0m
+  But it's expected to have type: [1;33mstring[0m
+  
+  You can convert [1;33mint[0m to [1;33mstring[0m with [1;33mInt.toString[0m.
+
+```
+
+#### M2-8 — no reference (OCaml internal setup error)
+
+`Lib.res`:
+
+```rescript
+module F = (X: {type t}) => {
+module G = (Y: {type u = X.t; let y: u}) => {module A = Y}
+}
+module R = F({type t = int})
+```
+
+`Main.res`:
+
+```rescript
+module Q = Lib.R.G({type u = int; let y = 2})
+let y: string = Q.A.y
+```
+
+`dependency/rescript.json` (Lib sources copied unchanged):
+
+```json
+{"name":"probe-dependency","sources":["."]}
+```
+
+Additional flags: `-I dependency/lib/rescript -bs-package-name checker-probe -bs-package-output commonjs:.`.
+
+This attempt leaves the root Lib artifacts in the load path.
+
+Dependency OCaml prebuild, exit 0; stdout:
+
+```text
+OCaml reference build: 1 of 1 modules built
+```
+
+stderr:
+
+```text
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Lib.res: TRACE M1 x8, TRACE M10-entry x2, TRACE M10-full x2, TRACE M2 x2, TRACE M5 x60
+Main.res: TRACE M1 x8, TRACE M10-entry x1, TRACE M10-full x1, TRACE M2 x1, TRACE M5 x60
+```
+
+OCaml, Lib.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+Fatal error: exception Failure("File \"compiler/ext/ext_path.ml\", line 122, characters 27-34bsc was invoked without -bs-project-root; cannot determine the package root. Pass -bs-project-root <dir> or invoke bsc via rewatch / cli/bsc.js.")
+```
+
+Rust, Lib.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Generated JavaScript file:
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  let G = Y => ({
+    A: Y
+  });
+  return {
+    G: G
+  };
+}
+
+function G(Y) {
+  return {
+    A: Y
+  };
+}
+
+let R = {
+  G: G
+};
+
+exports.F = F;
+exports.R = R;
+/* No side effect */
+```
+
+Rust, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:17-21
+
+  1 │ module Q = Lib.R.G({type u = int; let y = 2})
+  2 │ let y: string = Q.A.y
+  3 │ 
+
+  This has type: [1;31mQ.A.u[0m [2m(defined as[0m [1;31mint[0m[2m)[0m
+  But it's expected to have type: [1;33mstring[0m
+  
+  You can convert [1;33mint[0m to [1;33mstring[0m with [1;33mInt.toString[0m.
+
+```
+
+#### M2-9 — outputs agree
+
+`Lib.res`:
+
+```rescript
+module F = (X: {type t}) => {
+module G = (Y: {type u = X.t; let y: u}) => {module A = Y}
+}
+module R = F({type t = int})
+```
+
+`Main.res`:
+
+```rescript
+module Q = Lib.R.G({type u = int; let y = 2})
+let y: string = Q.A.y
+```
+
+`dependency/rescript.json` (Lib sources copied unchanged):
+
+```json
+{"name":"probe-dependency","sources":["."]}
+```
+
+Additional flags: `-I dependency/lib/rescript -bs-package-name checker-probe -bs-package-output commonjs:. -bs-project-root .`.
+
+This attempt leaves the root Lib artifacts in the load path.
+
+Dependency OCaml prebuild, exit 0; stdout:
+
+```text
+OCaml reference build: 1 of 1 modules built
+```
+
+stderr:
+
+```text
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Lib.res: TRACE M1 x8, TRACE M10-entry x2, TRACE M10-full x2, TRACE M2 x2, TRACE M5 x60
+Main.res: TRACE M1 x8, TRACE M10-entry x1, TRACE M10-full x1, TRACE M2 x1, TRACE M5 x60
+```
+
+Both compilers, Lib.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Generated JavaScript file:
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  let G = Y => ({
+    A: Y
+  });
+  return {
+    G: G
+  };
+}
+
+function G(Y) {
+  return {
+    A: Y
+  };
+}
+
+let R = {
+  G: G
+};
+
+exports.F = F;
+exports.R = R;
+/* No side effect */
+```
+
+Both compilers, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:17-21
+
+  1 │ module Q = Lib.R.G({type u = int; let y = 2})
+  2 │ let y: string = Q.A.y
+  3 │ 
+
+  This has type: [1;31mQ.A.u[0m [2m(defined as[0m [1;31mint[0m[2m)[0m
+  But it's expected to have type: [1;33mstring[0m
+  
+  You can convert [1;33mint[0m to [1;33mstring[0m with [1;33mInt.toString[0m.
+
+```
+
+### M3 — NOT REACHED
+
+Give `convert_module_expr_raw0` a module expression whose type is `MtyAlias(MtaPresent, _)` (`convert.rs:4221-4240`), rather than the absent aliases that OCaml erases (`translmod.ml:257-267`). Check the emitted JavaScript, including functor bodies, includes, packing and an interface boundary, for an incorrectly erased module value.
+
+No candidate logged `TRACE M3 MtaPresent`; the logged aliases are all `MtaAbsent`. The unsatisfied condition is the present-alias expression type at `convert.rs:4229`, not the ability to write an ordinary alias: `typemod.ml:1269` initially gives a module identifier an absent alias and the following aliasability/coercion logic can replace it with a signature. M3-1–5, 7–8, 13–14 and the repaired two-unit M3-16 agree in JavaScript, also after removing blank lines. M3-6, 9–11 and 15 are setup attempts; M3-12 is invalid inline package-type syntax.
+
+#### M3-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+module N = {let x = 1}
+module A = N
+let y = A.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M3 MtaAbsent x1, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let N = {
+  x: 1
+};
+
+let A;
+
+let y = 1;
+
+exports.N = N;
+exports.A = A;
+exports.y = y;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M3-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+module N = {let x = 1}
+module F = (X: {let x: int}) => {module A = X; let y = A.x}
+module R = F(N)
+let y = R.y
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-full x1, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let N = {
+  x: 1
+};
+
+function F(X) {
+  return {
+    A: X,
+    y: X.x
+  };
+}
+
+let R = {
+  A: N,
+  y: 1
+};
+
+let y = 1;
+
+exports.N = N;
+exports.F = F;
+exports.R = R;
+exports.y = y;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M3-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+module N = {let x = 1}
+module R = {module A = N; include A}
+let y = R.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M3 MtaAbsent x2, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let N = {
+  x: 1
+};
+
+let R = {
+  A: undefined,
+  x: 1
+};
+
+let y = 1;
+
+exports.N = N;
+exports.R = R;
+exports.y = y;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M3-4 — outputs agree
+
+`Main.resi`:
+
+```rescript
+module N: {let x: int}
+module A = N
+let y: int
+```
+
+`Main.res`:
+
+```rescript
+module N = {let x = 1}
+module A = N
+let y = A.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.resi: TRACE M5 x60
+Main.res: TRACE M3 MtaAbsent x1, TRACE M5 x60
+```
+
+Both compilers, Main.resi, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let N = {
+  x: 1
+};
+
+let A;
+
+let y = 1;
+
+exports.N = N;
+exports.A = A;
+exports.y = y;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M3-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+module N = {let x = 1}
+module F = (X: {module N: {let x: int}; module M = N}) => {module Z = X.M}
+module R = F({module N = N; module M = N})
+let y = R.Z.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M1 x1, TRACE M10-entry x1, TRACE M10-full x1, TRACE M3 MtaAbsent x3, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let N = {
+  x: 1
+};
+
+function F(X) {
+  return {
+    Z: undefined
+  };
+}
+
+let R = {
+  Z: undefined
+};
+
+let y = 1;
+
+exports.N = N;
+exports.F = F;
+exports.R = R;
+exports.y = y;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M3-6 — setup attempt
+
+`Lib.resi`:
+
+```rescript
+module N: {let x: int}
+module A = N
+```
+
+`Lib.res`:
+
+```rescript
+module N = {let x = 1}
+module A = N
+```
+
+`Main.res`:
+
+```rescript
+module B = Lib.A
+module R = {include B}
+let y = R.x
+```
+
+Setup: plain `-I .`, no dependency package. These attempts cannot supply a dependency to the in-process Rust CLI. M2-6/M3-6 also cleaned the OCaml artifacts before Rust; M4-5 retained them.
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Lib.resi: TRACE M5 x60
+Lib.res: TRACE M3 MtaAbsent x1, TRACE M5 x60
+Main.res: TRACE M5 x60
+```
+
+OCaml, Lib.resi, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+OCaml, Lib.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let N = {
+  x: 1
+};
+
+let A;
+
+exports.N = N;
+exports.A = A;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+OCaml, Main.res, exit 2; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res
+
+  Lib.js not found, needed in script mode 
+
+```
+
+Rust, Lib.resi, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Rust, Lib.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let N = {
+  x: 1
+};
+
+let A;
+
+exports.N = N;
+exports.A = A;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Rust, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:12-16
+
+  1 │ module B = Lib.A
+  2 │ module R = {include B}
+  3 │ let y = R.x
+
+  [1;33mThe module or file Lib can't be found.[0m
+  - If it's a third-party dependency:
+    - Did you add it to the "dependencies" or "dev-dependencies" in rescript.json?
+  - Did you include the file's directory to the "sources" in rescript.json?
+  
+
+```
+
+#### M3-7 — outputs agree
+
+`Main.res`:
+
+```rescript
+module N = {let x = 1}
+module A = N
+module R = {include A}
+module type S = module type of A
+module P: S = N
+let y = P.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-full x1, TRACE M3 MtaAbsent x3, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let N = {
+  x: 1
+};
+
+let R = {
+  x: 1
+};
+
+let A;
+
+let P = N;
+
+let y = 1;
+
+exports.N = N;
+exports.A = A;
+exports.R = R;
+exports.P = P;
+exports.y = y;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M3-8 — outputs agree
+
+`Main.res`:
+
+```rescript
+module N = {let x = 1}
+module A = N
+module type S = {module M: module type of A}
+module F = (X: S) => {include X.M}
+module R = F({module M = N})
+let y = R.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M1 x1, TRACE M10-entry x1, TRACE M10-full x1, TRACE M3 MtaAbsent x2, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let N = {
+  x: 1
+};
+
+function F(X) {
+  return {
+    x: X.M.x
+  };
+}
+
+let R = {
+  x: 1
+};
+
+let A;
+
+let y = 1;
+
+exports.N = N;
+exports.A = A;
+exports.F = F;
+exports.R = R;
+exports.y = y;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M3-9 — setup attempt
+
+`Lib.resi`:
+
+```rescript
+module N: {let x: int}
+module A = N
+```
+
+`Lib.res`:
+
+```rescript
+module N = {let x = 1}
+module A = N
+```
+
+`Main.res`:
+
+```rescript
+module B = Lib.A
+module R = {include B}
+let y = R.x
+```
+
+`dependency/rescript.json` (Lib sources copied unchanged):
+
+```json
+{"name":"probe-dependency","sources":["."]}
+```
+
+Additional flags: `-I dependency/lib/rescript -bs-package-name checker-probe`.
+
+This attempt leaves the root Lib artifacts in the load path.
+
+Dependency OCaml prebuild, exit 0; stdout:
+
+```text
+OCaml reference build: 1 of 1 modules built
+```
+
+stderr:
+
+```text
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Lib.resi: TRACE M3 MtaAbsent x1, TRACE M5 x60
+Lib.res: TRACE M3 MtaAbsent x2, TRACE M5 x60
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M3 MtaAbsent x3, TRACE M5 x61
+```
+
+OCaml, Lib.resi, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+OCaml, Lib.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+OCaml, Main.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Rust, Lib.resi, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Rust, Lib.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let N = {
+  x: 1
+};
+
+let A;
+
+exports.N = N;
+exports.A = A;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Rust, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res
+
+  Missing dependency Lib in search path
+
+```
+
+#### M3-10 — no reference (OCaml internal setup error)
+
+`Lib.resi`:
+
+```rescript
+module N: {let x: int}
+module A = N
+```
+
+`Lib.res`:
+
+```rescript
+module N = {let x = 1}
+module A = N
+```
+
+`Main.res`:
+
+```rescript
+module B = Lib.A
+module R = {include B}
+let y = R.x
+```
+
+`dependency/rescript.json` (Lib sources copied unchanged):
+
+```json
+{"name":"probe-dependency","sources":["."]}
+```
+
+Additional flags: `-I dependency/lib/rescript -bs-package-name checker-probe -bs-package-output commonjs:.`.
+
+This attempt leaves the root Lib artifacts in the load path.
+
+Dependency OCaml prebuild, exit 0; stdout:
+
+```text
+OCaml reference build: 1 of 1 modules built
+```
+
+stderr:
+
+```text
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Lib.resi: TRACE M3 MtaAbsent x1, TRACE M5 x60
+Lib.res: TRACE M3 MtaAbsent x2, TRACE M5 x60
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M3 MtaAbsent x3, TRACE M5 x61
+```
+
+OCaml, Lib.resi, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+OCaml, Lib.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+Fatal error: exception Failure("File \"compiler/ext/ext_path.ml\", line 122, characters 27-34bsc was invoked without -bs-project-root; cannot determine the package root. Pass -bs-project-root <dir> or invoke bsc via rewatch / cli/bsc.js.")
+```
+
+Rust, Lib.resi, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Rust, Lib.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Generated JavaScript file:
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let N = {
+  x: 1
+};
+
+let A;
+
+exports.N = N;
+exports.A = A;
+/* No side effect */
+```
+
+Rust, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res
+
+  Missing dependency Lib in search path
+
+```
+
+#### M3-11 — setup attempt
+
+`Lib.resi`:
+
+```rescript
+module N: {let x: int}
+module A = N
+```
+
+`Lib.res`:
+
+```rescript
+module N = {let x = 1}
+module A = N
+```
+
+`Main.res`:
+
+```rescript
+module B = Lib.A
+module R = {include B}
+let y = R.x
+```
+
+`dependency/rescript.json` (Lib sources copied unchanged):
+
+```json
+{"name":"probe-dependency","sources":["."]}
+```
+
+Additional flags: `-I dependency/lib/rescript -bs-package-name checker-probe -bs-package-output commonjs:. -bs-project-root .`.
+
+This attempt leaves the root Lib artifacts in the load path.
+
+Dependency OCaml prebuild, exit 0; stdout:
+
+```text
+OCaml reference build: 1 of 1 modules built
+```
+
+stderr:
+
+```text
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Lib.resi: TRACE M3 MtaAbsent x1, TRACE M5 x60
+Lib.res: TRACE M3 MtaAbsent x2, TRACE M5 x60
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M3 MtaAbsent x3, TRACE M5 x61
+```
+
+OCaml, Lib.resi, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+OCaml, Lib.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Generated JavaScript file:
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let N = {
+  x: 1
+};
+
+let A;
+
+exports.N = N;
+exports.A = A;
+/* No side effect */
+```
+
+OCaml, Main.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Generated JavaScript file:
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Lib = require("./Lib.js");
+
+let x = Lib.N.x;
+
+let R = {
+  x: x
+};
+
+let B;
+
+let y = x;
+
+exports.B = B;
+exports.R = R;
+exports.y = y;
+/* No side effect */
+```
+
+Rust, Lib.resi, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Rust, Lib.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Generated JavaScript file:
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let N = {
+  x: 1
+};
+
+let A;
+
+exports.N = N;
+exports.A = A;
+/* No side effect */
+```
+
+Rust, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res
+
+  Missing dependency Lib in search path
+
+```
+
+#### M3-12 — outputs agree
+
+`Main.res`:
+
+```rescript
+module N = {let x = 1}
+module A = N
+let p = module(A: {let x: int})
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: (none)
+```
+
+Both compilers, Main.res, exit 1; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  Syntax error!
+  Main.res:3:19
+
+  1 │ module N = {let x = 1}
+  2 │ module A = N
+  3 │ let p = module(A: {let x: int})
+  4 │ 
+
+  At this point, I'm looking for an uppercased name like `Array` or `Math`
+
+
+  Syntax error!
+  Main.res:3:18-19
+
+  1 │ module N = {let x = 1}
+  2 │ module A = N
+  3 │ let p = module(A: {let x: int})
+  4 │ 
+
+  Consecutive statements on a line must be separated by ';' or a newline
+
+
+  Syntax error!
+  Main.res:3:30
+
+  1 │ module N = {let x = 1}
+  2 │ module A = N
+  3 │ let p = module(A: {let x: int})
+  4 │ 
+
+  Did you forget a `=` here?
+
+```
+
+#### M3-13 — outputs agree
+
+`Main.res`:
+
+```rescript
+module N = {let x = 1}
+module A = N
+module F = (X: {module M = N}) => {include X.M}
+module R = F({module M = A})
+let y = R.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M1 x1, TRACE M10-entry x1, TRACE M10-full x1, TRACE M3 MtaAbsent x3, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let N = {
+  x: 1
+};
+
+function F(X) {
+  return {
+    x: 1
+  };
+}
+
+let R = {
+  x: 1
+};
+
+let A;
+
+let y = 1;
+
+exports.N = N;
+exports.A = A;
+exports.F = F;
+exports.R = R;
+exports.y = y;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M3-14 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type S = {let x: int}
+module N = {let x = 1}
+module A = N
+let p = module(A: S)
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M3 MtaAbsent x1, TRACE M5 x60, TRACE M9 x2
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let N = {
+  x: 1
+};
+
+let A;
+
+let p = N;
+
+exports.N = N;
+exports.A = A;
+exports.p = p;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M3-15 — setup attempt
+
+`Lib.resi`:
+
+```rescript
+module N: {let x: int}
+module A = N
+```
+
+`Lib.res`:
+
+```rescript
+module N = {let x = 1}
+module A = N
+```
+
+`Main.res`:
+
+```rescript
+module B = Lib.A
+module R = {include B}
+let y = R.x
+```
+
+`dependency/rescript.json` (Lib sources copied unchanged):
+
+```json
+{"name":"probe-dependency","sources":["."],"package-specs":{"module":"commonjs","in-source":true}}
+```
+
+Additional flags: `-I dependency/lib/rescript -bs-package-name checker-probe -bs-package-output commonjs:. -bs-project-root .`.
+
+This attempt leaves the root Lib artifacts in the load path.
+
+Dependency OCaml prebuild, exit 0; stdout:
+
+```text
+OCaml reference build: 1 of 1 modules built
+```
+
+stderr:
+
+```text
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Lib.resi: TRACE M3 MtaAbsent x1, TRACE M5 x60
+Lib.res: TRACE M3 MtaAbsent x2, TRACE M5 x60
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M3 MtaAbsent x3, TRACE M5 x61
+```
+
+OCaml, Lib.resi, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+OCaml, Lib.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Generated JavaScript file:
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let N = {
+  x: 1
+};
+
+let A;
+
+exports.N = N;
+exports.A = A;
+/* No side effect */
+```
+
+OCaml, Main.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Generated JavaScript file:
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Lib = require("./Lib.js");
+
+let x = Lib.N.x;
+
+let R = {
+  x: x
+};
+
+let B;
+
+let y = x;
+
+exports.B = B;
+exports.R = R;
+exports.y = y;
+/* No side effect */
+```
+
+Rust, Lib.resi, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Rust, Lib.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Generated JavaScript file:
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let N = {
+  x: 1
+};
+
+let A;
+
+exports.N = N;
+exports.A = A;
+/* No side effect */
+```
+
+Rust, Main.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Generated JavaScript file:
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Lib = require("probe-dependency/Lib.js");
+
+let x = Lib.N.x;
+
+let R = {
+  x: x
+};
+
+let B;
+
+let y = x;
+
+exports.B = B;
+exports.R = R;
+exports.y = y;
+/* No side effect */
+```
+
+#### M3-16 — outputs agree
+
+`Lib.resi`:
+
+```rescript
+module N: {let x: int}
+module A = N
+```
+
+`Lib.res`:
+
+```rescript
+module N = {let x = 1}
+module A = N
+```
+
+`Main.res`:
+
+```rescript
+module B = Lib.A
+module R = {include B}
+let y = R.x
+```
+
+`dependency/rescript.json` (Lib sources copied unchanged):
+
+```json
+{"name":"probe-dependency","sources":["."],"package-specs":{"module":"commonjs","in-source":true}}
+```
+
+Additional flags: `-I dependency/lib/rescript -bs-package-name checker-probe -bs-package-output commonjs:. -bs-project-root .`.
+
+Before Main.res, remove root Lib.cmi, Lib.cmj and Lib.js (the separate dependency copies remain).
+
+Dependency OCaml prebuild, exit 0; stdout:
+
+```text
+OCaml reference build: 1 of 1 modules built
+```
+
+stderr:
+
+```text
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Lib.resi: TRACE M3 MtaAbsent x1, TRACE M5 x60
+Lib.res: TRACE M3 MtaAbsent x2, TRACE M5 x60
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M3 MtaAbsent x3, TRACE M5 x61
+```
+
+Both compilers, Lib.resi, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Both compilers, Lib.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Generated JavaScript file:
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let N = {
+  x: 1
+};
+
+let A;
+
+exports.N = N;
+exports.A = A;
+/* No side effect */
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Generated JavaScript file:
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Lib = require("probe-dependency/Lib.js");
+
+let x = Lib.N.x;
+
+let R = {
+  x: x
+};
+
+let B;
+
+let y = x;
+
+exports.B = B;
+exports.R = R;
+exports.y = y;
+/* No side effect */
+```
+
+### M4 — REACHED, NO DIFFERENCE SEEN
+
+Use a dotted module type inside a module expression retained as `MtyIdent`, so a caller reaches the raw-signature dotted arm of `Env::lookup_modtype` (`env.rs:2700-2720`) instead of the component lookup (`env.ml:1555-1585`). Then use its dependent types, nested modules or recursive-module initialization and compare rejection diagnostics and generated JavaScript for a missing access-path substitution.
+
+M4-8–10 hit the actual M4 marker and agree; M4-1–4, 6–7 agree without that marker. Merely writing `A.S` did not suffice: the functor parameter containing a submodule and the recursive modules retained the dotted module type until a raw lookup. M4-5 is a dependency setup attempt.
+
+#### M4-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+module M = {type t = int; module type S = {let x: t}}
+module A = M
+module N: A.S = {let x = 1}
+let y: string = N.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:17-19
+
+  2 │ module A = M
+  3 │ module N: A.S = {let x = 1}
+  4 │ let y: string = N.x
+  5 │ 
+
+  This has type: [1;31mA.t[0m [2m(defined as[0m [1;31mint[0m[2m)[0m
+  But it's expected to have type: [1;33mstring[0m
+  
+  You can convert [1;33mint[0m to [1;33mstring[0m with [1;33mInt.toString[0m.
+
+```
+
+#### M4-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+module M = {module Y = {module type S = {let x: int}}; module type S = Y.S}
+module A = M
+module N: A.S = {let x = 1}
+let y = N.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-full x1, TRACE M3 MtaAbsent x1, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let Y = {};
+
+let M = {
+  Y: Y
+};
+
+let N = {
+  x: 1
+};
+
+let A;
+
+let y = 1;
+
+exports.M = M;
+exports.A = A;
+exports.N = N;
+exports.y = y;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M4-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+module F = (X: {type t}) => {module type S = {let x: X.t}}
+module M = F({type t = int})
+module N: M.S = {let x = 1}
+let y = N.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M1 x2, TRACE M10-entry x1, TRACE M10-full x1, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  return {};
+}
+
+let M = {};
+
+let N = {
+  x: 1
+};
+
+let y = 1;
+
+exports.F = F;
+exports.M = M;
+exports.N = N;
+exports.y = y;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M4-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+module M = {type t = int; module type S = {let x: t}}
+module A: module type of M = M
+module N: A.S = {let x = "bad"}
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:17-31
+
+  1 │ module M = {type t = int; module type S = {let x: t}}
+  2 │ module A: module type of M = M
+  3 │ module N: A.S = {let x = "bad"}
+  4 │ 
+
+  Signature mismatch:
+  
+  Actual declaration (Main.res:3:22):
+    let x: string
+  
+  Expected declaration (Main.res:1:44-51):
+    let x: A.t
+
+```
+
+#### M4-5 — setup attempt
+
+`Lib.res`:
+
+```rescript
+module M = {type t = int; module type S = {let x: t}}
+module A = M
+```
+
+`Main.res`:
+
+```rescript
+module N: Lib.A.S = {let x = 1}
+let y: string = N.x
+```
+
+Setup: plain `-I .`, no dependency package. These attempts cannot supply a dependency to the in-process Rust CLI. M2-6/M3-6 also cleaned the OCaml artifacts before Rust; M4-5 retained them.
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Lib.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M3 MtaAbsent x1, TRACE M5 x60
+Main.res: TRACE M5 x60
+```
+
+OCaml, Lib.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let M = {};
+
+let A;
+
+exports.M = M;
+exports.A = A;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+OCaml, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:17-19
+
+  1 │ module N: Lib.A.S = {let x = 1}
+  2 │ let y: string = N.x
+  3 │ 
+
+  This has type: [1;31mLib.A.t[0m [2m(defined as[0m [1;31mint[0m[2m)[0m
+  But it's expected to have type: [1;33mstring[0m
+  
+  You can convert [1;33mint[0m to [1;33mstring[0m with [1;33mInt.toString[0m.
+
+```
+
+Rust, Lib.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let M = {};
+
+let A;
+
+exports.M = M;
+exports.A = A;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Rust, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:11-17
+
+  1 │ module N: Lib.A.S = {let x = 1}
+  2 │ let y: string = N.x
+  3 │ 
+
+  [1;33mThe module or file Lib can't be found.[0m
+  - If it's a third-party dependency:
+    - Did you add it to the "dependencies" or "dev-dependencies" in rescript.json?
+  - Did you include the file's directory to the "sources" in rescript.json?
+  
+
+```
+
+#### M4-6 — outputs agree
+
+`Main.res`:
+
+```rescript
+module M = {module Y = {type t = int; module type S = {let x: t}}; module type S = Y.S}
+module A = M
+module type T = A.S
+let unpack = (p: module(T)) => {module N = unpack(p: T); N.x}
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-full x1, TRACE M3 MtaAbsent x1, TRACE M5 x60, TRACE M9 x2
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let Y = {};
+
+let M = {
+  Y: Y
+};
+
+function unpack(p) {
+  return p.x;
+}
+
+let A;
+
+exports.M = M;
+exports.A = A;
+exports.unpack = unpack;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M4-7 — outputs agree
+
+`Lib.res`:
+
+```rescript
+module M = {type t = int; module type S = {let x: t}}
+module A = M
+```
+
+`Main.res`:
+
+```rescript
+module N: Lib.A.S = {let x = 1}
+let y: string = N.x
+```
+
+`dependency/rescript.json` (Lib sources copied unchanged):
+
+```json
+{"name":"probe-dependency","sources":["."]}
+```
+
+Additional flags: `-I dependency/lib/rescript`.
+
+This attempt leaves the root Lib artifacts in the load path.
+
+Dependency OCaml prebuild, exit 0; stdout:
+
+```text
+OCaml reference build: 1 of 1 modules built
+```
+
+stderr:
+
+```text
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Lib.res: TRACE M10-entry x2, TRACE M10-shortcut x2, TRACE M3 MtaAbsent x2, TRACE M5 x60
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M3 MtaAbsent x1, TRACE M5 x61
+```
+
+Both compilers, Lib.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let M = {};
+
+let A;
+
+exports.M = M;
+exports.A = A;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Both compilers, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:17-19
+
+  1 │ module N: Lib.A.S = {let x = 1}
+  2 │ let y: string = N.x
+  3 │ 
+
+  This has type: [1;31mLib.A.t[0m [2m(defined as[0m [1;31mint[0m[2m)[0m
+  But it's expected to have type: [1;33mstring[0m
+  
+  You can convert [1;33mint[0m to [1;33mstring[0m with [1;33mInt.toString[0m.
+
+```
+
+#### M4-8 — outputs agree
+
+`Main.res`:
+
+```rescript
+module M = {type t = int; module type S = {module N: {let x: t}}}
+module F = (X: M.S) => {module A = X.N; let x = A.x}
+module R = F({module N = {let x = 1}})
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M1 x2, TRACE M10-entry x1, TRACE M10-full x1, TRACE M4 x1, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let M = {};
+
+function F(X) {
+  let A = X.N;
+  return {
+    A: A,
+    x: A.x
+  };
+}
+
+let N = {
+  x: 1
+};
+
+let R = {
+  A: N,
+  x: 1
+};
+
+exports.M = M;
+exports.F = F;
+exports.R = R;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M4-9 — outputs agree
+
+`Main.res`:
+
+```rescript
+module M = {module Y = {module type S = {let f: int => int}}; module type S = Y.S}
+module rec A: M.S = {let f = x => B.f(x)}
+and B: M.S = {let f = x => x}
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-full x1, TRACE M4 x6, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let Y = {};
+
+let M = {
+  Y: Y
+};
+
+function f(x) {
+  return x;
+}
+
+let B = {
+  f: f
+};
+
+function f$1(x) {
+  return x;
+}
+
+let A = {
+  f: f$1
+};
+
+exports.M = M;
+exports.A = A;
+exports.B = B;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M4-10 — outputs agree
+
+`Main.res`:
+
+```rescript
+module M = {module Y = {module type S = {let f: int => int}}; module type S = Y.S}
+module O = M
+module rec A: O.S = {let f = x => B.f(x)}
+and B: O.S = {let f = x => x}
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-full x1, TRACE M3 MtaAbsent x1, TRACE M4 x4, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let Y = {};
+
+let M = {
+  Y: Y
+};
+
+function f(x) {
+  return x;
+}
+
+let B = {
+  f: f
+};
+
+function f$1(x) {
+  return x;
+}
+
+let A = {
+  f: f$1
+};
+
+let O;
+
+exports.M = M;
+exports.O = O;
+exports.A = A;
+exports.B = B;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+### M5 — REACHED, NO DIFFERENCE SEEN
+
+Read values, types or module types through an alias of a module containing a sibling alias, and through a persisted dependency so `describe_tables` registers its alias source (`module_view.rs:817-823`; `env.ml:1369-1410,1519`). Compare the accessed type identities, spelling hints and JavaScript, while distinguishing that table registration from the separate value-lookup fallback at `typecore.rs:22671`.
+
+M5-1–5 agree locally; M5-11 agrees across the dependency package. The empty-value control and all local-only candidates log M5 60 times from runtime setup; that alone is not evidence for the candidate. M5-11 logs it 63 times for Main.res, registering the dependency aliases in addition to the 60 runtime registrations. The verdict covers `describe_tables`; the separate value-lookup fallback was not instrumented and its reachability is not claimed. M5-6–10 are retained setup attempts.
+
+#### M5-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+module Outer = {module R = {type t = int; let x: t = 1}; module A = R}
+module O = Outer
+let y: int = O.A.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M3 MtaAbsent x2, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let R = {
+  x: 1
+};
+
+let Outer = {
+  R: R,
+  A: undefined
+};
+
+let O;
+
+let y = 1;
+
+exports.Outer = Outer;
+exports.O = O;
+exports.y = y;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M5-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+module Outer = {module R = {type t = int; let x: t = 1}; module A = R}
+module O = Outer
+let y: string = O.A.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:17-21
+
+  1 │ module Outer = {module R = {type t = int; let x: t = 1}; module A = R}
+  2 │ module O = Outer
+  3 │ let y: string = O.A.x
+  4 │ 
+
+  This has type: [1;31mO.A.t[0m [2m(defined as[0m [1;31mint[0m[2m)[0m
+  But it's expected to have type: [1;33mstring[0m
+  
+  You can convert [1;33mint[0m to [1;33mstring[0m with [1;33mInt.toString[0m.
+
+```
+
+#### M5-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+module Outer = {module R = {type t = int; let x: t = 1}; module A = R}
+module O = Outer
+let y: O.A.t = Outer.R.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M3 MtaAbsent x2, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let R = {
+  x: 1
+};
+
+let Outer = {
+  R: R,
+  A: undefined
+};
+
+let O;
+
+let y = 1;
+
+exports.Outer = Outer;
+exports.O = O;
+exports.y = y;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M5-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+module Outer = {module R = {type t = int; module type S = {let x: t}}; module A = R}
+module O = Outer
+module N: O.A.S = {let x = 1}
+let y: string = N.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:17-19
+
+  2 │ module O = Outer
+  3 │ module N: O.A.S = {let x = 1}
+  4 │ let y: string = N.x
+  5 │ 
+
+  This has type: [1;31mO.A.t[0m [2m(defined as[0m [1;31mint[0m[2m)[0m
+  But it's expected to have type: [1;33mstring[0m
+  
+  You can convert [1;33mint[0m to [1;33mstring[0m with [1;33mInt.toString[0m.
+
+```
+
+#### M5-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+module Outer = {module R = {type thing = int; let value = 1}; module A = R}
+module O = Outer
+let y = O.A.vaule
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:9-17
+
+  1 │ module Outer = {module R = {type thing = int; let value = 1}; module A =
+    │  R}
+  2 │ module O = Outer
+  3 │ let y = O.A.vaule
+  4 │ 
+
+  The value vaule can't be found in O.A
+  
+  [1;33mHint: Did you mean value?[0m
+
+```
+
+#### M5-6 — setup attempt
+
+`Lib.res`:
+
+```rescript
+module Outer = {module R = {type t = int; module type S = {let x: t}; let x = 1}; module A = R}
+module O = Outer
+```
+
+`Main.res`:
+
+```rescript
+module P = Lib.O
+module N: P.A.S = {let x = P.A.x}
+let y: P.A.t = N.x
+```
+
+`dependency/rescript.json` (Lib sources copied unchanged):
+
+```json
+{"name":"probe-dependency","sources":["."]}
+```
+
+Additional flags: `-I dependency/lib/rescript`.
+
+This attempt leaves the root Lib artifacts in the load path.
+
+Dependency OCaml prebuild, exit 0; stdout:
+
+```text
+OCaml reference build: 1 of 1 modules built
+```
+
+stderr:
+
+```text
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Lib.res: TRACE M10-entry x2, TRACE M10-shortcut x2, TRACE M3 MtaAbsent x4, TRACE M5 x60
+Main.res: TRACE M10-entry x2, TRACE M10-full x1, TRACE M10-shortcut x1, TRACE M3 MtaAbsent x3, TRACE M5 x63
+```
+
+OCaml, Lib.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let R = {
+  x: 1
+};
+
+let Outer = {
+  R: R,
+  A: undefined
+};
+
+let O;
+
+exports.Outer = Outer;
+exports.O = O;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+OCaml, Main.res, exit 2; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res
+
+  Lib.js not found, needed in script mode 
+
+```
+
+Rust, Lib.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let R = {
+  x: 1
+};
+
+let Outer = {
+  R: R,
+  A: undefined
+};
+
+let O;
+
+exports.Outer = Outer;
+exports.O = O;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Rust, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res
+
+  Missing dependency Lib in search path
+
+```
+
+#### M5-7 — setup attempt
+
+`Lib.res`:
+
+```rescript
+module Outer = {module R = {type t = int; module type S = {let x: t}; let x = 1}; module A = R}
+module O = Outer
+```
+
+`Main.res`:
+
+```rescript
+module P = Lib.O
+module N: P.A.S = {let x = P.A.x}
+let y: P.A.t = N.x
+```
+
+`dependency/rescript.json` (Lib sources copied unchanged):
+
+```json
+{"name":"probe-dependency","sources":["."]}
+```
+
+Additional flags: `-I dependency/lib/rescript -bs-package-name checker-probe`.
+
+This attempt leaves the root Lib artifacts in the load path.
+
+Dependency OCaml prebuild, exit 0; stdout:
+
+```text
+OCaml reference build: 1 of 1 modules built
+```
+
+stderr:
+
+```text
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Lib.res: TRACE M10-entry x2, TRACE M10-shortcut x2, TRACE M3 MtaAbsent x4, TRACE M5 x60
+Main.res: TRACE M10-entry x2, TRACE M10-full x1, TRACE M10-shortcut x1, TRACE M3 MtaAbsent x3, TRACE M5 x63
+```
+
+OCaml, Lib.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+OCaml, Main.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Rust, Lib.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let R = {
+  x: 1
+};
+
+let Outer = {
+  R: R,
+  A: undefined
+};
+
+let O;
+
+exports.Outer = Outer;
+exports.O = O;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Rust, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res
+
+  Missing dependency Lib in search path
+
+```
+
+#### M5-8 — no reference (OCaml internal setup error)
+
+`Lib.res`:
+
+```rescript
+module Outer = {module R = {type t = int; module type S = {let x: t}; let x = 1}; module A = R}
+module O = Outer
+```
+
+`Main.res`:
+
+```rescript
+module P = Lib.O
+module N: P.A.S = {let x = P.A.x}
+let y: P.A.t = N.x
+```
+
+`dependency/rescript.json` (Lib sources copied unchanged):
+
+```json
+{"name":"probe-dependency","sources":["."]}
+```
+
+Additional flags: `-I dependency/lib/rescript -bs-package-name checker-probe -bs-package-output commonjs:.`.
+
+This attempt leaves the root Lib artifacts in the load path.
+
+Dependency OCaml prebuild, exit 0; stdout:
+
+```text
+OCaml reference build: 1 of 1 modules built
+```
+
+stderr:
+
+```text
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Lib.res: TRACE M10-entry x2, TRACE M10-shortcut x2, TRACE M3 MtaAbsent x4, TRACE M5 x60
+Main.res: TRACE M10-entry x2, TRACE M10-full x1, TRACE M10-shortcut x1, TRACE M3 MtaAbsent x3, TRACE M5 x63
+```
+
+OCaml, Lib.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+Fatal error: exception Failure("File \"compiler/ext/ext_path.ml\", line 122, characters 27-34bsc was invoked without -bs-project-root; cannot determine the package root. Pass -bs-project-root <dir> or invoke bsc via rewatch / cli/bsc.js.")
+```
+
+Rust, Lib.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Generated JavaScript file:
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let R = {
+  x: 1
+};
+
+let Outer = {
+  R: R,
+  A: undefined
+};
+
+let O;
+
+exports.Outer = Outer;
+exports.O = O;
+/* No side effect */
+```
+
+Rust, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res
+
+  Missing dependency Lib in search path
+
+```
+
+#### M5-9 — setup attempt
+
+`Lib.res`:
+
+```rescript
+module Outer = {module R = {type t = int; module type S = {let x: t}; let x = 1}; module A = R}
+module O = Outer
+```
+
+`Main.res`:
+
+```rescript
+module P = Lib.O
+module N: P.A.S = {let x = P.A.x}
+let y: P.A.t = N.x
+```
+
+`dependency/rescript.json` (Lib sources copied unchanged):
+
+```json
+{"name":"probe-dependency","sources":["."]}
+```
+
+Additional flags: `-I dependency/lib/rescript -bs-package-name checker-probe -bs-package-output commonjs:. -bs-project-root .`.
+
+This attempt leaves the root Lib artifacts in the load path.
+
+Dependency OCaml prebuild, exit 0; stdout:
+
+```text
+OCaml reference build: 1 of 1 modules built
+```
+
+stderr:
+
+```text
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Lib.res: TRACE M10-entry x2, TRACE M10-shortcut x2, TRACE M3 MtaAbsent x4, TRACE M5 x60
+Main.res: TRACE M10-entry x2, TRACE M10-full x1, TRACE M10-shortcut x1, TRACE M3 MtaAbsent x3, TRACE M5 x63
+```
+
+OCaml, Lib.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Generated JavaScript file:
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let R = {
+  x: 1
+};
+
+let Outer = {
+  R: R,
+  A: undefined
+};
+
+let O;
+
+exports.Outer = Outer;
+exports.O = O;
+/* No side effect */
+```
+
+OCaml, Main.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Generated JavaScript file:
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Lib = require("./Lib.js");
+
+let x = Lib.Outer.R.x;
+
+let N = {
+  x: x
+};
+
+let P;
+
+let y = x;
+
+exports.P = P;
+exports.N = N;
+exports.y = y;
+/* No side effect */
+```
+
+Rust, Lib.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Generated JavaScript file:
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let R = {
+  x: 1
+};
+
+let Outer = {
+  R: R,
+  A: undefined
+};
+
+let O;
+
+exports.Outer = Outer;
+exports.O = O;
+/* No side effect */
+```
+
+Rust, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res
+
+  Missing dependency Lib in search path
+
+```
+
+#### M5-10 — setup attempt
+
+`Lib.res`:
+
+```rescript
+module Outer = {module R = {type t = int; module type S = {let x: t}; let x = 1}; module A = R}
+module O = Outer
+```
+
+`Main.res`:
+
+```rescript
+module P = Lib.O
+module N: P.A.S = {let x = P.A.x}
+let y: P.A.t = N.x
+```
+
+`dependency/rescript.json` (Lib sources copied unchanged):
+
+```json
+{"name":"probe-dependency","sources":["."],"package-specs":{"module":"commonjs","in-source":true}}
+```
+
+Additional flags: `-I dependency/lib/rescript -bs-package-name checker-probe -bs-package-output commonjs:. -bs-project-root .`.
+
+This attempt leaves the root Lib artifacts in the load path.
+
+Dependency OCaml prebuild, exit 0; stdout:
+
+```text
+OCaml reference build: 1 of 1 modules built
+```
+
+stderr:
+
+```text
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Lib.res: TRACE M10-entry x2, TRACE M10-shortcut x2, TRACE M3 MtaAbsent x4, TRACE M5 x60
+Main.res: TRACE M10-entry x2, TRACE M10-full x1, TRACE M10-shortcut x1, TRACE M3 MtaAbsent x3, TRACE M5 x63
+```
+
+OCaml, Lib.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Generated JavaScript file:
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let R = {
+  x: 1
+};
+
+let Outer = {
+  R: R,
+  A: undefined
+};
+
+let O;
+
+exports.Outer = Outer;
+exports.O = O;
+/* No side effect */
+```
+
+OCaml, Main.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Generated JavaScript file:
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Lib = require("./Lib.js");
+
+let x = Lib.Outer.R.x;
+
+let N = {
+  x: x
+};
+
+let P;
+
+let y = x;
+
+exports.P = P;
+exports.N = N;
+exports.y = y;
+/* No side effect */
+```
+
+Rust, Lib.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Generated JavaScript file:
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let R = {
+  x: 1
+};
+
+let Outer = {
+  R: R,
+  A: undefined
+};
+
+let O;
+
+exports.Outer = Outer;
+exports.O = O;
+/* No side effect */
+```
+
+Rust, Main.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Generated JavaScript file:
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Lib = require("probe-dependency/Lib.js");
+
+let x = Lib.Outer.R.x;
+
+let N = {
+  x: x
+};
+
+let P;
+
+let y = x;
+
+exports.P = P;
+exports.N = N;
+exports.y = y;
+/* No side effect */
+```
+
+#### M5-11 — outputs agree
+
+`Lib.res`:
+
+```rescript
+module Outer = {module R = {type t = int; module type S = {let x: t}; let x = 1}; module A = R}
+module O = Outer
+```
+
+`Main.res`:
+
+```rescript
+module P = Lib.O
+module N: P.A.S = {let x = P.A.x}
+let y: P.A.t = N.x
+```
+
+`dependency/rescript.json` (Lib sources copied unchanged):
+
+```json
+{"name":"probe-dependency","sources":["."],"package-specs":{"module":"commonjs","in-source":true}}
+```
+
+Additional flags: `-I dependency/lib/rescript -bs-package-name checker-probe -bs-package-output commonjs:. -bs-project-root .`.
+
+Before Main.res, remove root Lib.cmi, Lib.cmj and Lib.js (the separate dependency copies remain).
+
+Dependency OCaml prebuild, exit 0; stdout:
+
+```text
+OCaml reference build: 1 of 1 modules built
+```
+
+stderr:
+
+```text
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Lib.res: TRACE M10-entry x2, TRACE M10-shortcut x2, TRACE M3 MtaAbsent x4, TRACE M5 x60
+Main.res: TRACE M10-entry x2, TRACE M10-full x1, TRACE M10-shortcut x1, TRACE M3 MtaAbsent x3, TRACE M5 x63
+```
+
+Both compilers, Lib.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Generated JavaScript file:
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let R = {
+  x: 1
+};
+
+let Outer = {
+  R: R,
+  A: undefined
+};
+
+let O;
+
+exports.Outer = Outer;
+exports.O = O;
+/* No side effect */
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Generated JavaScript file:
+
+```javascript
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Lib = require("probe-dependency/Lib.js");
+
+let x = Lib.Outer.R.x;
+
+let N = {
+  x: x
+};
+
+let P;
+
+let y = x;
+
+exports.P = P;
+exports.N = N;
+exports.y = y;
+/* No side effect */
+```
+
+### M6 — WITNESS
+
+Rebind an exception or extension constructor through a module path or an open, with the source module hidden by a signature so unused warnings remain observable (`lookup_rebind_constructor`, `typemod.rs:555-610`; `typedecl.ml:1694-1700`). Compare all usage warnings because OCaml constructor lookup marks the type path and modules (`typetexp.ml:109`, `env.ml:952-970,1147-1152`) in addition to the constructor mark.
+
+M6-2, 3, 5–9 are witnesses; M6-1 and M6-4 agree. Smallest witness found: M6-7 (argument-free exceptions, no extra value); M6-8 isolates the extra module warning without the common unused-A warning, and M6-9 isolates the extra unused-open warning. M6-6 also shows the missing use marks at both levels of a module path. These all hit M6.
+
+#### M6-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+let f = () => {module M = {exception E(int)}; exception A = M.E; A(1)}
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M5 x60, TRACE M6 x1
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_exceptions = require("@rescript/runtime/lib/js/Primitive_exceptions.cjs");
+
+function f() {
+  let E = /* @__PURE__ */Primitive_exceptions.create("E");
+  return {
+    RE_EXN_ID: E,
+    _1: 1
+  };
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M6-2 — WITNESS
+
+`Main.res`:
+
+```rescript
+module M: {} = {module N = {exception E(int)}; exception A = N.E}
+let x = 1
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M5 x60, TRACE M6 x1
+```
+
+OCaml, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let M = {};
+
+let x = 1;
+
+exports.M = M;
+exports.x = x;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 38
+  Main.res:1:48-64
+
+  1 │ module M: {} = {module N = {exception E(int)}; exception A = N.E}
+  2 │ let x = 1
+  3 │ 
+
+  unused exception A
+
+```
+
+Rust, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let M = {};
+
+let x = 1;
+
+exports.M = M;
+exports.x = x;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 60
+  Main.res:1:24-45
+
+  1 │ module M: {} = {module N = {exception E(int)}; exception A = N.E}
+  2 │ let x = 1
+  3 │ 
+
+  unused module N.
+
+
+  Warning number 38
+  Main.res:1:48-64
+
+  1 │ module M: {} = {module N = {exception E(int)}; exception A = N.E}
+  2 │ let x = 1
+  3 │ 
+
+  unused exception A
+
+```
+
+#### M6-3 — WITNESS
+
+`Main.res`:
+
+```rescript
+module M: {} = {module N = {exception E(int)}; open N; exception A = E}
+let x = 1
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M5 x60, TRACE M6 x1
+```
+
+OCaml, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let M = {};
+
+let x = 1;
+
+exports.M = M;
+exports.x = x;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 38
+  Main.res:1:56-70
+
+  1 │ module M: {} = {module N = {exception E(int)}; open N; exception A = E}
+  2 │ let x = 1
+  3 │ 
+
+  unused exception A
+
+```
+
+Rust, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let M = {};
+
+let x = 1;
+
+exports.M = M;
+exports.x = x;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 33
+  Main.res:1:48-53
+
+  1 │ module M: {} = {module N = {exception E(int)}; open N; exception A = E}
+  2 │ let x = 1
+  3 │ 
+
+  unused open N.
+
+
+  Warning number 38
+  Main.res:1:56-70
+
+  1 │ module M: {} = {module N = {exception E(int)}; open N; exception A = E}
+  2 │ let x = 1
+  3 │ 
+
+  unused exception A
+
+```
+
+#### M6-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+module M: {} = {module N = {type t = ..; type t += E(int)}; type N.t += A = N.E}
+let x = 1
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M5 x60, TRACE M6 x1
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let M = {};
+
+let x = 1;
+
+exports.M = M;
+exports.x = x;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 38
+  Main.res:1:73-79
+
+  1 │ module M: {} = {module N = {type t = ..; type t += E(int)}; type N.t += 
+    │ A = N.E}
+  2 │ let x = 1
+  3 │ 
+
+  unused extension constructor A
+
+```
+
+#### M6-5 — WITNESS
+
+`Main.resi`:
+
+```rescript
+exception A(int)
+```
+
+`Main.res`:
+
+```rescript
+module M = {exception E(int)}
+exception A = M.E
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.resi: TRACE M5 x60, TRACE M7-M8 x1
+Main.res: TRACE M5 x60, TRACE M6 x1, TRACE M7-M8 x2
+```
+
+OCaml, Main.resi, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+OCaml, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_exceptions = require("@rescript/runtime/lib/js/Primitive_exceptions.cjs");
+
+let E = /* @__PURE__ */Primitive_exceptions.create("Main.M.E");
+
+let A = E;
+
+exports.A = A;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Rust, Main.resi, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Rust, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_exceptions = require("@rescript/runtime/lib/js/Primitive_exceptions.cjs");
+
+let E = /* @__PURE__ */Primitive_exceptions.create("Main.M.E");
+
+let A = E;
+
+exports.A = A;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 60
+  Main.res:1:8-29
+
+  1 │ module M = {exception E(int)}
+  2 │ exception A = M.E
+  3 │ 
+
+  unused module M.
+
+```
+
+#### M6-6 — WITNESS
+
+`Main.res`:
+
+```rescript
+module M: {} = {module N = {module P = {exception E(int)}}; exception A = N.P.E}
+let x = 1
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M5 x60, TRACE M6 x1
+```
+
+OCaml, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let M = {};
+
+let x = 1;
+
+exports.M = M;
+exports.x = x;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 38
+  Main.res:1:61-79
+
+  1 │ module M: {} = {module N = {module P = {exception E(int)}}; exception A 
+    │ = N.P.E}
+  2 │ let x = 1
+  3 │ 
+
+  unused exception A
+
+```
+
+Rust, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let M = {};
+
+let x = 1;
+
+exports.M = M;
+exports.x = x;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 60
+  Main.res:1:36-57
+
+  1 │ module M: {} = {module N = {module P = {exception E(int)}}; exception A 
+    │ = N.P.E}
+  2 │ let x = 1
+  3 │ 
+
+  unused module P.
+
+
+  Warning number 60
+  Main.res:1:24-58
+
+  1 │ module M: {} = {module N = {module P = {exception E(int)}}; exception A 
+    │ = N.P.E}
+  2 │ let x = 1
+  3 │ 
+
+  unused module N.
+
+
+  Warning number 38
+  Main.res:1:61-79
+
+  1 │ module M: {} = {module N = {module P = {exception E(int)}}; exception A 
+    │ = N.P.E}
+  2 │ let x = 1
+  3 │ 
+
+  unused exception A
+
+```
+
+#### M6-7 — WITNESS
+
+`Main.res`:
+
+```rescript
+module M: {} = {module N = {exception E}; exception A = N.E}
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M5 x60, TRACE M6 x1
+```
+
+OCaml, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let M = {};
+
+exports.M = M;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 38
+  Main.res:1:43-59
+
+  1 │ module M: {} = {module N = {exception E}; exception A = N.E}
+  2 │ 
+
+  unused exception A
+
+```
+
+Rust, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let M = {};
+
+exports.M = M;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 60
+  Main.res:1:24-40
+
+  1 │ module M: {} = {module N = {exception E}; exception A = N.E}
+  2 │ 
+
+  unused module N.
+
+
+  Warning number 38
+  Main.res:1:43-59
+
+  1 │ module M: {} = {module N = {exception E}; exception A = N.E}
+  2 │ 
+
+  unused exception A
+
+```
+
+#### M6-8 — WITNESS
+
+`Main.res`:
+
+```rescript
+module M: {exception A} = {module N = {exception E}; exception A = N.E}
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M5 x60, TRACE M6 x1, TRACE M7-M8 x1
+```
+
+OCaml, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_exceptions = require("@rescript/runtime/lib/js/Primitive_exceptions.cjs");
+
+let E = /* @__PURE__ */Primitive_exceptions.create("Main.M.N.E");
+
+let M = {
+  A: E
+};
+
+exports.M = M;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Rust, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_exceptions = require("@rescript/runtime/lib/js/Primitive_exceptions.cjs");
+
+let E = /* @__PURE__ */Primitive_exceptions.create("Main.M.N.E");
+
+let M = {
+  A: E
+};
+
+exports.M = M;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 60
+  Main.res:1:35-51
+
+  1 │ module M: {exception A} = {module N = {exception E}; exception A = N.E}
+  2 │ 
+
+  unused module N.
+
+```
+
+#### M6-9 — WITNESS
+
+`Main.res`:
+
+```rescript
+module M: {exception A} = {module N = {exception E}; open N; exception A = E}
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M5 x60, TRACE M6 x1, TRACE M7-M8 x1
+```
+
+OCaml, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_exceptions = require("@rescript/runtime/lib/js/Primitive_exceptions.cjs");
+
+let E = /* @__PURE__ */Primitive_exceptions.create("Main.M.N.E");
+
+let M = {
+  A: E
+};
+
+exports.M = M;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+Rust, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_exceptions = require("@rescript/runtime/lib/js/Primitive_exceptions.cjs");
+
+let E = /* @__PURE__ */Primitive_exceptions.create("Main.M.N.E");
+
+let M = {
+  A: E
+};
+
+exports.M = M;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 33
+  Main.res:1:54-59
+
+  1 │ module M: {exception A} = {module N = {exception E}; open N; exception A
+    │  = E}
+  2 │ 
+
+  unused open N.
+
+```
+
+### M7 — WITNESS
+
+Match an implementation extension constructor against an explicit interface or module signature (`extension_constructors`, `includemod.rs:4940`; `includecore.ml:711-740`), including an inner signature hidden by an outer one. Compare delayed unused-constructor warnings after inclusion, not just the inclusion result.
+
+M7-1–5 agree and reach extension inclusion; M7-6–7 produce an extra Rust warning 38 at the inner signature declaration, while M7-8 uses the exported constructor and agrees. Smallest witness found: M7-7. The premise that Rust never marks the constructor is stale: lines 4950–4965 do mark it unless the coercion is implicit. The witness is an observable usage-mark discrepancy in this area, not proof that the implementation declaration lacks the mark; the warning location is the signature declaration.
+
+#### M7-1 — outputs agree
+
+`Main.resi`:
+
+```rescript
+exception E(int)
+```
+
+`Main.res`:
+
+```rescript
+exception E(int)
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.resi: TRACE M5 x60, TRACE M7-M8 x1
+Main.res: TRACE M5 x60, TRACE M7-M8 x2
+```
+
+Both compilers, Main.resi, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_exceptions = require("@rescript/runtime/lib/js/Primitive_exceptions.cjs");
+
+let E = /* @__PURE__ */Primitive_exceptions.create("Main.E");
+
+exports.E = E;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M7-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+module M: {exception E(int)} = {exception E(int)}
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M5 x60, TRACE M7-M8 x1
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_exceptions = require("@rescript/runtime/lib/js/Primitive_exceptions.cjs");
+
+let E = /* @__PURE__ */Primitive_exceptions.create("Main.M.E");
+
+let M = {
+  E: E
+};
+
+exports.M = M;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M7-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+type t = ..
+module M: {type t += E(int)} = {type t += E(int)}
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M5 x60, TRACE M7-M8 x1
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_exceptions = require("@rescript/runtime/lib/js/Primitive_exceptions.cjs");
+
+let E = /* @__PURE__ */Primitive_exceptions.create("Main.M.E");
+
+let M = {
+  E: E
+};
+
+exports.M = M;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M7-4 — outputs agree
+
+`Main.resi`:
+
+```rescript
+type t = ..
+type t += E(int)
+```
+
+`Main.res`:
+
+```rescript
+type t = ..
+type t += E(int)
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.resi: TRACE M5 x60, TRACE M7-M8 x1
+Main.res: TRACE M5 x60, TRACE M7-M8 x2
+```
+
+Both compilers, Main.resi, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_exceptions = require("@rescript/runtime/lib/js/Primitive_exceptions.cjs");
+
+let E = /* @__PURE__ */Primitive_exceptions.create("Main.E");
+
+exports.E = E;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M7-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+module M: {exception E(int)} = {exception E(string)}
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M5 x60, TRACE M7-M8 x2
+```
+
+Both compilers, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:32-52
+
+  1 │ module M: {exception E(int)} = {exception E(string)}
+  2 │ 
+
+  Signature mismatch:
+  
+  Actual declaration (Main.res:1:33-51):
+    type exn += E(string)
+  
+  Expected declaration (Main.res:1:12-27):
+    type exn += E(int)
+
+```
+
+#### M7-6 — WITNESS
+
+`Main.res`:
+
+```rescript
+module M: {} = {module N: {exception E(int)} = {exception E(int)}}
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M5 x60, TRACE M7-M8 x1
+```
+
+OCaml, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let M = {};
+
+exports.M = M;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 60
+  Main.res:1:24-65
+
+  1 │ module M: {} = {module N: {exception E(int)} = {exception E(int)}}
+  2 │ 
+
+  unused module N.
+
+```
+
+Rust, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let M = {};
+
+exports.M = M;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 38
+  Main.res:1:28-43
+
+  1 │ module M: {} = {module N: {exception E(int)} = {exception E(int)}}
+  2 │ 
+
+  unused exception E
+
+
+  Warning number 60
+  Main.res:1:24-65
+
+  1 │ module M: {} = {module N: {exception E(int)} = {exception E(int)}}
+  2 │ 
+
+  unused module N.
+
+```
+
+#### M7-7 — WITNESS
+
+`Main.res`:
+
+```rescript
+module M: {} = {module N: {exception E} = {exception E}}
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M5 x60, TRACE M7-M8 x1
+```
+
+OCaml, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let M = {};
+
+exports.M = M;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 60
+  Main.res:1:24-55
+
+  1 │ module M: {} = {module N: {exception E} = {exception E}}
+  2 │ 
+
+  unused module N.
+
+```
+
+Rust, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let M = {};
+
+exports.M = M;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 38
+  Main.res:1:28-38
+
+  1 │ module M: {} = {module N: {exception E} = {exception E}}
+  2 │ 
+
+  unused exception E
+
+
+  Warning number 60
+  Main.res:1:24-55
+
+  1 │ module M: {} = {module N: {exception E} = {exception E}}
+  2 │ 
+
+  unused module N.
+
+```
+
+#### M7-8 — outputs agree
+
+`Main.res`:
+
+```rescript
+module M: {} = {module N: {exception E} = {exception E}; let e = N.E}
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M5 x60, TRACE M7-M8 x1
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let M = {};
+
+exports.M = M;
+/* No side effect */
+```
+
+stderr:
+
+```text
+
+  Warning number 32
+  Main.res:1:62
+
+  1 │ module M: {} = {module N: {exception E} = {exception E}; let e = N.E}
+  2 │ 
+
+  unused value e.
+
+```
+
+### M8 — REACHED, NO DIFFERENCE SEEN
+
+Include constructors of parameterized extensible types, with parameter-dependent argument types and explicit result types, through `extension_constructors` (`includemod.rs:4967-5034`; `includecore.ml:717-740`). Compare both successful alpha-renaming and rejected swapped parameters or incompatible results to expose a parameter-map error in equality.
+
+M8-1–6 all reach extension inclusion and agree, including the interface file in M8-4, reversed parameter order in M8-3, and accepted/rejected explicit result types in M8-5–6.
+
+#### M8-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+type t<'a> = ..
+module M: {type t<'a> += E('a)} = {type t<'a> += E('a)}
+let e = M.E(1)
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M5 x60, TRACE M7-M8 x1
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_exceptions = require("@rescript/runtime/lib/js/Primitive_exceptions.cjs");
+
+let E = /* @__PURE__ */Primitive_exceptions.create("Main.M.E");
+
+let M = {
+  E: E
+};
+
+let e = {
+  RE_EXN_ID: E,
+  _1: 1
+};
+
+exports.M = M;
+exports.e = e;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M8-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+type t<'a, 'b> = ..
+module M: {type t<'a, 'b> += E('a, 'b)} = {type t<'x, 'y> += E('x, 'y)}
+let e = M.E(1, "x")
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M5 x60, TRACE M7-M8 x1
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_exceptions = require("@rescript/runtime/lib/js/Primitive_exceptions.cjs");
+
+let E = /* @__PURE__ */Primitive_exceptions.create("Main.M.E");
+
+let M = {
+  E: E
+};
+
+let e = {
+  RE_EXN_ID: E,
+  _1: 1,
+  _2: "x"
+};
+
+exports.M = M;
+exports.e = e;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M8-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+type t<'a, 'b> = ..
+module M: {type t<'a, 'b> += E('a, 'b)} = {type t<'x, 'y> += E('y, 'x)}
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M5 x60, TRACE M7-M8 x2
+```
+
+Both compilers, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:43-71
+
+  1 │ type t<'a, 'b> = ..
+  2 │ module M: {type t<'a, 'b> += E('a, 'b)} = {type t<'x, 'y> += E('y, 'x)}
+  3 │ 
+
+  Signature mismatch:
+  
+  Actual declaration (Main.res:2:62-70):
+    type t<'x, 'y> += E('y, 'x)
+  
+  Expected declaration (Main.res:2:30-38):
+    type t<'a, 'b> += E('a, 'b)
+
+```
+
+#### M8-4 — outputs agree
+
+`Main.resi`:
+
+```rescript
+type t<'a, 'b> = ..
+type t<'a, 'b> += E('b, 'a)
+```
+
+`Main.res`:
+
+```rescript
+type t<'x, 'y> = ..
+type t<'x, 'y> += E('y, 'x)
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.resi: TRACE M5 x60, TRACE M7-M8 x1
+Main.res: TRACE M5 x60, TRACE M7-M8 x2
+```
+
+Both compilers, Main.resi, exit 0; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_exceptions = require("@rescript/runtime/lib/js/Primitive_exceptions.cjs");
+
+let E = /* @__PURE__ */Primitive_exceptions.create("Main.E");
+
+exports.E = E;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M8-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+type t<'a> = ..
+module M: {type t<'a> += E: t<int>} = {type t<'a> += E: t<int>}
+let e = M.E
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M5 x60, TRACE M7-M8 x1
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+let Primitive_exceptions = require("@rescript/runtime/lib/js/Primitive_exceptions.cjs");
+
+let E = /* @__PURE__ */Primitive_exceptions.create("Main.M.E");
+
+let M = {
+  E: E
+};
+
+let e = {
+  RE_EXN_ID: E
+};
+
+exports.M = M;
+exports.e = e;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M8-6 — outputs agree
+
+`Main.res`:
+
+```rescript
+type t<'a> = ..
+module M: {type t<'a> += E: t<int>} = {type t<'a> += E: t<string>}
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M5 x60, TRACE M7-M8 x2
+```
+
+Both compilers, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:2:39-66
+
+  1 │ type t<'a> = ..
+  2 │ module M: {type t<'a> += E: t<int>} = {type t<'a> += E: t<string>}
+  3 │ 
+
+  Signature mismatch:
+  
+  Actual declaration (Main.res:2:54-65):
+    type t<'a> += E: t<string>
+  
+  Expected declaration (Main.res:2:26-34):
+    type t<'a> += E: t<int>
+
+```
+
+### M9 — REACHED, NO DIFFERENCE SEEN
+
+Unify a package reached through a type abbreviation with another package listing more constraints at a nested level (`ctype.rs:9061-9102`, `unify_package:7905`; `ctype.ml:2416-2423`). Then generalize the function or retain a weak reference and use incompatible instantiations, checking whether constraint completion at the expanded-node level changes types or diagnostics.
+
+M9-7–12 reach the package-unification arm and agree, including generalization in M9-9 and the weak-reference rejection in M9-12. M9-1–6 expose a constraint-translation obstacle: directly constraining a manifest component of S is rejected before the intended comparison; M9-5 also logs M9 during an earlier package operation. The repaired programs use a second module type T with abstract components and complete its constraints against the manifests in S. The marker proves the package arm, not that the two candidate node levels were numerically unequal.
+
+#### M9-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type S = {type t = int; type u; let x: u}
+type p<'a> = module(S with type u = 'a)
+let f = (p: p<'a>): module(S with type t = int and type u = 'a) => p
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:21-63
+
+  1 │ module type S = {type t = int; type u; let x: u}
+  2 │ type p<'a> = module(S with type u = 'a)
+  3 │ let f = (p: p<'a>): module(S with type t = int and type u = 'a) => p
+  4 │ 
+
+  In this `with' constraint, the new definition of t
+  does not match its original definition in the constrained signature:
+  
+  Actual declaration (Main.res:3:21-63):
+    type t
+  
+  Expected declaration (Main.res:1:18-29):
+    type t = int
+
+```
+
+#### M9-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type S = {type t = int; type u; let x: u}
+type p<'a> = module(S with type u = 'a)
+let f = (p: module(S with type t = int and type u = 'a)): p<'a> => p
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:13-55
+
+  1 │ module type S = {type t = int; type u; let x: u}
+  2 │ type p<'a> = module(S with type u = 'a)
+  3 │ let f = (p: module(S with type t = int and type u = 'a)): p<'a> => p
+  4 │ 
+
+  In this `with' constraint, the new definition of t
+  does not match its original definition in the constrained signature:
+  
+  Actual declaration (Main.res:3:13-55):
+    type t
+  
+  Expected declaration (Main.res:1:18-29):
+    type t = int
+
+```
+
+#### M9-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type S = {type t = int; type u; let x: u}
+type p<'a> = module(S with type u = 'a)
+let f = () => {let g = (p: p<'a>): module(S with type t = int and type u = 'a) => p; g}
+let a = f()(module({type t = int; type u = int; let x = 1}: S with type u = int))
+let b = f()(module({type t = int; type u = string; let x = "s"}: S with type u = string))
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:36-78
+
+  1 │ module type S = {type t = int; type u; let x: u}
+  2 │ type p<'a> = module(S with type u = 'a)
+  3 │ let f = () => {let g = (p: p<'a>): module(S with type t = int and type u
+    │  = 'a) => p; g}
+  4 │ let a = f()(module({type t = int; type u = int; let x = 1}: S with type 
+    │ u = int))
+  5 │ let b = f()(module({type t = int; type u = string; let x = "s"}: S with 
+    │ type u = string))
+
+  In this `with' constraint, the new definition of t
+  does not match its original definition in the constrained signature:
+  
+  Actual declaration (Main.res:3:36-78):
+    type t
+  
+  Expected declaration (Main.res:1:18-29):
+    type t = int
+
+```
+
+#### M9-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type S = {type t = int; type u; let x: u}
+type p<'a> = module(S with type u = 'a)
+let f = (p: p<int>): module(S with type t = int and type u = string) => p
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:22-68
+
+  1 │ module type S = {type t = int; type u; let x: u}
+  2 │ type p<'a> = module(S with type u = 'a)
+  3 │ let f = (p: p<int>): module(S with type t = int and type u = string) => 
+    │ p
+  4 │ 
+
+  In this `with' constraint, the new definition of t
+  does not match its original definition in the constrained signature:
+  
+  Actual declaration (Main.res:3:22-68):
+    type t
+  
+  Expected declaration (Main.res:1:18-29):
+    type t = int
+
+```
+
+#### M9-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type S = {type t = int; type u; let x: u}
+type p<'a> = module(S with type u = 'a)
+type q<'a> = p<'a>
+let f = (p: q<'a>) => {let g = () => (p: module(S with type t = int and type u = 'a)); g()}
+let use = (p: q<int>): q<string> => f(p)
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M5 x60, TRACE M9 x2
+```
+
+Both compilers, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:42-84
+
+  2 │ type p<'a> = module(S with type u = 'a)
+  3 │ type q<'a> = p<'a>
+  4 │ let f = (p: q<'a>) => {let g = () => (p: module(S with type t = int and 
+    │ type u = 'a)); g()}
+  5 │ let use = (p: q<int>): q<string> => f(p)
+  6 │ 
+
+  In this `with' constraint, the new definition of t
+  does not match its original definition in the constrained signature:
+  
+  Actual declaration (Main.res:4:42-84):
+    type t
+  
+  Expected declaration (Main.res:1:18-29):
+    type t = int
+
+```
+
+#### M9-6 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type S = {type t = int; type u; let x: u}
+type p<'a> = module(S with type u = 'a)
+let make = () => {let r = ref(None); let f = (p: p<'a>) => {r := Some(p); (p: module(S with type t = int and type u = 'a))}; f}
+let f = make()
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:3:79-121
+
+  1 │ module type S = {type t = int; type u; let x: u}
+  2 │ type p<'a> = module(S with type u = 'a)
+  3 │ let make = () => {let r = ref(None); let f = (p: p<'a>) => {r := Some(p)
+    │ ; (p: module(S with type t = int and type u = 'a))}; f}
+  4 │ let f = make()
+  5 │ 
+
+  In this `with' constraint, the new definition of t
+  does not match its original definition in the constrained signature:
+  
+  Actual declaration (Main.res:3:79-121):
+    type t
+  
+  Expected declaration (Main.res:1:18-29):
+    type t = int
+
+```
+
+#### M9-7 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type S = {type t = int; type u; let x: u}
+module type T = {type t; type u; let x: u}
+type p<'a> = module(S with type u = 'a)
+let f = (p: p<'a>): module(T with type t = int and type u = 'a) => p
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M5 x60, TRACE M9 x2
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(p) {
+  return p;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M9-8 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type S = {type t = int; type u; let x: u}
+module type T = {type t; type u; let x: u}
+type p<'a> = module(S with type u = 'a)
+let f = (p: module(T with type t = int and type u = 'a)): p<'a> => p
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M5 x60, TRACE M9 x2
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(p) {
+  return p;
+}
+
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M9-9 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type S = {type t = int; type u; let x: u}
+module type T = {type t; type u; let x: u}
+type p<'a> = module(S with type u = 'a)
+let f = () => {let g = (p: p<'a>): module(T with type t = int and type u = 'a) => p; g}
+let a = f()(module({type t = int; type u = int; let x = 1}: S with type u = int))
+let b = f()(module({type t = int; type u = string; let x = "s"}: S with type u = string))
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M5 x60, TRACE M9 x8
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f() {
+  return p => p;
+}
+
+let a = {
+  x: 1
+};
+
+let b = {
+  x: "s"
+};
+
+exports.f = f;
+exports.a = a;
+exports.b = b;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M9-10 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type S = {type t = int; type u; let x: u}
+module type T = {type t; type u; let x: u}
+type p<'a> = module(S with type u = 'a)
+let f = (p: p<int>): module(T with type t = int and type u = string) => p
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M5 x60, TRACE M9 x3
+```
+
+Both compilers, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:4:73
+
+  2 │ module type T = {type t; type u; let x: u}
+  3 │ type p<'a> = module(S with type u = 'a)
+  4 │ let f = (p: p<int>): module(T with type t = int and type u = string) => 
+    │ p
+  5 │ 
+
+  This has type: [1;31mp<int>[0m [2m(defined as[0m [1;31mmodule(S with type u = int)[0m[2m)[0m
+  But it's expected to have type:
+    [1;33mmodule(T with type t = int and type u = string)[0m
+  
+  The incompatible parts:
+    [1;31mint[0m vs [1;33mstring[0m
+  
+  You can convert [1;33mint[0m to [1;33mstring[0m with [1;33mInt.toString[0m.
+
+```
+
+#### M9-11 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type S = {type t = int; type u; let x: u}
+module type T = {type t; type u; let x: u}
+type p<'a> = module(S with type u = 'a)
+type q<'a> = p<'a>
+let f = (p: q<'a>) => {let g = () => (p: module(T with type t = int and type u = 'a)); g()}
+let use = (p: q<int>): q<string> => f(p)
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M5 x60, TRACE M9 x11
+```
+
+Both compilers, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:6:37-40
+
+  4 │ type q<'a> = p<'a>
+  5 │ let f = (p: q<'a>) => {let g = () => (p: module(T with type t = int and 
+    │ type u = 'a)); g()}
+  6 │ let use = (p: q<int>): q<string> => f(p)
+  7 │ 
+
+  This has type: [1;31mmodule(T with type t = int and type u = int)[0m
+  But it's expected to have type:
+    [1;33mq<string>[0m [2m(defined as[0m [1;33mmodule(S with type u = string)[0m[2m)[0m
+  
+  The incompatible parts:
+    [1;31mint[0m vs [1;33mstring[0m
+  
+  You can convert [1;33mint[0m to [1;33mstring[0m with [1;33mInt.toString[0m.
+
+```
+
+#### M9-12 — outputs agree
+
+`Main.res`:
+
+```rescript
+module type S = {type t = int; type u; let x: u}
+module type T = {type t; type u; let x: u}
+type p<'a> = module(S with type u = 'a)
+let make = () => {let r = ref(None); let f = (p: p<'a>) => {r := Some(p); (p: module(T with type t = int and type u = 'a))}; f}
+let f = make()
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x2, TRACE M10-shortcut x2, TRACE M5 x60, TRACE M9 x4
+```
+
+Both compilers, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:5:5
+
+  3 │ type p<'a> = module(S with type u = 'a)
+  4 │ let make = () => {let r = ref(None); let f = (p: p<'a>) => {r := Some(p)
+    │ ; (p: module(T with type t = int and type u = 'a))}; f}
+  5 │ let f = make()
+  6 │ 
+
+  This expression's type contains type variables that cannot be generalized:
+  [1;31mp<'_weak1> => module(T with type t = int and type u = '_weak1)[0m
+  
+  This happens when the type system senses there's a mutation/side-effect,
+  in combination with a polymorphic value.
+  [1;33mUsing or annotating that value usually solves it.[0m
+
+```
+
+### M10 — REACHED, NO DIFFERENCE SEEN
+
+Compile a unit without an interface or explicitly bound polymorphic field, allowing weak variables, late row closing, private rows, recursive modules or functor results to reach the inferred-signature check (`driver.rs:7395`, `includemod.rs:2212`; `typemod.ml:1812-1815`). Check whether OCaml rejects at self-inclusion while Rust takes the shortcut, separating that from the subsequent non-generalizable-type check.
+
+M10-1–6 agree; M10-1–3 and M10-5 take the shortcut, while M10-4 and M10-6 take the full check despite having no explicit polymorphic field. The proposed “only with bound variables” condition omits `!includes_itself_plainly(simple_sig)` at includemod.rs:2218. M10-1 is rejected by both for a non-generalizable type, not as an inferred-signature mismatch. No candidate produced the requested OCaml self-inclusion rejection.
+
+#### M10-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+module M = {let r = ref(None)}
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x2, TRACE M10-shortcut x2, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 2; stdout:
+
+```text
+```
+
+stderr:
+
+```text
+
+  We've found a bug for you!
+  Main.res:1:8-30
+
+  1 │ module M = {let r = ref(None)}
+  2 │ 
+
+  The type of this module contains type variables that cannot be generalized:
+  [1;31m{
+    let r: ref<option<'_weak1>>
+  }[0m
+  
+  This happens when the type system senses there's a mutation/side-effect,
+  in combination with a polymorphic value.
+  [1;33mUsing or annotating that value usually solves it.[0m
+
+```
+
+#### M10-2 — outputs agree
+
+`Main.res`:
+
+```rescript
+module M = {let r = ref(None)}
+let set = () => M.r := Some(1)
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let r = {
+  contents: undefined
+};
+
+let M = {
+  r: r
+};
+
+function set() {
+  r.contents = 1;
+}
+
+exports.M = M;
+exports.set = set;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M10-3 — outputs agree
+
+`Main.res`:
+
+```rescript
+module M = {let f = x => switch x {| #A(y) => y | #B => 0}}
+let f: [#A(int) | #B] => int = M.f
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x) {
+  if (typeof x === "object") {
+    return x.VAL;
+  } else {
+    return 0;
+  }
+}
+
+let M = {
+  f: f
+};
+
+exports.M = M;
+exports.f = f;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M10-4 — outputs agree
+
+`Main.res`:
+
+```rescript
+module M: {type t = private [> #A]; let x: t} = {type t = [#A]; let x = #A}
+let x = M.x
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-full x1, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let M = {
+  x: "A"
+};
+
+let x = "A";
+
+exports.M = M;
+exports.x = x;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M10-5 — outputs agree
+
+`Main.res`:
+
+```rescript
+module rec A: {type t = B.t; let f: t => t} = {type t = B.t; let f = x => B.f(x)}
+and B: {type t = int; let f: t => t} = {type t = int; let f = x => x}
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function f(x) {
+  return x;
+}
+
+let B = {
+  f: f
+};
+
+function f$1(x) {
+  return x;
+}
+
+let A = {
+  f: f$1
+};
+
+exports.A = A;
+exports.B = B;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+#### M10-6 — outputs agree
+
+`Main.res`:
+
+```rescript
+module F = (X: {}) => {let r = ref(None)}
+module M = F({})
+let set = () => M.r := Some(1)
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M1 x1, TRACE M10-entry x1, TRACE M10-full x1, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+function F(X) {
+  let r = {
+    contents: undefined
+  };
+  return {
+    r: r
+  };
+}
+
+let r = {
+  contents: undefined
+};
+
+let M = {
+  r: r
+};
+
+function set() {
+  r.contents = 1;
+}
+
+exports.F = F;
+exports.M = M;
+exports.set = set;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+### Control
+
+#### Control-1 — outputs agree
+
+`Main.res`:
+
+```rescript
+let x = 1
+```
+
+Trace counts from the separate instrumented invocations:
+
+```text
+Main.res: TRACE M10-entry x1, TRACE M10-shortcut x1, TRACE M5 x60
+```
+
+Both compilers, Main.res, exit 0; stdout:
+
+```text
+// Generated by ReScript, PLEASE EDIT WITH CARE
+'use strict';
+
+
+let x = 1;
+
+exports.x = x;
+/* No side effect */
+```
+
+stderr:
+
+```text
+```
+
+### No reference and setup failures
+
+M2-8, M3-10 and M5-8 stop in OCaml with `Failure` from ext_path.ml:122 because `-bs-package-output` requires `-bs-project-root`. Their full programs and both outputs are above; none is a reference-backed witness.
+
+The remaining dependency setup attempts expose different inputs to the compilers, not an attributable checker departure: plain -I directories do not build a Rust dependency registry; script-mode OCaml requires Lib.js; a dependency without an explicit CommonJS output does not supply the requested Rust import mode; finally, root Lib artifacts shadow the dependency package only for the file-based compiler. The last problem gives `./Lib.js` versus `probe-dependency/Lib.js`, and disappears when both compilers read the same dependency. M2-9, M3-16 and M5-11 are the repaired comparisons. Generated-file text is recorded only for successful commands; a failed invocation cannot establish that a pre-existing JavaScript file is its output.
+
+### Found on the way
+
+No additional reference-backed compiler difference outside M6/M7 was established. Syntax failures, incompatible package setup and the three no-reference OCaml failures are retained above instead of misclassified as witnesses. M7’s signature-location warning needs its own causal investigation; this search does not claim that the existing implementation-side mark is absent.
+
+### Gates and limits
+
+The OCaml build, fresh-target thin-LTO Rust release build, runtime reference build and named fixture parity calibration passed. All candidate invocations are recorded above; no whole compiler test suite was run, no manifest was touched, and no compiler/test/fixture source changed. The permitted single successful release build contains disabled-by-default reachability markers; this is not a release-performance comparison. No two-binary application benchmark or signature comparison was run: this documentation-only task provides no changed compiler candidate, and the permitted build budget was used for the witness-search executable. CI is a separate publication gate; its result is reported on the pull request rather than asserted here.

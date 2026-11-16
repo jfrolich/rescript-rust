@@ -1,0 +1,1 @@
+- Record a module-focused checker witness search, including exception usage-warning differences and executed alias, functor, extension and package comparisons.
