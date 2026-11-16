@@ -151,3 +151,10 @@ val container_element_closing_tag_loc :
   Parsetree.jsx_closing_container_tag -> Warnings.loc
 
 val unary_element_closing_token : Warnings.loc -> Warnings.loc
+
+(* The variable a pattern starts with, as in [x] for [x as y] or [x | A] *)
+val leftmost_pattern_var : Parsetree.pattern -> string option
+
+(* Whether a type is printed starting with the unqualified type constructor
+   [name], as in [private] or [private as 'a] *)
+val typ_starts_with_lident : string -> Parsetree.core_type -> bool
