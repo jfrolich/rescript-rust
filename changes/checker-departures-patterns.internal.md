@@ -1,0 +1,1 @@
+- Document the pattern-mode checker witness search, including row diagnostics and abstract module-type equations.
