@@ -1464,6 +1464,8 @@ pub fn plan(build_state: &mut BuildCommandState) {
                         .any(|(import, _)| !build_state.modules.contains_key(import))
                 });
             let unreplayable_warnings = has_unreplayable_warnings(build_state, module_name);
+            // Its recorded interface was compiled without locations.
+            let located = build_state.located_modules.contains(module_name);
             if build_state.get_module(module_name).is_some_and(|module|
                 build_state.packages[&module.package_name].prebuilt) { continue; }
             if own_stale
@@ -1471,6 +1473,7 @@ pub fn plan(build_state: &mut BuildCommandState) {
                 || references_new_module
                 || import_removed
                 || unreplayable_warnings
+                || located
             {
                 stale.insert(module_name.clone());
                 continue;

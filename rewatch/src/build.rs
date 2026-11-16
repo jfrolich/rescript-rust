@@ -617,6 +617,7 @@ pub fn incremental_build_without_lock(
         fresh_in_process && !build_state.diagnostic_locations && incremental::applies(build_state);
     if incremental
         && build_state.build_state.source_map_command == SourceMapCommand::Build
+        && build_state.located_modules.is_empty()
         && incremental::everything_up_to_date(build_state)
     {
         for module in build_state.build_state.modules.values_mut() {

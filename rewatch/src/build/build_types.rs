@@ -353,6 +353,11 @@ pub struct BuildCommandState {
     /// A diagnostic build rechecks dependencies with locations too, because
     /// cross-module errors can quote the dependency's declaration site.
     pub diagnostic_locations: bool,
+    /// Modules this build compiles with source locations, whether or not
+    /// they changed, so that their interfaces place their declarations; the
+    /// other modules are compiled without them. `rescript doc` uses it for
+    /// the modules whose declarations it documents.
+    pub located_modules: AHashSet<String>,
     pub diagnostic_retry: std::sync::atomic::AtomicBool,
     /// What `RESCRIPT_DERIVED_PATH=check` found in this build: reported
     /// together when the compile phase ends, and then the build fails.
@@ -522,6 +527,13 @@ impl BuildCommandState {
         self.diagnostic_locations || self.dump.as_ref().is_some_and(DumpRequest::needs_locations)
     }
 
+    /// Whether `module_name` is parsed with source locations from the start:
+    /// when every module is ([`Self::parses_with_locations`]), or when it is
+    /// one of [`Self::located_modules`].
+    pub fn parses_module_with_locations(&self, module_name: &str) -> bool {
+        self.parses_with_locations() || self.located_modules.contains(module_name)
+    }
+
     pub fn new(
         root_folder: PathBuf,
         project_context: ProjectContext,
@@ -539,6 +551,7 @@ impl BuildCommandState {
             revoked_snapshots: [false; 2],
             stored_asts: Mutex::new(AHashMap::new()),
             diagnostic_locations: false,
+            located_modules: AHashSet::new(),
             diagnostic_retry: std::sync::atomic::AtomicBool::new(false),
             derived_differences: Default::default(),
             in_memory_interfaces: Mutex::new(AHashMap::new()),
