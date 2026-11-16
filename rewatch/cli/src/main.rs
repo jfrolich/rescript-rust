@@ -250,12 +250,17 @@ fn run_main(telemetry: &telemetry::TelemetryGuard) -> Result<i32> {
             result.map(|()| 0)
         }
         cli::Command::Format { stdin, check, files } => format::format(stdin, check, files).map(|()| 0),
-        cli::Command::Doc { path } => {
+        cli::Command::Doc { path, batch } => {
             // Standard output is the command's result.
             log::set_max_level(log_level_filter.min(LevelFilter::Warn));
             let cwd = std::env::current_dir()?;
             configure_rayon_for_in_process();
-            match run_with_in_process_stack(|| build::tooling::doc(&cwd, &path, plain_output)) {
+            let docs = run_with_in_process_stack(|| match (&path, &batch) {
+                (_, Some(paths)) => build::tooling::doc_batch(&cwd, paths, plain_output),
+                (Some(path), None) => build::tooling::doc(&cwd, path, plain_output),
+                (None, None) => unreachable!("clap requires a path or --batch"),
+            });
+            match docs {
                 Ok(docs) => {
                     std::io::stdout().write_all(&docs)?;
                     Ok(0)

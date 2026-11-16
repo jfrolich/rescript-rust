@@ -219,7 +219,21 @@ pub fn get_compiler_args(rescript_file_path: &Path) -> Result<String> {
 /// rebuild, so the hash is kept in a file in the temporary directory with the
 /// executable's size, modification and change times and inode, and reused
 /// while those are the same (replacing or rewriting the binary changes them).
-fn executable_hash(path: &Path) -> Option<blake3::Hash> {
+/// `remember` says whether to write that file when the hash is computed: a
+/// check writes no file, but reads the one a build left. Within a process
+/// the hash is computed at most once (a tooling command checks the project
+/// several times).
+fn executable_hash(path: &Path, remember: bool) -> Option<blake3::Hash> {
+    static HASHES: std::sync::Mutex<Vec<(PathBuf, blake3::Hash)>> = std::sync::Mutex::new(Vec::new());
+    if let Some((_, hash)) = HASHES.lock().unwrap().iter().find(|(known, _)| known == path) {
+        return Some(*hash);
+    }
+    let hash = executable_hash_uncached(path, remember)?;
+    HASHES.lock().unwrap().push((path.to_path_buf(), hash));
+    Some(hash)
+}
+
+fn executable_hash_uncached(path: &Path, remember: bool) -> Option<blake3::Hash> {
     let metadata = std::fs::metadata(path).ok()?;
     let mut stamp = format!(
         "{}\n{}\n{}",
@@ -253,6 +267,9 @@ fn executable_hash(path: &Path) -> Option<blake3::Hash> {
         return Some(hash);
     }
     let hash = helpers::compute_file_hash(path)?;
+    if !remember {
+        return Some(hash);
+    }
     let tmp = cache.with_extension(format!("tmp{}", std::process::id()));
     if std::fs::write(&tmp, format!("{stamp}\n{}", hash.to_hex())).is_ok() {
         let _ = std::fs::rename(&tmp, &cache);
@@ -301,12 +318,7 @@ fn get_compiler_info_with_mode(
     let bsc_path = std::env::current_exe()
         .and_then(|path| path.canonicalize())
         .context("Could not resolve the rescript executable")?;
-    let bsc_hash = (if check_only {
-        helpers::compute_file_hash(&bsc_path)
-    } else {
-        executable_hash(&bsc_path)
-    })
-    .ok_or(anyhow!(
+    let bsc_hash = executable_hash(&bsc_path, /* remember */ !check_only).ok_or(anyhow!(
         "Failed to compute bsc hash for {}",
         bsc_path.to_string_lossy()
     ))?;
@@ -617,6 +629,7 @@ pub fn incremental_build_without_lock(
         fresh_in_process && !build_state.diagnostic_locations && incremental::applies(build_state);
     if incremental
         && build_state.build_state.source_map_command == SourceMapCommand::Build
+        && build_state.located_modules.is_empty()
         && incremental::everything_up_to_date(build_state)
     {
         for module in build_state.build_state.modules.values_mut() {

@@ -342,19 +342,24 @@ pub fn reanalyze(
     Ok(out.into_bytes())
 }
 
-/// `rescript-tools doc <path>` (tools/bin/main.ml): what it prints, the
-/// documentation of the module at `path` as JSON and a newline, or why there
-/// is none. `project` must be built with source locations (see [`docgen`]),
-/// which a watcher's builds leave out, so this is no watcher command.
-pub fn doc(cwd: &Path, path: &str, project: &dyn session::Project) -> Result<Vec<u8>, String> {
+/// `rescript-tools doc <path>` (tools/bin/main.ml): the documentation of the
+/// module at `path`, or why there is none. What the command prints is
+/// [`docgen::Docs::json`] and a newline. Its items declared in other modules
+/// are where `project`'s interfaces place them (see [`docgen`]).
+pub fn doc(cwd: &Path, path: &str, project: &dyn session::Project) -> Result<docgen::Docs, String> {
     let session = session::ProjectSession::new(project);
     let docs = docgen::extract_docs(&session, cwd, path)?;
     if let Some(failure) = session.failure() {
         return Err(failure);
     }
-    let mut out = Output::default();
-    out.print_endline(&docs);
-    Ok(out.into_bytes())
+    // The project built, so its modules type-check against its interfaces;
+    // one that does not would be documented without its items.
+    if let Some(report) = session.typecheck_failure() {
+        return Err(format!(
+            "error: failed to generate doc for {path}: {report}"
+        ));
+    }
+    Ok(docs)
 }
 
 /// `Cli.print_string`: the pretty JSON and a newline.

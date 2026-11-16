@@ -872,6 +872,84 @@ pub fn load_stored(build_state: &BuildCommandState, modules: &AHashSet<String>) 
     loaded
 }
 
+/// Load the stored interfaces of those of `modules` that this build neither
+/// compiled nor loaded, for tooling that type-checks a module against them
+/// after the build. A build loads only the interfaces its compiles read: a
+/// check with nothing stale loads none.
+/// Cost: one pass over `modules`, and [`load_stored`] of those it keeps:
+/// one database read of each one's extras; cores are read on first lookup.
+pub fn load_stored_for_tooling(build_state: &mut BuildCommandState, modules: &AHashSet<String>) {
+    let Some(previous) = build_state.previous_in_process.as_ref() else {
+        return;
+    };
+    let missing: AHashSet<String> = modules
+        .iter()
+        .filter(|module_name| {
+            build_state.get_module(module_name).is_some_and(|module| {
+                !module.is_mlmap()
+                    && !build_state.packages[&module.package_name].prebuilt
+                    && !build_state.compiled_modules.contains(*module_name)
+                    && !build_state.loaded_modules.contains(*module_name)
+                    && previous
+                        .packages
+                        .get(&module.package_name)
+                        .is_some_and(|record| record.state.stored_interfaces.contains_key(*module_name))
+            })
+        })
+        .cloned()
+        .collect();
+    let loaded = load_stored(build_state, &missing);
+    build_state.loaded_modules.extend(loaded);
+}
+
+/// Compute the module graph of a build that found everything up to date
+/// (which returns before it computes the graph), from the module references
+/// the record keeps for each source. Returns whether the graph is known:
+/// not when a source changed since its references were recorded.
+/// Cost: one file-system `stat` per source, then the graph's resolution
+/// (`deps::get_deps`), linear in the modules and their references.
+pub fn graph_from_record(build_state: &mut BuildCommandState) -> bool {
+    if build_state.deps_initialized {
+        return true;
+    }
+    if build_state.previous_in_process.is_none() {
+        return false;
+    }
+    collect_source_mtimes(build_state);
+    seed_recorded_deps(build_state);
+    // The modules of a prebuilt package (the Belt snapshot) have no recorded
+    // references; the graph resolves none for them either.
+    let unrecorded = build_state
+        .modules
+        .values()
+        .any(|module| match &module.source_type {
+            _ if build_state.packages[&module.package_name].prebuilt => false,
+            SourceType::SourceFile(source_file) => {
+                source_file.implementation.parse_dirty
+                    || source_file
+                        .interface
+                        .as_ref()
+                        .is_some_and(|interface| interface.parse_dirty)
+            }
+            SourceType::MlMap(_) => false,
+        });
+    for module in build_state.build_state.modules.values_mut() {
+        module.compile_dirty = false;
+        if let SourceType::SourceFile(source_file) = &mut module.source_type {
+            source_file.implementation.parse_dirty = false;
+            if let Some(interface) = source_file.interface.as_mut() {
+                interface.parse_dirty = false;
+            }
+        }
+    }
+    if unrecorded {
+        return false;
+    }
+    let deleted = build_state.deleted_modules.clone();
+    super::deps::get_deps(build_state, &deleted);
+    true
+}
+
 /// The JS metadata recorded with `module_name`'s stored interface, `None`
 /// when the previous build stored none.
 ///
@@ -1349,9 +1427,11 @@ fn changed_beside_record(build_state: &BuildCommandState, module_name: &str, tim
 /// Whether this build cannot report `module_name`'s recorded warnings as
 /// they are. A build that generated code recorded them, and some may be
 /// warnings only code generation reports. A check generates no code and
-/// reports none of those, so it checks such a module again instead.
+/// reports none of those, so it checks such a module again instead, unless
+/// it prints no warnings (a tooling check).
 fn has_unreplayable_warnings(build_state: &BuildCommandState, module_name: &str) -> bool {
     build_state.check_only
+        && build_state.print_warnings
         && recorded_row(build_state, module_name)
             .is_some_and(|row| row.implementation_warnings.is_some() || row.interface_warnings.is_some())
 }
@@ -1464,6 +1544,8 @@ pub fn plan(build_state: &mut BuildCommandState) {
                         .any(|(import, _)| !build_state.modules.contains_key(import))
                 });
             let unreplayable_warnings = has_unreplayable_warnings(build_state, module_name);
+            // Its recorded interface was compiled without locations.
+            let located = build_state.located_modules.contains(module_name);
             if build_state.get_module(module_name).is_some_and(|module|
                 build_state.packages[&module.package_name].prebuilt) { continue; }
             if own_stale
@@ -1471,6 +1553,7 @@ pub fn plan(build_state: &mut BuildCommandState) {
                 || references_new_module
                 || import_removed
                 || unreplayable_warnings
+                || located
             {
                 stale.insert(module_name.clone());
                 continue;

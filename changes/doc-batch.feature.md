@@ -1,0 +1,1 @@
+- `rescript doc --batch <file>...` documents several files with one check of their project and prints one JSON object with a field for each file, named by its path, holding what `rescript-tools doc` prints for it. On a 3,700-module application, 287 files take 0.7 s instead of 14 s with one call per file.

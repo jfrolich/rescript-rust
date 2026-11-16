@@ -10,6 +10,7 @@ use super::build_types::{BuildCommandState, SourceType, StoredAst, StoredSignatu
 use super::{compile, packages, parse};
 use crate::{config, helpers};
 use anyhow::{Result, anyhow};
+use rescript_compiler::analysis::docgen::Docs;
 use rescript_compiler::analysis::session::{LocalModule, LocalPackage, Project, SourcePaths, TypedSource};
 use rescript_compiler::cmi::persistent_env::ModuleRegistry;
 use rescript_compiler::parse_arena::ParseArena;
@@ -442,7 +443,7 @@ impl Project for WatchProject<'_> {
 /// Run `command` on a thread of its own, with the stack the build's compile
 /// workers get: typed trees are not `Send`, so a tooling command type-checks
 /// and reads its modules on one thread.
-fn on_tooling_thread(command: impl FnOnce() -> Result<Vec<u8>, String> + Send) -> Result<Vec<u8>> {
+fn on_tooling_thread<T: Send>(command: impl FnOnce() -> Result<T, String> + Send) -> Result<T> {
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .name("rewatch-tooling".to_string())
@@ -468,29 +469,319 @@ pub fn run_command(build_state: &BuildCommandState, cwd: PathBuf, args: Vec<Stri
 /// (relative to `cwd`) as JSON.
 ///
 /// The OCaml tool reads the module's `.cmt`, which builds do not write.
-/// Instead the project of the file is type-checked here, writing no files,
-/// and the module is documented from its Rust typed tree. The docs give the
-/// position of every item, also of those other modules declare, so this
-/// build keeps source locations, as the diagnostic rebuild does.
+/// Instead the project of the file is checked here, writing no files, and
+/// the module is type-checked with source locations and documented from its
+/// Rust typed tree (see [`doc_files`]).
 pub fn doc(cwd: &Path, path: &str, plain_output: bool) -> Result<Vec<u8>> {
-    let file = cwd.join(path);
-    if !file.is_file() {
-        return Err(anyhow!(
-            "error: failed to generate doc for {path}, there is no such file"
-        ));
+    let mut docs = doc_files(cwd, &[path.to_string()], plain_output)?;
+    Ok(docs.remove(0).printed())
+}
+
+/// `rescript doc --batch <path>...`: the documentation of the modules at
+/// `paths` (relative to `cwd`), as one JSON object whose fields are the
+/// paths as given, in that order, each the JSON [`doc`] prints for it. A
+/// path given twice is documented once. All the files of a project share
+/// its checks (see [`doc_files`]), and each file costs only its own
+/// type-check with locations, so documenting many files this way is much
+/// faster than one `rescript doc` per file. Fails, printing no docs, when
+/// one of the files cannot be documented.
+pub fn doc_batch(cwd: &Path, paths: &[String], plain_output: bool) -> Result<Vec<u8>> {
+    let mut seen = ahash::AHashSet::new();
+    let paths: Vec<String> = paths
+        .iter()
+        .filter(|path| seen.insert(path.as_str()))
+        .cloned()
+        .collect();
+    let docs = doc_files(cwd, &paths, plain_output)?;
+    Ok(rescript_compiler::analysis::docgen::print_batch(
+        paths.iter().map(String::as_str).zip(docs),
+    ))
+}
+
+/// The documentation of the modules at `paths` (relative to `cwd`), in that
+/// order.
+///
+/// Each file's project is checked as `rescript build --check-only` checks
+/// it: the check reads the build record, so it type-checks only what
+/// changed since the last build, without locations. Each module is then
+/// type-checked with locations against the interfaces, which places every
+/// item the module declares itself. An item declared in another module (an
+/// item of an `include`, of an included functor application) is placed by
+/// that module's published interface, which has no locations then. So when
+/// the docs of some files have such items, the project is checked again,
+/// with locations for exactly the modules those declarations can have
+/// reached the documented modules through: the declaring modules, and those
+/// of a documented module's dependencies that depend on them. Only those
+/// files are documented again. Every position printed then comes from a
+/// compile of the current sources with locations, as in a build that keeps
+/// them all. Should an item still be declared elsewhere (a module the build
+/// cannot compile, such as the runtime's), the project is checked with
+/// every location, which places everything.
+///
+/// The files of one project share each check, and are documented in
+/// parallel, each with its own type-checked modules.
+fn doc_files(cwd: &Path, paths: &[String], plain_output: bool) -> Result<Vec<Docs>> {
+    // The projects of the files, in the order their first file appears.
+    let mut projects: Vec<(PathBuf, Vec<usize>)> = Vec::new();
+    for (index, path) in paths.iter().enumerate() {
+        let file = cwd.join(path);
+        if !file.is_file() {
+            return Err(anyhow!(
+                "error: failed to generate doc for {path}, there is no such file"
+            ));
+        }
+        let root = helpers::get_nearest_config(&file).ok_or_else(|| {
+            anyhow!("error: failed to generate doc for {path}, it is in no ReScript project")
+        })?;
+        match projects.iter_mut().find(|(known, _)| *known == root) {
+            Some((_, files)) => files.push(index),
+            None => projects.push((root, vec![index])),
+        }
     }
-    let project_root = helpers::get_nearest_config(&file)
-        .ok_or_else(|| anyhow!("error: failed to generate doc for {path}, it is in no ReScript project"))?;
-    let failed = |err: &dyn std::fmt::Display| {
+    let mut documented: Vec<Option<Docs>> = paths.iter().map(|_| None).collect();
+    for (root, files) in projects {
+        doc_project(cwd, &root, paths, files, plain_output, &mut documented)?;
+    }
+    Ok(documented
+        .into_iter()
+        .map(|docs| docs.expect("every file is documented"))
+        .collect())
+}
+
+/// [`doc_files`] for the files `files` (indices into `paths`) of the project
+/// at `project_root`, into `documented`.
+fn doc_project(
+    cwd: &Path,
+    project_root: &Path,
+    paths: &[String],
+    mut files: Vec<usize>,
+    plain_output: bool,
+    documented: &mut [Option<Docs>],
+) -> Result<()> {
+    let failed = |files: &[usize], err: &dyn std::fmt::Display| {
+        let path = &paths[files[0]];
         anyhow!("error: failed to generate doc for {path}, the project does not build: {err:#}")
     };
-    // `build::build` in check-only mode (no lock taken, no files written),
-    // keeping locations and printing no warnings.
+    let mut located = ahash::AHashSet::new();
+    // Each round compiles more modules with locations: the first none, the
+    // second every module between the declaring modules and the documented
+    // ones. A re-export that only a located compile reveals takes another.
+    // More rounds fall back below.
+    for _ in 0..DOC_LOCATED_ROUNDS {
+        super::phase_mark(&format!("doc-round located={}", located.len()));
+        let mut build_state = doc_check(project_root, plain_output, |state| {
+            state.located_modules = located.clone();
+        })
+        .map_err(|err| failed(&files, &err))?;
+        // The docs type-check the modules and every file a module alias of
+        // them names, which may be any module of the project (OCaml resolves
+        // the alias as a file name). Those the check did not compile are in
+        // the build record; registering them all reads no cores (about 3 ms
+        // for 3,700 modules).
+        let modules: ahash::AHashSet<String> = build_state.modules.keys().cloned().collect();
+        super::incremental::load_stored_for_tooling(&mut build_state, &modules);
+        super::phase_mark("doc:stored-interfaces");
+        compile::prepare_registry_for_tooling(&build_state).map_err(|err| failed(&files, &err))?;
+        super::phase_mark("doc:registry");
+        let docs = document(&build_state, cwd, paths, &files);
+        super::phase_mark("doc:documented");
+        let mut graph_known = build_state.build_state.deps_initialized;
+        let mut next = located.clone();
+        let mut everything = false;
+        let mut unplaced = Vec::new();
+        for (index, docs) in files.iter().copied().zip(docs) {
+            let docs = docs.map_err(|err| anyhow!(err))?;
+            // Placing needs the module graph, which a check that found
+            // everything up to date did not compute.
+            if !docs.declared_in.is_empty() && !graph_known {
+                graph_known = super::incremental::graph_from_record(&mut build_state);
+            }
+            let entry = source_module(&build_state, &cwd.join(&paths[index]))
+                .map(|source| source.module_name.to_string());
+            match modules_placing(&build_state, entry.as_deref(), &docs, &located) {
+                Placing::Done => documented[index] = Some(docs),
+                Placing::Round(more) => {
+                    next.extend(more);
+                    unplaced.push(index);
+                }
+                Placing::Everything => {
+                    everything = true;
+                    unplaced.push(index);
+                }
+            }
+        }
+        // A one-shot command: let the OS reclaim the build graph at exit.
+        std::mem::forget(build_state);
+        files = unplaced;
+        if files.is_empty() {
+            return Ok(());
+        }
+        if everything || next.is_subset(&located) {
+            break;
+        }
+        located = next;
+    }
+    super::phase_mark("doc-round every-location");
+    let build_state = doc_check(project_root, plain_output, |state| {
+        state.diagnostic_locations = true;
+    })
+    .map_err(|err| failed(&files, &err))?;
+    let docs = document(&build_state, cwd, paths, &files);
+    std::mem::forget(build_state);
+    for (index, docs) in files.into_iter().zip(docs) {
+        documented[index] = Some(docs.map_err(|err| anyhow!(err))?);
+    }
+    Ok(())
+}
+
+/// The documentation of the files `files` (indices into `paths`), against
+/// the interfaces of `build_state`, in that order. The files are documented
+/// in parallel, each with a session of its own (typed trees stay on the
+/// thread that checked them); the files of one package share its project.
+fn document(
+    build_state: &BuildCommandState,
+    cwd: &Path,
+    paths: &[String],
+    files: &[usize],
+) -> Vec<std::result::Result<Docs, String>> {
+    let mut projects: Vec<(Option<&str>, WatchProject<'_>)> = Vec::new();
+    let mut jobs: Vec<(usize, &str)> = Vec::with_capacity(files.len());
+    for &index in files {
+        let path = paths[index].as_str();
+        let package = source_module(build_state, &cwd.join(path)).map(|source| source.package.name.as_str());
+        let project = match projects.iter().position(|(known, _)| *known == package) {
+            Some(project) => project,
+            None => {
+                projects.push((package, WatchProject::new(build_state, cwd, &[path.to_string()])));
+                projects.len() - 1
+            }
+        };
+        jobs.push((project, path));
+    }
+    let results: Vec<std::sync::Mutex<Option<std::result::Result<Docs, String>>>> =
+        jobs.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    projects[0].1.run_jobs(jobs.len(), &|job| {
+        let (project, path) = jobs[job];
+        let docs = rescript_compiler::analysis::doc(cwd, path, &projects[project].1);
+        *results[job].lock().unwrap() = Some(docs);
+    });
+    results
+        .into_iter()
+        .map(|result| result.into_inner().unwrap().expect("every job runs"))
+        .collect()
+}
+
+/// The most check rounds [`doc`] runs before it checks with every location.
+const DOC_LOCATED_ROUNDS: usize = 4;
+
+/// What placing the items of the docs takes, after a check round.
+enum Placing {
+    /// The check placed every item.
+    Done,
+    /// A check that also compiles these modules with locations.
+    Round(ahash::AHashSet<String>),
+    /// Only a check with every location.
+    Everything,
+}
+
+/// What placing the items of `docs` (of module `entry`) takes, given that
+/// the check compiled the modules `located` with locations.
+///
+/// An item declared in module `n` reaches `entry` through the interfaces
+/// of modules that depend on `n` and that `entry` depends on, and a compile
+/// without locations can lose the position at each of them: it places
+/// `n`'s declarations by an ordinal of `n`'s source when it was compiled,
+/// which a later change of `n` can shift without changing its interface.
+/// So the items are placed when `n` and all those modules were compiled
+/// with locations, from their current sources.
+/// Cost: one walk over `entry`'s dependencies and one over the dependents
+/// of the declaring modules, each visiting a module and its edges once.
+fn modules_placing(
+    build_state: &BuildCommandState,
+    entry: Option<&str>,
+    docs: &Docs,
+    located: &ahash::AHashSet<String>,
+) -> Placing {
+    if docs.declared_in.is_empty() && !docs.declared_outside {
+        return Placing::Done;
+    }
+    let compilable = |name: &str| {
+        build_state.get_module(name).is_some_and(|module| {
+            matches!(module.source_type, SourceType::SourceFile(_))
+                && !build_state.packages[&module.package_name].prebuilt
+        })
+    };
+    let Some(entry) = entry else {
+        return Placing::Everything;
+    };
+    if docs.declared_outside || !docs.declared_in.iter().all(|module| compilable(module)) {
+        return Placing::Everything;
+    }
+    // A check that found everything up to date computed no module graph;
+    // the next round, which compiles modules, does.
+    if !build_state.build_state.deps_initialized {
+        return Placing::Round(located.iter().chain(&docs.declared_in).cloned().collect());
+    }
+    let dependencies = dependency_closure(build_state, entry);
+    let through = closure(
+        build_state,
+        docs.declared_in.iter().map(String::as_str),
+        |module| &module.dependents,
+    );
+    let required: ahash::AHashSet<String> = through
+        .into_iter()
+        .filter(|name| {
+            name != entry
+                && (docs.declared_in.contains(name) || dependencies.contains(name))
+                && compilable(name)
+        })
+        .collect();
+    if required.is_subset(located) {
+        Placing::Done
+    } else {
+        Placing::Round(located.iter().chain(&required).cloned().collect())
+    }
+}
+
+/// `entry` and every module it depends on, directly or not.
+fn dependency_closure(build_state: &BuildCommandState, entry: &str) -> ahash::AHashSet<String> {
+    closure(build_state, std::iter::once(entry), |module| &module.deps)
+}
+
+/// `starts` and every module `next` leads to from them, repeatedly.
+/// Cost: each module and each of its `next` edges visited once.
+fn closure<'a>(
+    build_state: &BuildCommandState,
+    starts: impl Iterator<Item = &'a str>,
+    next: impl Fn(&super::build_types::Module) -> &ahash::AHashSet<String>,
+) -> ahash::AHashSet<String> {
+    let mut seen: ahash::AHashSet<String> = starts.map(str::to_string).collect();
+    let mut stack: Vec<String> = seen.iter().cloned().collect();
+    while let Some(name) = stack.pop() {
+        if let Some(module) = build_state.get_module(&name) {
+            for other in next(module) {
+                if seen.insert(other.clone()) {
+                    stack.push(other.clone());
+                }
+            }
+        }
+    }
+    seen
+}
+
+/// A check of the project at `project_root` for tooling, as `build::build`
+/// in check-only mode runs it (no lock taken, no files written), printing no
+/// warnings, after `setup` adjusts the build state.
+fn doc_check(
+    project_root: &Path,
+    plain_output: bool,
+    setup: impl FnOnce(&mut BuildCommandState),
+) -> Result<BuildCommandState> {
     let mut build_state = super::initialize_build_with_mode(
         /* no_timing */ true,
         &None,
         /* show_progress */ false,
-        &project_root,
+        project_root,
         plain_output,
         /* warn_error */ None,
         /* prod */ false,
@@ -498,9 +789,9 @@ pub fn doc(cwd: &Path, path: &str, plain_output: bool) -> Result<Vec<u8>> {
         config::SourceMapCommand::Build,
         /* check_only */ true,
     )
-    .map_err(|err| failed(&format!("{err:#}")))?;
+    .map_err(|err| anyhow!("{err:#}"))?;
     build_state.print_warnings = false;
-    build_state.diagnostic_locations = true;
+    setup(&mut build_state);
     super::incremental_build_without_lock(
         &mut build_state,
         /* no_timing */ true,
@@ -510,14 +801,8 @@ pub fn doc(cwd: &Path, path: &str, plain_output: bool) -> Result<Vec<u8>> {
         plain_output,
         super::CompilerInfoWrite::WithRecord,
     )
-    .map_err(|err| failed(&err))?;
-    let docs = on_tooling_thread(|| {
-        let project = WatchProject::new(&build_state, cwd, &[path.to_string()]);
-        rescript_compiler::analysis::doc(cwd, path, &project)
-    });
-    // A one-shot command: let the OS reclaim the build graph at exit.
-    std::mem::forget(build_state);
-    docs
+    .map_err(|err| anyhow!("{err}"))?;
+    Ok(build_state)
 }
 
 /// `rescript-tools reanalyze <args>`: the dead code, exception and

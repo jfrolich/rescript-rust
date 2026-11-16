@@ -29,8 +29,34 @@ rescript-tools doc src/EntryPointLibFile.res > doc.json
 ```
 
 `doc <file>` runs `rescript doc <file>`: builds write no `.cmt` files to read
-the module from, so it type-checks the file's project first, without writing
-files, and fails when the project has an error.
+the module from, so it checks the file's project first, without writing
+files, and fails when the project has an error. The check reads the last
+build's record and type-checks only what changed since, so run it after a
+build. Items another module declares (those of an `include`) take another
+check that compiles the modules they come through with source locations.
+
+To document many files, pass them all to one `rescript doc --batch`
+instead of running `doc` once per file:
+
+```sh
+rescript doc --batch src/A.res src/B.resi src/C.res > docs.json
+```
+
+It prints one JSON object with a field for each file, named by its path as
+given and in that order, holding the JSON `doc` prints for that file:
+
+```json
+{
+  "src/A.res": { "name": "A", "docstrings": [], "source": {}, "items": [] },
+  "src/B.resi": { "name": "B", "docstrings": [], "source": {}, "items": [] }
+}
+```
+
+The files of a project share its checks and are documented in parallel, so
+each file adds only its own type-check: on a 3,700-module application, 287
+files take 0.7 s, against 14 s with one `doc` per file. The command fails
+and prints no docs when any file cannot be documented (a missing file, a
+project that does not build). A file given twice is documented once.
 
 ### Reanalyze
 

@@ -46,6 +46,38 @@ if [ -x "$tools_exe" ]; then
   fi
 fi
 
+# `rescript doc --batch` documents every fixture with one check: one object
+# whose field for each file, named by its path as given, is that file's
+# snapshot.
+rescript_exe() {
+  node "$PWD/../../cli/rescript.js" "$@"
+}
+fixtures=(src/*.res src/*.resi)
+if ! rescript_exe doc --batch "${fixtures[@]}" > "$actual"; then
+  fail "rescript doc --batch failed"
+elif ! node -e '
+  const fs = require("fs");
+  const [actual, ...files] = process.argv.slice(1);
+  const batch = JSON.parse(fs.readFileSync(actual, "latin1"));
+  if (JSON.stringify(Object.keys(batch)) !== JSON.stringify(files)) {
+    console.error("fields", Object.keys(batch), "files", files);
+    process.exit(1);
+  }
+  for (const file of files) {
+    const expected = fs.readFileSync(`src/expected/${file.slice(4)}.json`, "latin1");
+    if (JSON.stringify(batch[file]) !== JSON.stringify(JSON.parse(expected))) {
+      console.error(`${file} differs from its snapshot`);
+      process.exit(1);
+    }
+  }' "$actual" "${fixtures[@]}"; then
+  fail "rescript doc --batch differs from the doc snapshots"
+fi
+if rescript_exe doc --batch src/ModC.res src/Missing.res > "$actual" 2> /dev/null; then
+  fail "rescript doc --batch with a missing file should fail"
+elif [ -s "$actual" ]; then
+  fail "rescript doc --batch with a missing file printed docs"
+fi
+
 # Failures exit with a status other than 0 and print no docs.
 for file in src/Missing.res rescript.json; do
   if doc "$file" > "$actual" 2> /dev/null; then
@@ -69,6 +101,49 @@ elif [ "$(grep -c '"id": "Self-Ns.Me.Other.x"' "$actual")" != 1 ] \
   fail "rescript-tools doc of a namespace alias printed unexpected docs"
   cat "$actual"
 fi
+
+# Items of an `include` are placed where their declaration is in the
+# current source, also after an edit that moves the declaration and keeps
+# the interface, so that a build recompiles the declaring module (B) but not
+# the module that includes it (C): C's recorded interface then still holds
+# B's declarations as B was before the edit.
+reexport=$(mktemp -d)
+cleanup_reexport() {
+  case "$reexport" in
+    "${TMPDIR:-/tmp}"*|/tmp/*|/var/folders/*) rm -r -- "$reexport" ;;
+  esac
+}
+mkdir "$reexport/src"
+echo '{"name": "reexport", "sources": "src"}' > "$reexport/rescript.json"
+printf 'let f = () => 1\n/** The x. */\nlet x = 1\n' > "$reexport/src/B.res"
+printf 'include B\n' > "$reexport/src/C.res"
+printf 'include C\n' > "$reexport/src/T.res"
+x_line() {
+  grep -A8 '"id": "T.x"' "$actual" | grep -o '"line": [0-9]*' | head -1
+}
+rescript_cli="$PWD/../../cli/rescript.js"
+rescript() {
+  node "$rescript_cli" "$@"
+}
+if ! (cd "$reexport" && rescript build > /dev/null && doc src/T.res > "$actual"); then
+  fail "rescript-tools doc of an included module failed"
+elif [ "$(x_line)" != '"line": 3' ]; then
+  fail "rescript-tools doc placed an included item at $(x_line), not line 3"
+  cat "$actual"
+fi
+printf 'let f = () => {\n  let a = [1, 2]\n  a->Array.length\n}\n\n/** The x. */\nlet x = 1\n' > "$reexport/src/B.res"
+# Without a build since the edit, then after one.
+for step in edited built; do
+  if [ "$step" = built ] && ! (cd "$reexport" && rescript build > /dev/null); then
+    fail "rescript build after the edit failed"
+  elif ! (cd "$reexport" && doc src/T.res > "$actual"); then
+    fail "rescript-tools doc of an included module failed ($step)"
+  elif [ "$(x_line)" != '"line": 7' ]; then
+    fail "rescript-tools doc placed an included item at $(x_line), not line 7 ($step)"
+    cat "$actual"
+  fi
+done
+cleanup_reexport
 
 if [ "$status" = 0 ]; then
   printf "${green}✅ rescript-tools doc matches the doc snapshots.${reset}\n"

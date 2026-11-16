@@ -105,7 +105,7 @@ pub fn generate_asts(
                                 state.get_warn_error_override(),
                                 &parse_span,
                                 ParseFor::Build {
-                                    omit_locations: !state.parses_with_locations(),
+                                    omit_locations: !state.parses_module_with_locations(module_name),
                                 },
                             )
                             .map_err(|e| e.to_string());
@@ -119,7 +119,7 @@ pub fn generate_asts(
                                         state.get_warn_error_override(),
                                         &parse_span,
                                         ParseFor::Build {
-                                            omit_locations: !state.parses_with_locations(),
+                                            omit_locations: !state.parses_module_with_locations(module_name),
                                         },
                                     ) {
                                         Ok(v) => Ok(Some(v)),
