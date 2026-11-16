@@ -15835,7 +15835,9 @@ fn transl_modtype<'a>(
         }
         PMtyDesc::Pmty_typeof(me_idx) => {
             let me = arena.get_mod_expr(*me_idx);
-            let (typed_me, _module_type) = type_module_type_of(tctx, env, arena, me)?;
+            // typemod.ml:776: `let env = Env.in_signature false env`.
+            let env = env.in_signature(false);
+            let (typed_me, _module_type) = type_module_type_of(tctx, &env, arena, me)?;
             TMtyDesc::Tmty_typeof(tctx.typed.push_module_expr(typed_me))
         }
         PMtyDesc::Pmty_alias(lid) => {
@@ -15908,7 +15910,8 @@ pub fn transl_signature<'a>(
     let mut typed_items = Vec::new();
     // Thread environment through the loop so Psig_open extends it
     // for subsequent items (matching OCaml's transl_signature behavior).
-    let mut sig_env = env.clone();
+    // typemod.ml:916: `transl_sig (Env.in_signature true env) sg`.
+    let mut sig_env = env.in_signature(true);
     let mut names = Names::default();
 
     for item in items {

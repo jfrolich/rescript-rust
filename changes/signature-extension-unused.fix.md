@@ -1,0 +1,1 @@
+- A constructor or extension constructor declared in a signature (of a submodule, a functor parameter or result, a recursive module or a module type) no longer gets an "unused" warning when the signature is hidden, as in the OCaml compiler.

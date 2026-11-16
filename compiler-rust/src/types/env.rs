@@ -1605,6 +1605,21 @@ impl Env {
         env
     }
 
+    /// `Env.in_signature b env` (env.ml:452-462): the environment a
+    /// signature's items are translated in. The unused checks of the
+    /// constructors and extension constructors declared there read it and
+    /// never warn (env.ml:1689, 1729). Cost: the copy of the bindings that
+    /// the signature's first binding would make anyway.
+    pub fn in_signature(&self, b: bool) -> Env {
+        if self.data.flags.in_signature == b {
+            return self.clone();
+        }
+        let mut env = self.clone();
+        env.bump_id();
+        env.data_mut().flags.in_signature = b;
+        env
+    }
+
     /// `Env.is_in_signature` (env.ml:505).
     pub fn is_in_signature(&self) -> bool {
         self.data.flags.in_signature
