@@ -8396,6 +8396,100 @@ All programs of R1 and I1 above still agree.
 
 Nothing of this place.
 
+### P1 - an equation can refine an abstract type reached through a module path
+
+The place is G6 of "Fifth round: patterns, equations and compatibility"
+(pull request 337); its witness is G6-2. Reduced:
+
+```rescript
+type rec t<_> = I: t<int>
+module F = (X: {type t}) => {
+  let f = (I: t<X.t>, v: X.t): int => v
+}
+```
+
+OCaml accepts it: matching `I` adds the equation `X.t = int`. Rust
+rejected `v` with "This has type: X.t / But it's expected to have type:
+int". With the result annotated `: string` both reject, and OCaml prints
+"X.t (defined as int)" and the conversion hint "You can convert int to
+string with Int.toString."; Rust printed neither, since it had no equation.
+
+Commands as in "Scope, calibration and reproducibility" of the Fifth round
+(OCaml `bsc` from `dune build`, Rust from thin-LTO release builds of
+`5fd5b73eb2` (before) and of the fix (after), the runtime built by
+`build-reference` with the OCaml `bsc`, `-w +A -bs-jsx 4 -color never`,
+stdout, stderr and the exit status compared byte for byte). The program
+with a library unit is a project of `Lib.resi`, `Lib.res` and `Main.res`,
+built by `rescript build` and by `rescript build-reference` with the OCaml
+`bsc`, comparing `Main.js`.
+
+| # | index of the equation | OCaml | before | after |
+| --- | --- | --- | --- | --- |
+| 1 | functor parameter `X.t`, constructor `I: t<int>` in a parameter | accepted | DIFFER (rejected at `v`) | agree |
+| 2 | functor parameter, `eq<X.t, int>` and `eq<X.t, string>` | accepted | DIFFER | agree |
+| 3 | 1 with result `: string` | rejected, "(defined as int)" and conversion hint | DIFFER (no note, no hint) | agree |
+| 4 | result of a generative functor, `R.t` | accepted | DIFFER | agree |
+| 5 | sealed submodule `N: {type t} = {type t = int}`, used outside as `N.t` | accepted | DIFFER | agree |
+| 6 | first-class module unpacked, `module M = unpack(m)`, the function returned | rejected, `M.t` would escape | DIFFER (rejected at `v`) | agree |
+| 7 | recursive module `A.t`, inside and outside | accepted | DIFFER | agree |
+| 8 | two deep, `P.Q.t` | accepted | DIFFER | agree |
+| 9 | `type t = private int` (has a manifest) | rejected | agree | agree |
+| 10 | private row `type t = private [< #a \| #b]` | rejected at the result | DIFFER (rejected at the pattern) | DIFFER: P2 |
+| 11 | parameterized `X.t<int>` (arity 1) | rejected | agree | agree |
+| 12 | top-level abstract `type t` of the same unit, a bare identifier | rejected | agree | agree |
+| 13 | locally abstract `(type a)` | accepted | agree | agree |
+| 14 | standard library `Date.t` | accepted | DIFFER | agree |
+| 15 | two functor parameters, `eq<X.t, Y.u>` | accepted | DIFFER | agree |
+| 16 | functor parameter against a locally abstract type | accepted | agree | agree |
+| 17 | `switch` over `I: t<int> \| S: t<string>` at `t<X.t>`, one case and both | accepted, warning 8 "\| S" for the one case | agree | agree |
+| 18 | the same at the sealed `N.t` | accepted, warning 8 "\| S" | agree | agree |
+| 19 | the same at the same unit's abstract `u` | rejected | agree | agree |
+| 20 | the same at `type t = private int` | accepted, no warning | agree | agree |
+| 21 | the same at `X.t<int>` | accepted, warning 8 "\| S" | agree | agree |
+| 22 | the same, `y: X.t` used as `int` and as `string` in the two cases | accepted | DIFFER | agree |
+| 23 | 2 with result `: string` | rejected, "(defined as int)" and conversion hint | DIFFER | agree |
+| 24 | `eq<Lib.t, int>` with `Lib.resi` declaring `type t`, and a `switch` at `t<Lib.t>` with the case `S` missing | accepted, `Match_failure` for `S` in `Main.js` | DIFFER (rejected at `v`) | agree (JavaScript; Rust reports warning 8, which `build-reference` does not show) |
+| 25 | the `switch` of 22 with the case `S` missing, `y + 1` in `I` | accepted, warning 8 "\| S" | DIFFER (rejected at `y`) | agree |
+
+The G6 candidates G6-1 and G6-3 to G6-8 agreed before and agree after.
+Program 10 differs because OCaml expands `X.t` to its private row and
+reaches the variant arm of `unify3`; that is P2 below.
+
+#### Fixed
+
+- OCaml's `is_instantiable` (`compiler/ml/ctype.ml:1874-1881`) looks up
+  the declaration of the whole path with `Env.find_type` and asks that it
+  be abstract, public, nullary, without manifest and not `non_aliasable`
+  (`ctype.ml:1870-1872`: a bare identifier without a newtype level). So
+  `X.t` is instantiable without a newtype level. The Rust
+  `is_instantiable` (`compiler-rust/src/types/ctype.rs:579` before the fix)
+  differed in two ways: it looked the declaration up by the last name
+  alone (`path.head_name()`, "t" for `X.t`), and it required a newtype
+  level for every path. A trace (a temporary print in `is_instantiable`)
+  showed that each decides alone for programs 1 and 2: in program 1 the
+  last-name lookup found the indexed type `t<_>` itself, a variant; in
+  program 2 it found no `t`; and the declaration of the whole path `X.t`
+  is abstract, without manifest, and has no newtype level, so the level
+  test also failed.
+- `is_instantiable` (`compiler-rust/src/types/ctype.rs`) now does what
+  OCaml's does, on the declaration `lookup_type_decl_for_path` finds for
+  the whole path. `find_newtype_level` is OCaml's (`ctype.ml:2084-2091`):
+  the declaration's newtype level, else the path's binding time twice;
+  the equation's declaration gets it, and the choice between two
+  instantiable sides compares it. `add_gadt_equation` is OCaml's
+  (`ctype.ml:2093-2100`); the caller reifies the destination first, as
+  `unify3` does (`ctype.ml:2382-2389`), in `unify_gadt_equation`, which
+  replaces the two copies of these arms in `unify_types`.
+- Fixtures: `tests/tests/src/pattern_equation_module_path.res` (the
+  accepted programs), super_errors
+  `pattern_equation_module_path_mismatch` (program 3),
+  `pattern_equation_same_unit_abstract` (program 12) and
+  `pattern_equation_module_path_unused_case` (program 25).
+
+#### Open
+
+Nothing of this place.
+
 ## Fourth round: modules, aliases and usage marks
 
 ### Scope, commands and calibration

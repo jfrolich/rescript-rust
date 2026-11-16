@@ -574,24 +574,32 @@ impl Default for UnifyState {
 // GADT Equation Support
 // ============================================================================
 
-/// Check if a type path points to an instantiable newtype (abstract type with
-/// newtype_level set). Matches OCaml's `is_instantiable` in ctype.ml.
-fn is_instantiable(env: &Env, path: &Path) -> bool {
-    // Check local constraints first (GADT equations may have been added)
-    if let Some(decl) = env.find_local_constraint(path) {
-        return matches!(decl.type_kind, super::TypeKind::TypeAbstract)
-            && decl.type_manifest.is_none()
-            && decl.type_newtype_level.is_some();
-    }
-    // Then check normal type table by name
-    let name = path.head_name();
-    if let Ok(decl) = env.find_type(name) {
+/// OCaml `is_instantiable` (compiler/ml/ctype.ml:1874-1881): the declaration
+/// found for the whole path (local constraints first, as `Env.find_type`) is
+/// abstract, public, nullary and without manifest, and not `non_aliasable`.
+/// So an abstract type reached through a module path (`X.t`) is instantiable
+/// without a newtype level, and a bare identifier needs one. One call is one
+/// declaration lookup.
+fn is_instantiable(ctx: &TypeContext, env: &Env, path: &Path) -> bool {
+    lookup_type_decl_for_path(ctx, env, path).is_some_and(|decl| {
         matches!(decl.type_kind, super::TypeKind::TypeAbstract)
+            && decl.type_private == super::PrivateFlag::Public
+            && decl.type_arity == 0
             && decl.type_manifest.is_none()
-            && decl.type_newtype_level.is_some()
-    } else {
-        false
-    }
+            && !non_aliasable(path, &decl)
+    })
+}
+
+/// OCaml `find_newtype_level` (compiler/ml/ctype.ml:2084-2091): the newtype
+/// level of the declaration, else the path's binding time twice. One call is
+/// one declaration lookup.
+fn find_newtype_level(ctx: &TypeContext, env: &Env, path: &Path) -> (i32, i32) {
+    lookup_type_decl_for_path(ctx, env, path)
+        .and_then(|decl| decl.type_newtype_level)
+        .unwrap_or_else(|| {
+            let lev = path.binding_time();
+            (lev, lev)
+        })
 }
 
 pub(crate) fn lookup_type_decl_for_path<'a>(
@@ -1697,29 +1705,66 @@ fn unify_pattern_constructor_mismatch(
     Ok(())
 }
 
+/// OCaml `unify3`'s equation arms (compiler/ml/ctype.ml:2370-2392), for
+/// pattern unification that generates equations: when both sides are
+/// instantiable nullary constructors, the one with the later newtype level
+/// gets the other as its equation; when one side is, the other side is
+/// reified and becomes its equation. `None` when no arm applies. One call is
+/// at most two declaration lookups per side plus the reification and the
+/// equation's copy of the destination.
+fn unify_gadt_equation(
+    ctx: &TypeContext,
+    state: &mut UnifyState,
+    t1: TypeExprRef,
+    t2: TypeExprRef,
+    path1: Option<Path>,
+    path2: Option<Path>,
+) -> Option<TypeResult<()>> {
+    let env = state.env()?;
+    let inst1 = path1.filter(|p| is_instantiable(ctx, env, p));
+    let inst2 = path2.filter(|p| is_instantiable(ctx, env, p));
+    let (source, destination) = match (inst1, inst2) {
+        (Some(p1), Some(p2)) => {
+            if find_newtype_level(ctx, env, &p1) > find_newtype_level(ctx, env, &p2) {
+                (p1, t2)
+            } else {
+                (p2, t1)
+            }
+        }
+        (Some(p1), None) => {
+            if let Err(err) = reify_in_unify_state(ctx, state, t2) {
+                return Some(Err(err));
+            }
+            (p1, t2)
+        }
+        (None, Some(p2)) => {
+            if let Err(err) = reify_in_unify_state(ctx, state, t1) {
+                return Some(Err(err));
+            }
+            (p2, t1)
+        }
+        (None, None) => return None,
+    };
+    let env = state.env_mut()?;
+    add_gadt_equation(ctx, env, &source, destination);
+    Some(Ok(()))
+}
+
+/// OCaml `add_gadt_equation` (compiler/ml/ctype.ml:2093-2100). One call is
+/// the recursion check on the destination plus a copy of it.
 fn add_gadt_equation(
     ctx: &TypeContext,
     env: &mut Env,
-    newtype_level: Option<i32>,
     source_path: &Path,
     destination: TypeExprRef,
-) -> TypeResult<()> {
+) {
     if !local_non_recursive_abbrev(ctx, env, source_path, destination) {
-        return Ok(());
-    }
-
-    if let Some(newtype_level) = newtype_level {
-        reify(ctx, env, newtype_level, destination)?;
+        return;
     }
 
     // duplicate_type: structural copy of destination
     let destination_copy = subst_identity_copy(ctx, destination);
-
-    // Find the newtype level from the source declaration
-    let source_lev = env
-        .find_local_constraint(source_path)
-        .or_else(|| env.find_type(source_path.head_name()).ok())
-        .and_then(|decl| decl.type_newtype_level);
+    let source_lev = find_newtype_level(ctx, env, source_path);
 
     // Create a new declaration with manifest = destination_copy
     let decl = super::TypeDeclaration {
@@ -1729,7 +1774,7 @@ fn add_gadt_equation(
         type_private: super::PrivateFlag::Public,
         type_manifest: Some(destination_copy),
         type_variance: vec![],
-        type_newtype_level: source_lev,
+        type_newtype_level: Some(source_lev),
         type_loc: crate::types::DeclLoc::none(),
         type_attributes: vec![],
         type_immediate: false,
@@ -1744,7 +1789,6 @@ fn add_gadt_equation(
     // OCaml add_gadt_equation calls cleanup_abbrev after installing the new
     // local constraint so future expansions observe the updated equation.
     ctx.clear_abbrev_memos();
-    Ok(())
 }
 
 fn reified_type_decl(newtype_level: i32) -> super::TypeDeclaration {
@@ -8836,51 +8880,11 @@ fn unify_types(
                 };
 
 
-                // GADT equation handling for Tconstr with different paths
                 if state.generate_equations {
-                    let newtype_level = state.newtype_level;
-                    if let Some(ref p1) = gadt_path1 {
-                        if let Some(ref p2) = gadt_path2 {
-                            if let Some(env) = state.env_mut() {
-                                let inst1 = is_instantiable(env, p1);
-                                let inst2 = is_instantiable(env, p2);
-                                if inst1 && inst2 {
-                                    let lev1 = env
-                                        .find_local_constraint(p1)
-                                        .or_else(|| env.find_type(p1.head_name()).ok())
-                                        .and_then(|d| d.type_newtype_level);
-                                    let lev2 = env
-                                        .find_local_constraint(p2)
-                                        .or_else(|| env.find_type(p2.head_name()).ok())
-                                        .and_then(|d| d.type_newtype_level);
-                                    let (source, dest) = if lev1 > lev2 {
-                                        (*p1, t2)
-                                    } else {
-                                        (*p2, t1)
-                                    };
-                                    add_gadt_equation(ctx, env, newtype_level, &source, dest)?;
-                                    return Ok(());
-                                } else if inst1 {
-                                    add_gadt_equation(ctx, env, newtype_level, p1, t2)?;
-                                    return Ok(());
-                                } else if inst2 {
-                                    add_gadt_equation(ctx, env, newtype_level, p2, t1)?;
-                                    return Ok(());
-                                }
-                            }
-                        } else if let Some(env) = state.env_mut() {
-                            if is_instantiable(env, p1) {
-                                add_gadt_equation(ctx, env, newtype_level, p1, t2)?;
-                                return Ok(());
-                            }
-                        }
-                    } else if let Some(ref p2) = gadt_path2 {
-                        if let Some(env) = state.env_mut() {
-                            if is_instantiable(env, p2) {
-                                add_gadt_equation(ctx, env, newtype_level, p2, t1)?;
-                                return Ok(());
-                            }
-                        }
+                    if let Some(result) =
+                        unify_gadt_equation(ctx, state, t1, t2, gadt_path1, gadt_path2)
+                    {
+                        return result;
                     }
                 }
 
@@ -9176,59 +9180,12 @@ fn unify_types(
                 }
             }
 
-            // GADT equation handling (OCaml ctype.ml:2385-2408)
-            // When generate_equations is true and one/both sides are instantiable
-            // newtypes, add a type equation instead of failing.
+            // GADT equation handling (OCaml ctype.ml:2370-2392)
             if state.generate_equations {
-                let newtype_level = state.newtype_level;
-                if let Some(ref p1) = path1_for_gadt {
-                    if let Some(ref p2) = path2_for_gadt {
-                        // Both are nullary Tconstr
-                        if let Some(env) = state.env_mut() {
-                            let inst1 = is_instantiable(env, p1);
-                            let inst2 = is_instantiable(env, p2);
-                            if inst1 && inst2 {
-                                // Both instantiable: equation from higher to lower newtype level
-                                let lev1 = env
-                                    .find_local_constraint(p1)
-                                    .or_else(|| env.find_type(p1.head_name()).ok())
-                                    .and_then(|d| d.type_newtype_level);
-                                let lev2 = env
-                                    .find_local_constraint(p2)
-                                    .or_else(|| env.find_type(p2.head_name()).ok())
-                                    .and_then(|d| d.type_newtype_level);
-                                let (source, dest) = if lev1 > lev2 {
-                                    (*p1, t2)
-                                } else {
-                                    (*p2, t1)
-                                };
-                                add_gadt_equation(ctx, env, newtype_level, &source, dest)?;
-                                return Ok(());
-                            } else if inst1 {
-                                add_gadt_equation(ctx, env, newtype_level, p1, t2)?;
-                                return Ok(());
-                            } else if inst2 {
-                                add_gadt_equation(ctx, env, newtype_level, p2, t1)?;
-                                return Ok(());
-                            }
-                        }
-                    } else {
-                        // Only left is nullary Tconstr
-                        if let Some(env) = state.env_mut() {
-                            if is_instantiable(env, p1) {
-                                add_gadt_equation(ctx, env, newtype_level, p1, t2)?;
-                                return Ok(());
-                            }
-                        }
-                    }
-                } else if let Some(ref p2) = path2_for_gadt {
-                    // Only right is nullary Tconstr
-                    if let Some(env) = state.env_mut() {
-                        if is_instantiable(env, p2) {
-                            add_gadt_equation(ctx, env, newtype_level, p2, t1)?;
-                            return Ok(());
-                        }
-                    }
+                if let Some(result) =
+                    unify_gadt_equation(ctx, state, t1, t2, path1_for_gadt, path2_for_gadt)
+                {
+                    return result;
                 }
             }
 

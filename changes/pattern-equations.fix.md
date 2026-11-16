@@ -1,0 +1,1 @@
+- An equation of a constructor pattern refines an abstract type reached through a module path (a functor parameter's `X.t`, a sealed module's `N.t`, another unit's `Lib.t`), as in OCaml.
