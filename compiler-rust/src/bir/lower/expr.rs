@@ -280,7 +280,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     unreachable!("return was realized")
                 };
                 assert!(body.value.is_none());
-                let list = self.statements.take_list(&mut self.arena, body.stmts);
+                let list = B::list_id(self.statements.take_list(&mut self.js, &mut self.arena, body.stmts));
                 let body = self.js.block_of(&mut self.arena, B::list_from(list));
                 let body = match loop_ {
                     Some(frame) => B::stmt_from_node(self.loop_function_body(frame, header, B::stmt_node(body))),
@@ -308,7 +308,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     fn hold_effect(&mut self, slot: u32, value: NodeId) {
         let mut held = std::mem::take(&mut self.scratch);
         self.js.effect(&mut self.arena, B::from_node(value), |s| held.push(B::stmt_node(s)));
-        self.statements.fill_held(slot, &held);
+        self.statements.fill_held(slot, held.iter().map(|&n| B::stmt_from_node(n)));
         held.clear();
         self.scratch = held;
     }
@@ -318,7 +318,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// decision reads one cached flag.
     pub(super) fn drop_pure_effect(&mut self, value: NodeId) {
         let statements = &mut self.statements;
-        self.js.effect(&mut self.arena, B::from_node(value), |s| statements.push(B::stmt_node(s)));
+        self.js.effect(&mut self.arena, B::from_node(value), |s| statements.push(s));
     }
 }
 

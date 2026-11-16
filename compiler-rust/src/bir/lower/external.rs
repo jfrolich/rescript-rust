@@ -33,7 +33,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 self.js.declare(&mut self.arena, LetKind::Strict, var, Some(B::from_node(value)));
             self.statements.fill_held(
                 arg.stmts.start + arg.stmts.len - 1,
-                &[B::stmt_node(statement)],
+                [statement],
             );
             let mut held = self.js.var(&mut self.arena, var);
             self.js.assume_strict(&mut self.arena, &mut held);
@@ -178,7 +178,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         let obj = self.fresh_variable("tmp");
         let declaration =
             self.js.declare(&mut self.arena, LetKind::Variable, obj, Some(B::from_node(object)));
-        self.statements.push(B::stmt_node(declaration));
+        self.statements.push(declaration);
         for (i, mut arg) in pending.drain(..) {
             self.primitive_steps += 1;
             let spec = &specs[i as usize];
@@ -193,7 +193,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 let tmp = self.fresh_variable("tmp");
                 let declaration =
                     self.js.declare(&mut self.arena, LetKind::Strict, tmp, Some(B::from_node(arg)));
-                self.statements.push(B::stmt_node(declaration));
+                self.statements.push(declaration);
                 let mut held = self.js.var(&mut self.arena, tmp);
                 self.js.assume_strict(&mut self.arena, &mut held);
                 arg = B::node(held);
@@ -227,7 +227,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let yes = self.js.list(&mut self.arena, 1, std::iter::once(statement));
             let no = self.js.list(&mut self.arena, 0, std::iter::empty());
             let branch = self.js.if_(&mut self.arena, test, yes, no);
-            self.statements.push(B::stmt_node(branch));
+            self.statements.push(branch);
         }
         self.external_pending = pending;
         let mut object = self.js.var(&mut self.arena, obj);

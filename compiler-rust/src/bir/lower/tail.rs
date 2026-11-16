@@ -64,10 +64,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let assignment = self.js.assign(&mut self.arena, copy, B::from_node(value));
             assignments.push(B::stmt_node(assignment));
         }
-        for statement in assignments.drain(..).rev() { self.statements.push(statement); }
+        for statement in assignments.drain(..).rev() { self.statements.push(B::stmt_from_node(statement)); }
         self.tail_assignments = assignments;
         let jump = self.js.continue_(&mut self.arena, None);
-        self.statements.push(B::stmt_node(jump));
+        self.statements.push(jump);
         Probed::Out(Out { stmts: self.statements.since(Span { start: statements.start, len: 0 }), value: None, finished: Finished::True })
     }
 
@@ -98,15 +98,15 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let copy = self.tail_copies[param.index()].unwrap();
             let value = self.js.var(&mut self.arena, copy);
             let statement = self.js.declare(&mut self.arena, LetKind::Alias, param, Some(value));
-            self.statements.push(B::stmt_node(statement));
+            self.statements.push(statement);
         }
         self.tail_order = ordered;
         let (statements, moved) = (&mut self.statements, &mut self.tail_body_statements);
         self.js.unblock(&mut self.arena, B::stmt_from_node(body), |s| {
             *moved += 1;
-            statements.push(B::stmt_node(s));
+            statements.push(s);
         });
-        let list = self.statements.take_list(&mut self.arena, self.statements.since(mark));
+        let list = B::list_id(self.statements.take_list(&mut self.js, &mut self.arena, self.statements.since(mark)));
         let condition = self.js.boolean(&mut self.arena, true);
         let loop_ = self.js.while_(&mut self.arena, condition, B::list_from(list), None);
         let loop_ = self.js.list(&mut self.arena, 1, std::iter::once(loop_));

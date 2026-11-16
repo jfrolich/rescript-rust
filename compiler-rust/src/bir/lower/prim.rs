@@ -113,7 +113,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         {
             self.js.locate_stmt(&mut self.arena, &mut statement, loc);
         }
-        self.statements.push(B::stmt_node(statement));
+        self.statements.push(statement);
     }
 
     /// P: compile_primitive_js. O(a + emitted metadata bytes), plus sequencing

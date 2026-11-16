@@ -1,0 +1,1 @@
+- Probe (not for merge): the backend lowering's statement stack holds statement handles of its interface.

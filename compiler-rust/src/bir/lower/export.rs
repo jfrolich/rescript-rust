@@ -272,7 +272,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// allocation once the stack has its capacity.
     fn push_effect(&mut self, value: NodeId) {
         let statements = &mut self.statements;
-        self.js.effect(&mut self.arena, B::from_node(value), |s| statements.push(B::stmt_node(s)));
+        self.js.effect(&mut self.arena, B::from_node(value), |s| statements.push(s));
     }
 
     /// The variables of the export block `exports`, as the importer recorded
