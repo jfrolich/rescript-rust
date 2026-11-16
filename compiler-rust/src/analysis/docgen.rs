@@ -735,8 +735,8 @@ struct DeclaredIn {
 
 /// The documentation of a module, and where its items are declared.
 pub struct Docs {
-    /// The pretty JSON.
-    pub json: String,
+    /// The JSON.
+    pub json: Json,
     /// The modules whose declarations the docs print as items of another
     /// module: the module an `include` includes, a functor whose result is
     /// included, and so on. Their positions come from the published
@@ -752,9 +752,23 @@ impl Docs {
     /// What `rescript-tools doc` prints: the JSON and a newline.
     pub fn printed(&self) -> Vec<u8> {
         let mut out = super::Output::default();
-        out.print_endline(&self.json);
+        out.print_endline(&self.json.pretty());
         out.into_bytes()
     }
+}
+
+/// What `rescript doc --batch` prints for the docs of several files: one
+/// pretty JSON object with a field for each file, named by its path as
+/// given and holding the JSON [`Docs::printed`] prints for it, and a
+/// newline.
+pub fn print_batch<'a>(docs: impl IntoIterator<Item = (&'a str, Docs)>) -> Vec<u8> {
+    let fields = docs
+        .into_iter()
+        .map(|(path, docs)| (path.to_string(), docs.json))
+        .collect();
+    let mut out = super::Output::default();
+    out.print_endline(&Json::Assoc(fields).pretty());
+    out.into_bytes()
 }
 
 /// A file being documented: the entry point, or a file a module alias of
@@ -1067,7 +1081,7 @@ pub fn extract_docs(
     );
     let declared_in = extraction.declared_in.into_inner();
     Ok(Docs {
-        json: docs_for_module_json(&docs).pretty(),
+        json: docs_for_module_json(&docs),
         declared_in: declared_in.other,
         declared_outside: declared_in.unknown,
     })

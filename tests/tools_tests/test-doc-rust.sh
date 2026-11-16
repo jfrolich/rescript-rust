@@ -46,6 +46,38 @@ if [ -x "$tools_exe" ]; then
   fi
 fi
 
+# `rescript doc --batch` documents every fixture with one check: one object
+# whose field for each file, named by its path as given, is that file's
+# snapshot.
+rescript_exe() {
+  node "$PWD/../../cli/rescript.js" "$@"
+}
+fixtures=(src/*.res src/*.resi)
+if ! rescript_exe doc --batch "${fixtures[@]}" > "$actual"; then
+  fail "rescript doc --batch failed"
+elif ! node -e '
+  const fs = require("fs");
+  const [actual, ...files] = process.argv.slice(1);
+  const batch = JSON.parse(fs.readFileSync(actual, "latin1"));
+  if (JSON.stringify(Object.keys(batch)) !== JSON.stringify(files)) {
+    console.error("fields", Object.keys(batch), "files", files);
+    process.exit(1);
+  }
+  for (const file of files) {
+    const expected = fs.readFileSync(`src/expected/${file.slice(4)}.json`, "latin1");
+    if (JSON.stringify(batch[file]) !== JSON.stringify(JSON.parse(expected))) {
+      console.error(`${file} differs from its snapshot`);
+      process.exit(1);
+    }
+  }' "$actual" "${fixtures[@]}"; then
+  fail "rescript doc --batch differs from the doc snapshots"
+fi
+if rescript_exe doc --batch src/ModC.res src/Missing.res > "$actual" 2> /dev/null; then
+  fail "rescript doc --batch with a missing file should fail"
+elif [ -s "$actual" ]; then
+  fail "rescript doc --batch with a missing file printed docs"
+fi
+
 # Failures exit with a status other than 0 and print no docs.
 for file in src/Missing.res rescript.json; do
   if doc "$file" > "$actual" 2> /dev/null; then

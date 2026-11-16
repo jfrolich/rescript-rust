@@ -322,11 +322,25 @@ mod tests {
     #[test]
     fn doc_takes_one_source_file() {
         let cli = parse(&["rescript", "doc", "src/A.res"]).unwrap();
-        assert!(matches!(cli.command, Command::Doc { path } if path == "src/A.res"));
+        assert!(matches!(cli.command, Command::Doc { path: Some(path), batch: None } if path == "src/A.res"));
         assert!(parse(&["rescript", "doc"]).is_err());
         assert!(parse(&["rescript", "doc", "rescript.json"]).is_err());
         // One file, as the OCaml tool takes.
         assert!(parse(&["rescript", "doc", "src/A.res", "src/B.res"]).is_err());
+    }
+
+    #[test]
+    fn doc_batch_takes_source_files() {
+        let cli = parse(&["rescript", "doc", "--batch", "src/A.res", "src/B.resi"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Doc { path: None, batch: Some(paths) } if paths == ["src/A.res", "src/B.resi"]
+        ));
+        let cli = parse(&["rescript", "doc", "--batch", "src/A.res"]).unwrap();
+        assert!(matches!(cli.command, Command::Doc { batch: Some(paths), .. } if paths == ["src/A.res"]));
+        assert!(parse(&["rescript", "doc", "--batch"]).is_err());
+        assert!(parse(&["rescript", "doc", "--batch", "src/A.res", "rescript.json"]).is_err());
+        assert!(parse(&["rescript", "doc", "src/A.res", "--batch", "src/B.res"]).is_err());
     }
 
     #[test]
@@ -689,13 +703,20 @@ pub enum Command {
         path: String,
     },
     /// Print the documentation of a ReScript module as JSON (what
-    /// `rescript-tools doc` prints). Type-checks the project without writing
-    /// files first.
+    /// `rescript-tools doc` prints). Checks the project without writing
+    /// files first, type-checking what changed since the last build.
+    ///
+    /// With `--batch`, documents several modules with one check of their
+    /// project and prints one JSON object: a field for each file, named by
+    /// its path as given.
     #[command(hide = true)]
     Doc {
         /// Path to a ReScript source file (.res or .resi)
-        #[arg(value_parser = parse_source_path)]
-        path: String,
+        #[arg(value_parser = parse_source_path, required_unless_present = "batch", conflicts_with = "batch")]
+        path: Option<String>,
+        /// Paths to several ReScript source files (.res or .resi)
+        #[arg(long, value_parser = parse_source_path, num_args = 1..)]
+        batch: Option<Vec<String>>,
     },
     /// Run the dead code, exception and termination analyses of the project
     /// (what `rescript-tools reanalyze` prints). Type-checks the project
