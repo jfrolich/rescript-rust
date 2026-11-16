@@ -2753,14 +2753,106 @@ impl Checker {
     /// pushed. The supplier is taken out of [`Checker::packages`] for the
     /// calls and put back, also on a clash. Pattern mode (`List.iter
     /// (reify env) (tl1 @ tl2)`) is R3h's. O(names of both), one step a
-    /// name; no allocation beyond the frames. (R3p)
+    /// name; no allocation beyond the frames. Cold and not inlined, as its
+    /// `todo!` was: packages are rare, and inlined it moves the code of
+    /// every unification. (R3p)
+    #[cold]
+    #[inline(never)]
     pub fn unify_package(
         &mut self,
         [t1x, t2x]: [Ty; 2],
         left: Node,
         right: Node,
     ) -> Result<(), Clash> {
-        todo!("R3p")
+        let Some(mut decls) = self.packages.take() else {
+            return Err(Clash);
+        };
+        let (base, saved_base) = (self.frames.len(), self.saved.len());
+        self.saved.push(left);
+        self.frames.push(Frame {
+            left: t1x,
+            right: t2x,
+            kind: FrameKind::PackageEnd,
+            extra: saved_base as u32,
+        });
+        let merged = self.merge_packages(&mut *decls, left, right);
+        self.packages = Some(decls);
+        if merged.is_err() {
+            self.frames.truncate(base);
+            self.saved.truncate(saved_base);
+            return merged;
+        }
+        self.frames[base + 1..].reverse();
+        Ok(())
+    }
+
+    /// The merge of [`Checker::unify_package`]: one turn a name of either
+    /// list, one [`PackageDecls::compare`] while both lists have names
+    /// left, one [`PackageDecls::complete`] for a name of one side only,
+    /// one pair pushed a turn, in name order. Stops at the first answer
+    /// that is not a type. O(names of both) plus the supplier; no
+    /// allocation beyond the frames.
+    fn merge_packages(
+        &mut self,
+        decls: &mut dyn PackageDecls,
+        left: Node,
+        right: Node,
+    ) -> Result<(), Clash> {
+        let (row1, row2) = (self.package_row(left), self.package_row(right));
+        let level = left.level.min(right.level);
+        let (n1, n2) = (row1.longidents.len, row2.longidents.len);
+        // The arguments are the node's slots from `arguments.start` on.
+        let (args1, args2) = (
+            left.b + row1.arguments.start,
+            right.b + row2.arguments.start,
+        );
+        let (mut i, mut j) = (0, 0);
+        while i < n1 || j < n2 {
+            #[cfg(test)]
+            super::steps::tick();
+            let (name1, name2) = (row1.longidents.start + i, row2.longidents.start + j);
+            let order = if i == n1 {
+                Ordering::Greater
+            } else if j == n2 {
+                Ordering::Less
+            } else {
+                decls.compare(name1, name2)
+            };
+            let [l, r] = match order {
+                Ordering::Equal => [
+                    self.g.lists[(args1 + i) as usize],
+                    self.g.lists[(args2 + j) as usize],
+                ],
+                // A name only the left lists: the right module type's
+                // answer (`complete_type_list env n1 lv2 (Mty_ident p2)`,
+                // ctype.ml:2173).
+                Ordering::Less => match decls.complete(self, row2.path, name1, level) {
+                    Completion::Type(ty) => [self.g.lists[(args1 + i) as usize], ty],
+                    _ => return Err(Clash),
+                },
+                Ordering::Greater => match decls.complete(self, row1.path, name2, level) {
+                    Completion::Type(ty) => [ty, self.g.lists[(args2 + j) as usize]],
+                    _ => return Err(Clash),
+                },
+            };
+            i += u32::from(order != Ordering::Greater);
+            j += u32::from(order != Ordering::Less);
+            self.frames.push(Frame {
+                left: l,
+                right: r,
+                kind: FrameKind::Pair,
+                extra: 0,
+            });
+        }
+        Ok(())
+    }
+
+    /// O(1): the [`PackageRow`] of a package descriptor.
+    fn package_row(&self, node: Node) -> PackageRow {
+        match self.extras.descriptors[node.a as usize] {
+            ExtraDescriptor::Package(row) => self.extras.packages[row as usize],
+            _ => unreachable!("a package descriptor"),
+        }
     }
 
     /// The pop of a [`FrameKind::PackageEnd`] frame: the completed lists
@@ -2770,9 +2862,23 @@ impl Checker {
     /// Otherwise [`PackageDecls::compatible`] with the left descriptor
     /// (`saved[frame.extra]`) and the right node's; `false` is a clash
     /// with no pair of its own. `saved` is cut back to the frame's
-    /// `extra`. O(1) plus the supplier. (R3p)
+    /// `extra`. O(1) plus the supplier. Cold and not inlined, like
+    /// [`Checker::unify_package`]. (R3p)
+    #[cold]
+    #[inline(never)]
     pub fn package_end(&mut self, frame: Frame) -> Result<(), Clash> {
-        todo!("R3p")
+        let left = self.saved[frame.extra as usize];
+        self.saved.truncate(frame.extra as usize);
+        let right = self.g.nodes[frame.right.0 as usize];
+        if self.package_row(left).path == self.package_row(right).path {
+            return Ok(());
+        }
+        let Some(mut decls) = self.packages.take() else {
+            return Err(Clash);
+        };
+        let compatible = decls.compatible(self, left, right);
+        self.packages = Some(decls);
+        if compatible { Ok(()) } else { Err(Clash) }
     }
 
     /// `reify` (compiler/ml/ctype.ml:1813-1870): replace the variables of a
