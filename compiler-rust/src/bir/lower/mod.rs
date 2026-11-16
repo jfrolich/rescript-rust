@@ -550,7 +550,7 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     /// The handlers of the catches being lowered, a stack of flattened tables.
     catch_table: Vec<(NodeId, crate::bir::CatchId)>,
     catches: Vec<Option<exit::Plan>>,
-    tries: Vec<try_::Plan>,
+    tries: Vec<try_::Plan<B::L>>,
     loops: Vec<loops::Plan<B::L>>,
     next_loop_label: u32,
     labels: label::Schedule,
