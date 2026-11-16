@@ -12569,8 +12569,19 @@ fn approx_modtype_rec<'a>(
                         &mut tctx.persistent_env,
                         tctx.type_ctx,
                     ) {
+                        // typemod.ml:567-574: `Env.add_signature`, whose
+                        // `add_item` gives a `Sig_typext` to
+                        // `add_extension ~check:false` (env.ml:1840).
                         for item in &sig {
-                            crate::types::includemod::add_sig_item_to_env(tctx.type_ctx, item, &mut sig_env);
+                            if let crate::types::decl::SignatureItem::SigTypext(id, ext, _) = item {
+                                sig_env.add_extension(tctx.type_ctx, *id, ext);
+                            } else {
+                                crate::types::includemod::add_sig_item_to_env(
+                                    tctx.type_ctx,
+                                    item,
+                                    &mut sig_env,
+                                );
+                            }
                         }
                         items.extend(sig);
                     }
