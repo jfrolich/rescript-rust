@@ -2528,6 +2528,7 @@ impl Checker {
     /// O(scopes × bound variables): one step and one `repr` per slot
     /// compared, at most `2 × (left_len + right_len)` a scope; no
     /// allocation. (R3g)
+    #[inline(never)]
     pub fn unify_univar(&mut self, t1: Ty, t2: Ty) -> Result<(), Clash> {
         for at in (0..self.scopes.len()).rev() {
             let scope = self.scopes[at];
@@ -2612,6 +2613,7 @@ impl Checker {
     /// (`B + left_len + right_len`), and the escape walk only when a bound
     /// variable is already known. OCaml rebuilds `known_univars` at every
     /// entry too. (R3g)
+    #[inline(never)]
     pub fn enter_poly(&mut self, left: Node, right: Node) -> Result<(), Clash> {
         let (left_len, right_len) = (left.arity() - 1, right.arity() - 1);
         let base = self.scopes.len();
@@ -2703,6 +2705,7 @@ impl Checker {
     /// table). O(bound variables of the open scopes + nodes of `other`),
     /// one step a slot of the family pass and one a node visited; no
     /// allocation. (R3g)
+    #[inline(never)]
     pub fn univars_escape(&mut self, binder: Node, other: Node) -> bool {
         // `get_univar_family` (ctype.ml:1612-1623).
         let family = self.fresh_marks();
@@ -2825,6 +2828,7 @@ impl Checker {
     /// without a polymorphic type that shares a node with the outside.
     /// No allocation: `g.work` and `open_polys` keep their capacity.
     /// Never called when [`Extras::univars`] is 0. (R3g)
+    #[inline(never)]
     pub fn free_univar(&mut self, ty: Ty) -> Ty {
         if self.mark_generation > u32::MAX / 2 {
             self.marks.fill(0);
@@ -3003,6 +3007,7 @@ impl Checker {
     ///
     /// O(types gained) walks, each [`Checker::free_univar`]'s cost; no
     /// allocation. (R3g)
+    #[inline(never)]
     pub fn split_univars(
         &mut self,
         frame: Frame,
