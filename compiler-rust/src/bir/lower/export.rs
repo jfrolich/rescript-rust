@@ -6,7 +6,8 @@
 //! of the legacy shake module (S). OCaml references name the file under
 //! `compiler/core` without its prefix: `coercion.ml` and `compile_main.ml`.
 use super::*;
-use crate::bir::{JsPayload, NodeFlags, Op};
+use crate::bir::JsPayload;
+use crate::emit::row::{self, flag};
 use crate::lambda::TagInfo;
 use crate::name::Name;
 
@@ -208,44 +209,42 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         value: Option<NodeId>,
         finished: Finished,
     ) -> Option<Vec<Ident>> {
-        let mut value = value?;
-        if matches!(self.arena.view(value), View::JUndefined) {
-            self.arena.release(value);
+        let mut value = B::from_node(value?);
+        if self.js.kind(&self.arena, B::of(&value)) == row::Kind::Undefined {
+            self.js.release(&mut self.arena, value);
             return None;
         }
-        let mut end = value;
-        while let View::JSeq { second, .. } = self.arena.view(end) {
-            end = second;
-        }
-        let block = match self.arena.view(end) {
-            View::JBlockLit { info, .. } => matches!(
-                self.arena.javascript(info),
-                JsPayload::Block(TagInfo::ModuleExport(_))
-            )
-            .then_some(info),
-            _ => None,
+        let block = {
+            let mut end = B::of(&value);
+            while self.js.kind(&self.arena, end) == row::Kind::Seq {
+                end = self.js.operand(&self.arena, end, 1);
+            }
+            match self.js.kind(&self.arena, end) {
+                row::Kind::BlockLit => self.js.info_of(&self.arena, end).filter(|&info| {
+                    matches!(
+                        self.arena.javascript(info),
+                        JsPayload::Block(TagInfo::ModuleExport(_))
+                    )
+                }),
+                _ => None,
+            }
         };
         let Some(info) = block else {
-            self.push_effect(value);
+            self.push_effect(B::node(value));
             return None;
         };
-        while let View::JSeq { first, second } = self.arena.view(value) {
-            self.arena.detach(first);
-            self.arena.detach(second);
-            self.arena.release(value);
-            self.push_effect(first);
-            value = second;
+        while self.js.kind(&self.arena, B::of(&value)) == row::Kind::Seq {
+            self.js.unpack_rev(&mut self.arena, value);
+            let first = self.js.pop();
+            value = self.js.pop();
+            self.push_effect(B::node(first));
         }
         let mut values = std::mem::take(&mut self.coercion.values);
         values.clear();
-        let View::JBlockLit { values: fields, .. } = self.arena.view(value) else {
-            unreachable!("the right spine ends in the export block")
-        };
-        values.extend_from_slice(fields);
-        for &field in &values {
-            self.arena.detach(field);
+        let count = self.js.unpack_rev(&mut self.arena, value);
+        for _ in 0..count {
+            values.push(B::node(self.js.pop()));
         }
-        self.arena.release(value);
         let JsPayload::Block(TagInfo::ModuleExport(exports)) =
             &mut self.arena.pools.js[info.index()]
         else {
@@ -259,24 +258,21 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         );
         if finished == Finished::True {
             for field in &mut values {
-                self.arena.release(*field);
-                *field = self.pure_expression(View::JUndefined, 0);
+                self.js.release(&mut self.arena, B::from_node(*field));
+                *field = B::node(self.js.undefined(&mut self.arena, false));
             }
         }
         self.coercion.values = values;
         Some(exports)
     }
 
-    /// O:339 push_effect_expression onto the top-level run. One step per
-    /// comma operand of `value`; the scratch vector is reused.
+    /// O:339 push_effect_expression onto the top-level run (J-M14,
+    /// `JsStmt::effect`): each statement is pushed as the rule gives it.
+    /// Cost: the rule's, one visit per comma operand of `value`; no
+    /// allocation once the stack has its capacity.
     fn push_effect(&mut self, value: NodeId) {
-        let mut effects = std::mem::take(&mut self.scratch);
-        debug_assert!(effects.is_empty());
-        crate::bir::j::norm::jm14_push_effect_expression(&mut self.arena, value, &mut effects);
-        for statement in effects.drain(..) {
-            self.statements.push(statement);
-        }
-        self.scratch = effects;
+        let statements = &mut self.statements;
+        self.js.effect(&mut self.arena, B::from_node(value), |s| statements.push(B::stmt_node(s)));
     }
 
     /// The variables of the export block `exports`, as the importer recorded
@@ -364,19 +360,22 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 t.steps += 1;
                 let row = t.rows.len() as u32;
                 let mut bits = if depth > 0 { Row::NESTED } else { 0 };
-                match self.arena.view(stmt) {
-                    View::SBlock { statements } => {
+                let handle = B::stmt_from_node(stmt);
+                match self.js.stmt_kind(&self.arena, &handle) {
+                    row::Kind::Block => {
                         bits |= Row::BLOCK;
-                        nested.extend_from_slice(statements);
+                        self.js.block_ids(&self.arena, &handle, |id| nested.push(NodeId(id)));
                         work.push(NodeId(u32::MAX));
                         work.extend(nested.drain(..).rev());
                         depth += 1;
                     }
-                    View::SDecl { var, value } => {
+                    row::Kind::Declare => {
                         bits |= Row::DECL;
+                        let var = self.js.declared(&self.arena, &handle).expect("a declaration binds");
+                        let value = self.js.value_of(&self.arena, &handle);
                         if let Some(value) = value {
                             bits |= Row::VALUE;
-                            if self.arena.node(value).op() == Op::JFun {
+                            if self.js.kind(&self.arena, value) == row::Kind::Fun {
                                 bits |= Row::FUNCTION;
                                 t.last_function = row + 1;
                             }
@@ -398,8 +397,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                             }
                         }
                     }
-                    View::SRest { var, .. } => {
+                    row::Kind::Rest => {
                         bits |= Row::DECL | Row::VALUE;
+                        let var = self.js.declared(&self.arena, &handle).expect("a rest binds");
                         let origin = self.arena.vars.j_origin[var.index()];
                         if t.decl[origin.index()] == 0 {
                             t.decl[origin.index()] = row + 1;
@@ -440,35 +440,45 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// The variable, the initialiser and the kind of a declaration row.
+    /// Cost: O(1), a fixed number of reads of the statement.
     fn declared_by(&self, row: u32) -> (VarId, Option<NodeId>, LetKind) {
         let stmt = self.coercion.rows[row as usize].stmt;
-        let kind = match self.arena.node(stmt).aux() & 3 {
+        let handle = B::stmt_from_node(stmt);
+        let kind = match self.js.stmt_aux(&self.arena, &handle) & 3 {
             0 => LetKind::Strict,
             1 => LetKind::Alias,
             2 => LetKind::StrictOpt,
             _ => LetKind::Variable,
         };
-        match self.arena.view(stmt) {
-            View::SDecl { var, value } => (self.origin(var), value, kind),
-            View::SRest { var, .. } => (self.origin(var), Some(stmt), kind),
+        let var = self.js.declared(&self.arena, &handle).expect("a declaration row");
+        match self.js.stmt_kind(&self.arena, &handle) {
+            row::Kind::Declare => {
+                let value = self.js.value_of(&self.arena, &handle);
+                (self.origin(var), value.map(|value| NodeId(self.js.id(&self.arena, value))), kind)
+            }
+            row::Kind::Rest => (self.origin(var), Some(stmt), kind),
             _ => unreachable!("a declaration row"),
         }
     }
 
-    /// S:36 is_literal. One read.
+    /// S:36 is_literal. Cost: O(1), one read.
     fn is_literal(&self, node: NodeId) -> bool {
         matches!(
-            self.arena.node(node).op(),
-            Op::JNumber | Op::JStr | Op::JBool | Op::JUndefined | Op::JNull
+            self.js.kind_of(&self.arena, node.0),
+            row::Kind::Number | row::Kind::Str | row::Kind::Bool | row::Kind::Undefined | row::Kind::Null
         )
     }
 
-    /// Classify an expression as an initialiser. One read.
+    /// Classify an expression as an initialiser. Cost: O(1), the kind and
+    /// the variable of a reference.
     fn classify(&self, node: NodeId) -> Init {
-        match self.arena.view(node) {
-            View::Var { var } => Init::Var(self.origin(var), node),
-            View::JQualified { .. } => Init::Qualified(node),
-            View::JFun { .. } => Init::Fun,
+        match self.js.kind_of(&self.arena, node.0) {
+            row::Kind::Var => {
+                let var = self.js.var_of(&self.arena, B::at(node)).expect("a reference");
+                Init::Var(self.origin(var), node)
+            }
+            row::Kind::Qualified => Init::Qualified(node),
+            row::Kind::Fun => Init::Fun,
             _ if self.is_literal(node) => Init::Literal(node),
             _ => Init::Other(node),
         }
@@ -578,9 +588,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             Err(var) => Replacement::Var(var),
         };
         let mut current = match start {
-            Ok(node) => match self.arena.view(node) {
-                View::Var { var } => self.origin(var),
-                _ => return unresolved,
+            Ok(node) => match self.js.var_of(&self.arena, B::at(node)) {
+                Some(var) => self.origin(var),
+                None => return unresolved,
             },
             Err(var) => var,
         };
@@ -625,15 +635,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         resolved
     }
 
-    /// The module member a replacement reads, if it is one. One read.
+    /// The module member a replacement reads, if it is one. Cost: O(1), one
+    /// read.
     fn member_of(&self, replacement: Replacement) -> Option<(crate::bir::ImportId, Option<crate::bir::StrId>)> {
         let (Replacement::Node(node) | Replacement::Member(node)) = replacement else {
             return None;
         };
-        match self.arena.view(node) {
-            View::JQualified { module, member } => Some((module, member)),
-            _ => None,
-        }
+        self.js.qualified_of(&self.arena, B::at(node))
     }
 
     /// S:428 ml_module_field_tail_move_replacement and S:414 its same-name
@@ -668,15 +676,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         if self.coercion.decl[var.index()] != 0 {
             return true;
         }
-        let Some(mut node) = self.arena.vars.binder(var) else {
+        let Some(binder) = self.arena.vars.binder(var) else {
             return false;
         };
-        if !matches!(self.arena.node(node).op(), Op::SDecl | Op::SRest) {
+        let mut node = binder.0;
+        if !matches!(self.js.kind_of(&self.arena, node), row::Kind::Declare | row::Kind::Rest) {
             return false;
         }
-        while let Some(parent) = self.arena.parents[node.index()] {
+        while let Some(parent) = self.js.owner(&self.arena, node) {
             self.coercion.steps += 1;
-            if !matches!(self.arena.node(parent).op(), Op::SIf | Op::SBlock) {
+            if !matches!(self.js.kind_of(&self.arena, parent), row::Kind::If | row::Kind::Block) {
                 return false;
             }
             node = parent;
@@ -685,57 +694,26 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// E:15 js_expr_no_side_effects and S:1053 js_statement_no_side_effects
-    /// as S:641 statement_has_toplevel_effect reads them. A declaration, an
-    /// expression statement and a return are one read; a compound statement
-    /// is read until its first statement with an effect.
+    /// as S:641 statement_has_toplevel_effect reads them. A declaration row
+    /// is one read: a `let` with a value that is not strictly pure, and a
+    /// rest declaration, have an effect. Any other row is one step and
+    /// `JsStmt::effect_free`, whose steps (`Js::steps`) are its own: on rows
+    /// one per node it reads until the first effect, O(1) where the
+    /// implementation keeps the fact with the statement.
     fn has_toplevel_effect(&mut self, row: u32) -> bool {
         let Row { stmt, bits } = self.coercion.rows[row as usize];
+        let handle = B::stmt_from_node(stmt);
         if bits & Row::DECL != 0 {
-            return match self.arena.view(stmt) {
-                View::SDecl { value, .. } => value.is_some_and(|value| {
-                    !self.arena.node(value).flags().contains(NodeFlags::STRICT)
-                }),
+            return match self.js.stmt_kind(&self.arena, &handle) {
+                row::Kind::Declare => self
+                    .js
+                    .value_of(&self.arena, &handle)
+                    .is_some_and(|value| !self.js.has(&self.arena, value, flag::STRICT)),
                 _ => true,
             };
         }
-        let mut work = std::mem::take(&mut self.coercion.path);
-        work.clear();
-        work.push(stmt);
-        let mut pure = true;
-        while let Some(node) = work.pop() {
-            self.coercion.steps += 1;
-            let ok = match self.arena.view(node) {
-                View::SExp { value } | View::SReturn { value } => {
-                    self.arena.node(value).flags().contains(NodeFlags::STRICT)
-                }
-                View::SBlock { .. }
-                | View::SIf { .. }
-                | View::SWhile { .. }
-                | View::SForRange { .. }
-                | View::SForRangeExisting { .. }
-                | View::SSwitch { .. }
-                | View::STry { .. } => {
-                    work.extend(self.arena.view(node).children());
-                    true
-                }
-                View::SThrow { .. }
-                | View::SDebugger
-                | View::SBreak { .. }
-                | View::SContinue { .. }
-                | View::SDecl { .. }
-                | View::SRest { .. }
-                | View::SForOf { .. }
-                | View::SForAwaitOf { .. } => false,
-                _ => self.arena.node(node).flags().contains(NodeFlags::STRICT),
-            };
-            if !ok {
-                pure = false;
-                break;
-            }
-        }
-        work.clear();
-        self.coercion.path = work;
-        !pure
+        self.coercion.steps += 1;
+        !self.js.effect_free(&self.arena, &handle)
     }
 
     /// The last row plus one with a top-level effect, read once per unit
@@ -765,10 +743,14 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// `(row + 1) << 1 | function`, or one when the node is in no row (an
     /// export value). Each node above a queried reference is entered once
     /// per unit: the walk stops at the first ancestor another walk reached.
+    /// Cost: the first call of a unit sizes the table by `Js::id_bound` and
+    /// takes one step per row; then one step, one `owner` and one `kind_of`
+    /// per ancestor entered. No allocation once `Tables::path` and the table
+    /// have their capacity.
     fn row_of(&mut self, node: NodeId) -> u32 {
         let t = &mut self.coercion;
         if t.row_of.is_empty() {
-            t.row_of.resize(self.arena.nodes.len(), 0);
+            t.row_of.resize(self.js.id_bound(&self.arena) as usize, 0);
             for (index, row) in t.rows.iter().enumerate() {
                 t.steps += 1;
                 if row.bits & (Row::REMOVED | Row::INSERTED | Row::TAIL) == 0 {
@@ -785,13 +767,13 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             }
             t.steps += 1;
             path.push(at);
-            match self.arena.parents[at.index()] {
-                Some(parent) => at = parent,
+            match self.js.owner(&self.arena, at.0) {
+                Some(parent) => at = NodeId(parent),
                 None => break 1,
             }
         };
         while let Some(at) = path.pop() {
-            if known != 1 && self.arena.nodes[at.index()].op() == Op::JFun {
+            if known != 1 && self.js.kind_of(&self.arena, at.0) == row::Kind::Fun {
                 known |= 1;
             }
             // The reference itself is not remembered: a replacement frees
@@ -832,10 +814,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             if site.node == NodeId(u32::MAX) {
                 continue;
             }
-            let Some(parent) = self.arena.parents[site.node.index()] else {
+            let Some(parent) = self.js.owner(&self.arena, site.node.0) else {
                 continue;
             };
-            let place = self.row_of(parent);
+            let place = self.row_of(NodeId(parent));
             if place == 1 {
                 continue;
             }
@@ -856,14 +838,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 if bits & Row::VALUE != 0 && !function {
                     found.0 |= Mentions::LATER_INITIALISER;
                 }
-                let safe = match self.arena.view(parent) {
-                    View::JCall { callee, .. }
-                    | View::JFlatCall { callee, .. }
-                    | View::JNew { callee, .. } => callee == site.node,
-                    View::JTagged { tag, .. } => tag == site.node,
-                    _ => false,
-                };
-                if !safe {
+                if !self.js.is_callee(&self.arena, site.node.0) {
                     found.0 |= Mentions::LATER_UNSAFE;
                 }
             }
@@ -912,51 +887,46 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// A fresh copy of a replacement. A literal, a module member and a
-    /// variable are one node; a chain of static field reads is one node per
-    /// read.
+    /// variable are one node (`var`, or `copy_leaf`); a chain of static
+    /// field reads is one node per read (`copy_leaf` of its leaf, then one
+    /// `dot` per read, each with the cold data of the original). One step
+    /// per node; no allocation once `Tables::path` has its capacity.
     fn copy_replacement(&mut self, replacement: Replacement) -> NodeId {
         match replacement {
             Replacement::Var(var) => {
-                let copy = self.pure_expression(View::Var { var }, 0);
-                self.built(copy)
+                let copy = self.js.var(&mut self.arena, var);
+                self.built(NodeId(self.js.id(&self.arena, B::of(&copy))));
+                B::node(copy)
             }
             Replacement::Member(node) => {
-                let View::JQualified { module, member } = self.arena.view(node) else {
-                    unreachable!("a module member")
-                };
-                let aux = self.arena.node(node).aux();
-                let copy = self.pure_expression(View::JQualified { module, member }, aux);
-                self.built(copy)
+                let mut copy = self.js.copy_leaf(&mut self.arena, B::at(node));
+                self.js.assume_strict(&mut self.arena, &mut copy);
+                self.built(NodeId(self.js.id(&self.arena, B::of(&copy))));
+                B::node(copy)
             }
             Replacement::Node(node) => {
                 // The spine of static reads, innermost last.
                 let mut spine = std::mem::take(&mut self.coercion.path);
                 spine.clear();
-                let mut at = node;
-                while let View::JDot { object, .. } = self.arena.view(at) {
-                    spine.push(at);
-                    at = object;
+                let mut at = B::at(node);
+                while self.js.kind(&self.arena, at) == row::Kind::Dot {
+                    spine.push(NodeId(self.js.id(&self.arena, at)));
+                    at = self.js.operand(&self.arena, at, 0);
                 }
-                let mut copy = self.arena.copy_leaf(at);
-                self.built(copy);
+                let leaf = B::at(NodeId(self.js.id(&self.arena, at)));
+                let mut copy = self.js.copy_leaf(&mut self.arena, leaf);
+                self.js.copy_cold(&mut self.arena, leaf, &mut copy);
+                self.built(NodeId(self.js.id(&self.arena, B::of(&copy))));
                 while let Some(read) = spine.pop() {
-                    let View::JDot { property, position, .. } = self.arena.view(read) else {
-                        unreachable!("a static read")
-                    };
-                    let aux = self.arena.node(read).aux();
-                    let outer = crate::bir::j::member(&mut self.arena, copy, property, position, aux);
-                    if let Some(cold) = self.arena.cold(read) {
-                        self.arena.set_cold(outer, cold);
-                    }
-                    if self.arena.node(read).flags().contains(NodeFlags::JS_LOC_PRESENT) {
-                        let mut flags = self.arena.node(outer).flags();
-                        flags.0 |= NodeFlags::JS_LOC_PRESENT;
-                        self.arena.nodes[outer.index()].set_flags(flags);
-                    }
-                    copy = self.built(outer);
+                    let read = B::at(read);
+                    let (name, position) = self.js.member_of(&self.arena, read).expect("a static read");
+                    let tag = self.js.aux(&self.arena, read) != 0;
+                    copy = self.js.dot(&mut self.arena, copy, name, position, tag);
+                    self.js.copy_cold(&mut self.arena, read, &mut copy);
+                    self.built(NodeId(self.js.id(&self.arena, B::of(&copy))));
                 }
                 self.coercion.path = spine;
-                copy
+                B::node(copy)
             }
         }
     }
@@ -994,7 +964,8 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// B:1420 define, for the export `export`: `let var = value`, as a row
     /// of kind `place` (`INSERTED` or `TAIL`) that carries the export's
     /// name. When the variable is declared already, the declaration binds a
-    /// copy that prints as the variable. Constant.
+    /// copy that prints as the variable. Cost: O(1); it allocates only when
+    /// a table grows.
     fn define(&mut self, export: u32, place: u32, var: VarId, value: Option<NodeId>, kind: LetKind) -> NodeId {
         let var = if self.arena.vars.binder(var).is_some() {
             let copy = self.arena.new_var_id(self.arena.vars.name(var), self.arena.vars.order(var));
@@ -1006,17 +977,16 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         } else {
             var
         };
-        let stmt = self.arena.new_node(
-            View::SDecl { var, value },
-            kind as u16 | ((crate::js_ir::op::UsedStats::default() as u16) << 2),
-        );
+        // Read before the statement takes the value.
+        let function = value.is_some_and(|value| self.js.kind_of(&self.arena, value.0) == row::Kind::Fun);
+        let stmt = B::stmt_node(self.js.declare(&mut self.arena, kind, var, value.map(B::from_node)));
         self.built(stmt);
         // The declaration is a row of the final block: C:801 and O:30 read it.
         let row = self.coercion.rows.len() as u32;
         let mut bits = Row::DECL | place;
-        if let Some(value) = value {
+        if value.is_some() {
             bits |= Row::VALUE;
-            if self.arena.node(value).op() == Op::JFun {
+            if function {
                 bits |= Row::FUNCTION;
             }
         }
@@ -1078,9 +1048,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     /// materialised root, one for the replacement when it is a function,
     /// and `substitute_after` when the alias moves.
     fn move_alias_to_tail(&mut self, export: VarId, value: NodeId) -> Option<(Replacement, LetKind)> {
-        let View::Var { var } = self.arena.view(value) else {
-            return None;
-        };
+        let var = self.js.var_of(&self.arena, B::at(value))?;
         let target = self.origin(var);
         if self.arena.vars.name(target) != self.arena.vars.name(export) {
             return None;
@@ -1115,7 +1083,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             || (qualified && self.coercion.last_function > index + 1)
             || replacement == Replacement::Var(target)
             || matches!(replacement, Replacement::Node(node)
-                if matches!(self.arena.view(node), View::Var { var } if self.origin(var) == target))
+                if self.js.var_of(&self.arena, B::at(node)).is_some_and(|var| self.origin(var) == target))
             || uses.has(Mentions::PRIOR)
             || (qualified && !qualified_safe)
             || later_initialiser
@@ -1150,30 +1118,32 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
 
     /// O:308 same_reusable_export_value. One step per static read of the
     /// shorter chain.
-    fn same_reusable_value(&mut self, mut left: NodeId, mut right: NodeId) -> bool {
+    fn same_reusable_value(&mut self, left: NodeId, right: NodeId) -> bool {
+        let (mut left, mut right) = (B::at(left), B::at(right));
         loop {
             self.coercion.steps += 1;
-            match (self.arena.view(left), self.arena.view(right)) {
-                (View::Var { var: l }, View::Var { var: r }) => {
-                    return self.ident(l) == self.ident(r);
+            match (self.js.kind(&self.arena, left), self.js.kind(&self.arena, right)) {
+                (row::Kind::Var, row::Kind::Var) => {
+                    let (l, r) = (self.js.var_of(&self.arena, left), self.js.var_of(&self.arena, right));
+                    return self.ident(l.expect("a reference")) == self.ident(r.expect("a reference"));
                 }
-                (
-                    View::JQualified { module: lm, member: lf },
-                    View::JQualified { module: rm, member: rf },
-                ) => {
+                (row::Kind::Qualified, row::Kind::Qualified) => {
+                    let (lm, lf) = self.js.qualified_of(&self.arena, left).expect("a module reference");
+                    let (rm, rf) = self.js.qualified_of(&self.arena, right).expect("a module reference");
                     return self.arena.pools.j_modules[lm.index()]
                         == self.arena.pools.j_modules[rm.index()]
                         && lf.map(|f| self.arena.text(f)) == rf.map(|f| self.arena.text(f));
                 }
-                (
-                    View::JDot { object: lo, property: lp, position: lpos },
-                    View::JDot { object: ro, property: rp, position: rpos },
-                ) if self.arena.node(left).aux() == 0 && self.arena.node(right).aux() == 0 => {
+                (row::Kind::Dot, row::Kind::Dot)
+                    if self.js.aux(&self.arena, left) == 0 && self.js.aux(&self.arena, right) == 0 =>
+                {
+                    let (lp, lpos) = self.js.member_of(&self.arena, left).expect("a member read");
+                    let (rp, rpos) = self.js.member_of(&self.arena, right).expect("a member read");
                     if self.arena.text(lp) != self.arena.text(rp) || lpos != rpos {
                         return false;
                     }
-                    left = lo;
-                    right = ro;
+                    left = self.js.operand(&self.arena, left, 0);
+                    right = self.js.operand(&self.arena, right, 0);
                 }
                 _ => return false,
             }
@@ -1181,11 +1151,14 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// C:172 reusable_export_value_candidate. One step per static read.
-    fn reusable_candidate(&self, mut value: NodeId) -> bool {
+    fn reusable_candidate(&self, value: NodeId) -> bool {
+        let mut value = B::at(value);
         loop {
-            match self.arena.view(value) {
-                View::Var { .. } | View::JQualified { .. } => return true,
-                View::JDot { object, .. } if self.arena.node(value).aux() == 0 => value = object,
+            match self.js.kind(&self.arena, value) {
+                row::Kind::Var | row::Kind::Qualified => return true,
+                row::Kind::Dot if self.js.aux(&self.arena, value) == 0 => {
+                    value = self.js.operand(&self.arena, value, 0);
+                }
                 _ => return false,
             }
         }
@@ -1324,7 +1297,9 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
     }
 
     /// The predicate of O:266: a declaration of a later export whose
-    /// initialiser equals the literal (B:237 ocaml_eq_expression).
+    /// initialiser equals the literal (B:237 ocaml_eq_expression). Cost:
+    /// O(1) to reach the initialiser, then `Js::equal`: one step per pair of
+    /// nodes it inspects, bounded by the smaller tree.
     fn equivalent_later(&self, row: u32, export: u32, value: NodeId) -> bool {
         if !self.coercion.rows[row as usize].has(Row::DECL | Row::VALUE) {
             return false;
@@ -1335,7 +1310,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         };
         self.coercion.position[var.index()] > export + 1
             && initialiser != self.coercion.rows[row as usize].stmt
-            && crate::bir::j::equal::equal(&self.arena, initialiser, value, &mut 0)
+            && self.js.equal(&self.arena, B::at(initialiser), B::at(value), &mut 0)
     }
 
     /// C:1099 coerce_toplevel_exports_with_name_reservations on the rows of
@@ -1364,10 +1339,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let ident = idents[index as usize];
             let value = self.coercion.values[index as usize];
             // Read before the arms add rows: the rows are the block's.
-            let value_var = match self.arena.view(value) {
-                View::Var { var } => Some(self.origin(var)),
-                _ => None,
-            };
+            let value_var = self.js.var_of(&self.arena, B::at(value)).map(|var| self.origin(var));
             let exact_self_export = value_var == Some(export);
             // coercion.ml:99-111: an export of its own identifier
             // changes the export list only.
@@ -1377,7 +1349,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     let target = value_var.expect("a moved alias is a variable");
                     let row = self.declaration_row_removed(target);
                     self.release_row(row);
-                    self.arena.release(value);
+                    self.js.release(&mut self.arena, B::from_node(value));
                     self.define(index, Row::TAIL, export, Some(late), property);
                     selected.push(export);
                     #[cfg(test)]
@@ -1398,7 +1370,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                             self.reserve_name(export, ident);
                         }
                         selected.push(chosen);
-                        self.arena.release(value);
+                        self.js.release(&mut self.arena, B::from_node(value));
                         #[cfg(test)]
                         self.coercion.arms.push(Arm::DeclaredExport);
                         continue;
@@ -1414,18 +1386,18 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                             self.reserve_name(export, ident);
                         }
                         selected.push(chosen);
-                        self.arena.release(value);
+                        self.js.release(&mut self.arena, B::from_node(value));
                         #[cfg(test)]
                         self.coercion.arms.push(Arm::DeclaredTarget);
                         continue;
                     }
                 }
             }
-            if matches!(self.arena.view(value), View::JUndefined)
+            if self.js.kind_of(&self.arena, value.0) == row::Kind::Undefined
                 && ((self.declared(export) && self.can_reuse_undefined(export)) || block_ended)
             {
                 selected.push(export);
-                self.arena.release(value);
+                self.js.release(&mut self.arena, B::from_node(value));
                 #[cfg(test)]
                 self.coercion.arms.push(Arm::Undefined);
                 continue;
@@ -1435,7 +1407,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     let late = self.copy_replacement(replacement);
                     let row = self.reused_row_removed(index);
                     self.release_row(row);
-                    self.arena.release(value);
+                    self.js.release(&mut self.arena, B::from_node(value));
                     self.define(index, Row::TAIL, export, Some(late), property);
                     selected.push(export);
                     #[cfg(test)]
@@ -1447,7 +1419,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     // S:599 keeps_declared_same_name_reusable_export_binding.
                     if reused == export && property != LetKind::Variable {
                         selected.push(export);
-                        self.arena.release(value);
+                        self.js.release(&mut self.arena, B::from_node(value));
                         #[cfg(test)]
                         self.coercion.arms.push(Arm::KeptReused);
                         continue;
@@ -1456,7 +1428,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                 // O:295 reusable_same_name_export_binding.
                 if let Some(reused) = self.reusable_binding(index, export, value) {
                     selected.push(reused);
-                    self.arena.release(value);
+                    self.js.release(&mut self.arena, B::from_node(value));
                     #[cfg(test)]
                     self.coercion.arms.push(Arm::Reused);
                     continue;
@@ -1615,13 +1587,12 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             Some(row) => self.coercion.rows[row as usize].stmt,
             None => self.arena.vars.binder(var)?,
         };
-        match self.arena.view(stmt) {
-            View::SDecl { value: Some(value), .. } => match self.arena.view(value) {
-                View::Var { var } => Some(self.origin(var)),
-                _ => None,
-            },
-            _ => None,
+        let handle = B::stmt_from_node(stmt);
+        if self.js.stmt_kind(&self.arena, &handle) != row::Kind::Declare {
+            return None;
         }
+        let value = self.js.value_of(&self.arena, &handle)?;
+        self.js.var_of(&self.arena, value).map(|var| self.origin(var))
     }
 
     /// O:112 collect_declared_idents on the final block, for one variable.
