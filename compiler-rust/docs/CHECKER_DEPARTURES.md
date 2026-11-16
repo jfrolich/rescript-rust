@@ -8567,6 +8567,7 @@ programs all agree after this commit, program 10 included.
   only in Pattern mode, is restored on a clash and the pair goes to
   `unify_pattern_constructor_mismatch`, the reify-and-`mcomp` step of the
   constructor arm (`ctype.ml:2396-2399`). Expression mode is unchanged.
+  Commit `b22d458c9`.
 - Fixtures: `tests/tests/src/pattern_equation_private_row.res` (programs
   21, 22, 23, 26 and 28), super_errors `pattern_equation_row_closed`
   (program 1), `pattern_equation_row_disjoint` (2),
@@ -16699,6 +16700,12 @@ stdout (empty):
 
 Match a result-indexed constructor whose polymorphic-variant row clashes with the scrutinee index, reaching Rust `unify_rows` in Pattern mode (ctype.rs:9019–9025) and OCaml’s recovery arm (ctype.ml:2400–2411). Compare the entire trace-derived error after the row clash, not just the accept/reject result.
 
+#### Fixed
+
+Fixed by `b22d458c9`; see "P2 - a row clash in a pattern is retried as
+OCaml retries it" in "Third round: differences found while fixing". All
+eight candidates agree after it.
+
 G3-1–4 and G3-7 differ; G3-5/6/8 agree. All eight hit `rows:gadt`. The two reduced witnesses below distinguish a missing closed-row tag from disjoint rows. Rust preserves extra row-detail advice where the OCaml recovery/reification/compatibility path emits only the outer mismatch; both reject.
 
 #### G3-1 — outputs differ
@@ -17921,6 +17928,12 @@ stdout (empty):
 ### G6 — WITNESS
 
 Match an equality whose index is a functor parameter’s abstract, private or parameterized type (OCaml ctype.ml:1874–1881; Rust ctype.rs:579–595). After the match, demand that an expression of that module type have the concrete index type, so merely accepting the constructor pattern is insufficient.
+
+#### Fixed
+
+Fixed by `4a248ec60`; see "P1 - an equation can refine an abstract type
+reached through a module path" in "Third round: differences found while
+fixing". All eight candidates agree after it.
 
 G6-2 is a witness: OCaml adds the abstract module type equation, but Rust’s newtype-level requirement prevents it, leaving the branch expression at `X.t`. G6-1/3–8 agree. All eight reach `is_instantiable`, but parameterized indices are filtered by the nullary-constructor check before that function; there is no evidence of a parameterized declaration being incorrectly instantiated. The witness demonstrates that the extra Rust newtype-level requirement is too restrictive, rather than that a missing privacy/arity test is too permissive.
 
