@@ -1,0 +1,11 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/include_extension_constructor_arity.res[0m:[2m7:10-15[0m
+
+  5 [2m│[0m 
+  6 [2m│[0m include N
+  [1;31m7[0m [2m│[0m let v = E[1;31m(1, 2)[0m
+  8 [2m│[0m 
+
+  This has type: [1;31m('a, 'b)[0m
+  But it's expected to have type: [1;33mint[0m

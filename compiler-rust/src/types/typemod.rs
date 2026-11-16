@@ -8010,9 +8010,9 @@ fn add_signature_items_to_env(
             SignatureItem::SigType(id, decl, _) => env.store_type(ctx, *id, decl.clone()),
             SignatureItem::SigModule(id, md, _) => env.add_module(*id, md.clone()),
             SignatureItem::SigModtype(id, mtd) => env.add_modtype(*id, mtd.clone()),
-            SignatureItem::SigTypext(_, _, _)
-            | SignatureItem::SigClass
-            | SignatureItem::SigClassType => {}
+            // env.ml:1840: `Sig_typext` goes to `add_extension ~check:false`.
+            SignatureItem::SigTypext(id, ext, _) => env.add_extension(ctx, *id, ext),
+            SignatureItem::SigClass | SignatureItem::SigClassType => {}
         }
     }
     Ok(())
@@ -19875,7 +19875,13 @@ fn type_structure_item<'a>(
                         crate::types::decl::SignatureItem::SigModtype(id, mtd) => {
                             new_env.add_modtype(*id, mtd.clone());
                         }
-                        _ => {}
+                        // env.ml:1840: `Sig_typext` goes to
+                        // `add_extension ~check:false`.
+                        crate::types::decl::SignatureItem::SigTypext(id, ext, _) => {
+                            new_env.add_extension(tctx.type_ctx, *id, ext);
+                        }
+                        crate::types::decl::SignatureItem::SigClass
+                        | crate::types::decl::SignatureItem::SigClassType => {}
                     }
                 }
             }

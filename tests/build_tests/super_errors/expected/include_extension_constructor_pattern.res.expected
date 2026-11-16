@@ -1,0 +1,12 @@
+
+  [1;33mWarning number 9[0m
+  [36m/.../fixtures/include_extension_constructor_pattern.res[0m:[2m39:9-11[0m
+
+  37 [2m┆[0m let f = x =>
+  38 [2m┆[0m   switch x {
+  [1;33m39[0m [2m┆[0m   | E([1;33m{a}[0m) => a
+  40 [2m┆[0m   | _ => 0
+  41 [2m┆[0m   }
+
+  the following labels are not bound in this record pattern: b
+Either bind these labels explicitly or add ', _' to the pattern.
