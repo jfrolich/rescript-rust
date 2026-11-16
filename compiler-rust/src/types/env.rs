@@ -1608,15 +1608,16 @@ impl Env {
     /// `Env.in_signature b env` (env.ml:452-462): the environment a
     /// signature's items are translated in. The unused checks of the
     /// constructors and extension constructors declared there read it and
-    /// never warn (env.ml:1689, 1729). Cost: the copy of the bindings that
-    /// the signature's first binding would make anyway.
+    /// never warn (env.ml:1689, 1729). The flag is no binding, so the
+    /// version `id` stays: a new id would clear the abbreviation memos
+    /// (`check_abbrev_env`) for lookups the flag cannot change. Cost: the
+    /// copy of the bindings that the signature's first binding would make
+    /// anyway.
     pub fn in_signature(&self, b: bool) -> Env {
-        if self.data.flags.in_signature == b {
-            return self.clone();
-        }
         let mut env = self.clone();
-        env.bump_id();
-        env.data_mut().flags.in_signature = b;
+        if self.data.flags.in_signature != b {
+            env.data_mut().flags.in_signature = b;
+        }
         env
     }
 
