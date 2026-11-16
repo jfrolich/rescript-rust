@@ -80,9 +80,10 @@ fn sizes() {
     assert_eq!(std::mem::size_of::<E>(), 4);
     assert_eq!(std::mem::size_of::<Option<E>>(), 8);
     assert_eq!(std::mem::size_of::<Mark>(), 4);
-    // The operand stack (24), the step count (8), the copy storage (336)
-    // and the label vector (24): one per unit, never passed down a walk.
-    assert_eq!(std::mem::size_of::<Rows>(), 392);
+    // The operand stack (24), the step count (8), the copy storage (336),
+    // the label vector (24) and the work stack of `effect_free` (24): one
+    // per unit, never passed down a walk.
+    assert_eq!(std::mem::size_of::<Rows>(), 416);
     assert_eq!(std::mem::size_of::<<Rows as Js>::Ref<'_>>(), 4);
 }
 
@@ -1070,4 +1071,120 @@ fn a_node_keeps_its_row_over_other_operands() {
             },
         );
     }
+}
+
+/// `copy` costs one step per node copied also when the copy takes slots
+/// that a release freed (the node vector does not grow then), and in a
+/// warm unit it allocates nothing.
+#[test]
+fn a_copy_into_freed_slots_costs_one_step_per_node() {
+    let copied = |calls: usize| {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let tree = nest(&mut r, &mut u, calls);
+        // As many nodes again, released: the copy below reuses them.
+        let other = nest(&mut r, &mut u, calls);
+        let before = r.steps();
+        r.release(&mut u.b, other);
+        let nodes = r.steps() - before;
+        // A first copy sizes the pools and the copy storage.
+        let lists_before = u.b.lists.storage_shape().0;
+        let warm = r.copy(&mut u.b, Rows::of(&tree));
+        let growth = u.b.lists.storage_shape().0 - lists_before;
+        r.release(&mut u.b, warm);
+        u.b.lists.reserve_test_growth(growth);
+        r.reserve_copy(&u.b);
+        u.b.js_scope.as_mut().expect("the unit counts occurrences").reserve_repeat();
+        let (len, before) = (u.b.nodes.len(), r.steps());
+        let mut copy = None;
+        let allocations = allocation_counter::measure(|| copy = Some(r.copy(&mut u.b, Rows::of(&tree))));
+        let steps = r.steps() - before;
+        assert_eq!(u.b.nodes.len(), len, "the copy took freed slots");
+        assert_eq!(steps, nodes, "one step per node copied");
+        assert_eq!(allocations.count_total, 0, "{calls} calls");
+        done(copy.expect("the copy"));
+        steps
+    };
+    let (one, two, ten) = (copied(1_000), copied(2_000), copied(10_000));
+    assert_eq!(ten - one, 9 * (two - one), "{one} {two} {ten}");
+    assert!(one as usize >= 1_000);
+}
+
+#[test]
+#[should_panic(expected = "one operand per key of the object")]
+fn an_object_with_fewer_operands_than_keys_is_refused() {
+    let mut u = unit();
+    let mut r = Rows::default();
+    let mark = r.mark();
+    let x = r.var(&mut u.b, u.x);
+    r.push(x);
+    // `u.keys` has two keys.
+    done(r.object(&mut u.b, mark, u.keys));
+}
+
+#[test]
+#[should_panic(expected = "the operands the JSX header counts")]
+fn a_jsx_element_without_the_operands_of_its_header_is_refused() {
+    let mut u = unit();
+    let mut r = Rows::default();
+    let info = u.b.js_info(JsPayload::Jsx(crate::bir::JsxHeader {
+        spread: false,
+        props: crate::bir::PropertySpan { start: 0, len: 2 },
+        children: 0,
+        key: false,
+        multi: false,
+        fragment: false,
+    }));
+    let mark = r.mark();
+    // The callee and the tag, and no value for the two properties.
+    for var in [u.f, u.x] {
+        let operand = r.var(&mut u.b, var);
+        r.push(operand);
+    }
+    done(r.jsx(&mut u.b, mark, info, false));
+}
+
+
+/// `equal` is `bir::j::equal::equal` and counts the pairs it inspects:
+/// ten times the nodes, ten times the steps, and one step when the roots
+/// differ.
+#[test]
+fn equal_compares_as_the_rules_do_and_counts_its_pairs() {
+    let mut u = unit();
+    let mut r = Rows::default();
+    let a = &mut u.b;
+    let (x, y, one, other) = (r.var(a, u.x), r.var(a, u.y), r.int_literal(a, 1), r.int_literal(a, 1));
+    let string = r.string(a, "text");
+    for (left, right) in [(&x, &x), (&x, &y), (&one, &other), (&one, &string), (&string, &string)] {
+        let (mut steps, mut expected) = (0, 0);
+        let (l, rr) = (Rows::of(left), Rows::of(right));
+        assert_eq!(r.equal(a, l, rr, &mut steps), crate::bir::j::equal::equal(a, l, rr, &mut expected));
+        assert_eq!(steps, expected);
+    }
+    let pairs = |calls: usize| {
+        let mut u = unit();
+        let mut r = Rows::default();
+        let (left, right) = (nest(&mut r, &mut u, calls), nest(&mut r, &mut u, calls));
+        let mut steps = 0;
+        assert!(r.equal(&u.b, Rows::of(&left), Rows::of(&right), &mut steps));
+        // Unequal at the root: one pair, whatever the size.
+        let other = r.var(&mut u.b, u.x);
+        let mut first = 0;
+        assert!(!r.equal(&u.b, Rows::of(&left), Rows::of(&other), &mut first));
+        assert_eq!(first, 1);
+        steps
+    };
+    let (one, two, ten) = (pairs(1_000), pairs(2_000), pairs(10_000));
+    assert_eq!(ten - one, 9 * (two - one), "{one} {two} {ten}");
+    assert!(one >= 1_000);
+}
+
+#[test]
+fn the_id_bound_is_above_every_id() {
+    let mut u = unit();
+    let mut r = Rows::default();
+    let before = r.id_bound(&u.b);
+    let x = r.var(&mut u.b, u.x);
+    assert!(r.id(&u.b, Rows::of(&x)) < r.id_bound(&u.b));
+    assert!(r.id(&u.b, Rows::of(&x)) >= before);
 }

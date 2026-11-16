@@ -3594,7 +3594,6 @@ fn with_supplier(
 ///
 /// Reaches: R3p.
 #[test]
-#[ignore = "R3p build"]
 fn packages_of_one_module_type_unify_name_by_name() {
     let names = ["t", "u", "t", "u"];
     let (mut c, calls) = with_supplier(Mode::Success, &names, &[], false);
@@ -3660,7 +3659,6 @@ fn packages_of_one_module_type_unify_name_by_name() {
 ///
 /// Reaches: R3p.
 #[test]
-#[ignore = "R3p build"]
 fn a_package_is_completed_from_the_other_module_type() {
     let names = ["t", "t", "u"];
     for reversed in [false, true] {
@@ -3715,7 +3713,6 @@ fn a_package_is_completed_from_the_other_module_type() {
 /// names, with every second name completed.
 /// Reaches: R3p.
 #[test]
-#[ignore = "R3p build"]
 fn packages_of_ten_thousand_names_are_linear() {
     let run = |n: u32| {
         let texts: Vec<&'static str> = (0..n)
