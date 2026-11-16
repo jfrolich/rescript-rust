@@ -2102,10 +2102,14 @@ impl Checker {
         } else {
             (gained1, gained2)
         };
-        // `List.iter (update_level !env (repr more).level) (tl1' @ tl2')`.
+        // `List.iter (update_level !env (repr more).level) (tl1' @ tl2')`:
+        // each range on its own. After the split the two need not be
+        // adjacent, and what lies between them is what its compaction
+        // left behind, which can be a type that holds a universal
+        // variable and that OCaml does not lower.
         let level = self.more_level(record);
         if level != GENERIC {
-            for at in gained1.start..gained2.end {
+            for at in gained1.clone().chain(gained2.clone()) {
                 let ty = self.extras.row_scratch[at].ty;
                 if self.lower(ty, level).is_err() {
                     self.extras.row_scratch.truncate(base);
