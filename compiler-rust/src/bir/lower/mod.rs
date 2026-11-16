@@ -474,7 +474,7 @@ struct State<'a, B: js_stmt::JsStmt = crate::bir::j::rows::Rows> {
     group_table: hashbrown::HashTable<usize>,
     group_order: Vec<usize>,
     group_heads: Vec<usize>,
-    switch_output_nodes: Vec<NodeId>,
+    switch_output_nodes: Vec<Option<B::S>>,
     switch_output_clauses: Vec<crate::bir::ClauseMeta>,
     switch_group_steps: usize,
     switch_hash_bytes: Vec<u8>,

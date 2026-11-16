@@ -326,7 +326,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             len: count as u32,
         };
         self.switch_output_nodes
-            .resize(self.switch_output_nodes.len() + count, NodeId(u32::MAX));
+            .resize_with(self.switch_output_nodes.len() + count, || None);
         self.switch_output_clauses.resize(
             self.switch_output_clauses.len() + count,
             ClauseMeta {
@@ -719,7 +719,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let loc = self.switch_location(source);
             let plan = self.switches[frame.0 as usize].as_mut().unwrap();
             let slot = plan.output.start as usize + index - 1;
-            self.switch_output_nodes[slot] = B::stmt_node(block);
+            self.switch_output_nodes[slot] = Some(block);
             self.switch_output_clauses[slot] = ClauseMeta {
                 should_break: should_break && !explicit,
                 comment: None,
@@ -750,10 +750,10 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
         }
         let scrutinee = B::from_node(plan.value.expect("lowered scrutinee"));
         let body_cont = plan.target.map_or(cx.cont, Cont::Assign);
-        let empty = self.switch_output_nodes[plan.output.start as usize..(plan.output.start + plan.output.len) as usize].iter().all(|&body| self.js.is_empty_block(&self.arena, &B::stmt_from_node(body)));
+        let empty = self.switch_output_nodes[plan.output.start as usize..(plan.output.start + plan.output.len) as usize].iter().all(|body| self.js.is_empty_block(&self.arena, body.as_ref().expect("switch body")));
         if empty && plan.kind != Kind::Named && matches!(cx.cont, Cont::Effect(Tail::No)) {
             for i in 0..plan.output.len {
-                let body = B::stmt_from_node(self.switch_output_nodes[(plan.output.start + i) as usize]);
+                let body = self.switch_output_nodes[(plan.output.start + i) as usize].take().expect("switch body");
                 self.js.release_stmt(&mut self.arena, body);
             }
             let statement = self.js.exp_rule(&mut self.arena, scrutinee);
@@ -781,7 +781,7 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
                     let next = self.group_indices[plan.groups.next.start as usize + case];
                     let (action, clause) = if next == NONE {
                         (
-                            self.switch_output_nodes[plan.output.start as usize + group],
+                            B::stmt_node(self.switch_output_nodes[plan.output.start as usize + group].take().expect("switch body")),
                             self.switch_output_clauses[plan.output.start as usize + group],
                         )
                     } else {
@@ -810,14 +810,14 @@ impl<B: super::js_stmt::JsStmt> State<'_, B> {
             let mut has_default = plan.default.is_some();
             if has_default {
                 let body =
-                    self.switch_output_nodes[(plan.output.start + plan.output.len - 1) as usize];
+                    self.switch_output_nodes[(plan.output.start + plan.output.len - 1) as usize].take().expect("switch body");
                 if !matches!(body_cont, Cont::Assign(_))
-                    && self.js.is_empty_block(&self.arena, &B::stmt_from_node(body))
+                    && self.js.is_empty_block(&self.arena, &body)
                 {
-                    self.js.release_stmt(&mut self.arena, B::stmt_from_node(body));
+                    self.js.release_stmt(&mut self.arena, body);
                     has_default = false;
                 } else {
-                    self.arena.lists.set(actions, clauses.len as usize, body);
+                    self.arena.lists.set(actions, clauses.len as usize, B::stmt_node(body));
                     self.arena.pools.switch_clauses.push(
                         self.switch_output_clauses
                             [(plan.output.start + plan.output.len - 1) as usize],
