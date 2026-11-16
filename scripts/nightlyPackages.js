@@ -28,8 +28,11 @@
 // The version appends `nightly.<commit time>.g<short sha>` to the package
 // version, so nightlies sort in commit order and before the next release.
 // The command rewrites the package.json files in place: run it on a throwaway
-// checkout, after the platform binaries are in place. A platform package whose
-// binaries are missing is left out of the compiler's optional dependencies.
+// checkout, after the binaries of every platform are in place: it fails when
+// one is missing, since a nightly without a platform drops it from the
+// lockfiles of the projects that install it. `--allow-missing-platforms`
+// publishes the platforms that are there and leaves the others out of the
+// compiler's optional dependencies (for a dry run on one machine).
 // The runtime is published with its sources, the JavaScript checked in with
 // them, and the compiled interfaces in lib/rescript. `rescript` compiles the
 // runtime from its sources on every build, but `rescript-ocaml` reads
@@ -71,6 +74,7 @@ const { values: args } = parseArgs({
     repository: { type: "string", default: process.env.GITHUB_REPOSITORY },
     "dry-run": { type: "boolean", default: false },
     bootstrap: { type: "boolean", default: false },
+    "allow-missing-platforms": { type: "boolean", default: false },
   },
 });
 
@@ -125,6 +129,11 @@ const missingPlatforms = platforms.filter(p => !builtPlatforms.includes(p));
 
 if (builtPlatforms.length === 0) {
   fail("No platform package has its binaries in bin/.");
+}
+if (missingPlatforms.length > 0 && !args["allow-missing-platforms"]) {
+  fail(
+    `No binaries in bin/ for ${missingPlatforms.join(", ")}: a nightly needs every platform (--allow-missing-platforms publishes without them).`,
+  );
 }
 
 // Dependencies first, so that the compiler package never refers to a version

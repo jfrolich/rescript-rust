@@ -110,11 +110,14 @@ jobs:
           path: packages/@rescript/${{ matrix.node-target }}/bin
           retention-days: 3
 
-  # Runs when some platforms failed to build as well: the others are
-  # published, and the compiler package leaves the missing ones out.
+  # Runs only when every platform built: a nightly without one of them would
+  # drop it from the lockfiles of the projects that install it. A build that
+  # failed or never got a runner leaves the commit unpublished, and "Re-run
+  # failed jobs" builds it again and publishes it: npm has nothing of that
+  # version yet. (A rerun after a newer commit was published refuses to move
+  # the dist-tag back; see scripts/nightlyPackages.js.)
   publish:
     needs: build
-    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04-arm
     timeout-minutes: 30
     # One publish at a time, so that the dist-tag moves in commit order.
